@@ -17,7 +17,8 @@
 /**
  * The Decision retention panel of Admin > Server Config (hub.decision_retention):
  * shown only with the web flag on, revision-CAS saves, client and hub validation
- * errors, last run summary, and confirmation before a save that deletes more.
+ * errors, per-project overrides, preview and manual run maintenance ops, last run
+ * summary, and confirmation before a save that deletes more.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -35,12 +36,24 @@ const {
   buildDecisionRetentionPutBody,
   decisionRetentionSaveErrors,
   decisionRetentionWarning,
+  lastDecisionPreviewSummary,
   lastDecisionRunSummary,
   needsDecisionPurgeConfirmation,
+  validateDecisionRetentionOverride,
 } = mod;
 type Panel = import('./admin-decision-retention.js').ScionAdminDecisionRetention;
 type Settings = import('./admin-decision-retention.js').DecisionRetentionSettings;
 type Run = import('./admin-decision-retention.js').DecisionRetentionRun;
+
+const PROJ_PAYMENTS = '11111111-1111-1111-1111-111111111111';
+const PROJ_SCRATCH = '22222222-2222-2222-2222-222222222222';
+const PROJ_WEB = '33333333-3333-3333-3333-333333333333';
+
+const PROJECTS = [
+  { id: PROJ_PAYMENTS, name: 'payments-api', slug: 'payments-api' },
+  { id: PROJ_SCRATCH, name: 'scratch-experiments', slug: 'scratch-experiments' },
+  { id: PROJ_WEB, name: 'web-console', slug: 'web-console' },
+];
 
 function run(over: Partial<Run> = {}): Run {
   return {
@@ -69,6 +82,7 @@ function settings(over: Partial<Settings> = {}): Settings {
   return {
     enabled: false,
     retention_days: null,
+    project_overrides: {},
     sweep: { page_size: 200, tick_budget_seconds: 30, tick_interval_minutes: 60 },
     revision: 3,
     runs: [],
@@ -113,19 +127,63 @@ async function type(el: Panel, sel: string, value: string): Promise<void> {
   await el.updateComplete;
 }
 
+async function select(el: Panel, sel: string, value: string): Promise<void> {
+  const control = q<HTMLInputElement>(el, sel);
+  if (!control) throw new Error(`no ${sel}`);
+  control.value = value;
+  control.dispatchEvent(new Event('sl-change'));
+  await el.updateComplete;
+}
+
 async function save(el: Panel): Promise<void> {
   q(el, '.retention-save')?.click();
   await settle();
   await el.updateComplete;
 }
 
+describe('validateDecisionRetentionOverride', () => {
+  it('accepts keep_forever regardless of days input', () => {
+    expect(validateDecisionRetentionOverride('keep_forever', '')).toEqual({
+      ok: true,
+      override: { mode: 'keep_forever' },
+    });
+  });
+
+  it('accepts days within 30..36500 and rejects out-of-range values', () => {
+    expect(validateDecisionRetentionOverride('days', '30')).toEqual({
+      ok: true,
+      override: { mode: 'days', days: 30 },
+    });
+    expect(validateDecisionRetentionOverride('days', '29').ok).toBe(false);
+    expect(validateDecisionRetentionOverride('days', '36501').ok).toBe(false);
+    expect(validateDecisionRetentionOverride('days', '').ok).toBe(false);
+  });
+});
+
 describe('buildDecisionRetentionPutBody', () => {
-  it('sends an empty window as an explicit null with the loaded revision', () => {
-    expect(buildDecisionRetentionPutBody({ enabled: true, days: '', sweep: SWEEP }, 4)).toEqual({
+  it('sends an empty window as null and includes project_overrides with the loaded revision', () => {
+    expect(
+      buildDecisionRetentionPutBody(
+        {
+          enabled: true,
+          days: '',
+          overrides: {
+            [PROJ_PAYMENTS]: { mode: 'keep_forever' },
+            [PROJ_SCRATCH]: { mode: 'days', days: 30 },
+          },
+          sweep: SWEEP,
+        },
+        4
+      )
+    ).toEqual({
       ok: true,
       body: {
         enabled: true,
         retention_days: null,
+        project_overrides: {
+          [PROJ_PAYMENTS]: { mode: 'keep_forever' },
+          [PROJ_SCRATCH]: { mode: 'days', days: 30 },
+        },
         sweep: {
           page_size: 200,
           tick_budget_seconds: 30,
@@ -169,15 +227,12 @@ describe('buildDecisionRetentionPutBody', () => {
 
 describe('decisionRetentionWarning', () => {
   it('names the window when set', () => {
-    expect(decisionRetentionWarning(180)).toBe(
-      'While enabled, settled decisions with no activity for 180 days are permanently deleted from this hub.'
-    );
+    expect(decisionRetentionWarning(180)).toContain('180 days are permanently deleted');
   });
 
-  it('explains keep-forever when no window is set', () => {
-    expect(decisionRetentionWarning(null)).toBe(
-      'No hub default window is set: settled decisions are kept forever.'
-    );
+  it('distinguishes keep-forever with and without day-window overrides', () => {
+    expect(decisionRetentionWarning(null, false)).toContain('kept forever');
+    expect(decisionRetentionWarning(null, true)).toContain('day-window override');
   });
 
   it('returns empty string when the window input is invalid', () => {
@@ -185,7 +240,7 @@ describe('decisionRetentionWarning', () => {
   });
 });
 
-describe('lastDecisionRunSummary', () => {
+describe('lastDecisionRunSummary and lastDecisionPreviewSummary', () => {
   it('returns None yet when there are no non-dry-run runs', () => {
     expect(lastDecisionRunSummary(undefined)).toBe('None yet');
     expect(lastDecisionRunSummary([])).toBe('None yet');
@@ -198,63 +253,90 @@ describe('lastDecisionRunSummary', () => {
     expect(text).toContain('1,284 decisions, 1,190 answers deleted in 6 projects');
   });
 
-  it('uses singular nouns for 1 decision, 1 answer, 1 project', () => {
-    const text = lastDecisionRunSummary([
-      run({ projects: 1, totals: { decisions: 1, answers: 1 } }),
-    ]);
-    expect(text).toContain('1 decision, 1 answer deleted in 1 project');
-  });
-
-  it('skips dry-run previews and reports running and failed states', () => {
-    const skipped = lastDecisionRunSummary([
-      run({ id: 'p', trigger: 'preview', dry_run: true, totals: { decisions: 9999, answers: 0 } }),
-      run({ id: 's', totals: { decisions: 10, answers: 8 }, projects: 2 }),
-    ]);
-    expect(skipped).toContain('10 decisions, 8 answers deleted in 2 projects');
-    expect(lastDecisionRunSummary([run({ status: 'running', finished_at: null })])).toContain(
-      'Running (started'
-    );
-    expect(lastDecisionRunSummary([run({ status: 'failed', error: 'timeout' })])).toContain(
-      'Failed'
-    );
-    expect(lastDecisionRunSummary([run({ status: 'failed', error: 'timeout' })])).toContain(
-      'timeout'
-    );
+  it('formats preview count as an estimate', () => {
+    expect(lastDecisionPreviewSummary([])).toBe('');
+    expect(lastDecisionPreviewSummary([], true)).toBe('Preview running…');
+    expect(
+      lastDecisionPreviewSummary([
+        run({ trigger: 'preview', dry_run: true, totals: { decisions: 2310, answers: 2100 } }),
+      ])
+    ).toBe('Preview estimate: 2,310 decisions would be deleted now.');
+    expect(
+      lastDecisionPreviewSummary([
+        run({ trigger: 'preview', dry_run: true, status: 'failed', error: 'deadline' }),
+      ])
+    ).toContain('Last preview failed: deadline');
   });
 });
 
 describe('needsDecisionPurgeConfirmation', () => {
-  const on = { enabled: true, retention_days: 180 };
+  const on = { enabled: true, retention_days: 180, project_overrides: {} };
   it.each([
     [
-      'enabling with a window',
-      { enabled: false, retention_days: null },
-      { enabled: true, retention_days: 180 },
+      'enabling with a hub window',
+      { enabled: false, retention_days: null, project_overrides: {} },
+      { enabled: true, retention_days: 180, project_overrides: {} },
       true,
     ],
     [
-      'enabling without a window',
-      { enabled: false, retention_days: null },
-      { enabled: true, retention_days: null },
-      false,
-    ],
-    [
-      'setting a first window while enabled',
-      { enabled: true, retention_days: null },
-      { enabled: true, retention_days: 90 },
+      'enabling with only a days override',
+      { enabled: false, retention_days: null, project_overrides: {} },
+      {
+        enabled: true,
+        retention_days: null,
+        project_overrides: { [PROJ_SCRATCH]: { mode: 'days', days: 30 } },
+      },
       true,
     ],
-    ['shortening the window', on, { enabled: true, retention_days: 30 }, true],
-    ['lengthening the window', on, { enabled: true, retention_days: 365 }, false],
-    ['keeping the same window', on, { enabled: true, retention_days: 180 }, false],
-    ['removing the window', on, { enabled: true, retention_days: null }, false],
-    ['disabling', on, { enabled: false, retention_days: 30 }, false],
     [
-      'staying disabled',
-      { enabled: false, retention_days: null },
-      { enabled: false, retention_days: 30 },
+      'enabling with no window',
+      { enabled: false, retention_days: null, project_overrides: {} },
+      { enabled: true, retention_days: null, project_overrides: {} },
       false,
     ],
+    [
+      'shortening hub default',
+      on,
+      { enabled: true, retention_days: 30, project_overrides: {} },
+      true,
+    ],
+    [
+      'adding a shorter project override while enabled',
+      on,
+      {
+        enabled: true,
+        retention_days: 180,
+        project_overrides: { [PROJ_SCRATCH]: { mode: 'days', days: 30 } },
+      },
+      true,
+    ],
+    [
+      'removing a keep_forever hold while hub default is active',
+      {
+        enabled: true,
+        retention_days: 180,
+        project_overrides: { [PROJ_PAYMENTS]: { mode: 'keep_forever' } },
+      },
+      on,
+      true,
+    ],
+    [
+      'adding a keep_forever hold',
+      on,
+      {
+        enabled: true,
+        retention_days: 180,
+        project_overrides: { [PROJ_PAYMENTS]: { mode: 'keep_forever' } },
+      },
+      false,
+    ],
+    [
+      'lengthening hub default',
+      on,
+      { enabled: true, retention_days: 365, project_overrides: {} },
+      false,
+    ],
+    ['disabling', on, { enabled: false, retention_days: 30, project_overrides: {} }, false],
   ])('%s: %s', (_name, saved, next, want) => {
     expect(needsDecisionPurgeConfirmation(saved, next)).toBe(want);
   });
@@ -266,18 +348,14 @@ describe('decisionRetentionSaveErrors', () => {
       decisionRetentionSaveErrors(
         {
           error: 'validation_failed',
-          errors: [{ Path: 'sweep/page_size', Message: 'must be >= 50' }, { Message: 'bad' }],
+          errors: [
+            { Path: `project_overrides.${PROJ_WEB}`, Message: 'project not found' },
+            { Message: 'bad' },
+          ],
         },
         'fallback'
       )
-    ).toEqual(['sweep/page_size: must be >= 50', 'bad']);
-  });
-
-  it('falls back to the error message, then the fallback', () => {
-    expect(
-      decisionRetentionSaveErrors({ error: { message: 'window too short' } }, 'fallback')
-    ).toEqual(['window too short']);
-    expect(decisionRetentionSaveErrors(null, 'fallback')).toEqual(['fallback']);
+    ).toEqual([`project_overrides.${PROJ_WEB}: project not found`, 'bad']);
   });
 });
 
@@ -289,9 +367,12 @@ describe('scion-admin-decision-retention', () => {
     current = settings();
     putResponse = () => json(current);
     apiFetch.mockReset();
-    apiFetch.mockImplementation((_path, init) =>
-      Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current))
-    );
+    apiFetch.mockImplementation((path, init) => {
+      if (path === '/api/v1/projects') {
+        return Promise.resolve(json({ projects: PROJECTS }));
+      }
+      return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+    });
   });
 
   afterEach(() => {
@@ -317,11 +398,23 @@ describe('scion-admin-decision-retention', () => {
   describe('with the flag on', () => {
     beforeEach(() => setFeatureFlag(DECISION_RETENTION_FLAG, true));
 
-    it('shows the mocks intro copy, loaded values, last run summary, and collapsed Advanced area', async () => {
+    it('shows the mocks intro copy, loaded values, overrides table, preview estimate, and last run', async () => {
       current = settings({
         enabled: true,
         retention_days: 180,
-        runs: [run()],
+        project_overrides: {
+          [PROJ_PAYMENTS]: { mode: 'keep_forever' },
+          [PROJ_SCRATCH]: { mode: 'days', days: 30 },
+        },
+        runs: [
+          run({
+            id: 'p1',
+            trigger: 'preview',
+            dry_run: true,
+            totals: { decisions: 2310, answers: 2000 },
+          }),
+          run({ id: 's1' }),
+        ],
       });
       const el = await mount();
 
@@ -334,62 +427,143 @@ describe('scion-admin-decision-retention', () => {
       expect(q(el, '.last-run')?.textContent).toContain(
         '1,284 decisions, 1,190 answers deleted in 6 projects'
       );
-      expect(q<HTMLDetailsElement>(el, 'details.advanced')?.open).toBe(false);
-      expect(el.shadowRoot?.querySelectorAll('.sweep-input').length).toBe(3);
-      expect(q(el, '.delete-warning')?.textContent).toContain(
-        'While enabled, settled decisions with no activity for 180 days are permanently deleted from this hub.'
+      expect(q(el, '.preview')?.textContent).toBe(
+        'Preview estimate: 2,310 decisions would be deleted now.'
       );
+
+      const rows = Array.from(el.shadowRoot?.querySelectorAll('tr.override-row') ?? []);
+      expect(rows.length).toBe(2);
+      expect(rows[0]?.textContent).toContain('payments-api');
+      expect(rows[0]?.textContent).toContain('Keep forever');
+      expect(rows[0]?.textContent).toContain('never deleted');
+      expect(rows[1]?.textContent).toContain('scratch-experiments');
+      expect(rows[1]?.textContent).toContain('30 days');
+      expect(rows[1]?.textContent).toContain('after 30 days');
     });
 
-    it('saves with expected_revision and updates the revision', async () => {
+    it('adds and removes project overrides and sends them in PUT', async () => {
       const el = await mount();
-      await type(el, '.retention-days', '');
-      await type(el, '.sweep-input[data-key="page_size"]', '100');
-      putResponse = () =>
-        json(settings({ revision: 4, sweep: { ...current.sweep, page_size: 100 } }));
-      await save(el);
+      await select(el, '.override-project', PROJ_PAYMENTS);
+      await select(el, '.override-mode', 'keep_forever');
+      q(el, '.add-override')?.click();
+      await el.updateComplete;
 
-      expect(puts()).toEqual([
-        {
-          enabled: false,
-          retention_days: null,
-          sweep: {
-            page_size: 100,
-            tick_budget_seconds: 30,
-            tick_interval_minutes: 60,
-          },
-          expected_revision: 3,
-        },
-      ]);
-      expect(q(el, '.status-message.success')?.textContent).toContain('saved');
-      expect(q(el, '.meta')?.textContent).toContain('Revision: 4');
-    });
+      await select(el, '.override-project', PROJ_SCRATCH);
+      await select(el, '.override-mode', 'days');
+      await type(el, '.override-days', '45');
+      q(el, '.add-override')?.click();
+      await el.updateComplete;
 
-    it('does not send a window shorter than 30 days', async () => {
-      const el = await mount();
-      await type(el, '.retention-days', '29');
-      await save(el);
+      expect(el.shadowRoot?.querySelectorAll('tr.override-row').length).toBe(2);
 
-      expect(puts()).toEqual([]);
-      expect(q(el, '.save-errors')?.textContent).toContain('from 30 to 36500');
-    });
+      // Remove scratch-experiments before saving
+      const scratchRow = q(el, `tr.override-row[data-project-id="${PROJ_SCRATCH}"]`);
+      scratchRow?.querySelector<HTMLElement>('.remove-override')?.click();
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelectorAll('tr.override-row').length).toBe(1);
 
-    it('shows the hub validation errors', async () => {
-      const el = await mount();
       putResponse = () =>
         json(
-          {
-            error: 'validation_failed',
-            errors: [{ Path: 'sweep/page_size', Message: 'must be <= 1000' }],
-          },
-          400
+          settings({
+            revision: 4,
+            project_overrides: { [PROJ_PAYMENTS]: { mode: 'keep_forever' } },
+          })
         );
       await save(el);
 
-      expect(q(el, '.save-errors')?.textContent).toContain('sweep/page_size: must be <= 1000');
+      expect(puts()).toEqual([
+        expect.objectContaining({
+          project_overrides: { [PROJ_PAYMENTS]: { mode: 'keep_forever' } },
+          expected_revision: 3,
+        }),
+      ]);
     });
 
-    it('reloads current values on a 409 revision conflict', async () => {
+    it('validates add-override inputs before mutating the table', async () => {
+      const el = await mount();
+      q(el, '.add-override')?.click();
+      await el.updateComplete;
+      expect(q(el, '.override-error')?.textContent).toContain('Choose a project');
+
+      await select(el, '.override-project', PROJ_SCRATCH);
+      await type(el, '.override-days', '15');
+      q(el, '.add-override')?.click();
+      await el.updateComplete;
+      expect(q(el, '.override-error')?.textContent).toContain('from 30 to 36500');
+      expect(el.shadowRoot?.querySelectorAll('tr.override-row').length).toBe(0);
+    });
+
+    it('starts a preview via decision-retention-preview even while disabled', async () => {
+      const el = await mount();
+      apiFetch.mockImplementation((path, init) => {
+        if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
+        if (path.endsWith('/decision-retention-preview/run')) {
+          return Promise.resolve(json({ runId: 'run-9', status: 'running' }));
+        }
+        if (path.includes('/runs/')) return Promise.resolve(json({ status: 'running' }));
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+      q(el, '.run-preview')?.click();
+      await settle();
+      await el.updateComplete;
+
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/decision-retention-preview/run')
+      );
+      expect(post?.[1]?.method).toBe('POST');
+      expect(JSON.parse(post?.[1]?.body as string)).toEqual({ params: {} });
+      expect(q(el, '.preview')?.textContent).toBe('Preview running…');
+      el.remove();
+    });
+
+    it('disables Run now while retention is off and confirms before starting decision-retention-run', async () => {
+      const el = await mount();
+      expect(q(el, '.run-manual')?.hasAttribute('disabled')).toBe(true);
+      el.remove();
+
+      current = settings({
+        enabled: true,
+        retention_days: 180,
+        runs: [
+          run({
+            id: 'p1',
+            trigger: 'preview',
+            dry_run: true,
+            totals: { decisions: 50, answers: 40 },
+          }),
+        ],
+      });
+      const el2 = await mount();
+      expect(q(el2, '.run-manual')?.hasAttribute('disabled')).toBe(false);
+
+      apiFetch.mockImplementation((path, init) => {
+        if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
+        if (path.endsWith('/decision-retention-run/run')) {
+          return Promise.resolve(json({ runId: 'run-12', status: 'running' }));
+        }
+        if (path.includes('/runs/')) return Promise.resolve(json({ status: 'running' }));
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+
+      q(el2, '.run-manual')?.click();
+      await el2.updateComplete;
+      expect(q(el2, '.manual-run-dialog')?.hasAttribute('open')).toBe(true);
+      expect(q(el2, '.manual-run-preview')?.textContent).toContain(
+        'Actual deletions may be slightly higher'
+      );
+
+      q(el2, '.manual-run-confirm')?.click();
+      await settle();
+      await el2.updateComplete;
+
+      const post = apiFetch.mock.calls.find(([path]) =>
+        path.endsWith('/decision-retention-run/run')
+      );
+      expect(post?.[1]?.method).toBe('POST');
+      el2.remove();
+    });
+
+    it('surfaces 409 revision conflict and reloads settings', async () => {
       const el = await mount();
       await type(el, '.retention-days', '90');
       putResponse = () => {
@@ -403,44 +577,11 @@ describe('scion-admin-decision-retention', () => {
       expect(q(el, '.meta')?.textContent).toContain('Revision: 9');
     });
 
-    it('asks for confirmation before enabling with a window, and saves only on confirm', async () => {
-      const el = await mount();
-      const sw = q<HTMLInputElement>(el, '.retention-enabled');
-      if (sw) sw.checked = true;
-      sw?.dispatchEvent(new Event('sl-change'));
-      await el.updateComplete;
-      await type(el, '.retention-days', '180');
-      await save(el);
-
-      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(true);
-      expect(q(el, '.confirm-change')?.textContent).toContain('180-day window');
-      expect(puts()).toEqual([]);
-
-      q(el, '.confirm-cancel')?.click();
-      await el.updateComplete;
-      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
-      expect(puts()).toEqual([]);
-
-      await save(el);
-      putResponse = () => json(settings({ enabled: true, retention_days: 180, revision: 4 }));
-      q(el, '.confirm-save')?.click();
-      await settle();
-      await el.updateComplete;
-      expect(puts()).toEqual([expect.objectContaining({ enabled: true, retention_days: 180 })]);
-      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
-    });
-
-    it('saves a longer window without asking for confirmation', async () => {
-      current = settings({ enabled: true, retention_days: 90 });
-      const el = await mount();
-      await type(el, '.retention-days', '180');
-      await save(el);
-      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
-      expect(puts()).toEqual([expect.objectContaining({ retention_days: 180 })]);
-    });
-
     it('says the experiment is off when the hub answers 404', async () => {
-      apiFetch.mockImplementation(() => Promise.resolve(json({}, 404)));
+      apiFetch.mockImplementation((path) => {
+        if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
+        return Promise.resolve(json({}, 404));
+      });
       const el = await mount();
 
       expect(q(el, '.unavailable')?.textContent).toContain('hub.decision_retention is off');

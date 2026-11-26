@@ -15,13 +15,16 @@
  */
 
 /**
- * The Decision retention panel of Admin > Server Config: hub-wide retention
- * settings for settled decisions (GET/PUT /api/v1/admin/decision-retention).
+ * The Decision retention panel of Admin > Server Config: hub-wide and
+ * per-project retention settings for settled decisions
+ * (GET/PUT /api/v1/admin/decision-retention), plus dry-run preview and manual
+ * run via the decision-retention-preview / decision-retention-run maintenance
+ * operations.
  *
  * Rendered only while the hub.decision_retention web flag is on; the flag only
- * controls presentation, and the hub answers 404 on the API while the
- * experiment is off. A save names the revision it was made against
- * (expected_revision); a 409 reloads the current values.
+ * controls presentation, and the hub answers 404 on the API and maintenance
+ * operations while the experiment is off. A save names the revision it was
+ * made against (expected_revision); a 409 reloads the current values.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -37,12 +40,30 @@ import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 const API_PATH = '/api/v1/admin/decision-retention';
+const PROJECTS_PATH = '/api/v1/projects';
+const PREVIEW_OP = 'decision-retention-preview';
+const MANUAL_RUN_OP = 'decision-retention-run';
+const PREVIEW_RUN_PATH = `/api/v1/admin/maintenance/operations/${PREVIEW_OP}/run`;
+const MANUAL_RUN_PATH = `/api/v1/admin/maintenance/operations/${MANUAL_RUN_OP}/run`;
+
+/** How often a started preview or manual run is checked, and for how long at most. */
+const OP_POLL_MS = 2000;
+const OP_POLL_MAX = 900;
 
 /** Sweep tuning, as pkg/hub/admin_decision_retention.go sends it. */
 export interface DecisionRetentionSweep {
   page_size: number;
   tick_budget_seconds: number;
   tick_interval_minutes: number;
+}
+
+/** Per-project override mode (design-8984 §3.1). */
+export type DecisionRetentionOverrideMode = 'days' | 'keep_forever';
+
+/** Per-project retention override, as pkg/config/opsettings/decision_retention.go sends it. */
+export interface DecisionRetentionOverride {
+  mode: DecisionRetentionOverrideMode;
+  days?: number | undefined;
 }
 
 /** Aggregate decision and answer counts for a retention run. */
@@ -63,9 +84,10 @@ export interface DecisionRetentionRun {
   status: string;
   actor?: string;
   error?: string;
-  /** Projects with at least one deleted decision or answer. */
+  /** Projects with at least one deleted (or previewed) decision or answer. */
   projects: number;
   totals: DecisionRetentionCounts;
+  counts?: Record<string, DecisionRetentionCounts>;
   retention_days: number;
 }
 
@@ -74,10 +96,19 @@ export interface DecisionRetentionSettings {
   enabled: boolean;
   /** null = no hub default window: settled decisions are kept forever. */
   retention_days: number | null;
+  /** Map of project UUID -> per-project override. */
+  project_overrides?: Record<string, DecisionRetentionOverride> | undefined;
   sweep: DecisionRetentionSweep;
   revision: number;
   /** The most recent retention runs, newest first. */
   runs?: DecisionRetentionRun[] | undefined;
+}
+
+/** Minimal project option from GET /api/v1/projects for the overrides picker. */
+export interface DecisionRetentionProjectOption {
+  id: string;
+  name: string;
+  slug?: string;
 }
 
 /** Bounds of the settings, as pkg/config/opsettings/decision_retention.go sets them. */
@@ -120,6 +151,7 @@ const SWEEP_FIELDS: ReadonlyArray<{
 interface DecisionRetentionForm {
   enabled: boolean;
   days: string;
+  overrides: Record<string, DecisionRetentionOverride>;
   sweep: Record<SweepKey, string>;
 }
 
@@ -130,6 +162,7 @@ export type DecisionRetentionPutBody =
       body: {
         enabled: boolean;
         retention_days: number | null;
+        project_overrides: Record<string, DecisionRetentionOverride>;
         sweep: DecisionRetentionSweep;
         expected_revision: number;
       };
@@ -143,12 +176,37 @@ function parseWholeNumber(value: string): number | null {
 }
 
 /**
+ * Validate a single per-project override entry.
+ */
+export function validateDecisionRetentionOverride(
+  mode: DecisionRetentionOverrideMode,
+  daysInput: string
+): { ok: true; override: DecisionRetentionOverride } | { ok: false; error: string } {
+  if (mode === 'keep_forever') {
+    return { ok: true, override: { mode: 'keep_forever' } };
+  }
+  const days = parseWholeNumber(daysInput);
+  if (days === null || days < DECISION_RETENTION_MIN_DAYS || days > DECISION_RETENTION_MAX_DAYS) {
+    return {
+      ok: false,
+      error: `Override window must be a whole number of days from ${DECISION_RETENTION_MIN_DAYS} to ${DECISION_RETENTION_MAX_DAYS}.`,
+    };
+  }
+  return { ok: true, override: { mode: 'days', days } };
+}
+
+/**
  * Validate the form and build the PUT body. An empty hub default window is
- * sent as an explicit null (keep forever); every field is sent with the
- * revision the form was loaded at.
+ * sent as an explicit null (keep forever); overrides are sent in full so
+ * removals persist; every field is sent with the revision the form was loaded at.
  */
 export function buildDecisionRetentionPutBody(
-  form: { enabled: boolean; days: string; sweep: Record<SweepKey, string> },
+  form: {
+    enabled: boolean;
+    days: string;
+    overrides?: Record<string, DecisionRetentionOverride>;
+    sweep: Record<SweepKey, string>;
+  },
   revision: number
 ): DecisionRetentionPutBody {
   const errors: string[] = [];
@@ -158,6 +216,24 @@ export function buildDecisionRetentionPutBody(
     if (days === null || days < DECISION_RETENTION_MIN_DAYS || days > DECISION_RETENTION_MAX_DAYS) {
       errors.push(
         `Hub default window must be a whole number of days from ${DECISION_RETENTION_MIN_DAYS} to ${DECISION_RETENTION_MAX_DAYS}, or empty to keep decisions forever.`
+      );
+    }
+  }
+  const projectOverrides: Record<string, DecisionRetentionOverride> = {};
+  for (const [pid, ov] of Object.entries(form.overrides ?? {})) {
+    if (ov.mode === 'keep_forever') {
+      projectOverrides[pid] = { mode: 'keep_forever' };
+    } else if (
+      ov.mode === 'days' &&
+      typeof ov.days === 'number' &&
+      Number.isInteger(ov.days) &&
+      ov.days >= DECISION_RETENTION_MIN_DAYS &&
+      ov.days <= DECISION_RETENTION_MAX_DAYS
+    ) {
+      projectOverrides[pid] = { mode: 'days', days: ov.days };
+    } else {
+      errors.push(
+        `Project override for ${pid} must be Keep forever or a whole number of days from ${DECISION_RETENTION_MIN_DAYS} to ${DECISION_RETENTION_MAX_DAYS}.`
       );
     }
   }
@@ -176,6 +252,7 @@ export function buildDecisionRetentionPutBody(
     body: {
       enabled: form.enabled,
       retention_days: days,
+      project_overrides: projectOverrides,
       sweep,
       expected_revision: revision,
     },
@@ -206,17 +283,36 @@ export function decisionRetentionSaveErrors(body: unknown, fallback: string): st
   return [apiErrorMessageFromBody(body) ?? fallback];
 }
 
+/** Whether a policy has any active day window (hub default or any days override). */
+export function policyHasAnyWindow(policy: {
+  retention_days: number | null;
+  project_overrides?: Record<string, DecisionRetentionOverride> | undefined;
+}): boolean {
+  if (policy.retention_days !== null && policy.retention_days > 0) return true;
+  for (const ov of Object.values(policy.project_overrides ?? {})) {
+    if (ov.mode === 'days' && typeof ov.days === 'number' && ov.days > 0) return true;
+  }
+  return false;
+}
+
 /**
  * The warning shown while decision retention is enabled: what it deletes, with
  * the hub default window (null when none is set, 'invalid' while the field
- * holds a value that is not a valid window).
+ * holds a value that is not a valid window) and whether any project override
+ * sets a day window.
  */
-export function decisionRetentionWarning(days: number | null | 'invalid'): string {
+export function decisionRetentionWarning(
+  days: number | null | 'invalid',
+  hasDayOverride = false
+): string {
   if (days === 'invalid') return '';
   if (days === null) {
+    if (hasDayOverride) {
+      return 'No hub default window is set: settled decisions are deleted only in projects with a day-window override.';
+    }
     return 'No hub default window is set: settled decisions are kept forever.';
   }
-  return `While enabled, settled decisions with no activity for ${days} days are permanently deleted from this hub.`;
+  return `While enabled, settled decisions with no activity for ${days} days are permanently deleted from this hub (unless a project overrides the policy).`;
 }
 
 function plural(n: number, one: string, many: string): string {
@@ -251,24 +347,96 @@ export function lastDecisionRunSummary(runs: DecisionRetentionRun[] | null | und
 }
 
 /**
+ * The one-line estimate from the most recent dry-run preview. Worded as an
+ * estimate because rows can age past the cutoff during a subsequent manual run.
+ */
+export function lastDecisionPreviewSummary(
+  runs: DecisionRetentionRun[] | null | undefined,
+  running = false
+): string {
+  if (running) return 'Preview running…';
+  const preview = runs?.find((r) => r.dry_run);
+  if (!preview) return '';
+  if (preview.status === 'running') return 'Preview running…';
+  if (preview.status === 'failed') {
+    return `Last preview failed${preview.error ? `: ${preview.error}` : '.'}`;
+  }
+  const decisions = preview.totals?.decisions ?? 0;
+  return `Preview estimate: ${plural(decisions, 'decision', 'decisions')} would be deleted now.`;
+}
+
+function effectiveDaysForProject(
+  policy: {
+    retention_days: number | null;
+    project_overrides?: Record<string, DecisionRetentionOverride> | undefined;
+  },
+  projectId: string
+): number | null {
+  const ov = policy.project_overrides?.[projectId];
+  if (ov) {
+    return ov.mode === 'days' && typeof ov.days === 'number' ? ov.days : null;
+  }
+  return policy.retention_days;
+}
+
+/**
  * Whether saving `next` deletes more than the saved settings do: it enables
- * retention (with a window), or, while enabled, sets a first window or
- * shortens it. Such a save asks for confirmation first.
+ * retention with at least one active window, or, while enabled, adds/shortens
+ * the hub default window or gives any project a shorter effective window than
+ * before (including lifting a keep_forever hold while a hub default is set).
  */
 export function needsDecisionPurgeConfirmation(
-  saved: Pick<DecisionRetentionSettings, 'enabled' | 'retention_days'>,
-  next: { enabled: boolean; retention_days: number | null }
+  saved: Pick<DecisionRetentionSettings, 'enabled' | 'retention_days' | 'project_overrides'>,
+  next: {
+    enabled: boolean;
+    retention_days: number | null;
+    project_overrides?: Record<string, DecisionRetentionOverride> | undefined;
+  }
 ): boolean {
   if (!next.enabled) return false;
-  if (!saved.enabled) return next.retention_days !== null;
-  if (next.retention_days === null) return false;
-  return saved.retention_days === null || next.retention_days < saved.retention_days;
+  if (!saved.enabled) return policyHasAnyWindow(next);
+
+  // Hub default added or shortened.
+  if (
+    next.retention_days !== null &&
+    (saved.retention_days === null || next.retention_days < saved.retention_days)
+  ) {
+    return true;
+  }
+
+  // Any overridden project now has a newly active or shorter effective window.
+  const projectIds = new Set([
+    ...Object.keys(saved.project_overrides ?? {}),
+    ...Object.keys(next.project_overrides ?? {}),
+  ]);
+  for (const pid of projectIds) {
+    const prevDays = effectiveDaysForProject(saved, pid);
+    const nextDays = effectiveDaysForProject(next, pid);
+    if (nextDays !== null && (prevDays === null || nextDays < prevDays)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function cloneOverrides(
+  overrides: Record<string, DecisionRetentionOverride> | undefined
+): Record<string, DecisionRetentionOverride> {
+  const out: Record<string, DecisionRetentionOverride> = {};
+  for (const [k, v] of Object.entries(overrides ?? {})) {
+    out[k] =
+      v.mode === 'days' && v.days !== undefined
+        ? { mode: 'days', days: v.days }
+        : { mode: 'keep_forever' };
+  }
+  return out;
 }
 
 function formFrom(s: DecisionRetentionSettings): DecisionRetentionForm {
   return {
     enabled: s.enabled,
     days: s.retention_days === null ? '' : String(s.retention_days),
+    overrides: cloneOverrides(s.project_overrides),
     sweep: {
       page_size: String(s.sweep.page_size),
       tick_budget_seconds: String(s.sweep.tick_budget_seconds),
@@ -289,12 +457,30 @@ export class ScionAdminDecisionRetention extends LitElement {
   @state() private success: string | null = null;
   @state() private settings: DecisionRetentionSettings | null = null;
   @state() private form: DecisionRetentionForm | null = null;
+  @state() private projects: DecisionRetentionProjectOption[] = [];
+
+  /** Add-override draft controls. */
+  @state() private draftProjectId = '';
+  @state() private draftMode: DecisionRetentionOverrideMode = 'days';
+  @state() private draftDays = '';
+  @state() private overrideError: string | null = null;
+
   /** The validated PUT body waiting for the purge confirmation. */
   @state() private pendingSave: Extract<DecisionRetentionPutBody, { ok: true }>['body'] | null =
     null;
 
+  /** Maintenance op state (preview + manual run). */
+  @state() private previewStarting = false;
+  @state() private previewRunning = false;
+  @state() private manualRunStarting = false;
+  @state() private manualRunRunning = false;
+  @state() private confirmManualRunOpen = false;
+  @state() private opError: string | null = null;
+
   private loadRequested = false;
-  /** Re-renders the last run timestamp when the display zone changes. */
+  private previewPoll: ReturnType<typeof setTimeout> | null = null;
+  private manualRunPoll: ReturnType<typeof setTimeout> | null = null;
+  /** Re-renders timestamps when the display zone changes. */
   readonly _zone = new DisplayZoneController(this);
 
   private readonly onFlagsChanged = (): void => {
@@ -362,6 +548,73 @@ export class ScionAdminDecisionRetention extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
     }
+    .subsection-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--scion-text, #1e293b);
+      margin: 1.25rem 0 0.5rem 0;
+    }
+    table.overrides-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+    table.overrides-table th {
+      text-align: left;
+      font-weight: 600;
+      color: var(--scion-text-secondary, #64748b);
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.375rem 0.5rem;
+    }
+    table.overrides-table td {
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      padding: 0.375rem 0.5rem;
+      vertical-align: middle;
+      color: var(--scion-text, #1e293b);
+    }
+    table.overrides-table td.muted {
+      color: var(--scion-text-muted, #64748b);
+    }
+    table.overrides-table td.action-col {
+      text-align: right;
+      width: 2.5rem;
+    }
+    @media (max-width: 640px) {
+      .col-hide {
+        display: none;
+      }
+    }
+    .tag {
+      display: inline-block;
+      padding: 0.05rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: var(--scion-badge-neutral-bg, #f1f5f9);
+      color: var(--scion-badge-neutral-text, #334155);
+    }
+    .tag.hold {
+      background: var(--scion-badge-primary-bg, #dbeafe);
+      color: var(--scion-badge-primary-text, #1d4ed8);
+    }
+    .row-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      margin-top: 0.65rem;
+      flex-wrap: wrap;
+    }
+    .row-actions .override-project {
+      min-width: 12rem;
+      flex: 1 1 12rem;
+      max-width: 18rem;
+    }
+    .row-actions .override-mode {
+      width: 9rem;
+    }
+    .row-actions .override-days {
+      width: 6rem;
+    }
     details.advanced {
       margin-top: 1rem;
       border-top: 1px solid var(--scion-border, #e2e8f0);
@@ -403,7 +656,7 @@ export class ScionAdminDecisionRetention extends LitElement {
       display: flex;
       align-items: center;
       justify-content: flex-end;
-      gap: 0.75rem;
+      gap: 0.5rem;
       margin-top: 1rem;
       flex-wrap: wrap;
     }
@@ -411,6 +664,10 @@ export class ScionAdminDecisionRetention extends LitElement {
       font-size: 0.6875rem;
       color: var(--scion-text-muted, #64748b);
       margin-right: auto;
+    }
+    .preview {
+      font-size: 0.8rem;
+      color: var(--scion-text-secondary, #475569);
     }
   `;
 
@@ -422,7 +679,19 @@ export class ScionAdminDecisionRetention extends LitElement {
 
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
+    this.stopPolls();
     super.disconnectedCallback();
+  }
+
+  private stopPolls(): void {
+    if (this.previewPoll !== null) {
+      clearTimeout(this.previewPoll);
+      this.previewPoll = null;
+    }
+    if (this.manualRunPoll !== null) {
+      clearTimeout(this.manualRunPoll);
+      this.manualRunPoll = null;
+    }
   }
 
   private applySettings(s: DecisionRetentionSettings): void {
@@ -435,7 +704,18 @@ export class ScionAdminDecisionRetention extends LitElement {
     this.loading = true;
     this.loadError = null;
     try {
-      const res = await apiFetch(API_PATH);
+      const [res, projectsRes] = await Promise.all([
+        apiFetch(API_PATH),
+        apiFetch(PROJECTS_PATH).catch(() => null),
+      ]);
+      if (projectsRes && projectsRes.ok) {
+        const pdata = (await projectsRes.json().catch(() => null)) as {
+          projects?: DecisionRetentionProjectOption[];
+        } | null;
+        if (Array.isArray(pdata?.projects)) {
+          this.projects = pdata.projects;
+        }
+      }
       if (res.status === 404) {
         this.unavailable = true;
         return;
@@ -453,6 +733,21 @@ export class ScionAdminDecisionRetention extends LitElement {
       this.loadError = 'Failed to load decision retention settings';
     } finally {
       this.loading = false;
+    }
+  }
+
+  /** Reload runs after a preview or manual run completes, preserving unsaved form edits. */
+  private async reloadRuns(): Promise<void> {
+    try {
+      const res = await apiFetch(API_PATH);
+      if (!res.ok || !this.settings) return;
+      const s = (await res.json()) as DecisionRetentionSettings;
+      this.settings = {
+        ...this.settings,
+        runs: s.runs,
+      };
+    } catch {
+      // Keep existing run history on transient errors.
     }
   }
 
@@ -509,6 +804,135 @@ export class ScionAdminDecisionRetention extends LitElement {
     }
   }
 
+  private async startPreview(): Promise<void> {
+    this.opError = null;
+    this.previewStarting = true;
+    try {
+      const res = await apiFetch(PREVIEW_RUN_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
+      const body = (await res.json().catch(() => null)) as { runId?: string } | null;
+      if (!res.ok || !body?.runId) {
+        this.opError = decisionRetentionSaveErrors(body, 'Failed to start preview').join(' ');
+        return;
+      }
+      this.previewRunning = true;
+      await this.reloadRuns();
+      this.pollOperation(PREVIEW_OP, body.runId, 0);
+    } catch {
+      this.opError = 'Failed to start preview';
+    } finally {
+      this.previewStarting = false;
+    }
+  }
+
+  private async startManualRun(): Promise<void> {
+    this.confirmManualRunOpen = false;
+    this.opError = null;
+    this.manualRunStarting = true;
+    try {
+      const res = await apiFetch(MANUAL_RUN_PATH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ params: {} }),
+      });
+      const body = (await res.json().catch(() => null)) as { runId?: string } | null;
+      if (!res.ok || !body?.runId) {
+        this.opError = decisionRetentionSaveErrors(
+          body,
+          'Failed to start decision retention run'
+        ).join(' ');
+        return;
+      }
+      this.manualRunRunning = true;
+      await this.reloadRuns();
+      this.pollOperation(MANUAL_RUN_OP, body.runId, 0);
+    } catch {
+      this.opError = 'Failed to start decision retention run';
+    } finally {
+      this.manualRunStarting = false;
+    }
+  }
+
+  private pollOperation(op: string, runId: string, attempt: number): void {
+    const isPreview = op === PREVIEW_OP;
+    if (isPreview && this.previewPoll !== null) {
+      clearTimeout(this.previewPoll);
+      this.previewPoll = null;
+    }
+    if (!isPreview && this.manualRunPoll !== null) {
+      clearTimeout(this.manualRunPoll);
+      this.manualRunPoll = null;
+    }
+    const timer = setTimeout(() => {
+      if (isPreview) this.previewPoll = null;
+      else this.manualRunPoll = null;
+      void (async () => {
+        let running = attempt + 1 < OP_POLL_MAX;
+        try {
+          const res = await apiFetch(
+            `/api/v1/admin/maintenance/operations/${op}/runs/${encodeURIComponent(runId)}`
+          );
+          if (res.ok) {
+            const run = (await res.json()) as { status?: string };
+            running = running && run.status === 'running';
+          }
+        } catch {
+          // Retry on next poll.
+        }
+        if (!this.isConnected) return;
+        if (running) {
+          this.pollOperation(op, runId, attempt + 1);
+          return;
+        }
+        if (isPreview) this.previewRunning = false;
+        else this.manualRunRunning = false;
+        await this.reloadRuns();
+      })();
+    }, OP_POLL_MS);
+    if (isPreview) this.previewPoll = timer;
+    else this.manualRunPoll = timer;
+  }
+
+  private addOverride(): void {
+    if (!this.form) return;
+    this.overrideError = null;
+    const pid = this.draftProjectId.trim();
+    if (!pid) {
+      this.overrideError = 'Choose a project to add an override.';
+      return;
+    }
+    const validated = validateDecisionRetentionOverride(this.draftMode, this.draftDays);
+    if (!validated.ok) {
+      this.overrideError = validated.error;
+      return;
+    }
+    this.updateForm({
+      overrides: {
+        ...this.form.overrides,
+        [pid]: validated.override,
+      },
+    });
+    this.draftProjectId = '';
+    this.draftDays = '';
+    this.draftMode = 'days';
+  }
+
+  private removeOverride(projectId: string): void {
+    if (!this.form) return;
+    const next = { ...this.form.overrides };
+    delete next[projectId];
+    this.overrideError = null;
+    this.updateForm({ overrides: next });
+  }
+
+  private projectLabel(projectId: string): string {
+    const found = this.projects.find((p) => p.id === projectId);
+    return found?.name || found?.slug || projectId;
+  }
+
   private updateForm(patch: Partial<DecisionRetentionForm>): void {
     if (!this.form) return;
     this.form = { ...this.form, ...patch };
@@ -559,9 +983,17 @@ export class ScionAdminDecisionRetention extends LitElement {
     const windowSet = form.days.trim() !== '';
     const windowValid =
       days !== null && days >= DECISION_RETENTION_MIN_DAYS && days <= DECISION_RETENTION_MAX_DAYS;
+    const hasDayOverride = Object.values(form.overrides).some(
+      (ov) => ov.mode === 'days' && typeof ov.days === 'number' && ov.days > 0
+    );
     const warning = form.enabled
-      ? decisionRetentionWarning(!windowSet ? null : windowValid ? days : 'invalid')
+      ? decisionRetentionWarning(!windowSet ? null : windowValid ? days : 'invalid', hasDayOverride)
       : '';
+    const previewBusy = this.previewStarting || this.previewRunning;
+    const manualRunBusy = this.manualRunStarting || this.manualRunRunning;
+    const canManualRun = this.settings.enabled && policyHasAnyWindow(this.settings);
+    const previewSummary = lastDecisionPreviewSummary(this.settings.runs, this.previewRunning);
+
     return html`
       <div class="form-grid">
         <div class="form-field full-width">
@@ -601,6 +1033,9 @@ export class ScionAdminDecisionRetention extends LitElement {
           <span class="hint">Runs keep counts per project only, never content.</span>
         </div>
       </div>
+
+      ${this.renderOverridesSection(form)}
+
       <details class="advanced">
         <summary>Advanced: sweep tuning</summary>
         <div class="form-grid">
@@ -627,8 +1062,12 @@ export class ScionAdminDecisionRetention extends LitElement {
           )}
         </div>
       </details>
+
       ${warning
         ? html`<div class="status-message warning delete-warning">${warning}</div>`
+        : nothing}
+      ${this.opError
+        ? html`<div class="status-message error op-error" role="alert">${this.opError}</div>`
         : nothing}
       ${this.saveErrors.length > 0
         ? html`<div class="status-message error save-errors" role="alert">
@@ -640,8 +1079,28 @@ export class ScionAdminDecisionRetention extends LitElement {
       ${this.success
         ? html`<div class="status-message success" role="status">${this.success}</div>`
         : nothing}
+
       <div class="actions">
         <span class="meta">Revision: ${this.settings.revision}</span>
+        ${previewSummary ? html`<span class="preview">${previewSummary}</span>` : nothing}
+        <sl-button
+          class="run-preview"
+          size="small"
+          ?loading=${previewBusy}
+          ?disabled=${previewBusy || manualRunBusy}
+          @click=${() => void this.startPreview()}
+          >Preview</sl-button
+        >
+        <sl-button
+          class="run-manual"
+          size="small"
+          ?loading=${manualRunBusy}
+          ?disabled=${!canManualRun || manualRunBusy || previewBusy}
+          @click=${() => {
+            this.confirmManualRunOpen = true;
+          }}
+          >Run now</sl-button
+        >
         <sl-button
           class="retention-save"
           variant="primary"
@@ -652,7 +1111,119 @@ export class ScionAdminDecisionRetention extends LitElement {
           >Save</sl-button
         >
       </div>
-      ${this.renderConfirmDialog()}
+      ${this.renderConfirmDialog()} ${this.renderManualRunDialog()}
+    `;
+  }
+
+  private renderOverridesSection(form: DecisionRetentionForm) {
+    const entries = Object.entries(form.overrides).sort(([idA], [idB]) =>
+      this.projectLabel(idA).localeCompare(this.projectLabel(idB))
+    );
+    const availableProjects = this.projects
+      .filter((p) => !Object.prototype.hasOwnProperty.call(form.overrides, p.id))
+      .sort((a, b) => (a.name || a.slug || a.id).localeCompare(b.name || b.slug || b.id));
+
+    return html`
+      <h4 class="subsection-title">Project overrides</h4>
+      ${entries.length === 0
+        ? html`<p class="hint no-overrides">No project overrides configured.</p>`
+        : html`<table class="overrides-table">
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Policy</th>
+                <th class="col-hide">Effective</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${entries.map(
+                ([pid, ov]) => html`
+                  <tr class="override-row" data-project-id=${pid}>
+                    <td>${this.projectLabel(pid)}</td>
+                    <td>
+                      ${ov.mode === 'keep_forever'
+                        ? html`<span class="tag hold">Keep forever</span>`
+                        : html`<span class="tag">${ov.days} days</span>`}
+                    </td>
+                    <td class="col-hide muted">
+                      ${ov.mode === 'keep_forever' ? 'never deleted' : `after ${ov.days} days`}
+                    </td>
+                    <td class="action-col">
+                      <sl-icon-button
+                        class="remove-override"
+                        name="trash"
+                        label="Remove override"
+                        ?disabled=${this.saving}
+                        @click=${() => this.removeOverride(pid)}
+                      ></sl-icon-button>
+                    </td>
+                  </tr>
+                `
+              )}
+            </tbody>
+          </table>`}
+      <div class="row-actions">
+        <sl-select
+          class="override-project"
+          placeholder="Choose a project"
+          size="small"
+          .value=${this.draftProjectId}
+          ?disabled=${this.saving || availableProjects.length === 0}
+          @sl-change=${(e: Event) => {
+            this.draftProjectId = (e.target as HTMLInputElement).value;
+            this.overrideError = null;
+          }}
+        >
+          ${availableProjects.map(
+            (p) => html`<sl-option value=${p.id}>${p.name || p.slug || p.id}</sl-option>`
+          )}
+        </sl-select>
+        <sl-select
+          class="override-mode"
+          size="small"
+          .value=${this.draftMode}
+          ?disabled=${this.saving}
+          @sl-change=${(e: Event) => {
+            const val = (e.target as HTMLInputElement).value;
+            this.draftMode = val === 'keep_forever' ? 'keep_forever' : 'days';
+            this.overrideError = null;
+          }}
+        >
+          <sl-option value="days">Days</sl-option>
+          <sl-option value="keep_forever">Keep forever</sl-option>
+        </sl-select>
+        ${this.draftMode === 'days'
+          ? html`<sl-input
+              class="override-days"
+              type="number"
+              size="small"
+              min=${DECISION_RETENTION_MIN_DAYS}
+              max=${DECISION_RETENTION_MAX_DAYS}
+              placeholder="Days"
+              .value=${this.draftDays}
+              ?disabled=${this.saving}
+              @sl-input=${(e: Event) => {
+                this.draftDays = (e.target as HTMLInputElement).value;
+                this.overrideError = null;
+              }}
+            ></sl-input>`
+          : nothing}
+        <sl-button
+          class="add-override"
+          size="small"
+          ?disabled=${this.saving}
+          @click=${() => this.addOverride()}
+        >
+          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+          Add override
+        </sl-button>
+      </div>
+      ${this.overrideError
+        ? html`<div class="status-message error override-error" role="alert">
+            ${this.overrideError}
+          </div>`
+        : nothing}
     `;
   }
 
@@ -660,6 +1231,7 @@ export class ScionAdminDecisionRetention extends LitElement {
     const body = this.pendingSave;
     const s = this.settings;
     const enabling = body !== null && s !== null && !s.enabled;
+    const previewSummary = lastDecisionPreviewSummary(s?.runs);
     return html`
       <sl-dialog
         class="confirm-dialog"
@@ -672,10 +1244,11 @@ export class ScionAdminDecisionRetention extends LitElement {
       >
         <p class="confirm-change">
           ${enabling
-            ? `Enabling decision retention with a ${body?.retention_days ?? ''}-day window permanently deletes settled decisions older than the window.`
-            : `Shortening the hub default window to ${body?.retention_days ?? ''} days permanently deletes settled decisions older than the new window.`}
+            ? 'Enabling decision retention permanently deletes settled decisions older than the configured windows.'
+            : 'This change shortens or activates a decision retention window and permanently deletes older settled decisions.'}
           Deleted decisions and answers cannot be restored; take a database backup first.
         </p>
+        ${previewSummary ? html`<p class="confirm-preview">${previewSummary}</p>` : nothing}
         <sl-button
           slot="footer"
           class="confirm-cancel"
@@ -690,6 +1263,47 @@ export class ScionAdminDecisionRetention extends LitElement {
           variant="danger"
           @click=${() => void this.confirmSave()}
           >Save and delete</sl-button
+        >
+      </sl-dialog>
+    `;
+  }
+
+  private renderManualRunDialog() {
+    const previewSummary = lastDecisionPreviewSummary(this.settings?.runs);
+    return html`
+      <sl-dialog
+        class="manual-run-dialog"
+        label="Run decision retention now?"
+        ?open=${this.confirmManualRunOpen}
+        @sl-request-close=${(e: Event) => {
+          if (e.target !== e.currentTarget) return;
+          this.confirmManualRunOpen = false;
+        }}
+      >
+        <p class="manual-run-change">
+          This runs the saved decision retention policy now and permanently deletes eligible settled
+          decisions and their answers.
+        </p>
+        ${previewSummary
+          ? html`<p class="manual-run-preview">
+              ${previewSummary} Actual deletions may be slightly higher if additional decisions age
+              past the cutoff while the run executes.
+            </p>`
+          : nothing}
+        <sl-button
+          slot="footer"
+          class="manual-run-cancel"
+          @click=${() => {
+            this.confirmManualRunOpen = false;
+          }}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          class="manual-run-confirm"
+          variant="danger"
+          @click=${() => void this.startManualRun()}
+          >Run now</sl-button
         >
       </sl-dialog>
     `;
