@@ -160,6 +160,13 @@ type UsageIngestRequest struct {
 	// FinalState optionally transitions meter_health.final_state from "open"
 	// to "final" or "incomplete" (e.g. shutdown drain or post-exit harvest).
 	FinalState string `json:"final_state,omitempty"`
+
+	// DirectOTelSuppressed indicates that the producer suppressed direct OTel
+	// export of gen_ai.api.calls and scion.usage.tokens for the events in this
+	// batch (per Hub capability probe suppress_direct_otel=true). The Hub only
+	// re-emits canonical OTel counters for batches with this flag set so older
+	// sciontool versions or pre-switch residual batches are never double-counted.
+	DirectOTelSuppressed bool `json:"direct_otel_suppressed,omitempty"`
 }
 
 // UsageIngestRejection describes a single event rejected during ingest

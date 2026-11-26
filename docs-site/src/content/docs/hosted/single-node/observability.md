@@ -667,6 +667,23 @@ The response returns process uptime and real-time divergence counters, along wit
 - **comparisons**: Arithmetic sum of `matches` + `mismatches` (internally consistent but approximate).
 - **fallbacks**: Number of read-path fallback attempts to old routing configurations during the switch.
 
+## Hub Usage OTel Re-Emission
+
+When the `tokenomics.usage_ledger` experiment is enabled and the Hub has at least one constructed metrics export sink (Cloud Monitoring via Hub credentials and/or an operator-configured OTLP gRPC collector via `SCION_OTEL_ENDPOINT` + `SCION_OTEL_HEADERS`), the Hub re-emits canonical usage counters from newly committed `usage_events` rows:
+
+- `gen_ai.api.calls` (cumulative counter, unit `{call}`, labels: `harness`, `model`, `status`, plus attribution labels)
+- `scion.usage.tokens` (cumulative counter, unit `{token}`, labels: `harness`, `model`, `token_type` ∈ `{input, output, cache_read, cache_write, reasoning}`, plus attribution labels; `cache_write_1h` is excluded and unknown/NULL fields are not emitted)
+- `scion.usage.meter_stale` (observable gauge, unit `{agent}`, label: `project`): count of active runs whose latest open `meter_health` receipt is older than 3 heartbeat intervals (180s). Every Hub replica computes this gauge from the shared database and reports the same per-project value, so dashboards **must aggregate across `service.instance.id` using `max` (not `sum`)**.
+
+Each Hub replica carries a distinct `service.instance.id` resource attribute so Cloud Monitoring and OTLP collectors never see duplicate writers on the same time series; dashboards sum `gen_ai.api.calls` and `scion.usage.tokens` across `service.instance.id`. When the Hub has an active metrics sink, the capability probe (`GET /api/v1/agents/{id}/usage/capabilities`) advertises `suppress_direct_otel: true` so `sciontool` suppresses duplicate direct container export of those two canonical counters while leaving traces, logs, and non-canonical metrics unchanged.
+
+### Cardinality Control (`SCION_HUB_USAGE_OTEL_CARDINALITY`)
+
+| Value | Stamped Attribution Labels | When to Use |
+|---|---|---|
+| `agent` *(default)* | `scion_project_id`, `scion_agent_id`, `scion_agent_slug` | Default. Preserves full parity with per-agent Cloud Monitoring queries and `UniqueAgents`. Roughly ~7 active series per `(agent, model)` per Hub replica (~28k active series for 1,000 agents/day × 2 models × 2 replicas, within Cloud Monitoring's 50k–250k per-descriptor limit). |
+| `project` | `scion_project_id` only | High-cardinality hubs where per-agent series would approach Cloud Monitoring descriptor limits. Emits project-level OTel aggregates only; per-agent breakdowns remain available from Hub DB rollups. |
+
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration

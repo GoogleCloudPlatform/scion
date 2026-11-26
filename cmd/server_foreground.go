@@ -647,11 +647,23 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		log.Print(obs.Tracing.LogLine())
 
-		// Wire hub OTel metrics export to Cloud Monitoring.
-		if obs.Metrics.Enabled {
-			mp, mpErr := hubmetrics.NewMeterProvider(ctx, obs.Metrics.Project.ID, telemetryID.metricsOptions()...)
+		// Wire hub OTel metrics export to Cloud Monitoring and/or operator OTLP.
+		otlpMetricsCfg, otlpMetricsCfgErr := hubmetrics.LoadOTLPConfigFromEnv()
+		if otlpMetricsCfgErr != nil {
+			log.Printf("WARNING: hub OTLP metrics config invalid: %v", otlpMetricsCfgErr)
+		}
+		if obs.Metrics.Enabled || otlpMetricsCfg.Enabled() {
+			gcpMetricsProjectID := ""
+			if obs.Metrics.Enabled {
+				gcpMetricsProjectID = obs.Metrics.Project.ID
+			}
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, gcpMetricsProjectID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
-				obs.Metrics = obs.Metrics.Failed(mpErr)
+				if obs.Metrics.Enabled {
+					obs.Metrics = obs.Metrics.Failed(mpErr)
+				} else {
+					log.Printf("WARNING: hub OTLP metrics export disabled: %v", mpErr)
+				}
 			} else {
 				exit.addFlush(mp.Shutdown)
 				lifecycleMeterProvider = mp
@@ -3273,6 +3285,13 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 	if err := hubSrv.RegisterNeverSuspendMetrics(mp); err != nil {
 		log.Printf("WARNING: hub never-suspend metrics disabled: %v", err)
+	}
+	if err := hubSrv.RegisterUsageOTelMetrics(
+		mp,
+		hub.WithUsageOTelActiveSink(true),
+		hub.WithUsageOTelCardinality(hub.UsageOTelCardinalityFromEnv()),
+	); err != nil {
+		log.Printf("WARNING: hub usage OTel re-emission metrics disabled: %v", err)
 	}
 
 	if drainRec, err := hub.NewOTelConduitIngressDrainMetrics(mp); err != nil {

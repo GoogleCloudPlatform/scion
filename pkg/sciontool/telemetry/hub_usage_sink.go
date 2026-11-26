@@ -61,6 +61,10 @@ type HubUsageSinkConfig struct {
 	// SupportedSignals returns the usage signal categories this producer can
 	// report for the current run (e.g. ["calls", "input", "output", ...]).
 	SupportedSignals func() []string
+	// SuppressDirectOTel records whether the Hub capability probe instructed
+	// this container to suppress direct OTel export of gen_ai.api.calls and
+	// scion.usage.tokens (Tokenomics P2.2 D3).
+	SuppressDirectOTel bool
 }
 
 func (c HubUsageSinkConfig) maxBatchEvents() int {
@@ -282,6 +286,14 @@ func (s *HubUsageSink) sendGroup(
 		seq = ledgerSeq
 	}
 
+	// Only mark DirectOTelSuppressed=true when suppression is active AND the
+	// batch belongs to the current run (or no RunID was pinned). Residual WAL
+	// events replayed from an earlier run (runID != s.cfg.RunID) may have been
+	// exported directly by the container before suppression took effect, so
+	// leaving DirectOTelSuppressed=false prevents Hub re-emission from double
+	// counting them while still persisting them to the ledger and rollups.
+	directSuppressed := s.cfg.SuppressDirectOTel && (s.cfg.RunID == "" || runID == s.cfg.RunID)
+
 	req := telemetrycontract.UsageIngestRequest{
 		Events:               events,
 		RunID:                runID,
@@ -289,6 +301,7 @@ func (s *HubUsageSink) sendGroup(
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
+		DirectOTelSuppressed: directSuppressed,
 	}
 
 	// Proactive re-encoded size check (O2): encoding/json HTML-escaping or

@@ -83,12 +83,13 @@ func buildHubUsageSinkConfig(caps *telemetrycontract.UsageCapabilitiesResponse, 
 			}
 			return resp, nil
 		},
-		RunID:             runID,
-		HubID:             caps.HubID,
-		MaxBatchEvents:    caps.MaxBatchEvents,
-		MaxBatchBytes:     caps.MaxBatchBytes,
-		DrainInterval:     drainInterval,
-		HeartbeatInterval: heartbeatInterval,
+		RunID:              runID,
+		HubID:              caps.HubID,
+		MaxBatchEvents:     caps.MaxBatchEvents,
+		MaxBatchBytes:      caps.MaxBatchBytes,
+		DrainInterval:      drainInterval,
+		HeartbeatInterval:  heartbeatInterval,
+		SuppressDirectOTel: caps.SuppressDirectOTel,
 	}
 }
 
@@ -161,7 +162,7 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 		if cfg != nil {
 			pipeline.SetHubUsageSink(*cfg)
 			_ = os.Setenv(telemetry.EnvUsageHubIngest, "1")
-			log.Info("Hub usage ingest sink enabled (run_id=%s, max_events=%d, max_bytes=%d)", cfg.RunID, cfg.MaxBatchEvents, cfg.MaxBatchBytes)
+			log.Info("Hub usage ingest sink enabled (run_id=%s, max_events=%d, max_bytes=%d, suppress_direct_otel=%t)", cfg.RunID, cfg.MaxBatchEvents, cfg.MaxBatchBytes, cfg.SuppressDirectOTel)
 			return true
 		}
 		if !transient {

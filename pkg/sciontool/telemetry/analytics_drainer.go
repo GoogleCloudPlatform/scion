@@ -745,14 +745,15 @@ type analyticsState struct {
 	// outboxDir, hubOutboxDir and owner locate the outboxes under the AGENT
 	// home and name their owner (Pipeline.SetAnalyticsOutbox); resolver
 	// overrides the hub ID resolver (tests).
-	outboxDir        string
-	hubOutboxDir     string
-	owner            *OutboxOwner
-	resolver         HubIDResolver
-	hubSinkCfg       *HubUsageSinkConfig
-	hubProbe         HubUsageProbeFunc
-	hubProbeInterval time.Duration
-	supportedSignals func() []string
+	outboxDir         string
+	hubOutboxDir      string
+	owner             *OutboxOwner
+	resolver          HubIDResolver
+	hubSinkCfg        *HubUsageSinkConfig
+	hubProbe          HubUsageProbeFunc
+	hubProbeInterval  time.Duration
+	supportedSignals  func() []string
+	onSuppressChanged func(bool)
 }
 
 // SetHubUsageSink configures the pipeline's analytics outbox to drain usage
@@ -844,6 +845,9 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 	if a.drainer != nil {
 		return
 	}
+	if a.onSuppressChanged != nil {
+		a.onSuppressChanged(false)
+	}
 	if a.hubSinkCfg == nil && gcp == nil {
 		// Hub-only mode (no GCP exporter) does not late-activate after a
 		// negative init probe: without producers wired at startup, heartbeats
@@ -866,6 +870,12 @@ func (a *analyticsState) probeInterval() time.Duration {
 }
 
 func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
+	onSuppressChanged := a.onSuppressChanged
+	setSuppress := func(v bool) {
+		if onSuppressChanged != nil {
+			onSuppressChanged(v)
+		}
+	}
 	gcpDir, hubDir := a.resolvedDirs()
 	resolver := a.resolver
 	if resolver == nil && a.hubSinkCfg != nil && a.hubSinkCfg.HubID != "" {
@@ -904,8 +914,10 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 			a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 			hubSend := newCountingBatchSend(sink.SendBatch)
 			a.drainer = newDualAnalyticsDrainerWithSend(gcpOutbox, a.send.Send, hubOutbox, sink, hubSend.SendBatch, resolver)
+			setSuppress(cfg.SuppressDirectOTel)
 			native := a.native
 			a.drainer.onHubRevoked = func() {
+				setSuppress(false)
 				native.clearHubOutbox()
 			}
 		}
@@ -927,8 +939,10 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 		a.send = newCountingBatchSend(sink.SendBatch)
 		a.drainer = newHubAnalyticsDrainerWithSend(hubOutbox, sink, a.send.SendBatch, resolver)
+		setSuppress(cfg.SuppressDirectOTel)
 		native := a.native
 		a.drainer.onHubRevoked = func() {
+			setSuppress(false)
 			native.detach()
 		}
 	default:
@@ -950,12 +964,14 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		if a.hubProbe != nil {
 			native := a.native
 			a.drainer.onHubRevoked = func() {
+				setSuppress(false)
 				native.clearHubOutbox()
 			}
 			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
 				if native != nil {
 					native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 				}
+				setSuppress(cfg.SuppressDirectOTel)
 			})
 		}
 	}

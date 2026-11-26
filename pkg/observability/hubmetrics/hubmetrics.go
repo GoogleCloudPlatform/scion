@@ -84,6 +84,9 @@ type options struct {
 	// exporterOpts are extra Cloud Monitoring exporter options. Tests use
 	// them to point the exporter at an in-process fake API server.
 	exporterOpts []mexporter.Option
+	// otlp configures an optional operator-managed OTLP gRPC metrics sink.
+	// When nil, NewMeterProvider falls back to LoadOTLPConfigFromEnv().
+	otlp *OTLPConfig
 }
 
 // WithExportInterval sets the periodic reader interval. Defaults to 60s.
@@ -123,43 +126,92 @@ func withExporterOptions(opts ...mexporter.Option) Option {
 }
 
 // NewMeterProvider creates an OTel SDK MeterProvider that exports to GCP Cloud
-// Monitoring. It uses Application Default Credentials (workload identity on
-// Cloud Run, attached SA on GCE).
+// Monitoring (via Application Default Credentials when gcpProjectID is
+// non-empty) and/or an operator-configured OTLP gRPC sink (when WithOTLPConfig
+// or SCION_OTEL_ENDPOINT is configured).
 //
-// If gcpProjectID is empty, an error is returned — callers should fall back to
-// disabled recorders.
+// Both sinks share the same OTel Resource, including service.instance.id, so
+// multi-replica Hubs never collide on the same time series.
+//
+// If neither gcpProjectID nor an OTLP endpoint is configured (or all
+// configured exporters fail to construct), an error is returned — callers
+// should fall back to disabled recorders.
 func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) (*metric.MeterProvider, error) {
-	if gcpProjectID == "" {
-		return nil, fmt.Errorf("GCP project ID is required for hub metrics export")
-	}
-
 	o := &options{exportInterval: defaultExportInterval}
 	for _, fn := range opts {
 		fn(o)
 	}
 
-	exporterOpts := append([]mexporter.Option{
-		mexporter.WithProjectID(gcpProjectID),
-		mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
-	}, o.exporterOpts...)
-	baseExporter, err := mexporter.New(exporterOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
+	var otlpCfg OTLPConfig
+	var otlpCfgErr error
+	if o.otlp != nil {
+		otlpCfg = *o.otlp
+	} else {
+		otlpCfg, otlpCfgErr = LoadOTLPConfigFromEnv()
 	}
-	exporter := &loggingExporter{delegate: baseExporter}
+
+	if gcpProjectID == "" && !otlpCfg.Enabled() {
+		if otlpCfgErr != nil {
+			return nil, otlpCfgErr
+		}
+		return nil, fmt.Errorf("GCP project ID or OTLP endpoint is required for hub metrics export")
+	}
 
 	res, err := newResource(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 
-	mpOpts := []metric.Option{
-		metric.WithResource(res),
-		metric.WithReader(metric.NewPeriodicReader(exporter,
-			metric.WithInterval(o.exportInterval),
-		)),
+	var readers []metric.Reader
+	var firstErr error
+
+	if gcpProjectID != "" {
+		exporterOpts := append([]mexporter.Option{
+			mexporter.WithProjectID(gcpProjectID),
+			mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
+		}, o.exporterOpts...)
+		baseExporter, gcpErr := mexporter.New(exporterOpts...)
+		if gcpErr != nil {
+			firstErr = fmt.Errorf("creating GCP metric exporter: %w", gcpErr)
+		} else {
+			exporter := &loggingExporter{delegate: baseExporter}
+			readers = append(readers, metric.NewPeriodicReader(exporter,
+				metric.WithInterval(o.exportInterval),
+			))
+		}
 	}
 
+	if otlpCfgErr != nil {
+		warnOTLPConfig(otlpCfgErr)
+		if firstErr == nil {
+			firstErr = otlpCfgErr
+		}
+	} else if otlpCfg.Enabled() {
+		otlpExp, otlpErr := newOTLPExporter(ctx, otlpCfg)
+		if otlpErr != nil {
+			warnOTLPConfig(otlpErr)
+			if firstErr == nil {
+				firstErr = otlpErr
+			}
+		} else {
+			readers = append(readers, metric.NewPeriodicReader(otlpExp,
+				metric.WithInterval(o.exportInterval),
+			))
+		}
+	}
+
+	if len(readers) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("no hub metrics exporter constructed")
+	}
+
+	mpOpts := make([]metric.Option, 0, 1+len(readers))
+	mpOpts = append(mpOpts, metric.WithResource(res))
+	for _, r := range readers {
+		mpOpts = append(mpOpts, metric.WithReader(r))
+	}
 	mpOpts = append(mpOpts, groupDropViews()...)
 
 	return metric.NewMeterProvider(mpOpts...), nil

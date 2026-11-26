@@ -3315,6 +3315,11 @@ type Server struct {
 	// background goroutine lifecycle (usage_ledger.go).
 	usageLedger usageLedgerRuntime
 
+	// usageOTelMetrics re-emits canonical Track 1 usage counters and exposes
+	// scion.usage.meter_stale on the Hub MeterProvider when a metrics sink is
+	// configured (usage_otel.go).
+	usageOTelMetrics *UsageOTelMetrics
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -5719,6 +5724,22 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcpTokenMetrics = m
+}
+
+// SetUsageOTelMetrics wires the Hub Track 1 usage OTel re-emitter. Callers
+// must call this before Start, not concurrently with serving requests.
+func (s *Server) SetUsageOTelMetrics(m *UsageOTelMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usageOTelMetrics = m
+}
+
+// UsageOTelMetrics returns the configured Hub Track 1 usage OTel re-emitter,
+// or nil when none is wired.
+func (s *Server) UsageOTelMetrics() *UsageOTelMetrics {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.usageOTelMetrics
 }
 
 // SetAgentRunScopeMetrics wires the agent token run-scope counter. It does

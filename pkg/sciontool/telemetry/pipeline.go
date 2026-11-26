@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel/attribute"
 	otelmetric "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -79,6 +80,12 @@ type Pipeline struct {
 	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health             healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
+	// suppressDirectOTel is true when the Hub usage sink is active and the Hub
+	// advertised suppress_direct_otel=true (Tokenomics P2.2 D3). When true,
+	// handleMetrics strips gen_ai.api.calls and scion.usage.tokens before
+	// direct export while leaving traces, logs, non-canonical metrics, and raw
+	// native metrics policy unchanged.
+	suppressDirectOTel atomic.Bool
 	// apiOutcomeObserver receives model API outcomes (api_outcome.go).
 	apiOutcomeObserver atomic.Pointer[APIOutcomeObserver]
 	intakeMu           sync.Mutex
@@ -116,6 +123,31 @@ type Pipeline struct {
 	metricBatchSequence, metricPendingSequence                     uint64
 
 	authStandDown authStandDown
+}
+
+var canonicalUsageCounterMetrics = map[string]bool{
+	telemetrycontract.MetricAPICalls:    true,
+	telemetrycontract.MetricUsageTokens: true,
+}
+
+// SuppressDirectOTel reports whether direct container export of the two
+// canonical usage counters (gen_ai.api.calls, scion.usage.tokens) is currently
+// suppressed in favor of Hub OTel re-emission.
+func (p *Pipeline) SuppressDirectOTel() bool {
+	if p == nil {
+		return false
+	}
+	return p.suppressDirectOTel.Load()
+}
+
+func (p *Pipeline) setSuppressDirectOTel(suppress bool) {
+	if p == nil {
+		return
+	}
+	prev := p.suppressDirectOTel.Swap(suppress)
+	if prev != suppress {
+		log.Info("Direct container export of canonical usage counters suppressed=%t", suppress)
+	}
 }
 
 func (p *Pipeline) now() time.Time {
@@ -400,6 +432,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		gcpExporter = p.exporter.gcpExporter
 	}
 	p.analytics.supportedSignals = p.supportedUsageSignals
+	p.analytics.onSuppressChanged = p.setSuppressDirectOTel
 	p.analytics.start(ctx, gcpExporter)
 
 	// Create receiver with span and metric handlers
@@ -1003,6 +1036,15 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		if dropped := before - countMetricPoints(processed); dropped > 0 {
 			p.metricDiagnostics.filtered.Add(int64(dropped))
 		}
+	}
+	if p.suppressDirectOTel.Load() {
+		// Tokenomics P2.2 (D3): when the Hub usage sink is active and the Hub
+		// re-emits canonical counters to a configured sink, suppress direct
+		// container export of gen_ai.api.calls and scion.usage.tokens while
+		// keeping traces, logs, non-canonical metrics, and raw native metrics
+		// policy unchanged. Runs after nativeMeteringOnly so sciontool-derived
+		// canonical counters remain subject to suppression in metering-only mode.
+		processed = stripMatchedUsageMetrics(processed, canonicalUsageCounterMetrics)
 	}
 	if len(processed) == 0 {
 		return nil
