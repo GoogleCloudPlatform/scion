@@ -103,6 +103,7 @@ import {
 import {
   ADMIN_MANAGED_BROKERS_FLAG,
   AGENT_LIMIT_CEILINGS_FLAG,
+  agentLimitCeilingsEnabled,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -2936,7 +2937,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
     if (ok('default_max_model_calls')) payload.default_max_model_calls = this.defaultMaxModelCalls;
     if (ok('default_max_duration')) payload.default_max_duration = this.defaultMaxDuration;
-    this.addAgentLimitsToPayload(payload);
 
     if (
       ok('default_resources') &&
@@ -3174,7 +3174,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (this.agentLimitMaxTurns > 0) block.max_turns = this.agentLimitMaxTurns;
     if (this.agentLimitMaxModelCalls > 0) block.max_model_calls = this.agentLimitMaxModelCalls;
     if (duration) block.max_duration = duration;
-    payload.agent_limits = block;
+    // Send explicit null for a full clear so it is never dropped as an empty
+    // object, and carry expected_revisions.agent_limits for optimistic CAS.
+    payload.agent_limits = Object.keys(block).length > 0 ? block : null;
+    const expectedRevisions =
+      (payload.expected_revisions as Record<string, number> | undefined) ?? {};
+    expectedRevisions.agent_limits = this.loadedRevisions['agent_limits'] ?? 0;
+    payload.expected_revisions = expectedRevisions;
   }
 
   /**
@@ -3236,6 +3242,10 @@ export class ScionPageAdminServerConfig extends LitElement {
         payload.expected_revisions = dirty.expectedRevisions;
       }
     }
+    // agent_limits is DB-only with no KoanfPaths, so it is attached after
+    // dirtySectionsPayload (which would otherwise drop an empty clear and omit
+    // its expected_revisions entry).
+    this.addAgentLimitsToPayload(payload);
     if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
     return payload;
   }
@@ -3356,9 +3366,6 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_max_turns')) payload.default_max_turns = this.defaultMaxTurns;
     if (ok('default_max_model_calls')) payload.default_max_model_calls = this.defaultMaxModelCalls;
     if (ok('default_max_duration')) payload.default_max_duration = this.defaultMaxDuration;
-    if (this.settingsTier === 'db') {
-      this.addAgentLimitsToPayload(payload);
-    }
     if (
       ok('default_resources') &&
       (this.defaultResCpuReq ||
@@ -5247,7 +5254,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (this.settingsTier !== 'db') {
       return nothing;
     }
-    const expEnabled = isFeatureEnabled(AGENT_LIMIT_CEILINGS_FLAG);
+    const expEnabled = agentLimitCeilingsEnabled();
     const hasStoredCeilings =
       this.loadedAgentLimitMaxTurns > 0 ||
       this.loadedAgentLimitMaxModelCalls > 0 ||
@@ -5281,11 +5288,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         </p>
         <div class="form-grid">
           <div class="form-field">
-            <label>Max Turns Ceiling</label>
-            <span class="hint"
-              >Maximum conversation turns allowed per run (empty = no ceiling)</span
-            >
             <sl-input
+              label="Max Turns Ceiling"
+              help-text="Maximum conversation turns allowed per run (empty = no ceiling)"
               type="number"
               min="0"
               data-field="agent_limits.max_turns"
@@ -5298,9 +5303,9 @@ export class ScionPageAdminServerConfig extends LitElement {
             ></sl-input>
           </div>
           <div class="form-field">
-            <label>Max Model Calls Ceiling</label>
-            <span class="hint">Maximum LLM API calls allowed per run (empty = no ceiling)</span>
             <sl-input
+              label="Max Model Calls Ceiling"
+              help-text="Maximum LLM API calls allowed per run (empty = no ceiling)"
               type="number"
               min="0"
               data-field="agent_limits.max_model_calls"
@@ -5313,11 +5318,9 @@ export class ScionPageAdminServerConfig extends LitElement {
             ></sl-input>
           </div>
           <div class="form-field full-width">
-            <label>Max Duration Ceiling</label>
-            <span class="hint"
-              >Maximum run duration allowed (Go duration, e.g. 4h, 30m; empty = no ceiling)</span
-            >
             <sl-input
+              label="Max Duration Ceiling"
+              help-text="Maximum run duration allowed (Go duration, e.g. 4h, 30m; empty = no ceiling)"
               data-field="agent_limits.max_duration"
               value=${this.agentLimitMaxDuration}
               placeholder="No ceiling (e.g. 4h, 30m)"

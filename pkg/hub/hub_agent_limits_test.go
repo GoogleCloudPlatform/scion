@@ -475,8 +475,21 @@ func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "validation_error")
 	assert.Equal(t, 100, ops.AgentLimits().MaxTurns)
 
-	// Clearing ceilings via empty object succeeds and GET omits agent_limits.
+	// Clearing ceilings via empty object succeeds, and clearing via null
+	// (the UI full-clear payload) also succeeds.
 	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.True(t, ops.AgentLimits().IsEmpty())
+
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":100}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, 100, ops.AgentLimits().MaxTurns)
+
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":null}`)
 	rr = httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, req, ops)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())

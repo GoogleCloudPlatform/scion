@@ -1942,14 +1942,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if secName == "telemetry" {
 			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
 		}
-		if secName == opsettings.AgentLimitsSectionName && len(errs) == 0 {
-			if _, parseErr := opsettings.ParseAgentLimitsDoc(doc); parseErr != nil {
-				errs = append(errs, config.ValidationError{
-					Path:    "max_duration",
-					Message: parseErr.Error(),
-				})
-			}
-		}
 		if len(errs) > 0 {
 			allValidationErrors[secName] = errs
 		}
@@ -2236,6 +2228,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		// (which runs alphabetically before agent_limits) so simultaneous
 		// raise/lower updates do not trip against the stale cached ceiling;
 		// agent_limits still validates against the newly cached agent_defaults.
+		//
+		// Note: the section write loop is non-transactional. If agent_defaults
+		// commits with the skip and the subsequent agent_limits write fails
+		// (e.g. a stale expected_revisions.agent_limits CAS conflict -> 409, or
+		// a concurrent agent_defaults writer racing between validation and
+		// write -> 500), the stored defaults may temporarily exceed the stored
+		// ceiling until the next edit; broker-side clamping remains the runtime
+		// backstop and any standalone edit of either section gets 422 until the
+		// pair is brought back into compliance.
 		_, hasAgentLimitsInPut := sectionDocs[opsettings.AgentLimitsSectionName]
 		skipCrossSection := secName == "agent_defaults" && hasAgentLimitsInPut
 		newRev, inEffect, err := ops.updateInternal(r.Context(), secName, doc, updatedBy, expectedRev, "managed", skipCrossSection)

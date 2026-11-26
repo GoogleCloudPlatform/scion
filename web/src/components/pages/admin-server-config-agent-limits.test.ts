@@ -21,12 +21,16 @@ type ConfigHost = HTMLElement & {
   updateComplete: Promise<unknown>;
   populateForm(data: Record<string, unknown>): void;
   buildLayer1Payload(): Record<string, unknown>;
+  buildSavePayload(): Record<string, unknown>;
   settingsTier: 'db' | 'file';
   loading: boolean;
   activeTab: string;
   agentLimitMaxTurns: number;
   agentLimitMaxModelCalls: number;
   agentLimitMaxDuration: string;
+  layer1Baseline: Record<string, unknown> | null;
+  sectionKoanfPaths: Record<string, string[]> | null;
+  loadedRevisions: Record<string, number>;
 };
 
 describe('admin server config Agent Limit Ceilings panel', () => {
@@ -51,7 +55,11 @@ describe('admin server config Agent Limit Ceilings panel', () => {
     vi.restoreAllMocks();
   });
 
-  async function mount(data: Record<string, unknown>, flagOn: boolean): Promise<ConfigHost> {
+  async function mount(
+    data: Record<string, unknown>,
+    flagOn: boolean,
+    revisions: Record<string, number> = {}
+  ): Promise<ConfigHost> {
     setFeatureFlag(AGENT_LIMIT_CEILINGS_FLAG, flagOn);
     const el = document.createElement('scion-page-admin-server-config') as ConfigHost;
     document.body.appendChild(el);
@@ -59,6 +67,11 @@ describe('admin server config Agent Limit Ceilings panel', () => {
     el.activeTab = 'general';
     el.settingsTier = 'db';
     el.populateForm(data);
+    el.sectionKoanfPaths = {
+      agent_defaults: ['default_max_turns', 'default_max_model_calls', 'default_max_duration'],
+    };
+    el.layer1Baseline = el.buildLayer1Payload();
+    el.loadedRevisions = revisions;
     await el.updateComplete;
     return el;
   }
@@ -77,7 +90,7 @@ describe('admin server config Agent Limit Ceilings panel', () => {
     expect(alert!.textContent).toContain(AGENT_LIMIT_CEILINGS_FLAG);
   });
 
-  it('renders three ceiling inputs and cooperative guardrail note when experiment is on', async () => {
+  it('renders three labeled ceiling inputs and cooperative guardrail note when experiment is on', async () => {
     const el = await mount(
       {
         settings_tier: 'db',
@@ -94,24 +107,52 @@ describe('admin server config Agent Limit Ceilings panel', () => {
     const turns = section!.querySelector('[data-field="agent_limits.max_turns"]')!;
     const calls = section!.querySelector('[data-field="agent_limits.max_model_calls"]')!;
     const dur = section!.querySelector('[data-field="agent_limits.max_duration"]')!;
+    expect(turns.getAttribute('label')).toBe('Max Turns Ceiling');
+    expect(calls.getAttribute('label')).toBe('Max Model Calls Ceiling');
+    expect(dur.getAttribute('label')).toBe('Max Duration Ceiling');
     expect(turns.getAttribute('value')).toBe('50');
     expect(calls.getAttribute('value')).toBe('200');
     expect(dur.getAttribute('value')).toBe('2h');
   });
 
-  it('omits agent_limits from save payload when untouched, and includes it when edited or cleared', async () => {
-    const el = await mount({ settings_tier: 'db', agent_limits: { max_turns: 50 } }, true);
-    expect(el.buildLayer1Payload().agent_limits).toBeUndefined();
+  it('omits agent_limits from buildSavePayload when unchanged', async () => {
+    const el = await mount({ settings_tier: 'db', agent_limits: { max_turns: 50 } }, true, {
+      agent_limits: 4,
+    });
+    const body = el.buildSavePayload();
+    expect(body).not.toHaveProperty('agent_limits');
+    expect(body).not.toHaveProperty('expected_revisions');
+  });
 
+  it('sends agent_limits: null and expected_revisions when a single stored ceiling is cleared', async () => {
+    const el = await mount({ settings_tier: 'db', agent_limits: { max_turns: 50 } }, true, {
+      agent_limits: 4,
+    });
+    el.agentLimitMaxTurns = 0;
+    const body = el.buildSavePayload();
+    expect(body.agent_limits).toBeNull();
+    expect(body.expected_revisions).toEqual({ agent_limits: 4 });
+  });
+
+  it('sends agent_limits: null and expected_revisions when multiple stored ceilings are all cleared', async () => {
+    const el = await mount(
+      { settings_tier: 'db', agent_limits: { max_turns: 50, max_model_calls: 200 } },
+      true,
+      { agent_limits: 7 }
+    );
+    el.agentLimitMaxTurns = 0;
+    el.agentLimitMaxModelCalls = 0;
+    const body = el.buildSavePayload();
+    expect(body.agent_limits).toBeNull();
+    expect(body.expected_revisions).toEqual({ agent_limits: 7 });
+  });
+
+  it('sends edited ceilings with expected_revisions.agent_limits (defaulting to 0 when unstored)', async () => {
+    const el = await mount({ settings_tier: 'db' }, true, {});
     el.agentLimitMaxTurns = 75;
     el.agentLimitMaxDuration = '4h';
-    expect(el.buildLayer1Payload().agent_limits).toEqual({
-      max_turns: 75,
-      max_duration: '4h',
-    });
-
-    el.agentLimitMaxTurns = 0;
-    el.agentLimitMaxDuration = '';
-    expect(el.buildLayer1Payload().agent_limits).toEqual({});
+    const body = el.buildSavePayload();
+    expect(body.agent_limits).toEqual({ max_turns: 75, max_duration: '4h' });
+    expect(body.expected_revisions).toEqual({ agent_limits: 0 });
   });
 });

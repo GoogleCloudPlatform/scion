@@ -788,9 +788,8 @@ export interface TelemetryConfig {
 }
 
 /**
- * The agent's inline config: every key of api.ScionConfig
- * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
- * and accepts it in the agent PATCH body's `config` object.
+ * Broker-reported effective run limits projected onto single-agent GET
+ * responses from store.AgentEffectiveConfig.
  */
 export interface AgentEffectiveConfig {
   maxTurns?: number;
@@ -799,6 +798,11 @@ export interface AgentEffectiveConfig {
   limitsClampedBy?: string[];
 }
 
+/**
+ * The agent's inline config: every key of api.ScionConfig
+ * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
+ * and accepts it in the agent PATCH body's `config` object.
+ */
 export interface AgentInlineConfig {
   harness?: string;
   harness_config?: string;
