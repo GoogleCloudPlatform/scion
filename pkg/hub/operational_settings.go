@@ -139,8 +139,9 @@ type Layer1Snapshot struct {
 	HasMaintenanceRow bool
 
 	// Telemetry
-	TelemetryEnabled *bool
-	TelemetryConfig  *config.V1TelemetryConfig
+	TelemetryEnabled  *bool
+	TelemetryEnforced bool
+	TelemetryConfig   *config.V1TelemetryConfig
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
@@ -742,6 +743,19 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+	// telemetry.enforced is DB-only: read exclusively from the stored DB
+	// telemetry row (never from bootstrap settings.yaml or env) and only when
+	// the decoded row passes Resolve() (fail closed).
+	if rawTel, inDB := dbSections["telemetry"]; inDB && len(rawTel) > 0 {
+		var ts opsettings.TelemetrySettings
+		if err := json.Unmarshal(rawTel, &ts); err != nil {
+			slog.Error("operational settings: cannot decode telemetry DB row for enforced flag", "error", err)
+		} else if resolved, err := ts.Resolve(); err != nil {
+			slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
+		} else {
+			snap.TelemetryEnforced = resolved.Enforced
+		}
+	}
 	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
@@ -1770,6 +1784,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "telemetry_default")
 	}
 	s.config.TelemetryDefault = telemetryDefault
+	telemetryEnforced := s.config.TelemetryEnforced
+	if snap.FromOperationalSettings {
+		telemetryEnforced = snap.TelemetryEnforced
+	}
+	if s.config.TelemetryEnforced != telemetryEnforced {
+		applied = append(applied, "telemetry_enforced")
+	}
+	s.config.TelemetryEnforced = telemetryEnforced
 	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
 		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)

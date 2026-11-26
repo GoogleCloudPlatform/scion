@@ -53,6 +53,11 @@ var sectionSchemaDiffAllowList = map[string]string{
 	"runtimes.*.kubernetes_block_service_account: pattern <nil>, root ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$":   "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
 	"runtimes.*.kubernetes_service_account_mappings.*: pattern <nil>, root ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$": "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
 	"runtimes.*.priority_class_name: pattern <nil>, root ^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$":                "type only in the section; the value rule is a save check (config.RuntimeSaveChecks: refused when a save sets it, a warning when stored and untouched; ptone/scion#6580)",
+
+	// Hub opsettings-only key: not added to V1TelemetryConfig or broker
+	// settings.yaml, so it intentionally has no root schema property
+	// (ptone/scion#9370).
+	"telemetry.enforced: missing from root schema": "opsettings-only hub enforcement flag, not in broker settings.yaml; ptone/scion#9370",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema

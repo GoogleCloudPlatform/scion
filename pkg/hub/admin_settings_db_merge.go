@@ -625,6 +625,11 @@ func sectionKeyKoanfPath(section, key string) string {
 			return p
 		}
 	}
+	for _, p := range sec.DBOnlyKeys {
+		if p == key || p == section+"."+key {
+			return p
+		}
+	}
 	return ""
 }
 

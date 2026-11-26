@@ -54,7 +54,7 @@ type ServerConfigResponse struct {
 	ImageRegistry        string                               `json:"image_registry,omitempty"`
 	WorkspacePath        string                               `json:"workspace_path,omitempty"`
 	Server               *config.V1ServerConfig               `json:"server,omitempty"`
-	Telemetry            *config.V1TelemetryConfig            `json:"telemetry,omitempty"`
+	Telemetry            *opsettings.TelemetrySettings        `json:"telemetry,omitempty"`
 	Runtimes             map[string]config.V1RuntimeConfig    `json:"runtimes,omitempty"`
 	HarnessConfigs       map[string]config.HarnessConfigEntry `json:"harness_configs,omitempty"`
 	Profiles             map[string]config.V1ProfileConfig    `json:"profiles,omitempty"`
@@ -160,7 +160,7 @@ type ServerConfigUpdateRequest struct {
 	ImageRegistry        *string                              `json:"image_registry,omitempty"`
 	WorkspacePath        *string                              `json:"workspace_path,omitempty"`
 	Server               *config.V1ServerConfig               `json:"server,omitempty"`
-	Telemetry            *config.V1TelemetryConfig            `json:"telemetry,omitempty"`
+	Telemetry            *opsettings.TelemetrySettings        `json:"telemetry,omitempty"`
 	Runtimes             map[string]config.V1RuntimeConfig    `json:"runtimes,omitempty"`
 	HarnessConfigs       map[string]config.HarnessConfigEntry `json:"harness_configs,omitempty"`
 	Profiles             map[string]config.V1ProfileConfig    `json:"profiles,omitempty"`
@@ -794,6 +794,17 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// telemetry.enforced is opsettings-only (database-backed hubs) and gated by
+	// experiment agent_policy.telemetry_enforcement (ptone/scion#9370).
+	if req.Telemetry != nil && req.Telemetry.Enforced {
+		if !s.experimentEnabled(experiments.AgentPolicyTelemetryEnforcement) {
+			writeTelemetryEnforcementExperimentDisabled(w)
+			return
+		}
+		writeSettingsFieldError(w, "telemetry.enforced", "telemetry.enforced is only supported on database-backed hubs")
+		return
+	}
+
 	// GET masks secrets and clients send the GET body back on save: restore
 	// every still-masked field before anything is written. The stored view
 	// is decoded from the same read that is merged and written below, so the
@@ -811,14 +822,14 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// telemetry.cloud.headers values are masked in GET too: a masked echo
 	// keeps the stored header.
-	if len(maskedTelemetryHeaderNames(req.Telemetry)) > 0 {
+	if req.Telemetry != nil && len(maskedTelemetryHeaderNames(&req.Telemetry.V1TelemetryConfig)) > 0 {
 		stored, err := telemetryConfigFromRaw(raw)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to parse existing settings", nil)
 			return
 		}
-		unchanged := telemetryCloudUnchangedFile(raw, req.Telemetry, rawRequestObject(rawBody, "Telemetry"), stored)
-		if err := restoreMaskedTelemetryHeaders(req.Telemetry, stored, unchanged); err != nil {
+		unchanged := telemetryCloudUnchangedFile(raw, &req.Telemetry.V1TelemetryConfig, rawRequestObject(rawBody, "Telemetry"), stored)
+		if err := restoreMaskedTelemetryHeaders(&req.Telemetry.V1TelemetryConfig, stored, unchanged); err != nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 			return
 		}
@@ -1145,7 +1156,7 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 	// send only part of it (the settings page leaves out filter, resource
 	// and cloud headers, tls and batch), and the rest must be kept.
 	if req.Telemetry != nil {
-		mergeSettingsSection(raw, "telemetry", req.Telemetry, rawRequestObject(rawBody, "Telemetry"))
+		mergeSettingsSection(raw, "telemetry", &req.Telemetry.V1TelemetryConfig, rawRequestObject(rawBody, "Telemetry"))
 	}
 	// runtimes: each sent entry is merged key by key on the stored one, so
 	// a stored key the body leaves out is kept (ptone/scion#6580;

@@ -410,6 +410,10 @@ type ServerConfig struct {
 	// TelemetryDefault is the default telemetry enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	TelemetryDefault *bool
+	// TelemetryEnforced makes telemetry mandatory for every agent this hub
+	// dispatches when experiment agent_policy.telemetry_enforcement is on.
+	// Read through Server.telemetryEnforced().
+	TelemetryEnforced bool
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool
@@ -6219,6 +6223,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	// Hub telemetry default and template job config (ptone/scion#4222).
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
+	dispatcher.SetTelemetryEnforcedProvider(s.telemetryEnforced)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
 	// Wire the async agent launch settings. Enabled follows the

@@ -349,6 +349,10 @@ type HTTPAgentDispatcher struct {
 	// dispatch time (see dispatchTelemetry). Nil = no hub telemetry default.
 	hubTelemetryProvider func() *api.TelemetryConfig
 
+	// telemetryEnforcedProvider reports whether hub-level telemetry
+	// enforcement is active at dispatch time (see dispatchTelemetry).
+	telemetryEnforcedProvider func() bool
+
 	// templateJobConfigProvider returns a Hub template's job config: its
 	// AgentConfig snapshot (derived once and persisted when the row has
 	// none) with environment keys stripped (Server.templateJobConfigByID).
@@ -586,6 +590,12 @@ func (d *HTTPAgentDispatcher) SetAgentLimitsProvider(fn func() opsettings.AgentL
 // telemetry config, read on every create, start and restart dispatch.
 func (d *HTTPAgentDispatcher) SetHubTelemetryProvider(fn func() *api.TelemetryConfig) {
 	d.hubTelemetryProvider = fn
+}
+
+// SetTelemetryEnforcedProvider registers the accessor for whether hub-level
+// telemetry enforcement is active, read on every create, start and restart dispatch.
+func (d *HTTPAgentDispatcher) SetTelemetryEnforcedProvider(fn func() bool) {
+	d.telemetryEnforcedProvider = fn
 }
 
 // SetTemplateJobConfigProvider registers the accessor for a Hub template's

@@ -30,6 +30,12 @@ type Section struct {
 	Name       string
 	Schema     *jsonschema.Schema
 	KoanfPaths []string
+	// DBOnlyKeys are dotted key paths owned by this section in database-backed
+	// operational settings only (no settings.yaml or env-var representation).
+	// They are indexed for OwningSection/IsLayer1Key/ClassifyKeys so PUT
+	// /api/v1/admin/server-config accepts them as Layer-1 keys, without adding
+	// them to KoanfPaths (seeding, settings-v1.schema.json, or env contract).
+	DBOnlyKeys []string
 	New        func() any
 
 	// RestartRequired lists the koanf paths of this section whose saved
@@ -143,6 +149,10 @@ var sectionIndex map[string]*Section
 // keyIndex maps koanf path → section name for ownership lookup.
 var keyIndex map[string]string
 
+// dbOnlyKeyIndex tracks keys registered in Section.DBOnlyKeys (no settings.yaml
+// or environment variable representation).
+var dbOnlyKeyIndex map[string]bool
+
 func init() {
 	Registry = []Section{
 		{
@@ -190,6 +200,7 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.resource",
 			},
+			DBOnlyKeys:      []string{"telemetry.enforced"},
 			New:             func() any { return &TelemetrySettings{} },
 			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval"},
 		},
@@ -409,13 +420,24 @@ func init() {
 func ensureIndexes() {
 	sectionIndex = make(map[string]*Section, len(Registry))
 	keyIndex = make(map[string]string)
+	dbOnlyKeyIndex = make(map[string]bool)
 	for i := range Registry {
 		s := &Registry[i]
 		sectionIndex[s.Name] = s
 		for _, kp := range s.KoanfPaths {
 			keyIndex[kp] = s.Name
 		}
+		for _, kp := range s.DBOnlyKeys {
+			keyIndex[kp] = s.Name
+			dbOnlyKeyIndex[kp] = true
+		}
 	}
+}
+
+// IsDBOnlyKey reports whether key is registered as a DB-only key (no
+// settings.yaml or environment variable representation).
+func IsDBOnlyKey(key string) bool {
+	return dbOnlyKeyIndex[key]
 }
 
 // SectionByName returns the Section with the given name, or nil if not found.
@@ -1092,8 +1114,23 @@ func resolveRef(root map[string]interface{}, ref string) interface{} {
 }
 
 func buildTelemetrySchema(defs map[string]interface{}) map[string]interface{} {
-	if tc, ok := defs["telemetryConfig"]; ok {
-		return tc.(map[string]interface{})
+	if tc, ok := defs["telemetryConfig"].(map[string]interface{}); ok {
+		cloned := make(map[string]interface{}, len(tc))
+		for k, v := range tc {
+			cloned[k] = v
+		}
+		if props, ok := tc["properties"].(map[string]interface{}); ok {
+			clonedProps := make(map[string]interface{}, len(props)+1)
+			for k, v := range props {
+				clonedProps[k] = v
+			}
+			clonedProps["enforced"] = map[string]interface{}{
+				"type":        "boolean",
+				"description": "Make telemetry mandatory for every agent this hub dispatches. Requires enabled=true.",
+			}
+			cloned["properties"] = clonedProps
+		}
+		return cloned
 	}
 	return map[string]interface{}{
 		"type":                 "object",
@@ -1192,6 +1229,16 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 	case AgentLimitsSectionName:
 		if _, err := ParseAgentLimitsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}
+		}
+		return nil
+	case "telemetry":
+		var ts TelemetrySettings
+		if err := json.Unmarshal(doc, &ts); err != nil {
+			// ValidateSchema already reported any JSON or field-type error.
+			return nil
+		}
+		if _, err := ts.Resolve(); err != nil {
+			return []config.ValidationError{{Path: "enforced", Message: err.Error()}}
 		}
 		return nil
 	default:

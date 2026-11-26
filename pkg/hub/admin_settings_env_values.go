@@ -154,6 +154,10 @@ func envValueMayBeShown(key string) bool {
 // never-shown keys are hidden and secrets are masked (see
 // hideAndMaskServerConfig).
 func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfigResponse {
+	var telemetry *opsettings.TelemetrySettings
+	if vs.Telemetry != nil {
+		telemetry = &opsettings.TelemetrySettings{V1TelemetryConfig: *vs.Telemetry}
+	}
 	resp := ServerConfigResponse{
 		SchemaVersion:        vs.SchemaVersion,
 		ActiveProfile:        vs.ActiveProfile,
@@ -162,7 +166,7 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 		ImageRegistry:        vs.ImageRegistry,
 		WorkspacePath:        vs.WorkspacePath,
 		Server:               vs.Server,
-		Telemetry:            vs.Telemetry,
+		Telemetry:            telemetry,
 		Runtimes:             vs.Runtimes,
 		HarnessConfigs:       vs.HarnessConfigs,
 		Profiles:             vs.Profiles,
