@@ -397,12 +397,13 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	sam1 := &store.User{ID: tid("sugg-sam1"), Email: "sam1@example.com", DisplayName: "Sam Taylor", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
 	sam2 := &store.User{ID: tid("sugg-sam2"), Email: "sam2@example.com", DisplayName: "Sam Taylor", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
 	priya := &store.User{ID: tid("sugg-priya"), Email: "priya@example.com", DisplayName: "Priya Raman", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
-	for _, u := range []*store.User{aaron, sam1, sam2, priya} {
+	namedMe := &store.User{ID: tid("sugg-me-name"), Email: "me-user@example.com", DisplayName: "Me", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
+	for _, u := range []*store.User{aaron, sam1, sam2, priya, namedMe} {
 		require.NoError(t, f.store.CreateUser(ctx, u))
 		ensureHubMembership(ctx, f.store, u.ID)
 		addProjectMemberWithRole(t, f.store, f.project, u.ID, store.GroupMemberRoleAdmin)
 	}
-	for i, u := range []*store.User{f.bob, aaron, sam1, sam2, priya} {
+	for i, u := range []*store.User{f.bob, aaron, sam1, sam2, priya, namedMe} {
 		_, rowID := seedSuggestionPrompt(t, f, f.agent.ID, f.agent.Slug, f.agent.Name, f.topicID, fmt.Sprintf("k-by-%d", i), fmt.Sprintf("Ans Q %d", i))
 		require.Equal(t, http.StatusOK, f.answer(t, u, rowID, map[string]interface{}{"choice_id": "yes"}).Code)
 	}
@@ -424,6 +425,14 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	assert.Equal(t, "Sam Taylor", byMap["sam1@example.com"], "colliding answerer inserts email with display name hint")
 	assert.Equal(t, "Sam Taylor", byMap["sam2@example.com"], "colliding answerer inserts email with display name hint")
 	assert.NotContains(t, byMap, "Sam Taylor", "colliding display name must not be inserted directly")
+	assert.Equal(t, "Me", byMap["me-user@example.com"], "answerer named Me collides with me keyword and inserts email with Me hint")
+	assert.NotContains(t, byMap, "Me", "display name Me must not be inserted directly")
+
+	// O3: cancelled/timed-out context aborts decisionSuggestionsCore cleanly.
+	cancelCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	_, cerr := f.srv.decisionSuggestionsCore(cancelCtx, nil, newDecisionScopeSet([]*projectReadableScope{{project: f.project, chatKeys: []string{f.topicID}}}), f.project.ID, decisionSuggestionsQuery{key: "agent", limit: 12}, false)
+	assert.ErrorIs(t, cerr, context.Canceled)
 
 	// limit=0 with structured q loads raw facets for resolution, returns filteredCounts,
 	// and emits no facet views or facetsTruncated.

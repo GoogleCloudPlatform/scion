@@ -393,7 +393,10 @@ func (s *Server) decisionSuggestionsCore(
 		lowerHelp  string
 	}
 	ranked := make([]rankedSuggestion, 0, len(candidates))
-	for _, c := range candidates {
+	for i, c := range candidates {
+		if i&63 == 0 && ctx.Err() != nil {
+			return DecisionSuggestionsResponse{}, ctx.Err()
+		}
 		tier := filterquery.MatchTierExact
 		if normPrefix != "" {
 			t, ok := filterquery.ClassifyMatch(normPrefix, c.item.Value)
@@ -538,6 +541,7 @@ func decisionSuggestionCandidates(
 			viewerDisplayName = user.DisplayName()
 		}
 		nameCounts := make(map[string]int, len(bundle.rawAnswerers))
+		emailsAndIDs := make(map[string]bool, len(bundle.rawAnswerers)*2)
 		selfName := ""
 		for _, a := range bundle.rawAnswerers {
 			if viewerID != "" && a.ID == viewerID && a.Name != "" {
@@ -545,6 +549,12 @@ func decisionSuggestionCandidates(
 			}
 			if lower := strings.ToLower(a.Name); lower != "" {
 				nameCounts[lower]++
+			}
+			if lower := strings.ToLower(a.Email); lower != "" {
+				emailsAndIDs[lower] = true
+			}
+			if lower := strings.ToLower(a.ID); lower != "" {
+				emailsAndIDs[lower] = true
 			}
 		}
 		if viewerID != "" {
@@ -562,7 +572,8 @@ func decisionSuggestionCandidates(
 				continue
 			}
 			lower := strings.ToLower(a.Name)
-			if lower != "" && nameCounts[lower] > 1 && a.Email != "" {
+			collides := lower != "" && (nameCounts[lower] > 1 || lower == "me" || (emailsAndIDs[lower] && !strings.EqualFold(a.Name, a.Email)))
+			if collides && a.Email != "" {
 				add(a.Email, a.Name, false)
 				continue
 			}
