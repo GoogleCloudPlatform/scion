@@ -382,11 +382,19 @@ export class ScionPageProfileDecisions extends LitElement {
   }
 
   private renderTruncatedBanner(): TemplateResult | typeof nothing {
-    if (!this.ctrl.truncatedProjects || this.ctrl.filterProject) return nothing;
+    if (
+      !this.ctrl.truncatedProjects ||
+      this.ctrl.filterProject ||
+      this.ctrl.hasPositiveProjectDialectFilter
+    ) {
+      return nothing;
+    }
     return html`
       <sl-alert variant="primary" open data-truncated-projects>
         <sl-icon slot="icon" name="info-circle"></sl-icon>
-        Showing your 200 most recently active projects; pick a project to see others
+        ${this.ctrl.queryDialect
+          ? 'Showing your 200 most recently active projects; only those 200 projects are searched.'
+          : 'Showing your 200 most recently active projects; pick a project to see others'}
       </sl-alert>
     `;
   }

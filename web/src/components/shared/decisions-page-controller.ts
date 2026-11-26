@@ -804,6 +804,17 @@ export class DecisionsPageController implements ReactiveController {
   readonly validateDialectQuery = (raw: string): boolean =>
     isValidDecisionsDialectQuery(raw, this.dialectView);
 
+  get hasPositiveProjectDialectFilter(): boolean {
+    if (!this.queryDialect || this.adapter.scope !== 'profile') return false;
+    const raw = normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery);
+    if (!raw) return false;
+    const schema = getViewSchema('profile-decisions');
+    if (!schema) return false;
+    const parsed = parseFilterQuery(raw, knownKeysFor(schema));
+    if (parsed.error || !parsed.query || parsed.query.mode !== 'structured') return false;
+    return parsed.query.terms.some((t) => t.key.toLowerCase() === 'project' && !t.negate);
+  }
+
   private hasPendingDialectFilter(): boolean {
     if (!this.queryDialect) return false;
     const raw = normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery);
@@ -1514,7 +1525,16 @@ export class DecisionsPageController implements ReactiveController {
     if (!cleaned) return { project: this.filterProject, q: this.filterQ };
     if (this.queryDialect) {
       const proj = this.knownProjectsById.get(cleaned);
-      const nextQ = buildProfileProjectDrillDownQuery(this.filterQ, proj?.slug || cleaned);
+      const uniqueSlug =
+        proj !== undefined &&
+        Boolean(proj.slug) &&
+        Array.from(this.knownProjectsById.values()).filter(
+          (p) => p.slug.toLowerCase() === proj.slug.toLowerCase()
+        ).length === 1;
+      const nextQ = buildProfileProjectDrillDownQuery(
+        this.filterQ,
+        uniqueSlug ? proj.slug : cleaned
+      );
       return { project: '', q: nextQ };
     }
     return { project: cleaned, q: this.filterQ };

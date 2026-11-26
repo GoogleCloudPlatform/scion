@@ -374,4 +374,38 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
     const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
     expect(box.value).toBe(`project:${unknownProjId}`);
   });
+
+  it('rewords the 200-project truncation banner in dialect mode and hides it for positive project: queries (O3)', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          makeResponse({
+            counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+            prompts: [],
+            ...defaultProfileFacets(),
+            truncatedProjects: true,
+          })
+        )
+      )
+    );
+
+    // Unfiltered: dialect wording (does not say "pick a project")
+    const el1 = await mountPage('');
+    const banner1 = el1.shadowRoot?.querySelector('sl-alert[data-truncated-projects]');
+    expect(banner1).not.toBeNull();
+    expect(banner1?.textContent).toContain('only those 200 projects are searched');
+    expect(banner1?.textContent).not.toContain('pick a project');
+    el1.remove();
+
+    // Positive project: term hides the banner
+    const el2 = await mountPage('?q=project%3Aalpha-app');
+    expect(el2.shadowRoot?.querySelector('sl-alert[data-truncated-projects]')).toBeNull();
+    el2.remove();
+
+    // Negated -project: term keeps the banner visible
+    const el3 = await mountPage('?q=-project%3Aalpha-app');
+    expect(el3.shadowRoot?.querySelector('sl-alert[data-truncated-projects]')).not.toBeNull();
+  });
 });
