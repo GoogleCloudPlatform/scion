@@ -883,6 +883,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					DecisionRetention() store.DecisionRetentionStore
 				}); ok {
 					hubSrv.SetDecisionRetentionStore(drp.DecisionRetention())
+					// Sweep, preview and manual runs a crash/restart interrupted
+					// would otherwise stay "running" forever if the job is
+					// subsequently disabled or idle.
+					hubSrv.ReconcileInterruptedDecisionRetentionRuns(context.Background())
 				}
 
 				// W7: Initialize local-disk attachment store.

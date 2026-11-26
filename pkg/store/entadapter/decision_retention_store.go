@@ -773,6 +773,31 @@ func (s *DecisionRetentionStore) SaveDecisionRetentionRun(ctx context.Context, r
 	return nil
 }
 
+// FailRunningDecisionRetentionRuns implements store.DecisionRetentionStore.
+func (s *DecisionRetentionStore) FailRunningDecisionRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error) {
+	if len(triggers) == 0 {
+		return 0, nil
+	}
+	ts := make([]decisionretentionrun.Trigger, len(triggers))
+	for i, t := range triggers {
+		ts[i] = decisionretentionrun.Trigger(t)
+	}
+	n, err := s.client.DecisionRetentionRun.Update().
+		Where(
+			decisionretentionrun.StatusEQ(decisionretentionrun.StatusRunning),
+			decisionretentionrun.TriggerIn(ts...),
+			decisionretentionrun.StartedAtLT(before.UTC()),
+		).
+		SetStatus(decisionretentionrun.StatusFailed).
+		SetError(errMsg).
+		SetFinishedAt(finishedAt.UTC()).
+		Save(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("decision retention: fail interrupted runs: %w", err)
+	}
+	return n, nil
+}
+
 // PruneDecisionRetentionRuns implements store.DecisionRetentionStore.
 func (s *DecisionRetentionStore) PruneDecisionRetentionRuns(ctx context.Context, before time.Time) (int, error) {
 	n, err := s.client.DecisionRetentionRun.Delete().

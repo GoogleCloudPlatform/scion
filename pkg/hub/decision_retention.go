@@ -63,6 +63,15 @@ const (
 	// decisionRetentionTickSlack absorbs scheduler jitter when checking whether
 	// tick_interval_minutes has passed since the last tick.
 	decisionRetentionTickSlack = 5 * time.Second
+	// decisionRetentionReconcileTimeout bounds startup reconciliation of
+	// interrupted running rows.
+	decisionRetentionReconcileTimeout = 10 * time.Second
+	// decisionRetentionRunMaxAge is the fallback age threshold for failing
+	// running rows when another replica currently holds LockDecisionRetention.
+	decisionRetentionRunMaxAge = decisionRetentionRunWindow + time.Hour
+	// decisionRetentionInterruptedError is recorded on running rows failed by
+	// ReconcileInterruptedDecisionRetentionRuns after a crash/restart.
+	decisionRetentionInterruptedError = "interrupted by hub restart"
 )
 
 // decisionRetentionPolicy is the policy snapshot of one tick.
@@ -117,6 +126,79 @@ func (s *Server) decisionRetentionStore() store.DecisionRetentionStore {
 	s.decisionRetention.mu.Lock()
 	defer s.decisionRetention.mu.Unlock()
 	return s.decisionRetention.store
+}
+
+func (s *Server) tryDecisionRetentionLock(ctx context.Context) (func(), bool, error) {
+	locker, ok := s.store.(store.AdvisoryLocker)
+	if !ok {
+		return func() {}, true, nil
+	}
+	acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockDecisionRetention)
+	if err != nil {
+		return nil, false, err
+	}
+	if !acquired {
+		_ = release()
+		return nil, false, nil
+	}
+	return func() { _ = release() }, true, nil
+}
+
+// ReconcileInterruptedDecisionRetentionRuns marks any decision_retention_runs
+// rows left in status=running by a crash/restart as failed so they never stay
+// stuck in running if retention is subsequently disabled or idle. Call once at
+// startup after SetDecisionRetentionStore.
+//
+// When this process acquires LockDecisionRetention, no replica is actively
+// executing a sweep or manual run, so every running row started before this
+// process's startTime is marked failed. If another replica currently holds the
+// lock, only locked-trigger rows older than decisionRetentionRunMaxAge are
+// failed (previews take no lock and use startTime).
+func (s *Server) ReconcileInterruptedDecisionRetentionRuns(ctx context.Context) int {
+	st := s.decisionRetentionStore()
+	if st == nil {
+		return 0
+	}
+	s.mu.RLock()
+	started := s.startTime
+	s.mu.RUnlock()
+	now := time.Now()
+	if started.IsZero() {
+		started = now
+	}
+	ctx, cancel := context.WithTimeout(ctx, decisionRetentionReconcileTimeout)
+	defer cancel()
+
+	lockedBefore := now.Add(-decisionRetentionRunMaxAge)
+	if release, acquired, err := s.tryDecisionRetentionLock(ctx); err != nil {
+		slog.Warn("decision retention: reconcile: advisory lock", "error", err)
+	} else if acquired {
+		lockedBefore = started
+		defer release()
+	}
+	if lockedBefore.After(started) {
+		lockedBefore = started
+	}
+
+	total := 0
+	for _, step := range []struct {
+		triggers []string
+		before   time.Time
+	}{
+		{[]string{store.DecisionRetentionTriggerPreview}, started},
+		{[]string{store.DecisionRetentionTriggerSweep, store.DecisionRetentionTriggerManual}, lockedBefore},
+	} {
+		n, err := st.FailRunningDecisionRetentionRuns(ctx, step.triggers, step.before, decisionRetentionInterruptedError, now)
+		if err != nil {
+			slog.Warn("decision retention: reconcile interrupted runs", "triggers", step.triggers, "error", err)
+			continue
+		}
+		total += n
+	}
+	if total > 0 {
+		slog.Warn("decision retention: marked interrupted runs failed", "count", total)
+	}
+	return total
 }
 
 // decisionRetentionHandler is the "decision-retention" recurring singleton.

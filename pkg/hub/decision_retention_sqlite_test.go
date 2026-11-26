@@ -567,3 +567,59 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 	assert.True(t, cur3.ResetAt.After(day1ResetAt), "ResetAt must advance when cursor resets")
 	assert.False(t, cur3.ReachedCutoff)
 }
+
+// TestDecisionRetentionJob_ReconcileInterruptedRuns verifies that startup
+// reconciliation marks running rows started before server startTime as failed
+// (preserving committed counts), leaves rows started after startTime alone,
+// and is idempotent.
+func TestDecisionRetentionJob_ReconcileInterruptedRuns(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	cs := s.(*entadapter.CompositeStore)
+	st := cs.DecisionRetention()
+	srv.SetDecisionRetentionStore(st)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	srv.mu.Lock()
+	srv.startTime = now
+	srv.mu.Unlock()
+
+	projID := uuid.NewString()
+	interrupted := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerSweep,
+		StartedAt: now.Add(-5 * time.Minute),
+		Status:    store.DecisionRetentionStatusRunning,
+		Policy:    store.DecisionRetentionPolicy{RetentionDays: 30, Cutoff: now.Add(-30 * 24 * time.Hour)},
+		Counts:    map[string]store.DecisionRetentionCounts{projID: {Decisions: 50, Answers: 50}},
+	}
+	require.NoError(t, st.SaveDecisionRetentionRun(ctx, interrupted))
+
+	live := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerSweep,
+		StartedAt: now.Add(time.Minute),
+		Status:    store.DecisionRetentionStatusRunning,
+		Policy:    store.DecisionRetentionPolicy{RetentionDays: 30, Cutoff: now.Add(-30 * 24 * time.Hour)},
+		Counts:    map[string]store.DecisionRetentionCounts{},
+	}
+	require.NoError(t, st.SaveDecisionRetentionRun(ctx, live))
+
+	assert.Equal(t, 1, srv.ReconcileInterruptedDecisionRetentionRuns(ctx))
+	assert.Equal(t, 0, srv.ReconcileInterruptedDecisionRetentionRuns(ctx), "reconcile must be idempotent")
+
+	runs, err := st.ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, runs, 2)
+	byID := map[string]store.DecisionRetentionRun{}
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	gotInt := byID[interrupted.ID]
+	assert.Equal(t, store.DecisionRetentionStatusFailed, gotInt.Status)
+	assert.Equal(t, decisionRetentionInterruptedError, gotInt.Error)
+	assert.NotNil(t, gotInt.FinishedAt)
+	assert.Equal(t, int64(50), gotInt.Counts[projID].Decisions, "committed counts must be preserved")
+
+	gotLive := byID[live.ID]
+	assert.Equal(t, store.DecisionRetentionStatusRunning, gotLive.Status)
+	assert.Nil(t, gotLive.FinishedAt)
+}

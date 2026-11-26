@@ -164,6 +164,11 @@ type DecisionRetentionStore interface {
 	// and otherwise updates its finished_at, status, policy, counts and error.
 	SaveDecisionRetentionRun(ctx context.Context, run *DecisionRetentionRun) error
 
+	// FailRunningDecisionRetentionRuns marks running rows matching triggers
+	// whose started_at is strictly before before as failed with errMsg and
+	// finishedAt, returning the number of rows updated.
+	FailRunningDecisionRetentionRuns(ctx context.Context, triggers []string, before time.Time, errMsg string, finishedAt time.Time) (int, error)
+
 	// PruneDecisionRetentionRuns deletes runs started before before and
 	// returns how many it deleted.
 	PruneDecisionRetentionRuns(ctx context.Context, before time.Time) (int, error)
