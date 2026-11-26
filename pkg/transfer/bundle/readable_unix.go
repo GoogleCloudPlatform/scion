@@ -17,6 +17,7 @@
 package bundle
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -31,6 +32,13 @@ import (
 const (
 	nfsAnonUID16 uint32 = 65534
 	nfsAnonUID32 uint32 = 4294967294
+
+	// maxRootPreLatchProbes bounds the number of non-latching root readability
+	// probes (entries owned by UIDs other than ExpectedOwnerUID / NFS anon)
+	// before the expected owner latch fires. Past this cap, checkReadable fails
+	// closed with fs.ErrPermission so an unusual ownership mix cannot cause
+	// O(HomeMaxEntries) opens on NFS.
+	maxRootPreLatchProbes = 64
 )
 
 func isNFSAnonUID(uid uint32) bool {
@@ -69,6 +77,7 @@ type statAccessChecker struct {
 	groups           map[uint32]struct{}
 	expectedOwnerUID int
 	rootVerified     bool
+	preLatchProbes   int
 }
 
 func newStatAccessChecker(expectedOwnerUID int) statAccessChecker {
@@ -137,11 +146,17 @@ func (c *statAccessChecker) checkReadable(root *os.Root, rel string, info fs.Fil
 		if ok && isNFSAnonUID(st.Uid) && perm&ownerNeed == ownerNeed {
 			return nil
 		}
+		canLatch := ok && c.canLatchRootVerified(st.Uid)
+		if !canLatch && c.preLatchProbes >= maxRootPreLatchProbes {
+			return fmt.Errorf("root readability probe limit exceeded: %w", fs.ErrPermission)
+		}
 		if err := rootReadProbe(root, filepath.FromSlash(rel), isDir); err != nil {
 			return err
 		}
-		if ok && c.canLatchRootVerified(st.Uid) {
+		if canLatch {
 			c.rootVerified = true
+		} else {
+			c.preLatchProbes++
 		}
 		return nil
 	}

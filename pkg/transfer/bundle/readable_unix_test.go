@@ -153,6 +153,34 @@ func TestStatAccessChecker_RootAndNonRootCases(t *testing.T) {
 		assert.Equal(t, []string{"a-custom-anon.txt", "b-pod.txt"}, probed, "custom anonuid probe must not latch rootVerified when expectedOwnerUID is set")
 	})
 
+	t.Run("root pre-latch non-owner probes are capped and refuse conservatively", func(t *testing.T) {
+		statAccessEUID = func() int { return 0 }
+		statAccessEGID = func() int { return 0 }
+		statAccessGroups = func() ([]int, error) { return nil, nil }
+
+		const (
+			podUID   uint32 = 1000
+			otherUID uint32 = 2000
+		)
+		otherInfo := fakeOwnerFileInfo{FileInfo: privInfo, uid: otherUID, gid: otherUID}
+		probes := 0
+		rootReadProbe = func(_ *os.Root, _ string, _ bool) error {
+			probes++
+			return nil
+		}
+
+		c := newStatAccessChecker(int(podUID))
+		for i := 0; i < maxRootPreLatchProbes; i++ {
+			require.NoError(t, c.checkReadable(root, fmt.Sprintf("other-%03d.txt", i), otherInfo, false))
+		}
+		assert.Equal(t, maxRootPreLatchProbes, probes, "should probe up to maxRootPreLatchProbes non-latching entries")
+
+		// Next non-latching entry must be refused conservatively with fs.ErrPermission and 0 additional probes.
+		err := c.checkReadable(root, "other-overflow.txt", otherInfo, false)
+		assert.ErrorIs(t, err, fs.ErrPermission)
+		assert.Equal(t, maxRootPreLatchProbes, probes, "overflow past cap must not perform additional opens")
+	})
+
 	t.Run("root where every entry is world-readable allows with 0 opens", func(t *testing.T) {
 		statAccessEUID = func() int { return 0 }
 		statAccessEGID = func() int { return 0 }
