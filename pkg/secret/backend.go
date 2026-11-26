@@ -17,8 +17,6 @@ package secret
 import (
 	"context"
 	"fmt"
-	"path"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -198,8 +196,7 @@ func isTelemetryCredentialFile(meta SecretMeta) bool {
 	if meta.Scope != ScopeHub || meta.SecretType != store.SecretTypeFile || meta.Name != telemetryCredentialFileName {
 		return false
 	}
-	target := path.Clean(meta.Target)
-	return target == telemetryCredentialFilePath || strings.HasSuffix(target, "/"+telemetryCredentialFilePath)
+	return IsReservedTelemetryCredentialFileTarget(meta.Target)
 }
 
 // NewBackend creates a SecretBackend of the specified type.

@@ -488,6 +488,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	// The test-admin scope restriction, evaluated once: the start-time
 	// checks' keep decision and the withholding below use this one result.
 	ta := d.testAdminScopesFor(ctx, agent)
+	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
+	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
 
 	// The start-time owner-path and progeny checks resolveSecrets applies
 	// through the backend's Resolve. Nil without an authorization service.
@@ -555,6 +557,18 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 				// row with the same name stays in effect.
 				continue
 			}
+			if d.hostedMode && m.SecretType == store.SecretTypeFile {
+				effTarget := m.Target
+				if effTarget == "" {
+					effTarget = m.Name
+				}
+				if secret.IsReservedFileTarget(sc.scope, effTarget) {
+					if !withheld(sc.scope) {
+						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, sc.scope)
+					}
+					continue
+				}
+			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, scopeRank: scopeRank})
 		}
 	}
@@ -578,6 +592,18 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			}
 			if !check(m) {
 				continue
+			}
+			if d.hostedMode && m.SecretType == store.SecretTypeFile {
+				effTarget := m.Target
+				if effTarget == "" {
+					effTarget = m.Name
+				}
+				if secret.IsReservedFileTarget(m.Scope, effTarget) {
+					if !withheld(m.Scope) {
+						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, m.Scope)
+					}
+					continue
+				}
 			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, progeny: true})
 		}
@@ -604,16 +630,13 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 		return nil, nil, nil, nil
 	}
 
-	// The test-admin scope restriction is decided before the fetch, so no
+	// The test-admin scope restriction was decided before the fetch, so no
 	// value is read for a scope it withholds. A withheld item is still
 	// placed in precedence below, without a value: as when it was fetched
 	// and dropped afterwards, it outranks a lower-scope item of the same
 	// name or target, and the restriction then drops it. The one
 	// difference is fail-closed: a withheld item whose value could not
 	// have been read still outranks that lower-scope item.
-	restricted, allowedScopes, testAdminRoot := ta.restricted, ta.allowed, ta.root
-	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
-
 	metas := make([]secret.SecretMeta, 0, len(kept))
 	for _, c := range kept {
 		if withheld(c.meta.Scope) {

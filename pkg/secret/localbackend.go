@@ -275,6 +275,18 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 		if shadowed.ShadowsScope(*fromStoreSecretMeta(&s), c.scopeRank) {
 			continue
 		}
+		if opts != nil && opts.DropReservedFileTargets && s.SecretType == store.SecretTypeFile {
+			effTarget := s.Target
+			if effTarget == "" {
+				effTarget = s.Key
+			}
+			if IsReservedFileTarget(s.Scope, effTarget) {
+				if opts.OnReservedFileTargetSkipped != nil {
+					opts.OnReservedFileTargetSkipped(*fromStoreSecretMeta(&s))
+				}
+				continue
+			}
+		}
 
 		rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
 		if errors.Is(err, store.ErrNotFound) {
@@ -364,6 +376,18 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			// progeny value is read.
 			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
+			}
+			if opts.DropReservedFileTargets && s.SecretType == store.SecretTypeFile {
+				effTarget := s.Target
+				if effTarget == "" {
+					effTarget = s.Key
+				}
+				if IsReservedFileTarget(s.Scope, effTarget) {
+					if opts.OnReservedFileTargetSkipped != nil {
+						opts.OnReservedFileTargetSkipped(*meta)
+					}
+					continue
+				}
 			}
 
 			rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)

@@ -39,3 +39,51 @@ func TestIsReservedEnvTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestIsReservedTelemetryCredentialFileTarget(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   bool
+	}{
+		{"tilde in-home path", "~/.scion/telemetry-gcp-credentials.json", true},
+		{"double slash and dot segments", "~//.scion/./telemetry-gcp-credentials.json", true},
+		{"absolute home path", "/home/scion/.scion/telemetry-gcp-credentials.json", true},
+		{"absolute with dotdot collapsing to target", "/home/scion/.scion/other/../telemetry-gcp-credentials.json", true},
+		{"relative in-home path", ".scion/telemetry-gcp-credentials.json", true},
+		{"windows backslashes", `~\.scion\telemetry-gcp-credentials.json`, true},
+		{"missing segment boundary", "/tmp/x.scion/telemetry-gcp-credentials.json", false},
+		{"nested subdirectory under .scion", "~/.scion/other/telemetry-gcp-credentials.json", false},
+		{"different filename", "~/.scion/telemetry-gcp-credentials.json.bak", false},
+		{"ordinary file target", "~/.config/gcp/sa.json", false},
+		{"empty target", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsReservedTelemetryCredentialFileTarget(tt.target); got != tt.want {
+				t.Errorf("IsReservedTelemetryCredentialFileTarget(%q) = %v, want %v", tt.target, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsReservedFileTarget(t *testing.T) {
+	target := "~/.scion/telemetry-gcp-credentials.json"
+	tests := []struct {
+		scope  string
+		target string
+		want   bool
+	}{
+		{ScopeHub, target, false},
+		{ScopeProject, target, true},
+		{ScopeUser, target, true},
+		{ScopeAgent, target, true},
+		{ScopeRuntimeBroker, target, true},
+		{ScopeProject, "~/.config/gcp/sa.json", false},
+	}
+	for _, tt := range tests {
+		if got := IsReservedFileTarget(tt.scope, tt.target); got != tt.want {
+			t.Errorf("IsReservedFileTarget(%q, %q) = %v, want %v", tt.scope, tt.target, got, tt.want)
+		}
+	}
+}

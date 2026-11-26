@@ -651,6 +651,18 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		if shadowed.ShadowsScope(*fromStoreSecretMeta(&s), c.scopeRank) {
 			continue
 		}
+		if opts != nil && opts.DropReservedFileTargets && s.SecretType == store.SecretTypeFile {
+			effTarget := s.Target
+			if effTarget == "" {
+				effTarget = s.Key
+			}
+			if IsReservedFileTarget(s.Scope, effTarget) {
+				if opts.OnReservedFileTargetSkipped != nil {
+					opts.OnReservedFileTargetSkipped(*fromStoreSecretMeta(&s))
+				}
+				continue
+			}
+		}
 
 		var value string
 		var secretRef string
@@ -751,6 +763,18 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			// progeny value is read.
 			if opts.AuthzCheck == nil || !opts.AuthzCheck(*meta) {
 				continue
+			}
+			if opts.DropReservedFileTargets && s.SecretType == store.SecretTypeFile {
+				effTarget := s.Target
+				if effTarget == "" {
+					effTarget = s.Key
+				}
+				if IsReservedFileTarget(s.Scope, effTarget) {
+					if opts.OnReservedFileTargetSkipped != nil {
+						opts.OnReservedFileTargetSkipped(*meta)
+					}
+					continue
+				}
 			}
 
 			// Read value from GCP SM, preferring stored SecretRef

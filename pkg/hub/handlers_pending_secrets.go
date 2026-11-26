@@ -594,6 +594,9 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 		})
 		return
 	}
+	if !s.validateFileSecretTarget(w, store.ScopeUser, p.SecretType, p.Target) {
+		return
+	}
 
 	// Read the held value before claiming the row, so a read failure
 	// changes nothing.

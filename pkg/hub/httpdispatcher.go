@@ -5892,6 +5892,21 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" && !isShellAgent(agent) {
 		resolveOpts = &secret.ResolveOpts{AgentID: agent.ID}
 	}
+	if d.hostedMode {
+		if resolveOpts == nil {
+			resolveOpts = &secret.ResolveOpts{}
+		}
+		resolveOpts.DropReservedFileTargets = true
+		resolveOpts.OnReservedFileTargetSkipped = func(m secret.SecretMeta) {
+			if isShellAgent(agent) && m.Scope != store.ScopeUser {
+				return
+			}
+			if ta.restricted && !ta.allowed[m.Scope] {
+				return
+			}
+			d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, m.Scope)
+		}
+	}
 
 	projectID, brokerID := agent.ProjectID, agent.RuntimeBrokerID
 	if isShellAgent(agent) {
@@ -5921,6 +5936,13 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			if d.debug {
 				d.log.Debug("resolveSecrets: dropping reserved-target secret", "name", sv.Name, "target", sv.Target, "scope", sv.Scope)
 			}
+			continue
+		}
+		// Defense in depth for custom/fake backends that did not honor
+		// DropReservedFileTargets: never deliver a non-hub-scope file secret
+		// targeting the reserved telemetry credential path in hosted mode.
+		if d.hostedMode && sv.SecretType == store.SecretTypeFile && secret.IsReservedFileTarget(sv.Scope, sv.Target) {
+			d.warnReservedTelemetryCredentialSecret(ctx, agent, sv.Name, sv.Scope)
 			continue
 		}
 		// Only skip as_needed environment-type secrets (handled by the
@@ -5957,6 +5979,24 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"asNeededKeys", asNeededKeys)
 	}
 	return result, asNeededKeys, nil
+}
+
+// warnReservedTelemetryCredentialSecret logs and emits a dispatch warning when
+// a pre-existing non-hub-scope file secret targeting the reserved telemetry
+// credential path is skipped during hosted dispatch. The secret's value is
+// never included.
+func (d *HTTPAgentDispatcher) warnReservedTelemetryCredentialSecret(ctx context.Context, agent *store.Agent, name, scope string) {
+	agentID := ""
+	if agent != nil {
+		agentID = agent.ID
+	}
+	if d.log != nil {
+		d.log.WarnContext(ctx, "skipping non-hub file secret targeting reserved telemetry credential path",
+			"agent_id", agentID, "secret", name, "scope", scope)
+	}
+	addDispatchWarnings(ctx, fmt.Sprintf(
+		"Warning: skipping secret %q (%s scope): target path ~/.scion/telemetry-gcp-credentials.json is reserved for hub-scoped telemetry credentials in hosted mode",
+		name, scope))
 }
 
 // filterShellUserSecrets restricts resolved secrets for shell execution

@@ -302,6 +302,14 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 					details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].target", i), "key": in.Key, "value": target},
 				}
 			}
+			if !s.config.Workstation && secret.IsReservedFileTarget(store.ScopeAgent, target) {
+				return nil, &secretValidationError{
+					status:  http.StatusBadRequest,
+					code:    ErrCodeReservedTarget,
+					message: "target path is reserved for hub-scoped telemetry credentials in hosted mode",
+					details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].target", i), "key": in.Key, "value": target},
+				}
+			}
 		}
 
 		out = append(out, validatedAgentSecret{

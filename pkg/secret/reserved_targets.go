@@ -15,6 +15,7 @@
 package secret
 
 import (
+	"path"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -41,4 +42,26 @@ func IsReservedEnvTarget(target string) bool {
 		}
 	}
 	return false
+}
+
+// IsReservedTelemetryCredentialFileTarget reports whether target resolves to
+// the well-known telemetry GCP credentials path (.scion/telemetry-gcp-credentials.json)
+// at a path-segment boundary, after slash normalization and path cleaning.
+func IsReservedTelemetryCredentialFileTarget(target string) bool {
+	if target == "" {
+		return false
+	}
+	cleaned := path.Clean(strings.ReplaceAll(target, "\\", "/"))
+	return cleaned == telemetryCredentialFilePath || strings.HasSuffix(cleaned, "/"+telemetryCredentialFilePath)
+}
+
+// IsReservedFileTarget reports whether target is reserved for hub-only file
+// secrets and therefore prohibited for non-hub scopes in hosted mode.
+// Hub-scope secrets (ScopeHub) are permitted to target it (for the well-known
+// scion-telemetry-gcp-credentials secret).
+func IsReservedFileTarget(scope, target string) bool {
+	if scope == ScopeHub {
+		return false
+	}
+	return IsReservedTelemetryCredentialFileTarget(target)
 }

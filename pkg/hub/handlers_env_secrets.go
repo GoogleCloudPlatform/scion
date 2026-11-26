@@ -1223,6 +1223,28 @@ func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) b
 	return false
 }
 
+// validateFileSecretTarget rejects a non-hub-scope file secret whose target
+// resolves to a hub-only reserved file path (such as
+// ~/.scion/telemetry-gcp-credentials.json) when running in hosted mode
+// (!s.config.Workstation). In workstation mode the user is the operator, so
+// non-hub file secrets may still target the path.
+// On rejection it writes HTTP 400 with error code reserved_target and returns false.
+func (s *Server) validateFileSecretTarget(w http.ResponseWriter, scope, secretType, target string) bool {
+	if s.config.Workstation || secretType != store.SecretTypeFile {
+		return true
+	}
+	if !secret.IsReservedFileTarget(scope, target) {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeReservedTarget,
+		"target path is reserved for hub-scoped telemetry credentials in hosted mode",
+		map[string]interface{}{
+			"field": "target",
+			"value": target,
+		})
+	return false
+}
+
 const retiredVariableSecretTypeMessage = "type \"variable\" was removed; use \"on_demand\" instead"
 
 // validateSecretTypeInput validates a non-empty secret type supplied to a
@@ -1374,6 +1396,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 				"field": "target",
 				"value": target,
 			})
+			return
+		}
+		if !s.validateFileSecretTarget(w, scope, secretType, target) {
 			return
 		}
 		if len(decoded) > 64*1024 {
@@ -1565,6 +1590,9 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if !validateEnvSecretTarget(w, effectiveType, effectiveTarget) {
+		return
+	}
+	if !s.validateFileSecretTarget(w, scope, effectiveType, effectiveTarget) {
 		return
 	}
 
@@ -1956,6 +1984,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 					"field": "target",
 					"value": target,
 				})
+				return
+			}
+			if !s.validateFileSecretTarget(w, scope, secretType, target) {
 				return
 			}
 			if len(decoded) > 64*1024 {
@@ -2991,6 +3022,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			}
 			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
 				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": target})
+				return
+			}
+			if !s.validateFileSecretTarget(w, scope, secretType, target) {
 				return
 			}
 			if len(decoded) > 64*1024 {
