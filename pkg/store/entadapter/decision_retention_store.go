@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
@@ -452,7 +451,7 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 		// Recompute only when the purged contributor could have been the newest
 		// (entry.LatestAt <= maxPurgedAt[k], including ties).
 		if !entry.LatestAt.UTC().Truncate(time.Microsecond).After(maxPurgedAt[k]) {
-			if err := recomputeFacetEntryMetadataTx(ctx, client, entry, k); err != nil {
+			if err := s.recomputeFacetEntryMetadataTx(ctx, client, entry, k); err != nil {
 				return res, err
 			}
 		}
@@ -464,71 +463,26 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 // recomputeFacetEntryMetadataTx recomputes (name, email, latest_at) for a
 // surviving decision_facet_entries row from the newest remaining indexed
 // contributor, or deletes the row if none remains.
-func recomputeFacetEntryMetadataTx(ctx context.Context, client *ent.Client, entry *ent.DecisionFacetEntry, k facetEntryKey) error {
-	drv := client.Driver()
-	isPG := drv.Dialect() == dialect.Postgres
-	rebind := func(q string) string {
-		if !isPG {
-			return q
-		}
-		var b strings.Builder
-		n := 0
-		for _, r := range q {
-			if r == '?' {
-				n++
-				b.WriteByte('$')
-				b.WriteString(strconv.Itoa(n))
-				continue
-			}
-			b.WriteRune(r)
-		}
-		return b.String()
-	}
-
+func (s *DecisionRetentionStore) recomputeFacetEntryMetadataTx(ctx context.Context, client *ent.Client, entry *ent.DecisionFacetEntry, k facetEntryKey) error {
+	var (
+		query string
+		args  []any
+	)
 	switch k.Kind {
 	case decisionfacetentry.KindAsker:
 		actorUUID, err := uuid.Parse(k.ActorID)
 		if err != nil {
 			return nil
 		}
-		q := rebind(`SELECT asker_agent_name, created_at
+		query = s.rebind(`SELECT asker_agent_name, '', created_at
 FROM decisions
 WHERE project_id = ? AND chat_key = ? AND asker_agent_id = ? AND facet_indexed = true
 ORDER BY created_at DESC, asker_agent_name DESC
 LIMIT 1`)
-		rows := &entsql.Rows{}
-		if err := drv.Query(ctx, q, []any{k.ProjectID, k.ChatKey, actorUUID}, rows); err != nil {
-			return mapError(err)
-		}
-		found := rows.Next()
-		var name string
-		var latest time.Time
-		var scanErr error
-		if found {
-			scanErr = rows.Scan(&name, &latest)
-		}
-		rowErr := rows.Err()
-		closeErr := rows.Close()
-		if scanErr != nil {
-			return mapError(scanErr)
-		}
-		if rowErr != nil {
-			return mapError(rowErr)
-		}
-		if closeErr != nil {
-			return mapError(closeErr)
-		}
-		if !found {
-			return mapError(client.DecisionFacetEntry.DeleteOneID(entry.ID).Exec(ctx))
-		}
-		return mapError(client.DecisionFacetEntry.UpdateOneID(entry.ID).
-			SetName(name).
-			SetEmail("").
-			SetLatestAt(latest.UTC().Truncate(time.Microsecond)).
-			Exec(ctx))
+		args = []any{k.ProjectID, k.ChatKey, actorUUID}
 
 	case decisionfacetentry.KindAnswerer:
-		q := rebind(`SELECT a.answered_by_name, a.answered_by_email, a.created_at
+		query = s.rebind(`SELECT a.answered_by_name, a.answered_by_email, a.created_at
 FROM decision_answers a
 INNER JOIN decisions d ON d.id = a.decision_row_id
 WHERE d.project_id = ? AND d.chat_key = ? AND a.answered_by_user_id = ? AND a.facet_indexed = true
@@ -538,38 +492,44 @@ WHERE d.project_id = ? AND d.chat_key = ? AND a.answered_by_user_id = ? AND a.fa
   ))
 ORDER BY a.created_at DESC, a.answered_by_name DESC, a.answered_by_email DESC
 LIMIT 1`)
-		rows := &entsql.Rows{}
-		if err := drv.Query(ctx, q, []any{k.ProjectID, k.ChatKey, k.ActorID}, rows); err != nil {
-			return mapError(err)
-		}
-		found := rows.Next()
-		var name, email string
-		var latest time.Time
-		var scanErr error
-		if found {
-			scanErr = rows.Scan(&name, &email, &latest)
-		}
-		rowErr := rows.Err()
-		closeErr := rows.Close()
-		if scanErr != nil {
-			return mapError(scanErr)
-		}
-		if rowErr != nil {
-			return mapError(rowErr)
-		}
-		if closeErr != nil {
-			return mapError(closeErr)
-		}
-		if !found {
-			return mapError(client.DecisionFacetEntry.DeleteOneID(entry.ID).Exec(ctx))
-		}
-		return mapError(client.DecisionFacetEntry.UpdateOneID(entry.ID).
-			SetName(name).
-			SetEmail(email).
-			SetLatestAt(latest.UTC().Truncate(time.Microsecond)).
-			Exec(ctx))
+		args = []any{k.ProjectID, k.ChatKey, k.ActorID}
+
+	default:
+		return nil
 	}
-	return nil
+
+	rows := &entsql.Rows{}
+	if err := client.Driver().Query(ctx, query, args, rows); err != nil {
+		return mapError(err)
+	}
+	found := rows.Next()
+	var (
+		name, email string
+		latest      time.Time
+		scanErr     error
+	)
+	if found {
+		scanErr = rows.Scan(&name, &email, &latest)
+	}
+	rowErr := rows.Err()
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return mapError(scanErr)
+	}
+	if rowErr != nil {
+		return mapError(rowErr)
+	}
+	if closeErr != nil {
+		return mapError(closeErr)
+	}
+	if !found {
+		return mapError(client.DecisionFacetEntry.DeleteOneID(entry.ID).Exec(ctx))
+	}
+	return mapError(client.DecisionFacetEntry.UpdateOneID(entry.ID).
+		SetName(name).
+		SetEmail(email).
+		SetLatestAt(latest.UTC().Truncate(time.Microsecond)).
+		Exec(ctx))
 }
 
 // GetDecisionRetentionCursor implements store.DecisionRetentionStore.
