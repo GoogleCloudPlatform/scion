@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -28,7 +29,10 @@ import (
 const (
 	defaultHourlyRollupRetentionDays = 14
 	defaultUsageGroupsLimit          = 100
-	maxUsageGroupsLimit              = 500
+	// defaultHourlyUsageGroupsLimit covers a full 14-day hourly time series
+	// (14 * 24 = 336 buckets) without truncation when limit is omitted (O3).
+	defaultHourlyUsageGroupsLimit = defaultHourlyRollupRetentionDays * 24
+	maxUsageGroupsLimit           = 500
 )
 
 // UsageScopeRef identifies the scope evaluated by a scoped usage summary API.
@@ -46,13 +50,16 @@ type UsageWindow struct {
 }
 
 // UsageGroupRow is one grouped aggregation row in UsageSummaryResponse.
+// Grouped dimension fields are pointers so a grouped dimension with an empty
+// value (e.g., unknown harness/model or NULL billing_user_id) is always
+// emitted as "" while ungrouped dimensions are omitted.
 type UsageGroupRow struct {
 	BucketStart     *time.Time       `json:"bucket_start,omitempty"`
-	ProjectID       string           `json:"project_id,omitempty"`
-	UserID          string           `json:"user_id,omitempty"`
-	AgentID         string           `json:"agent_id,omitempty"`
-	Harness         string           `json:"harness,omitempty"`
-	Model           string           `json:"model,omitempty"`
+	ProjectID       *string          `json:"project_id,omitempty"`
+	UserID          *string          `json:"user_id,omitempty"`
+	AgentID         *string          `json:"agent_id,omitempty"`
+	Harness         *string          `json:"harness,omitempty"`
+	Model           *string          `json:"model,omitempty"`
 	Calls           int64            `json:"calls"`
 	ErrorCalls      int64            `json:"error_calls"`
 	Events          int64            `json:"events"`
@@ -253,7 +260,7 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	limit, err := parseUsageLimit(qParams.Get("limit"))
+	limit, err := parseUsageLimit(qParams.Get("limit"), hasHourGroup)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
@@ -326,9 +333,15 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
+	// Coverage is scoped to project, billing user, agent_id, and [since, until].
+	// Note: harness and model filters narrow token totals/groups but do not
+	// narrow agent-level coverage counts (O1d).
 	cov, err := s.store.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
 		ProjectID:     filterProjectID,
 		BillingUserID: filterUserID,
+		AgentID:       filterAgentID,
+		Since:         win.Since,
+		Until:         win.Until,
 		StaleAfter:    staleHeartbeatMultiplier * defaultHeartbeatInterval,
 		DBNow:         dbNow,
 	})
@@ -385,9 +398,12 @@ func parseUsageGroupBy(rawValues []string) ([]string, bool, error) {
 	return out, hasHour, nil
 }
 
-func parseUsageLimit(raw string) (int, error) {
+func parseUsageLimit(raw string, hasHourGroup bool) (int, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
+		if hasHourGroup {
+			return defaultHourlyUsageGroupsLimit, nil
+		}
 		return defaultUsageGroupsLimit, nil
 	}
 	n, err := strconv.Atoi(s)
@@ -501,6 +517,14 @@ func buildScopedUsageResponse(
 		t.Input, t.Output, t.CacheRead, t.CacheWrite, t.CacheWrite1h, t.Reasoning,
 		presenceFromTotals(t),
 	)
+	if t.Saturated {
+		totalTokens.Saturated = true
+	}
+
+	grouped := make(map[string]bool, len(groupBy))
+	for _, d := range groupBy {
+		grouped[d] = true
+	}
 
 	var groups []UsageGroupRow
 	if len(groupBy) > 0 {
@@ -514,21 +538,42 @@ func buildScopedUsageResponse(
 				g.Input, g.Output, g.CacheRead, g.CacheWrite, g.CacheWrite1h, g.Reasoning,
 				presenceFromTotals(g.UsageRollupTotals),
 			)
-			groups = append(groups, UsageGroupRow{
+			if g.Saturated {
+				gt.Saturated = true
+			}
+			row := UsageGroupRow{
 				BucketStart:     g.BucketStart,
-				ProjectID:       g.ProjectID,
-				UserID:          g.BillingUserID,
-				AgentID:         g.AgentID,
-				Harness:         g.Harness,
-				Model:           g.Model,
 				Calls:           g.Calls,
 				ErrorCalls:      g.ErrorCalls,
 				Events:          g.Events,
 				NullTokenEvents: g.NullTokenEvents,
 				Tokens:          gt,
-			})
+			}
+			if grouped[store.UsageGroupByProject] {
+				v := g.ProjectID
+				row.ProjectID = &v
+			}
+			if grouped[store.UsageGroupByUser] {
+				v := g.BillingUserID
+				row.UserID = &v
+			}
+			if grouped[store.UsageGroupByAgent] {
+				v := g.AgentID
+				row.AgentID = &v
+			}
+			if grouped[store.UsageGroupByHarness] {
+				v := g.Harness
+				row.Harness = &v
+			}
+			if grouped[store.UsageGroupByModel] {
+				v := g.Model
+				row.Model = &v
+			}
+			groups = append(groups, row)
 		}
 	}
+
+	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, t.Events, dbNow)
 
 	return UsageSummaryResponse{
 		Scope:             scope,
@@ -541,22 +586,64 @@ func buildScopedUsageResponse(
 		Tokens:            totalTokens,
 		Groups:            groups,
 		Truncated:         rollupRes.Truncated,
-		MeasurementStatus: aggregateMeasurementStatus(cov, t.Events),
-		UnmeasuredAgents:  cov.UnmeasuredAgents,
-		StaleAgents:       cov.StaleAgents,
+		MeasurementStatus: status,
+		UnmeasuredAgents:  unmeasuredAgents,
+		StaleAgents:       staleAgents,
 		AsOf:              dbNow,
 		LastReceiptAt:     cov.LastReceiptAt,
 	}
 }
 
-// aggregateMeasurementStatus computes the aggregate status for a project,
-// user, or global usage view using precedence stale > measured > unmeasured.
-func aggregateMeasurementStatus(cov *store.UsageScopeCoverage, totalEvents int64) string {
-	if cov != nil && cov.StaleAgents > 0 {
-		return MeasurementStatusStale
+// deriveScopeCoverageSummary maps each SQL-grouped coverage bucket through the
+// single deriveMeasurementStatus function in Go (O1c) and computes aggregate
+// status using precedence stale > measured > unmeasured.
+func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64, dbNow time.Time) (status string, unmeasuredAgents, staleAgents int) {
+	var measuredAgents int
+	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
+	if cov != nil {
+		for _, b := range cov.Buckets {
+			if b.AgentCount <= 0 {
+				continue
+			}
+			phase := string(state.PhaseStopped)
+			if b.IsRunning {
+				phase = string(state.PhaseRunning)
+			}
+			var mhRows []*store.MeterHealth
+			if b.HasMeterHealth {
+				receiptAt := dbNow
+				if b.IsReceiptStale {
+					receiptAt = dbNow.Add(-(staleAfter + time.Second))
+				}
+				mhRows = []*store.MeterHealth{{
+					FinalState:    b.LatestFinalState,
+					LastReceiptAt: receiptAt,
+				}}
+			}
+			s := deriveMeasurementStatus(measurementStatusInput{
+				MeterHealth:       mhRows,
+				HasRunUsageEvents: b.HasUsageData,
+				DBNow:             dbNow,
+				AgentPhase:        phase,
+			})
+			switch s {
+			case MeasurementStatusStale:
+				staleAgents += b.AgentCount
+			case MeasurementStatusMeasured:
+				measuredAgents += b.AgentCount
+			default:
+				unmeasuredAgents += b.AgentCount
+			}
+		}
 	}
-	if (cov != nil && cov.MeasuredAgents > 0) || totalEvents > 0 {
-		return MeasurementStatusMeasured
+
+	switch {
+	case staleAgents > 0:
+		status = MeasurementStatusStale
+	case measuredAgents > 0 || totalEvents > 0:
+		status = MeasurementStatusMeasured
+	default:
+		status = MeasurementStatusUnmeasured
 	}
-	return MeasurementStatusUnmeasured
+	return status, unmeasuredAgents, staleAgents
 }

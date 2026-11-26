@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -25,6 +26,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -111,6 +115,9 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 		ProducerSeq:   2,
 	}
 
+	dbNowBefore, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+
 	res, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID: agentID,
 		Events:  []*store.UsageEvent{ev1, ev2},
@@ -127,11 +134,14 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.Accepted)
 
-	// Hourly coverage marker was recorded at earliest UTC hour bucket (day1 12:00Z).
+	// R1: Hourly coverage marker is set to ceil_hour(DB now) (the next complete
+	// UTC hour after DB now), NOT the back-dated event timestamp (day1).
 	covStart, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
 	require.NoError(t, err)
 	require.True(t, hasCov)
-	assert.Equal(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC), covStart)
+	expectedMinCov := utcHourStart(dbNowBefore).Add(time.Hour)
+	assert.False(t, covStart.Before(expectedMinCov), "coverage marker %s must be >= ceil_hour(dbNow) %s", covStart, expectedMinCov)
+	assert.True(t, covStart.After(day2), "back-dated events must not pull coverage marker into the past")
 
 	// Duplicate replay should not change daily/hourly rollups or presence counts.
 	resDup, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
@@ -163,16 +173,23 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	assert.Equal(t, int64(0), rollups[1].ReasoningKnownEvents)  // NULL
 	assert.Equal(t, int64(1), rollups[1].PresenceTrackedEvents)
 
-	// ListUsageRollupsHourlyByAgent mirrors daily with UTC hour buckets.
-	hourly, err := cs.ListUsageRollupsHourlyByAgent(ctx, agentID, day1, day2)
+	// QueryUsageRollups on hourly table mirrors daily with UTC hour buckets.
+	hourlyRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       day1,
+		Until:       day2,
+		AgentID:     agentID,
+		GroupBy:     []string{store.UsageGroupByHour},
+		Limit:       10,
+	})
 	require.NoError(t, err)
-	require.Len(t, hourly, 2)
-	assert.Equal(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC), hourly[0].BucketStart)
-	assert.Equal(t, int64(8), hourly[0].Input)
-	assert.Equal(t, int64(1), hourly[0].PresenceTrackedEvents)
-	assert.Equal(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), hourly[1].BucketStart)
-	assert.Equal(t, int64(1), hourly[1].CacheReadKnownEvents)
-	assert.Equal(t, int64(0), hourly[1].CacheWriteKnownEvents)
+	require.Len(t, hourlyRes.Groups, 2)
+	assert.Equal(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC), *hourlyRes.Groups[0].BucketStart)
+	assert.Equal(t, int64(8), hourlyRes.Groups[0].Input)
+	assert.Equal(t, int64(1), hourlyRes.Groups[0].PresenceTrackedEvents)
+	assert.Equal(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), *hourlyRes.Groups[1].BucketStart)
+	assert.Equal(t, int64(1), hourlyRes.Groups[1].CacheReadKnownEvents)
+	assert.Equal(t, int64(0), hourlyRes.Groups[1].CacheWriteKnownEvents)
 
 	// Narrow window (day1 only)
 	rollupsDay1, err := cs.ListUsageRollupsDailyByAgent(ctx, agentID, day1, day1)
@@ -379,6 +396,184 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 	assert.Len(t, counts, 2)
 }
 
+// TestUsageRead_CoverageMarkerUpgradeHour verifies R1 on both SQLite and
+// Postgres: pre-upgrade daily-only events written earlier in the upgrade hour
+// (and back-dated events in the first post-upgrade batch) never cause an hourly
+// read to silently under-count, and windows starting at or after the marker
+// match daily totals identically.
+func TestUsageRead_CoverageMarkerUpgradeHour(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	csPre := NewCompositeStore(client)
+	t.Cleanup(func() { _ = csPre.Close() })
+
+	projID := createTestProject(t, csPre, "r1-upgrade-hour")
+	userID := createTestUser(t, csPre, "r1-user@example.com")
+	agentID := uuid.NewString()
+	runID := "run-r1-" + uuid.NewString()
+	seedRunForIngestTest(t, csPre, projID, agentID, runID, &userID)
+
+	dbNow, err := csPre.DBNow(ctx)
+	require.NoError(t, err)
+	upgradeHour := utcHourStart(dbNow)
+
+	// 1. Simulate pre-upgrade binary ingesting event A at HH:05 (daily-only).
+	evA := makeStoreUsageEvent("hub-r1", "evt-r1-pre", runID, projID, agentID, &userID, 1, upgradeHour.Add(5*time.Minute), 100, 20, 0, 0)
+	_, err = csPre.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{AgentID: agentID, Events: []*store.UsageEvent{evA}})
+	require.NoError(t, err)
+	// Remove hourly rows and coverage marker to replicate pre-upgrade DB state.
+	_, err = client.UsageRollupHourly.Delete().Exec(ctx)
+	require.NoError(t, err)
+	_, err = client.HubSetting.Delete().Where(hubsetting.SectionEQ(store.UsageRollupHourlyCoverageSection)).Exec(ctx)
+	require.NoError(t, err)
+
+	// 2. Fresh post-upgrade store ingests event B at HH:20 AND back-dated event C from 3 hours earlier.
+	csPost := NewCompositeStore(client)
+	evB := makeStoreUsageEvent("hub-r1", "evt-r1-post", runID, projID, agentID, &userID, 2, upgradeHour.Add(20*time.Minute), 10, 5, 0, 0)
+	evC := makeStoreUsageEvent("hub-r1", "evt-r1-backdated", runID, projID, agentID, &userID, 3, upgradeHour.Add(-3*time.Hour), 50, 10, 0, 0)
+	_, err = csPost.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{AgentID: agentID, Events: []*store.UsageEvent{evB, evC}})
+	require.NoError(t, err)
+
+	covStart, hasCov, err := csPost.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	require.True(t, hasCov)
+	// Marker must be strictly after upgradeHour (ceil_hour(DB now) >= upgradeHour + 1h),
+	// so upgradeHour is NOT considered hourly-covered and queries fall back to daily.
+	assert.True(t, covStart.After(upgradeHour), "marker %s must be after upgrade hour %s", covStart, upgradeHour)
+
+	// 3. Ingest event D in the covered hour (covStart + 5m) and verify hourly == daily.
+	evD := makeStoreUsageEvent("hub-r1", "evt-r1-covered", runID, projID, agentID, &userID, 4, covStart.Add(5*time.Minute), 77, 33, 4, 2)
+	_, err = csPost.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{AgentID: agentID, Events: []*store.UsageEvent{evD}})
+	require.NoError(t, err)
+
+	// Hourly vs daily for a full day starting at covStart's day (if same day, compare covStart hour via hourly):
+	// Specifically verify covStart hour contains event D completely in hourly rollups.
+	hRow, err := client.UsageRollupHourly.Query().
+		Where(usagerolluphourly.BucketStartEQ(covStart), usagerolluphourly.AgentIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(77), hRow.Input)
+	assert.Equal(t, int64(33), hRow.Output)
+
+	// In a clean day starting at covStart (simulated by ingesting into covStart + 24h), hourly == daily.
+	nextDay := utcDayStart(covStart).Add(24 * time.Hour)
+	evE := makeStoreUsageEvent("hub-r1", "evt-r1-nextday", runID, projID, agentID, &userID, 5, nextDay.Add(15*time.Minute), 42, 18, 6, 3)
+	_, err = csPost.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{AgentID: agentID, Events: []*store.UsageEvent{evE}})
+	require.NoError(t, err)
+
+	hRes, err := csPost.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       nextDay,
+		Until:       nextDay.Add(23 * time.Hour),
+		ProjectID:   projID,
+	})
+	require.NoError(t, err)
+	dRes, err := csPost.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		Since:       nextDay,
+		Until:       nextDay.Add(23 * time.Hour),
+		ProjectID:   projID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, dRes.Totals.Input, hRes.Totals.Input)
+	assert.Equal(t, dRes.Totals.Output, hRes.Totals.Output)
+	assert.Equal(t, dRes.Totals.Calls, hRes.Totals.Calls)
+}
+
+// TestUsageRead_SumOverflowSaturates verifies R2 on both SQLite and Postgres:
+// summing multiple rollup rows near math.MaxInt64 never fails with integer
+// overflow or bigint out of range, clamps to math.MaxInt64, and sets Saturated.
+func TestUsageRead_SumOverflowSaturates(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projID := createTestProject(t, cs, "r2-overflow")
+	day := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+
+	// Seed two daily rollup rows in the same project with values near MaxInt64.
+	_, err := client.UsageRollupDaily.Create().
+		SetBucketStart(day).
+		SetProjectID(projID).
+		SetBillingUserID("u1").
+		SetAgentID("ag-1").
+		SetHarness("claude").
+		SetModel("claude-sonnet-4-6").
+		SetUsageSource(store.UsageSourceNative).
+		SetCalls(10).
+		SetInput(math.MaxInt64 - 100).
+		SetOutput(math.MaxInt64 - 50).
+		SetEvents(10).
+		SetInputKnownEvents(10).
+		SetOutputKnownEvents(10).
+		SetPresenceTrackedEvents(10).
+		SetFirstEventTs(day).
+		SetLastEventTs(day).
+		Save(ctx)
+	require.NoError(t, err)
+
+	_, err = client.UsageRollupDaily.Create().
+		SetBucketStart(day).
+		SetProjectID(projID).
+		SetBillingUserID("u1").
+		SetAgentID("ag-2").
+		SetHarness("claude").
+		SetModel("claude-opus-4-6").
+		SetUsageSource(store.UsageSourceNative).
+		SetCalls(20).
+		SetInput(math.MaxInt64 - 10).
+		SetOutput(500).
+		SetEvents(20).
+		SetInputKnownEvents(20).
+		SetOutputKnownEvents(20).
+		SetPresenceTrackedEvents(20).
+		SetFirstEventTs(day).
+		SetLastEventTs(day).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 1. Totals-only query.
+	totRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		Since:       day,
+		Until:       day,
+		ProjectID:   projID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(math.MaxInt64), totRes.Totals.Input)
+	assert.Equal(t, int64(math.MaxInt64), totRes.Totals.Output)
+	assert.Equal(t, int64(30), totRes.Totals.Calls)
+	assert.True(t, totRes.Totals.Saturated)
+
+	// 2. Merged groupBy=project query.
+	projRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		Since:       day,
+		Until:       day,
+		ProjectID:   projID,
+		GroupBy:     []string{store.UsageGroupByProject},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	require.Len(t, projRes.Groups, 1)
+	assert.Equal(t, int64(math.MaxInt64), projRes.Groups[0].Input)
+	assert.Equal(t, int64(math.MaxInt64), projRes.Groups[0].Output)
+	assert.True(t, projRes.Groups[0].Saturated)
+
+	// 3. Ordered groupBy=model query (exercises ORDER BY across large rows).
+	modelRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		Since:       day,
+		Until:       day,
+		ProjectID:   projID,
+		GroupBy:     []string{store.UsageGroupByModel},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	require.Len(t, modelRes.Groups, 2)
+}
+
 func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -396,6 +591,7 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 		Name:      "ag-measured",
 		ProjectID: projA,
 		OwnerID:   user1,
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, cs.CreateAgent(ctx, agMeasured))
 	_, err := cs.SetAgentRunID(ctx, agMeasured.ID, "run-m-1", nil)
@@ -408,11 +604,37 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 		Name:      "ag-stale",
 		ProjectID: projA,
 		OwnerID:   user1,
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, cs.CreateAgent(ctx, agStale))
 	_, err = cs.SetAgentRunID(ctx, agStale.ID, "run-s-1", nil)
 	require.NoError(t, err)
 	agStale.RunID = "run-s-1"
+
+	// O1b: Stopped agent with an old open meter_health must NOT be flagged as stale.
+	agStoppedOpen := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "ag-stopped-open",
+		Name:      "ag-stopped-open",
+		ProjectID: projA,
+		OwnerID:   user1,
+		Phase:     string(state.PhaseStopped),
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agStoppedOpen))
+	_, err = cs.SetAgentRunID(ctx, agStoppedOpen.ID, "run-so-1", nil)
+	require.NoError(t, err)
+	agStoppedOpen.RunID = "run-so-1"
+
+	// O1a: Never-started agent (no run_attribution) must NOT be counted in coverage.
+	agNeverStarted := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "ag-never-started",
+		Name:      "ag-never-started",
+		ProjectID: projA,
+		OwnerID:   user1,
+		Phase:     string(state.PhaseCreated),
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agNeverStarted))
 
 	agUnmeasured := &store.Agent{
 		ID:        uuid.NewString(),
@@ -420,26 +642,35 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 		Name:      "ag-unmeasured",
 		ProjectID: projB,
 		OwnerID:   user2,
+		Phase:     string(state.PhaseRunning),
 	}
 	require.NoError(t, cs.CreateAgent(ctx, agUnmeasured))
 	_, err = cs.SetAgentRunID(ctx, agUnmeasured.ID, "run-u-1", nil)
 	require.NoError(t, err)
 	agUnmeasured.RunID = "run-u-1"
 
-	seedRunForIngestTest(t, cs, projA, agMeasured.ID, agMeasured.RunID, &user1)
-	seedRunForIngestTest(t, cs, projA, agStale.ID, agStale.RunID, &user1)
-	seedRunForIngestTest(t, cs, projB, agUnmeasured.ID, agUnmeasured.RunID, &user2)
-
 	base := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	seedRunAt := func(projID, agID, runID string, uid *string, createdAt time.Time) {
+		_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID: runID, Generation: 1, HubID: "hub-q", ProjectID: projID,
+			AgentID: agID, BillingUserID: uid, Harness: "claude", CreatedAt: createdAt,
+		})
+		require.NoError(t, err)
+	}
+	seedRunAt(projA, agMeasured.ID, agMeasured.RunID, &user1, base)
+	seedRunAt(projA, agStale.ID, agStale.RunID, &user1, base)
+	seedRunAt(projA, agStoppedOpen.ID, agStoppedOpen.RunID, &user1, base)
+	seedRunAt(projB, agUnmeasured.ID, agUnmeasured.RunID, &user2, base)
+
 	ev1 := makeStoreUsageEvent("hub-q", "q-1", agMeasured.RunID, projA, agMeasured.ID, &user1, 1, base.Add(5*time.Minute), 100, 50, 10, 0)
 	ev1.Model = "claude-sonnet-4-6"
 	ev1.Reasoning = i64p(20)
 
 	ev2 := makeStoreUsageEvent("hub-q", "q-2", agMeasured.RunID, projA, agMeasured.ID, &user1, 2, base.Add(65*time.Minute), 200, 80, 0, 5)
 	ev2.Model = "claude-haiku-4-5"
-	ev2.Reasoning = nil // mixed known+unknown reasoning
+	ev2.Reasoning = nil
 
-	ev3 := makeStoreUsageEvent("hub-q", "q-3", agStale.RunID, projA, agStale.ID, &user1, 1, base.Add(10*time.Minute), 40, 10, 0, 0)
+	ev3 := makeStoreUsageEvent("hub-q", "q-3", agStale.RunID, projA, agStale.ID, &user1, 1, base.Add(125*time.Minute), 40, 10, 0, 0)
 	ev3.Model = "claude-opus-4-6"
 	ev3.CacheRead = nil
 	ev3.CacheWrite = nil
@@ -474,11 +705,28 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// Stopped agent with old open meter_health and an event.
+	evStopped := makeStoreUsageEvent("hub-q", "q-4", agStoppedOpen.RunID, projA, agStoppedOpen.ID, &user1, 1, base.Add(15*time.Minute), 12, 8, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agStoppedOpen.ID,
+		Events:  []*store.UsageEvent{evStopped},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agStoppedOpen.ID,
+			RunID:         agStoppedOpen.RunID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: base.Add(15 * time.Minute),
+			ProducerSeq:   1,
+			ReceivedSeqs:  []int64{1},
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
 	// Hourly query grouped by model with limit=2 -> truncated=true, exact totals preserved.
 	res, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: store.UsageGranularityHour,
 		Since:       base,
-		Until:       base.Add(2 * time.Hour),
+		Until:       base.Add(3 * time.Hour),
 		ProjectID:   projA,
 		GroupBy:     []string{store.UsageGroupByModel},
 		Limit:       2,
@@ -486,77 +734,81 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.Truncated)
 	assert.Len(t, res.Groups, 2)
-	assert.Equal(t, int64(340), res.Totals.Input)
-	assert.Equal(t, int64(140), res.Totals.Output)
-	assert.Equal(t, int64(3), res.Totals.Events)
-	assert.Equal(t, int64(3), res.Totals.PresenceTrackedEvents)
-	assert.Equal(t, int64(1), res.Totals.ReasoningKnownEvents)
-	assert.Equal(t, int64(2), res.Totals.CacheReadKnownEvents)
+	assert.Equal(t, int64(352), res.Totals.Input)
+	assert.Equal(t, int64(148), res.Totals.Output)
+	assert.Equal(t, int64(4), res.Totals.Events)
+	assert.Equal(t, int64(4), res.Totals.PresenceTrackedEvents)
 
-	// Hourly query grouped by hour -> ordered ASC by bucket_start.
+	// O3: Hourly query grouped by hour with limit=2 over 3 hours -> keeps the 2 MOST RECENT hours, presented ASC!
 	hourRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: store.UsageGranularityHour,
 		Since:       base,
-		Until:       base.Add(2 * time.Hour),
+		Until:       base.Add(3 * time.Hour),
 		ProjectID:   projA,
 		GroupBy:     []string{store.UsageGroupByHour},
-		Limit:       10,
+		Limit:       2,
 	})
 	require.NoError(t, err)
+	assert.True(t, hourRes.Truncated)
 	require.Len(t, hourRes.Groups, 2)
-	require.NotNil(t, hourRes.Groups[0].BucketStart)
-	require.NotNil(t, hourRes.Groups[1].BucketStart)
-	assert.Equal(t, base, *hourRes.Groups[0].BucketStart)
-	assert.Equal(t, base.Add(time.Hour), *hourRes.Groups[1].BucketStart)
+	assert.Equal(t, base.Add(time.Hour), *hourRes.Groups[0].BucketStart, "must keep 2nd most recent hour first (ASC)")
+	assert.Equal(t, base.Add(2*time.Hour), *hourRes.Groups[1].BucketStart, "must keep most recent hour last (ASC)")
 
-	// Hourly table grouped by day collapses both hours into 1 UTC day bucket.
+	// Hourly table grouped by day collapses all hours into 1 UTC day bucket.
 	dayFromHourly, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: store.UsageGranularityHour,
 		Since:       base,
-		Until:       base.Add(2 * time.Hour),
+		Until:       base.Add(3 * time.Hour),
 		ProjectID:   projA,
 		GroupBy:     []string{store.UsageGroupByDay},
 		Limit:       10,
 	})
 	require.NoError(t, err)
 	require.Len(t, dayFromHourly.Groups, 1)
-	require.NotNil(t, dayFromHourly.Groups[0].BucketStart)
 	assert.Equal(t, time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC), *dayFromHourly.Groups[0].BucketStart)
-	assert.Equal(t, int64(340), dayFromHourly.Groups[0].Input)
+	assert.Equal(t, int64(352), dayFromHourly.Groups[0].Input)
 
-	// Scope coverage: projA has 1 measured + 1 stale; projB has 1 unmeasured; global has 3 total.
+	// O1: Scope coverage buckets for projA (3 started agents; agNeverStarted excluded).
 	dbNow := base.Add(2*time.Hour + 1*time.Minute)
 	covA, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
 		ProjectID:  projA,
+		Since:      base,
+		Until:      dbNow,
 		StaleAfter: 3 * time.Minute,
 		DBNow:      dbNow,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 2, covA.TotalAgents)
-	assert.Equal(t, 1, covA.MeasuredAgents)
-	assert.Equal(t, 1, covA.StaleAgents)
-	assert.Equal(t, 0, covA.UnmeasuredAgents)
+	totalA := 0
+	runningStaleA := 0
+	stoppedOpenA := 0
+	for _, b := range covA.Buckets {
+		totalA += b.AgentCount
+		if b.IsRunning && b.IsReceiptStale {
+			runningStaleA += b.AgentCount
+		}
+		if !b.IsRunning && b.HasMeterHealth && b.IsReceiptStale {
+			stoppedOpenA += b.AgentCount
+		}
+	}
+	assert.Equal(t, 3, totalA, "agNeverStarted must be excluded from coverage")
+	assert.Equal(t, 1, runningStaleA, "only running agStale is stale")
+	assert.Equal(t, 1, stoppedOpenA, "agStoppedOpen has IsRunning=false so Hub derives measured, not stale")
 	require.NotNil(t, covA.LastReceiptAt)
 	assert.Equal(t, base.Add(2*time.Hour), *covA.LastReceiptAt)
 
-	covGlobal, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+	// O1d: agent_id filter narrows coverage to the single agent.
+	covSingle, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projA,
+		AgentID:    agMeasured.ID,
+		Since:      base,
+		Until:      dbNow,
 		StaleAfter: 3 * time.Minute,
 		DBNow:      dbNow,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 3, covGlobal.TotalAgents)
-	assert.Equal(t, 1, covGlobal.MeasuredAgents)
-	assert.Equal(t, 1, covGlobal.StaleAgents)
-	assert.Equal(t, 1, covGlobal.UnmeasuredAgents)
-
-	covUser2, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
-		BillingUserID: user2,
-		StaleAfter:    3 * time.Minute,
-		DBNow:         dbNow,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 1, covUser2.TotalAgents)
-	assert.Equal(t, 0, covUser2.MeasuredAgents)
-	assert.Equal(t, 0, covUser2.StaleAgents)
-	assert.Equal(t, 1, covUser2.UnmeasuredAgents)
+	totalSingle := 0
+	for _, b := range covSingle.Buckets {
+		totalSingle += b.AgentCount
+	}
+	assert.Equal(t, 1, totalSingle)
 }

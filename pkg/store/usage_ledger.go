@@ -349,7 +349,8 @@ type UsageIngestBatchResult struct {
 }
 
 // UsageRollupTotals holds aggregated counter sums and presence counters over a
-// query window or group.
+// query window or group. Saturated is true when any summed counter reached or
+// exceeded math.MaxInt64 and was clamped.
 type UsageRollupTotals struct {
 	Calls                   int64
 	ErrorCalls              int64
@@ -369,6 +370,7 @@ type UsageRollupTotals struct {
 	CacheWrite1hKnownEvents int64
 	ReasoningKnownEvents    int64
 	PresenceTrackedEvents   int64
+	Saturated               bool
 }
 
 // UsageRollupGroup is one aggregated group row returned by QueryUsageRollups.
@@ -407,21 +409,33 @@ type UsageRollupQueryResult struct {
 }
 
 // UsageCoverageFilter scopes a single-query aggregate meter-health and
-// measurement-coverage summary over non-deleted agents.
+// measurement-coverage summary over non-deleted agents overlapping [Since, Until].
 type UsageCoverageFilter struct {
 	ProjectID     string
 	BillingUserID string
+	AgentID       string
+	Since         time.Time
+	Until         time.Time
 	StaleAfter    time.Duration
 	DBNow         time.Time
 }
 
-// UsageScopeCoverage summarizes measurement coverage across agents in scope.
+// UsageCoverageBucket aggregates agent counts sharing the same
+// measurement-status derivation inputs so the Hub derives status through a
+// single Go function (deriveMeasurementStatus) without per-agent queries.
+type UsageCoverageBucket struct {
+	IsRunning        bool
+	HasMeterHealth   bool
+	LatestFinalState string
+	IsReceiptStale   bool
+	HasUsageData     bool
+	AgentCount       int
+}
+
+// UsageScopeCoverage summarizes measurement coverage inputs across agents in scope.
 type UsageScopeCoverage struct {
-	TotalAgents      int
-	MeasuredAgents   int
-	UnmeasuredAgents int
-	StaleAgents      int
-	LastReceiptAt    *time.Time
+	Buckets       []UsageCoverageBucket
+	LastReceiptAt *time.Time
 }
 
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
@@ -483,10 +497,6 @@ type UsageLedgerStore interface {
 	// ListUsageRollupsDailyByAgent returns usage_rollups_daily rows for agentID
 	// with bucket_start in [sinceDay, untilDay] (inclusive, UTC day boundaries).
 	ListUsageRollupsDailyByAgent(ctx context.Context, agentID string, sinceDay, untilDay time.Time) ([]*UsageRollupDaily, error)
-
-	// ListUsageRollupsHourlyByAgent returns usage_rollups_hourly rows for agentID
-	// with bucket_start in [sinceHour, untilHour] (inclusive, UTC hour boundaries).
-	ListUsageRollupsHourlyByAgent(ctx context.Context, agentID string, sinceHour, untilHour time.Time) ([]*UsageRollupHourly, error)
 
 	// GetUsageHourlyCoverageStart returns the UTC hour-aligned timestamp when
 	// usage_rollups_hourly coverage began, and ok=false if hourly rollups have

@@ -290,13 +290,16 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 			return nil, false, err
 		}
 		if s.hourlyCoverageRecorded == nil || !s.hourlyCoverageRecorded.Load() {
-			minHour := utcHourStart(insertedEvents[0].EventTS)
-			for _, ev := range insertedEvents[1:] {
-				if h := utcHourStart(ev.EventTS); h.Before(minHour) {
-					minHour = h
-				}
+			// R1: Set hourly coverage start to the next complete UTC hour after
+			// DB now (ceil_hour(DB now)) so pre-upgrade daily-only events written
+			// earlier in the upgrade hour — or back-dated events in the first
+			// batch — never cause silent hourly under-counting.
+			dbNow, err := dbNowFromDriver(ctx, drv, dialectName)
+			if err != nil {
+				return nil, false, err
 			}
-			if err := ensureHourlyCoverageMarkerTx(ctx, drv, dialectName, minHour); err != nil {
+			coverageStart := utcHourStart(dbNow).Add(time.Hour)
+			if err := ensureHourlyCoverageMarkerTx(ctx, drv, dialectName, coverageStart); err != nil {
 				return nil, false, err
 			}
 			wroteHourly = true

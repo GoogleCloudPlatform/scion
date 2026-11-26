@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,19 +28,41 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
 	defaultUsageRollupQueryLimit = 100
 	maxUsageRollupQueryLimit     = 500
+	sqliteSplitRadix             = int64(1_000_000_000)
 )
+
+var rollupSumColumns = []string{
+	"calls",
+	"error_calls",
+	"input",
+	"output",
+	"cache_read",
+	"cache_write",
+	"cache_write_1h",
+	"reasoning",
+	"reported_cost_micros",
+	"events",
+	"null_token_events",
+	"input_known_events",
+	"output_known_events",
+	"cache_read_known_events",
+	"cache_write_known_events",
+	"cache_write_1h_known_events",
+	"reasoning_known_events",
+	"presence_tracked_events",
+}
 
 // ListMeterHealthByAgent implements store.UsageLedgerStore.ListMeterHealthByAgent.
 func (s *UsageLedgerStore) ListMeterHealthByAgent(ctx context.Context, agentID string) ([]*store.MeterHealth, error) {
@@ -90,37 +114,6 @@ func (s *UsageLedgerStore) ListUsageRollupsDailyByAgent(ctx context.Context, age
 	return out, nil
 }
 
-// ListUsageRollupsHourlyByAgent implements store.UsageLedgerStore.ListUsageRollupsHourlyByAgent.
-func (s *UsageLedgerStore) ListUsageRollupsHourlyByAgent(ctx context.Context, agentID string, sinceHour, untilHour time.Time) ([]*store.UsageRollupHourly, error) {
-	if agentID == "" {
-		return nil, fmt.Errorf("%w: agent_id is required", store.ErrInvalidInput)
-	}
-	q := s.client.UsageRollupHourly.Query().
-		Where(usagerolluphourly.AgentIDEQ(agentID))
-	if !sinceHour.IsZero() {
-		q = q.Where(usagerolluphourly.BucketStartGTE(utcHourStart(sinceHour)))
-	}
-	if !untilHour.IsZero() {
-		q = q.Where(usagerolluphourly.BucketStartLTE(utcHourStart(untilHour)))
-	}
-	rows, err := q.
-		Order(
-			ent.Asc(usagerolluphourly.FieldBucketStart),
-			ent.Asc(usagerolluphourly.FieldHarness),
-			ent.Asc(usagerolluphourly.FieldModel),
-			ent.Asc(usagerolluphourly.FieldUsageSource),
-		).
-		All(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	out := make([]*store.UsageRollupHourly, len(rows))
-	for i, r := range rows {
-		out[i] = entUsageRollupHourlyToStore(r)
-	}
-	return out, nil
-}
-
 // GetUsageHourlyCoverageStart implements store.UsageLedgerStore.GetUsageHourlyCoverageStart.
 func (s *UsageLedgerStore) GetUsageHourlyCoverageStart(ctx context.Context) (time.Time, bool, error) {
 	row, err := s.client.HubSetting.Query().
@@ -147,9 +140,11 @@ func (s *UsageLedgerStore) GetUsageHourlyCoverageStart(ctx context.Context) (tim
 }
 
 // QueryUsageRollups implements store.UsageLedgerStore.QueryUsageRollups.
-// It pushes aggregation into SQL against usage_rollups_hourly or
-// usage_rollups_daily using the composite indexes and bounds grouped results
-// with LIMIT limit+1 so unbounded rollup rows are never loaded into Go memory.
+// It pushes overflow-safe saturating aggregation into SQL against
+// usage_rollups_hourly or usage_rollups_daily using the composite indexes and
+// bounds grouped results with LIMIT limit+1 so unbounded rollup rows are never
+// loaded into Go memory. Time-series queries order newest-first in SQL so
+// truncation preserves the most recent buckets, then return ascending order.
 func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageRollupQuery) (*store.UsageRollupQueryResult, error) {
 	var (
 		tableName string
@@ -218,27 +213,9 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 		whereSQL = " WHERE " + strings.Join(whereParts, " AND ")
 	}
 
-	sumCols := `
-	CAST(COALESCE(SUM(calls), 0) AS BIGINT),
-	CAST(COALESCE(SUM(error_calls), 0) AS BIGINT),
-	CAST(COALESCE(SUM(input), 0) AS BIGINT),
-	CAST(COALESCE(SUM(output), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_read), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_write), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_write_1h), 0) AS BIGINT),
-	CAST(COALESCE(SUM(reasoning), 0) AS BIGINT),
-	CAST(COALESCE(SUM(reported_cost_micros), 0) AS BIGINT),
-	CAST(COALESCE(SUM(events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(null_token_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(input_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(output_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_read_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_write_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(cache_write_1h_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(reasoning_known_events), 0) AS BIGINT),
-	CAST(COALESCE(SUM(presence_tracked_events), 0) AS BIGINT)`
+	sumCols := buildRollupSumSelectSQL(dialectName)
 
-	// 1. Overall window totals (exact even when groups are truncated).
+	// 1. Overall window totals (exact even when groups are truncated; saturated on int64 overflow).
 	totalsQuery := usageRebindSQL(dialectName, "SELECT "+sumCols+" FROM "+tableName+whereSQL)
 	totalsRows := &entsql.Rows{}
 	if err := drv.Query(ctx, totalsQuery, whereArgs, totalsRows); err != nil {
@@ -246,7 +223,7 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 	}
 	var totals store.UsageRollupTotals
 	if totalsRows.Next() {
-		if err := scanUsageRollupTotals(totalsRows, &totals); err != nil {
+		if err := scanUsageRollupTotalsRow(dialectName, totalsRows, nil, &totals); err != nil {
 			_ = totalsRows.Close()
 			return nil, mapError(err)
 		}
@@ -327,7 +304,9 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 		selectParts = append(selectParts, d.selectEx)
 		groupParts = append(groupParts, d.groupEx)
 		if d.isTime {
-			timeOrderExpr = d.groupEx + " ASC"
+			// O3: Order newest-first in SQL so LIMIT keeps the most recent buckets
+			// on truncation; re-sorted ascending in Go below.
+			timeOrderExpr = d.groupEx + " DESC"
 		} else {
 			nonTimeOrders = append(nonTimeOrders, d.groupEx+" ASC")
 		}
@@ -337,10 +316,19 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 	if timeOrderExpr != "" {
 		orderParts = append(orderParts, timeOrderExpr)
 	}
-	orderParts = append(orderParts,
-		"CAST(COALESCE(SUM(input), 0) + COALESCE(SUM(output), 0) + COALESCE(SUM(cache_read), 0) + COALESCE(SUM(cache_write), 0) AS BIGINT) DESC",
-		"CAST(COALESCE(SUM(calls), 0) AS BIGINT) DESC",
-	)
+	if dialectName == dialect.Postgres {
+		// Postgres SUM(bigint) produces arbitrary-precision numeric (never overflows).
+		orderParts = append(orderParts,
+			"(COALESCE(SUM(input), 0) + COALESCE(SUM(output), 0) + COALESCE(SUM(cache_read), 0) + COALESCE(SUM(cache_write), 0)) DESC",
+			"COALESCE(SUM(calls), 0) DESC",
+		)
+	} else {
+		// SQLite TOTAL() produces float64 (never raises integer overflow).
+		orderParts = append(orderParts,
+			"(TOTAL(input) + TOTAL(output) + TOTAL(cache_read) + TOTAL(cache_write)) DESC",
+			"TOTAL(calls) DESC",
+		)
+	}
 	orderParts = append(orderParts, nonTimeOrders...)
 
 	groupQuery := fmt.Sprintf(
@@ -364,44 +352,24 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 	for gRows.Next() {
 		var grp store.UsageRollupGroup
 		var rawTime any
-		dests := make([]any, 0, len(dims)+18)
+		prefixDests := make([]any, 0, len(dims))
 		for _, d := range dims {
 			switch d.name {
 			case store.UsageGroupByHour, store.UsageGroupByDay:
-				dests = append(dests, &rawTime)
+				prefixDests = append(prefixDests, &rawTime)
 			case store.UsageGroupByProject:
-				dests = append(dests, &grp.ProjectID)
+				prefixDests = append(prefixDests, &grp.ProjectID)
 			case store.UsageGroupByUser:
-				dests = append(dests, &grp.BillingUserID)
+				prefixDests = append(prefixDests, &grp.BillingUserID)
 			case store.UsageGroupByAgent:
-				dests = append(dests, &grp.AgentID)
+				prefixDests = append(prefixDests, &grp.AgentID)
 			case store.UsageGroupByHarness:
-				dests = append(dests, &grp.Harness)
+				prefixDests = append(prefixDests, &grp.Harness)
 			case store.UsageGroupByModel:
-				dests = append(dests, &grp.Model)
+				prefixDests = append(prefixDests, &grp.Model)
 			}
 		}
-		dests = append(dests,
-			&grp.Calls,
-			&grp.ErrorCalls,
-			&grp.Input,
-			&grp.Output,
-			&grp.CacheRead,
-			&grp.CacheWrite,
-			&grp.CacheWrite1h,
-			&grp.Reasoning,
-			&grp.ReportedCostMicros,
-			&grp.Events,
-			&grp.NullTokenEvents,
-			&grp.InputKnownEvents,
-			&grp.OutputKnownEvents,
-			&grp.CacheReadKnownEvents,
-			&grp.CacheWriteKnownEvents,
-			&grp.CacheWrite1hKnownEvents,
-			&grp.ReasoningKnownEvents,
-			&grp.PresenceTrackedEvents,
-		)
-		if err := gRows.Scan(dests...); err != nil {
+		if err := scanUsageRollupTotalsRow(dialectName, gRows, prefixDests, &grp.UsageRollupTotals); err != nil {
 			return nil, mapError(err)
 		}
 		if hasDay || hasHour {
@@ -428,14 +396,38 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 	if err := gRows.Err(); err != nil {
 		return nil, mapError(err)
 	}
+
+	// Present time-series groups in ascending chronological order while
+	// preserving the most recent buckets retained by LIMIT.
+	if hasDay || hasHour {
+		sort.SliceStable(groups, func(i, j int) bool {
+			ti, tj := groups[i].BucketStart, groups[j].BucketStart
+			if ti == nil && tj == nil {
+				return false
+			}
+			if ti == nil {
+				return true
+			}
+			if tj == nil {
+				return false
+			}
+			if !ti.Equal(*tj) {
+				return ti.Before(*tj)
+			}
+			return false
+		})
+	}
+
 	res.Groups = groups
 	return res, nil
 }
 
 // GetUsageScopeCoverage implements store.UsageLedgerStore.GetUsageScopeCoverage.
-// Executes a single aggregate SQL query over non-deleted agents in scope,
-// joining meter_health and probing usage_events via EXISTS so global and
-// project views never perform per-agent round trips.
+// Executes a single bounded aggregate SQL query over non-deleted agents
+// overlapping [Since, Until] (with at least one run_attribution created at or
+// before Until), returning counts grouped by the derivation's input flags
+// (at most ~12 rows regardless of fleet size) so the Hub derives status
+// through its single deriveMeasurementStatus function in Go.
 func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter store.UsageCoverageFilter) (*store.UsageScopeCoverage, error) {
 	drv := s.client.Driver()
 	dialectName := drv.Dialect()
@@ -443,12 +435,25 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	dbNow := filter.DBNow
 	if dbNow.IsZero() {
 		var err error
-		dbNow, err = s.DBNow(ctx)
+		dbNow, err = dbNowFromDriver(ctx, drv, dialectName)
 		if err != nil {
 			return nil, err
 		}
 	}
+	until := filter.Until
+	if until.IsZero() {
+		until = dbNow
+	}
+	until = until.UTC().Truncate(time.Microsecond)
+	since := filter.Since
+	if since.IsZero() {
+		since = utcDayStart(until).AddDate(0, 0, -29)
+	}
+	since = since.UTC().Truncate(time.Microsecond)
+	sinceDay := utcDayStart(since)
+	untilDay := utcDayStart(until)
 	staleCutoff := dbNow.UTC().Add(-filter.StaleAfter).Truncate(time.Microsecond)
+	runningPhase := string(state.PhaseRunning)
 
 	var scopeWhere []string
 	var args []any
@@ -462,27 +467,47 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 		scopeWhere = append(scopeWhere, "a.project_id = ?")
 		args = append(args, projUUID)
 	}
-	if filter.BillingUserID != "" {
-		ownerUUID, parseErr := uuid.Parse(filter.BillingUserID)
-		if parseErr == nil {
-			scopeWhere = append(scopeWhere,
-				"(EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.run_id = a.run_id AND ra.billing_user_id = ?) OR (a.run_id = '' AND a.owner_id = ?))")
-			args = append(args, filter.BillingUserID, ownerUUID)
-		} else {
-			scopeWhere = append(scopeWhere,
-				"EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.run_id = a.run_id AND ra.billing_user_id = ?)")
-			args = append(args, filter.BillingUserID)
+	if filter.AgentID != "" {
+		agentUUID, err := uuid.Parse(filter.AgentID)
+		if err != nil {
+			return &store.UsageScopeCoverage{}, nil
 		}
+		scopeWhere = append(scopeWhere, "a.id = ?")
+		args = append(args, agentUUID)
 	}
 
-	// Bind staleCutoff twice for the two CASE branches.
-	args = append(args, staleCutoff, staleCutoff)
+	// Window relevance (O1a): agent must have a run_attribution created <= until
+	// (matching billing_user_id when scoped to a user) AND overlap [since, until]
+	// via run creation, active running phase, receipt timestamp, or daily rollup.
+	raCond := "ra.agent_id = CAST(a.id AS TEXT) AND ra.created_at <= ?"
+	args = append(args, until)
+	if filter.BillingUserID != "" {
+		raCond += " AND ra.billing_user_id = ?"
+		args = append(args, filter.BillingUserID)
+	}
+	scopeWhere = append(scopeWhere, fmt.Sprintf("EXISTS (SELECT 1 FROM run_attribution ra WHERE %s)", raCond))
+
+	overlapCond := `(
+		EXISTS (SELECT 1 FROM run_attribution ra2 WHERE ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?)
+		OR a.phase = ?
+		OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
+		OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?)
+	)`
+	scopeWhere = append(scopeWhere, overlapCond)
+	args = append(args, since, until, runningPhase, since, until, sinceDay, untilDay)
+
+	// Parameters for agent_flags projection:
+	// 1. runningPhase for is_running
+	// 2. staleCutoff for is_receipt_stale
+	// 3. sinceDay, untilDay for non-running rollup existence fallback
+	args = append(args, runningPhase, staleCutoff, sinceDay, untilDay)
 
 	query := fmt.Sprintf(`
 WITH scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
-		COALESCE(a.run_id, '') AS run_id
+		COALESCE(a.run_id, '') AS run_id,
+		COALESCE(a.phase, '') AS phase
 	FROM agents a
 	WHERE %s
 ),
@@ -490,32 +515,49 @@ agent_mh AS (
 	SELECT
 		sa.agent_id_text,
 		sa.run_id,
+		sa.phase,
 		MAX(mh.last_receipt_at) AS latest_receipt_at,
-		MAX(CASE
-			WHEN mh.final_state = 'open' AND mh.last_receipt_at = (
+		COALESCE(MAX(CASE
+			WHEN mh.last_receipt_at = (
 				SELECT MAX(mh2.last_receipt_at)
 				FROM meter_health mh2
 				WHERE mh2.agent_id = sa.agent_id_text AND mh2.run_id = sa.run_id
-			) THEN 1
-			ELSE 0
-		END) AS latest_is_open
+			) THEN mh.final_state
+			ELSE ''
+		END), '') AS latest_final_state
 	FROM scoped_agents sa
 	LEFT JOIN meter_health mh
 		ON mh.agent_id = sa.agent_id_text AND mh.run_id = sa.run_id AND sa.run_id <> ''
-	GROUP BY sa.agent_id_text, sa.run_id
+	GROUP BY sa.agent_id_text, sa.run_id, sa.phase
+),
+agent_flags AS (
+	SELECT
+		CASE WHEN am.phase = ? THEN 1 ELSE 0 END AS is_running,
+		CASE WHEN am.latest_receipt_at IS NOT NULL THEN 1 ELSE 0 END AS has_meter_health,
+		am.latest_final_state AS latest_final_state,
+		CASE WHEN am.latest_receipt_at IS NOT NULL AND am.latest_receipt_at < ? THEN 1 ELSE 0 END AS is_receipt_stale,
+		CASE
+			WHEN am.run_id <> '' AND EXISTS (
+				SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
+			) THEN 1
+			WHEN EXISTS (
+				SELECT 1 FROM usage_rollups_daily rd WHERE rd.agent_id = am.agent_id_text AND rd.bucket_start >= ? AND rd.bucket_start <= ?
+			) THEN 1
+			ELSE 0
+		END AS has_usage_data,
+		am.latest_receipt_at AS latest_receipt_at
+	FROM agent_mh am
 )
 SELECT
-	CAST(COUNT(*) AS BIGINT) AS total_agents,
-	CAST(COALESCE(SUM(CASE WHEN am.run_id <> '' AND am.latest_is_open = 1 AND am.latest_receipt_at < ? THEN 1 ELSE 0 END), 0) AS BIGINT) AS stale_agents,
-	CAST(COALESCE(SUM(CASE
-		WHEN am.run_id <> '' AND am.latest_is_open = 1 AND am.latest_receipt_at < ? THEN 0
-		WHEN am.run_id <> '' AND EXISTS (
-			SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
-		) THEN 1
-		ELSE 0
-	END), 0) AS BIGINT) AS measured_agents,
-	MAX(am.latest_receipt_at) AS max_last_receipt_at
-FROM agent_mh am`, strings.Join(scopeWhere, " AND "))
+	is_running,
+	has_meter_health,
+	latest_final_state,
+	is_receipt_stale,
+	has_usage_data,
+	CAST(COUNT(*) AS BIGINT) AS agent_count,
+	MAX(latest_receipt_at) AS max_last_receipt_at
+FROM agent_flags
+GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data`, strings.Join(scopeWhere, " AND "))
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), args, rows); err != nil {
@@ -524,30 +566,43 @@ FROM agent_mh am`, strings.Join(scopeWhere, " AND "))
 	defer func() { _ = rows.Close() }()
 
 	out := &store.UsageScopeCoverage{}
-	if rows.Next() {
+	for rows.Next() {
 		var (
-			totalAgents    int64
-			staleAgents    int64
-			measuredAgents int64
-			rawLastReceipt any
+			isRunning        int
+			hasMeterHealth   int
+			latestFinalState string
+			isReceiptStale   int
+			hasUsageData     int
+			agentCount       int64
+			rawLastReceipt   any
 		)
-		if err := rows.Scan(&totalAgents, &staleAgents, &measuredAgents, &rawLastReceipt); err != nil {
+		if err := rows.Scan(
+			&isRunning,
+			&hasMeterHealth,
+			&latestFinalState,
+			&isReceiptStale,
+			&hasUsageData,
+			&agentCount,
+			&rawLastReceipt,
+		); err != nil {
 			return nil, mapError(err)
 		}
-		out.TotalAgents = int(totalAgents)
-		out.StaleAgents = int(staleAgents)
-		out.MeasuredAgents = int(measuredAgents)
-		unmeasured := totalAgents - staleAgents - measuredAgents
-		if unmeasured < 0 {
-			unmeasured = 0
-		}
-		out.UnmeasuredAgents = int(unmeasured)
+		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
+			IsRunning:        isRunning != 0,
+			HasMeterHealth:   hasMeterHealth != 0,
+			LatestFinalState: latestFinalState,
+			IsReceiptStale:   isReceiptStale != 0,
+			HasUsageData:     hasUsageData != 0,
+			AgentCount:       int(agentCount),
+		})
 		if rawLastReceipt != nil {
 			ts, err := parseSQLTimestamp(rawLastReceipt)
 			if err != nil {
 				return nil, fmt.Errorf("parse max_last_receipt_at: %w", err)
 			}
-			out.LastReceiptAt = ts
+			if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
+				out.LastReceiptAt = ts
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -574,8 +629,10 @@ func (s *UsageLedgerStore) HasUsageEventsForRun(ctx context.Context, agentID, ru
 // timestamp directly from the database engine clock (§4.2 item 7).
 func (s *UsageLedgerStore) DBNow(ctx context.Context) (time.Time, error) {
 	drv := s.client.Driver()
-	dialectName := drv.Dialect()
+	return dbNowFromDriver(ctx, drv, drv.Dialect())
+}
 
+func dbNowFromDriver(ctx context.Context, drv dialect.Driver, dialectName string) (time.Time, error) {
 	rows := &entsql.Rows{}
 	if dialectName == dialect.Postgres {
 		if err := drv.Query(ctx, "SELECT CURRENT_TIMESTAMP", []any{}, rows); err != nil {
@@ -672,8 +729,107 @@ ORDER BY project_id ASC`
 	return out, nil
 }
 
-func scanUsageRollupTotals(rows *entsql.Rows, dst *store.UsageRollupTotals) error {
-	return rows.Scan(
+// buildRollupSumSelectSQL builds an overflow-safe SELECT list for all 18
+// rollup counters:
+//   - Postgres: SUM(bigint) returns arbitrary-precision numeric; clamped with
+//     LEAST(..., 9223372036854775807::numeric) before BIGINT cast, plus a
+//     boolean saturated flag.
+//   - SQLite: splits each int64 into exact (col / 1e9, col % 1e9) integer
+//     halves so SUM never raises "integer overflow" up to 100M saturated rows,
+//     then recombines with saturation in Go.
+func buildRollupSumSelectSQL(dialectName string) string {
+	if dialectName == dialect.Postgres {
+		parts := make([]string, 0, len(rollupSumColumns)+1)
+		for _, col := range rollupSumColumns {
+			parts = append(parts, fmt.Sprintf("CAST(LEAST(COALESCE(SUM(%s), 0), 9223372036854775807::numeric) AS BIGINT)", col))
+		}
+		satChecks := make([]string, 0, len(rollupSumColumns))
+		for _, col := range rollupSumColumns {
+			satChecks = append(satChecks, fmt.Sprintf("COALESCE(SUM(%s), 0) >= 9223372036854775807::numeric", col))
+		}
+		parts = append(parts, "("+strings.Join(satChecks, " OR ")+")")
+		return strings.Join(parts, ",\n\t")
+	}
+
+	parts := make([]string, 0, len(rollupSumColumns)*2)
+	for _, col := range rollupSumColumns {
+		parts = append(parts,
+			fmt.Sprintf("COALESCE(SUM(%s / %d), 0)", col, sqliteSplitRadix),
+			fmt.Sprintf("COALESCE(SUM(%s %% %d), 0)", col, sqliteSplitRadix),
+		)
+	}
+	return strings.Join(parts, ",\n\t")
+}
+
+func combineSplitInt64(hi, lo int64) (int64, bool) {
+	if hi < 0 {
+		hi = 0
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	carry := lo / sqliteSplitRadix
+	rem := lo % sqliteSplitRadix
+	if hi > math.MaxInt64-carry {
+		return math.MaxInt64, true
+	}
+	hi += carry
+	maxHi := math.MaxInt64 / sqliteSplitRadix
+	if hi > maxHi {
+		return math.MaxInt64, true
+	}
+	val := hi * sqliteSplitRadix
+	if rem > math.MaxInt64-val {
+		return math.MaxInt64, true
+	}
+	val += rem
+	return val, val == math.MaxInt64
+}
+
+func scanUsageRollupTotalsRow(dialectName string, rows *entsql.Rows, prefixDests []any, dst *store.UsageRollupTotals) error {
+	if dialectName == dialect.Postgres {
+		var sat bool
+		dests := make([]any, 0, len(prefixDests)+len(rollupSumColumns)+1)
+		dests = append(dests, prefixDests...)
+		dests = append(dests,
+			&dst.Calls,
+			&dst.ErrorCalls,
+			&dst.Input,
+			&dst.Output,
+			&dst.CacheRead,
+			&dst.CacheWrite,
+			&dst.CacheWrite1h,
+			&dst.Reasoning,
+			&dst.ReportedCostMicros,
+			&dst.Events,
+			&dst.NullTokenEvents,
+			&dst.InputKnownEvents,
+			&dst.OutputKnownEvents,
+			&dst.CacheReadKnownEvents,
+			&dst.CacheWriteKnownEvents,
+			&dst.CacheWrite1hKnownEvents,
+			&dst.ReasoningKnownEvents,
+			&dst.PresenceTrackedEvents,
+			&sat,
+		)
+		if err := rows.Scan(dests...); err != nil {
+			return err
+		}
+		dst.Saturated = sat
+		return nil
+	}
+
+	var hi, lo [18]int64
+	dests := make([]any, 0, len(prefixDests)+36)
+	dests = append(dests, prefixDests...)
+	for i := 0; i < 18; i++ {
+		dests = append(dests, &hi[i], &lo[i])
+	}
+	if err := rows.Scan(dests...); err != nil {
+		return err
+	}
+
+	targets := []*int64{
 		&dst.Calls,
 		&dst.ErrorCalls,
 		&dst.Input,
@@ -692,7 +848,17 @@ func scanUsageRollupTotals(rows *entsql.Rows, dst *store.UsageRollupTotals) erro
 		&dst.CacheWrite1hKnownEvents,
 		&dst.ReasoningKnownEvents,
 		&dst.PresenceTrackedEvents,
-	)
+	}
+	saturated := false
+	for i, ptr := range targets {
+		v, sat := combineSplitInt64(hi[i], lo[i])
+		*ptr = v
+		if sat {
+			saturated = true
+		}
+	}
+	dst.Saturated = saturated
+	return nil
 }
 
 func parseSQLTimestamp(v any) (*time.Time, error) {
@@ -741,39 +907,6 @@ func parseSQLTimestampString(raw string) (*time.Time, error) {
 
 func entUsageRollupDailyToStore(r *ent.UsageRollupDaily) *store.UsageRollupDaily {
 	return &store.UsageRollupDaily{
-		ID:                      r.ID.String(),
-		BucketStart:             r.BucketStart.UTC(),
-		ProjectID:               r.ProjectID,
-		BillingUserID:           r.BillingUserID,
-		AgentID:                 r.AgentID,
-		Harness:                 r.Harness,
-		Model:                   r.Model,
-		UsageSource:             r.UsageSource,
-		Calls:                   r.Calls,
-		ErrorCalls:              r.ErrorCalls,
-		Input:                   r.Input,
-		Output:                  r.Output,
-		CacheRead:               r.CacheRead,
-		CacheWrite:              r.CacheWrite,
-		CacheWrite1h:            r.CacheWrite1h,
-		Reasoning:               r.Reasoning,
-		ReportedCostMicros:      r.ReportedCostMicros,
-		Events:                  r.Events,
-		NullTokenEvents:         r.NullTokenEvents,
-		InputKnownEvents:        r.InputKnownEvents,
-		OutputKnownEvents:       r.OutputKnownEvents,
-		CacheReadKnownEvents:    r.CacheReadKnownEvents,
-		CacheWriteKnownEvents:   r.CacheWriteKnownEvents,
-		CacheWrite1hKnownEvents: r.CacheWrite1hKnownEvents,
-		ReasoningKnownEvents:    r.ReasoningKnownEvents,
-		PresenceTrackedEvents:   r.PresenceTrackedEvents,
-		FirstEventTS:            r.FirstEventTs.UTC(),
-		LastEventTS:             r.LastEventTs.UTC(),
-	}
-}
-
-func entUsageRollupHourlyToStore(r *ent.UsageRollupHourly) *store.UsageRollupHourly {
-	return &store.UsageRollupHourly{
 		ID:                      r.ID.String(),
 		BucketStart:             r.BucketStart.UTC(),
 		ProjectID:               r.ProjectID,

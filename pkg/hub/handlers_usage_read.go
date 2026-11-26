@@ -16,12 +16,14 @@ package hub
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -69,6 +71,7 @@ type AgentUsageTokens struct {
 	Reasoning      *int64                         `json:"reasoning"`
 	SummableTokens *int64                         `json:"summable_tokens"`
 	UnknownEvents  *AgentUsageBucketUnknownEvents `json:"unknown_events,omitempty"`
+	Saturated      bool                           `json:"saturated,omitempty"`
 }
 
 // AgentUsageModelBreakdown reports per-model usage totals over the query window.
@@ -530,6 +533,7 @@ func buildAgentUsageResponse(
 		MeterHealth:       currentRunMeterRows,
 		HasRunUsageEvents: hasRunData,
 		DBNow:             dbNow,
+		AgentPhase:        agent.Phase,
 	})
 
 	return AgentUsageResponse{
@@ -611,17 +615,35 @@ func resolveNullableTokens(
 
 	// SummableTokens = sum of known {input, output, cache_read, cache_write} (§3.1).
 	// Reasoning and cache_write_1h are subsets and are never added to SummableTokens.
+	// Saturate at math.MaxInt64 so large sums never wrap negative.
 	var summable int64
 	hasAnySummable := false
+	saturated := false
 	for _, p := range []*int64{out.Input, out.Output, out.CacheRead, out.CacheWrite} {
 		if p != nil {
-			summable += *p
+			v := *p
+			if v == math.MaxInt64 {
+				saturated = true
+			}
+			if v > math.MaxInt64-summable {
+				summable = math.MaxInt64
+				saturated = true
+			} else {
+				summable += v
+			}
 			hasAnySummable = true
 		}
+	}
+	if out.CacheWrite1h != nil && *out.CacheWrite1h == math.MaxInt64 {
+		saturated = true
+	}
+	if out.Reasoning != nil && *out.Reasoning == math.MaxInt64 {
+		saturated = true
 	}
 	if hasAnySummable {
 		out.SummableTokens = &summable
 	}
+	out.Saturated = saturated
 	return out
 }
 
@@ -632,13 +654,18 @@ type measurementStatusInput struct {
 	MeterHealth       []*store.MeterHealth
 	HasRunUsageEvents bool
 	DBNow             time.Time
+	// AgentPhase, when non-empty, restricts open-meter staleness to running
+	// agents (PhaseRunning) so stopped or crashed agents do not remain stale
+	// indefinitely (O1b).
+	AgentPhase string
 }
 
 // deriveMeasurementStatus computes the P1 measurement_status for an agent's
 // current run:
 //   - "stale" when an open meter_health row for the run has had no receipt for
 //     more than 3 heartbeat intervals (180s), evaluated at read time from DBNow
-//     (§4.2 item 7);
+//     (§4.2 item 7), and (when AgentPhase is provided) the agent is in a
+//     running phase;
 //   - "measured" when the current run has received Track 1 usage events and its
 //     meter is fresh (or cleanly closed with final_state="final");
 //   - "unmeasured" when no Track 1 usage data has been received for the current
@@ -660,7 +687,9 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 
 	if latest != nil {
 		staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
-		if latest.FinalState == store.MeterHealthFinalStateOpen &&
+		isRunning := in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning)
+		if isRunning &&
+			latest.FinalState == store.MeterHealthFinalStateOpen &&
 			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
 			return MeasurementStatusStale
 		}

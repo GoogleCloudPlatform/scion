@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -282,7 +283,9 @@ func TestScopedUsageRead_GranularityHourlyCoverageGroupByAndNullability(t *testi
 	assert.Equal(t, 2, noCovResp.UnmeasuredAgents)
 	assert.Equal(t, 0, noCovResp.StaleAgents)
 
-	// Ingest two events in distinct recent hours (sets hourly coverage start at now-2h).
+	// Ingest two events in distinct recent hours; R1 sets hourly coverage marker
+	// to ceil_hour(DB now), so the current upgrade hour must fall back to day
+	// and reject groupBy=hour.
 	dbNow, err := s.DBNow(ctx)
 	require.NoError(t, err)
 	h1 := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), dbNow.Hour(), 0, 0, 0, time.UTC).Add(-2 * time.Hour)
@@ -317,6 +320,17 @@ func TestScopedUsageRead_GranularityHourlyCoverageGroupByAndNullability(t *testi
 			FinalState: store.MeterHealthFinalStateOpen,
 		},
 	})
+	require.NoError(t, err)
+
+	// Right after first post-upgrade write, coverage marker is ceil_hour(dbNow),
+	// so requesting groupBy=hour for h1 (before marker) returns 400 and default uses day.
+	recUpgradeHour := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+h1.Format(time.RFC3339)+"&groupBy=hour", admin)
+	assert.Equal(t, http.StatusBadRequest, recUpgradeHour.Code)
+
+	// Simulate an established hub whose hourly coverage started at h1.
+	markerPayload, err := json.Marshal(map[string]string{"started_at": h1.UTC().Format(time.RFC3339)})
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, store.UsageRollupHourlyCoverageSection, markerPayload, "test", -1, "seeded")
 	require.NoError(t, err)
 
 	// Window starting BEFORE hourly coverage start (h1 - 24h): falls back to day; explicit groupBy=hour returns 400.
@@ -381,4 +395,100 @@ func TestScopedUsageRead_GranularityHourlyCoverageGroupByAndNullability(t *testi
 	require.NoError(t, json.Unmarshal(recOld.Body.Bytes(), &oldResp))
 	assert.Equal(t, store.UsageGranularityDay, oldResp.Window.Granularity)
 	assert.Equal(t, http.StatusBadRequest, doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+oldSince+"&groupBy=hour", admin).Code)
+
+	// O1d: agent_id filter narrows coverage to ag1 (measured -> 0 unmeasured agents).
+	recAgentFilter := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+atStart+"&agent_id="+ag1.ID, admin)
+	require.Equal(t, http.StatusOK, recAgentFilter.Code)
+	var agFilterResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recAgentFilter.Body.Bytes(), &agFilterResp))
+	assert.Equal(t, 0, agFilterResp.UnmeasuredAgents)
+	assert.Equal(t, MeasurementStatusMeasured, agFilterResp.MeasurementStatus)
+
+	// O3: truncated groupBy=hour keeps the MOST RECENT bucket (h2), not h1.
+	recHourTrunc := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+atStart+"&groupBy=hour&limit=1", admin)
+	require.Equal(t, http.StatusOK, recHourTrunc.Code)
+	var hourTruncResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recHourTrunc.Body.Bytes(), &hourTruncResp))
+	assert.True(t, hourTruncResp.Truncated)
+	require.Len(t, hourTruncResp.Groups, 1)
+	require.NotNil(t, hourTruncResp.Groups[0].BucketStart)
+	assert.Equal(t, h2, *hourTruncResp.Groups[0].BucketStart, "truncated time series must keep the most recent bucket")
+
+	// Nit omitempty: grouped dimension with empty string value is always emitted in JSON.
+	evEmptyHarness := &store.UsageEvent{
+		HubID: "hub-gran", EventID: "g-empty-h", RunID: ag2.RunID, ProjectID: proj.ID, AgentID: ag2.ID,
+		BillingUserID: nil, Harness: "", Model: "unknown",
+		ModelSource: telemetrycontract.ModelSourceEvent, UsageSource: store.UsageSourceNative,
+		Status: telemetrycontract.StatusSuccess, Calls: 1,
+		Input: usageInt64p(5), Output: usageInt64p(5),
+		TokenStatus: telemetrycontract.TokenStatusReported, EventTS: h2.Add(20 * time.Minute), ReceivedAt: dbNow,
+		ProducerEpoch: "ep-2", ProducerSeq: 1,
+	}
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{AgentID: ag2.ID, Events: []*store.UsageEvent{evEmptyHarness}})
+	require.NoError(t, err)
+	recEmptyDim := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+atStart+"&groupBy=harness,user&agent_id="+ag2.ID, admin)
+	require.Equal(t, http.StatusOK, recEmptyDim.Code)
+	var rawEmptyDim map[string]any
+	require.NoError(t, json.Unmarshal(recEmptyDim.Body.Bytes(), &rawEmptyDim))
+	rawGroups := rawEmptyDim["groups"].([]any)
+	require.Len(t, rawGroups, 1)
+	g0 := rawGroups[0].(map[string]any)
+	hVal, hasH := g0["harness"]
+	uVal, hasU := g0["user_id"]
+	assert.True(t, hasH, "grouped harness dimension must be present even when empty")
+	assert.Equal(t, "", hVal)
+	assert.True(t, hasU, "grouped user_id dimension must be present even when empty")
+	assert.Equal(t, "", uVal)
+	_, hasModel := g0["model"]
+	assert.False(t, hasModel, "ungrouped model dimension must remain omitted")
+}
+
+func TestScopedUsageRead_SaturatedTotalsAndStoppedNotStale(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	win := UsageWindow{Since: now.Add(-time.Hour), Until: now, Granularity: store.UsageGranularityDay}
+
+	// R2: Saturated rollup totals propagate Saturated=true and never wrap negative.
+	resp := buildScopedUsageResponse(
+		UsageScopeRef{Kind: store.UsageScopeKindProject, ID: "p1"},
+		win,
+		[]string{store.UsageGroupByProject},
+		now,
+		&store.UsageRollupQueryResult{
+			Totals: store.UsageRollupTotals{
+				Calls:                 2,
+				Events:                2,
+				Input:                 math.MaxInt64,
+				Output:                math.MaxInt64,
+				InputKnownEvents:      2,
+				OutputKnownEvents:     2,
+				PresenceTrackedEvents: 2,
+				Saturated:             true,
+			},
+			Groups: []*store.UsageRollupGroup{{
+				ProjectID: "p1",
+				UsageRollupTotals: store.UsageRollupTotals{
+					Calls:                 2,
+					Events:                2,
+					Input:                 math.MaxInt64,
+					Output:                math.MaxInt64,
+					InputKnownEvents:      2,
+					OutputKnownEvents:     2,
+					PresenceTrackedEvents: 2,
+					Saturated:             true,
+				},
+			}},
+		},
+		&store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				// Stopped agent with old open meter + usage data -> derived as measured, NOT stale.
+				{IsRunning: false, HasMeterHealth: true, LatestFinalState: store.MeterHealthFinalStateOpen, IsReceiptStale: true, HasUsageData: true, AgentCount: 2},
+			},
+		},
+	)
+	require.NotNil(t, resp.Tokens.SummableTokens)
+	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.SummableTokens)
+	assert.True(t, resp.Tokens.Saturated)
+	assert.Equal(t, MeasurementStatusMeasured, resp.MeasurementStatus)
+	assert.Equal(t, 0, resp.StaleAgents)
+	assert.Equal(t, 0, resp.UnmeasuredAgents)
 }

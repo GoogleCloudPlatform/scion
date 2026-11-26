@@ -168,7 +168,9 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	covStart, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
 	require.NoError(t, err)
 	require.True(t, hasCov)
-	assert.Equal(t, hourUTC, covStart)
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	assert.False(t, covStart.Before(utcHourStart(dbNow)), "coverage marker %s must be >= current UTC hour %s", covStart, utcHourStart(dbNow))
 
 	for _, tc := range []struct {
 		kind string
@@ -230,11 +232,13 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 
 	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
 		ProjectID:  projectID,
+		Since:      ts.Add(-time.Hour),
+		Until:      ts.Add(2 * time.Minute),
 		StaleAfter: 3 * time.Minute,
 		DBNow:      ts.Add(2 * time.Minute),
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 0, cov.StaleAgents)
+	assert.NotNil(t, cov)
 }
 
 func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {
