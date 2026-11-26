@@ -48,7 +48,7 @@ type DialectConfig struct {
 	// runtime.DefaultMaxEvalTime = 3s, clamped to runtime.MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
 	// Enabled gates Compile and Evaluate on feature availability before any I/O
-	// (AC-13 option (b)). When nil, the dialect is treated as enabled.
+	// (AC-13 option (b)). When nil, the dialect fails closed (disabled).
 	Enabled func() bool
 	// Environments optionally supplies a shared ContentEnvironment registry.
 	// When nil, NewDialect creates a fresh spec.NewEnvironmentRegistry() with
@@ -343,7 +343,7 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 
 func (d *Dialect) isEnabled() bool {
 	if d == nil || d.enabled == nil {
-		return true
+		return false
 	}
 	return d.enabled()
 }

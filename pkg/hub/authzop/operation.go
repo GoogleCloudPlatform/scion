@@ -672,6 +672,9 @@ const (
 	// closed, because a caller binding is of a kind the leave does not
 	// classify (ptone/scion#7494).
 	DenialLeaveBindingUnclassified DenialCode = "leave_binding_unclassified"
+	// DenialRateLimited: request refused because the caller's per-replica
+	// rate limit bucket is exhausted (HTTP 429 rate_limited).
+	DenialRateLimited DenialCode = "rate_limited"
 )
 
 // TestRef references an executable test that proves part of the contract.

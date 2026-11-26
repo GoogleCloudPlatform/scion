@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 )
 
 // Evaluator compiles, caches, invalidates, and evaluates message_policy CEL
@@ -75,6 +76,158 @@ func (e *Evaluator) CompileViolation(ctx context.Context, expr string) error {
 	}
 	_, err := e.engine.Compile(ctx, ruleengine.DialectCEL, expr, KindViolation, ViolationEnvironmentRef())
 	return err
+}
+
+// CompileSystemOne validates and compiles a System One judgments rule JSON
+// against the message_policy v1 ContentEnvironment via ruleengine.Engine.
+func (e *Evaluator) CompileSystemOne(ctx context.Context, rawRule string) (ruleengine.Compiled, error) {
+	if strings.TrimSpace(rawRule) == "" {
+		return ruleengine.Compiled{}, errors.New("messagepolicy: system_one_rule must not be empty")
+	}
+	return e.engine.Compile(ctx, systemone.DialectName, rawRule, KindJudgments, SystemOneEnvironmentRef())
+}
+
+// EvaluateSystemOne compiles and evaluates a System One judgments rule against
+// req (which carries the consumer-authorized ProjectID and typed Input) via
+// ruleengine.Engine. On Success it returns ClassPass with Evaluation and
+// extracted Judgments (Flags/Labels only); on Uncertain or Failed it returns
+// the classified error with Evaluation attached.
+func (e *Evaluator) EvaluateSystemOne(
+	ctx context.Context,
+	rawRule string,
+	req systemone.Request,
+	opts ...EvalOption,
+) (*systemone.Evaluation, Classification) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, ClassifyError(&ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err})
+		}
+	}
+	cfg := applyEvalOpts(opts)
+	compiled, err := e.CompileSystemOne(ctx, rawRule)
+	if err != nil {
+		// When hub.system_one is turned off after a policy was authored,
+		// Dialect.Compile returns UnsupportedDialectError{Reason: unknown_dialect}
+		// even though the dialect is registered and admitted for message_policy.
+		// Surface that as FailedError{Reason: dialect_disabled} (without
+		// AdmissionError) so on_failed_reasons["dialect_disabled"] is reachable
+		// on the real evaluation path while authoring stays 400 unsupported_dialect.
+		var unsup *ruleengine.UnsupportedDialectError
+		if errors.As(err, &unsup) &&
+			unsup.Dialect == systemone.DialectName &&
+			unsup.Reason == ruleengine.ReasonUnknownDialect &&
+			e.engine.Supports(ConsumerName, systemone.DialectName) {
+			return nil, ClassifyError(&ruleengine.FailedError{
+				Reason: systemone.ReasonDialectDisabled,
+				Cause:  err,
+			})
+		}
+		return nil, ClassifyError(err)
+	}
+	dec, err := e.engine.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: req,
+	}, ruleengine.Budget{
+		MaxEvalTime: cfg.maxEvalTime,
+		Tracker:     cfg.tracker,
+	})
+	if err != nil {
+		cls := ClassifyError(err)
+		return cls.Evaluation, cls
+	}
+	eval, _ := dec.Detail.(*systemone.Evaluation)
+	judgments := ExtractJudgments(eval)
+	return eval, Classification{
+		Class:      ClassPass,
+		Evaluation: eval,
+		Judgments:  judgments,
+	}
+}
+
+// EvaluatePolicy evaluates a message policy (optional system_one_rule followed
+// by required CEL violation_rule) for policyID@revision. When systemOneRule is
+// non-empty, System One runs first with the consumer-authorized projectID;
+// Uncertain and Failed results short-circuit before CEL (consumer design §5.5).
+// On System One Success, extracted judgment_flags and judgment_labels are fed
+// into the CEL activation (judgment_scores stays empty until M2b).
+func (e *Evaluator) EvaluatePolicy(
+	ctx context.Context,
+	policyID string,
+	revision int64,
+	violationRule string,
+	systemOneRule string,
+	projectID string,
+	facts Facts,
+	celOpts []EvalOption,
+	soOpts []EvalOption,
+) Classification {
+	return e.evaluatePolicy(ctx, policyID, revision, violationRule, systemOneRule, projectID, facts, true, celOpts, soOpts)
+}
+
+// EvaluatePolicyTest evaluates a message policy without caching the compiled
+// CEL program, for the policy test endpoint. When systemOneRule is non-empty,
+// this performs a live System One evaluation against the configured provider
+// (sending selected fields, potentially incurring provider cost, with no
+// automatic replay or retry).
+func (e *Evaluator) EvaluatePolicyTest(
+	ctx context.Context,
+	policyID string,
+	revision int64,
+	violationRule string,
+	systemOneRule string,
+	projectID string,
+	facts Facts,
+	celOpts []EvalOption,
+	soOpts []EvalOption,
+) Classification {
+	return e.evaluatePolicy(ctx, policyID, revision, violationRule, systemOneRule, projectID, facts, false, celOpts, soOpts)
+}
+
+func (e *Evaluator) evaluatePolicy(
+	ctx context.Context,
+	policyID string,
+	revision int64,
+	violationRule string,
+	systemOneRule string,
+	projectID string,
+	facts Facts,
+	useCELCache bool,
+	celOpts []EvalOption,
+	soOpts []EvalOption,
+) Classification {
+	if strings.TrimSpace(systemOneRule) == "" {
+		act := NewActivation(facts)
+		if useCELCache {
+			return e.EvaluateViolation(ctx, policyID, revision, violationRule, act, celOpts...)
+		}
+		return e.EvaluateExpr(ctx, violationRule, act, celOpts...)
+	}
+
+	req := systemone.Request{
+		Input:     BuildSystemOneInput(facts),
+		ProjectID: projectID,
+		RuleID:    policyID,
+		Revision:  revision,
+	}
+	eval, soCls := e.EvaluateSystemOne(ctx, systemOneRule, req, soOpts...)
+	if soCls.Class != ClassPass {
+		return soCls
+	}
+
+	factsWithJudgments := facts
+	factsWithJudgments.Judgments = Judgments{
+		Flags:  soCls.Judgments.Flags,
+		Labels: soCls.Judgments.Labels,
+	}
+	act := NewActivation(factsWithJudgments)
+	var celCls Classification
+	if useCELCache {
+		celCls = e.EvaluateViolation(ctx, policyID, revision, violationRule, act, celOpts...)
+	} else {
+		celCls = e.EvaluateExpr(ctx, violationRule, act, celOpts...)
+	}
+	celCls.Evaluation = eval
+	celCls.Judgments = soCls.Judgments
+	return celCls
 }
 
 // Invalidate removes cached compiled program bindings for policyID at or below
@@ -162,7 +315,7 @@ func (e *Evaluator) EvaluateViolation(
 }
 
 // EvaluateExpr compiles expr without caching and evaluates it against act.
-// Used by dry-run / test endpoints so transient authoring probes do not churn
+// Used by the policy test endpoint so transient authoring tests do not churn
 // the runtime LRU cache.
 func (e *Evaluator) EvaluateExpr(
 	ctx context.Context,

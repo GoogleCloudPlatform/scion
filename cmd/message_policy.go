@@ -43,7 +43,7 @@ const (
 	// maxMessagePolicySpecFileBytes bounds policy spec/rule files read by CLI commands.
 	maxMessagePolicySpecFileBytes = 64 * 1024
 
-	// maxMessagePolicyTestInputBytes bounds dry-run test sample/request files so
+	// maxMessagePolicyTestInputBytes bounds policy test sample/request files so
 	// 16 KiB+ bodies (for testing UTF-8 truncation behavior) fit comfortably.
 	maxMessagePolicyTestInputBytes = 256 * 1024
 
@@ -74,8 +74,8 @@ var messagePolicyCmd = newMessagePolicyCmd()
 func newMessagePolicyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "message-policy",
-		Short: "Manage CEL project message policies",
-		Long: `Author, inspect, dry-run test, and audit CEL message policies for a project.
+		Short: "Manage project message policies",
+		Long: `Author, inspect, test, and audit project message policies.
 
 Each Hub reports its active enforcement coverage (coverage.enforced_surfaces and
 coverage.uncovered_agent_paths) in list and get responses. Currently enforced
@@ -85,7 +85,7 @@ broadcast), scheduled deliveries, user-originated sends, and inbound external
 bridges are NOT evaluated.
 
 In agent mode, only read-only inspection ('list' and 'get') is available;
-policy authoring, deletion, dry-run testing, and decision log queries are
+policy authoring, updates, deletion, sample testing, and decision log queries are
 human-mode operations requiring project owner/admin or Hub admin permissions.`,
 		// Args/Run make this command Runnable so cobra validates subcommand
 		// names, as for "scion artifact" and "scion hub": an unrecognized
@@ -104,6 +104,7 @@ human-mode operations requiring project owner/admin or Hub admin permissions.`,
 		newMessagePolicyCreateCmd(),
 		newMessagePolicyListCmd(),
 		newMessagePolicyGetCmd(),
+		newMessagePolicyUpdateCmd(),
 		newMessagePolicyDeleteCmd(),
 		newMessagePolicyTestCmd(),
 		newMessagePolicyDecisionsCmd(),
@@ -166,10 +167,13 @@ func formatMessagePolicyAPIError(err error) error {
 	}
 
 	switch apiErr.Code {
-	case messagepolicy.ErrCodeInvalidRule:
+	case messagepolicy.ErrCodeInvalidRule, messagepolicy.ErrCodeNotYetSupported:
 		var qualifiers []string
 		if cat := detailString(apiErr.Details, "category"); cat != "" {
 			qualifiers = append(qualifiers, "category="+safeText(cat))
+		}
+		if path := detailString(apiErr.Details, "path"); path != "" {
+			qualifiers = append(qualifiers, "path="+safeText(path))
 		}
 		if line, ok := detailInt(apiErr.Details, "line"); ok && line > 0 {
 			qualifiers = append(qualifiers, fmt.Sprintf("line=%d", line))
@@ -180,7 +184,7 @@ func formatMessagePolicyAPIError(err error) error {
 		if field := detailString(apiErr.Details, "field"); field != "" && len(qualifiers) == 0 {
 			qualifiers = append(qualifiers, "field="+safeText(field))
 		}
-		prefix := "invalid_rule"
+		prefix := safeText(apiErr.Code)
 		if len(qualifiers) > 0 {
 			prefix += " [" + strings.Join(qualifiers, ", ") + "]"
 		}
@@ -360,6 +364,12 @@ func writeMessagePolicyDetail(out io.Writer, pol *hubclient.MessagePolicyRespons
 		_, _ = fmt.Fprintf(out, "Reject Remediation: %s\n", safeText(pol.RejectRemediation))
 	}
 	_, _ = fmt.Fprintf(out, "Violation Rule:     %s\n", collapseSingleLine(pol.ViolationRule))
+	if strings.TrimSpace(pol.SystemOneRule) != "" {
+		_, _ = fmt.Fprintf(out, "System One Rule:    %s\n", collapseSingleLine(pol.SystemOneRule))
+	}
+	if len(pol.SystemOneRefs) > 0 {
+		_, _ = fmt.Fprintf(out, "System One Refs:    %s\n", safeListOrNone(pol.SystemOneRefs))
+	}
 	if !pol.CreatedAt.IsZero() {
 		_, _ = fmt.Fprintf(out, "Created:            %s\n", clitime.Format(pol.CreatedAt, clitime.Full))
 	}

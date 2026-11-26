@@ -1947,7 +1947,7 @@ func TestMessagePolicyGate_UnstoredSendDoesNotRecordDanglingMessageID(t *testing
 
 	// 4. N1: nil evaluator on a bare Server fails closed with consumer_not_registered.
 	bareSrv := &Server{}
-	c := bareSrv.evalOneMessagePolicy(ctx, enfPol, messagepolicy.Activation{}, nil)
+	c := bareSrv.evalOneMessagePolicyWithFacts(ctx, enfPol, f.project.ID, messagepolicy.Facts{}, messagepolicy.Activation{}, nil, 0)
 	assert.Equal(t, messagepolicy.ClassFailed, c.Class)
 	assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, c.Reason)
 	assert.True(t, c.AdmissionError)
@@ -3259,7 +3259,7 @@ func BenchmarkMessagePolicyGate_ShadowCacheMiss(b *testing.B) {
 		b.StartTimer()
 
 		t0 := time.Now()
-		c := srv.evalOneMessagePolicy(ctx, pol, act, budget)
+		c := srv.evalOneMessagePolicyWithFacts(ctx, pol, pol.ProjectID, messagepolicy.Facts{}, act, budget, 0)
 		d := time.Since(t0)
 		if c.Class != messagepolicy.ClassViolation {
 			b.Fatalf("expected ClassViolation on cache-miss eval, got %+v", c)

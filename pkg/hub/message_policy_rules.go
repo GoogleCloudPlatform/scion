@@ -19,11 +19,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 )
 
 // registerMessagePolicyRules attaches the "message_policy" v1 CEL environment
-// to the Hub Server's shared CELDialect and grants the "message_policy"
-// consumer pure CEL admission only (AllowIO: false).
+// to the Hub Server's shared CELDialect, grants the "message_policy" consumer
+// pure CEL plus I/O-bearing System One admission, and registers the
+// "message_policy" v1 System One ContentEnvironment on the shared System One
+// dialect (ptone/scion#8048).
 //
 // Registration performs no I/O and reads neither the database nor the
 // operational settings store. Any error fails Hub startup closed.
@@ -41,8 +44,16 @@ func (s *Server) registerMessagePolicyRules() error {
 	if err := s.rules.AllowConsumerDialects(
 		messagepolicy.ConsumerName,
 		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.GrantIO(systemone.DialectName),
 	); err != nil {
 		return fmt.Errorf("allow message_policy rule dialects: %w", err)
+	}
+	if err := systemone.RegisterConsumerEnvironment(
+		s.rules,
+		messagepolicy.ConsumerName,
+		messagepolicy.SystemOneContentEnv(),
+	); err != nil {
+		return fmt.Errorf("register message_policy system_one content environment: %w", err)
 	}
 	return nil
 }

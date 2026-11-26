@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
-	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 type stubRuleDialect struct {
@@ -57,18 +56,22 @@ func (d stubRuleDialect) Declares() ruleengine.Capabilities {
 	}
 }
 
-// Target 9a: Admission guard for message_policy consumer registration.
+// M2 Admission guard for message_policy consumer registration (ptone/scion#8048,
+// comment-6920751463):
 // Verifies that registerMessagePolicyRules grants message_policy strictly
-// [{Dialect: "cel", AllowIO: false}], refuses unregistered consumers and
-// system_one compilation for message_policy, fails startup closed on
-// registration error, and maps evaluation-time admission failure to ClassFailed.
+// [{Dialect: "cel", AllowIO: false}, {Dialect: "system_one", AllowIO: true}],
+// registers the message_policy v1 System One ContentEnvironment, pins a non-nil
+// Enabled gate on system_one so turning hub.system_one OFF fails closed with
+// zero provider calls, refuses extra dialects and unregistered consumers, fails
+// startup closed on registration error, and maps evaluation-time admission
+// failure to ClassFailed.
 func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	ctx := context.Background()
 
-	// Start a Hub Server with hub.system_one ON and an enabled instance so that
-	// system_one is fully live on the engine — proving admission alone blocks
-	// message_policy from reaching system_one with zero provider calls.
-	srv, s, _ := newSystemOneTestServer(t, true)
+	// Start a Hub Server with hub.system_one OFF first to prove the pinned
+	// non-nil Enabled gate blocks message_policy System One compile/eval with
+	// zero provider calls before toggling hub.system_one ON.
+	srv, s, _ := newSystemOneTestServer(t, false)
 	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "mp-reg-admin", store.SystemRoleSuperAdmin))
 	require.NoError(t, err)
 
@@ -85,19 +88,6 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 		),
 	)
 
-	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
-		"name":    "ts-mp-guard",
-		"adapter": "typesafe",
-		"model":   "jev-1.14.0",
-		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-mp-guard-0001"},
-	})
-	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
-
-	instRow, err := s.GetSystemOneInstanceByName(ctx, "ts-mp-guard")
-	require.NoError(t, err)
-	instRow.Endpoint = tlsSrv.URL
-	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
-
 	re := srv.RuleEngine()
 	require.NotNil(t, re)
 	require.NotNil(t, srv.CELDialect())
@@ -105,12 +95,24 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, celEnvEng)
 
-	// 1. message_policy is admitted to "cel" and evaluates through messagepolicy.New(re).
+	// 1. message_policy is admitted to "cel" (AllowIO: false) and "system_one" (AllowIO: true),
+	// and the message_policy v1 ContentEnvironment is registered on the system_one dialect.
 	assert.True(t, re.Supports(messagepolicy.ConsumerName, ruleengine.DialectCEL))
 	celHandle, err := re.DialectFor(messagepolicy.ConsumerName, ruleengine.DialectCEL)
 	require.NoError(t, err)
 	assert.Equal(t, ruleengine.DialectCEL, celHandle.Name())
 	assert.False(t, celHandle.Declares().PerformsIO)
+
+	assert.True(t, re.Supports(messagepolicy.ConsumerName, systemone.DialectName))
+	s1Handle, err := re.DialectFor(messagepolicy.ConsumerName, systemone.DialectName)
+	require.NoError(t, err)
+	assert.Equal(t, systemone.DialectName, s1Handle.Name())
+	assert.True(t, s1Handle.Declares().PerformsIO)
+	soDialect, ok := s1Handle.(*systemone.Dialect)
+	require.True(t, ok)
+	gotEnv, hasEnv := soDialect.Environment(messagepolicy.EnvironmentName)
+	require.True(t, hasEnv, "message_policy System One ContentEnvironment must be registered")
+	assert.Equal(t, messagepolicy.SystemOneContentEnv(), gotEnv)
 
 	ev, err := messagepolicy.New(re)
 	require.NoError(t, err)
@@ -122,43 +124,66 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	}))
 	assert.Equal(t, messagepolicy.ClassViolation, res.Class)
 
-	// 2. system_one compile and evaluate for message_policy are refused with dialect_not_allowed.
+	// 2. Non-nil Enabled gate fails closed when hub.system_one is OFF (0 provider calls).
 	const rawS1Spec = `{
-	  "version": 1,
-	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does the message ask a prose question?"}],
-	  "output": {"question": "q1"}
+	  "dialect": "system_one",
+	  "inputs": ["message.body"],
+	  "spec": {
+	    "version": 1,
+	    "questions": [{"id": "q1", "type": "binary", "instructions": "Does the message ask a prose question?"}]
+	  }
 	}`
-	assert.False(t, re.Supports(messagepolicy.ConsumerName, systemone.DialectName))
-	_, err = re.Compile(ctx, systemone.DialectName, rawS1Spec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: messagepolicy.ConsumerName,
-		Name:     spec.ProbeEnvironmentName,
-	})
-	var unsupS1 *ruleengine.UnsupportedDialectError
-	require.ErrorAs(t, err, &unsupS1)
-	assert.Equal(t, systemone.DialectName, unsupS1.Dialect)
-	assert.Equal(t, messagepolicy.ConsumerName, unsupS1.Consumer)
-	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsupS1.Reason)
+	_, err = re.Compile(ctx, systemone.DialectName, rawS1Spec, messagepolicy.KindJudgments, messagepolicy.SystemOneEnvironmentRef())
+	var unsupOff *ruleengine.UnsupportedDialectError
+	require.ErrorAs(t, err, &unsupOff)
+	assert.Equal(t, systemone.DialectName, unsupOff.Dialect)
+	assert.Equal(t, messagepolicy.ConsumerName, unsupOff.Consumer)
+	assert.Equal(t, ruleengine.ReasonUnknownDialect, unsupOff.Reason)
 
-	forgedS1 := ruleengine.NewCompiled(messagepolicy.ConsumerName, systemone.DialectName, ruleengine.KindFilter, struct{}{})
+	forgedS1 := ruleengine.NewCompiled(messagepolicy.ConsumerName, systemone.DialectName, messagepolicy.KindJudgments, struct{}{})
 	_, err = re.Evaluate(ctx, forgedS1, ruleengine.Input{Payload: systemone.ProbeInput("hello")}, ruleengine.Budget{})
-	unsupS1 = nil
-	require.ErrorAs(t, err, &unsupS1)
-	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsupS1.Reason)
-	assert.Zero(t, providerCalls.Load(), "denied system_one compile/eval for message_policy must make zero provider calls")
+	var failedOff *ruleengine.FailedError
+	require.ErrorAs(t, err, &failedOff)
+	assert.Equal(t, systemone.ReasonDialectDisabled, failedOff.Reason)
+	assert.Zero(t, providerCalls.Load(), "disabled hub.system_one must make zero provider calls")
 
-	// 3. Any additional pure dialect registered on the engine is also refused for message_policy,
-	// confirming no extra dialect grants exist beyond "cel".
-	require.NoError(t, re.Register(stubRuleDialect{name: "extra_pure", performsIO: false}))
-	assert.False(t, re.Supports(messagepolicy.ConsumerName, "extra_pure"))
-	_, err = re.DialectFor(messagepolicy.ConsumerName, "extra_pure")
-	var unsupExtra *ruleengine.UnsupportedDialectError
-	require.ErrorAs(t, err, &unsupExtra)
-	assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsupExtra.Reason)
+	// Flip hub.system_one ON and seed an instance: compile succeeds for message_policy.
+	setSystemOneExperimentLive(t, srv, true)
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "ts-mp-guard",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-mp-guard-0001"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	instRow, err := s.GetSystemOneInstanceByName(ctx, "ts-mp-guard")
+	require.NoError(t, err)
+	instRow.Endpoint = tlsSrv.URL
+	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+
+	compiledS1, err := ev.CompileSystemOne(ctx, rawS1Spec)
+	require.NoError(t, err)
+	assert.False(t, compiledS1.IsZero())
+
+	// 3. Any additional pure or I/O dialect registered on the engine is refused for message_policy,
+	// confirming grants are strictly ["cel", "system_one"].
+	for _, extra := range []stubRuleDialect{
+		{name: "extra_pure", performsIO: false},
+		{name: "extra_io", performsIO: true},
+	} {
+		require.NoError(t, re.Register(extra))
+		assert.False(t, re.Supports(messagepolicy.ConsumerName, extra.name))
+		_, err = re.DialectFor(messagepolicy.ConsumerName, extra.name)
+		var unsupExtra *ruleengine.UnsupportedDialectError
+		require.ErrorAs(t, err, &unsupExtra)
+		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsupExtra.Reason)
+	}
 
 	// 4. Prove the "cel" grant registered by registerMessagePolicyRules has AllowIO == false:
 	// if "cel" declared PerformsIO: true, message_policy's grant rejects it with io_not_allowed.
 	ioTestEngine := ruleengine.NewEngine()
 	require.NoError(t, ioTestEngine.Register(stubRuleDialect{name: ruleengine.DialectCEL, performsIO: true}))
+	require.NoError(t, ioTestEngine.Register(systemone.NewDialect(systemone.DialectConfig{Enabled: func() bool { return true }})))
 	ioTestCEL, err := ruleengine.NewCELDialect()
 	require.NoError(t, err)
 	ioTestSrv := &Server{rules: ioTestEngine, celDialect: ioTestCEL}

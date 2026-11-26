@@ -20,6 +20,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	s1spec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 // Classification describes the outcome class and reason of evaluating one
@@ -41,6 +44,14 @@ type Classification struct {
 
 	// Stats holds content-free CEL evaluation metrics when available.
 	Stats celengine.EvalStats
+
+	// Evaluation holds the content-free System One evaluation record when a
+	// policy evaluated a system_one_rule (consumer design §5.8).
+	Evaluation *systemone.Evaluation
+
+	// Judgments holds the typed flags/labels extracted from a successful
+	// System One evaluation for template substitution (consumer design §5.3).
+	Judgments Judgments
 }
 
 // ClassifyDecision classifies a ruleengine evaluation result or error.
@@ -70,10 +81,12 @@ func ClassifyError(err error) Classification {
 	if err == nil {
 		return Classification{Class: ClassPass}
 	}
+	eval, _ := systemone.EvaluationFrom(err)
 	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
 		return Classification{
-			Class:  ClassFailed,
-			Reason: ReasonBudgetExhausted,
+			Class:      ClassFailed,
+			Reason:     ReasonBudgetExhausted,
+			Evaluation: eval,
 		}
 	}
 
@@ -84,8 +97,9 @@ func ClassifyError(err error) Classification {
 			reason = "uncertain"
 		}
 		return Classification{
-			Class:  ClassUncertain,
-			Reason: reason,
+			Class:      ClassUncertain,
+			Reason:     reason,
+			Evaluation: eval,
 		}
 	}
 
@@ -96,8 +110,9 @@ func ClassifyError(err error) Classification {
 			reason = celengine.ReasonRuntime
 		}
 		return Classification{
-			Class:  ClassFailed,
-			Reason: reason,
+			Class:      ClassFailed,
+			Reason:     reason,
+			Evaluation: eval,
 		}
 	}
 
@@ -108,8 +123,9 @@ func ClassifyError(err error) Classification {
 			reason = celengine.ReasonRuntime
 		}
 		return Classification{
-			Class:  ClassFailed,
-			Reason: reason,
+			Class:      ClassFailed,
+			Reason:     reason,
+			Evaluation: eval,
 		}
 	}
 
@@ -123,32 +139,50 @@ func ClassifyError(err error) Classification {
 			Class:          ClassFailed,
 			Reason:         reason,
 			AdmissionError: true,
+			Evaluation:     eval,
 		}
 	}
 
 	var compErr *celengine.CompileError
 	if errors.As(err, &compErr) {
 		return Classification{
-			Class:  ClassFailed,
-			Reason: ReasonCompileError,
+			Class:      ClassFailed,
+			Reason:     ReasonCompileError,
+			Evaluation: eval,
+		}
+	}
+
+	var s1CompErr *s1spec.CompileError
+	if errors.As(err, &s1CompErr) {
+		reason := ReasonCompileError
+		if s1CompErr.Category == s1spec.CategoryBinding {
+			reason = string(systemoneprovider.FailNoEligibleInstance)
+		}
+		return Classification{
+			Class:      ClassFailed,
+			Reason:     reason,
+			Evaluation: eval,
 		}
 	}
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		return Classification{
-			Class:  ClassFailed,
-			Reason: celengine.ReasonTimeout,
+			Class:      ClassFailed,
+			Reason:     celengine.ReasonTimeout,
+			Evaluation: eval,
 		}
 	}
 	if errors.Is(err, context.Canceled) {
 		return Classification{
-			Class:  ClassFailed,
-			Reason: celengine.ReasonCanceled,
+			Class:      ClassFailed,
+			Reason:     celengine.ReasonCanceled,
+			Evaluation: eval,
 		}
 	}
 	return Classification{
-		Class:  ClassFailed,
-		Reason: celengine.ReasonRuntime,
+		Class:      ClassFailed,
+		Reason:     celengine.ReasonRuntime,
+		Evaluation: eval,
 	}
 }
 

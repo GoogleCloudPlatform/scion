@@ -2610,7 +2610,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "project.messagepolicy.test",
 		Domain:      "project",
-		Description: "Dry-run an inline or stored project message policy against synthetic sample send facts without persisting or echoing message content. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047; 404 while hub.message_policies is off)",
+		Description: "Evaluate an inline or stored project message policy against sample send facts without persisting decisions or echoing message content. When system_one_rule is set and no synthetic judgments are supplied, performs a live System One provider call (sending selected fields, potentially incurring provider cost, with no automatic replay or retry; requires project.secret_read for project-scoped secrets; rate-limited to 30/min per caller per project per replica, returning 429 rate_limited with Retry-After). CEL-only and synthetic-judgment tests are not rate-limited. The caller must also be an active project owner, project admin, or local unscoped hub admin (ptone/scion#8047, ptone/scion#8048; 404 while hub.message_policies is off)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/message-policies/test", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/message-policies/{policyId}/test", Method: "POST"},
@@ -2622,7 +2622,7 @@ var projectOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
+		DenialCodes:      []DenialCode{DenialForbidden, DenialRateLimited},
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestMessagePolicyAuthz_Target7_CredentialMatrix"}},
 		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetProjectPath,
 			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub}, Pin: "TestMessagePolicyAuthz_Target7_CredentialMatrix"},

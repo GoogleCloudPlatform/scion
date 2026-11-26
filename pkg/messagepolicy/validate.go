@@ -24,6 +24,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	s1spec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 // Authoring validation error codes (brief §§1, 1a, 3, 5).
@@ -41,6 +44,7 @@ const (
 type ValidationError struct {
 	Code     string
 	Field    string
+	Path     string
 	Message  string
 	Line     int
 	Column   int
@@ -135,27 +139,63 @@ func IsCanonicalSlug(s string) bool {
 	return !prevHyphen
 }
 
-var knownFailureReasons = []string{
-	celengine.ReasonCanceled,
-	celengine.ReasonCostLimit,
-	celengine.ReasonMissingInput,
-	celengine.ReasonRuntime,
-	celengine.ReasonTimeout,
-	celengine.ReasonType,
-	ReasonBodyTruncated,
-	ReasonBudgetExhausted,
-	ReasonCompileError,
-	ReasonFactsUnavailable,
-	ReasonInvalidCompiledProgram,
-	ReasonPolicyCapExceeded,
-	ReasonUninitializedProgram,
-	ReasonUnsupportedDialect,
-	ruleengine.ReasonConsumerNotRegistered,
-	ruleengine.ReasonDialectNotAllowed,
-	ruleengine.ReasonEmptyConsumer,
-	ruleengine.ReasonIONotAllowed,
-	ruleengine.ReasonUnknownDialect,
-}
+// knownCELFailureReasons is the M1 closed failure-reason set accepted by
+// on_failed_reasons for CEL-only policies (strict M1 parity).
+var knownCELFailureReasons = func() []string {
+	out := []string{
+		celengine.ReasonCanceled,
+		celengine.ReasonCostLimit,
+		celengine.ReasonMissingInput,
+		celengine.ReasonRuntime,
+		celengine.ReasonTimeout,
+		celengine.ReasonType,
+		ReasonBodyTruncated,
+		ReasonBudgetExhausted,
+		ReasonCompileError,
+		ReasonFactsUnavailable,
+		ReasonInvalidCompiledProgram,
+		ReasonPolicyCapExceeded,
+		ReasonUninitializedProgram,
+		ReasonUnsupportedDialect,
+		ruleengine.ReasonConsumerNotRegistered,
+		ruleengine.ReasonDialectNotAllowed,
+		ruleengine.ReasonEmptyConsumer,
+		ruleengine.ReasonIONotAllowed,
+		ruleengine.ReasonUnknownDialect,
+	}
+	slices.Sort(out)
+	return out
+}()
+
+var knownCELFailureReasonSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(knownCELFailureReasons))
+	for _, r := range knownCELFailureReasons {
+		m[r] = struct{}{}
+	}
+	return m
+}()
+
+var knownFailureReasons = func() []string {
+	seen := make(map[string]struct{}, len(knownCELFailureReasons)+len(provider.AllFailReasons())+1)
+	out := make([]string, 0, len(knownCELFailureReasons)+len(provider.AllFailReasons())+1)
+	for _, r := range knownCELFailureReasons {
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	if _, dup := seen[systemone.ReasonDialectDisabled]; !dup {
+		seen[systemone.ReasonDialectDisabled] = struct{}{}
+		out = append(out, systemone.ReasonDialectDisabled)
+	}
+	for _, fr := range provider.AllFailReasons() {
+		r := string(fr)
+		if _, dup := seen[r]; !dup {
+			seen[r] = struct{}{}
+			out = append(out, r)
+		}
+	}
+	slices.Sort(out)
+	return out
+}()
 
 var knownFailureReasonSet = func() map[string]struct{} {
 	m := make(map[string]struct{}, len(knownFailureReasons))
@@ -166,18 +206,34 @@ var knownFailureReasonSet = func() map[string]struct{} {
 }()
 
 // KnownFailureReasons returns a sorted copy of the closed failure-reason set
-// accepted by on_failed_reasons in M1 (CEL evaluation, ruleengine program and
-// consumer admission, and message_policy consumer failure reasons; consumer
+// accepted by on_failed_reasons for CEL-only policies (M1 parity; consumer
 // design §5.3).
 func KnownFailureReasons() []string {
+	out := slices.Clone(knownCELFailureReasons)
+	slices.Sort(out)
+	return out
+}
+
+// KnownSystemOneFailureReasons returns a sorted copy of the closed
+// failure-reason set accepted by on_failed_reasons when system_one_rule is set
+// (CEL + System One provider failure reasons + dialect_disabled).
+func KnownSystemOneFailureReasons() []string {
 	out := slices.Clone(knownFailureReasons)
 	slices.Sort(out)
 	return out
 }
 
-// IsValidFailureReason reports whether reason belongs to the closed M1 failure
-// reason set accepted as an on_failed_reasons key.
+// IsValidFailureReason reports whether reason belongs to the closed M1 CEL-only
+// failure reason set accepted as an on_failed_reasons key.
 func IsValidFailureReason(reason string) bool {
+	_, ok := knownCELFailureReasonSet[reason]
+	return ok
+}
+
+// IsValidSystemOneFailureReason reports whether reason belongs to the closed
+// System One failure reason set (CEL + System One provider reasons +
+// dialect_disabled).
+func IsValidSystemOneFailureReason(reason string) bool {
 	_, ok := knownFailureReasonSet[reason]
 	return ok
 }
@@ -214,6 +270,14 @@ type AuthoringSpec struct {
 	OnFailedReasons   map[string]string
 	RejectReason      string
 	RejectRemediation string
+
+	// SkipSystemOneBindingValidation skips runtime binding validation
+	// (Dialect.Compile / ValidateCompiled and the hub.system_one experiment
+	// check), running only syntax/schema/environment compilation via
+	// s1spec.Compile. Used strictly when PATCH results in a disabled policy
+	// with system_one_rule unchanged so operators can always disable a policy
+	// whose provider binding is broken or while hub.system_one is off.
+	SkipSystemOneBindingValidation bool
 }
 
 // ValidateAuthoring validates spec against M1 authoring rules and compiles
@@ -240,11 +304,13 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 		}
 	}
 
-	if strings.TrimSpace(spec.SystemOneRule) != "" {
+	hasSystemOne := strings.TrimSpace(spec.SystemOneRule) != ""
+	if hasSystemOne && len(spec.SystemOneRule) > MaxSystemOneRuleBytes {
 		return "", &ValidationError{
-			Code:    ErrCodeNotYetSupported,
-			Field:   "system_one_rule",
-			Message: "system_one judgments not yet supported",
+			Code:     ErrCodeInvalidRule,
+			Field:    "system_one_rule",
+			Category: string(s1spec.CategoryLimit),
+			Message:  fmt.Sprintf("system_one_rule length %d exceeds maximum %d bytes", len(spec.SystemOneRule), MaxSystemOneRuleBytes),
 		}
 	}
 
@@ -314,7 +380,15 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 			Message: fmt.Sprintf("on_failed is required and must be %q or %q", OutcomeAdmit, OutcomeReject),
 		}
 	}
-	if spec.OnUncertain != "" && spec.OnUncertain != OutcomeAdmit && spec.OnUncertain != OutcomeReject {
+	if hasSystemOne {
+		if spec.OnUncertain != OutcomeAdmit && spec.OnUncertain != OutcomeReject {
+			return "", &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   "on_uncertain",
+				Message: fmt.Sprintf("on_uncertain is required when system_one_rule is set and must be %q or %q", OutcomeAdmit, OutcomeReject),
+			}
+		}
+	} else if spec.OnUncertain != "" && spec.OnUncertain != OutcomeAdmit && spec.OnUncertain != OutcomeReject {
 		return "", &ValidationError{
 			Code:    ErrCodeValidation,
 			Field:   "on_uncertain",
@@ -323,7 +397,11 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 	}
 	for _, reason := range slices.Sorted(maps.Keys(spec.OnFailedReasons)) {
 		outcome := spec.OnFailedReasons[reason]
-		if !IsValidFailureReason(reason) {
+		validReason := IsValidFailureReason(reason)
+		if hasSystemOne {
+			validReason = IsValidSystemOneFailureReason(reason)
+		}
+		if !validReason {
 			return "", &ValidationError{
 				Code:    ErrCodeValidation,
 				Field:   "on_failed_reasons",
@@ -381,6 +459,51 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 			Field:   "violation_rule",
 			Message: err.Error(),
 			Cause:   err,
+		}
+	}
+
+	if hasSystemOne {
+		var s1Err error
+		if spec.SkipSystemOneBindingValidation {
+			contentEnv := SystemOneContentEnv()
+			_, s1Err = s1spec.Compile([]byte(spec.SystemOneRule), s1spec.CompileOptions{
+				Kind:        s1spec.Kind(KindJudgments),
+				Environment: &contentEnv,
+			})
+		} else {
+			_, s1Err = e.CompileSystemOne(ctx, spec.SystemOneRule)
+		}
+		if s1Err != nil {
+			if compErr, ok := s1spec.AsCompileError(s1Err); ok {
+				code := ErrCodeInvalidRule
+				if compErr.Category == s1spec.CategoryCapability {
+					code = ErrCodeNotYetSupported
+				}
+				return "", &ValidationError{
+					Code:     code,
+					Field:    "system_one_rule",
+					Path:     compErr.Path,
+					Message:  compErr.Message,
+					Category: string(compErr.Category),
+					Cause:    s1Err,
+				}
+			}
+			var unsupErr *ruleengine.UnsupportedDialectError
+			if errors.As(s1Err, &unsupErr) {
+				return "", &ValidationError{
+					Code:     ErrCodeUnsupportedDialect,
+					Field:    "system_one_rule",
+					Message:  unsupErr.Error(),
+					Category: unsupErr.Reason,
+					Cause:    s1Err,
+				}
+			}
+			return "", &ValidationError{
+				Code:    ErrCodeInvalidRule,
+				Field:   "system_one_rule",
+				Message: s1Err.Error(),
+				Cause:   s1Err,
+			}
 		}
 	}
 

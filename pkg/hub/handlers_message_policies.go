@@ -30,18 +30,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
-// Project message policy routes (ptone/scion#8047):
+// Project message policy routes (ptone/scion#8047, ptone/scion#8048):
 //
 //	GET    /api/v1/projects/{id}/message-policies                      list policies
 //	POST   /api/v1/projects/{id}/message-policies                      create policy
-//	POST   /api/v1/projects/{id}/message-policies/test                 dry-run inline policy + sample
+//	POST   /api/v1/projects/{id}/message-policies/test                 test inline policy + sample (runs System One live unless synthetic judgments are supplied)
 //	GET    /api/v1/projects/{id}/message-policies/decisions            list content-free decisions
 //	GET    /api/v1/projects/{id}/message-policies/{policyId}           get policy (by ID or name)
 //	PATCH  /api/v1/projects/{id}/message-policies/{policyId}           edit policy (bumps revision + invalidates cache)
 //	DELETE /api/v1/projects/{id}/message-policies/{policyId}           delete policy (invalidates cache)
-//	POST   /api/v1/projects/{id}/message-policies/{policyId}/test      dry-run stored policy + sample
+//	POST   /api/v1/projects/{id}/message-policies/{policyId}/test      test stored policy + sample (runs System One live unless synthetic judgments are supplied)
 //	GET    /api/v1/projects/{id}/message-policies/{policyId}/decisions list content-free decisions for one policy
 //
 // Every route answers 404 while the hub.message_policies experiment is off.
@@ -50,7 +51,7 @@ const (
 	// maxMessagePolicyWriteBodyBytes bounds create/patch JSON request bodies.
 	maxMessagePolicyWriteBodyBytes = 64 * 1024
 
-	// maxMessagePolicyTestBodyBytes bounds dry-run test JSON request bodies so
+	// maxMessagePolicyTestBodyBytes bounds policy test JSON request bodies so
 	// a full 16 KiB (or larger, to exercise UTF-8 body truncation) sample plus
 	// inline policy spec fits comfortably.
 	maxMessagePolicyTestBodyBytes = 256 * 1024
@@ -122,7 +123,7 @@ type PatchMessagePolicyRequest struct {
 	ExpectedRevision  int64                     `json:"expected_revision,omitempty"`
 }
 
-// MessagePolicyInlineSpec carries an inline policy definition for the dry-run
+// MessagePolicyInlineSpec carries an inline policy definition for the policy
 // test endpoint.
 type MessagePolicyInlineSpec struct {
 	Name              string                    `json:"name,omitempty"`
@@ -138,9 +139,11 @@ type MessagePolicyInlineSpec struct {
 	RejectRemediation string                    `json:"reject_remediation,omitempty"`
 }
 
-// MessagePolicyTestSample carries synthetic send facts for the dry-run test
-// endpoint. The sample body is evaluated in-memory only and is never persisted
-// or echoed in the response.
+// MessagePolicyTestSample carries synthetic send facts for the policy test
+// endpoint. The sample body is never persisted or echoed in the response. When
+// the tested policy has a system_one_rule and synthetic judgments are not
+// supplied, selected sample fields are sent to the configured provider, which
+// may incur provider cost, with no automatic replay or retry.
 type MessagePolicyTestSample struct {
 	Surface           string                           `json:"surface,omitempty"`
 	Body              string                           `json:"body"`
@@ -179,24 +182,25 @@ type TestMessagePolicyRequest struct {
 	Body    string                   `json:"body,omitempty"`
 }
 
-// TestMessagePolicyResponse is the content-free dry-run evaluation response.
+// TestMessagePolicyResponse is the content-free policy test evaluation response.
 // It never echoes the sample message body.
 type TestMessagePolicyResponse struct {
-	PolicyID       string `json:"policy_id,omitempty"`
-	PolicyName     string `json:"policy_name"`
-	PolicyRevision int64  `json:"policy_revision,omitempty"`
-	Mode           string `json:"mode"`
-	Surface        string `json:"surface"`
-	ScopeMatched   bool   `json:"scope_matched"`
-	Class          string `json:"class"`
-	ReasonCode     string `json:"reason_code,omitempty"`
-	Outcome        string `json:"outcome"`
-	Action         string `json:"action"`
-	Reason         string `json:"reason,omitempty"`
-	Remediation    string `json:"remediation,omitempty"`
-	ElapsedMs      int64  `json:"elapsed_ms"`
-	BodyBytes      int    `json:"body_bytes"`
-	BodyTruncated  bool   `json:"body_truncated"`
+	PolicyID       string          `json:"policy_id,omitempty"`
+	PolicyName     string          `json:"policy_name"`
+	PolicyRevision int64           `json:"policy_revision,omitempty"`
+	Mode           string          `json:"mode"`
+	Surface        string          `json:"surface"`
+	ScopeMatched   bool            `json:"scope_matched"`
+	Class          string          `json:"class"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	Outcome        string          `json:"outcome"`
+	Action         string          `json:"action"`
+	Reason         string          `json:"reason,omitempty"`
+	Remediation    string          `json:"remediation,omitempty"`
+	Evaluation     json.RawMessage `json:"evaluation,omitempty"`
+	ElapsedMs      int64           `json:"elapsed_ms"`
+	BodyBytes      int             `json:"body_bytes"`
+	BodyTruncated  bool            `json:"body_truncated"`
 }
 
 func toMessagePolicyResponse(pol store.MessagePolicy) MessagePolicyResponse {
@@ -503,6 +507,152 @@ func (s *Server) authorizeMessagePolicyManage(w http.ResponseWriter, r *http.Req
 	return identity.ID(), true
 }
 
+// systemOneRuleMayReadProjectSecret reports whether evaluating rawSystemOneRule
+// on projectID could resolve a System One instance whose auth reads a
+// project-scoped named secret ("project" or "project_or_hub"). For explicitly
+// bound rules it checks the referenced instance(s); for unbound rules it
+// mirrors Runtime.resolveBinding by checking the project's allowlist ∩ enabled
+// instances (bounded at <=64 entries, with no 200-instance page cap).
+func (s *Server) systemOneRuleMayReadProjectSecret(ctx context.Context, projectID, rawSystemOneRule string) (bool, error) {
+	refs := messagepolicy.ExtractSystemOneRefs(rawSystemOneRule)
+	if len(refs) > 0 {
+		for _, name := range refs {
+			inst, err := s.store.GetSystemOneInstanceByName(ctx, name)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					continue
+				}
+				return false, err
+			}
+			if probeRequiresProjectSecretRead(inst) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	allowed, err := s.store.GetProjectSystemOneInstances(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range allowed {
+		inst, err := s.store.GetSystemOneInstanceByName(ctx, name)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return false, err
+		}
+		if !inst.Enabled {
+			continue
+		}
+		if probeRequiresProjectSecretRead(inst) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// authorizeMessagePolicyTestSystemOne enforces the G4/L1 credential-use
+// boundary on POST .../message-policies[/{id}]/test before any live System One
+// evaluation (when synthetic judgments are not supplied). When the rule can
+// resolve an instance with a project or project_or_hub named secret ref, the
+// caller's credential must hold both project.read and project.secret_read on
+// project before any secret lookup, token mint, or provider call runs.
+func (s *Server) authorizeMessagePolicyTestSystemOne(
+	w http.ResponseWriter,
+	r *http.Request,
+	project *store.Project,
+	rawSystemOneRule string,
+) bool {
+	ctx := r.Context()
+	needsProjectSecret, err := s.systemOneRuleMayReadProjectSecret(ctx, project.ID, rawSystemOneRule)
+	if err != nil {
+		writeErrorFromErr(w, err, "System One instance")
+		return false
+	}
+	if !needsProjectSecret {
+		return true
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || s.authzService == nil {
+		Forbidden(w)
+		return false
+	}
+	res := projectResource(project)
+	readDec := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   res,
+		Action:     ActionRead,
+		Permission: "project.read",
+	})
+	if !readDec.Allowed {
+		logAuthzDenial(r, identity, res, ActionRead, readDec.Reason)
+		writeForbiddenStructuredDenialCause(w, "", res.Type, ActionRead, readDec.DeniedBy, readDec.adoptionDetailsCause())
+		return false
+	}
+	secDec := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   res,
+		Action:     actionProjectSecretRead,
+		Permission: permissionProjectSecretRead,
+	})
+	if !secDec.Allowed {
+		logAuthzDenial(r, identity, res, actionProjectSecretRead, secDec.Reason)
+		writeForbiddenStructuredDenialCause(w, "", res.Type, actionProjectSecretRead, secDec.DeniedBy, secDec.adoptionDetailsCause())
+		return false
+	}
+	return true
+}
+
+const (
+	// messagePolicyTestRatePerSecond and messagePolicyTestBurst bound live
+	// System One /test evaluations to 30/min (burst 30) per authenticated
+	// principal (type + ID) per resolved project, per Hub replica (matching
+	// chatSendHumanRatePerMinute; consumer-design §5.3).
+	messagePolicyTestRatePerSecond = 30.0 / 60.0
+	messagePolicyTestBurst         = 30.0
+)
+
+func messagePolicyTestBucketKey(ctx context.Context, projectID string) (string, bool) {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) || identity.Type() == "" || identity.ID() == "" {
+		return "", false
+	}
+	return identity.Type() + ":" + identity.ID() + ":" + projectID, true
+}
+
+// allowMessagePolicyLiveTest enforces the per-caller per-project rate limit on
+// live System One /test evaluations. Called after authz, authoring validation,
+// scope matching, and credential-boundary checks so 400/403 and out-of-scope
+// requests are never charged, and before any secret lookup, token mint, or
+// provider call. Fails closed (401 Unauthorized, no shared bucket) if no
+// verified identity is present on the request context.
+func (s *Server) allowMessagePolicyLiveTest(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	key, ok := messagePolicyTestBucketKey(r.Context(), projectID)
+	if !ok {
+		Unauthorized(w)
+		return false
+	}
+	if s.messagePolicyTestLimiter == nil {
+		return true
+	}
+	allowed, retryAfter := s.messagePolicyTestLimiter.Allow(key)
+	if allowed {
+		return true
+	}
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited,
+		fmt.Sprintf("live message policy test rate limit exceeded (%d per minute); retry in %ds",
+			int(messagePolicyTestBurst), seconds), nil)
+	return false
+}
+
 func (s *Server) resolveProjectMessagePolicy(ctx context.Context, projectID, ref string) (*store.MessagePolicy, error) {
 	if ref == "" {
 		return nil, store.ErrNotFound
@@ -538,10 +688,13 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 	var valErr *messagepolicy.ValidationError
 	if errors.As(err, &valErr) {
 		var details map[string]interface{}
-		if valErr.Field != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" || valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
+		if valErr.Field != "" || valErr.Path != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" || valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
 			details = make(map[string]interface{})
 			if valErr.Field != "" {
 				details["field"] = valErr.Field
+			}
+			if valErr.Path != "" {
+				details["path"] = valErr.Path
 			}
 			if valErr.Line > 0 {
 				details["line"] = valErr.Line
@@ -751,7 +904,9 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		RejectReason:      req.RejectReason,
 		RejectRemediation: req.RejectRemediation,
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	// Attach project.ID to ctx so System One authoring enforces the P2b
+	// per-project instance allowlist via ValidateCompiled.
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(systemoneruntime.WithEvalProjectID(ctx, project.ID), w, project.ID, spec, true)
 	if !ok {
 		return
 	}
@@ -773,6 +928,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		Scope:             scope,
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
+		SystemOneRefs:     messagepolicy.ExtractSystemOneRefs(req.SystemOneRule),
 		OnUncertain:       spec.OnUncertain,
 		OnFailed:          spec.OnFailed,
 		OnFailedReasons:   req.OnFailedReasons,
@@ -899,12 +1055,26 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		RejectReason:      candidate.RejectReason,
 		RejectRemediation: candidate.RejectRemediation,
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	// Attach project.ID to ctx so System One authoring enforces the P2b
+	// per-project instance allowlist and runtime binding checks via
+	// ValidateCompiled, except when PATCH results in a disabled policy with
+	// system_one_rule unchanged (so operators can always disable a policy
+	// whose provider binding is broken, ambiguous, deleted, or while
+	// hub.system_one is off). Re-enabling or changing system_one_rule stays
+	// strictly validated.
+	authorCtx := ctx
+	if req.SystemOneRule == nil && !candidate.Enabled {
+		spec.SkipSystemOneBindingValidation = true
+	} else {
+		authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
+	}
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
 	if !ok {
 		return
 	}
 	candidate.Mode = mode
 	candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
+	candidate.SystemOneRefs = messagepolicy.ExtractSystemOneRefs(candidate.SystemOneRule)
 
 	if err := s.store.UpdateMessagePolicy(ctx, candidate); err != nil {
 		switch {
@@ -1095,7 +1265,13 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		RejectReason:      effective.RejectReason,
 		RejectRemediation: effective.RejectRemediation,
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, false)
+	// Attach project.ID to evalCtx so System One validation on /test enforces
+	// the exact same project allowlist and binding rules as create/update
+	// (400 invalid_rule with category=binding for not allowlisted, disabled,
+	// ambiguous, or deleted instances, and unbound resolution strictly within
+	// this project's allowlist even when >200 Hub instances exist).
+	evalCtx := systemoneruntime.WithEvalProjectID(ctx, project.ID)
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(evalCtx, w, project.ID, spec, false)
 	if !ok {
 		return
 	}
@@ -1217,14 +1393,18 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 
 	var judgments messagepolicy.Judgments
+	manualJudgments := false
 	if sample.Judgments != nil {
 		judgments = *sample.Judgments
+		manualJudgments = true
 	}
 	if len(sample.JudgmentFlags) > 0 {
 		judgments.Flags = sample.JudgmentFlags
+		manualJudgments = true
 	}
 	if len(sample.JudgmentLabels) > 0 {
 		judgments.Labels = sample.JudgmentLabels
+		manualJudgments = true
 	}
 
 	facts := messagepolicy.Facts{
@@ -1243,11 +1423,20 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		Conversation:      conv,
 		Judgments:         judgments,
 	}
-	act := messagepolicy.NewActivation(facts)
+
+	hasSystemOne := strings.TrimSpace(effective.SystemOneRule) != ""
+	if hasSystemOne && !manualJudgments {
+		if !s.authorizeMessagePolicyTestSystemOne(w, r, project, effective.SystemOneRule) {
+			return
+		}
+		if !s.allowMessagePolicyLiveTest(w, r, project.ID) {
+			return
+		}
+	}
 
 	var cls messagepolicy.Classification
 	var elapsedMs int64
-	if bodyTruncated {
+	if !hasSystemOne && bodyTruncated {
 		cls = messagepolicy.Classification{
 			Class:  messagepolicy.ClassFailed,
 			Reason: messagepolicy.ReasonBodyTruncated,
@@ -1255,9 +1444,26 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	} else {
 		ev := s.MessagePolicyEvaluator()
 		start := time.Now()
-		cls = ev.EvaluateExpr(ctx, effective.ViolationRule, act,
-			messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
-		)
+		if hasSystemOne && !manualJudgments {
+			soBudget := s.messagePolicyGate.systemOneSendBudget()
+			cls = ev.EvaluatePolicyTest(
+				evalCtx,
+				effective.ID,
+				effective.Revision,
+				effective.ViolationRule,
+				effective.SystemOneRule,
+				project.ID,
+				facts,
+				[]messagepolicy.EvalOption{messagepolicy.WithBudget(messagepolicy.NewSendBudget())},
+				[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soBudget)},
+			)
+			judgments = cls.Judgments
+		} else {
+			act := messagepolicy.NewActivation(facts)
+			cls = ev.EvaluateExpr(ctx, effective.ViolationRule, act,
+				messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
+			)
+		}
 		elapsedMs = time.Since(start).Milliseconds()
 		if elapsedMs < 0 {
 			elapsedMs = 0
@@ -1311,6 +1517,7 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		Action:         action,
 		Reason:         reason,
 		Remediation:    remediation,
+		Evaluation:     messagepolicy.MarshalEvaluationProjection(cls.Evaluation),
 		ElapsedMs:      elapsedMs,
 		BodyBytes:      bodyBytes,
 		BodyTruncated:  bodyTruncated,

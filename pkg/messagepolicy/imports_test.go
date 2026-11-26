@@ -25,9 +25,12 @@ import (
 )
 
 const (
-	modulePath     = "github.com/GoogleCloudPlatform/scion"
-	celEnginePath  = modulePath + "/pkg/celengine"
-	ruleEnginePath = modulePath + "/pkg/ruleengine"
+	modulePath            = "github.com/GoogleCloudPlatform/scion"
+	celEnginePath         = modulePath + "/pkg/celengine"
+	ruleEnginePath        = modulePath + "/pkg/ruleengine"
+	systemOnePath         = modulePath + "/pkg/systemone"
+	systemOneSpecPath     = modulePath + "/pkg/systemone/spec"
+	systemOneProviderPath = modulePath + "/pkg/systemone/provider"
 )
 
 func moduleRoot(t *testing.T) string {
@@ -54,8 +57,11 @@ func moduleRoot(t *testing.T) string {
 func TestLeafImports(t *testing.T) {
 	root := moduleRoot(t)
 	allowedInModule := map[string]bool{
-		celEnginePath:  true,
-		ruleEnginePath: true,
+		celEnginePath:         true,
+		ruleEnginePath:        true,
+		systemOnePath:         true,
+		systemOneSpecPath:     true,
+		systemOneProviderPath: true,
 	}
 	dir := filepath.Join(root, "pkg", "messagepolicy")
 	entries, err := os.ReadDir(dir)

@@ -73,7 +73,7 @@ func runMessagePolicyCLI(t *testing.T, args ...string) (string, error) {
 }
 
 func TestMessagePolicyCLI_WindowsGateAllowsSubtree(t *testing.T) {
-	for _, sub := range []string{"create", "list", "get", "delete", "test", "decisions"} {
+	for _, sub := range []string{"create", "list", "get", "update", "delete", "test", "decisions"} {
 		path := "message-policy." + sub
 		require.True(t, windowsAllowed[path], "%s must be in windowsAllowed", path)
 
@@ -93,17 +93,25 @@ func TestMessagePolicyCLI_HelpCoverageAndDefaults(t *testing.T) {
 	assert.Contains(t, out, "agent_dm")
 	assert.Contains(t, out, "NOT evaluated")
 	assert.NotContains(t, out, "M1", "user-facing help must not contain internal milestone labels")
+	assert.NotContains(t, strings.ToLower(out), "dry-run", "help must not call policy test a dry-run")
+	assert.NotContains(t, strings.ToLower(out), "dry run", "help must not call policy test a dry run")
 
-	for _, sub := range []string{"create", "list", "get", "delete", "test", "decisions"} {
+	for _, sub := range []string{"create", "list", "get", "update", "delete", "test", "decisions"} {
 		subHelp, subErr := runMessagePolicyCLI(t, sub, "--help")
 		require.NoError(t, subErr)
 		assert.NotContains(t, subHelp, "M1", "subcommand %s --help must not contain internal milestone labels", sub)
+		assert.NotContains(t, strings.ToLower(subHelp), "dry-run", "subcommand %s --help must not say dry-run", sub)
+		assert.NotContains(t, strings.ToLower(subHelp), "dry run", "subcommand %s --help must not say dry run", sub)
 	}
 
 	testHelp, err := runMessagePolicyCLI(t, "test", "--help")
 	require.NoError(t, err)
 	assert.Contains(t, testHelp, "(default: message)")
 	assert.Contains(t, testHelp, "(default: inline-test)")
+	assert.Contains(t, testHelp, "provider cost")
+	assert.Contains(t, testHelp, "no automatic")
+	assert.Contains(t, testHelp, "replay or retry")
+	assert.NotContains(t, testHelp, "in-memory only")
 }
 
 func TestMessagePolicyCLI_CreateListGetDelete_TextAndJSON(t *testing.T) {
@@ -531,4 +539,98 @@ func TestMessagePolicyCreateHelp_DocumentsContentTriggeredFailuresAndBodyTruncat
 	require.NoError(t, err)
 	assert.Contains(t, out, "body_truncated")
 	assert.Contains(t, out, "cost_limit, timeout, budget_exhausted and body_truncated can be triggered by message content; admit lets such messages through.")
+}
+
+func TestMessagePolicyCLI_CreateUpdateGetSystemOneRule(t *testing.T) {
+	cov := messagepolicy.Coverage()
+	const s1Rule = `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"ts-1"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+
+	var (
+		createdReq hubclient.CreateMessagePolicyRequest
+		patchedReq hubclient.PatchMessagePolicyRequest
+	)
+	installMockMessagePolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/message-policies"):
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&createdReq))
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.MessagePolicyResponse{
+				MessagePolicy: store.MessagePolicy{
+					ID:            "pol-s1-1",
+					ProjectID:     "proj-1",
+					Name:          createdReq.Name,
+					Enabled:       true,
+					Mode:          "shadow",
+					Scope:         createdReq.Scope,
+					ViolationRule: createdReq.ViolationRule,
+					SystemOneRule: createdReq.SystemOneRule,
+					SystemOneRefs: []string{"ts-1"},
+					OnUncertain:   createdReq.OnUncertain,
+					OnFailed:      createdReq.OnFailed,
+					Revision:      1,
+				},
+				Coverage: cov,
+			})
+		case r.Method == http.MethodPatch && strings.HasSuffix(r.URL.Path, "/message-policies/no-prose-s1"):
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&patchedReq))
+			_ = json.NewEncoder(w).Encode(hubclient.MessagePolicyResponse{
+				MessagePolicy: store.MessagePolicy{
+					ID:            "pol-s1-1",
+					ProjectID:     "proj-1",
+					Name:          "no-prose-s1",
+					Enabled:       true,
+					Mode:          "enforce",
+					Scope:         store.MessagePolicyScope{Surfaces: []string{"agent_to_user"}},
+					ViolationRule: "!message.has_choices && judgment_flags.asks_choice",
+					SystemOneRule: s1Rule,
+					SystemOneRefs: []string{"ts-1"},
+					OnUncertain:   "reject",
+					OnFailed:      "reject",
+					Revision:      2,
+				},
+				Coverage: cov,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	createOut, err := runMessagePolicyCLI(t,
+		"create", "no-prose-s1",
+		"--surface", "agent_to_user",
+		"--rule", "!message.has_choices && judgment_flags.asks_choice",
+		"--system-one-rule", s1Rule,
+		"--on-uncertain", "admit",
+		"--on-failed", "reject",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, s1Rule, createdReq.SystemOneRule)
+	assert.Equal(t, "admit", createdReq.OnUncertain)
+	assert.Contains(t, createOut, "System One Rule:")
+	assert.Contains(t, createOut, "System One Refs:    ts-1")
+
+	updateOut, err := runMessagePolicyCLI(t,
+		"update", "no-prose-s1",
+		"--mode", "enforce",
+		"--on-uncertain", "reject",
+		"--expected-revision", "1",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, patchedReq.Mode)
+	assert.Equal(t, "enforce", *patchedReq.Mode)
+	require.NotNil(t, patchedReq.OnUncertain)
+	assert.Equal(t, "reject", *patchedReq.OnUncertain)
+	assert.Equal(t, int64(1), patchedReq.ExpectedRevision)
+	// O4: partial update must leave omitted fields nil so stored values are preserved.
+	assert.Nil(t, patchedReq.SystemOneRule)
+	assert.Nil(t, patchedReq.ViolationRule)
+	assert.Nil(t, patchedReq.OnFailed)
+	assert.Nil(t, patchedReq.Scope)
+	assert.Nil(t, patchedReq.Enabled)
+	assert.Contains(t, updateOut, "Updated message policy \"no-prose-s1\"")
+	assert.Contains(t, updateOut, "System One Refs:    ts-1")
+
+	// Agent mode must keep message-policy.update hidden (only list and get allowed).
+	assert.False(t, agentAllowed["message-policy.update"])
 }

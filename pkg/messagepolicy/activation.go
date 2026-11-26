@@ -17,7 +17,12 @@ package messagepolicy
 import (
 	"maps"
 	"slices"
+	"strings"
 	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 // SenderFacts carries mechanical sender attributes exposed under `sender` in CEL.
@@ -46,9 +51,10 @@ type MessageFacts struct {
 
 // ConversationFacts carries conversation participant metadata exposed under `conversation` in CEL.
 type ConversationFacts struct {
-	Kind                string
-	AgentParticipantIDs []string
-	UserParticipantIDs  []string
+	Kind                  string   `json:"kind,omitempty"`
+	AgentParticipantIDs   []string `json:"agent_participant_ids,omitempty"`
+	UserParticipantIDs    []string `json:"user_participant_ids,omitempty"`
+	UnmentionedAgentSlugs []string `json:"unmentioned_agent_slugs,omitempty"`
 }
 
 // Judgments carries optional typed judgment maps (empty in M1; reading an
@@ -169,4 +175,52 @@ func (a Activation) Map() map[string]any {
 		return map[string]any{}
 	}
 	return a.vars
+}
+
+// BuildSystemOneInput constructs a bounded systemone.Input from typed outbound
+// message Facts matching the message_policy v1 ContentEnvironment (consumer
+// design §5.4). The System One runtime selects only fields referenced by the
+// compiled rule's inputs list and enforces per-field MaxBytes / on_oversize.
+func BuildSystemOneInput(f Facts) systemone.Input {
+	fields := []provider.InputField{
+		{
+			Name:  FieldMessageBody,
+			Kind:  spec.FieldKindText,
+			Value: f.Message.Body,
+			Trust: spec.TrustUntrusted,
+		},
+		{
+			Name:  FieldMessageType,
+			Kind:  spec.FieldKindText,
+			Value: f.Message.Type,
+			Trust: spec.TrustUntrusted,
+		},
+		{
+			Name:  FieldSenderSlug,
+			Kind:  spec.FieldKindText,
+			Value: f.Sender.Slug,
+			Trust: spec.TrustTrusted,
+		},
+		{
+			Name:  FieldRecipientSlug,
+			Kind:  spec.FieldKindText,
+			Value: f.Recipient.Slug,
+			Trust: spec.TrustTrusted,
+		},
+		{
+			Name:  FieldRecipientKind,
+			Kind:  spec.FieldKindText,
+			Value: f.Recipient.Kind,
+			Trust: spec.TrustTrusted,
+		},
+		{
+			Name:  FieldConversationUnmentionedAgentSlug,
+			Kind:  spec.FieldKindText,
+			Value: strings.Join(f.Conversation.UnmentionedAgentSlugs, "\n"),
+			Trust: spec.TrustTrusted,
+		},
+	}
+	return systemone.Input{
+		Fields: fields,
+	}
 }
