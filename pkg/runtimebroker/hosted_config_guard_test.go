@@ -27,10 +27,12 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // hostedLocalVolume is a member-written host bind that no Runtime Broker
@@ -147,8 +149,69 @@ func TestCreateAgent_AllowsGKESharedVolumeOnRemoteK8sAndCloudRunOverride(t *test
 		}
 	})
 
-	t.Run("cloudrun broker overriding docker profile allows cloudrun-volume", func(t *testing.T) {
+	t.Run("off cloudrun env: default cloudrun runtime still enforces docker profile volume checks", func(t *testing.T) {
 		setupTestScionEnv(t)
+		t.Setenv(cloudrunenv.ServiceEnv, "")
+		t.Setenv(cloudrunenv.InstanceEnv, "")
+		settingsYAML := `schema_version: "1"
+active_profile: docker-prof
+runtimes:
+    docker:
+        type: docker
+profiles:
+    docker-prof:
+        runtime: docker
+`
+		if err := os.WriteFile(filepath.Join(".scion", "settings.yaml"), []byte(settingsYAML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		home := os.Getenv("HOME")
+		globalDir := filepath.Join(home, ".scion")
+		if err := os.MkdirAll(globalDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		mgr := &mockManager{}
+		cfg := testServerConfig()
+		cfg.BrokerID = "test-broker-id"
+		cfg.WorkstationMode = true
+		rt := &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}
+		srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+		endAsyncLaunchesAtCleanup(t, srv)
+
+		// Control-path host bind must still be refused with 400 control_path_mount.
+		bodyCtl := fmt.Sprintf(`{"name": "a1", "profile": "docker-prof", "inlineConfig": {"volumes": [{"source": %q, "target": "/x"}]}}`, globalDir)
+		reqCtl := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(bodyCtl))
+		reqCtl.Header.Set("Content-Type", "application/json")
+		wCtl := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(wCtl, reqCtl)
+		if wCtl.Code != http.StatusBadRequest {
+			t.Fatalf("control-path status = %d, want 400: %s", wCtl.Code, wCtl.Body.String())
+		}
+		if code, _ := decodeError(t, wCtl); code != brokercontrol.ErrorCode {
+			t.Fatalf("control-path code = %q, want %q", code, brokercontrol.ErrorCode)
+		}
+
+		// cloudrun-volume must still be refused with 400 unsupported_volume_type.
+		bodyCR := `{"name": "a1", "profile": "docker-prof", "inlineConfig": {"volumes": [{"type": "cloudrun-volume", "volume_name": "v", "target": "/mnt/cr"}]}}`
+		reqCR := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(bodyCR))
+		reqCR.Header.Set("Content-Type", "application/json")
+		wCR := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(wCR, reqCR)
+		if wCR.Code != http.StatusBadRequest {
+			t.Fatalf("cloudrun-volume status = %d, want 400: %s", wCR.Code, wCR.Body.String())
+		}
+		if code, _ := decodeError(t, wCR); code != api.LaunchCodeUnsupportedVolumeType {
+			t.Fatalf("cloudrun-volume code = %q, want %q", code, api.LaunchCodeUnsupportedVolumeType)
+		}
+		if mgr.startCalls != 0 {
+			t.Fatalf("Start was called %d times after refusal, want 0", mgr.startCalls)
+		}
+	})
+
+	t.Run("on cloudrun env: docker profile override allows cloudrun-volume", func(t *testing.T) {
+		setupTestScionEnv(t)
+		t.Setenv(cloudrunenv.ServiceEnv, "svc")
 		settingsYAML := `schema_version: "1"
 active_profile: docker-prof
 runtimes:
@@ -170,12 +233,12 @@ profiles:
 		endAsyncLaunchesAtCleanup(t, srv)
 
 		// Verify resolveRuntimeNameForOpts returns raw "docker" from settings,
-		// while volumeCheckRuntimeName classifies it by the Cloud Run broker.
+		// while volumeCheckRuntimeName classifies it as "cloudrun" from K_SERVICE.
 		rawRT, err := srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "a1", Profile: "docker-prof"})
 		if err != nil || rawRT != "docker" {
 			t.Fatalf("resolveRuntimeNameForOpts = (%q, %v), want (\"docker\", nil)", rawRT, err)
 		}
-		if got := srv.volumeCheckRuntimeName(rawRT); got != "cloudrun" {
+		if got := volumeCheckRuntimeName(rawRT); got != "cloudrun" {
 			t.Fatalf("volumeCheckRuntimeName(%q) = %q, want \"cloudrun\"", rawRT, got)
 		}
 
@@ -190,7 +253,7 @@ profiles:
 		if w.Code == http.StatusBadRequest {
 			code, _ := decodeError(t, w)
 			if code == api.LaunchCodeUnsupportedVolumeType {
-				t.Fatalf("cloudrun broker refused cloudrun-volume with 400 %s: %s", code, w.Body.String())
+				t.Fatalf("cloudrun env refused cloudrun-volume with 400 %s: %s", code, w.Body.String())
 			}
 		}
 	})

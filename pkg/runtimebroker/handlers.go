@@ -1133,7 +1133,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			return name
 		}
 		if len(cfgVols) > 0 || len(inlineVols) > 0 {
-			if err := checkRequestVolumes(s.volumeCheckRuntimeName(runtimeName()), cfgVols, inlineVols); err != nil {
+			if err := checkRequestVolumes(volumeCheckRuntimeName(runtimeName()), cfgVols, inlineVols); err != nil {
 				span.SetStatus(codes.Error, volumeRefusalCode(err))
 				writeControlPathRefusal(w, err)
 				return
