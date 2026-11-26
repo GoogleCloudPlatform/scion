@@ -116,6 +116,12 @@ type AuthConfig struct {
 	// enforcement) for self-contained credentials like JWTs that do not
 	// themselves hit the database.
 	UserStore store.UserStore
+	// AccessConstraintsEnabled, when non-nil, reports whether the
+	// hub.access_constraints experiment is enabled. When it returns false,
+	// auth failures on the constraint audit route normalize to NotFound("route")
+	// so refused credentials and valid credentials hitting requireExperiment
+	// receive identical 404 responses.
+	AccessConstraintsEnabled func() bool
 	// Debug enables verbose logging
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
@@ -242,6 +248,7 @@ type constraintAuditAuthFailureWriter struct {
 	// wrapped. A normalized response carries exactly these headers plus
 	// the not-found response's own.
 	header     http.Header
+	resource   string
 	normalized bool
 }
 
@@ -257,7 +264,11 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 		for k, v := range w.header {
 			h[k] = v
 		}
-		NotFound(w.ResponseWriter, "Access Constraint")
+		resource := w.resource
+		if resource == "" {
+			resource = "Access Constraint"
+		}
+		NotFound(w.ResponseWriter, resource)
 		return
 	}
 	w.ResponseWriter.WriteHeader(statusCode)
@@ -270,9 +281,13 @@ func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
 	return w.ResponseWriter.Write(body)
 }
 
-func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
+func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request, accessConstraintsEnabled func() bool) http.ResponseWriter {
 	if isConstraintAuditAuthFailureRoute(r) {
-		return &constraintAuditAuthFailureWriter{ResponseWriter: w, header: w.Header().Clone()}
+		resource := "Access Constraint"
+		if accessConstraintsEnabled != nil && !accessConstraintsEnabled() {
+			resource = "route"
+		}
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w, header: w.Header().Clone(), resource: resource}
 	}
 	return w
 }
@@ -320,7 +335,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w = normalizeConstraintAuditAuthFailures(w, r)
+			w = normalizeConstraintAuditAuthFailures(w, r, cfg.AccessConstraintsEnabled)
 			ctx := r.Context()
 
 			// Skip auth for unauthenticated endpoints (health checks, CLI OAuth)

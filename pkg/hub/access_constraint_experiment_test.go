@@ -55,26 +55,31 @@ func TestAccessConstraintsExperiment_GatingAndEnforcement(t *testing.T) {
 	assert.True(t, present, "hub.access_constraints must be present in GET /api/v1/experiments")
 	assert.False(t, val, "hub.access_constraints must default to false")
 
-	gatedRoutes := []struct {
-		method string
-		path   string
-		body   any
-	}{
-		{http.MethodGet, "/api/v1/admin/access-constraints", nil},
-		{http.MethodPost, "/api/v1/admin/access-constraints", map[string]any{}},
-		{http.MethodGet, "/api/v1/admin/access-constraints/00000000-0000-0000-0000-000000000001", nil},
-		{http.MethodPut, "/api/v1/admin/access-constraints/00000000-0000-0000-0000-000000000001", map[string]any{}},
-		{http.MethodDelete, "/api/v1/admin/access-constraints/00000000-0000-0000-0000-000000000001", map[string]any{}},
-		{http.MethodGet, "/api/v1/admin/access-constraints/00000000-0000-0000-0000-000000000001/affected-principals", nil},
-		{http.MethodGet, "/api/v1/admin/access-constraints/00000000-0000-0000-0000-000000000001/audit", nil},
-		{http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{}},
-		{http.MethodGet, "/api/v1/admin/access-constraint-previews/job-1", nil},
-		{http.MethodGet, "/api/v1/admin/access-constraint-previews/job-1/result", nil},
+	assertAllGatedOff := func(label, constraintID string) {
+		t.Helper()
+		gatedRoutes := []struct {
+			method string
+			path   string
+			body   any
+		}{
+			{http.MethodGet, "/api/v1/admin/access-constraints", nil},
+			{http.MethodPost, "/api/v1/admin/access-constraints", map[string]any{}},
+			{http.MethodGet, "/api/v1/admin/access-constraints/" + constraintID, nil},
+			{http.MethodPut, "/api/v1/admin/access-constraints/" + constraintID, map[string]any{}},
+			{http.MethodDelete, "/api/v1/admin/access-constraints/" + constraintID, map[string]any{}},
+			{http.MethodGet, "/api/v1/admin/access-constraints/" + constraintID + "/affected-principals", nil},
+			{http.MethodGet, "/api/v1/admin/access-constraints/" + constraintID + "/audit", nil},
+			{http.MethodPost, "/api/v1/admin/access-constraint-previews", map[string]any{}},
+			{http.MethodGet, "/api/v1/admin/access-constraint-previews/job-1", nil},
+			{http.MethodGet, "/api/v1/admin/access-constraint-previews/job-1/result", nil},
+		}
+		for _, rt := range gatedRoutes {
+			rec := doRequest(t, srv, rt.method, rt.path, rt.body)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s %s should return 404 (got %s)", label, rt.method, rt.path, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "route not found", "%s: %s %s must be refused by requireExperiment gate, not handler", label, rt.method, rt.path)
+		}
 	}
-	for _, rt := range gatedRoutes {
-		rec := doRequest(t, srv, rt.method, rt.path, rt.body)
-		assert.Equal(t, http.StatusNotFound, rec.Code, "flag off: %s %s should return 404 (got %s)", rt.method, rt.path, rec.Body.String())
-	}
+	assertAllGatedOff("flag-off-initial", "00000000-0000-0000-0000-000000000001")
 
 	// 2. Flag on: routes behave unchanged (preview, create, list, get, audit, update, delete).
 	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: true})
@@ -164,10 +169,10 @@ func TestAccessConstraintsExperiment_GatingAndEnforcement(t *testing.T) {
 	// Verify enforcement while flag is on.
 	assertConstrained("flag-on")
 
-	// Turn flag OFF explicitly.
+	// Turn flag OFF explicitly and verify every route (with real created.ID)
+	// returns the experiment gate's 404 while stored enforcement stays active.
 	setExperimentOverrides(t, srv, map[string]bool{experiments.AccessConstraints: false})
-	assert.Equal(t, http.StatusNotFound, doRequest(t, srv, http.MethodGet, "/api/v1/admin/access-constraints", nil).Code)
-	assert.Equal(t, http.StatusNotFound, doRequest(t, srv, http.MethodGet, "/api/v1/admin/access-constraints/"+created.ID, nil).Code)
+	assertAllGatedOff("flag-off-with-stored", created.ID)
 	assertConstrained("flag-off")
 
 	// Simulate malformed experiments document (which forces all LayerServer experiments off).

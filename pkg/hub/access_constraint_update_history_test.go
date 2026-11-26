@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -317,6 +318,7 @@ func p6FileBackedBoundaryServer(t *testing.T, dsn string) (*Server, store.Store)
 	st, err := newTestStoreAt(t, dsn)
 	require.NoError(t, err)
 	srv, s := testServerWithStore(t, st)
+	setServerExperimentDefault(t, srv, experiments.AccessConstraints, true)
 	if srv.previewService == nil {
 		srv.initBoundaryServices()
 	}

@@ -249,7 +249,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 	devUser := NewDevUser(userCfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w = normalizeConstraintAuditAuthFailures(w, r)
+			w = normalizeConstraintAuditAuthFailures(w, r, nil)
 			// Skip auth for health endpoints
 			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 				serveAfterAuth(w, next, r)

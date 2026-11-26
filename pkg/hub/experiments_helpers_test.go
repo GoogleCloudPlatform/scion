@@ -93,3 +93,22 @@ func productionRegistryWithFixture(t *testing.T) *experiments.Registry {
 	}
 	return reg
 }
+
+// setServerExperimentDefault flips one experiment's compiled default on srv's
+// registry via setExperimentRegistry without touching OperationalSettings.
+func setServerExperimentDefault(t *testing.T, srv *Server, name string, on bool) {
+	t.Helper()
+	cur := srv.experimentRegistry()
+	var active []experiments.Experiment
+	for _, e := range cur.All() {
+		if e.Name == name {
+			e.Default = on
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, cur.Retired())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	srv.setExperimentRegistry(reg)
+}

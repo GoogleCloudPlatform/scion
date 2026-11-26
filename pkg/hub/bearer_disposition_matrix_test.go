@@ -79,46 +79,6 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.effective_permissions experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and HEAD with hub- and project-boundary tokens carrying and lacking role_binding:read",
 		Pin:    "TestAdminEffectivePermissions_ScopedTokens",
 	},
-	{OperationID: "access.constraint.create", Method: "POST", Pattern: "/api/v1/admin/access-constraints"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives POST with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintAdminToken_RequiresConstraintAdminSelector",
-	},
-	{OperationID: "access.constraint.update", Method: "PUT", Pattern: "/api/v1/admin/access-constraints/{id}"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives PUT with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintAdminToken_RequiresConstraintAdminSelector",
-	},
-	{OperationID: "access.constraint.delete", Method: "DELETE", Pattern: "/api/v1/admin/access-constraints/{id}"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives DELETE with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintRelaxToken_SessionOnly",
-	},
-	{OperationID: "access.constraint.preview", Method: "POST", Pattern: "/api/v1/admin/access-constraint-previews"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives POST with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintAdminToken_RequiresConstraintAdminSelector",
-	},
-	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintAdminToken_RequiresConstraintAdminSelector",
-	},
-	{OperationID: "access.constraint.preview", Method: "GET", Pattern: "/api/v1/admin/access-constraint-previews/{jobId}/result"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub-boundary tokens carrying and lacking access_constraint:admin",
-		Pin:    "TestConstraintAdminToken_RequiresConstraintAdminSelector",
-	},
-	{OperationID: "access.constraint.read", Method: "GET", Pattern: "/api/v1/admin/access-constraints"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub- and project-boundary tokens carrying and lacking access_constraint:read",
-		Pin:    "TestConstraintReadToken_DoesNotAdmitConstraintAdmin",
-	},
-	{OperationID: "access.constraint.read", Method: "GET", Pattern: "/api/v1/admin/access-constraints/{id}"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub- and project-boundary tokens carrying and lacking access_constraint:read",
-		Pin:    "TestConstraintReadToken_DoesNotAdmitConstraintAdmin",
-	},
-	{OperationID: "access.constraint.read", Method: "GET", Pattern: "/api/v1/admin/access-constraints/{id}/affected-principals"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub- and project-boundary tokens carrying and lacking access_constraint:read",
-		Pin:    "TestConstraintReadToken_DoesNotAdmitConstraintAdmin",
-	},
-	{OperationID: "hub.audit.constraint", Method: "GET", Pattern: "/api/v1/admin/access-constraints/{id}/audit"}: {
-		Reason: "the route answers 404 while the hub.access_constraints experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET with hub- and project-boundary tokens carrying and lacking hub_audit:read",
-		Pin:    "TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary",
-	},
 	{OperationID: "agent.secret.read", Method: "GET", Pattern: "/api/v1/secrets"}: {
 		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives /api/v1/secrets?scope=agent&scopeId=... with agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
 		Pin:    "TestAgentSecrets_ScopedTokens",

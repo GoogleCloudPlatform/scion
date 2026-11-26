@@ -2149,7 +2149,7 @@ func (s *Server) WarnStoredAccessConstraintsExperimentOff(ctx context.Context) {
 		return
 	}
 	if count > 0 {
-		slog.Warn("stored access constraints are actively enforced while experiment hub.access_constraints is off — enable hub.access_constraints to view or manage them",
+		slog.Warn("access constraints are stored and any active ones remain enforced while experiment hub.access_constraints is off — enable hub.access_constraints to view or manage them",
 			"count", count,
 			"experiment", experiments.AccessConstraints)
 	}
