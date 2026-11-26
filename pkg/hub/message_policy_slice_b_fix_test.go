@@ -658,7 +658,7 @@ func TestO3_AttachmentCountPinning(t *testing.T) {
 			Msg:               "see files @" + m1.Slug,
 			Type:              messages.TypeInstruction,
 			ParentMessageID:   "o3-origin-msg",
-			ParentAttachments: []AttachmentRef{{ArtifactID: "art-1", Filename: "a.txt"}}, // 1 != 2
+			ParentAttachments: []AttachmentRef{{ID: "art-1", Name: "a.txt"}}, // 1 != 2
 			CopyAdmission:     out.copyAdmission,
 		}, &resolvedMentionPlan{
 			Results: []messages.MentionResult{{Slug: m1.Slug, Status: "delivered"}},
@@ -706,8 +706,8 @@ func TestO3_AttachmentCountPinning(t *testing.T) {
 			Type:            messages.TypeInstruction,
 			ParentMessageID: "o3-origin-msg-2",
 			ParentAttachments: []AttachmentRef{
-				{ArtifactID: "art-1", Filename: "a.txt"},
-				{ArtifactID: "art-2", Filename: "b.txt"},
+				{ID: "art-1", Name: "a.txt"},
+				{ID: "art-2", Name: "b.txt"},
 			},
 			CopyAdmission: out2.copyAdmission,
 		}, &resolvedMentionPlan{
