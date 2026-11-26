@@ -37,8 +37,10 @@ func (s *Server) mentionOptions() messages.MentionOptions {
 // ---------------------------------------------------------------------------
 // Server-side @mention fan-out for agent-authored sends.
 //
-// fanOutAgentMentions is the single entry point every agent send adapter
-// calls after its primary delivery succeeds. It is the counterpart to
+// Production agent send adapters call resolveMentionCopyTargets once before
+// the origin message policy gate and deliverResolvedAgentMentions after their
+// primary delivery succeeds (the test-only fanOutAgentMentions wrapper lives
+// in agent_mention_fanout_helper_test.go). It is the counterpart to
 // processMentions (handlers_agent_messaging.go), which stays in place for
 // human/broker senders. Unlike processMentions, every recipient goes through
 // ExecuteAgentDM, so mention deliveries are charged to the sender's rate
@@ -77,9 +79,9 @@ var mentionFanoutTypes = map[string]bool{
 	messages.TypeChat:        true,
 }
 
-// agentMentionFanoutInput is the normalized input to fanOutAgentMentions.
-// Adapters construct this from their respective request shapes after their
-// own primary delivery has already succeeded.
+// agentMentionFanoutInput is the normalized input to resolveMentionCopyTargets
+// and deliverResolvedAgentMentions. Adapters construct this from their
+// respective request shapes.
 type agentMentionFanoutInput struct {
 	// Sender is the sending agent's fresh store record.
 	Sender *store.Agent

@@ -30,8 +30,13 @@ import (
 
 // copyFactsFingerprint pins the pre-effect Seam A snapshot for one copy target:
 // conversation kind, conversation ID (group) or DM key (direct), planned
-// attachment count (O3), sorted participant ID lists, sorted
+// attempted attachment count (O3), sorted participant ID lists, sorted
 // unmentioned_agent_slugs used, and copy body + surface hash.
+//
+// Disclosed O3 consequence (O-e): if post-persistence origin attachment binding
+// drops any reference, attachment-bearing copies are refused with copy-facts
+// drift before any copy addressee, DM creation, persistence, or dispatch; the
+// already-admitted origin remains delivered.
 type copyFactsFingerprint struct {
 	Surface               string
 	BodyHash              string
@@ -196,9 +201,13 @@ func (r *copyAdmissionRegistry) acknowledgedSet() map[string]struct{} {
 
 // derivedAdmission is the trusted, unexported, pre-effect proof minted ONLY by
 // mintCopyAdmission after the origin message policy gate admits a send.
+//
+// Runtime linkage is enforced by per-send registry pointer identity plus
+// originMessageID (attached once after origin persistence). sendID is
+// diagnostic only (not a cross-send linkage check).
 type derivedAdmission struct {
 	registry                  *copyAdmissionRegistry
-	sendID                    string
+	sendID                    string // diagnostic only
 	senderAgentID             string
 	senderIdentityKind        string
 	evalProjectID             string
@@ -282,6 +291,13 @@ func (a *derivedAdmission) RecordAcknowledgedRegistration(agentID string) {
 	a.registry.recordAcknowledgedRegistration(a, agentID)
 }
 
+// verifyParentLinkage enforces originMessageID parent linkage against the
+// admission's registry-bound origin message ID (sendID != "" is a diagnostic
+// sanity check only).
+//
+// Disclosed F2 consequence: if an origin row fails to persist (no persisted
+// originMessageID attached), copies carrying a ParentMessageID are refused
+// fail-closed rather than delivered with a dangling mention_of.
 func (a *derivedAdmission) verifyParentLinkage(parentMessageID string) error {
 	if a == nil || a.sendID == "" {
 		return errCopyAdmissionMismatch

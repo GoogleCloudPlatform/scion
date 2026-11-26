@@ -152,10 +152,10 @@ func TestR1_GroupCopyNormalization(t *testing.T) {
 		assert.Len(t, f.dispatcher.getCalls(), 3, "primary + 2 mentions must all be dispatched")
 	}
 
-	t.Run("E3b_group_nonparticipant_primary_plus_2_mentions_no_policy", func(t *testing.T) {
+	t.Run("E3b_group_primary_plus_2_nonparticipant_mentions_no_policy", func(t *testing.T) {
 		runE3bGroupPrimaryPlusMentions(t, false)
 	})
-	t.Run("E3b_group_nonparticipant_primary_plus_2_mentions_with_policies", func(t *testing.T) {
+	t.Run("E3b_group_primary_plus_2_nonparticipant_mentions_with_policies", func(t *testing.T) {
 		runE3bGroupPrimaryPlusMentions(t, true)
 	})
 
@@ -776,6 +776,221 @@ func TestN2_ParentMessageIDLinkage(t *testing.T) {
 		CopyAdmission:   adm,
 	}, m1, "body")
 	assert.NoError(t, err)
+}
+
+// TestR1_SlugNormalization_UnmentionedAcknowledgedID (O-a) exercises
+// computeNormalizedUnmentionedSlugs when an acknowledged, non-baseline,
+// UNMENTIONED agent ID is present in L and the copy target has
+// needUnmentioned=true. Kills the `slugs` mutant (verify compares live slugs
+// without normalizing against L \ R).
+func TestR1_SlugNormalization_UnmentionedAcknowledgedID(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+	m1 := sliceBMakeAgent(t, f, "oa-m1")
+	unmAck := sliceBMakeAgent(t, f, "oa-unm-ack")
+
+	parentConv := &messaging.ConversationResult{
+		ConversationID: f.groupConv.ID,
+		ExternalRef:    f.groupConv.ExternalRef,
+		Kind:           "group",
+		Surface:        "native",
+	}
+
+	// Build baseline snapshot with needUnmentioned=true (unmAck is NOT in P0 and NOT mentioned).
+	ts, _, _ := f.srv.buildCopyTargetSnapshot(ctx, f.sender, resolvedCopyTarget{
+		Agent:              m1,
+		Position:           "body",
+		ParentConv:         parentConv,
+		ParentConvVerified: true,
+	}, "hello @"+m1.Slug, 0, false, nil, false, true)
+	require.NoError(t, ts.factsErr)
+	require.Equal(t, []string{f.defaultAgent.Slug}, ts.fingerprint.UnmentionedAgentSlugs)
+
+	adm := mintCopyAdmission(copyAdmissionMintInput{
+		sendID:             "oa-send",
+		senderAgentID:      f.sender.ID,
+		senderIdentityKind: "agent",
+		evalProjectID:      f.project.ID,
+		copyBody:           "hello @" + m1.Slug,
+		snapshots:          []copyTargetSnapshot{ts},
+	})
+	defer adm.Close()
+	adm.AttachMessageID("oa-origin-msg")
+
+	// Add unmAck to the group and record it in R (acknowledged, non-baseline, UNMENTIONED).
+	require.NoError(t, f.s.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: f.groupConv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    unmAck.ID,
+		Role:           "member",
+	}))
+	adm.RecordAcknowledgedRegistration(unmAck.ID)
+
+	// Without slug normalization, live unmentioned_agent_slugs would include unmAck.Slug
+	// and fail verify; with normalization against L \ R, copy delivery succeeds.
+	sliceBResetDispatcher(f.dispatcher)
+	out := f.srv.deliverAgentMentionCopy(ctx, ctx, agentMentionFanoutInput{
+		Sender:             f.sender,
+		SenderIdent:        sliceBSendAgentIdent(f.sender),
+		Msg:                "hello @" + m1.Slug,
+		Type:               messages.TypeInstruction,
+		ParentConv:         parentConv,
+		ParentConvVerified: true,
+		ParentMessageID:    "oa-origin-msg",
+		CopyAdmission:      adm,
+	}, m1, "body")
+	assert.Equal(t, "delivered", out.Status, "copy with normalized unmentioned slugs must deliver (err=%q)", out.Error)
+	assert.Len(t, f.dispatcher.getCalls(), 1)
+}
+
+// TestO3_DeliveryLayerAlone_BoundCountMismatchRefused (O-b) calls
+// ExecuteAgentDM directly in copy mode with a mismatched
+// copyBoundAttachmentCount, killing the `bcdeliv` mutant (delivery ignores
+// bound count).
+func TestO3_DeliveryLayerAlone_BoundCountMismatchRefused(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+	m1 := sliceBMakeAgent(t, f, "ob-m1")
+
+	out, rej := f.srv.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+		sendID:                 "ob-send",
+		sender:                 f.sender,
+		senderIdent:            sliceBSendAgentIdent(f.sender),
+		requireActorCrossCheck: true,
+		originSnap: h2FactSnapshot{
+			surface:       store.MessagePolicySurfaceAgentDM,
+			projectID:     f.project.ID,
+			senderID:      f.sender.ID,
+			senderSlug:    f.sender.Slug,
+			recipientKind: "agent",
+			recipientID:   f.peerAgent.ID,
+			recipientSlug: f.peerAgent.Slug,
+			msgType:       messages.TypeInstruction,
+			introBody:     "files @" + m1.Slug,
+			msgBody:       "files @" + m1.Slug,
+			convKind:      "direct",
+		},
+		copyTargets:         []resolvedCopyTarget{{Agent: m1, Position: "body"}},
+		copyBody:            "files @" + m1.Slug,
+		copyAttachmentCount: 2,
+	})
+	require.Nil(t, rej)
+	require.NotNil(t, out.copyAdmission)
+	out.copyAdmission.AttachMessageID("ob-origin-msg")
+	defer out.releaseCopyAdmission()
+
+	// Mismatched bound attachment count (1 != 2) directly at ExecuteAgentDM delivery verify -> refused.
+	sliceBResetDispatcher(f.dispatcher)
+	_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:              f.sender,
+		SenderIdentity:           sliceBSendAgentIdent(f.sender),
+		TargetAgent:              m1,
+		Msg:                      "files @" + m1.Slug,
+		Type:                     messages.TypeMention,
+		ProjectID:                f.project.ID,
+		SkipPhaseGate:            true,
+		copyIntent:               true,
+		copyAdmission:            out.copyAdmission,
+		copyBoundAttachmentCount: 1,
+		copyParentMessageID:      "ob-origin-msg",
+	})
+	require.NotNil(t, dmErr)
+	assert.Contains(t, dmErr.Message, errCopyAdmissionFacts.Error())
+	assert.Empty(t, f.dispatcher.getCalls(), "mismatched delivery bound count must not dispatch")
+
+	msgs, err := f.s.ListMessages(ctx, store.MessageFilter{RecipientID: m1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "mismatched delivery bound count must not persist")
+
+	// Matching bound attachment count (2 == 2) -> admitted and delivered.
+	dmRes, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:              f.sender,
+		SenderIdentity:           sliceBSendAgentIdent(f.sender),
+		TargetAgent:              m1,
+		Msg:                      "files @" + m1.Slug,
+		Type:                     messages.TypeMention,
+		ProjectID:                f.project.ID,
+		SkipPhaseGate:            true,
+		copyIntent:               true,
+		copyAdmission:            out.copyAdmission,
+		copyBoundAttachmentCount: 2,
+		copyParentMessageID:      "ob-origin-msg",
+	})
+	require.Nil(t, dmErr)
+	require.NotNil(t, dmRes)
+	assert.Len(t, f.dispatcher.getCalls(), 1)
+}
+
+// TestCopyAdmission_CopiedOrUnregisteredValueRefused (O-d) proves that per-send
+// registry pointer identity is the runtime defence: a copied or unregistered
+// derivedAdmission carrying identical fields and pointing at the live registry
+// is REFUSED at both preflight and ExecuteAgentDM verify.
+func TestCopyAdmission_CopiedOrUnregisteredValueRefused(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+	m1 := sliceBMakeAgent(t, f, "od-m1")
+
+	ts, _, _ := f.srv.buildCopyTargetSnapshot(ctx, f.sender, resolvedCopyTarget{Agent: m1, Position: "body"}, "hi @"+m1.Slug, 0, false, nil, false, false)
+	adm := mintCopyAdmission(copyAdmissionMintInput{
+		sendID:             "od-send",
+		senderAgentID:      f.sender.ID,
+		senderIdentityKind: "agent",
+		evalProjectID:      f.project.ID,
+		copyBody:           "hi @" + m1.Slug,
+		snapshots:          []copyTargetSnapshot{ts},
+	})
+	defer adm.Close()
+	adm.AttachMessageID("od-origin-msg")
+
+	// Construct an unregistered copy pointing at the SAME live registry with identical fields.
+	forgedCopy := &derivedAdmission{
+		registry:                  adm.registry,
+		sendID:                    adm.sendID,
+		senderAgentID:             adm.senderAgentID,
+		senderIdentityKind:        adm.senderIdentityKind,
+		evalProjectID:             adm.evalProjectID,
+		copyBodyHash:              adm.copyBodyHash,
+		targets:                   adm.targets,
+		baselineAgentParticipants: adm.baselineAgentParticipants,
+		policySnapshotIDs:         adm.policySnapshotIDs,
+		originMessageID:           "od-origin-msg",
+		attached:                  true,
+	}
+
+	assert.True(t, adm.isOpen(), "real minted admission must be open")
+	assert.False(t, forgedCopy.isOpen(), "unregistered copy must NOT be open in registry")
+
+	// Preflight refuses with errCopyAdmissionClosed.
+	err := f.srv.verifyCopyAdmissionPreflight(ctx, agentMentionFanoutInput{
+		Sender:          f.sender,
+		SenderIdent:     sliceBSendAgentIdent(f.sender),
+		Msg:             "hi @" + m1.Slug,
+		ParentMessageID: "od-origin-msg",
+		CopyAdmission:   forgedCopy,
+	}, m1, "body")
+	assert.ErrorIs(t, err, errCopyAdmissionClosed)
+
+	// Direct ExecuteAgentDM copy verify refuses with errCopyAdmissionClosed, zero delivery, zero persistence.
+	sliceBResetDispatcher(f.dispatcher)
+	_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:         f.sender,
+		SenderIdentity:      sliceBSendAgentIdent(f.sender),
+		TargetAgent:         m1,
+		Msg:                 "hi @" + m1.Slug,
+		Type:                messages.TypeMention,
+		ProjectID:           f.project.ID,
+		SkipPhaseGate:       true,
+		copyIntent:          true,
+		copyAdmission:       forgedCopy,
+		copyParentMessageID: "od-origin-msg",
+	})
+	require.NotNil(t, dmErr)
+	assert.Contains(t, dmErr.Message, errCopyAdmissionClosed.Error())
+	assert.Empty(t, f.dispatcher.getCalls())
+
+	msgs, err := f.s.ListMessages(ctx, store.MessageFilter{RecipientID: m1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items)
 }
 
 // Keep unused time import check happy.
