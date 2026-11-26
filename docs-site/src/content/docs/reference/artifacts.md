@@ -489,7 +489,7 @@ Every listed artifact passes the same check as `GET /api/v1/artifacts/{id}` for 
 
 | Parameter | Effect |
 | :--- | :--- |
-| `q` | Unified [filter query](/scion/reference/filter-queries/) (`artifacts` view keys `is:review`, `is:requested`, `is:mine`, `is:shared`, `is:draft`, `project:`, `-` negation; with `scope=`, the `artifacts-project` keys `is:requested`, `is:shared`) or plain text matching title or key (case is ignored for ASCII letters; for other letters it depends on the database). Limits: 512 bytes raw, 200 runes of free text, and at most 20 distinct `project:` values. Malformed, invalid-value, or over-limit queries return `400 invalid_filter_query`; unknown `key:` terms are searched as text. |
+| `q` | Unified [filter query](/scion/reference/filter-queries/) (`artifacts` view keys `is:review`, `is:requested`, `is:mine`, `is:shared`, `is:draft`, `project:`, `-` negation; `is:draft` requires the `hub.artifacts_review_drafts` experiment — while off it matches nothing and `-is:draft` is a no-op; with `scope=`, the `artifacts-project` keys `is:requested`, `is:shared`) or plain text matching title or key (case is ignored for ASCII letters; for other letters it depends on the database). Limits: 512 bytes raw, 200 runes of free text, and at most 20 distinct `project:` values. Malformed, invalid-value, or over-limit queries return `400 invalid_filter_query`; unknown `key:` terms are searched as text. |
 | `review_pending=1` | Keep artifacts whose current version is a review awaiting the owner. |
 | `requested=1` | Keep artifacts where the caller has an open review request (requires `hub.artifacts_review_requests`; matches nothing while off). |
 | `owner=me` | Keep only artifacts the caller owns. |

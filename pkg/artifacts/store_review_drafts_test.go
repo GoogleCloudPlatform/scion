@@ -572,7 +572,8 @@ func TestReviewDraftStoreListArtifactIDs(t *testing.T) {
 			t.Fatalf("empty kind ListReviewDraftArtifactIDs = %v, %v", got, err)
 		}
 
-		// Save drafts for u1 on a1 and a3, u2 on a2 and a3, agent ag1 on a1.
+		// Save drafts for u1 on a1 and a3, u2 on a2 and a3, agent ag1 on a1,
+		// and an agent sharing ref "u1" on a2 to pin principal_kind scoping.
 		for _, tc := range []struct {
 			art       *Artifact
 			kind, ref string
@@ -582,6 +583,7 @@ func TestReviewDraftStoreListArtifactIDs(t *testing.T) {
 			{a2, PrincipalKindUser, "u2"},
 			{a3, PrincipalKindUser, "u2"},
 			{a1, PrincipalKindAgent, "ag1"},
+			{a2, PrincipalKindAgent, "u1"},
 		} {
 			if _, err := st.PutReviewDraft(ctx, testDraft(tc.art, tc.kind, tc.ref, 1, "doc.md", "draft", ""), 0, now, MaxDraftsPerPrincipal); err != nil {
 				t.Fatalf("PutReviewDraft(%+v): %v", tc, err)
@@ -596,6 +598,14 @@ func TestReviewDraftStoreListArtifactIDs(t *testing.T) {
 		slices.Sort(wantU1)
 		if !slices.Equal(gotU1, wantU1) {
 			t.Errorf("u1 draft IDs = %v, want %v", gotU1, wantU1)
+		}
+
+		gotAgentU1, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindAgent, "u1")
+		if err != nil {
+			t.Fatalf("ListReviewDraftArtifactIDs(agent:u1): %v", err)
+		}
+		if !slices.Equal(gotAgentU1, []string{a2.ID}) {
+			t.Errorf("agent:u1 draft IDs = %v, want [%s]", gotAgentU1, a2.ID)
 		}
 
 		gotU2, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindUser, "u2")

@@ -66,7 +66,7 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
-| `is` | flag_set | `review`, `mine`, `shared`, `draft` (`mine` and `shared` are mutually exclusive; `draft` matches artifacts with an unsubmitted saved draft review by the caller) | server | `is:review`, `is:mine`, `is:draft`, `-is:shared` | Artifact state or access |
+| `is` | flag_set | `review`, `mine`, `shared`, `draft` (`mine` and `shared` are mutually exclusive; `draft` matches artifacts with an unsubmitted saved draft review by the caller and requires the `hub.artifacts_review_drafts` experiment — while off, `is:draft` matches nothing and `-is:draft` is a no-op) | server | `is:review`, `is:mine`, `is:draft`, `-is:shared` | Artifact state or access |
 | `project` | ref | Project slug or UUID | server | `project:web-app`, `-project:archive` | Home project slug or ID |
 
 ### `artifacts-project` (Project artifacts list)

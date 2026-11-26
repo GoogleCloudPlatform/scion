@@ -275,7 +275,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
 			return
 		}
-		if queryMentionsDraft(queryTerms) {
+		if queryMentionsDraft(queryTerms) && s.featureEnabled(ctx, FeatureReviewDrafts) {
 			draftIDs, err := b.store.ListReviewDraftArtifactIDs(ctx, kind, ref)
 			if err != nil {
 				slog.ErrorContext(ctx, "artifacts: list review draft ids failed", "error", err)

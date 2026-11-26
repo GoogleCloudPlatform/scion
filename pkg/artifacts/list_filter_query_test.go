@@ -512,6 +512,8 @@ func (c *draftCountingStore) resetDraftCount() int {
 
 func TestListFilterQueryDialect_IsDraft(t *testing.T) {
 	f := newFixture(t, false)
+	draftGate := &reviewDraftHost{fakeHost: f.host, on: true}
+	f.svc.host = draftGate
 	cs := &draftCountingStore{Store: f.store}
 	f.svc.SetStore(cs)
 	f.host.slugs = map[string]string{
@@ -689,7 +691,35 @@ func TestListFilterQueryDialect_IsDraft(t *testing.T) {
 		t.Errorf("project-scoped is:draft status = %d, want 400", projRec.Code)
 	}
 
-	// 8. Store error on draft lookup surfaces as 500 internal (fail closed / surface error).
+	// 8. Experiment off (FeatureReviewDrafts disabled): skip the store lookup
+	// and leave DraftIDs empty even when drafts are already saved for the caller.
+	draftGate.setOn(false)
+	cs.resetDraftCount()
+	if got := qList(userU, "is:draft"); len(got) != 0 {
+		t.Errorf("experiment off is:draft = %v, want empty", got)
+	}
+	if n := cs.resetDraftCount(); n != 0 {
+		t.Errorf("experiment off is:draft lookup count = %d, want 0", n)
+	}
+	if got := qList(userU, "-is:draft"); !slices.Equal(got, want(aMineRev, aProj, aShared)) {
+		t.Errorf("experiment off -is:draft = %v, want %v", got, want(aMineRev, aProj, aShared))
+	}
+	if n := cs.resetDraftCount(); n != 0 {
+		t.Errorf("experiment off -is:draft lookup count = %d, want 0", n)
+	}
+	if got := qList(userU, "is:draft,review"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("experiment off is:draft,review = %v, want %v", got, want(aMineRev))
+	}
+	if got := qList(userU, "-is:draft,shared"); !slices.Equal(got, want(aMineRev, aProj)) {
+		t.Errorf("experiment off -is:draft,shared = %v, want %v", got, want(aMineRev, aProj))
+	}
+	if n := cs.resetDraftCount(); n != 0 {
+		t.Errorf("experiment off combined draft queries lookup count = %d, want 0", n)
+	}
+
+	// 9. Store error on draft lookup surfaces as 500 internal when the
+	// experiment is on, and is not triggered when the experiment is off.
+	draftGate.setOn(true)
 	cs.mu.Lock()
 	cs.failDrafts = errors.New("draft lookup unavailable")
 	cs.mu.Unlock()
@@ -698,5 +728,16 @@ func TestListFilterQueryDialect_IsDraft(t *testing.T) {
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("draft lookup error for %q: status = %d, want 500", q, rec.Code)
 		}
+	}
+	draftGate.setOn(false)
+	cs.resetDraftCount()
+	for _, q := range []string{"is:draft", "-is:draft"} {
+		rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(q), nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("experiment off with failing store for %q: status = %d, want 200", q, rec.Code)
+		}
+	}
+	if n := cs.resetDraftCount(); n != 0 {
+		t.Errorf("experiment off with failing store lookup count = %d, want 0", n)
 	}
 }
