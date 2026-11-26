@@ -415,3 +415,100 @@ func TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit(t *testing.T) {
 	assert.NotNil(t, finalRuns[0].FinishedAt)
 	assert.Equal(t, int64(50), finalRuns[0].Counts[projID].Decisions)
 }
+
+// TestDecisionRetentionOps_ReconcileInterruptedManualAndPreviewRuns verifies:
+//  1. Startup reconciliation marks interrupted running manual and preview rows
+//     started before server startTime as failed (preserving committed counts),
+//     leaves rows started after startTime running, and is idempotent.
+//  2. Running preview and manual ops does not overwrite or reset the sweep's
+//     persisted (created_at, id, ReachedCutoff) cursor.
+func TestDecisionRetentionOps_ReconcileInterruptedManualAndPreviewRuns(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	cs := s.(*entadapter.CompositeStore)
+	st := cs.DecisionRetention()
+	srv.SetDecisionRetentionStore(st)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	srv.mu.Lock()
+	srv.startTime = now
+	srv.mu.Unlock()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "reconcile-ops", Slug: "reconcile-ops", Created: now,
+	}))
+
+	// Seed interrupted running manual & preview rows (before startTime) plus a live preview (after startTime).
+	intManual := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerManual,
+		DryRun:    false,
+		StartedAt: now.Add(-10 * time.Minute),
+		Status:    store.DecisionRetentionStatusRunning,
+		Actor:     admin.ID,
+		Policy:    store.DecisionRetentionPolicy{RetentionDays: 30, Cutoff: now.Add(-30 * 24 * time.Hour)},
+		Counts:    map[string]store.DecisionRetentionCounts{projID: {Decisions: 12, Answers: 12}},
+	}
+	intPreview := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerPreview,
+		DryRun:    true,
+		StartedAt: now.Add(-5 * time.Minute),
+		Status:    store.DecisionRetentionStatusRunning,
+		Actor:     admin.ID,
+		Policy:    store.DecisionRetentionPolicy{RetentionDays: 30, Cutoff: now.Add(-30 * 24 * time.Hour)},
+		Counts:    map[string]store.DecisionRetentionCounts{},
+	}
+	livePreview := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerPreview,
+		DryRun:    true,
+		StartedAt: now.Add(time.Minute),
+		Status:    store.DecisionRetentionStatusRunning,
+		Actor:     admin.ID,
+		Policy:    store.DecisionRetentionPolicy{RetentionDays: 30, Cutoff: now.Add(-30 * 24 * time.Hour)},
+		Counts:    map[string]store.DecisionRetentionCounts{},
+	}
+	for _, r := range []*store.DecisionRetentionRun{intManual, intPreview, livePreview} {
+		require.NoError(t, st.SaveDecisionRetentionRun(ctx, r))
+	}
+
+	assert.Equal(t, 2, srv.ReconcileInterruptedDecisionRetentionRuns(ctx))
+	assert.Equal(t, 0, srv.ReconcileInterruptedDecisionRetentionRuns(ctx), "reconcile must be idempotent")
+
+	runs, err := st.ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	byID := make(map[string]store.DecisionRetentionRun, len(runs))
+	for _, r := range runs {
+		byID[r.ID] = r
+	}
+	assert.Equal(t, store.DecisionRetentionStatusFailed, byID[intManual.ID].Status)
+	assert.Equal(t, decisionRetentionInterruptedError, byID[intManual.ID].Error)
+	assert.Equal(t, int64(12), byID[intManual.ID].Counts[projID].Decisions, "manual committed counts preserved")
+	assert.Equal(t, store.DecisionRetentionStatusFailed, byID[intPreview.ID].Status)
+	assert.Equal(t, decisionRetentionInterruptedError, byID[intPreview.ID].Error)
+	assert.Equal(t, store.DecisionRetentionStatusRunning, byID[livePreview.ID].Status)
+
+	// Verify preview and manual run preserve an existing sweep cursor (including ReachedCutoff=false).
+	resetAt := now.Add(-2 * time.Hour)
+	savedCursor := store.DecisionRetentionCursor{
+		Position:      store.DecisionRetentionPosition{CreatedAt: now.Add(-45 * 24 * time.Hour), ID: uuid.NewString()},
+		ResetAt:       &resetAt,
+		ReachedCutoff: false,
+	}
+	require.NoError(t, st.SaveDecisionRetentionCursor(ctx, savedCursor))
+
+	ops := srv.GetOperationalSettings()
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30}`), "test", 0, "managed")
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	_, err = srv.runDecisionRetentionPreview(ctx, &buf, admin.ID)
+	require.NoError(t, err)
+	_, _, err = srv.runDecisionRetentionManual(ctx, &buf, admin.ID)
+	require.NoError(t, err)
+
+	gotCur, err := st.GetDecisionRetentionCursor(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, savedCursor.Position.ID, gotCur.Position.ID, "preview/manual run must not clobber sweep cursor")
+	assert.False(t, gotCur.ReachedCutoff, "preview/manual run must not alter sweep ReachedCutoff")
+}
