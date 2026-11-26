@@ -54,6 +54,7 @@ type AgentEffectiveConfig struct {
 	MaxTurns        int      `json:"maxTurns,omitempty"`
 	MaxModelCalls   int      `json:"maxModelCalls,omitempty"`
 	MaxDuration     string   `json:"maxDuration,omitempty"`
+	RunDeadline     string   `json:"runDeadline,omitempty"`
 	LimitsClampedBy []string `json:"limitsClampedBy,omitempty"`
 
 	// Source is EffectiveConfigSourceSync or EffectiveConfigSourceLaunchReport.
@@ -98,6 +99,7 @@ func (c AgentEffectiveConfig) SameEcho(o AgentEffectiveConfig) bool {
 		c.MaxTurns == o.MaxTurns &&
 		c.MaxModelCalls == o.MaxModelCalls &&
 		c.MaxDuration == o.MaxDuration &&
+		c.RunDeadline == o.RunDeadline &&
 		c.Source == o.Source
 }
 

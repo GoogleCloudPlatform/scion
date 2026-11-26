@@ -3211,6 +3211,16 @@ authDone:
 		// records) without changing cleanup ownership.
 		ObserveResourceCreated: opts.ObserveResourceCreated,
 	}
+	var runDeadlineStr string
+	if api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.AgentPolicyDurationBackstop) {
+		if effDur := finalScionCfg.ParseMaxDuration(); effDur > 0 {
+			totalBudget := effDur + api.DurationBackstopGrace
+			deadline := time.Now().UTC().Add(totalBudget)
+			runCfg.RunDeadline = deadline
+			runCfg.RunDeadlineDuration = totalBudget
+			runDeadlineStr = deadline.Format(time.RFC3339)
+		}
+	}
 	// The agent policy's single choke point: the RunConfig is final here,
 	// and Runtime.Run (below) is the only call that creates an agent
 	// container on any runtime.
@@ -3403,6 +3413,7 @@ authDone:
 				a.TemplateHash = th
 			}
 			a.EffectiveMaxTurns, a.EffectiveMaxModelCalls, a.EffectiveMaxDuration = effectiveLimitsFromConfig(finalScionCfg)
+			a.EffectiveRunDeadline = runDeadlineStr
 			if len(clampedLimits) > 0 {
 				a.LimitsClampedBy = append([]string(nil), clampedLimits...)
 			}
@@ -3443,6 +3454,7 @@ authDone:
 		EffectiveMaxTurns:      effMaxTurns,
 		EffectiveMaxModelCalls: effMaxModelCalls,
 		EffectiveMaxDuration:   effMaxDuration,
+		EffectiveRunDeadline:   runDeadlineStr,
 		LimitsClampedBy:        append([]string(nil), clampedLimits...),
 		HarnessAuth:            opts.HarnessAuth,
 		Profile:                profileName,

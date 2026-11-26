@@ -2444,12 +2444,21 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// find. If it cannot be written, nothing is launched.
 	startedAt := sandboxNow()
 	until := startingUntil(ctx, startedAt)
+	entryLabels := cfg.Labels
+	if !cfg.RunDeadline.IsZero() {
+		cloned := make(map[string]string, len(cfg.Labels)+1)
+		for k, v := range cfg.Labels {
+			cloned[k] = v
+		}
+		cloned[api.LabelRunDeadline] = cfg.RunDeadline.UTC().Format(time.RFC3339)
+		entryLabels = cloned
+	}
 	entry := &sandboxStateEntry{
 		SandboxName:   slug,
 		AgentID:       cfg.Name,
 		ProjectID:     cfg.ProjectID,
 		Project:       cfg.Project,
-		Labels:        cfg.Labels,
+		Labels:        entryLabels,
 		Template:      cfg.Template,
 		HarnessConfig: labelValue(cfg.Labels, "scion.harness_config"),
 		CreatedAt:     startedAt,

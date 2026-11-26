@@ -171,6 +171,7 @@ type AgentLaunchReportInfo struct {
 	MaxTurns              int      `json:"maxTurns,omitempty"`
 	MaxModelCalls         int      `json:"maxModelCalls,omitempty"`
 	MaxDuration           string   `json:"maxDuration,omitempty"`
+	RunDeadline           string   `json:"runDeadline,omitempty"`
 	LimitsClampedBy       []string `json:"limitsClampedBy,omitempty"`
 }
 

@@ -42,21 +42,29 @@ type RunConfig struct {
 	// Harness.GetEnv() and all non-harness-config layers during its own container
 	// env assembly and emits the final winning withheld set authoritatively via
 	// envpolicy.HookWithheldEnvVar.
-	HookWithheldEnv  []string
-	ResolvedSecrets  []api.ResolvedSecret
-	Volumes          []api.VolumeMount
-	Labels           map[string]string
-	Annotations      map[string]string
-	ResolvedAuth     *api.ResolvedAuth
-	Harness          api.Harness
-	Task             string
-	CommandArgs      []string
-	Resume           bool
-	Persistence      api.Persistence // from the dispatch; ephemeral only where HasEphemeralPersistenceSupport (ptone/scion#7780)
-	TelemetryEnabled bool
-	Resources        *api.ResourceSpec
-	Kubernetes       *api.KubernetesConfig
-	GitClone         *api.GitCloneConfig
+	HookWithheldEnv []string
+	ResolvedSecrets []api.ResolvedSecret
+	Volumes         []api.VolumeMount
+	Labels          map[string]string
+	Annotations     map[string]string
+	// RunDeadline is the absolute UTC deadline for the broker-side max_duration
+	// backstop (ptone/scion#9372). Zero when the backstop is not enabled for
+	// this launch or no positive effective max_duration applies.
+	RunDeadline time.Time
+	// RunDeadlineDuration is the total wall-clock budget (effective
+	// max_duration + api.DurationBackstopGrace) used to set Kubernetes
+	// pod.Spec.ActiveDeadlineSeconds when RunDeadline is set.
+	RunDeadlineDuration time.Duration
+	ResolvedAuth        *api.ResolvedAuth
+	Harness             api.Harness
+	Task                string
+	CommandArgs         []string
+	Resume              bool
+	Persistence         api.Persistence // from the dispatch; ephemeral only where HasEphemeralPersistenceSupport (ptone/scion#7780)
+	TelemetryEnabled    bool
+	Resources           *api.ResourceSpec
+	Kubernetes          *api.KubernetesConfig
+	GitClone            *api.GitCloneConfig
 	// AgentOwnWorkspace marks Workspace as the agent's own directory
 	// (<agent dir>/workspace: its worktree or private checkout), as the
 	// broker decided from its own paths. That workspace's .scion is the

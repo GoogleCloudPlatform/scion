@@ -1836,6 +1836,7 @@ func brokerEffectiveConfigOf(info *RemoteAgentInfo, brokerID string, log *slog.L
 		{"runtime", info.Runtime, &eff.Runtime},
 		{"brokerBuild", info.BrokerBuild, &eff.BrokerBuild},
 		{"maxDuration", info.MaxDuration, &eff.MaxDuration},
+		{"runDeadline", info.RunDeadline, &eff.RunDeadline},
 	} {
 		if validEchoString(f.src) {
 			*f.dst = f.src

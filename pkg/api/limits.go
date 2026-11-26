@@ -17,6 +17,25 @@ package api
 import (
 	"fmt"
 	"strconv"
+	"time"
+)
+
+// Duration backstop constants (ptone/scion#9372).
+const (
+	// LabelRunDeadline is the container label (Docker/Podman/Apple/Cloud Run
+	// Sandbox) or resource annotation (Kubernetes/Cloud Run Instances) storing
+	// an agent run's absolute UTC RFC3339 deadline for the broker backstop.
+	LabelRunDeadline = "scion.io/run-deadline"
+
+	// DurationBackstopGrace is added to effective max_duration when computing
+	// the broker-enforced run deadline, matching limitsExceededStopGrace so
+	// sciontool's cooperative timer normally exits cleanly first.
+	DurationBackstopGrace = 2 * time.Minute
+
+	// ReasonMaxDurationBackstop is the status message / reason reported when
+	// the broker backstop (or Kubernetes activeDeadlineSeconds) terminates an
+	// expired run.
+	ReasonMaxDurationBackstop = "max_duration_backstop"
 )
 
 // Count limits (ScionConfig.MaxTurns and MaxModelCalls) are optional typed

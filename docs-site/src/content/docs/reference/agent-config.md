@@ -69,6 +69,15 @@ These platform skills are managed by Scion and do not need to be manually includ
 
 Each limit has three states: left out (or `null`), which inherits the value from the template chain and then from the hub and broker default limits; an explicit "no limit" (`0` for a count, `"0"` for a duration), which overrides an inherited limit and is never filled by a default; and a limit. A negative count is invalid. Before count limits were typed, a `max_turns: 0` or `max_model_calls: 0` in a template or config file was accepted silently and meant "inherit"; it now means no limit, so remove the key to inherit. A Runtime Broker logs each template that sets a count limit to `0` when it provisions an agent. An explicit count limit of `0` takes effect only on a Runtime Broker that advertises the `unlimitedCountLimits` capability: at create or start an older broker keeps the inherited limit and the Hub warns about it, while a configuration edit (`PATCH /api/v1/agents/:id` or `PATCH /api/v1/projects/:id/agents/:agentId`) that changes `max_turns` or `max_model_calls` to `0` is refused with `422 validation_error` (`unlimited_not_supported_by_broker`, or `broker_unknown` when the agent's Runtime Broker is not registered).
 
+**Enforcement boundaries:**
+
+- **Count limits (`max_turns`, `max_model_calls`) are cooperative budget guardrails.** Their counters are tracked inside the container by harness hooks and are not an adversarial security boundary.
+- **Duration (`max_duration`) is enforced externally by the Runtime Broker** when the `agent_policy.duration_backstop` experiment is enabled and an agent launches with a positive effective `max_duration`. At launch, the broker computes an immutable deadline (`launch + max_duration + 2m` grace, so `sciontool`'s cooperative shutdown normally exits cleanly first) and records it as `scion.io/run-deadline` (RFC3339 UTC):
+  - **Docker, Podman, Apple Container, Cloud Run Sandbox:** container/sandbox label `scion.io/run-deadline`.
+  - **Kubernetes:** pod annotation `scion.io/run-deadline` and `spec.activeDeadlineSeconds` (enforced by kubelet even if the broker is down).
+  - **Cloud Run Instances:** instance annotation `scion.io/run-deadline` (Cloud Run Instances has no native hard run-duration timeout, so enforcement relies on the broker sweep).
+- A 60-second broker sweep stops any running agent whose stamped deadline has passed and reports `activity=limits_exceeded` with reason `max_duration_backstop`. Because the deadline is stored on the runtime object rather than broker memory, enforcement survives broker restarts. Turning `agent_policy.duration_backstop` off stops stamping new launches; already-stamped runs continue to be enforced by the sweeper until they exit.
+
 ### Environment variables (`env`)
 
 ```yaml
