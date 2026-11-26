@@ -336,12 +336,10 @@ func (s *Server) dispatchTransferNotice(ctx context.Context, agent *store.Agent,
 	}
 	msg := messages.NewSystemMessage("system", "agent:"+agent.Slug, text, messages.SystemCategoryArtifactReview)
 	msg.RecipientID = agent.ID
-	if s.writeDenyEnabled() {
-		var ts time.Time
-		if t, err := time.Parse(time.RFC3339, msg.Timestamp); err == nil {
-			ts = t
-		}
-		msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{Msg: msg, CreatedAt: ts})
+	var ts time.Time
+	if t, err := time.Parse(time.RFC3339, msg.Timestamp); err == nil {
+		ts = t
 	}
+	msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{Msg: msg, CreatedAt: ts})
 	return dispatchWithBrokerRetry(ctx, s.deliveryMarker(), s.recordLog(), dispatcher, agent, text, false, msg)
 }
