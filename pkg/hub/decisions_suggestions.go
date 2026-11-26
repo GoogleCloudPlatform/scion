@@ -79,9 +79,12 @@ type DecisionSuggestionsResponse struct {
 
 type decisionSuggestionCursor struct {
 	Offset     int    `json:"offset"`
+	Scope      string `json:"scope"`
 	Key        string `json:"key"`
 	PrefixHash string `json:"prefixHash"`
 }
+
+const decisionSuggestionProfileScope = "me"
 
 type decisionSuggestionsQuery struct {
 	key    string
@@ -102,9 +105,12 @@ type decisionFacetsBundle struct {
 
 // buildDecisionFacets loads and formats decision filter facets for set.
 // When kind == decisionFacetAll, all facets are built (and projectsFacet when
-// includeProjects is true). When kind names a single facet (agent, by,
-// conversation), only that facet is built. When capped is true, each facet is
-// capped at maxProjectDecisionFacetOptions and truncated flags are populated.
+// includeProjects is true). When kind == decisionFacetRawOnly (used by limit=0
+// structured queries), raw facet rows are loaded for filter-query resolution
+// without building facet views or truncation flags. When kind names a single
+// facet (agent, by, conversation), only that facet is built. When capped is
+// true, each facet is capped at maxProjectDecisionFacetOptions and truncated
+// flags are populated.
 func (s *Server) buildDecisionFacets(
 	ctx context.Context,
 	set *decisionScopeSet,
@@ -157,9 +163,10 @@ func decisionSuggestionPrefixHash(prefix string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
-func encodeDecisionSuggestionCursor(offset int, key, prefix string) (string, error) {
+func encodeDecisionSuggestionCursor(offset int, scope, key, prefix string) (string, error) {
 	raw, err := json.Marshal(decisionSuggestionCursor{
 		Offset:     offset,
+		Scope:      scope,
 		Key:        key,
 		PrefixHash: decisionSuggestionPrefixHash(prefix),
 	})
@@ -169,7 +176,7 @@ func encodeDecisionSuggestionCursor(offset int, key, prefix string) (string, err
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
-func decodeDecisionSuggestionCursor(token, key, prefix string) (int, error) {
+func decodeDecisionSuggestionCursor(token, scope, key, prefix string) (int, error) {
 	trimmed := strings.TrimSpace(token)
 	if len(trimmed) > maxDecisionSuggestionCursorBytes {
 		return 0, errors.New("cursor too long")
@@ -182,13 +189,13 @@ func decodeDecisionSuggestionCursor(token, key, prefix string) (int, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return 0, err
 	}
-	if c.Offset <= 0 || c.Key != key || c.PrefixHash != decisionSuggestionPrefixHash(prefix) {
+	if c.Offset <= 0 || c.Scope != scope || c.Key != key || c.PrefixHash != decisionSuggestionPrefixHash(prefix) {
 		return 0, errors.New("cursor mismatch")
 	}
 	return c.Offset, nil
 }
 
-func parseDecisionSuggestionsQuery(w http.ResponseWriter, r *http.Request) (decisionSuggestionsQuery, bool) {
+func parseDecisionSuggestionsQuery(w http.ResponseWriter, r *http.Request, scope string) (decisionSuggestionsQuery, bool) {
 	q := r.URL.Query()
 	key := strings.ToLower(strings.TrimSpace(q.Get("key")))
 	switch decisionFacetKind(key) {
@@ -223,7 +230,7 @@ func parseDecisionSuggestionsQuery(w http.ResponseWriter, r *http.Request) (deci
 
 	offset := 0
 	if rawCursor := strings.TrimSpace(q.Get("cursor")); rawCursor != "" {
-		off, err := decodeDecisionSuggestionCursor(rawCursor, key, prefix)
+		off, err := decodeDecisionSuggestionCursor(rawCursor, scope, key, prefix)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, errCodeInvalidCursor,
 				"invalid cursor", map[string]interface{}{"field": "cursor"})
@@ -264,7 +271,7 @@ func (s *Server) listProjectDecisionSuggestions(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	sq, ok := parseDecisionSuggestionsQuery(w, r)
+	sq, ok := parseDecisionSuggestionsQuery(w, r, projectID)
 	if !ok {
 		return
 	}
@@ -294,7 +301,7 @@ func (s *Server) listProjectDecisionSuggestions(w http.ResponseWriter, r *http.R
 		writeDecisionsError(w, r, searchCtx, err)
 		return
 	}
-	resp, err := s.decisionSuggestionsCore(searchCtx, user, newDecisionScopeSet([]*projectReadableScope{scope}), sq, false)
+	resp, err := s.decisionSuggestionsCore(searchCtx, user, newDecisionScopeSet([]*projectReadableScope{scope}), projectID, sq, false)
 	if err == nil && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
 		err = searchCtx.Err()
 	}
@@ -328,7 +335,7 @@ func (s *Server) listUserMeDecisionSuggestions(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	sq, ok := parseDecisionSuggestionsQuery(w, r)
+	sq, ok := parseDecisionSuggestionsQuery(w, r, decisionSuggestionProfileScope)
 	if !ok {
 		return
 	}
@@ -351,7 +358,7 @@ func (s *Server) listUserMeDecisionSuggestions(w http.ResponseWriter, r *http.Re
 		writeDecisionsError(w, r, searchCtx, err)
 		return
 	}
-	resp, err := s.decisionSuggestionsCore(searchCtx, user, newDecisionScopeSet(scopes), sq, true)
+	resp, err := s.decisionSuggestionsCore(searchCtx, user, newDecisionScopeSet(scopes), decisionSuggestionProfileScope, sq, true)
 	if err == nil && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
 		err = searchCtx.Err()
 	}
@@ -366,6 +373,7 @@ func (s *Server) decisionSuggestionsCore(
 	ctx context.Context,
 	user UserIdentity,
 	set *decisionScopeSet,
+	scope string,
 	sq decisionSuggestionsQuery,
 	profile bool,
 ) (DecisionSuggestionsResponse, error) {
@@ -442,7 +450,7 @@ func (s *Server) decisionSuggestionsCore(
 			values = append(values, r.item)
 		}
 		if end < total {
-			nextCursor, err = encodeDecisionSuggestionCursor(end, sq.key, sq.prefix)
+			nextCursor, err = encodeDecisionSuggestionCursor(end, scope, sq.key, sq.prefix)
 			if err != nil {
 				return DecisionSuggestionsResponse{}, err
 			}
@@ -518,6 +526,11 @@ func decisionSuggestionCandidates(
 		}
 
 	case decisionFacetAnswerer:
+		// If the caller has no readable conversations in scope (e.g. a UAT
+		// without project:read on the profile route), return empty values.
+		if set == nil || len(set.chatKeys) == 0 {
+			return nil
+		}
 		viewerID := ""
 		viewerDisplayName := ""
 		if user != nil {

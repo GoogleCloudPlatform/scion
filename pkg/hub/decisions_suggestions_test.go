@@ -172,6 +172,110 @@ func TestProjectDecisionSuggestions_AuthzScopeAndExperiments(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bobConvRR.Body.Bytes(), &bobConvResp))
 	require.Len(t, bobConvResp.Values, 1)
 	assert.Equal(t, "DM with secret-dm-bot", bobConvResp.Values[0].Value)
+
+	// R2: UATs (project-bounded and hub-bounded, with and without inbox:read,
+	// wrong-project, missing project:read) and federated user refusal.
+	t.Run("UATs and federated user", func(t *testing.T) {
+		cf := newChatFixture(t)
+		setDecisionsAndDialectExperiments(t, cf.srv, true, true)
+		cctx := context.Background()
+		pPath := "/api/v1/projects/" + cf.projA + "/decisions/suggestions"
+
+		cf.agentA.OwnerID = cf.member
+		cf.agentA.Ancestry = []string{cf.member}
+		cf.agentA.MessageMode = store.MessageModeProject
+		require.NoError(t, cf.s.UpdateAgent(cctx, cf.agentA))
+
+		// Create a DM-only agent so we can prove UAT without inbox:read sees
+		// zero DM-derived agent, answerer, or conversation values across all 3 keys.
+		dmOnlyAgent := &store.Agent{
+			ID: api.NewUUID(), Slug: "uat-dm-only-bot", Name: "uat-dm-only-bot",
+			ProjectID: cf.projA, OwnerID: cf.member, CreatedBy: cf.member, Ancestry: []string{cf.member},
+			Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, cf.s.CreateAgent(cctx, dmOnlyAgent))
+
+		memberUser, err := cf.s.GetUser(cctx, cf.member)
+		require.NoError(t, err)
+		dmOnlyAnswerer := &store.User{
+			ID: tid("uat-dm-ans"), Email: "uat-dm-ans@example.com", DisplayName: "UAT DM Only Answerer",
+			Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC(),
+		}
+		require.NoError(t, cf.s.CreateUser(cctx, dmOnlyAnswerer))
+
+		// Seed topic decision answered by admin, plus member's private DM with
+		// dmOnlyAgent answered by dmOnlyAnswerer.
+		seedChatDec := func(chatKey, recip string, ag *store.Agent, key string) string {
+			decs, nerr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]}]`))
+			require.NoError(t, nerr)
+			res, cerr := cf.s.CreateDecisionPrompt(cctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: api.NewUUID(), ProjectID: cf.projA, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
+					Recipient: recip, ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				Intro: key, AskerAgentID: ag.ID, AskerAgentName: ag.Name, Decisions: decs,
+			})
+			require.NoError(t, cerr)
+			return res.Decisions[0].RowID
+		}
+		adminUser, err := cf.s.GetUser(cctx, cf.admin)
+		require.NoError(t, err)
+		topicRowID := seedChatDec(cf.topicA, "chat", cf.agentA, "uat-topic")
+		_, _, err = cf.s.RecordAnswer(cctx, &store.RecordAnswerInput{
+			DecisionRowID: topicRowID, ChoiceID: "yes",
+			AnsweredByUserID: adminUser.ID, AnsweredByName: adminUser.DisplayName, AnsweredByEmail: adminUser.Email,
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{ID: api.NewUUID(), ProjectID: cf.projA, Sender: "user:" + adminUser.Email, Recipient: "agent:" + cf.agentA.Slug, ThreadID: cf.topicA, Msg: "yes"},
+		})
+		require.NoError(t, err)
+
+		dmKey := cf.dm(t, cf.member, "agent", dmOnlyAgent.ID)
+		dmRowID := seedChatDec(dmKey, "user:"+cf.member, dmOnlyAgent, "uat-dm")
+		_, _, err = cf.s.RecordAnswer(cctx, &store.RecordAnswerInput{
+			DecisionRowID: dmRowID, ChoiceID: "yes",
+			AnsweredByUserID: dmOnlyAnswerer.ID, AnsweredByName: dmOnlyAnswerer.DisplayName, AnsweredByEmail: dmOnlyAnswerer.Email,
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{ID: api.NewUUID(), ProjectID: cf.projA, Sender: "user:" + dmOnlyAnswerer.Email, Recipient: "agent:" + dmOnlyAgent.Slug, ThreadID: dmKey, Msg: "yes"},
+		})
+		require.NoError(t, err)
+
+		// Federated user -> 403.
+		fed := NewFederatedUserIdentity("https://issuer.test", "sub-fed", memberUser.Email, "Fed Member", "member", nil)
+		assert.Equal(t, http.StatusForbidden, requestAsIdentity(t, cf.srv, fed, http.MethodGet, pPath+"?key=agent", nil).Code)
+
+		// Wrong-project UAT -> 403.
+		tokWrongProj := cf.mint(t, cf.admin, projectBoundary(cf.projB), "project:read", "inbox:read", "agent:read")
+		assert.Equal(t, http.StatusForbidden, cf.call(t, tokWrongProj, http.MethodGet, pPath+"?key=agent", nil).Code)
+
+		// UAT missing project:read -> 403.
+		tokNoProjRead := cf.mint(t, cf.member, projectBoundary(cf.projA), "inbox:read", "agent:read")
+		assert.Equal(t, http.StatusForbidden, cf.call(t, tokNoProjRead, http.MethodGet, pPath+"?key=agent", nil).Code)
+
+		decodeVals := func(rr *httptest.ResponseRecorder) []string {
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var resp DecisionSuggestionsResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			out := make([]string, 0, len(resp.Values))
+			for _, v := range resp.Values {
+				out = append(out, v.Value)
+			}
+			return out
+		}
+
+		// Project UAT with project:read only (no inbox:read): topic suggestions only,
+		// NEVER DM-only agent, DM-only answerer, or DM conversation label!
+		tokNoInbox := cf.mint(t, cf.member, projectBoundary(cf.projA), "project:read")
+		assert.NotContains(t, decodeVals(cf.call(t, tokNoInbox, http.MethodGet, pPath+"?key=agent", nil)), "uat-dm-only-bot")
+		assert.Contains(t, decodeVals(cf.call(t, tokNoInbox, http.MethodGet, pPath+"?key=agent", nil)), cf.agentA.Name)
+		assert.NotContains(t, decodeVals(cf.call(t, tokNoInbox, http.MethodGet, pPath+"?key=conversation", nil)), "DM with uat-dm-only-bot")
+		assert.NotContains(t, decodeVals(cf.call(t, tokNoInbox, http.MethodGet, pPath+"?key=by", nil)), "UAT DM Only Answerer")
+
+		// Project UAT with project:read + inbox:read + agent:read: own DM included for all 3 keys!
+		tokWithInbox := cf.mint(t, cf.member, projectBoundary(cf.projA), "project:read", "inbox:read", "agent:read")
+		assert.Contains(t, decodeVals(cf.call(t, tokWithInbox, http.MethodGet, pPath+"?key=agent", nil)), "uat-dm-only-bot")
+		assert.Contains(t, decodeVals(cf.call(t, tokWithInbox, http.MethodGet, pPath+"?key=conversation", nil)), "DM with uat-dm-only-bot")
+		assert.Contains(t, decodeVals(cf.call(t, tokWithInbox, http.MethodGet, pPath+"?key=by", nil)), "UAT DM Only Answerer")
+	})
 }
 
 func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *testing.T) {
@@ -254,6 +358,29 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	assert.Equal(t, http.StatusBadRequest, badPrefixRR.Code)
 	assert.Contains(t, badPrefixRR.Body.String(), errCodeInvalidCursor)
 
+	// O4: project A's cursor is rejected (400 invalid_cursor) on project B and on /users/me.
+	otherProj := &store.Project{ID: api.NewUUID(), Name: "Other Project", Slug: "other-proj", Created: time.Now().UTC(), Updated: time.Now().UTC()}
+	require.NoError(t, f.store.CreateProject(ctx, otherProj))
+	require.NoError(t, f.store.CreateGroup(ctx, &store.Group{
+		ID:        api.NewUUID(),
+		Name:      otherProj.Name + " Members",
+		Slug:      "project:" + otherProj.Slug + ":members",
+		GroupType: store.GroupTypeExplicit,
+		ProjectID: otherProj.ID,
+		Created:   time.Now().UTC(),
+		Updated:   time.Now().UTC(),
+	}))
+	addProjectMemberWithRole(t, f.store, otherProj, f.bob.ID, store.GroupMemberRoleAdmin)
+	otherProjRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+		"/api/v1/projects/"+otherProj.ID+"/decisions/suggestions?key=agent&prefix=dep&cursor="+url.QueryEscape(p1.NextCursor), nil)
+	assert.Equal(t, http.StatusBadRequest, otherProjRR.Code)
+	assert.Contains(t, otherProjRR.Body.String(), errCodeInvalidCursor)
+
+	profileCurRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+		"/api/v1/users/me/decisions/suggestions?key=agent&prefix=dep&cursor="+url.QueryEscape(p1.NextCursor), nil)
+	assert.Equal(t, http.StatusBadRequest, profileCurRR.Code)
+	assert.Contains(t, profileCurRR.Body.String(), errCodeInvalidCursor)
+
 	// Page 2 with valid cursor returns remaining 2 items and no nextCursor.
 	p2RR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent&prefix=dep&limit=2&cursor="+url.QueryEscape(p1.NextCursor), nil)
 	require.Equal(t, http.StatusOK, p2RR.Code)
@@ -316,6 +443,7 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 func TestProjectDecisionSuggestions_UncappedPast500AndFacetsTruncated(t *testing.T) {
 	f := newDecisionsFixture(t)
 	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	ctx := context.Background()
 	listPath := "/api/v1/projects/" + f.project.ID + "/decisions"
 	suggPath := listPath + "/suggestions"
 
@@ -327,40 +455,99 @@ func TestProjectDecisionSuggestions_UncappedPast500AndFacetsTruncated(t *testing
 	require.NoError(t, json.Unmarshal(smallRR.Body.Bytes(), &smallResp))
 	assert.Nil(t, smallResp.FacetsTruncated)
 
-	// Seed 505 distinct asking agents via decisions (agent-000 .. agent-504,
-	// with zzz-past-cap-agent sorting past the 500 cap).
-	const totalAgents = 505
-	for i := 0; i < totalAgents; i++ {
-		name := fmt.Sprintf("agent-%03d", i)
-		if i == totalAgents-1 {
-			name = "zzz-past-cap-agent"
+	// O3: Seed >500 distinct asking agents, >500 distinct answerers, and >500
+	// distinct readable topics so all three facetsTruncated flags must be true
+	// and /suggestions must find the past-cap entry for every key.
+	f.srv.mu.RLock()
+	wcs := f.srv.webChatStore
+	f.srv.mu.RUnlock()
+
+	const totalItems = 505
+	for i := 0; i < totalItems; i++ {
+		agName := fmt.Sprintf("agent-%03d", i)
+		ansName := fmt.Sprintf("Answerer %03d", i)
+		ansEmail := fmt.Sprintf("ans%03d@example.com", i)
+		topicName := fmt.Sprintf("topic-%03d", i)
+		if i == totalItems-1 {
+			agName = "zzz-past-cap-agent"
+			ansName = "Zzz Past Cap Answerer"
+			ansEmail = "zzz-past-cap@example.com"
+			topicName = "zzz-topic-504"
 		}
+
+		topicID := api.NewUUID()
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID:        topicID,
+			ProjectID: f.project.ID,
+			Name:      topicName,
+			CreatedBy: f.bob.ID,
+			CreatedAt: time.Now().UTC(),
+		}))
+
 		agID := api.NewUUID()
-		seedSuggestionPrompt(t, f, agID, name, name, f.topicID, fmt.Sprintf("k-cap-%03d", i), "Q?")
+		_, rowID := seedSuggestionPrompt(t, f, agID, agName, agName, topicID, fmt.Sprintf("k-cap-%03d", i), "Q?")
+		_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID:    rowID,
+			ChoiceID:         "yes",
+			AnsweredByUserID: fmt.Sprintf("u-cap-%04d", i),
+			AnsweredByName:   ansName,
+			AnsweredByEmail:  ansEmail,
+			Provenance:       store.DecisionProvenanceDirect,
+			Outcome:          store.DecisionOutcomeAnswer,
+			Surface:          store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID:        api.NewUUID(),
+				ProjectID: f.project.ID,
+				Sender:    "user:" + ansEmail,
+				Recipient: "agent:" + agName,
+				ThreadID:  topicID,
+				Msg:       "Yes",
+			},
+		})
+		require.NoError(t, err)
 	}
 
-	// List response caps agents at 500 and sets facetsTruncated.agents = true.
-	bigRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, listPath+"?tab=pending&limit=5", nil)
+	// List response caps all 3 facets at 500 and sets all 3 facetsTruncated flags.
+	bigRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, listPath+"?tab=made&limit=5", nil)
 	require.Equal(t, http.StatusOK, bigRR.Code, bigRR.Body.String())
-	var bigResp ProjectPendingDecisionsResponse
+	var bigResp ProjectMadeDecisionsResponse
 	require.NoError(t, json.Unmarshal(bigRR.Body.Bytes(), &bigResp))
 	assert.Len(t, bigResp.Agents, maxProjectDecisionFacetOptions)
+	assert.Len(t, bigResp.Answerers, maxProjectDecisionFacetOptions)
+	assert.Len(t, bigResp.Conversations, maxProjectDecisionFacetOptions)
 	require.NotNil(t, bigResp.FacetsTruncated)
-	assert.True(t, bigResp.FacetsTruncated.Agents)
-	assert.False(t, bigResp.FacetsTruncated.Answerers)
-	assert.False(t, bigResp.FacetsTruncated.Conversations)
+	assert.True(t, bigResp.FacetsTruncated.Agents, "agents must be flagged truncated")
+	assert.True(t, bigResp.FacetsTruncated.Answerers, "answerers must be flagged truncated")
+	assert.True(t, bigResp.FacetsTruncated.Conversations, "conversations must be flagged truncated")
 	for _, a := range bigResp.Agents {
 		assert.NotEqual(t, "zzz-past-cap-agent", a.Name)
 	}
+	for _, u := range bigResp.Answerers {
+		assert.NotEqual(t, "Zzz Past Cap Answerer", u.Name)
+	}
+	for _, c := range bigResp.Conversations {
+		assert.NotEqual(t, "#zzz-topic-504", c.Label)
+	}
 
-	// Suggestions endpoint searches uncapped and finds zzz-past-cap-agent!
-	suggRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent&prefix=zzz-past-cap", nil)
-	require.Equal(t, http.StatusOK, suggRR.Code, suggRR.Body.String())
-	var suggResp DecisionSuggestionsResponse
-	require.NoError(t, json.Unmarshal(suggRR.Body.Bytes(), &suggResp))
-	assert.Equal(t, 1, suggResp.Total)
-	require.Len(t, suggResp.Values, 1)
-	assert.Equal(t, "zzz-past-cap-agent", suggResp.Values[0].Value)
+	// Suggestions endpoint searches uncapped and finds all 3 past-cap values!
+	for _, tc := range []struct {
+		key    string
+		prefix string
+		want   string
+	}{
+		{"agent", "zzz-past-cap", "zzz-past-cap-agent"},
+		{"by", "Zzz Past Cap", "Zzz Past Cap Answerer"},
+		{"conversation", "zzz-topic-504", "#zzz-topic-504"},
+	} {
+		suggRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			suggPath+"?key="+tc.key+"&prefix="+url.QueryEscape(tc.prefix), nil)
+		require.Equal(t, http.StatusOK, suggRR.Code, suggRR.Body.String())
+		var suggResp DecisionSuggestionsResponse
+		require.NoError(t, json.Unmarshal(suggRR.Body.Bytes(), &suggResp))
+		assert.Equal(t, 1, suggResp.Total, "key=%s", tc.key)
+		require.Len(t, suggResp.Values, 1, "key=%s", tc.key)
+		assert.Equal(t, tc.want, suggResp.Values[0].Value, "key=%s", tc.key)
+	}
 }
 
 func TestUserMeDecisionSuggestions_AuthzScopeAndValidation(t *testing.T) {
@@ -415,4 +602,103 @@ func TestUserMeDecisionSuggestions_AuthzScopeAndValidation(t *testing.T) {
 	var bobResp DecisionSuggestionsResponse
 	require.NoError(t, json.Unmarshal(bobRR.Body.Bytes(), &bobResp))
 	assert.Equal(t, 2, bobResp.Total)
+
+	// R2: Profile route UATs (hub UAT without project:read -> 200 values: [],
+	// project-bounded UAT sees only its boundary project, UAT without inbox:read
+	// omits own DM across all 3 keys, UAT with inbox:read includes own DM) and
+	// federated user refusal.
+	t.Run("UATs and federated user", func(t *testing.T) {
+		cf := newChatFixture(t)
+		setDecisionsAndDialectExperiments(t, cf.srv, true, true)
+		cctx := context.Background()
+		bindProjectMember(t, cf.s, cf.projB, cf.member)
+
+		for _, ag := range []*store.Agent{cf.agentA, cf.agentB} {
+			ag.OwnerID = cf.member
+			ag.Ancestry = []string{cf.member}
+			ag.MessageMode = store.MessageModeProject
+			require.NoError(t, cf.s.UpdateAgent(cctx, ag))
+		}
+		dmOnlyAgent := &store.Agent{
+			ID: api.NewUUID(), Slug: "prof-dm-only-bot", Name: "prof-dm-only-bot",
+			ProjectID: cf.projA, OwnerID: cf.member, CreatedBy: cf.member, Ancestry: []string{cf.member},
+			Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, cf.s.CreateAgent(cctx, dmOnlyAgent))
+
+		memberUser, err := cf.s.GetUser(cctx, cf.member)
+		require.NoError(t, err)
+		dmOnlyAnswerer := &store.User{
+			ID: tid("prof-dm-ans"), Email: "prof-dm-ans@example.com", DisplayName: "Prof DM Only Answerer",
+			Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC(),
+		}
+		require.NoError(t, cf.s.CreateUser(cctx, dmOnlyAnswerer))
+
+		seedProfDec := func(projID, chatKey, recip string, ag *store.Agent, key string) string {
+			decs, nerr := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}]}]`))
+			require.NoError(t, nerr)
+			res, cerr := cf.s.CreateDecisionPrompt(cctx, &store.DecisionPromptInput{
+				Message: &store.Message{
+					ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
+					Recipient: recip, ThreadID: chatKey, Channel: "web", CreatedAt: time.Now().UTC(),
+				},
+				Intro: key, AskerAgentID: ag.ID, AskerAgentName: ag.Name, Decisions: decs,
+			})
+			require.NoError(t, cerr)
+			return res.Decisions[0].RowID
+		}
+		seedProfDec(cf.projA, cf.topicA, "chat", cf.agentA, "prof-a-topic")
+		seedProfDec(cf.projB, cf.topicB, "chat", cf.agentB, "prof-b-topic")
+
+		dmKeyA := cf.dm(t, cf.member, "agent", dmOnlyAgent.ID)
+		dmRowA := seedProfDec(cf.projA, dmKeyA, "user:"+cf.member, dmOnlyAgent, "prof-a-dm")
+		_, _, err = cf.s.RecordAnswer(cctx, &store.RecordAnswerInput{
+			DecisionRowID: dmRowA, ChoiceID: "yes",
+			AnsweredByUserID: dmOnlyAnswerer.ID, AnsweredByName: dmOnlyAnswerer.DisplayName, AnsweredByEmail: dmOnlyAnswerer.Email,
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{ID: api.NewUUID(), ProjectID: cf.projA, Sender: "user:" + dmOnlyAnswerer.Email, Recipient: "agent:" + dmOnlyAgent.Slug, ThreadID: dmKeyA, Msg: "yes"},
+		})
+		require.NoError(t, err)
+
+		// Federated user -> 403.
+		fed := NewFederatedUserIdentity("https://issuer.test", "sub-fed-prof", memberUser.Email, "Fed Member", "member", nil)
+		assert.Equal(t, http.StatusForbidden, requestAsIdentity(t, cf.srv, fed, http.MethodGet, suggPath+"?key=agent", nil).Code)
+
+		decodeVals := func(rr *httptest.ResponseRecorder) []string {
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var resp DecisionSuggestionsResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			out := make([]string, 0, len(resp.Values))
+			for _, v := range resp.Values {
+				out = append(out, v.Value)
+			}
+			return out
+		}
+
+		// Hub UAT without project:read -> 200 with empty values for all 3 keys.
+		tokHubNoProjRead := cf.mint(t, cf.member, hubBoundary(), "inbox:read")
+		for _, k := range []string{"agent", "conversation", "by"} {
+			assert.Empty(t, decodeVals(cf.call(t, tokHubNoProjRead, http.MethodGet, suggPath+"?key="+k, nil)), "key=%s", k)
+		}
+
+		// Project-bounded UAT (projA) without inbox:read -> sees projA topic only,
+		// NOT projB and NOT own DM across all 3 keys.
+		tokProjANoInbox := cf.mint(t, cf.member, projectBoundary(cf.projA), "project:read")
+		agVals := decodeVals(cf.call(t, tokProjANoInbox, http.MethodGet, suggPath+"?key=agent", nil))
+		assert.Contains(t, agVals, cf.agentA.Name)
+		assert.NotContains(t, agVals, cf.agentB.Name)
+		assert.NotContains(t, agVals, "prof-dm-only-bot")
+		assert.NotContains(t, decodeVals(cf.call(t, tokProjANoInbox, http.MethodGet, suggPath+"?key=conversation", nil)), "DM with prof-dm-only-bot")
+		assert.NotContains(t, decodeVals(cf.call(t, tokProjANoInbox, http.MethodGet, suggPath+"?key=by", nil)), "Prof DM Only Answerer")
+
+		// Project-bounded UAT (projA) with project:read + inbox:read + agent:read ->
+		// sees projA topic + own projA DM, still NOT projB!
+		tokProjAWithInbox := cf.mint(t, cf.member, projectBoundary(cf.projA), "project:read", "inbox:read", "agent:read")
+		agValsDM := decodeVals(cf.call(t, tokProjAWithInbox, http.MethodGet, suggPath+"?key=agent", nil))
+		assert.Contains(t, agValsDM, cf.agentA.Name)
+		assert.Contains(t, agValsDM, "prof-dm-only-bot")
+		assert.NotContains(t, agValsDM, cf.agentB.Name)
+		assert.Contains(t, decodeVals(cf.call(t, tokProjAWithInbox, http.MethodGet, suggPath+"?key=conversation", nil)), "DM with prof-dm-only-bot")
+		assert.Contains(t, decodeVals(cf.call(t, tokProjAWithInbox, http.MethodGet, suggPath+"?key=by", nil)), "Prof DM Only Answerer")
+	})
 }
