@@ -122,8 +122,11 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	// (testAdminGrantableAtProjectScope) so built-in project-owner and
 	// project-admin bindings remain assignable by test admins.
 	"project.manage_system_one_instances": testAdminPolicyDeny,
-	// Pre-start hook writes, held by hub admins only.
-	"project.manage_pre_start_hooks": testAdminPolicyAllow,
+	// Pre-start hook writes, held by hub admins only: deny, matching
+	// hub.lifecycle_hooks.update. Admin-kind test identities can hold web
+	// sessions and must not be able to plant hooks that execute in every
+	// agent of a project (and override the hub hook).
+	"project.manage_pre_start_hooks": testAdminPolicyDeny,
 	"project.clone":                  testAdminPolicyAllow,
 	"project.list":                   testAdminPolicyAllow,
 	// Posting into a project's chat threads, held by the built-in
@@ -382,6 +385,7 @@ var testAdminMustDenyPermissions = []string{
 	"access_constraint.admin",
 	"user.promote",
 	"secret.use",
+	"project.manage_pre_start_hooks",
 }
 
 // testAdminMustDenyPermissionPrefixes are permission families that are
