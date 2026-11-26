@@ -38,7 +38,7 @@ func setReviewRequestsForTest(t *testing.T, srv *Server, on bool) {
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		switch e.Name {
-		case experiments.Artifacts, experiments.FiltersQueryDialect, experiments.InboxDashboard:
+		case experiments.Artifacts, experiments.InboxDashboard:
 			e.Default = true
 		case experiments.ArtifactsReviewRequests:
 			e.Default = on

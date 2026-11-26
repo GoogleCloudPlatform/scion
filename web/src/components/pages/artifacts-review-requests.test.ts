@@ -22,7 +22,6 @@ import '../shared/artifact-list.js';
 import type { ScionArtifactList } from '../shared/artifact-list.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import type { ArtifactListItem } from '../../client/artifacts.js';
-import { FILTERS_QUERY_DIALECT_FLAG } from '../../shared/filter-query/index.js';
 import {
   ARTIFACTS_REVIEW_REQUESTS_FLAG,
   resetServerFlagStateForTests,
@@ -106,12 +105,10 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
   async function mountGlobal(opts: {
     search?: string;
     reviewRequestsOn: boolean;
-    dialectOn: boolean;
   }): Promise<ScionPageArtifacts> {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACTS_REVIEW_REQUESTS_FLAG]: opts.reviewRequestsOn,
-      [FILTERS_QUERY_DIALECT_FLAG]: opts.dialectOn,
     };
     window.history.replaceState(null, '', `/artifacts${opts.search ?? ''}`);
     const el = document.createElement('scion-page-artifacts') as ScionPageArtifacts;
@@ -130,45 +127,18 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
     const el = await mountGlobal({
       search: '?requested=1',
       reviewRequestsOn: false,
-      dialectOn: false,
     });
     const chips = [...el.shadowRoot!.querySelectorAll('.filter-chip')];
     expect(chips.find((c) => c.textContent?.trim() === 'Requested of me')).toBeUndefined();
     expect(urls[0].searchParams.get('requested')).toBeNull();
+    expect(urls[0].searchParams.get('q')).toBeNull();
   });
 
-  it('shows primary "Review requested" badge and hydrates ?requested=1 into chip state in legacy mode', async () => {
+  it('shows primary "Review requested" badge, hydrates ?requested=1 into is:requested, and strips legacy param', async () => {
     const urls = mockList([makeItem('a1', { reviewRequested: true })]);
     const el = await mountGlobal({
       search: '?requested=1',
       reviewRequestsOn: true,
-      dialectOn: false,
-    });
-
-    const chip = [...el.shadowRoot!.querySelectorAll('.filter-chip')].find(
-      (c) => c.textContent?.trim() === 'Requested of me'
-    ) as HTMLButtonElement;
-    expect(chip).toBeDefined();
-    expect(chip.getAttribute('aria-pressed')).toBe('true');
-    expect(urls[0].searchParams.get('requested')).toBe('1');
-
-    const badge = el.shadowRoot!.querySelector('tbody sl-badge[variant="primary"]');
-    expect(badge?.textContent?.trim()).toBe('Review requested');
-
-    // Toggling off updates URL and refetches without requested=1.
-    chip.click();
-    await settle(el);
-    expect(chip.getAttribute('aria-pressed')).toBe('false');
-    expect(new URLSearchParams(window.location.search).get('requested')).toBeNull();
-    expect(urls.at(-1)!.searchParams.get('requested')).toBeNull();
-  });
-
-  it('hydrates ?requested=1 into is:requested in dialect mode and strips legacy param', async () => {
-    const urls = mockList([makeItem('a1', { reviewRequested: true })]);
-    const el = await mountGlobal({
-      search: '?requested=1',
-      reviewRequestsOn: true,
-      dialectOn: true,
     });
 
     const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
@@ -177,6 +147,9 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
     expect(afterParams.get('q')).toBe('is:requested');
     expect(afterParams.get('requested')).toBeNull();
     expect(urls[0].searchParams.get('q')).toBe('is:requested');
+
+    const badge = el.shadowRoot!.querySelector('tbody sl-badge[variant="primary"]');
+    expect(badge?.textContent?.trim()).toBe('Review requested');
 
     const chip = [...el.shadowRoot!.querySelectorAll('.filter-chip')].find(
       (c) => c.textContent?.trim() === 'Requested of me'
@@ -196,7 +169,6 @@ describe('artifacts list & project artifact-list: review requests (P1)', () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACTS_REVIEW_REQUESTS_FLAG]: true,
-      [FILTERS_QUERY_DIALECT_FLAG]: true,
     };
     window.history.replaceState(null, '', `/projects/${PROJECT_ID}?requested=1`);
 

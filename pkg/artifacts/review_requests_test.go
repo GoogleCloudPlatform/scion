@@ -143,7 +143,6 @@ func newReviewRequestFixture(t *testing.T) (*Service, *reviewRequestTestHost, St
 	svc := NewService(h)
 	svc.SetStore(st)
 	svc.SetBlobStorage(blobs, "hub-test")
-	svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return true })
 
 	pAlice := principal{PrincipalKindUser, "alice", ""}
 	pBob := principal{PrincipalKindUser, "bob", ""}
