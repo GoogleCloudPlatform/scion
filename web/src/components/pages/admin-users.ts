@@ -37,9 +37,16 @@ import '../shared/effective-access-boundary-notice.js';
 import '../shared/effective-permissions-view.js';
 import type { ScionEffectivePermissionsView } from '../shared/effective-permissions-view.js';
 import '../shared/security-review-dialog.js';
+import '../shared/invite-users-dialog.js';
+import type {
+  InviteCompletedDetail,
+  InviteDialogMode,
+  InviteFeedbackDetail,
+} from '../shared/invite-users-dialog.js';
+export { provisionWarningText } from '../shared/invite-batch-utils.js';
 import { invitedStatusTagStyles } from '../shared/styles.js';
 import { formatRelative } from '../../utils/time.js';
-import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { stateManager } from '../../client/state.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
@@ -299,27 +306,6 @@ const FEEDBACK_AUTO_CLOSE_MS = 5000;
 /** Variants of the page's action feedback alert. */
 type FeedbackVariant = 'success' | 'danger' | 'warning' | 'primary';
 
-/** Response body of POST /api/v1/users. */
-interface ProvisionUserResponse {
-  user: { id?: string; email: string; status: string };
-  created: boolean;
-  warnings?: string[];
-}
-
-/** Describes an advisory warning of POST /api/v1/users. */
-export function provisionWarningText(warning: string): string {
-  switch (warning) {
-    case 'reserved_identity':
-      return 'This email is a reserved platform identity; sign-in will be refused.';
-    case 'domain_not_authorized':
-      return "This email is outside the hub's authorized domains; sign-in will be refused.";
-    case 'sign_in_currently_blocked_by_access_mode':
-      return "The hub's access mode currently blocks all sign-ins.";
-    default:
-      return `Warning: ${warning}.`;
-  }
-}
-
 @customElement('scion-page-admin-users')
 export class ScionPageAdminUsers extends LitElement {
   @state()
@@ -362,6 +348,13 @@ export class ScionPageAdminUsers extends LitElement {
   @state()
   private canInviteUsers = false;
 
+  /**
+   * Whether the signed-in viewer holds `user.read` (from `/api/v1/auth/admin-status`).
+   * Gates optional project memberships in the batch invite dialog.
+   */
+  @state()
+  private canReadUsers = false;
+
   @state()
   private confirmAction: ConfirmAction | null = null;
 
@@ -384,33 +377,12 @@ export class ScionPageAdminUsers extends LitElement {
   @state()
   private roleFilter: RoleFilter = 'all';
 
-  // Invite user dialog state
+  // Invite / CSV import dialog state
   @state()
-  private showInviteUserDialog = false;
+  private showInviteDialog = false;
 
   @state()
-  private inviteUserEmail = '';
-
-  @state()
-  private inviteUserNote = '';
-
-  /**
-   * Optional display name. When set, the invite dialog pre-registers the
-   * user through POST /api/v1/users, which stores the name; otherwise it
-   * uses the invite endpoint as before.
-   */
-  @state()
-  private inviteUserDisplayName = '';
-
-  @state()
-  private inviteUserInProgress = false;
-
-  // Bulk import dialog state
-  @state()
-  private showImportDialog = false;
-
-  @state()
-  private importInProgress = false;
+  private inviteDialogMode: InviteDialogMode = 'invite';
 
   // Invite codes tab state
   @state()
@@ -1090,6 +1062,7 @@ export class ScionPageAdminUsers extends LitElement {
           void this.loadInvitePermission(userId);
         } else if (!userId) {
           this.canInviteUsers = false;
+          this.canReadUsers = false;
           if (this.activeTab === 'invites') {
             this.activeTab = 'users';
           }
@@ -1110,6 +1083,7 @@ export class ScionPageAdminUsers extends LitElement {
     const status = await loadAdminStatus(userId);
     if (!this.isConnected || userId !== this.currentUserId) return;
     this.canInviteUsers = hasAnyPermission(status, ['user.invite']);
+    this.canReadUsers = hasAnyPermission(status, ['user.read']);
     if (!this.canInviteUsers && this.activeTab === 'invites') {
       this.activeTab = 'users';
     }
@@ -1861,139 +1835,6 @@ export class ScionPageAdminUsers extends LitElement {
     void this.loadUsers();
   }
 
-  // ==================== Invite User ====================
-
-  private async inviteUser(): Promise<void> {
-    const email = this.inviteUserEmail.trim().toLowerCase();
-    if (!email || !email.includes('@')) return;
-
-    this.inviteUserInProgress = true;
-    try {
-      const displayName = this.inviteUserDisplayName.trim();
-      const done = displayName
-        ? await this.provisionUser(email, displayName)
-        : await this.inviteUserByEmail(email);
-      if (!done) return;
-      this.showInviteUserDialog = false;
-      this.inviteUserEmail = '';
-      this.inviteUserNote = '';
-      this.inviteUserDisplayName = '';
-      void this.loadUsers(
-        this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
-      );
-    } catch (err) {
-      this.showFeedback('danger', err instanceof Error ? err.message : 'Failed to invite user');
-    } finally {
-      this.inviteUserInProgress = false;
-    }
-  }
-
-  /** Invites through the invite endpoint. Returns true on success. */
-  private async inviteUserByEmail(email: string): Promise<boolean> {
-    const response = await apiFetch('/api/v1/admin/users/invite', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, note: this.inviteUserNote }),
-    });
-    if (response.status === 409) {
-      this.showFeedback('danger', 'User already exists.');
-      return false;
-    }
-    if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-    }
-    this.showFeedback('success', `Invited ${email}.`);
-    return true;
-  }
-
-  /**
-   * Pre-registers the user with a display name through POST /api/v1/users.
-   * Returns true when the user is (or already was) pre-registered with
-   * these details.
-   */
-  private async provisionUser(email: string, displayName: string): Promise<boolean> {
-    const body: { email: string; displayName: string; note?: string } = { email, displayName };
-    if (this.inviteUserNote) body.note = this.inviteUserNote;
-    const response = await apiFetch('/api/v1/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (response.status === 409) {
-      const { details } = await parseApiError(response, '');
-      const reason = typeof details?.reason === 'string' ? details.reason : undefined;
-      if (reason === 'pending_user_exists') {
-        this.showFeedback(
-          'danger',
-          'A pending record for this email exists with different details.'
-        );
-      } else if (reason === 'user_suspended_exists') {
-        this.showFeedback('danger', 'This email belongs to a suspended user.');
-      } else {
-        this.showFeedback('danger', 'User already exists.');
-      }
-      return false;
-    }
-    if (!response.ok) {
-      throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-    }
-    let result: ProvisionUserResponse | null = null;
-    try {
-      result = (await response.json()) as ProvisionUserResponse;
-    } catch {
-      // A success response without a readable body: report the success.
-    }
-    const warnings = (result?.warnings ?? []).map(provisionWarningText);
-    const message =
-      result && !result.created
-        ? `${email} is already pre-registered with these details.`
-        : `Invited ${email}.`;
-    if (warnings.length > 0) {
-      this.showFeedback('warning', `${message} ${warnings.join(' ')}`);
-    } else {
-      this.showFeedback(result && !result.created ? 'primary' : 'success', message);
-    }
-    return true;
-  }
-
-  // ==================== Bulk Import ====================
-
-  private async importCSV(): Promise<void> {
-    const input = this.shadowRoot?.querySelector('#import-file-input') as HTMLInputElement;
-    if (!input?.files?.length) {
-      this.showFeedback('danger', 'Please select a file.');
-      return;
-    }
-
-    const file = input.files[0];
-    const formData = new FormData();
-    formData.append('file', file);
-
-    this.importInProgress = true;
-    try {
-      const response = await apiFetch('/api/v1/admin/users/invite/bulk', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!response.ok) {
-        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
-      }
-      const result = (await response.json()) as { invited: number; skipped: number; total: number };
-      this.showFeedback(
-        'success',
-        `Import complete: ${result.invited} invited, ${result.skipped} skipped.`
-      );
-      this.showImportDialog = false;
-      void this.loadUsers(
-        this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
-      );
-    } catch (err) {
-      this.showFeedback('danger', err instanceof Error ? err.message : 'Import failed');
-    } finally {
-      this.importInProgress = false;
-    }
-  }
-
   // ==================== Invite Codes Tab ====================
 
   private async loadInvites(): Promise<void> {
@@ -2166,9 +2007,36 @@ export class ScionPageAdminUsers extends LitElement {
             ? this.renderError()
             : this.renderUsers()
         : this.renderInvitesTab()}
-      ${this.renderConfirmDialog()} ${this.renderDeletionPanel()} ${this.renderInviteUserDialog()}
-      ${this.renderImportDialog()} ${this.renderCreateInviteDialog()}
-      ${this.renderInviteRevealDialog()} ${this.renderViewRolesDialog()}
+      ${this.renderConfirmDialog()} ${this.renderDeletionPanel()}
+      ${this.canInviteUsers
+        ? html`
+            <scion-invite-users-dialog
+              ?open=${this.showInviteDialog}
+              .mode=${this.inviteDialogMode}
+              ?canReadUsers=${this.canReadUsers}
+              @invite-dialog-close=${() => {
+                this.showInviteDialog = false;
+              }}
+              @invite-completed=${(e: CustomEvent<InviteCompletedDetail>) => {
+                if (e.detail.feedback) {
+                  this.showFeedback(e.detail.feedback.variant, e.detail.feedback.message);
+                }
+                if (e.detail.reload) {
+                  void this.loadUsers(
+                    this.currentPage > 1
+                      ? this.cursorHistory[this.cursorHistory.length - 1]
+                      : undefined
+                  );
+                }
+              }}
+              @invite-feedback=${(e: CustomEvent<InviteFeedbackDetail>) => {
+                this.showFeedback(e.detail.variant, e.detail.message);
+              }}
+            ></scion-invite-users-dialog>
+          `
+        : nothing}
+      ${this.renderCreateInviteDialog()} ${this.renderInviteRevealDialog()}
+      ${this.renderViewRolesDialog()}
       <scion-security-review-dialog
         ?open=${this.showSecurityReview}
         .detail=${this.securityReviewDetail}
@@ -2267,7 +2135,8 @@ export class ScionPageAdminUsers extends LitElement {
                   variant="primary"
                   style="margin-top: 1rem"
                   @click=${() => {
-                    this.showInviteUserDialog = true;
+                    this.inviteDialogMode = 'invite';
+                    this.showInviteDialog = true;
                   }}
                 >
                   <sl-icon slot="prefix" name="person-plus"></sl-icon>
@@ -2294,7 +2163,8 @@ export class ScionPageAdminUsers extends LitElement {
                   size="small"
                   variant="default"
                   @click=${() => {
-                    this.showImportDialog = true;
+                    this.inviteDialogMode = 'csv';
+                    this.showInviteDialog = true;
                   }}
                 >
                   <sl-icon slot="prefix" name="upload"></sl-icon>
@@ -2304,7 +2174,8 @@ export class ScionPageAdminUsers extends LitElement {
                   size="small"
                   variant="primary"
                   @click=${() => {
-                    this.showInviteUserDialog = true;
+                    this.inviteDialogMode = 'invite';
+                    this.showInviteDialog = true;
                   }}
                 >
                   <sl-icon slot="prefix" name="person-plus"></sl-icon>
@@ -2835,113 +2706,6 @@ export class ScionPageAdminUsers extends LitElement {
           ? html`<p class="delete-blockers-more">More are not shown.</p>`
           : nothing}
       </div>
-    `;
-  }
-
-  private renderInviteUserDialog() {
-    if (!this.showInviteUserDialog || !this.canInviteUsers) return nothing;
-
-    return html`
-      <sl-dialog
-        label="Invite User"
-        open
-        @sl-request-close=${() => {
-          if (!this.inviteUserInProgress) this.showInviteUserDialog = false;
-        }}
-      >
-        <div class="invite-form">
-          <sl-input
-            label="Email address"
-            type="email"
-            placeholder="user@example.com"
-            .value=${this.inviteUserEmail}
-            @sl-input=${(e: Event) => {
-              this.inviteUserEmail = (e.target as HTMLInputElement).value;
-            }}
-            required
-          ></sl-input>
-          <sl-input
-            label="Display name (optional)"
-            placeholder="e.g., Alice Smith"
-            help-text="Replaced at first sign-in by the name from the sign-in provider, if it supplies one."
-            maxlength="128"
-            .value=${this.inviteUserDisplayName}
-            @sl-input=${(e: Event): void => {
-              this.inviteUserDisplayName = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
-          <sl-input
-            label="Note (optional)"
-            placeholder="e.g., New hire, Q3 contractor"
-            .value=${this.inviteUserNote}
-            @sl-input=${(e: Event) => {
-              this.inviteUserNote = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
-          <p class="invite-role-hint">
-            Role is assigned at first sign-in using the hub default (Admin &gt; Server Config).
-          </p>
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.inviteUserInProgress}
-          @click=${() => {
-            this.showInviteUserDialog = false;
-          }}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.inviteUserInProgress}
-          ?disabled=${!this.inviteUserEmail.trim().includes('@')}
-          @click=${() => this.inviteUser()}
-          >Invite User</sl-button
-        >
-      </sl-dialog>
-    `;
-  }
-
-  private renderImportDialog() {
-    if (!this.showImportDialog || !this.canInviteUsers) return nothing;
-    return html`
-      <sl-dialog
-        label="Import Users from CSV"
-        open
-        @sl-request-close=${() => {
-          if (!this.importInProgress) this.showImportDialog = false;
-        }}
-      >
-        <div class="import-form">
-          <p style="margin: 0 0 1rem; font-size: 0.875rem; color: var(--scion-text-muted)">
-            Upload a CSV file with one email per line. An optional second column can contain notes.
-            Users will be created with <strong>invited</strong> status.
-          </p>
-          <input
-            type="file"
-            accept=".csv,.txt"
-            id="import-file-input"
-            style="margin-bottom: 1rem"
-          />
-        </div>
-        <sl-button
-          slot="footer"
-          variant="default"
-          ?disabled=${this.importInProgress}
-          @click=${() => {
-            this.showImportDialog = false;
-          }}
-          >Cancel</sl-button
-        >
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.importInProgress}
-          @click=${() => this.importCSV()}
-          >Import</sl-button
-        >
-      </sl-dialog>
     `;
   }
 
