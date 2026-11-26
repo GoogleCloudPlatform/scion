@@ -2351,6 +2351,9 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.reconcileLifecycleEvents(context.Background())
 	s.reconcileTriggerDrainer(context.Background())
 	s.reconcileUsageLedgerAsync(context.Background())
+	if slices.Contains(applied, "telemetry_config") {
+		s.reconcileUsageRetentionSchedule()
+	}
 
 	return map[string]interface{}{
 		"applied":          applied,

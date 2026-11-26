@@ -2860,6 +2860,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{MeterHealthColumns[12], MeterHealthColumns[13]},
 			},
+			{
+				Name:    "meterhealth_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{MeterHealthColumns[13]},
+			},
 		},
 	}
 	// MutationAuditsColumns holds the columns for the "mutation_audits" table.
@@ -3469,6 +3474,11 @@ var (
 				Name:    "runattribution_billing_user_id_created_at",
 				Unique:  false,
 				Columns: []*schema.Column{RunAttributionColumns[9], RunAttributionColumns[25]},
+			},
+			{
+				Name:    "runattribution_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{RunAttributionColumns[25]},
 			},
 		},
 	}
@@ -4663,6 +4673,11 @@ var (
 				Name:    "usageevent_run_id",
 				Unique:  false,
 				Columns: []*schema.Column{UsageEventsColumns[35]},
+			},
+			{
+				Name:    "usageevent_event_ts",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[28]},
 			},
 		},
 	}

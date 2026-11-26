@@ -2912,6 +2912,7 @@
         "hub": { "$ref": "#/$defs/telemetryHub" },
         "local": { "$ref": "#/$defs/telemetryLocal" },
         "filter": { "$ref": "#/$defs/telemetryFilter" },
+        "retention": { "$ref": "#/$defs/telemetryRetention" },
         "resource": {
           "type": "object",
           "description": "Resource attributes added to all telemetry events (e.g., service.name).",
@@ -3047,6 +3048,62 @@
           "type": "string",
           "default": "30s",
           "description": "Interval between Hub telemetry reports (e.g., '30s').",
+          "x-since": "1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "telemetryRetention": {
+      "type": "object",
+      "description": "Hub DB usage-ledger retention settings. Explicit 0 on *_days fields opts into unlimited retention.",
+      "properties": {
+        "usage_events_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 45,
+          "description": "Retention window in days for usage_events (min 35, or 0 for unlimited).",
+          "x-since": "1"
+        },
+        "hourly_rollups_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 14,
+          "description": "Retention window in days for usage_rollups_hourly (min 1, or 0 for unlimited).",
+          "x-since": "1"
+        },
+        "daily_rollups_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 365,
+          "description": "Retention window in days for usage_rollups_daily (min 90, or 0 for unlimited).",
+          "x-since": "1"
+        },
+        "scope_counters_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 90,
+          "description": "Retention window in days for usage_scope_counters_daily (min 65, or 0 for unlimited; always preserves current and previous calendar months).",
+          "x-since": "1"
+        },
+        "meter_health_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 30,
+          "description": "Retention window in days for closed/abandoned meter_health rows (min 1, or 0 for unlimited).",
+          "x-since": "1"
+        },
+        "sweep_interval": {
+          "type": "string",
+          "default": "24h",
+          "description": "Cadence between Hub DB usage retention sweeps (Go duration, min '1m').",
+          "x-since": "1"
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50000,
+          "default": 5000,
+          "description": "Maximum rows deleted per transaction batch during retention sweeps.",
           "x-since": "1"
         }
       },

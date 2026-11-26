@@ -3329,6 +3329,10 @@ type Server struct {
 	// configured (usage_otel.go).
 	usageOTelMetrics *UsageOTelMetrics
 
+	// usageRetention holds the bounded Hub DB retention sweeper for Track 1
+	// usage tables (usage_retention.go).
+	usageRetention *UsageRetentionSweeper
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -7685,6 +7689,15 @@ func (s *Server) registerSchedulerHandlers() {
 	// enabled, and a retention window are all active and tick_interval_minutes
 	// have elapsed.
 	s.scheduler.RegisterRecurringSingleton("decision-retention", 1, store.LockDecisionRetention, s.decisionRetentionHandler())
+	// Bounded Hub DB usage-ledger retention (tokenomics.usage_ledger, ptone/scion#9237):
+	// nightly by default (configurable via telemetry.retention.sweep_interval),
+	// single-leader across replicas via LockUsageRetention.
+	s.scheduler.RegisterRecurringSingleton(
+		usageRetentionJobName,
+		usageRetentionIntervalMinutes(s.usageRetentionConfig()),
+		store.LockUsageRetention,
+		s.usageRetentionHandler(),
+	)
 	s.scheduler.RegisterRecurringSingleton("exposed-ports-sweep", 5, store.LockExposedPortsSweep, s.exposedPortsSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-dispatch-sweep", 5, store.LockNotificationDispatchSweep, s.notificationDispatchSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())

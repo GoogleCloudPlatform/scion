@@ -3158,12 +3158,26 @@ type V1CLIConfig struct {
 // Configurable at global or project scope in settings.yaml, and overridable per-template/agent
 // in scion-agent.yaml. See design doc section 10.2 for the full reference.
 type V1TelemetryConfig struct {
-	Enabled  *bool                    `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
-	Cloud    *V1TelemetryCloudConfig  `json:"cloud,omitempty" yaml:"cloud,omitempty" koanf:"cloud"`
-	Hub      *V1TelemetryHubConfig    `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Local    *V1TelemetryLocalConfig  `json:"local,omitempty" yaml:"local,omitempty" koanf:"local"`
-	Filter   *V1TelemetryFilterConfig `json:"filter,omitempty" yaml:"filter,omitempty" koanf:"filter"`
-	Resource map[string]string        `json:"resource,omitempty" yaml:"resource,omitempty" koanf:"resource"`
+	Enabled   *bool                       `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Cloud     *V1TelemetryCloudConfig     `json:"cloud,omitempty" yaml:"cloud,omitempty" koanf:"cloud"`
+	Hub       *V1TelemetryHubConfig       `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Local     *V1TelemetryLocalConfig     `json:"local,omitempty" yaml:"local,omitempty" koanf:"local"`
+	Filter    *V1TelemetryFilterConfig    `json:"filter,omitempty" yaml:"filter,omitempty" koanf:"filter"`
+	Retention *V1TelemetryRetentionConfig `json:"retention,omitempty" yaml:"retention,omitempty" koanf:"retention"`
+	Resource  map[string]string           `json:"resource,omitempty" yaml:"resource,omitempty" koanf:"resource"`
+}
+
+// V1TelemetryRetentionConfig holds Hub DB usage-ledger retention settings
+// (Tokenomics design §4.2). Pointer *int fields distinguish unset (use default)
+// from explicit 0 (opt-in unlimited retention). Hub-only.
+type V1TelemetryRetentionConfig struct {
+	UsageEventsDays   *int   `json:"usage_events_days,omitempty" yaml:"usage_events_days,omitempty" koanf:"usage_events_days"`
+	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty" koanf:"hourly_rollups_days"`
+	DailyRollupsDays  *int   `json:"daily_rollups_days,omitempty" yaml:"daily_rollups_days,omitempty" koanf:"daily_rollups_days"`
+	ScopeCountersDays *int   `json:"scope_counters_days,omitempty" yaml:"scope_counters_days,omitempty" koanf:"scope_counters_days"`
+	MeterHealthDays   *int   `json:"meter_health_days,omitempty" yaml:"meter_health_days,omitempty" koanf:"meter_health_days"`
+	SweepInterval     string `json:"sweep_interval,omitempty" yaml:"sweep_interval,omitempty" koanf:"sweep_interval"`
+	BatchSize         *int   `json:"batch_size,omitempty" yaml:"batch_size,omitempty" koanf:"batch_size"`
 }
 
 // V1TelemetryCloudConfig holds cloud OTLP forwarding settings.

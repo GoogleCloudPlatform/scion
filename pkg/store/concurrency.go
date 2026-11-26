@@ -345,6 +345,12 @@ const (
 	// retention window.
 	LockDecisionRetention AdvisoryLockKey = 0x5C100036
 
+	// LockUsageRetention guards the Track 1 usage-ledger bounded retention
+	// sweeper ("usage-retention", ptone/scion#9237), so at most one replica
+	// runs batched retention deletes across usage_events, rollups, scope
+	// counters, meter_health, and run_attribution at a time.
+	LockUsageRetention AdvisoryLockKey = 0x5C100037
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

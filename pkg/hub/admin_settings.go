@@ -888,6 +888,12 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Telemetry != nil && req.Telemetry.Retention != nil {
+		if err := config.ValidateV1TelemetryRetention(req.Telemetry.Retention); err != nil {
+			writeSettingsFieldError(w, "telemetry.retention", err.Error())
+			return
+		}
+	}
 
 	// Start-claim timing (server.hub.start_*): the same check, ranges and 422
 	// as the DB-mode handler (validateStartClaimSettingStrings, against the

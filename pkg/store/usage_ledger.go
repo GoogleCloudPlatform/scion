@@ -538,4 +538,50 @@ type UsageLedgerStore interface {
 	// project_id whose latest open meter_health receipt is strictly older than
 	// staleBefore (and not superseded by a newer non-open epoch).
 	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
+
+	UsageRetentionStore
+}
+
+// UsageExportCursor is the analytics export watermark for usage_events (P8).
+// When provided to SweepUsageEventsBatch, only rows at or before this cursor
+// are eligible for retention deletion; rows newer than the cursor are kept
+// until exported.
+type UsageExportCursor struct {
+	ReceivedAt time.Time
+	// EventID is an optional tie-breaker matching the (received_at, event_id)
+	// index. When empty, all rows with received_at <= ReceivedAt are eligible.
+	EventID string
+}
+
+// UsageRetentionStore defines bounded-batch retention sweep operations for the
+// Hub DB Track 1 usage tables (Tokenomics design §4.2, D8/D8a). Each method
+// deletes at most batchSize rows in one transaction and returns the deleted
+// row count.
+type UsageRetentionStore interface {
+	// SweepUsageEventsBatch deletes up to batchSize usage_events rows with
+	// event_ts < cutoff (and at or before exportCursor when non-nil).
+	SweepUsageEventsBatch(ctx context.Context, cutoff time.Time, exportCursor *UsageExportCursor, batchSize int) (int64, error)
+
+	// SweepUsageRollupsHourlyBatch deletes up to batchSize usage_rollups_hourly
+	// rows with bucket_start < cutoff.
+	SweepUsageRollupsHourlyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageRollupsDailyBatch deletes up to batchSize usage_rollups_daily
+	// rows with bucket_start < cutoff.
+	SweepUsageRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageScopeCountersDailyBatch deletes up to batchSize
+	// usage_scope_counters_daily rows with day_utc < cutoff.
+	SweepUsageScopeCountersDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepMeterHealthBatch deletes up to batchSize meter_health rows with
+	// updated_at < cutoff that do not belong to the current run of a live
+	// (non-deleted) agent (D8 rule).
+	SweepMeterHealthBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepRunAttributionBatch deletes up to batchSize run_attribution rows
+	// with created_at < cutoff, legal_hold = false, not the current run of a
+	// live (non-deleted) agent, and with no remaining usage_events or
+	// meter_health rows referencing the run (D8a rule).
+	SweepRunAttributionBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }

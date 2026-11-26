@@ -514,6 +514,11 @@ func loadVersionedSettings(projectPath string, opts versionedLoadOptions) (*Vers
 			return nil, nil, err
 		}
 	}
+	if settings.Telemetry != nil && settings.Telemetry.Retention != nil {
+		if err := ValidateV1TelemetryRetention(settings.Telemetry.Retention); err != nil {
+			return nil, nil, err
+		}
+	}
 	return settings, res, nil
 }
 

@@ -150,6 +150,7 @@ func (RunAttribution) Indexes() []ent.Index {
 		index.Fields("agent_id", "created_at"),
 		index.Fields("project_id", "created_at"),
 		index.Fields("billing_user_id", "created_at"),
+		index.Fields("created_at"),
 	}
 }
 

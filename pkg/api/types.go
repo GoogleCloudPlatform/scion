@@ -444,12 +444,26 @@ type AgentHubConfig struct {
 // TelemetryConfig holds telemetry/observability settings at the agent/template level.
 // These are merged with settings-level telemetry config (last write wins).
 type TelemetryConfig struct {
-	Enabled  *bool                  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Cloud    *TelemetryCloudConfig  `json:"cloud,omitempty" yaml:"cloud,omitempty"`
-	Hub      *TelemetryHubConfig    `json:"hub,omitempty" yaml:"hub,omitempty"`
-	Local    *TelemetryLocalConfig  `json:"local,omitempty" yaml:"local,omitempty"`
-	Filter   *TelemetryFilterConfig `json:"filter,omitempty" yaml:"filter,omitempty"`
-	Resource map[string]string      `json:"resource,omitempty" yaml:"resource,omitempty"`
+	Enabled   *bool                     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Cloud     *TelemetryCloudConfig     `json:"cloud,omitempty" yaml:"cloud,omitempty"`
+	Hub       *TelemetryHubConfig       `json:"hub,omitempty" yaml:"hub,omitempty"`
+	Local     *TelemetryLocalConfig     `json:"local,omitempty" yaml:"local,omitempty"`
+	Filter    *TelemetryFilterConfig    `json:"filter,omitempty" yaml:"filter,omitempty"`
+	Retention *TelemetryRetentionConfig `json:"retention,omitempty" yaml:"retention,omitempty"`
+	Resource  map[string]string         `json:"resource,omitempty" yaml:"resource,omitempty"`
+}
+
+// TelemetryRetentionConfig holds Hub DB usage-ledger retention settings.
+// Pointer *int fields distinguish unset (use compiled default) from explicit 0
+// (opt-in unlimited retention). Hub-only; never injected into agent containers.
+type TelemetryRetentionConfig struct {
+	UsageEventsDays   *int   `json:"usage_events_days,omitempty" yaml:"usage_events_days,omitempty"`
+	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty"`
+	DailyRollupsDays  *int   `json:"daily_rollups_days,omitempty" yaml:"daily_rollups_days,omitempty"`
+	ScopeCountersDays *int   `json:"scope_counters_days,omitempty" yaml:"scope_counters_days,omitempty"`
+	MeterHealthDays   *int   `json:"meter_health_days,omitempty" yaml:"meter_health_days,omitempty"`
+	SweepInterval     string `json:"sweep_interval,omitempty" yaml:"sweep_interval,omitempty"`
+	BatchSize         *int   `json:"batch_size,omitempty" yaml:"batch_size,omitempty"`
 }
 
 // TelemetryCloudConfig holds cloud OTLP forwarding settings.
