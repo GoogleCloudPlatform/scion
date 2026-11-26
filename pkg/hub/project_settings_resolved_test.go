@@ -402,6 +402,13 @@ func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 	var settings map[string]map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(body["settings"], &settings))
 
+	// On per-setting entries, "effective" is a declared nullable field that
+	// must be null whenever the setting is not locked by the hub; the other
+	// names remain forbidden outright.
+	entryForbiddenNames := []string{
+		"value", "effectiveValue", "source", "winner",
+	}
+
 	for _, key := range projectSettingKeys {
 		entry, ok := settings[key]
 		require.Truef(t, ok, "registered setting %q missing from the wire payload", key)
@@ -413,11 +420,17 @@ func TestResolvedSettings_EndpointReturnsNoEffectiveValue(t *testing.T) {
 		// the whole of this phase the guard could not see a promoted field, and
 		// this denylist is what actually fired. Neither is authoritative over
 		// the other; they fail on different things.
-		for _, forbidden := range forbiddenNames {
+		for _, forbidden := range entryForbiddenNames {
 			assert.NotContainsf(t, entry, forbidden,
 				"the resolved response must not carry %q: this endpoint does not "+
 					"resolve precedence", forbidden)
 		}
+		assert.Equal(t, "null", string(entry["effective"]),
+			"unlocked setting %q must report effective=null", key)
+		assert.Equal(t, "null", string(entry["lockedBy"]),
+			"unlocked setting %q must report lockedBy=null", key)
+		assert.Equal(t, "null", string(entry["storedValue"]),
+			"unlocked setting %q must report storedValue=null", key)
 
 		require.Contains(t, entry, "hubDefault")
 		var state string

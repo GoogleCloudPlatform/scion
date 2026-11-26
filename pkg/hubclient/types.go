@@ -363,6 +363,12 @@ type ResolvedProjectSetting struct {
 	// Ceiling is the active Hub run-limit ceiling for this setting when
 	// configured and enabled, null otherwise.
 	Ceiling any `json:"ceiling"`
+	// LockedBy reports the layer locking this setting ("hub"), or null when unlocked.
+	LockedBy *string `json:"lockedBy"`
+	// Effective is the enforced value when LockedBy is non-null, null otherwise.
+	Effective any `json:"effective"`
+	// StoredValue is the shadowed project value when LockedBy is non-null, null otherwise.
+	StoredValue any `json:"storedValue"`
 }
 
 // ResolvedProjectSettings is the GET /api/v1/projects/{id}/settings/resolved

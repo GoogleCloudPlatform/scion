@@ -333,6 +333,12 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			return false
 		}
 	}
+	if s.telemetryEnforced() {
+		if field, disabled := configDisablesTelemetry(withChangedEnvOnly(cfg, stored, ep)); disabled {
+			writeTelemetryEnforcedRefusal(w, field)
+			return false
+		}
+	}
 	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
 }
 

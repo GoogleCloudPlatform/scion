@@ -1867,6 +1867,16 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// When telemetry is enforced by the hub operator, refuse requester-level
+	// attempts to disable it (config.telemetry.enabled=false or
+	// SCION_TELEMETRY_ENABLED=false) up front at create.
+	if s.telemetryEnforced() {
+		if field, disabled := configDisablesTelemetry(req.Config); disabled {
+			writeTelemetryEnforcedRefusal(w, field)
+			return
+		}
+	}
+
 	// Resolve effective agent role using the authority lattice.
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.

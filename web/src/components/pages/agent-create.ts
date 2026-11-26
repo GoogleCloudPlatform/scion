@@ -119,6 +119,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projectSettings: ProjectCreateDefaults | null = null;
   /** Active Hub run-limit ceilings from resolved project settings, if any. */
   @state() private limitCeilings: AgentLimitCeilings | null = null;
+  @state() private telemetryLockedByHub = false;
+  private projectTelemetryLockedCache = new Map<string, boolean>();
 
   /**
    * The GCP identity picker's state. Owned here, so submit can validate and
@@ -616,6 +618,7 @@ export class ScionPageAgentCreate extends LitElement {
     const isStale = this.projectLoadGuard();
     this.projectSettings = null;
     this.limitCeilings = null;
+    this.telemetryLockedByHub = false;
     const [settings, ceilings] = await Promise.all([
       this.fetchProjectSettings(this.projectId),
       this.fetchProjectLimitCeilings(this.projectId),
@@ -623,6 +626,7 @@ export class ScionPageAgentCreate extends LitElement {
     if (isStale()) return;
     this.projectSettings = settings;
     this.limitCeilings = ceilings;
+    this.telemetryLockedByHub = this.projectTelemetryLockedCache.get(this.projectId) ?? false;
   }
 
   /**
@@ -817,9 +821,22 @@ export class ScionPageAgentCreate extends LitElement {
     if (cached !== undefined) return cached;
 
     try {
+      const resolvedRes = await apiFetch(`/api/v1/projects/${projectId}/settings/resolved`);
+      if (resolvedRes.ok) {
+        const resolved = (await resolvedRes.json()) as {
+          project?: ProjectCreateDefaults;
+          settings?: Record<string, { lockedBy?: string | null }>;
+        };
+        const data = resolved.project ?? {};
+        const locked = resolved.settings?.['scion.io/telemetry-enabled']?.lockedBy === 'hub';
+        this.projectTelemetryLockedCache.set(projectId, locked);
+        this.projectSettingsCache.set(projectId, data);
+        return data;
+      }
       const res = await apiFetch(`/api/v1/projects/${projectId}/settings`);
       if (res.ok) {
         const data = (await res.json()) as ProjectCreateDefaults;
+        this.projectTelemetryLockedCache.set(projectId, false);
         this.projectSettingsCache.set(projectId, data);
         return data;
       }
@@ -1164,6 +1181,7 @@ export class ScionPageAgentCreate extends LitElement {
             .gcpIdentity=${this.gcp}
             ?branchAvailable=${!!this.selectedProject?.gitRemote &&
             !isSharedWorkspace(this.selectedProject)}
+            ?telemetryLockedByHub=${this.telemetryLockedByHub}
             ?disabled=${this.submitting}
           ></scion-agent-config-form>
         </sl-details>

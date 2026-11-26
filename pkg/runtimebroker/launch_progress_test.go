@@ -678,6 +678,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "preempted by ns-secret/agent-secret-pod", "the agent pod was preempted, evicted or deleted while starting"},
 		{api.LaunchCodeLaunchTimeout, api.LaunchStepAwaitingCapacity, "", "launch timed out waiting for the agent pod to be ready"},
 		{api.LaunchCodeWorkspaceNotPermitted, api.LaunchStepLaunching, "", "the agent workspace path is not permitted"},
+		{api.LaunchCodeTelemetryEnforcementUnsupported, api.LaunchStepLaunching, "", "the runtime broker does not support enforced telemetry; upgrade the broker"},
 		// A reason that is not an enum (free text) is never reported.
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "back-off restarting ns-secret/agent-secret-pod", "the agent container keeps crashing on start"},
 	} {

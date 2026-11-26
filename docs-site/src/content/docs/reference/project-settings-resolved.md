@@ -98,6 +98,9 @@ without being wired up here.
 | --- | --- | --- |
 | `projectSet` | bool | Whether the project has an annotation for this setting. A stored `scion.io/default-thinking-level` outside 1-100 (for example a `0` saved by an older Hub) counts as unset, as in `GET /settings`: new agents get the hub default, and the next save of the project settings removes it. |
 | `projectValue` | string \| null | The annotation's raw value, or `null` when `projectSet` is false. Always a string — annotations are strings. For `scion.io/default-max-turns` and `scion.io/default-max-model-calls`, `"0"` is Unlimited (an explicit "no limit"), not a clear: a cleared count limit has no annotation. |
+| `lockedBy` | string \| null | Layer that locks this setting (`"hub"` when enforced by the hub operator, e.g. `telemetry.enforced`), or `null` when unlocked. |
+| `effective` | any \| null | Enforced effective value when `lockedBy` is non-null (e.g. `true` for hub-enforced telemetry), and `null` for all unlocked settings. |
+| `storedValue` | any \| null | Shadowed project value when `lockedBy` is non-null (e.g. `false` when the project had `telemetryEnabled: false` stored before enforcement), or `null` otherwise. |
 | `hubDefault` | string | Whether a hub-level default exists. See below. |
 
 ### `hubDefault` is tri-state

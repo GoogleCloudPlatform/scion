@@ -1313,6 +1313,9 @@ func startAgentViaHubWithSecrets(cmd *cobra.Command, hubCtx *HubContext, agentNa
 		if enableTelemetry {
 			configEnv["SCION_TELEMETRY_ENABLED"] = "true"
 		} else if disableTelemetry {
+			if err := checkDisableTelemetryAllowed(hubCtx.Client, projectID); err != nil {
+				return err
+			}
 			configEnv["SCION_TELEMETRY_ENABLED"] = "false"
 		}
 		if len(configEnv) > 0 {
@@ -2406,4 +2409,24 @@ func mergeUniqueWarnings(first, second []string) []string {
 		}
 	}
 	return merged
+}
+
+// checkDisableTelemetryAllowed checks resolved project settings before sending
+// --disable-telemetry to a Hub. If the Hub reports telemetry is locked by the
+// hub operator, fail fast with a clear CLI message; if the endpoint is
+// unavailable (e.g. older Hub), fall through to the Hub's create validation.
+func checkDisableTelemetryAllowed(client hubclient.Client, projectID string) error {
+	if client == nil || projectID == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resolved, err := client.Projects().GetResolvedSettings(ctx, projectID)
+	if err != nil || resolved == nil {
+		return nil
+	}
+	if entry, ok := resolved.Settings["scion.io/telemetry-enabled"]; ok && entry.LockedBy != nil && *entry.LockedBy == "hub" {
+		return fmt.Errorf("cannot use --disable-telemetry: telemetry is enforced by the hub operator")
+	}
+	return nil
 }

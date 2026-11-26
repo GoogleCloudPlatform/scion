@@ -29,7 +29,7 @@ import (
 // Both must stay sorted; the assertions compare sorted slices.
 var (
 	expectedResolvedWrapperFields = []string{"project", "settings"}
-	expectedResolvedEntryFields   = []string{"ceiling", "hubDefault", "hubValue", "projectSet", "projectValue"}
+	expectedResolvedEntryFields   = []string{"ceiling", "effective", "hubDefault", "hubValue", "lockedBy", "projectSet", "projectValue", "storedValue"}
 )
 
 // resolvedResponseTypes enumerates every type whose fields land directly in the

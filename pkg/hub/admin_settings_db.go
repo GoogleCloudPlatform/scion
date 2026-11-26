@@ -345,6 +345,11 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	} else {
 		resp.Telemetry = nil
 	}
+	if snap.TelemetryEnforcedInvalid {
+		resp.TelemetryEnforcedWarning = "stored telemetry settings have enforced=true but failed validation (telemetry.enforced requires telemetry.enabled=true); enforcement is currently inactive until corrected"
+	} else {
+		resp.TelemetryEnforcedWarning = ""
+	}
 
 	// Ensure server sub-structs exist.
 	if resp.Server == nil {

@@ -176,6 +176,9 @@ interface ResolvedHubSetting {
   hubDefault: 'present' | 'absent' | 'unknown';
   hubValue: any;
   ceiling?: number | string | null;
+  lockedBy?: string | null;
+  effective?: unknown;
+  storedValue?: unknown;
 }
 
 interface ResolvedProjectSettings {
@@ -1605,6 +1608,18 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  /** Whether the hub operator has locked telemetry on for all agents. */
+  private isTelemetryLockedByHub(): boolean {
+    return this.resolvedSettings['scion.io/telemetry-enabled']?.lockedBy === 'hub';
+  }
+
+  /** Whether a stored project telemetry=false is overridden by hub enforcement. */
+  private isTelemetryShadowedDisabled(): boolean {
+    if (!this.isTelemetryLockedByHub()) return false;
+    const entry = this.resolvedSettings['scion.io/telemetry-enabled'];
+    return entry?.storedValue === false || this.configTelemetryEnabled === false;
+  }
+
   /** Fallback for loading hub telemetry default when /settings/resolved is unavailable. */
   private async loadHubTelemetryDefaultFallback(): Promise<void> {
     const settings = await getPublicSettings();
@@ -2616,7 +2631,6 @@ export class ScionPageProjectSettings extends LitElement {
         defaultHarnessConfig: this.configDefaultHarnessConfig || '',
         defaultHarnessAuth: this.configDefaultHarnessAuth || '',
         defaultModel: defaultModel || '',
-        telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
         defaultMaxDuration: this.configDefaultMaxDuration || '',
         defaultResources: defaultResources ?? {},
@@ -2629,6 +2643,9 @@ export class ScionPageProjectSettings extends LitElement {
         maxAgentRole: this.configMaxAgentRole || '',
         defaultAgentRole: this.configDefaultAgentRole || '',
       };
+      if (!this.isTelemetryLockedByHub()) {
+        body.telemetryEnabled = this.configTelemetryEnabled;
+      }
       if (this.configDefaultMaxTurns !== this.loadedDefaultMaxTurns) {
         body.defaultMaxTurns = this.configDefaultMaxTurns;
       }
@@ -3388,16 +3405,21 @@ export class ScionPageProjectSettings extends LitElement {
                 class="config-field ${this.isHubDefault('scion.io/telemetry-enabled')
                   ? 'hub-inherited'
                   : ''}"
+                data-testid="project-telemetry-field"
               >
                 <label>Telemetry ${this.renderHubIndicator('scion.io/telemetry-enabled')}</label>
                 <sl-select
-                  value=${this.configTelemetryEnabled === true
+                  data-testid="project-telemetry-select"
+                  value=${this.isTelemetryLockedByHub()
                     ? 'enabled'
-                    : this.configTelemetryEnabled === false
-                      ? 'disabled'
-                      : 'inherit'}
-                  ?disabled=${!canEdit}
+                    : this.configTelemetryEnabled === true
+                      ? 'enabled'
+                      : this.configTelemetryEnabled === false
+                        ? 'disabled'
+                        : 'inherit'}
+                  ?disabled=${!canEdit || this.isTelemetryLockedByHub()}
                   @sl-change=${(e: Event) => {
+                    if (this.isTelemetryLockedByHub()) return;
                     const val = (e.target as HTMLSelectElement).value;
                     this.configTelemetryEnabled =
                       val === 'enabled' ? true : val === 'disabled' ? false : null;
@@ -3414,10 +3436,16 @@ export class ScionPageProjectSettings extends LitElement {
                   <sl-option value="enabled">Enabled</sl-option>
                   <sl-option value="disabled">Disabled</sl-option>
                 </sl-select>
-                <span class="field-help"
-                  >Controls telemetry for agents in this project. "Use hub default" inherits the
-                  server-level setting.</span
-                >
+                ${this.isTelemetryLockedByHub()
+                  ? html`<span class="field-help" data-testid="project-telemetry-locked-help"
+                      >Required by hub operator${this.isTelemetryShadowedDisabled()
+                        ? '. Project setting (Disabled) is overridden.'
+                        : ''}</span
+                    >`
+                  : html`<span class="field-help"
+                      >Controls telemetry for agents in this project. "Use hub default" inherits the
+                      server-level setting.</span
+                    >`}
               </div>
 
               <div

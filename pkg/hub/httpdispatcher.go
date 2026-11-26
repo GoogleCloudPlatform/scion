@@ -2341,6 +2341,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -2499,6 +2503,9 @@ func (d *HTTPAgentDispatcher) dispatchProvisionWithWorkspaceSource(ctx context.C
 		return err
 	}
 	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
 		return err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, reprovision); err != nil {
@@ -2764,6 +2771,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
 		return nil, err
 	}
@@ -2988,6 +2998,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
@@ -4281,6 +4294,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	// Capture the phase and launch-error this dispatch found the agent in,
 	// before buildStartEnv/applyBrokerResponse can change either. The
@@ -4702,6 +4719,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 	if err := d.hostedConfigPrecheck(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.telemetryEnforcementPrecheck(ctx, agent); err != nil {
 		return err
 	}
 

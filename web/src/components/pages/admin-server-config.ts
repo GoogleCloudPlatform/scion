@@ -363,6 +363,7 @@ interface V1TelemetryLocalConfig {
 
 interface V1TelemetryConfig {
   enabled?: boolean;
+  enforced?: boolean;
   cloud?: V1TelemetryCloudConfig;
   hub?: V1TelemetryHubConfig;
   local?: V1TelemetryLocalConfig;
@@ -510,6 +511,7 @@ interface ServerConfigResponse {
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
   default_user_role_warning?: DefaultUserRoleWarning;
+  telemetry_enforced_warning?: string;
   eligible_default_roles?: EligibleDefaultRole[];
 }
 
@@ -1284,6 +1286,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Telemetry
   @state() private telemetryEnabled: boolean | null = null;
   private loadedTelemetryEnabled: boolean | null = null;
+  @state() private telemetryEnforced = false;
+  private loadedTelemetryEnforced = false;
+  @state() private telemetryEnforcedWarning = '';
   @state() private telemetryCloudEnabled: boolean | null = null;
   private loadedTelemetryCloudEnabled: boolean | null = null;
   @state() private telemetryCloudEndpoint = '';
@@ -2407,6 +2412,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     const tel = data.telemetry;
     this.storedTelemetryLocal = tel?.local;
     this.telemetryEnabled = tel?.enabled ?? null;
+    this.telemetryEnforced = tel?.enforced === true;
+    this.telemetryEnforcedWarning = data.telemetry_enforced_warning || '';
     this.telemetryCloudEnabled = tel?.cloud?.enabled ?? null;
     this.telemetryCloudEndpoint = tel?.cloud?.endpoint || '';
     this.telemetryCloudProtocol = tel?.cloud?.protocol || '';
@@ -2416,6 +2423,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.telemetryHubEnabled = tel?.hub?.enabled ?? null;
     this.telemetryHubReportInterval = tel?.hub?.report_interval || '';
     this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedTelemetryEnforced = this.telemetryEnforced;
     this.loadedTelemetryCloudEnabled = this.telemetryCloudEnabled;
     this.loadedTelemetryCloudCloudLogging = this.telemetryCloudCloudLogging;
     this.loadedTelemetryHubEnabled = this.telemetryHubEnabled;
@@ -3077,6 +3085,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('telemetry.enabled')) {
       const telemetry: Record<string, unknown> = {};
       putTriState(telemetry, 'enabled', this.telemetryEnabled, this.loadedTelemetryEnabled);
+      if (this.telemetryEnforced !== this.loadedTelemetryEnforced) {
+        telemetry.enforced = this.telemetryEnforced;
+      }
       if (ok('telemetry.cloud.enabled')) {
         const cloud: Record<string, unknown> = {
           endpoint: this.telemetryCloudEndpoint,
@@ -4761,9 +4772,41 @@ export class ScionPageAdminServerConfig extends LitElement {
                     loaded: this.loadedTelemetryEnabled,
                     unsetChecked: false,
                     unsetLabel: 'Not set (default applies)',
-                    set: (v) => (this.telemetryEnabled = v),
+                    set: (v) => {
+                      this.telemetryEnabled = v;
+                      if (v !== true) {
+                        this.telemetryEnforced = false;
+                      }
+                    },
                   })}
                   <span class="hint">Default opt-in state for new agents</span>
+                </div>
+                <div class="form-field full-width">
+                  <sl-switch
+                    data-testid="telemetry-enforced-switch"
+                    ?checked=${this.telemetryEnforced}
+                    ?disabled=${this.telemetryEnabled !== true || this.settingsTier === 'file'}
+                    @sl-change=${(e: Event) => {
+                      this.telemetryEnforced = (e.target as HTMLInputElement).checked;
+                    }}
+                  >
+                    Enforce telemetry for all agents
+                  </sl-switch>
+                  <span class="hint"
+                    >Prevent projects and requesters from disabling telemetry. Requires Enable
+                    Telemetry to be turned on.</span
+                  >
+                  ${this.telemetryEnforcedWarning
+                    ? html`<sl-alert
+                        variant="warning"
+                        open
+                        data-testid="telemetry-enforced-warning"
+                        style="margin-top: 0.5rem"
+                      >
+                        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                        ${this.telemetryEnforcedWarning}
+                      </sl-alert>`
+                    : nothing}
                 </div>
                 <div class="form-field full-width">
                   ${this.renderTriStateSwitch({
