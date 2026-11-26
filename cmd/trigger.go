@@ -57,6 +57,8 @@ var (
 	triggerOffline           string
 	triggerQueueTTL          string
 	triggerDispatch          dispatchAgentFlagValues
+	triggerComment           string
+	triggerReplyInThread     bool
 	triggerSubjectExpr       string
 	triggerOnSubject         string
 	triggerCoalesceWindow    string
@@ -495,11 +497,15 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 }
 
 func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
-	req, _, err := buildCreateTriggerRequestWithAllow(false)
+	req, _, err := buildCreateTriggerRequestWithFlags(false, false, false, false)
 	return req, err
 }
 
 func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
+	return buildCreateTriggerRequestWithFlags(allowExplicit, false, false, false)
+}
+
+func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
 	name := strings.TrimSpace(triggerName)
 	if name == "" {
 		return nil, nil, newUsageError("--name is required")
@@ -515,9 +521,30 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		return nil, nil, newUsageError("--type is required when --github is set")
 	}
 
-	actionKind, err := normalizeTriggerActionKind(triggerAction)
+	commentSet := commentExplicit || triggerComment != ""
+	ackCommentSet := ackCommentExplicit || triggerDispatch.ackComment != ""
+	if triggerReplyInThread && !commentSet {
+		return nil, nil, newUsageError("--reply-in-thread requires --comment")
+	}
+
+	rawAction := strings.TrimSpace(triggerAction)
+	if commentSet {
+		if actionExplicit && rawAction != "github.comment" {
+			return nil, nil, newUsageError("--comment cannot be used with --action %s", triggerTerminalText(rawAction, false))
+		}
+		rawAction = "github.comment"
+	}
+
+	actionKind, err := normalizeTriggerActionKind(rawAction)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if actionKind == "github.comment" && !triggerGitHubSource {
+		return nil, nil, newUsageError("--comment requires --github")
+	}
+	if ackCommentSet && !triggerGitHubSource {
+		return nil, nil, newUsageError("--ack-comment requires --github")
 	}
 
 	var (
@@ -528,6 +555,9 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 	case "message":
 		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
 			return nil, nil, newUsageError("%s cannot be used with --action message", badFlag)
+		}
+		if ackCommentExplicit {
+			return nil, nil, newUsageError("--ack-comment cannot be used with --action message")
 		}
 		agentRef := strings.TrimSpace(triggerAgent)
 		if agentRef == "" {
@@ -587,7 +617,30 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 		if strings.TrimSpace(triggerQueueTTL) != "" {
 			return nil, nil, newUsageError("--queue-ttl cannot be used with --action dispatch-agent")
 		}
+		if ackCommentExplicit && strings.TrimSpace(triggerDispatch.ackComment) == "" {
+			return nil, nil, newUsageError("--ack-comment cannot be empty")
+		}
 		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
+		if err != nil {
+			return nil, nil, err
+		}
+	case "github.comment":
+		if badFlag, ok := hasMessageFlagValues(triggerAgent, triggerMessage, triggerInterrupt, triggerWake, triggerPlain); ok {
+			return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+		}
+		if strings.TrimSpace(triggerOffline) != "" {
+			return nil, nil, newUsageError("--offline cannot be used with --action github.comment")
+		}
+		if strings.TrimSpace(triggerQueueTTL) != "" {
+			return nil, nil, newUsageError("--queue-ttl cannot be used with --action github.comment")
+		}
+		if badFlag, ok := hasDispatchAgentFlagValues(&triggerDispatch); ok {
+			return nil, nil, newUsageError("%s cannot be used with --action github.comment", badFlag)
+		}
+		if ackCommentExplicit {
+			return nil, nil, newUsageError("--ack-comment cannot be used with --action github.comment")
+		}
+		action, derivedUntrusted, err = buildGitHubCommentActionSpec(triggerComment, triggerReplyInThread, triggerDispatch.allow, allowExplicit)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -659,7 +712,10 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 
 func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
-	req, derivedUntrusted, err := buildCreateTriggerRequestWithAllow(allowExplicit)
+	actionExplicit := cmd != nil && cmd.Flags().Changed("action")
+	commentExplicit := cmd != nil && cmd.Flags().Changed("comment")
+	ackCommentExplicit := cmd != nil && cmd.Flags().Changed("ack-comment")
+	req, derivedUntrusted, err := buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit)
 	if err != nil {
 		return err
 	}
@@ -761,6 +817,8 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		agentLabel := tr.Action.AgentName
 		if tr.Action.Type == "dispatch_agent" {
 			agentLabel = "dispatch:" + tr.Action.Template
+		} else if tr.Action.Type == "github.comment" {
+			agentLabel = "github.comment"
 		} else if agentLabel == "" {
 			agentLabel = tr.Action.AgentID
 			if len(agentLabel) > 8 {
@@ -1120,7 +1178,7 @@ func init() {
 	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received for --webhook; required for --github)")
 	triggerCreateCmd.Flags().StringArrayVar(&triggerWhereRules, "where", nil, "Ordered match rule [<dialect>:]<expr> (repeatable, 1-8 rules, <= 4096B each; put cheap CEL guards first; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
 	triggerCreateCmd.Flags().StringVar(&triggerWhereFile, "where-file", "", "Path to JSON file containing an ordered array of {dialect, expr} match rules")
-	triggerCreateCmd.Flags().StringVar(&triggerAction, "action", "message", "Action kind (message or dispatch-agent)")
+	triggerCreateCmd.Flags().StringVar(&triggerAction, "action", "message", "Action kind (message, dispatch-agent, or github.comment)")
 	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required for --action message)")
 	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required for --action message)")
 	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")
@@ -1129,6 +1187,8 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerOffline, "offline", "", "Offline target policy for message actions (skip or queue; default skip)")
 	triggerCreateCmd.Flags().StringVar(&triggerQueueTTL, "queue-ttl", "", "Maximum wait duration when --offline queue is set (e.g. 30m, 24h; 60s..48h, default 24h)")
 	bindDispatchAgentFlags(triggerCreateCmd.Flags(), &triggerDispatch)
+	triggerCreateCmd.Flags().StringVar(&triggerComment, "comment", "", "Post a GitHub comment with this body template (shorthand for --action github.comment; requires --github)")
+	triggerCreateCmd.Flags().BoolVar(&triggerReplyInThread, "reply-in-thread", false, "Reply under the review comment thread instead of the PR/issue conversation (requires --comment)")
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new, skip, or reuse; default new)")
 	triggerCreateCmd.Flags().StringVar(&triggerCoalesceWindow, "coalesce", "", "Coalescing window duration (0s disables, max 10m, e.g. 30s)")

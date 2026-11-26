@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
@@ -47,6 +48,7 @@ type dispatchAgentFlagValues struct {
 	labels         []string
 	ephemeral      bool
 	reuseMessage   string
+	ackComment     string
 	githubToken    string
 	agentRole      string
 	allow          []string
@@ -62,6 +64,7 @@ func bindDispatchAgentFlags(fs *pflag.FlagSet, v *dispatchAgentFlagValues) {
 	fs.StringArrayVar(&v.labels, "label", nil, "Agent label in key=value template form for dispatch-agent actions (repeatable)")
 	fs.BoolVar(&v.ephemeral, "ephemeral", false, "Request an ephemeral dispatched agent (currently refused by the Hub until ephemeral agents ship)")
 	fs.StringVar(&v.reuseMessage, "reuse-message", "", "Message template delivered when reusing a live dispatched agent (Stage 3)")
+	fs.StringVar(&v.ackComment, "ack-comment", "", "GitHub acknowledgement comment template posted after dispatch-agent succeeds (requires --github)")
 	fs.StringVar(&v.githubToken, "github-token", "", "GitHub token precedence for dispatched agents (installation or user_preferred)")
 	fs.StringVar(&v.agentRole, "agent-role", "", "Explicit role for dispatched agents (optional; defaults to project/hub ladder)")
 	fs.StringArrayVar(&v.allow, "allow", nil, "Explicitly opt in an untrusted event variable path (or trailing .*) for template rendering (repeatable; derived automatically when omitted)")
@@ -73,8 +76,10 @@ func normalizeTriggerActionKind(raw string) (string, error) {
 		return "message", nil
 	case "dispatch-agent", "dispatch_agent":
 		return "dispatch_agent", nil
+	case store.TriggerActionGitHubComment:
+		return store.TriggerActionGitHubComment, nil
 	default:
-		return "", newUsageError("unsupported --action %q (supported: message, dispatch-agent)", triggerTerminalText(raw, false))
+		return "", newUsageError("unsupported --action %q (supported: message, dispatch-agent, github.comment)", triggerTerminalText(raw, false))
 	}
 }
 
@@ -168,7 +173,71 @@ func deriveDispatchUntrustedVars(action *hubclient.TriggerActionSpec) ([]string,
 	if err := collect(action.ReuseMessage, triggertemplate.SlotMessage); err != nil {
 		return nil, err
 	}
+	if action.AckComment != nil && action.AckComment.Body != "" {
+		if err := collect(action.AckComment.Body, hub.TriggerTemplateSlotGitHubAckCommentBody); err != nil {
+			return nil, err
+		}
+	}
 	return derived, nil
+}
+
+// deriveGitHubCommentUntrustedVars parses a github.comment body template using
+// the github.comment.body slot and returns the deduplicated untrusted
+// placeholder paths in first-appearance order (Stage 3 §7.1).
+func deriveGitHubCommentUntrustedVars(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	tmpl, err := triggertemplate.Parse(raw, hub.TriggerTemplateSlotGitHubCommentBody)
+	if err != nil {
+		var pe *triggertemplate.ParseError
+		if errors.As(err, &pe) {
+			return nil, newUsageError("invalid template in slot %q at byte offset %d: %s",
+				triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
+		}
+		return nil, newUsageError("invalid template in slot %q: %v", hub.TriggerTemplateSlotGitHubCommentBody, err)
+	}
+	untrusted := tmpl.Untrusted()
+	if len(untrusted) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(untrusted))
+	derived := make([]string, 0, len(untrusted))
+	for _, p := range untrusted {
+		if !seen[p] {
+			seen[p] = true
+			derived = append(derived, p)
+		}
+	}
+	return derived, nil
+}
+
+func buildGitHubCommentActionSpec(body string, replyInThread bool, allow []string, allowExplicit bool) (hubclient.TriggerActionSpec, []string, error) {
+	if strings.TrimSpace(body) == "" {
+		return hubclient.TriggerActionSpec{}, nil, newUsageError("--comment is required for --action github.comment")
+	}
+	action := hubclient.TriggerActionSpec{
+		Type:          store.TriggerActionGitHubComment,
+		Body:          body,
+		Target:        "event",
+		ReplyInThread: replyInThread,
+	}
+	var (
+		derived []string
+		err     error
+	)
+	if allowExplicit || len(allow) > 0 {
+		action.UntrustedVars = append([]string(nil), allow...)
+	} else {
+		derived, err = deriveGitHubCommentUntrustedVars(body)
+		if err != nil {
+			return hubclient.TriggerActionSpec{}, nil, err
+		}
+		if len(derived) > 0 {
+			action.UntrustedVars = derived
+		}
+	}
+	return action, derived, nil
 }
 
 func hasDispatchAgentFlagValues(v *dispatchAgentFlagValues) (string, bool) {
@@ -194,6 +263,8 @@ func hasDispatchAgentFlagValues(v *dispatchAgentFlagValues) (string, bool) {
 		return "--ephemeral", true
 	case v.reuseMessage != "":
 		return "--reuse-message", true
+	case v.ackComment != "":
+		return "--ack-comment", true
 	case strings.TrimSpace(v.githubToken) != "":
 		return "--github-token", true
 	case strings.TrimSpace(v.agentRole) != "":
@@ -229,8 +300,8 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 	case "message":
 		disallowed = []string{
 			"template", "task", "task-file", "agent-name", "on-name-conflict",
-			"branch", "label", "ephemeral", "reuse-message", "github-token",
-			"agent-role",
+			"branch", "label", "ephemeral", "reuse-message", "ack-comment",
+			"github-token", "agent-role",
 		}
 	case "dispatch_agent":
 		disallowed = []string{"agent", "message", "interrupt", "wake", "plain", "offline", "queue-ttl"}
@@ -325,6 +396,14 @@ func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool
 		return hubclient.TriggerActionSpec{}, nil, err
 	}
 
+	var ackComment *hubclient.DispatchAgentAckComment
+	if v.ackComment != "" {
+		if strings.TrimSpace(v.ackComment) == "" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--ack-comment cannot be empty")
+		}
+		ackComment = &hubclient.DispatchAgentAckComment{Body: v.ackComment}
+	}
+
 	action := hubclient.TriggerActionSpec{
 		Type:         "dispatch_agent",
 		Template:     tmplRef,
@@ -335,6 +414,7 @@ func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool
 		Labels:       labelsMap,
 		Ephemeral:    v.ephemeral,
 		ReuseMessage: v.reuseMessage,
+		AckComment:   ackComment,
 		GithubToken:  ghToken,
 		AgentRole:    strings.TrimSpace(v.agentRole),
 	}
@@ -444,7 +524,7 @@ func formatTriggerAPIError(err error) error {
 		}
 		return &cp
 
-	case "github_token_unsupported", "dispatch_agent_github_unsupported":
+	case "github_token_unsupported", "dispatch_agent_github_unsupported", "ack_comment_requires_github_source":
 		if apiErr.Message != "" {
 			cp.Message = triggerTerminalText(apiErr.Message, false)
 			return &cp
@@ -615,7 +695,7 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		flags.Changed("offline") || flags.Changed("queue-ttl") ||
 		flags.Changed("template") || flags.Changed("task") || flags.Changed("task-file") || flags.Changed("agent-name") ||
 		flags.Changed("on-name-conflict") || flags.Changed("branch") || flags.Changed("label") || flags.Changed("ephemeral") ||
-		flags.Changed("reuse-message") || flags.Changed("github-token") || flags.Changed("agent-role") || flags.Changed("allow")
+		flags.Changed("reuse-message") || flags.Changed("ack-comment") || flags.Changed("github-token") || flags.Changed("agent-role") || flags.Changed("allow")
 
 	var derivedUntrusted []string
 	if actionFlagsChanged {
@@ -733,6 +813,10 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 				spec.GithubToken = existing.Action.GithubToken
 				spec.AgentRole = existing.Action.AgentRole
 				spec.ReuseMessage = existing.Action.ReuseMessage
+				if existing.Action.AckComment != nil {
+					cp := *existing.Action.AckComment
+					spec.AckComment = &cp
+				}
 				spec.NoAuth = existing.Action.NoAuth
 				if existing.Action.Labels != nil {
 					spec.Labels = make(map[string]string, len(existing.Action.Labels))
@@ -782,6 +866,13 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			}
 			if flags.Changed("reuse-message") {
 				spec.ReuseMessage = triggerUpdateDispatch.reuseMessage
+			}
+			if flags.Changed("ack-comment") {
+				if strings.TrimSpace(triggerUpdateDispatch.ackComment) == "" {
+					spec.AckComment = nil
+				} else {
+					spec.AckComment = &hubclient.DispatchAgentAckComment{Body: triggerUpdateDispatch.ackComment}
+				}
 			}
 			if flags.Changed("github-token") {
 				gt := strings.TrimSpace(triggerUpdateDispatch.githubToken)
@@ -846,6 +937,20 @@ func printTriggerActionSummary(action hubclient.TriggerActionSpec) {
 		}
 		if action.AgentRole != "" {
 			fmt.Printf("  Role:    %s\n", triggerTerminalText(action.AgentRole, false))
+		}
+		if action.AckComment != nil && action.AckComment.Body != "" {
+			fmt.Printf("  Ack:     %s\n", triggerTerminalText(action.AckComment.Body, true))
+		}
+		return
+	}
+	if action.Type == store.TriggerActionGitHubComment {
+		if action.ReplyInThread {
+			fmt.Printf("  Action:  github.comment (reply-in-thread)\n")
+		} else {
+			fmt.Printf("  Action:  github.comment\n")
+		}
+		if action.Body != "" {
+			fmt.Printf("  Comment: %s\n", triggerTerminalText(action.Body, true))
 		}
 		return
 	}
