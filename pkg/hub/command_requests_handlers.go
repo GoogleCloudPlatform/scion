@@ -153,8 +153,11 @@ func normalizeCommandRequestSurface(raw string) (string, bool) {
 	}
 }
 
-func (s *Server) loadCommandRequestWithMessage(ctx context.Context, reqID string) (*store.CommandRequest, *store.Message, string, error) {
+func (s *Server) loadCommandRequestWithMessage(ctx context.Context, reqID string, allowMessageIDFallback bool) (*store.CommandRequest, *store.Message, string, error) {
 	row, err := s.store.GetCommandRequest(ctx, reqID)
+	if err != nil && allowMessageIDFallback && errors.Is(err, store.ErrNotFound) {
+		row, err = s.store.GetCommandRequestByMessageID(ctx, reqID)
+	}
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -187,7 +190,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	ctx := r.Context()
-	row, promptMsg, chatKey, err := s.loadCommandRequestWithMessage(ctx, reqID)
+	row, promptMsg, chatKey, err := s.loadCommandRequestWithMessage(ctx, reqID, true)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Command request")
@@ -249,13 +252,62 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	projectName := ""
+	if row.ProjectID != "" {
+		if proj, perr := s.store.GetProject(ctx, row.ProjectID); perr == nil && proj != nil {
+			projectName = proj.Name
+			if projectName == "" {
+				projectName = proj.Slug
+			}
+		}
+	}
+	intro := ""
+	if promptMsg != nil && row.IntroLength > 0 && row.IntroLength <= len(promptMsg.Msg) {
+		intro = promptMsg.Msg[:row.IntroLength]
+	}
+	approverName := ""
+	approverEmail := ""
+	if row.ApproverUserID != "" {
+		if approver, uerr := s.store.GetUser(ctx, row.ApproverUserID); uerr == nil && approver != nil {
+			approverName = approver.DisplayName
+			approverEmail = approver.Email
+		}
+	}
+	var prevUnknown *messages.CommandRequestPreviousUnknown
+	if row.Version > 1 {
+		if listRes, lerr := s.store.ListAgentCommandRequests(ctx, &store.ListAgentCommandRequestsOptions{
+			AgentID: row.AgentID,
+			Key:     row.Key,
+			Limit:   store.DefaultCommandRequestListLimit,
+		}); lerr == nil && listRes != nil {
+			for _, item := range listRes.Items {
+				if item.Version == row.Version-1 {
+					if prevRun := listRes.Runs[item.ID]; prevRun != nil && prevRun.Status == store.CommandRunStatusUnknown {
+						prevUnknown = &messages.CommandRequestPreviousUnknown{
+							Version: item.Version,
+							RowID:   item.ID,
+							RunID:   prevRun.ID,
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
 	runView := commandRunView(runRow)
 	writeJSON(w, http.StatusOK, messages.CommandRequestDetailResponse{
-		Request:       commandRequestView(row, replacedBy, runRow),
-		Run:           runView,
-		ExecContainer: execView,
-		CanApprove:    canApprove,
-		Reason:        reason,
+		Request:                commandRequestView(row, replacedBy, runRow),
+		Run:                    runView,
+		ExecContainer:          execView,
+		ProjectName:            projectName,
+		ThreadID:               chatKey,
+		Intro:                  intro,
+		ApproverName:           approverName,
+		ApproverEmail:          approverEmail,
+		PreviousVersionUnknown: prevUnknown,
+		CanApprove:             canApprove,
+		Reason:                 reason,
 	})
 }
 
@@ -263,6 +315,8 @@ func (s *Server) buildExecContainerView(ctx context.Context, res ExecContainerRe
 	v := &messages.CommandRequestExecContainerView{
 		State:          string(res.State),
 		HomePersistent: res.HomePersistent,
+		// Wake-on-approve lands in P2; false until then (R2).
+		CanWake: false,
 	}
 	if res.Agent != nil {
 		v.AgentID = res.Agent.ID
@@ -321,7 +375,7 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	row, promptMsg, chatKey, err := s.loadCommandRequestWithMessage(ctx, reqID)
+	row, promptMsg, chatKey, err := s.loadCommandRequestWithMessage(ctx, reqID, false)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Command request")
@@ -554,6 +608,7 @@ func commandRequestView(row *store.CommandRequest, replacedBy *store.CommandRequ
 		Description:          row.Description,
 		Script:               row.Script,
 		Workdir:              row.Workdir,
+		WorkdirKind:          messages.CommandWorkdirKind(row.Workdir),
 		TimeoutS:             row.TimeoutS,
 		ShareOutputRequested: row.ShareOutputRequested,
 		CommandSHA256:        row.CommandSHA256,

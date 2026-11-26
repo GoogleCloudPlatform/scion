@@ -301,7 +301,7 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 	if wd == "" {
 		wd = "$HOME"
 	}
-	_, _ = fmt.Fprintf(out, "Workdir:         %s\n", safeText(wd))
+	_, _ = fmt.Fprintf(out, "Workdir:         %s\n", formatCommandInlineForDisplay(wd))
 	switch messages.CommandWorkdirKind(req.Workdir) {
 	case messages.CommandWorkdirKindWorkspace:
 		_, _ = fmt.Fprintln(out, "WARNING:         workdir is under /workspace (agent-writable)")
@@ -326,6 +326,22 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 	}
 	_, _ = fmt.Fprintln(out, "--- end script ---")
 	_, _ = fmt.Fprintf(out, "(%d lines, %d bytes)\n", len(displayLines), len(req.Script))
+}
+
+// formatCommandInlineForDisplay renders a single-line hashed field (such as
+// workdir) with the same per-rune escape rule as formatCommandScriptForDisplay
+// so non-ASCII homoglyphs and control characters are always visibly escaped
+// as \u{XXXX} (ptone/scion#9283 O1).
+func formatCommandInlineForDisplay(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x20 && r <= 0x7e && !unicode.IsControl(r) && !unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
+			b.WriteRune(r)
+		} else {
+			_, _ = fmt.Fprintf(&b, `\u{%04X}`, r)
+		}
+	}
+	return b.String()
 }
 
 // formatCommandScriptForDisplay renders an agent-authored script safely for

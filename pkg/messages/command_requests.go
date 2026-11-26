@@ -99,12 +99,18 @@ func isBidiControl(r rune) bool {
 
 // isInvisibleOrNonASCIIWhitespace reports whether r is a non-ASCII format
 // character (Cf), line/paragraph separator (Zl, Zp), non-ASCII space (Zs),
-// Other_Default_Ignorable_Code_Point, or Hangul filler that renderers draw as
+// Other_Default_Ignorable_Code_Point, Hangul filler, Unicode variation
+// selector (U+FE00–U+FE0F, U+E0100–U+E01EF), Mongolian free variation selector
+// (U+180B–U+180F), or Braille Pattern Blank (U+2800) that renderers draw as
 // blank or a line break while bash treats as an ordinary word character.
 func isInvisibleOrNonASCIIWhitespace(r rune) bool {
 	return r > 0x7e && (unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Other_Default_Ignorable_Code_Point) ||
 		unicode.Is(unicode.Zs, r) ||
-		r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0)
+		r == 0x115F || r == 0x1160 || r == 0x3164 || r == 0xFFA0 ||
+		(r >= 0xFE00 && r <= 0xFE0F) ||
+		(r >= 0xE0100 && r <= 0xE01EF) ||
+		(r >= 0x180B && r <= 0x180F) ||
+		r == 0x2800)
 }
 
 // ValidateCommandRequestScript validates a command script per §4.5:
@@ -363,7 +369,18 @@ type CommandRequestExecContainerView struct {
 	ProjectID      string `json:"projectId,omitempty"`
 	ProjectName    string `json:"projectName,omitempty"`
 	HomePersistent *bool  `json:"homePersistent,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	// CanWake reports whether this hub supports waking a suspended execution
+	// container on approval. Always false until P2 (wake-on-approve) lands.
+	CanWake bool   `json:"canWake"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// CommandRequestPreviousUnknown identifies a prior version of the same key
+// whose run ended with status=unknown (D7 banner: "it may have run").
+type CommandRequestPreviousUnknown struct {
+	Version int    `json:"version"`
+	RowID   string `json:"rowId"`
+	RunID   string `json:"runId,omitempty"`
 }
 
 // CommandRequestView is one version of a command request as clients see it.
@@ -378,6 +395,7 @@ type CommandRequestView struct {
 	Description          string                    `json:"description,omitempty"`
 	Script               string                    `json:"script"`
 	Workdir              string                    `json:"workdir,omitempty"`
+	WorkdirKind          string                    `json:"workdirKind,omitempty"`
 	TimeoutS             int                       `json:"timeoutS"`
 	ShareOutputRequested bool                      `json:"shareOutputRequested"`
 	CommandSHA256        string                    `json:"commandSha256"`
@@ -394,11 +412,21 @@ type CommandRequestView struct {
 
 // CommandRequestDetailResponse is the 200 response of GET /api/v1/command-requests/{id}.
 type CommandRequestDetailResponse struct {
-	Request       CommandRequestView               `json:"request"`
-	Run           *CommandRequestRunView           `json:"run,omitempty"`
-	ExecContainer *CommandRequestExecContainerView `json:"exec_container,omitempty"`
-	CanApprove    bool                             `json:"canApprove"`
-	Reason        string                           `json:"reason,omitempty"`
+	Request                CommandRequestView               `json:"request"`
+	Run                    *CommandRequestRunView           `json:"run,omitempty"`
+	ExecContainer          *CommandRequestExecContainerView `json:"exec_container,omitempty"`
+	ProjectName            string                           `json:"projectName,omitempty"`
+	ThreadID               string                           `json:"threadId,omitempty"`
+	Intro                  string                           `json:"intro,omitempty"`
+	ApproverName           string                           `json:"approverName,omitempty"`
+	ApproverEmail          string                           `json:"approverEmail,omitempty"`
+	PreviousVersionUnknown *CommandRequestPreviousUnknown   `json:"previousVersionUnknown,omitempty"`
+	CanApprove             bool                             `json:"canApprove"`
+	// CanDismiss is a P5 feature-detect hook; false until the dismiss API lands in P5.
+	CanDismiss bool `json:"canDismiss,omitempty"`
+	// OutputAvailable is a P4 feature-detect hook; false until the output API lands in P4.
+	OutputAvailable bool   `json:"outputAvailable,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // ApproveCommandRequestBody is the request body of POST /api/v1/command-requests/{id}/approve.

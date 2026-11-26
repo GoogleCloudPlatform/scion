@@ -504,3 +504,17 @@ export const ACCESS_CONSTRAINTS_FLAG = 'hub.access_constraints';
 export function accessConstraintsEnabled(): boolean {
   return isFeatureEnabled(ACCESS_CONSTRAINTS_FLAG);
 }
+
+/**
+ * Human-approved command execution (hub.command_requests, ptone/scion#9278):
+ * shows inline command-request cards in chat and the standalone
+ * /command-requests/:id page. Presentation only: the hub enforces the
+ * experiment on every command-request route and command-run dispatch.
+ * Default OFF.
+ */
+export const COMMAND_REQUESTS_FLAG = 'hub.command_requests';
+
+/** Whether command-request UI surfaces are enabled in this session. */
+export function commandRequestsEnabled(): boolean {
+  return isFeatureEnabled(COMMAND_REQUESTS_FLAG);
+}

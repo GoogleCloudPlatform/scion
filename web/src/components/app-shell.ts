@@ -37,6 +37,7 @@ import type { PageTitleDetail } from '../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
 import {
   agentSecretsEnabled,
+  commandRequestsEnabled,
   decisionsEnabled,
   isFeatureEnabled,
   triggersEnabled,
@@ -438,6 +439,9 @@ export class ScionApp extends LitElement {
     }
     if (path.match(/^\/secret-requests\/[^/]+$/)) {
       return agentSecretsEnabled() ? 'Secret Request' : 'Page Not Found';
+    }
+    if (path.match(/^\/command-requests\/[^/]+$/)) {
+      return commandRequestsEnabled() ? 'Command Request' : 'Page Not Found';
     }
     if (path.match(/^\/projects\/[^/]+\/metrics$/)) {
       return 'Project Metrics';

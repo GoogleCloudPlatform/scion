@@ -410,3 +410,25 @@ func TestCommandRequestCLI_ApproveRefusesServerHashMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not match the displayed script")
 	assert.False(t, approveCalled, "POST /approve must not be called when displayed script hash mismatches")
 }
+
+func TestPrintCommandRequestConfirmationSummary_EscapesNonASCIIWorkdir(t *testing.T) {
+	// O1: Cyrillic 'о' (U+043E) in /wоrkspace/app must be rendered as \u{043E}.
+	homoglyphWorkdir := "/w\u043Erkspace/app"
+	var out bytes.Buffer
+	printCommandRequestConfirmationSummary(&out, &messages.CommandRequestDetailResponse{
+		Request: messages.CommandRequestView{
+			RowID:         "row-1",
+			Key:           "k1",
+			Version:       1,
+			AgentName:     "bot",
+			Script:        "pwd\n",
+			Workdir:       homoglyphWorkdir,
+			TimeoutS:      600,
+			CommandSHA256: messages.CommandRequestCanonicalHash("pwd\n", homoglyphWorkdir, 600),
+		},
+	}, "alice-shell")
+
+	got := out.String()
+	assert.Contains(t, got, `/w\u{043E}rkspace/app`, "CLI confirmation must escape non-ASCII workdir code points")
+	assert.NotContains(t, got, homoglyphWorkdir, "CLI confirmation must not print raw non-ASCII workdir homoglyph")
+}
