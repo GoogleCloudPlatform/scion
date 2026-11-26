@@ -101,6 +101,12 @@ const (
 	LegacyUsageRollupHourlyCoverageSection = "internal.usage_rollups_hourly_coverage"
 )
 
+// UsageRetentionStateSection is the internal hub_settings section that
+// persists shared usage-retention sweeper progress (last completed pass,
+// resume index for multi-tick passes) and the monotonic hourly swept-through
+// watermark across replicas and restarts.
+const UsageRetentionStateSection = "internal.usage_retention_state"
+
 // Usage rollup granularities and supported groupBy dimensions.
 const (
 	UsageGranularityHour = "hour"
@@ -553,11 +559,40 @@ type UsageExportCursor struct {
 	EventID string
 }
 
+// UsageRetentionState holds durable state for the Hub DB usage-ledger
+// retention sweeper (stored in hub_settings under UsageRetentionStateSection).
+type UsageRetentionState struct {
+	// LastCompletedAt is the UTC timestamp when the last full retention pass
+	// drained every registered target.
+	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
+	// NextTargetIndex is the 0-based target index to resume from on the next
+	// 1-minute tick while InProgress is true.
+	NextTargetIndex int `json:"next_target_index,omitempty"`
+	// InProgress is true when a pass did not finish draining all targets within
+	// a tick budget and should continue on subsequent 1-minute ticks without
+	// waiting sweep_interval.
+	InProgress bool `json:"in_progress,omitempty"`
+	// HourlySweptThrough is the highest UTC hour-aligned cutoff that the
+	// usage_rollups_hourly sweeper has swept through. Monotonic: never moves
+	// backward, preventing silent under-reporting if hourly_rollups_days is
+	// later increased.
+	HourlySweptThrough *time.Time `json:"hourly_swept_through,omitempty"`
+}
+
 // UsageRetentionStore defines bounded-batch retention sweep operations for the
 // Hub DB Track 1 usage tables (Tokenomics design §4.2, D8/D8a). Each method
 // deletes at most batchSize rows in one transaction and returns the deleted
 // row count.
 type UsageRetentionStore interface {
+	// GetUsageRetentionState loads the persisted usage retention sweeper state
+	// and hourly swept-through watermark. Returns a zero-value state (not an
+	// error) when no row exists yet.
+	GetUsageRetentionState(ctx context.Context) (*UsageRetentionState, error)
+
+	// SaveUsageRetentionState persists the usage retention sweeper state and
+	// hourly swept-through watermark in hub_settings.
+	SaveUsageRetentionState(ctx context.Context, state *UsageRetentionState) error
+
 	// SweepUsageEventsBatch deletes up to batchSize usage_events rows with
 	// event_ts < cutoff (and at or before exportCursor when non-nil).
 	SweepUsageEventsBatch(ctx context.Context, cutoff time.Time, exportCursor *UsageExportCursor, batchSize int) (int64, error)

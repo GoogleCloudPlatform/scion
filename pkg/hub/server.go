@@ -7690,11 +7690,12 @@ func (s *Server) registerSchedulerHandlers() {
 	// have elapsed.
 	s.scheduler.RegisterRecurringSingleton("decision-retention", 1, store.LockDecisionRetention, s.decisionRetentionHandler())
 	// Bounded Hub DB usage-ledger retention (tokenomics.usage_ledger, ptone/scion#9237):
-	// nightly by default (configurable via telemetry.retention.sweep_interval),
-	// single-leader across replicas via LockUsageRetention.
+	// checked every minute as a single-leader singleton (LockUsageRetention);
+	// enforces sweep_interval between completed passes and continues across
+	// ticks within a bounded per-tick budget until every target drains.
 	s.scheduler.RegisterRecurringSingleton(
 		usageRetentionJobName,
-		usageRetentionIntervalMinutes(s.usageRetentionConfig()),
+		1,
 		store.LockUsageRetention,
 		s.usageRetentionHandler(),
 	)

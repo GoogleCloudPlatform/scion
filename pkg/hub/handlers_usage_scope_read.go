@@ -336,6 +336,16 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
+	retentionState, err := s.store.GetUsageRetentionState(ctx)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	var hourlySweptThrough time.Time
+	if retentionState != nil && retentionState.HourlySweptThrough != nil {
+		hourlySweptThrough = *retentionState.HourlySweptThrough
+	}
+
 	hourlyRetentionDays := s.usageRetentionConfig().HourlyRollupsDays
 
 	win, err := resolveUsageWindowAndGranularity(
@@ -346,6 +356,7 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		hasHourlyCoverage,
 		hasHourGroup,
 		hourlyRetentionDays,
+		hourlySweptThrough,
 	)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
@@ -488,11 +499,12 @@ func parseUsageLimit(raw string, hasHourGroup bool) (int, error) {
 }
 
 // resolveUsageWindowAndGranularity parses since/until in UTC and chooses
-// "hour" granularity only when the window starts within the configured hourly
-// retention horizon (0 = unlimited) AND at or after hourlyCoverageStart
-// (preventing silent under-reporting of pre-migration or swept periods);
-// otherwise it selects "day". An explicit groupBy=hour outside hourly coverage
-// or retention returns an error.
+// "hour" granularity only when the window starts at or after the effective
+// hourly horizon: max(hourlyCoverageStart, hourlySweptThrough,
+// now - hourlyRetentionDays) (preventing silent under-reporting of
+// pre-migration or previously swept periods even after hourly_rollups_days is
+// raised); otherwise it selects "day". An explicit groupBy=hour outside that
+// horizon returns an error.
 func resolveUsageWindowAndGranularity(
 	sinceRaw, untilRaw string,
 	dbNow time.Time,
@@ -500,6 +512,7 @@ func resolveUsageWindowAndGranularity(
 	hasHourlyCoverage bool,
 	requireHourly bool,
 	hourlyRetentionDays int,
+	hourlySweptThrough time.Time,
 ) (UsageWindow, error) {
 	now := dbNow.UTC().Truncate(time.Microsecond)
 	until := now
@@ -540,6 +553,15 @@ func resolveUsageWindowAndGranularity(
 		retentionCutoff = hourlyRollupsRetentionCutoff(now, hourlyRetentionDays)
 		withinRetention = !sinceHour.Before(retentionCutoff)
 	}
+	var sweptThroughHour time.Time
+	withinSwept := true
+	if !hourlySweptThrough.IsZero() {
+		sweptThroughHour = time.Date(
+			hourlySweptThrough.Year(), hourlySweptThrough.Month(), hourlySweptThrough.Day(), hourlySweptThrough.Hour(),
+			0, 0, 0, time.UTC,
+		)
+		withinSwept = !sinceHour.Before(sweptThroughHour)
+	}
 	withinCoverage := hasHourlyCoverage && !sinceHour.Before(coverageStartHour)
 
 	if requireHourly {
@@ -550,13 +572,17 @@ func resolveUsageWindowAndGranularity(
 			return UsageWindow{}, fmt.Errorf("groupBy=hour is unavailable before %s (hourly rollup coverage start)",
 				coverageStartHour.UTC().Format(time.RFC3339))
 		}
+		if !withinSwept {
+			return UsageWindow{}, fmt.Errorf("groupBy=hour is unavailable before %s (hourly rollups already swept)",
+				sweptThroughHour.UTC().Format(time.RFC3339))
+		}
 		if !withinRetention {
 			return UsageWindow{}, fmt.Errorf("groupBy=hour is only available within the %d-day hourly retention window (since >= %s)",
 				hourlyRetentionDays, retentionCutoff.UTC().Format(time.RFC3339))
 		}
 	}
 
-	if withinRetention && withinCoverage {
+	if withinRetention && withinCoverage && withinSwept {
 		untilHour := time.Date(until.Year(), until.Month(), until.Day(), until.Hour(), 0, 0, 0, time.UTC)
 		return UsageWindow{
 			Since:       sinceHour,

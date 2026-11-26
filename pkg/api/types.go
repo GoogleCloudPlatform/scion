@@ -455,7 +455,8 @@ type TelemetryConfig struct {
 
 // TelemetryRetentionConfig holds Hub DB usage-ledger retention settings.
 // Pointer *int fields distinguish unset (use compiled default) from explicit 0
-// (opt-in unlimited retention). Hub-only; never injected into agent containers.
+// (opt-in unlimited retention). Consumed only by the Hub; not emitted to agent
+// container environment variables by TelemetryConfigToEnv.
 type TelemetryRetentionConfig struct {
 	UsageEventsDays   *int   `json:"usage_events_days,omitempty" yaml:"usage_events_days,omitempty"`
 	HourlyRollupsDays *int   `json:"hourly_rollups_days,omitempty" yaml:"hourly_rollups_days,omitempty"`

@@ -462,3 +462,57 @@ func TestUsageRetention_BoundedBatching(t *testing.T) {
 	_, err = cs.SweepUsageEventsBatch(ctx, cutoff, nil, 0)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 }
+
+func TestUsageRetention_StatePersistence(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	// Initially empty (not an error).
+	got, err := cs.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Nil(t, got.LastCompletedAt)
+	assert.Nil(t, got.HourlySweptThrough)
+	assert.False(t, got.InProgress)
+	assert.Equal(t, 0, got.NextTargetIndex)
+
+	// Insert initial state.
+	t1 := time.Date(2026, 11, 20, 14, 30, 0, 0, time.UTC)
+	wm1 := time.Date(2026, 11, 6, 14, 0, 0, 0, time.UTC)
+	require.NoError(t, cs.SaveUsageRetentionState(ctx, &store.UsageRetentionState{
+		LastCompletedAt:    &t1,
+		NextTargetIndex:    2,
+		InProgress:         true,
+		HourlySweptThrough: &wm1,
+	}))
+
+	got, err = cs.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastCompletedAt)
+	require.NotNil(t, got.HourlySweptThrough)
+	assert.Equal(t, t1, *got.LastCompletedAt)
+	assert.Equal(t, wm1, *got.HourlySweptThrough)
+	assert.True(t, got.InProgress)
+	assert.Equal(t, 2, got.NextTargetIndex)
+
+	// Upsert updated state.
+	t2 := t1.Add(24 * time.Hour)
+	wm2 := wm1.Add(24 * time.Hour)
+	require.NoError(t, cs.SaveUsageRetentionState(ctx, &store.UsageRetentionState{
+		LastCompletedAt:    &t2,
+		NextTargetIndex:    0,
+		InProgress:         false,
+		HourlySweptThrough: &wm2,
+	}))
+
+	got, err = cs.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastCompletedAt)
+	require.NotNil(t, got.HourlySweptThrough)
+	assert.Equal(t, t2, *got.LastCompletedAt)
+	assert.Equal(t, wm2, *got.HourlySweptThrough)
+	assert.False(t, got.InProgress)
+	assert.Equal(t, 0, got.NextTargetIndex)
+}

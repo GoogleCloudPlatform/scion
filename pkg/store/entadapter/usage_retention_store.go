@@ -17,12 +17,82 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// GetUsageRetentionState implements store.UsageRetentionStore.GetUsageRetentionState.
+func (s *UsageLedgerStore) GetUsageRetentionState(ctx context.Context) (*store.UsageRetentionState, error) {
+	row, err := s.client.HubSetting.Query().
+		Where(hubsetting.SectionEQ(store.UsageRetentionStateSection)).
+		Only(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return &store.UsageRetentionState{}, nil
+		}
+		return nil, mapError(err)
+	}
+	var st store.UsageRetentionState
+	if err := json.Unmarshal(row.Value, &st); err != nil {
+		return nil, fmt.Errorf("parse usage retention state: %w", err)
+	}
+	if st.LastCompletedAt != nil {
+		t := st.LastCompletedAt.UTC()
+		st.LastCompletedAt = &t
+	}
+	if st.HourlySweptThrough != nil {
+		t := utcHourStart(*st.HourlySweptThrough)
+		st.HourlySweptThrough = &t
+	}
+	return &st, nil
+}
+
+// SaveUsageRetentionState implements store.UsageRetentionStore.SaveUsageRetentionState.
+func (s *UsageLedgerStore) SaveUsageRetentionState(ctx context.Context, state *store.UsageRetentionState) error {
+	if state == nil {
+		return fmt.Errorf("%w: usage retention state is required", store.ErrInvalidInput)
+	}
+	normalized := *state
+	if normalized.LastCompletedAt != nil {
+		t := normalized.LastCompletedAt.UTC().Truncate(time.Microsecond)
+		normalized.LastCompletedAt = &t
+	}
+	if normalized.HourlySweptThrough != nil {
+		t := utcHourStart(*normalized.HourlySweptThrough)
+		normalized.HourlySweptThrough = &t
+	}
+	payload, err := json.Marshal(&normalized)
+	if err != nil {
+		return fmt.Errorf("marshal usage retention state: %w", err)
+	}
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+	valParam := "?"
+	if dialectName == dialect.Postgres {
+		valParam = "CAST(? AS jsonb)"
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	q := usageRebindSQL(dialectName, fmt.Sprintf(`
+INSERT INTO hub_settings (id, section, value, revision, updated_by, origin, create_time, update_time)
+VALUES (?, ?, %s, 1, 'system', 'seeded', ?, ?)
+ON CONFLICT (section) DO UPDATE SET
+	value = EXCLUDED.value,
+	revision = hub_settings.revision + 1,
+	update_time = EXCLUDED.update_time`, valParam))
+	var res sql.Result
+	if err := drv.Exec(ctx, q, []any{uuid.New(), store.UsageRetentionStateSection, string(payload), now, now}, &res); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
 
 // execUsageRetentionDeleteBatch executes a bounded DELETE statement inside its
 // own transaction (unless the store is already bound to a tx) and returns the
