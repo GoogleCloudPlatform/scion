@@ -692,6 +692,109 @@ func TestRouterClient_BodyLimitEnforced(t *testing.T) {
 	}
 }
 
+type trackingReadCloser struct {
+	r      io.Reader
+	closes atomic.Int32
+}
+
+func (rc *trackingReadCloser) Read(p []byte) (int, error) {
+	if rc.closes.Load() > 0 {
+		return 0, errors.New("read after close")
+	}
+	return rc.r.Read(p)
+}
+
+func (rc *trackingReadCloser) Close() error {
+	rc.closes.Add(1)
+	return nil
+}
+
+func TestRouterClient_ClosesRequestBody(t *testing.T) {
+	t.Run("normal 200 response", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			_, _ = w.Write(b)
+		}))
+		defer srv.Close()
+
+		c := NewRouterClient(srv.URL)
+		body := &trackingReadCloser{r: strings.NewReader("hello")}
+		resp, err := c.Do(testCtx(t), "s", "a", ControlServerPort, http.MethodPost, "/exec", body, nil)
+		if err != nil {
+			t.Fatalf("Do() error = %v", err)
+		}
+		if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "hello" {
+			t.Errorf("Do() = %d %q, want 200 hello", resp.StatusCode, got)
+		}
+		if got := body.closes.Load(); got != 1 {
+			t.Errorf("body Close() count = %d, want 1", got)
+		}
+	})
+
+	t.Run("retryable 503 followed by 200", func(t *testing.T) {
+		var mu sync.Mutex
+		var seen []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			seen = append(seen, string(b))
+			attempt := len(seen)
+			mu.Unlock()
+			if attempt == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.WriteString(w, "ok")
+		}))
+		defer srv.Close()
+
+		c := NewRouterClient(srv.URL)
+		_ = recordSleeps(c)
+		body := &trackingReadCloser{r: strings.NewReader("replayed")}
+		resp, err := c.Do(testCtx(t), "s", "a", ControlServerPort, http.MethodPost, "/bootstrap", body, nil)
+		if err != nil {
+			t.Fatalf("Do() error = %v", err)
+		}
+		if got := readBody(t, resp); resp.StatusCode != http.StatusOK || got != "ok" {
+			t.Errorf("Do() = %d %q, want 200 ok", resp.StatusCode, got)
+		}
+		if got := body.closes.Load(); got != 1 {
+			t.Errorf("body Close() count = %d, want 1", got)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(seen) != 2 || seen[0] != "replayed" || seen[1] != "replayed" {
+			t.Errorf("server saw bodies %v, want [replayed replayed]", seen)
+		}
+	})
+
+	t.Run("body exceeding limit", func(t *testing.T) {
+		var hits atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		c := NewRouterClient(srv.URL)
+		body := &trackingReadCloser{r: io.LimitReader(zeroReader{}, maxRouterRequestBodyBytes+1)}
+		resp, err := c.Do(testCtx(t), "s", "a", ControlServerPort, http.MethodPost, "/bootstrap", body, nil)
+		if err == nil {
+			_ = readBody(t, resp)
+			t.Fatal("Do() with oversized body = nil error, want limit error")
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Errorf("error = %v, want body-limit error", err)
+		}
+		if got := body.closes.Load(); got != 1 {
+			t.Errorf("body Close() count = %d, want 1", got)
+		}
+		if got := hits.Load(); got != 0 {
+			t.Errorf("server received %d request(s), want 0", got)
+		}
+	})
+}
+
 func TestRouterClient_ConnectCancelledDuringHandshakeReturnsPromptly(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

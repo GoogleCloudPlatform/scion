@@ -174,11 +174,14 @@ const maxRouterRequestBodyBytes = 64 << 20
 // Do sends method+path to port on the actor identified by atespace/actor,
 // through the router, with the given body and extra headers (hdr may be
 // nil). The body is buffered (up to maxRouterRequestBodyBytes) so a
-// router-originated 503 can be retried. The caller closes the returned
-// response body.
+// router-originated 503 can be retried; if body implements io.Closer, Do
+// closes it before returning. The caller closes the returned response body.
 func (c *RouterClient) Do(ctx context.Context, atespace, actor string, port int, method, path string, body io.Reader, hdr http.Header) (*http.Response, error) {
 	var payload []byte
 	if body != nil {
+		if closer, ok := body.(io.Closer); ok {
+			defer func() { _ = closer.Close() }()
+		}
 		b, err := io.ReadAll(io.LimitReader(body, maxRouterRequestBodyBytes+1))
 		if err != nil {
 			return nil, fmt.Errorf("substrate: read router request body: %w", err)
