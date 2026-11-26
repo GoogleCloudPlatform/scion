@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 func TestFormatNewDelivery_TextRequest(t *testing.T) {
@@ -282,7 +284,7 @@ func TestFormatNewDelivery_Delimiters(t *testing.T) {
 
 	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, false, false)
 
-	expectedPrefix := "You are receiving a message from the orchestration system:\n\n---BEGIN SCION MESSAGE---\n"
+	expectedPrefix := "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n---BEGIN SCION MESSAGE---\n"
 	if !strings.HasPrefix(result, expectedPrefix) {
 		t.Errorf("result does not start with expected delimiter prefix.\nGot prefix: %q", result[:min(len(result), len(expectedPrefix)+10)])
 	}
@@ -831,7 +833,7 @@ func TestFormatNewDelivery_ExternalPayloadPromptInjectionFraming(t *testing.T) {
 			CreatedAt: time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC),
 		}
 		rendered := FormatNewDelivery(msg, nil, nil, DeliveryOptions{}, false, false)
-		expectedHeader := deliveryIntro + "\n" + wantNote + "\n\n" + beginDelimiter
+		expectedHeader := messages.DeliveryIntro + "\n" + wantNote + "\n\n" + beginDelimiter
 		if !strings.HasPrefix(rendered, expectedHeader) {
 			t.Fatalf("rendered delivery missing external_payload framing header:\ngot:\n%s", rendered)
 		}
@@ -901,7 +903,7 @@ func TestFormatNewDelivery_ExternalPayloadPromptInjectionFraming(t *testing.T) {
 			CreatedAt: time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC),
 		}
 		rendered := FormatNewDelivery(msg, nil, nil, DeliveryOptions{}, false, false)
-		expectedHeader := deliveryIntro + "\n" + wantTemplated + "\n\n" + beginDelimiter
+		expectedHeader := messages.DeliveryIntro + "\n" + wantTemplated + "\n\n" + beginDelimiter
 		if !strings.HasPrefix(rendered, expectedHeader) {
 			t.Fatalf("rendered delivery missing extended templated_vars framing header:\ngot:\n%s", rendered)
 		}

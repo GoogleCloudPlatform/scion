@@ -573,7 +573,7 @@ Scion does not forward an agent's end-of-turn text to anyone. A user, an agent o
 When an agent receives an inbound message in Hub mode, it arrives as a JSON object wrapped in standard delimiters:
 
 ```text
-You are receiving a message from the orchestration system:
+You are receiving a message from the orchestration system (read the scion-messaging skill before replying):
 
 ---BEGIN SCION MESSAGE---
 {

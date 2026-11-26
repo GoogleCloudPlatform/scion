@@ -50,9 +50,12 @@ func TestFormatForDelivery_Structured(t *testing.T) {
 
 	result := FormatForDelivery(msg)
 
-	// Should have the intro
-	if !strings.Contains(result, deliveryIntro) {
+	// Should have the intro pointing to the scion-messaging skill
+	if !strings.Contains(result, DeliveryIntro) {
 		t.Error("missing delivery intro")
+	}
+	if !strings.Contains(DeliveryIntro, "scion-messaging") {
+		t.Error("delivery intro should direct agents to the scion-messaging skill")
 	}
 
 	// Should have delimiters
@@ -276,7 +279,7 @@ func TestFormatForDelivery_SystemMessage(t *testing.T) {
 	result := FormatForDelivery(msg)
 
 	// Should have the intro and delimiters
-	if !strings.Contains(result, deliveryIntro) {
+	if !strings.Contains(result, DeliveryIntro) {
 		t.Error("missing delivery intro")
 	}
 	if !strings.Contains(result, beginDelimiter) {
