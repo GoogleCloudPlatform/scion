@@ -147,7 +147,9 @@ user-facing format. Agent-only messages do not require it.
   credential, token, or key from a user, send a secret request with
   `scion message --secret-request KEY --secret-description "..."` (or
   `--secret-request-file <file>` for multiple or typed keys) instead of asking
-  them to paste values into chat. When the user submits it, the value is stored
+  them to paste values into chat. Requests default to `on_demand` (never placed
+  in the container; use `environment` only when a tool must find the value in
+  env at the next restart). When the user submits it, the value is stored
   directly at agent scope and you receive a `secret-response` message; read it
   inline each time you need it with `$(scion secret get --value KEY)` and never
   echo, write to disk, commit, or log it. If a user pastes a secret into chat

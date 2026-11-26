@@ -94,16 +94,17 @@ Only metadata (key, scope, creation time) can be viewed.
 By default, secrets are scoped to the current user. Use --project or --broker
 to set secrets at different scopes.
 
-Secret types control how the value is projected into agent containers:
+Secret types control how the value is made available to agents:
   - environment (default): Injected as an environment variable
-  - variable: Written to ~/.scion/secrets.json for programmatic access
   - file: Written to the filesystem at the specified target path
+  - on_demand: Never placed in the container; fetched explicitly by agents with
+    'scion secret get --value KEY' (project and agent scope only)
 
 For file secrets, prefix the value with @ to read from a file:
   scion hub secret set --type file --target /etc/ssl/cert.pem TLS_CERT @cert.pem
 
 To read the value from stdin without exposing it in shell history or process
-listings, pass '-' as VALUE (trailing CR/LF is trimmed; type is unchanged):
+listings, pass '-' as VALUE (trailing CR/LF is trimmed for non-file types; type is unchanged):
   printf %s "$V" | scion hub secret set --agent my-agent API_KEY -
 
 Examples:
@@ -111,7 +112,7 @@ Examples:
   printf %s "$V" | scion hub secret set API_KEY -
   scion hub secret set --scope hub API_KEY sk-abc123
   scion hub secret set --project DATABASE_PASSWORD mypassword
-  scion hub secret set --type variable CONFIG_JSON '{"key":"val"}'
+  scion hub secret set --project --type on_demand API_TOKEN sk-abc123
   scion hub secret set --type file --target /home/scion/.ssh/id_rsa SSH_KEY @~/.ssh/id_rsa`,
 	Args: cobra.ExactArgs(2),
 	RunE: runSecretSet,
@@ -171,7 +172,7 @@ At least one metadata flag must be provided.
 Examples:
   scion hub secret update API_KEY --description "Production API key"
   scion hub secret update API_KEY --injection-mode always
-  scion hub secret update API_KEY --type variable
+  scion hub secret update --project API_KEY --type on_demand
   scion hub secret update API_KEY --allow-progeny
   scion hub secret update --project API_KEY --description "Project key"`,
 	Args: secretUpdateArgs,
@@ -222,15 +223,15 @@ func init() {
 	hubSecretListCmd.Flags().BoolVar(&secretOutputJSON, "json", false, "Output in JSON format")
 
 	// Type and target flags for set command
-	hubSecretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), variable, file")
-	hubSecretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Projection target (env var name, json key, or file path; defaults to KEY)")
+	hubSecretSetCmd.Flags().StringVar(&secretType, "type", "", "Secret type: environment (default), file, on_demand")
+	hubSecretSetCmd.Flags().StringVar(&secretTarget, "target", "", "Projection target (env var name or file path; defaults to KEY; not supported for on_demand)")
 	hubSecretSetCmd.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "Allow creator's progeny agents to access this secret (user scope only)")
 
 	// Metadata flags for update command
 	hubSecretUpdateCmd.Flags().StringP("description", "d", "", "Description for the secret")
 	hubSecretUpdateCmd.Flags().String("injection-mode", "", "Injection mode: always or as_needed")
-	hubSecretUpdateCmd.Flags().String("type", "", "Secret type: environment, variable, file")
-	hubSecretUpdateCmd.Flags().String("target", "", "Projection target (env var name, json key, or file path)")
+	hubSecretUpdateCmd.Flags().String("type", "", "Secret type: environment, file, on_demand")
+	hubSecretUpdateCmd.Flags().String("target", "", "Projection target (env var name or file path; not supported for on_demand)")
 	hubSecretUpdateCmd.Flags().Bool("allow-progeny", false, "Allow creator's progeny agents to access this secret (user scope only)")
 }
 
@@ -321,6 +322,34 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (hubScope
 	return hubScopeTarget{scope: "user"}, nil
 }
 
+// validateSecretTypeFlag validates a --type value for secret commands.
+// Empty string means unset (the server defaults to "environment").
+func validateSecretTypeFlag(t string) error {
+	switch t {
+	case "", "environment", "file", "on_demand":
+		return nil
+	case "variable":
+		return newUsageError(`type "variable" was removed; use "on_demand" instead`)
+	default:
+		return newUsageError("type must be one of: environment, file, on_demand")
+	}
+}
+
+// validateHubSecretOnDemandScopeFlags enforces client-side that --type on_demand
+// is only used with project or agent scope on `scion hub secret` commands.
+func validateHubSecretOnDemandScopeFlags(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("project") || cmd.Flags().Changed("agent") {
+		return nil
+	}
+	if cmd.Flags().Changed("scope") {
+		return newUsageError("on_demand secrets are only supported at project and agent scope (cannot use --scope %s)", secretScope)
+	}
+	if cmd.Flags().Changed("broker") {
+		return newUsageError("on_demand secrets are only supported at project and agent scope (cannot use --broker)")
+	}
+	return newUsageError("on_demand secrets are only supported at project and agent scope (use --project or --agent)")
+}
+
 func runSecretSet(cmd *cobra.Command, args []string) error {
 	key := args[0]
 	value := args[1]
@@ -331,6 +360,20 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 	}
 	if strings.ContainsAny(key, "= \t\n") {
 		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
+	}
+
+	// Validate --type and on_demand constraints client-side before reading
+	// stdin/@file or contacting the Hub.
+	if err := validateSecretTypeFlag(secretType); err != nil {
+		return err
+	}
+	if secretType == "on_demand" {
+		if cmd.Flags().Changed("target") || secretTarget != "" {
+			return newUsageError("--target cannot be used with --type on_demand")
+		}
+		if err := validateHubSecretOnDemandScopeFlags(cmd); err != nil {
+			return err
+		}
 	}
 
 	// Handle '-' to read secret value from stdin without changing the secret type,
@@ -374,8 +417,8 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		if secretType == "" {
 			secretType = "file"
 		}
-		// Auto-set target from source file path if not explicitly provided
-		if secretTarget == "" {
+		// Auto-set target from source file path for file secrets if not explicitly provided
+		if secretType == "file" && secretTarget == "" {
 			absPath, err := filepath.Abs(filePath)
 			if err != nil {
 				return fmt.Errorf("failed to resolve absolute path for %s: %w", filePath, err)
@@ -679,11 +722,19 @@ func secretUpdateArgs(cmd *cobra.Command, args []string) error {
 	// Validate type if provided
 	if cmd.Flags().Changed("type") {
 		secretTypeVal, _ := cmd.Flags().GetString("type")
-		switch secretTypeVal {
-		case "environment", "variable", "file":
-			// valid
-		default:
-			return fmt.Errorf("type must be one of: environment, variable, file")
+		if err := validateSecretTypeFlag(secretTypeVal); err != nil {
+			return err
+		}
+		if secretTypeVal == "on_demand" {
+			if cmd.Flags().Changed("injection-mode") {
+				return newUsageError("--injection-mode cannot be used with --type on_demand")
+			}
+			if cmd.Flags().Changed("target") {
+				return newUsageError("--target cannot be used with --type on_demand")
+			}
+			if err := validateHubSecretOnDemandScopeFlags(cmd); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

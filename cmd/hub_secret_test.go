@@ -37,8 +37,12 @@ type secretTestState struct {
 	projectPath        string
 	secretProjectScope string
 	secretBrokerScope  string
+	secretAgentScope   string
 	secretScope        string
 	secretOutputJSON   bool
+	secretType         string
+	secretTarget       string
+	secretAllowProgeny bool
 }
 
 func saveSecretTestState() secretTestState {
@@ -47,8 +51,12 @@ func saveSecretTestState() secretTestState {
 		projectPath:        projectPath,
 		secretProjectScope: secretProjectScope,
 		secretBrokerScope:  secretBrokerScope,
+		secretAgentScope:   secretAgentScope,
 		secretScope:        secretScope,
 		secretOutputJSON:   secretOutputJSON,
+		secretType:         secretType,
+		secretTarget:       secretTarget,
+		secretAllowProgeny: secretAllowProgeny,
 	}
 }
 
@@ -57,8 +65,12 @@ func (s secretTestState) restore() {
 	projectPath = s.projectPath
 	secretProjectScope = s.secretProjectScope
 	secretBrokerScope = s.secretBrokerScope
+	secretAgentScope = s.secretAgentScope
 	secretScope = s.secretScope
 	secretOutputJSON = s.secretOutputJSON
+	secretType = s.secretType
+	secretTarget = s.secretTarget
+	secretAllowProgeny = s.secretAllowProgeny
 }
 
 // setupSecretProject creates a project directory with settings pointing to the given hub endpoint.
@@ -553,4 +565,250 @@ func TestRunSecretList_TableOutput(t *testing.T) {
 		fmt.Sprintf("%-30s  %-8s  %-12s  %-8s  %-8s  %s\n", "CONFIG", "approved", "environment", "-", "v1", updated2)
 	assert.Equal(t, want, out)
 	assert.NotContains(t, out, "do-not-print")
+}
+
+func newHubSecretSetTestCmd() *cobra.Command {
+	c := &cobra.Command{Use: "set"}
+	c.Flags().StringVar(&secretScope, "scope", "", "")
+	c.Flags().StringVar(&secretProjectScope, "project", "", "")
+	c.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+	c.Flags().StringVar(&secretBrokerScope, "broker", "", "")
+	c.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
+	c.Flags().StringVar(&secretAgentScope, "agent", "", "")
+	c.Flags().StringVar(&secretType, "type", "", "")
+	c.Flags().StringVar(&secretTarget, "target", "", "")
+	c.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "")
+	return c
+}
+
+func newHubSecretUpdateTestCmd() *cobra.Command {
+	c := &cobra.Command{Use: "update"}
+	c.Flags().StringVar(&secretScope, "scope", "", "")
+	c.Flags().StringVar(&secretProjectScope, "project", "", "")
+	c.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
+	c.Flags().StringVar(&secretBrokerScope, "broker", "", "")
+	c.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
+	c.Flags().StringVar(&secretAgentScope, "agent", "", "")
+	c.Flags().StringP("description", "d", "", "")
+	c.Flags().String("injection-mode", "", "")
+	c.Flags().String("type", "", "")
+	c.Flags().String("target", "", "")
+	c.Flags().Bool("allow-progeny", false, "")
+	return c
+}
+
+func TestHubSecretSet_TypeAndOnDemandValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		flags   map[string]string
+		wantErr string
+	}{
+		{
+			name:    "variable type rejected naming on_demand",
+			flags:   map[string]string{"type": "variable"},
+			wantErr: "on_demand",
+		},
+		{
+			name:    "unknown type rejected",
+			flags:   map[string]string{"type": "bogus"},
+			wantErr: "environment, file, on_demand",
+		},
+		{
+			name:    "on_demand rejected at hub scope",
+			flags:   map[string]string{"type": "on_demand", "scope": "hub"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at user scope",
+			flags:   map[string]string{"type": "on_demand", "scope": "user"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at default user scope",
+			flags:   map[string]string{"type": "on_demand"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at broker scope",
+			flags:   map[string]string{"type": "on_demand", "broker": "b1"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected with target",
+			flags:   map[string]string{"type": "on_demand", "project": "p1", "target": "OTHER"},
+			wantErr: "--target cannot be used with --type on_demand",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := saveSecretTestState()
+			defer orig.restore()
+			secretScope = ""
+			secretProjectScope = ""
+			secretBrokerScope = ""
+			secretAgentScope = ""
+			secretType = ""
+			secretTarget = ""
+			secretAllowProgeny = false
+
+			c := newHubSecretSetTestCmd()
+			for k, v := range tt.flags {
+				require.NoError(t, c.Flags().Set(k, v))
+			}
+
+			err := runSecretSet(c, []string{"MY_KEY", "my-val"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+
+	t.Run("on_demand accepted at project scope", func(t *testing.T) {
+		orig := saveSecretTestState()
+		defer orig.restore()
+
+		var captured map[string]interface{}
+		projectID := "11111111-1111-1111-1111-111111111111"
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			case r.URL.Path == "/api/v1/projects/"+projectID && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "test-project"})
+			case r.Method == http.MethodPut && len(r.URL.Path) > len("/api/v1/secrets/"):
+				var body map[string]interface{}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("failed to decode request body: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				captured = body
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"secret":  map[string]interface{}{"key": "MY_KEY", "scope": "project", "type": "on_demand", "version": 1, "created": "2026-01-01T00:00:00Z", "updated": "2026-01-01T00:00:00Z"},
+					"created": true,
+				})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+		projectPath = setupSecretProject(t, tmpHome, server.URL)
+
+		secretScope = ""
+		secretProjectScope = ""
+		secretBrokerScope = ""
+		secretAgentScope = ""
+		secretType = ""
+		secretTarget = ""
+		secretAllowProgeny = false
+
+		c := newHubSecretSetTestCmd()
+		require.NoError(t, c.Flags().Set("type", "on_demand"))
+		require.NoError(t, c.Flags().Set("project", projectID))
+
+		err := runSecretSet(c, []string{"MY_KEY", "my-val"})
+		require.NoError(t, err)
+		assert.Equal(t, "on_demand", captured["type"])
+		assert.Equal(t, "project", captured["scope"])
+		assert.Empty(t, captured["target"])
+	})
+}
+
+func TestHubSecretUpdateArgs_TypeAndOnDemandValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		flags   map[string]string
+		wantErr string
+	}{
+		{
+			name:    "variable type rejected naming on_demand",
+			flags:   map[string]string{"type": "variable", "project": "p1"},
+			wantErr: "on_demand",
+		},
+		{
+			name:    "unknown type rejected",
+			flags:   map[string]string{"type": "bogus", "project": "p1"},
+			wantErr: "environment, file, on_demand",
+		},
+		{
+			name:    "on_demand rejected with injection-mode always",
+			flags:   map[string]string{"type": "on_demand", "project": "p1", "injection-mode": "always"},
+			wantErr: "--injection-mode cannot be used with --type on_demand",
+		},
+		{
+			name:    "on_demand rejected with injection-mode as_needed",
+			flags:   map[string]string{"type": "on_demand", "project": "p1", "injection-mode": "as_needed"},
+			wantErr: "--injection-mode cannot be used with --type on_demand",
+		},
+		{
+			name:    "on_demand rejected with target",
+			flags:   map[string]string{"type": "on_demand", "project": "p1", "target": "OTHER"},
+			wantErr: "--target cannot be used with --type on_demand",
+		},
+		{
+			name:    "on_demand rejected at hub scope",
+			flags:   map[string]string{"type": "on_demand", "scope": "hub"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at user scope",
+			flags:   map[string]string{"type": "on_demand", "scope": "user"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at default user scope",
+			flags:   map[string]string{"type": "on_demand"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:    "on_demand rejected at broker scope",
+			flags:   map[string]string{"type": "on_demand", "broker": "b1"},
+			wantErr: "only supported at project and agent scope",
+		},
+		{
+			name:  "on_demand accepted at project scope",
+			flags: map[string]string{"type": "on_demand", "project": "p1"},
+		},
+		{
+			name:  "on_demand accepted at agent scope",
+			flags: map[string]string{"type": "on_demand", "agent": "my-agent"},
+		},
+		{
+			name:  "environment accepted",
+			flags: map[string]string{"type": "environment"},
+		},
+		{
+			name:  "file accepted",
+			flags: map[string]string{"type": "file"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := saveSecretTestState()
+			defer orig.restore()
+			secretScope = ""
+			secretProjectScope = ""
+			secretBrokerScope = ""
+			secretAgentScope = ""
+
+			c := newHubSecretUpdateTestCmd()
+			for k, v := range tt.flags {
+				require.NoError(t, c.Flags().Set(k, v))
+			}
+
+			err := secretUpdateArgs(c, []string{"MY_KEY"})
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
 }

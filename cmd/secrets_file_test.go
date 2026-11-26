@@ -70,10 +70,9 @@ func TestLoadSecretsFile_FullForm(t *testing.T) {
   - key: OPENAI_API_KEY
     fromEnv: TEST_OPENAI_SECRET
     injectionMode: always
-  - key: LITERAL_VAR
+  - key: LITERAL_ON_DEMAND
     value: "hello-world"
-    type: variable
-    target: literal_var
+    type: on_demand
 `
 	path := filepath.Join(dir, "secrets.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yamlBody), 0o600))
@@ -97,11 +96,10 @@ func TestLoadSecretsFile_FullForm(t *testing.T) {
 		InjectionMode: "always",
 	}, got[1])
 	assert.Equal(t, hubclient.AgentSecretInput{
-		Key:      "LITERAL_VAR",
+		Key:      "LITERAL_ON_DEMAND",
 		Value:    "hello-world",
 		Encoding: "raw",
-		Type:     "variable",
-		Target:   "literal_var",
+		Type:     "on_demand",
 	}, got[2])
 }
 

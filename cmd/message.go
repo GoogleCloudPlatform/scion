@@ -145,10 +145,14 @@ To retire a decision without a replacement, use scion decisions withdraw.
 
 Secret requests (--secret-request or --secret-request-file, from an agent to a
 user or a conversation) ask a human to supply one or more agent-scoped secrets
-through the Hub (never in chat). They print one line per key with its version
-(and replaced version when --update replaces a pending request). With --format
-json the output is the Hub's full send result. Use scion secret request list
-and scion secret request withdraw to inspect or retire open requests.
+through the Hub (never in chat). Requests default to type "on_demand" (fetched
+explicitly via 'scion secret get --value KEY', never placed in the container);
+use type "environment" only when a tool must find the value in its environment
+at the next restart, or "file" with a target path under ~/. They print one line
+per key with its version (and replaced version when --update replaces a pending
+request). With --format json the output is the Hub's full send result. Use
+scion secret request list and scion secret request withdraw to inspect or
+retire open requests.
 
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
@@ -1997,9 +2001,9 @@ func init() {
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 	messageCmd.Flags().StringVar(&msgDecisions, "decisions", "", "Send a decision prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.decisions experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgDecisionsFile, "decisions-file", "", "Read the --decisions JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
+	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; defaults to type on_demand; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
-	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}) from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}; type defaults to on_demand — use environment only when a tool must find it in env at next restart, or file with target) from a file ('-' reads stdin, which then excludes --body-file -)")
 	messageCmd.Flags().StringVar(&msgCommandRequestKey, "command-request", "", "Propose a command to run in the recipient's execution container (DM to user only; agents only; needs the hub.command_requests experiment)")
 	messageCmd.Flags().StringVar(&msgCommandInline, "command", "", "With --command-request: inline shell command/script to propose")
 	messageCmd.Flags().StringVar(&msgCommandFile, "command-file", "", "With --command-request: read the proposed shell script from a file ('-' reads stdin, which then excludes --body-file -)")

@@ -237,14 +237,19 @@ _Avoid_: Dashboard (when naming the mode-switcher option rather than the `/` ove
 _See also_: Native Web Chat
 
 **Secret**:
-A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by runtime broker, hub, project, user, or (with `hub.agent_secrets`) agent, and injects them into the container. Also holds the Hub's signing keys.
+A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by runtime broker, hub, project, user, or (with `hub.agent_secrets`) agent, and injects deliverable types (`environment` and `file`) into the container (while `on_demand` secrets are fetched explicitly by agents via CLI). Also holds the Hub's signing keys and `internal` integration credentials.
 _Avoid_: credential, vault, secret store, env secret
-_See also_: Agent Scope, Secret Request, Harness-config, Profile
+_See also_: On-demand secret, Agent Scope, Secret Request, Harness-config, Profile
+
+**On-demand secret**:
+A secret of type `on_demand`, allowed only at **project** and **agent** scope, that is never delivered to an agent container at start, restart, or during harness credential gathering (and has no `target` or `always` injection mode). Agents discover available keys with `scion secret list` and read values explicitly via `scion secret get --value KEY` (or `POST /api/v1/agent/secrets`). An on-demand secret shadows lower-scope secrets with the same name or effective environment target (plain environment variables are not shadowed). Hub- and Runtime Broker-side consumers (System One, the Hub's own project clone token, and `gh://` skill provision credentials) remain exempt. Replaces the retired `variable` secret type.
+_Avoid_: variable secret, secrets.json, lazy secret
+_See also_: Secret, Agent Scope, Secret Request
 
 **Agent Scope** (agent-scoped secret):
 A secret scope (`scope=agent`, keyed by the agent's stable UUID) that binds a secret to one agent. No API returns an agent-scope value to anyone but the bound agent's token; for humans, agent-scoped secrets are write-only (managed with `agent.read` for metadata and `agent.update` for writes, with no reveal), while the bound agent manages its own with `scion secret list|get|set --scope agent` (and `sciontool secret delete --scope agent`). Agent scope sits at the top of the secret precedence ladder (`runtime_broker < hub < project < user < agent`), applies to secrets only (not plain environment variables), never propagates to progeny (`allowProgeny` is rejected), persists across stop, suspend, restart, reincarnation, and soft delete, and is deleted when the agent is hard-deleted or purged. Gated by the `hub.agent_secrets` experiment.
 _Avoid_: private agent env, per-agent profile, agent-only credential
-_See also_: Secret, Secret Request
+_See also_: Secret, On-demand secret, Secret Request
 
 **Port Forwarding**:
 The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated outbound WebSocket connection from the container to the Hub.

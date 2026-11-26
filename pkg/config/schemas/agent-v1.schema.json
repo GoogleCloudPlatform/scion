@@ -376,7 +376,7 @@
       "properties": {
         "key": { "type": "string", "description": "Secret key name." },
         "description": { "type": "string", "description": "Human-readable description." },
-        "type": { "type": "string", "enum": ["environment", "variable", "file"], "default": "environment" },
+        "type": { "type": "string", "enum": ["environment", "file"], "default": "environment" },
         "target": { "type": "string", "description": "Projection target (defaults to key for env type)." },
         "alternative_env_keys": {
           "type": "array",

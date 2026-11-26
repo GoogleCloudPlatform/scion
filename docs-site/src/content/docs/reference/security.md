@@ -224,17 +224,23 @@ Secrets are scoped and resolved hierarchically when an agent starts. The followi
 1. **Runtime Broker scope** (lowest priority): Infrastructure-level defaults for agents on that broker.
 2. **Hub scope**: Global defaults.
 3. **Project scope**: Project-level secrets.
-4. **User scope** (highest priority): Personal secrets for the agent's owner.
+4. **User scope**: Personal secrets for the agent's owner.
+5. **Agent scope** (highest priority, secrets only, behind `hub.agent_secrets`): Secrets bound to a single agent.
 
-This produces a merged set of secrets for each agent: for the same key, User scope wins over Project scope, Project over Hub, and Hub over Runtime Broker. Environment variables use the same scope order, and for the same key a variable from any scope takes precedence over an environment-type secret.
+This produces a merged set of secrets for each agent: for the same key, Agent scope wins over User scope, User over Project, Project over Hub, and Hub over Runtime Broker. Environment variables use the same scope order (without Agent scope), and for the same key a plain environment variable from any scope takes precedence over an environment-type secret.
 
-### 4.3 Secret Types and Projection
+### 4.3 Secret Types, Delivery Exclusion, and Shadowing
 
-Secrets are typed to control how they reach the agent container:
+Secrets are typed to control how (or whether) they reach the agent container:
 
-- **`environment`**: Injected as environment variables (default).
-- **`variable`**: Written to `~/.scion/secrets.json` inside the container.
-- **`file`**: Written to a specified filesystem path (max 64 KiB).
+- **`environment`**: Injected as environment variables (default). `always` secrets are injected at start and restart; `as_needed` secrets are injected only when requested by the template or harness credential gather.
+- **`file`**: Written to a specified filesystem path (max 64 KiB) at start and restart, regardless of injection mode.
+- **`on_demand`**: Allowed only at `project` and `agent` scope (`hub`, `user`, and `runtime_broker` are rejected with `400`), with no `target` and no `always` injection mode. Never placed in the agent container; agents discover keys with `scion secret list` and fetch values explicitly via `scion secret get --value KEY` (or `POST /api/v1/agent/secrets`).
+- **`internal`**: Hub-owned credentials (signing keys, OIDC keys, chat integrations, GitHub App credentials, and message broker plugin tokens). Refused by generic secret CRUD, hidden from the Hub secrets page, and never delivered or readable by agents.
+
+**Container delivery exclusion (allowlist):** Every container delivery and harness-gather path uses a strict allowlist (`DeliverableType`: `environment` and `file` only). Non-deliverable types (`on_demand` and `internal`) are excluded at metadata enumeration before any value is fetched from the secret backend, so their values are never read on start, restart, or gather paths. "Never delivered at start" means never delivered into the agent container: Hub- and Runtime Broker-side consumers are exempt — System One (which accepts `project` `on_demand` secrets), the Hub's own project clone token, and `gh://` skill provision credentials (on hosted deployments with remote Runtime Brokers, an `on_demand` token named by a `gh://` skill reference crosses the Hub→Runtime Broker channel for provisioning and is never forwarded into the container).
+
+**Shadowing:** An `on_demand` secret at a higher-precedence scope shadows lower-scope secrets with the same name **or** whose effective environment target equals its key across both start delivery and harness credential gathering. For example, an agent-scope `on_demand` `GITHUB_TOKEN` prevents a project-scope `environment` `GITHUB_TOKEN` from being injected into the container. Plain environment variables (`env_vars`) are not shadowed; a same-scope secret with a different name but the same target is still delivered; and shadowing by agent-scope rows lapses when `hub.agent_secrets` is off.
 
 ### 4.4 User Access Tokens (UATs)
 

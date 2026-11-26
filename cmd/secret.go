@@ -192,8 +192,8 @@ func init() {
 
 	agentSecretListCmd.Flags().StringVar(&agentSecretListScope, "scope", "", "Filter by scope: agent, project, or all (default: all)")
 
-	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")
-	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
+	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), file, on_demand")
+	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file; not supported for on_demand)")
 	agentSecretSetCmd.Flags().StringVar(&agentSecretSetScope, "scope", "", "Secret scope: project (default), user, or agent")
 	agentSecretSetCmd.Flags().BoolVar(&agentSecretForce, "force", false, "Overwrite existing secret")
 	agentSecretSetCmd.Flags().BoolVar(&agentSecretAllowProgeny, "allow-progeny", false, "Allow progeny agents to inherit this secret (user scope only)")
@@ -437,6 +437,19 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		return newUsageError("--scope must be \"project\", \"user\", or \"agent\"")
 	}
 
+	// Validate type flag and on_demand constraints client-side.
+	if err := validateSecretTypeFlag(agentSecretType); err != nil {
+		return err
+	}
+	if agentSecretType == "on_demand" {
+		if cmd.Flags().Changed("target") || agentSecretTarget != "" {
+			return newUsageError("--target cannot be used with --type on_demand")
+		}
+		if agentSecretSetScope == "user" {
+			return newUsageError("on_demand secrets are only supported at project and agent scope")
+		}
+	}
+
 	localType := agentSecretType
 	localTarget := agentSecretTarget
 
@@ -495,8 +508,8 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 		if localType == "" {
 			localType = "file"
 		}
-		// Auto-set target from source file path if not explicitly provided.
-		if localTarget == "" {
+		// Auto-set target from source file path for file secrets if not explicitly provided.
+		if localType == "file" && localTarget == "" {
 			absPath, err := filepath.Abs(filePath)
 			if err != nil {
 				return fmt.Errorf("failed to resolve absolute path for %s: %w", filePath, err)
