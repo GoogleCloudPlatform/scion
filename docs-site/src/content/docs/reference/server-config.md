@@ -1247,7 +1247,7 @@ Controls Hub-side reincarnation settings. `server.reincarnate` is a Layer 0 (sta
 
 #### Move bundle limits (`server.reincarnate.move_bundle`)
 
-Bounds and timeouts for cross-broker bundle moves (`transferMode: "bundle"`, gated by [`hub.agent_move_bundle`](/scion/reference/experiments/#server-experiments-with-notes)). The Hub sends the resolved limits to the source and target Runtime Brokers on every precheck, export, and import request; zero or omitted fields fall back to the defaults below.
+Bounds and timeouts for cross-broker bundle moves (`transferMode: "bundle"`, gated by [`hub.agent_move_bundle`](/scion/reference/experiments/#server-experiments-with-notes)). The Hub sends the resolved limits to the source and target Runtime Brokers on every precheck, export, and import request; zero, omitted, or negative values — as well as unparseable duration strings — fall back silently to the defaults below.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
