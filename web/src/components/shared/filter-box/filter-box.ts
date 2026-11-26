@@ -211,16 +211,22 @@ export class ScionFilterBox extends LitElement {
       color: var(--scion-text-muted);
     }
 
-    .listbox {
+    .listbox-popover {
       position: absolute;
       top: calc(100% + 2px);
       left: 0;
       right: 0;
       z-index: 50;
+      display: flex;
+      flex-direction: column;
       background: var(--scion-surface-raised, var(--scion-surface));
       border: 1px solid var(--scion-border);
       border-radius: var(--scion-radius);
       box-shadow: var(--scion-shadow-md, 0 4px 12px var(--scion-border));
+      overflow: hidden;
+    }
+
+    .listbox {
       max-height: 240px;
       overflow-y: auto;
       padding: 0.25rem;
@@ -293,14 +299,12 @@ export class ScionFilterBox extends LitElement {
     }
 
     .listbox-footer {
-      position: sticky;
-      bottom: 0;
+      flex-shrink: 0;
       background: var(--scion-surface-raised, var(--scion-surface));
       font-size: 0.72rem;
       color: var(--scion-text-muted);
-      padding: 0.3rem 0.5rem 0.15rem;
+      padding: 0.3rem 0.65rem 0.35rem;
       border-top: 1px solid var(--scion-border);
-      margin-top: 0.2rem;
     }
 
     .sr-only {
@@ -621,6 +625,7 @@ export class ScionFilterBox extends LitElement {
     this.remoteError = false;
     this.remoteEmpty = false;
     this.remoteTotal = null;
+    this.liveAnnouncement = '';
   }
 
   private formatNoMatchText(): string {
@@ -891,69 +896,71 @@ export class ScionFilterBox extends LitElement {
       ${this.open &&
       (this.suggestions.length > 0 || this.remoteLoading || this.remoteError || this.remoteEmpty)
         ? html`
-            <ul
-              id=${this.listboxId}
-              class="listbox"
-              role="listbox"
-              aria-busy=${this.remoteLoading ? 'true' : nothing}
-            >
-              ${this.remoteLoading
-                ? html`
-                    <li class="status-row" role="presentation" data-remote-status="loading">
-                      <span class="spinner" aria-hidden="true"></span>
-                      <span>Searching…</span>
-                    </li>
-                  `
-                : nothing}
-              ${this.remoteError
-                ? html`
+            <div class="listbox-popover">
+              <ul
+                id=${this.listboxId}
+                class="listbox"
+                role="listbox"
+                aria-busy=${this.remoteLoading ? 'true' : nothing}
+              >
+                ${this.remoteLoading
+                  ? html`
+                      <li class="status-row" role="presentation" data-remote-status="loading">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span>Searching…</span>
+                      </li>
+                    `
+                  : nothing}
+                ${this.remoteError
+                  ? html`
+                      <li
+                        class="status-row status-warn"
+                        role="presentation"
+                        data-remote-status="error"
+                      >
+                        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                        <span>Couldn't load suggestions. You can still type a value.</span>
+                      </li>
+                    `
+                  : nothing}
+                ${!this.remoteLoading && !this.remoteError && this.remoteEmpty
+                  ? html`
+                      <li class="status-row" role="presentation" data-remote-status="empty">
+                        <span>${this.formatNoMatchText()}</span>
+                      </li>
+                    `
+                  : nothing}
+                ${this.suggestions.map(
+                  (s, idx) => html`
                     <li
-                      class="status-row status-warn"
-                      role="presentation"
-                      data-remote-status="error"
+                      id="${this.listboxId}-opt-${idx}"
+                      class="option ${idx === this.activeIndex ? 'active' : ''} ${this.remoteLoading
+                        ? 'dim'
+                        : ''}"
+                      role="option"
+                      aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
+                      @mousedown=${(e: MouseEvent) => {
+                        e.preventDefault();
+                        this.acceptSuggestion(s);
+                      }}
                     >
-                      <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-                      <span>Couldn't load suggestions. You can still type a value.</span>
+                      <span class="option-label">${s.label}</span>
+                      ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
                     </li>
                   `
-                : nothing}
-              ${!this.remoteLoading && !this.remoteError && this.remoteEmpty
-                ? html`
-                    <li class="status-row" role="presentation" data-remote-status="empty">
-                      <span>${this.formatNoMatchText()}</span>
-                    </li>
-                  `
-                : nothing}
-              ${this.suggestions.map(
-                (s, idx) => html`
-                  <li
-                    id="${this.listboxId}-opt-${idx}"
-                    class="option ${idx === this.activeIndex ? 'active' : ''} ${this.remoteLoading
-                      ? 'dim'
-                      : ''}"
-                    role="option"
-                    aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
-                    @mousedown=${(e: MouseEvent) => {
-                      e.preventDefault();
-                      this.acceptSuggestion(s);
-                    }}
-                  >
-                    <span class="option-label">${s.label}</span>
-                    ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
-                  </li>
-                `
-              )}
+                )}
+              </ul>
               ${!this.remoteLoading &&
               !this.remoteError &&
               this.remoteTotal !== null &&
               this.suggestions.length > 0
                 ? html`
-                    <li class="listbox-footer" role="presentation" data-remote-footer>
+                    <div class="listbox-footer" data-remote-footer>
                       Showing ${this.suggestions.length} of ${this.remoteTotal} · keep typing
-                    </li>
+                    </div>
                   `
                 : nothing}
-            </ul>
+            </div>
           `
         : nothing}
 

@@ -453,6 +453,40 @@ describe('<scion-filter-box>', () => {
     expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim() ?? '').toBe('');
   });
 
+  it('clears liveAnnouncement between remote queries so consecutive same-count results re-announce', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.remoteValueSuggestions = (_key, prefix) =>
+      Promise.resolve({ values: [{ value: `${prefix}-agent` }], total: 1 });
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:alpha';
+    input.setSelectionRange(11, 11);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '1 suggestion'
+    );
+
+    // Starting the next remote query clears the live region before the next same-count result arrives.
+    input.value = 'agent:beta';
+    input.setSelectionRange(10, 10);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe('');
+
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '1 suggestion'
+    );
+  });
+
   it('skips remote loading when remoteValueSuggestions returns null', async () => {
     vi.useFakeTimers();
     const el = await mount();
