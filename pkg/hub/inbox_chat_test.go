@@ -569,7 +569,6 @@ type inboxChatCountingMainStore struct {
 	store.Store
 	getUsersByIDs  atomic.Int32
 	getAgentsByIDs atomic.Int32
-	latestByThread atomic.Int32
 	latestByConv   atomic.Int32
 }
 
@@ -581,11 +580,6 @@ func (s *inboxChatCountingMainStore) GetUsersByIDs(ctx context.Context, ids []st
 func (s *inboxChatCountingMainStore) GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
 	s.getAgentsByIDs.Add(1)
 	return s.Store.GetAgentsByIDsIncludingDeleted(ctx, ids)
-}
-
-func (s *inboxChatCountingMainStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
-	s.latestByThread.Add(1)
-	return s.Store.LatestMessagesByThreadIDs(ctx, ids, opts)
 }
 
 func (s *inboxChatCountingMainStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
@@ -679,7 +673,6 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 		wcsSpy.unreadMentions.Store(0)
 		mainSpy.getUsersByIDs.Store(0)
 		mainSpy.getAgentsByIDs.Store(0)
-		mainSpy.latestByThread.Store(0)
 		mainSpy.latestByConv.Store(0)
 
 		resp := h.decodeSummary(doRequestAsUser(t, srv, me, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=10", nil))
@@ -692,7 +685,7 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 			unreadMentions: wcsSpy.unreadMentions.Load(),
 			getUsers:       mainSpy.getUsersByIDs.Load(),
 			getAgents:      mainSpy.getAgentsByIDs.Load(),
-			dmLastMessages: mainSpy.latestByThread.Load() + mainSpy.latestByConv.Load(),
+			dmLastMessages: mainSpy.latestByConv.Load(),
 		}
 	}
 
