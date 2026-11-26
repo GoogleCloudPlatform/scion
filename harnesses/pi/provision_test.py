@@ -111,6 +111,18 @@ class AuthTest(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, *AUTH)))
         self.assertEqual(out["PI_SKIP_VERSION_CHECK"], "1")
         self.assertEqual(out["PI_TELEMETRY"], "0")
+        self.assertEqual(out["SCION_USAGE_SOURCE"], "hooks")
+
+    def test_usage_source_hooks_declared_for_all_auth_modes(self) -> None:
+        body = json.dumps({"anthropic": {"type": "api_key", "key": SECRET}})
+        for label, kwargs in (
+            ("api-key", {"env_vars": ["ANTHROPIC_API_KEY"]}),
+            ("auth-file", {"auth_secret": body}),
+            ("no-auth", {}),
+        ):
+            with self.subTest(mode=label), tempfile.TemporaryDirectory() as tmp, env(tmp):
+                out = invoke(tmp, **kwargs)
+                self.assertEqual(out["SCION_USAGE_SOURCE"], "hooks")
 
     def test_env_json_never_contains_the_secret(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, env(tmp, ANTHROPIC_API_KEY=SECRET):

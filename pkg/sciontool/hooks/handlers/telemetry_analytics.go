@@ -26,14 +26,25 @@ import (
 // captured payloads carry one, else none. Antigravity (agy 1.2.12 fixture):
 // conversationId plus initialNumSteps (advances across turns) plus
 // invocationNum (advances within a turn) names one main-loop invocation.
+// Pi (pi 1.3.0): (message_id, response_id, timestamp) from assistant
+// message_end names one completed model request.
 func hookSourceIdentity(event *hooks.Event) (identity, sourceEventID string) {
-	if event.Dialect == "antigravity" {
+	switch event.Dialect {
+	case "antigravity":
 		conv := rawScalar(event.Data.Raw, "conversationId")
 		steps := rawScalar(event.Data.Raw, "initialNumSteps")
 		inv := rawScalar(event.Data.Raw, "invocationNum")
 		if conv != "" && steps != "" && inv != "" {
 			return telemetrycontract.SourceIdentityComposite,
 				telemetry.CompositeSourceEventID("hook", event.Dialect, event.RawName, conv, steps, inv)
+		}
+	case "pi":
+		msgID := rawScalar(event.Data.Raw, "message_id")
+		respID := rawScalar(event.Data.Raw, "response_id")
+		ts := rawScalar(event.Data.Raw, "timestamp")
+		if msgID != "" || respID != "" || ts != "" {
+			return telemetrycontract.SourceIdentityComposite,
+				telemetry.CompositeSourceEventID("hook", event.Dialect, event.RawName, msgID, respID, ts)
 		}
 	}
 	return telemetrycontract.SourceIdentityNone, ""

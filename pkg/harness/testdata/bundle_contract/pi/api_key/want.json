@@ -7,6 +7,7 @@
   },
   "env": {
     "PI_SKIP_VERSION_CHECK": "1",
-    "PI_TELEMETRY": "0"
+    "PI_TELEMETRY": "0",
+    "SCION_USAGE_SOURCE": "hooks"
   }
 }

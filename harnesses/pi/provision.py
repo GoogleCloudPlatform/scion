@@ -469,7 +469,14 @@ def provision(ctx: sh.ProvisionContext) -> None:
     # The container env (config.yaml env:) already sets PI_SKIP_VERSION_CHECK
     # and PI_TELEMETRY; repeating them here keeps them set if a project
     # override of env: drops the block. Container env still wins when set.
-    env = {"PI_SKIP_VERSION_CHECK": "1", "PI_TELEMETRY": "0"}
+    # pi has no native OTel usage emitter (capabilities.telemetry.native_emitter
+    # is "no"), so model calls and tokens are published from hooks via
+    # scion-bridge.js's assistant message_end -> model-end events.
+    env = {
+        "PI_SKIP_VERSION_CHECK": "1",
+        "PI_TELEMETRY": "0",
+        "SCION_USAGE_SOURCE": "hooks",
+    }
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     ctx.info(f"method={resolved.method} project_trust={settings['defaultProjectTrust']}")

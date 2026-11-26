@@ -153,12 +153,41 @@ const FIXTURE = join(
 const BRIDGE_SESSION = [
   ['session_start', { type: 'session_start', reason: 'startup' }],
   ['input', { type: 'input', text: 'list the files', source: 'interactive' }],
+  ['message_end', {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Checking files.' }],
+      api: 'openai-completions',
+      provider: 'mockprov',
+      model: 'mock-model',
+      responseModel: 'mock-model-2026',
+      responseId: 'chatcmpl-mock-1',
+      usage: { input: 380, output: 40, cacheRead: 120, cacheWrite: 25, reasoning: 15, totalTokens: 565 },
+      stopReason: 'toolUse',
+      timestamp: 1795719212534,
+    },
+  }],
   ['tool_execution_start', { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls -la', timeout: 30 } }],
   ['tool_execution_end', { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', result: {}, isError: false }],
   ['tool_execution_start', { type: 'tool_execution_start', toolCallId: 't2', toolName: 'read', args: { path: 'missing.txt' } }],
   ['tool_execution_end', { type: 'tool_execution_end', toolCallId: 't2', toolName: 'read', result: {}, isError: true }],
   ['agent_end', { type: 'agent_end', messages: [asst('Here are the files.')] }],
   ['input', { type: 'input', text: 'again', source: 'rpc' }],
+  ['message_end', {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [],
+      api: 'openai-completions',
+      provider: 'mockprov',
+      model: 'mock-model',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      stopReason: 'error',
+      errorMessage: '429 rate limited: retry later',
+      timestamp: 1795719213601,
+    },
+  }],
   ['agent_end', { type: 'agent_end', messages: [asst('', { stopReason: 'error', errorMessage: '429 rate limited: retry later' })] }],
   ['session_start', { type: 'session_start', reason: 'resume' }],
   ['session_start', { type: 'session_start', reason: 'reload' }],
@@ -226,9 +255,161 @@ test('default export registers exactly the expected pi events and starts nothing
   scionBridge({ on: (name, fn) => registered.push([name, typeof fn]) });
   assert.deepEqual(
     registered.map((r) => r[0]).sort(),
-    ['agent_end', 'agent_settled', 'input', 'project_trust', 'session_start', 'tool_execution_end', 'tool_execution_start'],
+    ['agent_end', 'agent_settled', 'input', 'message_end', 'project_trust', 'session_start', 'tool_execution_end', 'tool_execution_start'],
   );
   assert.ok(registered.every((r) => r[1] === 'function'));
+});
+
+// --- message_end model usage -------------------------------------------------
+
+test('message_end emits canonical token fields, responseModel over model, and request identity', () => {
+  const { calls, h } = harness();
+  // Wire shape captured from pinned @earendil-works/pi-coding-agent@1.3.0
+  // against a local mock OpenAI-compatible server (scrubbed).
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Hello from mock.' }],
+      api: 'openai-completions',
+      provider: 'mockprov',
+      model: 'mock-model',
+      responseModel: 'mock-model-2026',
+      responseId: 'chatcmpl-mock-1',
+      id: 'msg-1',
+      usage: {
+        input: 380,
+        output: 40,
+        cacheRead: 120,
+        cacheWrite: 25,
+        reasoning: 15,
+        totalTokens: 565,
+        cost: { input: 0.00038, output: 0.00008, cacheRead: 0.000012, cacheWrite: 0.00003, total: 0.000502 },
+      },
+      stopReason: 'stop',
+      timestamp: 1795719212534,
+    },
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].argv, ['hook', '--dialect=pi']);
+  assert.deepEqual(calls[0].stdin, {
+    hook_event_name: 'message_end',
+    message_id: 'msg-1',
+    response_id: 'chatcmpl-mock-1',
+    timestamp: 1795719212534,
+    model: 'mockprov/mock-model-2026',
+    input_tokens: 380,
+    output_tokens: 40,
+    cached_tokens: 120,
+    cache_write_tokens: 25,
+    reasoning_tokens: 15,
+  });
+});
+
+test('message_end omits unknown, missing, zero, or non-finite token fields (never fabricates 0)', () => {
+  const { calls, h } = harness();
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      usage: { input: 100, output: 0, cacheRead: undefined, cacheWrite: null, reasoning: Number.NaN },
+      stopReason: 'stop',
+      timestamp: 1795719212500,
+    },
+  });
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      model: 'anthropic/claude-sonnet-4-5',
+      provider: 'anthropic',
+      stopReason: 'stop',
+      timestamp: 1795719212600,
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].stdin, {
+    hook_event_name: 'message_end',
+    timestamp: 1795719212500,
+    model: 'anthropic/claude-sonnet-4-5',
+    input_tokens: 100,
+  });
+  assert.ok(!Object.hasOwn(calls[0].stdin, 'output_tokens'));
+  assert.ok(!Object.hasOwn(calls[0].stdin, 'cached_tokens'));
+  assert.ok(!Object.hasOwn(calls[0].stdin, 'cache_write_tokens'));
+  assert.ok(!Object.hasOwn(calls[0].stdin, 'reasoning_tokens'));
+  // Already provider-prefixed model is not double-prefixed; absent usage emits no token keys.
+  assert.deepEqual(calls[1].stdin, {
+    hook_event_name: 'message_end',
+    timestamp: 1795719212600,
+    model: 'anthropic/claude-sonnet-4-5',
+  });
+});
+
+test('message_end ignores non-assistant messages and non-terminal stopReasons', () => {
+  const { calls, h } = harness();
+  h.message_end(undefined);
+  h.message_end({ type: 'message_end', message: { role: 'user', content: 'hi', timestamp: 1 } });
+  h.message_end({ type: 'message_end', message: { role: 'system', content: '', timestamp: 2 } });
+  h.message_end({ type: 'message_end', message: { role: 'toolResult', toolCallId: 't1', usage: { input: 5, output: 5 }, timestamp: 3 } });
+  h.message_end({ type: 'message_end', message: { role: 'assistant', stopReason: 'pending', usage: { input: 5, output: 5 }, timestamp: 4 } });
+  h.message_end({ type: 'message_end', message: { role: 'assistant', stopReason: 'deferred', usage: { input: 5, output: 5 }, timestamp: 5 } });
+  assert.equal(calls.length, 0);
+});
+
+test('message_end deduplicates repeated deliveries on (id, responseId, timestamp) without collapsing distinct calls', () => {
+  const { calls, h } = harness();
+  const base = {
+    role: 'assistant',
+    provider: 'mockprov',
+    model: 'mock-model',
+    responseId: 'resp-1',
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+    stopReason: 'stop',
+    timestamp: 1795719212000,
+  };
+  h.message_end({ type: 'message_end', message: base });
+  h.message_end({ type: 'message_end', message: { ...base } });
+  // Identical token counts on a distinct request (new responseId/timestamp) must still count.
+  h.message_end({ type: 'message_end', message: { ...base, responseId: 'resp-2', timestamp: 1795719212999 } });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].stdin.response_id, 'resp-1');
+  assert.equal(calls[1].stdin.response_id, 'resp-2');
+});
+
+test('message_end carries bounded error for error and aborted outcomes and omits EMPTY_USAGE zeros', () => {
+  const { calls, h } = harness();
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      provider: 'mockprov',
+      model: 'mock-model',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      stopReason: 'error',
+      errorMessage: '400: ' + 'x'.repeat(300),
+      timestamp: 1795719213601,
+    },
+  });
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      provider: 'mockprov',
+      model: 'mock-model',
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+      stopReason: 'aborted',
+      timestamp: 1795719213700,
+    },
+  });
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].stdin.error.startsWith('400: '));
+  assert.ok(calls[0].stdin.error.length <= 200);
+  assert.ok(!Object.hasOwn(calls[0].stdin, 'input_tokens'));
+  assert.equal(calls[1].stdin.error, 'aborted');
+  assert.ok(!Object.hasOwn(calls[1].stdin, 'output_tokens'));
 });
 
 // --- agent-set sticky status -------------------------------------------------

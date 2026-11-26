@@ -76,7 +76,7 @@ env:
 capabilities:
   limits:
     max_turns: { support: "yes" }
-    max_model_calls: { support: "no", reason: "No model start/end events are mapped by the bridge" }
+    max_model_calls: { support: "partial", reason: "model-end per assistant message_end; no explicit model-start event" }
     max_duration: { support: "yes" }
   telemetry:
     enabled: { support: "yes" }
