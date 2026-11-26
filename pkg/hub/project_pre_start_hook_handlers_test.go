@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -306,4 +307,108 @@ func TestProjectPreStartHooks_Delete_Archived(t *testing.T) {
 	// Verify it's gone.
 	recGet := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/pre-start-hooks/"+firstHook.ID, nil)
 	assert.Equal(t, http.StatusNotFound, recGet.Code)
+}
+
+// =============================================================================
+// Authorization: project.manage_pre_start_hooks (ptone/scion#9355)
+// =============================================================================
+
+func TestProjectPreStartHookWrite_ProjectOwnerDenied(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	// Positive control: alice owns the project (she may update it).
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, "member", "api")
+	require.True(t, srv.authzService.CheckAccess(ctx, aliceIdent, projectResource(project), ActionUpdate).Allowed,
+		"alice must hold project.update for this test to mean anything")
+
+	// Project _capabilities must NOT expose manage_pre_start_hooks to a project owner.
+	ownerCaps := srv.authzService.ComputeCapabilities(ctx, aliceIdent, projectResource(project))
+	assert.Contains(t, ownerCaps.Actions, string(ActionUpdate))
+	assert.NotContains(t, ownerCaps.Actions, string(ActionManagePreStartHooks))
+
+	base := "/api/v1/projects/" + project.ID + "/pre-start-hooks"
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, base, CreateProjectPreStartHookRequest{
+		Name: "owner hook", Script: "#!/bin/sh\necho owned\n",
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project owner must not create a pre-start hook: %s", rec.Body.String())
+
+	hook, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
+		ProjectID: project.ID, Name: "admin hook", Slug: "admin-hook", Script: "#!/bin/sh\ntrue\n",
+	})
+	require.NoError(t, err)
+
+	newScript := "#!/bin/sh\necho changed\n"
+	rec = doRequestAsUser(t, srv, alice, http.MethodPut, base+"/"+hook.ID, UpdateProjectPreStartHookRequest{Script: &newScript})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project owner must not update a pre-start hook: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, base+"/"+hook.ID+"/activate", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project owner must not activate a pre-start hook: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, alice, http.MethodDelete, base+"/"+hook.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project owner must not delete a pre-start hook: %s", rec.Body.String())
+
+	stored, err := s.GetProjectPreStartHook(ctx, hook.ID, project.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "#!/bin/sh\ntrue\n", stored.Script, "the hook is unchanged")
+
+	// Reading is unchanged: the owner still lists and reads hooks.
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, base, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "project owner still lists hooks: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, alice, http.MethodGet, base+"/"+hook.ID, nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "project owner still reads a hook: %s", rec.Body.String())
+}
+
+func TestProjectPreStartHookWrite_HubAdminAllowed(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	hubAdminID := tid("psh-hub-admin")
+	createTestUserWithRole(t, s, hubAdminID, "psh-hub-admin@test.com", "member", store.SystemRoleHubAdmin)
+	hubAdmin, err := s.GetUser(ctx, hubAdminID)
+	require.NoError(t, err)
+
+	// Project _capabilities must expose manage_pre_start_hooks to a hub admin.
+	hubAdminIdent := NewAuthenticatedUser(hubAdmin.ID, hubAdmin.Email, hubAdmin.DisplayName, "member", "api")
+	caps := srv.authzService.ComputeCapabilities(ctx, hubAdminIdent, projectResource(project))
+	assert.Contains(t, caps.Actions, string(ActionManagePreStartHooks))
+
+	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", CreateProjectPreStartHookRequest{
+		Name: "admin hook", Script: "#!/bin/sh\ntrue\n",
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, "hub admin creates a pre-start hook: %s", rec.Body.String())
+}
+
+func TestProjectPreStartHookWrite_WorkstationDevUserAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	srv.workstation = true
+	project := createTestProjectForPSH(t, s)
+
+	// Local workstation user (dev-auth) must see manage_pre_start_hooks in
+	// project _capabilities and be allowed to write hooks.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var resp struct {
+		Cap *Capabilities `json:"_capabilities"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Cap)
+	assert.Contains(t, resp.Cap.Actions, string(ActionManagePreStartHooks))
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/pre-start-hooks", CreateProjectPreStartHookRequest{
+		Name: "workstation hook", Script: "#!/bin/sh\ntrue\n",
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, "workstation dev user creates a pre-start hook: %s", rec.Body.String())
+}
+
+func TestBuiltInProjectRoles_NoPreStartHookWrite(t *testing.T) {
+	for _, role := range BuiltInRoles() {
+		if role.ScopeType != store.RoleScopeProject {
+			continue
+		}
+		assert.NotContains(t, role.Permissions, "project.manage_pre_start_hooks", "built-in project role %s", role.Name)
+	}
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleHubAdmin || role.Name == store.SystemRoleSuperAdmin {
+			assert.Contains(t, role.Permissions, "project.manage_pre_start_hooks", "%s keeps hook writes", role.Name)
+		}
+	}
 }

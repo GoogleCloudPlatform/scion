@@ -73,6 +73,9 @@ const (
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
+	// ActionManagePreStartHooks covers creating, updating, activating and
+	// deleting a project's pre-start hooks (project.manage_pre_start_hooks).
+	ActionManagePreStartHooks Action = "manage_pre_start_hooks"
 	// ActionChatPost covers posting messages into a project's chat
 	// threads (project.chat_post).
 	ActionChatPost Action = "chat_post"

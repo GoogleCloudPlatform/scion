@@ -5194,11 +5194,11 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
-**Base Permission:** `project.update`
+**Base Permission:** `project.manage_pre_start_hooks`
 
 **Resource Resolver:** project-from-url
 
@@ -5216,6 +5216,7 @@
 ### Tests
 
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+- `pkg/hub:TestProjectPreStartHookWrite_ProjectOwnerDenied`
 
 ---
 

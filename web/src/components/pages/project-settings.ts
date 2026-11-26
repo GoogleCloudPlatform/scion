@@ -3995,7 +3995,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private renderPreStartHooksContent() {
-    const canEdit = canAny(this.project!._capabilities, 'update', 'manage');
+    const canEdit = can(this.project!._capabilities, 'manage_pre_start_hooks');
     return html`
       <div class="section-header" style="margin-bottom: 1rem;">
         <div class="section-header-text">

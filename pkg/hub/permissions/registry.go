@@ -256,6 +256,11 @@ var Registry = []Permission{
 	{ID: "project.read_message_policies", Resource: ResourceProject, Action: "read_message_policies", CapabilityKind: CapabilityResource, UATScope: "project:read_message_policies", Description: "List and read a project's message policies and surface coverage", Enforcement: []string{"pkg/hub/handlers_message_policies.go"}},
 	{ID: "project.manage_system_one_instances", Resource: ResourceProject, Action: "manage_system_one_instances", CapabilityKind: CapabilityResource, UATScope: "project:manage_system_one_instances", Description: "Manage a project's System One provider instance allowlist (project owner/admin or hub admin)", Enforcement: []string{"pkg/hub/handlers_project_system_one_instances.go"}},
 	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (project owner/admin, hub admin)", Enforcement: []string{"pkg/hub/handlers_project_visitors.go"}},
+	// project.manage_pre_start_hooks gates writing a project's pre-start
+	// hooks. A hook runs inside every agent of the project, with each
+	// agent's creator's secrets, so no built-in project role holds it: only
+	// hub admins (and a custom role a hub admin grants) write hooks.
+	{ID: "project.manage_pre_start_hooks", Resource: ResourceProject, Action: "manage_pre_start_hooks", CapabilityKind: CapabilityResource, Description: "Create, update, activate or delete a project's pre-start hooks, which run inside every agent of the project (hub admin; no built-in project role holds it)", Enforcement: []string{"pkg/hub/project_pre_start_hook_handlers.go"}},
 	// project.chat_post covers chat thread sends, scheduled sends, DM
 	// promotion, project attachment uploads and thread posts a user sends
 	// through the agent message endpoint's thread key, all decided by the
