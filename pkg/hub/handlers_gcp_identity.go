@@ -438,7 +438,12 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if code, msg, refused := s.gcpServiceAccountEmailRefusal(req.Email); refused {
+	code, msg, refused, err := s.gcpServiceAccountEmailRefusal(r.Context(), req.Email)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if refused {
 		writeError(w, http.StatusBadRequest, code, msg, nil)
 		return
 	}
@@ -788,7 +793,12 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // route, where a hub-scoped account is checked against every broker on the
 // hub (hubSAMappingWarnings) and other scopes get no warning.
 func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
-	if code, msg, refused := s.gcpServiceAccountEmailRefusal(sa.Email); refused {
+	code, msg, refused, err := s.gcpServiceAccountRefusal(r.Context(), sa)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if refused {
 		writeError(w, http.StatusBadRequest, code, msg, nil)
 		return
 	}
@@ -1301,8 +1311,9 @@ var (
 	// another broker, or carrying no broker binding).
 	errGCPSABrokerMismatch = errors.New("the assigned GCP service account is a broker host service account that is not bound to this agent's broker")
 	// errGCPSAReserved: the assigned service account matches a reserved
-	// platform identity (such as the Hub's own GCP service account).
-	errGCPSAReserved = errors.New("the assigned GCP service account matches the Hub's own identity and cannot be used by agents")
+	// platform identity (the Hub's own GCP service account or a Runtime
+	// Broker's host service account).
+	errGCPSAReserved = errors.New("the assigned GCP service account matches a reserved platform identity and cannot be used by agents")
 )
 
 // isGCPAssignmentInadmissible reports whether err is one of the refusal
@@ -1358,7 +1369,9 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	if sa == nil {
 		return nil, errGCPSANotAvailable
 	}
-	if s.isHubOwnServiceAccountEmail(sa.Email) {
+	if _, _, refused, err := s.gcpServiceAccountRefusal(ctx, sa); err != nil {
+		return nil, fmt.Errorf("check reserved GCP service account: %w", err)
+	} else if refused {
 		return nil, errGCPSAReserved
 	}
 	if !gcpServiceAccountVerified(sa) {
