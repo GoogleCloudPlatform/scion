@@ -71,6 +71,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker honours an explicit count limit of 0 as "no limit"
 		// (ptone/scion#5605).
 		UnlimitedCountLimits: true,
+		// This broker enforces Hub-supplied LimitCeilings and echoes
+		// effective limits back to the Hub (ptone/scion#9371).
+		LimitCeilings: true,
 		// This broker applies the resources sub-field entries of
 		// cleared_fields at start (ptone/scion#5676).
 		ClearedResourceSubfields: true,
@@ -172,6 +175,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
 	add(c.UnlimitedCountLimits, "unlimitedCountLimits")
+	add(c.LimitCeilings, "limitCeilings")
 	add(c.ClearedResourceSubfields, "clearedResourceSubfields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
 	add(c.HomeFiles, "homeFiles")

@@ -14,6 +14,7 @@
     "ephemeralPersistence",
     "githubTokenInstallationOnly",
     "homeFiles",
+    "limitCeilings",
     "nodeImageRegistry",
     "reprovision",
     "reprovisionEmptyPerAgent",

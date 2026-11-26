@@ -327,6 +327,12 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			return false
 		}
 	}
+	if ceilings := s.agentLimitCeilings(); !ceilings.IsEmpty() {
+		if v := validateScionConfigAgainstCeilings(cfg, ceilings); v != nil {
+			writeLimitCeilingRefusal(w, v)
+			return false
+		}
+	}
 	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
 }
 

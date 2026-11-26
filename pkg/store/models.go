@@ -1641,6 +1641,11 @@ type BrokerCapabilities struct {
 	// for such a broker does the hub accept a change of a count limit to
 	// Unlimited; an older broker would keep the inherited limit.
 	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// LimitCeilings indicates the broker enforces Hub-supplied LimitCeilings
+	// (config.ClampLimits) on create, start and restart and echoes effective
+	// limits back to the Hub (ptone/scion#9371). When Hub agent_limits
+	// ceilings are configured, the Hub refuses dispatch to brokers lacking it.
+	LimitCeilings bool `json:"limitCeilings,omitempty"`
 	// ClearedResourceSubfields indicates the broker applies the resources
 	// sub-field entries of cleared_fields (resources.requests.cpu and the
 	// like, api.ResourceSubPaths) at start, so a resources edit that drops

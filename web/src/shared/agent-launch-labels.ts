@@ -73,6 +73,7 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   hosted_config_refused: 'the hosted server does not allow this member-written config',
   agent_policy_refused: "the broker's agent policy refused this configuration",
   workspace_not_permitted: 'the agent workspace path is not permitted',
+  limit_ceilings_unsupported: 'the runtime broker does not support hub agent limit ceilings',
   skill_resolution_failed: 'a required skill could not be resolved',
   storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',

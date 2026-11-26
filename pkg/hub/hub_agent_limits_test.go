@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+func setProjectBrokerLimitCeilingsCap(t *testing.T, s store.Store, project *store.Project, supported bool) {
+	t.Helper()
+	b, err := s.GetRuntimeBroker(context.Background(), project.DefaultRuntimeBrokerID)
+	require.NoError(t, err)
+	if b.Capabilities == nil {
+		b.Capabilities = &store.BrokerCapabilities{}
+	}
+	b.Capabilities.LimitCeilings = supported
+	require.NoError(t, s.UpdateRuntimeBroker(context.Background(), b))
+}
 
 func setAgentLimitsOpSettings(t *testing.T, srv *Server, experimentOn bool, ceilingsDoc string) *OperationalSettings {
 	t.Helper()
@@ -210,6 +223,7 @@ func (c *limitCeilingsBrokerClient) applySimulatedBrokerClamp(
 
 func TestAgentLimits_CreateFailFastAndExperimentGate(t *testing.T) {
 	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
 	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
 
@@ -274,6 +288,7 @@ func TestAgentLimits_CreateFailFastAndExperimentGate(t *testing.T) {
 // returns a clamped warning in the create response.
 func TestAgentLimits_EndToEndTemplateUnlimitedClampedWithEchoAndWarning(t *testing.T) {
 	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
 	brokerClient := &limitCeilingsBrokerClient{
 		mockRuntimeBrokerClient: mock,
 		templateMaxTurns:        api.IntPtr(0),
@@ -311,6 +326,7 @@ func TestAgentLimits_EndToEndTemplateUnlimitedClampedWithEchoAndWarning(t *testi
 // Hub records EffectiveConfig + returns the warning.
 func TestAgentLimits_StoredOverCeilingClampedOnStart(t *testing.T) {
 	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
 	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
 
@@ -564,4 +580,297 @@ func TestGetAgent_IncludesEffectiveConfigLimits(t *testing.T) {
 	require.NotNil(t, got.EffectiveConfig)
 	assert.Equal(t, 50, got.EffectiveConfig.MaxTurns)
 	assert.Equal(t, []string{"max_turns"}, got.EffectiveConfig.LimitsClampedBy)
+}
+
+// TestAgentLimits_CreateFailFastAllLimits verifies Hub create-time fail-fast
+// for max_model_calls and max_duration ("0", "9999h", unparsable, negative)
+// when the agent_policy.limit_ceilings experiment is enabled, and passthrough
+// when the experiment is disabled.
+func TestAgentLimits_CreateFailFastAllLimits(t *testing.T) {
+	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
+	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
+
+	// Experiment OFF: over-ceiling and 0/"0"/"9999h" are accepted, no limitCeilings on wire.
+	setAgentLimitsOpSettings(t, srv, false, `{"max_model_calls":100,"max_duration":"2h"}`)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "exp-off-all",
+		"config": map[string]interface{}{
+			"max_model_calls": 0,
+			"max_duration":    "9999h",
+		},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	rawOff, err := json.Marshal(brokerClient.lastCreateReq)
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawOff), "limitCeilings")
+
+	// Experiment ON: ceilings max_model_calls=100, max_duration="2h".
+	setAgentLimitsOpSettings(t, srv, true, `{"max_model_calls":100,"max_duration":"2h"}`)
+
+	for _, tc := range []struct {
+		name      string
+		cfg       map[string]interface{}
+		wantField string
+	}{
+		{"model calls over ceiling", map[string]interface{}{"max_model_calls": 101}, "max_model_calls"},
+		{"model calls unlimited 0", map[string]interface{}{"max_model_calls": 0}, "max_model_calls"},
+		{"duration unlimited 0", map[string]interface{}{"max_duration": "0"}, "max_duration"},
+		{"duration over ceiling 9999h", map[string]interface{}{"max_duration": "9999h"}, "max_duration"},
+		{"duration unparsable", map[string]interface{}{"max_duration": "not-a-duration"}, "max_duration"},
+		{"duration negative", map[string]interface{}{"max_duration": "-5m"}, "max_duration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+				"name":   "refused-" + strings.ReplaceAll(tc.name, " ", "-"),
+				"config": tc.cfg,
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeLimitExceedsHubCeiling)
+			assert.Contains(t, rec.Body.String(), tc.wantField)
+		})
+	}
+
+	// Within ceilings succeeds and dispatches LimitCeilings.
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "allowed-all",
+		"config": map[string]interface{}{
+			"max_model_calls": 100,
+			"max_duration":    "2h",
+		},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.NotNil(t, brokerClient.lastCreateHubDefaults)
+	require.NotNil(t, brokerClient.lastCreateHubDefaults.LimitCeilings)
+	assert.Equal(t, 100, brokerClient.lastCreateHubDefaults.LimitCeilings.MaxModelCalls)
+	assert.Equal(t, "2h", brokerClient.lastCreateHubDefaults.LimitCeilings.MaxDuration)
+}
+
+// TestAgentLimits_ProjectSettingsPutCeilingsAndUnlimitedAudit verifies project
+// settings PUT refusal (400 limit_exceeds_hub_ceiling) for defaultMaxTurns,
+// defaultMaxModelCalls, and defaultMaxDuration, confirms the 0 = Unlimited
+// audit event is NOT emitted when refused by a ceiling, and confirms it still
+// fires when no ceilings are configured.
+func TestAgentLimits_ProjectSettingsPutCeilingsAndUnlimitedAudit(t *testing.T) {
+	srv, s, project, _ := setupThinkingLevelDispatch(t)
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50,"max_model_calls":100,"max_duration":"2h"}`)
+
+	putSettings := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/projects/"+project.ID+"/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	listUnlimitedAudits := func() []*store.MutationAuditRecord {
+		recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+			MutationType: mutationTypeProjectSettingsLimitUnlimited,
+			TargetID:     project.ID,
+			Limit:        20,
+		})
+		require.NoError(t, err)
+		return recs
+	}
+
+	// Over-ceiling and unlimited values are refused with 400 limit_exceeds_hub_ceiling.
+	for _, tc := range []struct {
+		name      string
+		body      string
+		wantField string
+	}{
+		{"turns over ceiling", `{"defaultMaxTurns":80}`, projectSettingsFieldMaxTurns},
+		{"turns unlimited 0", `{"defaultMaxTurns":0}`, projectSettingsFieldMaxTurns},
+		{"model calls over ceiling", `{"defaultMaxModelCalls":150}`, projectSettingsFieldMaxModelCalls},
+		{"model calls unlimited 0", `{"defaultMaxModelCalls":0}`, projectSettingsFieldMaxModelCalls},
+		{"duration unlimited 0", `{"defaultMaxDuration":"0"}`, projectSettingsFieldMaxDuration},
+		{"duration over ceiling", `{"defaultMaxDuration":"9999h"}`, projectSettingsFieldMaxDuration},
+		{"duration unparsable", `{"defaultMaxDuration":"bogus"}`, projectSettingsFieldMaxDuration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := putSettings(tc.body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeLimitExceedsHubCeiling)
+			assert.Contains(t, rec.Body.String(), tc.wantField)
+		})
+	}
+
+	// Refused 0 transitions must NOT have emitted any unlimited audit event.
+	time.Sleep(100 * time.Millisecond)
+	assert.Empty(t, listUnlimitedAudits(), "refused 0 transitions must not emit unlimited audit events")
+
+	// Within ceilings succeeds.
+	rec := putSettings(`{"defaultMaxTurns":50,"defaultMaxModelCalls":100,"defaultMaxDuration":"2h"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Clearing via null / "" succeeds.
+	rec = putSettings(`{"defaultMaxTurns":null,"defaultMaxModelCalls":null,"defaultMaxDuration":""}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Pre-existing over-ceiling annotation does not block an unrelated partial PUT.
+	storedProj, err := s.GetProject(context.Background(), project.ID)
+	require.NoError(t, err)
+	if storedProj.Annotations == nil {
+		storedProj.Annotations = map[string]string{}
+	}
+	storedProj.Annotations[projectSettingDefaultMaxTurns] = "200"
+	require.NoError(t, s.UpdateProject(context.Background(), storedProj))
+
+	rec = putSettings(`{"defaultModel":"claude-sonnet"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// When no ceilings are configured, 0 = Unlimited succeeds and emits the audit event.
+	setAgentLimitsOpSettings(t, srv, true, `{}`)
+	rec = putSettings(`{"defaultMaxTurns":0}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Eventually(t, func() bool {
+		return len(listUnlimitedAudits()) >= 1
+	}, 5*time.Second, 20*time.Millisecond, "expected unlimited audit event when no ceiling is configured")
+}
+
+// TestAgentLimits_AgentPatchCeilings verifies PATCH /api/v1/agents/{id}
+// refuses over-ceiling, unlimited (0 / "0"), and unparsable limits with 400
+// limit_exceeds_hub_ceiling (including on pre-existing over-ceiling rows per
+// D4), while allowing compliant edits and unrelated partial patches.
+func TestAgentLimits_AgentPatchCeilings(t *testing.T) {
+	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
+	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
+
+	// Create an agent before ceilings are active with max_turns=100.
+	setAgentLimitsOpSettings(t, srv, false, "")
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name":   "patch-ceiling-agent",
+		"config": map[string]interface{}{"max_turns": 100},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var createResp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
+	agentID := createResp.Agent.ID
+
+	// Transition to stopped so live PATCH is accepted, and use a harness
+	// ("gemini") that supports max_turns and max_model_calls.
+	ag, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	ag.Phase = string(state.PhaseStopped)
+	if ag.AppliedConfig != nil {
+		ag.AppliedConfig.Harness = "gemini"
+	}
+	require.NoError(t, s.UpdateAgent(context.Background(), ag))
+
+	// Enable ceilings.
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50,"max_model_calls":100,"max_duration":"2h"}`)
+
+	for _, tc := range []struct {
+		name      string
+		cfg       map[string]interface{}
+		wantField string
+	}{
+		{"turns over ceiling (re-sending stored 100)", map[string]interface{}{"max_turns": 100}, "max_turns"},
+		{"turns unlimited 0", map[string]interface{}{"max_turns": 0}, "max_turns"},
+		{"model calls over ceiling", map[string]interface{}{"max_model_calls": 101}, "max_model_calls"},
+		{"model calls unlimited 0", map[string]interface{}{"max_model_calls": 0}, "max_model_calls"},
+		{"duration unlimited 0", map[string]interface{}{"max_duration": "0"}, "max_duration"},
+		{"duration over ceiling 9999h", map[string]interface{}{"max_duration": "9999h"}, "max_duration"},
+		{"duration unparsable", map[string]interface{}{"max_duration": "bogus"}, "max_duration"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
+				"config": tc.cfg,
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeLimitExceedsHubCeiling)
+			assert.Contains(t, rec.Body.String(), tc.wantField)
+		})
+	}
+
+	// Unrelated PATCH (model only) succeeds even though stored max_turns=100.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
+		"config": map[string]interface{}{"model": "claude-sonnet"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Compliant PATCH succeeds.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
+		"config": map[string]interface{}{
+			"max_turns":       40,
+			"max_model_calls": 80,
+			"max_duration":    "1h",
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestAgentLimits_OldBrokerRefusalAndCapability verifies D3:
+//   - capabilitiesFromStrings parses limitCeilings / limit_ceilings;
+//   - when a Hub ceiling is active and the target broker lacks LimitCeilings,
+//     create, start, and restart dispatches are refused with typed
+//     limit_ceilings_unsupported (412) without calling the broker;
+//   - when no ceiling is active (or experiment is off), the same broker works.
+func TestAgentLimits_OldBrokerRefusalAndCapability(t *testing.T) {
+	// Capability string parsing.
+	for _, name := range []string{"limitCeilings", "limit_ceilings", " LimitCeilings "} {
+		assert.True(t, capabilitiesFromStrings([]string{name}).LimitCeilings, name)
+	}
+	assert.False(t, capabilitiesFromStrings([]string{"unlimitedCountLimits"}).LimitCeilings)
+
+	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	// Broker does NOT advertise LimitCeilings.
+	setProjectBrokerLimitCeilingsCap(t, s, project, false)
+	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
+
+	// With no ceilings configured, the old broker works normally.
+	setAgentLimitsOpSettings(t, srv, true, `{}`)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "old-broker-no-ceiling",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var createResp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
+	agentID := createResp.Agent.ID
+
+	// Reset capture pointers before enabling ceiling.
+	brokerClient.lastCreateReq = nil
+	brokerClient.lastStartHubDefaults = nil
+
+	// Enable ceiling max_turns=50: create on the old broker is refused with 412 limit_ceilings_unsupported.
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50}`)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "old-broker-refused-create",
+	})
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), api.LaunchCodeLimitCeilingsUnsupported)
+	assert.Nil(t, brokerClient.lastCreateReq, "refused create must not call broker")
+
+	// Start of the existing agent on the old broker is also refused with 412 limit_ceilings_unsupported.
+	ag, err := s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	ag.Phase = string(state.PhaseStopped)
+	require.NoError(t, s.UpdateAgent(context.Background(), ag))
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), api.LaunchCodeLimitCeilingsUnsupported)
+	assert.Nil(t, brokerClient.lastStartHubDefaults, "refused start must not call broker")
+
+	// Restart of the existing agent on the old broker is also refused with 412 limit_ceilings_unsupported.
+	ag.Phase = string(state.PhaseRunning)
+	require.NoError(t, s.UpdateAgent(context.Background(), ag))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/restart", nil)
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), api.LaunchCodeLimitCeilingsUnsupported)
+
+	// Upgrading the broker to advertise LimitCeilings allows start to succeed.
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
+	ag.Phase = string(state.PhaseStopped)
+	require.NoError(t, s.UpdateAgent(context.Background(), ag))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agentID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, brokerClient.lastStartHubDefaults)
+	require.NotNil(t, brokerClient.lastStartHubDefaults.LimitCeilings)
+	assert.Equal(t, 50, brokerClient.lastStartHubDefaults.LimitCeilings.MaxTurns)
 }

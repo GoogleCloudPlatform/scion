@@ -465,6 +465,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// An explicit count limit of 0 is "no limit"
 			// (ptone/scion#5605).
 			UnlimitedCountLimits: true,
+			// Hub-supplied LimitCeilings clamping and effective echo (ptone/scion#9371).
+			LimitCeilings: true,
 			// The resources sub-field entries of cleared_fields are
 			// applied at start (ptone/scion#5676).
 			ClearedResourceSubfields: true,

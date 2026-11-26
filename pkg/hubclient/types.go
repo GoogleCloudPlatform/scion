@@ -512,6 +512,9 @@ type BrokerCapabilities struct {
 	// (ptone/scion#5605; store.BrokerCapabilities.UnlimitedCountLimits is
 	// its counterpart).
 	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// LimitCeilings indicates the broker enforces Hub-supplied LimitCeilings
+	// (store.BrokerCapabilities.LimitCeilings is its counterpart).
+	LimitCeilings bool `json:"limitCeilings,omitempty"`
 	// ClearedResourceSubfields indicates the broker applies the resources
 	// sub-field entries of cleared_fields at start (ptone/scion#5676;
 	// store.BrokerCapabilities.ClearedResourceSubfields is its
