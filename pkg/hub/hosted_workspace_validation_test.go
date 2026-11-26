@@ -189,6 +189,7 @@ func TestCreateAgent_HostedAllowsRelativeAndEmptyWorkspace(t *testing.T) {
 
 		// Verify the Hub-filled absolute path passes the L2 dispatch check.
 		d := srv.CreateAuthenticatedDispatcher()
+		require.NotNil(t, d.hostedWorkspaceResolver, "production dispatcher must wire hostedWorkspaceResolver")
 		require.NoError(t, d.hostedWorkspacePrecheck(context.Background(), got))
 	})
 }
@@ -373,9 +374,10 @@ func TestScanHostedExplicitWorkspaces(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, linkedProject))
 	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: linkedProject.ID,
-		BrokerID:  brokerID,
-		LocalPath: "/local/linked/repo",
+		ProjectID:  linkedProject.ID,
+		BrokerID:   brokerID,
+		BrokerName: "scan-broker",
+		LocalPath:  "/local/linked/repo",
 	}))
 
 	foreignAgent := &store.Agent{

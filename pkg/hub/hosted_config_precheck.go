@@ -46,7 +46,9 @@ func (d *HTTPAgentDispatcher) SetHostedHarnessConfigCheck(check func(ctx context
 
 // SetHostedWorkspaceResolver sets the resolver hostedConfigPrecheck uses to
 // verify stored absolute workspaces on a hosted hub
-// (Server.projectWorkspaceResolved). Nil fails closed for absolute workspaces.
+// (Server.projectWorkspaceResolved). Nil checks nothing (matching
+// SetHostedHarnessConfigCheck and SetHostedTemplateCheck); production
+// dispatchers always wire it via CreateAuthenticatedDispatcher.
 func (d *HTTPAgentDispatcher) SetHostedWorkspaceResolver(resolver func(project *store.Project) (projectfs.Resolved, error)) {
 	d.hostedWorkspaceResolver = resolver
 }
@@ -86,7 +88,7 @@ func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *s
 // authority. Pre-existing rows whose stored absolute workspace does not match
 // are refused before dispatch with a typed workspace_not_permitted error.
 func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent *store.Agent) error {
-	if !d.hostedMode || agent == nil || agent.AppliedConfig == nil {
+	if !d.hostedMode || d.hostedWorkspaceResolver == nil || agent == nil || agent.AppliedConfig == nil {
 		return nil
 	}
 	raw := agent.AppliedConfig.Workspace
@@ -111,13 +113,7 @@ func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent
 			project = p
 		}
 	}
-	var want projectfs.Resolved
-	var resolveErr error
-	if d.hostedWorkspaceResolver != nil {
-		want, resolveErr = d.hostedWorkspaceResolver(project)
-	} else {
-		resolveErr = errors.New("project workspace resolver is not configured")
-	}
+	want, resolveErr := d.hostedWorkspaceResolver(project)
 	if resolveErr != nil || want.HostPath == "" || !sameWorkspacePath(ws, want.HostPath) {
 		slog.Warn("Hosted dispatch refused: stored absolute workspace does not match resolved project workspace",
 			"agent_id", agent.ID,
