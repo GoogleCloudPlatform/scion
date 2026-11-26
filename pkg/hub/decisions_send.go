@@ -18,7 +18,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -66,37 +65,41 @@ type decisionStoreError struct{ err error }
 func (e *decisionStoreError) Error() string { return e.err.Error() }
 func (e *decisionStoreError) Unwrap() error { return e.err }
 
+// jsonKeyPresent records whether a JSON key appeared in a decoded object,
+// regardless of its value (including null, false, or empty arrays).
+type jsonKeyPresent bool
+
+func (p *jsonKeyPresent) UnmarshalJSON([]byte) error {
+	*p = true
+	return nil
+}
+
+// rejectLegacyChoicesFields answers 400 validation_error and reports true when
+// an outbound-message request carries the removed legacy "choices" or
+// "choices_update" keys, even if empty or null (ptone/scion#8249).
+func rejectLegacyChoicesFields(w http.ResponseWriter, hasChoices, hasChoicesUpdate bool) bool {
+	if hasChoices {
+		ValidationError(w,
+			`the legacy "choices" field was removed; it was renamed to "decisions" — update your scion CLI`,
+			map[string]interface{}{"field": "choices"})
+		return true
+	}
+	if hasChoicesUpdate {
+		ValidationError(w,
+			`the legacy "choices_update" field was removed; it was renamed to "decisions_update" (for "decisions") — update your scion CLI`,
+			map[string]interface{}{"field": "choices_update"})
+		return true
+	}
+	return false
+}
+
 // prepareDecisionPromptSend checks a send that carries decisions, before any
 // routing: the experiment (400 experiment_disabled when off, never a silent
 // drop), --update without decisions, a recipient that is an agent or a
 // broadcast, attachments, and the decisions themselves. It returns nil and
 // true for an ordinary send, and false when it wrote the refusal.
-func (s *Server) prepareDecisionPromptSend(w http.ResponseWriter, agentID string, req *OutboundMessageRequest) (*decisionPromptSend, bool) {
-	decisionsInput := req.Decisions
-	decisionsUpdate := req.DecisionsUpdate
-
-	// legacy choices fallback: remove in ptone/scion#8249
-	if req.Choices != nil && req.Decisions != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"cannot specify both decisions and legacy choices",
-			map[string]interface{}{"field": "decisions"})
-		return nil, false
-	}
-	if (req.Decisions == nil && req.Choices != nil) || (!req.DecisionsUpdate && req.ChoicesUpdate) {
-		if decisionsInput == nil {
-			decisionsInput = req.Choices
-		}
-		if !decisionsUpdate {
-			decisionsUpdate = req.ChoicesUpdate
-		}
-		if s.messageLog != nil {
-			s.messageLog.Debug("legacy choices request field used", "agent_id", agentID)
-		} else {
-			slog.Debug("legacy choices request field used", "agent_id", agentID)
-		}
-	}
-
-	if decisionsInput == nil && !decisionsUpdate {
+func (s *Server) prepareDecisionPromptSend(w http.ResponseWriter, req *OutboundMessageRequest) (*decisionPromptSend, bool) {
+	if req.Decisions == nil && !req.DecisionsUpdate {
 		return nil, true
 	}
 	if !s.experimentEnabled(experiments.Decisions) {
@@ -105,7 +108,7 @@ func (s *Server) prepareDecisionPromptSend(w http.ResponseWriter, agentID string
 			map[string]interface{}{"experiment": experiments.Decisions})
 		return nil, false
 	}
-	if decisionsInput == nil {
+	if req.Decisions == nil {
 		ValidationError(w, "decisions_update requires decisions", map[string]interface{}{"field": "decisions_update"})
 		return nil, false
 	}
@@ -119,13 +122,13 @@ func (s *Server) prepareDecisionPromptSend(w http.ResponseWriter, agentID string
 		ValidationError(w, "a message with decisions cannot carry attachments", map[string]interface{}{"field": "attachments"})
 		return nil, false
 	}
-	decisions, err := messages.NormalizeDecisions("decisions", decisionsInput)
+	decisions, err := messages.NormalizeDecisions("decisions", req.Decisions)
 	if err != nil {
 		writeDecisionValidationErrors(w, err)
 		return nil, false
 	}
 	// The intro is set from the body once its mentions are rewritten.
-	return &decisionPromptSend{decisions: decisions, update: decisionsUpdate}, true
+	return &decisionPromptSend{decisions: decisions, update: req.DecisionsUpdate}, true
 }
 
 // isBroadcastRecipient reports whether a recipient names a broadcast.

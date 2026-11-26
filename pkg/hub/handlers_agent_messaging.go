@@ -114,10 +114,6 @@ type OutboundMessageRequest struct {
 	// SecretRequests.
 	SecretRequestsUpdate bool `json:"secret_requests_update,omitempty"`
 
-	// legacy choices fallback: remove in ptone/scion#8249
-	Choices       []messages.DecisionInput `json:"choices,omitempty"`
-	ChoicesUpdate bool                     `json:"choices_update,omitempty"`
-
 	// This outbound path never accepted a raw field. A "raw" member in the
 	// request body is an unknown field and is ignored by JSON decoding; it
 	// is not a message-raw ingress (see .design/agent-keys-raw-inventory.md).
@@ -1216,11 +1212,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var req OutboundMessageRequest
-	if err := readJSON(r, &req); err != nil {
+	var payload struct {
+		OutboundMessageRequest
+		LegacyChoices       jsonKeyPresent `json:"choices"`
+		LegacyChoicesUpdate jsonKeyPresent `json:"choices_update"`
+	}
+	if err := readJSON(r, &payload); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if rejectLegacyChoicesFields(w, bool(payload.LegacyChoices), bool(payload.LegacyChoicesUpdate)) {
+		return
+	}
+	req := payload.OutboundMessageRequest
 	if isReservedSchedulerChannel(req.Channel) {
 		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.Channel), nil)
 		return
@@ -1230,7 +1234,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if rejectHubMintedType(w, req.Type) {
 		return
 	}
-	decisionSend, ok := s.prepareDecisionPromptSend(w, id, &req)
+	decisionSend, ok := s.prepareDecisionPromptSend(w, &req)
 	if !ok {
 		return
 	}

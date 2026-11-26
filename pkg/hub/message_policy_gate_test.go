@@ -378,13 +378,13 @@ func TestMessagePolicyGate_FlagOff_LoadsNothingAndDelivers(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, rrGroup.Code, "body: %s", rrGroup.Body.String())
 
-	// 3. Choice prompt succeeds.
-	var choices []messages.DecisionInput
-	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &choices))
+	// 3. Decision prompt succeeds.
+	var decisions []messages.DecisionInput
+	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &decisions))
 	rrChoice := f.sendOutbound(t, OutboundMessageRequest{
 		Recipient: "user:" + f.alice.Email,
 		Msg:       "Choose one:",
-		Choices:   choices,
+		Decisions: decisions,
 	})
 	require.Equal(t, http.StatusOK, rrChoice.Code, "body: %s", rrChoice.Body.String())
 
@@ -522,13 +522,13 @@ func TestMessagePolicyGate_H2EnforceViolation_ZeroSideEffectsAnd422WireShape(t *
 	assert.NotContains(t, string(rawDecs), secretMarker, "decision rows must never contain message text")
 	assert.NotContains(t, string(rawDecs), "Option A", "decision rows must never contain message text")
 
-	// Case C: Resending with structured choices passes the policy and delivers.
-	var choices []messages.DecisionInput
-	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &choices))
+	// Case C: Resending with structured decisions passes the policy and delivers.
+	var decisions []messages.DecisionInput
+	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &decisions))
 	rrAdmit := f.sendOutbound(t, OutboundMessageRequest{
 		Recipient: "user:" + f.alice.Email,
 		Msg:       "Do you prefer Option A or Option B?",
-		Choices:   choices,
+		Decisions: decisions,
 	})
 	require.Equal(t, http.StatusOK, rrAdmit.Code, "body: %s", rrAdmit.Body.String())
 	var okResp struct {

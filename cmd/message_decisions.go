@@ -35,12 +35,8 @@ var (
 	msgDecisions       string
 	msgDecisionsFile   string
 	msgDecisionsUpdate bool
-	// legacy choices fallback: remove in ptone/scion#8249
-	msgLegacyChoices     string
-	msgLegacyChoicesFile string
 	// msgDecisionsPayload is the decisions JSON loaded from --decisions or
-	// --decisions-file (or their deprecated --choices* aliases) for this
-	// invocation; nil for an ordinary message.
+	// --decisions-file for this invocation; nil for an ordinary message.
 	msgDecisionsPayload json.RawMessage
 )
 
@@ -108,27 +104,19 @@ func warnDecisionLengths(w io.Writer, payload json.RawMessage) {
 
 // decisionsRequested reports whether this invocation sends decisions.
 func decisionsRequested() bool {
-	return msgDecisions != "" || msgDecisionsFile != "" || msgLegacyChoices != "" || msgLegacyChoicesFile != ""
+	return msgDecisions != "" || msgDecisionsFile != ""
 }
 
 // resetDecisionFlags clears the decision flag state (tests reuse the command).
 func resetDecisionFlags() {
-	msgDecisions, msgDecisionsFile, msgLegacyChoices, msgLegacyChoicesFile, msgDecisionsUpdate, msgDecisionsPayload = "", "", "", "", false, nil
+	msgDecisions, msgDecisionsFile, msgDecisionsUpdate, msgDecisionsPayload = "", "", false, nil
 }
 
 // validateDecisionFlags checks the decision flags against each other and the
 // recipient, before anything is read or sent. agentTarget and group are
 // the recipient kinds a decision prompt may not go to.
 func validateDecisionFlags(agentTarget, group bool) error {
-	if msgDecisions != "" && msgLegacyChoices != "" {
-		return newUsageError("--decisions and --choices are mutually exclusive; use --decisions")
-	}
-	if msgDecisionsFile != "" && msgLegacyChoicesFile != "" {
-		return newUsageError("--decisions-file and --choices-file are mutually exclusive; use --decisions-file")
-	}
-	hasInline := msgDecisions != "" || msgLegacyChoices != ""
-	hasFile := msgDecisionsFile != "" || msgLegacyChoicesFile != ""
-	if hasInline && hasFile {
+	if msgDecisions != "" && msgDecisionsFile != "" {
 		return newUsageError("--decisions and --decisions-file are mutually exclusive")
 	}
 	if !decisionsRequested() {
@@ -137,7 +125,7 @@ func validateDecisionFlags(agentTarget, group bool) error {
 		}
 		return nil
 	}
-	if (msgDecisionsFile == "-" || msgLegacyChoicesFile == "-") && msgBodyFile == "-" {
+	if msgDecisionsFile == "-" && msgBodyFile == "-" {
 		return newUsageError("--decisions-file - and --body-file - both read stdin; use a file for one of them")
 	}
 	if agentTarget || group {
@@ -177,26 +165,18 @@ func decisionsSenderIsAgent() bool {
 // loadDecisionsPayload reads the decisions JSON and checks only that it is a
 // JSON array; every rule is the hub's to enforce.
 func loadDecisionsPayload() (json.RawMessage, error) {
-	inline := msgDecisions
-	if inline == "" {
-		inline = msgLegacyChoices
-	}
-	file := msgDecisionsFile
-	if file == "" {
-		file = msgLegacyChoicesFile
-	}
 	var raw []byte
 	switch {
-	case inline != "":
-		raw = []byte(inline)
-	case file == "-":
+	case msgDecisions != "":
+		raw = []byte(msgDecisions)
+	case msgDecisionsFile == "-":
 		b, err := io.ReadAll(decisionsStdin)
 		if err != nil {
 			return nil, fmt.Errorf("reading --decisions-file from stdin: %w", err)
 		}
 		raw = b
 	default:
-		b, err := os.ReadFile(file)
+		b, err := os.ReadFile(msgDecisionsFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading --decisions-file: %w", err)
 		}

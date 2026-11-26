@@ -73,7 +73,7 @@ func resetMessageFlags() func() {
 	msgArtifactRefs = nil
 	resetDecisionFlags()
 	resetSecretRequestFlags()
-	for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "secret-request", "secret-description", "secret-request-file", "update"} {
+	for _, name := range []string{"decisions", "decisions-file", "secret-request", "secret-description", "secret-request-file", "update"} {
 		f := messageCmd.Flags().Lookup(name)
 		if sl, ok := f.Value.(interface{ Replace([]string) error }); ok {
 			_ = sl.Replace(nil)
@@ -91,7 +91,7 @@ func resetMessageFlags() func() {
 		msgArtifactRefs = nil
 		resetDecisionFlags()
 		resetSecretRequestFlags()
-		for _, name := range []string{"decisions", "decisions-file", "choices", "choices-file", "secret-request", "secret-description", "secret-request-file", "update"} {
+		for _, name := range []string{"decisions", "decisions-file", "secret-request", "secret-description", "secret-request-file", "update"} {
 			f := messageCmd.Flags().Lookup(name)
 			if sl, ok := f.Value.(interface{ Replace([]string) error }); ok {
 				_ = sl.Replace(nil)
@@ -358,7 +358,6 @@ func TestDeprecatedFlags_Hidden(t *testing.T) {
 		"broadcast", "all", // removed, still registered to avoid "unknown flag" errors
 		"in", "at", "plain", "raw",
 		"notify", "channel", "thread-id", "cc",
-		"choices", "choices-file",
 	}
 	for _, name := range deprecatedFlags {
 		f := messageCmd.Flags().Lookup(name)
