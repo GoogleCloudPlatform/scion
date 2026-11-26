@@ -1121,3 +1121,157 @@ describe('scion-profile-nav — View as member switch (ptone/scion#9074)', () =>
     expect(postCount).toBe(1);
   });
 });
+
+describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#9291)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(async () => {
+    element?.remove();
+    element = null;
+    const { inboxSummaryStore } = await import('../../client/inbox-summary.js');
+    inboxSummaryStore.resetForTests();
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountInboxNav(options: {
+    inboxEnabled: boolean;
+    decisionsEnabled?: boolean;
+    currentPath?: string;
+    waitingOnYou?: number;
+  }): Promise<HTMLElement & { updateComplete: Promise<boolean>; currentPath: string }> {
+    const { inboxSummaryStore } = await import('../../client/inbox-summary.js');
+    inboxSummaryStore.resetForTests();
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    if (options.inboxEnabled) {
+      flags.setFeatureFlag(flags.INBOX_DASHBOARD_FLAG, true);
+    }
+    if (options.decisionsEnabled ?? true) {
+      flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          return Promise.resolve(
+            jsonResponse({
+              counts: { waitingOnYou: options.waitingOnYou ?? 2, waitingOnOthers: 0 },
+            })
+          );
+        }
+        if (raw.startsWith('/api/v1/users/me/inbox/summary')) {
+          return Promise.resolve(
+            jsonResponse({
+              generatedAt: '2026-11-26T12:00:00Z',
+              total: 3,
+              totalCapped: false,
+              categories: {},
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    el.user = user('member');
+    el.currentPath = options.currentPath ?? '/profile/inbox';
+    document.body.appendChild(el);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  it('renders only the single Inbox item with no nested Decisions item when Inbox is on', async () => {
+    const nav = await mountInboxNav({ inboxEnabled: true, decisionsEnabled: true });
+    element = nav;
+
+    const section = nav.shadowRoot?.querySelector('[data-inbox-nav-section]');
+    expect(section).not.toBeNull();
+    expect(section?.querySelectorAll('li.nav-item')).toHaveLength(1);
+    expect(section?.querySelector('[data-inbox-nav-link]')).not.toBeNull();
+    expect(nav.shadowRoot?.querySelector('[data-decisions-nav-link]')).toBeNull();
+    expect(nav.shadowRoot?.querySelector('.nav-item-sub')).toBeNull();
+    expect(section?.querySelector('[data-inbox-nav-badge]')?.textContent?.trim()).toBe('3');
+  });
+
+  it('keeps the Inbox item active across INBOX_CHILD_ROUTES and inactive elsewhere', async () => {
+    const nav = await mountInboxNav({
+      inboxEnabled: true,
+      decisionsEnabled: true,
+      currentPath: '/profile/inbox',
+    });
+    element = nav;
+
+    const inboxLink = (): HTMLAnchorElement | null =>
+      nav.shadowRoot?.querySelector<HTMLAnchorElement>('[data-inbox-nav-link]') ?? null;
+
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
+    nav.currentPath = '/profile/decisions';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
+    nav.currentPath = '/profile/decisions?tab=pending';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
+    nav.currentPath = '/profile/decisions/item-1';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
+    nav.currentPath = '/profile/secrets';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(false);
+
+    nav.currentPath = '/profile/env';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(false);
+  });
+
+  it('keeps the standalone Decisions section when Inbox is off', async () => {
+    const nav = await mountInboxNav({
+      inboxEnabled: false,
+      decisionsEnabled: true,
+      waitingOnYou: 5,
+      currentPath: '/profile/decisions',
+    });
+    element = nav;
+
+    expect(nav.shadowRoot?.querySelector('[data-inbox-nav-section]')).toBeNull();
+    const decisionsLink = nav.shadowRoot?.querySelector<HTMLAnchorElement>(
+      '[data-decisions-nav-link]'
+    );
+    expect(decisionsLink).not.toBeNull();
+    expect(decisionsLink?.classList.contains('active')).toBe(true);
+    expect(nav.shadowRoot?.querySelector('[data-decisions-nav-badge]')?.textContent?.trim()).toBe(
+      '5'
+    );
+  });
+});
