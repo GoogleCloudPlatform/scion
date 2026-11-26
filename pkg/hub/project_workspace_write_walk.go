@@ -37,8 +37,14 @@ var errWorkspaceWriteRefused = errors.New("refused")
 
 // errWorkspaceThroughDotGit is the refusal of a path that reaches a .git
 // directory (by name or as the workspace root's .git entry). It wraps
-// errWorkspaceWriteRefused; it is the only refusal answered with the .git text.
+// errWorkspaceWriteRefused; it is answered with the .git refusal text.
 var errWorkspaceThroughDotGit = fmt.Errorf("%w: path resolves through a .git directory", errWorkspaceWriteRefused)
+
+// errWorkspaceThroughDotScion is the refusal of a write or delete path that
+// reaches a .scion directory (by name or as the workspace root's .scion
+// entry). It wraps errWorkspaceWriteRefused; it is answered with the .scion
+// refusal text.
+var errWorkspaceThroughDotScion = fmt.Errorf("%w: path resolves through a .scion directory", errWorkspaceWriteRefused)
 
 // workspaceWriteParent is the open parent directory of a workspace write
 // target, reached one component at a time from the workspace root.
@@ -48,7 +54,11 @@ type workspaceWriteParent struct {
 	stack []*os.Root
 	// gitDir is the workspace root's .git entry, or nil when it has none.
 	gitDir fs.FileInfo
-	hops   int
+	// scionDir is the workspace root's .scion entry, or nil when it has none
+	// or when blockDotScion is false (read walks).
+	scionDir      fs.FileInfo
+	blockDotScion bool
+	hops          int
 }
 
 // openWorkspaceWriteParent opens the directory that will hold relPath
@@ -56,23 +66,23 @@ type workspaceWriteParent struct {
 // creating missing directories on the way.
 //
 // Each component is opened through the handle of the directory before it,
-// and the opened handle itself is compared with the root's .git entry, so a
-// symlink or an ancestor swapped in the meantime cannot route the write into
-// .git. A symlinked directory on the way is followed by walking its target
-// the same way; ".." in a target steps back to the previous handle and never
-// above the workspace root.
+// and the opened handle itself is compared with the root's .git and .scion
+// entries, so a symlink or an ancestor swapped in the meantime cannot route
+// the write into .git or .scion. A symlinked directory on the way is followed
+// by walking its target the same way; ".." in a target steps back to the
+// previous handle and never above the workspace root.
 func openWorkspaceWriteParent(root *os.Root, relPath string) (*workspaceWriteParent, string, error) {
-	return openWorkspaceParent(root, relPath, true)
+	return openWorkspaceParent(root, relPath, true, true)
 }
 
 // openWorkspaceReadTarget opens the parent of relPath like
-// openWorkspaceWriteParent, but creates nothing, and refuses when the final
-// component is a symlink: a download serves only an entry that is itself in
-// the opened parent. It also returns the target's Lstat info, which the
-// caller compares with the handle it opens. A missing parent or target is an
-// fs.ErrNotExist error.
+// openWorkspaceWriteParent, but creates nothing, allows .scion (still
+// refusing .git), and refuses when the final component is a symlink: a
+// download serves only an entry that is itself in the opened parent. It also
+// returns the target's Lstat info, which the caller compares with the handle
+// it opens. A missing parent or target is an fs.ErrNotExist error.
 func openWorkspaceReadTarget(root *os.Root, relPath string) (*workspaceWriteParent, string, fs.FileInfo, error) {
-	p, base, err := openWorkspaceParent(root, relPath, false)
+	p, base, err := openWorkspaceParent(root, relPath, false, false)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -91,23 +101,32 @@ func openWorkspaceReadTarget(root *os.Root, relPath string) (*workspaceWritePare
 }
 
 // openWorkspaceDeleteTarget opens the parent of relPath like
-// openWorkspaceReadTarget (creating nothing) and returns it with the final
-// component and a function that closes the walk. The final component may be
-// a symlink: a delete removes the link itself.
+// openWorkspaceReadTarget (creating nothing, blocking both .git and .scion)
+// and returns it with the final component and a function that closes the walk.
+// The final component may be a symlink: a delete removes the link itself.
 func openWorkspaceDeleteTarget(root *os.Root, relPath string) (*os.Root, string, func(), error) {
-	p, base, err := openWorkspaceParent(root, relPath, false)
+	p, base, err := openWorkspaceParent(root, relPath, false, true)
 	if err != nil {
 		return nil, "", nil, err
 	}
 	return p.Dir(), base, p.Close, nil
 }
 
-// openWorkspaceParent is the walk behind openWorkspaceWriteParent and
-// openWorkspaceReadTarget; create makes missing directories on the way.
-func openWorkspaceParent(root *os.Root, relPath string, create bool) (*workspaceWriteParent, string, error) {
-	p := &workspaceWriteParent{stack: []*os.Root{root}}
+// openWorkspaceParent is the walk behind openWorkspaceWriteParent,
+// openWorkspaceReadTarget, and openWorkspaceDeleteTarget; create makes
+// missing directories on the way, and blockDotScion refuses .scion traversal.
+func openWorkspaceParent(root *os.Root, relPath string, create, blockDotScion bool) (*workspaceWriteParent, string, error) {
+	p := &workspaceWriteParent{
+		stack:         []*os.Root{root},
+		blockDotScion: blockDotScion,
+	}
 	if info, err := root.Stat(".git"); err == nil {
 		p.gitDir = info
+	}
+	if blockDotScion {
+		if info, err := root.Stat(".scion"); err == nil {
+			p.scionDir = info
+		}
 	}
 	dir, base := path.Split(relPath)
 	for _, c := range strings.Split(dir, "/") {
@@ -150,6 +169,11 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 		// Request components are refused lexically before the walk; this
 		// keeps the walk from ever creating a .git directory.
 		return errWorkspaceThroughDotGit
+	}
+	if create && p.blockDotScion && util.IsDotScionComponent(name) {
+		// Request components are refused lexically before the walk; this
+		// keeps the walk from ever creating a .scion directory.
+		return errWorkspaceThroughDotScion
 	}
 	cur := p.Dir()
 	info, err := cur.Lstat(name)
@@ -205,6 +229,10 @@ func (p *workspaceWriteParent) step(name string, create bool) error {
 		_ = next.Close()
 		return errWorkspaceThroughDotGit
 	}
+	if p.blockDotScion && p.isDotScion(name, opened) {
+		_ = next.Close()
+		return errWorkspaceThroughDotScion
+	}
 	p.stack = append(p.stack, next)
 	return nil
 }
@@ -217,6 +245,17 @@ func (p *workspaceWriteParent) isDotGit(name string, opened fs.FileInfo) bool {
 		return true
 	}
 	return p.gitDir != nil && os.SameFile(opened, p.gitDir)
+}
+
+// isDotScion reports whether the directory opened as name is a .scion
+// directory: by name under util.IsDotScionComponent, or as the workspace
+// root's .scion entry (compared through the opened handle, so a symlink or
+// alias is caught too).
+func (p *workspaceWriteParent) isDotScion(name string, opened fs.FileInfo) bool {
+	if util.IsDotScionComponent(name) {
+		return true
+	}
+	return p.scionDir != nil && os.SameFile(opened, p.scionDir)
 }
 
 // writeWorkspaceFile writes src to relPath under root through

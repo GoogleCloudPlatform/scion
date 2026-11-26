@@ -36,6 +36,8 @@ var notStoredKeys = []string{
 // globalOnlyKeys are rejected at the project layer only.
 var globalOnlyKeys = []string{
 	"server.auth.display_name", "server.auth.email", "server.auth.username",
+	"hub.brokerId", "hub.brokerToken", "hub.brokerNickname",
+	"use_host_credentials",
 }
 
 // writePolicySecret is the value every rejected write carries; no error
@@ -195,15 +197,22 @@ func TestValidateSettingWrite(t *testing.T) {
 		assertNotWritable(t, ValidateSettingWrite(key, false), key)
 		assert.NoError(t, ValidateSettingWrite(key, true), key)
 	}
-	// Writable keys, including ones that only look close to a rejected
-	// one.
+	// Writable project-scoped keys.
 	for _, key := range []string{
-		"active_profile", "hub.endpoint", "hub.brokerToken", "hub.brokerId",
-		"project_id", "hub.project_id", "hub.tokenx", "bucket", "server.authx",
-		"hub_connectionsx",
+		"active_profile", "default_template", "hub.endpoint",
+		"project_id", "hub.project_id", "hub.tokenx",
 	} {
 		for _, global := range []bool{true, false} {
 			assert.NoError(t, ValidateSettingWrite(key, global), key)
+		}
+	}
+	// Unknown keys under denied roots are refused as unknown at both layers.
+	for _, key := range []string{
+		"server.broker.broker_id", "server.foo", "server.authx",
+		"bucket", "hub_connectionsx",
+	} {
+		for _, global := range []bool{true, false} {
+			assertUnknownKey(t, ValidateSettingWrite(key, global), key)
 		}
 	}
 }

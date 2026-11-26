@@ -41,3 +41,29 @@ func TestIsDotGitComponent(t *testing.T) {
 		}
 	}
 }
+
+func TestIsDotScionComponent(t *testing.T) {
+	cases := []struct {
+		comp string
+		want bool
+	}{
+		{".scion", true},
+		{".SCION", true},
+		{".Scion", true},
+		{".scion.", true},
+		{".scion ", true},
+		{".scion. .", true},
+		{"", false},
+		{"README.md", false},
+		{".scion-volumes", false},
+		{".scionx", false},
+		{"scion", false},
+		{"x.scion", false},
+		{".scion/settings.yaml", false},
+	}
+	for _, c := range cases {
+		if got := IsDotScionComponent(c.comp); got != c.want {
+			t.Errorf("IsDotScionComponent(%q) = %v, want %v", c.comp, got, c.want)
+		}
+	}
+}

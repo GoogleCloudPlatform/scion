@@ -18,6 +18,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // ErrSettingNotWritable is matched (errors.Is) by every error that
@@ -51,7 +53,7 @@ const (
 	reasonHubCredential = `hub credentials are not stored in settings files; use "scion hub auth login" to store them`
 	reasonHubSyncState  = "sync state is not stored in settings files; scion records it itself"
 	reasonNoBucket      = "settings files have no bucket section"
-	reasonGlobalOnly    = "it is read only from the global settings file; use --global to write it there"
+	reasonGlobalOnly    = "project settings do not read this key; use --global to write it to the global settings file"
 	reasonHubConnection = "hub connections are kept in the broker credential store, not in settings files; 'scion broker deregister' removes a legacy entry from the global settings"
 )
 
@@ -65,13 +67,19 @@ var settingsNotStoredKeys = map[string]string{
 	"bucket.prefix":    reasonNoBucket,
 }
 
-// settingsGlobalOnlyPrefixes are rejected at the project layer. server.auth
-// (the workstation dev-auth identity) is read from the global settings file
-// only: by the hub's onboarding status (computeOnboardingStatus in
-// pkg/hub/system_handlers.go) and by server startup (LoadGlobalConfig,
-// which reads a file other than the global one only when an explicit
-// --config path names it). A project's own copy is never read.
-var settingsGlobalOnlyPrefixes = []string{"server.auth."}
+// projectWriteAllowed reports whether key may be written to a project-tier
+// settings file. It resolves versionedSettingKeys aliases (such as
+// hub.brokerId -> server.broker.broker_id) before checking projectTierAllowed.
+func projectWriteAllowed(key string) bool {
+	if projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key) {
+		return true
+	}
+	root := rootOfKey(key)
+	if sk, ok := versionedSettingKeys[key]; ok && len(sk.path) > 0 {
+		root = sk.path[0]
+	}
+	return projectTierAllowed(root)
+}
 
 // settingsNotStoredRoot and every key under it are rejected at every
 // layer: hub_connections is read from a settings file (and removed on
@@ -87,7 +95,7 @@ const settingsNotStoredRoot = "hub_connections"
 // ErrSettingNotWritable and does not contain the value.
 //
 // It covers keys whose write would be accepted and then never read at
-// that layer, and the global-only keys the writer does not know (refused
+// that layer, and the non-project keys the writer does not know (refused
 // as unknown at either layer, so no layer hint points at a key no layer
 // accepts). Other keys the writer does not know are still rejected later
 // as unknown.
@@ -98,13 +106,10 @@ func ValidateSettingWrite(key string, global bool) error {
 	if key == settingsNotStoredRoot || strings.HasPrefix(key, settingsNotStoredRoot+".") {
 		return &SettingNotWritableError{Key: key, Reason: reasonHubConnection}
 	}
-	for _, p := range settingsGlobalOnlyPrefixes {
-		if !strings.HasPrefix(key, p) {
-			continue
-		}
+	if !projectWriteAllowed(key) {
 		// The hint to use --global is only for a key the writer accepts
-		// there. Any other key under the prefix is unknown at both layers,
-		// and is refused as such here, before any I/O (ptone/scion#5481).
+		// there. Any other non-project key is unknown at both layers, and is
+		// refused as such here, before any I/O (ptone/scion#5481).
 		if _, ok := versionedSettingKeys[key]; !ok {
 			return fmt.Errorf("unknown or complex setting key: %s", key)
 		}

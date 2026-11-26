@@ -108,21 +108,21 @@ func TestUpdateSetting_V1BrokerIdMapsToServerBroker(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 hub:
   endpoint: https://hub.example.com
 `
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(v1Content), 0644))
 
-	// Update hub.brokerId — in v1 this maps to server.broker.broker_id
-	err := UpdateSetting(projectDir, "hub.brokerId", "broker-123", false)
+	// Update hub.brokerId at global scope — in v1 this maps to server.broker.broker_id
+	err := UpdateSetting(globalDir, "hub.brokerId", "broker-123", true)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)
@@ -148,18 +148,18 @@ func TestUpdateSetting_V1BrokerTokenMapsToServerBroker(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
 `
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(v1Content), 0644))
 
-	err := UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false)
+	err := UpdateSetting(globalDir, "hub.brokerToken", "token-xyz", true)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	var vs VersionedSettings
@@ -205,8 +205,8 @@ func TestUpdateSetting_V1MultipleUpdatesPreserveFormat(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
 	v1Content := `schema_version: "1"
 active_profile: local
@@ -216,16 +216,16 @@ hub:
   endpoint: https://hub.example.com
   grove_id: grove-1
 `
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(v1Content), 0644))
 
 	// Simulate what happens during hub operations: multiple sequential updates
-	require.NoError(t, UpdateSetting(projectDir, "project_id", "new-project-id", false))
-	require.NoError(t, UpdateSetting(projectDir, "hub.brokerId", "broker-abc", false))
-	require.NoError(t, UpdateSetting(projectDir, "hub.brokerToken", "token-xyz", false))
-	require.NoError(t, UpdateSetting(projectDir, "hub.enabled", "false", false))
+	require.NoError(t, UpdateSetting(globalDir, "project_id", "new-project-id", true))
+	require.NoError(t, UpdateSetting(globalDir, "hub.brokerId", "broker-abc", true))
+	require.NoError(t, UpdateSetting(globalDir, "hub.brokerToken", "token-xyz", true))
+	require.NoError(t, UpdateSetting(globalDir, "hub.enabled", "false", true))
 
 	// Read final state
-	data, err := os.ReadFile(filepath.Join(projectDir, "settings.yaml"))
+	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)
 
 	version, _ := DetectSettingsFormat(data)

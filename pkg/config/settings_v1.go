@@ -4173,11 +4173,14 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// A hub-managed workspace root without a .scion entry has no project
 	// settings: its own settings file is workspace content.
 	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
-	// The storage blocks are Layer-0: a project's settings never supply
-	// them. They are taken from the layers loaded so far (defaults and the
-	// global file) and put back after the project layers.
-	storageSnapshot := snapshotLayer0StorageKeys(k)
+	// Project-tier settings files are deny-by-default: only the explicit
+	// allow-list of top-level roots survives project layers. Snapshot every
+	// non-allowed root from defaults+global now and restore them after steps
+	// 3 and 4.
+	projectGuard := guardProjectLayers(k, res.sources)
+	var projectLayerDirs []string
 	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
+		projectLayerDirs = append(projectLayerDirs, projectPath)
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
 			return nil, err
@@ -4195,6 +4198,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// -> FindProjectRoot): step 3 above never runs in that case, so the
 	// precedence check must run here too, not only in step 3.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath && !noProjectLayer {
+		projectLayerDirs = append(projectLayerDirs, effectiveProjectPath)
 		migratedHub, err := fileLayer("project", effectiveProjectPath)
 		if err != nil {
 			return nil, err
@@ -4204,7 +4208,7 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		}
 	}
 
-	if err := restoreLayer0StorageKeys(k, storageSnapshot, res.sources); err != nil {
+	if err := projectGuard.restore(k, res.sources, settingsHierarchySources(projectLayerDirs...)); err != nil {
 		return nil, err
 	}
 

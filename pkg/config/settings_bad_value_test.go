@@ -66,10 +66,10 @@ func setupBadValueProject(t *testing.T, cloneDepth, autoSuspendStalled string) (
 		}
 	}
 	unsetTestEnv(t, names...)
-	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 	content := []byte(fmt.Sprintf(badValueSettingsYAML, cloneDepth, autoSuspendStalled))
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), content, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), content, 0644))
 
 	resetWarnedUnparseableSettingsCache()
 	t.Cleanup(resetWarnedUnparseableSettingsCache)
@@ -78,7 +78,7 @@ func setupBadValueProject(t *testing.T, cloneDepth, autoSuspendStalled string) (
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
-	return projectDir, &buf
+	return globalDir, &buf
 }
 
 // TestLoadVersionedSettings_BadValueFallsBackPerField: an int from the
