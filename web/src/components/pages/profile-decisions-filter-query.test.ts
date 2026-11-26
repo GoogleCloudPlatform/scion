@@ -395,4 +395,46 @@ describe('Profile Decisions page — filter query dialect (ptone/scion#9348)', (
     const el3 = await mountPage('?q=-project%3Aalpha-app');
     expect(el3.shadowRoot?.querySelector('sl-alert[data-truncated-projects]')).not.toBeNull();
   });
+
+  it('shows over-limit 201-256 rune ?q= inline as an error without sending it to the hub', async () => {
+    setServerFlags({ 'web.decisions': true });
+    const overlong = 'a'.repeat(210);
+    const el = await mountPage(`?tab=made&q=${overlong}`);
+
+    expect(requestedUrls.some((u) => u.includes('q='))).toBe(false);
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    expect(box.value).toBe(overlong);
+    expect(box.shadowRoot?.querySelector('.feedback.error')).not.toBeNull();
+  });
+
+  it('always renders <scion-filter-box view="profile-decisions"> without legacy Project combobox even when hub omits conversations', async () => {
+    setServerFlags({ 'web.decisions': true });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          makeResponse({
+            counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+            prompts: [],
+            agents: [],
+            answerers: [],
+            projects: [{ id: PROJ_ALPHA_ID, name: 'Alpha App', slug: 'alpha-app' }],
+            truncatedProjects: true,
+          })
+        )
+      )
+    );
+    const el = await mountPage('');
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    expect(panel.shadowRoot?.querySelector('scion-filter-box')).not.toBeNull();
+    expect(panel.querySelector('scion-facet-combobox[data-filter="project"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[data-truncated-projects]')?.textContent).toContain(
+      'only those 200 projects are searched'
+    );
+  });
 });
