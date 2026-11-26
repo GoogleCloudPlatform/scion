@@ -217,7 +217,6 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 		return newUsageError("--share-output and --no-share-output are mutually exclusive")
 	}
 	shareFlagVal, _ := cmd.Flags().GetBool("share-output")
-	noShareFlagVal, _ := cmd.Flags().GetBool("no-share-output")
 
 	client, err := commandRequestsClientFactory()
 	if err != nil {
@@ -244,7 +243,8 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 	case shareFlagSet:
 		shareOutput = shareFlagVal
 	case noShareFlagSet:
-		shareOutput = !noShareFlagVal
+		// Any use of --no-share-output means do not share output.
+		shareOutput = false
 	}
 
 	out := cmd.OutOrStdout()

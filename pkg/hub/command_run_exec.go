@@ -1046,9 +1046,6 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 			if run.OutputStatus != "" {
 				meta["command_run_output_status"] = run.OutputStatus
 			}
-			if outputTail != "" {
-				meta["command_run_output_tail"] = outputTail
-			}
 		},
 		LogPrefix: "command_run",
 		Label:     "command-response",

@@ -446,7 +446,7 @@ func TestCommandRequestCLI_ShareOutputFlags(t *testing.T) {
 		name            string
 		agentRequested  bool
 		setShare        bool
-		setNoShare      bool
+		noShareVal      string
 		wantErrContains string
 		wantShareOutput bool
 	}{
@@ -463,7 +463,13 @@ func TestCommandRequestCLI_ShareOutputFlags(t *testing.T) {
 		{
 			name:            "--no-share-output overrides agent requested=true",
 			agentRequested:  true,
-			setNoShare:      true,
+			noShareVal:      "true",
+			wantShareOutput: false,
+		},
+		{
+			name:            "--no-share-output=false still means do not share",
+			agentRequested:  true,
+			noShareVal:      "false",
 			wantShareOutput: false,
 		},
 		{
@@ -476,7 +482,7 @@ func TestCommandRequestCLI_ShareOutputFlags(t *testing.T) {
 			name:            "both flags mutually exclusive",
 			agentRequested:  true,
 			setShare:        true,
-			setNoShare:      true,
+			noShareVal:      "true",
 			wantErrContains: "mutually exclusive",
 		},
 	}
@@ -527,8 +533,8 @@ func TestCommandRequestCLI_ShareOutputFlags(t *testing.T) {
 			if tc.setShare {
 				require.NoError(t, cmd.Flags().Set("share-output", "true"))
 			}
-			if tc.setNoShare {
-				require.NoError(t, cmd.Flags().Set("no-share-output", "true"))
+			if tc.noShareVal != "" {
+				require.NoError(t, cmd.Flags().Set("no-share-output", tc.noShareVal))
 			}
 			var out bytes.Buffer
 			cmd.SetOut(&out)

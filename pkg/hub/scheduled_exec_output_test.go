@@ -41,9 +41,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// checkExecOutputReaderCalls inspects a parsed Go file and returns an error
+// message for every call to a guarded exec_run_outputs reader outside its
+// allow-listed files.
+func checkExecOutputReaderCalls(fset *token.FileSet, name string, f *ast.File, allowedCallers map[string]map[string]bool) []string {
+	var violations []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok {
+			if allowed, guarded := allowedCallers[sel.Sel.Name]; guarded && !allowed[name] {
+				violations = append(violations,
+					fset.Position(sel.Pos()).String()+": "+name+" calls "+sel.Sel.Name+"; only allow-listed gated handlers may read exec_run_outputs")
+			}
+		}
+		return true
+	})
+	return violations
+}
+
 // TestExecOutputReaders guards A15 and ptone/scion#9278 §4.9: in pkg/hub,
-// only the allow-listed output handler files may call GetScheduledExecRunOutput
-// or GetActionRunOutput.
+// only the allow-listed output files may call GetScheduledExecRunOutput,
+// GetActionRunOutput, or loadSharedCommandRunOutputTail.
 func TestExecOutputReaders(t *testing.T) {
 	allowedCallers := map[string]map[string]bool{
 		"GetScheduledExecRunOutput": {
@@ -51,6 +68,11 @@ func TestExecOutputReaders(t *testing.T) {
 		},
 		"GetActionRunOutput": {
 			"handlers_command_request_output.go": true,
+			"command_output_share.go":            true,
+		},
+		"loadSharedCommandRunOutputTail": {
+			"command_run_exec.go":          true,
+			"command_requests_handlers.go": true,
 		},
 	}
 	fset := token.NewFileSet()
@@ -65,16 +87,25 @@ func TestExecOutputReaders(t *testing.T) {
 		require.NoError(t, err)
 		f, err := parser.ParseFile(fset, name, src, 0)
 		require.NoError(t, err)
-		ast.Inspect(f, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok {
-				if allowed, guarded := allowedCallers[sel.Sel.Name]; guarded && !allowed[name] {
-					t.Errorf("%s: %s calls %s; only allow-listed gated handlers may read exec_run_outputs",
-						fset.Position(sel.Pos()), name, sel.Sel.Name)
-				}
-			}
-			return true
-		})
+		for _, v := range checkExecOutputReaderCalls(fset, name, f, allowedCallers) {
+			t.Error(v)
+		}
 	}
+
+	// Self-test: prove that a new non-test file in pkg/hub calling either
+	// GetActionRunOutput or loadSharedCommandRunOutputTail fails the guard.
+	rogueSrc := `package hub
+import "context"
+func (s *Server) rogue(ctx context.Context) {
+	_, _ = s.store.GetActionRunOutput(ctx, "id")
+	_, _ = s.loadSharedCommandRunOutputTail(ctx, nil)
+}
+`
+	rogueFset := token.NewFileSet()
+	rogueFile, err := parser.ParseFile(rogueFset, "rogue_handler.go", rogueSrc, 0)
+	require.NoError(t, err)
+	violations := checkExecOutputReaderCalls(rogueFset, "rogue_handler.go", rogueFile, allowedCallers)
+	assert.Len(t, violations, 2, "expected violations for both GetActionRunOutput and loadSharedCommandRunOutputTail, got %v", violations)
 }
 
 // TestScheduledExecCapture_OneShotJSONIntegration verifies the Commit 1

@@ -411,8 +411,7 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 // even if a new call site forgets to strip the key after consuming it,
 // LogAttrs will not emit it.
 var logMetadataSkipKeys = map[string]bool{
-	AttachmentsMetadataKey:    true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
-	"command_run_output_tail": true, // command-run output tail must never reach slog (ptone/scion#9278 G7/S9)
+	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
 }
 
 // LogAttrs returns slog attributes for structured logging of this message.

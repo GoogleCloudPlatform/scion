@@ -107,3 +107,36 @@ func TestRedactAndBoundCommandOutput_UTF8BoundaryAndBoundarySecret(t *testing.T)
 	assert.NotContains(t, tail, "ghp_")
 	assert.True(t, strings.HasSuffix(tail, "€€€"), "tail should preserve the end of output")
 }
+
+func TestRedactAndBoundCommandOutput_LeadingKeyFragmentPGPAndCLIFlags(t *testing.T) {
+	// 1. Tail capture starting mid-PEM key (END without BEGIN).
+	leadingFrag := "AAAAB3NzaC1yc2EAAAADAQABAAABAQCheadcutbody\n-----END RSA PRIVATE KEY-----\nsafe trailing line"
+	tail, count := redactAndBoundCommandOutput([]byte(leadingFrag))
+	assert.Equal(t, 1, count)
+	assert.NotContains(t, tail, "headcutbody")
+	assert.NotContains(t, tail, "END RSA PRIVATE KEY")
+	assert.Equal(t, "[REDACTED]\nsafe trailing line", tail)
+
+	// 2. PGP private key block.
+	pgp := "before\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBFtestpgpsecretbody\n-----END PGP PRIVATE KEY BLOCK-----\nafter"
+	tail, count = redactAndBoundCommandOutput([]byte(pgp))
+	assert.Equal(t, 1, count)
+	assert.NotContains(t, tail, "lQOYBFtestpgpsecretbody")
+	assert.Equal(t, "before\n[REDACTED]\nafter", tail)
+
+	// 3. Space-separated CLI flags (--password, --token, --secret) and no Bearer double-count.
+	cliInput := strings.Join([]string{
+		"mysql -u root --password hunter2 --host db",
+		`curl --api-token "tok-val-999" --client-secret mysec123`,
+		"token: Bearer super-secret-bearer-token-9999",
+	}, "\n")
+	tail, count = redactAndBoundCommandOutput([]byte(cliInput))
+	assert.Equal(t, 4, count, "expected 4 redactions (3 CLI flags + 1 Bearer, no double-count)")
+	assert.Contains(t, tail, "--password [REDACTED] --host db")
+	assert.Contains(t, tail, "--api-token [REDACTED] --client-secret [REDACTED]")
+	assert.Contains(t, tail, "token: Bearer [REDACTED]")
+	assert.NotContains(t, tail, "hunter2")
+	assert.NotContains(t, tail, "tok-val-999")
+	assert.NotContains(t, tail, "mysec123")
+	assert.NotContains(t, tail, "super-secret-bearer-token-9999")
+}

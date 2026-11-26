@@ -37,63 +37,84 @@ type commandOutputRedactRule struct {
 }
 
 var commandOutputRedactRules = []commandOutputRedactRule{
-	// 1. Complete PEM private key blocks (RSA, EC, OPENSSH, PKCS8, etc.).
+	// 1. Complete PEM/PGP private key blocks (RSA, EC, OPENSSH, PKCS8, PGP, etc.).
 	{
-		re: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`),
+		re: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 2. Unterminated/truncated PEM private key blocks (e.g. cut off at capture boundary).
+	// 2. Leading PEM/PGP key fragment when ring-buffer tail capture starts mid-key
+	//    (no BEGIN before END): redact from the start of the text through END.
 	{
-		re: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*$`),
+		re: regexp.MustCompile(`(?s)\A.*?-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 3. Bearer authorization tokens (runs before JWT so "Bearer eyJ..." counts once).
+	// 3. Unterminated/truncated PEM/PGP private key blocks (BEGIN without END).
+	{
+		re: regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*$`),
+		replace: func(_ string, _ []int) (string, bool) {
+			return commandOutputRedactedMarker, true
+		},
+	},
+	// 4. Bearer authorization tokens (runs before JWT so "Bearer eyJ..." counts once).
 	{
 		re: regexp.MustCompile(`(?i)\bBearer[ \t]+[A-Za-z0-9._~+/=-]{8,}`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return "Bearer " + commandOutputRedactedMarker, true
 		},
 	},
-	// 4. GitHub tokens (ghp_, gho_, ghs_, github_pat_).
+	// 5. GitHub tokens (ghp_, gho_, ghs_, github_pat_).
 	{
 		re: regexp.MustCompile(`\b(?:gh[pos]_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,})\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 5. AWS access key IDs (AKIA..., ASIA...).
+	// 6. AWS access key IDs (AKIA..., ASIA...).
 	{
 		re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{12,}\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 6. Google OAuth2 access tokens (ya29....).
+	// 7. Google OAuth2 access tokens (ya29....).
 	{
 		re: regexp.MustCompile(`\bya29\.[A-Za-z0-9._-]{10,}`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 7. Slack tokens (xoxa-, xoxb-, xoxp-, xoxr-).
+	// 8. Slack tokens (xoxa-, xoxb-, xoxp-, xoxr-).
 	{
 		re: regexp.MustCompile(`\bxox[abpr]-[A-Za-z0-9-]{8,}`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 8. JWT-shaped tokens (eyJ... . ... . ...).
+	// 9. JWT-shaped tokens (eyJ... . ... . ...).
 	{
 		re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 9. password|passwd|secret|token key-value assignments (env, shell, YAML, JSON).
+	// 10. Space-separated CLI secret flags (--password <val>, --token <val>, --secret <val>).
+	{
+		re: regexp.MustCompile(`(?i)(--(?:[a-z0-9_-]*-)?(?:password|passwd|secret|token)[ \t]+)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;]+)`),
+		replace: func(src string, loc []int) (string, bool) {
+			prefix := src[loc[2]:loc[3]]
+			val := src[loc[4]:loc[5]]
+			trimmed := strings.Trim(val, `"'`)
+			if trimmed == "" || trimmed == commandOutputRedactedMarker || strings.HasPrefix(trimmed, "-") {
+				return src[loc[0]:loc[1]], false
+			}
+			return prefix + commandOutputRedactedMarker, true
+		},
+	},
+	// 11. password|passwd|secret|token key-value assignments (env, shell, YAML, JSON).
 	{
 		re: regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*(?:password|passwd|secret|token)[A-Za-z0-9_.-]*"?[ \t]*[:=][ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;\}]+)`),
 		replace: func(src string, loc []int) (string, bool) {
@@ -101,6 +122,10 @@ var commandOutputRedactRules = []commandOutputRedactRule{
 			val := src[loc[4]:loc[5]]
 			trimmed := strings.Trim(val, `"'`)
 			if trimmed == "" || trimmed == commandOutputRedactedMarker {
+				return src[loc[0]:loc[1]], false
+			}
+			// Avoid double-counting "token: Bearer [REDACTED]" already handled by the Bearer rule.
+			if strings.EqualFold(trimmed, "Bearer") && strings.HasPrefix(strings.TrimLeft(src[loc[5]:], " \t"), commandOutputRedactedMarker) {
 				return src[loc[0]:loc[1]], false
 			}
 			return prefix + commandOutputRedactedMarker, true

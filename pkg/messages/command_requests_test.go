@@ -252,8 +252,7 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 		Type:      TypeCommandResponse,
 		Msg:       "Finished.\n```\n" + outputMarker + "\n```",
 		Metadata: map[string]string{
-			"command_run_status":      "succeeded",
-			"command_run_output_tail": outputMarker,
+			"command_run_status": "succeeded",
 		},
 	}
 	respAttrs := respMsg.LogAttrs()
@@ -265,9 +264,6 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 	}
 	if _, hasContent := respKV["message_content"]; hasContent {
 		t.Fatalf("TypeCommandResponse LogAttrs must omit message_content, got %v", respKV["message_content"])
-	}
-	if _, hasTail := respKV["meta_command_run_output_tail"]; hasTail {
-		t.Fatalf("TypeCommandResponse LogAttrs must omit meta_command_run_output_tail, got %v", respKV["meta_command_run_output_tail"])
 	}
 	if respKV["message_content_omitted"] != true {
 		t.Errorf("TypeCommandResponse message_content_omitted = %v, want true", respKV["message_content_omitted"])

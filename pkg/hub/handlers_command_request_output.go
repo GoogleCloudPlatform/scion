@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -34,8 +33,9 @@ import (
 //   - live agent.attach on run.ExecAgentID as caller (fails closed if deleted)
 //   - Cache-Control: no-store
 //
-// This file is the sole allow-listed caller of GetActionRunOutput in pkg/hub
-// (guarded by TestExecOutputReaders).
+// This file (approver raw-output endpoint) and command_output_share.go
+// (share_output-gated redacting helper) are the only allow-listed callers of
+// GetActionRunOutput in pkg/hub (guarded by TestExecOutputReaders).
 func (s *Server) handleCommandRequestOutput(w http.ResponseWriter, r *http.Request, reqID string) {
 	user := s.messageActionHumanSessionCaller(w, r, msgaction.KindCommandRequest, reqID, "")
 	if user == nil {
@@ -161,21 +161,4 @@ func (s *Server) handleCommandRequestOutput(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// loadSharedCommandRunOutputTail loads, redacts, and bounds (<= 4 KiB UTF-8)
-// the captured output for a command run ONLY when the approver opted into
-// sharing (run.ShareOutput == true). Raw output is never returned.
-func (s *Server) loadSharedCommandRunOutputTail(ctx context.Context, run *store.CommandRun) (string, int) {
-	if run == nil || !run.ShareOutput {
-		return "", 0
-	}
-	if run.OutputStatus != agentcontrol.ExecOutputCaptured && run.OutputStatus != agentcontrol.ExecOutputTruncated {
-		return "", 0
-	}
-	content, err := s.store.GetActionRunOutput(ctx, run.ID)
-	if err != nil || len(content) == 0 {
-		return "", 0
-	}
-	return redactAndBoundCommandOutput(content)
 }
