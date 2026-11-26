@@ -174,7 +174,7 @@ func CheckVolumeSourcesWithPolicy(vols []api.VolumeMount, runtimeKind string, gi
 		case RealizeNamed, RealizeFUSE, RealizeCSI:
 			continue
 		case RealizeUnsupported:
-			if isBindRuntime(runtimeKind) {
+			if !isNonBindRuntime(runtimeKind) {
 				return unsupportedVolumeTypeError(i, v, runtimeKind)
 			}
 			continue
@@ -220,7 +220,7 @@ func CheckWorkspaceVolumeSourcesForRuntime(vols []api.VolumeMount, runtimeKind s
 				return fmt.Errorf("volumes[%d] (target %s): %w", i, v.Target, err)
 			}
 		case RealizeUnsupported:
-			if isBindRuntime(runtimeKind) {
+			if !isNonBindRuntime(runtimeKind) {
 				return unsupportedVolumeTypeError(i, v, runtimeKind)
 			}
 			// On non-bind runtimes (e.g. Kubernetes), a /workspace entry with

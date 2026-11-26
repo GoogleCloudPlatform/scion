@@ -76,6 +76,44 @@ func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 	}
 }
 
+// TestCreateAgent_RefusesUnsupportedVolumeTypeOnDocker verifies at the HTTP
+// handler level that POST /api/v1/agents with gke-shared-volume or
+// cloudrun-volume on a docker broker (even in workstation mode where
+// hostedguard is off) returns 400 unsupported_volume_type and records no
+// create attempt.
+func TestCreateAgent_RefusesUnsupportedVolumeTypeOnDocker(t *testing.T) {
+	for _, volType := range []string{"gke-shared-volume", "cloudrun-volume"} {
+		t.Run(volType, func(t *testing.T) {
+			setupTestScionEnv(t)
+			mgr := &mockManager{}
+			cfg := testServerConfig()
+			cfg.BrokerID = "test-broker-id"
+			cfg.WorkstationMode = true
+			cfg.ForceRuntime = "docker"
+			rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+			srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+			endAsyncLaunchesAtCleanup(t, srv)
+
+			body := fmt.Sprintf(`{"name": "a1", "inlineConfig": {"volumes": [{"type": %q, "volume_name": "v", "target": "/mnt/u"}]}}`, volType)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			code, _ := decodeError(t, w)
+			if code != api.LaunchCodeUnsupportedVolumeType {
+				t.Fatalf("code = %q, want %q (body: %s)", code, api.LaunchCodeUnsupportedVolumeType, w.Body.String())
+			}
+			if mgr.startCalls != 0 {
+				t.Fatalf("Start was called %d times after refusal, want 0", mgr.startCalls)
+			}
+		})
+	}
+}
+
 // A gcs volume is let through on a hosted broker whose agents run on
 // Kubernetes, under each name a Kubernetes runtime type may have in
 // settings ("kubernetes", and the legacy "k8s" and "remote"); the create or

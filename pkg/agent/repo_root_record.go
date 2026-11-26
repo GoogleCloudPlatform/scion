@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -91,8 +92,9 @@ func trustedProjectRepoRoot(projectDir string) string {
 // agentMountSources returns the host paths the agent's container mounts
 // from: the workspace, the repository root mount (repoRoot/.git when the
 // workspace is below repoRoot, otherwise the whole repoRoot, as
-// pkg/runtime/common.go does), and configured local volumes.
-func agentMountSources(workspace, repoRoot string, volumes []api.VolumeMount) []string {
+// pkg/runtime/common.go does), and configured volumes realized as host binds
+// for runtimeName.
+func agentMountSources(workspace, repoRoot, runtimeName string, volumes []api.VolumeMount) []string {
 	var sources []string
 	if workspace != "" {
 		sources = append(sources, workspace)
@@ -105,7 +107,7 @@ func agentMountSources(workspace, repoRoot string, volumes []api.VolumeMount) []
 		}
 	}
 	for _, v := range volumes {
-		if v.Type == "gcs" || v.Source == "" {
+		if v.Source == "" || runtime.RealizeVolume(v, runtimeName) != runtime.RealizeHostBind {
 			continue
 		}
 		src := v.Source
@@ -238,6 +240,7 @@ type startRepoRootInput struct {
 	workspace   string // effectiveWorkspace, as Start has it
 	ctxRepoRoot string // the broker's signal for this dispatch, if any
 	explicit    bool   // an explicit-workspace start
+	runtimeName string
 	volumes     []api.VolumeMount
 	settings    *config.VersionedSettings
 }
@@ -285,7 +288,7 @@ const repoRootRecordMax = 4096
 //     unreadable record refuses the start; a missing or untrusted record uses
 //     the derived root unchanged.
 func resolveStartRepoRoot(in startRepoRootInput) (repoRoot string, rec repoRootRecordState, candidate string, err error) {
-	rec = readRepoRootRecordState(in.agentName, in.agentDir, in.workspace, in.volumes)
+	rec = readRepoRootRecordState(in.agentName, in.agentDir, in.workspace, in.runtimeName, in.volumes)
 	candidate = in.ctxRepoRoot
 	if candidate == "" && rec.status == recordPresent {
 		candidate = rec.root
@@ -316,9 +319,9 @@ func composeRepoRoot(agentName, candidate string, rec repoRootRecordState, works
 // A record outside every agent mount is then read: absent is missing; present
 // but unreadable or malformed is unreadable; otherwise present. The broker ctx
 // signal is not a record; the caller uses it as the candidate.
-func readRepoRootRecordState(agentName, agentDir, workspace string, volumes []api.VolumeMount) repoRootRecordState {
+func readRepoRootRecordState(agentName, agentDir, workspace, runtimeName string, volumes []api.VolumeMount) repoRootRecordState {
 	recPath := filepath.Join(agentDir, provisionedWorktreeStateFile)
-	reachable := !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", volumes))
+	reachable := !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, "", runtimeName, volumes))
 	// Decide existence with Lstat before opening anything: an absent record is
 	// missing with no log; a reachable record is missing whatever it is.
 	if _, err := os.Lstat(recPath); err != nil {
@@ -356,7 +359,7 @@ func readRepoRootRecordState(agentName, agentDir, workspace string, volumes []ap
 	}
 	// With the record's own root known, the guard can add the recorded
 	// repository's mount to the sources, which can only tighten it.
-	if !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, state.RepoRoot, volumes)) {
+	if !agentDirOutsideAgentMounts(agentDir, agentMountSources(workspace, state.RepoRoot, runtimeName, volumes)) {
 		slog.Warn("start: the agent directory is inside the recorded repository's mount; the record is not used", "agent", agentName)
 		return repoRootRecordState{status: recordMissing}
 	}

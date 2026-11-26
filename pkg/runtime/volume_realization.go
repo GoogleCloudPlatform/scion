@@ -109,12 +109,14 @@ func unsupportedVolumeTypeError(index int, v api.VolumeMount, runtimeKind string
 	}
 }
 
-// isBindRuntime reports whether runtimeKind is a local container bind runtime
-// (docker, podman, container, apple-container). An empty runtimeKind defaults
-// to bind-runtime semantics (fail closed).
-func isBindRuntime(runtimeKind string) bool {
+// isNonBindRuntime reports whether runtimeKind belongs to the non-bind runtime
+// families (kubernetes, cloudrun, substrate) that do not realize configured
+// host-bind volumes. Every other runtimeKind (including "", "local", "auto",
+// "docker", "podman", "container", "apple-container") uses bind-runtime
+// semantics, failing closed.
+func isNonBindRuntime(runtimeKind string) bool {
 	switch strings.ToLower(strings.TrimSpace(runtimeKind)) {
-	case "", "docker", "podman", "container", "apple-container":
+	case "kubernetes", "k8s", "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "substrate":
 		return true
 	default:
 		return false
@@ -127,7 +129,8 @@ func isBindRuntime(runtimeKind string) bool {
 // "" and "local" mean a host bind (or a daemon named volume when Source is a
 // valid named volume).
 //
-// On bind runtimes (docker, podman, container, apple-container, or empty):
+// On bind runtimes (docker, podman, container, apple-container, or any
+// non-k8s/cloudrun/substrate kind such as "", "local", "auto"):
 //   - "", "local" → RealizeNamed (if isNamedVolume(v.Source)) or RealizeHostBind
 //   - "nfs" → RealizeHostBind (host path to an NFS mount)
 //   - "gcs" → RealizeFUSE (gcsfuse inside the container)
@@ -164,9 +167,8 @@ func RealizeVolume(v api.VolumeMount, runtimeKind string) VolumeRealization {
 			return RealizeHostBind
 		case "gcs":
 			return RealizeFUSE
-		case "cloudrun-volume", "gke-shared-volume":
-			return RealizeUnsupported
 		default:
+			// Includes cloudrun-volume, gke-shared-volume, and unknown types.
 			return RealizeUnsupported
 		}
 	}

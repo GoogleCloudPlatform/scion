@@ -3003,7 +3003,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// gate, for the one case this function never runs at all: GetAgent
 	// skipping ProvisionAgent because the agent directory already exists.
 	// See persistProvisionedWorktreeRepoRootIfValid.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource, finalScionCfg.Volumes)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource, agentRuntimeFromContext(ctx), finalScionCfg.Volumes)
 
 	// Record the project's repository root for a git project (Case 2), so
 	// every later start reads it from this record instead of deriving it
@@ -3015,7 +3015,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			recordWorkspace = workspaceSource
 		}
 		if err := writeRepoRootRecord(agentDir, projectRepoRoot, repoRootSourceProvision,
-			agentMountSources(recordWorkspace, projectRepoRoot, finalScionCfg.Volumes)); err != nil {
+			agentMountSources(recordWorkspace, projectRepoRoot, agentRuntimeFromContext(ctx), finalScionCfg.Volumes)); err != nil {
 			slog.Info("provision: repository root not recorded; the agent starts without a repository root mount",
 				"agent", agentName, "reason", err)
 		}
@@ -3825,11 +3825,11 @@ func readAgentOwnWorkspace(agentDir string) string {
 // A write failure only means a later resume has no broker record;
 // see writeRepoRootRecord (the production writer, which also applies the
 // agentDir-unmounted check).
-func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace string, volumes []api.VolumeMount) {
+func persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, workspace, runtimeName string, volumes []api.VolumeMount) {
 	if ctxRepoRoot == "" || validatedWorktreeRepoRoot(ctxRepoRoot, workspace) != ctxRepoRoot {
 		return
 	}
-	if err := writeRepoRootRecord(agentDir, ctxRepoRoot, repoRootSourceBroker, agentMountSources(workspace, ctxRepoRoot, volumes)); err != nil {
+	if err := writeRepoRootRecord(agentDir, ctxRepoRoot, repoRootSourceBroker, agentMountSources(workspace, ctxRepoRoot, runtimeName, volumes)); err != nil {
 		util.Debugf("persistProvisionedWorktreeRepoRootIfValid: not persisted for %s: %v", agentDir, err)
 	}
 }

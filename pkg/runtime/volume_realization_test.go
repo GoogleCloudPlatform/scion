@@ -271,4 +271,19 @@ func TestVolumeRealization_KubernetesAndCloudRun(t *testing.T) {
 			t.Fatalf("CheckVolumeSourcesForRuntime(cloudrun) = %v, want nil", err)
 		}
 	})
+
+	// Generic/alias bind-runtime names ("auto", "local") share the exact same
+	// partition as RealizeVolume and refuse unsupported volume types fail-closed.
+	for _, rt := range []string{"auto", "local"} {
+		t.Run("alias/"+rt, func(t *testing.T) {
+			vol := api.VolumeMount{Type: "cloudrun-volume", VolumeName: "v", Target: "/mnt/cr"}
+			if err := CheckVolumeSourcesForRuntime([]api.VolumeMount{vol}, rt); !errors.Is(err, ErrUnsupportedVolumeType) {
+				t.Fatalf("CheckVolumeSourcesForRuntime(%q) = %v, want ErrUnsupportedVolumeType", rt, err)
+			}
+			wsVol := api.VolumeMount{Type: "cloudrun-volume", VolumeName: "v", Target: "/workspace"}
+			if err := CheckWorkspaceVolumeSourcesForRuntime([]api.VolumeMount{wsVol}, rt); !errors.Is(err, ErrUnsupportedVolumeType) {
+				t.Fatalf("CheckWorkspaceVolumeSourcesForRuntime(%q) = %v, want ErrUnsupportedVolumeType", rt, err)
+			}
+		})
+	}
 }
