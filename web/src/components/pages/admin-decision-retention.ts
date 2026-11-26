@@ -710,22 +710,43 @@ export class ScionAdminDecisionRetention extends LitElement {
     this.form = formFrom(s);
   }
 
+  private async loadAllProjects(): Promise<DecisionRetentionProjectOption[]> {
+    const all: DecisionRetentionProjectOption[] = [];
+    const seenIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor = '';
+    for (let page = 0; page < 50; page++) {
+      const url = cursor ? `${PROJECTS_PATH}?cursor=${encodeURIComponent(cursor)}` : PROJECTS_PATH;
+      const res = await apiFetch(url).catch(() => null);
+      if (!res || !res.ok) break;
+      const pdata = (await res.json().catch(() => null)) as {
+        projects?: DecisionRetentionProjectOption[];
+        nextCursor?: string;
+      } | null;
+      if (Array.isArray(pdata?.projects)) {
+        for (const p of pdata.projects) {
+          if (p?.id && !seenIds.has(p.id)) {
+            seenIds.add(p.id);
+            all.push(p);
+          }
+        }
+      }
+      const next = typeof pdata?.nextCursor === 'string' ? pdata.nextCursor.trim() : '';
+      if (!next || seenCursors.has(next)) break;
+      seenCursors.add(next);
+      cursor = next;
+    }
+    return all;
+  }
+
   private async load(): Promise<void> {
     this.loadRequested = true;
     this.loading = true;
     this.loadError = null;
     try {
-      const [res, projectsRes] = await Promise.all([
-        apiFetch(API_PATH),
-        apiFetch(PROJECTS_PATH).catch(() => null),
-      ]);
-      if (projectsRes && projectsRes.ok) {
-        const pdata = (await projectsRes.json().catch(() => null)) as {
-          projects?: DecisionRetentionProjectOption[];
-        } | null;
-        if (Array.isArray(pdata?.projects)) {
-          this.projects = pdata.projects;
-        }
+      const [res, projects] = await Promise.all([apiFetch(API_PATH), this.loadAllProjects()]);
+      if (projects.length > 0) {
+        this.projects = projects;
       }
       if (res.status === 404) {
         this.unavailable = true;

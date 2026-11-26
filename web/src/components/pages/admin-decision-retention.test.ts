@@ -720,6 +720,27 @@ describe('scion-admin-decision-retention', () => {
       }
     });
 
+    it('paginates /api/v1/projects following nextCursor for the override picker', async () => {
+      apiFetch.mockImplementation((path, init) => {
+        if (path === '/api/v1/projects') {
+          return Promise.resolve(json({ projects: [PROJECTS[0]], nextCursor: 'page-2' }));
+        }
+        if (path === '/api/v1/projects?cursor=page-2') {
+          return Promise.resolve(json({ projects: [PROJECTS[1], PROJECTS[2]] }));
+        }
+        return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+      });
+      const el = await mount();
+      const options = Array.from(
+        el.shadowRoot?.querySelectorAll('.override-project sl-option') ?? []
+      );
+      expect(options.map((o) => o.getAttribute('value'))).toEqual([
+        PROJ_PAYMENTS,
+        PROJ_SCRATCH,
+        PROJ_WEB,
+      ]);
+    });
+
     it('says the experiment is off when the hub answers 404', async () => {
       apiFetch.mockImplementation((path) => {
         if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
