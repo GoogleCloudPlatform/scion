@@ -1024,7 +1024,7 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 	if v, ok := m.tmuxVersionOK.Load(key); ok && v.(bool) {
 		return nil
 	}
-	out, err := m.Runtime.Exec(runtime.WithSensitiveExec(ctx), target.ContainerID, []string{"tmux", "-V"})
+	out, err := m.Runtime.Exec(runtime.WithResolvedContainerID(runtime.WithSensitiveExec(ctx)), target.ContainerID, []string{"tmux", "-V"})
 	if err != nil {
 		return nil
 	}
@@ -1233,7 +1233,7 @@ func (m *AgentManager) sendKeysCore(ctx context.Context, scope keysScope, agentS
 	// error rather than the proven-before-execution ErrTerminalNotReady the
 	// contract requires. Run against the same target.ContainerID the
 	// original resolution proved, not a fresh lookup.
-	probeCtx := runtime.WithSensitiveExec(ctx)
+	probeCtx := runtime.WithResolvedContainerID(runtime.WithSensitiveExec(ctx))
 	if _, err := m.Runtime.Exec(probeCtx, target.ContainerID, []string{"tmux", "has-session", "-t", keysTarget}); err != nil {
 		// The admission deadline may have fired during the probe itself,
 		// rather than the session genuinely being unready — that is a
@@ -1282,7 +1282,7 @@ func (m *AgentManager) sendKeysCore(ctx context.Context, scope keysScope, agentS
 		return wrapNotStarted(err)
 	}
 
-	sendCtx := runtime.WithSensitiveExec(ctx)
+	sendCtx := runtime.WithResolvedContainerID(runtime.WithSensitiveExec(ctx))
 	script := sendKeysScript(keysTarget, keys)
 	cmd := []string{"tmux", "source-file", "-"}
 	if _, err := m.Runtime.ExecWithStdin(sendCtx, target.ContainerID, cmd, strings.NewReader(script)); err != nil {
@@ -1675,6 +1675,7 @@ func execDeliveryError(ctx context.Context, agentName string, submitKeys []strin
 // exec, streaming stdin with ExecWithStdin when a step has one.
 func (m *AgentManager) execRunner(containerID string) tmuxdeliver.Runner {
 	return tmuxdeliver.RunnerFunc(func(ctx context.Context, argv []string, stdin io.Reader) (string, error) {
+		ctx = runtime.WithResolvedContainerID(ctx)
 		if stdin != nil {
 			return m.Runtime.ExecWithStdin(ctx, containerID, argv, stdin)
 		}
