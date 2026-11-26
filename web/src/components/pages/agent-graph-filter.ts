@@ -16,6 +16,8 @@
 
 import type { Agent, Project } from '../../shared/types.js';
 import { parentIdOf } from '../../shared/lineage.js';
+import { apiFetch } from '../../client/api.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import {
   agentToFilterRow,
   buildAgentValueSuggestions,
@@ -55,14 +57,20 @@ export function agentToGraphFilterRow(agent: Agent): FilterRow {
 }
 
 /**
- * Evaluates q over allAgents and returns M ∪ ancestors(M) plus
- * contextIds = ancestors(M) \ M, preserving lineage via parentIdOf.
+ * Given the full set of loaded agents and the subset matching an active filter,
+ * returns M ∪ ancestors(M) (in `allAgents` order, followed by any ancestors
+ * resolved via `resolveAncestor`) plus `contextIds = ancestors(M) \ M`,
+ * preserving lineage via `parentIdOf`.
+ * When `hasActiveFilter` is false, returns `allAgents` unchanged with an empty
+ * `contextIds` set.
  */
-export function filterGraphAgents(
+export function expandGraphMatchesWithAncestors(
   allAgents: readonly Agent[],
-  query: Query | null
+  matchedAgents: readonly Agent[],
+  hasActiveFilter = true,
+  resolveAncestor?: (id: string) => Agent | undefined
 ): GraphFilterResult {
-  if (isEmptyGraphQuery(query)) {
+  if (!hasActiveFilter) {
     return {
       agents: allAgents as Agent[],
       contextIds: EMPTY_SET,
@@ -70,16 +78,7 @@ export function filterGraphAgents(
     };
   }
 
-  const byId = new Map<string, Agent>();
-  const matched = new Set<string>();
-  for (const agent of allAgents) {
-    byId.set(agent.id, agent);
-    if (match(query as Query, agentToGraphFilterRow(agent))) {
-      matched.add(agent.id);
-    }
-  }
-
-  if (matched.size === 0) {
+  if (matchedAgents.length === 0) {
     return {
       agents: [],
       contextIds: EMPTY_SET,
@@ -87,7 +86,18 @@ export function filterGraphAgents(
     };
   }
 
+  const byId = new Map<string, Agent>();
+  for (const agent of allAgents) {
+    byId.set(agent.id, agent);
+  }
+  const matched = new Set<string>();
+  for (const agent of matchedAgents) {
+    matched.add(agent.id);
+  }
+
   const contextIds = new Set<string>();
+  const extraAncestors: Agent[] = [];
+  const extraAncestorIds = new Set<string>();
   for (const id of matched) {
     const seen = new Set<string>([id]);
     let cur = byId.get(id);
@@ -95,7 +105,14 @@ export function filterGraphAgents(
       const pid = parentIdOf(cur);
       if (!pid || seen.has(pid)) break;
       seen.add(pid);
-      const parent = byId.get(pid);
+      let parent = byId.get(pid);
+      if (!parent && resolveAncestor) {
+        parent = resolveAncestor(pid);
+        if (parent && !extraAncestorIds.has(pid)) {
+          extraAncestorIds.add(pid);
+          extraAncestors.push(parent);
+        }
+      }
       if (!parent) break;
       if (!matched.has(pid)) {
         contextIds.add(pid);
@@ -105,11 +122,154 @@ export function filterGraphAgents(
   }
 
   const agents = allAgents.filter((a) => matched.has(a.id) || contextIds.has(a.id));
+  if (extraAncestors.length > 0) {
+    agents.push(...extraAncestors);
+  }
   return {
     agents,
     contextIds,
     hasActiveFilter: true,
   };
+}
+
+const MAX_ANCESTOR_IDS_PER_REQUEST = 100;
+const MAX_ANCESTOR_IDS_TOTAL = 500;
+
+/**
+ * Collects ancestor agent IDs referenced in `matchedAgents`'s `ancestry` chains
+ * (and transitively through any already-known ancestors) that are absent from
+ * both `allAgents` and `resolveAncestor`.
+ *
+ * Skips colon-prefixed principal IDs (such as `user:...`), self-references, and
+ * any ID in `skipIds` (already attempted or deleted). Returning the full chain
+ * of missing IDs allows callers to fetch multi-hop ancestors in one round-trip.
+ */
+export function collectMissingAncestorIds(
+  allAgents: readonly Agent[],
+  matchedAgents: readonly Agent[],
+  resolveAncestor?: (id: string) => Agent | undefined,
+  skipIds?: ReadonlySet<string>
+): string[] {
+  if (matchedAgents.length === 0) return [];
+  const byId = new Map<string, Agent>();
+  for (const agent of allAgents) {
+    byId.set(agent.id, agent);
+  }
+
+  const missing: string[] = [];
+  const missingSet = new Set<string>();
+  const visited = new Set<string>();
+
+  for (const root of matchedAgents) {
+    const stack: Agent[] = [root];
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      if (visited.has(cur.id)) continue;
+      visited.add(cur.id);
+      const chain = cur.ancestry;
+      if (!chain || chain.length === 0) continue;
+      for (const id of chain) {
+        if (!id || id === cur.id || id.includes(':')) continue;
+        const known = byId.get(id) ?? resolveAncestor?.(id);
+        if (known) {
+          if (!visited.has(known.id)) {
+            stack.push(known);
+          }
+        } else if (!skipIds?.has(id) && !missingSet.has(id)) {
+          missingSet.add(id);
+          missing.push(id);
+        }
+      }
+    }
+  }
+
+  return missing;
+}
+
+export interface FetchMissingGraphAncestorsOptions {
+  includeAuthority?: boolean;
+  signal?: AbortSignal;
+}
+
+/**
+ * Fetches missing graph ancestor agents by ID via the hub's sorted `?ids=`
+ * endpoint (without `?q=`, so non-matching ancestors are returned) and seeds
+ * them into `stateManager` with `partial: true` under an `AgentSeedEpoch`.
+ * Returns the number of ancestor rows seeded.
+ */
+export async function fetchMissingGraphAncestors(
+  basePath: string,
+  ids: readonly string[],
+  options: FetchMissingGraphAncestorsOptions = {}
+): Promise<number> {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    unique.push(id);
+    if (unique.length >= MAX_ANCESTOR_IDS_TOTAL) break;
+  }
+  if (unique.length === 0) return 0;
+
+  let seededCount = 0;
+  for (let i = 0; i < unique.length; i += MAX_ANCESTOR_IDS_PER_REQUEST) {
+    if (options.signal?.aborted) break;
+    const chunk = unique.slice(i, i + MAX_ANCESTOR_IDS_PER_REQUEST);
+    const qs = new URLSearchParams();
+    qs.set('sort', 'created');
+    qs.set('dir', 'desc');
+    qs.set('limit', String(chunk.length));
+    qs.set('ids', chunk.join(','));
+    if (options.includeAuthority) {
+      qs.set('include', 'authority');
+    }
+
+    const epoch = new AgentSeedEpoch();
+    try {
+      const response = await apiFetch(
+        `${basePath}?${qs.toString()}`,
+        options.signal ? { signal: options.signal } : undefined
+      );
+      if (options.signal?.aborted) break;
+      if (!response.ok) {
+        console.warn(`Failed to fetch graph ancestors (${response.status}): ${basePath}`);
+        continue;
+      }
+      const body = (await response.json()) as { agents?: Agent[] } | Agent[];
+      if (options.signal?.aborted) break;
+      const rows = Array.isArray(body) ? body : body.agents || [];
+      if (rows.length > 0) {
+        const seeded = epoch.seed(rows, { partial: true });
+        seededCount += seeded.agents.length;
+      }
+    } catch (err) {
+      if (options.signal?.aborted || (err instanceof Error && err.name === 'AbortError')) {
+        throw err;
+      }
+      console.warn('Failed to fetch graph ancestors:', err);
+    } finally {
+      epoch.close();
+    }
+  }
+
+  return seededCount;
+}
+
+/**
+ * Evaluates q over allAgents and returns M ∪ ancestors(M) plus
+ * contextIds = ancestors(M) \ M, preserving lineage via parentIdOf.
+ */
+export function filterGraphAgents(
+  allAgents: readonly Agent[],
+  query: Query | null
+): GraphFilterResult {
+  if (isEmptyGraphQuery(query)) {
+    return expandGraphMatchesWithAncestors(allAgents, allAgents, false);
+  }
+  const activeQuery = query as Query;
+  const matched = allAgents.filter((agent) => match(activeQuery, agentToGraphFilterRow(agent)));
+  return expandGraphMatchesWithAncestors(allAgents, matched, true);
 }
 
 /**

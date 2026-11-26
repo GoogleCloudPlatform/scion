@@ -121,6 +121,7 @@ import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box
 import {
   buildAgentValueSuggestions,
   canLiveAddAgent,
+  canonical,
   drainServerQuery,
   getActiveSingleKeyValue,
   getViewSchema,
@@ -141,6 +142,12 @@ import {
   type Query as FilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
+import {
+  collectMissingAncestorIds,
+  expandGraphMatchesWithAncestors,
+  fetchMissingGraphAncestors,
+  type GraphFilterResult,
+} from './agent-graph-filter.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { addLeaveGuard, navigateTo } from '../../client/navigation.js';
 import {
@@ -521,12 +528,21 @@ export class ScionPageProjectDetail extends LitElement {
     const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
     this.agentWindow.applyChanges(detail);
     if (this.agentWindow.state !== 'paged') {
+      const prevAgents = this.agents;
       this.mergeAgentsChanged(detail);
+      if (this.agents === prevAgents && this.hasGraphContextChange(detail)) {
+        this.graphContextVersion++;
+      }
     }
   };
 
   private boundOnAgentsResync = () => {
     this.agentWindow.markResync();
+    this.cancelGraphAncestorsFetch();
+    this.attemptedGraphAncestorIds.clear();
+    if (this.viewMode === 'graph') {
+      this.graphContextVersion++;
+    }
   };
 
   @state()
@@ -1456,6 +1472,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
+    this.cancelGraphAncestorsFetch();
     this.cancelDecisionsCountLoad();
     this.filesSectionObserver?.disconnect();
     this.filesSectionObserver = null;
@@ -1491,8 +1508,13 @@ export class ScionPageProjectDetail extends LitElement {
     if (changed.has('pageData')) {
       void this.loadAdminStatusForUser();
     }
+    if (changed.has('projectId')) {
+      this.cancelGraphAncestorsFetch();
+      this.attemptedGraphAncestorIds.clear();
+    }
     this.observeFilesSection();
     this.noteRowsReady();
+    this.maybeFetchMissingGraphAncestors();
   }
 
   private async loadAdminStatusForUser(): Promise<void> {
@@ -3781,6 +3803,130 @@ export class ScionPageProjectDetail extends LitElement {
     `;
   }
 
+  /** Bumped when store-resolved graph context ancestors are seeded or change via SSE. */
+  @state()
+  private graphContextVersion = 0;
+
+  /** Ancestor IDs already requested via `?ids=` in this project scope (avoids retry loops). */
+  private attemptedGraphAncestorIds = new Set<string>();
+
+  /** In-flight ancestor fetch controllers, aborted on disconnect, project change or resync. */
+  private graphAncestorAborts = new Set<AbortController>();
+
+  /** Memoised graph filter result (matches ∪ ancestors + contextIds). */
+  private graphFilterCache: {
+    agents: Agent[];
+    matched: Agent[];
+    hasActiveFilter: boolean;
+    contextVersion: number;
+    result: GraphFilterResult;
+  } | null = null;
+
+  private getFilteredGraph(matched: Agent[], hasActiveFilter: boolean): GraphFilterResult {
+    if (
+      this.graphFilterCache &&
+      this.graphFilterCache.agents === this.agents &&
+      this.graphFilterCache.matched === matched &&
+      this.graphFilterCache.hasActiveFilter === hasActiveFilter &&
+      this.graphFilterCache.contextVersion === this.graphContextVersion
+    ) {
+      return this.graphFilterCache.result;
+    }
+    const result = expandGraphMatchesWithAncestors(this.agents, matched, hasActiveFilter, (id) => {
+      const a = stateManager.getAgent(id);
+      return a && a.projectId === this.projectId ? a : undefined;
+    });
+    this.graphFilterCache = {
+      agents: this.agents,
+      matched,
+      hasActiveFilter,
+      contextVersion: this.graphContextVersion,
+      result,
+    };
+    return result;
+  }
+
+  private hasGraphContextChange(detail: AgentsChangedDetail): boolean {
+    if (this.viewMode !== 'graph' || !this.graphFilterCache) return false;
+    const contextIds = this.graphFilterCache.result.contextIds;
+    if (contextIds.size === 0 && this.attemptedGraphAncestorIds.size === 0) return false;
+    for (const id of detail.upserted) {
+      if (contextIds.has(id) || this.attemptedGraphAncestorIds.has(id)) return true;
+    }
+    for (const id of detail.deleted) {
+      if (contextIds.has(id)) return true;
+    }
+    return false;
+  }
+
+  private cancelGraphAncestorsFetch(): void {
+    for (const controller of this.graphAncestorAborts) {
+      controller.abort();
+    }
+    this.graphAncestorAborts.clear();
+  }
+
+  private maybeFetchMissingGraphAncestors(): void {
+    if (
+      this.viewMode !== 'graph' ||
+      !this.hasActiveDialectFilter ||
+      this.agentWindow.state === 'paged' ||
+      !this.projectId
+    ) {
+      return;
+    }
+    const matched = this.agentWindow.display;
+    if (matched.length === 0) return;
+
+    const deleted = stateManager.getDeletedAgentIds();
+    const skip =
+      deleted.size > 0
+        ? new Set<string>([...this.attemptedGraphAncestorIds, ...deleted])
+        : this.attemptedGraphAncestorIds;
+    const missing = collectMissingAncestorIds(
+      this.agents,
+      matched,
+      (id) => {
+        const a = stateManager.getAgent(id);
+        return a && a.projectId === this.projectId ? a : undefined;
+      },
+      skip
+    );
+    if (missing.length === 0) return;
+
+    for (const id of missing) {
+      this.attemptedGraphAncestorIds.add(id);
+    }
+
+    const projectId = this.projectId;
+    const controller = new AbortController();
+    this.graphAncestorAborts.add(controller);
+    void fetchMissingGraphAncestors(`/api/v1/projects/${projectId}/agents`, missing, {
+      includeAuthority: true,
+      signal: controller.signal,
+    })
+      .then((seededCount) => {
+        if (
+          seededCount > 0 &&
+          this.isConnected &&
+          !controller.signal.aborted &&
+          this.projectId === projectId
+        ) {
+          this.graphContextVersion++;
+        }
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || this.isAbortError(err)) {
+          for (const id of missing) {
+            this.attemptedGraphAncestorIds.delete(id);
+          }
+        }
+      })
+      .finally(() => {
+        this.graphAncestorAborts.delete(controller);
+      });
+  }
+
   /**
    * The agent rows for the current view, all rendered from the window:
    * the tree from the unsliced `display`, grid and list from the page
@@ -3806,9 +3952,11 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.viewMode === 'graph') {
       const display = win.display;
       if (display.length === 0) return this.renderNoAgentRows();
+      const graphFiltered = this.getFilteredGraph(display, this.hasActiveDialectFilter);
       return html`<scion-agent-tree-view
-        .agents=${display}
-        filterKey=${this.filterQueryText}
+        .agents=${graphFiltered.agents}
+        .contextIds=${graphFiltered.contextIds}
+        filterKey=${this.filterQuery ? canonical(this.filterQuery) : this.filterQueryText}
       ></scion-agent-tree-view>`;
     }
     if (this.viewMode === 'grid') {
