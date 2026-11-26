@@ -1244,7 +1244,7 @@ func TestTriggerExec_SubjectOptIn_ClaimReleaseOnOverlap_AndFireRateCap(t *testin
 			FireID:         tfOver.ID,
 		},
 		ActionType: store.TriggerActionExec,
-		Payload:    firstTriggerAction(*trCap).Payload,
+		Payload:    firstTriggerAction(trCap).Payload,
 		Event: &hubfire.FireEvent{
 			ID:         evOver.ID,
 			ProjectID:  projectID,
