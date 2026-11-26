@@ -361,6 +361,44 @@ export function lastDecisionRunSummary(runs: DecisionRetentionRun[] | null | und
 }
 
 /**
+ * Extract the failure message of a polled MaintenanceOperationRun.
+ * The hub stores the failure under `result` as a JSON-encoded string
+ * (`{"error":"..."}`) while `log` holds progress lines; prefer `result.error`,
+ * falling back to `run.error`, then the last non-empty `log` line, then `fallback`.
+ */
+export function maintenanceRunFailureMessage(
+  run: { result?: unknown; error?: string; log?: string } | null | undefined,
+  fallback: string
+): string {
+  if (run) {
+    let parsedResult: unknown = run.result;
+    if (typeof parsedResult === 'string' && parsedResult.trim() !== '') {
+      try {
+        parsedResult = JSON.parse(parsedResult) as unknown;
+      } catch {
+        parsedResult = null;
+      }
+    }
+    if (parsedResult && typeof parsedResult === 'object') {
+      const errField = (parsedResult as { error?: unknown }).error;
+      if (typeof errField === 'string' && errField.trim() !== '') {
+        return errField.trim();
+      }
+    }
+    if (typeof run.error === 'string' && run.error.trim() !== '') {
+      return run.error.trim();
+    }
+    const logTail = run.log
+      ?.split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .pop();
+    if (logTail) return logTail;
+  }
+  return fallback;
+}
+
+/**
  * The one-line estimate from the most recent dry-run preview, stamped with its
  * start time and saved hub default window. Worded as an estimate because rows
  * can age past the cutoff during a subsequent manual run.
@@ -927,19 +965,15 @@ export class ScionAdminDecisionRetention extends LitElement {
             nextErrors = 0;
             const run = (await res.json().catch(() => null)) as {
               status?: string;
+              result?: unknown;
               error?: string;
               log?: string;
             } | null;
             if (run?.status === 'failed') {
-              const logTail = run.log
-                ?.split('\n')
-                .map((l) => l.trim())
-                .filter(Boolean)
-                .pop();
-              this.opError =
-                run.error?.trim() ||
-                logTail ||
-                (isPreview ? 'Preview failed.' : 'Decision retention run failed.');
+              this.opError = maintenanceRunFailureMessage(
+                run,
+                isPreview ? 'Preview failed.' : 'Decision retention run failed.'
+              );
               running = false;
             } else {
               running = running && run?.status === 'running';

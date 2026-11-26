@@ -38,6 +38,7 @@ const {
   decisionRetentionWarning,
   lastDecisionPreviewSummary,
   lastDecisionRunSummary,
+  maintenanceRunFailureMessage,
   needsDecisionPurgeConfirmation,
   validateDecisionRetentionOverride,
 } = mod;
@@ -369,6 +370,29 @@ describe('needsDecisionPurgeConfirmation', () => {
   });
 });
 
+describe('maintenanceRunFailureMessage', () => {
+  it('prefers JSON-encoded result.error over progress lines in log', () => {
+    expect(
+      maintenanceRunFailureMessage(
+        {
+          result: JSON.stringify({ error: 'decision retention lock timed out' }),
+          log: 'Waiting for the running decision retention sweep to finish\n',
+        },
+        'fallback'
+      )
+    ).toBe('decision retention lock timed out');
+  });
+
+  it('falls back to log tail when result has no error, then fallback', () => {
+    expect(
+      maintenanceRunFailureMessage({ result: '{}', log: 'line 1\nfinal detail\n' }, 'fallback')
+    ).toBe('final detail');
+    expect(maintenanceRunFailureMessage({ result: 'not-json', log: '' }, 'fallback')).toBe(
+      'fallback'
+    );
+  });
+});
+
 describe('decisionRetentionSaveErrors', () => {
   it('lists the per-field errors of a validation_failed body and maps project_overrides UUIDs', () => {
     expect(
@@ -692,7 +716,19 @@ describe('scion-admin-decision-retention', () => {
             return Promise.resolve(json({ runId: 'run-fail', status: 'running' }));
           }
           if (path.includes('/runs/run-fail')) {
-            return Promise.resolve(json({ status: 'failed', log: 'starting\nlock contention\n' }));
+            return Promise.resolve(
+              json({
+                id: 'run-fail',
+                operationKey: 'decision-retention-preview',
+                status: 'failed',
+                startedAt: '2026-11-26T12:00:00Z',
+                completedAt: '2026-11-26T12:00:05Z',
+                result: JSON.stringify({
+                  error: 'decision retention preview failed: lock timeout',
+                }),
+                log: 'Waiting for the running decision retention sweep to finish\n',
+              })
+            );
           }
           return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
         });
@@ -701,7 +737,10 @@ describe('scion-admin-decision-retention', () => {
         await vi.advanceTimersByTimeAsync(2100);
         await el.updateComplete;
 
-        expect(q(el, '.op-error')?.textContent).toContain('lock contention');
+        expect(q(el, '.op-error')?.textContent).toContain(
+          'decision retention preview failed: lock timeout'
+        );
+        expect(q(el, '.op-error')?.textContent).not.toContain('Waiting for the running');
         expect(q(el, '.run-preview')?.hasAttribute('disabled')).toBe(false);
         el.remove();
       } finally {
