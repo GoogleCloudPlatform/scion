@@ -12,6 +12,7 @@ package telemetry
 
 import (
 	"errors"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -811,9 +812,12 @@ func geminiObservation(eventName string, attrs []*commonpb.KeyValue) UsageObserv
 	return obs
 }
 
-// grokBuildObservation: input_tokens is inclusive of cache_read_tokens and
-// cache_creation_tokens, so input is derived only when all three are present
-// and consistent; output_tokens includes reasoning_tokens.
+// grokBuildObservation: input_tokens is inclusive of cache_read_tokens (and
+// assumed inclusive of cache_creation_tokens; unverified live since only 0 was
+// observed on Vertex AI xai/grok-4.6), so input is derived only when all three
+// are present and consistent. output_tokens is exclusive of reasoning_tokens,
+// so canonical output is output_tokens + reasoning_tokens when both are present
+// (canonical output includes reasoning).
 func grokBuildObservation(eventName string, attrs []*commonpb.KeyValue) UsageObservation {
 	if eventName == grokBuildAPIErrorEvent {
 		obs := errorObservation("grok-build.api_error")
@@ -830,12 +834,15 @@ func grokBuildObservation(eventName string, attrs []*commonpb.KeyValue) UsageObs
 		input.malformed, cached.malformed, cacheWrite.malformed = true, true, true
 		fields[0], fields[2], fields[3] = input, cached, cacheWrite
 	}
+	if output.ok() && reasoning.ok() && reasoning.n > math.MaxInt64-output.n {
+		output.malformed, reasoning.malformed = true, true
+		fields[1], fields[4] = output, reasoning
+	}
 	obs := UsageObservation{
 		SourceKind:              "grok-build.api_request",
 		SessionID:               logAttrString(attrs, "session.id"),
 		Status:                  telemetrycontract.StatusSuccess,
 		Calls:                   1,
-		Output:                  output.ptr(),
 		CacheRead:               cached.ptr(),
 		CacheWrite:              cacheWrite.ptr(),
 		Reasoning:               reasoning.ptr(),
@@ -847,8 +854,8 @@ func grokBuildObservation(eventName string, attrs []*commonpb.KeyValue) UsageObs
 		obs.Input = int64Ptr(input.n - cached.n - cacheWrite.n)
 		obs.InputDerivation = telemetrycontract.InputDerivationDerived
 	}
-	if cost := readTokenField(attrs, "cost_usd_micros"); cost.ok() {
-		obs.ReportedCostMicros = cost.ptr()
+	if output.ok() && reasoning.ok() {
+		obs.Output = int64Ptr(output.n + reasoning.n)
 	}
 	return obs
 }

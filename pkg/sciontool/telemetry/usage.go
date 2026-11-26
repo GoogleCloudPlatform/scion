@@ -590,8 +590,9 @@ func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
 // grokBuildAPIRequestEvent and grokBuildAPIErrorEvent are Grok Build's
 // per-model-call native OTLP log events (scope "ai.xai.grok_code", carried in
 // LogRecord.EventName). Verified against a live capture of grok 1.0.92
-// (b06756fd6256) exporting over OTLP/gRPC to a local receiver (see
-// loadGrokBuildUsageFixture in usage_grok_test.go).
+// (b06756fd6256) talking to real Vertex AI Model Garden (xai/grok-4.6,
+// chat_completions backend) and exporting over OTLP/gRPC to a local receiver
+// (see loadGrokBuildUsageFixture in usage_grok_test.go).
 //
 // Like codex and gemini-cli, this rule does not gate on instrumentation scope:
 // it is already filtered to SCION_HARNESS=grok-build at construction and both
@@ -601,16 +602,24 @@ func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
 // not matched, so per-turn records never inflate calls and non-provider errors
 // are not counted as failed API calls.
 //
-// Capture note on retries: an HTTP 500 that grok retries internally to a 200
-// emits only the successful grok_code.api_request (with the combined
-// duration_ms); terminal failures (e.g. HTTP 400) emit one grok_code.api_error.
+// Capture note on failed calls (terminal failures only; internal retries not
+// observable): an HTTP 500 that grok retries internally to a 200 emits only
+// the successful grok_code.api_request (with the combined duration_ms);
+// terminal failures (e.g. HTTP 400/404) emit one grok_code.api_error.
 //
-// Token mapping (design §3.1, §4.5): grok_code.api_request reports
-// input_tokens inclusive of cache_read_tokens and cache_creation_tokens, and
-// output_tokens inclusive of reasoning_tokens:
+// Token mapping (design §3.1, §4.5): real Vertex AI xai/grok-4.6 responses
+// satisfy prompt_tokens + completion_tokens + reasoning_tokens = total_tokens
+// (e.g. call 1: 7378 + 29 + 30 = 7437; call 2: 7454 + 6 + 26 = 7486 with
+// cached_tokens=7296), and grok 1.0.92 forwards prompt_tokens as input_tokens,
+// completion_tokens as output_tokens, reasoning_tokens as reasoning_tokens,
+// and cached_tokens as cache_read_tokens. Thus input_tokens is inclusive of
+// cache_read_tokens, while output_tokens is *exclusive* of reasoning_tokens.
+// The §3.1 canonical contract defines output as inclusive of reasoning, so:
 //
 //   - input = input_tokens − cache_read_tokens − cache_creation_tokens
-//   - output = output_tokens
+//     (Note: cache_creation_tokens inclusivity in input_tokens is unverified
+//     live; only 0 was observed on Vertex AI xai/grok-4.6.)
+//   - output = output_tokens + reasoning_tokens
 //   - cache_read = cache_read_tokens
 //   - cache_write = cache_creation_tokens
 //   - reasoning = reasoning_tokens (informational subset of output)
@@ -654,6 +663,9 @@ func (grokBuildUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord
 	if malformed == nil && (cached > input || cacheWrite > input-cached) {
 		malformed = fmt.Errorf("grok_code.api_request: cache_read_tokens %d + cache_creation_tokens %d exceeds input_tokens %d", cached, cacheWrite, input)
 	}
+	if malformed == nil && reasoning > math.MaxInt64-output {
+		malformed = errors.New("grok_code.api_request: output_tokens + reasoning_tokens overflows int64")
+	}
 
 	increment := usageIncrement{
 		Model:  logAttrString(record.Attributes, "model"),
@@ -665,8 +677,8 @@ func (grokBuildUsageRule) MatchLog(_, eventName string, record *logspb.LogRecord
 		if remaining := input - cached - cacheWrite; remaining > 0 {
 			tokens[telemetrycontract.TokenTypeInput] = remaining
 		}
-		if output > 0 {
-			tokens[telemetrycontract.TokenTypeOutput] = output
+		if totalOutput := output + reasoning; totalOutput > 0 {
+			tokens[telemetrycontract.TokenTypeOutput] = totalOutput
 		}
 		if cached > 0 {
 			tokens[telemetrycontract.TokenTypeCacheRead] = cached
