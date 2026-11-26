@@ -16,7 +16,6 @@ package github
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,24 +64,10 @@ const (
 
 // VerifyWebhookSignature validates a GitHub webhook payload signature using
 // X-Hub-Signature-256 ("sha256=<lowercase-hex>"). This is the single canonical
-// GitHub webhook HMAC-SHA256 verifier shared with pkg/hub/githubapp.
+// GitHub webhook HMAC-SHA256 verifier shared with pkg/hub/githubapp and
+// pkg/hub/trigger's github_v1 mode.
 func VerifyWebhookSignature(payload []byte, signature string, secret string) bool {
-	if secret == "" || signature == "" {
-		return false
-	}
-
-	const prefix = "sha256="
-	if !strings.HasPrefix(signature, prefix) {
-		return false
-	}
-	sigHex := signature[len(prefix):]
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	expectedMAC := mac.Sum(nil)
-	expectedHex := fmt.Sprintf("%x", expectedMAC)
-
-	return hmac.Equal([]byte(sigHex), []byte(expectedHex))
+	return source.VerifyHMACSHA256Hex(payload, signature, "sha256=", secret)
 }
 
 // WebhookTargetMatches checks Stage 3 §4.1 step 1: configured appID > 0,

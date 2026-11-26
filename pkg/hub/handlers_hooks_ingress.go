@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -93,12 +94,13 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 	}
 	trustedNets := parseTrustedProxies(trustedProxies)
 	return trigger.NewIngress(trigger.IngressConfig{
-		Store:             srv.store,
-		QueueStore:        dqs,
-		Queue:             srv.durableQueue,
-		Storage:           srv.GetStorage,
-		LoadSecret:        srv.loadWebhookEndpointSecret,
-		AuthorizeHubToken: srv.authorizeWebhookIngressHubToken,
+		Store:                 srv.store,
+		QueueStore:            dqs,
+		Queue:                 srv.durableQueue,
+		Storage:               srv.GetStorage,
+		LoadSecret:            srv.loadWebhookEndpointSecret,
+		VerifyGitHubSignature: githubapp.VerifyWebhookSignature,
+		AuthorizeHubToken:     srv.authorizeWebhookIngressHubToken,
 		ClientIP: func(r *http.Request) string {
 			return trustedClientIP(r, trustedNets)
 		},

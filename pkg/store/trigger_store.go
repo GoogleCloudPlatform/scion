@@ -36,6 +36,8 @@ const (
 	WebhookAuthModeHubToken = "hub_token"
 
 	WebhookSignatureModeScionV1  = "scion_v1"
+	WebhookSignatureModeGitHubV1 = "github_v1"
+	WebhookSignatureModeStripeV1 = "stripe_v1"
 	WebhookSignatureModeBodyOnly = "body_only"
 
 	WebhookEndpointStatusActive   = "active"
@@ -156,37 +158,52 @@ func WebhookEndpointProjectSecretKeyPrefix(projectID string) string {
 	return fmt.Sprintf("webhook_endpoint.%s.", projectID)
 }
 
+// WebhookRoutingHints configures optional RFC 6901 JSON pointers (<= 128 bytes
+// each) that extract event type, subject, and dedup key from a verified webhook
+// JSON body (Stage 2 §7.2, §18 S20).
+type WebhookRoutingHints struct {
+	TypePath    string `json:"typePath,omitempty"`
+	SubjectPath string `json:"subjectPath,omitempty"`
+	DedupPath   string `json:"dedupPath,omitempty"`
+}
+
+// IsEmpty reports whether all routing hint paths are unset.
+func (h *WebhookRoutingHints) IsEmpty() bool {
+	return h == nil || (h.TypePath == "" && h.SubjectPath == "" && h.DedupPath == "")
+}
+
 // WebhookEndpoint represents a project-owned receiving webhook address (§4.1).
 // Its signing secret is stored out of band as a hub-scoped SecretTypeInternal
 // row in secrets, never on this struct.
 type WebhookEndpoint struct {
-	ID                  string            `json:"id"`
-	ProjectID           string            `json:"projectId"`
-	Name                string            `json:"name"`
-	Description         string            `json:"description,omitempty"`
-	OwnerPrincipalKind  string            `json:"ownerPrincipalKind"`
-	OwnerPrincipalID    string            `json:"ownerPrincipalId"`
-	OwnerCredentialKind string            `json:"ownerCredentialKind"`
-	AuthMode            string            `json:"authMode"`
-	AllowProjectAgents  bool              `json:"allowProjectAgents"`
-	MaxBodyBytes        int               `json:"maxBodyBytes"`
-	RatePerSecond       int               `json:"ratePerSecond"`
-	RateBurst           int               `json:"rateBurst"`
-	ReplayWindowSeconds int               `json:"replayWindowSeconds"`
-	SecretVersion       int               `json:"secretVersion"`
-	SecretRotatedAt     *time.Time        `json:"secretRotatedAt,omitempty"`
-	ConfigVersion       int               `json:"configVersion"`
-	SignatureMode       string            `json:"signatureMode"`
-	Status              string            `json:"status"`
-	BoundAgentID        string            `json:"boundAgentId,omitempty"`
-	BoundLifetime       string            `json:"boundLifetime,omitempty"`
-	CreatedBy           string            `json:"createdBy,omitempty"`
-	LastReceivedAt      *time.Time        `json:"lastReceivedAt,omitempty"`
-	ReceiveCount        int               `json:"receiveCount"`
-	RejectCount         int               `json:"rejectCount"`
-	CreatedAt           time.Time         `json:"createdAt"`
-	UpdatedAt           time.Time         `json:"updatedAt"`
-	Fixture             FixtureProvenance `json:"-"`
+	ID                  string               `json:"id"`
+	ProjectID           string               `json:"projectId"`
+	Name                string               `json:"name"`
+	Description         string               `json:"description,omitempty"`
+	OwnerPrincipalKind  string               `json:"ownerPrincipalKind"`
+	OwnerPrincipalID    string               `json:"ownerPrincipalId"`
+	OwnerCredentialKind string               `json:"ownerCredentialKind"`
+	AuthMode            string               `json:"authMode"`
+	AllowProjectAgents  bool                 `json:"allowProjectAgents"`
+	MaxBodyBytes        int                  `json:"maxBodyBytes"`
+	RatePerSecond       int                  `json:"ratePerSecond"`
+	RateBurst           int                  `json:"rateBurst"`
+	ReplayWindowSeconds int                  `json:"replayWindowSeconds"`
+	SecretVersion       int                  `json:"secretVersion"`
+	SecretRotatedAt     *time.Time           `json:"secretRotatedAt,omitempty"`
+	ConfigVersion       int                  `json:"configVersion"`
+	SignatureMode       string               `json:"signatureMode"`
+	RoutingHints        *WebhookRoutingHints `json:"routingHints,omitempty"`
+	Status              string               `json:"status"`
+	BoundAgentID        string               `json:"boundAgentId,omitempty"`
+	BoundLifetime       string               `json:"boundLifetime,omitempty"`
+	CreatedBy           string               `json:"createdBy,omitempty"`
+	LastReceivedAt      *time.Time           `json:"lastReceivedAt,omitempty"`
+	ReceiveCount        int                  `json:"receiveCount"`
+	RejectCount         int                  `json:"rejectCount"`
+	CreatedAt           time.Time            `json:"createdAt"`
+	UpdatedAt           time.Time            `json:"updatedAt"`
+	Fixture             FixtureProvenance    `json:"-"`
 }
 
 // WebhookEndpointFilter selects webhook endpoints in ListWebhookEndpoints.
@@ -212,6 +229,7 @@ type WebhookEndpointFieldMask struct {
 	AuthMode            bool
 	AllowProjectAgents  bool
 	SignatureMode       bool
+	RoutingHints        bool
 	MaxBodyBytes        bool
 	RatePerSecond       bool
 	RateBurst           bool

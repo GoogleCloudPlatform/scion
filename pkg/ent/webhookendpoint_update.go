@@ -265,6 +265,20 @@ func (_u *WebhookEndpointUpdate) SetNillableSignatureMode(v *string) *WebhookEnd
 	return _u
 }
 
+// SetRoutingHints sets the "routing_hints" field.
+func (_u *WebhookEndpointUpdate) SetRoutingHints(v string) *WebhookEndpointUpdate {
+	_u.mutation.SetRoutingHints(v)
+	return _u
+}
+
+// SetNillableRoutingHints sets the "routing_hints" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableRoutingHints(v *string) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetRoutingHints(*v)
+	}
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *WebhookEndpointUpdate) SetStatus(v string) *WebhookEndpointUpdate {
 	_u.mutation.SetStatus(v)
@@ -532,6 +546,9 @@ func (_u *WebhookEndpointUpdate) sqlSave(ctx context.Context) (_node int, err er
 	}
 	if value, ok := _u.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RoutingHints(); ok {
+		_spec.SetField(webhookendpoint.FieldRoutingHints, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)
@@ -824,6 +841,20 @@ func (_u *WebhookEndpointUpdateOne) SetSignatureMode(v string) *WebhookEndpointU
 func (_u *WebhookEndpointUpdateOne) SetNillableSignatureMode(v *string) *WebhookEndpointUpdateOne {
 	if v != nil {
 		_u.SetSignatureMode(*v)
+	}
+	return _u
+}
+
+// SetRoutingHints sets the "routing_hints" field.
+func (_u *WebhookEndpointUpdateOne) SetRoutingHints(v string) *WebhookEndpointUpdateOne {
+	_u.mutation.SetRoutingHints(v)
+	return _u
+}
+
+// SetNillableRoutingHints sets the "routing_hints" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableRoutingHints(v *string) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetRoutingHints(*v)
 	}
 	return _u
 }
@@ -1125,6 +1156,9 @@ func (_u *WebhookEndpointUpdateOne) sqlSave(ctx context.Context) (_node *Webhook
 	}
 	if value, ok := _u.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RoutingHints(); ok {
+		_spec.SetField(webhookendpoint.FieldRoutingHints, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)

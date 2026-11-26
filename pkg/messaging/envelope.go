@@ -254,6 +254,8 @@ type EventScheduleRef struct {
 const (
 	ExternalVerifiedScionV1                   = "scion-v1"
 	ExternalVerifiedHubToken                  = "hub-token"
+	ExternalVerifiedGitHubV1                  = "github_v1"
+	ExternalVerifiedStripeV1                  = "stripe_v1"
 	ExternalVerifiedHMACSHA256Body            = "hmac-sha256-body"
 	ExternalVerifiedGitHubHMACSHA256Projected = "github-hmac-sha256+projected"
 	ExternalVerifiedUnverified                = "unverified"

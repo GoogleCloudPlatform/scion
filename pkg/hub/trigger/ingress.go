@@ -72,14 +72,16 @@ var (
 	eventNamePattern = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+)*$`)
 
 	// allowedEventHeaders is the fixed §4.3 request-header allow-list stored on
-	// trigger_events.headers. Secret headers such as X-Scion-Signature and
-	// Authorization are never stored.
+	// trigger_events.headers. Secret headers such as X-Scion-Signature,
+	// X-Hub-Signature-256, Stripe-Signature, and Authorization are never stored.
 	allowedEventHeaders = []string{
 		"Content-Type",
 		"User-Agent",
 		HeaderEvent,
 		HeaderDelivery,
 		HeaderSubject,
+		HeaderGitHubEvent,
+		HeaderGitHubDelivery,
 	}
 
 	errQueueFull                    = errors.New("trigger event queue full for project")
@@ -247,6 +249,7 @@ type IngressConfig struct {
 	OverflowUploadTimeout      time.Duration
 	OverflowTxTimeout          time.Duration
 	LoadSecret                 SecretLoader
+	VerifyGitHubSignature      GitHubSignatureVerifyFunc
 	AuthorizeHubToken          HubTokenAuthorizer
 	ClientIP                   ClientIPFunc
 	Enabled                    func() bool
@@ -271,6 +274,7 @@ type Ingress struct {
 	overflowUploadTimeout time.Duration
 	overflowTxTimeout     time.Duration
 	loadSecret            SecretLoader
+	verifyGitHubSignature GitHubSignatureVerifyFunc
 	authorizeHubToken     HubTokenAuthorizer
 	clientIP              ClientIPFunc
 	enabled               func() bool
@@ -355,6 +359,7 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		overflowUploadTimeout: uploadTimeout,
 		overflowTxTimeout:     txTimeout,
 		loadSecret:            cfg.LoadSecret,
+		verifyGitHubSignature: cfg.VerifyGitHubSignature,
 		authorizeHubToken:     cfg.AuthorizeHubToken,
 		clientIP:              clientIP,
 		enabled:               cfg.Enabled,
@@ -571,21 +576,19 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 6: authenticate the delivery according to ep.AuthMode (§7.1).
+	// Step 6: authenticate the delivery according to ep.AuthMode (§7.1, §7.2).
 	//   - hub_token: require an authenticated hub identity passing
 	//     webhookEndpointAccessDecision(send); routing headers are honoured
 	//     unsigned and bounded in step 7.
-	//   - hmac (default): verify HMAC signature using ep.SignatureMode and
-	//     ep.ReplayWindowSeconds (P4b plugs provider Verifier implementations
-	//     and routing hints into the hmac branch here).
+	//   - hmac (default): dispatch ep.SignatureMode through Verifier
+	//     (scion_v1, github_v1, stripe_v1) with P3 rotation grace and P4a
+	//     replay_window_seconds.
 	// Header bounds are checked for status 400 ONLY after step 6 succeeds so an
 	// unauthenticated caller always receives 401/403 (§8.1 step 7).
-	delivery := r.Header.Get(HeaderDelivery)
-	eventHdr := r.Header.Get(HeaderEvent)
-	subjectHdr := r.Header.Get(HeaderSubject)
 	var (
-		sigModeAttr string
-		senderAttr  string
+		verifiedHdrs VerifiedHeaders
+		sigModeAttr  string
+		senderAttr   string
 	)
 	authMode := ep.AuthMode
 	if authMode == "" {
@@ -628,14 +631,28 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			apierr.WriteError(w, http.StatusForbidden, apierr.ErrCodeForbidden, "forbidden", nil)
 			return
 		}
+		delivery := r.Header.Get(HeaderDelivery)
+		eventHdr := r.Header.Get(HeaderEvent)
+		subjectHdr := r.Header.Get(HeaderSubject)
+		if hdrErr := validateSignedRoutingHeaders(r.Header, delivery, eventHdr, subjectHdr); hdrErr != nil {
+			h.rejectedBadHeader.Add(1)
+			h.recordMetric(IngressResultRejectedBadHeader)
+			h.counters.RecordRejected(ep.ID)
+			apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, hdrErr.Error(), nil)
+			return
+		}
+		verifiedHdrs = VerifiedHeaders{
+			Delivery: delivery,
+			Event:    eventHdr,
+			Subject:  subjectHdr,
+		}
 		sigModeAttr = store.WebhookAuthModeHubToken
 		senderAttr = authRes.Sender
 
 	case store.WebhookAuthModeHMAC:
-		// P4b extension point: dispatch ep.SignatureMode through a Verifier
-		// interface (scion_v1, github_v1, stripe_v1) and apply routing hints
-		// after verification.
-		if ep.SignatureMode != store.WebhookSignatureModeScionV1 {
+		replayWindow := EffectiveReplayWindow(ep.ReplayWindowSeconds)
+		verifier := NewVerifierForMode(ep.SignatureMode, now, replayWindow, h.verifyGitHubSignature)
+		if verifier == nil {
 			h.failedSecret.Add(1)
 			h.recordMetric(IngressResultRejectedSecretUnavailable)
 			h.logger.Error("Unsupported webhook endpoint signature mode",
@@ -660,12 +677,10 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		sigVals := r.Header.Values(HeaderSignature)
-		replayWindow := EffectiveReplayWindow(ep.ReplayWindowSeconds)
-		verified := len(sigVals) == 1 && VerifyScionV1SignatureWithWindow(secret, now, replayWindow, sigVals[0], delivery, eventHdr, subjectHdr, body)
+		vh, vErr := verifier.Verify(r, body, []string{secret})
 		// Stage 2 §4.4 / S22: during the 24h rotation grace window, fall back to
 		// verifying against secret version n-1 if the current version did not match.
-		if !verified && len(sigVals) == 1 && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
+		if errors.Is(vErr, ErrInvalidSignature) && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
 			!now.After(ep.SecretRotatedAt.UTC().Add(store.WebhookSecretRotationGraceWindow)) {
 			prevSecret, prevErr := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion-1)
 			if prevErr != nil && !errors.Is(prevErr, store.ErrNotFound) {
@@ -680,11 +695,18 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
 				return
 			}
-			if prevErr == nil && VerifyScionV1SignatureWithWindow(prevSecret, now, replayWindow, sigVals[0], delivery, eventHdr, subjectHdr, body) {
-				verified = true
+			if prevErr == nil {
+				vh, vErr = verifier.Verify(r, body, []string{prevSecret})
 			}
 		}
-		if !verified {
+		if vErr != nil {
+			if errors.Is(vErr, ErrInvalidHeader) {
+				h.rejectedBadHeader.Add(1)
+				h.recordMetric(IngressResultRejectedBadHeader)
+				h.counters.RecordRejected(ep.ID)
+				apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, strings.TrimPrefix(vErr.Error(), ErrInvalidHeader.Error()+": "), nil)
+				return
+			}
 			h.rejectedBadSig.Add(1)
 			h.recordMetric(IngressResultRejectedSignature)
 			h.counters.RecordRejected(ep.ID)
@@ -696,6 +718,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeInvalidSignature, "invalid signature", nil)
 			return
 		}
+		verifiedHdrs = vh
 		sigModeAttr = ep.SignatureMode
 
 	default:
@@ -710,14 +733,14 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 7: routing header bounds and charset checks (400 only after HMAC verified).
-	if hdrErr := validateSignedRoutingHeaders(r.Header, delivery, eventHdr, subjectHdr); hdrErr != nil {
-		h.rejectedBadHeader.Add(1)
-		h.recordMetric(IngressResultRejectedBadHeader)
-		h.counters.RecordRejected(ep.ID)
-		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, hdrErr.Error(), nil)
-		return
-	}
+	// Step 7: apply routing hints after verification (Stage 2 §7.2, §18 S20).
+	// Signed scion_v1 headers (and already-populated provider headers) always
+	// take precedence; for overflow bodies only the first 64 KiB is scanned.
+	effHints := EffectiveRoutingHints(sigModeAttr, ep.RoutingHints)
+	verifiedHdrs, hintErr := ResolveRoutingHints(body, effHints, verifiedHdrs)
+	delivery := verifiedHdrs.Delivery
+	eventHdr := verifiedHdrs.Event
+	subjectHdr := verifiedHdrs.Subject
 
 	// Step 8: per-project verified bucket (50/s burst 300) and hub-wide verified
 	// bucket (200/s burst 1000). The per-project pending queue cap (5000) is
@@ -759,7 +782,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, body, isOverflow, now, h.newEventID)
+	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, hintErr, body, isOverflow, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
 		h.recordMetric(IngressResultRejectedBadHeader)
@@ -1114,7 +1137,7 @@ func WebhookEventType(eventHeader string) string {
 func buildWebhookTriggerEvent(
 	ep *store.WebhookEndpoint,
 	hdr http.Header,
-	delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr string,
+	delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, routingHintErr string,
 	body []byte,
 	isOverflow bool,
 	now time.Time,
@@ -1174,6 +1197,9 @@ func buildWebhookTriggerEvent(
 	}
 	if senderAttr != "" {
 		attrs["sender"] = senderAttr
+	}
+	if routingHintErr != "" {
+		attrs["routing_hint_error"] = routingHintErr
 	}
 	if payloadRef != "" {
 		attrs["payload_ref"] = payloadRef

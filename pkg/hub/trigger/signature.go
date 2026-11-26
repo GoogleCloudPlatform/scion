@@ -216,7 +216,7 @@ func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 			return true
 		}
 		switch ep.SignatureMode {
-		case store.WebhookSignatureModeScionV1, "stripe_v1":
+		case store.WebhookSignatureModeScionV1, store.WebhookSignatureModeStripeV1:
 			return true
 		default:
 			return false
@@ -244,8 +244,8 @@ func WebhookEventVerificationMode(attrs map[string]string, ep *store.WebhookEndp
 		case store.WebhookAuthModeHubToken,
 			store.WebhookSignatureModeScionV1,
 			store.WebhookSignatureModeBodyOnly,
-			"github_v1",
-			"stripe_v1":
+			store.WebhookSignatureModeGitHubV1,
+			store.WebhookSignatureModeStripeV1:
 			return recorded
 		}
 	}
@@ -261,21 +261,33 @@ func WebhookEventVerificationMode(attrs map[string]string, ep *store.WebhookEndp
 // FireReplaySafe checks whether a trigger fire event satisfies both source-level
 // replay protection (SourceReplayProtected) and per-delivery deduplication
 // required by agent-creating or command-executing actions (Stage 2 §7.3,
-// P1c-1 security M1).
+// P1c-1 security M1, S19).
 //
 // Returns "" when safe to fire, or a closed-set fire refusal reason:
-//   - FireReplayReasonSourceNotProtected when SourceReplayProtected is false
+//   - FireReplayReasonSourceNotProtected when SourceReplayProtected is false OR
+//     when a webhook event was ingested under a non-replay-protected mode
+//     (e.g. github_v1 or body_only) even if the endpoint was later switched to
+//     a replay-protected mode
 //   - FireReplayReasonMissingDeliveryID when a webhook delivery not verified
-//     as hub_token at ingress omitted X-Scion-Delivery (leaving it replayable
-//     within replay_window_seconds)
+//     as hub_token at ingress omitted a delivery / dedup ID (leaving it
+//     replayable within replay_window_seconds)
 func FireReplaySafe(sourceKind string, ep *store.WebhookEndpoint, attrs map[string]string) string {
 	if !SourceReplayProtected(sourceKind, ep) {
 		return FireReplayReasonSourceNotProtected
 	}
-	if sourceKind == store.TriggerSourceKindWebhook &&
-		WebhookEventVerificationMode(attrs, ep) != store.WebhookAuthModeHubToken &&
-		strings.TrimSpace(attrs["delivery"]) == "" {
-		return FireReplayReasonMissingDeliveryID
+	if sourceKind == store.TriggerSourceKindWebhook {
+		mode := WebhookEventVerificationMode(attrs, ep)
+		switch mode {
+		case store.WebhookAuthModeHubToken,
+			store.WebhookSignatureModeScionV1,
+			store.WebhookSignatureModeStripeV1:
+			// Replay-protected ingress verification mode.
+		default:
+			return FireReplayReasonSourceNotProtected
+		}
+		if mode != store.WebhookAuthModeHubToken && strings.TrimSpace(attrs["delivery"]) == "" {
+			return FireReplayReasonMissingDeliveryID
+		}
 	}
 	return ""
 }

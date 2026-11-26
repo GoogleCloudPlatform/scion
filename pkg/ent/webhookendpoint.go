@@ -54,6 +54,8 @@ type WebhookEndpoint struct {
 	ConfigVersion int `json:"config_version,omitempty"`
 	// SignatureMode holds the value of the "signature_mode" field.
 	SignatureMode string `json:"signature_mode,omitempty"`
+	// RoutingHints holds the value of the "routing_hints" field.
+	RoutingHints string `json:"routing_hints,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// BoundAgentID holds the value of the "bound_agent_id" field.
@@ -86,7 +88,7 @@ func (*WebhookEndpoint) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case webhookendpoint.FieldMaxBodyBytes, webhookendpoint.FieldRatePerSecond, webhookendpoint.FieldRateBurst, webhookendpoint.FieldReplayWindowSeconds, webhookendpoint.FieldSecretVersion, webhookendpoint.FieldConfigVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
 			values[i] = new(sql.NullInt64)
-		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldAuthMode, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldBoundLifetime, webhookendpoint.FieldCreatedBy:
+		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldAuthMode, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldRoutingHints, webhookendpoint.FieldStatus, webhookendpoint.FieldBoundLifetime, webhookendpoint.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case webhookendpoint.FieldSecretRotatedAt, webhookendpoint.FieldLastReceivedAt, webhookendpoint.FieldCreated, webhookendpoint.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -223,6 +225,12 @@ func (_m *WebhookEndpoint) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field signature_mode", values[i])
 			} else if value.Valid {
 				_m.SignatureMode = value.String
+			}
+		case webhookendpoint.FieldRoutingHints:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field routing_hints", values[i])
+			} else if value.Valid {
+				_m.RoutingHints = value.String
 			}
 		case webhookendpoint.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -375,6 +383,9 @@ func (_m *WebhookEndpoint) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("signature_mode=")
 	builder.WriteString(_m.SignatureMode)
+	builder.WriteString(", ")
+	builder.WriteString("routing_hints=")
+	builder.WriteString(_m.RoutingHints)
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

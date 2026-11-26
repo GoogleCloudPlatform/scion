@@ -60,6 +60,7 @@ type WebhookEndpointResponse struct {
 	AuthMode            string                        `json:"auth"`
 	AllowProjectAgents  bool                          `json:"allowProjectAgents,omitempty"`
 	SignatureMode       string                        `json:"signatureMode"`
+	RoutingHints        *store.WebhookRoutingHints    `json:"routingHints,omitempty"`
 	MaxBodyBytes        int                           `json:"maxBodyBytes"`
 	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
 	ReplayWindowSeconds int                           `json:"replayWindowSeconds"`
@@ -366,6 +367,7 @@ func (s *Server) buildWebhookEndpointResponseWithCache(ctx context.Context, ep s
 		AuthMode:            authMode,
 		AllowProjectAgents:  ep.AllowProjectAgents,
 		SignatureMode:       ep.SignatureMode,
+		RoutingHints:        ep.RoutingHints,
 		MaxBodyBytes:        maxBody,
 		RateLimit:           rateLimit,
 		ReplayWindowSeconds: replayWin,

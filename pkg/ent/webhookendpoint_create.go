@@ -236,6 +236,20 @@ func (_c *WebhookEndpointCreate) SetNillableSignatureMode(v *string) *WebhookEnd
 	return _c
 }
 
+// SetRoutingHints sets the "routing_hints" field.
+func (_c *WebhookEndpointCreate) SetRoutingHints(v string) *WebhookEndpointCreate {
+	_c.mutation.SetRoutingHints(v)
+	return _c
+}
+
+// SetNillableRoutingHints sets the "routing_hints" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableRoutingHints(v *string) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetRoutingHints(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *WebhookEndpointCreate) SetStatus(v string) *WebhookEndpointCreate {
 	_c.mutation.SetStatus(v)
@@ -447,6 +461,10 @@ func (_c *WebhookEndpointCreate) defaults() {
 		v := webhookendpoint.DefaultSignatureMode
 		_c.mutation.SetSignatureMode(v)
 	}
+	if _, ok := _c.mutation.RoutingHints(); !ok {
+		v := webhookendpoint.DefaultRoutingHints
+		_c.mutation.SetRoutingHints(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := webhookendpoint.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -540,6 +558,9 @@ func (_c *WebhookEndpointCreate) check() error {
 	}
 	if _, ok := _c.mutation.SignatureMode(); !ok {
 		return &ValidationError{Name: "signature_mode", err: errors.New(`ent: missing required field "WebhookEndpoint.signature_mode"`)}
+	}
+	if _, ok := _c.mutation.RoutingHints(); !ok {
+		return &ValidationError{Name: "routing_hints", err: errors.New(`ent: missing required field "WebhookEndpoint.routing_hints"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "WebhookEndpoint.status"`)}
@@ -666,6 +687,10 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 	if value, ok := _c.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
 		_node.SignatureMode = value
+	}
+	if value, ok := _c.mutation.RoutingHints(); ok {
+		_spec.SetField(webhookendpoint.FieldRoutingHints, field.TypeString, value)
+		_node.RoutingHints = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)
@@ -956,6 +981,18 @@ func (u *WebhookEndpointUpsert) SetSignatureMode(v string) *WebhookEndpointUpser
 // UpdateSignatureMode sets the "signature_mode" field to the value that was provided on create.
 func (u *WebhookEndpointUpsert) UpdateSignatureMode() *WebhookEndpointUpsert {
 	u.SetExcluded(webhookendpoint.FieldSignatureMode)
+	return u
+}
+
+// SetRoutingHints sets the "routing_hints" field.
+func (u *WebhookEndpointUpsert) SetRoutingHints(v string) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldRoutingHints, v)
+	return u
+}
+
+// UpdateRoutingHints sets the "routing_hints" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateRoutingHints() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldRoutingHints)
 	return u
 }
 
@@ -1386,6 +1423,20 @@ func (u *WebhookEndpointUpsertOne) SetSignatureMode(v string) *WebhookEndpointUp
 func (u *WebhookEndpointUpsertOne) UpdateSignatureMode() *WebhookEndpointUpsertOne {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.UpdateSignatureMode()
+	})
+}
+
+// SetRoutingHints sets the "routing_hints" field.
+func (u *WebhookEndpointUpsertOne) SetRoutingHints(v string) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRoutingHints(v)
+	})
+}
+
+// UpdateRoutingHints sets the "routing_hints" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateRoutingHints() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRoutingHints()
 	})
 }
 
@@ -2004,6 +2055,20 @@ func (u *WebhookEndpointUpsertBulk) SetSignatureMode(v string) *WebhookEndpointU
 func (u *WebhookEndpointUpsertBulk) UpdateSignatureMode() *WebhookEndpointUpsertBulk {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.UpdateSignatureMode()
+	})
+}
+
+// SetRoutingHints sets the "routing_hints" field.
+func (u *WebhookEndpointUpsertBulk) SetRoutingHints(v string) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRoutingHints(v)
+	})
+}
+
+// UpdateRoutingHints sets the "routing_hints" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateRoutingHints() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRoutingHints()
 	})
 }
 

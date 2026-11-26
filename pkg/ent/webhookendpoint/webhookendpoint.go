@@ -50,6 +50,8 @@ const (
 	FieldConfigVersion = "config_version"
 	// FieldSignatureMode holds the string denoting the signature_mode field in the database.
 	FieldSignatureMode = "signature_mode"
+	// FieldRoutingHints holds the string denoting the routing_hints field in the database.
+	FieldRoutingHints = "routing_hints"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldBoundAgentID holds the string denoting the bound_agent_id field in the database.
@@ -93,6 +95,7 @@ var Columns = []string{
 	FieldSecretRotatedAt,
 	FieldConfigVersion,
 	FieldSignatureMode,
+	FieldRoutingHints,
 	FieldStatus,
 	FieldBoundAgentID,
 	FieldBoundLifetime,
@@ -141,6 +144,8 @@ var (
 	DefaultConfigVersion int
 	// DefaultSignatureMode holds the default value on creation for the "signature_mode" field.
 	DefaultSignatureMode string
+	// DefaultRoutingHints holds the default value on creation for the "routing_hints" field.
+	DefaultRoutingHints string
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// DefaultBoundLifetime holds the default value on creation for the "bound_lifetime" field.
@@ -255,6 +260,11 @@ func ByConfigVersion(opts ...sql.OrderTermOption) OrderOption {
 // BySignatureMode orders the results by the signature_mode field.
 func BySignatureMode(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSignatureMode, opts...).ToFunc()
+}
+
+// ByRoutingHints orders the results by the routing_hints field.
+func ByRoutingHints(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRoutingHints, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

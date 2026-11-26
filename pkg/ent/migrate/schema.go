@@ -5018,6 +5018,7 @@ var (
 		{Name: "secret_rotated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "config_version", Type: field.TypeInt, Default: 1},
 		{Name: "signature_mode", Type: field.TypeString, Default: "scion_v1"},
+		{Name: "routing_hints", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "bound_agent_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "bound_lifetime", Type: field.TypeString, Default: ""},
@@ -5052,7 +5053,7 @@ var (
 			{
 				Name:    "webhookendpoint_project_id_bound_agent_id",
 				Unique:  false,
-				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[20]},
+				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[21]},
 			},
 		},
 	}

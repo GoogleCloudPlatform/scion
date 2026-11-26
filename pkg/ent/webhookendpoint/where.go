@@ -145,6 +145,11 @@ func SignatureMode(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSignatureMode, v))
 }
 
+// RoutingHints applies equality check predicate on the "routing_hints" field. It's identical to RoutingHintsEQ.
+func RoutingHints(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRoutingHints, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldStatus, v))
@@ -1093,6 +1098,71 @@ func SignatureModeEqualFold(v string) predicate.WebhookEndpoint {
 // SignatureModeContainsFold applies the ContainsFold predicate on the "signature_mode" field.
 func SignatureModeContainsFold(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldSignatureMode, v))
+}
+
+// RoutingHintsEQ applies the EQ predicate on the "routing_hints" field.
+func RoutingHintsEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRoutingHints, v))
+}
+
+// RoutingHintsNEQ applies the NEQ predicate on the "routing_hints" field.
+func RoutingHintsNEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldRoutingHints, v))
+}
+
+// RoutingHintsIn applies the In predicate on the "routing_hints" field.
+func RoutingHintsIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldRoutingHints, vs...))
+}
+
+// RoutingHintsNotIn applies the NotIn predicate on the "routing_hints" field.
+func RoutingHintsNotIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldRoutingHints, vs...))
+}
+
+// RoutingHintsGT applies the GT predicate on the "routing_hints" field.
+func RoutingHintsGT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldRoutingHints, v))
+}
+
+// RoutingHintsGTE applies the GTE predicate on the "routing_hints" field.
+func RoutingHintsGTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldRoutingHints, v))
+}
+
+// RoutingHintsLT applies the LT predicate on the "routing_hints" field.
+func RoutingHintsLT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldRoutingHints, v))
+}
+
+// RoutingHintsLTE applies the LTE predicate on the "routing_hints" field.
+func RoutingHintsLTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldRoutingHints, v))
+}
+
+// RoutingHintsContains applies the Contains predicate on the "routing_hints" field.
+func RoutingHintsContains(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContains(FieldRoutingHints, v))
+}
+
+// RoutingHintsHasPrefix applies the HasPrefix predicate on the "routing_hints" field.
+func RoutingHintsHasPrefix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasPrefix(FieldRoutingHints, v))
+}
+
+// RoutingHintsHasSuffix applies the HasSuffix predicate on the "routing_hints" field.
+func RoutingHintsHasSuffix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasSuffix(FieldRoutingHints, v))
+}
+
+// RoutingHintsEqualFold applies the EqualFold predicate on the "routing_hints" field.
+func RoutingHintsEqualFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEqualFold(FieldRoutingHints, v))
+}
+
+// RoutingHintsContainsFold applies the ContainsFold predicate on the "routing_hints" field.
+func RoutingHintsContainsFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldRoutingHints, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

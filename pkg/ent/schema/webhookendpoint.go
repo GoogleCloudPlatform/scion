@@ -82,6 +82,8 @@ func (WebhookEndpoint) Fields() []ent.Field {
 			Default(1),
 		field.String("signature_mode").
 			Default("scion_v1"),
+		field.Text("routing_hints").
+			Default(""),
 		field.String("status").
 			Default("active"),
 		field.UUID("bound_agent_id", uuid.UUID{}).
