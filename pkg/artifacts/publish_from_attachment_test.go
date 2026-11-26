@@ -251,6 +251,47 @@ func TestPublishFromAttachment_NewArtifactAndBlobReuse(t *testing.T) {
 		t.Errorf("agentB GET provenance = (%q, %q), want (%q, \"\")", respB.Version.SourceAttachmentID, respB.Version.SourceMessageID, attID)
 	}
 
+	// Same viewer-scoped provenance gate on GET /{id}/versions and GET /{id}/versions/{seq}.
+	listU := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions", nil, nil)
+	if listU.Code != http.StatusOK {
+		t.Fatalf("userU GET /versions status = %d: %s", listU.Code, listU.Body.String())
+	}
+	var listRespU VersionListResponse
+	_ = json.Unmarshal(listU.Body.Bytes(), &listRespU)
+	if len(listRespU.Versions) != 1 || listRespU.Versions[0].SourceAttachmentID != attID || listRespU.Versions[0].SourceMessageID != "msg-42" {
+		t.Errorf("userU GET /versions provenance = %+v, want (%q, msg-42)", listRespU.Versions, attID)
+	}
+
+	listB := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions", nil, nil)
+	if listB.Code != http.StatusOK {
+		t.Fatalf("agentB GET /versions status = %d: %s", listB.Code, listB.Body.String())
+	}
+	var listRespB VersionListResponse
+	_ = json.Unmarshal(listB.Body.Bytes(), &listRespB)
+	if len(listRespB.Versions) != 1 || listRespB.Versions[0].SourceAttachmentID != attID || listRespB.Versions[0].SourceMessageID != "" {
+		t.Errorf("agentB GET /versions provenance = %+v, want (%q, \"\")", listRespB.Versions, attID)
+	}
+
+	verU := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions/1", nil, nil)
+	if verU.Code != http.StatusOK {
+		t.Fatalf("userU GET /versions/1 status = %d: %s", verU.Code, verU.Body.String())
+	}
+	var verRespU ArtifactResponse
+	_ = json.Unmarshal(verU.Body.Bytes(), &verRespU)
+	if verRespU.Version.SourceAttachmentID != attID || verRespU.Version.SourceMessageID != "msg-42" {
+		t.Errorf("userU GET /versions/1 provenance = (%q, %q), want (%q, msg-42)", verRespU.Version.SourceAttachmentID, verRespU.Version.SourceMessageID, attID)
+	}
+
+	verB := f.do(&agentB, http.MethodGet, "/api/v1/artifacts/"+resp.Artifact.ID+"/versions/1", nil, nil)
+	if verB.Code != http.StatusOK {
+		t.Fatalf("agentB GET /versions/1 status = %d: %s", verB.Code, verB.Body.String())
+	}
+	var verRespB ArtifactResponse
+	_ = json.Unmarshal(verB.Body.Bytes(), &verRespB)
+	if verRespB.Version.SourceAttachmentID != attID || verRespB.Version.SourceMessageID != "" {
+		t.Errorf("agentB GET /versions/1 provenance = (%q, %q), want (%q, \"\")", verRespB.Version.SourceAttachmentID, verRespB.Version.SourceMessageID, attID)
+	}
+
 	// Attachment itself stays unchanged and downloadable.
 	outcome, attRec := f.serve(&userU, "/att", attID)
 	if outcome != ServeWritten || attRec.Code != http.StatusOK || !bytes.Equal(attRec.Body.Bytes(), body) {
