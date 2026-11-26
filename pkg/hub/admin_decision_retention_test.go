@@ -102,13 +102,13 @@ func TestAdminDecisionRetention_TokenRefused(t *testing.T) {
 }
 
 // TestAdminDecisionRetention_AdminRoundTrip verifies defaults, updates, null
-// resets, bounds validation, and unknown-field rejection (incl. project_overrides).
+// resets, bounds validation, and unknown-field rejection.
 func TestAdminDecisionRetention_AdminRoundTrip(t *testing.T) {
 	srv, _, admin, _ := decisionRetentionAdminServer(t, true)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodGet, decisionRetentionAdminPath, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.JSONEq(t, `{"enabled":false,"retention_days":null,"sweep":{"page_size":200,"tick_budget_seconds":30,"tick_interval_minutes":60},"revision":0,"runs":[]}`, rec.Body.String())
+	assert.JSONEq(t, `{"enabled":false,"retention_days":null,"project_overrides":{},"sweep":{"page_size":200,"tick_budget_seconds":30,"tick_interval_minutes":60},"revision":0,"runs":[]}`, rec.Body.String())
 
 	got := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
 		"enabled": true, "retention_days": 45, "sweep": map[string]any{"page_size": 100}, "expected_revision": 0,
@@ -116,6 +116,7 @@ func TestAdminDecisionRetention_AdminRoundTrip(t *testing.T) {
 	assert.True(t, got.Enabled)
 	require.NotNil(t, got.RetentionDays)
 	assert.Equal(t, 45, *got.RetentionDays)
+	assert.Empty(t, got.ProjectOverrides)
 	assert.Equal(t, decisionRetentionSweepJSON{PageSize: 100, TickBudgetSeconds: 30, TickIntervalMinutes: 60}, got.Sweep)
 	require.Positive(t, got.Revision)
 
@@ -137,7 +138,7 @@ func TestAdminDecisionRetention_AdminRoundTrip(t *testing.T) {
 	for _, bad := range []map[string]any{
 		{"retention_days": 29, "expected_revision": got.Revision},
 		{"retention_days": 36501, "expected_revision": got.Revision},
-		{"project_overrides": map[string]any{}, "expected_revision": got.Revision},
+		{"unknown_field": true, "expected_revision": got.Revision},
 		{"sweep": map[string]any{"page_size": 10}},
 	} {
 		rec = doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, bad)
@@ -178,4 +179,118 @@ func TestAdminDecisionRetention_RevisionConflictAndAudit(t *testing.T) {
 	assert.Equal(t, decisionRetentionAuditSurface, audits[0].ExecutorID)
 	assert.Contains(t, audits[0].BeforeSummary, "enabled=false,retention_days=null")
 	assert.Contains(t, audits[0].AfterSummary, "enabled=true,retention_days=30")
+}
+
+// TestAdminDecisionRetention_ProjectOverridesAndDeletedPruning verifies
+// project_overrides validation, revision enforcement, mutation audit recording,
+// and automatic dropping of overrides for deleted projects on the next save.
+func TestAdminDecisionRetention_ProjectOverridesAndDeletedPruning(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	ctx := context.Background()
+
+	p1 := &store.Project{ID: "11111111-1111-1111-1111-111111111111", Name: "P1", Slug: "p1"}
+	p2 := &store.Project{ID: "22222222-2222-2222-2222-222222222222", Name: "P2", Slug: "p2"}
+	require.NoError(t, s.CreateProject(ctx, p1))
+	require.NoError(t, s.CreateProject(ctx, p2))
+
+	// Missing expected_revision when changing project_overrides -> 400.
+	rec := doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"project_overrides": map[string]any{
+			p1.ID: map[string]any{"mode": "keep_forever"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Invalid overrides fail closed with 400.
+	for _, bad := range []map[string]any{
+		{"project_overrides": map[string]any{"not-a-uuid": map[string]any{"mode": "keep_forever"}}, "expected_revision": 0},
+		{"project_overrides": map[string]any{p1.ID: map[string]any{"mode": "days", "days": 29}}, "expected_revision": 0},
+		{"project_overrides": map[string]any{p1.ID: map[string]any{"mode": "days"}}, "expected_revision": 0},
+		{"project_overrides": map[string]any{p1.ID: map[string]any{"mode": "keep_forever", "days": 30}}, "expected_revision": 0},
+		{"project_overrides": map[string]any{p1.ID: map[string]any{"mode": "unknown"}}, "expected_revision": 0},
+		{"project_overrides": map[string]any{p1.ID: map[string]any{"mode": "keep_forever", "extra": 1}}, "expected_revision": 0},
+	} {
+		rec = doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, bad)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "bad payload %v: %s", bad, rec.Body.String())
+	}
+
+	// Ghost UUID mapped to keep_forever in THIS request must return 400 with a
+	// field error on project_overrides.<id> and save nothing.
+	ghostID := "33333333-3333-3333-3333-333333333333"
+	rec = doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"enabled":        true,
+		"retention_days": 30,
+		"project_overrides": map[string]any{
+			p1.ID:   map[string]any{"mode": "keep_forever"},
+			ghostID: map[string]any{"mode": "keep_forever"},
+		},
+		"expected_revision": 0,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "ghost project override must return 400: %s", rec.Body.String())
+	var valErr struct {
+		Error  string `json:"error"`
+		Errors []struct {
+			Path    string `json:"path"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &valErr))
+	assert.Equal(t, "validation_failed", valErr.Error)
+	require.Len(t, valErr.Errors, 1)
+	assert.Equal(t, "project_overrides."+ghostID, valErr.Errors[0].Path)
+	// Confirm nothing was saved.
+	unchanged := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodGet, decisionRetentionAdminPath, nil))
+	assert.Equal(t, int64(0), unchanged.Revision)
+	assert.False(t, unchanged.Enabled)
+	assert.Empty(t, unchanged.ProjectOverrides)
+
+	// Valid save with two live projects succeeds.
+	got := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"enabled":        true,
+		"retention_days": 30,
+		"project_overrides": map[string]any{
+			p1.ID: map[string]any{"mode": "keep_forever"},
+			p2.ID: map[string]any{"mode": "days", "days": 90},
+		},
+		"expected_revision": 0,
+	}))
+	require.Len(t, got.ProjectOverrides, 2)
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, got.ProjectOverrides[p1.ID].Mode)
+	assert.Nil(t, got.ProjectOverrides[p1.ID].Days)
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeDays, got.ProjectOverrides[p2.ID].Mode)
+	require.NotNil(t, got.ProjectOverrides[p2.ID].Days)
+	assert.Equal(t, 90, *got.ProjectOverrides[p2.ID].Days)
+
+	// Mutation audit recorded the override summary.
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetID: opsettings.DecisionRetentionSectionName,
+		Limit:    10,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, audits)
+	assert.Contains(t, audits[0].AfterSummary, p1.ID+":keep_forever")
+	assert.Contains(t, audits[0].AfterSummary, p2.ID+":90d")
+
+	// Delete p2: GET must immediately omit the deleted project's override, and
+	// an unrelated save (changing retention_days) drops it from storage too.
+	require.NoError(t, s.DeleteProject(ctx, p2.ID))
+	gotAfterDelete := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodGet, decisionRetentionAdminPath, nil))
+	require.Len(t, gotAfterDelete.ProjectOverrides, 1)
+	assert.Contains(t, gotAfterDelete.ProjectOverrides, p1.ID)
+	assert.NotContains(t, gotAfterDelete.ProjectOverrides, p2.ID, "GET must omit override for deleted project")
+
+	got = decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"retention_days":    45,
+		"expected_revision": got.Revision,
+	}))
+	require.Len(t, got.ProjectOverrides, 1)
+	assert.Contains(t, got.ProjectOverrides, p1.ID)
+	assert.NotContains(t, got.ProjectOverrides, p2.ID, "deleted project override must be dropped on next save")
+
+	// Clearing overrides via empty object works.
+	got = decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"project_overrides": map[string]any{},
+		"expected_revision": got.Revision,
+	}))
+	assert.Empty(t, got.ProjectOverrides)
 }

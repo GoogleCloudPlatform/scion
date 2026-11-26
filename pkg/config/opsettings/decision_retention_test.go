@@ -25,14 +25,14 @@ func TestParseDecisionRetentionDoc_Defaults(t *testing.T) {
 		t.Fatalf("ParseDecisionRetentionDoc({}): %v", err)
 	}
 	want := DefaultDecisionRetentionConfig()
-	if cfg != want {
+	if !cfg.Equal(want) {
 		t.Fatalf("got %+v, want %+v", cfg, want)
 	}
 	if cfg.Enabled {
 		t.Fatal("default Enabled must be false")
 	}
-	if cfg.HasWindow() {
-		t.Fatal("default HasWindow must be false")
+	if _, ok := cfg.MinEffectiveDays(); cfg.HasWindow() || ok {
+		t.Fatal("default HasWindow and MinEffectiveDays must be false")
 	}
 }
 
@@ -53,7 +53,7 @@ func TestParseDecisionRetentionDoc_ValidBoundsAndRoundTrip(t *testing.T) {
 		t.Fatalf("schema Validate failed: %v", errs)
 	}
 	roundTrip, err := ParseDecisionRetentionDoc(doc)
-	if err != nil || roundTrip != cfg {
+	if err != nil || !roundTrip.Equal(cfg) {
 		t.Fatalf("round-trip mismatch: got %+v (err=%v), want %+v", roundTrip, err, cfg)
 	}
 
@@ -87,8 +87,15 @@ func TestParseDecisionRetentionDoc_InvalidAndFailClosed(t *testing.T) {
 		{"tick_interval below min", `{"sweep":{"tick_interval_minutes":0}}`},
 		{"tick_interval above max", `{"sweep":{"tick_interval_minutes":1441}}`},
 		{"unknown top-level key", `{"enabled":true,"extra":1}`},
-		{"project_overrides not accepted in PR-1", `{"enabled":true,"project_overrides":{}}`},
 		{"unknown sweep key", `{"sweep":{"chunk_size":100}}`},
+		{"override non-uuid key", `{"project_overrides":{"not-a-uuid":{"mode":"keep_forever"}}}`},
+		{"override uppercase uuid key", `{"project_overrides":{"11111111-1111-1111-1111-11111111111A":{"mode":"keep_forever"}}}`},
+		{"override invalid mode", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"archive"}}}`},
+		{"override days missing days", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"days"}}}`},
+		{"override days below min", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"days","days":29}}}`},
+		{"override days above max", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"days","days":36501}}}`},
+		{"override keep_forever with days", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"keep_forever","days":30}}}`},
+		{"override unknown field", `{"project_overrides":{"11111111-1111-1111-1111-111111111111":{"mode":"keep_forever","extra":1}}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,7 +103,7 @@ func TestParseDecisionRetentionDoc_InvalidAndFailClosed(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for %s, got %+v", tc.raw, cfg)
 			}
-			if cfg.Enabled || cfg.HasWindow() {
+			if _, ok := cfg.MinEffectiveDays(); cfg.Enabled || cfg.HasWindow() || ok {
 				t.Fatalf("failed parse must return disabled/no-window zero config, got %+v", cfg)
 			}
 			if tc.name != "malformed JSON" {
@@ -105,5 +112,97 @@ func TestParseDecisionRetentionDoc_InvalidAndFailClosed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing.T) {
+	const (
+		projDays = "11111111-1111-1111-1111-111111111111"
+		projHold = "22222222-2222-2222-2222-222222222222"
+		projDef  = "33333333-3333-3333-3333-333333333333"
+	)
+
+	// 1. Hub default 90d + override 45d + override keep_forever.
+	raw := json.RawMessage(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			"11111111-1111-1111-1111-111111111111": {"mode": "days", "days": 45},
+			"22222222-2222-2222-2222-222222222222": {"mode": "keep_forever"}
+		}
+	}`)
+	if errs := Validate(DecisionRetentionSectionName, raw); len(errs) > 0 {
+		t.Fatalf("schema Validate failed: %v", errs)
+	}
+	cfg, err := ParseDecisionRetentionDoc(raw)
+	if err != nil {
+		t.Fatalf("ParseDecisionRetentionDoc: %v", err)
+	}
+	if !cfg.HasWindow() {
+		t.Fatalf("expected HasWindow true")
+	}
+	if d, ok := cfg.EffectiveDays(projDays); !ok || d != 45 {
+		t.Fatalf("EffectiveDays(projDays) = (%d, %v), want (45, true)", d, ok)
+	}
+	if d, ok := cfg.EffectiveDays(projHold); ok || d != 0 {
+		t.Fatalf("EffectiveDays(projHold) = (%d, %v), want (0, false)", d, ok)
+	}
+	if d, ok := cfg.EffectiveDays(projDef); !ok || d != 90 {
+		t.Fatalf("EffectiveDays(projDef) = (%d, %v), want (90, true)", d, ok)
+	}
+	if minD, ok := cfg.MinEffectiveDays(); !ok || minD != 45 {
+		t.Fatalf("MinEffectiveDays() = (%d, %v), want (45, true)", minD, ok)
+	}
+
+	// Round-trip via Settings().
+	doc, err := json.Marshal(cfg.Settings())
+	if err != nil {
+		t.Fatalf("marshal Settings: %v", err)
+	}
+	if errs := Validate(DecisionRetentionSectionName, doc); len(errs) > 0 {
+		t.Fatalf("schema Validate round-trip failed: %v", errs)
+	}
+	rt, err := ParseDecisionRetentionDoc(doc)
+	if err != nil || !rt.Equal(cfg) {
+		t.Fatalf("round-trip mismatch: got %+v (err=%v), want %+v", rt, err, cfg)
+	}
+
+	// 2. No hub default, only a days override -> HasWindow=false, MinEffectiveDays=(60, true).
+	rawOverrideOnly := json.RawMessage(`{
+		"enabled": true,
+		"project_overrides": {
+			"11111111-1111-1111-1111-111111111111": {"mode": "days", "days": 60}
+		}
+	}`)
+	cfg2, err := ParseDecisionRetentionDoc(rawOverrideOnly)
+	if err != nil {
+		t.Fatalf("override-only parse: %v", err)
+	}
+	if cfg2.HasWindow() {
+		t.Fatal("expected HasWindow false when retention_days absent")
+	}
+	if d, ok := cfg2.EffectiveDays(projDays); !ok || d != 60 {
+		t.Fatalf("EffectiveDays(projDays) = (%d, %v), want (60, true)", d, ok)
+	}
+	if d, ok := cfg2.EffectiveDays(projDef); ok || d != 0 {
+		t.Fatalf("EffectiveDays(projDef) = (%d, %v), want (0, false)", d, ok)
+	}
+	if minD, ok := cfg2.MinEffectiveDays(); !ok || minD != 60 {
+		t.Fatalf("MinEffectiveDays() = (%d, %v), want (60, true)", minD, ok)
+	}
+
+	// 3. No hub default, only keep_forever override -> MinEffectiveDays=(0, false).
+	rawHoldOnly := json.RawMessage(`{
+		"enabled": true,
+		"project_overrides": {
+			"22222222-2222-2222-2222-222222222222": {"mode": "keep_forever"}
+		}
+	}`)
+	cfg3, err := ParseDecisionRetentionDoc(rawHoldOnly)
+	if err != nil {
+		t.Fatalf("hold-only parse: %v", err)
+	}
+	if minD, ok := cfg3.MinEffectiveDays(); ok || minD != 0 {
+		t.Fatalf("expected MinEffectiveDays (0, false) when only keep_forever overrides exist, got (%d, %v)", minD, ok)
 	}
 }

@@ -43,6 +43,9 @@ var operationParamAllowlist = map[string][]string{
 	// takes nothing.
 	entadapter.ChatRetentionPreviewKey: {chatRetentionParamDays},
 	entadapter.ChatRetentionRunKey:     {},
+	// Decision retention preview and manual run take no parameters.
+	entadapter.DecisionRetentionPreviewKey: {},
+	entadapter.DecisionRetentionRunKey:     {},
 	// The NFS orphan scan takes no parameters.
 	entadapter.NFSOrphanScanKey: {},
 }
@@ -76,9 +79,11 @@ func checkStringParams(body map[string]interface{}) error {
 // an experiment is on to that experiment. While it is off the operation is
 // not listed and its routes answer 404.
 var maintenanceOperationExperiments = map[string]string{
-	entadapter.ChatRetentionPreviewKey: experiments.ChatRetention,
-	entadapter.ChatRetentionRunKey:     experiments.ChatRetention,
-	entadapter.NFSOrphanScanKey:        experiments.RuntimeOrphanReconcile,
+	entadapter.ChatRetentionPreviewKey:     experiments.ChatRetention,
+	entadapter.ChatRetentionRunKey:         experiments.ChatRetention,
+	entadapter.DecisionRetentionPreviewKey: experiments.DecisionRetention,
+	entadapter.DecisionRetentionRunKey:     experiments.DecisionRetention,
+	entadapter.NFSOrphanScanKey:            experiments.RuntimeOrphanReconcile,
 }
 
 // maintenanceOperationAvailable reports whether operation key exists on
@@ -277,8 +282,10 @@ var maintenanceRunTimeouts = map[string]time.Duration{
 	entadapter.ChatStarReconcileKey: messageStarReconcileTimeout,
 	// A preview or manual chat retention run stops its walk early enough
 	// to record what it did before this.
-	entadapter.ChatRetentionPreviewKey: chatRetentionOpMaxDuration,
-	entadapter.ChatRetentionRunKey:     chatRetentionOpMaxDuration,
+	entadapter.ChatRetentionPreviewKey:     chatRetentionOpMaxDuration,
+	entadapter.ChatRetentionRunKey:         chatRetentionOpMaxDuration,
+	entadapter.DecisionRetentionPreviewKey: decisionRetentionOpMaxDuration,
+	entadapter.DecisionRetentionRunKey:     decisionRetentionOpMaxDuration,
 }
 
 // maintenanceRunContext returns the context a run of key executes under.

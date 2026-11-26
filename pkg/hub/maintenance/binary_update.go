@@ -91,6 +91,8 @@ const (
 // RequestError is a refusal of the requested operation that an API handler
 // reports with a specific error code (see HTTPStatus).
 type RequestError struct {
+	// Status optionally overrides the HTTP status code derived from Code.
+	Status  int
 	Code    string
 	Message string
 	// Details is extra machine-readable context for the API error's
@@ -100,9 +102,12 @@ type RequestError struct {
 
 func (e *RequestError) Error() string { return e.Message }
 
-// HTTPStatus is the status for the code: 400 for parameter errors, 409 for
-// targets that conflict with the running version.
+// HTTPStatus is the status for the error: Status when set, 400 for parameter
+// errors, 409 for targets that conflict with the running version.
 func (e *RequestError) HTTPStatus() int {
+	if e.Status != 0 {
+		return e.Status
+	}
 	switch e.Code {
 	case CodeUnknownParam, CodeInvalidParam:
 		return http.StatusBadRequest

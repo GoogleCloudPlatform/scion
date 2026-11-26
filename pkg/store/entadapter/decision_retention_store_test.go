@@ -995,3 +995,180 @@ func TestDecisionRetentionStore_SkipsUnindexedFacetRows(t *testing.T) {
 	assert.Equal(t, 0, res2.SkippedMessages)
 	assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
 }
+
+// TestDecisionRetentionStore_PerProjectWindowsPreviewAndDifferentialFacets
+// proves on BOTH SQLite and Postgres that:
+//   - per-project cutoffs in cutoffByProject purge each project according to its
+//     own window (30d default, 60d override keeps 45d and purges 75d, omitted
+//     project = keep_forever keeps 90d);
+//   - PreviewDecisionMessages applies the exact same facet_indexed=false skip
+//     as PurgeDecisionMessages and returns identical per-project counts without
+//     deleting any rows;
+//   - after purge under mixed per-project windows, summary-backed facets,
+//     ProjectsWithDecisions, and ListProjectDecisionAgentsForProjects equal
+//     the legacy queries on the remaining rows.
+func TestDecisionRetentionStore_PerProjectWindowsPreviewAndDifferentialFacets(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	st := cs.DecisionRetention()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	oldTime := now.Add(-100 * 24 * time.Hour)
+
+	projDefault := uuid.NewString()
+	projLong := uuid.NewString()
+	projHold := uuid.NewString()
+	for i, pid := range []string{projDefault, projLong, projHold} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("ret-mix-%d", i), Slug: fmt.Sprintf("ret-mix-%d", i), Created: oldTime,
+		}))
+	}
+	userID := uuid.NewString()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID: userID, Email: "ret-mix@test.com", DisplayName: "Mix User",
+		Role: store.UserRoleMember, Status: "active", Created: oldTime,
+	}))
+
+	choices := []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}}
+	seedSettled := func(pid, agentID, agentName, topic, key string, ageDays int) (msgID, decID string) {
+		ts := now.Add(-time.Duration(ageDays) * 24 * time.Hour)
+		msgID = uuid.NewString()
+		res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: msgID, ProjectID: pid, ThreadID: topic,
+				Sender: "agent:" + agentName, SenderID: agentID, Recipient: "user:" + userID, RecipientID: userID,
+			},
+			AskerAgentID:   agentID,
+			AskerAgentName: agentName,
+			Decisions:      []messages.Decision{{Key: key, Question: "Q " + key, Choices: choices}},
+		})
+		require.NoError(t, err)
+		decID = res.Decisions[0].RowID
+		_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID:    decID,
+			ChoiceID:         "1",
+			AnsweredByUserID: userID,
+			AnsweredByName:   "Mix User",
+			AnsweredByEmail:  "ret-mix@test.com",
+			Provenance:       store.DecisionProvenanceDirect,
+			Surface:          store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID: uuid.NewString(), ProjectID: pid, ThreadID: topic,
+				Sender: "user:" + userID, SenderID: userID, Recipient: "agent:" + agentName, RecipientID: agentID,
+			},
+		})
+		require.NoError(t, err)
+
+		uid := uuid.MustParse(decID)
+		db := clientDB(cs.client)
+		qDec := "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?"
+		qAns := "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?"
+		if cs.isPostgres() {
+			qDec = "UPDATE decisions SET created_at = $1, decided_at = $2 WHERE id = $3"
+			qAns = "UPDATE decision_answers SET created_at = $1 WHERE decision_row_id = $2"
+		}
+		_, err = db.ExecContext(ctx, qDec, ts, ts, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, qAns, ts, uid)
+		require.NoError(t, err)
+		return msgID, decID
+	}
+
+	topicDef := "topic-def-" + uuid.NewString()
+	topicLong := "topic-long-" + uuid.NewString()
+	topicHold := "topic-hold-" + uuid.NewString()
+
+	agentDefOld := uuid.NewString()
+	agentDefNew := uuid.NewString()
+	agentLong := uuid.NewString()
+	agentHold := uuid.NewString()
+
+	// projDefault (window 30d): 45d purged, 15d kept, plus one unindexed 45d skipped
+	mDef45, dDef45 := seedSettled(projDefault, agentDefOld, "DefOld", topicDef, "DEF-45", 45)
+	mDef15, dDef15 := seedSettled(projDefault, agentDefNew, "DefNew", topicDef, "DEF-15", 15)
+	mDefUnidx, dDefUnidx := seedSettled(projDefault, agentDefNew, "DefNew", topicDef, "DEF-UNIDX", 45)
+	// projLong (window 60d): 75d purged, 45d kept
+	mLong75, dLong75 := seedSettled(projLong, agentLong, "LongBot", topicLong, "LONG-75", 75)
+	mLong45, dLong45 := seedSettled(projLong, agentLong, "LongBot", topicLong, "LONG-45", 45)
+	// projHold (keep_forever / omitted): 90d kept
+	mHold90, dHold90 := seedSettled(projHold, agentHold, "HoldBot", topicHold, "HOLD-90", 90)
+
+	// Rebuild facet entries from the back-dated timestamps so latest_at matches created_at.
+	_, err := cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	drainDecisionIndex(t, ctx, cs, 100)
+	assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
+
+	// Flip dDefUnidx to facet_indexed=false to prove PreviewDecisionMessages skips
+	// unindexed rows identically to PurgeDecisionMessages.
+	require.NoError(t, cs.client.Decision.UpdateOneID(uuid.MustParse(dDefUnidx)).SetFacetIndexed(false).Exec(ctx))
+
+	allMsgs := []string{mDef45, mDef15, mDefUnidx, mLong75, mLong45, mHold90}
+	cutoffByProject := map[string]time.Time{
+		projDefault: now.Add(-30 * 24 * time.Hour),
+		projLong:    now.Add(-60 * 24 * time.Hour),
+		// projHold intentionally omitted (keep_forever)
+	}
+
+	// 1. Preview returns exact per-project counts (skipping unindexed row) and deletes NOTHING.
+	previewRes, err := st.PreviewDecisionMessages(ctx, allMsgs, cutoffByProject)
+	require.NoError(t, err)
+	assert.Equal(t, 2, previewRes.PurgedMessages)
+	assert.Equal(t, 4, previewRes.SkippedMessages)
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 1, Answers: 1}, previewRes.ByProject[projDefault])
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 1, Answers: 1}, previewRes.ByProject[projLong])
+	assert.Zero(t, previewRes.ByProject[projHold])
+
+	// Confirm nothing was deleted by preview.
+	for _, id := range []string{dDef45, dDef15, dDefUnidx, dLong75, dLong45, dHold90} {
+		_, err := cs.GetDecision(ctx, id)
+		require.NoError(t, err, "preview must not delete decision %s", id)
+	}
+
+	// 2. Purge with the same inputs produces identical counts.
+	purgeRes, err := st.PurgeDecisionMessages(ctx, allMsgs, cutoffByProject)
+	require.NoError(t, err)
+	assert.Equal(t, previewRes, purgeRes, "preview counts must equal purge counts (including unindexed skip)")
+
+	// Verify exact kept vs purged rows.
+	for _, gone := range []string{dDef45, dLong75} {
+		_, err := cs.GetDecision(ctx, gone)
+		assert.ErrorIs(t, err, store.ErrNotFound, "decision %s should be purged", gone)
+	}
+	for _, kept := range []string{dDef15, dDefUnidx, dLong45, dHold90} {
+		_, err := cs.GetDecision(ctx, kept)
+		assert.NoError(t, err, "decision %s should be kept", kept)
+	}
+
+	// Restore dDefUnidx facet_indexed=true (its facet entry was already counted
+	// during the initial drain above) before running the full differential check.
+	require.NoError(t, cs.client.Decision.UpdateOneID(uuid.MustParse(dDefUnidx)).SetFacetIndexed(true).Exec(ctx))
+
+	// 3. Differential facet check across all 3 projects after mixed-window purge.
+	assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
+	allProjects := []string{projDefault, projLong, projHold}
+	allProjectUUIDs := []uuid.UUID{uuid.MustParse(projDefault), uuid.MustParse(projLong), uuid.MustParse(projHold)}
+	allTopics := []string{topicDef, topicLong, topicHold}
+
+	sumAgents, sumAnswerers, sumConvs, err := cs.ListDecisionFacets(ctx, allProjects, allTopics)
+	require.NoError(t, err)
+	legAgents, legAnswerers, legConvs, err := cs.listDecisionFacetsLegacy(ctx, allProjectUUIDs, allTopics)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, legAgents, sumAgents, "summary agents must equal legacy after mixed-window purge")
+	assert.ElementsMatch(t, legAnswerers, sumAnswerers, "summary answerers must equal legacy after mixed-window purge")
+	assert.ElementsMatch(t, legConvs, sumConvs, "summary conversations must equal legacy after mixed-window purge")
+
+	sumProjs, err := cs.ProjectsWithDecisions(ctx, allProjects)
+	require.NoError(t, err)
+	legProjs, err := cs.projectsWithDecisionsLegacy(ctx, allProjectUUIDs)
+	require.NoError(t, err)
+	assert.Equal(t, legProjs, sumProjs, "ProjectsWithDecisions must equal legacy after mixed-window purge")
+
+	sumByProj, err := cs.ListProjectDecisionAgentsForProjects(ctx, allProjects)
+	require.NoError(t, err)
+	legByProj, err := cs.listProjectDecisionAgentsForProjectsLegacy(ctx, allProjectUUIDs)
+	require.NoError(t, err)
+	assert.Equal(t, legByProj, sumByProj, "ListProjectDecisionAgentsForProjects must equal legacy after mixed-window purge")
+}

@@ -164,12 +164,7 @@ func decisionRowLastActivity(d *ent.Decision, answers []*ent.DecisionAnswer) tim
 	return latest
 }
 
-// PurgeDecisionMessages implements store.DecisionRetentionStore.
-func (s *DecisionRetentionStore) PurgeDecisionMessages(ctx context.Context, messageIDs []string, cutoffByProject map[string]time.Time) (store.DecisionRetentionPurgeResult, error) {
-	res := store.DecisionRetentionPurgeResult{ByProject: map[string]store.DecisionRetentionCounts{}}
-	if len(messageIDs) == 0 || len(cutoffByProject) == 0 {
-		return res, nil
-	}
+func parseUniqueMessageUUIDs(messageIDs []string) []uuid.UUID {
 	seenMsg := make(map[uuid.UUID]bool, len(messageIDs))
 	msgUUIDs := make([]uuid.UUID, 0, len(messageIDs))
 	for _, raw := range messageIDs {
@@ -182,6 +177,134 @@ func (s *DecisionRetentionStore) PurgeDecisionMessages(ctx context.Context, mess
 			msgUUIDs = append(msgUUIDs, u)
 		}
 	}
+	return msgUUIDs
+}
+
+// evaluateDecisionRetentionMessages applies the whole-message eligibility rule
+// (design-8984 §3.2) to decs and ansByDec for msgUUIDs under cutoffByProject.
+// Shared by PurgeDecisionMessages and PreviewDecisionMessages so preview counts
+// match purge counts by construction.
+func evaluateDecisionRetentionMessages(
+	msgUUIDs []uuid.UUID,
+	decs []*ent.Decision,
+	ansByDec map[uuid.UUID][]*ent.DecisionAnswer,
+	cutoffByProject map[string]time.Time,
+) (res store.DecisionRetentionPurgeResult, eligibleDecs []*ent.Decision, eligibleDecIDs, eligibleAnsIDs []uuid.UUID) {
+	res = store.DecisionRetentionPurgeResult{ByProject: map[string]store.DecisionRetentionCounts{}}
+	byMsg := make(map[uuid.UUID][]*ent.Decision)
+	for _, d := range decs {
+		byMsg[d.MessageID] = append(byMsg[d.MessageID], d)
+	}
+	for _, mid := range msgUUIDs {
+		msgDecs := byMsg[mid]
+		if len(msgDecs) == 0 {
+			continue
+		}
+		eligible := true
+		for _, d := range msgDecs {
+			cutoff, ok := cutoffByProject[d.ProjectID.String()]
+			if !ok || cutoff.IsZero() {
+				eligible = false
+				break
+			}
+			ans := ansByDec[d.ID]
+			// A message with any unindexed decision or answer row is ineligible
+			// this tick so purge never deletes rows that
+			// indexDecisionFacetsAnswersPageTx may hold in an unlocked snapshot
+			// before acquiring FOR UPDATE SKIP LOCKED on their decisions.
+			if !d.FacetIndexed {
+				eligible = false
+				break
+			}
+			for _, a := range ans {
+				if !a.FacetIndexed {
+					eligible = false
+					break
+				}
+			}
+			if !eligible {
+				break
+			}
+			if !decisionRowSettled(d, ans) {
+				eligible = false
+				break
+			}
+			if !decisionRowLastActivity(d, ans).Before(cutoff.UTC()) {
+				eligible = false
+				break
+			}
+		}
+		if !eligible {
+			res.SkippedMessages++
+			continue
+		}
+		res.PurgedMessages++
+		for _, d := range msgDecs {
+			eligibleDecs = append(eligibleDecs, d)
+			eligibleDecIDs = append(eligibleDecIDs, d.ID)
+			pid := d.ProjectID.String()
+			c := res.ByProject[pid]
+			c.Decisions++
+			for _, a := range ansByDec[d.ID] {
+				eligibleAnsIDs = append(eligibleAnsIDs, a.ID)
+				c.Answers++
+			}
+			res.ByProject[pid] = c
+		}
+	}
+	return res, eligibleDecs, eligibleDecIDs, eligibleAnsIDs
+}
+
+// PreviewDecisionMessages implements store.DecisionRetentionStore.
+func (s *DecisionRetentionStore) PreviewDecisionMessages(ctx context.Context, messageIDs []string, cutoffByProject map[string]time.Time) (store.DecisionRetentionPurgeResult, error) {
+	res := store.DecisionRetentionPurgeResult{ByProject: map[string]store.DecisionRetentionCounts{}}
+	if len(messageIDs) == 0 || len(cutoffByProject) == 0 {
+		return res, nil
+	}
+	msgUUIDs := parseUniqueMessageUUIDs(messageIDs)
+	if len(msgUUIDs) == 0 {
+		return res, nil
+	}
+	decs, err := s.client.Decision.Query().
+		Where(decision.MessageIDIn(msgUUIDs...)).
+		Order(
+			ent.Asc(decision.FieldKeyNorm),
+			ent.Asc(decision.FieldVersion),
+			ent.Asc(decision.FieldAskerAgentID),
+			ent.Asc(decision.FieldID),
+		).
+		All(ctx)
+	if err != nil {
+		return res, mapError(err)
+	}
+	if len(decs) == 0 {
+		return res, nil
+	}
+	decIDs := make([]uuid.UUID, len(decs))
+	for i, d := range decs {
+		decIDs[i] = d.ID
+	}
+	ans, err := s.client.DecisionAnswer.Query().
+		Where(decisionanswer.DecisionRowIDIn(decIDs...)).
+		All(ctx)
+	if err != nil {
+		return res, mapError(err)
+	}
+	ansByDec := make(map[uuid.UUID][]*ent.DecisionAnswer, len(decs))
+	for _, a := range ans {
+		ansByDec[a.DecisionRowID] = append(ansByDec[a.DecisionRowID], a)
+	}
+	res, _, _, _ = evaluateDecisionRetentionMessages(msgUUIDs, decs, ansByDec, cutoffByProject)
+	return res, nil
+}
+
+// PurgeDecisionMessages implements store.DecisionRetentionStore.
+func (s *DecisionRetentionStore) PurgeDecisionMessages(ctx context.Context, messageIDs []string, cutoffByProject map[string]time.Time) (store.DecisionRetentionPurgeResult, error) {
+	res := store.DecisionRetentionPurgeResult{ByProject: map[string]store.DecisionRetentionCounts{}}
+	if len(messageIDs) == 0 || len(cutoffByProject) == 0 {
+		return res, nil
+	}
+	msgUUIDs := parseUniqueMessageUUIDs(messageIDs)
 	if len(msgUUIDs) == 0 {
 		return res, nil
 	}
@@ -233,10 +356,8 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 	}
 
 	lockedDecIDs := make([]uuid.UUID, len(lockedDecs))
-	byMsg := make(map[uuid.UUID][]*ent.Decision)
 	for i, d := range lockedDecs {
 		lockedDecIDs[i] = d.ID
-		byMsg[d.MessageID] = append(byMsg[d.MessageID], d)
 	}
 
 	// 2. Load all answers for the locked decision rows.
@@ -252,67 +373,7 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 	}
 
 	// 3. Re-check whole-message eligibility on the locked rows.
-	var eligibleDecs []*ent.Decision
-	var eligibleDecIDs []uuid.UUID
-	var eligibleAnsIDs []uuid.UUID
-
-	for _, mid := range msgUUIDs {
-		decs := byMsg[mid]
-		if len(decs) == 0 {
-			continue
-		}
-		eligible := true
-		for _, d := range decs {
-			cutoff, ok := cutoffByProject[d.ProjectID.String()]
-			if !ok || cutoff.IsZero() {
-				eligible = false
-				break
-			}
-			ans := ansByDec[d.ID]
-			// A message with any unindexed decision or answer row is ineligible
-			// this tick so purge never deletes rows that
-			// indexDecisionFacetsAnswersPageTx may hold in an unlocked snapshot
-			// before acquiring FOR UPDATE SKIP LOCKED on their decisions.
-			if !d.FacetIndexed {
-				eligible = false
-				break
-			}
-			for _, a := range ans {
-				if !a.FacetIndexed {
-					eligible = false
-					break
-				}
-			}
-			if !eligible {
-				break
-			}
-			if !decisionRowSettled(d, ans) {
-				eligible = false
-				break
-			}
-			if !decisionRowLastActivity(d, ans).Before(cutoff.UTC()) {
-				eligible = false
-				break
-			}
-		}
-		if !eligible {
-			res.SkippedMessages++
-			continue
-		}
-		res.PurgedMessages++
-		for _, d := range decs {
-			eligibleDecs = append(eligibleDecs, d)
-			eligibleDecIDs = append(eligibleDecIDs, d.ID)
-			pid := d.ProjectID.String()
-			c := res.ByProject[pid]
-			c.Decisions++
-			for _, a := range ansByDec[d.ID] {
-				eligibleAnsIDs = append(eligibleAnsIDs, a.ID)
-				c.Answers++
-			}
-			res.ByProject[pid] = c
-		}
-	}
+	res, eligibleDecs, eligibleDecIDs, eligibleAnsIDs := evaluateDecisionRetentionMessages(msgUUIDs, lockedDecs, ansByDec, cutoffByProject)
 
 	if len(eligibleDecIDs) == 0 {
 		return res, nil
