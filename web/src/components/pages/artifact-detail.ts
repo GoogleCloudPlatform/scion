@@ -2733,21 +2733,17 @@ export class ScionPageArtifactDetail extends LitElement {
         this.reviewNotice = nextNotice;
         this.reviewNoticeVariant = nextVariant;
       }
-      // Fulfilment is server-side in FinalizeVersion; clear/refresh the reviewer
-      // banner from the finalize response immediately before showCurrentVersion()
-      // refetches the artifact without a page reload.
-      if (this.data) {
-        if (finalized.reviewState) {
-          this.data = { ...this.data, reviewState: finalized.reviewState };
-        } else if (this.data.reviewState?.requestedOfMe) {
-          this.data = {
-            ...this.data,
-            reviewState: {
-              ...this.data.reviewState,
-              requestedOfMe: null,
-            },
-          };
-        }
+      // Fulfilment is server-side in FinalizeVersion (which does not return
+      // reviewState); clear the reviewer banner immediately before
+      // showCurrentVersion() refetches the artifact without a page reload.
+      if (this.data?.reviewState?.requestedOfMe) {
+        this.data = {
+          ...this.data,
+          reviewState: {
+            ...this.data.reviewState,
+            requestedOfMe: null,
+          },
+        };
       }
       this.reviewPending = null;
       this.reviewing = false;

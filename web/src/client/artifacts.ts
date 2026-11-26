@@ -257,6 +257,8 @@ export function reviewRequestRefusalText(code?: string): string {
       return 'Request already closed';
     case 'too_many_grants':
       return 'Artifact has reached the maximum number of grants';
+    case 'unavailable':
+      return 'Temporarily unavailable — try again';
     case 'agent_cannot_request_review':
       return 'Only users can request reviews';
     case CODE_USE_REVIEW_REQUESTS:

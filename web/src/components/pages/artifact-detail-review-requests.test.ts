@@ -423,7 +423,6 @@ describe('artifact-detail: review requests panel, withdraw, carry-forward & subm
                 seq: opts.resp.artifact.currentSeq + 1,
                 kind: 'review',
               },
-              reviewState: { requestedOfMe: null },
             };
         return Promise.resolve(jsonResponse(fin));
       }
@@ -720,12 +719,13 @@ describe('artifact-detail: review requests panel, withdraw, carry-forward & subm
           : baseResp,
       onFinalize: () => {
         submitted = true;
+        // Real hub handleFinalize omits reviewState; clearing relies on the
+        // local clear + showCurrentVersion() refetch path.
         return artifactResp({
           canPublish: false,
           canReview: true,
           artifact: { ...baseResp.artifact, currentSeq: 3 },
           version: { ...baseResp.version!, seq: 3, kind: 'review' },
-          reviewState: { requestedOfMe: null },
         });
       },
     });

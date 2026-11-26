@@ -227,7 +227,7 @@ describe('scion-artifact-request-review-dialog', () => {
     expect(events[0].requests).toHaveLength(4);
   });
 
-  it('shows Reminder sent for reminded+notified and Gave Can review for raised access', async () => {
+  it('shows Reminder sent for reminded+notified, Gave Can review for raised access, and friendly unavailable text', async () => {
     const responseBody: CreateReviewRequestsResponse = {
       requests: [
         {
@@ -242,6 +242,12 @@ describe('scion-artifact-request-review-dialog', () => {
           access: 'existing',
           notified: true,
         },
+        {
+          reviewer: 'user:u-dave',
+          outcome: 'refused',
+          code: 'unavailable',
+          notified: false,
+        },
       ],
     };
     fetchMock.mockImplementation((input: string | URL) => {
@@ -252,6 +258,7 @@ describe('scion-artifact-request-review-dialog', () => {
             users: [
               { id: 'u-bob', email: 'bob@example.com', displayName: 'Bob' },
               { id: 'u-carol', email: 'carol@example.com', displayName: 'Carol' },
+              { id: 'u-dave', email: 'dave@example.com', displayName: 'Dave' },
             ],
           })
         );
@@ -266,7 +273,7 @@ describe('scion-artifact-request-review-dialog', () => {
     const searchInput = el.shadowRoot!.querySelector('.reviewer-search') as HTMLElement & {
       value: string;
     };
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       searchInput.value = 'example';
       searchInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
       await new Promise((r) => setTimeout(r, 300));
@@ -279,12 +286,15 @@ describe('scion-artifact-request-review-dialog', () => {
     await settle(el);
 
     const rows = [...el.shadowRoot!.querySelectorAll('.result-row')];
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
     expect(rows[0].textContent).toContain('Requested');
     expect(rows[0].textContent).toContain('Notified');
     expect(rows[0].textContent).toContain('Gave Can review');
     expect(rows[1].textContent).toContain('Reminded');
     expect(rows[1].textContent).toContain('Reminder sent');
+    expect(rows[2].textContent).toContain('Refused');
+    expect(rows[2].textContent).toContain('Temporarily unavailable — try again');
+    expect(rows[2].textContent).toContain('unavailable');
   });
 
   it('ignores bubbled sl-after-hide from nested elements', async () => {
