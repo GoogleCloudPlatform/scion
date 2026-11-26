@@ -1312,3 +1312,93 @@ func TestHandleBrokerInbound_ParentRefWithoutExternalRef(t *testing.T) {
 	srv.mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+func TestHandleAgentMessage_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-strip-conv"),
+		Email:       "p4-strip-conv@example.com",
+		DisplayName: "P4 Strip Conv User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-strip-conv"),
+		Slug:      "p4-strip-conv",
+		Name:      "P4 Strip Conv",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	brokerID := tid("broker-p4-strip-conv")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "p4-strip-conv-broker", Slug: "p4-strip-conv-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: brokerID,
+		BrokerName: "p4-strip-conv-broker", Status: store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-p4-strip-conv"),
+		Slug:            "coder",
+		Name:            "Coder",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseRunning),
+		MessageMode:     store.MessageModeProject,
+		StateVersion:    1,
+		Created:         time.Now(),
+		Updated:         time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// A user caller attempts to spoof structured_message.conversation on
+	// POST /api/v1/agents/{id}/message. The hub must strip it before dispatch.
+	reqBody := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "attempt spoofed conversation",
+			Type:      messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_SPOOFED:999",
+				ParentRef:   "C_SPOOFED",
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Nil(t, calls[0].StructuredMessage.Conversation, "client-supplied Conversation must be stripped on HTTP ingress")
+}

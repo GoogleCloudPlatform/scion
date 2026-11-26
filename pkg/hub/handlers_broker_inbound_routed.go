@@ -141,6 +141,9 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clearInboundClientEvent(req.Message)
+	// Conversation is hub-populated for hub→plugin outbound delivery only;
+	// inbound broker plugins supply top-level Surface/ExternalRef/ParentRef/DisplayName.
+	req.Message.Conversation = nil
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)

@@ -1490,13 +1490,23 @@ func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testi
 	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-1", orig))
 	require.NoError(t, proxy.PublishMessage(ctx, projectID, orig))
 
+	// Defense-in-depth: even if a caller passes a pre-populated/spoofed
+	// Conversation alongside ConversationID, enrichConversation must overwrite
+	// it from the authoritative conversations row.
+	spoofed := *orig
+	spoofed.Conversation = &messages.Conversation{
+		Surface:     "discord",
+		ExternalRef: "spoofed-ref",
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-1", &spoofed))
+
 	// Caller's struct must not be mutated.
 	assert.Nil(t, orig.Conversation)
 
 	capBus.mu.Lock()
 	defer capBus.mu.Unlock()
-	require.Len(t, capBus.published, 2)
-	for i, got := range capBus.published {
+	require.Len(t, capBus.published, 3)
+	for i, got := range capBus.published[:2] {
 		require.NotNil(t, got.Conversation, "publish %d must carry Conversation", i)
 		assert.Equal(t, "slack", got.Conversation.Surface)
 		assert.Equal(t, "C0123ABC:1700000000.000100", got.Conversation.ExternalRef)
@@ -1507,4 +1517,10 @@ func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testi
 		assert.Equal(t, "C0123ABC:1700000000.000100", got.ThreadID)
 		assert.Equal(t, conv.ID, got.ConversationID)
 	}
+	gotSpoofed := capBus.published[2]
+	require.NotNil(t, gotSpoofed.Conversation)
+	assert.Equal(t, "slack", gotSpoofed.Conversation.Surface)
+	assert.Equal(t, "C0123ABC:1700000000.000100", gotSpoofed.Conversation.ExternalRef)
+	assert.Equal(t, "C0123ABC", gotSpoofed.Conversation.ParentRef)
+	assert.Equal(t, "#engineering", gotSpoofed.Conversation.DisplayName)
 }

@@ -2303,6 +2303,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Determine the message content and structured message to forward
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
+		// Conversation is hub-populated for hub→plugin outbound delivery only;
+		// strip any client-supplied value so callers cannot spoof external
+		// surface routing (external chat references use broker-authenticated
+		// top-level Surface/ExternalRef/ParentRef above).
+		structuredMsg.Conversation = nil
 		plainMessage = req.StructuredMessage.Msg
 		if req.Plain {
 			structuredMsg.Plain = true
@@ -4363,6 +4368,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.StructuredMessage.Channel), nil)
 		return
 	}
+	// Strip client-supplied Conversation (hub-populated for outbound plugin delivery only).
+	req.StructuredMessage.Conversation = nil
 	// A broadcast carries text: attachment ids are refused above, and the
 	// messages store accepts an empty body (attachment-only chat messages,
 	// ptone/scion#6146), so an empty one is refused here, before fan-out.

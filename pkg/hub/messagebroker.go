@@ -283,11 +283,12 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 }
 
 // enrichConversation populates msg.Conversation from the conversations table
-// when msg.ConversationID is set and msg.Conversation is nil. It returns a
-// shallow copy so callers' structs are never mutated, and preserves all legacy
-// fields (Channel, ThreadID, etc.) untouched for older plugin binaries.
+// when msg.ConversationID is set. It always overwrites any pre-existing
+// Conversation from the authoritative store row, returns a shallow copy so
+// callers' structs are never mutated, and preserves all legacy fields
+// (Channel, ThreadID, etc.) untouched for older plugin binaries.
 func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
-	if msg == nil || msg.Conversation != nil || msg.ConversationID == "" || p.store == nil {
+	if msg == nil || msg.ConversationID == "" || p.store == nil {
 		return msg
 	}
 	conv, err := p.store.GetConversation(ctx, msg.ConversationID)

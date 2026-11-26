@@ -124,6 +124,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// processing, render, or dispatch.
 	req.Message.Metadata = messaging.StripReservedMetadata(req.Message.Metadata)
 	clearInboundClientEvent(req.Message)
+	// Conversation is hub-populated for hub→plugin outbound delivery only;
+	// inbound broker plugins supply top-level Surface/ExternalRef/ParentRef/DisplayName.
+	req.Message.Conversation = nil
 
 	// Parse topic to extract project ID and agent slug
 	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
