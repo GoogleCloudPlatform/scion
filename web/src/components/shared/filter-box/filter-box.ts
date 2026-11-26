@@ -61,6 +61,10 @@ export class ScionFilterBox extends LitElement {
   @property({ attribute: false })
   valueSuggestions?: ValueSuggestionProvider;
 
+  /** Optional non-blocking warning supplied by the host view (e.g. Made-only keys on Pending tab). */
+  @property({ type: String })
+  externalWarning = '';
+
   @state()
   private suggestions: Suggestion[] = [];
 
@@ -314,6 +318,19 @@ export class ScionFilterBox extends LitElement {
       font-family: var(--scion-font-mono);
       font-size: 0.6875rem;
       margin-top: 0.125rem;
+    }
+
+    @media (max-width: 760px) {
+      input {
+        font-size: 1rem;
+      }
+    }
+
+    @media (pointer: coarse) {
+      .option {
+        min-height: 44px;
+        align-items: center;
+      }
     }
   `;
 
@@ -675,7 +692,11 @@ export class ScionFilterBox extends LitElement {
         : nothing}
 
       <div
-        class="feedback ${shownError ? 'error' : this.warning ? 'warning' : ''}"
+        class="feedback ${shownError
+          ? 'error'
+          : this.warning || this.externalWarning
+            ? 'warning'
+            : ''}"
         aria-live="polite"
       >
         ${shownError
@@ -684,7 +705,9 @@ export class ScionFilterBox extends LitElement {
               )}`
           : this.warning
             ? this.warning.message
-            : nothing}
+            : this.externalWarning
+              ? this.externalWarning
+              : nothing}
       </div>
     `;
   }

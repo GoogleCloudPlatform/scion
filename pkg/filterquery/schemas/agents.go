@@ -188,6 +188,7 @@ func All() []filterquery.Schema {
 		ProjectAgents,
 		Artifacts,
 		ProjectArtifacts,
+		Decisions,
 		Files,
 		Graph,
 	}

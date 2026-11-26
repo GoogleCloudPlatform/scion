@@ -267,6 +267,47 @@
     "textHelp": "Matches artifact title or key"
   },
   {
+    "view": "decisions",
+    "keys": [
+      {
+        "name": "agent",
+        "help": "Asking agent name or ID",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "conversation",
+        "help": "Conversation label or chat key",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "by",
+        "help": "me, email, ID, or display name · Made tab only",
+        "kind": "ref",
+        "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "provenance",
+        "help": "How it was answered · Made tab only",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "direct",
+          "interpreted",
+          "confirmed",
+          "overridden",
+          "dismissed"
+        ],
+        "multiValued": false
+      }
+    ],
+    "textHelp": "Matches question, answer, conversation label, or agent name"
+  },
+  {
     "view": "files",
     "keys": [
       {

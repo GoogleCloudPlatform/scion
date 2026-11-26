@@ -341,6 +341,29 @@
       "canonical": "-\"phase:running\""
     },
     {
+      "name": "decisions view: OR, negation, quoted conversation, display name, provenance, and text",
+      "input": "agent:a,b -conversation:\"DM with deploy\" by:\"Ada Lovelace\" provenance:direct,confirmed rollout",
+      "knownKeys": ["agent", "conversation", "by", "provenance"],
+      "expect": {
+        "mode": "structured",
+        "text": "rollout",
+        "terms": [
+          { "key": "agent", "values": ["a", "b"], "negate": false, "offset": 0, "length": 9 },
+          { "key": "conversation", "values": ["DM with deploy"], "negate": true, "offset": 10, "length": 30 },
+          { "key": "by", "values": ["Ada Lovelace"], "negate": false, "offset": 41, "length": 17 },
+          { "key": "provenance", "values": ["direct", "confirmed"], "negate": false, "offset": 59, "length": 27 }
+        ]
+      },
+      "canonical": "agent:a,b by:\"ada lovelace\" -conversation:\"dm with deploy\" provenance:confirmed,direct rollout"
+    },
+    {
+      "name": "decisions view: unknown project key stays text in project view",
+      "input": "project:demo",
+      "knownKeys": ["agent", "conversation", "by", "provenance"],
+      "expect": { "mode": "text", "text": "project:demo" },
+      "canonical": "project:demo"
+    },
+    {
       "name": "limit: input exceeds 512 ASCII bytes",
       "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "knownKeys": ["phase", "label"],

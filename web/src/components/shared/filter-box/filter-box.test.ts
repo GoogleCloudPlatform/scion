@@ -241,4 +241,59 @@ describe('<scion-filter-box>', () => {
     vi.advanceTimersByTime(500);
     expect(commits).toHaveLength(0);
   });
+
+  it('renders {value, help} object suggestions and preserves duplicate labels with distinct hints', async () => {
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = (key) => {
+      if (key === 'agent') {
+        return [
+          { value: 'deploy-frontend' },
+          { value: 'deploy-frontend', help: 'deleted · 3f9c' },
+          'db-ops',
+        ];
+      }
+      if (key === 'conversation') {
+        return [{ value: 'DM with deploy', help: 'Direct message' }];
+      }
+      return [];
+    };
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const options = Array.from(el.shadowRoot?.querySelectorAll('[role="option"]') ?? []);
+    expect(options).toHaveLength(2);
+    expect(options[0].querySelector('.option-label')?.textContent).toBe('deploy-frontend');
+    expect(options[0].querySelector('.option-help')).toBeNull();
+    expect(options[1].querySelector('.option-label')?.textContent).toBe('deploy-frontend');
+    expect(options[1].querySelector('.option-help')?.textContent).toBe('deleted · 3f9c');
+
+    // Values with spaces are quoted when inserted.
+    input.value = 'conversation:dm';
+    input.setSelectionRange(15, 15);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    const convOpt = el.shadowRoot?.querySelector('[role="option"]') as HTMLElement | null;
+    expect(convOpt?.querySelector('.option-help')?.textContent).toBe('Direct message');
+    convOpt?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+    expect(el.value).toBe('conversation:"DM with deploy"');
+  });
+
+  it('displays externalWarning as a non-blocking warning when no error or schema warning exists', async () => {
+    const el = await mount('by:me');
+    el.view = 'decisions';
+    el.externalWarning = 'by: applies to the Made tab only';
+    await el.updateComplete;
+
+    const feedback = el.shadowRoot?.querySelector('.feedback');
+    expect(feedback?.classList.contains('warning')).toBe(true);
+    expect(feedback?.textContent).toContain('by: applies to the Made tab only');
+  });
 });

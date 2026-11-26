@@ -183,9 +183,11 @@ const (
 // decisions or answers, carrying a stored display-name snapshot so deleted
 // actors remain readable. ProjectID is populated for asking agents (an agent
 // belongs to one project) and empty for answering users (users span projects).
+// Email is populated for answering users when recorded on their answers.
 type ProjectDecisionActor struct {
 	ID        string
 	Name      string
+	Email     string
 	ProjectID string
 }
 
@@ -203,20 +205,34 @@ type ProjectDecisionPrompt struct {
 	Decisions              []*Decision
 }
 
+// ProjectDecisionExcludeQuery is one negated free-text clause for
+// ListDecisionAnswers (e.g. `-foo` in structured filter query mode).
+type ProjectDecisionExcludeQuery struct {
+	Text     string
+	ChatKeys []string
+}
+
 // ProjectDecisionAnswerFilter filters ListDecisionAnswers (tab=made).
 type ProjectDecisionAnswerFilter struct {
-	AgentID    string     // asker_agent_id UUID
-	UserID     string     // answered_by_user_id
-	Provenance string     // ProjectDecisionProvenance* or "" for all
-	From       *time.Time // inclusive lower bound on decision_answers.created_at
-	To         *time.Time // inclusive upper bound on decision_answers.created_at
+	AgentID            string     // asker_agent_id UUID (ANDed with AgentIDs when both are set)
+	AgentIDs           []string   // asker_agent_id IN (...)
+	ExcludeAgentIDs    []string   // asker_agent_id NOT IN (...)
+	UserID             string     // answered_by_user_id (ANDed with UserIDs when both are set)
+	UserIDs            []string   // answered_by_user_id IN (...)
+	ExcludeUserIDs     []string   // answered_by_user_id NOT IN (...) (NULL rows preserved)
+	Provenance         string     // ProjectDecisionProvenance* or "" for all
+	Provenances        []string   // OR of ProjectDecisionProvenance* values
+	ExcludeProvenances []string   // AND of NOT ProjectDecisionProvenance* values
+	From               *time.Time // inclusive lower bound on decision_answers.created_at
+	To                 *time.Time // inclusive upper bound on decision_answers.created_at
 	// Query, when not empty, keeps only answers whose question text,
 	// choice label or decision key, or whose decision's asker agent name,
 	// contains it case-insensitively (matched literally: % and _ are not
 	// wildcards), or whose decision's chat_key is in QueryChatKeys (the
 	// readable conversations whose label matched Query in memory).
-	Query         string
-	QueryChatKeys []string
+	Query          string
+	QueryChatKeys  []string
+	ExcludeQueries []ProjectDecisionExcludeQuery
 }
 
 // ProjectDecisionAnswerEntry is one Made-tab decision_answers entry enriched
