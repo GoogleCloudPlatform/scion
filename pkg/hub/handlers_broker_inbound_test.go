@@ -1080,7 +1080,7 @@ func TestHandleBrokerInbound_SurfaceExternalRefWithoutLegacyFields(t *testing.T)
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	dispatcher := &recordingBrokerInboundDispatcher{}
+	dispatcher := &recordingDispatcher{}
 	srv.SetDispatcher(dispatcher)
 
 	user := &store.User{
@@ -1173,7 +1173,7 @@ func TestHandleBrokerInbound_LegacyChannelThreadIDOnly(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	dispatcher := &recordingBrokerInboundDispatcher{}
+	dispatcher := &recordingDispatcher{}
 	srv.SetDispatcher(dispatcher)
 
 	user := &store.User{

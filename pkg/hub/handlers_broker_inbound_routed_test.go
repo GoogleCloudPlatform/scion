@@ -853,7 +853,7 @@ func TestHandleBrokerInboundRouted_SurfaceExternalRefWithoutLegacyFields(t *test
 	assert.Equal(t, "C0123ABC", conv.ParentRef)
 	assert.Equal(t, "#eng-routed", conv.DisplayName)
 
-	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.alpha.ID}, store.ListOptions{Limit: 10})
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, msgs.Items, 1)
 	assert.Equal(t, conv.ID, msgs.Items[0].ConversationID)
@@ -880,7 +880,7 @@ func TestHandleBrokerInboundRouted_LegacyChannelThreadIDOnly(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.alpha.ID}, store.ListOptions{Limit: 10})
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, msgs.Items, 1)
 	assert.NotEmpty(t, msgs.Items[0].ConversationID)
