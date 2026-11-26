@@ -54,12 +54,14 @@ import {
 } from '../shared/decisions-page-controller.js';
 import {
   decisionsPageSharedStyles,
+  madeRetentionNoticeText,
   renderBulkDismissDialog,
   renderDateRangeError,
   renderDecisionsErrorState,
   renderDecisionsLoadingState,
   renderLoadMoreFooter,
   renderMadeEmptyState,
+  renderMadeRetentionNotice,
   renderMadeTableAndMobileList,
   renderNoMatchState,
   renderPendingEmptyState,
@@ -344,6 +346,11 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private renderMadePanel(): TemplateResult {
     const isFiltered = this.ctrl.isMadeFiltered;
+    const retentionNotice = madeRetentionNoticeText({
+      scope: 'project',
+      flagEnabled: this.ctrl.decisionRetentionEnabled,
+      projectRetention: this.ctrl.projectRetention,
+    });
 
     return html`
       ${this.ctrl.hasDateRangeError ? renderDateRangeError() : nothing}
@@ -358,25 +365,28 @@ export class ScionPageProjectDecisions extends LitElement {
                 retryAttr: 'data-retry-made',
                 onRetry: () => void this.ctrl.loadMadePage({ mode: 'reset' }),
               })
-            : this.ctrl.madeEntries.length === 0
-              ? isFiltered
-                ? renderNoMatchState('made', this.ctrl.clearFilters)
-                : renderMadeEmptyState('project')
-              : html`
-                  ${renderMadeTableAndMobileList(this.ctrl.madeEntries, {
-                    currentUserId: this.ctrl.currentUserId,
-                    showProjectColumn: false,
-                    defaultProjectId: this.projectId,
-                    disclosure: this.ctrl.madeDisclosure,
-                  })}
-                  ${renderLoadMoreFooter({
-                    tab: 'made',
-                    nextCursor: this.ctrl.madeNextCursor,
-                    loadingMore: this.ctrl.madeLoadingMore,
-                    showEndFilteredNotice: isFiltered,
-                    onLoadMore: () => void this.ctrl.loadMadePage({ mode: 'append' }),
-                  })}
-                `}
+            : html`
+                ${renderMadeRetentionNotice(retentionNotice)}
+                ${this.ctrl.madeEntries.length === 0
+                  ? isFiltered
+                    ? renderNoMatchState('made', this.ctrl.clearFilters)
+                    : renderMadeEmptyState('project')
+                  : html`
+                      ${renderMadeTableAndMobileList(this.ctrl.madeEntries, {
+                        currentUserId: this.ctrl.currentUserId,
+                        showProjectColumn: false,
+                        defaultProjectId: this.projectId,
+                        disclosure: this.ctrl.madeDisclosure,
+                      })}
+                      ${renderLoadMoreFooter({
+                        tab: 'made',
+                        nextCursor: this.ctrl.madeNextCursor,
+                        loadingMore: this.ctrl.madeLoadingMore,
+                        showEndFilteredNotice: isFiltered,
+                        onLoadMore: () => void this.ctrl.loadMadePage({ mode: 'append' }),
+                      })}
+                    `}
+              `}
     `;
   }
 }

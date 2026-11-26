@@ -174,7 +174,12 @@ import {
   type ProfileSharedDecisionsFilter,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
+import {
+  DECISION_RETENTION_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  decisionsEnabled,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { DISPLAY_TIMEZONE_CHANGED_EVENT } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { deepActiveElement } from './deep-active-element.js';
@@ -248,6 +253,7 @@ export class DecisionsPageController implements ReactiveController {
   private readonly adapter: DecisionsPageAdapter;
 
   enabled = false;
+  decisionRetentionEnabled = false;
   hubNotFound = false;
   currentUserId = '';
   activeTab: 'pending' | 'made' = 'pending';
@@ -277,6 +283,11 @@ export class DecisionsPageController implements ReactiveController {
   madeNextCursor = '';
   /** Answer IDs of Made entries whose detail panel is open (ptone/scion#8443). */
   madeExpanded: ReadonlySet<string> = new Set<string>();
+
+  /** Effective settled-decision retention policy for project scope (design-8984 §3.5). */
+  projectRetention: { active: boolean; days: number } | null = null;
+  /** Per-project effective settled-decision retention policies for profile scope. */
+  profileRetention: Record<string, { active: boolean; days: number }> | null = null;
 
   facetsAgents: ProfileDecisionActorView[] = [];
   facetsAnswerers: ProfileDecisionActorView[] = [];
@@ -369,7 +380,13 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnFlagsChanged = (): void => {
     const next = decisionsEnabled();
+    const nextRetention = isFeatureEnabled(DECISION_RETENTION_FLAG);
+    const retentionChanged = nextRetention !== this.decisionRetentionEnabled;
+    this.decisionRetentionEnabled = nextRetention;
     if (next === this.enabled) {
+      if (retentionChanged) {
+        this.notify();
+      }
       return;
     }
     this.enabled = next;
@@ -448,6 +465,7 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   hostConnected(): void {
+    this.decisionRetentionEnabled = isFeatureEnabled(DECISION_RETENTION_FLAG);
     this.extractRouteState();
     this.enabled = decisionsEnabled();
     this.notify();
@@ -914,6 +932,9 @@ export class DecisionsPageController implements ReactiveController {
       this.filteredCounts = res.filteredCounts ?? null;
       if ('truncatedProjects' in res) {
         this.truncatedProjects = res.truncatedProjects;
+        this.profileRetention = res.retention ?? null;
+      } else {
+        this.projectRetention = res.retention ?? null;
       }
       this.pendingSearchTimeout = false;
       this.recordKnownProjectsFromPrompts(res.prompts);
@@ -1122,6 +1143,9 @@ export class DecisionsPageController implements ReactiveController {
       this.updateCounts(res.counts);
       if ('truncatedProjects' in res) {
         this.truncatedProjects = res.truncatedProjects;
+        this.profileRetention = res.retention ?? null;
+      } else {
+        this.projectRetention = res.retention ?? null;
       }
       this.madeLoaded = true;
       this.madeError = null;

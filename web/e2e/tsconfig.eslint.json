@@ -18,6 +18,7 @@
     "./artifacts-review/*.ts",
     "./chat/*.ts",
     "./chat-decisions/*.ts",
+    "./decision-retention/*.ts",
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",
     "./chat-palette/*.ts",

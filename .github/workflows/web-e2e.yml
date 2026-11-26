@@ -194,6 +194,7 @@ jobs:
           - test-identity-session
           - page-policy
           - chat-decisions
+          - decision-retention
           - inbox
           - port-proxy
           - iap-driver

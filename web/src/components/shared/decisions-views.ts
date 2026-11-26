@@ -94,6 +94,24 @@ export const decisionsPageSharedStyles: CSSResult = css`
     padding: 0.75rem 0 0;
   }
 
+  .retention-notice {
+    display: flex;
+    gap: 0.45rem;
+    align-items: flex-start;
+    font-size: 0.8rem;
+    color: var(--scion-text-secondary, #475569);
+    background: var(--scion-bg-subtle, #f8fafc);
+    border-radius: var(--scion-radius, 0.5rem);
+    padding: 0.45rem 0.65rem;
+    margin-bottom: 0.6rem;
+  }
+
+  .retention-notice sl-icon {
+    flex: none;
+    margin-top: 0.1rem;
+    color: var(--scion-text-muted, #64748b);
+  }
+
   .loading-state {
     display: flex;
     flex-direction: column;
@@ -1807,5 +1825,68 @@ export function renderBulkDismissDialog(opts: {
         </sl-button>
       </div>
     </sl-dialog>
+  `;
+}
+
+export interface MadeRetentionNoticeOptions {
+  scope: 'project' | 'profile';
+  flagEnabled: boolean;
+  projectRetention?: { active: boolean; days: number } | null | undefined;
+  profileRetention?: Record<string, { active: boolean; days: number }> | null | undefined;
+  /** When profile scope is filtered to one project (ID, slug, or name). */
+  filteredProject?: string | undefined;
+  /** Known project refs used to map a slug/name filter to its project ID. */
+  projects?: readonly ProjectDecisionProjectRef[] | undefined;
+}
+
+/**
+ * Computes the Made tab retention notice copy from the ptone-approved mocks
+ * (ptone/scion#8984), or null when the notice should be hidden.
+ */
+export function madeRetentionNoticeText(opts: MadeRetentionNoticeOptions): string | null {
+  if (!opts.flagEnabled) return null;
+
+  if (opts.scope === 'project') {
+    const info = opts.projectRetention;
+    if (info?.active && info.days > 0) {
+      return `Settled decisions in this project are deleted ${info.days} days after their last activity.`;
+    }
+    return null;
+  }
+
+  const map = opts.profileRetention;
+  if (!map) return null;
+
+  const filterRaw = (opts.filteredProject ?? '').trim();
+  if (filterRaw) {
+    let resolvedId = filterRaw;
+    if (!Object.prototype.hasOwnProperty.call(map, resolvedId) && opts.projects) {
+      const lower = filterRaw.toLowerCase();
+      const match = opts.projects.find(
+        (p) =>
+          p.id === filterRaw || p.slug?.toLowerCase() === lower || p.name?.toLowerCase() === lower
+      );
+      if (match) resolvedId = match.id;
+    }
+    const info = map[resolvedId];
+    if (info?.active && info.days > 0) {
+      return `Settled decisions in this project are deleted ${info.days} days after their last activity.`;
+    }
+    return null;
+  }
+
+  const hasAnyActive = Object.values(map).some((info) => info?.active && info.days > 0);
+  if (!hasAnyActive) return null;
+  return 'Some projects delete settled decisions after a retention period, so older decisions may be missing.';
+}
+
+/** Renders the muted one-line Made retention notice above the list, or nothing when inactive. */
+export function renderMadeRetentionNotice(text: string | null): TemplateResult | typeof nothing {
+  if (!text) return nothing;
+  return html`
+    <div class="retention-notice" data-retention-notice role="note">
+      <sl-icon name="clock-history" aria-hidden="true"></sl-icon>
+      <span>${text}</span>
+    </div>
   `;
 }

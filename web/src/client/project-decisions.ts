@@ -164,6 +164,12 @@ export interface ProjectDecisionLogEntryView {
   project?: ProjectDecisionProjectRef;
 }
 
+/** Effective settled-decision retention policy for one project (design-8984 §3.5). */
+export interface DecisionRetentionInfo {
+  active: boolean;
+  days: number;
+}
+
 /** Response of `GET /api/v1/projects/{id}/decisions?tab=pending`. */
 export interface ProjectPendingDecisionsResponse {
   counts: ProjectDecisionCounts;
@@ -172,6 +178,7 @@ export interface ProjectPendingDecisionsResponse {
   agents: ProjectDecisionActorView[];
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
+  retention?: DecisionRetentionInfo | undefined;
   nextCursor?: string;
 }
 
@@ -182,6 +189,7 @@ export interface ProjectMadeDecisionsResponse {
   agents: ProjectDecisionActorView[];
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
+  retention?: DecisionRetentionInfo | undefined;
   nextCursor?: string;
 }
 
@@ -510,6 +518,15 @@ async function throwDecisionsApiError(res: Response): Promise<never> {
   throw new DecisionsApiError(info.message, res.status, info.code);
 }
 
+export function parseDecisionRetentionInfo(raw: unknown): DecisionRetentionInfo | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const { active, days } = raw as { active?: unknown; days?: unknown };
+  if (typeof active !== 'boolean' || typeof days !== 'number' || !Number.isFinite(days)) {
+    return undefined;
+  }
+  return { active, days };
+}
+
 /** Fetches `GET /api/v1/projects/{id}/decisions?tab=pending`. */
 export async function fetchProjectPendingDecisions(
   projectId: string,
@@ -550,6 +567,9 @@ export async function fetchProjectPendingDecisions(
     agents: Array.isArray(data?.agents) ? data.agents : [],
     answerers: Array.isArray(data?.answerers) ? data.answerers : [],
     ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
+    ...(parseDecisionRetentionInfo(data?.retention)
+      ? { retention: parseDecisionRetentionInfo(data?.retention) }
+      : {}),
     ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
   };
 }
@@ -586,6 +606,9 @@ export async function fetchProjectMadeDecisions(
     agents: Array.isArray(data?.agents) ? data.agents : [],
     answerers: Array.isArray(data?.answerers) ? data.answerers : [],
     ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
+    ...(parseDecisionRetentionInfo(data?.retention)
+      ? { retention: parseDecisionRetentionInfo(data?.retention) }
+      : {}),
     ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
   };
 }

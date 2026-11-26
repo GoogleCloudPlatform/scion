@@ -27,6 +27,8 @@ import {
   isValidDecisionCalendarDate,
   normalizeDecisionsFilterQuery,
   parseDecisionsUrlState,
+  parseDecisionRetentionInfo,
+  type DecisionRetentionInfo,
   type DecisionsUrlState,
   type MadeDecisionsFilter,
   type MadeDecisionsProvenanceFilter,
@@ -97,6 +99,7 @@ export interface ProfilePendingDecisionsResponse {
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
   truncatedProjects: boolean;
+  retention?: Record<string, DecisionRetentionInfo> | undefined;
   nextCursor?: string;
 }
 
@@ -110,6 +113,7 @@ export interface ProfileMadeRecentDecisionsResponse {
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
   truncatedProjects: boolean;
+  retention?: Record<string, DecisionRetentionInfo> | undefined;
   nextCursor?: string;
 }
 
@@ -123,6 +127,7 @@ export interface ProfileMadeByProjectDecisionsResponse {
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
   truncatedProjects: boolean;
+  retention?: Record<string, DecisionRetentionInfo> | undefined;
 }
 
 export type ProfileMadeDecisionsResponse =
@@ -458,6 +463,18 @@ function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
   );
 }
 
+function parseProfileRetentionMap(raw: unknown): Record<string, DecisionRetentionInfo> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  let out: Record<string, DecisionRetentionInfo> | undefined;
+  for (const [projectId, value] of Object.entries(raw as Record<string, unknown>)) {
+    const info = parseDecisionRetentionInfo(value);
+    if (!info) continue;
+    if (!out) out = {};
+    out[projectId] = info;
+  }
+  return out;
+}
+
 /** Fetches `GET /api/v1/users/me/decisions?tab=pending&sort=...`. */
 export async function fetchProfilePendingDecisions(
   options: {
@@ -502,6 +519,9 @@ export async function fetchProfilePendingDecisions(
       ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
       projects: Array.isArray(data?.projects) ? data.projects : [],
       truncatedProjects: Boolean(data?.truncatedProjects),
+      ...(parseProfileRetentionMap(data?.retention)
+        ? { retention: parseProfileRetentionMap(data?.retention) }
+        : {}),
       ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
     };
   });
@@ -551,6 +571,9 @@ export async function fetchProfileMadeDecisions(
         ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
         projects: Array.isArray(data?.projects) ? data.projects : [],
         truncatedProjects: Boolean(data?.truncatedProjects),
+        ...(parseProfileRetentionMap(data?.retention)
+          ? { retention: parseProfileRetentionMap(data?.retention) }
+          : {}),
       };
     }
 
@@ -567,6 +590,9 @@ export async function fetchProfileMadeDecisions(
       ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
       projects: Array.isArray(data?.projects) ? data.projects : [],
       truncatedProjects: Boolean(data?.truncatedProjects),
+      ...(parseProfileRetentionMap(data?.retention)
+        ? { retention: parseProfileRetentionMap(data?.retention) }
+        : {}),
       ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
     };
   });

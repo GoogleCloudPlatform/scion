@@ -58,6 +58,7 @@ import {
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
 import './admin-chat-retention.js';
+import './admin-decision-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import {
   issuesAt,
@@ -5552,6 +5553,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
       <scion-admin-chat-retention></scion-admin-chat-retention>
+      <scion-admin-decision-retention></scion-admin-decision-retention>
     `;
   }
 
