@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -119,10 +120,35 @@ func serveBackendProcess(t *testing.T, address, replicaID string) {
 
 func serveHTTPProcess(t *testing.T, address string, handler http.Handler) {
 	t.Helper()
-	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: time.Second}
+	server := &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	listener := inheritedHelperListener(t, address)
+	signalHelperReady(t)
 	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		t.Fatal(err)
+	}
+}
+
+func signalHelperReady(t *testing.T) {
+	t.Helper()
+	rawFD := os.Getenv(helperReadyFDEnv)
+	if rawFD == "" {
+		return
+	}
+	fd, err := strconv.Atoi(rawFD)
+	if err != nil || fd < 3 {
+		t.Fatalf("invalid readiness pipe fd %q", rawFD)
+	}
+	file := os.NewFile(uintptr(fd), "integration-helper-ready")
+	if file == nil {
+		t.Fatalf("open readiness pipe fd %d", fd)
+	}
+	_, writeErr := io.WriteString(file, helperReadySignal)
+	closeErr := file.Close()
+	if writeErr != nil {
+		t.Fatalf("write helper readiness signal: %v", writeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close helper readiness pipe: %v", closeErr)
 	}
 }
 

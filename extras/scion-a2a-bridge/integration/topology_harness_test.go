@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -32,6 +33,9 @@ const (
 	helperAddressEnv    = "SCION_INTEGRATION_HELPER_ADDRESS"
 	helperReplicaIDEnv  = "SCION_INTEGRATION_HELPER_REPLICA_ID"
 	helperListenerFDEnv = "SCION_INTEGRATION_HELPER_LISTENER_FD"
+	helperReadyFDEnv    = "SCION_INTEGRATION_HELPER_READY_FD"
+	helperReadySignal   = "ready\n"
+	helperReadyTimeout  = 15 * time.Second
 )
 
 type processSpec struct {
@@ -91,13 +95,21 @@ func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 		tb.Fatalf("inherit listener for %s: %v", spec.Name, err)
 	}
 
+	readyRead, readyWrite, err := os.Pipe()
+	if err != nil {
+		_ = listenerFile.Close()
+		tb.Fatalf("create readiness pipe for %s: %v", spec.Name, err)
+	}
+	defer func() { _ = readyRead.Close() }()
+
 	cmd := exec.CommandContext(t.ctx, os.Args[0], "-test.run=^TestHarnessHelperProcess$", "-test.v")
-	cmd.ExtraFiles = []*os.File{listenerFile}
+	cmd.ExtraFiles = []*os.File{listenerFile, readyWrite}
 	cmd.Env = append(os.Environ(),
 		helperModeEnv+"="+spec.Mode,
 		helperAddressEnv+"=127.0.0.1:"+strconv.Itoa(port),
 		helperReplicaIDEnv+"="+spec.ReplicaID,
 		helperListenerFDEnv+"=3",
+		helperReadyFDEnv+"=4",
 	)
 	for key, value := range spec.Env {
 		cmd.Env = append(cmd.Env, key+"="+value)
@@ -106,17 +118,22 @@ func (t *processTopology) start(tb testing.TB, spec processSpec) *testProcess {
 	cmd.Stderr = t.logs
 	if err := cmd.Start(); err != nil {
 		_ = listenerFile.Close()
+		_ = readyWrite.Close()
 		tb.Fatalf("start %s: %v", spec.Name, err)
 	}
 	if err := listenerFile.Close(); err != nil {
+		_ = readyWrite.Close()
 		tb.Fatalf("close inherited-listener copy for %s: %v", spec.Name, err)
+	}
+	if err := readyWrite.Close(); err != nil {
+		tb.Fatalf("close parent readiness pipe write end for %s: %v", spec.Name, err)
 	}
 	if err := t.allocator.release(port); err != nil {
 		tb.Fatalf("release parent listener for %s: %v", spec.Name, err)
 	}
 	process := &testProcess{Name: spec.Name, PID: cmd.Process.Pid, Port: port, cmd: cmd}
 	t.processes = append(t.processes, process)
-	if err := waitForTCP(t.ctx, fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second); err != nil {
+	if err := waitForHelperReady(t.ctx, readyRead, helperReadyTimeout); err != nil {
 		tb.Fatalf("wait for %s readiness (PID %d): %v\nlogs:\n%s", spec.Name, process.PID, err, t.logs.String())
 	}
 	process.Ready = true
@@ -158,21 +175,39 @@ func (t *processTopology) stop(tb testing.TB) {
 	})
 }
 
-func waitForTCP(ctx context.Context, address string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	dialer := net.Dialer{Timeout: 50 * time.Millisecond}
-	for time.Now().Before(deadline) {
-		connection, err := dialer.DialContext(ctx, "tcp", address)
-		if err == nil {
-			return connection.Close()
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
+func waitForHelperReady(ctx context.Context, readyPipe *os.File, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return fmt.Errorf("timed out waiting for %s", address)
+	deadline := time.Now().Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := readyPipe.SetReadDeadline(deadline); err != nil {
+		return fmt.Errorf("set readiness deadline: %w", err)
+	}
+	stopCancel := context.AfterFunc(ctx, func() {
+		_ = readyPipe.SetReadDeadline(time.Now())
+	})
+	defer stopCancel()
+
+	var buf [len(helperReadySignal)]byte
+	if _, err := io.ReadFull(readyPipe, buf[:]); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("timed out after %s waiting for helper readiness", timeout)
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("helper exited before signaling readiness: %w", err)
+		}
+		return fmt.Errorf("read helper readiness signal: %w", err)
+	}
+	if string(buf[:]) != helperReadySignal {
+		return fmt.Errorf("unexpected helper readiness signal %q", string(buf[:]))
+	}
+	return nil
 }
 
 type loopbackPortAllocator struct {
