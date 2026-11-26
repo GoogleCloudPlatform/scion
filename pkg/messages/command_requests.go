@@ -369,8 +369,9 @@ type CommandRequestExecContainerView struct {
 	ProjectID      string `json:"projectId,omitempty"`
 	ProjectName    string `json:"projectName,omitempty"`
 	HomePersistent *bool  `json:"homePersistent,omitempty"`
-	// CanWake reports whether this hub supports waking a suspended execution
-	// container on approval. Always false until P2 (wake-on-approve) lands.
+	// CanWake reports whether the approver's suspended execution container
+	// can be woken on approval (true only when suspended, non-managed runtime,
+	// and the approver holds agent.lifecycle permission).
 	CanWake bool   `json:"canWake"`
 	Reason  string `json:"reason,omitempty"`
 }

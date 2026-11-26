@@ -915,6 +915,93 @@ func (c *CompositeStore) ListExpiredCommandRuns(ctx context.Context, now time.Ti
 	return out, nil
 }
 
+// ClaimCommandRunsForPoll implements store.CommandRequestStore.
+func (c *CompositeStore) ClaimCommandRunsForPoll(ctx context.Context, now time.Time, claimTTL time.Duration, limit int, excludeRunIDs []string) ([]*store.CommandRun, error) {
+	nowUTC := now.UTC().Truncate(time.Microsecond)
+	if nowUTC.IsZero() {
+		nowUTC = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	cutoff := nowUTC
+	if claimTTL > 0 {
+		cutoff = nowUTC.Add(-claimTTL)
+	}
+	excludeSet := make(map[uuid.UUID]struct{}, len(excludeRunIDs))
+	var excludeUIDs []uuid.UUID
+	for _, id := range excludeRunIDs {
+		if uid, err := uuid.Parse(id); err == nil {
+			if _, dup := excludeSet[uid]; !dup {
+				excludeSet[uid] = struct{}{}
+				excludeUIDs = append(excludeUIDs, uid)
+			}
+		}
+	}
+	lim := clampLimit(limit)
+
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) ([]*store.CommandRun, error) {
+		preds := []predicate.CommandRun{
+			commandrun.FinishedAtIsNil(),
+			commandrun.StatusIn(commandrun.StatusDispatching, commandrun.StatusRunning),
+			commandrun.LeaseUntilGTE(nowUTC),
+			commandrun.Or(
+				commandrun.PollClaimedAtIsNil(),
+				commandrun.PollClaimedAtLTE(cutoff),
+			),
+		}
+		if len(excludeUIDs) > 0 {
+			preds = append(preds, commandrun.IDNotIn(excludeUIDs...))
+		}
+		q := tx.client.CommandRun.Query().
+			Where(preds...).
+			Order(
+				commandrun.ByPollClaimedAt(sql.OrderAsc(), sql.OrderNullsFirst()),
+				commandrun.ByCreatedAt(sql.OrderAsc()),
+				commandrun.ByID(sql.OrderAsc()),
+			).
+			Limit(lim)
+		if tx.isPostgres() {
+			q = q.ForUpdate(sql.WithLockAction(sql.SkipLocked))
+		}
+		candidates, err := q.All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if len(candidates) == 0 {
+			return nil, nil
+		}
+		ids := make([]uuid.UUID, len(candidates))
+		for i, r := range candidates {
+			ids[i] = r.ID
+		}
+		updPreds := append([]predicate.CommandRun{commandrun.IDIn(ids...)}, preds...)
+		n, err := tx.client.CommandRun.Update().
+			Where(updPreds...).
+			SetPollClaimedAt(nowUTC).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n == 0 {
+			return nil, nil
+		}
+		claimed, err := tx.client.CommandRun.Query().
+			Where(
+				commandrun.IDIn(ids...),
+				commandrun.FinishedAtIsNil(),
+				commandrun.PollClaimedAtEQ(nowUTC),
+			).
+			Order(commandrun.ByCreatedAt(sql.OrderAsc()), commandrun.ByID(sql.OrderAsc())).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		out := make([]*store.CommandRun, len(claimed))
+		for i, r := range claimed {
+			out[i] = entCommandRunToStore(r)
+		}
+		return out, nil
+	})
+}
+
 // UpdateCommandRunLastPolled implements store.CommandRequestStore.
 func (c *CompositeStore) UpdateCommandRunLastPolled(ctx context.Context, runID string, polledAt time.Time) error {
 	uid, err := parseUUID(runID)

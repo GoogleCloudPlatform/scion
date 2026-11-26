@@ -323,6 +323,13 @@ type CommandRequestStore interface {
 	// (finished_at IS NULL) whose lease_until < now, oldest lease first.
 	ListExpiredCommandRuns(ctx context.Context, now time.Time, limit int) ([]*CommandRun, error)
 
+	// ClaimCommandRunsForPoll atomically claims up to limit live unfinished
+	// command runs in status dispatching or running (finished_at IS NULL,
+	// lease_until >= now), excluding excludeRunIDs, whose poll_claimed_at is
+	// nil or <= now-claimTTL. It sets poll_claimed_at = now on the claimed
+	// rows so multiple replicas divide recovery polling cleanly (design §4.12).
+	ClaimCommandRunsForPoll(ctx context.Context, now time.Time, claimTTL time.Duration, limit int, excludeRunIDs []string) ([]*CommandRun, error)
+
 	// UpdateCommandRunLastPolled updates last_polled_at on an unfinished run.
 	UpdateCommandRunLastPolled(ctx context.Context, runID string, polledAt time.Time) error
 }

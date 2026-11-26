@@ -486,3 +486,129 @@ func TestCommandRequestStore_R1_DispatchLeaseAndSweeperInterleaving(t *testing.T
 		t.Fatalf("run 2 mutated after refused dispatch: %+v", got2)
 	}
 }
+
+func TestCommandRunStore_ClaimCommandRunsForPoll(t *testing.T) {
+	cs, projID, agentID := newCommandRequestTestStore(t)
+	ctx := context.Background()
+	execAgentID := uuid.New().String()
+	execProjID := uuid.New().String()
+	approverID := "user-poll-claim"
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	mkRun := func(key string, lease time.Time, status string) *store.CommandRun {
+		t.Helper()
+		c, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, key, "echo "+key, false, now))
+		if err != nil {
+			t.Fatalf("create %s: %v", key, err)
+		}
+		app, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+			RequestID:      c.Request.ID,
+			CommandSHA256:  c.Request.CommandSHA256,
+			UserID:         approverID,
+			Surface:        msgaction.CommandRequestSurfaceCLI,
+			IdempotencyKey: "idem-" + key,
+			ExecAgentID:    execAgentID,
+			ExecProjectID:  execProjID,
+			LeaseUntil:     lease,
+			Now:            now,
+		})
+		if err != nil || app.Run == nil {
+			t.Fatalf("approve %s: (%+v, %v)", key, app, err)
+		}
+		switch status {
+		case store.CommandRunStatusQueued:
+		case store.CommandRunStatusWaking:
+			won, err := cs.TransitionCommandRunToWaking(ctx, app.Run.ID, store.CommandRunWakeResume)
+			if err != nil || !won {
+				t.Fatalf("waking %s: (%v, %v)", key, won, err)
+			}
+		case store.CommandRunStatusDispatching, store.CommandRunStatusRunning, store.CommandRunStatusSucceeded:
+			won, err := cs.TransitionCommandRunToDispatching(ctx, &store.CommandRunDispatchInput{
+				RunID:        app.Run.ID,
+				LaunchID:     "launch-1",
+				NotAfter:     now.Add(1 * time.Minute),
+				LeaseUntil:   lease,
+				DispatchedAt: now,
+			})
+			if err != nil || !won {
+				t.Fatalf("dispatching %s: (%v, %v)", key, won, err)
+			}
+			if status == store.CommandRunStatusRunning || status == store.CommandRunStatusSucceeded {
+				won, err := cs.TransitionCommandRunToRunning(ctx, app.Run.ID)
+				if err != nil || !won {
+					t.Fatalf("running %s: (%v, %v)", key, won, err)
+				}
+			}
+			if status == store.CommandRunStatusSucceeded {
+				won, err := cs.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+					RunID:            app.Run.ID,
+					Status:           store.CommandRunStatusSucceeded,
+					ExpectedStatuses: []string{store.CommandRunStatusRunning},
+					FinishedAt:       now.Add(time.Second),
+				})
+				if err != nil || !won {
+					t.Fatalf("finish %s: (%v, %v)", key, won, err)
+				}
+			}
+		}
+		return app.Run
+	}
+
+	// Eligible live runs: dispatching + running.
+	rDisp := mkRun("live-disp", now.Add(10*time.Minute), store.CommandRunStatusDispatching)
+	rRun := mkRun("live-run", now.Add(10*time.Minute), store.CommandRunStatusRunning)
+	rOwned := mkRun("live-owned", now.Add(10*time.Minute), store.CommandRunStatusRunning)
+	// Ineligible runs: queued, waking, expired, finished.
+	_ = mkRun("queued", now.Add(10*time.Minute), store.CommandRunStatusQueued)
+	_ = mkRun("waking", now.Add(10*time.Minute), store.CommandRunStatusWaking)
+	_ = mkRun("expired", now.Add(5*time.Second), store.CommandRunStatusRunning)
+	_ = mkRun("finished", now.Add(10*time.Minute), store.CommandRunStatusSucceeded)
+
+	claimAt := now.Add(10 * time.Second)
+	claimTTL := 10 * time.Second
+
+	// Replica 1 claims excluding rOwned with limit 10 -> gets rDisp and rRun only.
+	claimed1, err := cs.ClaimCommandRunsForPoll(ctx, claimAt, claimTTL, 10, []string{rOwned.ID})
+	if err != nil {
+		t.Fatalf("ClaimCommandRunsForPoll 1: %v", err)
+	}
+	if len(claimed1) != 2 {
+		t.Fatalf("claimed1 len = %d, want 2 (%+v)", len(claimed1), claimed1)
+	}
+	gotIDs := map[string]bool{claimed1[0].ID: true, claimed1[1].ID: true}
+	if !gotIDs[rDisp.ID] || !gotIDs[rRun.ID] {
+		t.Fatalf("claimed1 IDs = %v, want %s and %s", gotIDs, rDisp.ID, rRun.ID)
+	}
+	for _, r := range claimed1 {
+		if r.PollClaimedAt == nil || !r.PollClaimedAt.Equal(claimAt) {
+			t.Fatalf("run %s poll_claimed_at = %v, want %v", r.ID, r.PollClaimedAt, claimAt)
+		}
+	}
+
+	// Replica 2 calling within claimTTL gets nothing for those two runs (still excluding rOwned).
+	claimed2, err := cs.ClaimCommandRunsForPoll(ctx, claimAt.Add(5*time.Second), claimTTL, 10, []string{rOwned.ID})
+	if err != nil {
+		t.Fatalf("ClaimCommandRunsForPoll 2: %v", err)
+	}
+	if len(claimed2) != 0 {
+		t.Fatalf("claimed2 within TTL = %d, want 0", len(claimed2))
+	}
+
+	// Replica 2 calling after claimTTL elapses claims them again (respecting limit=1).
+	later := claimAt.Add(claimTTL + time.Second)
+	claimed3, err := cs.ClaimCommandRunsForPoll(ctx, later, claimTTL, 1, []string{rOwned.ID})
+	if err != nil {
+		t.Fatalf("ClaimCommandRunsForPoll 3: %v", err)
+	}
+	if len(claimed3) != 1 {
+		t.Fatalf("claimed3 len = %d, want 1", len(claimed3))
+	}
+	// Second page at same timestamp gets the other one.
+	claimed4, err := cs.ClaimCommandRunsForPoll(ctx, later, claimTTL, 1, []string{rOwned.ID})
+	if err != nil {
+		t.Fatalf("ClaimCommandRunsForPoll 4: %v", err)
+	}
+	if len(claimed4) != 1 || claimed4[0].ID == claimed3[0].ID {
+		t.Fatalf("claimed4 = %+v, want the other run from %s", claimed4, claimed3[0].ID)
+	}
+}
