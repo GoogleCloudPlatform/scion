@@ -209,8 +209,10 @@ type inboxSourceEntry struct {
 	run inboxSourceFunc
 }
 
-// publishInboxHint emits a content-free invalidation hint on user.<userID>.inbox
-// when the web.inbox_dashboard experiment is enabled.
+// publishInboxHint emits an inbox invalidation hint on user.<userID>.inbox
+// when the web.inbox_dashboard experiment is enabled. Waiting hints carry only
+// agent ID and activity, which project members can already observe on the
+// project status stream.
 func (s *Server) publishInboxHint(ctx context.Context, userID string, hint InboxHint) {
 	if userID == "" || !s.experimentEnabled(experiments.InboxDashboard) {
 		return
@@ -599,6 +601,8 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 	if len(scopeResult.ExcludedProjectIDs) > 0 {
 		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
 	}
+	// Defence in depth behind ResolveListScopes's applyCredentialCaveats:
+	// pin project-bounded tokens to their boundary project in SQL as well.
 	if v.token != nil {
 		if boundaryProject := tokenBoundaryProject(v.token); boundaryProject != "" {
 			filter.ProjectID = boundaryProject
@@ -636,6 +640,8 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 	// bound signal ("N+ agents waiting").
 	capped := len(res.Items) >= limit
 
+	// Defence in depth behind ResolveListScopes's applyCredentialCaveats:
+	// re-verify each row's project against the token's inbox:read self-scope.
 	var candidates []store.Agent
 	if v.token != nil {
 		scopeCheck := s.newSelfScopeCheck(ctx, v.token, permInboxRead)

@@ -863,10 +863,34 @@ export class ScionPageAgents extends LitElement {
       ...(this.activityFilter
         ? {
             hasClientOnlyFilter: true,
-            filterPredicate: (a: Agent) => (a.activity ?? '').toLowerCase() === this.activityFilter,
+            filterPredicate: (a: Agent) => this.matchesLegacyActivityFilters(a),
           }
         : {}),
     };
+  }
+
+  /**
+   * Composes the dialect-off URL-hydrated activity filter with the legacy
+   * phase and label filters so those controls keep working while the activity
+   * tag is active (AgentListWindow replaces phase/label filtering whenever
+   * filterPredicate is set).
+   */
+  private matchesLegacyActivityFilters(a: Agent): boolean {
+    if ((a.activity ?? '').toLowerCase() !== this.activityFilter) return false;
+    if (this.phaseFilter && a.phase !== this.phaseFilter) return false;
+    const labelFilter = this.labelFilter.trim();
+    if (labelFilter) {
+      if (!a.labels) return false;
+      const eq = labelFilter.indexOf('=');
+      if (eq >= 0) {
+        const key = labelFilter.slice(0, eq);
+        const val = labelFilter.slice(eq + 1);
+        if (val ? a.labels[key] !== val : !(key in a.labels)) return false;
+      } else if (!(labelFilter in a.labels)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private clearActivityFilter(): void {

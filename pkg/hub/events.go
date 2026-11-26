@@ -492,8 +492,9 @@ type eventBuilder struct {
 	inboxWaitingRecipients atomic.Pointer[func(ctx context.Context, projectID, ownerID string) []string]
 	// waitingMu guards waitingAgents, which tracks agent IDs whose last
 	// published status had activity == waiting_for_input so PublishAgentStatus
-	// only resolves project members and emits waiting hints on transitions into
-	// or out of waiting_for_input.
+	// resolves project members and fans out waiting hints whenever the current
+	// or previously published status is waiting_for_input (entering, leaving,
+	// or updating while waiting), while the owner hint remains unconditional.
 	waitingMu     sync.Mutex
 	waitingAgents map[string]struct{}
 }
@@ -819,14 +820,20 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	}
 	isWaiting := agent.Activity == string(state.ActivityWaitingForInput)
 	wasWaiting := p.trackAgentWaiting(agent.ID, isWaiting)
-	if p.shouldEmitInboxHint() && (isWaiting || wasWaiting) {
+	if p.shouldEmitInboxHint() {
 		hint := InboxHint{
 			Category: InboxCategoryWaiting,
 			AgentID:  agent.ID,
 			Activity: agent.Activity,
 		}
-		for _, uid := range p.resolveInboxWaitingRecipients(ctx, agent.ProjectID, agent.OwnerID) {
-			p.PublishUserInboxHint(ctx, uid, hint)
+		if isWaiting || wasWaiting {
+			for _, uid := range p.resolveInboxWaitingRecipients(ctx, agent.ProjectID, agent.OwnerID) {
+				p.PublishUserInboxHint(ctx, uid, hint)
+			}
+		} else if agent.OwnerID != "" {
+			// Always deliver the owner hint so a hub restart or cross-replica
+			// leave transition never drops the owner's live refresh.
+			p.PublishUserInboxHint(ctx, agent.OwnerID, hint)
 		}
 	}
 }

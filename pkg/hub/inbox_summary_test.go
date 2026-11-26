@@ -1174,15 +1174,35 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	drainNoEvent(otherCh, "non-member on leave")
 	assert.Equal(t, int32(1), memberCounter.listMembers.Load(), "leaving waiting_for_input should resolve project members once")
 
-	// Non-waiting -> non-waiting transitions must NOT query project members or emit inbox hints.
+	// Non-waiting -> non-waiting transitions must NOT query project members or fan out
+	// to teammates, while still delivering the unconditional owner hint.
 	memberCounter.listMembers.Store(0)
 	agent.Activity = string(state.ActivityExecuting)
 	pub.PublishAgentStatus(ctx, agent)
-	drainNoEvent(ownerCh, "non-waiting transition owner")
+	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityExecuting))
 	drainNoEvent(teammateCh, "non-waiting transition teammate")
 	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "non-waiting -> non-waiting must not query project members")
 
-	// PublishAgentDeleted sends no inbox hint (§5.2) and clears tracked waiting state.
+	// Fresh publisher (simulating a hub restart or another replica that did not observe
+	// the prior waiting_for_input publish): leaving waiting_for_input still delivers the
+	// owner hint without querying project members.
+	pub2 := NewChannelEventPublisher()
+	defer pub2.Close()
+	srv.SetEventPublisher(pub2)
+	ownerCh2, unsubOwner2 := pub2.Subscribe("user." + ownerID + ".inbox")
+	defer unsubOwner2()
+	teammateCh2, unsubTeammate2 := pub2.Subscribe("user." + teammateID + ".inbox")
+	defer unsubTeammate2()
+
+	memberCounter.listMembers.Store(0)
+	agent.Activity = string(state.ActivityThinking)
+	pub2.PublishAgentStatus(ctx, agent)
+	expectWaitingHint(ownerCh2, ownerID, agent.ID, string(state.ActivityThinking))
+	drainNoEvent(teammateCh2, "fresh publisher leave teammate")
+	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "fresh publisher non-waiting publish must not query project members")
+
+	// Restore pub and verify PublishAgentDeleted sends no inbox hint (§5.2) and clears tracked state.
+	srv.SetEventPublisher(pub)
 	agent.Activity = string(state.ActivityWaitingForInput)
 	pub.PublishAgentStatus(ctx, agent)
 	expectWaitingHint(ownerCh, ownerID, agent.ID, string(state.ActivityWaitingForInput))
@@ -1193,6 +1213,69 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	drainNoEvent(ownerCh, "agent deleted owner")
 	drainNoEvent(teammateCh, "agent deleted teammate")
 	assert.Equal(t, int32(0), memberCounter.listMembers.Load(), "delete must not query project members")
+}
+
+func TestUserMeInboxSummary_WaitingSQLScopeWindowNotStarvedByUnreadable(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxDashboardExperiment(t, f.srv, true)
+	ctx := context.Background()
+
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+
+	// Create a project that f.member cannot read and seed more waiting agents
+	// than the waiting window limit, all with older timestamps than the
+	// caller's readable agent. Without SQL AuthorizedProjectIDs narrowing, the
+	// oldest-first window would fill with unreadable rows and drop the readable one.
+	hiddenProj := &store.Project{
+		ID:      api.NewUUID(),
+		Slug:    "inbox-wait-hidden-window",
+		Name:    "Inbox Wait Hidden Window",
+		OwnerID: f.owner,
+		Created: time.Now().UTC(),
+		Updated: time.Now().UTC(),
+	}
+	require.NoError(t, f.s.CreateProject(ctx, hiddenProj))
+
+	base := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 3; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		require.NoError(t, f.s.CreateAgent(ctx, &store.Agent{
+			ID:                api.NewUUID(),
+			Slug:              "hidden-wait-" + string(rune('a'+i)),
+			Name:              "Hidden Wait",
+			ProjectID:         hiddenProj.ID,
+			OwnerID:           f.owner,
+			Phase:             string(state.PhaseRunning),
+			Activity:          string(state.ActivityWaitingForInput),
+			Created:           ts,
+			Updated:           ts,
+			LastActivityEvent: ts,
+		}))
+	}
+
+	readableTS := base.Add(30 * time.Minute)
+	readableAgent := &store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "readable-wait-newer",
+		Name:              "Readable Wait Newer",
+		ProjectID:         f.projA,
+		OwnerID:           f.member,
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityWaitingForInput),
+		Created:           readableTS,
+		Updated:           readableTS,
+		LastActivityEvent: readableTS,
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, readableAgent))
+
+	f.srv.inboxWaitingLimitForTest = 2
+	resp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath, nil))
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, 1, waiting.Count, "unreadable agents in other projects must not starve the waiting SQL window")
+	assert.False(t, waiting.Capped)
+	assert.Equal(t, []string{readableAgent.ID}, waiting.AgentIDs)
 }
 
 func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {
