@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -552,15 +553,35 @@ func TestGCPLogsFlushAuthFailure_ClassifiesAuthAndSuppressesPerBatchError(t *tes
 		logging.ContextFunc(func() (context.Context, func()) { return context.WithTimeout(ctx, 3*time.Second) }),
 	)
 
+	var nowMu sync.Mutex
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
 	p.retryConfig.MaxRetries = 0
-	p.metricNow = func() time.Time { return now }
+	p.metricNow = func() time.Time {
+		nowMu.Lock()
+		defer nowMu.Unlock()
+		return now
+	}
 	p.authStandDown.interval = 5 * time.Minute
 
 	g := &GCPExporter{logClient: client, logger: logger, projectID: "auth-standdown-local"}
 	p.attachGCPAsyncLogErrorHook(g)
-	client.OnError = func(e error) { g.reportAsyncLogError(e) }
+	asyncErrDone := make(chan struct{}, 8)
+	client.OnError = func(e error) {
+		g.reportAsyncLogError(e)
+		select {
+		case asyncErrDone <- struct{}{}:
+		default:
+		}
+	}
+	waitAsyncErr := func(step string) {
+		t.Helper()
+		select {
+		case <-asyncErrDone:
+		case <-ctx.Done():
+			t.Fatalf("%s: timed out waiting for async OnError callback: %v", step, ctx.Err())
+		}
+	}
 	p.exporter = &CloudExporter{gcpExporter: g}
 	defer func() { _ = g.Shutdown(ctx) }()
 
@@ -570,6 +591,10 @@ func TestGCPLogsFlushAuthFailure_ClassifiesAuthAndSuppressesPerBatchError(t *tes
 	if err := p.handleLogs(ctx, logs); err == nil {
 		t.Fatal("first handleLogs succeeded despite PermissionDenied")
 	}
+	// Drain the Cloud Logging client's async OnError callback from the first batch
+	// before advancing the fake clock; otherwise a delayed callback can run after
+	// now advances and extend stand-down past the re-check window.
+	waitAsyncErr("first batch")
 	if !p.isAuthStandingDown("logs") {
 		t.Fatal("expected logs signal to be in auth stand-down")
 	}
@@ -584,10 +609,13 @@ func TestGCPLogsFlushAuthFailure_ClassifiesAuthAndSuppressesPerBatchError(t *tes
 	}
 
 	// 3. Re-check probe after 5m hits PermissionDenied again -> still no per-batch Error log.
+	nowMu.Lock()
 	now = now.Add(5 * time.Minute)
+	nowMu.Unlock()
 	if err := p.handleLogs(ctx, logs); err == nil {
 		t.Fatal("re-check probe succeeded despite PermissionDenied")
 	}
+	waitAsyncErr("re-check probe")
 
 	raw, err := os.ReadFile(logPath)
 	if err != nil {
