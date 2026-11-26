@@ -24,7 +24,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { openChatRail, openGeneralThread } from './fixture.js';
+import { clickTerminalPaneChatAction, openChatRail, openGeneralThread } from './fixture.js';
 import { PROJECT_A } from './mock-api.js';
 
 /** A UUID user, so DM keys built for it pass the page's DM-key check. */
@@ -211,7 +211,7 @@ test('the terminal pane chat button opens the agent DM, not the old thread', asy
     AGENT_ID
   );
   await expect(page).toHaveURL(`/terminals/${AGENT_ID}`);
-  await page.locator(`button[aria-label="Chat with ${AGENT_NAME}"]:visible`).first().click();
+  await clickTerminalPaneChatAction(page, AGENT_NAME);
 
   const dmKey = `dm:agent:${AGENT_ID}:user:${USER_ID}`;
   await expect(page).toHaveURL(`/chat/dm/${encodeURIComponent(dmKey)}`);
