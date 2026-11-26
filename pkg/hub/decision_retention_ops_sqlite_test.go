@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -497,4 +498,94 @@ func TestDecisionRetentionOps_ReconcileInterruptedManualAndPreviewRuns(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, savedCursor.Position.ID, gotCur.Position.ID, "preview/manual run must not clobber sweep cursor")
 	assert.False(t, gotCur.ReachedCutoff, "preview/manual run must not alter sweep ReachedCutoff")
+}
+
+// TestDecisionRetentionOps_PreviewCrossPageDedup verifies that Preview's
+// cross-page seenMsg deduplication counts a multi-decision prompt straddling
+// a page boundary (positions page_size and page_size+1) exactly once, matching
+// a manual run.
+func TestDecisionRetentionOps_PreviewCrossPageDedup(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tBase := now.Add(-60 * 24 * time.Hour)
+
+	projFill := uuid.NewString()
+	projStraddle := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projFill, Name: "dedup-fill", Slug: "dedup-fill", Created: now}))
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{ID: projStraddle, Name: "dedup-straddle", Slug: "dedup-straddle", Created: now}))
+
+	db := cs.DB()
+	const fillCount = 49 // page_size=50 -> rows 1..49 in projFill; straddle prompt rows sit at 50 and 51
+	for i := 0; i < fillCount; i++ {
+		agentID := uuid.NewString()
+		_, decID := seedOldSettledDecision(t, ctx, cs, projFill, agentID, admin.ID, fmt.Sprintf("F%02d", i), 60*24*time.Hour)
+		ts := tBase.Add(time.Duration(i) * time.Second)
+		uid := uuid.MustParse(decID)
+		_, err := db.ExecContext(ctx, "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?", ts, ts, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", ts, uid)
+		require.NoError(t, err)
+	}
+
+	// Seed a 2-decision settled prompt whose rows sit at positions 50 and 51.
+	straddleAgent := uuid.NewString()
+	msgID := uuid.NewString()
+	promptRes, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID: msgID, ProjectID: projStraddle, ThreadID: "topic-straddle",
+			Sender: "agent:straddle", SenderID: straddleAgent, Recipient: "user:" + admin.ID, RecipientID: admin.ID,
+		},
+		AskerAgentID:   straddleAgent,
+		AskerAgentName: "straddle",
+		Decisions: []messages.Decision{
+			{Key: "S1", Question: "Straddle 1", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+			{Key: "S2", Question: "Straddle 2", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, promptRes.Decisions, 2)
+
+	tStraddle := tBase.Add(fillCount * time.Second)
+	for _, d := range promptRes.Decisions {
+		_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID: d.RowID, ChoiceID: "1",
+			AnsweredByUserID: admin.ID, AnsweredByName: "Admin", AnsweredByEmail: "admin@test.com",
+			Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID: uuid.NewString(), ProjectID: projStraddle, ThreadID: "topic-straddle",
+				Sender: "user:" + admin.ID, SenderID: admin.ID, Recipient: "agent:straddle", RecipientID: straddleAgent,
+			},
+		})
+		require.NoError(t, err)
+		uid := uuid.MustParse(d.RowID)
+		_, err = db.ExecContext(ctx, "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?", tStraddle, tStraddle, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", tStraddle, uid)
+		require.NoError(t, err)
+	}
+
+	ops := srv.GetOperationalSettings()
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	var previewLog bytes.Buffer
+	previewRun, err := srv.runDecisionRetentionPreview(ctx, &previewLog, admin.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DecisionRetentionStatusOK, previewRun.Status)
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 2, Answers: 2}, previewRun.Counts[projStraddle],
+		"straddling 2-decision prompt must be counted once across pages")
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: fillCount, Answers: fillCount}, previewRun.Counts[projFill])
+
+	var manualLog bytes.Buffer
+	manualRun, _, err := srv.runDecisionRetentionManual(ctx, &manualLog, admin.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DecisionRetentionStatusOK, manualRun.Status)
+	assert.Equal(t, previewRun.Counts, manualRun.Counts, "preview ByProject must equal manual-run counts")
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 2, Answers: 2}, manualRun.Counts[projStraddle])
 }
