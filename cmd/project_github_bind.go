@@ -82,7 +82,7 @@ func runProjectGitHubBind(
 		if len(candidates) > 1 {
 			var lines []string
 			for _, c := range candidates {
-				lines = append(lines, fmt.Sprintf("  - %d (%s, %s)", c.InstallationID, c.AccountLogin, c.AccountType))
+				lines = append(lines, fmt.Sprintf("  - %d (%s, %s)", c.InstallationID, stripControlChars(c.AccountLogin), stripControlChars(c.AccountType)))
 			}
 			return fmt.Errorf("multiple active GitHub App installations match owner %q; pass --installation <id> to choose one:\n%s", info.Remote.Owner, strings.Join(lines, "\n"))
 		}
@@ -100,7 +100,7 @@ func runProjectGitHubBind(
 	}
 
 	if accountLogin != "" {
-		_, _ = fmt.Fprintf(out, "Bound GitHub App installation %s (#%d) to project %s.\n", accountLogin, resp.InstallationID, resp.ProjectID)
+		_, _ = fmt.Fprintf(out, "Bound GitHub App installation %s (#%d) to project %s.\n", stripControlChars(accountLogin), resp.InstallationID, resp.ProjectID)
 	} else {
 		_, _ = fmt.Fprintf(out, "Bound GitHub App installation #%d to project %s.\n", resp.InstallationID, resp.ProjectID)
 	}

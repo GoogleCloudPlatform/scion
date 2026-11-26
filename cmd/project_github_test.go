@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -186,8 +187,8 @@ func TestProjectGitHubStatus_StripsControlChars(t *testing.T) {
 	projects := &fakeProjectGitHubProjects{
 		info: &hubclient.ProjectGitHub{
 			ProjectID: "proj-1",
-			App:       hubclient.ProjectGitHubApp{Configured: true, Slug: "scion-bot", WebHost: "github.com"},
-			Remote:    hubclient.ProjectGitHubRemote{Owner: "acme", Repo: "api", OnAppHost: true},
+			App:       hubclient.ProjectGitHubApp{Configured: true, Slug: "scion\x1b[31m-bot\x1b[0m", WebHost: "github.com"},
+			Remote:    hubclient.ProjectGitHubRemote{Owner: "acme\x1b]0;own\x07", Repo: "api\x1b[2J", OnAppHost: true},
 			Association: hubclient.ProjectGitHubAssociation{
 				InstallationID: &instID,
 				AccountLogin:   "acme\x1b[31m-evil\x1b[0m",
@@ -300,6 +301,31 @@ func TestProjectGitHubBind_AutoSelectAndErrors(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []int64{9999}, projects.bindCalls)
 		assert.Contains(t, buf.String(), "#9999")
+	})
+
+	t.Run("strips control characters from candidate account login and type", func(t *testing.T) {
+		evilInfo := &hubclient.ProjectGitHub{
+			ProjectID: "proj-1",
+			App:       hubclient.ProjectGitHubApp{Configured: true, WebHost: "github.com"},
+			Remote:    hubclient.ProjectGitHubRemote{Owner: "acme\x1b[31m", Repo: "api", OnAppHost: true},
+		}
+		projects := &fakeProjectGitHubProjects{info: evilInfo}
+		ghApp := &fakeProjectGitHubApp{
+			installations: []hubclient.GitHubInstallation{
+				{InstallationID: 4412, AccountLogin: "acme\x1b[31m", AccountType: "Org\x1b]0;pwn\x07", Status: "active"},
+				{InstallationID: 5512, AccountLogin: "ACME\x1b[31m", AccountType: "User\x07", Status: "active"},
+			},
+		}
+		var buf bytes.Buffer
+		err := runProjectGitHubBind(context.Background(), projects, ghApp, "proj-1", 0, &buf)
+		require.Error(t, err)
+		// Check only the candidate list lines (the %q owner uses Go quoting).
+		lines := strings.Split(err.Error(), "\n")
+		require.GreaterOrEqual(t, len(lines), 3)
+		for _, line := range lines[1:] {
+			assert.NotContains(t, line, "\x1b")
+			assert.NotContains(t, line, "\x07")
+		}
 	})
 }
 

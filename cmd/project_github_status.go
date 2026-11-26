@@ -65,7 +65,7 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 	}
 
 	if info.Remote.Owner != "" && info.Remote.Repo != "" {
-		_, _ = fmt.Fprintf(out, "Repository:    %s/%s", info.Remote.Owner, info.Remote.Repo)
+		_, _ = fmt.Fprintf(out, "Repository:    %s/%s", stripControlChars(info.Remote.Owner), stripControlChars(info.Remote.Repo))
 		if info.App.WebHost != "" {
 			_, _ = fmt.Fprintf(out, " (%s)", info.App.WebHost)
 		}
@@ -76,7 +76,7 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 
 	if info.App.Configured {
 		if info.App.Slug != "" {
-			_, _ = fmt.Fprintf(out, "GitHub App:    @%s (configured)\n", info.App.Slug)
+			_, _ = fmt.Fprintf(out, "GitHub App:    @%s (configured)\n", stripControlChars(info.App.Slug))
 		} else {
 			_, _ = fmt.Fprintln(out, "GitHub App:    configured")
 		}
