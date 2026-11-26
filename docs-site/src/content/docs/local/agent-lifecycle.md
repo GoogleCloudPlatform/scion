@@ -76,6 +76,13 @@ by passing the harness-specific resume flag (`--continue` for Claude Code,
 `--resume` for Gemini CLI, and so on). Any `[task]` arguments you supply are
 appended to the resumed session as a new prompt, if the harness supports it.
 
+When a suspended agent is woken by an incoming message (via `--wake` or
+auto-wake), harnesses that use a `task_flag` start promptless and receive the
+waking message(s) followed by the resume instruction together in a single
+buffered input, rather than as a separate CLI resume turn before the message.
+Manual `scion resume`, restarts, and non-message schedules keep their normal
+CLI resume behavior.
+
 | Flag | Description |
 | :--- | :--- |
 | `-a, --attach` | Attach to the agent's session immediately after resuming. |

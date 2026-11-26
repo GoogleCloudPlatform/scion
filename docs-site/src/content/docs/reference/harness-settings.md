@@ -432,7 +432,7 @@ The `command` block defines how the agent's primary LLM tool is invoked.
     :::caution[Interactive Terminal Required]
     The tool specified in `command.base` **must** be an interactive application that keeps running and accepts input via the terminal. The Scion runtime manages terminal sessions via a PTY and requires the process to stay alive. Tools that execute a single prompt and exit immediately will cause the agent to terminate prematurely.
     :::
-*   `task_flag`: CLI flag used to pass the task (e.g., `--prompt`).
+*   `task_flag`: CLI flag used to pass the task (e.g., `--prompt`). On a manual resume without an explicit task, the Runtime Broker passes a standalone resume instruction via `task_flag`. On a message-triggered wake, the broker launches the harness promptless and appends a wake resume instruction after the waking message(s) in the first buffered delivery so both arrive as one input.
 *   `resume_flag`: CLI flag to resume a previous session (e.g., `--session`).
 *   `system_prompt_flag`: CLI flag for the system prompt.
 
