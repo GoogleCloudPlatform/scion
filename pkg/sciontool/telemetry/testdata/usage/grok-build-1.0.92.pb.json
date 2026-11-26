@@ -1,0 +1,634 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "grok_code.release_line",
+            "value": {
+              "stringValue": "public"
+            }
+          },
+          {
+            "key": "service.instance.id",
+            "value": {
+              "stringValue": "00000001-0000-4000-8000-000000000001"
+            }
+          },
+          {
+            "key": "app.entrypoint",
+            "value": {
+              "stringValue": "headless"
+            }
+          },
+          {
+            "key": "client.version",
+            "value": {
+              "stringValue": "1.0.92"
+            }
+          },
+          {
+            "key": "grok_code.schema.version",
+            "value": {
+              "stringValue": "v1"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.0.92 (b06756fd6256)"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "grok-cli"
+            }
+          },
+          {
+            "key": "terminal.type",
+            "value": {
+              "stringValue": "tmux"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "ai.xai.grok_code"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1795722354336495210",
+              "observedTimeUnixNano": "1795722354336495210",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000002-0000-4000-8000-000000000002"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000003-0000-4000-8000-000000000003"
+                  }
+                },
+                {
+                  "key": "prompt_length",
+                  "value": {
+                    "intValue": "41"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "screen_mode",
+                  "value": {
+                    "stringValue": "headless"
+                  }
+                }
+              ],
+              "eventName": "grok_code.user_prompt"
+            },
+            {
+              "timeUnixNano": "1795722356550121538",
+              "observedTimeUnixNano": "1795722356550121538",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000002-0000-4000-8000-000000000002"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000003-0000-4000-8000-000000000003"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "2157"
+                  }
+                },
+                {
+                  "key": "stop_reason",
+                  "value": {
+                    "stringValue": "toolcalls"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "800"
+                  }
+                },
+                {
+                  "key": "output_tokens",
+                  "value": {
+                    "intValue": "120"
+                  }
+                },
+                {
+                  "key": "reasoning_tokens",
+                  "value": {
+                    "intValue": "40"
+                  }
+                },
+                {
+                  "key": "cache_read_tokens",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "cache_creation_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "eventName": "grok_code.api_request"
+            },
+            {
+              "timeUnixNano": "1795722356571358955",
+              "observedTimeUnixNano": "1795722356571358955",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "5"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000002-0000-4000-8000-000000000002"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000003-0000-4000-8000-000000000003"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "10"
+                  }
+                },
+                {
+                  "key": "stop_reason",
+                  "value": {
+                    "stringValue": "stop"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "1500"
+                  }
+                },
+                {
+                  "key": "output_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "reasoning_tokens",
+                  "value": {
+                    "intValue": "80"
+                  }
+                },
+                {
+                  "key": "cache_read_tokens",
+                  "value": {
+                    "intValue": "900"
+                  }
+                },
+                {
+                  "key": "cache_creation_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "eventName": "grok_code.api_request"
+            },
+            {
+              "timeUnixNano": "1795722356640779596",
+              "observedTimeUnixNano": "1795722356640779596",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "6"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000003-0000-4000-8000-000000000003"
+                  }
+                },
+                {
+                  "key": "outcome",
+                  "value": {
+                    "stringValue": "completed"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "2273"
+                  }
+                },
+                {
+                  "key": "tool_call_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000002-0000-4000-8000-000000000002"
+                  }
+                }
+              ],
+              "eventName": "grok_code.turn_completed"
+            },
+            {
+              "timeUnixNano": "1795722356645157099",
+              "observedTimeUnixNano": "1795722356645157099",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "7"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000002-0000-4000-8000-000000000002"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000003-0000-4000-8000-000000000003"
+                  }
+                },
+                {
+                  "key": "response_length",
+                  "value": {
+                    "intValue": "14"
+                  }
+                }
+              ],
+              "eventName": "grok_code.assistant_response"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "terminal.type",
+            "value": {
+              "stringValue": "tmux"
+            }
+          },
+          {
+            "key": "grok_code.release_line",
+            "value": {
+              "stringValue": "public"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "1.0.92 (b06756fd6256)"
+            }
+          },
+          {
+            "key": "grok_code.schema.version",
+            "value": {
+              "stringValue": "v1"
+            }
+          },
+          {
+            "key": "service.instance.id",
+            "value": {
+              "stringValue": "00000004-0000-4000-8000-000000000004"
+            }
+          },
+          {
+            "key": "client.version",
+            "value": {
+              "stringValue": "1.0.92"
+            }
+          },
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "grok-cli"
+            }
+          },
+          {
+            "key": "app.entrypoint",
+            "value": {
+              "stringValue": "headless"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "ai.xai.grok_code"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1795722359027448813",
+              "observedTimeUnixNano": "1795722359027448813",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000005-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000006-0000-4000-8000-000000000006"
+                  }
+                },
+                {
+                  "key": "prompt_length",
+                  "value": {
+                    "intValue": "33"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "screen_mode",
+                  "value": {
+                    "stringValue": "headless"
+                  }
+                }
+              ],
+              "eventName": "grok_code.user_prompt"
+            },
+            {
+              "timeUnixNano": "1795722359159291741",
+              "observedTimeUnixNano": "1795722359159291741",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "4"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000006-0000-4000-8000-000000000006"
+                  }
+                },
+                {
+                  "key": "outcome",
+                  "value": {
+                    "stringValue": "error"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "70"
+                  }
+                },
+                {
+                  "key": "tool_call_count",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000005-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "error_category",
+                  "value": {
+                    "stringValue": "invalid_request"
+                  }
+                }
+              ],
+              "eventName": "grok_code.turn_completed"
+            },
+            {
+              "timeUnixNano": "1795722359159771762",
+              "observedTimeUnixNano": "1795722359159771762",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "5"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000005-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000006-0000-4000-8000-000000000006"
+                  }
+                },
+                {
+                  "key": "response_length",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "eventName": "grok_code.assistant_response"
+            },
+            {
+              "timeUnixNano": "1795722359180902430",
+              "observedTimeUnixNano": "1795722359180902430",
+              "severityNumber": "SEVERITY_NUMBER_INFO",
+              "attributes": [
+                {
+                  "key": "event.sequence",
+                  "value": {
+                    "intValue": "6"
+                  }
+                },
+                {
+                  "key": "session.id",
+                  "value": {
+                    "stringValue": "00000005-0000-4000-8000-000000000005"
+                  }
+                },
+                {
+                  "key": "turn_number",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "prompt.id",
+                  "value": {
+                    "stringValue": "00000006-0000-4000-8000-000000000006"
+                  }
+                },
+                {
+                  "key": "error_category",
+                  "value": {
+                    "stringValue": "invalid_request"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "grok-4.6"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "70"
+                  }
+                }
+              ],
+              "eventName": "grok_code.api_error"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

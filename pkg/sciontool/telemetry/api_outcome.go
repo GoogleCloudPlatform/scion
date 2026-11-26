@@ -52,8 +52,9 @@ const apiOutcomeMessageMaxRunes = 1024
 var apiOutcomeStatusAttrs = []string{"status_code", "http.response.status_code", "http.status_code"}
 
 // apiOutcomeMessageAttrs are the attributes a failure's text is read from,
-// in order: codex and gemini_cli set error.message, claude_code error.
-var apiOutcomeMessageAttrs = []string{"error.message", "error"}
+// in order: codex and gemini_cli set error.message, claude_code error,
+// grok-build error_category.
+var apiOutcomeMessageAttrs = []string{"error.message", "error", "error_category"}
 
 // apiOutcomeFromRecord builds the outcome of a record a usage rule matched
 // as increment.
