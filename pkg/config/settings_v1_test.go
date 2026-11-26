@@ -476,10 +476,10 @@ func TestLoadVersionedSettings_FederationGoogleIssuerFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
-	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
-	projectSettings := `
+	globalSettings := `
 schema_version: "1"
 server:
   federation:
@@ -491,9 +491,9 @@ server:
         allowed_domains: ["example.com", "other.example"]
         allowed_gcp_projects: ["gcp-proj-1", "gcp-proj-2"]
 `
-	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(projectSettings), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(globalSettings), 0644))
 
-	vs, err := LoadVersionedSettings(projectDir)
+	vs, err := LoadVersionedSettings(globalDir)
 	require.NoError(t, err)
 
 	require.NotNil(t, vs.Server)

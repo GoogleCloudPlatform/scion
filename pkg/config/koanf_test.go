@@ -511,13 +511,12 @@ func TestLoadSettingsV1BrokerFields(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create a v1 format settings file where broker fields are under server.broker
+	// Create a v1 format global settings file where broker fields are under server.broker
 	v1Settings := `schema_version: "1"
 hub:
   enabled: true
@@ -528,11 +527,11 @@ server:
     broker_token: "test-broker-token"
     broker_nickname: "my-test-broker"
 `
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(v1Settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettings(projectScionDir)
+	s, err := LoadSettings(globalScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -559,14 +558,13 @@ func TestLoadSettingsV1BrokerFieldsNoOverrideExisting(t *testing.T) {
 	defer func() { _ = os.Setenv("HOME", originalHome) }()
 	_ = os.Setenv("HOME", tmpDir)
 
-	projectDir := filepath.Join(tmpDir, "my-project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	if err := os.MkdirAll(projectScionDir, 0755); err != nil {
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	if err := os.MkdirAll(globalScionDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
-	// When both legacy hub.brokerId and v1 server.broker.broker_id exist,
-	// the legacy hub.brokerId should take precedence (not be overridden)
+	// When both legacy hub.brokerId and v1 server.broker.broker_id exist in
+	// global settings, the legacy hub.brokerId should take precedence (not be overridden)
 	settings := `hub:
   brokerId: "legacy-broker-id"
   brokerToken: "legacy-token"
@@ -575,11 +573,11 @@ server:
     broker_id: "v1-broker-id"
     broker_token: "v1-token"
 `
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settings), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settings), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := LoadSettings(projectScionDir)
+	s, err := LoadSettings(globalScionDir)
 	if err != nil {
 		t.Fatalf("LoadSettings failed: %v", err)
 	}
@@ -1350,9 +1348,11 @@ func TestLoadSettings_V1KnownKeys_NoWarning(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(oldLogger)
 
-	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+	homeDir := filepath.Join(t.TempDir(), "fakehome")
+	t.Setenv("HOME", homeDir)
 
-	dir := t.TempDir()
+	dir := filepath.Join(homeDir, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(v1SettingsWithAllKnownFields), 0644))
 
 	_, err := LoadSettings(dir)
@@ -1472,20 +1472,23 @@ bucket:
 }
 
 func TestLoadSettings_V1NestedTypoUnderV1OnlySection_StillWarnsAndNamesLeaf(t *testing.T) {
-	// A v1-format file with typos nested under sections legacy Settings does
-	// not have at all (server, harness_configs) must still warn and name the
-	// leaf key. Regression test for round-1 review finding 1b: a coarse
+	// A v1-format global file with typos nested under sections legacy Settings
+	// does not have at all (server, harness_configs) must still warn and name
+	// the leaf key. Regression test for round-1 review finding 1b: a coarse
 	// "section absent from the legacy struct" must not swallow the nested
 	// typo the other struct can see at full precision.
 	resetWarnedUnusedKeysCache()
+	resetWarnedProjectGuardKeysCache()
 	var buf bytes.Buffer
 	oldLogger := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	defer slog.SetDefault(oldLogger)
 
-	t.Setenv("HOME", filepath.Join(t.TempDir(), "fakehome"))
+	homeDir := filepath.Join(t.TempDir(), "fakehome")
+	t.Setenv("HOME", homeDir)
+	globalDir := filepath.Join(homeDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
 
-	dir := t.TempDir()
 	settingsYAML := `schema_version: "1"
 server:
   brokr:
@@ -1495,15 +1498,40 @@ harness_configs:
     harness: claude
     imagee: foo
 `
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsYAML), 0644))
 
-	_, err := LoadSettings(dir)
+	_, err := LoadSettings(globalDir)
 	require.NoError(t, err)
 
 	logged := buf.String()
 	assert.Contains(t, logged, "level=WARN", "expected a WARN log for the unknown keys")
 	assert.Contains(t, logged, "server.brokr", "expected warning to name the nested typo's leaf key, not just \"server\"")
 	assert.Contains(t, logged, "harness_configs[x].imagee", "expected warning to name the nested typo's leaf key, not just \"harness_configs\"")
+
+	// At project tier, server.* is stripped by the project-layer guard before
+	// decodeCollectingUnused, so the guard warning names server.brokr.broker_id
+	// while the typo inside the allow-listed harness_configs still produces the
+	// unused-key warning.
+	t.Run("project tier names server typo in guard warning", func(t *testing.T) {
+		resetWarnedUnusedKeysCache()
+		resetWarnedProjectGuardKeysCache()
+		var projBuf bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewTextHandler(&projBuf, nil)))
+
+		projHome := filepath.Join(t.TempDir(), "projhome")
+		t.Setenv("HOME", projHome)
+		projDir := filepath.Join(t.TempDir(), "proj", ".scion")
+		require.NoError(t, os.MkdirAll(projDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(projDir, "settings.yaml"), []byte(settingsYAML), 0644))
+
+		_, err := LoadSettings(projDir)
+		require.NoError(t, err)
+
+		projLogged := projBuf.String()
+		assert.Contains(t, projLogged, projectGuardWarnMessage)
+		assert.Contains(t, projLogged, "server.brokr.broker_id")
+		assert.Contains(t, projLogged, "harness_configs[x].imagee")
+	})
 }
 
 func TestLoadSettingsFromDir_V1OnlyKeyInLegacyFile_StillWarns(t *testing.T) {

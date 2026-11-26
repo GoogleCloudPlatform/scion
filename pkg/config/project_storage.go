@@ -16,14 +16,11 @@ package config
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 
-	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -733,60 +730,4 @@ func SharedDirStorageLayout(srv *V1ServerConfig) (layout projectfs.Layout, split
 		return projectfs.Layout{}, false, err
 	}
 	return full.SharedDirLayout(), full.SharedDirs != nil, nil
-}
-
-// layer0StorageKeys are the settings paths of the storage blocks. They are
-// Layer-0: read from the global settings (and the process environment),
-// never from a project's settings file.
-var layer0StorageKeys = []string{
-	ProjectStorageKey, workspaceStorageKey, sharedDirStorageKey, homeStorageKey,
-}
-
-// snapshotLayer0StorageKeys copies the storage blocks k holds now (the
-// defaults and global layers), keyed by path; a block k does not hold maps
-// to nil.
-func snapshotLayer0StorageKeys(k *koanf.Koanf) map[string]*koanf.Koanf {
-	snap := make(map[string]*koanf.Koanf, len(layer0StorageKeys))
-	for _, key := range layer0StorageKeys {
-		if k.Exists(key) {
-			snap[key] = k.Cut(key)
-		} else {
-			snap[key] = nil
-		}
-	}
-	return snap
-}
-
-// restoreLayer0StorageKeys drops whatever the project layers set under the
-// storage blocks and puts back the snapshot taken before them, so a
-// project's settings.yaml can never place a project's storage. sources, when
-// non-nil, loses the project attribution of the dropped keys.
-func restoreLayer0StorageKeys(k *koanf.Koanf, snap map[string]*koanf.Koanf, sources map[string]string) error {
-	for _, key := range layer0StorageKeys {
-		if k.Exists(key) {
-			cur := k.Cut(key)
-			saved := snap[key]
-			if saved == nil || !reflect.DeepEqual(cur.Raw(), saved.Raw()) {
-				slog.Warn("a project's settings set a storage block, which is read from the global settings only; the project's value is ignored",
-					"key", key)
-			}
-		}
-		k.Delete(key)
-		for src := range sources {
-			if src == key || strings.HasPrefix(src, key+".") {
-				delete(sources, src)
-			}
-		}
-		if saved := snap[key]; saved != nil {
-			if err := k.MergeAt(saved, key); err != nil {
-				return fmt.Errorf("restoring %s: %w", key, err)
-			}
-			for _, sub := range saved.Keys() {
-				if sources != nil {
-					sources[key+"."+sub] = "global"
-				}
-			}
-		}
-	}
-	return nil
 }

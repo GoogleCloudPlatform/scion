@@ -261,7 +261,7 @@ profiles:
       gemini:
         auth_selectedType: vertex-ai
 `
-	projectDir := setupSettingsViewTest(t, "schema_version: \"1\"\nactive_profile: local\n", legacyProject)
+	projectDir := setupSettingsViewTest(t, "schema_version: \"1\"\nactive_profile: local\nserver:\n  broker:\n    broker_id: global-broker\n", legacyProject)
 
 	vs, warnings, err := LoadEffectiveSettings(projectDir)
 	require.NoError(t, err)
@@ -273,7 +273,7 @@ profiles:
 	assert.Equal(t, "hub-camel", vs.Hub.ProjectID)
 	require.NotNil(t, vs.Server)
 	require.NotNil(t, vs.Server.Broker)
-	assert.Equal(t, "legacy-broker", vs.Server.Broker.BrokerID)
+	assert.Equal(t, "global-broker", vs.Server.Broker.BrokerID, "legacy hub.brokerId in project file must not override global server.broker.broker_id")
 	require.NotNil(t, vs.CLI)
 	require.NotNil(t, vs.CLI.InteractiveDisabled)
 	assert.True(t, *vs.CLI.InteractiveDisabled, "a v1-only key of a legacy file is kept")
@@ -471,8 +471,9 @@ func TestLoadSettings_LegacyHarnessEntryKeepsLowerHarness(t *testing.T) {
 // Legacy keys that differ only in case convert, as the legacy decode reads
 // them case-insensitively.
 func TestLoadSettings_LegacyKeysMatchCaseInsensitively(t *testing.T) {
-	projectDir := setupSettingsViewTest(t, "",
-		"project_id: local-id\nhub:\n  projectID: hub-ci\n  brokerID: broker-ci\nprofiles:\n  dev:\n    runtime: docker\n    harness_overrides:\n      claude:\n        auth_selectedtype: vertex-ai\n")
+	projectDir := setupSettingsViewTest(t,
+		"hub:\n  brokerID: broker-ci\n",
+		"project_id: local-id\nhub:\n  projectID: hub-ci\nprofiles:\n  dev:\n    runtime: docker\n    harness_overrides:\n      claude:\n        auth_selectedtype: vertex-ai\n")
 	resetWarnedUnusedKeysCache()
 	t.Cleanup(resetWarnedUnusedKeysCache)
 	var logs bytes.Buffer

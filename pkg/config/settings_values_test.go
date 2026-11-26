@@ -97,11 +97,11 @@ func TestResolveSettingValues_SourcesAndAgreement(t *testing.T) {
 		},
 		{
 			name:    "legacy-format project file",
-			global:  "schema_version: \"1\"\n",
-			project: "harnesses: {}\nhub:\n  endpoint: https://legacy.example.com\n  brokerId: broker-l\n",
+			global:  "harnesses: {}\nhub:\n  brokerId: broker-l\n",
+			project: "harnesses: {}\nhub:\n  endpoint: https://legacy.example.com\n  brokerId: ignored-project-broker\n",
 			want: map[string][2]string{
 				"hub.endpoint": {"https://legacy.example.com", "project"},
-				"hub.brokerId": {"broker-l", "project"},
+				"hub.brokerId": {"broker-l", "global"},
 			},
 		},
 		{

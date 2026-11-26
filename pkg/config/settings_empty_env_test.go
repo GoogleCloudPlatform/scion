@@ -29,6 +29,9 @@ const emptyEnvSettingsYAML = `schema_version: "1"
 default_template: file-template
 hub:
   endpoint: https://file-hub.example.com
+`
+
+const emptyEnvGlobalSettingsYAML = `schema_version: "1"
 server:
   broker:
     broker_name: file-broker
@@ -73,6 +76,9 @@ func setupEmptyEnvProjectWith(t *testing.T, settingsYAML string) string {
 		"SCION_HUB_ENDPOINT", "SCION_DEFAULT_TEMPLATE",
 		"SCION_SERVER_BROKER_BROKER_NAME", "SCION_PROJECT",
 		"SCION_PROJECT_ID", "SCION_HUB_PROJECT_ID", "SCION_AUTO_EXPOSE_PORTS")
+	globalDir := filepath.Join(tmpDir, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(emptyEnvGlobalSettingsYAML), 0644))
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte(settingsYAML), 0644))
