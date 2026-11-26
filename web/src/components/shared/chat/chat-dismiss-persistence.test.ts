@@ -35,7 +35,6 @@ vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/ma
 beforeAll(async () => {
   await import('./chat-composer.js');
   await import('./mention-autocomplete.js');
-  await import('./slash-autocomplete.js');
 });
 
 describe('reply/edit bar dismissal (#89)', () => {
@@ -179,69 +178,6 @@ describe('autocomplete dismissal (#90)', () => {
     expect(el.active).toBe(true);
 
     ta.remove();
-    el.remove();
-  });
-
-  it('slash: Escape survives the next keystroke', async () => {
-    const el = document.createElement('scion-slash-autocomplete') as any;
-    document.body.appendChild(el);
-    await el.updateComplete;
-
-    el.handleInput('/', 1);
-    await el.updateComplete;
-    expect(el.active).toBe(true);
-
-    el.handleKeydown(new KeyboardEvent('keydown', { key: 'Escape' }));
-    await el.updateComplete;
-    expect(el.active).toBe(false);
-
-    el.handleInput('/h', 2);
-    await el.updateComplete;
-    expect(el.active).toBe(false);
-
-    el.remove();
-  });
-
-  it('slash: typing a different command after dismissal reopens', async () => {
-    const el = document.createElement('scion-slash-autocomplete') as any;
-    document.body.appendChild(el);
-    await el.updateComplete;
-
-    // Dismiss while typing /he (matches /help)
-    el.handleInput('/he', 3);
-    await el.updateComplete;
-    expect(el.active).toBe(true);
-
-    el.handleKeydown(new KeyboardEvent('keydown', { key: 'Escape' }));
-    await el.updateComplete;
-    expect(el.active).toBe(false);
-
-    // Clear and type a different command — should reopen.
-    el.handleInput('/st', 3);
-    await el.updateComplete;
-    expect(el.active).toBe(true);
-
-    el.remove();
-  });
-
-  it('slash: backspacing past dismissed prefix reopens', async () => {
-    const el = document.createElement('scion-slash-autocomplete') as any;
-    document.body.appendChild(el);
-    await el.updateComplete;
-
-    el.handleInput('/hel', 4);
-    await el.updateComplete;
-    expect(el.active).toBe(true);
-
-    el.handleKeydown(new KeyboardEvent('keydown', { key: 'Escape' }));
-    await el.updateComplete;
-    expect(el.active).toBe(false);
-
-    // Backspace: prefix is now 'h', does NOT start with 'hel'.
-    el.handleInput('/h', 2);
-    await el.updateComplete;
-    expect(el.active).toBe(true);
-
     el.remove();
   });
 });

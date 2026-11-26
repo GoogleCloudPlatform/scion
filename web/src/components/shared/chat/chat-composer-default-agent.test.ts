@@ -118,4 +118,31 @@ describe('composer — thread default chip', () => {
     el.handleAgentMenuSelect(new CustomEvent('sl-select', { detail: { item: other } }));
     expect(changes).toEqual([{ defaultAgent: 'Other Agent' }]);
   });
+
+  it('clears the default agent when "No agent" is selected from the chip menu', async () => {
+    const el = await renderComposer('code-reviewer');
+    const changes: unknown[] = [];
+    el.addEventListener('default-agent-change', (e: CustomEvent) => changes.push(e.detail));
+
+    const clearItem = el.shadowRoot.querySelector('sl-menu-item[value="__clear__"]');
+    expect(clearItem).not.toBeNull();
+    el.handleAgentMenuSelect(new CustomEvent('sl-select', { detail: { item: clearItem } }));
+    expect(changes).toEqual([{ defaultAgent: '' }]);
+  });
+
+  it('sends slash-prefixed text as an ordinary chat-send message with no slash autocomplete', async () => {
+    const el = await renderComposer('code-reviewer');
+    expect(el.shadowRoot.querySelector('scion-slash-autocomplete')).toBeNull();
+
+    const sent: Array<{ text: string }> = [];
+    el.addEventListener('chat-send', (e: CustomEvent<{ text: string }>) => {
+      sent.push({ text: e.detail.text });
+    });
+
+    el.text = '/default other-agent';
+    await el.updateComplete;
+    el.handleSend();
+
+    expect(sent).toEqual([{ text: '/default other-agent' }]);
+  });
 });

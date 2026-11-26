@@ -377,9 +377,6 @@ const JUMP_SCROLL_VIEW_TOLERANCE_PX = 24;
 /** Jump-to-message re-check: cap on corrective re-scrolls to avoid a loop. */
 const JUMP_SCROLL_MAX_RECHECKS = 2;
 
-/** The hub rejects agent names longer than this many runes. */
-const MAX_AGENT_NAME_LENGTH = 63;
-
 /**
  * How long after a press on a link in a message (its last pointer event) a
  * menu opening on that message still counts as raised on the link. Covers
@@ -387,32 +384,6 @@ const MAX_AGENT_NAME_LENGTH = 63;
  * long-press case is expected to be one; not verified on a device).
  */
 const PRESS_LINK_WINDOW_MS = 1000;
-
-/** Length of the random suffix in a default /spawn name. */
-const SPAWN_SUFFIX_LENGTH = 4;
-
-/**
- * Default /spawn name: `<template>-<suffix>`. The template part is
- * truncated so the whole name fits the hub's length limit, and trailing
- * hyphens are dropped so the result stays a valid slug. The suffix is a
- * random integer below 36^length in base36, left-padded with zeros, so
- * it is always exactly SPAWN_SUFFIX_LENGTH characters of [0-9a-z].
- */
-function defaultSpawnName(template: string): string {
-  const suffix = Math.floor(Math.random() * 36 ** SPAWN_SUFFIX_LENGTH)
-    .toString(36)
-    .padStart(SPAWN_SUFFIX_LENGTH, '0');
-  const maxBase = MAX_AGENT_NAME_LENGTH - SPAWN_SUFFIX_LENGTH - 1;
-  const base = Array.from(template).slice(0, maxBase).join('').replace(/-+$/, '');
-  return `${base}-${suffix}`;
-}
-
-/**
- * /status: safety bound on agent-list pages followed via `nextCursor`. At the
- * server's 500-per-page cap this covers 10,000 agents; past it the listing
- * is shown with a truncation note rather than looping indefinitely.
- */
-const MAX_STATUS_AGENT_PAGES = 20;
 
 /**
  * Jump-to-message re-check: how long the fallback poll (older Safari, no
@@ -1928,17 +1899,6 @@ export class ScionChatThread extends LitElement {
 
       .context-menu-item.danger sl-icon {
         color: var(--scion-danger-600, #dc2626);
-      }
-
-      /* Phase-5: Slash command system message */
-      .system-info-message {
-        padding: 0.5rem 1rem;
-        font-size: var(--chat-fs-base);
-        color: var(--scion-text-muted, #64748b);
-        background: var(--scion-bg-subtle, #f1f5f9);
-        border-radius: calc(var(--scion-radius) * 0.75);
-        margin: 0.25rem 1rem;
-        white-space: pre-wrap;
       }
 
       /* Clear a landscape phone's notch and rounded corners (the page uses
@@ -3647,7 +3607,7 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, attachmentIds, artifactRefs, onSuccess, onError } = e.detail;
+    const { text, attachmentIds, artifactRefs, onError } = e.detail;
     const hasContent =
       text.length > 0 ||
       (attachmentIds && attachmentIds.length > 0) ||
@@ -3660,13 +3620,6 @@ export class ScionChatThread extends LitElement {
     if (this._sendingConversations.has(this.conversationKey)) {
       this.sendError = 'Still sending the previous message';
       onError?.(this.sendError);
-      return;
-    }
-
-    // Check for /default slash command
-    if (text.startsWith('/default ')) {
-      await this.handleDefaultCommand(text);
-      onSuccess();
       return;
     }
 
@@ -4236,41 +4189,6 @@ export class ScionChatThread extends LitElement {
         : 'Message not sent: you switched conversations.',
       'warning'
     );
-  }
-
-  /** Handle /default slash command. */
-  private async handleDefaultCommand(text: string): Promise<void> {
-    const arg = text.slice('/default '.length).trim();
-    if (!this.conversationKey || this.isDM) return;
-
-    try {
-      const body: Record<string, unknown> = {};
-      if (arg === 'clear') {
-        body.defaultAgent = '';
-      } else {
-        body.defaultAgent = arg;
-      }
-      const res = await apiFetch(
-        `/api/v1/chat/topics/${encodeURIComponent(this.conversationKey)}`,
-        {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        }
-      );
-      if (res.ok) {
-        const nextDefault = arg === 'clear' ? '' : arg;
-        this.dispatchEvent(
-          new CustomEvent('default-agent-changed', {
-            detail: { defaultAgent: nextDefault },
-            bubbles: true,
-            composed: true,
-          })
-        );
-      }
-    } catch {
-      // Non-critical
-    }
   }
 
   /** Handle default-agent-change from the composer dropdown. */
@@ -7259,238 +7177,6 @@ export class ScionChatThread extends LitElement {
     `;
   }
 
-  // ---------------------------------------------------------------------------
-  // Phase-5: Slash command handling
-  // ---------------------------------------------------------------------------
-
-  /** Handle slash commands dispatched from the composer. */
-  private async handleSlashCommand(
-    e: CustomEvent<{ command: string; args: string }>
-  ): Promise<void> {
-    const { command, args } = e.detail;
-
-    switch (command) {
-      case 'status':
-        await this.handleSlashStatus();
-        break;
-      case 'clear':
-        this.handleSlashClear();
-        break;
-      case 'help':
-        this.handleSlashHelp();
-        break;
-      case 'spawn':
-        await this.handleSlashSpawn(args);
-        break;
-      case 'stop':
-        await this.handleSlashStop(args);
-        break;
-      case 'default':
-        await this.handleDefaultCommand(`/default ${args}`);
-        break;
-      default:
-        this.insertLocalSystemMessage(`Unknown command: /${command}`);
-        break;
-    }
-  }
-
-  /**
-   * /status — Fetch agent status for the project.
-   *
-   * Like /stop, a chat-page DM resolves the peer agent's project via
-   * `peerAgentProjectId()`, since `this.projectId` there is only the
-   * inherited project. Non-DM threads use `this.projectId`.
-   */
-  private async handleSlashStatus(): Promise<void> {
-    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
-    if (!projectId) {
-      this.insertLocalSystemMessage('No project context available.');
-      return;
-    }
-
-    // GET /api/v1/agents filters on `projectId` and returns
-    // `{ agents, nextCursor }`. Pages are capped server-side, so follow
-    // `nextCursor` until it is empty. The cursor is bound to the request's
-    // filter, so every page must repeat the same `projectId`.
-    const base = `/api/v1/agents?projectId=${encodeURIComponent(projectId)}`;
-    const agents: Agent[] = [];
-    const seenCursors = new Set<string>();
-    let cursor = '';
-    let pages = 0;
-
-    try {
-      do {
-        const url = cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base;
-        const res = await apiFetch(url);
-        if (!res.ok) {
-          this.insertLocalSystemMessage('Failed to fetch project status.');
-          return;
-        }
-        const data = (await res.json()) as { agents?: Agent[]; nextCursor?: string } | null;
-        if (Array.isArray(data?.agents)) agents.push(...data.agents);
-        const next = typeof data?.nextCursor === 'string' ? data.nextCursor : '';
-        if (next && seenCursors.has(next)) {
-          this.insertLocalSystemMessage('Failed to fetch project status.');
-          return;
-        }
-        if (next) seenCursors.add(next);
-        cursor = next;
-        pages++;
-      } while (cursor && pages < MAX_STATUS_AGENT_PAGES);
-
-      if (agents.length === 0) {
-        this.insertLocalSystemMessage('No agents found in this project.');
-        return;
-      }
-
-      const lines = agents.map((a) => {
-        const slug = a.slug || a.name || 'unknown';
-        const phase = a.phase || 'unknown';
-        return `  ${slug}: ${phase}`;
-      });
-      if (cursor) lines.push('  … (list truncated)');
-      this.insertLocalSystemMessage(`Project agents:\n${lines.join('\n')}`);
-    } catch {
-      this.insertLocalSystemMessage('Failed to fetch project status.');
-    }
-  }
-
-  /** /clear — Clear messages locally. */
-  private handleSlashClear(): void {
-    this.messageMap.clear();
-    this._artifactRefsUnavailable.clear();
-    this.messages = [];
-    this.interagentMessages = [];
-    this.insertLocalSystemMessage('Conversation cleared.');
-  }
-
-  /** /help — List available commands. */
-  private handleSlashHelp(): void {
-    const helpText = [
-      'Available commands:',
-      '  /status — Show project agent status',
-      '  /clear — Clear the conversation view',
-      '  /help — Show this help message',
-      '  /spawn <template> [name] — Spawn a new agent from a template',
-      '  /stop <agent> — Stop a running agent',
-      '  /default <agent|clear> — Set or clear the thread default agent',
-    ].join('\n');
-    this.insertLocalSystemMessage(helpText);
-  }
-
-  /**
-   * /spawn <template> [name] — Create and start a new agent.
-   *
-   * The hub's create handler requires both `name` and `projectId`, so an
-   * omitted name defaults to the template plus a short random suffix (the
-   * hub rejects a name already taken in the project; see
-   * `defaultSpawnName`). The response wraps the created agent as
-   * `{ agent }`.
-   *
-   * Like /stop, a DM resolves the peer agent's project: a DM's
-   * `this.projectId` is only the inherited project (whatever the user was
-   * viewing before opening the DM), so spawning there would create the
-   * agent in an unrelated project.
-   */
-  private async handleSlashSpawn(args: string): Promise<void> {
-    const parts = args.trim().split(/\s+/).filter(Boolean);
-    const template = parts[0];
-    if (!template || parts.length > 2) {
-      this.insertLocalSystemMessage('Usage: /spawn <template> [name]');
-      return;
-    }
-    const name = parts[1] || defaultSpawnName(template);
-
-    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
-    if (!projectId) {
-      this.insertLocalSystemMessage('No project context available.');
-      return;
-    }
-
-    try {
-      const body = { name, projectId, template };
-      const res = await apiFetch('/api/v1/agents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to spawn agent');
-        this.insertLocalSystemMessage(`Failed to spawn agent: ${errMsg}`);
-        return;
-      }
-
-      const data = (await res.json()) as { agent?: { name?: string; slug?: string } };
-      const spawned = data?.agent?.slug || data?.agent?.name || name;
-      this.insertLocalSystemMessage(`Agent "${spawned}" spawned successfully.`);
-    } catch (err) {
-      this.insertLocalSystemMessage(
-        `Failed to spawn agent: ${err instanceof Error ? err.message : 'unknown error'}`
-      );
-    }
-  }
-
-  /**
-   * /stop <agent> — Stop a running agent.
-   *
-   * In a chat-page DM, `this.projectId` is only the inherited project
-   * (whatever the user was viewing before opening the DM), so DMs
-   * resolve the agent's project via `peerAgentProjectId()` instead.
-   * Non-DM threads use `this.projectId`, which is the thread's real
-   * project.
-   */
-  private async handleSlashStop(args: string): Promise<void> {
-    const agentSlug = args.trim();
-    if (!agentSlug) {
-      this.insertLocalSystemMessage('Usage: /stop <agent-slug>');
-      return;
-    }
-
-    const projectId = this.isDM ? this.peerAgentProjectId() : this.projectId;
-    if (!projectId) {
-      this.insertLocalSystemMessage('No project context available.');
-      return;
-    }
-
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentSlug)}/stop`,
-        { method: 'POST' }
-      );
-
-      if (!res.ok) {
-        const errMsg = await extractApiError(res, 'Failed to stop agent');
-        this.insertLocalSystemMessage(`Failed to stop agent: ${errMsg}`);
-        return;
-      }
-
-      this.insertLocalSystemMessage(`Agent "${agentSlug}" stop requested.`);
-    } catch (err) {
-      this.insertLocalSystemMessage(
-        `Failed to stop agent: ${err instanceof Error ? err.message : 'unknown error'}`
-      );
-    }
-  }
-
-  /** Insert a local-only system message into the thread. */
-  private insertLocalSystemMessage(text: string): void {
-    const localMsg: Message = {
-      id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      projectId: this.projectId,
-      sender: 'system',
-      senderId: '',
-      recipient: '',
-      recipientId: '',
-      msg: text,
-      type: 'system',
-      agentId: '',
-      createdAt: new Date().toISOString(),
-    };
-    this.mergeMessages([localMsg]);
-    this.scrollToBottomAfterRender();
-  }
-
   /** Focus the composer textarea when clicking the message area background. */
   private handleMessageAreaClick(e: MouseEvent): void {
     const target = e.target as HTMLElement;
@@ -7792,7 +7478,6 @@ export class ScionChatThread extends LitElement {
         @chat-edit=${this.handleChatEditV2}
         @chat-typing=${() => this.sendTypingEvent()}
         @default-agent-change=${this.handleDefaultAgentChange}
-        @chat-slash-command=${this.handleSlashCommand}
       ></scion-chat-composer>
     `;
   }

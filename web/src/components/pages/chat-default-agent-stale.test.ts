@@ -68,7 +68,6 @@ interface ChatInternals extends HTMLElement {
 
 interface ThreadInternals extends ScionChatThread {
   handleDefaultAgentChange(e: CustomEvent<{ defaultAgent: string }>): Promise<void>;
-  handleDefaultCommand(text: string): Promise<void>;
   handleSetDefaultAgent(agentSlug: string): Promise<void>;
 }
 
@@ -238,11 +237,18 @@ describe('scion-chat-thread does not mutate its parent-owned defaultAgent proper
       new CustomEvent('default-agent-change', { detail: { defaultAgent: 'agent-new' } })
     );
 
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/chat/topics/topic-a',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ defaultAgent: 'agent-new' }),
+      })
+    );
     expect(events).toEqual(['agent-new']);
     expect(el.defaultAgent).toBe('agent-old');
   });
 
-  it('dispatches default-agent-changed from /default command without mutating this.defaultAgent', async () => {
+  it('clears the default agent via composer dropdown without mutating this.defaultAgent', async () => {
     const el = document.createElement('scion-chat-thread') as ThreadInternals;
     el.conversationKey = 'topic-a';
     el.defaultAgent = 'agent-old';
@@ -251,9 +257,18 @@ describe('scion-chat-thread does not mutate its parent-owned defaultAgent proper
       events.push((e as CustomEvent<{ defaultAgent: string }>).detail.defaultAgent);
     });
 
-    await el.handleDefaultCommand('/default agent-slash');
+    await el.handleDefaultAgentChange(
+      new CustomEvent('default-agent-change', { detail: { defaultAgent: '' } })
+    );
 
-    expect(events).toEqual(['agent-slash']);
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/chat/topics/topic-a',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: JSON.stringify({ defaultAgent: '' }),
+      })
+    );
+    expect(events).toEqual(['']);
     expect(el.defaultAgent).toBe('agent-old');
   });
 
