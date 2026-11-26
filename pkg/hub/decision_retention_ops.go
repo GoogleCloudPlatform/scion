@@ -334,7 +334,8 @@ func (s *Server) runDecisionRetentionPreview(ctx context.Context, logger io.Writ
 		return nil, fmt.Errorf("decision retention preview: %w", err)
 	}
 	sw := newDecisionRetentionSweeper(st, s.isSQLiteStore())
-	sw.policy = s.decisionRetentionPolicyAt
+	// Preview intentionally evaluates a single policy snapshot without per-page
+	// re-reads (it deletes nothing).
 	start := sw.now()
 	// Preview evaluates the saved hub default and per-project overrides as if
 	// enabled=true so admins can inspect counts before enabling the sweep.
