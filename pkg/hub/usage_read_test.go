@@ -455,13 +455,17 @@ func TestAgentUsageRead_MeasurementStatus(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.SetAgentRunID(ctx, ag.ID, staleRunID, nil)
 	require.NoError(t, err)
-	require.NoError(t, s.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:       ag.ID,
-		RunID:         staleRunID,
-		ProducerEpoch: "ep-stale",
-		LastReceiptAt: dbNow.Add(-5 * time.Minute),
-		FinalState:    store.MeterHealthFinalStateOpen,
-	}))
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       ag.ID,
+			RunID:         staleRunID,
+			ProducerEpoch: "ep-stale",
+			LastReceiptAt: dbNow.Add(-5 * time.Minute),
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
 
 	recStale := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
 	require.Equal(t, http.StatusOK, recStale.Code)
