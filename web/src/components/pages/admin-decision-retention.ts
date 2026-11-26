@@ -49,6 +49,8 @@ const MANUAL_RUN_PATH = `/api/v1/admin/maintenance/operations/${MANUAL_RUN_OP}/r
 /** How often a started preview or manual run is checked, and for how long at most. */
 const OP_POLL_MS = 2000;
 const OP_POLL_MAX = 900;
+/** Stop polling with an error after this many consecutive non-2xx/network failures. */
+const OP_POLL_MAX_ERRORS = 5;
 
 /** Sweep tuning, as pkg/hub/admin_decision_retention.go sends it. */
 export interface DecisionRetentionSweep {
@@ -865,7 +867,7 @@ export class ScionAdminDecisionRetention extends LitElement {
     }
   }
 
-  private pollOperation(op: string, runId: string, attempt: number): void {
+  private pollOperation(op: string, runId: string, attempt: number, consecutiveErrors = 0): void {
     const isPreview = op === PREVIEW_OP;
     if (isPreview && this.previewPoll !== null) {
       clearTimeout(this.previewPoll);
@@ -880,20 +882,53 @@ export class ScionAdminDecisionRetention extends LitElement {
       else this.manualRunPoll = null;
       void (async () => {
         let running = attempt + 1 < OP_POLL_MAX;
+        let nextErrors = consecutiveErrors;
         try {
           const res = await apiFetch(
             `/api/v1/admin/maintenance/operations/${op}/runs/${encodeURIComponent(runId)}`
           );
           if (res.ok) {
-            const run = (await res.json()) as { status?: string };
-            running = running && run.status === 'running';
+            nextErrors = 0;
+            const run = (await res.json().catch(() => null)) as {
+              status?: string;
+              error?: string;
+              log?: string;
+            } | null;
+            if (run?.status === 'failed') {
+              const logTail = run.log
+                ?.split('\n')
+                .map((l) => l.trim())
+                .filter(Boolean)
+                .pop();
+              this.opError =
+                run.error?.trim() ||
+                logTail ||
+                (isPreview ? 'Preview failed.' : 'Decision retention run failed.');
+              running = false;
+            } else {
+              running = running && run?.status === 'running';
+            }
+          } else {
+            nextErrors++;
+            if (nextErrors >= OP_POLL_MAX_ERRORS) {
+              this.opError = isPreview
+                ? `Failed to check preview status (HTTP ${res.status}).`
+                : `Failed to check decision retention run status (HTTP ${res.status}).`;
+              running = false;
+            }
           }
         } catch {
-          // Retry on next poll.
+          nextErrors++;
+          if (nextErrors >= OP_POLL_MAX_ERRORS) {
+            this.opError = isPreview
+              ? 'Lost contact while checking preview status.'
+              : 'Lost contact while checking decision retention run status.';
+            running = false;
+          }
         }
         if (!this.isConnected) return;
         if (running) {
-          this.pollOperation(op, runId, attempt + 1);
+          this.pollOperation(op, runId, attempt + 1, nextErrors);
           return;
         }
         if (isPreview) this.previewRunning = false;

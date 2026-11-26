@@ -655,6 +655,71 @@ describe('scion-admin-decision-retention', () => {
       expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
     });
 
+    it('surfaces opError when a polled run ends failed without writing a run row', async () => {
+      vi.useFakeTimers();
+      try {
+        const el = document.createElement('scion-admin-decision-retention');
+        document.body.appendChild(el);
+        await vi.advanceTimersByTimeAsync(10);
+        await el.updateComplete;
+
+        apiFetch.mockImplementation((path, init) => {
+          if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
+          if (path.endsWith('/decision-retention-preview/run')) {
+            return Promise.resolve(json({ runId: 'run-fail', status: 'running' }));
+          }
+          if (path.includes('/runs/run-fail')) {
+            return Promise.resolve(json({ status: 'failed', log: 'starting\nlock contention\n' }));
+          }
+          return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+        });
+
+        q(el, '.run-preview')?.click();
+        await vi.advanceTimersByTimeAsync(2100);
+        await el.updateComplete;
+
+        expect(q(el, '.op-error')?.textContent).toContain('lock contention');
+        expect(q(el, '.run-preview')?.hasAttribute('disabled')).toBe(false);
+        el.remove();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops polling with an error after repeated non-2xx poll responses', async () => {
+      vi.useFakeTimers();
+      try {
+        const el = document.createElement('scion-admin-decision-retention');
+        document.body.appendChild(el);
+        await vi.advanceTimersByTimeAsync(10);
+        await el.updateComplete;
+
+        let pollCalls = 0;
+        apiFetch.mockImplementation((path, init) => {
+          if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
+          if (path.endsWith('/decision-retention-preview/run')) {
+            return Promise.resolve(json({ runId: 'run-500', status: 'running' }));
+          }
+          if (path.includes('/runs/run-500')) {
+            pollCalls++;
+            return Promise.resolve(json({ error: 'internal' }, 500));
+          }
+          return Promise.resolve(init?.method === 'PUT' ? putResponse() : json(current));
+        });
+
+        q(el, '.run-preview')?.click();
+        await vi.advanceTimersByTimeAsync(12000);
+        await el.updateComplete;
+
+        expect(pollCalls).toBe(5);
+        expect(q(el, '.op-error')?.textContent).toContain('HTTP 500');
+        expect(q(el, '.run-preview')?.hasAttribute('disabled')).toBe(false);
+        el.remove();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('says the experiment is off when the hub answers 404', async () => {
       apiFetch.mockImplementation((path) => {
         if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
