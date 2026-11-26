@@ -626,6 +626,35 @@ describe('scion-admin-decision-retention', () => {
       expect(puts()).toEqual([]);
     });
 
+    it('confirms before PUT when enabling with a window and sends exactly one PUT on confirm', async () => {
+      current = settings({ enabled: false, retention_days: null, revision: 3 });
+      const el = await mount();
+      const sw = q<HTMLInputElement>(el, '.retention-enabled');
+      if (sw) sw.checked = true;
+      sw?.dispatchEvent(new Event('sl-change'));
+      await el.updateComplete;
+      await type(el, '.retention-days', '180');
+      await save(el);
+
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(true);
+      expect(puts()).toEqual([]);
+
+      putResponse = () => json(settings({ enabled: true, retention_days: 180, revision: 4 }));
+      q(el, '.confirm-save')?.click();
+      await settle();
+      await el.updateComplete;
+
+      expect(puts()).toHaveLength(1);
+      expect(puts()[0]).toEqual(
+        expect.objectContaining({
+          enabled: true,
+          retention_days: 180,
+          expected_revision: 3,
+        })
+      );
+      expect(q(el, '.confirm-dialog')?.hasAttribute('open')).toBe(false);
+    });
+
     it('says the experiment is off when the hub answers 404', async () => {
       apiFetch.mockImplementation((path) => {
         if (path === '/api/v1/projects') return Promise.resolve(json({ projects: PROJECTS }));
