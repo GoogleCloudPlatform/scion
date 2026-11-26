@@ -8,7 +8,7 @@
 
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project
 - [agent.lifecycle.delete](#agentlifecycledelete) — Delete an agent
-- [agent.lifecycle.control](#agentlifecyclecontrol) — Start, stop, suspend or restart an agent
+- [agent.lifecycle.control](#agentlifecyclecontrol) — Start, stop, suspend or restart an agent; suspending a never-suspend agent requires force=true from a human principal (agent principals are refused with 403 force_suspend_forbidden)
 - [agent.lifecycle.restore](#agentlifecyclerestore) — Restore a soft-deleted agent
 - [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
 - [agent.screen.read](#agentscreenread) — Read the terminal screen saved before an agent's most recent suspend
@@ -544,7 +544,7 @@
 
 **Domain:** agent
 
-**Description:** Start, stop, suspend or restart an agent
+**Description:** Start, stop, suspend or restart an agent; suspending a never-suspend agent requires force=true from a human principal (agent principals are refused with 403 force_suspend_forbidden)
 
 ### Entry Points
 
@@ -571,7 +571,16 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+### Audit
+
+- **Event Type:** `agent.suspend.forced`
+- **Context Fields:** actor_id, agent_id
+- **Before Fields:** phase, activity, suspend_policy
+- **After Fields:** phase, suspend_reason
+- **Atomic:** No
+- **Non-Atomic Justification:** Forced suspend dispatches the container stop to the runtime broker before recording phase=suspended; the agent.suspend.forced audit record is emitted via emitMutationAudit immediately after the status write commits
+
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 

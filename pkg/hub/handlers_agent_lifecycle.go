@@ -584,21 +584,117 @@ func (s *Server) harnessSupportsResumeMemo(ctx context.Context, agent *store.Age
 	return true, harnessType, ""
 }
 
+const mutationTypeAgentSuspendForced = "agent.suspend.forced"
+
+// errAgentNeverSuspend is returned by suspendAgent when the agent has an active
+// never-suspend policy and the request did not carry force=true.
+type errAgentNeverSuspend struct {
+	agentName string
+}
+
+func (e *errAgentNeverSuspend) Error() string {
+	return fmt.Sprintf("agent %q has suspend policy \"never\"; pass force=true to suspend it", e.agentName)
+}
+
+// errForceSuspendForbidden is returned by suspendAgent and
+// convertHubSuspendToUser when a non-human principal attempts to force-suspend
+// a never-suspend agent; only allowlisted human principals may override
+// never-suspend.
+type errForceSuspendForbidden struct{}
+
+func (e *errForceSuspendForbidden) Error() string {
+	return "only human principals may force-suspend a never-suspend agent"
+}
+
+// isHumanForceSuspendPrincipal reports whether identity is an allowlisted
+// human principal permitted to force-suspend a never-suspend agent.
+// Allowlists PrincipalKindUser (interactive session and scoped UAT) and
+// PrincipalKindDev only, matching agent.lifecycle.control's admitted human
+// credentials and failing closed on nil, agent, delegated-agent, broker,
+// federated, visitor, or unclassified identities.
+func isHumanForceSuspendPrincipal(identity Identity) bool {
+	switch principalContextForIdentity(identity).Kind {
+	case PrincipalKindUser, PrincipalKindDev:
+		return true
+	default:
+		return false
+	}
+}
+
+// neverSuspendOverride evaluates whether a manual suspend of agent is blocked
+// by an active never-suspend policy or requires a human force override.
+// When neverSuspendActive(agent) is false (experiment off or policy != "never"),
+// force is accepted and ignored and (ctx, false, nil) is returned.
+func (s *Server) neverSuspendOverride(ctx context.Context, agent *store.Agent) (context.Context, bool, error) {
+	if !s.neverSuspendActive(agent) {
+		return ctx, false, nil
+	}
+	if !lifecycleSuspendForceFromContext(ctx) {
+		return ctx, false, &errAgentNeverSuspend{agentName: agent.Name}
+	}
+	if !isHumanForceSuspendPrincipal(GetIdentityFromContext(ctx)) {
+		return ctx, false, &errForceSuspendForbidden{}
+	}
+	return withLifecycleSuspendForced(ctx), true, nil
+}
+
+// emitForcedSuspendAudit writes the agent.suspend.forced mutation audit record
+// after a forced manual suspend (or auto-wake conversion) succeeds.
+func (s *Server) emitForcedSuspendAudit(ctx context.Context, agent *store.Agent, prePhase, preActivity, newPhase string) {
+	rec := &store.MutationAuditRecord{
+		MutationType:  mutationTypeAgentSuspendForced,
+		TargetType:    "agent",
+		TargetID:      agent.ID,
+		BeforeSummary: fmt.Sprintf("phase=%s activity=%s suspend_policy=%s", prePhase, preActivity, agent.SuspendPolicy),
+		AfterSummary:  fmt.Sprintf("phase=%s suspend_reason=%s forced=true", newPhase, state.SuspendReasonUser),
+	}
+	auditActorFromContext(ctx).ApplyActor(rec)
+	applyHubActorFallback(rec)
+	s.emitMutationAudit(ctx, rec)
+}
+
+// writeNeverSuspendError writes the HTTP 409/403 response for a never-suspend
+// refusal returned by neverSuspendOverride / suspendAgent.
+func writeNeverSuspendError(w http.ResponseWriter, agentID string, err error) bool {
+	var neverSuspend *errAgentNeverSuspend
+	if errors.As(err, &neverSuspend) {
+		writeError(w, http.StatusConflict, ErrCodeAgentNeverSuspend,
+			neverSuspend.Error(), map[string]interface{}{"agentId": agentID})
+		return true
+	}
+	var forceForbidden *errForceSuspendForbidden
+	if errors.As(err, &forceForbidden) {
+		writeError(w, http.StatusForbidden, ErrCodeForceSuspendForbidden,
+			forceForbidden.Error(), map[string]interface{}{"agentId": agentID})
+		return true
+	}
+	return false
+}
+
 // suspendAgent performs the core SUSPEND action for the HTTP lifecycle
 // handler (the auto-suspend scheduler runs its own inline copy of these
-// steps): it validates harness resume support, syncs the workspace on
-// stop, dispatches the container stop to the runtime broker, persists
-// phase=suspended (container_status=stopped, retained activity preserved
-// or non-retained activity cleared), and publishes the resulting status
-// event. It returns *errHarnessNoResume when the harness cannot resume so
-// callers can decline to suspend.
+// steps): it enforces the never-suspend policy, validates harness resume
+// support, syncs the workspace on stop, dispatches the container stop to the
+// runtime broker, persists phase=suspended (container_status=stopped, retained
+// activity preserved or non-retained activity cleared), emits the forced
+// suspend audit when overriding never-suspend, and publishes the resulting
+// status event. It returns *errAgentNeverSuspend (409),
+// *errForceSuspendForbidden (403), or *errHarnessNoResume (400) when the
+// request is declined.
 // The run intent is set to stopped before the dispatch. The handler passes
 // a ctx detached from the client (detachStopFromClient).
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
+	// Enforce never-suspend before any run-intent or broker mutation.
+	// When the experiment is off or the agent is unflagged, neverSuspendActive
+	// is false and any force flag is accepted and ignored.
+	ctx, forced, err := s.neverSuspendOverride(ctx, agent)
+	if err != nil {
+		return err
+	}
 	if ok, _, reason := s.harnessSupportsResume(ctx, agent); !ok {
 		return &errHarnessNoResume{reason: reason}
 	}
-	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
+	preActionPhase, preActionSuspendReason, preActionActivity := agent.Phase, agent.SuspendReason, agent.Activity
 
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
@@ -659,6 +755,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	}
 	if !recorded {
 		return nil
+	}
+
+	if forced {
+		s.emitForcedSuspendAudit(ctx, agent, preActionPhase, preActionActivity, newPhase)
 	}
 
 	s.revokeSuspendedCredentials(ctx, agent.ID)
@@ -901,8 +1001,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	}
 
 	if action == api.AgentActionStop || action == api.AgentActionSuspend {
-		if reason := parseLifecycleStopReason(r); reason != "" {
-			ctx = withLifecycleStopReason(ctx, reason)
+		stopReq := parseLifecycleStopRequest(r)
+		if stopReq.Reason != "" {
+			ctx = withLifecycleStopReason(ctx, stopReq.Reason)
+			r = r.WithContext(ctx)
+		}
+		if action == api.AgentActionSuspend && stopReq.Force {
+			ctx = withLifecycleSuspendForce(ctx)
 			r = r.WithContext(ctx)
 		}
 	}
@@ -1145,6 +1250,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
 		}
 		if err := s.suspendAgent(ctx, agent); err != nil {
+			if writeNeverSuspendError(w, agent.ID, err) {
+				return
+			}
 			var noResume *errHarnessNoResume
 			if errors.As(err, &noResume) {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,

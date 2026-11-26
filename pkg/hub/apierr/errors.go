@@ -178,6 +178,8 @@ const (
 	ErrCodeRuntimeTargetTypeUnsupported     = "runtime_target_type_unsupported"      // 422
 	ErrCodeExperimentDisabled               = "experiment_disabled"                  // 412 / 400
 	ErrCodeSuspendPolicyCreateOnly          = "suspend_policy_create_only"           // 409
+	ErrCodeAgentNeverSuspend                = "agent_never_suspend"                  // 409
+	ErrCodeForceSuspendForbidden            = "force_suspend_forbidden"              // 403
 	ErrCodeGitHubNotAssociated              = "github_not_associated"                // 409
 
 	// ErrCodeHarnessConfigNotFound is returned (404) by a reincarnate

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -631,4 +632,557 @@ func TestNeverSuspend_ExistingAgentConflict(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, store.SuspendPolicyNever, stored.SuspendPolicy)
 	})
+}
+
+// suspendSpyDispatcher counts DispatchAgentStop calls and always succeeds.
+type suspendSpyDispatcher struct {
+	mockDispatcher
+	stopCalls atomic.Int32
+}
+
+func (d *suspendSpyDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
+	d.stopCalls.Add(1)
+	return nil
+}
+
+func TestNeverSuspend_ManualSuspendAndForce(t *testing.T) {
+	srv, s := testServer(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
+	nd := NewNotificationDispatcher(s, srv.events, srv.GetDispatcher, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+	srv.notificationDispatcher = nd
+
+	disp := &suspendSpyDispatcher{}
+	srv.SetDispatcher(disp)
+
+	ctx := context.Background()
+
+	creatorID := tid("ns-man-creator")
+	adminID := tid("ns-man-admin")
+	createTestUserWithRole(t, s, creatorID, "ns-man-creator@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	createTestUserWithRole(t, s, adminID, "ns-man-admin@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	creator, err := s.GetUser(ctx, creatorID)
+	require.NoError(t, err)
+	adminUser, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-man-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS Manual Project", Slug: "ns-man-project",
+		GitRemote: "https://github.com/example/ns-man.git",
+		OwnerID:   adminID, CreatedBy: adminID,
+	}))
+	createTestUserWithProjectRole(t, s, creatorID, creator.Email, projectID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, adminID, adminUser.Email, projectID, store.ProjectRoleOwner)
+
+	brokerID := tid("ns-man-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "NS Manual Broker", Slug: "ns-man-broker", Status: store.BrokerStatusOnline,
+		CreatedBy: adminID,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS Manual Broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	// Helper to create a running agent in this project with a resumable harness.
+	makeRunningAgent := func(t *testing.T, slug, owner, policy, activity string) *store.Agent {
+		t.Helper()
+		ag := &store.Agent{
+			ID:              tid("ns-man-" + slug),
+			Slug:            slug,
+			Name:            slug,
+			ProjectID:       projectID,
+			RuntimeBrokerID: brokerID,
+			Phase:           string(state.PhaseRunning),
+			Activity:        activity,
+			RunIntent:       store.RunIntentRunning,
+			RunID:           "run-" + slug,
+			SuspendPolicy:   policy,
+			CreatedBy:       owner,
+			OwnerID:         owner,
+			Ancestry:        []string{owner},
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "claude",
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := srv.recordRunIntent(ctx, ag, store.RunIntentRunning)
+		require.NoError(t, err)
+		return ag
+	}
+
+	// Create an agent principal with full role (has agent.lifecycle) under adminID.
+	actorAgent := &store.Agent{
+		ID:        tid("ns-man-actor-agent"),
+		Slug:      "ns-actor-agent",
+		Name:      "ns-actor-agent",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: adminID,
+		OwnerID:   adminID,
+		Ancestry:  []string{adminID},
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: string(AgentRoleFull),
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, actorAgent))
+	require.NoError(t, s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   adminID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    actorAgent.ID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       projectID,
+		Role:          string(AgentRoleFull),
+		Active:        true,
+	}))
+	actorAgentToken, err := srv.GenerateAgentToken(
+		actorAgent.ID, projectID, []string{adminID}, AgentRoleFull, nil,
+	)
+	require.NoError(t, err)
+
+	t.Run("flagged agent without force returns 409 agent_never_suspend and leaves agent running", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeRunningAgent(t, "no-force", creatorID, store.SuspendPolicyNever, string(state.ActivityThinking))
+		beforeStops := disp.stopCalls.Load()
+
+		rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeAgentNeverSuspend, errResp.Error.Code)
+		assert.Equal(t, beforeStops, disp.stopCalls.Load(), "broker stop must not be dispatched")
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "run intent must not be mutated before refusal")
+	})
+
+	t.Run("agent principal with force returns 403 force_suspend_forbidden", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeRunningAgent(t, "agent-force", adminID, store.SuspendPolicyNever, string(state.ActivityIdle))
+		beforeStops := disp.stopCalls.Load()
+
+		// Without force: 409 agent_never_suspend.
+		rec409 := doRequestWithToken(t, srv, actorAgentToken, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+		require.Equal(t, http.StatusConflict, rec409.Code, "body: %s", rec409.Body.String())
+		var errResp409 ErrorResponse
+		require.NoError(t, json.Unmarshal(rec409.Body.Bytes(), &errResp409))
+		assert.Equal(t, ErrCodeAgentNeverSuspend, errResp409.Error.Code)
+
+		// With force: 403 force_suspend_forbidden.
+		rec403 := doRequestWithToken(t, srv, actorAgentToken, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+			AgentLifecycleStopRequest{Force: true})
+		require.Equal(t, http.StatusForbidden, rec403.Code, "body: %s", rec403.Body.String())
+		var errResp403 ErrorResponse
+		require.NoError(t, json.Unmarshal(rec403.Body.Bytes(), &errResp403))
+		assert.Equal(t, ErrCodeForceSuspendForbidden, errResp403.Error.Code)
+		assert.Equal(t, beforeStops, disp.stopCalls.Load(), "broker stop must not be dispatched")
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+	})
+
+	t.Run("human third-party force succeeds, writes audit, notifies creator, sets forced=true event, preserves flag", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeRunningAgent(t, "human-force-3p", creatorID, store.SuspendPolicyNever, string(state.ActivityThinking))
+
+		evCh, unsub := pub.Subscribe("agent." + ag.ID + ".status")
+		defer unsub()
+
+		rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+			AgentLifecycleStopRequest{Force: true, Reason: "emergency maintenance"})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+		assert.False(t, state.SuspendReason(got.SuspendReason).AutoWakes(), "forced suspend must never auto-wake")
+		assert.Equal(t, store.SuspendPolicyNever, got.SuspendPolicy, "forced suspend must preserve suspend_policy=never")
+
+		// Verify status event payload carries forced=true.
+		select {
+		case evt := <-evCh:
+			var statusEvt AgentStatusEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &statusEvt))
+			assert.Equal(t, string(state.PhaseSuspended), statusEvt.Phase)
+			assert.True(t, statusEvt.Forced, "status event must carry forced=true")
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for AgentStatusEvent")
+		}
+
+		// Verify agent.suspend.forced mutation audit record.
+		require.Eventually(t, func() bool {
+			audits, _, aerr := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+				TargetType:   "agent",
+				TargetID:     ag.ID,
+				MutationType: mutationTypeAgentSuspendForced,
+			})
+			if aerr != nil || len(audits) != 1 {
+				return false
+			}
+			assert.Equal(t, adminID, audits[0].ActorPrincipalID)
+			assert.Contains(t, audits[0].BeforeSummary, "activity="+string(state.ActivityThinking))
+			assert.Contains(t, audits[0].AfterSummary, "suspend_reason=user")
+			return true
+		}, 3*time.Second, 20*time.Millisecond, "expected agent.suspend.forced mutation audit")
+
+		// Verify third-party creator notification fired (actor=admin != creator).
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		var found bool
+		for _, n := range notifs {
+			if n.AgentID == ag.ID && n.Status == "SUSPENDED" {
+				found = true
+				assert.Contains(t, n.Message, "emergency maintenance")
+			}
+		}
+		assert.True(t, found, "creator must receive third-party notification when another human force-suspends")
+	})
+
+	t.Run("creator self force-suspend succeeds without third-party notification", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeRunningAgent(t, "creator-force-self", creatorID, store.SuspendPolicyNever, string(state.ActivityIdle))
+
+		rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+			AgentLifecycleStopRequest{Force: true})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, store.SuspendPolicyNever, got.SuspendPolicy)
+
+		// No third-party notification for ag.ID because actor == creator.
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		for _, n := range notifs {
+			assert.NotEqual(t, ag.ID, n.AgentID, "creator self-force-suspend must not emit a third-party notification")
+		}
+	})
+
+	t.Run("experiment off allows plain suspend on flagged agent and ignores force", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, false)
+		ag := makeRunningAgent(t, "exp-off-plain", creatorID, store.SuspendPolicyNever, string(state.ActivityIdle))
+
+		evCh, unsub := pub.Subscribe("agent." + ag.ID + ".status")
+		defer unsub()
+
+		rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+		assert.Equal(t, store.SuspendPolicyNever, got.SuspendPolicy)
+
+		select {
+		case evt := <-evCh:
+			var statusEvt AgentStatusEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &statusEvt))
+			assert.False(t, statusEvt.Forced, "plain suspend with experiment off must not set forced=true")
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for AgentStatusEvent")
+		}
+	})
+
+	t.Run("unflagged agent unaffected by force", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeRunningAgent(t, "unflagged-force", creatorID, store.SuspendPolicyAuto, string(state.ActivityIdle))
+
+		evCh, unsub := pub.Subscribe("agent." + ag.ID + ".status")
+		defer unsub()
+
+		rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+			AgentLifecycleStopRequest{Force: true})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		got, err := s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+
+		select {
+		case evt := <-evCh:
+			var statusEvt AgentStatusEvent
+			require.NoError(t, json.Unmarshal(evt.Data, &statusEvt))
+			assert.False(t, statusEvt.Forced, "force on an unflagged agent must not set forced=true")
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for AgentStatusEvent")
+		}
+
+		// No agent.suspend.forced audit for an unflagged agent.
+		audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			TargetType:   "agent",
+			TargetID:     ag.ID,
+			MutationType: mutationTypeAgentSuspendForced,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, audits)
+	})
+}
+
+func TestNeverSuspend_MembershipLossHoldStillApplies(t *testing.T) {
+	f := newMSFixture(t, "ns-memloss")
+	setNeverSuspendExperiment(t, f.srv, true)
+	setAgentSuspendPolicySQL(t, f.s, f.agentA.ID, store.SuspendPolicyNever)
+
+	ctx := mmrServiceCtx(f.ownerID, f.ownerID+"@test.com")
+	_, d := f.srv.membershipService.RemoveMember(ctx, MembershipRequest{
+		Op:        MembershipOpRemove,
+		ProjectID: f.projectID,
+		Actor:     f.ownerIdentity(),
+		BindingID: f.userBinding(f.userID).ID,
+	})
+	require.Nil(t, d)
+	requireStandingReason(t, f.srv.agentStanding(context.Background(), f.agentA.ID), standingReasonRootNotAdmitted)
+	requireCheck(t, f.s, f.userID, store.MembershipLossTriggerMemberRemove)
+	f.requireTreeHeldAndRefused()
+}
+
+func TestNeverSuspend_AlreadySuspendedConversion(t *testing.T) {
+	srv, s := testServer(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
+	nd := NewNotificationDispatcher(s, srv.events, srv.GetDispatcher, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+	srv.notificationDispatcher = nd
+
+	ctx := context.Background()
+
+	creatorID := tid("ns-conv-creator")
+	adminID := tid("ns-conv-admin")
+	createTestUserWithRole(t, s, creatorID, "ns-conv-creator@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	createTestUserWithRole(t, s, adminID, "ns-conv-admin@test.com", store.UserRoleMember, store.SystemRoleHubMember)
+	creator, err := s.GetUser(ctx, creatorID)
+	require.NoError(t, err)
+	adminUser, err := s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+
+	projectID := tid("ns-conv-project")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "NS Conv Project", Slug: "ns-conv-project",
+		GitRemote: "https://github.com/example/ns-conv.git",
+		OwnerID:   adminID, CreatedBy: adminID,
+	}))
+	createTestUserWithProjectRole(t, s, creatorID, creator.Email, projectID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, adminID, adminUser.Email, projectID, store.ProjectRoleOwner)
+
+	actorAgent := &store.Agent{
+		ID:        tid("ns-conv-actor-agent"),
+		Slug:      "ns-conv-actor",
+		Name:      "ns-conv-actor",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseRunning),
+		CreatedBy: adminID,
+		OwnerID:   adminID,
+		Ancestry:  []string{adminID},
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: string(AgentRoleFull),
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, actorAgent))
+	require.NoError(t, s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   adminID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    actorAgent.ID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       projectID,
+		Role:          string(AgentRoleFull),
+		Active:        true,
+	}))
+	actorAgentToken, err := srv.GenerateAgentToken(
+		actorAgent.ID, projectID, []string{adminID}, AgentRoleFull, nil,
+	)
+	require.NoError(t, err)
+
+	makeSuspendedAgent := func(t *testing.T, slug, suspendReason string) *store.Agent {
+		t.Helper()
+		ag := &store.Agent{
+			ID:            tid("ns-conv-" + slug),
+			Slug:          slug,
+			Name:          slug,
+			ProjectID:     projectID,
+			Phase:         string(state.PhaseSuspended),
+			SuspendReason: suspendReason,
+			SuspendPolicy: store.SuspendPolicyNever,
+			CreatedBy:     creatorID,
+			OwnerID:       creatorID,
+			Ancestry:      []string{creatorID},
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		return ag
+	}
+
+	for _, initialReason := range []string{string(state.SuspendReasonIdle), string(state.SuspendReasonStalled)} {
+		t.Run("reason="+initialReason, func(t *testing.T) {
+			t.Run("user without force gets 409 and reason unchanged", func(t *testing.T) {
+				setNeverSuspendExperiment(t, srv, true)
+				ag := makeSuspendedAgent(t, "conv-noforce-"+initialReason, initialReason)
+
+				rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+				require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+				var errResp ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+				assert.Equal(t, ErrCodeAgentNeverSuspend, errResp.Error.Code)
+
+				got, err := s.GetAgent(ctx, ag.ID)
+				require.NoError(t, err)
+				assert.Equal(t, initialReason, got.SuspendReason)
+			})
+
+			t.Run("agent principal with force gets 403 and reason unchanged", func(t *testing.T) {
+				setNeverSuspendExperiment(t, srv, true)
+				ag := makeSuspendedAgent(t, "conv-agentforce-"+initialReason, initialReason)
+
+				rec := doRequestWithToken(t, srv, actorAgentToken, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+					AgentLifecycleStopRequest{Force: true})
+				require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
+				var errResp ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+				assert.Equal(t, ErrCodeForceSuspendForbidden, errResp.Error.Code)
+
+				got, err := s.GetAgent(ctx, ag.ID)
+				require.NoError(t, err)
+				assert.Equal(t, initialReason, got.SuspendReason)
+			})
+
+			t.Run("human with force converts to user, writes one audit, and sets forced=true event", func(t *testing.T) {
+				setNeverSuspendExperiment(t, srv, true)
+				ag := makeSuspendedAgent(t, "conv-humanforce-"+initialReason, initialReason)
+
+				evCh, unsub := pub.Subscribe("agent." + ag.ID + ".status")
+				defer unsub()
+
+				rec := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend",
+					AgentLifecycleStopRequest{Force: true, Reason: "convert to manual"})
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+				srv.thirdPartyStopDispatches.Wait()
+
+				got, err := s.GetAgent(ctx, ag.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+				assert.Equal(t, store.SuspendPolicyNever, got.SuspendPolicy)
+
+				select {
+				case evt := <-evCh:
+					var statusEvt AgentStatusEvent
+					require.NoError(t, json.Unmarshal(evt.Data, &statusEvt))
+					assert.True(t, statusEvt.Forced, "forced conversion status event must carry forced=true")
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for AgentStatusEvent")
+				}
+
+				require.Eventually(t, func() bool {
+					audits, _, aerr := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+						TargetType:   "agent",
+						TargetID:     ag.ID,
+						MutationType: mutationTypeAgentSuspendForced,
+					})
+					return aerr == nil && len(audits) == 1 && audits[0].ActorPrincipalID == adminID
+				}, 3*time.Second, 20*time.Millisecond, "expected exactly one agent.suspend.forced audit")
+			})
+
+			t.Run("experiment off converts without force as before", func(t *testing.T) {
+				setNeverSuspendExperiment(t, srv, false)
+				ag := makeSuspendedAgent(t, "conv-expoff-"+initialReason, initialReason)
+
+				rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+				got, err := s.GetAgent(ctx, ag.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+
+				audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+					TargetType:   "agent",
+					TargetID:     ag.ID,
+					MutationType: mutationTypeAgentSuspendForced,
+				})
+				require.NoError(t, err)
+				assert.Empty(t, audits)
+			})
+		})
+	}
+
+	t.Run("already user-suspended never-suspend agent remains idempotent 200 without force", func(t *testing.T) {
+		setNeverSuspendExperiment(t, srv, true)
+		ag := makeSuspendedAgent(t, "conv-already-user", string(state.SuspendReasonUser))
+
+		rec := doRequestAsUser(t, srv, creator, http.MethodPost, "/api/v1/agents/"+ag.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			TargetType:   "agent",
+			TargetID:     ag.ID,
+			MutationType: mutationTypeAgentSuspendForced,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, audits)
+	})
+}
+
+func TestNeverSuspend_ForcePrincipalAllowlist(t *testing.T) {
+	srv, _ := testServer(t)
+	setNeverSuspendExperiment(t, srv, true)
+	flagged := &store.Agent{
+		ID:            tid("ns-allowlist-agent"),
+		Name:          "lead",
+		SuspendPolicy: store.SuspendPolicyNever,
+	}
+
+	authUser := NewAuthenticatedUser("u1", "u1@test.com", "User", "member", "session")
+	allowed := []struct {
+		name string
+		id   Identity
+	}{
+		{"AuthenticatedUser", authUser},
+		{"ScopedUserIdentity", NewScopedUserIdentity(authUser, "proj-1", []string{"agent:lifecycle"})},
+		{"DevUser", NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev"})},
+	}
+	for _, tc := range allowed {
+		t.Run("allow/"+tc.name, func(t *testing.T) {
+			assert.True(t, isHumanForceSuspendPrincipal(tc.id))
+			ctx := withLifecycleSuspendForce(contextWithIdentity(context.Background(), tc.id))
+			outCtx, forced, err := srv.neverSuspendOverride(ctx, flagged)
+			require.NoError(t, err)
+			assert.True(t, forced)
+			assert.True(t, lifecycleSuspendForcedFromContext(outCtx))
+		})
+	}
+
+	denied := []struct {
+		name string
+		id   Identity
+	}{
+		{"nil", nil},
+		{"BrokerIdentity", &brokerIdentityImpl{brokerID: "broker-1"}},
+		{"DelegatedAgentIdentity", &DelegatedAgentIdentity{agentID: tid("ns-delegated-agent")}},
+		{"FederatedServiceIdentity", NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@test.com", nil)},
+		{"FederatedUserIdentity", NewFederatedUserIdentity("https://issuer.example", "sub", "fed@test.com", "Fed", "member", nil)},
+	}
+	for _, tc := range denied {
+		t.Run("deny/"+tc.name, func(t *testing.T) {
+			assert.False(t, isHumanForceSuspendPrincipal(tc.id))
+			ctx := withLifecycleSuspendForce(contextWithIdentity(context.Background(), tc.id))
+			_, forced, err := srv.neverSuspendOverride(ctx, flagged)
+			require.Error(t, err)
+			var forbidden *errForceSuspendForbidden
+			assert.ErrorAs(t, err, &forbidden)
+			assert.False(t, forced)
+		})
+	}
 }

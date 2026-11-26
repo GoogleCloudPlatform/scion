@@ -758,6 +758,38 @@ func lifecycleStartBody(opts LifecycleStartOptions) interface{} {
 	return opts
 }
 
+// LifecycleSuspendOptions is the optional body of a suspend request.
+type LifecycleSuspendOptions struct {
+	Reason string `json:"reason,omitempty"`
+	Force  bool   `json:"force,omitempty"`
+}
+
+// LifecycleOptionsSuspender suspends an agent with options. It is a separate
+// interface so AgentService implementations outside this package are not
+// affected; the client's agent service implements it.
+type LifecycleOptionsSuspender interface {
+	// SuspendWithOptions is Suspend with a request body. Zero options post no
+	// body, exactly like Suspend.
+	SuspendWithOptions(ctx context.Context, agentID string, opts LifecycleSuspendOptions) (*LifecycleResponse, error)
+}
+
+var _ LifecycleOptionsSuspender = (*agentService)(nil)
+
+// SuspendWithOptions suspends a running agent with options; see
+// LifecycleOptionsSuspender.
+func (s *agentService) SuspendWithOptions(ctx context.Context, agentID string, opts LifecycleSuspendOptions) (*LifecycleResponse, error) {
+	return s.lifecycleWithBody(ctx, agentID, "suspend", lifecycleSuspendBody(opts))
+}
+
+// lifecycleSuspendBody returns the body for opts: nil (no body) for zero
+// options, so a plain suspend is unchanged on the wire.
+func lifecycleSuspendBody(opts LifecycleSuspendOptions) interface{} {
+	if opts == (LifecycleSuspendOptions{}) {
+		return nil
+	}
+	return opts
+}
+
 // ResetAuth injects a fresh token into a running agent without restarting.
 func (s *agentService) ResetAuth(ctx context.Context, agentID string) error {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reset-auth", nil, nil)

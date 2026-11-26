@@ -16,7 +16,9 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,4 +113,78 @@ func TestAgentLifecycle_DeleteInProgressReturnsError(t *testing.T) {
 			assert.Contains(t, err.Error(), "while it was starting")
 		})
 	}
+}
+
+func TestAgentLifecycle_SuspendWithOptionsAndTypedErrors(t *testing.T) {
+	t.Run("force sends JSON body", func(t *testing.T) {
+		var gotBody []byte
+		var gotPath string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotPath = r.Method + " " + r.URL.Path
+			gotBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"a1","name":"lead","phase":"suspended","suspendPolicy":"never"}`))
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		require.NoError(t, err)
+
+		suspender, ok := client.Agents().(LifecycleOptionsSuspender)
+		require.True(t, ok, "agentService must implement LifecycleOptionsSuspender")
+
+		resp, err := suspender.SuspendWithOptions(context.Background(), "a1", LifecycleSuspendOptions{Force: true})
+		require.NoError(t, err)
+		require.NotNil(t, resp)
+		require.NotNil(t, resp.Agent)
+		assert.Equal(t, "suspended", resp.Agent.Phase)
+		assert.Equal(t, "never", resp.Agent.SuspendPolicy)
+		assert.Equal(t, "POST /api/v1/agents/a1/suspend", gotPath)
+
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(gotBody, &decoded))
+		assert.Equal(t, true, decoded["force"])
+	})
+
+	t.Run("zero options sends no body", func(t *testing.T) {
+		var gotLen int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			gotLen = len(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"a1","name":"worker","phase":"suspended"}`))
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		require.NoError(t, err)
+
+		suspender := client.Agents().(LifecycleOptionsSuspender)
+		_, err = suspender.SuspendWithOptions(context.Background(), "a1", LifecycleSuspendOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, 0, gotLen)
+	})
+
+	t.Run("409 agent_never_suspend matches IsAgentNeverSuspendError", func(t *testing.T) {
+		client := lifecycleTestClient(t, http.StatusConflict,
+			`{"error":{"code":"agent_never_suspend","message":"agent \"lead\" has suspend policy \"never\"; pass force=true to suspend it"}}`, nil)
+
+		_, err := client.Agents().Suspend(context.Background(), "lead")
+		require.Error(t, err)
+		assert.True(t, apiclient.IsAgentNeverSuspendError(err))
+		assert.False(t, apiclient.IsForceSuspendForbiddenError(err))
+	})
+
+	t.Run("403 force_suspend_forbidden matches IsForceSuspendForbiddenError", func(t *testing.T) {
+		client := lifecycleTestClient(t, http.StatusForbidden,
+			`{"error":{"code":"force_suspend_forbidden","message":"only human principals may force-suspend a never-suspend agent"}}`, nil)
+
+		suspender := client.Agents().(LifecycleOptionsSuspender)
+		_, err := suspender.SuspendWithOptions(context.Background(), "lead", LifecycleSuspendOptions{Force: true})
+		require.Error(t, err)
+		assert.True(t, apiclient.IsForceSuspendForbiddenError(err))
+		assert.False(t, apiclient.IsAgentNeverSuspendError(err))
+	})
 }

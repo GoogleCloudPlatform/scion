@@ -23,12 +23,14 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
 
 var (
-	suspendAll bool
+	suspendAll   bool
+	suspendForce bool
 )
 
 var suspendCmd = &cobra.Command{
@@ -63,6 +65,9 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 		return getAgentNames(cmd, args, toComplete)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := checkFlagsForMode(cmd, resolveMode()); err != nil {
+			return err
+		}
 		if suspendAll {
 			hubCtx, err := requireHub(projectPath)
 			if err != nil {
@@ -82,6 +87,30 @@ that do not (e.g. generic) will return an error — use 'stop' instead.`,
 	},
 }
 
+func callAgentSuspend(ctx context.Context, agentSvc hubclient.AgentService, agentName string, force bool) (*hubclient.LifecycleResponse, error) {
+	if force {
+		suspender, ok := agentSvc.(hubclient.LifecycleOptionsSuspender)
+		if !ok {
+			return nil, fmt.Errorf("hub client does not support --force suspend")
+		}
+		return suspender.SuspendWithOptions(ctx, agentName, hubclient.LifecycleSuspendOptions{Force: true})
+	}
+	return agentSvc.Suspend(ctx, agentName)
+}
+
+func formatSuspendError(agentName string, err error) error {
+	if apiclient.IsAgentNeverSuspendError(err) {
+		if resolveMode() == ModeAgent {
+			return fmt.Errorf("agent '%s' is marked never-suspend and cannot be suspended", agentName)
+		}
+		return fmt.Errorf("agent '%s' is marked never-suspend; use 'scion suspend %s --force' to override", agentName, agentName)
+	}
+	if apiclient.IsForceSuspendForbiddenError(err) {
+		return fmt.Errorf("cannot force-suspend agent '%s': only human principals may force-suspend a never-suspend agent", agentName)
+	}
+	return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))
+}
+
 func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -99,14 +128,25 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
 
-	var running []hubclient.Agent
-	for _, a := range resp.Agents {
-		if a.Phase == string(state.PhaseRunning) {
-			running = append(running, a)
-		}
+	type agentResult struct {
+		Name   string
+		Status string
+		Reason string
+		Error  string
 	}
 
-	if len(running) == 0 {
+	var (
+		toSuspend []hubclient.Agent
+		results   []agentResult
+	)
+	for _, a := range resp.Agents {
+		if a.Phase != string(state.PhaseRunning) {
+			continue
+		}
+		toSuspend = append(toSuspend, a)
+	}
+
+	if len(toSuspend) == 0 {
 		if isJSONOutput() {
 			return outputJSON(map[string]interface{}{
 				"status":  "success",
@@ -119,30 +159,28 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 		return nil
 	}
 
-	type agentResult struct {
-		Name   string
-		Status string
-		Error  string
-	}
-
-	var (
-		mu      sync.Mutex
-		results []agentResult
-	)
+	var mu sync.Mutex
 
 	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
-	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+	// Send every running agent to the Hub so the Hub's experiment state is the
+	// single source of truth; 409 agent_never_suspend maps to skipped below.
+	boundedFanOut(context.Background(), len(toSuspend), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
 		func(i int) {
-			ag := running[i]
+			ag := toSuspend[i]
 
 			res := agentResult{Name: ag.Name, Status: "success"}
 
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer agentCancel()
 
-			if _, err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
-				res.Status = "error"
-				res.Error = wrapHubError(fmt.Errorf("failed to suspend: %w", err)).Error()
+			if _, err := callAgentSuspend(agentCtx, agentSvc, ag.Name, suspendForce); err != nil {
+				if !suspendForce && apiclient.IsAgentNeverSuspendError(err) {
+					res.Status = "skipped"
+					res.Reason = "never-suspend"
+				} else {
+					res.Status = "error"
+					res.Error = formatSuspendError(ag.Name, err).Error()
+				}
 				mu.Lock()
 				results = append(results, res)
 				mu.Unlock()
@@ -161,6 +199,9 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 			entry := map[string]interface{}{
 				"agent":  r.Name,
 				"status": r.Status,
+			}
+			if r.Reason != "" {
+				entry["reason"] = r.Reason
 			}
 			if r.Error != "" {
 				entry["error"] = r.Error
@@ -181,10 +222,13 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var errs []string
 	for _, r := range results {
-		if r.Error != "" {
+		switch r.Status {
+		case "skipped":
+			statusf("Agent '%s': skipped (%s)\n", r.Name, r.Reason)
+		case "error":
 			statusf("Agent '%s': error: %s\n", r.Name, r.Error)
 			errs = append(errs, fmt.Sprintf("%s: %s", r.Name, r.Error))
-		} else {
+		default:
 			statusf("Agent '%s' suspended via Hub.\n", r.Name)
 		}
 	}
@@ -209,9 +253,9 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	suspendResp, err := agentSvc.Suspend(ctx, agentName)
+	suspendResp, err := callAgentSuspend(ctx, agentSvc, agentName, suspendForce)
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))
+		return formatSuspendError(agentName, err)
 	}
 	printLifecycleWarnings(suspendResp)
 
@@ -230,5 +274,7 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 func init() {
 	suspendCmd.Flags().BoolVarP(&suspendAll, "all", "a", false, "Suspend all running agents in the current project")
+	suspendCmd.Flags().BoolVar(&suspendForce, "force", false, "Force-suspend agents marked never-suspend")
+	markFlagsForMode(suspendCmd, ModeHuman, "force")
 	rootCmd.AddCommand(suspendCmd)
 }

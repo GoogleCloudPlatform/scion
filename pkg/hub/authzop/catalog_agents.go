@@ -89,7 +89,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.lifecycle.control",
 		Domain:      "agent",
-		Description: "Start, stop, suspend or restart an agent",
+		Description: "Start, stop, suspend or restart an agent; suspending a never-suspend agent requires force=true from a human principal (agent principals are refused with 403 force_suspend_forbidden)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/start", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/stop", Method: "POST"},
@@ -107,9 +107,22 @@ var agentOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
-		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+		// Forced manual suspend of a never-suspend agent emits agent.suspend.forced
+		// via emitMutationAudit after the broker stop and suspended status write.
+		AuditObligation: &AuditObligation{
+			EventType:              "agent.suspend.forced",
+			ContextFields:          []string{"actor_id", "agent_id"},
+			BeforeFields:           []string{"phase", "activity", "suspend_policy"},
+			AfterFields:            []string{"phase", "suspend_reason"},
+			Atomic:                 false,
+			NonAtomicJustification: "Forced suspend dispatches the container stop to the runtime broker before recording phase=suspended; the agent.suspend.forced audit record is emitted via emitMutationAudit immediately after the status write commits",
+		},
+		// forbidden: missing agent.lifecycle, or force=true from an agent principal
+		// (403 force_suspend_forbidden). conflict: suspending a never-suspend agent
+		// without force=true (409 agent_never_suspend).
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
+		Bearer:      AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.lifecycle.restore",
