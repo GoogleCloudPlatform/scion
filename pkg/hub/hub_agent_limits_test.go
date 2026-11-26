@@ -620,6 +620,9 @@ func TestAgentLimits_CreateFailFastAllLimits(t *testing.T) {
 		{"duration over ceiling 9999h", map[string]interface{}{"max_duration": "9999h"}, "max_duration"},
 		{"duration unparsable", map[string]interface{}{"max_duration": "not-a-duration"}, "max_duration"},
 		{"duration negative", map[string]interface{}{"max_duration": "-5m"}, "max_duration"},
+		{"duration leading whitespace", map[string]interface{}{"max_duration": " 5m"}, "max_duration"},
+		{"duration trailing whitespace", map[string]interface{}{"max_duration": "5m "}, "max_duration"},
+		{"duration tab padded", map[string]interface{}{"max_duration": "1h\t"}, "max_duration"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
@@ -688,6 +691,9 @@ func TestAgentLimits_ProjectSettingsPutCeilingsAndUnlimitedAudit(t *testing.T) {
 		{"duration unlimited 0", `{"defaultMaxDuration":"0"}`, projectSettingsFieldMaxDuration},
 		{"duration over ceiling", `{"defaultMaxDuration":"9999h"}`, projectSettingsFieldMaxDuration},
 		{"duration unparsable", `{"defaultMaxDuration":"bogus"}`, projectSettingsFieldMaxDuration},
+		{"duration leading whitespace", `{"defaultMaxDuration":" 5m"}`, projectSettingsFieldMaxDuration},
+		{"duration trailing whitespace", `{"defaultMaxDuration":"5m "}`, projectSettingsFieldMaxDuration},
+		{"duration tab padded", `{"defaultMaxDuration":"1h\t"}`, projectSettingsFieldMaxDuration},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := putSettings(tc.body)
@@ -776,6 +782,9 @@ func TestAgentLimits_AgentPatchCeilings(t *testing.T) {
 		{"duration unlimited 0", map[string]interface{}{"max_duration": "0"}, "max_duration"},
 		{"duration over ceiling 9999h", map[string]interface{}{"max_duration": "9999h"}, "max_duration"},
 		{"duration unparsable", map[string]interface{}{"max_duration": "bogus"}, "max_duration"},
+		{"duration leading whitespace", map[string]interface{}{"max_duration": " 5m"}, "max_duration"},
+		{"duration trailing whitespace", map[string]interface{}{"max_duration": "5m "}, "max_duration"},
+		{"duration tab padded", map[string]interface{}{"max_duration": "1h\t"}, "max_duration"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
@@ -802,6 +811,41 @@ func TestAgentLimits_AgentPatchCeilings(t *testing.T) {
 		},
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Held PATCH path (running agent + hub.agent_edit_held enabled) also
+	// refuses whitespace-padded max_duration with 400 limit_exceeds_hub_ceiling.
+	ag, err = s.GetAgent(context.Background(), agentID)
+	require.NoError(t, err)
+	ag.Phase = string(state.PhaseRunning)
+	require.NoError(t, s.UpdateAgent(context.Background(), ag))
+
+	heldStore := newFakeHubSettingStore()
+	heldStore.seed("experiments", json.RawMessage(fmt.Sprintf(
+		`{"overrides":{%q:true,%q:true}}`,
+		experiments.AgentPolicyLimitCeilings, experiments.AgentEditHeld,
+	)))
+	heldStore.seed(opsettings.AgentLimitsSectionName, json.RawMessage(`{"max_turns":50,"max_model_calls":100,"max_duration":"2h"}`))
+	heldOps := NewOperationalSettings(heldStore, emptyKoanf(), emptyKoanf())
+	require.NoError(t, func() error { _, err := heldOps.Refresh(context.Background()); return err }())
+	srv.SetOperationalSettings(heldOps)
+
+	for _, tc := range []struct {
+		name string
+		dur  string
+	}{
+		{"held leading whitespace", " 5m"},
+		{"held trailing whitespace", "5m "},
+		{"held tab padded", "1h\t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
+				"config": map[string]interface{}{"max_duration": tc.dur},
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeLimitExceedsHubCeiling)
+			assert.Contains(t, rec.Body.String(), "max_duration")
+		})
+	}
 }
 
 // TestAgentLimits_OldBrokerRefusalAndCapability verifies D3:
@@ -823,9 +867,16 @@ func TestAgentLimits_OldBrokerRefusalAndCapability(t *testing.T) {
 	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
 
-	// With no ceilings configured, the old broker works normally.
-	setAgentLimitsOpSettings(t, srv, true, `{}`)
+	// With ceilings configured but experiment OFF, the old broker is NOT refused.
+	setAgentLimitsOpSettings(t, srv, false, `{"max_turns":50}`)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "old-broker-exp-off",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// With no ceilings configured and experiment ON, the old broker works normally.
+	setAgentLimitsOpSettings(t, srv, true, `{}`)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
 		"name": "old-broker-no-ceiling",
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -873,4 +924,60 @@ func TestAgentLimits_OldBrokerRefusalAndCapability(t *testing.T) {
 	require.NotNil(t, brokerClient.lastStartHubDefaults)
 	require.NotNil(t, brokerClient.lastStartHubDefaults.LimitCeilings)
 	assert.Equal(t, 50, brokerClient.lastStartHubDefaults.LimitCeilings.MaxTurns)
+}
+
+// TestAgentLimits_OldBrokerRefusalAllDispatchOps pins limitCeilingsBrokerPrecheck
+// directly across the remaining start-capable dispatch methods
+// (DispatchAgentProvision, DispatchAgentReprovision, DispatchAgentCreateWithGather,
+// DispatchFinalizeEnv): an old broker lacking Capabilities.LimitCeilings with an
+// active Hub ceiling is refused with *RuntimeTargetRefusal (code
+// limit_ceilings_unsupported) before any broker call is made.
+func TestAgentLimits_OldBrokerRefusalAllDispatchOps(t *testing.T) {
+	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, false)
+	brokerClient := &limitCeilingsBrokerClient{mockRuntimeBrokerClient: mock}
+	d := NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default())
+	srv.SetDispatcher(d)
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50}`)
+
+	agent := &store.Agent{
+		ID:              "agent-precheck-ops",
+		Slug:            "agent-precheck-ops",
+		Name:            "agent-precheck-ops",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: project.DefaultRuntimeBrokerID,
+		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"DispatchAgentProvision", func() error {
+			return d.DispatchAgentProvision(ctx, agent)
+		}},
+		{"DispatchAgentReprovision", func() error {
+			return d.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{})
+		}},
+		{"DispatchAgentCreateWithGather", func() error {
+			_, err := d.DispatchAgentCreateWithGather(ctx, agent)
+			return err
+		}},
+		{"DispatchFinalizeEnv", func() error {
+			_, err := d.DispatchFinalizeEnv(ctx, agent, nil)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			brokerClient.lastCreateReq = nil
+			err := tc.call()
+			require.Error(t, err)
+			var refusal *RuntimeTargetRefusal
+			require.ErrorAs(t, err, &refusal, "expected *RuntimeTargetRefusal, got %T: %v", err, err)
+			assert.Equal(t, api.LaunchCodeLimitCeilingsUnsupported, refusal.Code)
+			assert.Equal(t, http.StatusPreconditionFailed, refusal.Status)
+			assert.Nil(t, brokerClient.lastCreateReq, "refused %s must not call broker", tc.name)
+		})
+	}
 }

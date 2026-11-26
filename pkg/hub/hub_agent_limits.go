@@ -131,22 +131,26 @@ func validateLimitsAgainstCeilings(
 	}
 	if ceilingStr := strings.TrimSpace(ceilings.MaxDuration); ceilingStr != "" {
 		if ceilingDur := api.ParseDuration(ceilingStr); ceilingDur > 0 {
-			if raw := strings.TrimSpace(maxDuration); raw != "" {
-				d := api.ParseDuration(raw)
+			// Treat as set whenever non-blank, but parse the raw value
+			// untrimmed: sciontool parses SCION_MAX_DURATION with
+			// api.ParseDuration (time.ParseDuration), which returns 0
+			// (no limit) for whitespace-padded strings like " 5m" or "5m ".
+			if strings.TrimSpace(maxDuration) != "" {
+				d := api.ParseDuration(maxDuration)
 				if d <= 0 {
 					return &limitCeilingViolation{
 						Field:     durationField,
 						Ceiling:   ceilingStr,
-						Requested: raw,
-						Message:   fmt.Sprintf("%s (%q) must be a positive duration not exceeding hub ceiling (%s)", durationField, raw, ceilingStr),
+						Requested: maxDuration,
+						Message:   fmt.Sprintf("%s (%q) must be a positive duration not exceeding hub ceiling (%s)", durationField, maxDuration, ceilingStr),
 					}
 				}
 				if d > ceilingDur {
 					return &limitCeilingViolation{
 						Field:     durationField,
 						Ceiling:   ceilingStr,
-						Requested: raw,
-						Message:   fmt.Sprintf("%s (%s) exceeds hub ceiling (%s)", durationField, raw, ceilingStr),
+						Requested: maxDuration,
+						Message:   fmt.Sprintf("%s (%s) exceeds hub ceiling (%s)", durationField, maxDuration, ceilingStr),
 					}
 				}
 			}
