@@ -51,16 +51,15 @@ type SlackConfig struct {
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+	plugin.InboundConversation
 }
 
 // routedInboundPayload is the JSON body sent to the hub routed inbound endpoint.
 type routedInboundPayload struct {
 	ProjectID    string                      `json:"project_id"`
 	DefaultAgent string                      `json:"default_agent,omitempty"`
-	Surface      string                      `json:"surface,omitempty"`
-	ExternalRef  string                      `json:"external_ref,omitempty"`
-	ParentRef    string                      `json:"parent_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
+	plugin.InboundConversation
 }
 
 // routedInboundResult is the success response from the hub routed endpoint.
@@ -405,7 +404,7 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		return fmt.Errorf("message is nil")
 	}
 
-	if msg.Channel != "" && msg.Channel != "slack" {
+	if !plugin.MatchesSurface(msg, "slack") {
 		return nil
 	}
 
@@ -434,13 +433,14 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	var channelIDs []string
 	var threadTSs []string
 
-	if msg.ThreadID != "" {
-		parts := strings.SplitN(msg.ThreadID, ":", 2)
+	convTarget := plugin.ResolveConversationTarget(msg)
+	if convTarget.ExternalRef != "" {
+		parts := strings.SplitN(convTarget.ExternalRef, ":", 2)
 		if len(parts) == 2 {
 			channelIDs = append(channelIDs, parts[0])
 			threadTSs = append(threadTSs, parts[1])
 		} else {
-			channelIDs = append(channelIDs, msg.ThreadID)
+			channelIDs = append(channelIDs, convTarget.ExternalRef)
 			threadTSs = append(threadTSs, "")
 		}
 	}
@@ -703,6 +703,39 @@ func (b *SlackBroker) startEventListener() {
 
 // --- Hub delivery ---
 
+// slackInboundConversation derives the Phase 11 top-level conversation
+// addressing (surface, external_ref, parent_ref) for an inbound Slack message.
+func slackInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
+	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	var channelID, threadTS string
+	if msg.Metadata != nil {
+		channelID = msg.Metadata["slack_channel_id"]
+		threadTS = msg.Metadata["slack_thread_ts"]
+	}
+	if channelID != "" && threadTS != "" {
+		return plugin.InboundConversation{
+			Surface:     "slack",
+			ExternalRef: channelID + ":" + threadTS,
+			ParentRef:   channelID,
+		}
+	}
+	if channelID != "" {
+		return plugin.InboundConversation{
+			Surface:     "slack",
+			ExternalRef: channelID,
+		}
+	}
+	if msg.ThreadID != "" {
+		return plugin.InboundConversation{
+			Surface:     "slack",
+			ExternalRef: msg.ThreadID,
+		}
+	}
+	return plugin.InboundConversation{}
+}
+
 func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessage) *hubError {
 	b.mu.RLock()
 	hubURL := b.hubURL
@@ -717,8 +750,9 @@ func (b *SlackBroker) deliverInbound(topic string, msg *messages.StructuredMessa
 	}
 
 	payload := inboundPayload{
-		Topic:   topic,
-		Message: msg,
+		Topic:               topic,
+		Message:             msg,
+		InboundConversation: slackInboundConversation(msg),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -779,9 +813,10 @@ func (b *SlackBroker) deliverRoutedInbound(projectID, defaultAgent string, msg *
 	}
 
 	payload := routedInboundPayload{
-		ProjectID:    projectID,
-		DefaultAgent: defaultAgent,
-		Message:      msg,
+		ProjectID:           projectID,
+		DefaultAgent:        defaultAgent,
+		Message:             msg,
+		InboundConversation: slackInboundConversation(msg),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
