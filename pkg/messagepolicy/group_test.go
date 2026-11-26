@@ -170,9 +170,10 @@ type groupMemberResult struct {
 	Elapsed        time.Duration
 }
 
-// runPlannedGroupBatch mirrors the hub gate's immutable planned-group loop
-// over Evaluator.PlanSystemOneGroups / EvaluateJudgment / ApplyJudgment.
-func runPlannedGroupBatch(
+// evalPlannedGroups calls the shared production PlanSystemOneGroups and
+// RunGroupPlan helpers (the exact same path called by hub's
+// evalPlannedSystemOnePolicies) and resolves each member's outcome.
+func evalPlannedGroups(
 	soCtx context.Context,
 	ev *messagepolicy.Evaluator,
 	members []groupMemberSpec,
@@ -189,6 +190,7 @@ func runPlannedGroupBatch(
 			PolicyName:    m.PolicyName,
 			Revision:      m.Revision,
 			SystemOneRule: m.SystemOneRule,
+			ViolationRule: m.ViolationRule,
 		}
 	}
 	baseReq := systemone.Request{
@@ -202,48 +204,23 @@ func runPlannedGroupBatch(
 		MaxEvalTime:  soBudget,
 	}
 	plan := ev.PlanSystemOneGroups(soCtx, candidates, baseReq, keyCfg)
+	raw := ev.RunGroupPlan(
+		soCtx,
+		plan,
+		baseReq,
+		facts,
+		[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soBudget)},
+		[]messagepolicy.EvalOption{messagepolicy.WithBudget(celBudget)},
+	)
 	out := make([]groupMemberResult, len(members))
-	for _, u := range plan.Ungrouped {
-		m := members[u.Candidate.Index]
-		out[u.Candidate.Index] = groupMemberResult{
-			Classification: u.Classification,
-			Outcome:        messagepolicy.ResolveOutcome(u.Classification.Class, u.Classification.Reason, m.OnUncertain, m.OnFailed, m.OnFailedReasons),
+	for _, mr := range raw {
+		m := members[mr.Candidate.Index]
+		out[mr.Candidate.Index] = groupMemberResult{
+			Classification: mr.Classification,
+			Outcome:        messagepolicy.ResolveOutcome(mr.Classification.Class, mr.Classification.Reason, m.OnUncertain, m.OnFailed, m.OnFailedReasons),
+			Elapsed:        mr.Elapsed,
 		}
 	}
-	var wg sync.WaitGroup
-	for gi := range plan.Groups {
-		grp := plan.Groups[gi]
-		wg.Add(1)
-		go func(g messagepolicy.EvaluationGroup) {
-			defer wg.Done()
-			start := time.Now()
-			req := baseReq
-			req.RuleID = g.Primary.PolicyID
-			req.Revision = g.Primary.Revision
-			primaryEval, soCls := ev.EvaluateJudgment(soCtx, g.Compiled, req, messagepolicy.WithMaxEvalTime(soBudget))
-			groupElapsed := time.Since(start)
-			for _, cand := range g.Members {
-				m := members[cand.Index]
-				memberEval := primaryEval
-				sourceEvalID := ""
-				if cand.Index != g.Primary.Index {
-					memberEval = messagepolicy.CloneEvaluationForSecondary(primaryEval, m.PolicyID, m.Revision)
-					if primaryEval != nil {
-						sourceEvalID = primaryEval.EvalID
-					}
-				}
-				celStart := time.Now()
-				cls := ev.ApplyJudgment(soCtx, m.PolicyID, m.Revision, m.ViolationRule, facts, memberEval, soCls, messagepolicy.WithBudget(celBudget))
-				cls.SourceEvalID = sourceEvalID
-				out[cand.Index] = groupMemberResult{
-					Classification: cls,
-					Outcome:        messagepolicy.ResolveOutcome(cls.Class, cls.Reason, m.OnUncertain, m.OnFailed, m.OnFailedReasons),
-					Elapsed:        groupElapsed + time.Since(celStart),
-				}
-			}
-		}(grp)
-	}
-	wg.Wait()
 	return out, plan
 }
 
@@ -406,7 +383,7 @@ func TestGroups_OneExecutionPerGroup(t *testing.T) {
 		{PolicyID: "p-4", PolicyName: "pol-d", Revision: 1, SystemOneRule: groupRuleBodyOnly, ViolationRule: `judgment_flags.asks_choice`},
 	}
 
-	res, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("Pick A or B"), messagepolicy.NewSendBudget(), time.Second)
+	res, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("Pick A or B"), messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, plan.Groups, 1)
 	assert.Equal(t, int32(1), h.calls.Load(), "N identical policies must trigger exactly 1 provider call")
 	assert.Equal(t, messagepolicy.ClassViolation, res[0].Classification.Class)
@@ -422,7 +399,7 @@ func TestGroups_OneExecutionPerGroup(t *testing.T) {
 		{PolicyID: "p-3", PolicyName: "pol-c", Revision: 1, SystemOneRule: groupRuleBodyOnlyAlt, ViolationRule: `judgment_flags.asks_choice`},
 		{PolicyID: "p-4", PolicyName: "pol-d", Revision: 2, SystemOneRule: groupRuleBodyOnlyAlt, ViolationRule: `judgment_flags.asks_choice`},
 	}
-	_, planTwo := runPlannedGroupBatch(context.Background(), h.ev, membersTwoKeys, "proj-1", defaultGroupFacts("Pick A or B"), messagepolicy.NewSendBudget(), time.Second)
+	_, planTwo := evalPlannedGroups(context.Background(), h.ev, membersTwoKeys, "proj-1", defaultGroupFacts("Pick A or B"), messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, planTwo.Groups, 2)
 	assert.Equal(t, int32(2), h.calls.Load(), "2 distinct group keys must trigger exactly 2 provider calls")
 }
@@ -451,7 +428,7 @@ func TestGroups_IndependentConcurrent(t *testing.T) {
 	soCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	res, plan := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("Hello"), messagepolicy.NewSendBudget(), 2*time.Second)
+	res, plan := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("Hello"), messagepolicy.NewSendBudget(), 2*time.Second)
 	require.Len(t, plan.Groups, 2)
 	assert.Equal(t, int32(2), h.calls.Load())
 	assert.Equal(t, messagepolicy.ClassPass, res[0].Classification.Class)
@@ -510,7 +487,7 @@ func TestGroups_MemberOutcomesRealPath(t *testing.T) {
 		},
 	}
 
-	res, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), time.Second)
+	res, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, plan.Groups, 1)
 	assert.Equal(t, messagepolicy.ClassFailed, res[0].Classification.Class)
 	assert.Equal(t, string(provider.FailCapacity), res[0].Classification.Reason)
@@ -538,7 +515,7 @@ func TestGroups_SingleMemberParity(t *testing.T) {
 		},
 	}
 
-	grouped, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", facts, messagepolicy.NewSendBudget(), time.Second)
+	grouped, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", facts, messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, plan.Groups, 1)
 	require.Len(t, grouped, 1)
 
@@ -573,7 +550,7 @@ func TestGroups_CompileFailureUngrouped(t *testing.T) {
 		{PolicyID: "p-bad", PolicyName: "pol-bad", Revision: 1, SystemOneRule: `{"dialect":"system_one","spec":{"version":999}}`, ViolationRule: `judgment_flags.asks_choice`, OnFailed: messagepolicy.OutcomeReject},
 		{PolicyID: "p-2", PolicyName: "pol-b", Revision: 1, SystemOneRule: groupRuleBodyOnly, ViolationRule: `judgment_flags.asks_choice`},
 	}
-	res, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("hi"), messagepolicy.NewSendBudget(), time.Second)
+	res, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("hi"), messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, plan.Groups, 1)
 	require.Len(t, plan.Ungrouped, 1)
 	assert.Equal(t, int32(1), h.calls.Load())
@@ -604,7 +581,7 @@ func TestGroups_CompileFailureUngrouped(t *testing.T) {
 			OnFailedReasons: map[string]string{systemone.ReasonDialectDisabled: messagepolicy.OutcomeReject},
 		},
 	}
-	disRes, disPlan := runPlannedGroupBatch(context.Background(), hDis.ev, disMembers, "proj-1", defaultGroupFacts("hi"), messagepolicy.NewSendBudget(), time.Second)
+	disRes, disPlan := evalPlannedGroups(context.Background(), hDis.ev, disMembers, "proj-1", defaultGroupFacts("hi"), messagepolicy.NewSendBudget(), time.Second)
 	assert.Empty(t, disPlan.Groups, "dialect_disabled must never be grouped")
 	require.Len(t, disPlan.Ungrouped, 2)
 	assert.Equal(t, int32(0), hDis.calls.Load())
@@ -661,7 +638,7 @@ func TestGroups_CapacitySharedOneWait(t *testing.T) {
 	soCtx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	start := time.Now()
-	res, plan := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), budget)
+	res, plan := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), budget)
 	total := time.Since(start)
 
 	require.Len(t, plan.Groups, 1)
@@ -700,7 +677,7 @@ func TestGroups_CallTimeoutShared(t *testing.T) {
 	soCtx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	start := time.Now()
-	res, plan := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("slow"), messagepolicy.NewSendBudget(), budget)
+	res, plan := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("slow"), messagepolicy.NewSendBudget(), budget)
 	total := time.Since(start)
 
 	require.Len(t, plan.Groups, 1)
@@ -735,7 +712,7 @@ func TestGroups_ResourceAccounting(t *testing.T) {
 	}
 
 	celBudget := messagepolicy.NewSendBudget()
-	res, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("hi"), celBudget, time.Second)
+	res, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("hi"), celBudget, time.Second)
 	require.Len(t, plan.Groups, 1)
 	assert.Equal(t, int32(1), h.calls.Load(), "provider request charged once per group")
 	for i, r := range res {
@@ -752,7 +729,7 @@ func TestGroups_ResourceAccounting(t *testing.T) {
 	})
 	exhausted := ruleengine.NewBudgetTracker(time.Millisecond)
 	exhausted.Exhaust()
-	resEx, _ := runPlannedGroupBatch(context.Background(), h2.ev, members[:2], "proj-1", defaultGroupFacts("hi"), exhausted, time.Second)
+	resEx, _ := evalPlannedGroups(context.Background(), h2.ev, members[:2], "proj-1", defaultGroupFacts("hi"), exhausted, time.Second)
 	assert.Equal(t, int32(1), h2.calls.Load())
 	for i, r := range resEx {
 		assert.Equal(t, messagepolicy.ClassFailed, r.Classification.Class, "member %d", i)
@@ -779,7 +756,7 @@ func TestGroups_SoCtxCancel(t *testing.T) {
 
 	done := make(chan []groupMemberResult, 1)
 	go func() {
-		res, _ := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("cancel me"), messagepolicy.NewSendBudget(), 3*time.Second)
+		res, _ := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("cancel me"), messagepolicy.NewSendBudget(), 3*time.Second)
 		done <- res
 	}()
 
@@ -807,7 +784,7 @@ func TestGroups_ProvenanceRows(t *testing.T) {
 		{PolicyID: "id-a", PolicyName: "alpha", Revision: 2, SystemOneRule: groupRuleBodyOnly, ViolationRule: `judgment_flags.asks_choice`},
 	}
 
-	res, plan := runPlannedGroupBatch(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("choose"), messagepolicy.NewSendBudget(), time.Second)
+	res, plan := evalPlannedGroups(context.Background(), h.ev, members, "proj-1", defaultGroupFacts("choose"), messagepolicy.NewSendBudget(), time.Second)
 	require.Len(t, plan.Groups, 1)
 	assert.Equal(t, "id-a", plan.Groups[0].Primary.PolicyID, "primary must be lowest PolicyName then lowest PolicyID")
 	assert.Equal(t, int32(1), h.calls.Load())
@@ -885,7 +862,7 @@ func TestProbe_GroupsCapacityN(t *testing.T) {
 
 		soCtx, cancel := context.WithTimeout(context.Background(), tc.budget)
 		start := time.Now()
-		res, _ := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), tc.budget)
+		res, _ := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), tc.budget)
 		elapsed := time.Since(start)
 		cancel()
 		close(release)
@@ -928,7 +905,7 @@ func TestProbe_GroupsCallTimeoutSkew(t *testing.T) {
 
 		soCtx, cancel := context.WithTimeout(context.Background(), budget)
 		start := time.Now()
-		res, _ := runPlannedGroupBatch(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), budget)
+		res, _ := evalPlannedGroups(soCtx, h.ev, members, "proj-1", defaultGroupFacts("same"), messagepolicy.NewSendBudget(), budget)
 		elapsed := time.Since(start)
 		cancel()
 

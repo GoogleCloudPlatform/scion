@@ -477,4 +477,125 @@ func TestHubGroups_SoCtxCancelOnRequestDisconnect(t *testing.T) {
 
 	assert.Equal(t, 499, rec.Code)
 	assert.Equal(t, int32(1), calls.Load(), "canceled group must have executed only once")
+
+	// Directly exercise the production hub gate helper (evalPlannedSystemOnePolicies)
+	// under a canceled soCtx and verify EVERY member's canceled classification,
+	// real on_failed_reasons outcome, member-to-slot mapping, and provenance.
+	calls.Store(0)
+	entered2 := make(chan struct{})
+	release2 := make(chan struct{})
+	defer close(release2)
+	mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-cancel-direct", func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(entered2)
+		}
+		select {
+		case <-r.Context().Done():
+		case <-release2:
+		}
+		w.WriteHeader(http.StatusRequestTimeout)
+	})
+	ruleDirect := mpgGroupBinaryRule("ts-cancel-direct", "Slow question for per-member cancel check")
+	pols := []store.MessagePolicy{
+		{
+			ID:              "pol-cancel-z",
+			ProjectID:       f.project.ID,
+			Name:            "c-pol-reject",
+			Revision:        3,
+			Enabled:         true,
+			Mode:            store.MessagePolicyModeEnforce,
+			ViolationRule:   `judgment_flags.asks_choice`,
+			SystemOneRule:   ruleDirect,
+			OnFailed:        store.MessagePolicyOutcomeAdmit,
+			OnFailedReasons: map[string]string{string(provider.FailCanceled): store.MessagePolicyOutcomeReject},
+		},
+		{
+			ID:              "pol-cancel-a",
+			ProjectID:       f.project.ID,
+			Name:            "c-pol-admit",
+			Revision:        1,
+			Enabled:         true,
+			Mode:            store.MessagePolicyModeEnforce,
+			ViolationRule:   `judgment_flags.asks_choice`,
+			SystemOneRule:   ruleDirect,
+			OnFailed:        store.MessagePolicyOutcomeReject,
+			OnFailedReasons: map[string]string{string(provider.FailCanceled): store.MessagePolicyOutcomeAdmit},
+		},
+		{
+			ID:            "pol-cancel-m",
+			ProjectID:     f.project.ID,
+			Name:          "c-pol-default",
+			Revision:      2,
+			Enabled:       true,
+			Mode:          store.MessagePolicyModeEnforce,
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: ruleDirect,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+		},
+	}
+
+	facts := messagepolicy.Facts{
+		Surface:   messagepolicy.SurfaceAgentToUser,
+		Sender:    messagepolicy.SenderFacts{Kind: "agent", ID: f.sender.ID, Slug: f.sender.Slug, ProjectID: f.project.ID},
+		Recipient: messagepolicy.RecipientFacts{Kind: "user", ID: f.alice.ID, Slug: f.alice.Email},
+		Message:   messagepolicy.MessageFacts{Type: "message", Body: "cancel per-member test"},
+	}
+	act := messagepolicy.NewActivation(facts)
+	budget := f.srv.messagePolicyGate.makeSendBudget()
+	soCtx, soCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer soCancel()
+
+	results := make([]policyEvalResult, len(pols))
+	directDone := make(chan struct{})
+	go func() {
+		defer close(directDone)
+		f.srv.evalPlannedSystemOnePolicies(soCtx, pols, store.MaxActiveMatchingMessagePolicies, f.project.ID, facts, act, budget, 3*time.Second, false, results)
+	}()
+
+	<-entered2
+	soCancel()
+	<-directDone
+
+	assert.Equal(t, int32(1), calls.Load(), "production hub helper must execute canceled group once")
+	wantOutcomes := []string{
+		messagepolicy.OutcomeReject, // c-pol-reject: on_failed_reasons["canceled"] = reject
+		messagepolicy.OutcomeAdmit,  // c-pol-admit:  on_failed_reasons["canceled"] = admit
+		messagepolicy.OutcomeReject, // c-pol-default: on_failed = reject
+	}
+	primaryIdx := 1 // c-pol-admit has lowest PolicyName
+	require.NotNil(t, results[primaryIdx].classification.Evaluation)
+	primaryEvalID := results[primaryIdx].classification.Evaluation.EvalID
+	require.NotEmpty(t, primaryEvalID)
+
+	seenEvalIDs := make(map[string]bool, len(pols))
+	for i := range pols {
+		r := results[i]
+		require.NotNil(t, r.policy, "member %d must be populated", i)
+		assert.Equal(t, pols[i].ID, r.policy.ID, "result slot %d must map to policy %s", i, pols[i].ID)
+		assert.Equal(t, messagepolicy.ClassFailed, r.classification.Class, "member %d must be failed", i)
+		assert.Equal(t, string(provider.FailCanceled), r.classification.Reason, "member %d must receive runtime canceled classification", i)
+
+		outcome := messagepolicy.ResolveOutcome(
+			r.classification.Class,
+			r.classification.Reason,
+			pols[i].OnUncertain,
+			pols[i].OnFailed,
+			pols[i].OnFailedReasons,
+		)
+		assert.Equal(t, wantOutcomes[i], outcome, "member %d (%s) outcome mismatch", i, pols[i].Name)
+
+		require.NotNil(t, r.classification.Evaluation, "member %d must retain canceled provenance", i)
+		assert.Equal(t, pols[i].ID, r.classification.Evaluation.Rule.RuleID, "member %d rule_id mismatch", i)
+		assert.Equal(t, pols[i].Revision, r.classification.Evaluation.Rule.Revision, "member %d revision mismatch", i)
+		assert.False(t, seenEvalIDs[r.classification.Evaluation.EvalID], "member %d must have unique eval_id", i)
+		seenEvalIDs[r.classification.Evaluation.EvalID] = true
+		if i == primaryIdx {
+			assert.False(t, r.classification.Evaluation.CacheHit)
+			assert.Empty(t, r.classification.SourceEvalID)
+		} else {
+			assert.True(t, r.classification.Evaluation.CacheHit)
+			assert.Nil(t, r.classification.Evaluation.Usage)
+			assert.Equal(t, primaryEvalID, r.classification.SourceEvalID)
+		}
+	}
 }

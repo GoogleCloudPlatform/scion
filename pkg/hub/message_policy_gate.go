@@ -896,6 +896,7 @@ func (s *Server) evalPlannedSystemOnePolicies(
 			PolicyName:    pol.Name,
 			Revision:      pol.Revision,
 			SystemOneRule: pol.SystemOneRule,
+			ViolationRule: pol.ViolationRule,
 		})
 	}
 
@@ -919,48 +920,21 @@ func (s *Server) evalPlannedSystemOnePolicies(
 	}
 
 	plan := ev.PlanSystemOneGroups(evalCtx, candidates, baseReq, keyCfg)
-	for _, u := range plan.Ungrouped {
-		results[u.Candidate.Index] = policyEvalResult{
-			policy:         &policies[u.Candidate.Index],
-			classification: u.Classification,
+	memberResults := ev.RunGroupPlan(
+		evalCtx,
+		plan,
+		baseReq,
+		facts,
+		[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soBudget)},
+		[]messagepolicy.EvalOption{messagepolicy.WithBudget(budget)},
+	)
+	for _, mr := range memberResults {
+		results[mr.Candidate.Index] = policyEvalResult{
+			policy:         &policies[mr.Candidate.Index],
+			classification: mr.Classification,
+			elapsed:        mr.Elapsed,
 		}
 	}
-
-	var wg sync.WaitGroup
-	for gi := range plan.Groups {
-		grp := plan.Groups[gi]
-		wg.Add(1)
-		go func(g messagepolicy.EvaluationGroup) {
-			defer wg.Done()
-			groupStart := time.Now()
-			req := baseReq
-			req.RuleID = g.Primary.PolicyID
-			req.Revision = g.Primary.Revision
-			primaryEval, soCls := ev.EvaluateJudgment(evalCtx, g.Compiled, req, messagepolicy.WithMaxEvalTime(soBudget))
-			groupElapsed := time.Since(groupStart)
-
-			for _, m := range g.Members {
-				pol := &policies[m.Index]
-				memberEval := primaryEval
-				sourceEvalID := ""
-				if m.Index != g.Primary.Index {
-					memberEval = messagepolicy.CloneEvaluationForSecondary(primaryEval, pol.ID, pol.Revision)
-					if primaryEval != nil {
-						sourceEvalID = primaryEval.EvalID
-					}
-				}
-				celStart := time.Now()
-				cls := ev.ApplyJudgment(evalCtx, pol.ID, pol.Revision, pol.ViolationRule, facts, memberEval, soCls, messagepolicy.WithBudget(budget))
-				cls.SourceEvalID = sourceEvalID
-				results[m.Index] = policyEvalResult{
-					policy:         pol,
-					classification: cls,
-					elapsed:        groupElapsed + time.Since(celStart),
-				}
-			}
-		}(grp)
-	}
-	wg.Wait()
 }
 
 func (s *Server) evalOneMessagePolicyWithFacts(

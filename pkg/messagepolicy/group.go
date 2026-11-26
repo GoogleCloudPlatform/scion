@@ -26,6 +26,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
@@ -202,6 +203,15 @@ type GroupCandidate struct {
 	PolicyName    string
 	Revision      int64
 	SystemOneRule string
+	ViolationRule string
+}
+
+// GroupMemberResult holds the per-member Classification and elapsed duration
+// produced by RunGroup or RunGroupPlan for one GroupCandidate.
+type GroupMemberResult struct {
+	Candidate      GroupCandidate
+	Classification Classification
+	Elapsed        time.Duration
 }
 
 // EvaluationGroup is an immutable planned group of policy units that share one
@@ -303,6 +313,96 @@ func (e *Evaluator) PlanSystemOneGroups(
 	}
 
 	return plan
+}
+
+// RunGroup executes a single planned EvaluationGroup once under ctx using
+// group.Primary's RuleID/Revision, then applies each member's own CEL
+// violation_rule and provenance (primary carries Usage; secondary members
+// carry CacheHit=true, a fresh EvalID, their own Rule ref, cleared Usage, and
+// SourceEvalID pointing to the primary's EvalID).
+//
+// Runtime results — including failures (capacity, timeout, canceled) and
+// uncertain classifications — are shared across every member of the group.
+func (e *Evaluator) RunGroup(
+	ctx context.Context,
+	group EvaluationGroup,
+	baseReq systemone.Request,
+	facts Facts,
+	soOpts []EvalOption,
+	celOpts []EvalOption,
+) []GroupMemberResult {
+	groupStart := time.Now()
+	req := baseReq
+	req.RuleID = group.Primary.PolicyID
+	req.Revision = group.Primary.Revision
+	primaryEval, soCls := e.EvaluateJudgment(ctx, group.Compiled, req, soOpts...)
+	groupElapsed := time.Since(groupStart)
+
+	out := make([]GroupMemberResult, len(group.Members))
+	for i, m := range group.Members {
+		memberEval := primaryEval
+		sourceEvalID := ""
+		if m.Index != group.Primary.Index {
+			memberEval = CloneEvaluationForSecondary(primaryEval, m.PolicyID, m.Revision)
+			if primaryEval != nil {
+				sourceEvalID = primaryEval.EvalID
+			}
+		}
+		celStart := time.Now()
+		cls := e.ApplyJudgment(ctx, m.PolicyID, m.Revision, m.ViolationRule, facts, memberEval, soCls, celOpts...)
+		cls.SourceEvalID = sourceEvalID
+		out[i] = GroupMemberResult{
+			Candidate:      m,
+			Classification: cls,
+			Elapsed:        groupElapsed + time.Since(celStart),
+		}
+	}
+	return out
+}
+
+// RunGroupPlan executes all planned groups in plan concurrently via RunGroup
+// under ctx, preserving ungrouped compile/dialect_disabled failures unchanged,
+// and returns one GroupMemberResult per planned or ungrouped candidate.
+func (e *Evaluator) RunGroupPlan(
+	ctx context.Context,
+	plan GroupPlan,
+	baseReq systemone.Request,
+	facts Facts,
+	soOpts []EvalOption,
+	celOpts []EvalOption,
+) []GroupMemberResult {
+	total := len(plan.Ungrouped)
+	for i := range plan.Groups {
+		total += len(plan.Groups[i].Members)
+	}
+	if total == 0 {
+		return nil
+	}
+
+	out := make([]GroupMemberResult, total)
+	offset := 0
+	for _, u := range plan.Ungrouped {
+		out[offset] = GroupMemberResult{
+			Candidate:      u.Candidate,
+			Classification: u.Classification,
+		}
+		offset++
+	}
+
+	var wg sync.WaitGroup
+	for gi := range plan.Groups {
+		grp := plan.Groups[gi]
+		start := offset
+		offset += len(grp.Members)
+		wg.Add(1)
+		go func(g EvaluationGroup, dst []GroupMemberResult) {
+			defer wg.Done()
+			res := e.RunGroup(ctx, g, baseReq, facts, soOpts, celOpts)
+			copy(dst, res)
+		}(grp, out[start:start+len(grp.Members)])
+	}
+	wg.Wait()
+	return out
 }
 
 // candidateLess defines deterministic primary selection: lowest PolicyName,
