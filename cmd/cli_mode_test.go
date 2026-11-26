@@ -875,6 +875,20 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 		require.Contains(t, paths, mustInclude, "table must cover %s", mustInclude)
 	}
 
+	// executeAgent mirrors Execute()'s pre-ExecuteC agent-mode checks so
+	// top-level and nested gated commands (including --help forms) are tested
+	// against the real tree while keeping root non-Runnable.
+	executeAgent := func(root *cobra.Command, args []string) error {
+		if err := agentModeGatedInvocationError(root, args); err != nil {
+			return err
+		}
+		if err := unknownSubcommandHelpError(root, args); err != nil {
+			return err
+		}
+		root.SetArgs(args)
+		return root.Execute()
+	}
+
 	for _, tc := range cases {
 		t.Run(tc.path, func(t *testing.T) {
 			root := cloneCommandForModeExec(rootCmd)
@@ -884,10 +898,11 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 			root.SetOut(&out)
 			root.SetErr(&out)
 
+			root.InitDefaultHelpCmd()
 			applyModeRestrictions(root, ModeAgent)
+			require.False(t, root.Runnable(), "root must remain non-Runnable in agent mode")
 
-			root.SetArgs(tc.args)
-			err := root.Execute()
+			err := executeAgent(root, tc.args)
 			require.Error(t, err, "gated command %q must fail, not fall through to help", tc.path)
 			assert.Contains(t, err.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
 			assert.NotContains(t, err.Error(), "unknown command")
@@ -895,7 +910,7 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 
 			// "<cmd> --help" for any gated command must also report not available in agent mode.
 			helpArgs := append(append([]string(nil), tc.args...), "--help")
-			helpErr := unknownSubcommandHelpError(root, helpArgs)
+			helpErr := executeAgent(root, helpArgs)
 			require.Error(t, helpErr, "gated command help %q must fail", helpArgs)
 			assert.Contains(t, helpErr.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
 		})
@@ -920,10 +935,10 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 			root.SetOut(&out)
 			root.SetErr(&out)
 
+			root.InitDefaultHelpCmd()
 			applyModeRestrictions(root, ModeAgent)
 
-			root.SetArgs(tc.args)
-			err := root.Execute()
+			err := executeAgent(root, tc.args)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
 			assert.NotContains(t, err.Error(), "unknown command")
@@ -938,10 +953,10 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 		var out bytes.Buffer
 		root.SetOut(&out)
 		root.SetErr(&out)
+		root.InitDefaultHelpCmd()
 		applyModeRestrictions(root, ModeAgent)
 
-		root.SetArgs([]string{"nosuch"})
-		err := root.Execute()
+		err := executeAgent(root, []string{"nosuch"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `unknown command "nosuch" for "scion"`)
 		assert.NotContains(t, err.Error(), "not available in agent mode")
@@ -1043,6 +1058,36 @@ func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 			forbidStderr: "Usage:",
 		},
 		{
+			name:         "server_start_with_flag",
+			args:         []string{"server", "start", "--port", "8080"},
+			wantErr:      `command "scion server" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "help_server",
+			args:         []string{"help", "server"},
+			wantErr:      `command "scion server" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "help_broker_alias",
+			args:         []string{"help", "broker"},
+			wantErr:      `command "scion runtime-broker" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "help_completion",
+			args:         []string{"help", "completion"},
+			wantErr:      `command "scion completion" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "help_project_service_accounts_list",
+			args:         []string{"help", "project", "service-accounts", "list"},
+			wantErr:      `command "scion project service-accounts list" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
 			name:         "project_service_accounts_list",
 			args:         []string{"project", "service-accounts", "list"},
 			wantErr:      `command "scion project service-accounts list" is not available in agent mode`,
@@ -1088,11 +1133,26 @@ func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 		})
 	}
 
-	// Bare root still prints help and exits 0, listing only allowed commands.
+	// Bare root still prints help and exits 0, listing only allowed commands
+	// and without gaining "scion [flags]" (root remains non-Runnable).
 	rootRes := runSSHCLI(t, dir, home, nil)
 	assert.Equal(t, 0, rootRes.code, "bare root failed: stderr=%q", rootRes.stderr)
 	assert.Contains(t, rootRes.stdout, "Usage:")
+	assert.Contains(t, rootRes.stdout, "scion [command]")
+	assert.NotContains(t, rootRes.stdout, "scion [flags]")
 	assert.NotContains(t, rootRes.stdout, "  server ")
+
+	// "scion help <allowed>" prints the allowed command's help and exits 0.
+	helpAllowedRes := runSSHCLI(t, dir, home, nil, "help", "list")
+	assert.Equal(t, 0, helpAllowedRes.code, "help list failed: stderr=%q", helpAllowedRes.stderr)
+	assert.Contains(t, helpAllowedRes.stdout, "Usage:")
+	assert.Contains(t, helpAllowedRes.stdout, "scion list")
+
+	// "scion help <unknown>" keeps Cobra's "Unknown help topic" diagnostic.
+	helpUnknownRes := runSSHCLI(t, dir, home, nil, "help", "nosuch")
+	assert.Equal(t, 0, helpUnknownRes.code, "help nosuch failed: stderr=%q", helpUnknownRes.stderr)
+	assert.Contains(t, helpUnknownRes.stderr+helpUnknownRes.stdout, "Unknown help topic")
+	assert.NotContains(t, helpUnknownRes.stderr+helpUnknownRes.stdout, "not available in agent mode")
 
 	// Bare parent still prints help and exits 0, listing only allowed subcommands.
 	res := runSSHCLI(t, dir, home, nil, "project", "service-accounts")

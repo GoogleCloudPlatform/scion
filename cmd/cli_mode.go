@@ -405,9 +405,10 @@ func checkFlagsForMode(cmd *cobra.Command, mode CLIMode) error {
 	return err
 }
 
-// errNotAvailableInAgentMode is matched with errors.Is for commands removed by
-// the agent-mode gate. The concrete error names the command.
-var errNotAvailableInAgentMode = errors.New("command is not available in agent mode")
+// agentRemovedSubcommandsAnnotation stores the direct subcommands removed from
+// a command in agent mode as newline-separated "name=canonical" entries (so
+// aliases map back to their canonical command name).
+const agentRemovedSubcommandsAnnotation = "scion_agent_removed_subcommands"
 
 type agentModeUnavailableError struct {
 	command string // full command path, e.g. "scion server"
@@ -417,8 +418,77 @@ func (e *agentModeUnavailableError) Error() string {
 	return fmt.Sprintf("command %q is not available in agent mode", e.command)
 }
 
-func (e *agentModeUnavailableError) Is(target error) bool {
-	return target == errNotAvailableInAgentMode
+func isAgentModeUnavailableError(err error) bool {
+	var e *agentModeUnavailableError
+	return errors.As(err, &e)
+}
+
+func setRemovedSubcommands(cmd *cobra.Command, removed map[string]string) {
+	if len(removed) == 0 {
+		return
+	}
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	parts := make([]string, 0, len(removed))
+	for k, v := range removed {
+		parts = append(parts, k+"="+v)
+	}
+	cmd.Annotations[agentRemovedSubcommandsAnnotation] = strings.Join(parts, "\n")
+}
+
+func lookupRemovedSubcommand(cmd *cobra.Command, name string) (string, bool) {
+	raw := cmd.Annotations[agentRemovedSubcommandsAnnotation]
+	if raw == "" {
+		return "", false
+	}
+	prefix := name + "="
+	for _, entry := range strings.Split(raw, "\n") {
+		if canonical, ok := strings.CutPrefix(entry, prefix); ok {
+			return canonical, true
+		}
+	}
+	return "", false
+}
+
+// agentModeGatedInvocationError checks whether args invoke a top-level command
+// that applyAgentMode removed from root. Keeping root non-Runnable preserves
+// Cobra's root usage block (no "scion [flags]") and "Unknown help topic"
+// behavior; Execute calls this check before ExecuteC so gated top-level
+// commands (and their --help forms) still report "not available in agent mode".
+func agentModeGatedInvocationError(root *cobra.Command, args []string) error {
+	positional := positionalArgs(root, args)
+	if len(positional) == 0 {
+		return nil
+	}
+	if canonical, ok := lookupRemovedSubcommand(root, positional[0]); ok {
+		return &agentModeUnavailableError{command: root.CommandPath() + " " + canonical}
+	}
+	return nil
+}
+
+// agentModeRemovedCommand walks command path tokens from root and returns an
+// agentModeUnavailableError if any segment names a command removed in agent
+// mode (including aliases). Used by the wrapped "help" command.
+func agentModeRemovedCommand(root *cobra.Command, args []string) error {
+	cur := root
+	for _, arg := range args {
+		if canonical, ok := lookupRemovedSubcommand(cur, arg); ok {
+			return &agentModeUnavailableError{command: cur.CommandPath() + " " + canonical}
+		}
+		var next *cobra.Command
+		for _, child := range cur.Commands() {
+			if child.Name() == arg || child.HasAlias(arg) {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		cur = next
+	}
+	return nil
 }
 
 func applyAgentMode(root *cobra.Command) {
@@ -429,27 +499,52 @@ func applyAgentMode(root *cobra.Command) {
 		return !agentAllowed[path]
 	})
 	// Record Cobra's built-in "completion" command even when it has not been
-	// lazily added to root yet, so "scion completion" reports unavailable
-	// rather than unknown.
+	// lazily added to root yet, so "scion completion" and "scion help completion"
+	// report unavailable rather than unknown.
 	if removed == nil {
 		removed = map[string]string{}
 	}
 	removed["completion"] = "completion"
-	if !root.Runnable() {
-		rejectUnknownSubcommandsWithRemoved(root, removed)
-	} else {
-		wrapArgsWithRemoved(root, removed)
+	setRemovedSubcommands(root, removed)
+	wrapHelpCommandForAgentMode(root)
+}
+
+// wrapHelpCommandForAgentMode wraps root's "help" subcommand (when present) so
+// "scion help <gated>" reports agentModeUnavailableError while "scion help
+// <allowed>" and "scion help <unknown>" keep Cobra's standard help behavior.
+func wrapHelpCommandForAgentMode(root *cobra.Command) {
+	var helpCmd *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "help" {
+			helpCmd = c
+			break
+		}
+	}
+	if helpCmd == nil {
+		return
+	}
+	origRun := helpCmd.Run
+	origRunE := helpCmd.RunE
+	helpCmd.Run = nil
+	helpCmd.RunE = func(c *cobra.Command, args []string) error {
+		if err := agentModeRemovedCommand(c.Root(), args); err != nil {
+			return err
+		}
+		if origRunE != nil {
+			return origRunE(c, args)
+		}
+		if origRun != nil {
+			origRun(c, args)
+		}
+		return nil
 	}
 }
 
 // removeCommands walks the command tree and removes commands where shouldRemove
 // returns true, returning a map from each removed direct child's name (and
-// aliases) to its canonical name. It processes children recursively before
-// deciding whether to remove a parent. Surviving non-Runnable command groups
-// get rejectUnknownSubcommandsWithRemoved, and surviving Runnable groups with
-// removed children wrap their Args validator, so invoking a removed command
-// reports "not available in agent mode" while truly unknown subcommands still
-// fail with "unknown command".
+// aliases) to its canonical name. It is currently called only by applyAgentMode,
+// so removed children are recorded as unavailable in agent mode on their
+// surviving parent.
 func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(string) bool) map[string]string {
 	var removed map[string]string
 	for _, child := range parent.Commands() {
@@ -480,6 +575,7 @@ func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(stri
 			parent.RemoveCommand(child)
 			parent.Long = dropCommandLines(parent.Long, parent.CommandPath()+" "+name)
 		} else if hadSubcommands {
+			setRemovedSubcommands(child, childRemoved)
 			if !child.Runnable() {
 				rejectUnknownSubcommandsWithRemoved(child, childRemoved)
 			} else if len(childRemoved) > 0 {
