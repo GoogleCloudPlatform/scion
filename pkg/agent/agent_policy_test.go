@@ -111,6 +111,14 @@ func TestCheckAgentPolicyImage(t *testing.T) {
 	assert.Contains(t, err.Error(), "...")
 	assert.Less(t, len(err.Error()), 260)
 
+	// Credentials embedded in a resolved image (e.g. from image_registry)
+	// must be redacted before appearing in the public refusal message.
+	_, err = checkAgentPolicyImage(p, "a", "user:s3cret@internal.example.com/team/scion-claude:latest")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAgentPolicy)
+	assert.NotContains(t, err.Error(), "s3cret")
+	assert.NotContains(t, err.Error(), "user:")
+
 	// No prefix list: the image is untouched.
 	got, err := checkAgentPolicyImage(&config.V1AgentPolicy{}, "a", "postgres")
 	require.NoError(t, err)
@@ -222,31 +230,35 @@ func TestApplyAgentPolicyResources_KubernetesMapOnBindRuntimes(t *testing.T) {
 // platform defaults when both are unset, so missing limits are not filled
 // with max_resources (avoiding Cloud Run CPU/memory band violations and
 // silent upsizing of request-only agents). When both limit and request are
-// unset and the runtime's default exceeds (or may exceed) max_resources,
-// the start is refused fail-closed.
+// unset and the runtime's default exceeds (or may exceed) max_resources — or
+// on any unknown/unlisted runtime — the start is refused fail-closed.
+// Substrate reads Limits only and opts into missing-limit filling.
 func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 	p := &config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "8", Memory: "32Gi"}}
 
-	for _, rt := range []string{"cloudrun", "cloudrun-sandbox"} {
-		t.Run(rt+"_default_cpu_no_memory_fill", func(t *testing.T) {
-			in := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}
-			out, err := applyAgentPolicyResources(p, "a", rt, in, nil)
-			require.NoError(t, err)
-			require.NotNil(t, out)
-			assert.Equal(t, "2", out.Limits.CPU)
-			assert.Equal(t, "", out.Limits.Memory, "missing memory limit must not be filled to 32Gi on %s", rt)
-		})
-		t.Run(rt+"_request_only_not_upsized", func(t *testing.T) {
-			in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
-			out, err := applyAgentPolicyResources(p, "a", rt, in, nil)
-			require.NoError(t, err)
-			require.NotNil(t, out)
-			assert.Equal(t, "", out.Limits.CPU)
-			assert.Equal(t, "", out.Limits.Memory, "request-only agent must not be upsized to ceiling on %s", rt)
-			assert.Equal(t, "1", out.Requests.CPU)
-			assert.Equal(t, "2Gi", out.Requests.Memory)
-		})
-	}
+	t.Run("cloudrun_default_cpu_no_memory_fill", func(t *testing.T) {
+		in := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}
+		out, err := applyAgentPolicyResources(p, "a", "cloudrun", in, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, "2", out.Limits.CPU)
+		assert.Equal(t, "", out.Limits.Memory, "missing memory limit must not be filled to 32Gi on cloudrun")
+	})
+	t.Run("cloudrun_nil_spec_stays_nil_when_defaults_within_max", func(t *testing.T) {
+		out, err := applyAgentPolicyResources(p, "a", "cloudrun", nil, nil)
+		require.NoError(t, err)
+		assert.Nil(t, out, "nil spec must not become an empty non-nil spec when not filling")
+	})
+	t.Run("cloudrun_request_only_not_upsized", func(t *testing.T) {
+		in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
+		out, err := applyAgentPolicyResources(p, "a", "cloudrun", in, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, "", out.Limits.CPU)
+		assert.Equal(t, "", out.Limits.Memory, "request-only agent must not be upsized to ceiling on cloudrun")
+		assert.Equal(t, "1", out.Requests.CPU)
+		assert.Equal(t, "2Gi", out.Requests.Memory)
+	})
 
 	t.Run("container_no_fill", func(t *testing.T) {
 		in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
@@ -258,6 +270,41 @@ func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 		assert.Equal(t, "1", out.Requests.CPU)
 		assert.Equal(t, "2Gi", out.Requests.Memory)
 	})
+
+	// Substrate reads Limits only and opts into missing-limit fill, including
+	// when spec is nil.
+	t.Run("substrate_fills_missing_limits", func(t *testing.T) {
+		small := &config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "1", Memory: "1Gi"}}
+		out, err := applyAgentPolicyResources(small, "a", "substrate", &api.ResourceSpec{Limits: api.ResourceList{CPU: "1"}}, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, "1", out.Limits.CPU)
+		assert.Equal(t, "1Gi", out.Limits.Memory)
+
+		out, err = applyAgentPolicyResources(small, "a", "substrate", nil, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, api.ResourceList{CPU: "1", Memory: "1Gi"}, out.Limits)
+	})
+
+	// Unknown/unlisted runtimes fail closed when any capped resource is unset.
+	for _, rt := range []string{"future-rt", "cloudrun-sandbox"} {
+		t.Run(rt+"_unset_capped_resource_refused", func(t *testing.T) {
+			_, err := applyAgentPolicyResources(p, "a", rt, &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAgentPolicy)
+			assert.Contains(t, err.Error(), "resources.limits.memory")
+			assert.Contains(t, err.Error(), "agent_policy.max_resources.memory")
+		})
+		t.Run(rt+"_explicit_within_max_allowed", func(t *testing.T) {
+			in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
+			out, err := applyAgentPolicyResources(p, "a", rt, in, nil)
+			require.NoError(t, err)
+			require.NotNil(t, out)
+			assert.Equal(t, "", out.Limits.CPU)
+			assert.Equal(t, "", out.Limits.Memory)
+		})
+	}
 
 	// Unset memory when runtime default (2Gi on Cloud Run, 2G on Apple
 	// container) exceeds max_resources.memory must be refused fail-closed.
@@ -306,8 +353,8 @@ func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 	}
 
 	// Explicit requests and limits above the maximum are still refused on
-	// Cloud Run and Apple container.
-	for _, rt := range []string{"cloudrun", "cloudrun-sandbox", "container"} {
+	// Cloud Run, Apple container, and unlisted runtimes.
+	for _, rt := range []string{"cloudrun", "cloudrun-sandbox", "container", "future-rt"} {
 		_, err := applyAgentPolicyResources(p, "a", rt, &api.ResourceSpec{Requests: api.ResourceList{Memory: "64Gi"}}, nil)
 		require.Error(t, err, rt)
 		assert.ErrorIs(t, err, ErrAgentPolicy, rt)
@@ -434,4 +481,23 @@ agent_policy:
 	require.Error(t, err)
 	assert.Equal(t, 0, ran)
 	assert.ErrorIs(t, err, ErrAgentPolicy)
+}
+
+func TestStart_AgentPolicyImageRefusalRedactsRegistryCredentials(t *testing.T) {
+	_, ran, err := startWithAgentPolicy(t, `schema_version: "1"
+active_profile: local
+image_registry: "user:pw@internal.example.com/team"
+profiles:
+  local:
+    runtime: docker
+agent_policy:
+  allowed_image_prefixes: [ok.example.com/]
+`, nil)
+	require.Error(t, err)
+	assert.Equal(t, 0, ran)
+	assert.ErrorIs(t, err, ErrAgentPolicy)
+	var pe *AgentPolicyError
+	require.True(t, errors.As(err, &pe))
+	assert.NotContains(t, pe.PublicMessage(), "pw")
+	assert.NotContains(t, pe.PublicMessage(), "user:")
 }

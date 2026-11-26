@@ -188,7 +188,7 @@ func checkAgentPolicyImage(p *config.V1AgentPolicy, agentName, image string) (st
 		}
 	}
 	return "", refuseAgentPolicy(agentName, NewAgentPolicyError("image", "agent_policy.allowed_image_prefixes",
-		"image %s is not from an allowed registry or repository", quotePolicyValue(image)))
+		"image %s is not from an allowed registry or repository", quotePolicyValue(config.RedactImageRegistry(image))))
 }
 
 // maxEchoedPolicyValue is how many characters of a requester's value an
@@ -210,16 +210,19 @@ func quotePolicyValue(v string) string {
 var k8sDefaultRequestFor = map[string]string{"cpu": "250m", "memory": "512Mi"}
 
 // fillMissingLimitRuntimes are the runtimes where omitting a resource limit
-// leaves the container unlimited, so max_resources fills missing limits with
-// the configured maximum. Runtimes that fall back from limit to request or
-// apply a platform default (Cloud Run, Apple container) are not filled so
-// request-only agents are not silently upsized and Cloud Run CPU/memory
-// bands are not violated; instead, unset resources whose runtime default
-// exceeds (or may exceed) max_resources are refused fail-closed.
+// leaves the container unlimited (or where the runtime reads only Limits),
+// so max_resources fills missing limits with the configured maximum. Runtimes
+// that fall back from limit to request or apply a platform default (Cloud
+// Run, Apple container) are not filled so request-only agents are not
+// silently upsized and Cloud Run CPU/memory bands are not violated; instead,
+// unset resources whose runtime default exceeds (or may exceed) max_resources
+// — and any unknown/unlisted runtime with unset capped resources — are
+// refused fail-closed.
 var fillMissingLimitRuntimes = map[string]bool{
 	"docker":     true,
 	"podman":     true,
 	"kubernetes": true,
+	"substrate":  true,
 }
 
 // runtimeUnsetDefaults records the known platform defaults applied when a
@@ -349,13 +352,15 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 		})
 	}
 	// Pass 2: fill missing limits on unlimited-by-default runtimes, or refuse
-	// unset resources on non-fill runtimes when the runtime default exceeds
-	// (or may exceed) the maximum.
+	// unset resources on non-fill and unknown runtimes when the runtime
+	// default exceeds (or may exceed) the maximum.
+	filled := false
 	for _, rr := range resolved {
 		r := rr.rule
 		if fillMissingLimitRuntimes[runtimeName] {
 			if *r.limit == "" && (!rr.hasK8sLimit || rr.k8sLimit == "") {
 				*r.limit = r.max
+				filled = true
 				if runtimeName == "kubernetes" && *r.request == "" && (!rr.hasK8sRequest || rr.k8sRequest == "") {
 					req := k8sDefaultRequestFor[r.name]
 					if v, err := r.valueOf(req); err != nil || v > rr.maxVal {
@@ -366,18 +371,20 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 			}
 		} else if *r.limit == "" && *r.request == "" {
 			if defs, ok := runtimeUnsetDefaults[runtimeName]; ok {
-				if def, tracked := defs[r.name]; tracked {
-					if def == "" {
-						return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
-							"is unset and this runtime's default may exceed the maximum %s; set it explicitly", r.max))
-					}
+				if def, tracked := defs[r.name]; tracked && def != "" {
 					if defVal, err := r.valueOf(def); err != nil || defVal > rr.maxVal {
 						return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
 							"is unset and this runtime's default (%s) exceeds the maximum %s; set it explicitly", def, r.max))
 					}
+					continue
 				}
 			}
+			return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
+				"is unset and this runtime's default may exceed the maximum %s; set it explicitly", r.max))
 		}
+	}
+	if spec == nil && !filled {
+		return nil, nil
 	}
 	return out, nil
 }
