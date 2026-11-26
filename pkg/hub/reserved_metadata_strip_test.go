@@ -41,6 +41,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"messagebroker.go", "publishDeliveryDeferred"}:                   "hub-built delivery-deferred notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryUnconfirmed"}:                "hub-built delivery-unconfirmed notice to the original sender; no client metadata",
 	{"artifacts_review.go", "deliverArtifactReview"}:                  "hub-built review notice to the artifact's owner; messages.NewSystemMessage carries no client metadata",
+	{"artifacts_transfer.go", "dispatchTransferNotice"}:               "hub-built ownership transfer notice to new/former owner; messages.NewSystemMessage carries no client metadata",
 	{"notifications.go", "dispatchToAgent"}:                           "hub-built notification fan-out; no client metadata",
 	{"action_message.go", "deliverMessageAction"}:                     "deferred message action; messages.NewSystemMessage carries no client metadata",
 	{"message_hold_redrive.go", "dispatchClaimedHeldMessage"}:         "re-drives stored row via storedMessageDispatch, which rebuilds StructuredMessage from store.Message columns only and carries no client metadata",
