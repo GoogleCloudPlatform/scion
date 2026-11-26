@@ -317,6 +317,9 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 				if cur, gerr := s.store.GetAgent(ctx, agent.ID); errors.Is(gerr, store.ErrNotFound) || (gerr == nil && (cur == nil || !cur.DeletedAt.IsZero())) {
 					finishBeforeDispatch("container_changed")
 					return
+				} else if gerr == nil && mapExecContainerState(cur) == ExecContainerStateStopped {
+					finishBeforeDispatch("container_stopped")
+					return
 				}
 				slog.Warn("Command run: wake resume failed",
 					"run_id", run.ID, "exec_agent_id", run.ExecAgentID, "error", startErr)
@@ -510,13 +513,15 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 		}
 		if res.State == agentcontrol.ExecStateRunning {
 			tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-			if wonRun, terr := s.store.TransitionCommandRunToRunning(tctx, run.ID); terr == nil && wonRun {
-				run.Status = store.CommandRunStatusRunning
-				if req != nil {
-					s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
-				}
-			}
+			wonRun, terr := s.store.TransitionCommandRunToRunning(tctx, run.ID)
 			cancel()
+			// Monotonic transition: sciontool confirmed the run is running, so
+			// advance the local snapshot even if another replica's sweeper won
+			// the DB CAS first (R1).
+			run.Status = store.CommandRunStatusRunning
+			if terr == nil && wonRun && req != nil {
+				s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
+			}
 		}
 		// Track via exec-status (even on a 200 finished replay, because
 		// exec-start never includes captured output).
@@ -723,24 +728,56 @@ func (s *Server) pollCommandRunOnce(ctx context.Context, req *store.CommandReque
 	case agentcontrol.ExecStateRunning:
 		if run.Status == store.CommandRunStatusDispatching {
 			tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-			if won, terr := s.store.TransitionCommandRunToRunning(tctx, run.ID); terr == nil && won {
-				run.Status = store.CommandRunStatusRunning
-			}
+			_, _ = s.store.TransitionCommandRunToRunning(tctx, run.ID)
 			cancel()
+			run.Status = store.CommandRunStatusRunning
 		}
 		if pollPastLease {
 			return record(store.CommandRunStatusUnknown, "lease_expired", nil, agentcontrol.ExecOutputLost)
 		}
 		return false
 	default: // ExecStateUnknown (404)
+		// Re-read authoritative DB status before choosing between unknown and
+		// not_started: another replica's sweeper may have moved the row to
+		// running while our in-memory snapshot still reads dispatching (R1).
+		if fresh, gerr := s.store.GetCommandRun(ctx, run.ID); gerr == nil && fresh != nil {
+			if fresh.FinishedAt != nil {
+				return true
+			}
+			run.Status = fresh.Status
+		}
 		if run.Status == store.CommandRunStatusRunning {
 			// sciontool knew the run and has forgotten it: container restarted.
 			return record(store.CommandRunStatusUnknown, "agent_restarted", nil, agentcontrol.ExecOutputLost)
 		}
 		if run.NotAfter != nil && time.Now().After(run.NotAfter.Add(execSeamDuration(&scheduledExecStartAbsentGrace))) {
 			// Frozen start deadline + clock tolerance + grace has passed while
-			// still dispatching: sciontool can never admit the start.
-			return record(store.CommandRunStatusNotStarted, "dispatch_failed", nil, "")
+			// still dispatching: sciontool can never admit the start. Guard the
+			// not_started finish to ExpectedStatuses={dispatching} only so a
+			// concurrent dispatching->running transition can never be recorded
+			// as not_started (R1).
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+			won, ferr := s.finishCommandRun(recordCtx, req, run, []string{store.CommandRunStatusDispatching}, store.CommandRunStatusNotStarted, "dispatch_failed", nil, "")
+			cancel()
+			if ferr != nil {
+				return false
+			}
+			if won {
+				return true
+			}
+			if fresh, gerr := s.store.GetCommandRun(ctx, run.ID); gerr == nil && fresh != nil {
+				if fresh.FinishedAt != nil {
+					return true
+				}
+				if fresh.Status == store.CommandRunStatusRunning {
+					run.Status = store.CommandRunStatusRunning
+					recordCtx2, cancel2 := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+					_, ferr2 := s.finishCommandRun(recordCtx2, req, run, []string{store.CommandRunStatusRunning}, store.CommandRunStatusUnknown, "agent_restarted", nil, agentcontrol.ExecOutputLost)
+					cancel2()
+					return ferr2 == nil
+				}
+			}
+			return false
 		}
 		if pollPastLease {
 			return record(store.CommandRunStatusUnknown, "lease_expired", nil, agentcontrol.ExecOutputLost)

@@ -228,15 +228,6 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 			Detail:        "terminal attached",
 		}
 	}
-	// Active or uncollected Conduit exec runs guard auto-suspend across all
-	// exec-enabled agents (ptone/scion#9282 §4.10). Consulted before tiers
-	// 1 and 2, with SuppressStall=false so stall marking is unaffected.
-	if s.checkExec != nil {
-		if work := s.checkExec(); work != nil {
-			s.recordCPU(procs)
-			return work
-		}
-	}
 	excluded, harness := s.baseline(procs)
 	tool := s.toolCall(procs, excluded, harness, now, act, actSince)
 	if tool != nil && tool.SuppressStall {
@@ -245,6 +236,14 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 	}
 	if work := s.cpuWork(procs, excluded); work != nil {
 		return work
+	}
+	// Active or uncollected Conduit exec runs guard auto-suspend across all
+	// exec-enabled agents without masking Tier 1/2 stall suppression
+	// (ptone/scion#9282 §4.10).
+	if s.checkExec != nil {
+		if work := s.checkExec(); work != nil {
+			return work
+		}
 	}
 	return tool
 }

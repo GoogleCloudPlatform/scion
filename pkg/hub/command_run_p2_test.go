@@ -520,6 +520,10 @@ func TestCommandRunP2_AC_F4_WakeFailed_WakeTimeout_ExecUnsupported_MarkerFile(t 
 		fin := fx.waitRunFinished(t, run.ID)
 		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
 		assert.Equal(t, "exec_unsupported", fin.Reason)
+		assert.Nil(t, fin.DispatchedAt, "readiness check must refuse before dispatching is committed")
+		for _, ev := range fx.audit.snapshot() {
+			assert.NotEqual(t, msgaction.EventCmdRunDispatched, ev.EventType, "must not emit run_dispatched when readiness refuses")
+		}
 		assert.Zero(t, fx.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
 		_, statErr := os.Stat(marker)
 		assert.True(t, os.IsNotExist(statErr), "marker file must not exist after exec_unsupported")
@@ -838,4 +842,174 @@ func TestCommandRunP2_Q2_ResumeDispatchesCurrentExperiments(t *testing.T) {
 	assert.True(t, capturedResume, "resume flag must be sent to broker")
 	assert.Contains(t, capturedEnv[envHubExperiments], experiments.CommandRequests,
 		"Q2: resuming a suspended container must dispatch current SCION_HUB_EXPERIMENTS including hub.command_requests")
+}
+
+// TestCommandRunP2_R1_MultiReplicaRunningNeverRecordedNotStarted is the
+// regression test for Review 1 R1: when another replica's sweeper (c) wins the
+// dispatching->running transition in the DB and a 404 later arrives from
+// exec-status after not_after + grace, the owner must record
+// unknown/agent_restarted (output_status=lost), never not_started/dispatch_failed.
+func TestCommandRunP2_R1_MultiReplicaRunningNeverRecordedNotStarted(t *testing.T) {
+	t.Run("poll_stale_dispatching_snapshot_after_peer_moved_to_running", func(t *testing.T) {
+		cap := &execCapture{
+			answer: func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				if req.GetPath() == execRoutePath(agentcontrol.RouteExecStatus) {
+					return &conduitv1.RpcResponse{Status: http.StatusNotFound, Body: []byte(`{"state":"unknown"}`)}
+				}
+				return nil
+			},
+		}
+		fx := newCmdRunExecFixture(t, cap)
+		ctx := context.Background()
+		req, run := fx.createApprovedRun(t, "r1-poll-stale", "echo ran", "", 60)
+
+		pastNotAfter := time.Now().UTC().Add(-5 * time.Minute)
+		won, err := fx.store.TransitionCommandRunToDispatching(ctx, &store.CommandRunDispatchInput{
+			RunID:        run.ID,
+			LaunchID:     fx.launched.RunID,
+			NotAfter:     pastNotAfter,
+			LeaseUntil:   time.Now().UTC().Add(5 * time.Minute),
+			DispatchedAt: pastNotAfter.Add(-time.Minute),
+		})
+		require.NoError(t, err)
+		require.True(t, won)
+
+		// Snapshot the owner's stale in-memory copy while still dispatching.
+		staleOwnerCopy, err := fx.store.GetCommandRun(ctx, run.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.CommandRunStatusDispatching, staleOwnerCopy.Status)
+
+		// Peer replica's sweeper (c) moves the DB row to running.
+		wonRun, err := fx.store.TransitionCommandRunToRunning(ctx, run.ID)
+		require.NoError(t, err)
+		require.True(t, wonRun)
+
+		// Owner polls with stale dispatching copy and receives 404 after not_after+grace.
+		done := fx.srv.pollCommandRunOnce(ctx, req, staleOwnerCopy, false)
+		require.True(t, done)
+
+		fin, err := fx.store.GetCommandRun(ctx, run.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.CommandRunStatusUnknown, fin.Status, "run that ran must never be recorded not_started")
+		assert.Equal(t, "agent_restarted", fin.Reason)
+		assert.Equal(t, agentcontrol.ExecOutputLost, fin.OutputStatus)
+	})
+
+	t.Run("executor_202_loses_running_cas_then_404_after_grace", func(t *testing.T) {
+		scheduledExecSeamMu.Lock()
+		origNotAfter, origGrace := commandRunNotAfter, scheduledExecStartAbsentGrace
+		commandRunNotAfter = 1 * time.Millisecond
+		scheduledExecStartAbsentGrace = 1 * time.Millisecond
+		scheduledExecSeamMu.Unlock()
+		t.Cleanup(func() {
+			scheduledExecSeamMu.Lock()
+			commandRunNotAfter, scheduledExecStartAbsentGrace = origNotAfter, origGrace
+			scheduledExecSeamMu.Unlock()
+		})
+
+		var fx *cmdRunExecFixture
+		var runID string
+		cap := &execCapture{
+			answer: func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+				switch req.GetPath() {
+				case execRoutePath(agentcontrol.RouteExecStart):
+					// Peer replica's sweeper wins dispatching->running before owner processes 202.
+					_, _ = fx.store.TransitionCommandRunToRunning(context.Background(), runID)
+					return &conduitv1.RpcResponse{Status: http.StatusAccepted, Body: []byte(`{"state":"running"}`)}
+				case execRoutePath(agentcontrol.RouteExecStatus):
+					time.Sleep(15 * time.Millisecond)
+					return &conduitv1.RpcResponse{Status: http.StatusNotFound, Body: []byte(`{"state":"unknown"}`)}
+				}
+				return nil
+			},
+		}
+		fx = newCmdRunExecFixture(t, cap)
+		req, run := fx.createApprovedRun(t, "r1-exec-202", "echo ran", "", 60)
+		runID = run.ID
+
+		fx.srv.EnqueueCommandRun(req, run)
+		fin := fx.waitRunFinished(t, run.ID)
+		assert.Equal(t, store.CommandRunStatusUnknown, fin.Status, "executor 202 path losing running CAS must still record unknown on 404")
+		assert.Equal(t, "agent_restarted", fin.Reason)
+		assert.Equal(t, agentcontrol.ExecOutputLost, fin.OutputStatus)
+	})
+}
+
+// TestCommandRunP2_OptionalGuards pins the defence-in-depth guards raised in
+// Review 1: session-incarnation pin between step 3 and step 4, D5
+// suspended-snapshot vs stopped-row race before startAgentCore, and
+// canWake=false for managed runtimes.
+func TestCommandRunP2_OptionalGuards(t *testing.T) {
+	t.Run("incarnation_rotated_between_readiness_and_reresolve", func(t *testing.T) {
+		fx := newCmdRunExecFixture(t, nil)
+		ctx := context.Background()
+
+		origHook := commandRunExecHook
+		t.Cleanup(func() { commandRunExecHook = origHook })
+		commandRunExecHook = func(stage, _ string) {
+			if stage == commandRunStageReady {
+				_, _ = fx.store.SetAgentRunID(ctx, fx.launched.ID, api.NewUUID(), nil)
+			}
+		}
+
+		req, run := fx.createApprovedRun(t, "opt-incarnation-pin", "echo nope", "", 30)
+		fx.srv.EnqueueCommandRun(req, run)
+		fin := fx.waitRunFinished(t, run.ID)
+
+		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
+		assert.Equal(t, "container_changed", fin.Reason)
+		assert.Nil(t, fin.DispatchedAt, "must refuse in step 4 before dispatching commits")
+		assert.Zero(t, fx.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+	})
+
+	t.Run("suspended_snapshot_stopped_before_startAgentCore_d5", func(t *testing.T) {
+		disp := &cmdRunP2Dispatcher{}
+		fx := newCmdRunP2Fixture(t, disp, nil)
+		ctx := context.Background()
+
+		origHook := commandRunExecHook
+		t.Cleanup(func() { commandRunExecHook = origHook })
+		commandRunExecHook = func(stage, _ string) {
+			if stage == commandRunStageWaking {
+				ag, err := fx.store.GetAgent(ctx, fx.launched.ID)
+				if err == nil && ag != nil {
+					ag.Phase = string(state.PhaseStopped)
+					_ = fx.store.UpdateAgent(ctx, ag)
+				}
+			}
+		}
+
+		req, run := fx.createApprovedRun(t, "opt-d5-stopped-race", "echo nope", "", 30)
+		fx.srv.EnqueueCommandRun(req, run)
+		fin := fx.waitRunFinished(t, run.ID)
+
+		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
+		assert.Equal(t, "container_stopped", fin.Reason)
+		assert.Zero(t, disp.startCount(), "D5: stopped container must never be started")
+		assert.Zero(t, fx.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+	})
+
+	t.Run("canWake_false_for_managed_runtime", func(t *testing.T) {
+		disp := &cmdRunP2Dispatcher{}
+		fx := newCmdRunP2Fixture(t, disp, nil)
+		ctx := context.Background()
+
+		ag, err := fx.store.GetAgent(ctx, fx.launched.ID)
+		require.NoError(t, err)
+		ag.Runtime = ManagedRuntimePrefix + "test"
+		require.NoError(t, fx.store.UpdateAgent(ctx, ag))
+
+		reqRow := fx.createPendingRequest(t, "opt-managed-canwake", "echo nope")
+		getReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+reqRow.ID, nil)
+		getReq = getReq.WithContext(contextWithIdentity(getReq.Context(), fx.owner))
+		getRec := httptest.NewRecorder()
+		fx.srv.handleCommandRequestRoutes(getRec, getReq)
+		require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())
+
+		var detailResp messages.CommandRequestDetailResponse
+		require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &detailResp))
+		require.NotNil(t, detailResp.ExecContainer)
+		assert.Equal(t, string(ExecContainerStateSuspended), detailResp.ExecContainer.State)
+		assert.False(t, detailResp.ExecContainer.CanWake, "canWake must be false for managed runtimes")
+	})
 }

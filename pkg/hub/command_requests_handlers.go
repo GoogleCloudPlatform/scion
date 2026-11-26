@@ -318,7 +318,7 @@ func (s *Server) buildExecContainerView(ctx context.Context, actor UserIdentity,
 		// Wake-on-approve lands in P2; false until then (R2).
 		CanWake: false,
 	}
-	if res.State == ExecContainerStateSuspended && res.Agent != nil && actor != nil {
+	if res.State == ExecContainerStateSuspended && res.Agent != nil && actor != nil && !isManagedAgentRuntime(res.Agent.Runtime) {
 		v.CanWake = s.agentLifecycleAllowed(ctx, actor, res.Agent)
 	}
 	if res.Agent != nil {

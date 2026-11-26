@@ -21,7 +21,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
-func TestSampler_ExecLiveWorkBeforeTiers(t *testing.T) {
+// TestSampler_ExecLiveWorkPreservesStallSuppression verifies R2 / §4.10:
+// active or uncollected Conduit exec work guards auto-suspend (KindExec,
+// SuppressStall=false) when the agent is otherwise idle, without masking
+// Tier 1 (tool call) or Tier 2 (CPU process) stall suppression.
+func TestSampler_ExecLiveWorkPreservesStallSuppression(t *testing.T) {
 	var execWork *LiveWork
 	s := NewSampler(Config{
 		AgentUID:     agentUID,
@@ -43,25 +47,39 @@ func TestSampler_ExecLiveWorkBeforeTiers(t *testing.T) {
 		t.Fatalf("expected nil with no exec work, got %+v", got)
 	}
 
-	// Active exec work takes precedence over Tier 2 busy CPU process, with
-	// SuppressStall=false so stall marking is unaffected.
+	// Exec work active while otherwise idle -> KindExec with SuppressStall=false.
 	execWork = &LiveWork{Kind: KindExec, SuppressStall: false, Detail: "1 active exec run"}
-	tree[4].ticks += 500
 	got := f.sample(tree...)
 	if got == nil || got.Kind != KindExec {
-		t.Fatalf("expected KindExec, got %+v", got)
+		t.Fatalf("idle with exec work = %+v, want KindExec", got)
 	}
 	if got.SuppressStall {
-		t.Error("SuppressStall = true, want false")
+		t.Error("KindExec SuppressStall = true, want false")
 	}
 
-	// Once exec work clears, the CPU baseline recorded during the exec sample
-	// allows Tier 2 to detect the still-busy process on the next sample.
-	execWork = nil
+	// Exec work active + Tier 2 busy CPU process -> Tier 2 wins so stall
+	// suppression is preserved (SuppressStall=true).
 	tree[4].ticks += 500
 	got = f.sample(tree...)
-	if got == nil || got.Kind != KindProcess {
-		t.Fatalf("expected KindProcess after exec clears, got %+v", got)
+	if got == nil || got.Kind != KindProcess || !got.SuppressStall {
+		t.Fatalf("busy CPU + exec work = %+v, want KindProcess with SuppressStall=true", got)
+	}
+
+	// Exec work active + Tier 1 live tool call -> Tier 1 wins so stall
+	// suppression is preserved (SuppressStall=true).
+	boot := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	s.boot = boot
+	actSince := boot.Add(150 * time.Millisecond) // tool pid 50 started at tick 20 (200ms after boot)
+	got = s.sample(boot.Add(5*time.Second), state.ActivityExecuting, actSince)
+	if got == nil || got.Kind != KindToolCall || !got.SuppressStall {
+		t.Fatalf("live tool call + exec work = %+v, want KindToolCall with SuppressStall=true", got)
+	}
+
+	// Once exec work clears and no Tier 1/2 work is present -> nil.
+	execWork = nil
+	got = f.sample(tree...)
+	if got != nil {
+		t.Fatalf("idle after exec clears = %+v, want nil", got)
 	}
 }
 
