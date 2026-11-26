@@ -64,8 +64,19 @@ vi.mock('../../../client/main.js', async () => ({
   },
 }));
 
+// Starred messages are always on; answer star routes outside the shared
+// apiFetch mock so the debounced /api/v1/chat/stars/state fetch never
+// consumes a mockResolvedValueOnce queued for another call. Starred-message
+// behavior is covered by chat-thread-stars.test.ts and its siblings.
 vi.mock('../../../client/api.js', () => ({
-  apiFetch: (...args: unknown[]) => apiFetch(...args) as unknown,
+  apiFetch: (...args: unknown[]) =>
+    String(args[0]).startsWith('/api/v1/chat/stars')
+      ? Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ starredMessageIds: [] }),
+        })
+      : (apiFetch(...args) as unknown),
   extractApiError: (res: unknown, fallback: string) => extractApiErrorMock(res, fallback),
 }));
 
