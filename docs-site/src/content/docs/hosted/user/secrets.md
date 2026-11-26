@@ -14,7 +14,7 @@ Scion distinguishes between regular environment variables and secure secrets:
 | **Visibility** | Read/Write (via API and CLI) | Write-only (cannot be read back) |
 | **Storage** | Plaintext in database | Encrypted at rest / Externally stored |
 | **Use Case** | API URLs, log levels, feature flags | API keys, passwords, private keys |
-| **Injection** | Environment variables only | Environment, files, or JSON variables |
+| **Injection** | Environment variables only | Environment, files, or on-demand (fetched by CLI) |
 
 ---
 
@@ -49,7 +49,7 @@ A scope decides which agents receive a variable or secret, not which people can 
 
 Hub, Broker and Project scopes apply to child agents in the same way as to the agents users start directly.
 
-The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. Template choice is up to the user starting the agent, so any user who can start an agent in the scope can request the key. `file` and `variable` secrets are placed in every agent in their scope, whatever their injection mode. Hub scope is different for secrets: only `environment` secrets reach agents (`always` at start and restart, `as_needed` only through the harness credential pass; see [Hub-Scoped Secrets](#hub-scoped-secrets)).
+The [injection mode](#injection-modes) does not change who can receive a value. An `always` value is injected into every agent in its scope. An `as_needed` environment value is injected into any agent in its scope whose template or harness configuration requests that key. `file` secrets are placed in every agent in their scope, whatever their injection mode. `on_demand` secrets are never placed in the container at start or restart and are fetched explicitly by the agent with `scion secret get --value KEY`. Hub scope is different for secrets: only `environment` secrets reach agents (`always` at start and restart, `as_needed` only through the harness credential pass; see [Hub-Scoped Secrets](#hub-scoped-secrets)).
 
 :::caution[Hub and Broker scopes are shared]
 Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every user who can start an agent on the Hub, or on that Runtime Broker, receives them in their agents. These scopes do not keep a value private to one user. Put only values there that every such user may hold.
@@ -87,7 +87,7 @@ Each withheld row is counted as `scion.hub.user_material.owner_chain` with `outc
 
 ### Reserved Names
 
-Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.
+Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `on_demand` secrets are not affected.
 
 Values stored under a reserved name before this check existed are not deleted, but they are never used: the Hub drops them at dispatch and the Runtime Broker drops them again before injection. If a variable or secret collides with a value the runtime sets itself, the runtime's value wins.
 
@@ -95,11 +95,11 @@ Values stored under a reserved name before this check existed are not deleted, b
 
 ### Hub-Scoped Secrets
 
-Hub-scoped secrets reach agents only when their type is `environment`, apart from the telemetry credential file (below). Start and restart deliver a Hub-scoped `environment` secret directly only when its mode is `always`. A Hub-scoped `environment` secret with the `as_needed` mode is not delivered in the agent environment at start or restart; it is filled only by the harness credential pass for a key the harness asks for. Hub-scoped secrets of type `file` or `variable` are not delivered to any agent at create, start, restart or during credential gathering. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
+Hub-scoped secrets reach agents only when their type is `environment`, apart from the telemetry credential file (below). Start and restart deliver a Hub-scoped `environment` secret directly only when its mode is `always`. A Hub-scoped `environment` secret with the `as_needed` mode is not delivered in the agent environment at start or restart; it is filled only by the harness credential pass for a key the harness asks for. Hub-scoped secrets of type `file` (other than the telemetry credential file below) are not delivered to any agent at create, start, restart or during credential gathering. They are left out before scope precedence, so a Runtime Broker-scoped secret with the same name applies instead.
 
 One Hub-scoped `file` secret is delivered: the telemetry credential file, when its name is `scion-telemetry-gcp-credentials` and its target is a path whose last two parts are `.scion/telemetry-gcp-credentials.json`, such as `~/.scion/telemetry-gcp-credentials.json` (see [Well-Known Secrets](#well-known-secrets)). A Hub-scoped file secret with any other name or target is not delivered.
 
-This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file or a variable, store it at Project or User scope.
+This applies to Hub-scoped secrets only. Hub-scoped environment variables (`scion hub env set`), and secrets at User, Project and Runtime Broker scope, are not affected. To deliver a credential that has to be a file, store it at Project or User scope; for a secret that agents fetch explicitly by CLI, store an `on_demand` secret at Project or Agent scope. Hub-owned integration secrets (chat integrations, GitHub App credentials, and message broker plugins) are stored as `internal` secrets: they are hidden from the Hub secrets page and generic secret CRUD and are managed in their dedicated integration screens (where they can be rotated, not deleted).
 
 An agent reading Hub-scoped secrets (`GET /api/v1/secrets?scope=hub`, `GET /api/v1/env?scope=hub` and their single-key routes) sees only the `environment` secrets with the `always` mode. Every other Hub-scoped secret, including the telemetry credential file, is left out of those lists, and a request for it by name answers as for a key that does not exist. Hub administrators see every Hub-scoped secret.
 
@@ -212,15 +212,34 @@ To prevent accidental base64-decoding when setting plaintext secrets that happen
 If a template requires specific secrets or environment variables (defined in `scion-agent.yaml`), Scion utilizes an interactive gather pipeline during agent start and resume. For secrets, it prompts you for missing values and sends them for this agent only; they are not stored (store a secret on the Hub with `scion hub secret set` to reuse it), so sensitive credentials are never written to plain text configuration files. For environment variables found in your local environment, interactive `scion start` and `scion resume` prompt before sending them (confirmed automatically by `--yes`), while non-interactive `scion start` and `scion resume` send local environment values only when `--send-env` is passed and fail without it, naming the missing keys and the `--send-env` flag. When the CLI sends gathered environment values without showing the confirmation prompt (with `--yes`, with `--send-env` in a non-interactive run, or with `--format json`), it prints one line to `stderr` naming the keys, sorted (`Sending N environment value(s) to the Hub: KEY_A, KEY_B`), never the values.
 
 ### Secret Types
-Secrets can be projected into the agent container in three ways:
 
-1.  **Environment** (Default): Injected as a standard environment variable.
-2.  **File**: Written to a specific path on the agent's filesystem.
-3.  **Variable**: Added to a JSON file at `~/.scion/secrets.json` for programmatic access by the harness.
+Secrets have three user-facing types that control how (or whether) they reach the agent container:
+
+| Type | Allowed Scopes | Delivered at Start / Restart | Target / Injection Mode | When to Use |
+| :--- | :--- | :--- | :--- | :--- |
+| **`environment`** *(default)* | `runtime_broker`, `hub`, `project`, `user`, `agent` | `always`: yes; `as_needed`: only when requested by the template or harness | Optional target env var name (defaults to key); `as_needed` (default) or `always` | Credentials or tokens that a harness or tool expects in its process environment at startup (e.g. LLM API keys, `GITHUB_TOKEN`). |
+| **`file`** | `runtime_broker`, `hub` *(telemetry file only delivered)*, `project`, `user`, `agent` | Yes (regardless of injection mode) | Required target filesystem path (max 64 KiB) | Structured or binary credentials that a tool reads from disk (e.g. SSH keys, TLS certificates, GCP service account JSONs). |
+| **`on_demand`** | `project`, `agent` only | **Never** (and never part of harness credential gathering) | No target and no `always` injection mode (`--target` and `--injection-mode` are rejected) | Credentials an agent fetches explicitly at runtime via CLI without exposing them in the container's environment or filesystem at startup. |
+
+#### On-Demand Secrets (`on_demand`)
+
+An **`on_demand`** secret is stored in the configured secret backend and is **never** delivered to the agent container at start, restart, or during harness credential gathering. Agents discover available keys with `scion secret list` (which shows `TYPE` as `on_demand` with an empty `TARGET`) and fetch the value explicitly each time they need it:
+
+```bash
+# List available secrets (metadata only)
+scion secret list
+
+# Fetch an on-demand secret value inline inside an agent container
+curl -H "Authorization: Bearer $(scion secret get --value API_TOKEN)" https://api.example.com
+```
+
+- **Allowed scopes:** `project` and `agent` only (`hub`, `user`, and `runtime_broker` are rejected with `400`).
+- **Container exclusion vs. Hub/Runtime Broker consumers:** "Never delivered at start" means never delivered into the agent container. Hub- and Runtime Broker-side consumers are exempt: **System One** can reference a project `on_demand` secret, the Hub's own project clone token path can use one, and `gh://` skill provisioning can use an `on_demand` token named by `?token=SECRET_NAME` or the `GH_{OWNER}` / `GH_{OWNER}__{REPO}` convention (on hosted deployments with remote Runtime Brokers, that token crosses the Hub→Runtime Broker channel for provisioning and is never forwarded into the container).
+- **Shadowing:** An `on_demand` secret at a higher-precedence scope shadows lower-scope secrets with the same name **or** whose effective environment target equals its key, preventing a lower-scope `environment` secret from being injected in its place during start delivery or harness gathering. Plain environment variables (`env_vars`) are not shadowed; a same-scope secret with a different name but the same target is still delivered; and shadowing by agent-scope rows lapses when `hub.agent_secrets` is off.
 
 On the Cloud Run runtimes, secrets are delivered to the agent container as environment values, with these limits:
 
-- **File and variable secrets** are sent together in one environment value, capped at 32 KiB on Cloud Run Instances and at a 128 KiB entry on `cloudrun-sandbox`. File secrets are base64-encoded inside that base64 value and variable secrets are not, so the total room for them is about 18-24 KiB on Cloud Run Instances and about 72-96 KiB on `cloudrun-sandbox`, depending on the mix. On Cloud Run Instances the same value also carries the agent's Hub credential, which takes about 1-2 KiB of that room, and the harness credentials of the agent's harness configuration. A larger set fails agent start. On `cloudrun-sandbox` the error names the largest secret; on Cloud Run Instances it names only the largest part (the Hub credential, the file and variable secrets, or the harness secrets), and the Runtime Broker logs the size of the value and of each part at every start. To fix it, make the largest part smaller, for example by moving a large value to an environment secret, which has its own limit.
+- **File secrets** are sent together in one environment value, capped at 32 KiB on Cloud Run Instances and at a 128 KiB entry on `cloudrun-sandbox`. File secrets are base64-encoded inside that base64 value, so the total room for them is about 18-24 KiB on Cloud Run Instances and about 72-96 KiB on `cloudrun-sandbox`. On Cloud Run Instances the same value also carries the agent's Hub credential, which takes about 1-2 KiB of that room, and the harness credentials of the agent's harness configuration. A larger set fails agent start. On `cloudrun-sandbox` the error names the largest secret; on Cloud Run Instances it names only the largest part (the Hub credential, the file secrets, or the harness secrets), and the Runtime Broker logs the size of the value and of each part at every start. To fix it, make the largest part smaller, for example by moving a large value to an environment secret, which has its own limit, or to an `on_demand` secret (which is never staged into the container).
 - **Environment secrets** are limited to a 32 KiB value each on Cloud Run Instances and a 128 KiB `KEY=VALUE` entry each on `cloudrun-sandbox`. A larger one fails agent start with an error naming it.
 - **Reserved keys:** environment secrets cannot set `SCION_STAGED_SECRETS` or `SCION_OTEL_GCP_CREDENTIALS` on either runtime, and `SCION_HUB_TOKEN_STAGED` is dropped from the container environment from any source (secret or environment variable) on every runtime so only `sciontool init` sets it during its staging pass. On Cloud Run Instances environment secrets also cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_HARNESS_SECRETS_DIR` or `SCION_HARNESS_OUTPUTS_DIR`; on `cloudrun-sandbox` they also cannot override `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_WORKSPACE_PATH`, `HOME`, `USER` or `LOGNAME`. The runtime sets these itself.
 - **Existing keys:** a key that is already in the agent environment takes precedence over an environment secret with the same name, and the secret is not applied.
@@ -484,7 +503,7 @@ When `hub.agent_secrets` is enabled, Scion supports **agent-scoped secrets** (`s
 - **Descriptions are metadata:** Secret descriptions (including those supplied on secret requests) are visible to anyone holding `agent.read` on the agent. Never put secret values in a description.
 - **Secrets only:** Agent scope applies to secrets only, not plain environment variables.
 - **Precedence:** Agent scope sits at the top of the secret precedence ladder (`runtime_broker < hub < project < user < agent`). Non-empty environment values in the agent-create request still outrank every scope, and plain variables from any scope still beat environment-type secrets.
-- **Types, targets, and injection modes:** Supports `environment` (default), `file`, and `variable` types, custom targets, and `as_needed` (default) or `always` injection modes. `file` and `variable` secrets are placed regardless of injection mode.
+- **Types, targets, and injection modes:** Supports `environment` (default), `file`, and `on_demand` types. `file` secrets require a target path and are placed regardless of injection mode; `on_demand` secrets have no target or `always` injection mode and are never injected at start (read explicitly via `scion secret get --value KEY`).
 - **No progeny propagation:** Agent-scoped secrets never propagate to child agents; setting `allowProgeny` at agent scope is rejected with `400`.
 - **Reserved names:** `SCION_*` and `GCE_METADATA_*` are rejected for `environment`-type secrets, as at every other scope.
 - **Persistence and deletion:** Because agent-scoped secrets are keyed by the agent's stable UUID, they persist across stop, suspend, restart, reincarnation (including `--broker` moves), and soft delete. When the agent is **hard-deleted** or purged by retention, its local-backend secret rows are deleted in the hard-delete transaction and any GCP Secret Manager entries are deleted best-effort post-commit.
@@ -508,7 +527,7 @@ Listing or reading metadata for an agent's secrets requires `agent.read` on the 
   scion hub secret update --agent my-agent GITHUB_TOKEN --injection-mode always
   scion hub secret delete --agent my-agent GITHUB_TOKEN   # alias for clear
   ```
-  When passing `-` to `scion hub secret set`, stdin is read up to 64 KiB; trailing CR/LF characters are trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim.
+  When passing `-` to `scion hub secret set`, stdin is read up to 64 KiB; trailing CR/LF characters are trimmed for `environment` and `on_demand` types, while `file` secrets preserve stdin bytes verbatim.
 - **Web UI:** The agent detail and edit pages include a **Secrets** tab for adding, editing metadata, and deleting agent-scoped secrets (no reveal).
 
 ### Create-Time Secrets
@@ -566,7 +585,7 @@ Inside a running agent container (with `hub.agent_secrets` enabled):
   printf '%s' "$TOKEN" | scion secret set MY_AGENT_TOKEN - --scope agent
   sciontool secret delete MY_AGENT_TOKEN --scope agent
   ```
-  When passing `-` to `scion secret set`, stdin is read up to 64 KiB; a single trailing `\r\n` or `\n` is trimmed for `environment` and `variable` types, while `file` secrets preserve stdin bytes verbatim. Agent-scope writes are stored immediately (no pending approval step, and not blocked by `agent_secrets.user_scope_only`).
+  When passing `-` to `scion secret set`, stdin is read up to 64 KiB; a single trailing `\r\n` or `\n` is trimmed for `environment` and `on_demand` types, while `file` secrets preserve stdin bytes verbatim. Agent-scope writes are stored immediately (no pending approval step, and not blocked by `agent_secrets.user_scope_only`).
 - **File target restriction:** Any `--scope agent` file secret written by an agent (or requested via a file-type secret request) must target a path under the agent home (`~/...`) and must not contain `..`.
 
 ### Secret Requests (Agent Asks, Human Supplies)
@@ -586,7 +605,7 @@ EOF
 scion message @alice@example.com --secret-request-file req.json
 ```
 
-Each entry in `--secret-request-file` (pass `-` for stdin) is a JSON object with `key` (required, `[A-Za-z_][A-Za-z0-9_]{0,127}`), and optional `description` (up to 1,000 characters), `type` (`environment` default, `file`, or `variable`), and `target` (required for `file`, must be under `~/` without `..`).
+Each entry in `--secret-request-file` (pass `-` for stdin) is a JSON object with `key` (required, `[A-Za-z_][A-Za-z0-9_]{0,127}`), and optional `description` (up to 1,000 characters), `type` (`on_demand` default, `environment`, or `file`), and `target` (required for `file`, must be under `~/` without `..`; not supported for `on_demand`). Use `environment` only when a tool must find the value in its environment at the next restart.
 
 - **Destinations:** Users or conversations only (`user:<email>`, `@<email>`, `conv:<id>`, `#<thread>`). Agents, `group[...]`, and broadcasts are refused. Cannot be combined with `--decisions`/`--decisions-file`, `--attach`, `--artifact`, or `--wake`.
 - **Versioning and `--update`:** Keys compare case-insensitively, and an agent can have at most one `pending` version per key. Sending a key that is already `pending` without `--update` is refused with `409 secret_request_key_pending` (listing the version, card message ID, and a hint to pass `--update` or `scion secret request withdraw KEY`). Passing `--update` marks the pending version `replaced` and creates `v(n+1)` (if a fulfill is currently in flight, the send is refused with `409 secret_request_submitting`). Sending a key whose latest version is terminal (`fulfilled`, `withdrawn`, `dismissed`, or `expired`) creates the next version without `--update` — this is the normal way to ask for a secret rotation.
@@ -607,7 +626,7 @@ Withdrawal is all-or-nothing over the named keys' `pending` versions. `--set` al
 | :--- | :--- |
 | `pending` | Waiting for a human responder. |
 | `fulfilling` *(internal)* | Short-lived claim while the Hub writes to the secret backend; API views report `status: "pending"` with `submitting: true`. Stale claims older than **2 minutes** are automatically recovered back to `pending`. |
-| `fulfilled` | Stored at agent scope (`as_needed`); the agent receives a `secret-response` message (with auto-wake) and can read the value immediately with `scion secret get --value KEY`. `file` and `variable` secrets are placed at every later start; an `environment` secret is stored `as_needed`, reaching the environment at start only when the agent's template or harness requests that key, and otherwise is read with `scion secret get --value` (a human can switch it with `scion hub secret update --agent <agent> KEY --injection-mode always`). |
+| `fulfilled` | Stored at agent scope; the agent receives a `secret-response` message (with auto-wake) and can read the value immediately with `scion secret get --value KEY`. `on_demand` secrets (the default) are never placed in the container and are read via `scion secret get --value KEY` each time; `file` secrets are placed at every later start; an `environment` secret is stored `as_needed`, reaching the environment at start only when the agent's template or harness requests that key, and otherwise is read with `scion secret get --value` (a human can switch it with `scion hub secret update --agent <agent> KEY --injection-mode always`). |
 | `replaced` | Superseded by a newer version sent with `--update`; the old card links to the newer version and cannot be submitted (`409 replaced`). |
 | `withdrawn` | Retired by the agent (`withdrawn_by: "agent"`) or by the Hub when the agent is hard-deleted (`withdrawn_by: "hub"`, reason `"agent deleted"`). |
 | `dismissed` | Declined by an eligible responder (whole card or selected keys, optional reason up to 500 characters, no minimum age); the agent receives a `secret-response` message. |
@@ -734,7 +753,7 @@ On a hosted Hub, archive URLs that redirect (for example `github.com/.../archive
 
 Convention-keyed GitHub secrets support the standard injection modes:
 
-- **As Needed** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture. When the Hub dispatches an agent to a Runtime Broker, `provisionCredentials` includes only the `as_needed` environment-type secrets referenced by `?token=SECRET_NAME` on a `gh://` skill URI of the agent or matching a `GH_{OWNER}` / `GH_{OWNER}__{REPO}` convention name for one of the agent's `gh://` skill URIs, plus `GITHUB_TOKEN` (from the resolved environment or an `as_needed` secret) when any `gh://` skill has no explicit or convention token. Unreferenced `as_needed` secrets, `always`-injected secrets (already in the agent environment), and `file` or `variable` secrets are not sent in `provisionCredentials`.
+- **As Needed / On Demand** (recommended): The credential is used at provision time to fetch skills and templates but is **not** exposed inside the agent container. This is the minimum-privilege posture. When the Hub dispatches an agent to a Runtime Broker, `provisionCredentials` includes only the `as_needed` `environment`-type or `on_demand`-type secrets referenced by `?token=SECRET_NAME` on a `gh://` skill URI of the agent or matching a `GH_{OWNER}` / `GH_{OWNER}__{REPO}` convention name for one of the agent's `gh://` skill URIs, plus `GITHUB_TOKEN` (from the resolved environment, an `as_needed` secret, or an `on_demand` secret) when any `gh://` skill has no explicit or convention token. On hosted deployments with remote Runtime Brokers, an `on_demand` token named by a `gh://` skill reference crosses the Hub→Runtime Broker channel for provisioning and is never forwarded into the container. Unreferenced `as_needed` or `on_demand` secrets, `always`-injected secrets (already in the agent environment), and `file` secrets are not sent in `provisionCredentials`.
 
   ```bash
   scion hub secret set --project GH_ACME_CORP__PRIVATE_SKILLS github_pat_...

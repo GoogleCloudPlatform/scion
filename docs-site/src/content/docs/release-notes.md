@@ -14,6 +14,20 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Secret type `variable` removed; `on_demand` secret type added
+
+The `variable` secret type (which previously staged `~/.scion/secrets.json`) has been removed and replaced by **`on_demand`**, a secret type that is never delivered to agent containers at start, restart, or during harness credential gathering and is fetched explicitly by agents with `scion secret get --value KEY` (and listed by `scion secret list`).
+
+- **Allowed scopes and constraints:** `on_demand` is allowed only at **`project`** and **`agent`** scope (`hub`, `user`, and `runtime_broker` are rejected with `400` in both the API and CLI). It has no `target` and no `always` injection mode (`--target` and `--injection-mode` with `--type on_demand` are rejected). Passing `variable` as a secret type now returns an error naming `on_demand`.
+- **Secret requests default to `on_demand`:** `scion message --secret-request` and `--secret-request-file` now default omitted `type` entries to `on_demand`; use `environment` only when a tool must find the value in its environment at the next restart.
+- **Container exclusion, Hub/Runtime Broker exemptions, and shadowing:** Container delivery and harness gathering now use a strict allowlist (`environment` and `file` only) evaluated before backend value fetch. Hub- and Runtime Broker-side consumers are exempt — System One (accepts project `on_demand` secrets), the Hub's own project clone token, and `gh://` skill provision credentials (on hosted deployments with remote Runtime Brokers, an `on_demand` token named by a `gh://` skill reference crosses the Hub→Runtime Broker channel for provisioning and is never forwarded into the container). An `on_demand` secret at a higher-precedence scope shadows lower-scope secrets with the same name or whose effective env target equals its key; plain environment variables (`env_vars`) are not shadowed, a same-scope secret with a different name but the same target is still delivered, and shadowing by agent-scope rows lapses when `hub.agent_secrets` is off.
+- **Scoped `PUT` validation tightened:** Scoped secret `PUT` endpoints now return `400` when `allowProgeny` is set at non-user scopes or when `injectionMode` is invalid.
+- **Automatic upgrade migration:**
+  - Existing `project` and `agent` `variable` rows are rewritten to `on_demand` (and existing `secret_requests` rows of type `variable` become `on_demand`).
+  - Hub integration secrets (chat integrations, GitHub App credentials, and message broker plugins) are rewritten to **`internal`**. They are now hidden from the Hub secrets page and generic secret CRUD, and are managed in their dedicated integration screens (where they can be rotated, not deleted).
+  - Leftover `user`, `runtime_broker`, and non-integration `hub` `variable` rows (plus `pending_secrets` rows of type `variable`) are **deleted** on startup (including deleting their stored value in the secret backend) with one `WARN` log line per deleted row naming the key and scope. Any **System One** configuration that pointed at a deleted Hub-scope `variable` key fails closed until recreated as a project `on_demand` secret or a Hub `environment` secret.
+- **Downgrade floor raised (`nightly-20261126`):** `pkg/version.DowngradeFloor` is raised to `nightly-20261126` because older binaries used a denylist delivery path that would fetch and inject `on_demand` secrets into containers and reject `on_demand` in validators. See [Secret Types](/scion/hosted/user/secrets/#secret-types) and [Security — Secret Types, Delivery Exclusion, and Shadowing](/scion/reference/security/#43-secret-types-delivery-exclusion-and-shadowing).
+
 ## Message modes revised: `owner`, `direct`, and new `tree` mode
 
 Agent message modes now consist of six values: `none`, `owner`, `direct`, `tree`, `project`, and `hub`:
