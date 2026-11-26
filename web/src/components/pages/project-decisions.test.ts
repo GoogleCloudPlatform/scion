@@ -2181,7 +2181,9 @@ describe('<scion-page-project-decisions>', () => {
     expect(madeFocusSpy).toHaveBeenCalled();
 
     // Clear recovers from first-load timeout on Made (and clears stale timeout on inactive Pending tab)
-    madePanelEl!.dispatchEvent(new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true }));
+    madePanelEl!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(madeEl, 25);
     expect(window.location.search).toBe('?tab=made');
     expect(madeRoot.querySelector('[data-search-timeout]')).toBeNull();
