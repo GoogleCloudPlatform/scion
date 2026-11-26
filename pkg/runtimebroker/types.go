@@ -271,10 +271,14 @@ type AgentResponse struct {
 	// addendum v12 section 5): the template content hash, the harness and
 	// the effective model Start resolved, and the broker build. Older
 	// brokers omit them, and the hub then records nothing.
-	TemplateHash string `json:"templateHash,omitempty"`
-	Harness      string `json:"harness,omitempty"`
-	Model        string `json:"model,omitempty"`
-	BrokerBuild  string `json:"brokerBuild,omitempty"`
+	TemplateHash    string   `json:"templateHash,omitempty"`
+	Harness         string   `json:"harness,omitempty"`
+	Model           string   `json:"model,omitempty"`
+	BrokerBuild     string   `json:"brokerBuild,omitempty"`
+	MaxTurns        int      `json:"maxTurns,omitempty"`
+	MaxModelCalls   int      `json:"maxModelCalls,omitempty"`
+	MaxDuration     string   `json:"maxDuration,omitempty"`
+	LimitsClampedBy []string `json:"limitsClampedBy,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -866,6 +870,10 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Harness:               info.Harness,
 		Model:                 info.Model,
 		BrokerBuild:           effectiveBrokerBuild(info),
+		MaxTurns:              info.EffectiveMaxTurns,
+		MaxModelCalls:         info.EffectiveMaxModelCalls,
+		MaxDuration:           info.EffectiveMaxDuration,
+		LimitsClampedBy:       append([]string(nil), info.LimitsClampedBy...),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,
 		Profile:               info.Profile,

@@ -818,6 +818,13 @@ type AgentInfo struct {
 	// metadata mode that is not enforced under the agent's network mode. They
 	// are also included in Warnings.
 	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
+	// Effective run limits resolved by Start for this run (after filling
+	// defaults and clamping to any Hub LimitCeilings). Not persisted to
+	// scion-agent.json.
+	EffectiveMaxTurns      int      `json:"effectiveMaxTurns,omitempty"`
+	EffectiveMaxModelCalls int      `json:"effectiveMaxModelCalls,omitempty"`
+	EffectiveMaxDuration   string   `json:"effectiveMaxDuration,omitempty"`
+	LimitsClampedBy        []string `json:"limitsClampedBy,omitempty"`
 	// StartNotice is a fact about this start for the agent's status
 	// message, for example the repository git config keys left out of the
 	// agent's private copy. The broker reports it with a successful launch.
@@ -1448,6 +1455,10 @@ type HubAgentDefaults struct {
 	// account was minted by the Hub (Managed == true), never for BYO
 	// accounts.
 	CreateKSA bool `json:"createKSA,omitempty"`
+	// LimitCeilings carries the Hub's operational agent_limits ceilings
+	// (ptone/scion#9371). Applied per start on the broker after
+	// FillDefaultLimits and never persisted to scion-agent.json.
+	LimitCeilings *LimitCeilings `json:"limitCeilings,omitempty"`
 }
 
 // ResolvedImageTag returns the hub-resolved image tag, or "" when the hub
@@ -1489,7 +1500,8 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == "" && !d.CreateKSA
+		d.AutoExposePorts == nil && len(d.Experiments) == 0 && d.Telemetry == nil && d.ImageTag == "" &&
+		!d.CreateKSA && d.LimitCeilings.IsEmpty()
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port

@@ -340,6 +340,11 @@ type HTTPAgentDispatcher struct {
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 
+	// agentLimitsProvider returns the hub's active agent_limits ceilings at
+	// dispatch time (empty when the agent_policy.limit_ceilings experiment is
+	// off or no ceilings are configured).
+	agentLimitsProvider func() opsettings.AgentLimitsSettings
+
 	// hubTelemetryProvider returns the hub's settings telemetry config at
 	// dispatch time (see dispatchTelemetry). Nil = no hub telemetry default.
 	hubTelemetryProvider func() *api.TelemetryConfig
@@ -569,6 +574,12 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
+}
+
+// SetAgentLimitsProvider registers the accessor for the hub's active
+// agent_limits ceilings, read on every create, start, and restart dispatch.
+func (d *HTTPAgentDispatcher) SetAgentLimitsProvider(fn func() opsettings.AgentLimitsSettings) {
+	d.agentLimitsProvider = fn
 }
 
 // SetHubTelemetryProvider registers the accessor for the hub's settings
@@ -1109,9 +1120,12 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// or InlineConfig.Env, both of which outrank template and
 		// harness-config env at the broker) and lands at buildAgentEnv's
 		// lowest tier.
-		req.Config.HubAgentDefaults = withDispatchCreateKSA(
-			withDispatchImageTag(remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry()), imageTag),
-			d.shouldCreateKSA(ctx, agent, experiments),
+		req.Config.HubAgentDefaults = withDispatchLimitCeilings(
+			withDispatchCreateKSA(
+				withDispatchImageTag(remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry()), imageTag),
+				d.shouldCreateKSA(ctx, agent, experiments),
+			),
+			d.agentLimitCeilings(),
 		)
 		req.Config.TelemetryPolicy = tel.telemetryPolicy()
 
@@ -1643,6 +1657,12 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 	}
 	if resp.Agent != nil {
 		addDispatchWarnings(ctx, resp.Agent.Warnings...)
+		if len(resp.Agent.LimitsClampedBy) > 0 && !warningsMentionClamped(resp.Agent.Warnings) {
+			eff, _ := brokerEffectiveConfigOf(resp.Agent, agent.RuntimeBrokerID, d.log)
+			if w := limitsClampedWarning(eff.LimitsClampedBy, eff); w != "" {
+				addDispatchWarnings(ctx, w)
+			}
+		}
 		if d.debug {
 			d.log.Debug("applyBrokerResponse: applying broker phase",
 				"agentName", agent.Name,
@@ -1786,12 +1806,33 @@ func brokerEffectiveConfigOf(info *RemoteAgentInfo, brokerID string, log *slog.L
 		{"profile", info.Profile, &eff.Profile},
 		{"runtime", info.Runtime, &eff.Runtime},
 		{"brokerBuild", info.BrokerBuild, &eff.BrokerBuild},
+		{"maxDuration", info.MaxDuration, &eff.MaxDuration},
 	} {
 		if validEchoString(f.src) {
 			*f.dst = f.src
 		} else if log != nil {
 			log.Debug("lifecycle: omitted an invalid broker effective-configuration field",
 				"broker_id", brokerID, "field", f.name, "len", len(f.src))
+		}
+	}
+	if info.MaxTurns > 0 {
+		eff.MaxTurns = info.MaxTurns
+	}
+	if info.MaxModelCalls > 0 {
+		eff.MaxModelCalls = info.MaxModelCalls
+	}
+	if len(info.LimitsClampedBy) > 0 {
+		clamped := make([]string, 0, len(info.LimitsClampedBy))
+		for _, field := range info.LimitsClampedBy {
+			if validLimitClampedName(field) {
+				clamped = append(clamped, field)
+			} else if log != nil {
+				log.Debug("lifecycle: omitted an invalid broker limitsClampedBy entry",
+					"broker_id", brokerID, "field", field)
+			}
+		}
+		if len(clamped) > 0 {
+			eff.LimitsClampedBy = clamped
 		}
 	}
 	return eff, eff.HasEffectiveFields()
@@ -4347,9 +4388,12 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults: withDispatchCreateKSA(
-			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
-			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+		HubAgentDefaults: withDispatchLimitCeilings(
+			withDispatchCreateKSA(
+				withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
+				d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+			),
+			d.agentLimitCeilings(),
 		),
 		TelemetryPolicy:             tel.telemetryPolicy(),
 		Image:                       d.dispatchImageForBroker(agent, imageTag),
@@ -4658,9 +4702,12 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults: withDispatchCreateKSA(
-			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
-			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+		HubAgentDefaults: withDispatchLimitCeilings(
+			withDispatchCreateKSA(
+				withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
+				d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+			),
+			d.agentLimitCeilings(),
 		),
 		TelemetryPolicy:             tel.telemetryPolicy(),
 		Image:                       d.dispatchImageForBroker(agent, imageTag),

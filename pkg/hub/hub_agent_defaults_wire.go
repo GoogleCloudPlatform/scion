@@ -135,6 +135,24 @@ func withDispatchCreateKSA(h *RemoteHubAgentDefaults, createKSA bool) *RemoteHub
 	return h
 }
 
+// withDispatchLimitCeilings returns h with LimitCeilings set when ceilings has
+// at least one configured ceiling (ptone/scion#9371), allocating the wire
+// value when the hub has no other default to send. When ceilings is empty
+// (including when the agent_policy.limit_ceilings experiment is off), it
+// returns h unchanged so the wire payload is byte-identical to pre-change
+// behavior.
+func withDispatchLimitCeilings(h *RemoteHubAgentDefaults, ceilings opsettings.AgentLimitsSettings) *RemoteHubAgentDefaults {
+	wire := ceilings.ToAPI()
+	if wire == nil {
+		return h
+	}
+	if h == nil {
+		h = &RemoteHubAgentDefaults{}
+	}
+	h.LimitCeilings = wire
+	return h
+}
+
 // shouldCreateKSA reports whether the Hub authorizes opt-in broker KSA
 // creation for agent's dispatch: hub.k8s_workload_identity_setup is enabled
 // in enabledExperiments, the agent's GCP identity mode is "assign", and the
@@ -172,6 +190,15 @@ func (d *HTTPAgentDispatcher) hubAgentDefaults() opsettings.AgentDefaultsSetting
 		return opsettings.AgentDefaultsSettings{}
 	}
 	return d.hubAgentDefaultsProvider()
+}
+
+// agentLimitCeilings returns the hub's active agent_limits ceilings, or the
+// zero value when no provider is wired or the experiment is off.
+func (d *HTTPAgentDispatcher) agentLimitCeilings() opsettings.AgentLimitsSettings {
+	if d.agentLimitsProvider == nil {
+		return opsettings.AgentLimitsSettings{}
+	}
+	return d.agentLimitsProvider()
 }
 
 func copyBoolPtr(b *bool) *bool {

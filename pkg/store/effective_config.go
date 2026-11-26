@@ -14,7 +14,10 @@
 
 package store
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // AgentEffectiveConfig is the broker's verified effective configuration for
 // one run of an agent (WP1 slice 3 addendum v12): what the broker actually
@@ -46,6 +49,13 @@ type AgentEffectiveConfig struct {
 	BrokerID    string `json:"brokerId,omitempty"`
 	BrokerBuild string `json:"brokerBuild,omitempty"`
 
+	// Effective run limits resolved by the broker for this run, and which
+	// limit fields were clamped to Hub ceilings (ptone/scion#9371).
+	MaxTurns        int      `json:"maxTurns,omitempty"`
+	MaxModelCalls   int      `json:"maxModelCalls,omitempty"`
+	MaxDuration     string   `json:"maxDuration,omitempty"`
+	LimitsClampedBy []string `json:"limitsClampedBy,omitempty"`
+
 	// Source is EffectiveConfigSourceSync or EffectiveConfigSourceLaunchReport.
 	Source string `json:"source,omitempty"`
 	// ReportedAt is the hub commit time of the echo.
@@ -68,8 +78,27 @@ func (c AgentEffectiveConfig) HasEffectiveFields() bool {
 // SameEcho reports whether c and o are the same echo, ignoring ReportedAt
 // (an identical retry).
 func (c AgentEffectiveConfig) SameEcho(o AgentEffectiveConfig) bool {
-	c.ReportedAt, o.ReportedAt = time.Time{}, time.Time{}
-	return c == o
+	if !slices.Equal(c.LimitsClampedBy, o.LimitsClampedBy) {
+		return false
+	}
+	return c.RunID == o.RunID &&
+		c.LaunchID == o.LaunchID &&
+		c.Template == o.Template &&
+		c.TemplateHash == o.TemplateHash &&
+		c.Harness == o.Harness &&
+		c.Model == o.Model &&
+		c.HarnessConfig == o.HarnessConfig &&
+		c.HarnessConfigRevision == o.HarnessConfigRevision &&
+		c.HarnessConfigSource == o.HarnessConfigSource &&
+		c.Image == o.Image &&
+		c.Profile == o.Profile &&
+		c.Runtime == o.Runtime &&
+		c.BrokerID == o.BrokerID &&
+		c.BrokerBuild == o.BrokerBuild &&
+		c.MaxTurns == o.MaxTurns &&
+		c.MaxModelCalls == o.MaxModelCalls &&
+		c.MaxDuration == o.MaxDuration &&
+		c.Source == o.Source
 }
 
 // Stale-echo reasons returned by SetAgentEffectiveConfig, in precedence

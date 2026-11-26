@@ -521,6 +521,10 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Model:                 sr.info.Model,
 			HarnessConfigRevision: sr.info.HarnessConfigRevision,
 			BrokerBuild:           effectiveBrokerBuild(*sr.info),
+			MaxTurns:              sr.info.EffectiveMaxTurns,
+			MaxModelCalls:         sr.info.EffectiveMaxModelCalls,
+			MaxDuration:           sr.info.EffectiveMaxDuration,
+			LimitsClampedBy:       append([]string(nil), sr.info.LimitsClampedBy...),
 		}
 	}
 	// Journalled before it is sent (design wave 3 §1 C-a write 3): a

@@ -109,3 +109,95 @@ func TestLoadConfig_CountLimitZeroYAML(t *testing.T) {
 		}
 	}
 }
+
+func TestClampLimits(t *testing.T) {
+	ceilings := &api.LimitCeilings{
+		MaxTurns:      50,
+		MaxModelCalls: 100,
+		MaxDuration:   "1h",
+	}
+
+	for _, tc := range []struct {
+		name         string
+		cfg          api.ScionConfig
+		ceilings     *api.LimitCeilings
+		wantTurns    *int
+		wantCalls    *int
+		wantDuration string
+		wantClamped  []string
+	}{
+		{
+			name:         "no ceilings leaves config untouched",
+			cfg:          api.ScionConfig{MaxTurns: api.IntPtr(0), MaxModelCalls: api.IntPtr(500), MaxDuration: "0"},
+			ceilings:     nil,
+			wantTurns:    api.IntPtr(0),
+			wantCalls:    api.IntPtr(500),
+			wantDuration: "0",
+		},
+		{
+			name:         "nothing set fills ceilings without reporting clamped",
+			cfg:          api.ScionConfig{},
+			ceilings:     ceilings,
+			wantTurns:    api.IntPtr(50),
+			wantCalls:    api.IntPtr(100),
+			wantDuration: "1h",
+		},
+		{
+			name:         "explicit unlimited clamped to ceilings",
+			cfg:          api.ScionConfig{MaxTurns: api.IntPtr(0), MaxModelCalls: api.IntPtr(0), MaxDuration: "0"},
+			ceilings:     ceilings,
+			wantTurns:    api.IntPtr(50),
+			wantCalls:    api.IntPtr(100),
+			wantDuration: "1h",
+			wantClamped:  []string{"max_turns", "max_model_calls", "max_duration"},
+		},
+		{
+			name:         "values over ceiling clamped",
+			cfg:          api.ScionConfig{MaxTurns: api.IntPtr(80), MaxModelCalls: api.IntPtr(250), MaxDuration: "2h"},
+			ceilings:     ceilings,
+			wantTurns:    api.IntPtr(50),
+			wantCalls:    api.IntPtr(100),
+			wantDuration: "1h",
+			wantClamped:  []string{"max_turns", "max_model_calls", "max_duration"},
+		},
+		{
+			name:         "values within ceiling preserved",
+			cfg:          api.ScionConfig{MaxTurns: api.IntPtr(20), MaxModelCalls: api.IntPtr(50), MaxDuration: "30m"},
+			ceilings:     ceilings,
+			wantTurns:    api.IntPtr(20),
+			wantCalls:    api.IntPtr(50),
+			wantDuration: "30m",
+		},
+		{
+			name:         "unparsable duration and negative count clamped",
+			cfg:          api.ScionConfig{MaxTurns: api.IntPtr(-5), MaxDuration: "bogus"},
+			ceilings:     &api.LimitCeilings{MaxTurns: 50, MaxDuration: "1h"},
+			wantTurns:    api.IntPtr(50),
+			wantDuration: "1h",
+			wantClamped:  []string{"max_turns", "max_duration"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			gotClamped := ClampLimits(&cfg, tc.ceilings)
+			if !api.IntPtrEqual(cfg.MaxTurns, tc.wantTurns) ||
+				!api.IntPtrEqual(cfg.MaxModelCalls, tc.wantCalls) ||
+				cfg.MaxDuration != tc.wantDuration {
+				t.Errorf("limits = (%s, %s, %q), want (%s, %s, %q)",
+					api.FormatCountLimit(cfg.MaxTurns), api.FormatCountLimit(cfg.MaxModelCalls), cfg.MaxDuration,
+					api.FormatCountLimit(tc.wantTurns), api.FormatCountLimit(tc.wantCalls), tc.wantDuration)
+			}
+			if len(gotClamped) != len(tc.wantClamped) {
+				t.Fatalf("clamped = %v, want %v", gotClamped, tc.wantClamped)
+			}
+			for i := range gotClamped {
+				if gotClamped[i] != tc.wantClamped[i] {
+					t.Errorf("clamped[%d] = %q, want %q", i, gotClamped[i], tc.wantClamped[i])
+				}
+			}
+		})
+	}
+	if clamped := ClampLimits(nil, ceilings); clamped != nil {
+		t.Errorf("nil cfg: got %v, want nil", clamped)
+	}
+}

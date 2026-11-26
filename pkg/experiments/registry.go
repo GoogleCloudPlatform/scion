@@ -205,6 +205,13 @@ const ExecContainers = "hub.exec_containers"
 // refused; in-flight runs and the sweeper continue recording outcomes.
 const CommandRequests = "hub.command_requests"
 
+// AgentPolicyLimitCeilings gates Hub-level run-limit ceilings (ptone/scion#9371):
+// Hub agent_limits operational settings enforcement, fail-fast validation on
+// Hub creates, wire LimitCeilings on agent dispatches, broker clamping, and
+// effective-limit echo. While it is off, ceilings are not enforced and
+// LimitCeilings is omitted from dispatches.
+const AgentPolicyLimitCeilings = "agent_policy.limit_ceilings"
+
 // ViewAsMember gates the "View as member" session toggle for hub admins
 // (ptone/scion#8648). The hub checks it when a session enters the mode;
 // existing sessions in the mode remain honoured and exit stays available
@@ -761,6 +768,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8495",
 		Owner:       "templates",
 		ReviewBy:    "2027-05-24",
+	},
+	{
+		Name:        AgentPolicyLimitCeilings,
+		Title:       "Agent limit ceilings",
+		Description: "Enables Hub-level run-limit ceilings (agent_limits): fail-fast validation on Hub creates, wire ceilings to brokers, broker clamping, and effective-limit echo.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9371",
+		Owner:       "configuration",
+		ReviewBy:    "2027-05-26",
 	},
 	{
 		Name:        AgentMoveBundle,

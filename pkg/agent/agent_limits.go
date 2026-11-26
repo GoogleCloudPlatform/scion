@@ -17,8 +17,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -109,9 +111,14 @@ func readPersistedAgentLimits(agentDir string) (l agentLimits, ok bool) {
 }
 
 // applyDefaultLimits fills each limit cfg leaves unset, lowest tier last:
-// the hub agent_defaults on ctx, then this broker's settings.yaml defaults.
+// the hub agent_defaults on ctx, then this broker's settings.yaml defaults,
+// and then enforces any Hub agent_limits ceilings via config.ClampLimits.
 // Precedence is therefore agent (inline) > template > hub agent_defaults >
-// broker settings defaults.
+// broker settings defaults, capped by Hub ceilings (which also act as the
+// effective value when nothing was set anywhere).
+//
+// Returns the list of limit field names whose configured values were clamped
+// to a Hub ceiling (empty when no clamping occurred).
 //
 // The hub tier sits above the broker settings tier on purpose. The hub sends
 // nothing in file mode, so there a co-located broker applies the same
@@ -119,14 +126,70 @@ func readPersistedAgentLimits(agentDir string) (l agentLimits, ok bool) {
 // unchanged (design §3.2.4, rejected alternative A7). The hub defaults must
 // never be stamped into InlineConfig instead: that is a top-of-chain slot and
 // would outrank a template's explicit max_turns (rejected alternative A5).
-func applyDefaultLimits(ctx context.Context, cfg *api.ScionConfig, settings *config.VersionedSettings) {
+func applyDefaultLimits(ctx context.Context, cfg *api.ScionConfig, settings *config.VersionedSettings) []string {
 	if cfg == nil {
-		return
+		return nil
 	}
 	var turns, calls int
 	var duration string
 	if settings != nil {
 		turns, calls, duration = settings.DefaultMaxTurns, settings.DefaultMaxModelCalls, settings.DefaultMaxDuration
 	}
-	config.FillDefaultLimits(cfg, api.HubAgentDefaultsFromContext(ctx), turns, calls, duration)
+	hubDefaults := api.HubAgentDefaultsFromContext(ctx)
+	config.FillDefaultLimits(cfg, hubDefaults, turns, calls, duration)
+	if hubDefaults != nil && !hubDefaults.LimitCeilings.IsEmpty() {
+		return config.ClampLimits(cfg, hubDefaults.LimitCeilings)
+	}
+	return nil
+}
+
+// effectiveLimitsFromConfig returns the effective positive run limits from cfg
+// for reporting in AgentInfo (0 / "" when unlimited or unset).
+func effectiveLimitsFromConfig(cfg *api.ScionConfig) (maxTurns, maxModelCalls int, maxDuration string) {
+	if cfg == nil {
+		return 0, 0, ""
+	}
+	if n, ok := cfg.TurnLimit(); ok {
+		maxTurns = n
+	}
+	if n, ok := cfg.ModelCallLimit(); ok {
+		maxModelCalls = n
+	}
+	maxDuration = cfg.MaxDuration
+	return maxTurns, maxModelCalls, maxDuration
+}
+
+// formatLimitsClampedWarning builds a user-facing warning naming each run
+// limit that was clamped to a Hub ceiling and its effective value.
+func formatLimitsClampedWarning(clamped []string, cfg *api.ScionConfig) string {
+	if len(clamped) == 0 {
+		return ""
+	}
+	maxTurns, maxModelCalls, maxDuration := effectiveLimitsFromConfig(cfg)
+	parts := make([]string, 0, len(clamped))
+	for _, field := range clamped {
+		switch field {
+		case "max_turns":
+			if maxTurns > 0 {
+				parts = append(parts, fmt.Sprintf("max_turns=%d", maxTurns))
+			} else {
+				parts = append(parts, field)
+			}
+		case "max_model_calls":
+			if maxModelCalls > 0 {
+				parts = append(parts, fmt.Sprintf("max_model_calls=%d", maxModelCalls))
+			} else {
+				parts = append(parts, field)
+			}
+		case "max_duration":
+			if maxDuration != "" {
+				parts = append(parts, fmt.Sprintf("max_duration=%s", maxDuration))
+			} else {
+				parts = append(parts, field)
+			}
+		default:
+			parts = append(parts, field)
+		}
+	}
+	return "Run limits were clamped to hub ceiling: " + strings.Join(parts, ", ")
 }

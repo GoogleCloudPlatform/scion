@@ -1873,6 +1873,17 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			allValidationErrors[secName] = errs
 		}
 	}
+	if agentDefaultsDoc, ok := sectionDocs["agent_defaults"]; ok && len(allValidationErrors["agent_defaults"]) == 0 && len(allValidationErrors[opsettings.AgentLimitsSectionName]) == 0 {
+		limits := ops.AgentLimits()
+		if limitsDoc, hasLimits := sectionDocs[opsettings.AgentLimitsSectionName]; hasLimits {
+			if parsed, err := opsettings.ParseAgentLimitsDoc(limitsDoc); err == nil {
+				limits = parsed
+			}
+		}
+		if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(agentDefaultsDoc, limits); len(errs) > 0 {
+			allValidationErrors["agent_defaults"] = append(allValidationErrors["agent_defaults"], errs...)
+		}
+	}
 	if len(allValidationErrors) > 0 {
 		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
@@ -3632,9 +3643,10 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
-	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
-	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
-	"decision_retention":      settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
+	"agent_delegation_policy":         settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":                  settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
+	"decision_retention":              settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
+	opsettings.AgentLimitsSectionName: settingsTokenRefused, // hub-operator run-limit ceilings
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

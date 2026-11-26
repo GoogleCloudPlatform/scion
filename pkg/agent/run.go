@@ -762,9 +762,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if persisted, ok := readPersistedAgentLimits(agentDir); ok {
 		ownLimits = persisted.overlay(limitsOf(startInlineConfig))
 	}
+	var clampedLimits []string
 	if finalScionCfg != nil {
 		finalScionCfg = withLimits(finalScionCfg, ownLimits)
-		applyDefaultLimits(ctx, finalScionCfg, settings)
+		clampedLimits = applyDefaultLimits(ctx, finalScionCfg, settings)
 	}
 
 	// Telemetry tiers applied per start: broker settings telemetry < hub
@@ -2072,6 +2073,14 @@ authDone:
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
+	if len(clampedLimits) > 0 {
+		if w := formatLimitsClampedWarning(clampedLimits, finalScionCfg); w != "" {
+			slog.Warn("Start: run limits clamped to hub ceiling",
+				"agent", opts.Name, "clamped", clampedLimits)
+			warnings = append(warnings, w)
+			relayedWarnings = append(relayedWarnings, w)
+		}
+	}
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnvSnapshot)
 	if hostNetErr != nil {
 		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
@@ -3393,6 +3402,10 @@ authDone:
 			if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
 				a.TemplateHash = th
 			}
+			a.EffectiveMaxTurns, a.EffectiveMaxModelCalls, a.EffectiveMaxDuration = effectiveLimitsFromConfig(finalScionCfg)
+			if len(clampedLimits) > 0 {
+				a.LimitsClampedBy = append([]string(nil), clampedLimits...)
+			}
 			a.HarnessAuth = opts.HarnessAuth
 			a.Profile = profileName
 			a.WorkspacePlacement = workspacePlacement
@@ -3409,27 +3422,32 @@ authDone:
 	if isShellExecContainer {
 		fallbackRuntimeState = api.EncodeHomePersistentRuntimeState("", shellHomePersistent)
 	}
+	effMaxTurns, effMaxModelCalls, effMaxDuration := effectiveLimitsFromConfig(finalScionCfg)
 	return &api.AgentInfo{
-		ID:                    id,
-		RunID:                 runID,
-		Name:                  opts.Name,
-		Phase:                 successPhase,
-		Detached:              detached,
-		Warnings:              warnings,
-		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
-		RelayedWarnings:       relayedWarnings,
-		StartNotice:           startNotice,
-		HarnessConfig:         harnessConfigName,
-		HarnessConfigRevision: harnessConfigRevision,
-		HarnessConfigSource:   harnessConfigSource,
-		Harness:               launchedHarness,
-		Model:                 effectiveModel,
-		TemplateHash:          startedTemplateHash(provenance, finalScionCfg),
-		ConfigResolved:        true,
-		HarnessAuth:           opts.HarnessAuth,
-		Profile:               profileName,
-		WorkspacePlacement:    workspacePlacement,
-		RuntimeState:          fallbackRuntimeState,
+		ID:                     id,
+		RunID:                  runID,
+		Name:                   opts.Name,
+		Phase:                  successPhase,
+		Detached:               detached,
+		Warnings:               warnings,
+		HubOnlyEnvWarnings:     hubOnlyEnvWarnings,
+		RelayedWarnings:        relayedWarnings,
+		StartNotice:            startNotice,
+		HarnessConfig:          harnessConfigName,
+		HarnessConfigRevision:  harnessConfigRevision,
+		HarnessConfigSource:    harnessConfigSource,
+		Harness:                launchedHarness,
+		Model:                  effectiveModel,
+		TemplateHash:           startedTemplateHash(provenance, finalScionCfg),
+		ConfigResolved:         true,
+		EffectiveMaxTurns:      effMaxTurns,
+		EffectiveMaxModelCalls: effMaxModelCalls,
+		EffectiveMaxDuration:   effMaxDuration,
+		LimitsClampedBy:        append([]string(nil), clampedLimits...),
+		HarnessAuth:            opts.HarnessAuth,
+		Profile:                profileName,
+		WorkspacePlacement:     workspacePlacement,
+		RuntimeState:           fallbackRuntimeState,
 	}, nil
 }
 
