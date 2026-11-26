@@ -358,9 +358,10 @@ describe('<scion-filter-box>', () => {
     expect(opts[0].classList.contains('dim')).toBe(false);
     expect(opts[0].querySelector('.option-label')?.textContent).toBe('deploy-frontend');
     expect(opts[1].querySelector('.option-help')?.textContent).toBe('deleted · 3f9c');
-    expect(el.shadowRoot?.querySelector('[data-remote-footer]')?.textContent).toContain(
-      'Showing 2 of 143 · keep typing'
-    );
+    const footer = el.shadowRoot?.querySelector('[data-remote-footer]');
+    expect(footer?.textContent).toContain('Showing 2 of 143 · keep typing');
+    expect(listbox?.contains(footer ?? null)).toBe(false);
+    expect(el.shadowRoot?.querySelector('[role="listbox"] [data-remote-footer]')).toBeNull();
     expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
       '143 suggestions'
     );
