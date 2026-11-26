@@ -209,8 +209,16 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 	client := txCS.client
 
 	// 1. Lock all decision rows for the candidate messages in deterministic id
-	// order (FOR UPDATE on Postgres) so we serialize cleanly with all live
-	// writers and the facet indexer (design-8984 §3.4).
+	// order (FOR UPDATE on Postgres) so we serialize cleanly with live writers
+	// and the facet indexer (design-8984 §3.4).
+	//
+	// Note on lock ordering vs multi-key --update repost: purge locks decisions
+	// by id, whereas loadKeyStates in CreateDecisionPrompt locks by
+	// (key_norm, version). If a multi-key repost overlaps a purge of the same
+	// rows on Postgres, Postgres may abort one transaction with SQLSTATE 40P01
+	// (deadlock). This is rare (only old settled prompts being replaced by
+	// --update during a purge tick) and self-healing: the failed retention tick
+	// retries on the next interval, and the agent retries the repost.
 	decQ := client.Decision.Query().
 		Where(decision.MessageIDIn(msgUUIDs...)).
 		Order(ent.Asc(decision.FieldID))
@@ -262,6 +270,23 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 				break
 			}
 			ans := ansByDec[d.ID]
+			// A message with any unindexed decision or answer row is ineligible
+			// this tick so purge never deletes rows that
+			// indexDecisionFacetsAnswersPageTx may hold in an unlocked snapshot
+			// before acquiring FOR UPDATE SKIP LOCKED on their decisions.
+			if !d.FacetIndexed {
+				eligible = false
+				break
+			}
+			for _, a := range ans {
+				if !a.FacetIndexed {
+					eligible = false
+					break
+				}
+			}
+			if !eligible {
+				break
+			}
 			if !decisionRowSettled(d, ans) {
 				eligible = false
 				break
@@ -294,8 +319,9 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 		return res, nil
 	}
 
-	// 4. Compute facet decrements from locked eligible rows/answers with
-	// facet_indexed = true (design-8984 §3.4).
+	// 4. Compute facet decrements from locked eligible rows and answers.
+	// Step 3 already ensured every eligible decision and answer has
+	// facet_indexed = true.
 	var deltas []facetEntryDelta
 	maxPurgedAt := make(map[facetEntryKey]time.Time)
 	recordPurgedAt := func(k facetEntryKey, ts time.Time) {
@@ -310,22 +336,20 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 		if !hasChatKey {
 			continue
 		}
-		if d.FacetIndexed {
-			k := facetEntryKey{
-				ProjectID: d.ProjectID,
-				ChatKey:   *d.ChatKey,
-				Kind:      decisionfacetentry.KindAsker,
-				ActorID:   d.AskerAgentID.String(),
-			}
-			deltas = append(deltas, facetEntryDelta{
-				ProjectID: k.ProjectID,
-				ChatKey:   k.ChatKey,
-				Kind:      k.Kind,
-				ActorID:   k.ActorID,
-				Delta:     -1,
-			})
-			recordPurgedAt(k, d.CreatedAt)
+		k := facetEntryKey{
+			ProjectID: d.ProjectID,
+			ChatKey:   *d.ChatKey,
+			Kind:      decisionfacetentry.KindAsker,
+			ActorID:   d.AskerAgentID.String(),
 		}
+		deltas = append(deltas, facetEntryDelta{
+			ProjectID: k.ProjectID,
+			ChatKey:   k.ChatKey,
+			Kind:      k.Kind,
+			ActorID:   k.ActorID,
+			Delta:     -1,
+		})
+		recordPurgedAt(k, d.CreatedAt)
 
 		ans := ansByDec[d.ID]
 		hasDirect := false
@@ -336,27 +360,27 @@ func (s *DecisionRetentionStore) purgeDecisionMessagesTx(
 			}
 		}
 		for _, a := range ans {
-			if !a.FacetIndexed || a.AnsweredByUserID == nil || *a.AnsweredByUserID == "" {
+			if a.AnsweredByUserID == nil || *a.AnsweredByUserID == "" {
 				continue
 			}
 			// Superseded interpreted answers contributed 0 when direct exists.
 			if a.Provenance == decisionanswer.ProvenanceAgentInterpreted && hasDirect {
 				continue
 			}
-			k := facetEntryKey{
+			ak := facetEntryKey{
 				ProjectID: d.ProjectID,
 				ChatKey:   *d.ChatKey,
 				Kind:      decisionfacetentry.KindAnswerer,
 				ActorID:   *a.AnsweredByUserID,
 			}
 			deltas = append(deltas, facetEntryDelta{
-				ProjectID: k.ProjectID,
-				ChatKey:   k.ChatKey,
-				Kind:      k.Kind,
-				ActorID:   k.ActorID,
+				ProjectID: ak.ProjectID,
+				ChatKey:   ak.ChatKey,
+				Kind:      ak.Kind,
+				ActorID:   ak.ActorID,
 				Delta:     -1,
 			})
-			recordPurgedAt(k, a.CreatedAt)
+			recordPurgedAt(ak, a.CreatedAt)
 		}
 	}
 

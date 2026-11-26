@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -307,5 +308,109 @@ func TestDecisionRetentionRace_PurgeVsFacetIndexerAndUserDelete(t *testing.T) {
 
 	// Drain any remaining unindexed rows (on the kept second half) and assert exact summary parity.
 	drainDecisionIndex(t, ctx, f.cs, 100)
+	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
+}
+
+// TestDecisionRetentionRace_DeterministicAnswersIndexerSnapshotVsPurge
+// deterministically exercises the exact interleaving that broke the answers
+// facet indexer before R1:
+//  1. indexDecisionFacetsAnswersPageTx reads its page of unindexed answers
+//     without a lock and pauses before acquiring FOR UPDATE SKIP LOCKED.
+//  2. PurgeDecisionMessages runs and commits on both an indexed message and
+//     the message whose answer is in the indexer's unlocked snapshot.
+//  3. Because purge treats any message with facet_indexed=false decision or
+//     answer rows as ineligible, it purges only the indexed message and leaves
+//     the unindexed message intact.
+//  4. indexDecisionFacetsAnswersPageTx resumes, locks the decision, flips
+//     facet_indexed=true with zero CAS mismatch, and the summary matches a
+//     full recompute.
+func TestDecisionRetentionRace_DeterministicAnswersIndexerSnapshotVsPurge(t *testing.T) {
+	requirePostgres(t)
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	oldTime := time.Now().UTC().Add(-60 * 24 * time.Hour).Truncate(time.Microsecond)
+	cutoff := time.Now().UTC().Add(-30 * 24 * time.Hour)
+
+	pIdx := f.prompt("", false, yesNo("DET-IDX", "v1"))
+	pIdx.Message.ThreadID = "topic-race-det"
+	rIdx, err := f.cs.CreateDecisionPrompt(ctx, pIdx)
+	require.NoError(t, err)
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(rIdx.Decisions[0].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+	backdateDecisionForRace(t, f.cs, rIdx.Decisions[0].RowID, oldTime, &oldTime, &oldTime)
+
+	pUnidx := f.prompt("", false, yesNo("DET-UNIDX", "v1"))
+	pUnidx.Message.ThreadID = "topic-race-det"
+	rUnidx, err := f.cs.CreateDecisionPrompt(ctx, pUnidx)
+	require.NoError(t, err)
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(rUnidx.Decisions[0].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+	backdateDecisionForRace(t, f.cs, rUnidx.Decisions[0].RowID, oldTime.Add(time.Minute), &oldTime, &oldTime)
+
+	// Leave pIdx fully indexed (decision=true, answer=true) and pUnidx with
+	// decision=true, answer=false, with decision_facet_entries matching.
+	unidxDecUUID := uuid.MustParse(rUnidx.Decisions[0].RowID)
+	_, err = f.cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, f.cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	// Index both decisions.
+	_, _, err = f.cs.IndexDecisionFacetsDecisionsPage(ctx, "", 100)
+	require.NoError(t, err)
+	// Index only pIdx's answer (temporarily mark pUnidx's answer=true, then flip back).
+	require.NoError(t, f.cs.client.DecisionAnswer.Update().
+		Where(decisionanswer.DecisionRowIDEQ(unidxDecUUID)).
+		SetFacetIndexed(true).Exec(ctx))
+	_, _, err = f.cs.IndexDecisionFacetsAnswersPage(ctx, "", 100)
+	require.NoError(t, err)
+	require.NoError(t, f.cs.client.DecisionAnswer.Update().
+		Where(decisionanswer.DecisionRowIDEQ(unidxDecUUID)).
+		SetFacetIndexed(false).Exec(ctx))
+
+	snapshotTaken := make(chan struct{})
+	purgeDone := make(chan struct{})
+	prevHook := testHookAfterAnswersPageRead
+	testHookAfterAnswersPageRead = func() {
+		close(snapshotTaken)
+		<-purgeDone
+	}
+	t.Cleanup(func() { testHookAfterAnswersPageRead = prevHook })
+
+	type idxOut struct {
+		indexed int
+		err     error
+	}
+	idxDone := make(chan idxOut, 1)
+	go func() {
+		n, _, err := f.cs.IndexDecisionFacetsAnswersPage(ctx, "", 10)
+		idxDone <- idxOut{n, err}
+	}()
+
+	// Wait until answers page has taken its unlocked snapshot of pUnidx's answer.
+	<-snapshotTaken
+
+	// Run purge while the indexer holds its unlocked snapshot.
+	st := f.cs.DecisionRetention()
+	pr, err := st.PurgeDecisionMessages(ctx, []string{pIdx.Message.ID, pUnidx.Message.ID}, map[string]time.Time{f.projectID: cutoff})
+	close(purgeDone)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, pr.PurgedMessages, "indexed message must be purged")
+	assert.Equal(t, 1, pr.SkippedMessages, "unindexed message must be skipped while indexer holds snapshot")
+
+	out := <-idxDone
+	require.NoError(t, out.err, "answers page indexer must not suffer CAS mismatch")
+	assert.Equal(t, 1, out.indexed)
+
+	_, err = f.cs.GetDecision(ctx, rIdx.Decisions[0].RowID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = f.cs.GetDecision(ctx, rUnidx.Decisions[0].RowID)
+	assert.NoError(t, err)
+	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
+
+	// Once indexed, pUnidx purges cleanly on the next pass.
+	pr2, err := st.PurgeDecisionMessages(ctx, []string{pUnidx.Message.ID}, map[string]time.Time{f.projectID: cutoff})
+	require.NoError(t, err)
+	assert.Equal(t, 1, pr2.PurgedMessages)
 	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
 }

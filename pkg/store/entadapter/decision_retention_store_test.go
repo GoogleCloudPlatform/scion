@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -741,4 +742,251 @@ func TestDecisionRetentionStore_CursorAndRuns(t *testing.T) {
 
 	// Verify unused import guard.
 	_ = decisionanswer.Table
+}
+
+// TestDecisionRetentionStore_CandidateCursorTieBreak verifies that
+// SelectDecisionRetentionCandidates walks tied created_at rows in exact
+// (created_at, id) order without skipping or duplicating rows when paginated
+// with limit=1 and limit=2.
+func TestDecisionRetentionStore_CandidateCursorTieBreak(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	st := cs.DecisionRetention()
+
+	projID := uuid.New()
+	agentID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	tEarlier := now.Add(-70 * 24 * time.Hour)
+	tTied := now.Add(-60 * 24 * time.Hour)
+	tLater := now.Add(-50 * 24 * time.Hour)
+	tAfterCutoff := now.Add(-10 * 24 * time.Hour)
+	choices := []messages.Choice{{ID: "1", Label: "Yes"}}
+
+	type seeded struct {
+		id        string
+		createdAt time.Time
+	}
+	var expected []seeded
+
+	insertRow := func(key string, created time.Time, settled bool) string {
+		id := uuid.New()
+		dc := cs.client.Decision.Create().
+			SetID(id).
+			SetProjectID(projID).
+			SetMessageID(uuid.New()).
+			SetPosition(0).
+			SetAskerAgentID(agentID).
+			SetAskerAgentName("bot").
+			SetKey(key).
+			SetKeyNorm(strings.ToLower(key)).
+			SetKeySource(decision.KeySourceAgent).
+			SetVersion(1).
+			SetQuestion("Q " + key).
+			SetChoices(choices).
+			SetCreatedAt(created).
+			SetSettled(settled).
+			SetFacetIndexed(true)
+		if settled {
+			dc.SetStatus(decision.StatusWithdrawn).SetWithdrawnAt(created)
+		} else {
+			dc.SetStatus(decision.StatusPending)
+		}
+		require.NoError(t, dc.Exec(ctx))
+		return id.String()
+	}
+
+	// Seed 1 earlier, 3 tied on the exact same created_at, and 1 later (all < cutoff).
+	expected = append(expected, seeded{insertRow("E1", tEarlier, true), tEarlier})
+	for i := 0; i < 3; i++ {
+		expected = append(expected, seeded{insertRow(fmt.Sprintf("T%d", i), tTied, true), tTied})
+	}
+	expected = append(expected, seeded{insertRow("L1", tLater, true), tLater})
+	// Noise rows that must never be returned: unsettled at tTied, and settled >= cutoff.
+	insertRow("UNSETTLED", tTied, false)
+	insertRow("RECENT", tAfterCutoff, true)
+
+	sort.Slice(expected, func(i, j int) bool {
+		if !expected[i].createdAt.Equal(expected[j].createdAt) {
+			return expected[i].createdAt.Before(expected[j].createdAt)
+		}
+		return expected[i].id < expected[j].id
+	})
+	wantIDs := make([]string, len(expected))
+	for i, e := range expected {
+		wantIDs[i] = e.id
+	}
+
+	for _, limit := range []int{1, 2} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			var after store.DecisionRetentionPosition
+			var gotIDs []string
+			seen := make(map[string]bool)
+			for guard := 0; guard < 20; guard++ {
+				page, err := st.SelectDecisionRetentionCandidates(ctx, cutoff, after, limit)
+				require.NoError(t, err)
+				if len(page) == 0 {
+					break
+				}
+				assert.LessOrEqual(t, len(page), limit)
+				for _, c := range page {
+					assert.False(t, seen[c.ID], "duplicate candidate id %s", c.ID)
+					seen[c.ID] = true
+					gotIDs = append(gotIDs, c.ID)
+				}
+				last := page[len(page)-1]
+				after = store.DecisionRetentionPosition{CreatedAt: last.CreatedAt, ID: last.ID}
+			}
+			assert.Equal(t, wantIDs, gotIDs, "walk order must match (created_at, id) exactly")
+		})
+	}
+}
+
+// TestDecisionRetentionStore_SkipsUnindexedFacetRows verifies on both SQLite
+// and Postgres that an old settled message with any facet_indexed=false
+// decision or answer row is skipped by PurgeDecisionMessages, while a fully
+// indexed sibling message is purged and decision_facet_entries matches a full
+// recompute before and after purge.
+func TestDecisionRetentionStore_SkipsUnindexedFacetRows(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	st := cs.DecisionRetention()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	oldTime := now.Add(-60 * 24 * time.Hour)
+
+	proj := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: proj, Name: "ret-unidx", Slug: "ret-unidx", Created: oldTime,
+	}))
+	userID := uuid.NewString()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID: userID, Email: "unidx@test.com", DisplayName: "Unidx User",
+		Role: store.UserRoleMember, Status: "active", Created: oldTime,
+	}))
+	agentID := uuid.NewString()
+	topic := "topic-unidx-" + uuid.NewString()
+	choices := []messages.Choice{{ID: "1", Label: "Yes"}, {ID: "2", Label: "No"}}
+
+	seed := func(key string) (msgID, decID string) {
+		msgID = uuid.NewString()
+		res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: msgID, ProjectID: proj, ThreadID: topic,
+				Sender: "agent:bot", SenderID: agentID, Recipient: "user:" + userID, RecipientID: userID,
+			},
+			AskerAgentID:   agentID,
+			AskerAgentName: "bot",
+			Decisions:      []messages.Decision{{Key: key, Question: "Q " + key, Choices: choices}},
+		})
+		require.NoError(t, err)
+		decID = res.Decisions[0].RowID
+		_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID:    decID,
+			ChoiceID:         "1",
+			AnsweredByUserID: userID,
+			AnsweredByName:   "Unidx User",
+			AnsweredByEmail:  "unidx@test.com",
+			Provenance:       store.DecisionProvenanceDirect,
+			Surface:          store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID: uuid.NewString(), ProjectID: proj, ThreadID: topic,
+				Sender: "user:" + userID, SenderID: userID, Recipient: "agent:bot", RecipientID: agentID,
+			},
+		})
+		require.NoError(t, err)
+		uid := uuid.MustParse(decID)
+		db := clientDB(cs.client)
+		qDec := "UPDATE decisions SET created_at = ? WHERE id = ?"
+		qAns := "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?"
+		if cs.isPostgres() {
+			qDec = "UPDATE decisions SET created_at = $1 WHERE id = $2"
+			qAns = "UPDATE decision_answers SET created_at = $1 WHERE decision_row_id = $2"
+		}
+		_, err = db.ExecContext(ctx, qDec, oldTime, uid)
+		require.NoError(t, err)
+		require.NoError(t, cs.client.Decision.UpdateOneID(uid).SetDecidedAt(oldTime).Exec(ctx))
+		_, err = db.ExecContext(ctx, qAns, oldTime, uid)
+		require.NoError(t, err)
+		return msgID, decID
+	}
+
+	msgIndexed, decIndexed := seed("IDX1")
+	msgUnindexedDec, decUnindexedDec := seed("UIDX-DEC")
+	msgUnindexedAns, decUnindexedAns := seed("UIDX-ANS")
+
+	// Rebuild facet entries cleanly so only the rows we want indexed have
+	// facet_indexed=true and matching decision_facet_entries rows.
+	_, err := cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	// Index everything first, then unindex decUnindexedDec (decision) and
+	// decUnindexedAns (answer) and rebuild summary via targeted reindex.
+	drainDecisionIndex(t, ctx, cs, 100)
+
+	// Re-create exact partial-index state:
+	// - msgIndexed: decision=true, answer=true
+	// - msgUnindexedDec: decision=false, answer=true
+	// - msgUnindexedAns: decision=true, answer=false
+	_, err = cs.client.DecisionFacetEntry.Delete().Exec(ctx)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.Decision.Update().SetFacetIndexed(false).Exec(ctx))
+	require.NoError(t, cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
+	// Index only the two decisions that should be indexed (temporarily mark
+	// decUnindexedDec=true so decisions page skips it, then flip it back).
+	require.NoError(t, cs.client.Decision.UpdateOneID(uuid.MustParse(decUnindexedDec)).SetFacetIndexed(true).Exec(ctx))
+	_, _, err = cs.IndexDecisionFacetsDecisionsPage(ctx, "", 100)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.Decision.UpdateOneID(uuid.MustParse(decUnindexedDec)).SetFacetIndexed(false).Exec(ctx))
+	// Index only the two answers that should be indexed (temporarily mark
+	// decUnindexedAns's answer=true so answers page skips it, then flip it back).
+	require.NoError(t, cs.client.DecisionAnswer.Update().
+		Where(decisionanswer.DecisionRowIDEQ(uuid.MustParse(decUnindexedAns))).
+		SetFacetIndexed(true).Exec(ctx))
+	_, _, err = cs.IndexDecisionFacetsAnswersPage(ctx, "", 100)
+	require.NoError(t, err)
+	require.NoError(t, cs.client.DecisionAnswer.Update().
+		Where(decisionanswer.DecisionRowIDEQ(uuid.MustParse(decUnindexedAns))).
+		SetFacetIndexed(false).Exec(ctx))
+
+	// Before purge: 2 indexed decisions (msgIndexed, msgUnindexedAns) and
+	// 2 indexed answers (msgIndexed, msgUnindexedDec) are in decision_facet_entries.
+	// Purge all three: only msgIndexed is eligible.
+	res, err := st.PurgeDecisionMessages(ctx, []string{msgIndexed, msgUnindexedDec, msgUnindexedAns}, map[string]time.Time{proj: cutoff})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.PurgedMessages)
+	assert.Equal(t, 2, res.SkippedMessages)
+
+	_, err = cs.GetDecision(ctx, decIndexed)
+	assert.ErrorIs(t, err, store.ErrNotFound, "indexed message must be purged")
+	_, err = cs.GetDecision(ctx, decUnindexedDec)
+	assert.NoError(t, err, "message with facet_indexed=false decision must be skipped")
+	_, err = cs.GetDecision(ctx, decUnindexedAns)
+	assert.NoError(t, err, "message with facet_indexed=false answer must be skipped")
+
+	// Summary ref_counts must now be 1 asker and 1 answerer (the indexed row
+	// from msgUnindexedAns and msgUnindexedDec respectively).
+	askerRow, err := cs.client.DecisionFacetEntry.Query().
+		Where(decisionfacetentry.KindEQ(decisionfacetentry.KindAsker), decisionfacetentry.ActorIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, askerRow.RefCount)
+	ansRow, err := cs.client.DecisionFacetEntry.Query().
+		Where(decisionfacetentry.KindEQ(decisionfacetentry.KindAnswerer), decisionfacetentry.ActorIDEQ(userID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ansRow.RefCount)
+
+	// Once the indexer catches up, summary equals a full recompute, and both
+	// remaining messages become eligible and purge cleanly.
+	drainDecisionIndex(t, ctx, cs, 100)
+	assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
+
+	res2, err := st.PurgeDecisionMessages(ctx, []string{msgUnindexedDec, msgUnindexedAns}, map[string]time.Time{proj: cutoff})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res2.PurgedMessages)
+	assert.Equal(t, 0, res2.SkippedMessages)
+	assertFacetSummaryMatchesRecompute(t, ctx, cs.client)
 }
