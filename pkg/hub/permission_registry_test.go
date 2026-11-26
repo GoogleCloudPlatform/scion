@@ -417,12 +417,13 @@ func TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence(t *testing.T) {
 // applicability tables live in pkg/hub/permissions, which is not scanned.
 func TestArtifactPermissionsConsumedUnlessReserved(t *testing.T) {
 	constants := map[string]string{
-		"PermissionRead":    artifacts.PermissionRead,
-		"PermissionCreate":  artifacts.PermissionCreate,
-		"PermissionUpdate":  artifacts.PermissionUpdate,
-		"PermissionDelete":  artifacts.PermissionDelete,
-		"PermissionManage":  artifacts.PermissionManage,
-		"PermissionSteward": artifacts.PermissionSteward,
+		"PermissionRead":          artifacts.PermissionRead,
+		"PermissionCreate":        artifacts.PermissionCreate,
+		"PermissionUpdate":        artifacts.PermissionUpdate,
+		"PermissionDelete":        artifacts.PermissionDelete,
+		"PermissionManage":        artifacts.PermissionManage,
+		"PermissionSteward":       artifacts.PermissionSteward,
+		"PermissionRequestReview": artifacts.PermissionRequestReview,
 	}
 	uses := artifactPermissionUses(t, constants, isSeedRoleTable)
 	seen := map[string]bool{}

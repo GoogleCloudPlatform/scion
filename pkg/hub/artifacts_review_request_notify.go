@@ -39,25 +39,11 @@ var (
 )
 
 // MayNotifyReviewer implements artifacts.ReviewRequestNotifier: checks that the
-// caller is an interactive, unscoped user session (interactiveUserSession, the
-// same gate MayNotifyGrant uses) and can read reviewerUserID (anti-spam user
-// visibility, §4.3 step 4).
+// caller is an interactive, unscoped user session and can read reviewerUserID
+// (anti-spam user visibility, §4.3 step 4) by delegating to MayNotifyGrant so
+// the named-user subject check stays on the single allow-listed path.
 func (h *artifactHost) MayNotifyReviewer(ctx context.Context, reviewerUserID string) (bool, error) {
-	caller, ok := interactiveUserSession(ctx)
-	if !ok {
-		return false, nil
-	}
-	if h.server == nil || h.server.store == nil || h.server.authzService == nil {
-		return false, errReviewRequestNoticeUnavailable
-	}
-	subject, _, err := h.server.namedUserSubject(ctx, reviewerUserID)
-	if err != nil {
-		return false, err
-	}
-	if subject == nil {
-		return false, nil
-	}
-	return h.server.authzService.CheckAccess(ctx, caller, userResource(subject), ActionRead).Allowed, nil
+	return h.MayNotifyGrant(ctx, reviewerUserID)
 }
 
 // NotifyReviewRequest implements artifacts.ReviewRequestNotifier: writes an

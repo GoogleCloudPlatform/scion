@@ -26,12 +26,14 @@ import (
 )
 
 // Send-time recipient warning (ptone/scion#4575), open-review access filter
-// (ptone/scion#7650), and lost-access review-draft reaper (ptone/scion#8475):
-// the hub side of artifacts.RecipientAuthority.
+// (ptone/scion#7650), lost-access review-draft reaper (ptone/scion#8475), and
+// review-request existing-access check (ptone/scion#9296): the hub side of
+// artifacts.RecipientAuthority.
 //
 // These methods answer for a NAMED principal (the direct recipient of a
-// message, a reviewer with a recorded review session, or a reviewer with a
-// saved review draft), not for the caller of ctx. They are NON-ACCESS-GRANTING:
+// message, a reviewer with a recorded review session, a reviewer with a
+// saved review draft, or a candidate reviewer named in a review request), not
+// for the caller of ctx. They are NON-ACCESS-GRANTING:
 // nothing here ever grants access, serves content, or is consulted by any read
 // route; besides advisory warnings and filtering, a recipient check may also
 // withhold or remove the principal's own data on a definitive deny. The

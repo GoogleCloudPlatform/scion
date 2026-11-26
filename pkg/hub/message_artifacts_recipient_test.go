@@ -241,14 +241,16 @@ type moduleFuncKey struct{ path, function string }
 
 // recipientCheckSymbols are the non-access-granting named-principal check
 // entry points (the send-time recipient warning, the open-review access
-// filter, and the lost-access review-draft reaper), each with the only
-// functions in the module that may call it.
+// filter, the lost-access review-draft reaper, and the review-request
+// existing-access eligibility check), each with the only functions in the
+// module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
 	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
 	"ResolveRecipient": {
-		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:            true,
-		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:      true,
-		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}: true,
+		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:              true,
+		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:        true,
+		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}:   true,
+		{"pkg/artifacts/review_requests.go", "handleCreateReviewRequests"}: true,
 	},
 	"readableOpenReviews": {{"pkg/artifacts/review_sessions.go", "checkOpenReviews"}: true},
 	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
