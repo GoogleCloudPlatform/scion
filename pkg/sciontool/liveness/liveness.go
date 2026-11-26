@@ -51,6 +51,10 @@ const (
 	// KindAttached reports an interactive terminal client attached to the
 	// tmux session (shell execution containers only; guards idle-suspend).
 	KindAttached Kind = "attached"
+	// KindExec reports an active Conduit exec run or an uncollected finished
+	// exec tombstone. Guards auto-suspend only (SuppressStall: false),
+	// matching KindAttached semantics.
+	KindExec Kind = "exec"
 )
 
 // ToolCallStallCap is how long after a tool call began its live process
@@ -116,6 +120,10 @@ type Config struct {
 	// client is attached to the container's tmux session. Scoped to shell
 	// execution containers (ptone/scion#8812 §3.3).
 	CheckAttached func() bool
+	// CheckExec, when non-nil, reports active or uncollected Conduit exec
+	// work (ptone/scion#9282 §4.10). Consulted before tiers 1 and 2 on all
+	// agents with exec routes.
+	CheckExec func() *LiveWork
 }
 
 // MaxHarnessRootDepth caps Config.HarnessRootDepth: a deeper launcher
@@ -129,6 +137,7 @@ type Sampler struct {
 	agentUID      int
 	isManaged     func(pid int) bool
 	checkAttached func() bool
+	checkExec     func() *LiveWork
 	rootDepth     int
 	procRoot      string
 	// prev holds each process's CPU time at the previous sample; nil until
@@ -186,6 +195,7 @@ func NewSampler(cfg Config) *Sampler {
 		agentUID:      cfg.AgentUID,
 		isManaged:     isManaged,
 		checkAttached: cfg.CheckAttached,
+		checkExec:     cfg.CheckExec,
 		rootDepth:     depth,
 		procRoot:      "/proc",
 	}
@@ -216,6 +226,15 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 			Kind:          KindAttached,
 			SuppressStall: false,
 			Detail:        "terminal attached",
+		}
+	}
+	// Active or uncollected Conduit exec runs guard auto-suspend across all
+	// exec-enabled agents (ptone/scion#9282 §4.10). Consulted before tiers
+	// 1 and 2, with SuppressStall=false so stall marking is unaffected.
+	if s.checkExec != nil {
+		if work := s.checkExec(); work != nil {
+			s.recordCPU(procs)
+			return work
 		}
 	}
 	excluded, harness := s.baseline(procs)

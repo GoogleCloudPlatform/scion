@@ -1517,6 +1517,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}()
 
 		if hubClient != nil && hubClient.IsConfigured() {
+			var execLiveWork atomic.Pointer[func() *liveness.LiveWork]
 			// Start heartbeat loop in background
 			var heartbeatCtx context.Context
 			heartbeatCtx, heartbeatCancel = context.WithCancel(context.Background())
@@ -1529,13 +1530,20 @@ func RunInit(args []string, opts InitRunOptions) int {
 				OnSuccess: func() {
 					log.Debug("Heartbeat sent successfully")
 				},
-				// Live work (ptone/scion#7855): the Hub keeps an agent
-				// with a tool call in flight, or whose container is doing
-				// CPU work, from being marked stalled or auto-suspended.
+				// Live work (ptone/scion#7855, ptone/scion#9282): the Hub keeps
+				// an agent with active/uncollected Conduit exec work, an
+				// attached terminal, a tool call in flight, or CPU work from
+				// being auto-suspended.
 				LiveWork: liveWork.record(livenessProvider(liveness.NewSampler(liveness.Config{
 					AgentUID:         livenessAgentUID(targetUID),
 					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
 					CheckAttached:    livenessAttachedChecker(os.Getenv, livenessAgentUID(targetUID), livenessAgentGID(targetGID)),
+					CheckExec: func() *liveness.LiveWork {
+						if fn := execLiveWork.Load(); fn != nil && *fn != nil {
+							return (*fn)()
+						}
+						return nil
+					},
 				}), statusHandler.CurrentActivitySince)),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
@@ -1548,9 +1556,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 				log.Info("port forwarding disabled: skipping port-forward tunnel manager and auto-expose")
 			} else {
 				ptyUser := conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop)
+				execOpts := conduitExecOptions(os.Getenv, ptyUser, harnessShellEnv(config))
+				if execOpts != nil {
+					execOpts.OnLiveWork = func(fn func() *liveness.LiveWork) { execLiveWork.Store(&fn) }
+				}
 				go newPortForwarding(hubClient, opts.DisableConduit, ptyUser, conduitSSH,
 					conduitDeliverOptions(os.Getenv, exec.LookPath, childArgs, ptyUser),
-					conduitExecOptions(os.Getenv, ptyUser, harnessShellEnv(config)),
+					execOpts,
 					os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports

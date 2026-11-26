@@ -35,6 +35,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 )
 
 // Prefix is the path prefix of every control route.
@@ -112,6 +113,15 @@ func (h *Handler) Features() []string {
 		return []string{agentcontrol.FeatureExecCapture, agentcontrol.FeatureExecContextV1, agentcontrol.FeatureExecWorkdir}
 	}
 	return nil
+}
+
+// LiveWork reports active or uncollected Conduit exec work for sciontool's
+// liveness sampler, or nil when exec routes are not registered or idle.
+func (h *Handler) LiveWork() *liveness.LiveWork {
+	if h == nil || h.exec == nil {
+		return nil
+	}
+	return h.exec.LiveWork()
 }
 
 // ServeHTTP implements http.Handler.
