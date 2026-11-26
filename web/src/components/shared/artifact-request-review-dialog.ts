@@ -308,12 +308,33 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
         ${reviewRequestRefusalText(r.code)}
         ${r.code ? html`(<code class="result-code">${r.code}</code>)` : nothing}
       </span>`;
-    } else if (r.notifySkipped) {
+    } else if (r.outcome === 'unchanged') {
       detail = html`<span class="result-detail"
-        >Notification skipped (${r.notifySkipped.replace(/_/g, ' ')})</span
+        >Open request already exists — no new reminder sent (24-hour cooldown)</span
       >`;
-    } else if (r.notified) {
-      detail = html`<span class="result-detail">Notified</span>`;
+    } else {
+      const parts: string[] = [];
+      if (r.outcome === 'reminded') {
+        if (r.notifySkipped) {
+          parts.push(
+            `Reminder recorded · notification skipped (${r.notifySkipped.replace(/_/g, ' ')})`
+          );
+        } else if (r.notified) {
+          parts.push('Reminder sent');
+        } else {
+          parts.push('Reminder recorded');
+        }
+      } else if (r.notifySkipped) {
+        parts.push(`Notification skipped (${r.notifySkipped.replace(/_/g, ' ')})`);
+      } else if (r.notified) {
+        parts.push('Notified');
+      }
+      if (r.access === 'raised') {
+        parts.push('Gave Can review');
+      }
+      if (parts.length > 0) {
+        detail = html`<span class="result-detail">${parts.join(' · ')}</span>`;
+      }
     }
     return html`
       <li class="result-row" data-reviewer=${r.reviewer} data-outcome=${r.outcome}>
@@ -329,7 +350,7 @@ export class ScionArtifactRequestReviewDialog extends LitElement {
   private renderForm(): TemplateResult {
     const atLimit = this.selected.length >= MAX_REVIEW_REQUEST_REVIEWERS;
     return html`
-      <p class="hint">Ask people who can review this artifact to look at the current version.</p>
+      <p class="hint">Ask people to review the current version.</p>
       ${this.error
         ? html`<sl-alert variant="danger" open role="alert">
             <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>

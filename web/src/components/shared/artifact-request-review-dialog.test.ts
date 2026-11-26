@@ -218,12 +218,73 @@ describe('scion-artifact-request-review-dialog', () => {
     expect(rows[1].textContent).toContain('rate limited');
     expect(rows[2].textContent).toContain('Dave');
     expect(rows[2].textContent).toContain('Already requested');
+    expect(rows[2].textContent).toContain('24-hour cooldown');
     expect(rows[3].textContent).toContain('Eve');
     expect(rows[3].textContent).toContain('Refused');
     expect(rows[3].textContent).toContain('reviewer_cannot_review');
 
     expect(events).toHaveLength(1);
     expect(events[0].requests).toHaveLength(4);
+  });
+
+  it('shows Reminder sent for reminded+notified and Gave Can review for raised access', async () => {
+    const responseBody: CreateReviewRequestsResponse = {
+      requests: [
+        {
+          reviewer: 'user:u-bob',
+          outcome: 'created',
+          access: 'raised',
+          notified: true,
+        },
+        {
+          reviewer: 'user:u-carol',
+          outcome: 'reminded',
+          access: 'existing',
+          notified: true,
+        },
+      ],
+    };
+    fetchMock.mockImplementation((input: string | URL) => {
+      const url = String(input);
+      if (url.startsWith('/api/v1/users?search=')) {
+        return Promise.resolve(
+          jsonResponse({
+            users: [
+              { id: 'u-bob', email: 'bob@example.com', displayName: 'Bob' },
+              { id: 'u-carol', email: 'carol@example.com', displayName: 'Carol' },
+            ],
+          })
+        );
+      }
+      if (url === `/api/v1/artifacts/${ARTIFACT.id}/review-requests`) {
+        return Promise.resolve(jsonResponse(responseBody));
+      }
+      return Promise.resolve(jsonResponse({ error: 'unexpected' }, 500));
+    });
+
+    const el = await mount();
+    const searchInput = el.shadowRoot!.querySelector('.reviewer-search') as HTMLElement & {
+      value: string;
+    };
+    for (let i = 0; i < 2; i++) {
+      searchInput.value = 'example';
+      searchInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
+      await settle(el);
+      (el.shadowRoot!.querySelector('.suggestions button') as HTMLButtonElement).click();
+      await settle(el);
+    }
+
+    (el.shadowRoot!.querySelector('.submit-request-btn') as HTMLButtonElement).click();
+    await settle(el);
+
+    const rows = [...el.shadowRoot!.querySelectorAll('.result-row')];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain('Requested');
+    expect(rows[0].textContent).toContain('Notified');
+    expect(rows[0].textContent).toContain('Gave Can review');
+    expect(rows[1].textContent).toContain('Reminded');
+    expect(rows[1].textContent).toContain('Reminder sent');
   });
 
   it('ignores bubbled sl-after-hide from nested elements', async () => {

@@ -94,6 +94,7 @@ import {
   isInlineType,
   isRemoteFile,
   listGrants,
+  listReviewRequests,
   listVersions,
   mintView,
   parseArtifactPagePath,
@@ -104,6 +105,8 @@ import {
   ReviewOpenError,
   ReviewWakeOfferError,
   safeReviewDownloadName,
+  withdrawReviewRequest,
+  WithdrawReviewRequestError,
 } from '../../client/artifacts.js';
 import type {
   Artifact,
@@ -641,6 +644,11 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private deleteOpen = false;
   /** The Request review dialog is open. */
   @state() private requestReviewOpen = false;
+  /** Review requests for the publisher panel (experiment hub.artifacts_review_requests). */
+  @state() private reviewRequests: ReviewRequestInfo[] = [];
+  @state() private reviewRequestsError: string | null = null;
+  @state() private withdrawingRequestIds = new Set<string>();
+  private reviewRequestsGen = 0;
   /** The Dismiss review request dialog state. */
   @state() private dismissRequestOpen = false;
   @state() private dismissRequestNote = '';
@@ -919,6 +927,81 @@ export class ScionPageArtifactDetail extends LitElement {
       .dismiss-note-over {
         color: var(--scion-status-danger);
         font-weight: 500;
+      }
+      .review-requests-panel {
+        margin-bottom: 0.75rem;
+        border: 1px solid var(--scion-border);
+        border-radius: var(--scion-radius);
+        background: var(--scion-surface);
+        overflow: hidden;
+      }
+      .review-requests-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        padding: 0.55rem 0.85rem;
+        border-bottom: 1px solid var(--scion-border);
+        background: var(--scion-bg-subtle);
+      }
+      .review-requests-title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin: 0;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: var(--scion-text);
+      }
+      .review-requests-error {
+        margin: 0.5rem 0.85rem;
+      }
+      .review-requests-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      .review-request-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 0.5rem 0.75rem;
+        padding: 0.6rem 0.85rem;
+        border-bottom: 1px solid var(--scion-border);
+        font-size: 0.8125rem;
+      }
+      .review-request-row:last-child {
+        border-bottom: none;
+      }
+      .rr-main {
+        flex: 1;
+        min-width: 14rem;
+      }
+      .rr-top {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.375rem;
+      }
+      .rr-reviewer {
+        font-weight: 600;
+        color: var(--scion-text);
+      }
+      .rr-meta {
+        margin-top: 0.2rem;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted);
+      }
+      .rr-dismiss-note {
+        margin-top: 0.25rem;
+        font-size: 0.8125rem;
+        color: var(--scion-text-secondary);
+      }
+      .rr-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
       }
       .review-toolbar {
         display: flex;
@@ -1415,6 +1498,12 @@ export class ScionPageArtifactDetail extends LitElement {
       } else {
         this.savedDraft = null;
       }
+      if (this.reviewRequestsEnabled && data.canPublish) {
+        void this.loadReviewRequests(gen);
+      } else {
+        this.reviewRequests = [];
+        this.reviewRequestsError = null;
+      }
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
@@ -1496,6 +1585,12 @@ export class ScionPageArtifactDetail extends LitElement {
       } else {
         this.savedDraft = null;
       }
+      if (this.reviewRequestsEnabled && data.canPublish) {
+        void this.loadReviewRequests(gen);
+      } else {
+        this.reviewRequests = [];
+        this.reviewRequestsError = null;
+      }
       if (kind === 'html' && version) {
         void this.loadView(version.seq);
       } else {
@@ -1531,6 +1626,9 @@ export class ScionPageArtifactDetail extends LitElement {
     void this.loadVersions(0, this.loadGen);
     if (this.reviewDraftsEnabled && (this.canPublish || this.canReviewOnly)) {
       void this.loadSavedDraft(this.loadGen);
+    }
+    if (this.reviewRequestsEnabled && this.canPublish) {
+      void this.loadReviewRequests(this.loadGen);
     }
   };
 
@@ -2018,6 +2116,73 @@ export class ScionPageArtifactDetail extends LitElement {
     );
   }
 
+  /** Loads review requests for the publisher panel (ptone/scion#9307). */
+  private async loadReviewRequests(gen = this.loadGen): Promise<void> {
+    if (!this.reviewRequestsEnabled || !this.canPublish || !this.artifactId) {
+      this.reviewRequests = [];
+      this.reviewRequestsError = null;
+      return;
+    }
+    const reqGen = ++this.reviewRequestsGen;
+    this.reviewRequestsError = null;
+    try {
+      const res = await listReviewRequests(this.artifactId);
+      if (gen !== this.loadGen || reqGen !== this.reviewRequestsGen) return;
+      this.reviewRequests = res.requests;
+    } catch (err) {
+      if (gen !== this.loadGen || reqGen !== this.reviewRequestsGen) return;
+      this.reviewRequestsError =
+        err instanceof Error ? err.message : 'Could not load review requests';
+    }
+  }
+
+  /** Whether the signed-in user may withdraw this open review request (matches hub withdrawAuthority). */
+  private canWithdrawRequest(rr: ReviewRequestInfo): boolean {
+    if (rr.state !== 'open') return false;
+    if (this.data?.canManage || this.data?.canShare) return true;
+    const uid = this.pageData?.user?.id ?? '';
+    const a = this.data?.artifact;
+    if (uid && a && a.ownerKind === 'user' && a.ownerRef === uid) return true;
+    if (uid && rr.requester.kind === 'user' && rr.requester.ref === uid) return true;
+    return false;
+  }
+
+  private async withdrawRequest(rr: ReviewRequestInfo): Promise<void> {
+    if (!this.artifactId || this.withdrawingRequestIds.has(rr.id)) return;
+    const nextBusy = new Set(this.withdrawingRequestIds);
+    nextBusy.add(rr.id);
+    this.withdrawingRequestIds = nextBusy;
+    this.reviewRequestsError = null;
+    try {
+      await withdrawReviewRequest(this.artifactId, rr.id);
+      if (this.data?.reviewState?.requestedOfMe?.id === rr.id) {
+        this.data = {
+          ...this.data,
+          reviewState: {
+            ...this.data.reviewState,
+            requestedOfMe: null,
+          },
+        };
+      }
+      await this.loadReviewRequests();
+    } catch (err) {
+      const alreadyClosed =
+        err instanceof WithdrawReviewRequestError &&
+        (err.status === 404 || err.status === 409 || err.code === 'request_closed');
+      if (alreadyClosed) {
+        showToast('This review request was already closed.', 'primary');
+        await this.loadReviewRequests();
+        return;
+      }
+      this.reviewRequestsError =
+        err instanceof Error ? err.message : 'Could not withdraw review request';
+    } finally {
+      const cleared = new Set(this.withdrawingRequestIds);
+      cleared.delete(rr.id);
+      this.withdrawingRequestIds = cleared;
+    }
+  }
+
   private openDismissRequestDialog = (): void => {
     this.dismissRequestNote = '';
     this.dismissRequestError = null;
@@ -2049,6 +2214,7 @@ export class ScionPageArtifactDetail extends LitElement {
           },
         };
       }
+      if (this.canPublish) void this.loadReviewRequests();
     } catch (err) {
       const alreadyClosed =
         err instanceof DismissReviewRequestError &&
@@ -2068,6 +2234,7 @@ export class ScionPageArtifactDetail extends LitElement {
         }
         this.reviewNotice = 'This review request was already closed.';
         this.reviewNoticeVariant = 'primary';
+        if (this.canPublish) void this.loadReviewRequests();
         return;
       }
       this.dismissRequestError =
@@ -2101,6 +2268,10 @@ export class ScionPageArtifactDetail extends LitElement {
     this.staleDraft = null;
     this.staleReviewError = false;
     this.requestReviewOpen = false;
+    this.reviewRequestsGen++;
+    this.reviewRequests = [];
+    this.reviewRequestsError = null;
+    this.withdrawingRequestIds = new Set();
     this.dismissRequestOpen = false;
     this.dismissRequestNote = '';
     this.dismissRequestError = null;
@@ -2561,6 +2732,22 @@ export class ScionPageArtifactDetail extends LitElement {
       if (nextNotice) {
         this.reviewNotice = nextNotice;
         this.reviewNoticeVariant = nextVariant;
+      }
+      // Fulfilment is server-side in FinalizeVersion; clear/refresh the reviewer
+      // banner from the finalize response immediately before showCurrentVersion()
+      // refetches the artifact without a page reload.
+      if (this.data) {
+        if (finalized.reviewState) {
+          this.data = { ...this.data, reviewState: finalized.reviewState };
+        } else if (this.data.reviewState?.requestedOfMe) {
+          this.data = {
+            ...this.data,
+            reviewState: {
+              ...this.data.reviewState,
+              requestedOfMe: null,
+            },
+          };
+        }
       }
       this.reviewPending = null;
       this.reviewing = false;
@@ -3094,7 +3281,7 @@ export class ScionPageArtifactDetail extends LitElement {
           ? this.reviewGraphical
             ? this.renderGraphicalReview()
             : this.renderReview()
-          : html`${this.renderReviewNotice()}${this.renderReviewerRequestBanner()}${this.renderReviewBanner()}${this.renderTabs()}`}
+          : html`${this.renderReviewNotice()}${this.renderReviewerRequestBanner()}${this.renderReviewBanner()}${this.renderReviewRequestsPanel()}${this.renderTabs()}`}
       <scion-artifact-publish-dialog
         .artifactId=${this.artifactId}
         ?open=${this.publishOpen}
@@ -3195,6 +3382,9 @@ export class ScionPageArtifactDetail extends LitElement {
             .artifact=${this.data.artifact}
             .currentUserId=${this.pageData?.user?.id ?? ''}
             ?open=${this.requestReviewOpen}
+            @artifact-review-requested=${(): void => {
+              void this.loadReviewRequests();
+            }}
             @artifact-request-review-closed=${(): void => {
               this.requestReviewOpen = false;
             }}
@@ -4120,11 +4310,16 @@ export class ScionPageArtifactDetail extends LitElement {
     if (!req) return nothing;
     const requester =
       req.requester.displayName || this.label(req.requester.kind || 'user', req.requester.ref);
+    const latest = this.latestSeq;
+    const versionContext =
+      latest > req.requestedSeq
+        ? `requested on v${req.requestedSeq} · latest v${latest}`
+        : `v${req.requestedSeq}`;
     return html`<sl-alert class="reviewer-request-banner" variant="primary" open>
       <sl-icon slot="icon" name="person-check"></sl-icon>
       <div class="reviewer-request-row">
         <div class="reviewer-request-text">
-          <strong>${requester}</strong> asked you to review this (v${req.requestedSeq}).
+          <strong>${requester}</strong> asked you to review this (${versionContext}).
           ${req.note ? html`<div class="reviewer-request-note">“${req.note}”</div>` : nothing}
         </div>
         <div class="reviewer-request-actions">
@@ -4149,6 +4344,111 @@ export class ScionPageArtifactDetail extends LitElement {
         </div>
       </div>
     </sl-alert>`;
+  }
+
+  private reviewRequestStateBadge(state: string): {
+    label: string;
+    variant: 'primary' | 'success' | 'neutral';
+  } {
+    switch (state) {
+      case 'open':
+        return { label: 'Open', variant: 'primary' };
+      case 'fulfilled':
+        return { label: 'Fulfilled', variant: 'success' };
+      case 'dismissed':
+        return { label: 'Dismissed', variant: 'neutral' };
+      case 'withdrawn':
+        return { label: 'Withdrawn', variant: 'neutral' };
+      case 'expired':
+        return { label: 'Expired', variant: 'neutral' };
+      default:
+        return { label: state, variant: 'neutral' };
+    }
+  }
+
+  /** Publisher panel listing open and recent closed review requests (ptone/scion#9307). */
+  private renderReviewRequestsPanel(): TemplateResult | typeof nothing {
+    if (!this.reviewRequestsEnabled || !this.canPublish) return nothing;
+    if (this.reviewRequests.length === 0 && !this.reviewRequestsError) return nothing;
+    const openCount = this.reviewRequests.filter((r) => r.state === 'open').length;
+    const latest = this.latestSeq;
+    return html`<section class="review-requests-panel" aria-label="Review requests">
+      <div class="review-requests-header">
+        <h3 class="review-requests-title">
+          <sl-icon name="person-check"></sl-icon>
+          Review requests
+          ${openCount > 0
+            ? html`<sl-badge class="rr-open-count" variant="primary" pill
+                >${openCount} open</sl-badge
+              >`
+            : nothing}
+        </h3>
+      </div>
+      ${this.reviewRequestsError
+        ? html`<sl-alert class="review-requests-error" variant="danger" open role="alert">
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${this.reviewRequestsError}
+          </sl-alert>`
+        : nothing}
+      ${this.reviewRequests.length > 0
+        ? html`<ul class="review-requests-list">
+            ${this.reviewRequests.map((rr) => {
+              const reviewer = rr.reviewer.displayName || this.label('user', rr.reviewer.ref);
+              const badge = this.reviewRequestStateBadge(rr.state);
+              const versionText =
+                latest > rr.requestedSeq
+                  ? `requested on v${rr.requestedSeq} · latest v${latest}`
+                  : `requested on v${rr.requestedSeq}`;
+              const fulfilledText =
+                rr.state === 'fulfilled' && rr.resolvedSeq
+                  ? ` · reviewed in v${rr.resolvedSeq}`
+                  : '';
+              return html`<li
+                class="review-request-row"
+                data-request-id=${rr.id}
+                data-state=${rr.state}
+              >
+                <div class="rr-main">
+                  <div class="rr-top">
+                    <span class="rr-reviewer">${reviewer}</span>
+                    <sl-badge class="rr-state-badge" variant=${badge.variant} pill
+                      >${badge.label}</sl-badge
+                    >
+                    ${rr.state === 'open' && rr.inDraft
+                      ? html`<sl-badge class="rr-in-draft" variant="neutral" pill
+                          >in draft</sl-badge
+                        >`
+                      : nothing}
+                    ${rr.state === 'open' && rr.reviewerCanReview === false
+                      ? html`<sl-badge class="rr-no-access" variant="warning" pill
+                          >no access</sl-badge
+                        >`
+                      : nothing}
+                  </div>
+                  <div class="rr-meta">
+                    <span class="rr-version">${versionText}${fulfilledText}</span>
+                  </div>
+                  ${rr.responseNote
+                    ? html`<div class="rr-dismiss-note">“${rr.responseNote}”</div>`
+                    : nothing}
+                </div>
+                ${this.canWithdrawRequest(rr)
+                  ? html`<div class="rr-actions">
+                      <sl-button
+                        size="small"
+                        class="rr-withdraw-btn"
+                        ?loading=${this.withdrawingRequestIds.has(rr.id)}
+                        @click=${(): void => void this.withdrawRequest(rr)}
+                      >
+                        Withdraw
+                      </sl-button>
+                    </div>`
+                  : nothing}
+              </li>`;
+            })}
+          </ul>`
+        : nothing}
+    </section>`;
   }
 
   /** Dialog for dismissing the viewer's open review request with an optional note. */
