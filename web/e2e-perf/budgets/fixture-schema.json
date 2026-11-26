@@ -74,6 +74,7 @@
         "experiments.web.gcs_links:boolean",
         "experiments.web.inbox_dashboard:boolean",
         "experiments.web.sse_hidden_tab_close:boolean",
+        "experiments.web.terminal_key_bar:boolean",
         "experiments:object"
       ]
     },

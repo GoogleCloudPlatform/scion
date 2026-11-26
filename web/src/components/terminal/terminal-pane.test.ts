@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
@@ -16,15 +16,14 @@ const zeroJitter = { random: () => 0 };
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
+type MockTerminal = Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>> & {
+  element: HTMLElement | undefined;
+  input: Mock<(data: string) => void>;
+  modes: { applicationCursorKeysMode: boolean; mouseTrackingMode: string };
+  textarea: HTMLTextAreaElement | undefined;
+};
 const terminal = vi.hoisted(() => ({
-  instances: [] as Array<{
-    dispose: ReturnType<typeof vi.fn>;
-    reset: ReturnType<typeof vi.fn>;
-    focus: ReturnType<typeof vi.fn>;
-    blur: ReturnType<typeof vi.fn>;
-    element: HTMLElement | undefined;
-    modes: { mouseTrackingMode: string };
-  }>,
+  instances: [] as MockTerminal[],
   /** When set, fit() resizes the latest terminal to this measured size. */
   fitSize: null as { cols: number; rows: number } | null,
 }));
@@ -41,12 +40,20 @@ vi.mock('@xterm/xterm', () => ({
     parser = { registerOscHandler: vi.fn() };
     loadAddon = vi.fn();
     element: HTMLElement | undefined;
-    modes = { mouseTrackingMode: 'none' };
+    modes = { applicationCursorKeysMode: false, mouseTrackingMode: 'none' };
+    textarea: HTMLTextAreaElement | undefined = undefined;
     open = vi.fn((parent: HTMLElement): void => {
       this.element = document.createElement('div');
       parent.append(this.element);
     });
-    onData = vi.fn();
+    dataHandlers: Array<(data: string) => void> = [];
+    onData = vi.fn((handler: (data: string) => void) => {
+      this.dataHandlers.push(handler);
+    });
+    // Like xterm's input(): fires onData as typed input would.
+    input = vi.fn((data: string) => {
+      for (const handler of this.dataHandlers) handler(data);
+    });
     onBinary = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
     constructor() {
@@ -2688,10 +2695,479 @@ describe('touch-to-wheel scrolling', () => {
     const el = xt.element!;
     xt.modes.mouseTrackingMode = 'any';
     page.dispose();
+    // Restore the terminal reference after dispose so this assertion tests
+    // that the listeners were genuinely removed via AbortController.abort(),
+    // rather than only observing the null-terminal guard in mouseActive().
+    (page as unknown as { terminal: MockTerminal }).terminal = xt;
     const move = touch('touchmove', 100);
     el.dispatchEvent(touch('touchstart', 300));
     el.dispatchEvent(move);
     expect(move.defaultPrevented).toBe(false);
     expect(el.style.touchAction).toBe('');
+  });
+});
+
+describe('touch key bar', () => {
+  const keyBar = (): HTMLElement | null => page.shadowRoot!.querySelector<HTMLElement>('.key-bar');
+  const keyGroup = (): HTMLElement | null =>
+    page.shadowRoot!.querySelector<HTMLElement>('.key-bar[role="group"]');
+  const toggle = (): HTMLButtonElement | null =>
+    page.shadowRoot!.querySelector<HTMLButtonElement>('.key-bar-toggle');
+  const key = (label: string): HTMLButtonElement =>
+    page.shadowRoot!.querySelector<HTMLButtonElement>(`.key-bar button[aria-label^="${label}"]`)!;
+  /** Data frames the pane sent over the PTY socket since the last clear. */
+  const sent = (): string[] =>
+    FakeSocket.instances[0].send.mock.calls
+      .map(([frame]) => JSON.parse(frame as string) as { type: string; data?: string })
+      .filter((frame) => frame.type === 'data')
+      .map((frame) => atob(frame.data!));
+  const press = async (label: string): Promise<void> => {
+    key(label).click();
+    await page.updateComplete;
+  };
+  /** A character typed on the on-screen keyboard reaches xterm's onData. */
+  const type = (data: string): void => {
+    terminal.instances[0].input(data);
+  };
+
+  /** Stubs the touch query; returns a function that flips it later. */
+  function stubPointer(touch: boolean): {
+    flip: (touch: boolean) => void;
+    removeEventListener: ReturnType<typeof vi.fn>;
+  } {
+    const listeners: Array<() => void> = [];
+    const removeEventListener = vi.fn((_type: string, listener: () => void) => {
+      const idx = listeners.indexOf(listener);
+      if (idx >= 0) listeners.splice(idx, 1);
+    });
+    const query = {
+      media: '(hover: none) and (pointer: coarse)',
+      matches: touch,
+      addEventListener: (_type: string, listener: () => void): void => {
+        listeners.push(listener);
+      },
+      removeEventListener,
+    };
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => query)
+    );
+    return {
+      flip: (next) => {
+        query.matches = next;
+        for (const listener of [...listeners]) listener();
+      },
+      removeEventListener,
+    };
+  }
+
+  async function mountTouch(flagEnabled = true): Promise<(touch: boolean) => void> {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': flagEnabled };
+    const { flip } = stubPointer(true);
+    await mountConnected();
+    FakeSocket.instances[0].send.mockClear();
+    return flip;
+  }
+
+  // happy-dom's localStorage is not functional in this setup; the pane keeps
+  // the hidden preference there, so provide a minimal stub per test.
+  beforeEach(() => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, String(v)),
+      removeItem: (k: string) => void store.delete(k),
+    });
+  });
+
+  afterEach(() => {
+    delete window.__SCION_FEATURES__;
+  });
+
+  it('is absent, with no toggle, when the primary pointer is not touch', async () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': true };
+    stubPointer(false);
+    await mountConnected();
+    expect(keyBar()).toBeNull();
+    expect(toggle()).toBeNull();
+    type('c');
+    expect(sent()).toContain('c');
+  });
+
+  it('is absent when the web.terminal_key_bar experiment is off, and appears when enabled', async () => {
+    await mountTouch(false);
+    expect(keyBar()).toBeNull();
+    expect(toggle()).toBeNull();
+
+    const { setFeatureFlag } = await import('../../utils/feature-flags.js');
+    setFeatureFlag('web.terminal_key_bar', true);
+    await page.updateComplete;
+    expect(keyGroup()).not.toBeNull();
+    expect(toggle()).not.toBeNull();
+  });
+
+  it('shows on a touch device with the toggle inside the key bar (not the toolbar) and remembers collapse', async () => {
+    await mountTouch();
+    expect(page.shadowRoot!.querySelector('.toolbar .key-bar-toggle')).toBeNull();
+    expect(keyGroup()).not.toBeNull();
+    expect(keyGroup()!.getAttribute('aria-label')).toBe('Terminal keys');
+    expect(toggle()!.getAttribute('aria-label')).toBe('Hide terminal keys');
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('true');
+
+    toggle()!.click();
+    await page.updateComplete;
+    expect(keyGroup()).toBeNull();
+    expect(keyBar()!.classList.contains('collapsed')).toBe(true);
+    expect(keyBar()!.querySelectorAll('button')).toHaveLength(1);
+    expect(toggle()!.getAttribute('aria-label')).toBe('Show terminal keys');
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('false');
+    expect(localStorage.getItem('scion-terminal-key-bar-hidden')).toBe('true');
+
+    // A pane opened later starts hidden too.
+    const other = document.createElement('scion-terminal-pane');
+    document.body.append(other);
+    expect((other as unknown as { keyBarHidden: boolean }).keyBarHidden).toBe(true);
+    other.remove();
+
+    toggle()!.click();
+    await page.updateComplete;
+    expect(keyGroup()).not.toBeNull();
+    expect(toggle()!.getAttribute('aria-label')).toBe('Hide terminal keys');
+    expect(localStorage.getItem('scion-terminal-key-bar-hidden')).toBeNull();
+  });
+
+  it("labels every key, and a text key's name starts with its visible text", async () => {
+    await mountTouch();
+    const buttons = [...keyBar()!.querySelectorAll('button')];
+    expect(buttons.length).toBeGreaterThanOrEqual(9);
+    for (const button of buttons) {
+      const name = button.getAttribute('aria-label') ?? '';
+      const text = button.textContent!.trim();
+      expect(name).toBeTruthy();
+      // Arrow glyphs and the Shift glyph are symbols, named in words.
+      if (!/^[←↑↓→⇧]/.test(text)) expect(name.startsWith(text)).toBe(true);
+    }
+  });
+
+  it("moves focus into this pane's terminal when another pane or an input has focus", async () => {
+    await mountTouch();
+    const xt = terminal.instances[0];
+    // Another pane's terminal (split layout) or any input outside this pane.
+    const other = document.createElement('input');
+    document.body.append(other);
+    try {
+      other.focus();
+      xt.focus.mockClear();
+      await press('Ctrl');
+      expect(xt.focus).toHaveBeenCalledTimes(1);
+    } finally {
+      other.remove();
+    }
+
+    // A focused button outside the pane takes no typed text, so no keyboard
+    // is open and the bar key must not open one.
+    const button = document.createElement('button');
+    document.body.append(button);
+    try {
+      button.focus();
+      expect(document.activeElement).toBe(button);
+      xt.focus.mockClear();
+      await press('PgUp');
+      expect(xt.focus).not.toHaveBeenCalled();
+    } finally {
+      button.remove();
+    }
+
+    // A focused non-text input (checkbox, radio, range...) takes no typed text,
+    // so no keyboard is open and the bar key must not open one.
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    document.body.append(checkbox);
+    try {
+      checkbox.focus();
+      expect(document.activeElement).toBe(checkbox);
+      xt.focus.mockClear();
+      await press('PgUp');
+      expect(xt.focus).not.toHaveBeenCalled();
+    } finally {
+      checkbox.remove();
+    }
+
+    // Already focused in this pane: no focus call.
+    const textarea = document.createElement('textarea');
+    page.shadowRoot!.querySelector('.terminal-container')!.append(textarea);
+    xt.textarea = textarea;
+    textarea.focus();
+    expect(page.shadowRoot!.activeElement).toBe(textarea);
+    xt.focus.mockClear();
+    await press('Esc');
+    expect(xt.focus).not.toHaveBeenCalled();
+  });
+
+  it('leaves the keyboard closed: no focus move when nothing has focus', async () => {
+    await mountTouch();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect([null, document.body]).toContain(document.activeElement);
+    const xt = terminal.instances[0];
+    xt.focus.mockClear();
+    await press('PgUp');
+    await press('Ctrl');
+    expect(xt.focus).not.toHaveBeenCalled();
+    expect(sent()).toEqual(['\x1b[5~']);
+  });
+
+  it('clears an armed modifier on reconnect, keeps a locked one', async () => {
+    await mountTouch();
+    const reconnect = async (): Promise<void> => {
+      const socket = FakeSocket.instances.at(-1)!;
+      socket.readyState = 3;
+      socket.onclose?.({ code: 1006 });
+      await page.updateComplete;
+      const count = FakeSocket.instances.length;
+      void page.session!.connect();
+      await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(count + 1));
+      FakeSocket.instances.at(-1)!.open();
+      FakeSocket.instances.at(-1)!.data();
+      await page.updateComplete;
+    };
+    await press('Ctrl');
+    await reconnect();
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    await press('Ctrl');
+    await press('Ctrl');
+    await reconnect();
+    expect(key('Ctrl').classList.contains('locked')).toBe(true);
+  });
+
+  it('Ctrl with the on-screen Backspace sends BS (0x08)', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    type('\x7f');
+    type('\x7f');
+    expect(sent()).toEqual(['\b', '\x7f']);
+  });
+
+  it('sends Esc, Tab, Shift+Tab and Page keys through xterm input', async () => {
+    await mountTouch();
+    await press('Esc');
+    await press('Tab');
+    await press('Shift Tab');
+    await press('PgUp');
+    await press('PgDn');
+    expect(sent()).toEqual(['\x1b', '\t', '\x1b[Z', '\x1b[5~', '\x1b[6~']);
+    // Through xterm's own input path, so it acts like a typed key.
+    expect(terminal.instances[0].input).toHaveBeenCalledWith('\x1b');
+  });
+
+  it('sends arrows and Home/End in the current cursor mode (DECCKM)', async () => {
+    await mountTouch();
+    for (const label of ['Up arrow', 'Down arrow', 'Right arrow', 'Left arrow', 'Home', 'End'])
+      await press(label);
+    terminal.instances[0].modes.applicationCursorKeysMode = true;
+    for (const label of ['Up arrow', 'Down arrow', 'Right arrow', 'Left arrow', 'Home', 'End'])
+      await press(label);
+    expect(sent()).toEqual([
+      '\x1b[A',
+      '\x1b[B',
+      '\x1b[C',
+      '\x1b[D',
+      '\x1b[H',
+      '\x1b[F',
+      '\x1bOA',
+      '\x1bOB',
+      '\x1bOC',
+      '\x1bOD',
+      '\x1bOH',
+      '\x1bOF',
+    ]);
+  });
+
+  it('sticky Ctrl maps the next typed character to its control code, then clears', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+    expect(key('Ctrl').classList.contains('armed')).toBe(true);
+    type('c');
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
+    await press('Ctrl');
+    type('[');
+    expect(sent()).toEqual(['\x03', 'c', '\x1b']);
+  });
+
+  it('sticky Ctrl applies to bar keys too: modified arrows and a bar character', async () => {
+    await mountTouch();
+    terminal.instances[0].modes.applicationCursorKeysMode = true;
+    await press('Ctrl');
+    await press('Up arrow');
+    await press('Up arrow');
+    await press('Alt');
+    await press('/');
+    expect(sent()).toEqual(['\x1b[1;5A', '\x1bOA', '\x1b/']);
+  });
+
+  it('tapping Ctrl twice locks it until it is tapped again', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    await press('Ctrl');
+    expect(key('Ctrl').classList.contains('locked')).toBe(true);
+    expect(key('Ctrl').getAttribute('aria-label')).toBe('Ctrl (Control), locked');
+    type('a');
+    type('e');
+    await press('Ctrl');
+    type('a');
+    expect(sent()).toEqual(['\x01', '\x05', 'a']);
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('sticky Alt prefixes ESC; a terminal reply (ESC first) leaves it armed', async () => {
+    await mountTouch();
+    await press('Alt');
+    type('\x1b[1;1R');
+    type('b');
+    type('b');
+    expect(sent()).toEqual(['\x1b[1;1R', '\x1bb', 'b']);
+  });
+
+  it('a multi-character input (paste, dictation, IME word) uses up an armed Ctrl', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    type('ls');
+    type(' ');
+    // Locked stays locked across it.
+    await press('Ctrl');
+    await press('Ctrl');
+    type('ls');
+    type('c');
+    expect(sent()).toEqual(['ls', ' ', 'ls', '\x03']);
+  });
+
+  it('clears an armed modifier when the touch query stops matching', async () => {
+    const flip = await mountTouch();
+    await press('Ctrl');
+    flip(false);
+    await page.updateComplete;
+    expect(keyBar()).toBeNull();
+    flip(true);
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
+    expect(sent()).toEqual(['c']);
+  });
+
+  it('hiding the bar or the pane clears an armed modifier', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    toggle()!.click();
+    await page.updateComplete;
+    toggle()!.click();
+    await page.updateComplete;
+    // The bar is back and Ctrl is off: hiding it cleared the modifier.
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
+    await press('Ctrl');
+    page.setVisible(false);
+    page.setVisible(true);
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    type('c');
+    expect(sent()).toEqual(['c', 'c']);
+  });
+
+  it('does not take focus: mousedown is prevented, pointerdown is not (WebKit drops the click)', async () => {
+    await mountTouch();
+    terminal.instances[0].blur.mockClear();
+    for (const target of [key('Esc'), key('Ctrl'), toggle()!]) {
+      for (const type of ['mousedown', 'pointerdown']) {
+        const event = new Event(type, { bubbles: true, cancelable: true, composed: true });
+        target.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(type === 'mousedown');
+      }
+    }
+    await press('Esc');
+    expect(terminal.instances[0].blur).not.toHaveBeenCalled();
+  });
+
+  it('disables all bar keys while disconnected without moving focus or changing modifier state', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+    expect(key('Alt').getAttribute('aria-pressed')).toBe('false');
+
+    FakeSocket.instances[0].onclose?.({ code: 1006 });
+    await page.updateComplete;
+    // aria-disabled, not disabled: a disabled button may not dispatch the
+    // mousedown that keepFocus prevents, and the tap would close the keyboard.
+    for (const label of ['Esc', 'Ctrl', 'Alt']) {
+      expect(key(label).getAttribute('aria-disabled')).toBe('true');
+      expect(key(label).disabled).toBe(false);
+    }
+
+    const other = document.createElement('input');
+    document.body.append(other);
+    try {
+      other.focus();
+      terminal.instances[0].focus.mockClear();
+      await press('Esc');
+      await press('Ctrl');
+      await press('Alt');
+      expect(sent()).toEqual([]);
+      expect(terminal.instances[0].focus).not.toHaveBeenCalled();
+      expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+      expect(key('Ctrl').classList.contains('locked')).toBe(false);
+      expect(key('Alt').getAttribute('aria-pressed')).toBe('false');
+    } finally {
+      other.remove();
+    }
+
+    // Typed character while disconnected must also leave an armed modifier alone.
+    type('c');
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('a pane shown again picks up a toggle made in another pane', async () => {
+    await mountTouch();
+    page.setVisible(false);
+    localStorage.setItem('scion-terminal-key-bar-hidden', 'true');
+    page.setVisible(true);
+    await page.updateComplete;
+    expect(keyGroup()).toBeNull();
+    expect(toggle()!.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('uses up an armed modifier when the tab goes to the background, keeps a locked one', async () => {
+    await mountTouch();
+    await press('Ctrl');
+    await press('Alt');
+    await press('Alt');
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+    } finally {
+      hidden.mockRestore();
+    }
+    await page.updateComplete;
+    expect(key('Ctrl').getAttribute('aria-pressed')).toBe('false');
+    expect(key('Alt').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('cleans up key-bar listeners on disconnect/dispose without leaking across re-mount', async () => {
+    window.__SCION_FEATURES__ = { 'web.terminal_key_bar': true };
+    const { removeEventListener } = stubPointer(true);
+    const removeWindowSpy = vi.spyOn(window, 'removeEventListener');
+    try {
+      await mountConnected();
+      page.dispose();
+      page.remove();
+      expect(removeEventListener).toHaveBeenCalledWith('change', expect.any(Function));
+      expect(removeWindowSpy).toHaveBeenCalledWith(
+        'scion-feature-flags-changed',
+        expect.any(Function)
+      );
+    } finally {
+      removeWindowSpy.mockRestore();
+    }
   });
 });
