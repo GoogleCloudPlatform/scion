@@ -289,14 +289,6 @@ func (s *Server) resolveMentionCopyTargets(ctx context.Context, in agentMentionF
 	return plan
 }
 
-// fanOutAgentMentions resolves and delivers @-mentions for direct unit tests.
-// Production send paths call resolveMentionCopyTargets once before the policy
-// gate and then deliverResolvedAgentMentions with that exact resolved plan.
-func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutInput) []messages.MentionResult {
-	resolved := s.resolveMentionCopyTargets(ctx, in)
-	return s.deliverResolvedAgentMentions(ctx, in, resolved)
-}
-
 // deliverResolvedAgentMentions delivers copies for an already-resolved mention
 // plan without re-resolving mentions (Contract §6).
 func (s *Server) deliverResolvedAgentMentions(ctx context.Context, in agentMentionFanoutInput, resolved *resolvedMentionPlan) []messages.MentionResult {
