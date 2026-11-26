@@ -828,7 +828,7 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 	topicHidden, convHidden, msgsHidden := seedWebThread(projHidden, "secret-thread", base.Add(3*time.Minute), 1, true)
 	starMsg(msgsHidden[0], topicHidden, convHidden, projHidden.ID)
 
-	memberUser, err := f.s.GetUserByID(ctx, f.member)
+	memberUser, err := f.s.GetUser(ctx, f.member)
 	require.NoError(t, err)
 
 	// Case 1: 0 unread, 3 authorized starred messages across 1 project (projC).
