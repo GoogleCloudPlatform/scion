@@ -424,6 +424,12 @@ func IsDotGitComponent(c string) bool {
 	return strings.EqualFold(strings.TrimRight(c, ". "), ".git")
 }
 
+// IsDotScionComponent reports whether a single path component names .scion,
+// ignoring case and trailing dots and spaces. It does not match .scion-volumes.
+func IsDotScionComponent(c string) bool {
+	return strings.EqualFold(strings.TrimRight(c, ". "), ".scion")
+}
+
 // canonicalExisting returns EvalSymlinks plus abs of an existing path.
 func canonicalExisting(p string) (string, error) {
 	r, err := filepath.EvalSymlinks(p)

@@ -1644,9 +1644,9 @@ func validateWorkspaceFilePath(path string) error {
 }
 
 // validateWorkspaceWritePath is validateWorkspaceFilePath for the handlers
-// that create, change, remove or download workspace files (write, upload,
-// delete, download). It also refuses a path with a .git component under
-// util.IsDotGitComponent.
+// that create, change or remove workspace files (write, upload, delete). It
+// also refuses any path with a .git component under util.IsDotGitComponent or
+// a .scion component under util.IsDotScionComponent.
 func validateWorkspaceWritePath(path string) error {
 	if err := validateWorkspaceFilePath(path); err != nil {
 		return err
@@ -1655,27 +1655,34 @@ func validateWorkspaceWritePath(path string) error {
 		if util.IsDotGitComponent(c) {
 			return errDotGitComponent
 		}
+		if util.IsDotScionComponent(c) {
+			return errDotScionComponent
+		}
 	}
 	return nil
 }
 
 // writeWorkspaceRefusal answers a policy refusal (err wraps
-// errWorkspaceWriteRefused): the .git refusal when the path reaches a .git
-// directory, otherwise a neutral text that neither states the reason nor
-// echoes the path.
+// errWorkspaceWriteRefused): the .git or .scion refusal when the path reaches
+// one of those directories, otherwise a neutral text that neither states the
+// reason nor echoes the path.
 func writeWorkspaceRefusal(w http.ResponseWriter, relPath string, err error) {
 	if errors.Is(err, errWorkspaceThroughDotGit) {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotGitComponent.Error()))
+		return
+	}
+	if errors.Is(err, errWorkspaceThroughDotScion) {
+		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, errDotScionComponent.Error()))
 		return
 	}
 	BadRequest(w, "Invalid file path: path is not accessible")
 }
 
 // writeWorkspaceWalkError answers a failed download or delete walk: the .git
-// refusal (400) when the path reaches a .git directory, a neutral 400 that
-// does not echo the path for every other refusal (a symlink target, a
-// non-directory on the way, an entry that changed), 404 for a missing entry,
-// and notAccessible otherwise.
+// or .scion refusal (400) when the path reaches one of those directories, a
+// neutral 400 that does not echo the path for every other refusal (a symlink
+// target, a non-directory on the way, an entry that changed), 404 for a
+// missing entry, and notAccessible otherwise.
 func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err error) {
 	switch {
 	case errors.Is(err, errWorkspaceWriteRefused):
@@ -1691,8 +1698,25 @@ func writeWorkspaceWalkError(w http.ResponseWriter, kind, relPath string, err er
 // given to a download or delete whose walk reaches a .git directory.
 var errDotGitComponent = errors.New("paths with a .git component are not allowed")
 
-// validateWorkspaceReadPath is validateWorkspaceWritePath for downloads.
-func validateWorkspaceReadPath(path string) error { return validateWorkspaceWritePath(path) }
+// errDotScionComponent is the refusal of a write, upload, or delete path with
+// a .scion component, also given when a write or delete walk reaches a .scion
+// directory.
+var errDotScionComponent = errors.New("paths with a .scion component are not allowed")
+
+// validateWorkspaceReadPath is validateWorkspaceFilePath for downloads. It
+// refuses .git components (like writes) but allows .scion so downloading and
+// inspecting project config files remains possible.
+func validateWorkspaceReadPath(path string) error {
+	if err := validateWorkspaceFilePath(path); err != nil {
+		return err
+	}
+	for _, c := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if util.IsDotGitComponent(c) {
+			return errDotGitComponent
+		}
+	}
+	return nil
+}
 
 // skipDotGitEntry reports whether a listing or archive walk leaves out d, an
 // entry named .git under util.IsDotGitComponent (a directory or a gitfile),
