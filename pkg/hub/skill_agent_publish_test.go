@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -226,11 +227,13 @@ func TestAgentSkillPublish_RoleAndCeilingEnforced(t *testing.T) {
 				ScopeID: f.p.ID,
 			}, token)
 			assert.Equal(t, http.StatusForbidden, createRec.Code, createRec.Body.String())
+			assertSkillMissingScopeResponse(t, createRec)
 
 			pubRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.sp.ID+"/versions", PublishVersionRequest{
 				Version: "2.0.0",
 			}, token)
 			assert.Equal(t, http.StatusForbidden, pubRec.Code, pubRec.Body.String())
+			assertSkillMissingScopeResponse(t, pubRec)
 		})
 	}
 
@@ -244,11 +247,69 @@ func TestAgentSkillPublish_RoleAndCeilingEnforced(t *testing.T) {
 			ScopeID: f.p.ID,
 		}, token)
 		assert.Equal(t, http.StatusForbidden, createRec.Code, createRec.Body.String())
+		assert.Contains(t, createRec.Body.String(), `"code":"forbidden"`)
 
 		pubRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.sp.ID+"/versions", PublishVersionRequest{
 			Version: "2.0.0",
 		}, token)
 		assert.Equal(t, http.StatusForbidden, pubRec.Code, pubRec.Body.String())
+		assert.Contains(t, pubRec.Body.String(), `"code":"forbidden"`)
+	})
+
+	// Real mint path: an AgentRoleFull agent whose token was minted through
+	// AuthorizeAgentToken under a creator ceiling lacking skill.create/update
+	// has project:skill:write dropped from its JWT, and gets 403 missing_scope
+	// naming project:skill:write on own-project skill writes (ptone/scion#9452),
+	// while cross-project and global denials stay plain 403 forbidden.
+	t.Run("ceiling-dropped-scope-missing-scope", func(t *testing.T) {
+		ctx := context.Background()
+		agent := &store.Agent{
+			ID: tid("skillpub-dropped-scope"), Slug: tid("skillpub-dropped-scope"), Name: "skillpub-dropped-scope",
+			ProjectID: f.p.ID, Phase: string(state.PhaseRunning),
+			CreatedBy: f.u.ID, OwnerID: f.u.ID, Ancestry: []string{f.u.ID},
+			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, agent))
+		require.NoError(t, f.s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.u.ID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
+			ScopeType: store.RoleScopeProject, ScopeID: f.p.ID,
+			Role: string(AgentRoleFull), Active: true,
+			EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}))
+		grant, err := f.srv.AuthorizeAgentToken(ctx, agent)
+		require.NoError(t, err)
+		assert.NotContains(t, grant.Scopes, ScopeProjectSkillWrite)
+		assert.Contains(t, grant.DroppedScopes, ScopeProjectSkillWrite)
+
+		token := f.srv.generateRecordedAgentToken(t, agent.ID, f.p.ID, grant.Scopes, grant.Ancestry)
+
+		createRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+			Name:    "dropped-scope-skill",
+			Scope:   store.SkillScopeProject,
+			ScopeID: f.p.ID,
+		}, token)
+		assert.Equal(t, http.StatusForbidden, createRec.Code, createRec.Body.String())
+		assertSkillMissingScopeResponse(t, createRec)
+
+		pubRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.sp.ID+"/versions", PublishVersionRequest{
+			Version: "2.0.0",
+		}, token)
+		assert.Equal(t, http.StatusForbidden, pubRec.Code, pubRec.Body.String())
+		assertSkillMissingScopeResponse(t, pubRec)
+
+		otherRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.sq.ID+"/versions", PublishVersionRequest{
+			Version: "2.0.0",
+		}, token)
+		assert.Equal(t, http.StatusForbidden, otherRec.Code, otherRec.Body.String())
+		assert.Contains(t, otherRec.Body.String(), `"code":"forbidden"`)
+
+		globalRec := doAgentTokenRequest(t, f.srv, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+			Name:  "dropped-scope-global",
+			Scope: store.SkillScopeGlobal,
+		}, token)
+		assert.Equal(t, http.StatusForbidden, globalRec.Code, globalRec.Body.String())
+		assert.Contains(t, globalRec.Body.String(), `"code":"forbidden"`)
 	})
 
 	// A project-less agent with project:skill:write cannot create or update any
@@ -263,4 +324,20 @@ func TestAgentSkillPublish_RoleAndCeilingEnforced(t *testing.T) {
 		assert.False(t, f.srv.authzService.CheckAccess(ctx, ident, skillScopeResource(store.SkillScopeProject, f.p.ID), ActionCreate).Allowed)
 		assert.False(t, f.srv.authzService.CheckAccess(ctx, ident, skillResource(f.sp), ActionUpdate).Allowed)
 	})
+}
+
+func assertSkillMissingScopeResponse(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	assert.Equal(t, "missing_scope", body.Error.Code, rec.Body.String())
+	assert.Contains(t, body.Error.Message, string(ScopeProjectSkillWrite), rec.Body.String())
+	assert.Equal(t, string(ScopeProjectSkillWrite), body.Error.Details["scope"], rec.Body.String())
+	assert.Equal(t, []any{string(ScopeProjectSkillWrite)}, body.Error.Details["scopes"], rec.Body.String())
 }

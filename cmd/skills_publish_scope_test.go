@@ -192,3 +192,40 @@ func TestSkillsPublish_UserLookupFiltersByCaller(t *testing.T) {
 		assert.Nil(t, got)
 	})
 }
+
+// TestSkillsPublish_MissingScopeHint verifies that a 403 missing_scope response
+// for project:skill:write produces the actionable CLI hint naming the scope and
+// the reset-auth --reissue-scopes command (ptone/scion#9452).
+func TestSkillsPublish_MissingScopeHint(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "skill-publisher")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    "missing_scope",
+				"message": "the credential does not carry the project:skill:write scope needed to publish skills in this project",
+				"details": map[string]any{
+					"scope":  "project:skill:write",
+					"scopes": []string{"project:skill:write"},
+				},
+			},
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	_, err = client.Skills().Create(context.Background(), &hubclient.CreateSkillRequest{
+		Name:    "my-skill",
+		Scope:   "project",
+		ScopeID: "proj-1",
+	})
+	require.Error(t, err)
+
+	wrapped := wrapHubError(err)
+	assert.Contains(t, wrapped.Error(), "project:skill:write")
+	assert.Contains(t, wrapped.Error(), "scion reset-auth skill-publisher --reissue-scopes")
+}

@@ -166,14 +166,50 @@ func droppedCeilingOptionalScopes(candidates, issued []AgentTokenScope) []AgentT
 	return out
 }
 
+// debugOnlyDroppedScopes are ceiling-optional role scopes whose omission from
+// an agent token is logged at Hub debug rather than surfaced as a user-facing
+// dispatch warning (ptone/scion#9452). Minting, grant.DroppedScopes, and the
+// delegation ceiling are unaffected; an agent that later attempts an operation
+// requiring one of these scopes receives a 403 missing_scope error with the
+// reissue hint.
+var debugOnlyDroppedScopes = map[AgentTokenScope]bool{
+	ScopeProjectSkillWrite: true,
+}
+
+// debugOnlyDroppedScopesFromGrant returns the dropped scopes on grant that are
+// demoted to Hub debug logging rather than user-facing dispatch warnings.
+func debugOnlyDroppedScopesFromGrant(grant *AgentTokenGrant) []AgentTokenScope {
+	if grant == nil || len(grant.DroppedScopes) == 0 {
+		return nil
+	}
+	var out []AgentTokenScope
+	for _, scope := range grant.DroppedScopes {
+		if debugOnlyDroppedScopes[scope] {
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
 // droppedScopesWarning is the create and start warning for a grant whose
-// chain ceiling left out ceiling-optional role scopes, or "" when it left
-// out none (ptone/scion#4569, ptone/scion#8324). An agent created by a parent
-// whose ceiling lacks a ceiling-optional scope still gets its role, while
-// operations requiring that scope fail with missing_scope; this says so up
-// front.
+// chain ceiling left out user-visible ceiling-optional role scopes, or "" when
+// it left out none (ptone/scion#4569, ptone/scion#8324). Scopes listed in
+// debugOnlyDroppedScopes are excluded here and logged at Hub debug instead
+// (ptone/scion#9452). An agent created by a parent whose ceiling lacks a
+// ceiling-optional scope still gets its role, while operations requiring that
+// scope fail with missing_scope; this says so up front for non-demoted scopes.
 func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	if grant == nil || len(grant.DroppedScopes) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(grant.DroppedScopes))
+	for _, scope := range grant.DroppedScopes {
+		if debugOnlyDroppedScopes[scope] {
+			continue
+		}
+		names = append(names, string(scope))
+	}
+	if len(names) == 0 {
 		return ""
 	}
 	// The command names the agent by slug only: a display name may hold
@@ -181,10 +217,6 @@ func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	agentName := "<agent>"
 	if agent != nil && agent.Slug != "" {
 		agentName = agent.Slug
-	}
-	names := make([]string, len(grant.DroppedScopes))
-	for i, scope := range grant.DroppedScopes {
-		names[i] = string(scope)
 	}
 	noun, verb := "scope", "it"
 	if len(names) > 1 {
