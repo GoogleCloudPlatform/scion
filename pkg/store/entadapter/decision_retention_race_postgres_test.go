@@ -492,47 +492,57 @@ func TestDecisionRetentionRace_DeterministicPurgeVsRepostVersionLockOrder(t *tes
 	require.NoError(t, f.cs.client.DecisionAnswer.Update().SetFacetIndexed(false).Exec(ctx))
 	drainDecisionIndex(t, ctx, f.cs, 100)
 
-	// Hold FOR UPDATE on v1 first.
-	holdTx, err := f.cs.client.Tx(ctx)
+	// Hold FOR UPDATE on v1 inside the repost's own transaction (the first lock
+	// loadKeyStates acquires) so that an id-ordered purge locks a later version
+	// whose UUID sorts below v1 and blocks on v1, and then calling
+	// createDecisionPromptTx on this same tx deterministically deadlocks with
+	// SQLSTATE 40P01 instead of retrying.
+	repostTx, err := f.cs.client.Tx(ctx)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = holdTx.Rollback() })
-	_, err = holdTx.Decision.Query().
+	t.Cleanup(func() { _ = repostTx.Rollback() })
+	_, err = repostTx.Decision.Query().
 		Where(decision.IDEQ(uuid.MustParse(rowIDs[0]))).
 		ForUpdate().
 		Only(ctx)
 	require.NoError(t, err)
 
 	st := f.cs.DecisionRetention()
-	purgeDone := make(chan error, 1)
+	type purgeOut struct {
+		res store.DecisionRetentionPurgeResult
+		err error
+	}
+	purgeDone := make(chan purgeOut, 1)
 	go func() {
-		_, err := st.PurgeDecisionMessages(ctx, msgIDs, map[string]time.Time{f.projectID: cutoff})
-		purgeDone <- err
+		r, err := st.PurgeDecisionMessages(ctx, msgIDs, map[string]time.Time{f.projectID: cutoff})
+		purgeDone <- purgeOut{r, err}
 	}()
 
-	// Wait until purge is blocked on v1 (not holding a later version lock ahead of v1).
+	// Wait until purge is blocked on v1 (not holding any later version's lock ahead of v1).
 	select {
-	case err := <-purgeDone:
-		t.Fatalf("purge did not block on v1 lock: %v", err)
+	case out := <-purgeDone:
+		t.Fatalf("purge did not block on v1 lock: %+v", out)
 	case <-time.After(blockedFor):
 	}
 
-	repostDone := make(chan error, 1)
-	go func() {
-		p := f.prompt("", true, yesNo(key, "v7"))
-		p.Message.ThreadID = "topic-race-lockorder"
-		_, err := f.cs.CreateDecisionPrompt(ctx, p)
-		repostDone <- err
-	}()
-
-	select {
-	case err := <-repostDone:
-		t.Fatalf("repost did not block on v1 lock: %v", err)
-	case <-time.After(blockedFor):
+	// Execute the --update repost inside repostTx (which still holds v1):
+	// under (key_norm, version, asker_agent_id, id) ordering, repost locks
+	// v1..v6 without blocking, marks v6 replaced with a fresh replaced_at, and
+	// commits; purge then unblocks, purges v1..v5, skips v6, and succeeds.
+	p7 := f.prompt("", true, yesNo(key, "v7"))
+	p7.Message.ThreadID = "topic-race-lockorder"
+	_, repostErr := newTxCompositeStore(repostTx).createDecisionPromptTx(ctx, p7)
+	var commitErr error
+	if repostErr == nil {
+		commitErr = repostTx.Commit()
+	} else {
+		_ = repostTx.Rollback()
 	}
 
-	// Release v1: both purge and repost must succeed without 40P01 deadlock.
-	require.NoError(t, holdTx.Rollback())
-	require.NoError(t, <-purgeDone, "purge must succeed without lock-order deadlock")
-	require.NoError(t, <-repostDone, "repost must succeed without lock-order deadlock")
+	out := <-purgeDone
+	require.NoError(t, repostErr, "repost must succeed without lock-order deadlock")
+	require.NoError(t, commitErr, "repost tx commit must succeed")
+	require.NoError(t, out.err, "purge must succeed without lock-order deadlock")
+	assert.Equal(t, versions-1, out.res.PurgedMessages, "v1..v5 must be purged while freshly replaced v6 is skipped")
+	assert.Equal(t, 1, out.res.SkippedMessages)
 	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
 }
