@@ -73,6 +73,10 @@ export interface Artifact {
    * ptone/scion#4529). The artifact is otherwise unchanged.
    */
   ownerDeleted?: boolean;
+  /** Most recent ownership transfer, omitted when never transferred. */
+  formerOwnerKind?: string;
+  formerOwnerRef?: string;
+  transferredAt?: string;
 }
 
 export interface ArtifactResponse {
@@ -106,6 +110,13 @@ export interface ArtifactResponse {
    * owner or admin of its home project).
    */
   canRetire?: boolean;
+  /**
+   * On a GET: true when hub.artifacts_transfer is on, the owner is an agent,
+   * the caller holds a steward authority with a session or dev credential, and
+   * the live-owner rule passes. Advisory only; POST /{id}/transfer decides
+   * again.
+   */
+  canTransfer?: boolean;
   /**
    * On a GET: the artifact's home project was deleted. Advisory: absent when
    * the hub cannot tell.
@@ -1527,6 +1538,104 @@ export class ArtifactDeleteError extends Error {
     super(message);
     this.name = 'ArtifactDeleteError';
   }
+}
+
+/** One eligible target agent from GET /api/v1/artifacts/{id}/transfer-targets. */
+export interface TransferCandidate {
+  id: string;
+  slug: string;
+  name: string;
+  phase: string;
+}
+
+/** GET /api/v1/artifacts/{id}/transfer-targets. */
+export interface TransferTargetsResponse {
+  agents: TransferCandidate[];
+  truncated: boolean;
+}
+
+/** POST /api/v1/artifacts/{id}/transfer request body. */
+export interface TransferArtifactRequest {
+  to: string;
+  expectOwner: string;
+  clearKey?: boolean;
+}
+
+/** Best-effort notification outcomes from POST /api/v1/artifacts/{id}/transfer. */
+export interface TransferNoticeResult {
+  newOwner: boolean;
+  formerOwner: boolean;
+}
+
+/** POST /api/v1/artifacts/{id}/transfer response body. */
+export interface TransferArtifactResponse {
+  artifact: ArtifactResponse;
+  notified: TransferNoticeResult;
+}
+
+/** A refused or failed ownership transfer or target listing, with HTTP status and hub code. */
+export class ArtifactTransferError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = 'ArtifactTransferError';
+  }
+}
+
+async function throwTransferError(res: Response): Promise<never> {
+  let code = '';
+  let message = '';
+  try {
+    const body = (await res.clone().json()) as {
+      error?: { code?: string; message?: string };
+    };
+    if (typeof body.error?.code === 'string') code = body.error.code;
+    if (typeof body.error?.message === 'string') message = body.error.message;
+  } catch {
+    // Fall back to extractApiError below.
+  }
+  if (!message) {
+    message = await extractApiError(res, `HTTP ${res.status}`);
+  }
+  throw new ArtifactTransferError(message, res.status, code);
+}
+
+/** Lists agents eligible to take ownership of an artifact. */
+export async function listTransferTargets(
+  id: string,
+  signal?: AbortSignal
+): Promise<TransferTargetsResponse> {
+  const res = await apiFetch(`${artifactPath(id)}/transfer-targets`, {
+    signal: signal ?? null,
+  });
+  if (!res.ok) await throwTransferError(res);
+  const body = (await res.json()) as TransferTargetsResponse;
+  return {
+    agents: body.agents ?? [],
+    truncated: body.truncated === true,
+  };
+}
+
+/** Transfers ownership of an agent-owned artifact to another agent. */
+export async function transferArtifact(
+  id: string,
+  req: TransferArtifactRequest
+): Promise<TransferArtifactResponse> {
+  const body: TransferArtifactRequest = {
+    to: req.to,
+    expectOwner: req.expectOwner,
+  };
+  if (req.clearKey) body.clearKey = true;
+  const res = await apiFetch(`${artifactPath(id)}/transfer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwTransferError(res);
+  return (await res.json()) as TransferArtifactResponse;
 }
 
 /** Lists an artifact's grants, the home project's first. */
