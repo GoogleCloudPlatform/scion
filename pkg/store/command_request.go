@@ -332,4 +332,14 @@ type CommandRequestStore interface {
 
 	// UpdateCommandRunLastPolled updates last_polled_at on an unfinished run.
 	UpdateCommandRunLastPolled(ctx context.Context, runID string, polledAt time.Time) error
+
+	// GetActionRunOutput returns the captured output bytes for a command run
+	// from exec_run_outputs, hard-filtered to owner_kind='action_run', or
+	// ErrNotFound when no output row exists. Callers in pkg/hub are constrained
+	// by the TestExecOutputReaders allow-list.
+	GetActionRunOutput(ctx context.Context, runID string) ([]byte, error)
+
+	// PurgeOldActionRunOutputs deletes exec_run_outputs rows with
+	// owner_kind='action_run' whose created_at is older than olderThan.
+	PurgeOldActionRunOutputs(ctx context.Context, olderThan time.Time) (int, error)
 }

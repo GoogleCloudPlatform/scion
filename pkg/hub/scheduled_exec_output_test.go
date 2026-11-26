@@ -41,11 +41,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestExecOutputReaders guards A15: in pkg/hub, only the allow-listed output
-// handler file may call GetScheduledExecRunOutput.
+// TestExecOutputReaders guards A15 and ptone/scion#9278 §4.9: in pkg/hub,
+// only the allow-listed output handler files may call GetScheduledExecRunOutput
+// or GetActionRunOutput.
 func TestExecOutputReaders(t *testing.T) {
-	allowedCallers := map[string]bool{
-		"handlers_scheduled_exec_output.go": true,
+	allowedCallers := map[string]map[string]bool{
+		"GetScheduledExecRunOutput": {
+			"handlers_scheduled_exec_output.go": true,
+		},
+		"GetActionRunOutput": {
+			"handlers_command_request_output.go": true,
+		},
 	}
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers guardScanSubdirs
@@ -60,10 +66,10 @@ func TestExecOutputReaders(t *testing.T) {
 		f, err := parser.ParseFile(fset, name, src, 0)
 		require.NoError(t, err)
 		ast.Inspect(f, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "GetScheduledExecRunOutput" {
-				if !allowedCallers[name] {
-					t.Errorf("%s: %s calls GetScheduledExecRunOutput; only allow-listed gated handlers may read exec_run_outputs",
-						fset.Position(sel.Pos()), name)
+			if sel, ok := n.(*ast.SelectorExpr); ok {
+				if allowed, guarded := allowedCallers[sel.Sel.Name]; guarded && !allowed[name] {
+					t.Errorf("%s: %s calls %s; only allow-listed gated handlers may read exec_run_outputs",
+						fset.Position(sel.Pos()), name, sel.Sel.Name)
 				}
 			}
 			return true

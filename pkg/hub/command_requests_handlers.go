@@ -73,6 +73,7 @@ func (s *Server) enqueueCommandRun(req *store.CommandRequest, run *store.Command
 //
 //	GET  /api/v1/command-requests/{id}
 //	POST /api/v1/command-requests/{id}/approve
+//	GET  /api/v1/command-requests/{id}/output
 func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.CommandRequests, func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, commandRequestsRoutePrefix)
@@ -100,6 +101,12 @@ func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Reque
 				return
 			}
 			s.handleCommandRequestApprove(w, r, reqID)
+		case "output":
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
+			s.handleCommandRequestOutput(w, r, reqID)
 		default:
 			NotFound(w, "Command request")
 		}
@@ -480,7 +487,12 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Step 5: single transaction — CAS pending -> approved + INSERT command_runs(queued).
-	// Share-output opt-in is P4; P1 always records ShareOutput=false.
+	// Default share_output to the agent's share_output_requested unless the
+	// approver explicitly set share_output in the request body (D3).
+	shareOutput := row.ShareOutputRequested
+	if body.ShareOutput != nil {
+		shareOutput = *body.ShareOutput
+	}
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	appRes, err := s.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
 		RequestID:      row.ID,
@@ -492,7 +504,7 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 		IdempotencyKey: body.IdempotencyKey,
 		ExecAgentID:    execRes.Agent.ID,
 		ExecProjectID:  execRes.Agent.ProjectID,
-		ShareOutput:    false,
+		ShareOutput:    shareOutput,
 		LeaseUntil:     now.Add(commandRunWakeBudget + commandRunApprovalLeaseGrace),
 		Now:            now,
 	})
@@ -588,7 +600,12 @@ func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Re
 	}
 	items := make([]messages.CommandRequestView, len(res.Items))
 	for i, row := range res.Items {
-		items[i] = commandRequestSSEView(row, nil, res.Runs[row.ID])
+		run := res.Runs[row.ID]
+		items[i] = commandRequestSSEView(row, nil, run)
+		if items[i].Run != nil && run != nil && run.ShareOutput {
+			tail, _ := s.loadSharedCommandRunOutputTail(r.Context(), run)
+			items[i].Run.OutputTail = tail
+		}
 	}
 	writeJSON(w, http.StatusOK, messages.AgentCommandRequestListResponse{
 		Items:      items,

@@ -88,6 +88,16 @@ func TestCommandRequestService_GetApproveList(t *testing.T) {
 					Status:    "queued",
 				},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/command-requests/row-1/output":
+			w.Header().Set("Cache-Control", "no-store")
+			outBytes := int64(11)
+			_ = json.NewEncoder(w).Encode(messages.CommandRequestOutputResponse{
+				RunID:        "run-1",
+				CaptureMode:  "tail",
+				OutputStatus: "captured",
+				OutputBytes:  &outBytes,
+				Output:       "hello world",
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agent/command-requests":
 			gotListKey = r.URL.Query().Get("key")
 			_ = json.NewEncoder(w).Encode(messages.AgentCommandRequestListResponse{
@@ -98,8 +108,10 @@ func TestCommandRequestService_GetApproveList(t *testing.T) {
 						Version: 1,
 						Status:  "approved",
 						Run: &messages.CommandRequestRunView{
-							RunID:  "run-1",
-							Status: "succeeded",
+							RunID:       "run-1",
+							Status:      "succeeded",
+							ShareOutput: true,
+							OutputTail:  "hello world",
 						},
 					},
 				},
@@ -119,19 +131,30 @@ func TestCommandRequestService_GetApproveList(t *testing.T) {
 	assert.Equal(t, "deploy", detail.Request.Key)
 	assert.True(t, detail.CanApprove)
 
+	shareTrue := true
 	app, err := c.CommandRequests().Approve(ctx, "row-1", &ApproveCommandRequestBody{
 		RowID:          "row-1",
 		CommandSHA256:  detail.Request.CommandSHA256,
+		ShareOutput:    &shareTrue,
 		Surface:        "cli",
 		IdempotencyKey: "k-1",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", app.Run.RunID)
 	assert.Equal(t, "cli", gotApproveBody.Surface)
+	require.NotNil(t, gotApproveBody.ShareOutput)
+	assert.True(t, *gotApproveBody.ShareOutput)
+
+	outResp, err := c.CommandRequests().GetOutput(ctx, "row-1")
+	require.NoError(t, err)
+	assert.Equal(t, "run-1", outResp.RunID)
+	assert.Equal(t, "captured", outResp.OutputStatus)
+	assert.Equal(t, "hello world", outResp.Output)
 
 	list, err := c.CommandRequests().List(ctx, &ListAgentCommandRequestsOptions{Key: "deploy"})
 	require.NoError(t, err)
 	assert.Equal(t, "deploy", gotListKey)
 	require.Len(t, list.Items, 1)
 	assert.Equal(t, "succeeded", list.Items[0].Run.Status)
+	assert.Equal(t, "hello world", list.Items[0].Run.OutputTail)
 }

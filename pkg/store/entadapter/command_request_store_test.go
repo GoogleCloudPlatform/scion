@@ -612,3 +612,102 @@ func TestCommandRunStore_ClaimCommandRunsForPoll(t *testing.T) {
 		t.Fatalf("claimed4 = %+v, want the other run from %s", claimed4, claimed3[0].ID)
 	}
 }
+
+func TestCommandRequestStore_GetAndPurgeActionRunOutputs(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	agentID := uuid.NewString()
+	execAgentID := uuid.NewString()
+	execProjID := uuid.NewString()
+	approverID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	createFinishedRun := func(key string, finishedAt time.Time, output []byte) *store.CommandRun {
+		t.Helper()
+		c, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, key, "echo "+key, false, finishedAt.Add(-time.Minute)))
+		if err != nil {
+			t.Fatalf("create %s: %v", key, err)
+		}
+		app, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+			RequestID:     c.Request.ID,
+			CommandSHA256: c.Request.CommandSHA256,
+			UserID:        approverID,
+			Surface:       msgaction.CommandRequestSurfaceCLI,
+			ExecAgentID:   execAgentID,
+			ExecProjectID: execProjID,
+			LeaseUntil:    finishedAt.Add(5 * time.Minute),
+			Now:           finishedAt.Add(-30 * time.Second),
+		})
+		if err != nil || app.Run == nil {
+			t.Fatalf("approve %s: (%+v, %v)", key, app, err)
+		}
+		code := 0
+		dur := int64(10)
+		outLen := int64(len(output))
+		won, err := cs.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+			RunID:        app.Run.ID,
+			Status:       store.CommandRunStatusSucceeded,
+			ExitCode:     &code,
+			DurationMS:   &dur,
+			OutputBytes:  &outLen,
+			OutputStatus: "captured",
+			Output:       output,
+			FinishedAt:   finishedAt,
+		})
+		if err != nil || !won {
+			t.Fatalf("finish %s: (%v, %v)", key, won, err)
+		}
+		return app.Run
+	}
+
+	oldRun := createFinishedRun("old-out", now.Add(-8*24*time.Hour), []byte("old-action-output"))
+	recentRun := createFinishedRun("recent-out", now.Add(-2*24*time.Hour), []byte("recent-action-output"))
+
+	// Seed a scheduled_exec output row older than 7 days to verify strict owner_kind isolation.
+	schedRunID := uuid.New()
+	if _, err := cs.client.ExecRunOutput.Create().
+		SetID(schedRunID).
+		SetOwnerKind(execrunoutput.OwnerKindScheduledExec).
+		SetProjectID(uuid.MustParse(execProjID)).
+		SetCaptureMode("tail").
+		SetContent([]byte("old-scheduled-output")).
+		SetCreatedAt(now.Add(-10 * 24 * time.Hour)).
+		Save(ctx); err != nil {
+		t.Fatalf("seed scheduled_exec output: %v", err)
+	}
+
+	// GetActionRunOutput reads action_run rows and refuses scheduled_exec rows.
+	gotOld, err := cs.GetActionRunOutput(ctx, oldRun.ID)
+	if err != nil || string(gotOld) != "old-action-output" {
+		t.Fatalf("GetActionRunOutput(old) = (%q, %v), want old-action-output", string(gotOld), err)
+	}
+	if _, err := cs.GetActionRunOutput(ctx, schedRunID.String()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetActionRunOutput(scheduled_exec) err = %v, want ErrNotFound", err)
+	}
+	if _, err := cs.GetActionRunOutput(ctx, uuid.NewString()); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetActionRunOutput(missing) err = %v, want ErrNotFound", err)
+	}
+
+	// PurgeOldActionRunOutputs deletes only action_run rows older than 7 days.
+	purged, err := cs.PurgeOldActionRunOutputs(ctx, now.Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatalf("PurgeOldActionRunOutputs: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if _, err := cs.GetActionRunOutput(ctx, oldRun.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("old action_run output should be purged, got err=%v", err)
+	}
+	gotRecent, err := cs.GetActionRunOutput(ctx, recentRun.ID)
+	if err != nil || string(gotRecent) != "recent-action-output" {
+		t.Fatalf("recent action_run output should remain, got (%q, %v)", string(gotRecent), err)
+	}
+	// Scheduled output must be untouched by PurgeOldActionRunOutputs.
+	schedRow, err := cs.client.ExecRunOutput.Get(ctx, schedRunID)
+	if err != nil || string(schedRow.Content) != "old-scheduled-output" {
+		t.Fatalf("scheduled_exec output must remain untouched, got (%+v, %v)", schedRow, err)
+	}
+}

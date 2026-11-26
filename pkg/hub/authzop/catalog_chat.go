@@ -1340,6 +1340,32 @@ var chatOperations = []OperationSpec{
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
+		ID:          "chat.commandrequest.output",
+		Domain:      "chat",
+		Description: "Read the captured output tail of an approved command run. Requires an interactive human session, caller == run.approver_user_id, and live agent.attach on exec_agent_id (fails closed if deleted). Sets Cache-Control: no-store and bypasses response compression. 404 while hub.command_requests is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/command-requests/{id}/output", Method: "GET", Response: ResponseCredential},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "agent",
+		BasePermission:   "agent.attach",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:              "chat.commandrequest.output",
+			ContextFields:          []string{"actor_id", "row_id", "run_id", "exec_agent_id", "command_sha256"},
+			Atomic:                 false,
+			NonAtomicJustification: "Read-only output fetch emits output_viewed audit event with metadata only (never output bytes) before writing the response",
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestCommandRequestOutput_AuthzAndSharing"},
+		},
+		Bearer: SessionOnly(ReasonInteractiveState),
+	},
+	{
 		ID:          "chat.secretrequest.fulfill",
 		Domain:      "chat",
 		Description: "Fulfill all pending keys of a secret-request card, storing each value at agent scope in the secret backend, notifying the requesting agent via a secret-response message, and emitting fulfilled audit events (never values). Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off",

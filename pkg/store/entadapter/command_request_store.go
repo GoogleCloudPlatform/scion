@@ -1019,6 +1019,39 @@ func (c *CompositeStore) UpdateCommandRunLastPolled(ctx context.Context, runID s
 	return mapError(err)
 }
 
+// GetActionRunOutput implements store.CommandRequestStore.
+func (c *CompositeStore) GetActionRunOutput(ctx context.Context, runID string) ([]byte, error) {
+	uid, err := parseUUID(runID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := c.client.ExecRunOutput.Query().
+		Where(
+			execrunoutput.IDEQ(uid),
+			execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindActionRun),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return row.Content, nil
+}
+
+// PurgeOldActionRunOutputs implements store.CommandRequestStore.
+func (c *CompositeStore) PurgeOldActionRunOutputs(ctx context.Context, olderThan time.Time) (int, error) {
+	cutoff := olderThan.UTC().Truncate(time.Microsecond)
+	n, err := c.client.ExecRunOutput.Delete().
+		Where(
+			execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindActionRun),
+			execrunoutput.CreatedAtLT(cutoff),
+		).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 func entCommandRequestToStore(e *ent.CommandRequest) *store.CommandRequest {
 	r := &store.CommandRequest{
 		ID:                   e.ID.String(),

@@ -411,7 +411,8 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 // even if a new call site forgets to strip the key after consuming it,
 // LogAttrs will not emit it.
 var logMetadataSkipKeys = map[string]bool{
-	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+	AttachmentsMetadataKey:    true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+	"command_run_output_tail": true, // command-run output tail must never reach slog (ptone/scion#9278 G7/S9)
 }
 
 // LogAttrs returns slog attributes for structured logging of this message.
@@ -421,9 +422,10 @@ func (m *StructuredMessage) LogAttrs() []any {
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
 	}
-	if m.Type == TypeCommandRequest {
+	if m.Type == TypeCommandRequest || m.Type == TypeCommandResponse {
 		// Command request messages embed the proposed script in their Markdown
-		// fallback body; never emit script text to slog (ptone/scion#9278 G7/S12).
+		// fallback body, and command response messages may embed a shared
+		// output tail; never emit either to slog (ptone/scion#9278 G7/S9/S12).
 		attrs = append(attrs,
 			"message_content_omitted", true,
 			"message_content_len", len(m.Msg),

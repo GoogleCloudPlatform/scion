@@ -40,6 +40,7 @@ var (
 	msgCommandDescription string
 	msgCommandWorkdir     string
 	msgCommandTimeout     string
+	msgCommandShareOutput bool
 	msgCommandReqPayload  json.RawMessage
 )
 
@@ -57,6 +58,7 @@ func resetCommandRequestFlags() {
 	msgCommandDescription = ""
 	msgCommandWorkdir = ""
 	msgCommandTimeout = ""
+	msgCommandShareOutput = false
 	msgCommandReqPayload = nil
 }
 
@@ -66,8 +68,8 @@ func resetCommandRequestFlags() {
 // targets are refused.
 func validateCommandRequestFlags(agentTarget, group, convTarget bool) error {
 	if !commandRequestRequested() {
-		if msgCommandInline != "" || msgCommandFile != "" || msgCommandDescription != "" || msgCommandWorkdir != "" || msgCommandTimeout != "" {
-			return newUsageError("--command, --command-file, --description, --workdir, and --timeout are valid only with --command-request")
+		if msgCommandInline != "" || msgCommandFile != "" || msgCommandDescription != "" || msgCommandWorkdir != "" || msgCommandTimeout != "" || msgCommandShareOutput {
+			return newUsageError("--command, --command-file, --description, --workdir, --timeout, and --share-output are valid only with --command-request")
 		}
 		return nil
 	}
@@ -141,11 +143,12 @@ func loadCommandRequestPayload() (json.RawMessage, error) {
 	}
 
 	input := &messages.CommandRequestInput{
-		Key:         strings.TrimSpace(msgCommandRequestKey),
-		Description: msgCommandDescription,
-		Script:      script,
-		Workdir:     msgCommandWorkdir,
-		TimeoutS:    timeoutS,
+		Key:                  strings.TrimSpace(msgCommandRequestKey),
+		Description:          msgCommandDescription,
+		Script:               script,
+		Workdir:              msgCommandWorkdir,
+		TimeoutS:             timeoutS,
+		ShareOutputRequested: msgCommandShareOutput,
 	}
 	if _, err := messages.NormalizeCommandRequest("command_request", input); err != nil {
 		return nil, err

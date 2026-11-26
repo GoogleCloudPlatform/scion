@@ -32,6 +32,7 @@ type (
 	CommandRequestRunView           = messages.CommandRequestRunView
 	CommandRequestExecContainerView = messages.CommandRequestExecContainerView
 	CommandRequestDetailResponse    = messages.CommandRequestDetailResponse
+	CommandRequestOutputResponse    = messages.CommandRequestOutputResponse
 	ApproveCommandRequestBody       = messages.ApproveCommandRequestBody
 	ApproveCommandRequestResponse   = messages.ApproveCommandRequestResponse
 	AgentCommandRequestListResponse = messages.AgentCommandRequestListResponse
@@ -50,6 +51,9 @@ type CommandRequestService interface {
 	Get(ctx context.Context, id string) (*CommandRequestDetailResponse, error)
 	// Approve approves a pending command request (POST /api/v1/command-requests/{id}/approve).
 	Approve(ctx context.Context, id string, req *ApproveCommandRequestBody) (*ApproveCommandRequestResponse, error)
+	// GetOutput retrieves the captured output of an approved command run for the
+	// named approver (GET /api/v1/command-requests/{id}/output).
+	GetOutput(ctx context.Context, id string) (*CommandRequestOutputResponse, error)
 	// List lists command requests created by the calling agent (GET /api/v1/agent/command-requests).
 	List(ctx context.Context, opts *ListAgentCommandRequestsOptions) (*AgentCommandRequestListResponse, error)
 }
@@ -77,6 +81,15 @@ func (s *commandRequestService) Approve(ctx context.Context, id string, req *App
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ApproveCommandRequestResponse](resp)
+}
+
+// GetOutput implements CommandRequestService.
+func (s *commandRequestService) GetOutput(ctx context.Context, id string) (*CommandRequestOutputResponse, error) {
+	resp, err := s.c.get(ctx, "/api/v1/command-requests/"+url.PathEscape(id)+"/output", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[CommandRequestOutputResponse](resp)
 }
 
 // List implements CommandRequestService.

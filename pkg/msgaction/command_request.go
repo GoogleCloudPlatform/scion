@@ -94,6 +94,7 @@ var CommandRequestKindSpec = KindSpec{
 		"duration_ms",
 		"output_bytes",
 		"output_status",
+		"redaction_count",
 		"workdir_kind",
 		"share_output",
 		"not_started_reason",
