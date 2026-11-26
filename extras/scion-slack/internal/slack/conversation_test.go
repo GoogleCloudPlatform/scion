@@ -228,3 +228,70 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	assert.Equal(t, "C0123ABC:1700000000.000100", gotRouted["external_ref"])
 	assert.Equal(t, "C0123ABC", gotRouted["parent_ref"])
 }
+
+// TestSlackBroker_Publish_HubEnrichedOptionAShapes drives the Slack broker
+// with the exact outbound shapes emitted by MessageBrokerProxy.enrichConversation
+// under Option A: (1) an external thread reply carrying translated surface-native
+// Conversation.ExternalRef alongside legacy Channel/ThreadID, and (2) a DM reply
+// with Conversation omitted (nil) and reply-affinity Channel:"slack".
+func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
+	srv, getPosted := newTestSlackServer(t)
+
+	b := NewBroker(nil)
+	b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
+	b.store = newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.store.CreateUserMapping(ctx, &SlackUserMapping{
+		SlackUserID: "U_ALICE",
+		ScionEmail:  "alice@example.com",
+	}))
+	require.NoError(t, b.store.SetConversationContext(ctx, &ConversationContext{
+		SlackUserID:   "U_ALICE",
+		ProjectID:     "p1",
+		AgentSlug:     "coder",
+		LastChannelID: "D_ALICE_DM",
+	}))
+
+	topic := "scion.project.p1.user.u1.messages"
+
+	// 1. Outbound `--channel slack --thread-id C0123ABC:1700000000.000100`
+	// after Option A hub translation (thread:<proj>: stripped).
+	err := b.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "reply on slack thread",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ThreadID:       "C0123ABC:1700000000.000100",
+		ConversationID: "conv-slack-thread",
+		Conversation: &messages.Conversation{
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000100",
+			ParentRef:   "C0123ABC",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2. Outbound DM reply with affinity Channel:"slack": hub omits
+	// Conversation (nil) while preserving ConversationID and legacy fields.
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "dm reply via slack affinity",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-dm-1",
+		Conversation:   nil,
+	})
+	require.NoError(t, err)
+
+	posted := getPosted()
+	require.Len(t, posted, 2)
+	assert.Equal(t, "C0123ABC", posted[0].Channel)
+	assert.Equal(t, "1700000000.000100", posted[0].ThreadTS)
+	assert.Equal(t, "D_ALICE_DM", posted[1].Channel)
+	assert.Equal(t, "", posted[1].ThreadTS)
+}

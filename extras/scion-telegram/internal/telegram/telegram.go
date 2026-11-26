@@ -114,6 +114,13 @@ func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID in
 		return 0, false, 0
 	}
 	if msg != nil && msg.Conversation != nil && msg.Conversation.ExternalRef != "" {
+		// Positive bare integer matching msg.ThreadID is a forum MessageThreadID
+		// from an outbound --channel telegram --thread-id <tid> reply; route to
+		// the project/recipient chat with that thread ID instead of treating it
+		// as a chat ID.
+		if id > 0 && msg.ThreadID == target.ExternalRef {
+			return 0, false, id
+		}
 		return id, true, 0
 	}
 	return 0, false, id
@@ -121,35 +128,35 @@ func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID in
 
 // telegramInboundConversation derives the Phase 11 top-level conversation
 // addressing (surface, external_ref, parent_ref) for an inbound Telegram message.
+//
+// Only threaded messages (forum topics where msg.ThreadID is set) emit
+// (surface, external_ref) so they resolve to a thread:<project>:<chat>:<thread>
+// group conversation. Non-threaded messages (1:1 private chats and flat chats
+// without a forum topic) omit external_ref so the hub resolves them through
+// Phase 5 as direct dm: conversations, matching `scion message user:<x>`.
 func telegramInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
 	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	threadID := msg.ThreadID
+	if threadID == "" {
 		return plugin.InboundConversation{}
 	}
 	var chatID string
 	if msg.Metadata != nil {
 		chatID = msg.Metadata["telegram_chat_id"]
 	}
-	threadID := msg.ThreadID
-	if chatID != "" && threadID != "" {
+	if chatID != "" {
 		return plugin.InboundConversation{
 			Surface:     "telegram",
 			ExternalRef: chatID + ":" + threadID,
 			ParentRef:   chatID,
 		}
 	}
-	if chatID != "" {
-		return plugin.InboundConversation{
-			Surface:     "telegram",
-			ExternalRef: chatID,
-		}
+	return plugin.InboundConversation{
+		Surface:     "telegram",
+		ExternalRef: threadID,
 	}
-	if threadID != "" {
-		return plugin.InboundConversation{
-			Surface:     "telegram",
-			ExternalRef: threadID,
-		}
-	}
-	return plugin.InboundConversation{}
 }
 
 // hubError represents a structured error returned by the hub API.

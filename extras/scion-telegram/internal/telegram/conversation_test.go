@@ -282,9 +282,92 @@ func TestTelegramBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 		assert.Equal(t, "-100123456", gotInbound[i]["parent_ref"])
 	}
 
-	// Non-threaded delivery includes surface and external_ref "<chat>", omits parent_ref.
-	assert.Equal(t, "telegram", gotInbound[2]["surface"])
-	assert.Equal(t, "-100555666", gotInbound[2]["external_ref"])
+	// Non-threaded / private-chat delivery omits surface, external_ref, and
+	// parent_ref so the hub resolves it through Phase 5 as a direct dm:
+	// conversation (matching `scion message user:<x>`).
+	_, hasSurface := gotInbound[2]["surface"]
+	_, hasExtRef := gotInbound[2]["external_ref"]
 	_, hasParent := gotInbound[2]["parent_ref"]
-	assert.False(t, hasParent, "non-threaded chat should omit parent_ref")
+	assert.False(t, hasSurface, "non-threaded private chat should omit surface")
+	assert.False(t, hasExtRef, "non-threaded private chat should omit external_ref")
+	assert.False(t, hasParent, "non-threaded private chat should omit parent_ref")
+}
+
+// TestTelegramBroker_Publish_HubEnrichedOptionAShapes drives Telegram v2 with
+// the exact outbound shapes emitted by MessageBrokerProxy.enrichConversation
+// under Option A: (1) forum topic reply with translated "<chat>:<thread>",
+// (2) outbound `--channel telegram --thread-id 42` with translated bare "42",
+// and (3) DM reply with Conversation omitted (nil).
+func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	defer tgSrv.srv.Close()
+
+	b := NewV2(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b.api = NewAPIClient("test-token", tgSrv.srv.URL)
+	topic := "scion.project.p1.user.u1.messages"
+
+	// 1. Outbound `--channel telegram --thread-id -100123456:42` after Option A translation.
+	err := b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "reply on telegram forum topic",
+		Type:           messages.TypeInstruction,
+		Channel:        "telegram",
+		ThreadID:       "-100123456:42",
+		ConversationID: "conv-tg-topic",
+		Conversation: &messages.Conversation{
+			Surface:     "telegram",
+			ExternalRef: "-100123456:42",
+			ParentRef:   "-100123456",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2. Outbound `--channel telegram --thread-id 42` (bare topic ID) after Option A translation.
+	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "reply on bare topic id",
+		Type:           messages.TypeInstruction,
+		Channel:        "telegram",
+		ThreadID:       "42",
+		ConversationID: "conv-tg-bare-topic",
+		Conversation: &messages.Conversation{
+			Surface:     "telegram",
+			ExternalRef: "42",
+		},
+		Metadata: map[string]string{
+			"telegram_chat_id": "-100123456",
+		},
+	})
+	require.NoError(t, err)
+
+	// 3. Outbound DM reply with Conversation omitted (nil) and affinity Channel:"telegram".
+	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "dm reply via telegram",
+		Type:           messages.TypeInstruction,
+		Channel:        "telegram",
+		ThreadID:       "dm:agent:a1:user:u1",
+		ConversationID: "conv-dm-1",
+		Conversation:   nil,
+		Metadata: map[string]string{
+			"telegram_chat_id": "998877",
+		},
+	})
+	require.NoError(t, err)
+
+	tgSrv.mu.Lock()
+	defer tgSrv.mu.Unlock()
+	require.Len(t, tgSrv.sentMessages, 3)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[0].ChatID)
+	assert.Equal(t, int64(42), tgSrv.sentMessages[0].MessageThreadID)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[1].ChatID)
+	assert.Equal(t, int64(42), tgSrv.sentMessages[1].MessageThreadID)
+	assert.Equal(t, int64(998877), tgSrv.sentMessages[2].ChatID)
+	assert.Equal(t, int64(0), tgSrv.sentMessages[2].MessageThreadID)
 }

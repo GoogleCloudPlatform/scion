@@ -198,3 +198,49 @@ func TestDiscordBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	assert.Equal(t, "777777777777777777", gotRouted[0]["external_ref"])
 	assert.Equal(t, "200000000000000001", gotRouted[0]["parent_ref"])
 }
+
+// TestDiscordBroker_Publish_HubEnrichedOptionAShapes drives the Discord broker
+// with the exact outbound shapes emitted by MessageBrokerProxy.enrichConversation
+// under Option A: (1) an external thread reply with translated snowflake
+// ExternalRef, and (2) a DM reply with Conversation omitted (nil) and
+// reply-affinity Channel:"discord".
+func TestDiscordBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
+	f := newDMRouteFixture(t)
+	topic := "scion.project.p1.user.u1.messages"
+
+	// 1. Outbound `--channel discord --thread-id 777777777777777777` after
+	// Option A translation (thread:<proj>: stripped).
+	err := f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:" + dmTestEmail,
+		Msg:            "reply on discord thread",
+		Type:           messages.TypeInstruction,
+		Channel:        "discord",
+		ThreadID:       "777777777777777777",
+		ConversationID: "conv-discord-thread",
+		Conversation: &messages.Conversation{
+			Surface:     "discord",
+			ExternalRef: "777777777777777777",
+			ParentRef:   "200000000000000001",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2. Outbound DM reply with affinity Channel:"discord" and Conversation:nil.
+	err = f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:" + dmTestEmail,
+		Msg:            "dm reply via discord affinity",
+		Type:           messages.TypeInstruction,
+		Channel:        "discord",
+		ConversationID: "conv-dm-1",
+		Conversation:   nil,
+	})
+	require.NoError(t, err)
+
+	got := sentChannelIDs(f.transport)
+	require.Len(t, got, 2)
+	assert.Equal(t, "777777777777777777", got[0])
+}

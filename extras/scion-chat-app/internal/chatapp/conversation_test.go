@@ -243,3 +243,86 @@ func TestChatApp_R3_PluginNameGoogleChatSingleGate(t *testing.T) {
 		t.Errorf("msg 1 ThreadID = %q, want spaces/AAQAx/threads/t2", fm.messages[1].ThreadID)
 	}
 }
+
+// TestChatApp_Publish_HubEnrichedOptionAShapes drives chat-app with the exact
+// outbound shapes emitted by MessageBrokerProxy.enrichConversation under
+// Option A: (1) an external gchat thread reply with translated surface-native
+// ExternalRef, and (2) a DM reply with Conversation omitted (nil).
+func TestChatApp_Publish_HubEnrichedOptionAShapes(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if err := st.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/AAQAx",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
+		Platform:    "googlechat",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("SetSpaceLink: %v", err)
+	}
+	if err := st.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "alice@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("SetUserMapping: %v", err)
+	}
+
+	fm := &fakeMessenger{}
+	relay := NewNotificationRelay(st, fm, slog.Default())
+	broker := NewBrokerServer(relay.HandleBrokerMessage, slog.Default())
+	if err := broker.Configure(map[string]string{"plugin_name": "googlechat"}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	topic := "scion.project.project-abc.user.hub-user-1.messages"
+
+	// 1. Outbound `--channel gchat --thread-id spaces/AAQAx/threads/t-orig`
+	// after Option A translation (thread:<proj>: stripped).
+	if err := broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		RecipientID:    "hub-user-1",
+		Msg:            "reply on gchat thread",
+		Type:           messages.TypeInstruction,
+		Channel:        "googlechat",
+		ThreadID:       "spaces/AAQAx/threads/t-orig",
+		ConversationID: "conv-gchat-thread",
+		Conversation: &messages.Conversation{
+			Surface:     "gchat",
+			ExternalRef: "spaces/AAQAx/threads/t-orig",
+			ParentRef:   "spaces/AAQAx",
+		},
+	}); err != nil {
+		t.Fatalf("Publish(gchat thread): %v", err)
+	}
+
+	// 2. Outbound DM reply with Conversation omitted (nil).
+	if err := broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		RecipientID:    "hub-user-1",
+		Msg:            "dm reply via web",
+		Type:           messages.TypeInstruction,
+		Channel:        "web",
+		ThreadID:       "dm:agent:a1:user:hub-user-1",
+		ConversationID: "conv-dm-1",
+		Conversation:   nil,
+	}); err != nil {
+		t.Fatalf("Publish(web DM): %v", err)
+	}
+
+	if len(fm.messages) != 2 {
+		t.Fatalf("expected 2 relayed messages, got %d", len(fm.messages))
+	}
+	if fm.messages[0].SpaceID != "spaces/AAQAx" {
+		t.Errorf("msg 0 SpaceID = %q, want spaces/AAQAx", fm.messages[0].SpaceID)
+	}
+	if fm.messages[0].ThreadID != "spaces/AAQAx/threads/t-orig" {
+		t.Errorf("msg 0 ThreadID = %q, want spaces/AAQAx/threads/t-orig", fm.messages[0].ThreadID)
+	}
+}

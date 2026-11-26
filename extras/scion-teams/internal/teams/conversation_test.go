@@ -234,3 +234,82 @@ func TestTeamsHubClient_DeliverInbound_ConversationPayload(t *testing.T) {
 	_, hasParent := gotBodies[1]["parent_ref"]
 	assert.False(t, hasParent)
 }
+
+// TestTeamsBroker_Publish_HubEnrichedOptionAShapes drives the Teams broker
+// with the exact outbound shapes emitted by MessageBrokerProxy.enrichConversation
+// under Option A: (1) an external thread reply with translated Teams
+// conversation ID, and (2) a DM reply with Conversation omitted (nil).
+func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
+	var mu sync.Mutex
+	var delivered []string
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		delivered = append(delivered, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
+	}))
+	defer apiServer.Close()
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithAPI(t, broker, apiServer.URL)
+	ctx := context.Background()
+
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "19:chan-1@thread.tacv2;messageid=100",
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "a:dm-alice",
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+
+	topic := "scion.project.p1.user.u1.messages"
+
+	// 1. Outbound `--channel teams --thread-id 19:chan-1@thread.tacv2;messageid=100`
+	// after Option A translation (thread:<proj>: stripped).
+	require.NoError(t, broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "reply on teams thread",
+		Type:           messages.TypeInstruction,
+		Channel:        "teams",
+		ThreadID:       "19:chan-1@thread.tacv2;messageid=100",
+		ConversationID: "conv-teams-thread",
+		Conversation: &messages.Conversation{
+			Surface:     "teams",
+			ExternalRef: "19:chan-1@thread.tacv2;messageid=100",
+			ParentRef:   "19:chan-1@thread.tacv2",
+		},
+	}))
+
+	// 2. Outbound DM reply with Conversation omitted (nil) and affinity Channel:"teams".
+	require.NoError(t, broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "dm reply via teams",
+		Type:           messages.TypeInstruction,
+		Channel:        "teams",
+		ConversationID: "conv-dm-1",
+		Conversation:   nil,
+		Metadata: map[string]string{
+			"teams_conversation_id": "a:dm-alice",
+		},
+	}))
+
+	broker.mu.Lock()
+	sq := broker.sendQueue
+	broker.mu.Unlock()
+	sq.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, delivered, 2)
+	assert.Contains(t, delivered, "/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
+	assert.Contains(t, delivered, "/v3/conversations/a:dm-alice/activities")
+}
