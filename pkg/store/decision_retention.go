@@ -57,9 +57,10 @@ func (p DecisionRetentionPosition) IsStart() bool { return p.CreatedAt.IsZero() 
 // DecisionRetentionCursor is the persisted resume point of the decision
 // retention sweeper, stored in hub_settings["decision_retention_cursor"].
 type DecisionRetentionCursor struct {
-	Position  DecisionRetentionPosition `json:"position"`
-	ResetAt   *time.Time                `json:"reset_at,omitempty"`
-	UpdatedAt time.Time                 `json:"updated_at,omitempty"`
+	Position      DecisionRetentionPosition `json:"position"`
+	ResetAt       *time.Time                `json:"reset_at,omitempty"`
+	ReachedCutoff bool                      `json:"reached_cutoff,omitempty"`
+	UpdatedAt     time.Time                 `json:"updated_at,omitempty"`
 }
 
 // DecisionRetentionCounts are the rows one purge deleted, attributed to one

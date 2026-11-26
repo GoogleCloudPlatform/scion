@@ -415,3 +415,155 @@ func TestDecisionRetentionJob_MultiPageWalkAcrossTicks(t *testing.T) {
 	assert.Equal(t, int64(total), runs[0].Counts[projID].Decisions)
 	assert.Equal(t, int64(total), runs[0].Counts[projID].Answers)
 }
+
+// TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff verifies that
+// a backlog of ineligible old rows (e.g. settled rows paired with an open
+// sibling) larger than one day's scan budget does not starve newer eligible
+// rows: the cursor does not reset after 24h until the walk has actually reached
+// the cutoff, and resets on the day after reaching the cutoff.
+func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "ret-backlog", Slug: "ret-backlog", Created: time.Now().UTC(),
+	}))
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	baseNow := time.Now().UTC().Truncate(time.Microsecond)
+	tBacklog := baseNow.Add(-70 * 24 * time.Hour)
+	tEligible := baseNow.Add(-60 * 24 * time.Hour)
+	db := cs.DB()
+
+	// Seed 60 ineligible old settled rows (each sharing its message with a
+	// pending sibling) so page 1 (size 50) scans only ineligible rows.
+	const backlogMsgs = 60
+	for i := 0; i < backlogMsgs; i++ {
+		msgID := uuid.NewString()
+		res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: msgID, ProjectID: projID, ThreadID: "topic-ret-backlog",
+				Sender: "agent:bot", SenderID: agentID, Recipient: "user:" + userID, RecipientID: userID,
+			},
+			AskerAgentID:   agentID,
+			AskerAgentName: "bot",
+			Decisions: []messages.Decision{
+				{Key: fmt.Sprintf("B%02d-S", i), Question: "Settled", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+				{Key: fmt.Sprintf("B%02d-P", i), Question: "Pending", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+			},
+		})
+		require.NoError(t, err)
+		settledID := res.Decisions[0].RowID
+		pendingID := res.Decisions[1].RowID
+		_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID: settledID, ChoiceID: "1",
+			AnsweredByUserID: userID, AnsweredByName: "Alice", AnsweredByEmail: "alice@test.com",
+			Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{
+				ID: uuid.NewString(), ProjectID: projID, ThreadID: "topic-ret-backlog",
+				Sender: "user:" + userID, SenderID: userID, Recipient: "agent:bot", RecipientID: agentID,
+			},
+		})
+		require.NoError(t, err)
+		ts := tBacklog.Add(time.Duration(i) * time.Second)
+		for _, id := range []string{settledID, pendingID} {
+			uid := uuid.MustParse(id)
+			_, err = db.ExecContext(ctx, "UPDATE decisions SET created_at = ? WHERE id = ?", ts, uid)
+			require.NoError(t, err)
+		}
+		uidS := uuid.MustParse(settledID)
+		_, err = db.ExecContext(ctx, "UPDATE decisions SET decided_at = ? WHERE id = ?", ts, uidS)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", ts, uidS)
+		require.NoError(t, err)
+	}
+
+	// Seed 15 eligible old settled rows after the backlog.
+	const eligibleCount = 15
+	eligibleDecIDs := make([]string, eligibleCount)
+	for i := 0; i < eligibleCount; i++ {
+		_, eligibleDecIDs[i] = seedOldSettledDecision(t, ctx, cs, projID, agentID, userID, fmt.Sprintf("E%02d", i), 60*24*time.Hour)
+		ts := tEligible.Add(time.Duration(i) * time.Second)
+		uid := uuid.MustParse(eligibleDecIDs[i])
+		_, err := db.ExecContext(ctx, "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?", ts, ts, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", ts, uid)
+		require.NoError(t, err)
+	}
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.DecisionRetention)),
+		"test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_budget_seconds":10,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	fakeNow := baseNow
+	sw := newDecisionRetentionSweeper(cs.DecisionRetention(), true)
+	sw.policy = srv.decisionRetentionPolicyAt
+	sw.now = func() time.Time { return fakeNow }
+	// Exhaust the tick budget after 1 page (50 rows) so Day 1 cannot finish the backlog.
+	sw.sleep = func(_ context.Context, _ time.Duration) error {
+		fakeNow = fakeNow.Add(15 * time.Second)
+		return nil
+	}
+
+	// Day 1: scans first 50 ineligible backlog rows and stops on budget.
+	res1, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res1.Pages)
+	assert.Equal(t, 0, res1.PurgedMessages)
+	assert.Equal(t, 50, res1.SkippedMessages)
+	assert.True(t, res1.BudgetExhausted)
+	assert.False(t, res1.ReachedCutoff)
+
+	cur1, err := cs.DecisionRetention().GetDecisionRetentionCursor(ctx)
+	require.NoError(t, err)
+	assert.False(t, cur1.Position.IsStart())
+	assert.False(t, cur1.ReachedCutoff)
+	require.NotNil(t, cur1.ResetAt)
+	day1ResetAt := *cur1.ResetAt
+
+	// Day 2 (+25h): even though >24h elapsed, cursor MUST NOT reset because
+	// ReachedCutoff is false. It resumes past the first 50 backlog rows, scans
+	// the remaining 10 ineligible + 15 eligible rows, purges all 15 eligible
+	// rows, and reaches the cutoff.
+	fakeNow = baseNow.Add(25 * time.Hour)
+	res2, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res2.Pages)
+	assert.Equal(t, eligibleCount, res2.PurgedMessages, "eligible rows behind backlog must not be starved")
+	assert.Equal(t, 10, res2.SkippedMessages)
+	assert.True(t, res2.ReachedCutoff)
+
+	for _, id := range eligibleDecIDs {
+		_, err := cs.GetDecision(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	cur2, err := cs.DecisionRetention().GetDecisionRetentionCursor(ctx)
+	require.NoError(t, err)
+	assert.True(t, cur2.ReachedCutoff)
+	assert.True(t, cur2.ResetAt.Equal(day1ResetAt), "ResetAt must not advance before reset occurs")
+
+	// Day 3 (+50h): now ReachedCutoff is true AND >24h elapsed since day1ResetAt,
+	// so the cursor resets to the start of the walk and revisits the backlog.
+	fakeNow = baseNow.Add(50 * time.Hour)
+	res3, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	require.NoError(t, err)
+	assert.Equal(t, 1, res3.Pages)
+	assert.Equal(t, 50, res3.SkippedMessages, "after reset, walk revisits backlog from start")
+	assert.False(t, res3.ReachedCutoff)
+
+	cur3, err := cs.DecisionRetention().GetDecisionRetentionCursor(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, cur3.ResetAt)
+	assert.True(t, cur3.ResetAt.After(day1ResetAt), "ResetAt must advance when cursor resets")
+	assert.False(t, cur3.ReachedCutoff)
+}

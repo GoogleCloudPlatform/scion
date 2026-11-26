@@ -266,13 +266,28 @@ func (sw *decisionRetentionSweeper) sweepAndRecord(
 	cursor, tickErr := sw.store.GetDecisionRetentionCursor(ctx)
 	cursorDirty := false
 	if tickErr == nil {
-		if cursor.ResetAt == nil || start.Sub(*cursor.ResetAt) >= decisionRetentionCursorResetEvery {
+		// Initialize ResetAt on the first run; thereafter reset to the start of
+		// the walk only once the walk has actually reached the cutoff since the
+		// last reset AND at least 24h have elapsed. Resetting unconditionally
+		// would let a backlog of ineligible old rows (open siblings, unindexed
+		// rows, or held projects) larger than one day's scan budget starve newer
+		// eligible rows forever.
+		if cursor.ResetAt == nil {
+			t := start.UTC()
+			cursor.ResetAt = &t
+			cursorDirty = true
+		} else if cursor.ReachedCutoff && start.Sub(*cursor.ResetAt) >= decisionRetentionCursorResetEvery {
 			t := start.UTC()
 			cursor.ResetAt = &t
 			cursor.Position = store.DecisionRetentionPosition{}
+			cursor.ReachedCutoff = false
 			cursorDirty = true
 		}
 		tickErr = sw.walk(ctx, &p, &cursor, run, res, budgetEnd, &cursorDirty)
+		if tickErr == nil && res.ReachedCutoff && !cursor.ReachedCutoff {
+			cursor.ReachedCutoff = true
+			cursorDirty = true
+		}
 	}
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decisionRetentionFinalWriteTimeout)
