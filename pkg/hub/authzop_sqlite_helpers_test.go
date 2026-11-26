@@ -1117,8 +1117,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/review-draft":                {"id": f.artifact},
 		"/api/v1/artifacts/{id}/transfer":                    {"id": f.artifact},
 		"/api/v1/artifacts/{id}/transfer-targets":            {"id": f.artifact},
-		"/api/v1/artifacts/{id}/review-requests":             {"id": f.artifact},
-		"/api/v1/artifacts/{id}/review-request/dismiss":      {"id": f.artifact},
+		"/api/v1/artifacts/{id}/review-requests":                {"id": f.artifact},
+		"/api/v1/artifacts/{id}/review-requests/{rid}/withdraw": {"id": f.artifact},
+		"/api/v1/artifacts/{id}/review-request/dismiss":         {"id": f.artifact},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
