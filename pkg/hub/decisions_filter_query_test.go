@@ -357,7 +357,7 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 
 func TestProjectDecisions_AnswererSortThenCap600(t *testing.T) {
 	f := newDecisionsFixture(t)
-	setDecisionsAndDialectExperiments(t, f.srv, true, false)
+	setDecisionsExperiments(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -404,7 +404,7 @@ func TestProjectDecisions_AnswererSortThenCap600(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	// Experiment OFF: answerers facet is sorted by name first, then capped at 500.
+	// Answerers facet is sorted by name first, then capped at 500.
 	rrOff := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, basePath+"?tab=made&limit=5", nil)
 	madeOff := decodeMadeDecisions(t, rrOff)
 	require.Len(t, madeOff.Answerers, maxProjectDecisionFacetOptions)
@@ -412,8 +412,7 @@ func TestProjectDecisions_AnswererSortThenCap600(t *testing.T) {
 	assert.Equal(t, "ans0000@example.com", madeOff.Answerers[0].Hint)
 	assert.Equal(t, "Ans 0499", madeOff.Answerers[499].Name)
 
-	// Experiment ON: typing an answerer PAST the 500 cap still filters!
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	// Typing an answerer PAST the 500 cap still filters!
 	rrPast := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, basePath+"?tab=made&q="+url.QueryEscape(`by:"Ans 0599"`), nil)
 	madePast := decodeMadeDecisions(t, rrPast)
 	require.Len(t, madePast.Entries, 1)
