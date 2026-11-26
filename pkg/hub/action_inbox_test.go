@@ -900,12 +900,13 @@ func TestUserMeSecretRequests_AnswerableGuards(t *testing.T) {
 	//    readable == true, CanRespond (agent.attach) == true, answering-recipient == false.
 	//    Must give counts.open == 1, counts.answerable == 0, and inbox summary count == 0.
 	noPostRole := &store.RoleDefinition{
-		ID:            api.NewUUID(),
-		Name:          "attach-without-chat-post-" + api.NewUUID()[:8],
-		ScopeType:     store.RoleScopeProject,
-		PermissionIDs: []string{"project.read", "agent.read", "agent.attach"},
+		ID:          api.NewUUID(),
+		Name:        "attach-without-chat-post-" + api.NewUUID()[:8],
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read", "agent.read", "agent.attach"},
 	}
-	require.NoError(t, st.CreateRoleDefinition(ctx, noPostRole))
+	_, err := st.CreateRoleDefinition(ctx, noPostRole)
+	require.NoError(t, err)
 
 	dave := &store.User{
 		ID:          api.NewUUID(),
@@ -915,7 +916,7 @@ func TestUserMeSecretRequests_AnswerableGuards(t *testing.T) {
 		Status:      "active",
 	}
 	require.NoError(t, st.CreateUser(ctx, dave))
-	_, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
 		ID:               api.NewUUID(),
 		RoleDefinitionID: noPostRole.ID,
 		ScopeType:        store.RoleScopeProject,
