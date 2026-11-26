@@ -92,7 +92,7 @@ func (qs *QuotaService) acquireNeverSuspendProjectLock(ctx context.Context, proj
 		return nil, fmt.Errorf("quota enforcement unavailable: store does not support advisory locks")
 	}
 
-	acquired, releaseAdvisory, err := locker.TryAdvisoryLockObject(ctx, store.LockQuotaEnforcement, store.StableProjectHash(projectID))
+	acquired, releaseAdvisory, err := locker.TryAdvisoryLockObject(ctx, store.LockNeverSuspendQuota, store.StableProjectHash(projectID))
 	if err != nil {
 		scopeLock.Unlock()
 		return nil, fmt.Errorf("quota: advisory lock for %q: %w", limitName, err)
@@ -177,8 +177,12 @@ func checkNeverSuspendQuotaAfterWriteInTx(ctx context.Context, tx store.Store, p
 // checkNeverSuspendQuotaHeadroom performs an unlocked pre-check before an
 // env-gather recreate tears down an existing "auto" provisioning row to create
 // a "never" replacement, so an over-cap request fails before destroying the
-// existing row. The subsequent commitAgentCreate performs the authoritative
-// locked check-and-insert.
+// existing row.
+//
+// Because this pre-check is unlocked, a concurrent writer at cap-1 can still
+// fill the last slot between teardown and commitAgentCreate; in that narrow
+// race the old provisioning row is lost and the authoritative locked check in
+// commitAgentCreate refuses the new row with 429 quota_exceeded.
 func (s *Server) checkNeverSuspendQuotaHeadroom(ctx context.Context, subjectID, projectID string) error {
 	effectiveLimit, err := s.resolveNeverSuspendLimit(ctx, subjectID, projectID)
 	if err != nil || effectiveLimit <= 0 {

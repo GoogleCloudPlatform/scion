@@ -212,6 +212,14 @@ const (
 	// sequence is atomic, preventing over-allocation.
 	LockQuotaEnforcement AdvisoryLockKey = 0x5C101002
 
+	// LockNeverSuspendQuota is the CLASS ID for per-project row-only
+	// max_never_suspend_agents_per_project quota enforcement locks
+	// (pg_try_advisory_lock(classid, StableProjectHash(projectID))). Keeping it
+	// distinct from LockQuotaEnforcement prevents never-suspend creates, PATCHes,
+	// and restores from contending with concurrent max_agents_per_project
+	// Reserve calls in the same project on Postgres.
+	LockNeverSuspendQuota AdvisoryLockKey = 0x5C10100A
+
 	// LockBrokerQuotaReconcile guards the periodic (and startup, tick 0)
 	// reconcile of stale max_agents_per_broker reservations (ptone/scion#1963)
 	// — rows left with released_at IS NULL for agents that are no longer in a

@@ -484,6 +484,10 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 		})
 	}
 	var err error
+	// Deciding whether to take the per-project never-suspend quota lock from
+	// the pre-tx snapshot is safe because SetAgentSuspendPolicy refuses
+	// soft-deleted rows (deleted_at IS NULL), so a soft-deleted agent's
+	// suspend_policy cannot transition while it remains soft-deleted.
 	if a.SuspendPolicy == store.SuspendPolicyNever {
 		err = s.withNeverSuspendQuotaLock(ctx, projectQuotaSubject(a), a.ProjectID, runTx)
 	} else {

@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -638,5 +640,146 @@ func TestNeverSuspend_QuotaExperimentOffAndUnlimitedShortCircuit(t *testing.T) {
 		recRes := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/restore", nil)
 		require.Equal(t, http.StatusOK, recRes.Code, "restore must not enforce never-suspend quota when experiment is off: %s", recRes.Body.String())
 		assert.Equal(t, int64(0), calls.Load(), "experiment off must not execute count query")
+	})
+}
+
+type fakeNeverSuspendLockerStore struct {
+	store.Store
+	mu             sync.Mutex
+	failAcquire    bool
+	held           bool
+	acquireCount   int
+	releaseCount   int
+	lastClassID    store.AdvisoryLockKey
+	lastObjID      int32
+	heldAtTxCommit bool
+}
+
+func (f *fakeNeverSuspendLockerStore) TryAdvisoryLock(_ context.Context, _ store.AdvisoryLockKey) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (f *fakeNeverSuspendLockerStore) TryAdvisoryLockObject(_ context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.acquireCount++
+	f.lastClassID = classID
+	f.lastObjID = objID
+	if f.failAcquire {
+		return false, func() error { return nil }, nil
+	}
+	f.held = true
+	released := false
+	return true, func() error {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if !released {
+			released = true
+			f.held = false
+			f.releaseCount++
+		}
+		return nil
+	}, nil
+}
+
+func (f *fakeNeverSuspendLockerStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	err := f.Store.WithTx(ctx, fn)
+	if err == nil {
+		// Record whether the advisory lock is STILL held immediately after the
+		// underlying transaction commits.
+		f.mu.Lock()
+		f.heldAtTxCommit = f.held
+		f.mu.Unlock()
+	}
+	return err
+}
+
+func (f *fakeNeverSuspendLockerStore) isHeld() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.held
+}
+
+func TestNeverSuspend_QuotaLockContract(t *testing.T) {
+	ctx := context.Background()
+	f := newNSQuotaFixture(t, "ns-qlock")
+	setNeverSuspendProjectCap(t, f.s, 2)
+
+	fake := &fakeNeverSuspendLockerStore{Store: f.s}
+	srv := &Server{
+		store: fake,
+		quotaService: &QuotaService{
+			store:  fake,
+			logger: slog.Default(),
+		},
+	}
+	setNeverSuspendExperiment(t, srv, true)
+
+	t.Run("holds LockNeverSuspendQuota across fn and tx commit and releases after return", func(t *testing.T) {
+		var heldInFn, heldInTx bool
+		err := srv.withNeverSuspendQuotaLock(ctx, f.owner.ID, f.projectID, func(effectiveLimit int64) error {
+			require.Equal(t, int64(2), effectiveLimit)
+			heldInFn = fake.isHeld()
+			return srv.store.WithTx(ctx, func(tx store.Store) error {
+				heldInTx = fake.isHeld()
+				_, cErr := tx.CountNeverSuspendAgentsInProject(ctx, f.projectID)
+				return cErr
+			})
+		})
+		require.NoError(t, err)
+		assert.True(t, heldInFn, "advisory lock must be held while fn runs")
+		assert.True(t, heldInTx, "advisory lock must be held inside tx")
+		assert.True(t, fake.heldAtTxCommit, "advisory lock must remain held through tx commit")
+		assert.False(t, fake.isHeld(), "advisory lock must be released after fn returns")
+		assert.Equal(t, 1, fake.acquireCount)
+		assert.Equal(t, 1, fake.releaseCount)
+		assert.Equal(t, store.LockNeverSuspendQuota, fake.lastClassID,
+			"must use dedicated LockNeverSuspendQuota class ID, not LockQuotaEnforcement")
+		assert.NotEqual(t, store.LockQuotaEnforcement, fake.lastClassID)
+		assert.Equal(t, store.StableProjectHash(f.projectID), fake.lastObjID)
+	})
+
+	t.Run("failed try-lock returns ErrQuotaLockContention and releases in-process mutex", func(t *testing.T) {
+		fake.failAcquire = true
+		fnCalled := false
+		err := srv.withNeverSuspendQuotaLock(ctx, f.owner.ID, f.projectID, func(int64) error {
+			fnCalled = true
+			return nil
+		})
+		require.ErrorIs(t, err, ErrQuotaLockContention)
+		assert.False(t, fnCalled, "fn must not run when advisory lock is not acquired")
+		assert.False(t, fake.isHeld())
+
+		// If the in-process scope mutex had leaked, the next call on the same
+		// project would deadlock. Verify it acquires cleanly.
+		fake.failAcquire = false
+		done := make(chan error, 1)
+		go func() {
+			done <- srv.withNeverSuspendQuotaLock(ctx, f.owner.ID, f.projectID, func(int64) error {
+				return nil
+			})
+		}()
+		select {
+		case nextErr := <-done:
+			require.NoError(t, nextErr)
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-process scope mutex leaked after ErrQuotaLockContention")
+		}
+	})
+
+	t.Run("fn error releases both advisory lock and in-process mutex", func(t *testing.T) {
+		boom := errors.New("injected tx error")
+		err := srv.withNeverSuspendQuotaLock(ctx, f.owner.ID, f.projectID, func(int64) error {
+			assert.True(t, fake.isHeld())
+			return boom
+		})
+		require.ErrorIs(t, err, boom)
+		assert.False(t, fake.isHeld())
+
+		// Confirm in-process mutex was released.
+		err = srv.withNeverSuspendQuotaLock(ctx, f.owner.ID, f.projectID, func(int64) error {
+			return nil
+		})
+		require.NoError(t, err)
 	})
 }
