@@ -173,11 +173,11 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
       { value: 'deploy-frontend', help: 'deleted · 3f9c' },
     ]);
 
-    // Local value suggestions for `by:` offer `me`, unique display name with email hint,
+    // Local value suggestions for `by:` offer pinned `me`, unique display name with email hint,
     // and insert emails for colliding display names ("Sam Taylor").
     const bySugs = box?.valueSuggestions?.('by', '');
     expect(bySugs).toEqual([
-      { value: 'me', help: 'You · Alice' },
+      { value: 'me', help: 'You · Alice', pinned: true },
       { value: 'Bob', help: 'bob@example.com' },
       { value: 'sam1@example.com', help: 'Sam Taylor' },
       { value: 'sam2@example.com', help: 'Sam Taylor' },
@@ -216,7 +216,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
     expect(requestedUrls.some((u) => u.includes('q=-agent%3Adeploy-frontend'))).toBe(true);
   });
 
-  it('shows old URL params as filter terms on load and replaces them with q= on commit', async () => {
+  it('shows old URL params as filter terms on load (preserving colliding agent ID) and replaces them with q= on commit', async () => {
     setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
     const el = await mountPage(
       `?tab=made&agent=${AGENT_1_ID}&conversation=topic-ops&user=${VIEWER_ID}&provenance=direct`
@@ -226,21 +226,96 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
       'scion-decisions-filter-panel'
     ) as ScionDecisionsFilterPanel;
     const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
-    expect(box.value).toBe('conversation:#ops agent:deploy-frontend by:me provenance:direct');
+    // AGENT_1_ID shares the name "deploy-frontend" with AGENT_2_ID, so O2 keeps the exact UUID.
+    expect(box.value).toBe(`conversation:#ops agent:${AGENT_1_ID} by:me provenance:direct`);
 
-    // Committing replaces legacy separate params with q=.
+    // Committing an unrelated edit keeps AGENT_1_ID rather than widening to deploy-frontend.
+    requestedUrls = [];
     const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
-    input.value = 'by:me provenance:confirmed';
+    input.value = `agent:${AGENT_1_ID} by:me provenance:confirmed`;
     input.dispatchEvent(new Event('input'));
     await box.updateComplete;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     await flushRender(el);
 
     const params = new URLSearchParams(window.location.search);
-    expect(params.get('q')).toBe('by:me provenance:confirmed');
+    expect(params.get('q')).toBe(`agent:${AGENT_1_ID} by:me provenance:confirmed`);
     expect(params.get('agent')).toBeNull();
     expect(params.get('conversation')).toBeNull();
     expect(params.get('user')).toBeNull();
     expect(params.get('provenance')).toBeNull();
+    expect(requestedUrls.some((u) => u.includes(AGENT_1_ID))).toBe(true);
+  });
+
+  it('loads the unfiltered list with no 400 request and keeps raw text in the box for invalid q= URLs (O1)', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    const longText = 'x'.repeat(220);
+    for (const badQ of ['a', 'provenance:bogus', 'agent:', longText]) {
+      document.body.innerHTML = '';
+      requestedUrls = [];
+      const el = await mountPage(`?tab=made&q=${encodeURIComponent(badQ)}`);
+
+      const panel = el.shadowRoot?.querySelector(
+        'scion-decisions-filter-panel'
+      ) as ScionDecisionsFilterPanel;
+      const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+      expect(box.value).toBe(badQ);
+      // Every decisions request must omit `q` so the Hub never returns 400.
+      const decisionReqs = requestedUrls.filter((u) =>
+        u.includes(`/api/v1/projects/${PROJECT_ID}/decisions`)
+      );
+      expect(decisionReqs.length).toBeGreaterThan(0);
+      for (const reqUrl of decisionReqs) {
+        expect(new URL(reqUrl, 'http://localhost').searchParams.get('q')).toBeNull();
+      }
+    }
+  });
+
+  it('pins `me` first in by: suggestions even with >12 answerers sorting before "me" (O3)', async () => {
+    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    const manyAnswerers = [
+      { id: VIEWER_ID, name: 'Alice', hint: 'alice@example.com' },
+      ...Array.from({ length: 15 }, (_, i) => ({
+        id: `user-a-${i}`,
+        name: `Ans ${String(i).padStart(2, '0')}`,
+        hint: `ans${i}@example.com`,
+      })),
+    ];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes(`/api/v1/projects/${PROJECT_ID}/decisions`)) {
+          return Promise.resolve(
+            makeResponse({
+              counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+              prompts: [],
+              entries: [],
+              agents: [],
+              answerers: manyAnswerers,
+              conversations: [],
+            })
+          );
+        }
+        return Promise.resolve(makeResponse({ id: PROJECT_ID, name: 'Demo', slug: 'demo' }));
+      })
+    );
+
+    const el = await mountPage('?tab=made');
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'by:';
+    input.setSelectionRange(3, 3);
+    input.dispatchEvent(new Event('input'));
+    await box.updateComplete;
+
+    const options = Array.from(box.shadowRoot?.querySelectorAll('[role="option"]') ?? []);
+    expect(options.length).toBe(12);
+    expect(options[0].querySelector('.option-label')?.textContent).toBe('me');
+    expect(options[0].querySelector('.option-help')?.textContent).toBe('You · Alice');
   });
 });

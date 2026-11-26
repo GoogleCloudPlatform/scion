@@ -487,6 +487,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     super.willUpdate(changed);
     if (
       changed.has('q') ||
+      changed.has('searchText') ||
       changed.has('conversation') ||
       changed.has('agent') ||
       changed.has('user') ||
@@ -524,16 +525,27 @@ export class ScionDecisionsFilterPanel extends LitElement {
    * Formats legacy separate URL params (`agent=`, `conversation=`, `user=`,
    * `provenance=`) as filter query terms alongside `q` so old links show their
    * equivalent terms in `<scion-filter-box>` on load (design-8985 §3.4).
+   * When an agent name or conversation label collides or is absent from the
+   * facet list, emits the exact ID/key so a later commit does not widen the filter.
    */
   private synthesizeDialectQuery(): string {
     const parts: string[] = [];
     if (this.conversation) {
       const conv = this.conversations.find((c) => c.key === this.conversation);
-      parts.push(`conversation:${formatValue(conv?.label || this.conversation)}`);
+      const uniqueLabel =
+        conv !== undefined &&
+        Boolean(conv.label) &&
+        this.conversations.filter((c) => c.label.toLowerCase() === conv.label.toLowerCase())
+          .length === 1;
+      parts.push(`conversation:${formatValue(uniqueLabel ? conv.label : this.conversation)}`);
     }
     if (this.agent) {
       const actor = this.agents.find((a) => a.id === this.agent);
-      parts.push(`agent:${formatValue(actor?.name || this.agent)}`);
+      const uniqueName =
+        actor !== undefined &&
+        Boolean(actor.name) &&
+        this.agents.filter((a) => a.name.toLowerCase() === actor.name.toLowerCase()).length === 1;
+      parts.push(`agent:${formatValue(uniqueName ? actor.name : this.agent)}`);
     }
     if (this.user) {
       if (this.currentUserId && this.user === this.currentUserId) {
@@ -551,7 +563,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     if (this.provenance) {
       parts.push(`provenance:${formatValue(this.provenance)}`);
     }
-    const baseQ = this.q.trim();
+    const baseQ = this.q.trim() || (this.searchText ?? '').trim();
     if (baseQ) {
       parts.push(baseQ);
     }
@@ -587,7 +599,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
           }
         }
         if (this.currentUserId) {
-          out.push({ value: 'me', help: selfName ? `You · ${selfName}` : 'You' });
+          out.push({ value: 'me', help: selfName ? `You · ${selfName}` : 'You', pinned: true });
         }
         for (const u of this.answerers) {
           if (this.currentUserId && u.id === this.currentUserId) continue;

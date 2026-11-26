@@ -34,20 +34,25 @@ export interface Suggestion {
   continueSuggest?: boolean;
 }
 
-export type ValueSuggestion = string | { value: string; help?: string };
+export type ValueSuggestion = string | { value: string; help?: string; pinned?: boolean };
 
 export type ValueSuggestionProvider = (key: string, prefix: string) => ValueSuggestion[];
 
 interface NormalizedValueSuggestion {
   value: string;
   help?: string;
+  pinned?: boolean;
 }
 
 function normalizeValueSuggestion(raw: ValueSuggestion): NormalizedValueSuggestion {
   if (typeof raw === 'string') {
     return { value: raw };
   }
-  return raw.help ? { value: raw.value, help: raw.help } : { value: raw.value };
+  return {
+    value: raw.value,
+    ...(raw.help ? { help: raw.help } : {}),
+    ...(raw.pinned ? { pinned: true } : {}),
+  };
 }
 
 /**
@@ -120,6 +125,7 @@ export function getSuggestions(
       .sort(
         (a, b) =>
           a.tier - b.tier ||
+          (a.item.pinned ? 0 : 1) - (b.item.pinned ? 0 : 1) ||
           a.item.value.localeCompare(b.item.value) ||
           (a.item.help ?? '').localeCompare(b.item.help ?? '')
       );

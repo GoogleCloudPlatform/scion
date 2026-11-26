@@ -39,6 +39,7 @@ import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
   DecisionsApiError,
   buildDecisionsUrlSearch,
+  extractRawDecisionsQueryParam,
   hasDecisionsSearchCapability,
   isDecisionsSearchTimeoutError,
   normalizeDecisionsFilterQuery,
@@ -460,7 +461,11 @@ export class DecisionsPageController implements ReactiveController {
       this.sort = 'recent';
       this.filterProject = '';
       this.filterQ = parsed.q;
-      this.searchDraft = parsed.q;
+      // Under filters.query_dialect, keep an invalid raw q= in searchDraft so
+      // <scion-filter-box> displays it with its inline error while filterQ stays
+      // empty and loads the unfiltered list without sending a 400 request.
+      this.searchDraft =
+        parsed.q || (this.queryDialect ? extractRawDecisionsQueryParam(search) : '');
       this.filterConversation = parsed.conversation;
       this.filterAgent = parsed.agent;
       this.filterUser = parsed.user;
@@ -690,6 +695,7 @@ export class DecisionsPageController implements ReactiveController {
     if (parsed.query.text || (parsed.query.excludeText?.length ?? 0) > 0) return true;
     return parsed.query.terms.some((t) => {
       const k = t.key.toLowerCase();
+      // 'project' is used by the profile-decisions schema in Phase 3 (ptone/scion#9348).
       return k === 'agent' || k === 'conversation' || k === 'project';
     });
   }

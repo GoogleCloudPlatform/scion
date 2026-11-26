@@ -21,6 +21,12 @@
  */
 
 import { apiFetch, parseApiError } from './api.js';
+import {
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+  validate as validateFilterQuery,
+} from '../shared/filter-query/index.js';
 import type {
   AnswerView,
   ChoiceOption,
@@ -281,8 +287,11 @@ export function normalizeDecisionsSearchQuery(raw: string | undefined | null): s
 
 /**
  * Normalizes a `q` parameter when `filters.query_dialect` is enabled: trims
- * edge whitespace, rejects control characters, and enforces the 512-byte
- * `filterquery.MaxInputBytes` bound.
+ * edge whitespace, rejects control characters, enforces the 512-byte
+ * `filterquery.MaxInputBytes` bound, runs client `parse()` + `validate()`
+ * against the `decisions` schema, and enforces the text-mode 2-rune minimum
+ * (and 200-rune text cap). Returns `''` for invalid inputs so stale or
+ * hand-edited URLs never trigger HTTP 400 from the Hub.
  */
 export function normalizeDecisionsFilterQuery(raw: string | undefined | null): string {
   const trimmed = trimEdgeSpace(raw);
@@ -290,6 +299,29 @@ export function normalizeDecisionsFilterQuery(raw: string | undefined | null): s
   if (new TextEncoder().encode(trimmed).length > MAX_DECISIONS_FILTER_QUERY_BYTES) {
     return '';
   }
+  const schema = getViewSchema('decisions');
+  if (!schema) return normalizeDecisionsSearchQuery(trimmed);
+  const parsed = parseFilterQuery(trimmed, knownKeysFor(schema));
+  if (parsed.error || !parsed.query) return '';
+  const validation = validateFilterQuery(parsed.query, schema, trimmed);
+  if (validation.error) return '';
+  if (parsed.query.mode === 'text') {
+    if ([...parsed.query.text].length < MIN_DECISIONS_SEARCH_RUNES) {
+      return '';
+    }
+  }
+  return trimmed;
+}
+
+/**
+ * Returns the trimmed raw `q` query parameter (without control chars) for
+ * displaying an invalid URL query in `<scion-filter-box>` with its inline error
+ * while loading the unfiltered list.
+ */
+export function extractRawDecisionsQueryParam(search: string | URLSearchParams): string {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search;
+  const trimmed = trimEdgeSpace(params.get('q'));
+  if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
   return trimmed;
 }
 
@@ -348,8 +380,13 @@ function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProv
 }
 
 /**
- * Parses URL query parameters on load for `/projects/{id}/decisions`, silently
- * dropping invalid values so malformed or stale links never fail with HTTP 400 (D10, D11).
+ * Parses URL query parameters on load for `/projects/{id}/decisions`.
+ * Invalid values are dropped from the committed filter state so malformed or
+ * stale links never fail with HTTP 400 (D10, D11). Under `filters.query_dialect`,
+ * `q` is validated with the `decisions` schema parser/validator and the
+ * text-mode 2-rune minimum (200-rune text cap); callers may still read the raw
+ * `q` via `extractRawDecisionsQueryParam()` to show it with its inline error
+ * in `<scion-filter-box>` while loading the unfiltered list.
  */
 export function parseDecisionsUrlState(
   search: string | URLSearchParams,
