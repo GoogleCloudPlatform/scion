@@ -852,6 +852,7 @@ func (s *Server) decisionsCore(
 	resolved := resolveProjectDecisionsFilterQuery(set, user.ID(), pq, facetAgents, facetAnswerers, listKeys)
 	if pq.parsedQuery != nil {
 		listKeys = resolved.listKeys
+		targetProjectIDs = resolved.projectIDs
 	}
 
 	// Live counts and classified prompt cards across all open prompts.
@@ -901,7 +902,7 @@ func (s *Server) decisionsCore(
 	}
 
 	// tab=made
-	if resolved.impossible {
+	if resolved.impossible || (pq.parsedQuery != nil && len(listKeys) == 0) {
 		if pq.profile {
 			return s.finishProfileMadeDecisions(ctx, wcs, set, pq, nil, nil, pq.madeFilter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
 		}
