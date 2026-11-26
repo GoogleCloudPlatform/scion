@@ -324,3 +324,94 @@ func TestDecisionRetention_DecisionsResponseRetentionField(t *testing.T) {
 	// Profile Made filtered to keep_forever project -> retention absent.
 	assert.Nil(t, getJSON("/api/v1/users/me/decisions?tab=made&project=" + projHold)["retention"])
 }
+
+// TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit verifies that
+// RunManual (via sw.walk) re-reads policy per page, persists the running manual
+// run row after page 1 before page 2 begins, and stops immediately when a legal
+// hold (enabled=false) is set mid-run.
+func TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "man-hold", Slug: "man-hold", Created: time.Now().UTC(),
+	}))
+	agentID := uuid.NewString()
+	const total = 60 // page_size=50 -> page 1 purges 50, page 2 would purge 10
+	decIDs := make([]string, total)
+	for i := 0; i < total; i++ {
+		_, decIDs[i] = seedOldSettledDecision(t, ctx, cs, projID, agentID, admin.ID, fmt.Sprintf("MH%02d", i), 60*24*time.Hour)
+	}
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	sw := newDecisionRetentionSweeper(cs.DecisionRetention(), true)
+	sw.policy = srv.decisionRetentionPolicyAt
+	sleepCalls := 0
+	sw.sleep = func(ctx context.Context, _ time.Duration) error {
+		sleepCalls++
+		// Verify running manual run row is already persisted with page 1 counts.
+		midRuns, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{
+			Trigger: store.DecisionRetentionTriggerManual, Limit: 10,
+		})
+		require.NoError(t, err)
+		require.Len(t, midRuns, 1)
+		assert.Equal(t, store.DecisionRetentionStatusRunning, midRuns[0].Status)
+		assert.Nil(t, midRuns[0].FinishedAt)
+		assert.Equal(t, admin.ID, midRuns[0].Actor)
+		assert.Equal(t, int64(50), midRuns[0].Counts[projID].Decisions)
+		assert.Equal(t, int64(50), midRuns[0].Counts[projID].Answers)
+
+		// Flip enabled=false mid-run (legal hold).
+		_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+			json.RawMessage(`{"enabled":false,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+			"test", ops.SectionRevision(opsettings.DecisionRetentionSectionName), "managed")
+		require.NoError(t, err)
+		return nil
+	}
+
+	start := time.Now().UTC()
+	p, err := srv.decisionRetentionPolicyAt(ctx, start)
+	require.NoError(t, err)
+	run := &store.DecisionRetentionRun{
+		Trigger:   store.DecisionRetentionTriggerManual,
+		DryRun:    false,
+		StartedAt: start,
+		Status:    store.DecisionRetentionStatusRunning,
+		Actor:     admin.ID,
+		Policy:    decisionRetentionRunPolicy(p),
+		Counts:    map[string]store.DecisionRetentionCounts{},
+	}
+	require.NoError(t, cs.DecisionRetention().SaveDecisionRetentionRun(ctx, run))
+
+	res, err := sw.RunManual(ctx, p, run, start.Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, sleepCalls)
+	assert.Equal(t, 1, res.Pages, "mid-run hold must stop manual run before page 2")
+	assert.Equal(t, 50, res.PurgedMessages)
+	assert.False(t, res.ReachedCutoff)
+
+	remaining := 0
+	for _, id := range decIDs {
+		if _, err := cs.GetDecision(ctx, id); err == nil {
+			remaining++
+		}
+	}
+	assert.Equal(t, 10, remaining, "page 2 rows must remain untouched after mid-run hold")
+
+	finalRuns, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{
+		Trigger: store.DecisionRetentionTriggerManual, Limit: 10,
+	})
+	require.NoError(t, err)
+	require.Len(t, finalRuns, 1)
+	assert.Equal(t, store.DecisionRetentionStatusPartial, finalRuns[0].Status)
+	assert.NotNil(t, finalRuns[0].FinishedAt)
+	assert.Equal(t, int64(50), finalRuns[0].Counts[projID].Decisions)
+}
