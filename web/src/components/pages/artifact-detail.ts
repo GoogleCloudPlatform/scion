@@ -1135,13 +1135,58 @@ export class ScionPageArtifactDetail extends LitElement {
         border-radius: var(--scion-radius-sm);
         padding: 0 0.3rem;
       }
+      .g-review-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-shrink: 0;
+      }
+      @media (max-width: 900px) {
+        .g-review-actions .lbl {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip: rect(0 0 0 0);
+          white-space: nowrap;
+        }
+        .g-review-actions sl-button::part(base) {
+          padding-inline: 0.45rem;
+        }
+        .g-review-actions sl-button::part(label) {
+          padding: 0;
+        }
+      }
       @media (max-width: 640px) {
         .g-sticky {
           top: -1rem;
         }
         .g-toolbar {
-          gap: 0.3rem;
-          padding: 0.4rem;
+          flex-wrap: nowrap;
+          gap: 0.25rem;
+          padding: 0.35rem 0.4rem;
+        }
+        .g-toolbar .sep {
+          display: none;
+        }
+        .g-toolbar .draft-status-wrap {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          flex-shrink: 1;
+        }
+        .g-toolbar .draft-status {
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .g-toolbar sl-button::part(base) {
+          padding-inline: 0.4rem;
+        }
+        .g-toolbar sl-button::part(label) {
+          padding: 0;
+        }
+        .g-review-actions {
+          gap: 0.25rem;
         }
         /* Visually hidden, still the buttons' accessible names. */
         .g-toolbar .lbl {
@@ -4116,6 +4161,7 @@ export class ScionPageArtifactDetail extends LitElement {
                 </p>
               </div>
             </sl-dropdown>
+            ${this.renderStickyReviewActions(marks, marksOnly)}
           </div>
           ${this.renderGraphicalHint()}
         </div>
@@ -4356,13 +4402,84 @@ export class ScionPageArtifactDetail extends LitElement {
     `;
   }
 
-  private renderReviewFooter(marks: number, marksOnly: boolean): TemplateResult {
+  private reviewActionState(
+    marks: number,
+    marksOnly: boolean
+  ): { submitDisabled: boolean; saveDraftDisabled: boolean } {
     const submitDisabled =
       marks === 0 ||
       !marksOnly ||
       this.reviewText === lfText(this.text) ||
       (this.reviewDraftsEnabled && (this.draftSnapshot?.inFlight ?? false));
     const saveDraftDisabled = this.reviewBusy || !(this.draftController?.canSaveNow ?? false);
+    return { submitDisabled, saveDraftDisabled };
+  }
+
+  private renderStickyReviewActions(marks: number, marksOnly: boolean): TemplateResult {
+    const { submitDisabled, saveDraftDisabled } = this.reviewActionState(marks, marksOnly);
+    return html`
+      <span class="sep"></span>
+      <div class="g-review-actions">
+        <sl-tooltip content="Cancel">
+          <sl-button
+            size="small"
+            class="cancel-review-btn"
+            aria-label="Cancel"
+            ?disabled=${this.reviewBusy}
+            @click=${this.cancelReview}
+          >
+            <sl-icon slot="prefix" name="x-lg"></sl-icon>
+            <span class="lbl">Cancel</span>
+          </sl-button>
+        </sl-tooltip>
+        ${this.reviewDraftsEnabled
+          ? html`<sl-tooltip content="Save Draft">
+                <sl-button
+                  size="small"
+                  class="save-draft-btn"
+                  aria-label="Save Draft"
+                  ?loading=${this.draftSnapshot?.inFlight ?? false}
+                  ?disabled=${saveDraftDisabled}
+                  @click=${(): void => void this.saveDraftNow()}
+                >
+                  <sl-icon slot="prefix" name="floppy"></sl-icon>
+                  <span class="lbl">Save Draft</span>
+                </sl-button>
+              </sl-tooltip>
+              <sl-tooltip content="Submit Review">
+                <sl-button
+                  size="small"
+                  variant="primary"
+                  class="submit-review-btn"
+                  aria-label="Submit Review"
+                  ?loading=${this.reviewBusy}
+                  ?disabled=${submitDisabled}
+                  @click=${(): void => void this.saveReview()}
+                >
+                  <sl-icon slot="prefix" name="send"></sl-icon>
+                  <span class="lbl">Submit Review</span>
+                </sl-button>
+              </sl-tooltip>`
+          : html`<sl-tooltip content="Save review">
+              <sl-button
+                size="small"
+                variant="primary"
+                class="submit-review-btn"
+                aria-label="Save review"
+                ?loading=${this.reviewBusy}
+                ?disabled=${submitDisabled}
+                @click=${(): void => void this.saveReview()}
+              >
+                <sl-icon slot="prefix" name="floppy"></sl-icon>
+                <span class="lbl">Save review</span>
+              </sl-button>
+            </sl-tooltip>`}
+      </div>
+    `;
+  }
+
+  private renderReviewFooter(marks: number, marksOnly: boolean): TemplateResult {
+    const { submitDisabled, saveDraftDisabled } = this.reviewActionState(marks, marksOnly);
     return html`
       <div class="edit-footer">
         <sl-input
@@ -4374,7 +4491,11 @@ export class ScionPageArtifactDetail extends LitElement {
             this.draftController?.notifyChange();
           }}
         ></sl-input>
-        <sl-button size="small" ?disabled=${this.reviewBusy} @click=${this.cancelReview}
+        <sl-button
+          size="small"
+          class="cancel-review-btn"
+          ?disabled=${this.reviewBusy}
+          @click=${this.cancelReview}
           >Cancel</sl-button
         >
         ${this.reviewDraftsEnabled
@@ -4402,6 +4523,7 @@ export class ScionPageArtifactDetail extends LitElement {
           : html`<sl-button
               size="small"
               variant="primary"
+              class="submit-review-btn"
               ?loading=${this.reviewBusy}
               ?disabled=${submitDisabled}
               @click=${(): void => void this.saveReview()}
