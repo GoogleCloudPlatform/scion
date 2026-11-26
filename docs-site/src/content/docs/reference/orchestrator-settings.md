@@ -219,7 +219,7 @@ secrets:
 | :--- | :--- | :--- |
 | `key` | string | **Required**. The secret key name. |
 | `description` | string | Human-readable description. |
-| `type` | string | Projection type: `environment` (default), `file`, or `on_demand`. |
+| `type` | string | Projection type: `environment` (default) or `file`. |
 | `target` | string | For `file` type, the path where the secret is mounted. |
 
 ## Profiles (`profiles`)
