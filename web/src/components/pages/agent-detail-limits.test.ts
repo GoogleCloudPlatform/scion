@@ -39,14 +39,20 @@ vi.mock('../../client/api.js', () => ({
 }));
 
 type CardHost = {
-  renderConfigLimitsCard(inline: AgentInlineConfig | undefined): TemplateResult | typeof nothing;
+  renderConfigLimitsCard(
+    inline: AgentInlineConfig | undefined,
+    effective?: Agent['effectiveConfig']
+  ): TemplateResult | typeof nothing;
   renderLimitsUsageCard(agent: Agent): TemplateResult | typeof nothing;
 };
 
-function renderCard(inline: AgentInlineConfig | undefined): HTMLElement {
+function renderCard(
+  inline: AgentInlineConfig | undefined,
+  effective?: Agent['effectiveConfig']
+): HTMLElement {
   const el = document.createElement('scion-page-agent-detail') as unknown as CardHost;
   const host = document.createElement('div');
-  render(el.renderConfigLimitsCard(inline), host);
+  render(el.renderConfigLimitsCard(inline, effective), host);
   return host;
 }
 
@@ -286,5 +292,35 @@ describe('agent detail Limits & Usage card', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('shows effective limits from effectiveConfig and labels hub-ceiling clamping', () => {
+    const configHost = renderCard(undefined, {
+      maxTurns: 50,
+      maxModelCalls: 200,
+      maxDuration: '2h',
+      limitsClampedBy: ['max_turns'],
+    });
+    expect(values(configHost)).toEqual({
+      'Max Turns': '50 (hub ceiling)',
+      'Max Model Calls': '200',
+      'Max Duration': '2h',
+    });
+    expect(configHost.textContent).toContain('cooperative budget guardrails');
+
+    const usageHost = renderUsageCard({
+      currentTurns: 12,
+      currentModelCalls: 30,
+      effectiveConfig: {
+        maxTurns: 50,
+        maxModelCalls: 200,
+        limitsClampedBy: ['max_turns'],
+      },
+    });
+    expect(usageItems(usageHost)).toEqual({
+      Turns: { value: '12 / 50 (hub ceiling)', hasProgressBar: true },
+      'Model Calls': { value: '30 / 200', hasProgressBar: true },
+      'Max Duration': { value: 'Inherited', hasProgressBar: false },
+    });
   });
 });

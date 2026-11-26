@@ -792,6 +792,13 @@ export interface TelemetryConfig {
  * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
  * and accepts it in the agent PATCH body's `config` object.
  */
+export interface AgentEffectiveConfig {
+  maxTurns?: number;
+  maxModelCalls?: number;
+  maxDuration?: string;
+  limitsClampedBy?: string[];
+}
+
 export interface AgentInlineConfig {
   harness?: string;
   harness_config?: string;
@@ -1128,6 +1135,7 @@ export interface Agent {
   // appliedConfig; full items carry it as appliedConfig.creatorName.
   creatorName?: string;
   appliedConfig?: AgentAppliedConfig;
+  effectiveConfig?: AgentEffectiveConfig;
 
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
   // parent (user or spawning agent). Drives the lineage graph view.

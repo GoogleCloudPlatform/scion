@@ -793,9 +793,9 @@ var compiled = []Experiment{
 	{
 		Name:        AgentPolicyLimitCeilings,
 		Title:       "Agent limit ceilings",
-		Description: "Enables Hub-level run-limit ceilings (agent_limits): fail-fast validation on Hub creates, wire ceilings to brokers, broker clamping, and effective-limit echo.",
+		Description: "Enables Hub-level run-limit ceilings (agent_limits): admin ceilings UI/API, resolved-settings ceiling hints, fail-fast validation on Hub creates, wire ceilings to brokers, broker clamping, and effective-limit echo.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#9371",
 		Owner:       "configuration",

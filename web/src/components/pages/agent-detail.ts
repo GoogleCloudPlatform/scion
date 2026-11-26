@@ -2396,9 +2396,17 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderLimitsUsageCard(agent: Agent) {
     const cfg = agent.appliedConfig?.inlineConfig;
-    const rawTurns = cfg?.max_turns;
-    const rawModelCalls = cfg?.max_model_calls;
-    const rawDuration = cfg?.max_duration;
+    const eff = agent.effectiveConfig;
+    const clamped = new Set(eff?.limitsClampedBy ?? []);
+
+    const effTurns = eff?.maxTurns && eff.maxTurns > 0 ? eff.maxTurns : undefined;
+    const effModelCalls =
+      eff?.maxModelCalls && eff.maxModelCalls > 0 ? eff.maxModelCalls : undefined;
+    const effDuration = eff?.maxDuration?.trim() || undefined;
+
+    const rawTurns = effTurns ?? cfg?.max_turns;
+    const rawModelCalls = effModelCalls ?? cfg?.max_model_calls;
+    const rawDuration = effDuration ?? cfg?.max_duration;
 
     // Distinguish unset (inherited from template/hub/broker defaults, cap
     // unknown to the hub) from explicit 0 / "0" (Unlimited, no cap applies).
@@ -2441,30 +2449,45 @@ export class ScionPageAgentDetail extends LitElement {
           ${turnsInherited
             ? this.renderInheritedLimitItem('Turns', currentTurns)
             : maxTurns > 0
-              ? this.renderLimitItem('Turns', currentTurns, maxTurns)
+              ? this.renderLimitItem('Turns', currentTurns, maxTurns, clamped.has('max_turns'))
               : nothing}
           ${modelCallsInherited
             ? this.renderInheritedLimitItem('Model Calls', currentModelCalls)
             : maxModelCalls > 0
-              ? this.renderLimitItem('Model Calls', currentModelCalls, maxModelCalls)
+              ? this.renderLimitItem(
+                  'Model Calls',
+                  currentModelCalls,
+                  maxModelCalls,
+                  clamped.has('max_model_calls')
+                )
               : nothing}
           ${durationInherited
             ? this.renderInheritedTimeLimitItem(showInheritedElapsed ? elapsedSec : null)
             : maxDurationSec > 0
-              ? this.renderTimeLimitItem(timeRemainingSec, elapsedSec, maxDurationSec)
+              ? this.renderTimeLimitItem(
+                  timeRemainingSec,
+                  elapsedSec,
+                  maxDurationSec,
+                  clamped.has('max_duration')
+                )
               : nothing}
         </div>
       </div>
     `;
   }
 
-  private renderLimitItem(label: string, current: number, max: number) {
+  private renderLimitItem(label: string, current: number, max: number, clamped = false) {
     const pct = Math.min(100, (current / max) * 100);
     const colorClass = pct > 90 ? 'danger' : pct > 75 ? 'warning' : 'normal';
     return html`
       <div class="limit-item">
         <span class="limit-label">${label}</span>
-        <span class="limit-value">${current} / ${max}</span>
+        <span class="limit-value"
+          >${current} /
+          ${max}${clamped
+            ? html` <span class="limit-inherited">(hub ceiling)</span>`
+            : nothing}</span
+        >
         <div class="progress-bar-track">
           <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
         </div>
@@ -2481,14 +2504,23 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
-  private renderTimeLimitItem(remainingSec: number, elapsedSec: number, totalSec: number) {
+  private renderTimeLimitItem(
+    remainingSec: number,
+    elapsedSec: number,
+    totalSec: number,
+    clamped = false
+  ) {
     const pct = Math.min(100, (elapsedSec / totalSec) * 100);
     const remainPct = 100 - pct;
     const colorClass = remainPct < 10 ? 'danger' : remainPct < 25 ? 'warning' : 'normal';
     return html`
       <div class="limit-item">
         <span class="limit-label">Time Remaining</span>
-        <span class="limit-value">${formatDurationHMS(remainingSec)}</span>
+        <span class="limit-value"
+          >${formatDurationHMS(remainingSec)}${clamped
+            ? html` <span class="limit-inherited">(hub ceiling)</span>`
+            : nothing}</span
+        >
         <div class="progress-bar-track">
           <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
         </div>
@@ -2809,8 +2841,8 @@ export class ScionPageAgentDetail extends LitElement {
         this.gcpServiceAccount,
         this.gcpServiceAccountLoading
       )}
-      ${this.renderConfigLimitsCard(inline)} ${this.renderTelemetryCard(inline?.telemetry)}
-      ${this.renderInitialTaskCard(cfg)}
+      ${this.renderConfigLimitsCard(inline, agent.effectiveConfig)}
+      ${this.renderTelemetryCard(inline?.telemetry)} ${this.renderInitialTaskCard(cfg)}
     `;
   }
 
@@ -3388,14 +3420,43 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
-  private renderConfigLimitsCard(inline: AgentInlineConfig | undefined) {
+  private renderConfigLimitsCard(
+    inline: AgentInlineConfig | undefined,
+    effective?: Agent['effectiveConfig']
+  ) {
+    const effTurns = effective?.maxTurns && effective.maxTurns > 0 ? effective.maxTurns : undefined;
+    const effModelCalls =
+      effective?.maxModelCalls && effective.maxModelCalls > 0 ? effective.maxModelCalls : undefined;
+    const effDuration = effective?.maxDuration?.trim() || undefined;
+    const clamped = new Set(effective?.limitsClampedBy ?? []);
+
     const maxTurns = inline?.max_turns;
     const maxModelCalls = inline?.max_model_calls;
     const maxDuration = inline?.max_duration;
 
     // A stored 0 (or any zero duration spelling) is Unlimited, so the card hides
-    // only when no limit is stored at all.
-    if (maxTurns == null && maxModelCalls == null && !maxDuration) return nothing;
+    // only when neither inline nor effective limits are present.
+    if (
+      maxTurns == null &&
+      maxModelCalls == null &&
+      !maxDuration &&
+      effTurns == null &&
+      effModelCalls == null &&
+      !effDuration
+    ) {
+      return nothing;
+    }
+
+    const formatEffectiveOrInline = (
+      effVal: number | string | undefined,
+      inlineVal: number | string | undefined,
+      limitKey: string
+    ): string => {
+      if (effVal !== undefined) {
+        return clamped.has(limitKey) ? `${effVal} (hub ceiling)` : String(effVal);
+      }
+      return formatConfigLimit(inlineVal);
+    };
 
     return html`
       <div class="card">
@@ -3403,17 +3464,29 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">Max Turns</span>
-            <span class="info-value">${formatConfigLimit(maxTurns)}</span>
+            <span class="info-value"
+              >${formatEffectiveOrInline(effTurns, maxTurns, 'max_turns')}</span
+            >
           </div>
           <div class="info-item">
             <span class="info-label">Max Model Calls</span>
-            <span class="info-value">${formatConfigLimit(maxModelCalls)}</span>
+            <span class="info-value"
+              >${formatEffectiveOrInline(effModelCalls, maxModelCalls, 'max_model_calls')}</span
+            >
           </div>
           <div class="info-item">
             <span class="info-label">Max Duration</span>
-            <span class="info-value">${formatConfigLimit(maxDuration)}</span>
+            <span class="info-value"
+              >${formatEffectiveOrInline(effDuration, maxDuration, 'max_duration')}</span
+            >
           </div>
         </div>
+        <p
+          class="limits-guardrail-note"
+          style="margin: 0.75rem 0 0; font-size: 0.8125rem; color: var(--scion-text-muted);"
+        >
+          Turn and model-call limits are cooperative budget guardrails, not a security boundary.
+        </p>
       </div>
     `;
   }

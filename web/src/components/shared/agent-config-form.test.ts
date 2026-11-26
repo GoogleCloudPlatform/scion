@@ -575,3 +575,34 @@ describe('scion-agent-config-form does not echo an untouched auth type (ptone/sc
     expect(el.collectConfigPatch()).toEqual({ auth_selectedType: 'api-key' });
   });
 });
+
+describe('scion-agent-config-form limitCeilings', () => {
+  it('sets max, hides Unlimited, and shows Hub ceiling helper when ceilings are active', async () => {
+    const el = await mount({
+      mode: 'create',
+      fieldKeys: null,
+      limitCeilings: { max_turns: 50, max_duration: '2h' },
+    });
+
+    const turnsField = field(el, 'config.max_turns');
+    const turnsInput = turnsField.querySelector('sl-input')!;
+    expect(turnsInput.getAttribute('max')).toBe('50');
+    expect(turnsField.querySelector('sl-checkbox.unlimited')).toBeNull();
+    expect(turnsField.querySelector('[data-testid="limit-ceiling"]')?.textContent).toContain(
+      'Hub ceiling: 50.'
+    );
+    expect(turnsField.textContent).toContain('cooperative budget guardrail');
+
+    // No ceiling on max_model_calls -> Unlimited checkbox stays visible.
+    const callsField = field(el, 'config.max_model_calls');
+    expect(callsField.querySelector('sl-checkbox.unlimited')).not.toBeNull();
+    expect(callsField.querySelector('[data-testid="limit-ceiling"]')).toBeNull();
+
+    // Ceiling on max_duration -> Unlimited hidden and helper shown.
+    const durField = field(el, 'config.max_duration');
+    expect(durField.querySelector('sl-checkbox.unlimited')).toBeNull();
+    expect(durField.querySelector('[data-testid="limit-ceiling"]')?.textContent).toContain(
+      'Hub ceiling: 2h.'
+    );
+  });
+});

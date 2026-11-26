@@ -385,15 +385,17 @@ func TestPutServerConfigDB_AgentDefaultsExceedsAgentLimitsCeiling_422(t *testing
 }
 
 // TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity pins:
-//  1. Sending agent_limits directly on PUT /api/v1/admin/server-config is
-//     refused (422 unpersisted_keys_rejected) because agent_limits is DB-only
-//     with no KoanfPaths.
-//  2. A multi-section PUT carrying an earlier alphabetical section ("access")
+//  1. Sending agent_limits on PUT /api/v1/admin/server-config is refused with
+//     412 experiment_disabled when agent_policy.limit_ceilings is off (while
+//     echoing stored values or clearing passes), and persists cleanly when on.
+//  2. Unknown nested fields under agent_limits are refused with 422
+//     unpersisted_keys_rejected, and invalid durations return 422 validation_error.
+//  3. A multi-section PUT carrying an earlier alphabetical section ("access")
 //     plus an invalid agent_defaults value (default_max_turns > ceiling)
 //     fails upfront with 422 and writes neither section (no partial write).
-//  3. validateAgentLimitsSectionDocs uses effective post-request values when
-//     both agent_defaults and agent_limits are present, and refuses lowering
-//     agent_limits below stored agent_defaults.
+//  4. Simultaneous valid updates to agent_defaults + agent_limits succeed
+//     atomically, and lowering agent_limits below stored agent_defaults fails
+//     with 422.
 func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	ctx := context.Background()
@@ -401,15 +403,39 @@ func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
 	_, err := ops.Update(ctx, opsettings.AgentLimitsSectionName, json.RawMessage(`{"max_turns":50}`), "admin", -1, "managed")
 	require.NoError(t, err)
 
-	// (1) PUT carrying agent_limits directly is refused as unpersisted/unsupported.
+	// (1a) Experiment OFF: changing agent_limits to a new non-empty value is
+	// refused with 412 experiment_disabled.
 	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":40}}`)
 	rr := httptest.NewRecorder()
 	srv.handlePutServerConfigDB(rr, req, ops)
-	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "unpersisted_keys_rejected")
+	require.Equal(t, http.StatusPreconditionFailed, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), ErrCodeExperimentDisabled)
 	assert.Equal(t, 50, ops.AgentLimits().MaxTurns, "rejected PUT must not change agent_limits")
 
-	// (2) Multi-section PUT where "access" sorts before "agent_defaults" and
+	// (1b) Experiment OFF: echoing the stored agent_limits value passes.
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":50}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// (2) Enable experiment: unknown nested key returns 422 unpersisted_keys_rejected,
+	// invalid duration returns 422 validation_error, valid values persist and round-trip via GET.
+	_, err = ops.Update(ctx, "experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.AgentPolicyLimitCeilings)), "admin", -1, "managed")
+	require.NoError(t, err)
+
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":40,"bogus":1}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "unpersisted_keys_rejected")
+
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_duration":"not-a-duration"}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "validation_error")
+
+	// Multi-section PUT where "access" sorts before "agent_defaults" and
 	// agent_defaults exceeds the ceiling: 422 upfront, nothing written.
 	multiBody := `{"server":{"hub":{"admin_emails":["new@example.com"]}},"default_max_turns":80}`
 	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", multiBody)
@@ -424,18 +450,39 @@ func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
 	_, defaultsErr := fakeStore.GetHubSetting(ctx, "agent_defaults")
 	assert.Error(t, defaultsErr, "invalid 'agent_defaults' must not be written")
 
-	// (3) Upfront cross-section validator uses effective post-request values
-	// when both sections are present and checks lowering agent_limits against
-	// stored agent_defaults.
-	t.Run("simultaneous raise ceiling and default allowed", func(t *testing.T) {
-		errs := make(map[string][]config.ValidationError)
-		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
-			"agent_defaults":                  json.RawMessage(`{"default_max_turns":80}`),
-			opsettings.AgentLimitsSectionName: json.RawMessage(`{"max_turns":100}`),
-		}, errs)
-		assert.Empty(t, errs)
-	})
+	// Simultaneous raise of ceiling + default in one PUT succeeds and GET returns agent_limits.
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"default_max_turns":80,"agent_limits":{"max_turns":100,"max_model_calls":250,"max_duration":"2h"}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
+	getReq := adminRequest(http.MethodGet, "/api/v1/admin/server-config", "")
+	getRR := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(getRR, getReq, ops)
+	require.Equal(t, http.StatusOK, getRR.Code, getRR.Body.String())
+	var getResp ServerConfigDBResponse
+	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &getResp))
+	require.NotNil(t, getResp.AgentLimits)
+	assert.Equal(t, 100, getResp.AgentLimits.MaxTurns)
+	assert.Equal(t, 250, getResp.AgentLimits.MaxModelCalls)
+	assert.Equal(t, "2h", getResp.AgentLimits.MaxDuration)
+
+	// Lowering ceiling below stored default_max_turns=80 is refused with 422.
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{"max_turns":60}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "validation_error")
+	assert.Equal(t, 100, ops.AgentLimits().MaxTurns)
+
+	// Clearing ceilings via empty object succeeds and GET omits agent_limits.
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"agent_limits":{}}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.True(t, ops.AgentLimits().IsEmpty())
+
+	// Direct validator checks for simultaneous and single-section cases.
 	t.Run("simultaneous lower ceiling below incoming default refused", func(t *testing.T) {
 		errs := make(map[string][]config.ValidationError)
 		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
@@ -446,17 +493,62 @@ func TestPutServerConfigDB_AgentLimitsMultiSectionAtomicity(t *testing.T) {
 		assert.Contains(t, errs["agent_defaults"][0].Message, "agent_defaults.default_max_turns")
 		assert.Contains(t, errs["agent_defaults"][0].Message, "agent_limits.max_turns")
 	})
+}
 
-	t.Run("lowering agent_limits below stored agent_defaults refused", func(t *testing.T) {
-		_, err := ops.Update(ctx, "agent_defaults", json.RawMessage(`{"default_max_turns":45}`), "admin", -1, "managed")
-		require.NoError(t, err)
+// TestResolvedSettings_IncludesLimitCeilingsWhenExperimentEnabled verifies
+// GET /api/v1/projects/{id}/settings/resolved exposes ceiling per limit when
+// agent_policy.limit_ceilings is enabled, and null when off or unset.
+func TestResolvedSettings_IncludesLimitCeilingsWhenExperimentEnabled(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
 
-		errs := make(map[string][]config.ValidationError)
-		validateAgentLimitsSectionDocs(ops, map[string]json.RawMessage{
-			opsettings.AgentLimitsSectionName: json.RawMessage(`{"max_turns":30}`),
-		}, errs)
-		require.Len(t, errs[opsettings.AgentLimitsSectionName], 1)
-		assert.Contains(t, errs[opsettings.AgentLimitsSectionName][0].Message, "agent_defaults.default_max_turns")
-		assert.Contains(t, errs[opsettings.AgentLimitsSectionName][0].Message, "agent_limits.max_turns")
+	// Experiment OFF: ceilings are null even when stored in opsettings.
+	setAgentLimitsOpSettings(t, srv, false, `{"max_turns":50,"max_model_calls":200,"max_duration":"2h"}`)
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings/resolved", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var offResp ResolvedProjectSettings
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &offResp))
+	assert.Nil(t, offResp.Settings[projectSettingDefaultMaxTurns].Ceiling)
+	assert.Nil(t, offResp.Settings[projectSettingDefaultMaxModelCalls].Ceiling)
+	assert.Nil(t, offResp.Settings[projectSettingDefaultMaxDuration].Ceiling)
+
+	// Experiment ON: ceilings are populated for the three limit keys only.
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50,"max_model_calls":200,"max_duration":"2h"}`)
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings/resolved", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var onResp ResolvedProjectSettings
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &onResp))
+	assert.Equal(t, float64(50), onResp.Settings[projectSettingDefaultMaxTurns].Ceiling)
+	assert.Equal(t, float64(200), onResp.Settings[projectSettingDefaultMaxModelCalls].Ceiling)
+	assert.Equal(t, "2h", onResp.Settings[projectSettingDefaultMaxDuration].Ceiling)
+	assert.Nil(t, onResp.Settings[projectSettingDefaultModel].Ceiling)
+}
+
+// TestGetAgent_IncludesEffectiveConfigLimits verifies GET /api/v1/agents/{id}
+// projects EffectiveConfig (maxTurns, maxModelCalls, maxDuration, limitsClampedBy)
+// onto the single-agent response when recorded.
+func TestGetAgent_IncludesEffectiveConfigLimits(t *testing.T) {
+	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	brokerClient := &limitCeilingsBrokerClient{
+		mockRuntimeBrokerClient: mock,
+		templateMaxTurns:        api.IntPtr(0),
+	}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, brokerClient, false, slog.Default()))
+	setAgentLimitsOpSettings(t, srv, true, `{"max_turns":50}`)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", map[string]interface{}{
+		"name": "effective-limits-get",
 	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var createResp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
+	require.NotNil(t, createResp.Agent)
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+createResp.Agent.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var got AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &got))
+	require.NotNil(t, got.EffectiveConfig)
+	assert.Equal(t, 50, got.EffectiveConfig.MaxTurns)
+	assert.Equal(t, []string{"max_turns"}, got.EffectiveConfig.LimitsClampedBy)
 }

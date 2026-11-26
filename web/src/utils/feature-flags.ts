@@ -527,3 +527,16 @@ export const COMMAND_REQUESTS_FLAG = 'hub.command_requests';
 export function commandRequestsEnabled(): boolean {
   return isFeatureEnabled(COMMAND_REQUESTS_FLAG);
 }
+
+/**
+ * Agent limit ceilings (agent_policy.limit_ceilings, ptone/scion#9371):
+ * shows the Admin Server Config Agent Limit Ceilings panel and ceiling hints.
+ * Presentation only: Hub enforces ceilings on create/PUT/dispatch and returns
+ * ceilings in resolved settings only while enabled. Default OFF.
+ */
+export const AGENT_LIMIT_CEILINGS_FLAG = 'agent_policy.limit_ceilings';
+
+/** Whether the Agent Limit Ceilings admin UI is enabled in this session. */
+export function agentLimitCeilingsEnabled(): boolean {
+  return isFeatureEnabled(AGENT_LIMIT_CEILINGS_FLAG);
+}

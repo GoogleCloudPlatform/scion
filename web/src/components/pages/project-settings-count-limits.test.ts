@@ -37,6 +37,7 @@ interface Internals {
 }
 
 let putWarnings: string[] = [];
+let resolvedSettingsMap: Record<string, unknown> = {};
 
 let stored: Record<string, unknown> = {};
 let puts: Array<Record<string, unknown>> = [];
@@ -61,7 +62,7 @@ function stubFetch(): void {
         return json(putWarnings.length > 0 ? { ...stored, warnings: putWarnings } : stored);
       }
       if (path.endsWith('/settings/resolved')) {
-        return json({ projectId: 'proj-1', project: stored, settings: {} });
+        return json({ projectId: 'proj-1', project: stored, settings: resolvedSettingsMap });
       }
       if (path.endsWith('/settings')) return json(stored);
       if (path.includes('/templates')) {
@@ -91,8 +92,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mount(settings: Record<string, unknown>): Promise<HTMLElement & Internals> {
+async function mount(
+  settings: Record<string, unknown>,
+  resolved: Record<string, unknown> = {}
+): Promise<HTMLElement & Internals> {
   stored = settings;
+  resolvedSettingsMap = resolved;
   puts = [];
   putWarnings = [];
   stubFetch();
@@ -252,5 +257,59 @@ describe('project settings count limits', () => {
     await el.handleSaveConfig();
     expect(puts).toHaveLength(1);
     expect(el.settingsError).toBeNull();
+  });
+
+  it('applies hub ceilings: sets max attribute, hides Unlimited, shows helper, and rejects over-ceiling input', async () => {
+    const el = await mount(
+      {},
+      {
+        'scion.io/default-max-turns': {
+          projectSet: false,
+          projectValue: null,
+          hubDefault: 'absent',
+          hubValue: null,
+          ceiling: 50,
+        },
+        'scion.io/default-max-model-calls': {
+          projectSet: false,
+          projectValue: null,
+          hubDefault: 'absent',
+          hubValue: null,
+          ceiling: null,
+        },
+        'scion.io/default-max-duration': {
+          projectSet: false,
+          projectValue: null,
+          hubDefault: 'unknown',
+          hubValue: null,
+          ceiling: '2h',
+        },
+      }
+    );
+
+    const limitsPanel = el.shadowRoot!.querySelector('sl-tab-panel[name="limits"]')!;
+    const fields = Array.from(limitsPanel.querySelectorAll('.config-field'));
+    const turnsField = fields[0]!;
+    const callsField = fields[1]!;
+    const durField = fields[2]!;
+
+    const turnsInput = turnsField.querySelector('sl-input') as HTMLInputElement;
+    expect(turnsInput.getAttribute('max')).toBe('50');
+    expect(turnsField.querySelector('sl-checkbox.unlimited')).toBeNull();
+    expect(turnsField.textContent).toContain('Hub ceiling: 50.');
+
+    // No ceiling on max_model_calls -> Unlimited remains visible and no max attr.
+    const callsInput = callsField.querySelector('sl-input') as HTMLInputElement;
+    expect(callsInput.getAttribute('max')).toBeNull();
+    expect(callsField.querySelector('sl-checkbox.unlimited')).not.toBeNull();
+
+    // Duration helper shows Hub ceiling.
+    expect(durField.textContent).toContain('Hub ceiling: 2h.');
+
+    // Entering value > ceiling sets an error.
+    turnsInput.value = '80';
+    turnsInput.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.countLimitErrors['scion.io/default-max-turns']).toContain('hub ceiling (50)');
   });
 });

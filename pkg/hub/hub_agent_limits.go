@@ -17,16 +17,43 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // ErrCodeLimitExceedsHubCeiling is the HTTP 400 error code returned when a
 // requested run limit exceeds (or sets unlimited while a ceiling exists for)
 // a Hub agent_limits ceiling.
 const ErrCodeLimitExceedsHubCeiling = "limit_exceeds_hub_ceiling"
+
+func writeAgentLimitsExperimentDisabled(w http.ResponseWriter) {
+	writeError(w, http.StatusPreconditionFailed, ErrCodeExperimentDisabled,
+		"agent_limits ceilings are not enabled on this Hub (experiment "+experiments.AgentPolicyLimitCeilings+" is off)",
+		map[string]interface{}{"experiment": experiments.AgentPolicyLimitCeilings})
+}
+
+// agentEffectiveConfigView projects the effective run limits from a stored
+// AgentEffectiveConfig onto the single-agent GET response. Returns nil when
+// eff is nil or carries no effective limit fields.
+func agentEffectiveConfigView(eff *store.AgentEffectiveConfig) *AgentEffectiveConfigView {
+	if eff == nil {
+		return nil
+	}
+	if eff.MaxTurns <= 0 && eff.MaxModelCalls <= 0 && eff.MaxDuration == "" && len(eff.LimitsClampedBy) == 0 {
+		return nil
+	}
+	return &AgentEffectiveConfigView{
+		MaxTurns:        eff.MaxTurns,
+		MaxModelCalls:   eff.MaxModelCalls,
+		MaxDuration:     eff.MaxDuration,
+		LimitsClampedBy: slices.Clone(eff.LimitsClampedBy),
+	}
+}
 
 // agentLimitCeilings returns the active Hub agent_limits ceilings when the
 // agent_policy.limit_ceilings experiment is enabled, or the zero value
