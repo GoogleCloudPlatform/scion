@@ -72,6 +72,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicydecision"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -87,6 +88,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
@@ -112,7 +114,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
@@ -2547,6 +2552,50 @@ func init() {
 	messagepolicydecisionDescID := messagepolicydecisionFields[0].Descriptor()
 	// messagepolicydecision.DefaultID holds the default value on creation for the id field.
 	messagepolicydecision.DefaultID = messagepolicydecisionDescID.Default.(func() uuid.UUID)
+	meterhealthFields := schema.MeterHealth{}.Fields()
+	_ = meterhealthFields
+	// meterhealthDescAgentID is the schema descriptor for agent_id field.
+	meterhealthDescAgentID := meterhealthFields[1].Descriptor()
+	// meterhealth.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	meterhealth.AgentIDValidator = meterhealthDescAgentID.Validators[0].(func(string) error)
+	// meterhealthDescRunID is the schema descriptor for run_id field.
+	meterhealthDescRunID := meterhealthFields[2].Descriptor()
+	// meterhealth.RunIDValidator is a validator for the "run_id" field. It is called by the builders before save.
+	meterhealth.RunIDValidator = meterhealthDescRunID.Validators[0].(func(string) error)
+	// meterhealthDescProducerEpoch is the schema descriptor for producer_epoch field.
+	meterhealthDescProducerEpoch := meterhealthFields[3].Descriptor()
+	// meterhealth.ProducerEpochValidator is a validator for the "producer_epoch" field. It is called by the builders before save.
+	meterhealth.ProducerEpochValidator = meterhealthDescProducerEpoch.Validators[0].(func(string) error)
+	// meterhealthDescLastContiguousSeq is the schema descriptor for last_contiguous_seq field.
+	meterhealthDescLastContiguousSeq := meterhealthFields[5].Descriptor()
+	// meterhealth.DefaultLastContiguousSeq holds the default value on creation for the last_contiguous_seq field.
+	meterhealth.DefaultLastContiguousSeq = meterhealthDescLastContiguousSeq.Default.(int64)
+	// meterhealthDescMaxSeqSeen is the schema descriptor for max_seq_seen field.
+	meterhealthDescMaxSeqSeen := meterhealthFields[6].Descriptor()
+	// meterhealth.DefaultMaxSeqSeen holds the default value on creation for the max_seq_seen field.
+	meterhealth.DefaultMaxSeqSeen = meterhealthDescMaxSeqSeen.Default.(int64)
+	// meterhealthDescAnomalousCount is the schema descriptor for anomalous_count field.
+	meterhealthDescAnomalousCount := meterhealthFields[10].Descriptor()
+	// meterhealth.DefaultAnomalousCount holds the default value on creation for the anomalous_count field.
+	meterhealth.DefaultAnomalousCount = meterhealthDescAnomalousCount.Default.(int64)
+	// meterhealthDescSchemaDriftDetected is the schema descriptor for schema_drift_detected field.
+	meterhealthDescSchemaDriftDetected := meterhealthFields[11].Descriptor()
+	// meterhealth.DefaultSchemaDriftDetected holds the default value on creation for the schema_drift_detected field.
+	meterhealth.DefaultSchemaDriftDetected = meterhealthDescSchemaDriftDetected.Default.(bool)
+	// meterhealthDescFinalState is the schema descriptor for final_state field.
+	meterhealthDescFinalState := meterhealthFields[12].Descriptor()
+	// meterhealth.DefaultFinalState holds the default value on creation for the final_state field.
+	meterhealth.DefaultFinalState = meterhealthDescFinalState.Default.(string)
+	// meterhealthDescUpdatedAt is the schema descriptor for updated_at field.
+	meterhealthDescUpdatedAt := meterhealthFields[13].Descriptor()
+	// meterhealth.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	meterhealth.DefaultUpdatedAt = meterhealthDescUpdatedAt.Default.(func() time.Time)
+	// meterhealth.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	meterhealth.UpdateDefaultUpdatedAt = meterhealthDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// meterhealthDescID is the schema descriptor for id field.
+	meterhealthDescID := meterhealthFields[0].Descriptor()
+	// meterhealth.DefaultID holds the default value on creation for the id field.
+	meterhealth.DefaultID = meterhealthDescID.Default.(func() uuid.UUID)
 	mutationauditFields := schema.MutationAudit{}.Fields()
 	_ = mutationauditFields
 	// mutationauditDescTimestamp is the schema descriptor for timestamp field.
@@ -2933,6 +2982,84 @@ func init() {
 	roledefinitionDescID := roledefinitionFields[0].Descriptor()
 	// roledefinition.DefaultID holds the default value on creation for the id field.
 	roledefinition.DefaultID = roledefinitionDescID.Default.(func() uuid.UUID)
+	runattributionFields := schema.RunAttribution{}.Fields()
+	_ = runattributionFields
+	// runattributionDescLaunchID is the schema descriptor for launch_id field.
+	runattributionDescLaunchID := runattributionFields[1].Descriptor()
+	// runattribution.DefaultLaunchID holds the default value on creation for the launch_id field.
+	runattribution.DefaultLaunchID = runattributionDescLaunchID.Default.(string)
+	// runattributionDescGeneration is the schema descriptor for generation field.
+	runattributionDescGeneration := runattributionFields[2].Descriptor()
+	// runattribution.DefaultGeneration holds the default value on creation for the generation field.
+	runattribution.DefaultGeneration = runattributionDescGeneration.Default.(int)
+	// runattributionDescPriorRunID is the schema descriptor for prior_run_id field.
+	runattributionDescPriorRunID := runattributionFields[3].Descriptor()
+	// runattribution.DefaultPriorRunID holds the default value on creation for the prior_run_id field.
+	runattribution.DefaultPriorRunID = runattributionDescPriorRunID.Default.(string)
+	// runattributionDescHubID is the schema descriptor for hub_id field.
+	runattributionDescHubID := runattributionFields[4].Descriptor()
+	// runattribution.DefaultHubID holds the default value on creation for the hub_id field.
+	runattribution.DefaultHubID = runattributionDescHubID.Default.(string)
+	// runattributionDescProjectID is the schema descriptor for project_id field.
+	runattributionDescProjectID := runattributionFields[5].Descriptor()
+	// runattribution.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	runattribution.ProjectIDValidator = runattributionDescProjectID.Validators[0].(func(string) error)
+	// runattributionDescAgentID is the schema descriptor for agent_id field.
+	runattributionDescAgentID := runattributionFields[6].Descriptor()
+	// runattribution.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	runattribution.AgentIDValidator = runattributionDescAgentID.Validators[0].(func(string) error)
+	// runattributionDescAgentSlug is the schema descriptor for agent_slug field.
+	runattributionDescAgentSlug := runattributionFields[7].Descriptor()
+	// runattribution.DefaultAgentSlug holds the default value on creation for the agent_slug field.
+	runattribution.DefaultAgentSlug = runattributionDescAgentSlug.Default.(string)
+	// runattributionDescBrokerID is the schema descriptor for broker_id field.
+	runattributionDescBrokerID := runattributionFields[8].Descriptor()
+	// runattribution.DefaultBrokerID holds the default value on creation for the broker_id field.
+	runattribution.DefaultBrokerID = runattributionDescBrokerID.Default.(string)
+	// runattributionDescHarness is the schema descriptor for harness field.
+	runattributionDescHarness := runattributionFields[12].Descriptor()
+	// runattribution.DefaultHarness holds the default value on creation for the harness field.
+	runattribution.DefaultHarness = runattributionDescHarness.Default.(string)
+	// runattributionDescHarnessConfig is the schema descriptor for harness_config field.
+	runattributionDescHarnessConfig := runattributionFields[13].Descriptor()
+	// runattribution.DefaultHarnessConfig holds the default value on creation for the harness_config field.
+	runattribution.DefaultHarnessConfig = runattributionDescHarnessConfig.Default.(string)
+	// runattributionDescTemplate is the schema descriptor for template field.
+	runattributionDescTemplate := runattributionFields[14].Descriptor()
+	// runattribution.DefaultTemplate holds the default value on creation for the template field.
+	runattribution.DefaultTemplate = runattributionDescTemplate.Default.(string)
+	// runattributionDescMeteringWriterMode is the schema descriptor for metering_writer_mode field.
+	runattributionDescMeteringWriterMode := runattributionFields[19].Descriptor()
+	// runattribution.DefaultMeteringWriterMode holds the default value on creation for the metering_writer_mode field.
+	runattribution.DefaultMeteringWriterMode = runattributionDescMeteringWriterMode.Default.(string)
+	// runattributionDescUsageLiveSource is the schema descriptor for usage_live_source field.
+	runattributionDescUsageLiveSource := runattributionFields[20].Descriptor()
+	// runattribution.DefaultUsageLiveSource holds the default value on creation for the usage_live_source field.
+	runattribution.DefaultUsageLiveSource = runattributionDescUsageLiveSource.Default.(string)
+	// runattributionDescCapturePolicy is the schema descriptor for capture_policy field.
+	runattributionDescCapturePolicy := runattributionFields[21].Descriptor()
+	// runattribution.DefaultCapturePolicy holds the default value on creation for the capture_policy field.
+	runattribution.DefaultCapturePolicy = runattributionDescCapturePolicy.Default.(string)
+	// runattributionDescNoticeVersion is the schema descriptor for notice_version field.
+	runattributionDescNoticeVersion := runattributionFields[22].Descriptor()
+	// runattribution.DefaultNoticeVersion holds the default value on creation for the notice_version field.
+	runattribution.DefaultNoticeVersion = runattributionDescNoticeVersion.Default.(string)
+	// runattributionDescBackfillExisting is the schema descriptor for backfill_existing field.
+	runattributionDescBackfillExisting := runattributionFields[23].Descriptor()
+	// runattribution.DefaultBackfillExisting holds the default value on creation for the backfill_existing field.
+	runattribution.DefaultBackfillExisting = runattributionDescBackfillExisting.Default.(bool)
+	// runattributionDescLegalHold is the schema descriptor for legal_hold field.
+	runattributionDescLegalHold := runattributionFields[24].Descriptor()
+	// runattribution.DefaultLegalHold holds the default value on creation for the legal_hold field.
+	runattribution.DefaultLegalHold = runattributionDescLegalHold.Default.(bool)
+	// runattributionDescCreatedAt is the schema descriptor for created_at field.
+	runattributionDescCreatedAt := runattributionFields[25].Descriptor()
+	// runattribution.DefaultCreatedAt holds the default value on creation for the created_at field.
+	runattribution.DefaultCreatedAt = runattributionDescCreatedAt.Default.(func() time.Time)
+	// runattributionDescID is the schema descriptor for id field.
+	runattributionDescID := runattributionFields[0].Descriptor()
+	// runattribution.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	runattribution.IDValidator = runattributionDescID.Validators[0].(func(string) error)
 	runtimebrokerFields := schema.RuntimeBroker{}.Fields()
 	_ = runtimebrokerFields
 	// runtimebrokerDescName is the schema descriptor for name field.
@@ -3958,6 +4085,88 @@ func init() {
 	triggersubjectclaimDescID := triggersubjectclaimFields[0].Descriptor()
 	// triggersubjectclaim.DefaultID holds the default value on creation for the id field.
 	triggersubjectclaim.DefaultID = triggersubjectclaimDescID.Default.(func() uuid.UUID)
+	usageeventFields := schema.UsageEvent{}.Fields()
+	_ = usageeventFields
+	// usageeventDescHubID is the schema descriptor for hub_id field.
+	usageeventDescHubID := usageeventFields[1].Descriptor()
+	// usageevent.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	usageevent.HubIDValidator = usageeventDescHubID.Validators[0].(func(string) error)
+	// usageeventDescEventID is the schema descriptor for event_id field.
+	usageeventDescEventID := usageeventFields[2].Descriptor()
+	// usageevent.EventIDValidator is a validator for the "event_id" field. It is called by the builders before save.
+	usageevent.EventIDValidator = usageeventDescEventID.Validators[0].(func(string) error)
+	// usageeventDescRunID is the schema descriptor for run_id field.
+	usageeventDescRunID := usageeventFields[3].Descriptor()
+	// usageevent.RunIDValidator is a validator for the "run_id" field. It is called by the builders before save.
+	usageevent.RunIDValidator = usageeventDescRunID.Validators[0].(func(string) error)
+	// usageeventDescProjectID is the schema descriptor for project_id field.
+	usageeventDescProjectID := usageeventFields[4].Descriptor()
+	// usageevent.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	usageevent.ProjectIDValidator = usageeventDescProjectID.Validators[0].(func(string) error)
+	// usageeventDescAgentID is the schema descriptor for agent_id field.
+	usageeventDescAgentID := usageeventFields[5].Descriptor()
+	// usageevent.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	usageevent.AgentIDValidator = usageeventDescAgentID.Validators[0].(func(string) error)
+	// usageeventDescBrokerID is the schema descriptor for broker_id field.
+	usageeventDescBrokerID := usageeventFields[7].Descriptor()
+	// usageevent.DefaultBrokerID holds the default value on creation for the broker_id field.
+	usageevent.DefaultBrokerID = usageeventDescBrokerID.Default.(string)
+	// usageeventDescHarness is the schema descriptor for harness field.
+	usageeventDescHarness := usageeventFields[8].Descriptor()
+	// usageevent.DefaultHarness holds the default value on creation for the harness field.
+	usageevent.DefaultHarness = usageeventDescHarness.Default.(string)
+	// usageeventDescModel is the schema descriptor for model field.
+	usageeventDescModel := usageeventFields[9].Descriptor()
+	// usageevent.ModelValidator is a validator for the "model" field. It is called by the builders before save.
+	usageevent.ModelValidator = usageeventDescModel.Validators[0].(func(string) error)
+	// usageeventDescModelSource is the schema descriptor for model_source field.
+	usageeventDescModelSource := usageeventFields[10].Descriptor()
+	// usageevent.ModelSourceValidator is a validator for the "model_source" field. It is called by the builders before save.
+	usageevent.ModelSourceValidator = usageeventDescModelSource.Validators[0].(func(string) error)
+	// usageeventDescUsageSource is the schema descriptor for usage_source field.
+	usageeventDescUsageSource := usageeventFields[11].Descriptor()
+	// usageevent.UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.
+	usageevent.UsageSourceValidator = usageeventDescUsageSource.Validators[0].(func(string) error)
+	// usageeventDescSourceKind is the schema descriptor for source_kind field.
+	usageeventDescSourceKind := usageeventFields[12].Descriptor()
+	// usageevent.DefaultSourceKind holds the default value on creation for the source_kind field.
+	usageevent.DefaultSourceKind = usageeventDescSourceKind.Default.(string)
+	// usageeventDescSourceIdentity is the schema descriptor for source_identity field.
+	usageeventDescSourceIdentity := usageeventFields[13].Descriptor()
+	// usageevent.DefaultSourceIdentity holds the default value on creation for the source_identity field.
+	usageevent.DefaultSourceIdentity = usageeventDescSourceIdentity.Default.(string)
+	// usageeventDescStatus is the schema descriptor for status field.
+	usageeventDescStatus := usageeventFields[16].Descriptor()
+	// usageevent.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	usageevent.StatusValidator = usageeventDescStatus.Validators[0].(func(string) error)
+	// usageeventDescCalls is the schema descriptor for calls field.
+	usageeventDescCalls := usageeventFields[17].Descriptor()
+	// usageevent.DefaultCalls holds the default value on creation for the calls field.
+	usageevent.DefaultCalls = usageeventDescCalls.Default.(int64)
+	// usageeventDescTokenStatus is the schema descriptor for token_status field.
+	usageeventDescTokenStatus := usageeventFields[24].Descriptor()
+	// usageevent.TokenStatusValidator is a validator for the "token_status" field. It is called by the builders before save.
+	usageevent.TokenStatusValidator = usageeventDescTokenStatus.Validators[0].(func(string) error)
+	// usageeventDescReceivedAt is the schema descriptor for received_at field.
+	usageeventDescReceivedAt := usageeventFields[30].Descriptor()
+	// usageevent.DefaultReceivedAt holds the default value on creation for the received_at field.
+	usageevent.DefaultReceivedAt = usageeventDescReceivedAt.Default.(func() time.Time)
+	// usageeventDescProducerEpoch is the schema descriptor for producer_epoch field.
+	usageeventDescProducerEpoch := usageeventFields[31].Descriptor()
+	// usageevent.DefaultProducerEpoch holds the default value on creation for the producer_epoch field.
+	usageevent.DefaultProducerEpoch = usageeventDescProducerEpoch.Default.(string)
+	// usageeventDescProducerSeq is the schema descriptor for producer_seq field.
+	usageeventDescProducerSeq := usageeventFields[32].Descriptor()
+	// usageevent.DefaultProducerSeq holds the default value on creation for the producer_seq field.
+	usageevent.DefaultProducerSeq = usageeventDescProducerSeq.Default.(int64)
+	// usageeventDescAnomalous is the schema descriptor for anomalous field.
+	usageeventDescAnomalous := usageeventFields[33].Descriptor()
+	// usageevent.DefaultAnomalous holds the default value on creation for the anomalous field.
+	usageevent.DefaultAnomalous = usageeventDescAnomalous.Default.(bool)
+	// usageeventDescID is the schema descriptor for id field.
+	usageeventDescID := usageeventFields[0].Descriptor()
+	// usageevent.DefaultID holds the default value on creation for the id field.
+	usageevent.DefaultID = usageeventDescID.Default.(func() uuid.UUID)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.
@@ -3984,6 +4193,106 @@ func init() {
 	usagereservationDescID := usagereservationFields[0].Descriptor()
 	// usagereservation.DefaultID holds the default value on creation for the id field.
 	usagereservation.DefaultID = usagereservationDescID.Default.(func() uuid.UUID)
+	usagerollupdailyFields := schema.UsageRollupDaily{}.Fields()
+	_ = usagerollupdailyFields
+	// usagerollupdailyDescProjectID is the schema descriptor for project_id field.
+	usagerollupdailyDescProjectID := usagerollupdailyFields[2].Descriptor()
+	// usagerollupdaily.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	usagerollupdaily.ProjectIDValidator = usagerollupdailyDescProjectID.Validators[0].(func(string) error)
+	// usagerollupdailyDescBillingUserID is the schema descriptor for billing_user_id field.
+	usagerollupdailyDescBillingUserID := usagerollupdailyFields[3].Descriptor()
+	// usagerollupdaily.DefaultBillingUserID holds the default value on creation for the billing_user_id field.
+	usagerollupdaily.DefaultBillingUserID = usagerollupdailyDescBillingUserID.Default.(string)
+	// usagerollupdailyDescAgentID is the schema descriptor for agent_id field.
+	usagerollupdailyDescAgentID := usagerollupdailyFields[4].Descriptor()
+	// usagerollupdaily.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	usagerollupdaily.AgentIDValidator = usagerollupdailyDescAgentID.Validators[0].(func(string) error)
+	// usagerollupdailyDescHarness is the schema descriptor for harness field.
+	usagerollupdailyDescHarness := usagerollupdailyFields[5].Descriptor()
+	// usagerollupdaily.DefaultHarness holds the default value on creation for the harness field.
+	usagerollupdaily.DefaultHarness = usagerollupdailyDescHarness.Default.(string)
+	// usagerollupdailyDescModel is the schema descriptor for model field.
+	usagerollupdailyDescModel := usagerollupdailyFields[6].Descriptor()
+	// usagerollupdaily.DefaultModel holds the default value on creation for the model field.
+	usagerollupdaily.DefaultModel = usagerollupdailyDescModel.Default.(string)
+	// usagerollupdailyDescUsageSource is the schema descriptor for usage_source field.
+	usagerollupdailyDescUsageSource := usagerollupdailyFields[7].Descriptor()
+	// usagerollupdaily.UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.
+	usagerollupdaily.UsageSourceValidator = usagerollupdailyDescUsageSource.Validators[0].(func(string) error)
+	// usagerollupdailyDescCalls is the schema descriptor for calls field.
+	usagerollupdailyDescCalls := usagerollupdailyFields[8].Descriptor()
+	// usagerollupdaily.DefaultCalls holds the default value on creation for the calls field.
+	usagerollupdaily.DefaultCalls = usagerollupdailyDescCalls.Default.(int64)
+	// usagerollupdailyDescErrorCalls is the schema descriptor for error_calls field.
+	usagerollupdailyDescErrorCalls := usagerollupdailyFields[9].Descriptor()
+	// usagerollupdaily.DefaultErrorCalls holds the default value on creation for the error_calls field.
+	usagerollupdaily.DefaultErrorCalls = usagerollupdailyDescErrorCalls.Default.(int64)
+	// usagerollupdailyDescInput is the schema descriptor for input field.
+	usagerollupdailyDescInput := usagerollupdailyFields[10].Descriptor()
+	// usagerollupdaily.DefaultInput holds the default value on creation for the input field.
+	usagerollupdaily.DefaultInput = usagerollupdailyDescInput.Default.(int64)
+	// usagerollupdailyDescOutput is the schema descriptor for output field.
+	usagerollupdailyDescOutput := usagerollupdailyFields[11].Descriptor()
+	// usagerollupdaily.DefaultOutput holds the default value on creation for the output field.
+	usagerollupdaily.DefaultOutput = usagerollupdailyDescOutput.Default.(int64)
+	// usagerollupdailyDescCacheRead is the schema descriptor for cache_read field.
+	usagerollupdailyDescCacheRead := usagerollupdailyFields[12].Descriptor()
+	// usagerollupdaily.DefaultCacheRead holds the default value on creation for the cache_read field.
+	usagerollupdaily.DefaultCacheRead = usagerollupdailyDescCacheRead.Default.(int64)
+	// usagerollupdailyDescCacheWrite is the schema descriptor for cache_write field.
+	usagerollupdailyDescCacheWrite := usagerollupdailyFields[13].Descriptor()
+	// usagerollupdaily.DefaultCacheWrite holds the default value on creation for the cache_write field.
+	usagerollupdaily.DefaultCacheWrite = usagerollupdailyDescCacheWrite.Default.(int64)
+	// usagerollupdailyDescCacheWrite1h is the schema descriptor for cache_write_1h field.
+	usagerollupdailyDescCacheWrite1h := usagerollupdailyFields[14].Descriptor()
+	// usagerollupdaily.DefaultCacheWrite1h holds the default value on creation for the cache_write_1h field.
+	usagerollupdaily.DefaultCacheWrite1h = usagerollupdailyDescCacheWrite1h.Default.(int64)
+	// usagerollupdailyDescReasoning is the schema descriptor for reasoning field.
+	usagerollupdailyDescReasoning := usagerollupdailyFields[15].Descriptor()
+	// usagerollupdaily.DefaultReasoning holds the default value on creation for the reasoning field.
+	usagerollupdaily.DefaultReasoning = usagerollupdailyDescReasoning.Default.(int64)
+	// usagerollupdailyDescReportedCostMicros is the schema descriptor for reported_cost_micros field.
+	usagerollupdailyDescReportedCostMicros := usagerollupdailyFields[16].Descriptor()
+	// usagerollupdaily.DefaultReportedCostMicros holds the default value on creation for the reported_cost_micros field.
+	usagerollupdaily.DefaultReportedCostMicros = usagerollupdailyDescReportedCostMicros.Default.(int64)
+	// usagerollupdailyDescEvents is the schema descriptor for events field.
+	usagerollupdailyDescEvents := usagerollupdailyFields[17].Descriptor()
+	// usagerollupdaily.DefaultEvents holds the default value on creation for the events field.
+	usagerollupdaily.DefaultEvents = usagerollupdailyDescEvents.Default.(int64)
+	// usagerollupdailyDescNullTokenEvents is the schema descriptor for null_token_events field.
+	usagerollupdailyDescNullTokenEvents := usagerollupdailyFields[18].Descriptor()
+	// usagerollupdaily.DefaultNullTokenEvents holds the default value on creation for the null_token_events field.
+	usagerollupdaily.DefaultNullTokenEvents = usagerollupdailyDescNullTokenEvents.Default.(int64)
+	// usagerollupdailyDescID is the schema descriptor for id field.
+	usagerollupdailyDescID := usagerollupdailyFields[0].Descriptor()
+	// usagerollupdaily.DefaultID holds the default value on creation for the id field.
+	usagerollupdaily.DefaultID = usagerollupdailyDescID.Default.(func() uuid.UUID)
+	usagescopecounterdailyFields := schema.UsageScopeCounterDaily{}.Fields()
+	_ = usagescopecounterdailyFields
+	// usagescopecounterdailyDescScopeKind is the schema descriptor for scope_kind field.
+	usagescopecounterdailyDescScopeKind := usagescopecounterdailyFields[1].Descriptor()
+	// usagescopecounterdaily.ScopeKindValidator is a validator for the "scope_kind" field. It is called by the builders before save.
+	usagescopecounterdaily.ScopeKindValidator = usagescopecounterdailyDescScopeKind.Validators[0].(func(string) error)
+	// usagescopecounterdailyDescScopeID is the schema descriptor for scope_id field.
+	usagescopecounterdailyDescScopeID := usagescopecounterdailyFields[2].Descriptor()
+	// usagescopecounterdaily.ScopeIDValidator is a validator for the "scope_id" field. It is called by the builders before save.
+	usagescopecounterdaily.ScopeIDValidator = usagescopecounterdailyDescScopeID.Validators[0].(func(string) error)
+	// usagescopecounterdailyDescTokensSummable is the schema descriptor for tokens_summable field.
+	usagescopecounterdailyDescTokensSummable := usagescopecounterdailyFields[4].Descriptor()
+	// usagescopecounterdaily.DefaultTokensSummable holds the default value on creation for the tokens_summable field.
+	usagescopecounterdaily.DefaultTokensSummable = usagescopecounterdailyDescTokensSummable.Default.(int64)
+	// usagescopecounterdailyDescCalls is the schema descriptor for calls field.
+	usagescopecounterdailyDescCalls := usagescopecounterdailyFields[5].Descriptor()
+	// usagescopecounterdaily.DefaultCalls holds the default value on creation for the calls field.
+	usagescopecounterdaily.DefaultCalls = usagescopecounterdailyDescCalls.Default.(int64)
+	// usagescopecounterdailyDescUnmeasuredCalls is the schema descriptor for unmeasured_calls field.
+	usagescopecounterdailyDescUnmeasuredCalls := usagescopecounterdailyFields[6].Descriptor()
+	// usagescopecounterdaily.DefaultUnmeasuredCalls holds the default value on creation for the unmeasured_calls field.
+	usagescopecounterdaily.DefaultUnmeasuredCalls = usagescopecounterdailyDescUnmeasuredCalls.Default.(int64)
+	// usagescopecounterdailyDescID is the schema descriptor for id field.
+	usagescopecounterdailyDescID := usagescopecounterdailyFields[0].Descriptor()
+	// usagescopecounterdaily.DefaultID holds the default value on creation for the id field.
+	usagescopecounterdaily.DefaultID = usagescopecounterdailyDescID.Default.(func() uuid.UUID)
 	userFields := schema.User{}.Fields()
 	_ = userFields
 	// userDescEmail is the schema descriptor for email field.

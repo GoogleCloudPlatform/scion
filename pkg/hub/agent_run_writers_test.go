@@ -142,8 +142,9 @@ var entRunIDSetters = map[string]bool{
 // (applyAgentDeletionFields, which writes the run only for a
 // DeletionFields.SoftFinishRunID, which FinalizeAgentDeletion's soft mode
 // alone accepts, ptone/scion#5016), the agent credential insert, the
-// broker-reported run upsert and the runtime orphan upsert (each its own
-// run_id column).
+// broker-reported run upsert, the runtime orphan upsert, and the meter
+// health upsert (each its own run_id column; UpsertMeterHealth writes
+// meter_health.run_id, not agents.run_id).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_deletion_store.go applyAgentDeletionFields",
 	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
@@ -151,6 +152,7 @@ var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/broker_reported_run_store.go AgentStore.RecordBrokerReportedRuns",
 	"pkg/store/entadapter/credential_store.go createAgentCredential",
 	"pkg/store/entadapter/runtime_orphan_store.go AgentStore.RecordRuntimeOrphans",
+	"pkg/store/entadapter/usage_ledger_store.go UsageLedgerStore.UpsertMeterHealth", // writes meter_health.run_id, not agents.run_id
 }
 
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the

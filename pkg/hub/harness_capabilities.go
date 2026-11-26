@@ -25,22 +25,7 @@ import (
 )
 
 func canonicalHarnessName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "claude":
-		return "claude"
-	case "gemini", "gemini-cli":
-		return "gemini-cli"
-	case "opencode":
-		return "opencode"
-	case "codex":
-		return "codex"
-	case "generic":
-		return "generic"
-	case config.ShellHarnessConfigName:
-		return config.ShellHarnessConfigName
-	default:
-		return ""
-	}
+	return store.CanonicalHarnessName(name)
 }
 
 func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID, configRef string) string {

@@ -207,6 +207,9 @@ type MessagePolicy func(*sql.Selector)
 // MessagePolicyDecision is the predicate function for messagepolicydecision builders.
 type MessagePolicyDecision func(*sql.Selector)
 
+// MeterHealth is the predicate function for meterhealth builders.
+type MeterHealth func(*sql.Selector)
+
 // MutationAudit is the predicate function for mutationaudit builders.
 type MutationAudit func(*sql.Selector)
 
@@ -251,6 +254,9 @@ type RoleBinding func(*sql.Selector)
 
 // RoleDefinition is the predicate function for roledefinition builders.
 type RoleDefinition func(*sql.Selector)
+
+// RunAttribution is the predicate function for runattribution builders.
+type RunAttribution func(*sql.Selector)
 
 // RuntimeBroker is the predicate function for runtimebroker builders.
 type RuntimeBroker func(*sql.Selector)
@@ -324,8 +330,17 @@ type TriggerFire func(*sql.Selector)
 // TriggerSubjectClaim is the predicate function for triggersubjectclaim builders.
 type TriggerSubjectClaim func(*sql.Selector)
 
+// UsageEvent is the predicate function for usageevent builders.
+type UsageEvent func(*sql.Selector)
+
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)
+
+// UsageRollupDaily is the predicate function for usagerollupdaily builders.
+type UsageRollupDaily func(*sql.Selector)
+
+// UsageScopeCounterDaily is the predicate function for usagescopecounterdaily builders.
+type UsageScopeCounterDaily func(*sql.Selector)
 
 // User is the predicate function for user builders.
 type User func(*sql.Selector)

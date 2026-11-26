@@ -2661,6 +2661,46 @@ var (
 			},
 		},
 	}
+	// MeterHealthColumns holds the columns for the "meter_health" table.
+	MeterHealthColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "producer_epoch", Type: field.TypeString},
+		{Name: "last_receipt_at", Type: field.TypeTime},
+		{Name: "last_contiguous_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "max_seq_seen", Type: field.TypeInt64, Default: 0},
+		{Name: "missing_ranges", Type: field.TypeJSON, Nullable: true},
+		{Name: "last_source_activity_at", Type: field.TypeTime, Nullable: true},
+		{Name: "supported_signals", Type: field.TypeJSON, Nullable: true},
+		{Name: "anomalous_count", Type: field.TypeInt64, Default: 0},
+		{Name: "schema_drift_detected", Type: field.TypeBool, Default: false},
+		{Name: "final_state", Type: field.TypeString, Default: "open"},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// MeterHealthTable holds the schema information for the "meter_health" table.
+	MeterHealthTable = &schema.Table{
+		Name:       "meter_health",
+		Columns:    MeterHealthColumns,
+		PrimaryKey: []*schema.Column{MeterHealthColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "meter_health_agent_run_epoch",
+				Unique:  true,
+				Columns: []*schema.Column{MeterHealthColumns[1], MeterHealthColumns[2], MeterHealthColumns[3]},
+			},
+			{
+				Name:    "meterhealth_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{MeterHealthColumns[2]},
+			},
+			{
+				Name:    "meterhealth_final_state_updated_at",
+				Unique:  false,
+				Columns: []*schema.Column{MeterHealthColumns[12], MeterHealthColumns[13]},
+			},
+		},
+	}
 	// MutationAuditsColumns holds the columns for the "mutation_audits" table.
 	MutationAuditsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3216,6 +3256,58 @@ var (
 				Name:    "roledefinition_name_scope_type",
 				Unique:  true,
 				Columns: []*schema.Column{RoleDefinitionsColumns[1], RoleDefinitionsColumns[3]},
+			},
+		},
+	}
+	// RunAttributionColumns holds the columns for the "run_attribution" table.
+	RunAttributionColumns = []*schema.Column{
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "launch_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "generation", Type: field.TypeInt, Default: 1},
+		{Name: "prior_run_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "hub_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "agent_slug", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "broker_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "billing_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "owner_id", Type: field.TypeString, Nullable: true},
+		{Name: "created_by", Type: field.TypeString, Nullable: true},
+		{Name: "harness", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "harness_config", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "template", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "harness_config_digest", Type: field.TypeString, Nullable: true},
+		{Name: "template_digest", Type: field.TypeString, Nullable: true},
+		{Name: "harness_build", Type: field.TypeString, Nullable: true},
+		{Name: "labels_at_launch", Type: field.TypeJSON, Nullable: true},
+		{Name: "metering_writer_mode", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "usage_live_source", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "capture_policy", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "notice_version", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "backfill_existing", Type: field.TypeBool, Default: false},
+		{Name: "legal_hold", Type: field.TypeBool, Default: false},
+		{Name: "created_at", Type: field.TypeTime},
+	}
+	// RunAttributionTable holds the schema information for the "run_attribution" table.
+	RunAttributionTable = &schema.Table{
+		Name:       "run_attribution",
+		Columns:    RunAttributionColumns,
+		PrimaryKey: []*schema.Column{RunAttributionColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "runattribution_agent_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{RunAttributionColumns[6], RunAttributionColumns[25]},
+			},
+			{
+				Name:    "runattribution_project_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{RunAttributionColumns[5], RunAttributionColumns[25]},
+			},
+			{
+				Name:    "runattribution_billing_user_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{RunAttributionColumns[9], RunAttributionColumns[25]},
 			},
 		},
 	}
@@ -4317,6 +4409,91 @@ var (
 			},
 		},
 	}
+	// UsageEventsColumns holds the columns for the "usage_events" table.
+	UsageEventsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "event_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "billing_user_id", Type: field.TypeString, Nullable: true},
+		{Name: "broker_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "harness", Type: field.TypeString, Default: ""},
+		{Name: "model", Type: field.TypeString},
+		{Name: "model_source", Type: field.TypeString},
+		{Name: "usage_source", Type: field.TypeString},
+		{Name: "source_kind", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "source_identity", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "native_request_id", Type: field.TypeString, Nullable: true},
+		{Name: "session_id_hash", Type: field.TypeString, Nullable: true},
+		{Name: "status", Type: field.TypeString},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "input", Type: field.TypeInt64, Nullable: true},
+		{Name: "output", Type: field.TypeInt64, Nullable: true},
+		{Name: "cache_read", Type: field.TypeInt64, Nullable: true},
+		{Name: "cache_write", Type: field.TypeInt64, Nullable: true},
+		{Name: "cache_write_1h", Type: field.TypeInt64, Nullable: true},
+		{Name: "reasoning", Type: field.TypeInt64, Nullable: true},
+		{Name: "token_status", Type: field.TypeString},
+		{Name: "malformed_fields", Type: field.TypeJSON, Nullable: true},
+		{Name: "reported_cost_micros", Type: field.TypeInt64, Nullable: true},
+		{Name: "reported_cost_currency", Type: field.TypeString, Nullable: true},
+		{Name: "reported_cost_source", Type: field.TypeString, Nullable: true},
+		{Name: "event_ts", Type: field.TypeTime},
+		{Name: "received_at", Type: field.TypeTime},
+		{Name: "producer_epoch", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "producer_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "anomalous", Type: field.TypeBool, Default: false},
+		{Name: "charged_group_ids", Type: field.TypeJSON, Nullable: true},
+		{Name: "relocated_from_hub_id", Type: field.TypeString, Nullable: true},
+		{Name: "run_id", Type: field.TypeString},
+	}
+	// UsageEventsTable holds the schema information for the "usage_events" table.
+	UsageEventsTable = &schema.Table{
+		Name:       "usage_events",
+		Columns:    UsageEventsColumns,
+		PrimaryKey: []*schema.Column{UsageEventsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "usage_events_run_attribution_usage_events",
+				Columns:    []*schema.Column{UsageEventsColumns[35]},
+				RefColumns: []*schema.Column{RunAttributionColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usageevent_hub_id_event_id",
+				Unique:  true,
+				Columns: []*schema.Column{UsageEventsColumns[1], UsageEventsColumns[2]},
+			},
+			{
+				Name:    "usageevent_project_id_event_ts",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[3], UsageEventsColumns[28]},
+			},
+			{
+				Name:    "usageevent_billing_user_id_event_ts",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[5], UsageEventsColumns[28]},
+			},
+			{
+				Name:    "usageevent_agent_id_event_ts",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[4], UsageEventsColumns[28]},
+			},
+			{
+				Name:    "usageevent_received_at_event_id",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[29], UsageEventsColumns[2]},
+			},
+			{
+				Name:    "usageevent_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{UsageEventsColumns[35]},
+			},
+		},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4358,6 +4535,86 @@ var (
 				Annotation: &entsql.IndexAnnotation{
 					Where: "released_at IS NULL",
 				},
+			},
+		},
+	}
+	// UsageRollupsDailyColumns holds the columns for the "usage_rollups_daily" table.
+	UsageRollupsDailyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "bucket_start", Type: field.TypeTime},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "billing_user_id", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString, Default: ""},
+		{Name: "model", Type: field.TypeString, Default: ""},
+		{Name: "usage_source", Type: field.TypeString},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "error_calls", Type: field.TypeInt64, Default: 0},
+		{Name: "input", Type: field.TypeInt64, Default: 0},
+		{Name: "output", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_1h", Type: field.TypeInt64, Default: 0},
+		{Name: "reasoning", Type: field.TypeInt64, Default: 0},
+		{Name: "reported_cost_micros", Type: field.TypeInt64, Default: 0},
+		{Name: "events", Type: field.TypeInt64, Default: 0},
+		{Name: "null_token_events", Type: field.TypeInt64, Default: 0},
+		{Name: "first_event_ts", Type: field.TypeTime},
+		{Name: "last_event_ts", Type: field.TypeTime},
+	}
+	// UsageRollupsDailyTable holds the schema information for the "usage_rollups_daily" table.
+	UsageRollupsDailyTable = &schema.Table{
+		Name:       "usage_rollups_daily",
+		Columns:    UsageRollupsDailyColumns,
+		PrimaryKey: []*schema.Column{UsageRollupsDailyColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_rollups_daily_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageRollupsDailyColumns[1], UsageRollupsDailyColumns[2], UsageRollupsDailyColumns[3], UsageRollupsDailyColumns[4], UsageRollupsDailyColumns[5], UsageRollupsDailyColumns[6], UsageRollupsDailyColumns[7]},
+			},
+			{
+				Name:    "usagerollupdaily_project_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsDailyColumns[2], UsageRollupsDailyColumns[1]},
+			},
+			{
+				Name:    "usagerollupdaily_billing_user_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsDailyColumns[3], UsageRollupsDailyColumns[1]},
+			},
+			{
+				Name:    "usagerollupdaily_agent_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsDailyColumns[4], UsageRollupsDailyColumns[1]},
+			},
+		},
+	}
+	// UsageScopeCountersDailyColumns holds the columns for the "usage_scope_counters_daily" table.
+	UsageScopeCountersDailyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "scope_kind", Type: field.TypeString},
+		{Name: "scope_id", Type: field.TypeString},
+		{Name: "day_utc", Type: field.TypeTime},
+		{Name: "tokens_summable", Type: field.TypeInt64, Default: 0},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "unmeasured_calls", Type: field.TypeInt64, Default: 0},
+	}
+	// UsageScopeCountersDailyTable holds the schema information for the "usage_scope_counters_daily" table.
+	UsageScopeCountersDailyTable = &schema.Table{
+		Name:       "usage_scope_counters_daily",
+		Columns:    UsageScopeCountersDailyColumns,
+		PrimaryKey: []*schema.Column{UsageScopeCountersDailyColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_scope_counters_daily_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageScopeCountersDailyColumns[1], UsageScopeCountersDailyColumns[2], UsageScopeCountersDailyColumns[3]},
+			},
+			{
+				Name:    "usagescopecounterdaily_day_utc",
+				Unique:  false,
+				Columns: []*schema.Column{UsageScopeCountersDailyColumns[3]},
 			},
 		},
 	}
@@ -4726,6 +4983,7 @@ var (
 		MessageAddresseesTable,
 		MessagePoliciesTable,
 		MessagePolicyDecisionsTable,
+		MeterHealthTable,
 		MutationAuditsTable,
 		NonceCacheTable,
 		NotificationsTable,
@@ -4741,6 +4999,7 @@ var (
 		RelayInstancesTable,
 		RoleBindingsTable,
 		RoleDefinitionsTable,
+		RunAttributionTable,
 		RuntimeBrokersTable,
 		RuntimeOrphansTable,
 		SchedulesTable,
@@ -4765,7 +5024,10 @@ var (
 		TriggerEventsTable,
 		TriggerFiresTable,
 		TriggerSubjectClaimsTable,
+		UsageEventsTable,
 		UsageReservationsTable,
+		UsageRollupsDailyTable,
+		UsageScopeCountersDailyTable,
 		UsersTable,
 		UserAccessTokensTable,
 		UserDeletionsTable,
@@ -4949,6 +5211,9 @@ func init() {
 	MessagePolicyDecisionsTable.Annotation = &entsql.Annotation{
 		Table: "message_policy_decisions",
 	}
+	MeterHealthTable.Annotation = &entsql.Annotation{
+		Table: "meter_health",
+	}
 	NonceCacheTable.Annotation = &entsql.Annotation{
 		Table: "nonce_cache",
 	}
@@ -4984,6 +5249,9 @@ func init() {
 		Table: "relay_instances",
 	}
 	RoleBindingsTable.ForeignKeys[0].RefTable = RoleDefinitionsTable
+	RunAttributionTable.Annotation = &entsql.Annotation{
+		Table: "run_attribution",
+	}
 	RuntimeBrokersTable.Annotation = &entsql.Annotation{
 		Table: "runtime_brokers",
 	}
@@ -5059,7 +5327,17 @@ func init() {
 	TriggerSubjectClaimsTable.Annotation = &entsql.Annotation{
 		Table: "trigger_subject_claims",
 	}
+	UsageEventsTable.ForeignKeys[0].RefTable = RunAttributionTable
+	UsageEventsTable.Annotation = &entsql.Annotation{
+		Table: "usage_events",
+	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
+	UsageRollupsDailyTable.Annotation = &entsql.Annotation{
+		Table: "usage_rollups_daily",
+	}
+	UsageScopeCountersDailyTable.Annotation = &entsql.Annotation{
+		Table: "usage_scope_counters_daily",
+	}
 	UsersTable.Annotation = &entsql.Annotation{
 		Table: "users",
 	}
