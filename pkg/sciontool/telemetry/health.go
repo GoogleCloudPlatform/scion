@@ -58,7 +58,7 @@ type UsageSourceSelection struct {
 	Settled      bool
 	Source       string // effective SCION_USAGE_SOURCE value, may be "" or unrecognized
 	Origin       string // telemetrycontract.UsageSourceOrigin*
-	NativePolicy string // "enabled", "disabled" or "" (overlay marker)
+	NativePolicy string // "enabled", "disabled", "metering", or "" (overlay marker)
 }
 
 // resolveUsageSelection applies the runtime-env precedence rule of

@@ -1356,17 +1356,18 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
                 ctx.warn(f"failed to write API key approval: {exc}")
 
     env = _build_env_overlay(ctx, auth)
-    telemetry = ctx.telemetry
-    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
-    enabled = isinstance(config, dict) and config.get("enabled", True)
-    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    tel = scion_harness.resolve_native_telemetry(ctx)
+    config = tel.config
+    enabled = tel.enabled
+    loopback_only = tel.loopback_only
+    source_env = tel.source_env
     cloud = config.get("cloud") if isinstance(config, dict) else None
     configured_provider = cloud.get("provider", "") if isinstance(cloud, dict) else ""
     staged_provider = source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER", "")
     if enabled and configured_provider and staged_provider and configured_provider != staged_provider:
         raise scion_harness.ProvisionError("conflicting telemetry cloud provider")
     provider = staged_provider or configured_provider
-    if enabled and not provider:
+    if enabled and not provider and not loopback_only:
         # The receiver can infer GCP from credentials even when provider is
         # absent. A credential path is only a reason to stop, not a selector.
         has_credentials = bool(source_env.get("SCION_OTEL_GCP_CREDENTIALS")) or os.path.isfile(
@@ -1379,9 +1380,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
     env.update({
-        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
+        "SCION_NATIVE_TELEMETRY_POLICY": tel.policy,
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1" if enabled else "0",
-        "OTEL_METRICS_EXPORTER": "otlp" if enabled and provider != "gcp" else "none",
+        "OTEL_METRICS_EXPORTER": "otlp" if enabled and not loopback_only and provider != "gcp" else "none",
         "OTEL_LOGS_EXPORTER": "otlp" if enabled else "none",
         "OTEL_TRACES_EXPORTER": "none",
         "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",

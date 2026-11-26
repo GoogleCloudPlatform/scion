@@ -138,6 +138,8 @@ For a generic OTLP collector instead of GCP-native export, set `SCION_OTEL_ENDPO
 
 #### Harness-Specific Configuration
 
+When the `tokenomics.usage_ledger` experiment is active on the Hub, `sciontool` probes `GET /api/v1/agents/{id}/usage/capabilities` at container start and automatically enables **loopback-only native OTel** (`SCION_NATIVE_TELEMETRY_POLICY=metering`) to `127.0.0.1` for harnesses with native usage derivation (`claude`, `codex`, `gemini-cli`, `copilot`), even when no `telemetry:` block or cloud provider is configured in `settings.yaml`. No cloud export of native harness signals or prompt logging is enabled in this mode (even if `sciontool` has an active cloud exporter for its own spans and analytics), and Hub usage metering continues even if a configured cloud exporter fails to start (surfacing `delivery_state=degraded` in telemetry diagnostics). Explicit `telemetry.enabled: false` (in Hub settings, project policy, or `--disable-telemetry`) still disables both telemetry and usage metering; use `telemetry.cloud.enabled: false` to disable cloud export while keeping Hub metering active.
+
 Each harness integrates with `sciontool`'s telemetry pipeline differently depending on its native telemetry support:
 
 - **OpenTelemetry-native harnesses** (e.g. `opencode`): These harnesses emit OTLP data directly. Point them at the `sciontool` forwarder on localhost:

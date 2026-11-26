@@ -24,6 +24,7 @@ Stdlib-only so it works in any container image that ships python3.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import itertools
 import json
 import os
@@ -2734,3 +2735,135 @@ def _capture_one_cred(entry: dict[str, Any], force: bool, scope: str = "user") -
     if outcome == "error":
         return outcome, f"scion failed for {key}: {result.stderr.strip()}"
     return outcome, None
+
+
+# --- Native telemetry resolution (ptone/scion#9492) -------------------------
+
+
+@dataclass(frozen=True)
+class NativeTelemetryDecision:
+    """Resolved native OTel telemetry mode for a harness provisioner.
+
+    enabled: whether native OTel export to sciontool's loopback receiver is active.
+    loopback_only: True when native OTel is enabled solely for local Hub usage
+        metering (SCION_USAGE_HUB_INGEST=1) without explicit cloud telemetry
+        configuration. In this mode, provisioners emit
+        SCION_NATIVE_TELEMETRY_POLICY=metering so sciontool derives usage from
+        native signals and does not forward them to any cloud exporter, do not
+        require a cloud provider, and do not enable prompt/content logging.
+    config: the telemetry dict from inputs/telemetry.json, or None.
+    source_env: the env dict from inputs/telemetry.json (always a dict).
+    """
+
+    enabled: bool
+    loopback_only: bool
+    config: dict[str, Any] | None
+    source_env: dict[str, str]
+
+    @property
+    def policy(self) -> str:
+        """SCION_NATIVE_TELEMETRY_POLICY value for this decision."""
+        if not self.enabled:
+            return "disabled"
+        if self.loopback_only:
+            return "metering"
+        return "enabled"
+
+
+def _parse_explicit_bool_env(val: Any) -> bool | None:
+    """Parse an explicit boolean env value matching pkg/util.ParseBoolEnv."""
+    if not isinstance(val, str):
+        return None
+    low = val.strip().lower()
+    if low in ("true", "1", "yes", "on"):
+        return True
+    if low in ("false", "0", "no", "off"):
+        return False
+    return None
+
+
+def _has_cloud_telemetry_config(
+    config: dict[str, Any] | None,
+    source_env: dict[str, str],
+    home: str,
+) -> bool:
+    """Return True if any cloud telemetry provider, endpoint, or GCP credential is configured."""
+    cloud = config.get("cloud") if isinstance(config, dict) else None
+    if isinstance(cloud, dict):
+        if cloud.get("provider") or cloud.get("endpoint"):
+            return True
+    if (
+        source_env.get("SCION_TELEMETRY_CLOUD_PROVIDER")
+        or source_env.get("SCION_OTEL_ENDPOINT")
+        or source_env.get("SCION_OTEL_GCP_CREDENTIALS")
+        or os.environ.get("SCION_TELEMETRY_CLOUD_PROVIDER")
+        or os.environ.get("SCION_OTEL_ENDPOINT")
+        or os.environ.get("SCION_OTEL_GCP_CREDENTIALS")
+    ):
+        return True
+    if home and os.path.isfile(os.path.join(home, ".scion", "telemetry-gcp-credentials.json")):
+        return True
+    return False
+
+
+def resolve_native_telemetry(ctx: ProvisionContext) -> NativeTelemetryDecision:
+    """Resolve whether native OTel should be enabled, including loopback-only Hub metering.
+
+    Precedence:
+    1. Explicit telemetry.enabled == false (in inputs/telemetry.json, staged env,
+       or process SCION_TELEMETRY_ENABLED) always disables native OTel.
+    2. Explicit telemetry config in inputs/telemetry.json (non-empty dict with
+       enabled != false) enables native OTel. If Hub usage ingest is active
+       (SCION_USAGE_HUB_INGEST=1) and no cloud provider/endpoint/GCP credentials
+       are configured, loopback_only is True (policy="metering") so harnesses
+       (e.g. Claude) do not abort requiring a cloud provider and sciontool does
+       not forward native signals to any cloud exporter.
+    3. Unset/default telemetry (telemetry is None or empty dict): when
+       SCION_USAGE_HUB_INGEST=1, enables metering-only native OTel
+       (loopback_only=True, policy="metering") to sciontool's loopback receiver;
+       sciontool enforces that native harness signals are never forwarded to any
+       cloud exporter in metering mode. Otherwise keeps native OTel disabled.
+    """
+    payload = ctx.telemetry
+    raw_config = payload.get("telemetry") if isinstance(payload, dict) else None
+    config = raw_config if isinstance(raw_config, dict) else None
+    raw_env = payload.get("env") if isinstance(payload, dict) else None
+    source_env: dict[str, str] = raw_env if isinstance(raw_env, dict) else {}
+
+    # 1. Explicit disable wins at every layer (telemetry.json, staged env, process env).
+    if config is not None and config.get("enabled") is False:
+        return NativeTelemetryDecision(False, False, config, source_env)
+    for candidate in (
+        source_env.get("SCION_TELEMETRY_ENABLED"),
+        os.environ.get("SCION_TELEMETRY_ENABLED"),
+    ):
+        if _parse_explicit_bool_env(candidate) is False:
+            return NativeTelemetryDecision(False, False, config, source_env)
+
+    # Process env SCION_USAGE_HUB_INGEST and SCION_NATIVE_METERING_SUPPORTED
+    # (set by sciontool init after the live Hub capability probe and pipeline
+    # start) take precedence over staged env if present. Metering mode is only
+    # emitted when sciontool advertises SCION_NATIVE_METERING_SUPPORTED=1, so
+    # an older P1-era sciontool that only accepts enabled/disabled never fails
+    # startup on an unknown policy value.
+    hub_ingest_val = os.environ.get("SCION_USAGE_HUB_INGEST")
+    if hub_ingest_val is None or hub_ingest_val == "":
+        hub_ingest_val = source_env.get("SCION_USAGE_HUB_INGEST", "")
+    metering_supported_val = os.environ.get("SCION_NATIVE_METERING_SUPPORTED")
+    if metering_supported_val is None or metering_supported_val == "":
+        metering_supported_val = source_env.get("SCION_NATIVE_METERING_SUPPORTED", "")
+    hub_usage_active = hub_ingest_val == "1" and metering_supported_val == "1"
+    has_cloud = _has_cloud_telemetry_config(config, source_env, ctx.home)
+
+    # 2. Explicit telemetry block (non-empty dict, enabled is True or omitted).
+    if config:
+        enabled = config.get("enabled")
+        if enabled is None or bool(enabled):
+            return NativeTelemetryDecision(True, bool(hub_usage_active and not has_cloud), config, source_env)
+        return NativeTelemetryDecision(False, False, config, source_env)
+
+    # 3. Default / unset telemetry: auto-enable metering-only native OTel when Hub usage sink is active.
+    if hub_usage_active:
+        return NativeTelemetryDecision(True, True, config, source_env)
+
+    return NativeTelemetryDecision(False, False, config, source_env)

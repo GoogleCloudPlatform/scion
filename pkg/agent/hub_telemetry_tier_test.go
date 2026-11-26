@@ -284,3 +284,56 @@ func TestStart_TelemetryOverrideBeatsHubDefaultWithoutAliasing(t *testing.T) {
 		}
 	})
 }
+
+// TestStart_TelemetryDefaultUnsetVsExplicitDisabled verifies ptone/scion#9492:
+// when telemetry is unset across Hub defaults, project policy, and CLI flags,
+// SCION_TELEMETRY_ENABLED is NOT injected into container env (so sciontool's
+// default pipeline starts and can probe the Hub usage sink), whereas an explicit
+// enabled:false at any layer (Hub default, project policy, or --disable-telemetry)
+// emits SCION_TELEMETRY_ENABLED=false.
+func TestStart_TelemetryDefaultUnsetVsExplicitDisabled(t *testing.T) {
+	off := false
+
+	t.Run("unset default omits SCION_TELEMETRY_ENABLED", func(t *testing.T) {
+		project := hubTelemetryFixture(t, "")
+		writeHubTelemetryAgent(t, project, "default-unset", `{"harness": "gemini"}`)
+
+		env, rc := startWithHubTelemetry(t, project, "default-unset", nil, nil)
+
+		if rc.TelemetryEnabled {
+			t.Error("TelemetryEnabled = true, want false when telemetry is unset")
+		}
+		if got, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
+			t.Errorf("SCION_TELEMETRY_ENABLED = %q (present), want omitted on unset default", got)
+		}
+	})
+
+	t.Run("explicit hub default enabled=false sets SCION_TELEMETRY_ENABLED=false", func(t *testing.T) {
+		project := hubTelemetryFixture(t, "")
+		writeHubTelemetryAgent(t, project, "hub-disabled", `{"harness": "gemini"}`)
+		hd := &api.HubAgentDefaults{
+			Telemetry: &api.TelemetryConfig{Enabled: &off},
+		}
+
+		env, rc := startWithHubTelemetry(t, project, "hub-disabled", hd, nil)
+
+		if rc.TelemetryEnabled {
+			t.Error("TelemetryEnabled = true, want false when hub default disables telemetry")
+		}
+		assertEnv(t, env, "SCION_TELEMETRY_ENABLED", "false")
+	})
+
+	t.Run("explicit CLI/policy TelemetryOverride=false sets SCION_TELEMETRY_ENABLED=false", func(t *testing.T) {
+		project := hubTelemetryFixture(t, "")
+		writeHubTelemetryAgent(t, project, "override-disabled", `{"harness": "gemini"}`)
+
+		env, rc := startWithHubTelemetry(t, project, "override-disabled", nil, func(o *api.StartOptions) {
+			o.TelemetryOverride = &off
+		})
+
+		if rc.TelemetryEnabled {
+			t.Error("TelemetryEnabled = true, want false when TelemetryOverride=false")
+		}
+		assertEnv(t, env, "SCION_TELEMETRY_ENABLED", "false")
+	})
+}
