@@ -46,6 +46,7 @@ const (
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
 	InboxBreakdownAgents              = "agents"
 	InboxBreakdownProjects            = "projects"
+	InboxBreakdownSecretsProjects     = "secretsProjects"
 	InboxBreakdownToAddress           = "toAddress"
 	InboxBreakdownRequested           = "requested"
 	InboxBreakdownUnreadConversations = "unreadConversations"

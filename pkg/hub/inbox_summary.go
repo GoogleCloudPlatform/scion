@@ -50,6 +50,7 @@ const (
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
 	InboxBreakdownAgents              = "agents"
 	InboxBreakdownProjects            = "projects"
+	InboxBreakdownSecretsProjects     = "secretsProjects"
 	InboxBreakdownToAddress           = "toAddress"
 	InboxBreakdownRequested           = "requested"
 	InboxBreakdownUnreadConversations = "unreadConversations"
@@ -102,6 +103,12 @@ type InboxCategory struct {
 	// category's items expire (pending_secrets, agent_secrets). It lets
 	// previews=0 clients schedule expiry refreshes without fetching previews.
 	NextExpiresAt *time.Time `json:"nextExpiresAt,omitempty"`
+
+	// projectIDSet is an internal, non-serialized set of distinct non-empty
+	// project IDs over the category's counted items, used by buildInboxSummary
+	// to compute cross-category project unions (e.g. secretsProjects) without
+	// extra store queries.
+	projectIDSet map[string]struct{} `json:"-"`
 }
 
 // MarshalJSON preserves a non-nil empty AgentIDs slice as `"agentIds": []`
@@ -398,6 +405,27 @@ func (s *Server) buildInboxSummary(ctx context.Context, v inboxViewer, previews 
 		categories[src.key] = cat
 	}
 
+	if asCat, ok := categories[InboxCategoryAgentSecrets]; ok && asCat.State == InboxStateOK {
+		union := make(map[string]struct{}, len(asCat.projectIDSet))
+		for pid := range asCat.projectIDSet {
+			if pid != "" {
+				union[pid] = struct{}{}
+			}
+		}
+		if psCat, ok := categories[InboxCategoryPendingSecrets]; ok && psCat.State == InboxStateOK {
+			for pid := range psCat.projectIDSet {
+				if pid != "" {
+					union[pid] = struct{}{}
+				}
+			}
+		}
+		if asCat.Breakdown == nil {
+			asCat.Breakdown = make(map[string]int, 1)
+		}
+		asCat.Breakdown[InboxBreakdownSecretsProjects] = len(union)
+		categories[InboxCategoryAgentSecrets] = asCat
+	}
+
 	total, totalCapped := sumInboxCounted(categories)
 	return InboxSummaryResponse{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
@@ -532,6 +560,7 @@ func (s *Server) inboxPendingSecretsCategory(ctx context.Context, v inboxViewer,
 			InboxBreakdownProjects: len(seenProjects),
 		},
 		NextExpiresAt: nextExpiresAt,
+		projectIDSet:  seenProjects,
 	}
 }
 

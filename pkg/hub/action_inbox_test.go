@@ -542,8 +542,9 @@ func TestInboxSummary_AgentSecretsParityAndGates(t *testing.T) {
 	assert.Equal(t, 3, asCat.Count)
 	assert.Equal(t, probe.Counts.Answerable, asCat.Count, "AC-7 count parity")
 	assert.Equal(t, map[string]int{
-		InboxBreakdownAgents:   1,
-		InboxBreakdownProjects: 1,
+		InboxBreakdownAgents:          1,
+		InboxBreakdownProjects:        1,
+		InboxBreakdownSecretsProjects: 1,
 	}, asCat.Breakdown)
 	require.NotNil(t, asCat.NextExpiresAt)
 	assert.Equal(t, firstRes.Requests[0].Row.ExpiresAt.UTC(), asCat.NextExpiresAt.UTC())
@@ -619,6 +620,141 @@ func TestSecretRequest_DMUpdateEmitsInboxHint(t *testing.T) {
 		t.Fatalf("unexpected user inbox hint for thread secret request: %s", string(ev.Data))
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+func TestInboxSummary_SecretsProjectsUnion(t *testing.T) {
+	ctx := context.Background()
+	f := newSecretRequestsFixture(t, false)
+	st := f.store
+	srv := f.srv
+	enableHubExperiments(t, srv, st, map[string]bool{
+		experiments.InboxDashboard: true,
+		experiments.AgentSecrets:   true,
+	})
+
+	ownerRD, err := st.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Project A (f.project): overlapping — has BOTH an answerable agent_secrets row AND a pending_secrets row.
+	// Project B: disjoint — has ONLY an answerable agent_secrets row.
+	// Project C: disjoint — has ONLY a pending_secrets row.
+	projB := &store.Project{ID: api.NewUUID(), Slug: "union-proj-b-" + api.NewUUID()[:8], Name: "Union Proj B"}
+	require.NoError(t, st.CreateProject(ctx, projB))
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		RoleDefinitionID: ownerRD.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projB.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.alice.ID,
+	})
+	require.NoError(t, err)
+	agentB := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "union-agent-b",
+		Name:      "union-agent-b",
+		ProjectID: projB.ID,
+		OwnerID:   f.alice.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, st.CreateAgent(ctx, agentB))
+
+	projC := &store.Project{ID: api.NewUUID(), Slug: "union-proj-c-" + api.NewUUID()[:8], Name: "Union Proj C"}
+	require.NoError(t, st.CreateProject(ctx, projC))
+
+	topicA := createUserProjectTopic(t, srv, f.project.ID, "union-topic-a", f.alice.ID)
+	topicB := createUserProjectTopic(t, srv, projB.ID, "union-topic-b", f.alice.ID)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	_ = seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicA, now, []messages.SecretRequest{
+		{Key: "UNION_SR_A", KeyNorm: "UNION_SR_A", SecretType: "environment"},
+	}, false)
+	_ = seedThreadSecretRequest(t, st, projB.ID, agentB.ID, agentB.Name, topicB, now.Add(time.Second), []messages.SecretRequest{
+		{Key: "UNION_SR_B", KeyNorm: "UNION_SR_B", SecretType: "environment"},
+	}, false)
+
+	_, err = st.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+		ID:          api.NewUUID(),
+		Key:         "UNION_PS_A",
+		SecretType:  store.SecretTypeEnvironment,
+		Scope:       store.ScopeUser,
+		ScopeID:     f.alice.ID,
+		ValueRef:    "ref-a",
+		ValueLen:    8,
+		AgentID:     f.agent.ID,
+		AgentSlug:   f.agent.Slug,
+		ProjectID:   f.project.ID,
+		ProjectName: f.project.Name,
+		Created:     now,
+		Updated:     now,
+		ExpiresAt:   now.Add(24 * time.Hour),
+	}, now)
+	require.NoError(t, err)
+	_, err = st.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+		ID:          api.NewUUID(),
+		Key:         "UNION_PS_C",
+		SecretType:  store.SecretTypeEnvironment,
+		Scope:       store.ScopeUser,
+		ScopeID:     f.alice.ID,
+		ValueRef:    "ref-c",
+		ValueLen:    8,
+		AgentID:     agentB.ID,
+		AgentSlug:   agentB.Slug,
+		ProjectID:   projC.ID,
+		ProjectName: projC.Name,
+		Created:     now,
+		Updated:     now,
+		ExpiresAt:   now.Add(24 * time.Hour),
+	}, now)
+	require.NoError(t, err)
+
+	aliceTok := f.sessionToken(t, f.alice)
+	rr := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
+	require.Equal(t, http.StatusOK, rr.Code)
+	var sum InboxSummaryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sum))
+
+	asCat := sum.Categories[InboxCategoryAgentSecrets]
+	psCat := sum.Categories[InboxCategoryPendingSecrets]
+	assert.Equal(t, InboxStateOK, asCat.State)
+	assert.Equal(t, InboxStateOK, psCat.State)
+	assert.Equal(t, 2, asCat.Count)
+	assert.Equal(t, 2, psCat.Count)
+	assert.Equal(t, 2, asCat.Breakdown[InboxBreakdownProjects], "agent_secrets own projects = {A, B}")
+	assert.Equal(t, 2, psCat.Breakdown[InboxBreakdownProjects], "pending_secrets own projects = {A, C}")
+	assert.Equal(t, 3, asCat.Breakdown[InboxBreakdownSecretsProjects], "distinct union across both = {A, B, C}")
+	// secretsProjects does not inflate total.
+	assert.Equal(t, 4, sum.Total)
+
+	// When pending_secrets is not ok (error), union falls back to agent_secrets' own projects (2).
+	srv.inboxSourcesForTest = []inboxSourceEntry{
+		{
+			key: InboxCategoryPendingSecrets,
+			run: func(_ context.Context, _ inboxViewer, _ int, _ string) InboxCategory {
+				return InboxCategory{State: InboxStateError, ErrorCode: InboxErrorInternal, Previews: []any{}}
+			},
+		},
+		{key: InboxCategoryAgentSecrets, run: srv.inboxAgentSecretsCategory},
+	}
+	defer func() { srv.inboxSourcesForTest = nil }()
+
+	rrErr := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
+	require.Equal(t, http.StatusOK, rrErr.Code)
+	var sumErr InboxSummaryResponse
+	require.NoError(t, json.Unmarshal(rrErr.Body.Bytes(), &sumErr))
+	assert.Equal(t, 2, sumErr.Categories[InboxCategoryAgentSecrets].Breakdown[InboxBreakdownSecretsProjects])
+
+	// When agent_secrets is unavailable (UAT), secretsProjects is omitted.
+	srv.inboxSourcesForTest = nil
+	uatRaw, _, err := srv.uatService.CreateToken(rs4MintContext(f.alice.ID), f.alice.ID, "union-uat", f.project.ID, []string{"inbox:read"}, nil)
+	require.NoError(t, err)
+	rrUAT := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", uatRaw)
+	require.Equal(t, http.StatusOK, rrUAT.Code)
+	var sumUAT InboxSummaryResponse
+	require.NoError(t, json.Unmarshal(rrUAT.Body.Bytes(), &sumUAT))
+	assert.Equal(t, InboxStateUnavailable, sumUAT.Categories[InboxCategoryAgentSecrets].State)
+	_, hasKey := sumUAT.Categories[InboxCategoryAgentSecrets].Breakdown[InboxBreakdownSecretsProjects]
+	assert.False(t, hasKey)
 }
 
 func TestActionInboxGenericity_NoSecretRequestBranches(t *testing.T) {

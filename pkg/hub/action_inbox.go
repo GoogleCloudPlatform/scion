@@ -546,6 +546,7 @@ func (s *Server) actionInboxCategory(ctx context.Context, v inboxViewer, kind ac
 			InboxBreakdownProjects: len(seenProjects),
 		},
 		NextExpiresAt: nextExpiresAt,
+		projectIDSet:  seenProjects,
 	}
 }
 
