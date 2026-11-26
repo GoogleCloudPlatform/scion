@@ -2734,6 +2734,10 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		})(w, r)
 		return
 	}
+	if subPath == "decisions/suggestions" {
+		s.handleProjectDecisionSuggestions(w, r, projectID)
+		return
+	}
 	if strings.HasPrefix(subPath, "decisions/") {
 		NotFound(w, "Project decision route")
 		return

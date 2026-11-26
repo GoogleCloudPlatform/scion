@@ -395,9 +395,9 @@ func sortedMapKeys(m map[string]bool) []string {
 }
 
 // decisionAnswererFacetViews builds the answerers facet sorted by display name
-// (case-insensitive, tie-breaking by user ID) and capped at
+// (case-insensitive, tie-breaking by user ID) and optionally capped at
 // maxProjectDecisionFacetOptions (design-8985 §3.3).
-func decisionAnswererFacetViews(answerers []store.ProjectDecisionActor) []ProjectDecisionActorView {
+func decisionAnswererFacetViews(answerers []store.ProjectDecisionActor, capped bool) ([]ProjectDecisionActorView, bool) {
 	out := make([]ProjectDecisionActorView, 0, len(answerers))
 	for _, a := range answerers {
 		hint := ""
@@ -417,8 +417,9 @@ func decisionAnswererFacetViews(answerers []store.ProjectDecisionActor) []Projec
 		}
 		return out[i].ID < out[j].ID
 	})
-	if len(out) > maxProjectDecisionFacetOptions {
+	truncated := len(out) > maxProjectDecisionFacetOptions
+	if capped && truncated {
 		out = out[:maxProjectDecisionFacetOptions]
 	}
-	return out
+	return out, truncated
 }
