@@ -369,7 +369,9 @@ export function lastDecisionPreviewSummary(
   const policyLabel =
     preview.retention_days > 0 ? `${preview.retention_days}-day default` : 'no hub default';
   const stamp = when ? `${when}, ${policyLabel}` : policyLabel;
-  return `Preview estimate (${stamp}): ${plural(decisions, 'decision', 'decisions')} would be deleted now.`;
+  const count = plural(decisions, 'decision', 'decisions');
+  const qualifier = preview.status === 'partial' ? `at least ${count}` : count;
+  return `Preview estimate (${stamp}): ${qualifier} would be deleted now.`;
 }
 
 function effectiveDaysForProject(

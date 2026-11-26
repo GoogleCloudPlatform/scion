@@ -276,6 +276,18 @@ describe('lastDecisionRunSummary and lastDecisionPreviewSummary', () => {
       }),
     ]);
     expect(noWindow).toContain('no hub default');
+    const partial = lastDecisionPreviewSummary([
+      run({
+        trigger: 'preview',
+        dry_run: true,
+        status: 'partial',
+        retention_days: 180,
+        totals: { decisions: 500, answers: 450 },
+      }),
+    ]);
+    expect(partial).toMatch(
+      /^Preview estimate \(.*2026.*, 180-day default\): at least 500 decisions would be deleted now\.$/
+    );
     expect(
       lastDecisionPreviewSummary([
         run({ trigger: 'preview', dry_run: true, status: 'failed', error: 'deadline' }),
