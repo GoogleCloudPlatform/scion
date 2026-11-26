@@ -15,6 +15,8 @@
 package systemone
 
 import (
+	"context"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
@@ -49,10 +51,50 @@ type (
 	Decision            = runtime.Decision
 )
 
+// Request wraps a System One Input with consumer-authorized evaluation context
+// for ruleengine.Input.Payload (t2-p2-trigger-binding-amendment §2.2, I3).
+//
+// Consumers evaluating rules through the ruleengine.Dialect pass Request in
+// ruleengine.Input.Payload so the dialect forwards ProjectID, RuleID,
+// Revision, and optional ElementIndex into runtime.EvalOptions and evaluation
+// provenance. Dialect evaluations always enforce RequireProject: true (so a
+// bare Input fails closed); Hub admin probes call Runtime.Evaluate directly.
+//
+// Security contract: ProjectID MUST come from the consumer's authorized
+// context (for example a Hub-owned trigger or message-policy record), never
+// from untrusted caller input. The runtime trusts the ProjectID supplied here
+// when resolving project-scoped named secrets and recording provenance.
+type Request struct {
+	Input Input
+	// ProjectID is the consumer-authorized project ID for this evaluation.
+	// Must come from the consumer's authorized context, never caller input.
+	ProjectID string
+	// RuleID identifies the consumer rule (for example a trigger or policy ID).
+	RuleID string
+	// Revision is the consumer rule's revision (for example authorization_revision).
+	Revision int64
+	// ElementIndex optionally records the 0-based element position inside an
+	// ordered mixed-rule list for provenance only (never part of cache keys).
+	ElementIndex *int
+}
+
 // ProbeInput constructs a single-field Input for the built-in P1 synthetic
 // probe environment ("probe.text").
 func ProbeInput(text string) Input {
 	return runtime.ProbeInput(text)
+}
+
+// WithProjectID attaches a consumer-authorized project ID to ctx so authoring
+// (Compile) and runtime calls can enforce per-project instance allowlists
+// (t2-p2-trigger-binding-amendment D1) and project-scoped secret resolution.
+func WithProjectID(ctx context.Context, projectID string) context.Context {
+	return runtime.WithEvalProjectID(ctx, projectID)
+}
+
+// ProjectIDFromContext returns the validated project ID attached by
+// WithProjectID or runtime.WithEvalProjectID, or "" when unset.
+func ProjectIDFromContext(ctx context.Context) string {
+	return runtime.EvalProjectIDFromContext(ctx)
 }
 
 // EvaluationFrom extracts the *Evaluation provenance record from err via

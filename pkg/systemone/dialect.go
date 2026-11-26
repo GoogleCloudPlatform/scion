@@ -50,6 +50,10 @@ type DialectConfig struct {
 	// Enabled gates Compile and Evaluate on feature availability before any I/O
 	// (AC-13 option (b)). When nil, the dialect is treated as enabled.
 	Enabled func() bool
+	// Environments optionally supplies a shared ContentEnvironment registry.
+	// When nil, NewDialect creates a fresh spec.NewEnvironmentRegistry() with
+	// the built-in "probe" environment pre-registered.
+	Environments *spec.EnvironmentRegistry
 }
 
 // Dialect adapts System One spec compilation and bounded runtime evaluation to
@@ -67,10 +71,11 @@ type DialectConfig struct {
 //     *ruleengine.UnsupportedDialectError{Dialect: "system_one", Consumer: consumer,
 //     Reason: ruleengine.ReasonUnknownDialect}} without making any provider call.
 type Dialect struct {
-	runtime     *runtime.Runtime
-	runtimeFunc func() *runtime.Runtime
-	maxEvalTime time.Duration
-	enabled     func() bool
+	runtime      *runtime.Runtime
+	runtimeFunc  func() *runtime.Runtime
+	maxEvalTime  time.Duration
+	enabled      func() bool
+	environments *spec.EnvironmentRegistry
 }
 
 type compiledRule struct {
@@ -88,12 +93,59 @@ func NewDialect(cfg DialectConfig) *Dialect {
 	} else if cfg.Runtime != nil {
 		maxEval = cfg.Runtime.MaxEvalTime()
 	}
-	return &Dialect{
-		runtime:     cfg.Runtime,
-		runtimeFunc: cfg.RuntimeFunc,
-		maxEvalTime: maxEval,
-		enabled:     cfg.Enabled,
+	envs := cfg.Environments
+	if envs == nil {
+		envs = spec.NewEnvironmentRegistry()
 	}
+	return &Dialect{
+		runtime:      cfg.Runtime,
+		runtimeFunc:  cfg.RuntimeFunc,
+		maxEvalTime:  maxEval,
+		enabled:      cfg.Enabled,
+		environments: envs,
+	}
+}
+
+// Environment returns a defensive copy of the registered ContentEnvironment
+// named name.
+func (d *Dialect) Environment(name string) (spec.ContentEnvironment, bool) {
+	if d == nil || d.environments == nil {
+		return spec.ContentEnvironment{}, false
+	}
+	return d.environments.Get(name)
+}
+
+// Environments returns d's ContentEnvironment registry.
+func (d *Dialect) Environments() *spec.EnvironmentRegistry {
+	if d == nil {
+		return nil
+	}
+	return d.environments
+}
+
+// RegisterConsumerEnvironment binds env onto the "system_one" Dialect
+// registered in eng after verifying that consumer holds an active system_one
+// grant (including AllowIO) via eng.DialectFor (runtime-design §4.4).
+func RegisterConsumerEnvironment(eng *ruleengine.Engine, consumer string, env spec.ContentEnvironment) error {
+	if eng == nil {
+		return fmt.Errorf("system_one: cannot register environment on nil ruleengine.Engine")
+	}
+	d, err := eng.DialectFor(consumer, DialectName)
+	if err != nil {
+		return err
+	}
+	soDialect, ok := d.(*Dialect)
+	if !ok {
+		return fmt.Errorf("system_one: registered dialect %q has unexpected type %T", DialectName, d)
+	}
+	if soDialect == nil || soDialect.environments == nil {
+		return &spec.CompileError{
+			Path:     "environment",
+			Category: spec.CategoryInput,
+			Message:  "system_one dialect environment registry is not initialized",
+		}
+	}
+	return soDialect.environments.RegisterForConsumer(consumer, env)
 }
 
 // Name returns DialectName ("system_one").
@@ -115,7 +167,14 @@ func (d *Dialect) Declares() ruleengine.Capabilities {
 }
 
 // Compile validates and compiles raw JSON rule text via pkg/systemone/spec.
-// EnvironmentRef.Name selects the content environment ("probe" only in P1);
+// EnvironmentRef.Name selects the registered content environment (owned by
+// EnvironmentRef.Consumer).
+//
+// Caller obligation: consumer authoring paths that compile rules in a project
+// context MUST attach the project ID to ctx via WithProjectID(ctx, projectID)
+// so authoring-time allowlist validation runs against that project's allowlist.
+// Evaluation independently enforces RequireProject: true regardless of compile
+// context.
 // EnvironmentRef.ResultType is ignored.
 func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	if !d.isEnabled() {
@@ -138,19 +197,35 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 	}
 
 	envName := strings.TrimSpace(env.Name)
-	if envName != spec.ProbeEnvironmentName {
+	contentEnv, ok := d.Environment(envName)
+	if !ok {
 		return ruleengine.Compiled{}, &spec.CompileError{
 			Path:     "environment",
 			Category: spec.CategoryInput,
-			Message:  fmt.Sprintf("unsupported content environment %q (only %q is supported in P1)", envName, spec.ProbeEnvironmentName),
+			Message:  fmt.Sprintf("unknown content environment %q", envName),
+		}
+	}
+	consumer := strings.TrimSpace(env.Consumer)
+	if owner, hasOwner := d.environments.Owner(envName); hasOwner && owner != consumer {
+		return ruleengine.Compiled{}, &spec.CompileError{
+			Path:     "environment",
+			Category: spec.CategoryInput,
+			Message:  fmt.Sprintf("content environment %q is owned by consumer %q, not %q", envName, owner, consumer),
 		}
 	}
 
 	compiled, err := spec.Compile([]byte(rule), spec.CompileOptions{
-		Kind: spec.Kind(kind),
+		Kind:        spec.Kind(kind),
+		Environment: &contentEnv,
 	})
 	if err != nil {
 		return ruleengine.Compiled{}, err
+	}
+
+	if rt := d.resolveRuntime(); rt != nil {
+		if err := rt.ValidateCompiled(ctx, compiled); err != nil {
+			return ruleengine.Compiled{}, err
+		}
 	}
 
 	return ruleengine.NewCompiled(strings.TrimSpace(env.Consumer), DialectName, kind, &compiledRule{
@@ -159,8 +234,15 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 }
 
 // Evaluate executes a compiled System One rule against a typed systemone.Input
-// read from ruleengine.Input.Payload. Budget.CostLimit is ignored;
-// Budget.MaxEvalTime is forwarded to Runtime alongside ruleengine.EngineDeadlineMargin.
+// or systemone.Request read from ruleengine.Input.Payload. Budget.CostLimit is
+// ignored; Budget.MaxEvalTime is forwarded to Runtime alongside
+// ruleengine.EngineDeadlineMargin.
+//
+// When Payload is a systemone.Request, its consumer-authorized ProjectID,
+// RuleID, Revision, and optional ElementIndex are forwarded into
+// runtime.EvalOptions (and ProjectID is attached to the request context via
+// runtime.WithEvalProjectID) so Evaluation.ProjectID, Evaluation.Rule, and
+// project-scoped named secrets resolve cleanly on the dialect path.
 func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input ruleengine.Input, budget ruleengine.Budget) (ruleengine.Decision, error) {
 	if !d.isEnabled() {
 		return ruleengine.Decision{}, &ruleengine.FailedError{
@@ -177,21 +259,51 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	consumer := c.Consumer()
 	prog, ok := c.Rep().(*compiledRule)
 	if !ok || prog == nil || prog.compiled == nil {
-		return failedInternalDecision(nil, consumer, c.Kind(), start)
+		return failedInternalDecision(nil, consumer, c.Kind(), start, evalContextMeta{})
 	}
 
-	soInput, ok := input.Payload.(Input)
-	if !ok {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+	var (
+		soInput Input
+		meta    evalContextMeta
+	)
+	switch p := input.Payload.(type) {
+	case Input:
+		soInput = p
+	case Request:
+		soInput = p.Input
+		meta = evalContextMeta{
+			projectID: strings.TrimSpace(p.ProjectID),
+			ruleID:    strings.TrimSpace(p.RuleID),
+			revision:  p.Revision,
+		}
+		if p.ElementIndex != nil {
+			idx := *p.ElementIndex
+			meta.elementIndex = &idx
+		}
+	default:
+		return failedInternalDecision(prog, consumer, c.Kind(), start, evalContextMeta{})
 	}
 
 	rt := d.resolveRuntime()
 	if rt == nil {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start, meta)
 	}
 
-	dec, err := rt.Evaluate(ctx, prog.compiled, soInput, runtime.EvalOptions{
+	evalCtx := ctx
+	if meta.projectID != "" {
+		evalCtx = runtime.WithEvalProjectID(ctx, meta.projectID)
+	}
+	// Every dialect evaluation is a consumer path and requires an authorized
+	// ProjectID for D1 per-project allowlist enforcement (fail-closed when
+	// ProjectID is missing or empty, regardless of Input vs Request or
+	// environment name). Admin probes invoke Runtime.Evaluate directly.
+	dec, err := rt.Evaluate(evalCtx, prog.compiled, soInput, runtime.EvalOptions{
 		Consumer:             consumer,
+		RuleID:               meta.ruleID,
+		Revision:             meta.revision,
+		ElementIndex:         meta.elementIndex,
+		ProjectID:            meta.projectID,
+		RequireProject:       true,
 		EngineMaxEvalTime:    budget.MaxEvalTime,
 		EngineDeadlineMargin: ruleengine.EngineDeadlineMargin(budget.MaxEvalTime),
 	})
@@ -206,7 +318,7 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 
 	eval, hasEval := EvaluationFrom(err)
 	if !hasEval || eval == nil {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start, meta)
 	}
 	evalErr := &EvaluationError{Eval: eval}
 
@@ -246,13 +358,32 @@ func (d *Dialect) resolveRuntime() *runtime.Runtime {
 	return d.runtime
 }
 
-func failedInternalDecision(prog *compiledRule, consumer string, kind ruleengine.Kind, start time.Time) (ruleengine.Decision, error) {
+type evalContextMeta struct {
+	projectID    string
+	ruleID       string
+	revision     int64
+	elementIndex *int
+}
+
+func failedInternalDecision(prog *compiledRule, consumer string, kind ruleengine.Kind, start time.Time, meta evalContextMeta) (ruleengine.Decision, error) {
+	var elemIdx *int
+	if meta.elementIndex != nil {
+		v := *meta.elementIndex
+		elemIdx = &v
+	}
 	eval := &Evaluation{
-		EvalID:  newDialectEvalID(),
-		Rule:    RuleRef{Dialect: DialectName, Consumer: consumer},
-		Class:   ClassFailed,
-		Reason:  string(provider.FailInternal),
-		Elapsed: time.Since(start),
+		EvalID: newDialectEvalID(),
+		Rule: RuleRef{
+			Dialect:      DialectName,
+			Consumer:     consumer,
+			RuleID:       meta.ruleID,
+			Revision:     meta.revision,
+			ElementIndex: elemIdx,
+		},
+		ProjectID: meta.projectID,
+		Class:     ClassFailed,
+		Reason:    string(provider.FailInternal),
+		Elapsed:   time.Since(start),
 	}
 	if prog != nil && prog.compiled != nil {
 		eval.Rule.ContentHash = prog.compiled.ContentHash

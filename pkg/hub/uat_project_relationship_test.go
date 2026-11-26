@@ -980,10 +980,11 @@ func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
 	// R13/R11/R8 added trigger.* and webhook_endpoint.* (ptone/scion#8028);
 	// R14/R12/R9 added message policy permissions (ptone/scion#8047);
 	// R15/R13 added webhook_endpoint.update (ptone/scion#8060);
-	// R16/R14/R10 added webhook_endpoint.send (ptone/scion#8061).
+	// R16/R14/R10 added webhook_endpoint.send (ptone/scion#8061);
+	// R17/R15 added project.manage_system_one_instances (ptone/scion#8045).
 	revisions := map[string]int{
-		store.ProjectRoleOwner:  16,
-		store.ProjectRoleAdmin:  14,
+		store.ProjectRoleOwner:  17,
+		store.ProjectRoleAdmin:  15,
 		store.ProjectRoleMember: 10,
 	}
 	portAccess := map[string]bool{

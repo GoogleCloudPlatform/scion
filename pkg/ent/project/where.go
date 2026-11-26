@@ -1176,6 +1176,16 @@ func CrossProjectInboundRevisionLTE(v int64) predicate.Project {
 	return predicate.Project(sql.FieldLTE(FieldCrossProjectInboundRevision, v))
 }
 
+// SystemOneAllowedInstancesIsNil applies the IsNil predicate on the "system_one_allowed_instances" field.
+func SystemOneAllowedInstancesIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldSystemOneAllowedInstances))
+}
+
+// SystemOneAllowedInstancesNotNil applies the NotNil predicate on the "system_one_allowed_instances" field.
+func SystemOneAllowedInstancesNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldSystemOneAllowedInstances))
+}
+
 // HasAgents applies the HasEdge predicate on the "agents" edge.
 func HasAgents() predicate.Project {
 	return predicate.Project(func(s *sql.Selector) {

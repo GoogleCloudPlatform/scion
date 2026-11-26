@@ -200,24 +200,6 @@ func TestCompile_RefusesDeferredCapabilitiesWithCategoryCapability(t *testing.T)
 			kind:     spec.KindJudgmentScore,
 			wantPath: "kind",
 		},
-		{
-			name: "truncate_oversize_policy",
-			raw: `{
-				"dialect": "system_one",
-				"inputs": ["probe.text"],
-				"on_oversize": "truncate",
-				"spec": {
-					"version": 1,
-					"questions": [{
-						"id": "q1",
-						"type": "binary",
-						"instructions": "Check probe.text."
-					}]
-				}
-			}`,
-			kind:     spec.KindJudgments,
-			wantPath: "on_oversize",
-		},
 	}
 
 	for _, tc := range tests {

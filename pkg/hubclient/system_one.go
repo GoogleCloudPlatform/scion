@@ -56,6 +56,18 @@ type SystemOneService interface {
 	// ProbeInstance runs an admin probe or model listing (Models: true) against
 	// a named instance.
 	ProbeInstance(ctx context.Context, name string, req *ProbeSystemOneInstanceRequest) (*ProbeSystemOneInstanceResponse, error)
+
+	// GetProjectInstances returns the project's System One hub instance allowlist.
+	GetProjectInstances(ctx context.Context, projectID string) (*ProjectSystemOneInstancesResponse, error)
+
+	// SetProjectInstances replaces the project's System One hub instance allowlist.
+	SetProjectInstances(ctx context.Context, projectID string, instances []string) (*ProjectSystemOneInstancesResponse, error)
+
+	// AddProjectInstance adds a hub instance name to the project's allowlist (idempotent).
+	AddProjectInstance(ctx context.Context, projectID, instanceName string) (*ProjectSystemOneInstancesResponse, error)
+
+	// RemoveProjectInstance removes a hub instance name from the project's allowlist (idempotent).
+	RemoveProjectInstance(ctx context.Context, projectID, instanceName string) (*ProjectSystemOneInstancesResponse, error)
 }
 
 type systemOneService struct {
@@ -271,6 +283,20 @@ type ProbeSystemOneInstanceResponse struct {
 	Evaluation *systemoneruntime.Evaluation `json:"evaluation,omitempty"`
 }
 
+// ProjectSystemOneInstancesResponse is the response body for
+// GET/PUT /api/v1/projects/{id}/system-one/instances and
+// PUT/DELETE /api/v1/projects/{id}/system-one/instances/{name}.
+type ProjectSystemOneInstancesResponse struct {
+	ProjectID string   `json:"projectId"`
+	Instances []string `json:"instances"`
+}
+
+// SetProjectSystemOneInstancesRequest is the request body for
+// PUT /api/v1/projects/{id}/system-one/instances.
+type SetProjectSystemOneInstancesRequest struct {
+	Instances []string `json:"instances"`
+}
+
 func systemOneInstancePath(name string) string {
 	return systemOneInstancesBasePath + "/" + url.PathEscape(name)
 }
@@ -351,4 +377,63 @@ func (s *systemOneService) ProbeInstance(ctx context.Context, name string, req *
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ProbeSystemOneInstanceResponse](resp)
+}
+
+func projectSystemOneInstancesPath(projectID string) string {
+	return "/api/v1/projects/" + url.PathEscape(projectID) + "/system-one/instances"
+}
+
+func (s *systemOneService) GetProjectInstances(ctx context.Context, projectID string) (*ProjectSystemOneInstancesResponse, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	resp, err := s.c.get(ctx, projectSystemOneInstancesPath(projectID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSystemOneInstancesResponse](resp)
+}
+
+func (s *systemOneService) SetProjectInstances(ctx context.Context, projectID string, instances []string) (*ProjectSystemOneInstancesResponse, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if instances == nil {
+		instances = []string{}
+	}
+	resp, err := s.c.put(ctx, projectSystemOneInstancesPath(projectID), &SetProjectSystemOneInstancesRequest{
+		Instances: instances,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSystemOneInstancesResponse](resp)
+}
+
+func (s *systemOneService) AddProjectInstance(ctx context.Context, projectID, instanceName string) (*ProjectSystemOneInstancesResponse, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if instanceName == "" {
+		return nil, errors.New("instance name is required")
+	}
+	resp, err := s.c.put(ctx, projectSystemOneInstancesPath(projectID)+"/"+url.PathEscape(instanceName), nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSystemOneInstancesResponse](resp)
+}
+
+func (s *systemOneService) RemoveProjectInstance(ctx context.Context, projectID, instanceName string) (*ProjectSystemOneInstancesResponse, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if instanceName == "" {
+		return nil, errors.New("instance name is required")
+	}
+	resp, err := s.c.delete(ctx, projectSystemOneInstancesPath(projectID)+"/"+url.PathEscape(instanceName), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSystemOneInstancesResponse](resp)
 }

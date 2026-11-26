@@ -867,6 +867,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'project:manage_system_one_instances',
+    label: 'project:manage_system_one_instances',
+    description:
+      "Manage a project's System One provider instance allowlist (project owner/admin or hub admin)",
+    resource: 'project',
+    isAlias: false,
+  },
+  {
     value: 'quota:create',
     label: 'quota:create',
     description: 'Create limit definitions and entitlement bindings',

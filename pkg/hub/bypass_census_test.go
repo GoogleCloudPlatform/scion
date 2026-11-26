@@ -89,6 +89,7 @@ func TestBypassCensus(t *testing.T) {
 		{file: "handlers_agent_message_mode.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "handleSetMessageMode project-admin exclusion (D7, KEEP — super-admins must not be blocked by the project-admin deny gate)"},
 		{file: "project_messaging_policy.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "Messaging policy admin bypass (owner-or-admin check)"},
 		{file: "handlers_message_policies.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "Message policy owner-or-admin governance rule (runs after Decide checks project.manage_message_policies)"},
+		{file: "handlers_project_system_one_instances.go", lineSubstr: "IsUnscopedLocalPlatformAdmin(userIdent)", description: "Project System One instance allowlist owner-or-admin governance rule (runs after Decide checks project.manage_system_one_instances)"},
 
 		// ─── Auth/identity infrastructure (non-bypass references) ────────
 		{file: "handlers_auth.go", lineSubstr: "IsUnscopedLocalPlatformAdmin", description: "admin reconciliation comment reference"},

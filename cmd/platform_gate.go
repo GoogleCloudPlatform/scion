@@ -154,6 +154,12 @@ var windowsAllowed = map[string]bool{
 	"project.settings.get":   true,
 	"project.settings.set":   true,
 	"project.settings.unset": true,
+	// Pure Hub API client commands for per-project System One allowlist (ptone/scion#8045 D1).
+	"project.system-one":        true,
+	"project.system-one.list":   true,
+	"project.system-one.add":    true,
+	"project.system-one.remove": true,
+	"project.system-one.set":    true,
 	// Leaving a project: Hub API calls only (the dry run, the agent deletes
 	// and the leave), no local writes. The parent 'project' stays gated, as
 	// for project.use.

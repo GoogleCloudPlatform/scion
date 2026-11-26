@@ -971,6 +971,26 @@ func TestAdminSystemOne_GeminiNamedSecretVerticalCLIProbeFallbackAndDeleteSafety
 	assert.Contains(t, noProjOut, "Reason: invalid_request")
 	assert.Zero(t, providerHits.Load())
 
+	// 3b. Probe WITH --project before allowlisting fails closed with no_eligible_instance (0 provider requests).
+	resetAdminSystemOneFlags(t)
+	restoreAllSilenceUsage(t)
+	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {
+		return env.client.SystemOne(), nil
+	}
+	unlistedOut, _, unlistedErr := executeAdminSystemOneSubcmd(t, []string{
+		"probe", "gemini-cli-named",
+		"--project", createdProj.Slug,
+		"--spec-file", specFile,
+		"--text", "All 18 unit tests passed.",
+	}, nil)
+	require.Error(t, unlistedErr)
+	assert.Contains(t, unlistedOut, "Reason: no_eligible_instance")
+	assert.Zero(t, providerHits.Load())
+
+	// Allowlist gemini-cli-named on createdProj so subsequent --project probes are authorized.
+	_, err = env.client.SystemOne().AddProjectInstance(ctx, createdProj.ID, "gemini-cli-named")
+	require.NoError(t, err)
+
 	// 4. Probe WITH --project cli-g4d-proj resolves project secret (v1).
 	resetAdminSystemOneFlags(t)
 	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {

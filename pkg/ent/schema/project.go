@@ -101,6 +101,12 @@ func (Project) Fields() []ent.Field {
 		// Revision counter for optimistic concurrency on policy mutations.
 		field.Int64("cross_project_inbound_revision").
 			Default(1),
+
+		// Per-project System One hub instance allowlist (ptone/scion#8045, D1).
+		// Empty/unset by default on every hub (hosted and workstation); explicit
+		// opt-in by project owner/admin or hub admin.
+		field.JSON("system_one_allowed_instances", []string{}).
+			Optional(),
 	}
 }
 

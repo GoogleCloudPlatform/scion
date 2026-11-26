@@ -2072,11 +2072,19 @@ type V1ServerHubSchedulesConfig struct {
 }
 
 // V1ServerHubSystemOneConfig holds Hub-wide System One rule evaluation
-// settings (server.hub.system_one).
+// settings (server.hub.system_one). Concurrency and rate limits apply per Hub
+// replica.
 type V1ServerHubSystemOneConfig struct {
 	// MaxEvalTime bounds wall-clock evaluation of System One rules on a
 	// single message (e.g. "3s"; default "3s", hard max "30s").
 	MaxEvalTime string `json:"max_eval_time,omitempty" yaml:"max_eval_time,omitempty" koanf:"max_eval_time"`
+	// MaxInFlightPerProject caps concurrent in-flight System One evaluations
+	// per project per Hub replica (default 4; 0 = unlimited).
+	MaxInFlightPerProject *int `json:"max_in_flight_per_project,omitempty" yaml:"max_in_flight_per_project,omitempty" koanf:"max_in_flight_per_project"`
+	// AdmissionWait bounds how long an evaluation waits for per-project and
+	// per-instance admission permits before returning capacity (e.g. "100ms";
+	// default "100ms", hard max "30s").
+	AdmissionWait string `json:"admission_wait,omitempty" yaml:"admission_wait,omitempty" koanf:"admission_wait"`
 	// SecretNames maps System One adapter IDs to extra permitted named-secret
 	// keys (server.hub.system_one.secret_names). Startup/operator-only: never
 	// writable or echoed through the server-config API.
@@ -4951,8 +4959,13 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if so := v1.Hub.SystemOne; so != nil {
 			gc.Hub.SystemOne = HubSystemOneConfig{
-				MaxEvalTime: so.MaxEvalTime,
-				SecretNames: cloneStringSliceMap(so.SecretNames),
+				MaxEvalTime:   so.MaxEvalTime,
+				AdmissionWait: so.AdmissionWait,
+				SecretNames:   cloneStringSliceMap(so.SecretNames),
+			}
+			if so.MaxInFlightPerProject != nil {
+				n := *so.MaxInFlightPerProject
+				gc.Hub.SystemOne.MaxInFlightPerProject = &n
 			}
 		}
 		if b := v1.Hub.Branding; b != nil {
@@ -5447,8 +5460,13 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if so := gc.Hub.SystemOne; !so.IsZero() {
 		v1Hub.SystemOne = &V1ServerHubSystemOneConfig{
-			MaxEvalTime: so.MaxEvalTime,
-			SecretNames: so.CloneSecretNames(),
+			MaxEvalTime:   so.MaxEvalTime,
+			AdmissionWait: so.AdmissionWait,
+			SecretNames:   so.CloneSecretNames(),
+		}
+		if so.MaxInFlightPerProject != nil {
+			n := *so.MaxInFlightPerProject
+			v1Hub.SystemOne.MaxInFlightPerProject = &n
 		}
 	}
 	if b := gc.Hub.Branding; !b.IsZero() {

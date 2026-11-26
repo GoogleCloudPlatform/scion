@@ -42,6 +42,16 @@ const (
 	DefaultRuleTimeout = 2 * time.Second
 	// DefaultCallTimeout is the default per-instance CallTimeout ceiling when unset (5 s).
 	DefaultCallTimeout = 5 * time.Second
+	// DefaultAdmissionWait is the default maximum time Evaluate waits to acquire
+	// per-project/per-instance concurrency and rate admission permits before
+	// failing fast with FailCapacity (runtime-design §7.2).
+	DefaultAdmissionWait = 100 * time.Millisecond
+	// DefaultMaxInFlightPerProject is the default per-replica concurrency limit
+	// per project so one project cannot starve others on a shared instance
+	// (runtime-design §§4.2, 7.2). Per-project isolation only prevents a single
+	// project from holding every permit when the instance's MaxInFlight has
+	// headroom above the configured per-project cap.
+	DefaultMaxInFlightPerProject = 4
 	// BytesPerTokenPrecheck is the loose bytes-per-token upper-bound guard used
 	// for the pre-call MaxInputTokens check on non-silent adapters
 	// (TruncationNever / TruncationReported). Multibyte UTF-8 text (CJK, emoji)
@@ -161,12 +171,13 @@ func ProbeInput(text string) Input {
 // RuleRef identifies the evaluated rule in content-free provenance
 // (runtime-design §8.1).
 type RuleRef struct {
-	Consumer    string `json:"consumer,omitempty"`
-	RuleID      string `json:"rule_id,omitempty"`
-	Revision    int64  `json:"revision,omitempty"`
-	ContentHash string `json:"content_hash"`
-	Dialect     string `json:"dialect"`
-	Native      bool   `json:"native,omitempty"`
+	Consumer     string `json:"consumer,omitempty"`
+	RuleID       string `json:"rule_id,omitempty"`
+	Revision     int64  `json:"revision,omitempty"`
+	ElementIndex *int   `json:"element_index,omitempty"`
+	ContentHash  string `json:"content_hash"`
+	Dialect      string `json:"dialect"`
+	Native       bool   `json:"native,omitempty"`
 }
 
 // AnswerRecord is the content-free per-question result recorded in

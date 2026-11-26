@@ -259,6 +259,12 @@ func (_c *ProjectCreate) SetNillableCrossProjectInboundRevision(v *int64) *Proje
 	return _c
 }
 
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (_c *ProjectCreate) SetSystemOneAllowedInstances(v []string) *ProjectCreate {
+	_c.mutation.SetSystemOneAllowedInstances(v)
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *ProjectCreate) SetID(v uuid.UUID) *ProjectCreate {
 	_c.mutation.SetID(v)
@@ -491,6 +497,10 @@ func (_c *ProjectCreate) createSpec() (*Project, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.CrossProjectInboundRevision(); ok {
 		_spec.SetField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
 		_node.CrossProjectInboundRevision = value
+	}
+	if value, ok := _c.mutation.SystemOneAllowedInstances(); ok {
+		_spec.SetField(project.FieldSystemOneAllowedInstances, field.TypeJSON, value)
+		_node.SystemOneAllowedInstances = value
 	}
 	if nodes := _c.mutation.AgentsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -809,6 +819,24 @@ func (u *ProjectUpsert) UpdateCrossProjectInboundRevision() *ProjectUpsert {
 // AddCrossProjectInboundRevision adds v to the "cross_project_inbound_revision" field.
 func (u *ProjectUpsert) AddCrossProjectInboundRevision(v int64) *ProjectUpsert {
 	u.Add(project.FieldCrossProjectInboundRevision, v)
+	return u
+}
+
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (u *ProjectUpsert) SetSystemOneAllowedInstances(v []string) *ProjectUpsert {
+	u.Set(project.FieldSystemOneAllowedInstances, v)
+	return u
+}
+
+// UpdateSystemOneAllowedInstances sets the "system_one_allowed_instances" field to the value that was provided on create.
+func (u *ProjectUpsert) UpdateSystemOneAllowedInstances() *ProjectUpsert {
+	u.SetExcluded(project.FieldSystemOneAllowedInstances)
+	return u
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (u *ProjectUpsert) ClearSystemOneAllowedInstances() *ProjectUpsert {
+	u.SetNull(project.FieldSystemOneAllowedInstances)
 	return u
 }
 
@@ -1163,6 +1191,27 @@ func (u *ProjectUpsertOne) AddCrossProjectInboundRevision(v int64) *ProjectUpser
 func (u *ProjectUpsertOne) UpdateCrossProjectInboundRevision() *ProjectUpsertOne {
 	return u.Update(func(s *ProjectUpsert) {
 		s.UpdateCrossProjectInboundRevision()
+	})
+}
+
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (u *ProjectUpsertOne) SetSystemOneAllowedInstances(v []string) *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSystemOneAllowedInstances(v)
+	})
+}
+
+// UpdateSystemOneAllowedInstances sets the "system_one_allowed_instances" field to the value that was provided on create.
+func (u *ProjectUpsertOne) UpdateSystemOneAllowedInstances() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSystemOneAllowedInstances()
+	})
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (u *ProjectUpsertOne) ClearSystemOneAllowedInstances() *ProjectUpsertOne {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearSystemOneAllowedInstances()
 	})
 }
 
@@ -1684,6 +1733,27 @@ func (u *ProjectUpsertBulk) AddCrossProjectInboundRevision(v int64) *ProjectUpse
 func (u *ProjectUpsertBulk) UpdateCrossProjectInboundRevision() *ProjectUpsertBulk {
 	return u.Update(func(s *ProjectUpsert) {
 		s.UpdateCrossProjectInboundRevision()
+	})
+}
+
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (u *ProjectUpsertBulk) SetSystemOneAllowedInstances(v []string) *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.SetSystemOneAllowedInstances(v)
+	})
+}
+
+// UpdateSystemOneAllowedInstances sets the "system_one_allowed_instances" field to the value that was provided on create.
+func (u *ProjectUpsertBulk) UpdateSystemOneAllowedInstances() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.UpdateSystemOneAllowedInstances()
+	})
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (u *ProjectUpsertBulk) ClearSystemOneAllowedInstances() *ProjectUpsertBulk {
+	return u.Update(func(s *ProjectUpsert) {
+		s.ClearSystemOneAllowedInstances()
 	})
 }
 

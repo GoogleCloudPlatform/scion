@@ -18,8 +18,10 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -30,9 +32,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
@@ -112,6 +116,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	  ],
 	  "output": {"question": "service"}
 	}`
+	const rawEnvelope = `{"inputs": ["probe.text"], "spec": ` + rawSpec + `}`
 	const syntheticText = "Synthetic token exchange failures observed on login."
 
 	re := srv.RuleEngine()
@@ -122,13 +127,30 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 		ruleengine.GrantIO(systemone.DialectName),
 		ruleengine.Grant(ruleengine.DialectCEL),
 	))
+	const testEnvName = "system_one_test_env"
+	require.NoError(t, systemone.RegisterConsumerEnvironment(re, testSystemOneConsumer, spec.ContentEnvironment{
+		Name:    testEnvName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: spec.ProbeMaxBytes, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: spec.ProbeMaxBytes,
+	}))
+
+	proj := &store.Project{
+		ID:      "00000000-0000-0000-0000-00000000d100",
+		Name:    "System One Live Parity Project",
+		Slug:    "s1-live-parity-proj",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
 
 	// Phase 1: Initially OFF — Supports stays true for the test-granted consumer, admin routes 404, Compile returns UnsupportedDialectError.
 	assert.True(t, re.Supports(testSystemOneConsumer, systemone.DialectName))
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.Error(t, err)
 	var unsupErr *ruleengine.UnsupportedDialectError
@@ -153,6 +175,8 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	require.NoError(t, err)
 	instRow.Endpoint = tlsSrv.URL
 	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+	_, _, err = s.AddProjectSystemOneInstance(ctx, proj.ID, "ts-reg-live")
+	require.NoError(t, err)
 
 	// Evaluate via admin /probe endpoint.
 	probeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-reg-live/probe", ProbeSystemOneInstanceRequest{
@@ -171,14 +195,17 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	assert.Equal(t, int32(1), providerCalls.Load())
 
 	// Compile and evaluate the identical spec via srv.RuleEngine().
-	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
 	engDec, err := re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.NoError(t, err)
 	assert.Equal(t, ruleengine.Kind(spec.KindRoute), engDec.Kind)
@@ -188,7 +215,9 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	engEval, ok := engDec.Detail.(*systemone.Evaluation)
 	require.True(t, ok)
 	assert.Equal(t, probeResp.Evaluation.Class, engEval.Class)
-	assert.Equal(t, probeResp.Evaluation.Rule.ContentHash, engEval.Rule.ContentHash)
+	assert.NotEmpty(t, engEval.Rule.ContentHash)
+	assert.NotEqual(t, probeResp.Evaluation.Rule.ContentHash, engEval.Rule.ContentHash,
+		"content hash commits to environment name (probe vs consumer-owned environment)")
 	assert.Equal(t, probeResp.Evaluation.ConfiguredModel, engEval.ConfiguredModel)
 	assert.Equal(t, probeResp.Evaluation.ResolvedModel, engEval.ResolvedModel)
 	assert.Equal(t, probeResp.Evaluation.Input, engEval.Input)
@@ -203,9 +232,9 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 		"Engine.Supports reports registration and consumer grant only and remains true when experiment is off")
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.Error(t, err)
 	var unsupOff *ruleengine.UnsupportedDialectError
@@ -216,7 +245,10 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	assert.Equal(t, `unsupported dialect "system_one" for consumer "system_one_test": unknown_dialect`, err.Error())
 
 	_, err = re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.Error(t, err)
 	var failedOff *ruleengine.FailedError
@@ -232,14 +264,17 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	setSystemOneExperimentLive(t, srv, true)
 
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
-	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
+	_, err = re.Compile(ctx, systemone.DialectName, rawEnvelope, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
 	engDecAgain, err := re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.NoError(t, err)
 	assert.Equal(t, "auth", engDecAgain.String)
@@ -366,4 +401,154 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
 
 	assert.Zero(t, providerCalls.Load(), "denied default admission must never make a provider call")
+}
+
+type hubDialectPublicResolver struct{}
+
+func (hubDialectPublicResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type hubDialectTargetDialer struct {
+	targetAddr string
+}
+
+func (d hubDialectTargetDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, d.targetAddr)
+}
+
+func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *testing.T) {
+	ctx := context.Background()
+
+	srv, s, _ := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-projsec-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const (
+		projAPIKey = "AIza-project-scoped-dialect-canary-9911"
+	)
+
+	proj := &store.Project{
+		ID:      "00000000-0000-0000-0000-00000000d101",
+		Name:    "Dialect Secret Project",
+		Slug:    "dialect-secret-project",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	projID := proj.ID
+
+	// Store a project-scoped GEMINI_API_KEY environment secret in the Hub secret backend.
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      projAPIKey,
+		SecretType: store.SecretTypeEnvironment,
+		Scope:      store.ScopeProject,
+		ScopeID:    projID,
+	})
+	require.NoError(t, err)
+
+	var (
+		providerCalls atomic.Int32
+		seenKeyHeader string
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		seenKeyHeader = r.Header.Get("x-goog-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "answers": {"q1": {"type": "noul", "noul": 0.95, "confidence": 0.95}},
+		  "usage": {"total_input_tokens": 14, "total_output_tokens": 0, "total_tokens": 14}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-proj-sec",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind": "api_key",
+			"secretRef": map[string]any{
+				"name":  systemoneprovider.DefaultGeminiAPIKeySecretName,
+				"scope": systemoneprovider.SecretScopeProject,
+			},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	re := srv.RuleEngine()
+	require.NotNil(t, re)
+	require.NoError(t, re.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	const testEnvName = "system_one_test_projsec_env"
+	require.NoError(t, systemone.RegisterConsumerEnvironment(re, testSystemOneConsumer, spec.ContentEnvironment{
+		Name:    testEnvName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: spec.ProbeMaxBytes, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: spec.ProbeMaxBytes,
+	}))
+
+	const rawRule = `{
+	  "inputs": ["probe.text"],
+	  "spec": {
+	    "version": 1,
+	    "binding": {"instance": "gemini-proj-sec"},
+	    "questions": [{"id": "q1", "type": "binary", "instructions": "Does the text report an outage?"}],
+	    "output": {"question": "q1"}
+	  }
+	}`
+	compiled, err := re.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: testSystemOneConsumer,
+		Name:     testEnvName,
+	})
+	require.NoError(t, err)
+
+	// 1. Bare Input (no ProjectID) fails closed with no_eligible_instance (0 provider calls).
+	_, err = re.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: systemone.ProbeInput("no project id"),
+	}, ruleengine.Budget{})
+	require.Error(t, err)
+	var failedErr *ruleengine.FailedError
+	require.ErrorAs(t, err, &failedErr)
+	assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), failedErr.Reason)
+	assert.Zero(t, providerCalls.Load())
+
+	// 2. Allowlist the instance for projID, then Request with authorized ProjectID
+	// resolves the project-scoped secret through the dialect.
+	_, _, err = s.AddProjectSystemOneInstance(ctx, projID, "gemini-proj-sec")
+	require.NoError(t, err)
+
+	elemIdx := 1
+	dec, err := re.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: systemone.Request{
+			Input:        systemone.ProbeInput("synthetic outage"),
+			ProjectID:    projID,
+			RuleID:       "rule-hub-proj-sec",
+			Revision:     3,
+			ElementIndex: &elemIdx,
+		},
+	}, ruleengine.Budget{})
+	require.NoError(t, err)
+	assert.True(t, dec.Bool)
+	assert.Equal(t, int32(1), providerCalls.Load())
+	assert.Equal(t, projAPIKey, seenKeyHeader)
+
+	eval, ok := dec.Detail.(*systemone.Evaluation)
+	require.True(t, ok)
+	assert.Equal(t, projID, eval.ProjectID)
+	assert.Equal(t, "rule-hub-proj-sec", eval.Rule.RuleID)
+	assert.Equal(t, int64(3), eval.Rule.Revision)
+	require.NotNil(t, eval.Rule.ElementIndex)
+	assert.Equal(t, 1, *eval.Rule.ElementIndex)
+	require.NotNil(t, eval.Auth)
+	require.NotNil(t, eval.Auth.SecretRef)
+	assert.Equal(t, systemoneprovider.SecretScopeProject, eval.Auth.SecretRef.ScopeUsed)
 }

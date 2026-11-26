@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/textproto"
@@ -103,6 +104,37 @@ func (s *staticInstanceSource) ListInstances(_ context.Context) ([]Instance, err
 	return out, nil
 }
 
+// ProjectAllowlistSource resolves the per-project System One instance allowlist
+// without coupling pkg/systemone/runtime to pkg/store or pkg/hub
+// (t2-p2-trigger-binding-amendment D1; runtime-design §4.5 rule 4).
+//
+// Returning an empty slice means no hub instances are allowed for projectID
+// (default-empty everywhere, including workstation hubs).
+type ProjectAllowlistSource interface {
+	AllowedInstances(ctx context.Context, projectID string) ([]string, error)
+}
+
+type staticProjectAllowlist struct {
+	mu     sync.RWMutex
+	byProj map[string][]string
+}
+
+// StaticProjectAllowlist constructs an in-memory ProjectAllowlistSource from a
+// map of projectID -> allowed instance names.
+func StaticProjectAllowlist(allowed map[string][]string) ProjectAllowlistSource {
+	cp := make(map[string][]string, len(allowed))
+	for k, v := range allowed {
+		cp[k] = slices.Clone(v)
+	}
+	return &staticProjectAllowlist{byProj: cp}
+}
+
+func (s *staticProjectAllowlist) AllowedInstances(_ context.Context, projectID string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.byProj[strings.TrimSpace(projectID)]), nil
+}
+
 // Config configures a Runtime executor.
 type Config struct {
 	// Registry is the provider Adapter registry. Defaults to provider.DefaultRegistry() when nil.
@@ -126,6 +158,23 @@ type Config struct {
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
+	// MaxInFlightPerProject is the per-replica concurrency limit per project
+	// (server.hub.system_one.max_in_flight_per_project; runtime-design §§4.2, 7.2).
+	// <= 0 disables the per-project concurrency cap (unlimited, matching unset
+	// InstanceLimits.MaxInFlight); the Hub sets this to
+	// DefaultMaxInFlightPerProject (4) by default.
+	MaxInFlightPerProject int
+	// AdmissionWait is the maximum time Evaluate waits to acquire per-project
+	// and per-instance concurrency/rate admission permits before failing fast
+	// with FailCapacity (runtime-design §7.2). <= 0 uses DefaultAdmissionWait (100ms),
+	// clamped to MaxAllowedEvalTime.
+	AdmissionWait time.Duration
+	// ProjectAllowlist optionally enforces the per-project hub instance allowlist
+	// at authoring (ValidateCompiled) and evaluation (Evaluate, ListModels)
+	// before any credential resolution or provider I/O (D1). When nil, no D1
+	// allowlist check is performed (library default; the Hub always wires
+	// hubSystemOneAllowlistSource).
+	ProjectAllowlist ProjectAllowlistSource
 	// DefaultInstance optionally names the fallback default instance when a
 	// portable rule omits Spec.Binding.Instance.
 	DefaultInstance string
@@ -152,12 +201,20 @@ type EvalOptions struct {
 	// the Hub admin probe endpoint). If compiled.Spec.Binding.Instance is also
 	// non-empty, the names must match or Evaluate fails with FailNoEligibleInstance.
 	Instance *Instance
-	// Consumer, RuleID, and Revision populate Evaluation.Rule.
-	Consumer string
-	RuleID   string
-	Revision int64
-	// ProjectID populates Evaluation.ProjectID.
+	// Consumer, RuleID, Revision, and optional ElementIndex populate Evaluation.Rule.
+	Consumer     string
+	RuleID       string
+	Revision     int64
+	ElementIndex *int
+	// ProjectID populates Evaluation.ProjectID. It MUST come from the
+	// consumer's authorized context, never untrusted caller input.
 	ProjectID string
+	// RequireProject instructs Evaluate to fail closed with
+	// FailNoEligibleInstance (0 provider requests, 0 secret reads) when
+	// ProjectID is empty and ProjectAllowlist is configured. Consumer paths that
+	// evaluate project content set this true; hub-admin probes without --project
+	// leave it false.
+	RequireProject bool
 	// MaxEvalTime optionally lowers MaxEvalTime for this evaluation (clamped to
 	// MaxAllowedEvalTime = 30s; effective ceiling is min(r.MaxEvalTime(),
 	// opts.MaxEvalTime), never raising above the Runtime's configured ceiling).
@@ -310,10 +367,12 @@ func markPreCallAuthFailed(ctx context.Context) {
 type Runtime struct {
 	registry           *provider.Registry
 	instances          InstanceSource
+	projectAllowlist   ProjectAllowlistSource
 	credentials        CredentialSource
 	tokenSource        CredentialSource
 	allowedSecretNames func(provider.Adapter) []string
 	maxEvalTime        time.Duration
+	admission          *admissionController
 	defaultInstance    string
 	logger             *slog.Logger
 	egressOpts         []egress.Option
@@ -336,6 +395,14 @@ func New(cfg Config, opts ...Option) *Runtime {
 	if cfg.MaxEvalTime > 0 {
 		maxEval = clampDuration(cfg.MaxEvalTime, MaxAllowedEvalTime)
 	}
+	maxPerProject := cfg.MaxInFlightPerProject
+	if maxPerProject < 0 {
+		maxPerProject = 0 // unlimited
+	}
+	admissionWait := DefaultAdmissionWait
+	if cfg.AdmissionWait > 0 {
+		admissionWait = clampDuration(cfg.AdmissionWait, MaxAllowedEvalTime)
+	}
 
 	allowedNames := cfg.AllowedSecretNames
 	if allowedNames == nil {
@@ -345,10 +412,12 @@ func New(cfg Config, opts ...Option) *Runtime {
 	r := &Runtime{
 		registry:           reg,
 		instances:          cfg.Instances,
+		projectAllowlist:   cfg.ProjectAllowlist,
 		credentials:        cfg.Credentials,
 		tokenSource:        cfg.TokenSource,
 		allowedSecretNames: allowedNames,
 		maxEvalTime:        maxEval,
+		admission:          newAdmissionController(maxPerProject, admissionWait),
 		defaultInstance:    cfg.DefaultInstance,
 		logger:             logger,
 		transports:         make(map[transportKey]provider.Transport),
@@ -364,6 +433,229 @@ func New(cfg Config, opts ...Option) *Runtime {
 // MaxEvalTime returns the Runtime's configured evaluation time ceiling.
 func (r *Runtime) MaxEvalTime() time.Duration {
 	return r.maxEvalTime
+}
+
+// ValidateCompiled validates compiled at authoring/compile time against the
+// bound or eligible instance's capabilities (primitive limits, conservative
+// bytes-to-tokens MaxInputTokens pre-check, and Adapter.Validate;
+// runtime-design §§4.4, 4.5).
+//
+// When r.instances is nil, ValidateCompiled is a no-op (for runtimes that
+// supply EvalOptions.Instance per call). When compiled binds a specific
+// instance, that instance must exist, be enabled, and pass validation. When
+// compiled is unbound and enabled instances exist, at least one eligible
+// instance must pass (or r.defaultInstance when configured).
+func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled) error {
+	if r == nil || compiled == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if compiled.Spec.Binding.Pool != "" {
+		return &spec.CompileError{
+			Path:     "spec.binding.pool",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("pool binding %q is not supported yet (deferred to P4)", compiled.Spec.Binding.Pool),
+		}
+	}
+	if r.instances == nil {
+		return nil
+	}
+
+	projectID := strings.TrimSpace(EvalProjectIDFromContext(ctx))
+	var allowedSet map[string]struct{}
+	checkAllowlist := projectID != "" && r.projectAllowlist != nil
+	if checkAllowlist {
+		allowed, err := r.projectAllowlist.AllowedInstances(ctx, projectID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve allowed System One instances for project %q", projectID),
+			}
+		}
+		allowedSet = make(map[string]struct{}, len(allowed))
+		for _, name := range allowed {
+			allowedSet[name] = struct{}{}
+		}
+	}
+
+	var candidates []Instance
+	switch {
+	case compiled.Spec.Binding.Instance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[compiled.Spec.Binding.Instance]; !ok {
+				return &spec.CompileError{
+					Path:     "spec.binding.instance",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("instance %q is not allowed for project %q", compiled.Spec.Binding.Instance, projectID),
+				}
+			}
+		}
+		inst, found, err := r.instances.GetInstance(ctx, compiled.Spec.Binding.Instance)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding.instance",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve instance %q", compiled.Spec.Binding.Instance),
+			}
+		}
+		if !found || !inst.Enabled {
+			return &spec.CompileError{
+				Path:     "spec.binding.instance",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("instance %q is not found or disabled", compiled.Spec.Binding.Instance),
+			}
+		}
+		candidates = []Instance{inst}
+
+	case r.defaultInstance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[r.defaultInstance]; !ok {
+				return &spec.CompileError{
+					Path:     "spec.binding",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("default instance %q is not allowed for project %q", r.defaultInstance, projectID),
+				}
+			}
+		}
+		inst, found, err := r.instances.GetInstance(ctx, r.defaultInstance)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve default instance %q", r.defaultInstance),
+			}
+		}
+		if !found || !inst.Enabled {
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("default instance %q is not found or disabled", r.defaultInstance),
+			}
+		}
+		candidates = []Instance{inst}
+
+	default:
+		all, err := r.instances.ListInstances(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  "failed to list instances for compile validation",
+			}
+		}
+		for _, inst := range all {
+			if !inst.Enabled {
+				continue
+			}
+			if checkAllowlist {
+				if _, ok := allowedSet[inst.Name]; !ok {
+					continue
+				}
+			}
+			candidates = append(candidates, inst)
+		}
+		if len(candidates) == 0 {
+			if checkAllowlist {
+				return &spec.CompileError{
+					Path:     "spec.binding",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("no enabled System One instance is allowed for project %q", projectID),
+				}
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  "no enabled System One instance is available",
+			}
+		}
+		if len(candidates) > 1 {
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("unbound rule is ambiguous: %d eligible instances; bind an instance explicitly", len(candidates)),
+			}
+		}
+	}
+
+	var firstErr error
+	for _, inst := range candidates {
+		if err := r.validateCompiledForInstance(compiled, inst); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return nil
+	}
+	return firstErr
+}
+
+func (r *Runtime) validateCompiledForInstance(compiled *spec.Compiled, inst Instance) error {
+	adapter, ok := r.registry.Get(inst.Adapter)
+	if !ok {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("adapter %q for instance %q is not registered", inst.Adapter, inst.Name),
+		}
+	}
+	view := inst.View()
+	caps, err, panicked := capabilitiesSafely(adapter, view)
+	if panicked || err != nil {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("failed to inspect capabilities for instance %q", inst.Name),
+		}
+	}
+	if !caps.SideEffectFree {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryCapability,
+			Message:  fmt.Sprintf("adapter %q for instance %q is not side-effect-free", inst.Adapter, inst.Name),
+		}
+	}
+
+	specLimits := caps.SpecLimits()
+	if inst.Limits.MaxInputTokens > 0 && (specLimits.MaxInputTokens <= 0 || inst.Limits.MaxInputTokens < specLimits.MaxInputTokens) {
+		specLimits.MaxInputTokens = inst.Limits.MaxInputTokens
+	}
+	if err := spec.ValidateInputTokenBudget(compiled.Inputs, compiled.Environment, specLimits); err != nil {
+		return err
+	}
+	spCopy := cloneSpec(compiled.Spec)
+	if err := spec.ValidatePortable(&spCopy, specLimits); err != nil {
+		return err
+	}
+	if err := adapter.Validate(view, spCopy); err != nil {
+		if _, ok := spec.AsCompileError(err); ok {
+			return err
+		}
+		return &spec.CompileError{
+			Path:     "spec",
+			Category: spec.CategoryCapability,
+			Message:  fmt.Sprintf("instance %q rejected rule: %v", inst.Name, err),
+		}
+	}
+	return nil
 }
 
 // CloseIdleConnections closes idle HTTP keep-alive connections across cached
@@ -384,6 +676,7 @@ func (r *Runtime) ForgetInstance(id string) {
 	if id == "" {
 		return
 	}
+	r.admission.forgetInstance(id)
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()
 	for key, tr := range r.transports {
@@ -408,10 +701,16 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		ctx = context.Background()
 	}
 
+	var elemIdx *int
+	if opts.ElementIndex != nil {
+		v := *opts.ElementIndex
+		elemIdx = &v
+	}
+
 	if compiled == nil {
 		eval := &Evaluation{
 			EvalID:    evalID,
-			Rule:      RuleRef{Consumer: opts.Consumer, RuleID: opts.RuleID, Revision: opts.Revision, Dialect: DialectName},
+			Rule:      RuleRef{Consumer: opts.Consumer, RuleID: opts.RuleID, Revision: opts.Revision, ElementIndex: elemIdx, Dialect: DialectName},
 			ProjectID: opts.ProjectID,
 			Class:     ClassFailed,
 			Reason:    string(provider.FailInternal),
@@ -424,12 +723,13 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	eval := &Evaluation{
 		EvalID: evalID,
 		Rule: RuleRef{
-			Consumer:    opts.Consumer,
-			RuleID:      opts.RuleID,
-			Revision:    opts.Revision,
-			ContentHash: compiled.ContentHash,
-			Dialect:     DialectName,
-			Native:      compiled.Spec.Form == spec.FormNative,
+			Consumer:     opts.Consumer,
+			RuleID:       opts.RuleID,
+			Revision:     opts.Revision,
+			ElementIndex: elemIdx,
+			ContentHash:  compiled.ContentHash,
+			Dialect:      DialectName,
+			Native:       compiled.Spec.Form == spec.FormNative,
 		},
 		ProjectID: opts.ProjectID,
 		Requested: compiled.Spec.Binding,
@@ -477,8 +777,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), latchCause()))
 	}
 
-	// Step 1: Select and validate bounded probe environment fields (AC-2, AC-3).
-	selectedFields, fp, totalBytes, fieldReason := selectProbeFields(compiled, input)
+	// Step 1: Select and validate bounded content-environment fields and dynamic choice sets (AC-2, AC-3).
+	selectedFields, selectedChoiceSets, fp, totalBytes, fieldReason := selectInputFields(compiled, input)
 	eval.Input = fp
 	if fieldReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, fieldReason)
@@ -495,6 +795,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	_ = latchCause()
 
 	eval.ConfiguredModel = inst.Model
+
+	// Step 2b: Check dynamic choice set item counts against the bound instance's
+	// choice primitive MaxOptions (runtime-design §4.4).
+	if csReason := checkChoiceSetInstanceLimits(selectedChoiceSets, caps); csReason != "" {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, csReason)
+	}
 
 	// Step 3: Conservative bytes-to-tokens pre-check against MaxInputTokens (AC-3).
 	if precheckReason := checkMaxInputTokensBytes(totalBytes, caps, inst.Limits); precheckReason != "" {
@@ -533,8 +839,61 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), cause))
 	}
 
+	// Step 5b: Acquire per-replica admission permits (per-project semaphore,
+	// per-instance MaxInFlight semaphore, and per-instance RatePerSec token
+	// bucket), waiting at most min(admissionWait, attemptDeadline) before
+	// failing fast with FailCapacity and 0 provider requests (runtime-design §7.2).
+	admissionStart := time.Now().UTC()
+	releaseAdmission, stopCause := r.admission.acquire(attemptCtx, strings.TrimSpace(opts.ProjectID), inst)
+	if stopCause != admissionStopNone {
+		admissionDur := time.Since(admissionStart)
+		reason := provider.FailCapacity
+		switch stopCause {
+		case admissionStopCanceled:
+			cause := latchCause(context.Cause(attemptCtx))
+			if ctx.Err() != nil || errors.Is(cause, errRuntimeDeadline) {
+				reason = classifyContextCause(ctx.Err(), cause)
+			}
+		case admissionStopAttemptDeadline:
+			// The wait was bounded by attemptCtx's deadline (dl <= now+admissionWait).
+			// Preserve the limiting deadline's classification deterministically even if
+			// waitCtx expired before attemptCtx.Err()/ctx.Err() became visible:
+			//   - caller deadline <= ownDeadline -> FailCanceled (or FailTimeout if
+			//     errRuntimeDeadline was already latched)
+			//   - ownDeadline < caller deadline (or no caller deadline) -> FailTimeout
+			cause := latchCause(context.Cause(attemptCtx))
+			if ctx.Err() != nil {
+				reason = classifyContextCause(ctx.Err(), cause)
+			} else if callerDL, ok := ctx.Deadline(); ok && !ownDeadline.Before(callerDL) {
+				reason = classifyContextCause(context.DeadlineExceeded, cause)
+			} else {
+				reason = classifyContextCause(nil, errRuntimeDeadline)
+			}
+		case admissionStopCapacity:
+			cause := latchCause(context.Cause(attemptCtx))
+			if ctx.Err() != nil || errors.Is(cause, errRuntimeDeadline) {
+				reason = classifyContextCause(ctx.Err(), cause)
+			}
+		}
+		eval.Attempts = []Attempt{{
+			Instance:         inst.Name,
+			InstanceRevision: inst.Revision,
+			Adapter:          adapter.Name(),
+			AdapterVersion:   adapter.Version(),
+			ConfiguredModel:  inst.Model,
+			Location:         inst.Location,
+			Started:          admissionStart,
+			Duration:         admissionDur,
+			Requests:         0,
+			Retries:          0,
+			Outcome:          AttemptFailed,
+			Reason:           string(reason),
+		}}
+		return r.finishFailed(ctx, compiled.Kind, start, eval, reason)
+	}
+
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
-	req := buildModelRequest(evalID, compiled, selectedFields)
+	req := buildModelRequest(evalID, compiled, selectedFields, selectedChoiceSets)
 	instView := inst.View()
 	transport := r.transportForInstance(inst, selectedScheme)
 	callTracker := &evalCallTracker{}
@@ -542,6 +901,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 
 	attemptStart := time.Now().UTC()
 	res, invokeErr, panicked := invokeSafely(callCtx, adapter, transport, instView, req)
+	releaseAdmission()
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
@@ -716,6 +1076,18 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	if !inst.Enabled {
 		return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "instance is disabled")
 	}
+	if projID := strings.TrimSpace(EvalProjectIDFromContext(ctx)); projID != "" && r.projectAllowlist != nil {
+		allowed, err := r.projectAllowlist.AllowedInstances(ctx, projID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, provider.NewProviderError(provider.FailUnavailable, true, 0, 0, "failed to resolve project instance allowlist")
+		}
+		if !slices.Contains(allowed, inst.Name) {
+			return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "instance is not allowed for project")
+		}
+	}
 	adapter, ok := r.registry.Get(inst.Adapter)
 	if !ok {
 		return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "adapter is not registered")
@@ -845,6 +1217,34 @@ func (r *Runtime) resolveBinding(
 		return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 	}
 
+	// Per-project instance allowlist gate (D1; runtime-design §4.5 rule 4).
+	// Checked before any credential resolution, admission wait, or provider I/O.
+	projectID := strings.TrimSpace(opts.ProjectID)
+	var allowedSet map[string]struct{}
+	checkAllowlist := false
+	if r.projectAllowlist != nil {
+		if projectID == "" {
+			if opts.RequireProject {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		} else {
+			checkAllowlist = true
+			allowed, err := r.projectAllowlist.AllowedInstances(resolveCtx, projectID)
+			if err != nil {
+				if callerCtx.Err() != nil || resolveCtx.Err() != nil {
+					return Instance{}, nil, provider.Capabilities{}, classifyContextCause(callerCtx.Err(), context.Cause(resolveCtx))
+				}
+				return Instance{}, nil, provider.Capabilities{}, provider.FailUnavailable
+			}
+			allowedSet = make(map[string]struct{}, len(allowed))
+			for _, name := range allowed {
+				allowedSet[name] = struct{}{}
+			}
+		}
+	} else if opts.RequireProject && projectID == "" {
+		return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+	}
+
 	var inst Instance
 	switch {
 	case opts.Instance != nil:
@@ -854,6 +1254,11 @@ func (r *Runtime) resolveBinding(
 		inst = cloneInstance(*opts.Instance)
 
 	case compiled.Spec.Binding.Instance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[compiled.Spec.Binding.Instance]; !ok {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		}
 		if r.instances == nil {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
@@ -870,6 +1275,11 @@ func (r *Runtime) resolveBinding(
 		inst = cloneInstance(got)
 
 	case r.defaultInstance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[r.defaultInstance]; !ok {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		}
 		if r.instances == nil {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
@@ -898,14 +1308,26 @@ func (r *Runtime) resolveBinding(
 		}
 		var enabled []Instance
 		for _, candidate := range all {
-			if candidate.Enabled {
-				enabled = append(enabled, candidate)
+			if !candidate.Enabled {
+				continue
 			}
+			if checkAllowlist {
+				if _, ok := allowedSet[candidate.Name]; !ok {
+					continue
+				}
+			}
+			enabled = append(enabled, candidate)
 		}
 		if len(enabled) != 1 {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
 		inst = cloneInstance(enabled[0])
+	}
+
+	if checkAllowlist {
+		if _, ok := allowedSet[inst.Name]; !ok {
+			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+		}
 	}
 
 	if !inst.Enabled {
@@ -1084,68 +1506,193 @@ func (r *Runtime) logEvaluation(ctx context.Context, eval *Evaluation) {
 	)
 }
 
-func selectProbeFields(compiled *spec.Compiled, input Input) ([]provider.InputField, InputFingerprint, int, provider.FailReason) {
+func selectInputFields(
+	compiled *spec.Compiled,
+	input Input,
+) ([]provider.InputField, map[string][]string, InputFingerprint, int, provider.FailReason) {
 	if err := spec.ValidateInputs(compiled.Inputs, compiled.Environment); err != nil {
-		return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 	}
 
 	byName := make(map[string]provider.InputField, len(input.Fields))
 	for _, f := range input.Fields {
 		if _, dup := byName[f.Name]; dup {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		byName[f.Name] = f
 	}
 
+	// Validate dynamic choice sets declared in compiled.Environment (runtime-design §4.4).
+	var selectedChoiceSets map[string][]string
+	choiceSetBytes := 0
+	choiceSetOversize := false
+	if len(input.ChoiceSets) > 0 {
+		setNames := make([]string, 0, len(input.ChoiceSets))
+		for k := range input.ChoiceSets {
+			setNames = append(setNames, k)
+		}
+		slices.Sort(setNames)
+		selectedChoiceSets = make(map[string][]string, len(setNames))
+		for _, setName := range setNames {
+			decl, ok := compiled.Environment.ChoiceSet(setName)
+			if !ok {
+				return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			}
+			labels := input.ChoiceSets[setName]
+			if len(labels) > decl.MaxItems {
+				choiceSetOversize = true
+			}
+			seenLabels := make(map[string]struct{}, len(labels))
+			for _, lbl := range labels {
+				if lbl == "" || !utf8.ValidString(lbl) {
+					return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+				}
+				if _, dup := seenLabels[lbl]; dup {
+					return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+				}
+				seenLabels[lbl] = struct{}{}
+				if len(lbl) > decl.MaxLabelBytes {
+					choiceSetOversize = true
+				}
+				choiceSetBytes += len(lbl)
+			}
+			selectedChoiceSets[setName] = slices.Clone(labels)
+		}
+	}
+
+	truncate := compiled.OnOversize == spec.OversizeTruncate
 	selected := make([]provider.InputField, 0, len(compiled.Inputs))
-	fps := make([]FieldFingerprint, 0, len(compiled.Inputs))
-	totalBytes := 0
-	oversize := false
+	fieldOversize := false
 
 	for _, name := range compiled.Inputs {
 		decl, ok := compiled.Environment.Field(name)
 		if !ok {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		supplied, present := byName[name]
 		if !present {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		}
+		if supplied.Kind != "" && supplied.Kind != decl.Kind {
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		if !utf8.ValidString(supplied.Value) {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		}
+		if decl.Kind == spec.FieldKindJSON && !json.Valid([]byte(supplied.Value)) {
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 
-		sz := len(supplied.Value)
-		totalBytes += sz
-		fps = append(fps, FieldFingerprint{
-			Name:      name,
-			Bytes:     sz,
-			Truncated: false,
-		})
-		if decl.MaxBytes > 0 && sz > decl.MaxBytes {
-			oversize = true
+		val := supplied.Value
+		truncated := false
+		if decl.MaxBytes > 0 && len(val) > decl.MaxBytes {
+			if truncate {
+				val, truncated = truncateUTF8(val, decl.MaxBytes)
+			} else {
+				fieldOversize = true
+			}
 		}
 		selected = append(selected, provider.InputField{
 			Name:      name,
 			Kind:      decl.Kind,
-			Value:     supplied.Value,
-			Truncated: false,
+			Value:     val,
+			Truncated: truncated,
 			Trust:     decl.Trust,
 		})
 	}
 
-	if compiled.Environment.MaxTotalBytes > 0 && totalBytes > compiled.Environment.MaxTotalBytes {
-		oversize = true
+	// Choice set labels are identifiers and are never truncated.
+	if choiceSetOversize {
+		fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+		return nil, nil, fp, sumFieldBytes(selected) + choiceSetBytes, provider.FailInputTooLarge
 	}
 
-	fp := InputFingerprint{
+	totalBytes := sumFieldBytes(selected) + choiceSetBytes
+	if compiled.Environment.MaxTotalBytes > 0 && totalBytes > compiled.Environment.MaxTotalBytes {
+		if truncate {
+			if choiceSetBytes > compiled.Environment.MaxTotalBytes {
+				fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+				return nil, nil, fp, totalBytes, provider.FailInputTooLarge
+			}
+			remaining := compiled.Environment.MaxTotalBytes - choiceSetBytes
+			for i := range selected {
+				if len(selected[i].Value) <= remaining {
+					remaining -= len(selected[i].Value)
+					continue
+				}
+				cutVal, didCut := truncateUTF8(selected[i].Value, remaining)
+				selected[i].Value = cutVal
+				if didCut {
+					selected[i].Truncated = true
+				}
+				remaining -= len(cutVal)
+			}
+			totalBytes = sumFieldBytes(selected) + choiceSetBytes
+		} else {
+			fieldOversize = true
+		}
+	}
+
+	fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+	if fieldOversize {
+		return nil, nil, fp, totalBytes, provider.FailInputTooLarge
+	}
+	return selected, selectedChoiceSets, fp, totalBytes, ""
+}
+
+func checkChoiceSetInstanceLimits(choiceSets map[string][]string, caps provider.Capabilities) provider.FailReason {
+	if len(choiceSets) == 0 {
+		return ""
+	}
+	lim, ok := caps.Primitives[spec.PrimitiveChoice]
+	if !ok || !lim.Supported {
+		return provider.FailUnsupported
+	}
+	for _, labels := range choiceSets {
+		if lim.MaxOptions > 0 && len(labels) > lim.MaxOptions {
+			return provider.FailUnsupported
+		}
+	}
+	return ""
+}
+
+// truncateUTF8 cuts s to at most maxBytes bytes without splitting a multi-byte
+// UTF-8 rune. Returns the truncated string and whether any bytes were removed.
+func truncateUTF8(s string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 {
+		return "", len(s) > 0
+	}
+	if len(s) <= maxBytes {
+		return s, false
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
+func sumFieldBytes(fields []provider.InputField) int {
+	total := 0
+	for _, f := range fields {
+		total += len(f.Value)
+	}
+	return total
+}
+
+func buildInputFingerprint(fields []provider.InputField, params map[string]string, choiceSets map[string][]string) InputFingerprint {
+	fps := make([]FieldFingerprint, len(fields))
+	for i, f := range fields {
+		fps[i] = FieldFingerprint{
+			Name:      f.Name,
+			Bytes:     len(f.Value),
+			Truncated: f.Truncated,
+		}
+	}
+	return InputFingerprint{
 		Fields: fps,
-		SHA256: computeSelectedInputSHA256(selected, input.Params, input.ChoiceSets),
+		SHA256: computeSelectedInputSHA256(fields, params, choiceSets),
 	}
-	if oversize {
-		return nil, fp, totalBytes, provider.FailInputTooLarge
-	}
-	return selected, fp, totalBytes, ""
 }
 
 func checkMaxInputTokensBytes(totalBytes int, caps provider.Capabilities, limits InstanceLimits) provider.FailReason {
@@ -1361,7 +1908,12 @@ func hasValidGoogleOAuthScopes(scopes []string) bool {
 	return true
 }
 
-func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []provider.InputField) provider.ModelRequest {
+func buildModelRequest(
+	evalID string,
+	compiled *spec.Compiled,
+	selectedFields []provider.InputField,
+	selectedChoiceSets map[string][]string,
+) provider.ModelRequest {
 	spCopy := cloneSpec(compiled.Spec)
 	qIDs := make([]string, len(spCopy.Questions))
 	for i, q := range spCopy.Questions {
@@ -1369,11 +1921,19 @@ func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []
 	}
 	inCopy := make([]provider.InputField, len(selectedFields))
 	copy(inCopy, selectedFields)
+	var csCopy map[string][]string
+	if len(selectedChoiceSets) > 0 {
+		csCopy = make(map[string][]string, len(selectedChoiceSets))
+		for k, v := range selectedChoiceSets {
+			csCopy[k] = slices.Clone(v)
+		}
+	}
 	return provider.ModelRequest{
-		Rule:      spCopy,
-		Questions: qIDs,
-		Input:     inCopy,
-		RequestID: evalID,
+		Rule:       spCopy,
+		Questions:  qIDs,
+		Input:      inCopy,
+		ChoiceSets: csCopy,
+		RequestID:  evalID,
 	}
 }
 

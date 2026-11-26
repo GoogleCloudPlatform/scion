@@ -215,6 +215,22 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the default seeded scheduledEvent is a message event (404), and reading exec output requires both scheduled_event:read and live agent:attach on the target agent; the pin drives the full principal and UAT-scope matrix on a real capture run",
 		Pin:    "TestScheduledResponses_RouteEnumerationGuard",
 	},
+	{OperationID: "project.systemoneinstances.read", Method: "GET", Pattern: "/api/v1/projects/{id}/system-one/instances"}: {
+		Reason: "the route answers 404 while the hub.system_one experiment is off, as in this fixture; the dedicated test enables the experiment and drives the full credential and role matrix",
+		Pin:    "TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate",
+	},
+	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances"}: {
+		Reason: "404 while hub.system_one is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full credential and role matrix",
+		Pin:    "TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate",
+	},
+	{OperationID: "project.systemoneinstances.manage", Method: "PUT", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}: {
+		Reason: "404 while hub.system_one is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full credential and role matrix",
+		Pin:    "TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate",
+	},
+	{OperationID: "project.systemoneinstances.manage", Method: "DELETE", Pattern: "/api/v1/projects/{id}/system-one/instances/{name}"}: {
+		Reason: "404 while hub.system_one is off in this fixture, and management also requires active project owner/admin or unscoped local hub admin on the underlying user; the dedicated test enables the experiment and drives the full credential and role matrix",
+		Pin:    "TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate",
+	},
 	{OperationID: "project.messagepolicy.read", Method: "GET", Pattern: "/api/v1/projects/{id}/message-policies"}: {
 		Reason: "the route answers 404 while the hub.message_policies experiment is off, as in this fixture; the dedicated test enables the experiment and drives the full §4 credential matrix across session, dev, project/hub/other-project UATs, member, viewer, agent, delegated/broker/hub-delivery/federation/visitor, and hub admin",
 		Pin:    "TestMessagePolicyAuthz_Target7_CredentialMatrix",

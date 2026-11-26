@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -517,6 +519,218 @@ func (s *ProjectStore) UpdateProjectMessagingPolicy(ctx context.Context, project
 		return nil, err
 	}
 	return sp, nil
+}
+
+func normalizeSystemOneInstanceAllowlist(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if !store.IsValidSystemOneInstanceName(name) {
+			return nil, store.ErrInvalidInput
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) > store.MaxProjectSystemOneInstances {
+		return nil, store.ErrSystemOneAllowlistLimitExceeded
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func cloneSortedStrings(in []string) []string {
+	if len(in) == 0 {
+		return []string{}
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	sort.Strings(out)
+	return out
+}
+
+func (s *ProjectStore) lockProjectRowForUpdate(ctx context.Context, tx *ent.Tx, uid uuid.UUID) (*ent.Project, error) {
+	q := tx.Project.Query().Where(project.IDEQ(uid))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	p, err := q.Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return p, nil
+}
+
+// GetProjectSystemOneInstances returns the sorted, deduplicated list of System
+// One hub instance names allowed for projectID (empty by default).
+func (s *ProjectStore) GetProjectSystemOneInstances(ctx context.Context, projectID string) ([]string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	p, err := s.client.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return cloneSortedStrings(p.SystemOneAllowedInstances), nil
+}
+
+// verifySystemOneInstancesExistTx locks and verifies that every instance name
+// in sortedNames exists in system_one_instances inside tx. Locking
+// system_one_instances (in sorted name order) BEFORE projects maintains the
+// canonical lock order shared with DeleteSystemOneInstance so concurrent
+// add/set and delete cannot deadlock or leave orphan allowlist entries.
+func (s *ProjectStore) verifySystemOneInstancesExistTx(ctx context.Context, tx *ent.Tx, sortedNames []string) error {
+	useLocks := s.client.Driver().Dialect() == dialect.Postgres
+	for _, name := range sortedNames {
+		q := tx.SystemOneInstance.Query().Where(systemoneinstance.NameEQ(name))
+		if useLocks {
+			q = q.ForUpdate()
+		}
+		if _, err := q.Only(ctx); err != nil {
+			if ent.IsNotFound(err) {
+				return fmt.Errorf("%w: %s", store.ErrSystemOneInstanceNotFound, name)
+			}
+			return mapError(err)
+		}
+	}
+	return nil
+}
+
+// SetProjectSystemOneInstances atomically verifies that all named instances
+// exist and replaces the project's System One instance allowlist with a
+// validated, deduplicated, sorted list.
+func (s *ProjectStore) SetProjectSystemOneInstances(ctx context.Context, projectID string, instances []string) ([]string, []string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	clean, err := normalizeSystemOneInstanceAllowlist(instances)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, nil, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := s.verifySystemOneInstancesExistTx(ctx, tx, clean); err != nil {
+		return nil, nil, err
+	}
+
+	p, err := s.lockProjectRowForUpdate(ctx, tx, uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	before := cloneSortedStrings(p.SystemOneAllowedInstances)
+
+	upd := tx.Project.UpdateOneID(uid)
+	if len(clean) == 0 {
+		upd.ClearSystemOneAllowedInstances()
+	} else {
+		upd.SetSystemOneAllowedInstances(clean)
+	}
+	if _, err := upd.Save(ctx); err != nil {
+		return nil, nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, mapError(err)
+	}
+	return before, clean, nil
+}
+
+// AddProjectSystemOneInstance atomically verifies instanceName exists and adds
+// it to the project's System One instance allowlist (idempotent).
+func (s *ProjectStore) AddProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, []string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	name := strings.TrimSpace(instanceName)
+	if !store.IsValidSystemOneInstanceName(name) {
+		return nil, nil, store.ErrInvalidInput
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, nil, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := s.verifySystemOneInstancesExistTx(ctx, tx, []string{name}); err != nil {
+		return nil, nil, err
+	}
+
+	p, err := s.lockProjectRowForUpdate(ctx, tx, uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	before := cloneSortedStrings(p.SystemOneAllowedInstances)
+	combined := append(append([]string(nil), p.SystemOneAllowedInstances...), name)
+	clean, err := normalizeSystemOneInstanceAllowlist(combined)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := tx.Project.UpdateOneID(uid).SetSystemOneAllowedInstances(clean).Save(ctx); err != nil {
+		return nil, nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, mapError(err)
+	}
+	return before, clean, nil
+}
+
+// RemoveProjectSystemOneInstance atomically removes instanceName from the
+// project's System One instance allowlist (idempotent).
+func (s *ProjectStore) RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, []string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	name := strings.TrimSpace(instanceName)
+	if !store.IsValidSystemOneInstanceName(name) {
+		return nil, nil, store.ErrInvalidInput
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, nil, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	p, err := s.lockProjectRowForUpdate(ctx, tx, uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	before := cloneSortedStrings(p.SystemOneAllowedInstances)
+	filtered := make([]string, 0, len(p.SystemOneAllowedInstances))
+	for _, existing := range p.SystemOneAllowedInstances {
+		if existing != name {
+			filtered = append(filtered, existing)
+		}
+	}
+	sort.Strings(filtered)
+	upd := tx.Project.UpdateOneID(uid)
+	if len(filtered) == 0 {
+		upd.ClearSystemOneAllowedInstances()
+	} else {
+		upd.SetSystemOneAllowedInstances(filtered)
+	}
+	if _, err := upd.Save(ctx); err != nil {
+		return nil, nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, mapError(err)
+	}
+	return before, filtered, nil
 }
 
 // DeleteProject removes a project by ID.

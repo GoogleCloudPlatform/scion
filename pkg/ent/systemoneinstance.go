@@ -19,7 +19,7 @@ type SystemOneInstance struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
-	// Unique canonical slug identifying the instance (e.g. typesafe-prod).
+	// Unique canonical slug identifying the instance (e.g. typesafe-prod); immutable once created so project allowlists cannot drift.
 	Name string `json:"name,omitempty"`
 	// Registered adapter name (e.g. typesafe, google-genai, openai-compat, anthropic, bedrock).
 	Adapter string `json:"adapter,omitempty"`

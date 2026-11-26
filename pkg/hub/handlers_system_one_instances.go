@@ -747,6 +747,10 @@ func parseSystemOneLimits(dto *SystemOneInstanceLimitsDTO) (store.SystemOneInsta
 	if math.IsNaN(dto.RatePerSec) || math.IsInf(dto.RatePerSec, 0) || dto.RatePerSec < 0 {
 		return store.SystemOneInstanceLimits{}, errors.New("limits.ratePerSec must be a finite number >= 0")
 	}
+	const minPositiveSystemOneRatePerSec = 1e-6
+	if dto.RatePerSec > 0 && dto.RatePerSec < minPositiveSystemOneRatePerSec {
+		return store.SystemOneInstanceLimits{}, fmt.Errorf("limits.ratePerSec must be 0 or >= %g", minPositiveSystemOneRatePerSec)
+	}
 	if dto.MaxInputTokens < 0 {
 		return store.SystemOneInstanceLimits{}, errors.New("limits.maxInputTokens must be >= 0")
 	}
