@@ -27,6 +27,7 @@ import (
 const (
 	modulePath            = "github.com/GoogleCloudPlatform/scion"
 	celEnginePath         = modulePath + "/pkg/celengine"
+	messagesPath          = modulePath + "/pkg/messages"
 	ruleEnginePath        = modulePath + "/pkg/ruleengine"
 	systemOnePath         = modulePath + "/pkg/systemone"
 	systemOneSpecPath     = modulePath + "/pkg/systemone/spec"
@@ -52,12 +53,13 @@ func moduleRoot(t *testing.T) string {
 }
 
 // TestLeafImports verifies target 9: pkg/messagepolicy imports only
-// pkg/celengine, pkg/ruleengine, and Go standard library packages — never
-// pkg/hub, pkg/store, or cel-go directly.
+// pkg/celengine, pkg/messages, pkg/ruleengine, pkg/systemone/*, and Go standard
+// library packages — never pkg/hub, pkg/store, or cel-go directly.
 func TestLeafImports(t *testing.T) {
 	root := moduleRoot(t)
 	allowedInModule := map[string]bool{
 		celEnginePath:         true,
+		messagesPath:          true,
 		ruleEnginePath:        true,
 		systemOnePath:         true,
 		systemOneSpecPath:     true,

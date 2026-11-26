@@ -270,6 +270,7 @@ type h2PolicyInput struct {
 	req                 *OutboundMessageRequest
 	routing             *routingResult
 	hasChoices          bool
+	promptText          string
 	artifactAttachments int
 }
 
@@ -893,12 +894,21 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 			(req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:"))
 	}
 
+	msgBody := req.Msg
+	if in.promptText != "" {
+		if msgBody == "" {
+			msgBody = in.promptText
+		} else {
+			msgBody = msgBody + "\n\n" + in.promptText
+		}
+	}
+
 	snap := h2FactSnapshot{
 		projectID:       agent.ProjectID,
 		senderID:        agent.ID,
 		senderSlug:      agent.Slug,
 		msgType:         req.Type,
-		msgBody:         req.Msg,
+		msgBody:         msgBody,
 		hasChoices:      in.hasChoices,
 		urgent:          req.Urgent,
 		attachmentCount: len(req.Attachments) + in.artifactAttachments,
