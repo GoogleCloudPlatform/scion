@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -500,9 +501,15 @@ func (e *DecisionRetentionRunExecutor) RunResult() map[string]any {
 
 // ValidateParams implements maintenance.ParamValidator.
 func (e *DecisionRetentionRunExecutor) ValidateParams(map[string]string) error {
-	p, err := e.srv.decisionRetentionPolicyAt(context.Background(), time.Now())
+	ctx, cancel := context.WithTimeout(context.Background(), decisionRetentionPageTimeout)
+	defer cancel()
+	p, err := e.srv.decisionRetentionPolicyAt(ctx, time.Now())
 	if err != nil {
-		return err
+		slog.Error("decision retention run: failed to resolve policy", "error", err)
+		return &maintenance.RequestError{
+			Code:    ErrCodeInternalError,
+			Message: "Failed to verify decision retention policy",
+		}
 	}
 	if !p.Active {
 		return &maintenance.RequestError{
