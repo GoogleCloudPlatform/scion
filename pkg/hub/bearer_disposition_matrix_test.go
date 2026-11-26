@@ -396,7 +396,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestProjectDecisions_TokenAndCallerAuthz",
 	},
 	{OperationID: "chat.projectdecisions.suggestions", Method: "GET", Pattern: "/api/v1/projects/{id}/decisions/suggestions"}: {
-		Reason: "the route answers 404 while web.decisions or filters.query_dialect is off, as in this fixture; the dedicated test enables both experiments and drives the route across session, UATs, agent tokens, federated users and visitors",
+		Reason: "the route answers 404 while web.decisions is off, as in this fixture; the dedicated test enables web.decisions and drives the route across session, UATs, agent tokens, federated users and visitors",
 		Pin:    "TestProjectDecisionSuggestions_AuthzScopeAndExperiments",
 	},
 	{OperationID: "chat.userdecisions.list", Method: "GET", Pattern: "/api/v1/users/me/decisions"}: {
@@ -404,7 +404,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestUserMeDecisions_TokenAndCallerAuthz",
 	},
 	{OperationID: "chat.userdecisions.suggestions", Method: "GET", Pattern: "/api/v1/users/me/decisions/suggestions"}: {
-		Reason: "the route answers 404 while web.decisions or filters.query_dialect is off, as in this fixture; the dedicated test enables both experiments and drives the route across session, UATs, agent tokens, federated users and visitors",
+		Reason: "the route answers 404 while web.decisions is off, as in this fixture; the dedicated test enables web.decisions and drives the route across session, UATs, agent tokens, federated users and visitors",
 		Pin:    "TestUserMeDecisionSuggestions_AuthzScopeAndValidation",
 	},
 	{OperationID: "chat.conversation.decisions.topic", Method: "GET", Pattern: "/api/v1/chat/conversations/{id}/decisions"}: {

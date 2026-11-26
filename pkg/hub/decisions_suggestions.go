@@ -249,18 +249,14 @@ func parseDecisionSuggestionsQuery(w http.ResponseWriter, r *http.Request, scope
 
 // handleProjectDecisionSuggestions serves
 // GET /api/v1/projects/{id}/decisions/suggestions (design-8985 §3.3).
-// Unsupported methods return 405 before the experiment gates, which return 404
-// while web.decisions or filters.query_dialect is off.
+// Unsupported methods return 405 before the experiment gate, which returns 404
+// while web.decisions is off.
 func (s *Server) handleProjectDecisionSuggestions(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
-		if !s.experimentEnabled(experiments.FiltersQueryDialect) {
-			NotFound(w, "Decision suggestions")
-			return
-		}
 		s.listProjectDecisionSuggestions(w, r, projectID)
 	})(w, r)
 }
@@ -314,18 +310,14 @@ func (s *Server) listProjectDecisionSuggestions(w http.ResponseWriter, r *http.R
 
 // handleUserMeDecisionSuggestions serves
 // GET /api/v1/users/me/decisions/suggestions (design-8985 §3.3).
-// Unsupported methods return 405 before the experiment gates, which return 404
-// while web.decisions or filters.query_dialect is off.
+// Unsupported methods return 405 before the experiment gate, which returns 404
+// while web.decisions is off.
 func (s *Server) handleUserMeDecisionSuggestions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
-		if !s.experimentEnabled(experiments.FiltersQueryDialect) {
-			NotFound(w, "Decision suggestions")
-			return
-		}
 		s.listUserMeDecisionSuggestions(w, r)
 	})(w, r)
 }

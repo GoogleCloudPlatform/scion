@@ -70,29 +70,16 @@ func TestProjectDecisionSuggestions_AuthzScopeAndExperiments(t *testing.T) {
 	ctx := context.Background()
 	suggPath := "/api/v1/projects/" + f.project.ID + "/decisions/suggestions"
 
-	// Unsupported method returns 405 even while experiments are off.
-	setDecisionsAndDialectExperiments(t, f.srv, false, false)
+	// Unsupported method returns 405 even while web.decisions is off.
+	setDecisionsExperiment(t, f.srv, false)
 	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, suggPath+"?key=agent", nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 
-	// 404 while either web.decisions or filters.query_dialect is off.
-	for _, tc := range []struct {
-		name        string
-		decisionsOn bool
-		dialectOn   bool
-	}{
-		{"both off", false, false},
-		{"decisions on dialect off", true, false},
-		{"decisions off dialect on", false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setDecisionsAndDialectExperiments(t, f.srv, tc.decisionsOn, tc.dialectOn)
-			rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent", nil)
-			assert.Equal(t, http.StatusNotFound, rr.Code)
-		})
-	}
+	// 404 while web.decisions is off.
+	rr = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent", nil)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
 
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiment(t, f.srv, true)
 
 	// Seed a topic decision visible to both Alice and Bob, plus a Bob-only DM
 	// decision with a secret agent and a secret answerer.
@@ -177,7 +164,7 @@ func TestProjectDecisionSuggestions_AuthzScopeAndExperiments(t *testing.T) {
 	// wrong-project, missing project:read) and federated user refusal.
 	t.Run("UATs and federated user", func(t *testing.T) {
 		cf := newChatFixture(t)
-		setDecisionsAndDialectExperiments(t, cf.srv, true, true)
+		setDecisionsExperiment(t, cf.srv, true)
 		cctx := context.Background()
 		pPath := "/api/v1/projects/" + cf.projA + "/decisions/suggestions"
 
@@ -280,7 +267,7 @@ func TestProjectDecisionSuggestions_AuthzScopeAndExperiments(t *testing.T) {
 
 func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *testing.T) {
 	f := newDecisionsFixture(t)
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	suggPath := "/api/v1/projects/" + f.project.ID + "/decisions/suggestions"
 
@@ -510,7 +497,7 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 
 func TestProjectDecisionSuggestions_UncappedPast500AndFacetsTruncated(t *testing.T) {
 	f := newDecisionsFixture(t)
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiment(t, f.srv, true)
 	ctx := context.Background()
 	listPath := "/api/v1/projects/" + f.project.ID + "/decisions"
 	suggPath := listPath + "/suggestions"
@@ -622,20 +609,16 @@ func TestUserMeDecisionSuggestions_AuthzScopeAndValidation(t *testing.T) {
 	f := newDecisionsFixture(t)
 	suggPath := "/api/v1/users/me/decisions/suggestions"
 
-	// 405 on POST before experiment gates.
-	setDecisionsAndDialectExperiments(t, f.srv, false, false)
+	// 405 on POST before experiment gate.
+	setDecisionsExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusMethodNotAllowed,
 		doRequestAsUser(t, f.srv, f.bob, http.MethodPost, suggPath+"?key=agent", nil).Code)
 
-	// 404 when either experiment is off.
-	setDecisionsAndDialectExperiments(t, f.srv, true, false)
-	assert.Equal(t, http.StatusNotFound,
-		doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent", nil).Code)
-	setDecisionsAndDialectExperiments(t, f.srv, false, true)
+	// 404 while web.decisions is off.
 	assert.Equal(t, http.StatusNotFound,
 		doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=agent", nil).Code)
 
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiment(t, f.srv, true)
 
 	// Agent and visitor get 403.
 	assert.Equal(t, http.StatusForbidden,
@@ -677,7 +660,7 @@ func TestUserMeDecisionSuggestions_AuthzScopeAndValidation(t *testing.T) {
 	// federated user refusal.
 	t.Run("UATs and federated user", func(t *testing.T) {
 		cf := newChatFixture(t)
-		setDecisionsAndDialectExperiments(t, cf.srv, true, true)
+		setDecisionsExperiment(t, cf.srv, true)
 		cctx := context.Background()
 		bindProjectMember(t, cf.s, cf.projB, cf.member)
 

@@ -1457,7 +1457,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.projectdecisions.suggestions",
 		Domain:      "chat",
-		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) for a project. Needs project:read on the project, then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions or filters.query_dialect is off",
+		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) for a project. Needs project:read on the project, then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/decisions/suggestions", Method: "GET"},
 		},
@@ -1508,7 +1508,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.userdecisions.suggestions",
 		Domain:      "chat",
-		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) across every project the caller is a member of and can read (capped at 200 readable member projects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty values), then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions or filters.query_dialect is off",
+		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) across every project the caller is a member of and can read (capped at 200 readable member projects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty values), then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/decisions/suggestions", Method: "GET"},
 		},

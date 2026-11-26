@@ -369,7 +369,7 @@ describe('Project Decisions page — filter query dialect (ptone/scion#9346)', (
   it('makes no /suggestions requests when facets are not truncated', async () => {
     vi.useFakeTimers();
     try {
-      setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+      setServerFlags({ 'web.decisions': true });
       const el = await mountPage();
 
       const panel = el.shadowRoot?.querySelector(
@@ -394,7 +394,7 @@ describe('Project Decisions page — filter query dialect (ptone/scion#9346)', (
   it('fetches /decisions/suggestions only for truncated facets and renders remote results past the cap', async () => {
     vi.useFakeTimers();
     try {
-      setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+      setServerFlags({ 'web.decisions': true });
       vi.stubGlobal(
         'fetch',
         vi.fn((input: RequestInfo | URL) => {
