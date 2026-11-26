@@ -127,9 +127,9 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	}
 
 	// Pending prompts:
-	// - P1: f.agent in #general ("Rollout canary?")
+	// - P1: f.agent in #sched-topic ("Rollout canary?")
 	// - P2: agentOps in #ops ("Scale postgres?")
-	// - P3: agentCollide1 in #general ("Collide pending 1?")
+	// - P3: agentCollide1 in #sched-topic ("Collide pending 1?")
 	// - P4: agentCollide2 in #ops ("Collide pending 2?")
 	// - P5: f.agent in Bob's private DM ("Secret Bob DM?")
 	seedPrompt(f.agent, f.topicID, "P1", "Rollout canary?")
@@ -141,9 +141,9 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	_, p5Row := seedPrompt(f.agent, bobDMKey, "P5", "Secret Bob DM?")
 
 	// Made answers:
-	// - M1: f.agent, #general, answered by Bob (direct)
+	// - M1: f.agent, #sched-topic, answered by Bob (direct)
 	// - M2: agentOps, #ops, answered by Alice (direct)
-	// - M3: agentCollide1, #general, answered by sam1 (direct)
+	// - M3: agentCollide1, #sched-topic, answered by sam1 (direct)
 	// - M4: agentCollide2, #ops, answered by sam2 (dismissed)
 	// - M5: f.agent, Bob's private DM, answered by Bob (direct) — Alice cannot see!
 	_, m1Row := seedPrompt(f.agent, f.topicID, "M1", "Ship frontend v1?")
@@ -315,10 +315,17 @@ func TestProjectDecisions_FilterQueryDialect(t *testing.T) {
 	mNegText := getMade(f.alice, url.Values{"q": {"agent:db-ops," + f.agent.Name + " -ops"}})
 	assert.ElementsMatch(t, []string{"M1"}, entryKeys(mNegText))
 
-	// 13. (O5b) Negated conversation: removing every readable key -> empty 200 on both tabs.
-	pNegAllConv := getPending(f.alice, url.Values{"q": {"-conversation:#general,#ops"}})
+	// 13. (O5b) Negated conversation: first verify -conversation:#ops alone still returns #sched-topic rows
+	// on both tabs (non-vacuous), then remove every readable key Alice has -> empty 200 on both tabs.
+	pNegOpsOnly := getPending(f.alice, url.Values{"q": {"-conversation:#ops"}})
+	assert.ElementsMatch(t, []string{"P1", "P3"}, promptKeys(pNegOpsOnly))
+	mNegOpsOnly := getMade(f.alice, url.Values{"q": {"-conversation:#ops"}})
+	assert.ElementsMatch(t, []string{"M1", "M3"}, entryKeys(mNegOpsOnly))
+
+	excludeAllAliceConvs := fmt.Sprintf(`-conversation:#sched-topic,#ops,%q,"DM with db-ops","DM with shared-bot"`, "DM with "+f.agent.Name)
+	pNegAllConv := getPending(f.alice, url.Values{"q": {excludeAllAliceConvs}})
 	assert.Empty(t, pNegAllConv.Prompts)
-	mNegAllConv := getMade(f.alice, url.Values{"q": {"-conversation:#general,#ops"}})
+	mNegAllConv := getMade(f.alice, url.Values{"q": {excludeAllAliceConvs}})
 	assert.Empty(t, mNegAllConv.Entries)
 
 	// 14. (O5c) user= ANDed with by:, and provenance= ANDed with provenance:.
