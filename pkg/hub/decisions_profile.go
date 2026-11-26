@@ -65,6 +65,7 @@ type ProfilePendingDecisionsResponse struct {
 	Answerers         []ProjectDecisionActorView        `json:"answerers"`
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
+	FacetsTruncated   *ProjectDecisionFacetsTruncated   `json:"facetsTruncated,omitempty"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
 	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 	NextCursor        string                            `json:"nextCursor,omitempty"`
@@ -79,6 +80,7 @@ type ProfileMadeDecisionsResponse struct {
 	Answerers         []ProjectDecisionActorView        `json:"answerers"`
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
+	FacetsTruncated   *ProjectDecisionFacetsTruncated   `json:"facetsTruncated,omitempty"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
 	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 	NextCursor        string                            `json:"nextCursor,omitempty"`
@@ -93,6 +95,7 @@ type ProfileMadeByProjectDecisionsResponse struct {
 	Answerers         []ProjectDecisionActorView        `json:"answerers"`
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
+	FacetsTruncated   *ProjectDecisionFacetsTruncated   `json:"facetsTruncated,omitempty"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
 	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 }
@@ -802,6 +805,7 @@ func (s *Server) finishProfilePendingDecisions(
 	answerersFacet []ProjectDecisionActorView,
 	conversationsFacet []ProjectDecisionConversationView,
 	projectsFacet []ProjectDecisionProjectRef,
+	facetsTruncated *ProjectDecisionFacetsTruncated,
 ) (ProfilePendingDecisionsResponse, error) {
 	var (
 		pagePrompts []classifiedOpenPrompt
@@ -842,6 +846,7 @@ func (s *Server) finishProfilePendingDecisions(
 		Answerers:         answerersFacet,
 		Conversations:     conversationsFacet,
 		Projects:          projectsFacet,
+		FacetsTruncated:   facetsTruncated,
 		TruncatedProjects: pq.truncatedProjects,
 		Retention:         s.profileDecisionRetentionInfo(targetProjectIDs),
 		NextCursor:        nextCursor,
@@ -998,6 +1003,7 @@ func (s *Server) finishProfileMadeDecisions(
 	answerersFacet []ProjectDecisionActorView,
 	conversationsFacet []ProjectDecisionConversationView,
 	projectsFacet []ProjectDecisionProjectRef,
+	facetsTruncated *ProjectDecisionFacetsTruncated,
 ) (any, error) {
 	retention := s.profileDecisionRetentionInfo(targetProjectIDs)
 	if pq.sort == DecisionsSortProject {
@@ -1012,6 +1018,7 @@ func (s *Server) finishProfileMadeDecisions(
 			Answerers:         answerersFacet,
 			Conversations:     conversationsFacet,
 			Projects:          projectsFacet,
+			FacetsTruncated:   facetsTruncated,
 			TruncatedProjects: pq.truncatedProjects,
 			Retention:         retention,
 		}, nil
@@ -1041,6 +1048,7 @@ func (s *Server) finishProfileMadeDecisions(
 		Answerers:         answerersFacet,
 		Conversations:     conversationsFacet,
 		Projects:          projectsFacet,
+		FacetsTruncated:   facetsTruncated,
 		TruncatedProjects: pq.truncatedProjects,
 		Retention:         retention,
 		NextCursor:        nextCursor,

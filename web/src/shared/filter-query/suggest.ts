@@ -38,6 +38,26 @@ export type ValueSuggestion = string | { value: string; help?: string; pinned?: 
 
 export type ValueSuggestionProvider = (key: string, prefix: string) => ValueSuggestion[];
 
+export interface RemoteValueSuggestionsResult {
+  values: ValueSuggestion[];
+  total?: number;
+  /** Optional plural noun for empty-state text (e.g. "agents", "answerers"). */
+  emptyLabel?: string;
+}
+
+export type RemoteValueSuggestionProvider = (
+  key: string,
+  prefix: string,
+  signal: AbortSignal
+) => Promise<ValueSuggestion[] | RemoteValueSuggestionsResult> | null;
+
+export interface ValueSuggestionContext {
+  key: string;
+  prefix: string;
+  replaceStart: number;
+  replaceEnd: number;
+}
+
 interface NormalizedValueSuggestion {
   value: string;
   help?: string;
@@ -56,17 +76,16 @@ function normalizeValueSuggestion(raw: ValueSuggestion): NormalizedValueSuggesti
 }
 
 /**
- * Compute key or value autocomplete suggestions at `cursor` within `input`.
+ * If `cursor` is positioned inside the value part of a known `key:value` token,
+ * returns the key name, current value prefix (after the last comma), and the
+ * replacement range; otherwise returns `null`.
  */
-export function getSuggestions(
+export function getValueSuggestionContext(
   input: string,
   cursor: number,
-  schema: ViewSchema,
-  valueSuggestions?: ValueSuggestionProvider
-): Suggestion[] {
+  schema: ViewSchema
+): ValueSuggestionContext | null {
   const before = input.slice(0, cursor);
-
-  // Find the active token starting after the last whitespace.
   let tokenStart = before.length;
   while (tokenStart > 0 && !/\s/.test(before[tokenStart - 1])) {
     tokenStart--;
@@ -75,18 +94,74 @@ export function getSuggestions(
   const negatePrefix = token.startsWith('-') ? '-' : '';
   const body = negatePrefix ? token.slice(1) : token;
   const colonIdx = body.indexOf(':');
+  if (colonIdx <= 0) return null;
 
-  // After `key:` -> value suggestions.
-  if (colonIdx > 0) {
-    const keyName = body.slice(0, colonIdx).toLowerCase();
-    const keyDef = schema.keys.find((k) => k.name.toLowerCase() === keyName);
+  const keyName = body.slice(0, colonIdx).toLowerCase();
+  const keyDef = schema.keys.find((k) => k.name.toLowerCase() === keyName);
+  if (!keyDef) return null;
+
+  const afterColon = body.slice(colonIdx + 1);
+  const lastComma = afterColon.lastIndexOf(',');
+  const rawPrefix = lastComma >= 0 ? afterColon.slice(lastComma + 1) : afterColon;
+  const replaceStart =
+    tokenStart + negatePrefix.length + colonIdx + 1 + (lastComma >= 0 ? lastComma + 1 : 0);
+
+  // Strip a single leading unmatched double quote so typing `by:"Sam` matches
+  // "Sam Taylor" both locally and remotely while keeping replaceStart at `"`.
+  const prefix =
+    rawPrefix.startsWith('"') && !rawPrefix.slice(1).includes('"') ? rawPrefix.slice(1) : rawPrefix;
+
+  return {
+    key: keyDef.name,
+    prefix,
+    replaceStart,
+    replaceEnd: cursor,
+  };
+}
+
+/**
+ * Converts pre-ranked value suggestions (e.g. from a remote endpoint) into
+ * filter-box `Suggestion` items without re-ranking them.
+ */
+export function buildSuggestionsFromValues(
+  values: ValueSuggestion[],
+  replaceStart: number,
+  replaceEnd: number,
+  limit = 12
+): Suggestion[] {
+  const out: Suggestion[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    if (out.length >= limit) break;
+    const item = normalizeValueSuggestion(raw);
+    const dedupKey = `${item.value}\0${item.help ?? ''}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    out.push({
+      insertText: formatValue(item.value),
+      label: item.value,
+      ...(item.help ? { help: item.help } : {}),
+      replaceStart,
+      replaceEnd,
+    });
+  }
+  return out;
+}
+
+/**
+ * Compute key or value autocomplete suggestions at `cursor` within `input`.
+ */
+export function getSuggestions(
+  input: string,
+  cursor: number,
+  schema: ViewSchema,
+  valueSuggestions?: ValueSuggestionProvider
+): Suggestion[] {
+  // After `key:` -> value suggestions (reuse the single tokenizer in getValueSuggestionContext).
+  const valCtx = getValueSuggestionContext(input, cursor, schema);
+  if (valCtx) {
+    const keyDef = schema.keys.find((k) => k.name.toLowerCase() === valCtx.key.toLowerCase());
     if (!keyDef) return [];
-
-    const afterColon = body.slice(colonIdx + 1);
-    const lastComma = afterColon.lastIndexOf(',');
-    const valPrefix = lastComma >= 0 ? afterColon.slice(lastComma + 1) : afterColon;
-    const replaceStart =
-      tokenStart + negatePrefix.length + colonIdx + 1 + (lastComma >= 0 ? lastComma + 1 : 0);
 
     const candidates: NormalizedValueSuggestion[] = [];
     const seen = new Set<string>();
@@ -104,12 +179,12 @@ export function getSuggestions(
       }
     }
     if (valueSuggestions) {
-      for (const dyn of valueSuggestions(keyDef.name, valPrefix)) {
+      for (const dyn of valueSuggestions(keyDef.name, valCtx.prefix)) {
         addCandidate(dyn);
       }
     }
 
-    const q = trimASCIISpace(valPrefix).toLowerCase();
+    const q = trimASCIISpace(valCtx.prefix).toLowerCase();
     const scored = candidates
       .map((item) => {
         if (!q) return { item, tier: 0 };
@@ -134,12 +209,21 @@ export function getSuggestions(
       insertText: formatValue(item.value),
       label: item.value,
       ...(item.help ? { help: item.help } : {}),
-      replaceStart,
-      replaceEnd: cursor,
+      replaceStart: valCtx.replaceStart,
+      replaceEnd: valCtx.replaceEnd,
     }));
   }
 
   // At term boundary or typing a key name -> key suggestions.
+  const before = input.slice(0, cursor);
+  let tokenStart = before.length;
+  while (tokenStart > 0 && !/\s/.test(before[tokenStart - 1])) {
+    tokenStart--;
+  }
+  const token = before.slice(tokenStart);
+  const negatePrefix = token.startsWith('-') ? '-' : '';
+  const body = negatePrefix ? token.slice(1) : token;
+  if (body.indexOf(':') > 0) return [];
   const q = trimASCIISpace(body).toLowerCase();
   const scoredKeys = schema.keys
     .map((k) => {

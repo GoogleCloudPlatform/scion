@@ -175,25 +175,27 @@ type DecisionRetentionInfo struct {
 // Counts are never filtered; FilteredCounts is present when q, conversation
 // or agent narrows the list (design D6).
 type ProjectPendingDecisionsResponse struct {
-	Counts         ProjectDecisionCounts             `json:"counts"`
-	FilteredCounts *ProjectDecisionCounts            `json:"filteredCounts,omitempty"`
-	Prompts        []ProjectDecisionPromptView       `json:"prompts"`
-	Agents         []ProjectDecisionActorView        `json:"agents"`
-	Answerers      []ProjectDecisionActorView        `json:"answerers"`
-	Conversations  []ProjectDecisionConversationView `json:"conversations"`
-	Retention      *DecisionRetentionInfo            `json:"retention,omitempty"`
-	NextCursor     string                            `json:"nextCursor,omitempty"`
+	Counts          ProjectDecisionCounts             `json:"counts"`
+	FilteredCounts  *ProjectDecisionCounts            `json:"filteredCounts,omitempty"`
+	Prompts         []ProjectDecisionPromptView       `json:"prompts"`
+	Agents          []ProjectDecisionActorView        `json:"agents"`
+	Answerers       []ProjectDecisionActorView        `json:"answerers"`
+	Conversations   []ProjectDecisionConversationView `json:"conversations"`
+	FacetsTruncated *ProjectDecisionFacetsTruncated   `json:"facetsTruncated,omitempty"`
+	Retention       *DecisionRetentionInfo            `json:"retention,omitempty"`
+	NextCursor      string                            `json:"nextCursor,omitempty"`
 }
 
 // ProjectMadeDecisionsResponse is the response of GET /api/v1/projects/{id}/decisions?tab=made.
 type ProjectMadeDecisionsResponse struct {
-	Counts        ProjectDecisionCounts             `json:"counts"`
-	Entries       []ProjectDecisionLogEntryView     `json:"entries"`
-	Agents        []ProjectDecisionActorView        `json:"agents"`
-	Answerers     []ProjectDecisionActorView        `json:"answerers"`
-	Conversations []ProjectDecisionConversationView `json:"conversations"`
-	Retention     *DecisionRetentionInfo            `json:"retention,omitempty"`
-	NextCursor    string                            `json:"nextCursor,omitempty"`
+	Counts          ProjectDecisionCounts             `json:"counts"`
+	Entries         []ProjectDecisionLogEntryView     `json:"entries"`
+	Agents          []ProjectDecisionActorView        `json:"agents"`
+	Answerers       []ProjectDecisionActorView        `json:"answerers"`
+	Conversations   []ProjectDecisionConversationView `json:"conversations"`
+	FacetsTruncated *ProjectDecisionFacetsTruncated   `json:"facetsTruncated,omitempty"`
+	Retention       *DecisionRetentionInfo            `json:"retention,omitempty"`
+	NextCursor      string                            `json:"nextCursor,omitempty"`
 }
 
 // projectDecisionRetentionInfo returns the effective retention info for
@@ -824,30 +826,30 @@ func (s *Server) decisionsCore(
 ) (any, error) {
 	set := newDecisionScopeSet(scopes)
 
-	var (
-		facetAgents    []store.ProjectDecisionActor
-		facetAnswerers []store.ProjectDecisionActor
-		convKeys       []string
-	)
-	agentsFacet := []ProjectDecisionActorView{}
-	answerersFacet := []ProjectDecisionActorView{}
-	conversationsFacet := []ProjectDecisionConversationView{}
-	projectsFacet := []ProjectDecisionProjectRef{}
+	facets := decisionFacetsBundle{
+		agents:        []ProjectDecisionActorView{},
+		answerers:     []ProjectDecisionActorView{},
+		conversations: []ProjectDecisionConversationView{},
+		projects:      []ProjectDecisionProjectRef{},
+	}
 	if len(set.chatKeys) > 0 && (pq.limit > 0 || pq.parsedQuery != nil) {
+		kind := decisionFacetAll
+		if pq.limit == 0 {
+			kind = decisionFacetRawOnly
+		}
 		var err error
-		facetAgents, facetAnswerers, convKeys, err = s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
+		facets, err = s.buildDecisionFacets(ctx, set, kind, true, pq.profile)
 		if err != nil {
 			return nil, err
 		}
-		if pq.limit > 0 {
-			agentsFacet = decisionAgentFacetViews(set, facetAgents)
-			answerersFacet = decisionAnswererFacetViews(facetAnswerers)
-			conversationsFacet = decisionConversationFacetViews(set, convKeys)
-			if pq.profile {
-				projectsFacet = decisionProjectFacetViews(set, convKeys)
-			}
-		}
 	}
+	facetAgents := facets.rawAgents
+	facetAnswerers := facets.rawAnswerers
+	agentsFacet := facets.agents
+	answerersFacet := facets.answerers
+	conversationsFacet := facets.conversations
+	projectsFacet := facets.projects
+	facetsTruncated := facets.truncated
 
 	// The keys and projects the list is narrowed to. An unreadable conversation
 	// or non-member project narrows to nothing, so neither is an existence
@@ -908,7 +910,7 @@ func (s *Server) decisionsCore(
 			filteredCounts = &fc
 		}
 		if pq.profile {
-			return s.finishProfilePendingDecisions(ctx, set, pq, targetProjectIDs, counts, filteredCounts, classified, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+			return s.finishProfilePendingDecisions(ctx, set, pq, targetProjectIDs, counts, filteredCounts, classified, agentsFacet, answerersFacet, conversationsFacet, projectsFacet, facetsTruncated)
 		}
 		pagePrompts, nextCursor, err := paginateClassifiedPrompts(classified, pq.pendingCursor, pq.limit)
 		if err != nil {
@@ -919,28 +921,30 @@ func (s *Server) decisionsCore(
 			projectID = set.projectIDs[0]
 		}
 		return ProjectPendingDecisionsResponse{
-			Counts:         counts,
-			FilteredCounts: filteredCounts,
-			Prompts:        s.buildProjectDecisionPromptViews(ctx, set, pagePrompts),
-			Agents:         agentsFacet,
-			Answerers:      answerersFacet,
-			Conversations:  conversationsFacet,
-			Retention:      s.projectDecisionRetentionInfo(projectID),
-			NextCursor:     nextCursor,
+			Counts:          counts,
+			FilteredCounts:  filteredCounts,
+			Prompts:         s.buildProjectDecisionPromptViews(ctx, set, pagePrompts),
+			Agents:          agentsFacet,
+			Answerers:       answerersFacet,
+			Conversations:   conversationsFacet,
+			FacetsTruncated: facetsTruncated,
+			Retention:       s.projectDecisionRetentionInfo(projectID),
+			NextCursor:      nextCursor,
 		}, nil
 	}
 
 	// tab=made
 	if resolved.impossible || (pq.parsedQuery != nil && len(listKeys) == 0) {
 		if pq.profile {
-			return s.finishProfileMadeDecisions(ctx, wcs, set, pq, nil, nil, pq.madeFilter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+			return s.finishProfileMadeDecisions(ctx, wcs, set, pq, nil, nil, pq.madeFilter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet, facetsTruncated)
 		}
 		return ProjectMadeDecisionsResponse{
-			Counts:        counts,
-			Entries:       []ProjectDecisionLogEntryView{},
-			Agents:        agentsFacet,
-			Answerers:     answerersFacet,
-			Conversations: conversationsFacet,
+			Counts:          counts,
+			Entries:         []ProjectDecisionLogEntryView{},
+			Agents:          agentsFacet,
+			Answerers:       answerersFacet,
+			Conversations:   conversationsFacet,
+			FacetsTruncated: facetsTruncated,
 		}, nil
 	}
 	filter := pq.madeFilter
@@ -975,7 +979,7 @@ func (s *Server) decisionsCore(
 		filter.QueryChatKeys = set.labelMatchKeys(listKeys, strings.ToLower(pq.q))
 	}
 	if pq.profile {
-		return s.finishProfileMadeDecisions(ctx, wcs, set, pq, targetProjectIDs, listKeys, filter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+		return s.finishProfileMadeDecisions(ctx, wcs, set, pq, targetProjectIDs, listKeys, filter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet, facetsTruncated)
 	}
 	rawEntries, nextCursor, err := s.store.ListDecisionAnswers(ctx, targetProjectIDs, listKeys, filter, pq.cursor, pq.limit)
 	if err != nil {
@@ -986,21 +990,22 @@ func (s *Server) decisionsCore(
 		projectID = set.projectIDs[0]
 	}
 	return ProjectMadeDecisionsResponse{
-		Counts:        counts,
-		Entries:       s.buildProjectDecisionLogViews(ctx, wcs, set, rawEntries),
-		Agents:        agentsFacet,
-		Answerers:     answerersFacet,
-		Conversations: conversationsFacet,
-		Retention:     s.projectDecisionRetentionInfo(projectID),
-		NextCursor:    nextCursor,
+		Counts:          counts,
+		Entries:         s.buildProjectDecisionLogViews(ctx, wcs, set, rawEntries),
+		Agents:          agentsFacet,
+		Answerers:       answerersFacet,
+		Conversations:   conversationsFacet,
+		FacetsTruncated: facetsTruncated,
+		Retention:       s.projectDecisionRetentionInfo(projectID),
+		NextCursor:      nextCursor,
 	}, nil
 }
 
 // decisionAgentFacetViews labels the asking agents (design D5): the live
 // agent's name, else the newest decision's name snapshot. Agents whose labels
 // collide get a hint: "deleted · <id>" for a deleted agent, the short id for
-// one of several live agents. Sorted by label, capped.
-func decisionAgentFacetViews(set *decisionScopeSet, agents []store.ProjectDecisionActor) []ProjectDecisionActorView {
+// one of several live agents. Sorted by label, optionally capped.
+func decisionAgentFacetViews(set *decisionScopeSet, agents []store.ProjectDecisionActor, capped bool) ([]ProjectDecisionActorView, bool) {
 	type option struct {
 		view    ProjectDecisionActorView
 		deleted bool
@@ -1072,10 +1077,11 @@ func decisionAgentFacetViews(set *decisionScopeSet, agents []store.ProjectDecisi
 	for _, o := range opts {
 		out = append(out, o.view)
 	}
-	if len(out) > maxProjectDecisionFacetOptions {
+	truncated := len(out) > maxProjectDecisionFacetOptions
+	if capped && truncated {
 		out = out[:maxProjectDecisionFacetOptions]
 	}
-	return out
+	return out, truncated
 }
 
 // shortDecisionAgentID is the first four characters of an agent ID, the
@@ -1088,8 +1094,8 @@ func shortDecisionAgentID(id string) string {
 }
 
 // decisionConversationFacetViews builds the conversations facet from the
-// readable keys that have decisions, sorted by label, capped.
-func decisionConversationFacetViews(set *decisionScopeSet, keys []string) []ProjectDecisionConversationView {
+// readable keys that have decisions, sorted by label, optionally capped.
+func decisionConversationFacetViews(set *decisionScopeSet, keys []string, capped bool) ([]ProjectDecisionConversationView, bool) {
 	out := make([]ProjectDecisionConversationView, 0, len(keys))
 	for _, k := range keys {
 		if !set.readable[k] {
@@ -1108,10 +1114,11 @@ func decisionConversationFacetViews(set *decisionScopeSet, keys []string) []Proj
 		}
 		return out[i].Key < out[j].Key
 	})
-	if len(out) > maxProjectDecisionFacetOptions {
+	truncated := len(out) > maxProjectDecisionFacetOptions
+	if capped && truncated {
 		out = out[:maxProjectDecisionFacetOptions]
 	}
-	return out
+	return out, truncated
 }
 
 // filterClassifiedPrompts applies the pending filters in memory (design D6):

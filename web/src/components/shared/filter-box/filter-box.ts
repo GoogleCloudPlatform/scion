@@ -17,7 +17,9 @@
 import { LitElement, css, html, nothing } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
 import {
+  buildSuggestionsFromValues,
   getSuggestions,
+  getValueSuggestionContext,
   getViewSchema,
   knownKeysFor,
   parse,
@@ -26,6 +28,7 @@ import {
   type FilterError,
   type FilterWarning,
   type Query,
+  type RemoteValueSuggestionProvider,
   type Suggestion,
   type ValueSuggestionProvider,
   type ViewSchema,
@@ -45,6 +48,8 @@ export interface FilterCommitDetail {
 }
 
 const COMMIT_DEBOUNCE_MS = 300;
+const REMOTE_SUGGEST_DEBOUNCE_MS = 250;
+const MAX_VISIBLE_SUGGESTIONS = 12;
 const EMPTY_QUERY: Query = { mode: 'text', text: '' };
 
 @customElement('scion-filter-box')
@@ -60,6 +65,13 @@ export class ScionFilterBox extends LitElement {
 
   @property({ attribute: false })
   valueSuggestions?: ValueSuggestionProvider;
+
+  /**
+   * Optional remote value suggestion provider for truncated facets (design-8985 §3.3).
+   * Returning `null` skips any network call and keeps local suggestions unchanged.
+   */
+  @property({ attribute: false })
+  remoteValueSuggestions?: RemoteValueSuggestionProvider;
 
   /** Optional non-blocking warning supplied by the host view (e.g. Made-only keys on Pending tab). */
   @property({ type: String })
@@ -93,12 +105,36 @@ export class ScionFilterBox extends LitElement {
   @state()
   private suppressExpectedValueError = false;
 
+  @state()
+  private remoteLoading = false;
+
+  @state()
+  private remoteError = false;
+
+  @state()
+  private remoteEmpty = false;
+
+  @state()
+  private remoteTotal: number | null = null;
+
+  @state()
+  private remoteEmptyLabel = 'values';
+
+  @state()
+  private remotePrefix = '';
+
+  @state()
+  private liveAnnouncement = '';
+
   @query('input')
   private inputEl?: HTMLInputElement;
 
   private lastValidQuery: Query = EMPTY_QUERY;
   private lastEmittedValue = '';
   private commitTimer: ReturnType<typeof setTimeout> | null = null;
+  private remoteTimer: ReturnType<typeof setTimeout> | null = null;
+  private remoteAbort: AbortController | null = null;
+  private remoteGen = 0;
   private readonly listboxId = `filter-listbox-${Math.random().toString(36).slice(2, 8)}`;
 
   static override styles = css`
@@ -175,16 +211,22 @@ export class ScionFilterBox extends LitElement {
       color: var(--scion-text-muted);
     }
 
-    .listbox {
+    .listbox-popover {
       position: absolute;
       top: calc(100% + 2px);
       left: 0;
       right: 0;
       z-index: 50;
+      display: flex;
+      flex-direction: column;
       background: var(--scion-surface-raised, var(--scion-surface));
       border: 1px solid var(--scion-border);
       border-radius: var(--scion-radius);
       box-shadow: var(--scion-shadow-md, 0 4px 12px var(--scion-border));
+      overflow: hidden;
+    }
+
+    .listbox {
       max-height: 240px;
       overflow-y: auto;
       padding: 0.25rem;
@@ -221,6 +263,60 @@ export class ScionFilterBox extends LitElement {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+    }
+
+    .option.dim {
+      opacity: 0.5;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.5rem;
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted);
+    }
+
+    .status-row.status-warn {
+      color: var(--scion-text-secondary);
+    }
+
+    .spinner {
+      width: 0.75rem;
+      height: 0.75rem;
+      border: 2px solid var(--scion-border);
+      border-top-color: var(--scion-primary);
+      border-radius: 50%;
+      flex-shrink: 0;
+      animation: scion-filter-spin 700ms linear infinite;
+    }
+
+    @keyframes scion-filter-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .listbox-footer {
+      flex-shrink: 0;
+      background: var(--scion-surface-raised, var(--scion-surface));
+      font-size: 0.72rem;
+      color: var(--scion-text-muted);
+      padding: 0.3rem 0.65rem 0.35rem;
+      border-top: 1px solid var(--scion-border);
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }
 
     .feedback {
@@ -381,6 +477,7 @@ export class ScionFilterBox extends LitElement {
       clearTimeout(this.commitTimer);
       this.commitTimer = null;
     }
+    this.cancelRemoteSuggestions();
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
@@ -389,6 +486,9 @@ export class ScionFilterBox extends LitElement {
         clearTimeout(this.commitTimer);
         this.commitTimer = null;
       }
+      this.cancelRemoteSuggestions();
+      this.open = false;
+      this.activeIndex = -1;
       this.lastEmittedValue = this.value;
     }
     if (changed.has('value') || changed.has('view')) {
@@ -511,10 +611,122 @@ export class ScionFilterBox extends LitElement {
     }
   }
 
+  private cancelRemoteSuggestions(): void {
+    if (this.remoteTimer !== null) {
+      clearTimeout(this.remoteTimer);
+      this.remoteTimer = null;
+    }
+    if (this.remoteAbort) {
+      this.remoteAbort.abort();
+      this.remoteAbort = null;
+    }
+    this.remoteGen++;
+    this.remoteLoading = false;
+    this.remoteError = false;
+    this.remoteEmpty = false;
+    this.remoteTotal = null;
+    this.liveAnnouncement = '';
+  }
+
+  private formatNoMatchText(): string {
+    const noun = this.remoteEmptyLabel || 'values';
+    const trimmed = this.remotePrefix.trim();
+    return trimmed ? `No ${noun} match \u2018${trimmed}\u2019` : `No ${noun} found`;
+  }
+
+  private scheduleRemoteSuggestions(cursor: number): void {
+    this.cancelRemoteSuggestions();
+    if (!this.remoteValueSuggestions) return;
+
+    const ctx = getValueSuggestionContext(this.value, cursor, this.schema);
+    if (!ctx) return;
+
+    const gen = ++this.remoteGen;
+    this.remoteEmptyLabel = 'values';
+    this.remotePrefix = ctx.prefix;
+
+    this.remoteTimer = setTimeout(() => {
+      this.remoteTimer = null;
+      if (gen !== this.remoteGen || !this.isConnected) return;
+
+      const ac = new AbortController();
+      let maybePromise: ReturnType<RemoteValueSuggestionProvider>;
+      try {
+        maybePromise = this.remoteValueSuggestions?.(ctx.key, ctx.prefix, ac.signal) ?? null;
+      } catch {
+        this.remoteError = true;
+        this.remoteEmpty = false;
+        this.remoteTotal = null;
+        this.open = true;
+        this.liveAnnouncement = "Couldn't load suggestions";
+        return;
+      }
+      if (!maybePromise) {
+        return;
+      }
+
+      this.remoteAbort = ac;
+      this.remoteLoading = true;
+      this.remoteError = false;
+      this.remoteEmpty = false;
+      this.open = true;
+
+      maybePromise.then(
+        (raw) => {
+          if (ac.signal.aborted || gen !== this.remoteGen || !this.isConnected) return;
+          if (this.remoteAbort === ac) this.remoteAbort = null;
+          const values = Array.isArray(raw) ? raw : raw.values;
+          const total = Array.isArray(raw) ? values.length : (raw.total ?? values.length);
+          if (!Array.isArray(raw) && raw.emptyLabel) {
+            this.remoteEmptyLabel = raw.emptyLabel;
+          }
+          const prevActive = this.activeIndex >= 0 ? this.suggestions[this.activeIndex] : undefined;
+          const built = buildSuggestionsFromValues(
+            values,
+            ctx.replaceStart,
+            ctx.replaceEnd,
+            MAX_VISIBLE_SUGGESTIONS
+          );
+          let nextActive = -1;
+          if (prevActive) {
+            nextActive = built.findIndex(
+              (item) =>
+                item.label === prevActive.label && (item.help ?? '') === (prevActive.help ?? '')
+            );
+          }
+          this.remoteLoading = false;
+          this.remoteError = false;
+          this.suggestions = built;
+          this.activeIndex = nextActive;
+          this.remoteEmpty = built.length === 0;
+          this.remoteTotal = total > built.length ? total : null;
+          this.open = true;
+          this.liveAnnouncement =
+            built.length === 0
+              ? this.formatNoMatchText()
+              : total === 1
+                ? '1 suggestion'
+                : `${total} suggestions`;
+        },
+        () => {
+          if (ac.signal.aborted || gen !== this.remoteGen || !this.isConnected) return;
+          if (this.remoteAbort === ac) this.remoteAbort = null;
+          this.remoteLoading = false;
+          this.remoteError = true;
+          this.remoteEmpty = false;
+          this.remoteTotal = null;
+          this.open = true;
+          this.liveAnnouncement = "Couldn't load suggestions";
+        }
+      );
+    }, REMOTE_SUGGEST_DEBOUNCE_MS);
+  }
+
   private refreshSuggestions(): void {
     const cursor = this.inputEl?.selectionStart ?? this.value.length;
     this.suggestions = getSuggestions(this.value, cursor, this.schema, this.valueSuggestions);
     this.activeIndex = -1;
+    this.scheduleRemoteSuggestions(cursor);
   }
 
   private onInput(e: Event): void {
@@ -536,6 +748,7 @@ export class ScionFilterBox extends LitElement {
     setTimeout(() => {
       this.open = false;
       this.suppressExpectedValueError = false;
+      this.cancelRemoteSuggestions();
     }, 120);
   }
 
@@ -545,6 +758,7 @@ export class ScionFilterBox extends LitElement {
         e.preventDefault();
         this.open = false;
         this.suppressExpectedValueError = false;
+        this.cancelRemoteSuggestions();
       } else if (this.helpOpen) {
         e.preventDefault();
         this.helpOpen = false;
@@ -578,6 +792,7 @@ export class ScionFilterBox extends LitElement {
       if (e.key === 'Tab') {
         this.open = false;
         this.suppressExpectedValueError = false;
+        this.cancelRemoteSuggestions();
         return;
       }
     }
@@ -586,6 +801,7 @@ export class ScionFilterBox extends LitElement {
       e.preventDefault();
       this.open = false;
       this.suppressExpectedValueError = false;
+      this.cancelRemoteSuggestions();
       this.evaluateAndEmit(this.value, true);
     }
   }
@@ -602,8 +818,10 @@ export class ScionFilterBox extends LitElement {
       this.suggestions = getSuggestions(nextValue, nextCursor, this.schema, this.valueSuggestions);
       this.activeIndex = -1;
       this.open = this.suggestions.length > 0;
+      this.scheduleRemoteSuggestions(nextCursor);
     } else {
       this.open = false;
+      this.cancelRemoteSuggestions();
     }
     this.evaluateAndEmit(nextValue, !s.continueSuggest);
 
@@ -620,6 +838,7 @@ export class ScionFilterBox extends LitElement {
     this.suppressExpectedValueError = false;
     this.value = '';
     this.open = false;
+    this.cancelRemoteSuggestions();
     this.evaluateAndEmit('', true);
     this.inputEl?.focus();
   }
@@ -674,29 +893,80 @@ export class ScionFilterBox extends LitElement {
         </sl-popup>
       </div>
 
-      ${this.open && this.suggestions.length > 0
+      ${this.open &&
+      (this.suggestions.length > 0 || this.remoteLoading || this.remoteError || this.remoteEmpty)
         ? html`
-            <ul id=${this.listboxId} class="listbox" role="listbox">
-              ${this.suggestions.map(
-                (s, idx) => html`
-                  <li
-                    id="${this.listboxId}-opt-${idx}"
-                    class="option ${idx === this.activeIndex ? 'active' : ''}"
-                    role="option"
-                    aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
-                    @mousedown=${(e: MouseEvent) => {
-                      e.preventDefault();
-                      this.acceptSuggestion(s);
-                    }}
-                  >
-                    <span class="option-label">${s.label}</span>
-                    ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
-                  </li>
-                `
-              )}
-            </ul>
+            <div class="listbox-popover">
+              <ul
+                id=${this.listboxId}
+                class="listbox"
+                role="listbox"
+                aria-busy=${this.remoteLoading ? 'true' : nothing}
+              >
+                ${this.remoteLoading
+                  ? html`
+                      <li class="status-row" role="presentation" data-remote-status="loading">
+                        <span class="spinner" aria-hidden="true"></span>
+                        <span>Searching…</span>
+                      </li>
+                    `
+                  : nothing}
+                ${this.remoteError
+                  ? html`
+                      <li
+                        class="status-row status-warn"
+                        role="presentation"
+                        data-remote-status="error"
+                      >
+                        <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                        <span>Couldn't load suggestions. You can still type a value.</span>
+                      </li>
+                    `
+                  : nothing}
+                ${!this.remoteLoading && !this.remoteError && this.remoteEmpty
+                  ? html`
+                      <li class="status-row" role="presentation" data-remote-status="empty">
+                        <span>${this.formatNoMatchText()}</span>
+                      </li>
+                    `
+                  : nothing}
+                ${this.suggestions.map(
+                  (s, idx) => html`
+                    <li
+                      id="${this.listboxId}-opt-${idx}"
+                      class="option ${idx === this.activeIndex ? 'active' : ''} ${this.remoteLoading
+                        ? 'dim'
+                        : ''}"
+                      role="option"
+                      aria-selected=${idx === this.activeIndex ? 'true' : 'false'}
+                      @mousedown=${(e: MouseEvent) => {
+                        e.preventDefault();
+                        this.acceptSuggestion(s);
+                      }}
+                    >
+                      <span class="option-label">${s.label}</span>
+                      ${s.help ? html`<span class="option-help">${s.help}</span>` : nothing}
+                    </li>
+                  `
+                )}
+              </ul>
+              ${!this.remoteLoading &&
+              !this.remoteError &&
+              this.remoteTotal !== null &&
+              this.suggestions.length > 0
+                ? html`
+                    <div class="listbox-footer" data-remote-footer>
+                      Showing ${this.suggestions.length} of ${this.remoteTotal} · keep typing
+                    </div>
+                  `
+                : nothing}
+            </div>
           `
         : nothing}
+
+      <div class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        ${this.liveAnnouncement}
+      </div>
 
       <div
         class="feedback ${shownError

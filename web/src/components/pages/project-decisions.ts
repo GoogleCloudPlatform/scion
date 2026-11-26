@@ -35,11 +35,13 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import '../shared/breadcrumb.js';
 import {
+  fetchProjectDecisionSuggestions,
   fetchProjectMadeDecisions,
   fetchProjectPendingDecisions,
   type ProjectMadeDecisionsResponse,
   type ProjectPendingDecisionsResponse,
 } from '../../client/project-decisions.js';
+import type { RemoteValueSuggestionProvider } from '../../shared/filter-query/index.js';
 import { stateManager } from '../../client/state.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import type {
@@ -150,11 +152,35 @@ export class ScionPageProjectDecisions extends LitElement {
     }
   }
 
+  private readonly provideRemoteValueSuggestions: RemoteValueSuggestionProvider = (
+    key,
+    prefix,
+    signal
+  ) => {
+    if (!this.projectId) return null;
+    const trunc = this.ctrl.facetsTruncated;
+    const isTruncated =
+      (key === 'agent' && Boolean(trunc.agents)) ||
+      (key === 'conversation' && Boolean(trunc.conversations)) ||
+      (key === 'by' && Boolean(trunc.answerers));
+    if (!isTruncated) return null;
+    return fetchProjectDecisionSuggestions(this.projectId, {
+      key,
+      prefix,
+      signal,
+    }).then((res) => ({
+      values: res.values,
+      total: res.total,
+      emptyLabel: key === 'agent' ? 'agents' : key === 'by' ? 'answerers' : 'conversations',
+    }));
+  };
+
   private renderFilterPanel(): TemplateResult {
     return html`
       <scion-decisions-filter-panel
         scope="project"
         .supportsSearch=${this.ctrl.supportsSearch}
+        .remoteValueSuggestions=${this.provideRemoteValueSuggestions}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}

@@ -1455,6 +1455,31 @@ var chatOperations = []OperationSpec{
 		},
 	},
 	{
+		ID:          "chat.projectdecisions.suggestions",
+		Domain:      "chat",
+		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) for a project. Needs project:read on the project, then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/decisions/suggestions", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectDecisionSuggestions_AuthzScopeAndExperiments"},
+		},
+		Bearer: BearerDisposition{
+			Kind:       BearerAdmit,
+			Target:     BearerTargetProjectPath,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+			Pin:        "TestProjectDecisionSuggestions_AuthzScopeAndExperiments",
+		},
+	},
+	{
 		ID:          "chat.userdecisions.list",
 		Domain:      "chat",
 		Description: "List pending decision prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
@@ -1478,6 +1503,31 @@ var chatOperations = []OperationSpec{
 			Target:     BearerTargetProjectCollection,
 			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
 			Pin:        "TestUserMeDecisions_TokenAndCallerAuthz",
+		},
+	},
+	{
+		ID:          "chat.userdecisions.suggestions",
+		Domain:      "chat",
+		Description: "Search uncapped decision filter value suggestions (agent, conversation, or by) across every project the caller is a member of and can read (capped at 200 readable member projects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty values), then scopes every candidate to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/decisions/suggestions", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-collection",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserMeDecisionSuggestions_AuthzScopeAndValidation"},
+		},
+		Bearer: BearerDisposition{
+			Kind:       BearerAdmit,
+			Target:     BearerTargetProjectCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+			Pin:        "TestUserMeDecisionSuggestions_AuthzScopeAndValidation",
 		},
 	},
 	{

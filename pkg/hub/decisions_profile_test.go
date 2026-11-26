@@ -1032,7 +1032,7 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	rawAgents, _, rawConvKeys, err := f.store.ListDecisionFacets(ctx, measSet.projectIDs, measSet.chatKeys)
 	facetsDBElapsed := time.Since(startFacets)
 	require.NoError(t, err)
-	sortedAgents := decisionAgentFacetViews(measSet, rawAgents)
+	sortedAgents, _ := decisionAgentFacetViews(measSet, rawAgents, true)
 	facetsTotalElapsed := time.Since(startFacets)
 	t.Logf("200x5 ListDecisionFacets: rawAgents=%d rawConvs=%d db=%v db+sort+cap500=%v (capped=%d)",
 		len(rawAgents), len(rawConvKeys), facetsDBElapsed, facetsTotalElapsed, len(sortedAgents))

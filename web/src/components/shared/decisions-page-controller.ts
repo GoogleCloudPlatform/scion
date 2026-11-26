@@ -48,6 +48,7 @@ import {
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionConversationView,
   type ProjectDecisionCounts,
+  type ProjectDecisionFacetsTruncated,
   type ProjectDecisionLogEntryView,
   type ProjectDecisionProjectRef,
   type ProjectDecisionPromptView,
@@ -293,6 +294,7 @@ export class DecisionsPageController implements ReactiveController {
   facetsAnswerers: ProfileDecisionActorView[] = [];
   facetsConversations: ProjectDecisionConversationView[] = [];
   facetsProjects: ProjectDecisionProjectRef[] = [];
+  facetsTruncated: ProjectDecisionFacetsTruncated = {};
 
   filterProject = '';
   filterQ = '';
@@ -751,8 +753,10 @@ export class DecisionsPageController implements ReactiveController {
     answerers: ProfileDecisionActorView[];
     conversations?: ProjectDecisionConversationView[] | undefined;
     projects?: ProjectDecisionProjectRef[] | undefined;
+    facetsTruncated?: ProjectDecisionFacetsTruncated | undefined;
   }): void {
     this.facetsHydrated = true;
+    this.facetsTruncated = opts.facetsTruncated ?? {};
     if (opts.projects) {
       this.recordKnownProjects(opts.projects);
       if (opts.projects.length > 0 || this.facetsProjects.length === 0) {
@@ -975,6 +979,7 @@ export class DecisionsPageController implements ReactiveController {
         answerers: res.answerers,
         conversations: res.conversations,
         projects: 'projects' in res ? res.projects : undefined,
+        facetsTruncated: 'facetsTruncated' in res ? res.facetsTruncated : undefined,
       });
       if (opts.mode !== 'live') {
         this.error = null;
@@ -1064,6 +1069,7 @@ export class DecisionsPageController implements ReactiveController {
           answerers: res.answerers,
           conversations: res.conversations,
           projects: 'projects' in res ? res.projects : undefined,
+          facetsTruncated: 'facetsTruncated' in res ? res.facetsTruncated : undefined,
         });
         this.notify();
       } else {
@@ -1090,6 +1096,7 @@ export class DecisionsPageController implements ReactiveController {
           answerers: res.answerers,
           conversations: res.conversations,
           projects: 'projects' in res ? res.projects : undefined,
+          facetsTruncated: 'facetsTruncated' in res ? res.facetsTruncated : undefined,
         });
         this.notify();
       }
@@ -1189,6 +1196,7 @@ export class DecisionsPageController implements ReactiveController {
         answerers: res.answerers,
         conversations: res.conversations,
         projects: 'projects' in res ? res.projects : undefined,
+        facetsTruncated: 'facetsTruncated' in res ? res.facetsTruncated : undefined,
       });
       this.notify();
     } catch (err) {

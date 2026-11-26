@@ -29,12 +29,14 @@ import {
   parseDecisionsUrlState,
   parseDecisionRetentionInfo,
   type DecisionRetentionInfo,
+  type DecisionSuggestionsResponse,
   type DecisionsUrlState,
   type MadeDecisionsFilter,
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionActorView,
   type ProjectDecisionConversationView,
   type ProjectDecisionCounts,
+  type ProjectDecisionFacetsTruncated,
   type ProjectDecisionLogEntryView,
   type ProjectDecisionProjectRef,
   type ProjectDecisionPromptView,
@@ -98,6 +100,7 @@ export interface ProfilePendingDecisionsResponse {
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
+  facetsTruncated?: ProjectDecisionFacetsTruncated;
   truncatedProjects: boolean;
   retention?: Record<string, DecisionRetentionInfo> | undefined;
   nextCursor?: string;
@@ -112,6 +115,7 @@ export interface ProfileMadeRecentDecisionsResponse {
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
+  facetsTruncated?: ProjectDecisionFacetsTruncated;
   truncatedProjects: boolean;
   retention?: Record<string, DecisionRetentionInfo> | undefined;
   nextCursor?: string;
@@ -126,6 +130,7 @@ export interface ProfileMadeByProjectDecisionsResponse {
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
   projects: ProjectDecisionProjectRef[];
+  facetsTruncated?: ProjectDecisionFacetsTruncated;
   truncatedProjects: boolean;
   retention?: Record<string, DecisionRetentionInfo> | undefined;
 }
@@ -518,6 +523,7 @@ export async function fetchProfilePendingDecisions(
       answerers: Array.isArray(data?.answerers) ? data.answerers : [],
       ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
       projects: Array.isArray(data?.projects) ? data.projects : [],
+      ...(data?.facetsTruncated ? { facetsTruncated: data.facetsTruncated } : {}),
       truncatedProjects: Boolean(data?.truncatedProjects),
       ...(parseProfileRetentionMap(data?.retention)
         ? { retention: parseProfileRetentionMap(data?.retention) }
@@ -570,6 +576,7 @@ export async function fetchProfileMadeDecisions(
         answerers: Array.isArray(data?.answerers) ? data.answerers : [],
         ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
         projects: Array.isArray(data?.projects) ? data.projects : [],
+        ...(data?.facetsTruncated ? { facetsTruncated: data.facetsTruncated } : {}),
         truncatedProjects: Boolean(data?.truncatedProjects),
         ...(parseProfileRetentionMap(data?.retention)
           ? { retention: parseProfileRetentionMap(data?.retention) }
@@ -589,6 +596,7 @@ export async function fetchProfileMadeDecisions(
       answerers: Array.isArray(data?.answerers) ? data.answerers : [],
       ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
       projects: Array.isArray(data?.projects) ? data.projects : [],
+      ...(data?.facetsTruncated ? { facetsTruncated: data.facetsTruncated } : {}),
       truncatedProjects: Boolean(data?.truncatedProjects),
       ...(parseProfileRetentionMap(data?.retention)
         ? { retention: parseProfileRetentionMap(data?.retention) }
@@ -596,6 +604,39 @@ export async function fetchProfileMadeDecisions(
       ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
     };
   });
+}
+
+/** Fetches `GET /api/v1/users/me/decisions/suggestions`. */
+export async function fetchProfileDecisionSuggestions(options: {
+  key: string;
+  prefix?: string | undefined;
+  limit?: number | undefined;
+  cursor?: string | undefined;
+  signal?: AbortSignal | undefined;
+}): Promise<DecisionSuggestionsResponse> {
+  const params = new URLSearchParams();
+  params.set('key', options.key);
+  if (options.prefix !== undefined && options.prefix !== '') {
+    params.set('prefix', options.prefix);
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  if (options.cursor) {
+    params.set('cursor', options.cursor);
+  }
+  const url = `/api/v1/users/me/decisions/suggestions?${params.toString()}`;
+  const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
+  if (!res.ok) {
+    return throwDecisionsApiError(res);
+  }
+  const data = (await res.json()) as Partial<DecisionSuggestionsResponse> | null;
+  return {
+    key: data?.key ?? options.key,
+    values: Array.isArray(data?.values) ? data.values : [],
+    total: typeof data?.total === 'number' ? data.total : 0,
+    ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
+  };
 }
 
 /**

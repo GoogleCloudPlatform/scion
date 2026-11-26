@@ -8576,6 +8576,7 @@ func (s *Server) registerRoutes() {
 
 	// Profile decisions roll-up across member projects (/users/me/decisions)
 	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.withDecisionsBellReconcile(s.handleUserMeDecisions)))
+	s.mux.HandleFunc("/api/v1/users/me/decisions/suggestions", s.guarded("/api/v1/users/me/decisions/suggestions", s.handleUserMeDecisionSuggestions))
 
 	// Profile inbox summary across categories (/users/me/inbox/summary)
 	s.mux.HandleFunc("/api/v1/users/me/inbox/summary", s.guarded("/api/v1/users/me/inbox/summary", s.handleUserMeInboxSummary))

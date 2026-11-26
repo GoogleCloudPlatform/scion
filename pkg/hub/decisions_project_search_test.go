@@ -390,12 +390,12 @@ func TestDecisionAgentFacetViews_LabelsAndHints(t *testing.T) {
 		agentNames: map[string]string{},
 	}}
 	deletedID := "3f9c0000-0000-0000-0000-000000000000"
-	got := decisionAgentFacetViews(set, []store.ProjectDecisionActor{
+	got, _ := decisionAgentFacetViews(set, []store.ProjectDecisionActor{
 		{ID: liveA.ID, Name: "release-bot"},
 		{ID: deletedID, Name: "release-bot"},
 		{ID: renamed.ID, Name: "old-builder-name"},
 		{ID: "eeee5555-0000-0000-0000-000000000000", Name: "solo-deleted"},
-	})
+	}, true)
 	assert.Equal(t, []ProjectDecisionActorView{
 		{ID: renamed.ID, Name: "builder"},
 		{ID: liveA.ID, Name: "release-bot"},
@@ -404,10 +404,10 @@ func TestDecisionAgentFacetViews_LabelsAndHints(t *testing.T) {
 	}, got, "live name wins; only a colliding deleted agent gets a hint")
 
 	// Two live agents whose names fold to the same label both get the short id.
-	got = decisionAgentFacetViews(set, []store.ProjectDecisionActor{
+	got, _ = decisionAgentFacetViews(set, []store.ProjectDecisionActor{
 		{ID: liveA.ID, Name: "x"},
 		{ID: liveB.ID, Name: "y"},
-	})
+	}, true)
 	assert.Equal(t, []ProjectDecisionActorView{
 		{ID: liveA.ID, Name: "release-bot", Hint: "aaaa"},
 		{ID: liveB.ID, Name: "Release-Bot", Hint: "bbbb"},

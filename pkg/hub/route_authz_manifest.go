@@ -165,7 +165,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/exec-container": "authenticated", // GET/PUT/DELETE: caller's own registration; session/dev credential only (requireSessionCredentialFor)
 
 	// ── Profile decisions roll-up ──────────────────────────────────────
-	"/api/v1/users/me/decisions": "authenticated", // GET: caller's decisions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
+	"/api/v1/users/me/decisions":             "authenticated", // GET: caller's decisions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
+	"/api/v1/users/me/decisions/suggestions": "authenticated", // GET: caller's decision filter suggestions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
 
 	// ── Profile inbox summary ──────────────────────────────────────────
 	"/api/v1/users/me/inbox/summary": "authenticated", // GET: caller's inbox summary across categories; session or UAT with inbox:read

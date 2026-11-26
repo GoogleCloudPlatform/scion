@@ -365,4 +365,104 @@ describe('Project Decisions page — filter query dialect (ptone/scion#9346)', (
     expect(options[0].querySelector('.option-label')?.textContent).toBe('me');
     expect(options[0].querySelector('.option-help')?.textContent).toBe('You · Alice');
   });
+
+  it('makes no /suggestions requests when facets are not truncated', async () => {
+    vi.useFakeTimers();
+    try {
+      setServerFlags({ 'web.decisions': true });
+      const el = await mountPage();
+
+      const panel = el.shadowRoot?.querySelector(
+        'scion-decisions-filter-panel'
+      ) as ScionDecisionsFilterPanel;
+      const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+      requestedUrls = [];
+
+      const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+      input.value = 'agent:dep';
+      input.setSelectionRange(9, 9);
+      input.dispatchEvent(new Event('input'));
+      vi.advanceTimersByTime(300);
+      await flushRender(el);
+
+      expect(requestedUrls.some((u) => u.includes('/decisions/suggestions'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fetches /decisions/suggestions only for truncated facets and renders remote results past the cap', async () => {
+    vi.useFakeTimers();
+    try {
+      setServerFlags({ 'web.decisions': true });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          requestedUrls.push(url);
+          if (url.includes(`/api/v1/projects/${PROJECT_ID}/decisions/suggestions`)) {
+            return Promise.resolve(
+              makeResponse({
+                key: 'agent',
+                values: [{ value: 'zzz-past-cap-agent' }],
+                total: 1,
+              })
+            );
+          }
+          if (url.includes(`/api/v1/projects/${PROJECT_ID}/decisions`)) {
+            return Promise.resolve(
+              makeResponse({
+                counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+                prompts: [],
+                ...defaultFacets(),
+                facetsTruncated: { agents: true },
+              })
+            );
+          }
+          if (url.includes(`/api/v1/projects/${PROJECT_ID}`)) {
+            return Promise.resolve(makeResponse({ id: PROJECT_ID, name: 'Demo', slug: 'demo' }));
+          }
+          return Promise.resolve(makeResponse({}));
+        })
+      );
+
+      const el = await mountPage();
+      const panel = el.shadowRoot?.querySelector(
+        'scion-decisions-filter-panel'
+      ) as ScionDecisionsFilterPanel;
+      const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+      requestedUrls = [];
+
+      // Non-truncated key (`conversation:`) makes no remote call.
+      const input = box.shadowRoot?.querySelector('input') as HTMLInputElement;
+      input.value = 'conversation:ops';
+      input.setSelectionRange(16, 16);
+      input.dispatchEvent(new Event('input'));
+      vi.advanceTimersByTime(250);
+      await flushRender(el);
+      expect(requestedUrls.some((u) => u.includes('/decisions/suggestions'))).toBe(false);
+
+      // Truncated key (`agent:`) calls /decisions/suggestions and shows remote option.
+      input.value = 'agent:zzz-past';
+      input.setSelectionRange(14, 14);
+      input.dispatchEvent(new Event('input'));
+      vi.advanceTimersByTime(250);
+      await flushRender(el);
+
+      expect(
+        requestedUrls.some((u) =>
+          u.includes(
+            `/api/v1/projects/${PROJECT_ID}/decisions/suggestions?key=agent&prefix=zzz-past`
+          )
+        )
+      ).toBe(true);
+      const labels = Array.from(box.shadowRoot?.querySelectorAll('.option-label') ?? []).map(
+        (n) => n.textContent
+      );
+      expect(labels).toEqual(['zzz-past-cap-agent']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

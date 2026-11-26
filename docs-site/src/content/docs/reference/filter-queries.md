@@ -79,7 +79,7 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 
 ### `decisions` (Project Decisions page)
 
-Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Pure-text `q` requires at least 2 characters, and all `q` values follow the dialect limits above (max 512 bytes, 200 characters of search text; over-limit queries return `400 invalid_filter_query`). Covers both the **Waiting on you** (Pending) and **Made** tabs; Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning. Date range bounds (`From` / `To`) remain date inputs alongside the filter box on the Made tab.
+Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Pure-text `q` requires at least 2 characters, and all `q` values follow the dialect limits above (max 512 bytes, 200 characters of search text; over-limit queries return `400 invalid_filter_query`). Covers both the **Waiting on you** (Pending) and **Made** tabs; Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning. Date range bounds (`From` / `To`) remain date inputs alongside the filter box on the Made tab. Inline `agents`, `answerers`, and `conversations` facets cap at 500 entries per list response; when any facet exceeds that cap, the response sets the corresponding flag on `facetsTruncated`, and the filter box queries remote value suggestions (`GET /api/v1/projects/{id}/decisions/suggestions`) only for truncated keys so values past the cap remain discoverable.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -90,7 +90,7 @@ Text search matches decision **question**, **answer**, **conversation label**, o
 
 ### `profile-decisions` (Profile Decisions page)
 
-Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring), with the same `q` limits as `decisions` (min 2 characters for pure text, max 512 bytes, max 200 characters of search text; `400 invalid_filter_query` when exceeded). Exposes the same keys as `decisions` plus `project:`, which resolves strictly within the caller's readable member projects (up to the 200-project scope). Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning, and `From` / `To` remain date inputs alongside the filter box on the Made tab.
+Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring), with the same `q` limits as `decisions` (min 2 characters for pure text, max 512 bytes, max 200 characters of search text; `400 invalid_filter_query` when exceeded). Exposes the same keys as `decisions` plus `project:`, which resolves strictly within the caller's readable member projects (up to the 200-project scope). Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning, and `From` / `To` remain date inputs alongside the filter box on the Made tab. As on the project page, inline `agents`, `answerers`, and `conversations` facets cap at 500 entries with `facetsTruncated` signalling truncation; remote suggestions (`GET /api/v1/users/me/decisions/suggestions`) are queried only for truncated `agent`, `conversation`, and `by` keys (`project:` stays local-only).
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |

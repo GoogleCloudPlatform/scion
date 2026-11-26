@@ -296,4 +296,397 @@ describe('<scion-filter-box>', () => {
     expect(feedback?.classList.contains('warning')).toBe(true);
     expect(feedback?.textContent).toContain('by: applies to the Made tab only');
   });
+
+  it('debounces remoteValueSuggestions by 250ms, dims local results with Searching… and aria-busy, then replaces with remote results and footer', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = () => [{ value: 'deploy-local' }];
+
+    let resolveRemote:
+      | ((val: { values: Array<{ value: string; help?: string }>; total: number }) => void)
+      | null = null;
+    const provider = vi.fn(
+      () =>
+        new Promise<{ values: Array<{ value: string; help?: string }>; total: number }>(
+          (resolve) => {
+            resolveRemote = resolve;
+          }
+        )
+    );
+    el.remoteValueSuggestions = provider;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Local results appear immediately; remote not called at 249ms, called at 250ms.
+    expect(provider).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelectorAll('[role="option"]')).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('[data-remote-status="loading"]')).toBeNull();
+
+    vi.advanceTimersByTime(249);
+    await el.updateComplete;
+    expect(provider).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    await el.updateComplete;
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider).toHaveBeenCalledWith('agent', 'dep', expect.any(AbortSignal));
+    const listbox = el.shadowRoot?.querySelector('[role="listbox"]');
+    expect(listbox?.getAttribute('aria-busy')).toBe('true');
+    expect(el.shadowRoot?.querySelector('[data-remote-status="loading"]')?.textContent).toContain(
+      'Searching…'
+    );
+    expect(el.shadowRoot?.querySelector('[role="option"]')?.classList.contains('dim')).toBe(true);
+
+    // Resolve with remote results + total > shown.
+    resolveRemote!({
+      values: [{ value: 'deploy-frontend' }, { value: 'deploy-frontend', help: 'deleted · 3f9c' }],
+      total: 143,
+    });
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(listbox?.getAttribute('aria-busy')).toBeNull();
+    const opts = Array.from(el.shadowRoot?.querySelectorAll('[role="option"]') ?? []);
+    expect(opts).toHaveLength(2);
+    expect(opts[0].classList.contains('dim')).toBe(false);
+    expect(opts[0].querySelector('.option-label')?.textContent).toBe('deploy-frontend');
+    expect(opts[1].querySelector('.option-help')?.textContent).toBe('deleted · 3f9c');
+    const footer = el.shadowRoot?.querySelector('[data-remote-footer]');
+    expect(footer?.textContent).toContain('Showing 2 of 143 · keep typing');
+    expect(listbox?.contains(footer ?? null)).toBe(false);
+    expect(el.shadowRoot?.querySelector('[role="listbox"] [data-remote-footer]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '143 suggestions'
+    );
+  });
+
+  it('aborts in-flight remoteValueSuggestions request when user types again', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+
+    const signals: AbortSignal[] = [];
+    const resolvers: Array<(v: Array<{ value: string }>) => void> = [];
+    el.remoteValueSuggestions = (_key, _prefix, signal) => {
+      signals.push(signal);
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    };
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:de';
+    input.setSelectionRange(8, 8);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    // Typing again aborts the first request.
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    expect(signals[0].aborted).toBe(true);
+
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(signals).toHaveLength(2);
+    expect(signals[1].aborted).toBe(false);
+
+    // Fresh request resolves first, then late stale request resolves and must not overwrite.
+    resolvers[1]([{ value: 'fresh-agent' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+    resolvers[0]([{ value: 'stale-agent' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const labels = Array.from(el.shadowRoot?.querySelectorAll('.option-label') ?? []).map(
+      (n) => n.textContent
+    );
+    expect(labels).toEqual(['fresh-agent']);
+  });
+
+  it('cancels remote suggestions and keeps listbox closed when host changes value externally', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+
+    let resolveRemote: ((v: Array<{ value: string }>) => void) | null = null;
+    let capturedSignal: AbortSignal | null = null;
+    el.remoteValueSuggestions = (_key, _prefix, signal) => {
+      capturedSignal = signal;
+      return new Promise((resolve) => {
+        resolveRemote = resolve;
+      });
+    };
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:de';
+    input.setSelectionRange(8, 8);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(capturedSignal).not.toBeNull();
+    expect(capturedSignal!.aborted).toBe(false);
+
+    // Host updates value externally (e.g. Clear filters or URL navigation).
+    el.value = 'by:me';
+    await el.updateComplete;
+    expect(capturedSignal!.aborted).toBe(true);
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+
+    // Resolving the cancelled promise must not reopen the listbox.
+    resolveRemote!([{ value: 'deploy-frontend' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim() ?? '').toBe('');
+  });
+
+  it('clears liveAnnouncement between remote queries so consecutive same-count results re-announce', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.remoteValueSuggestions = (_key, prefix) =>
+      Promise.resolve({ values: [{ value: `${prefix}-agent` }], total: 1 });
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:alpha';
+    input.setSelectionRange(11, 11);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '1 suggestion'
+    );
+
+    // Starting the next remote query clears the live region before the next same-count result arrives.
+    input.value = 'agent:beta';
+    input.setSelectionRange(10, 10);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe('');
+
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '1 suggestion'
+    );
+  });
+
+  it('skips remote loading when remoteValueSuggestions returns null', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = () => [{ value: 'deploy-local' }];
+    const provider = vi.fn(() => null);
+    el.remoteValueSuggestions = provider;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(el.shadowRoot?.querySelector('[data-remote-status]')).toBeNull();
+    expect(el.shadowRoot?.querySelectorAll('[role="option"]')).toHaveLength(1);
+  });
+
+  it('shows no-match state and error fallback without blocking typed commit', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    // Empty match state (provider supplies plural noun via emptyLabel).
+    el.remoteValueSuggestions = () =>
+      Promise.resolve({ values: [], total: 0, emptyLabel: 'agents' });
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:zzq';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('[data-remote-status="empty"]')?.textContent).toContain(
+      'No agents match ‘zzq’'
+    );
+
+    // Error fallback state.
+    el.remoteValueSuggestions = () => Promise.reject(new Error('network down'));
+    input.value = 'agent:offline-bot';
+    input.setSelectionRange(17, 17);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('[data-remote-status="error"]')?.textContent).toContain(
+      "Couldn't load suggestions. You can still type a value."
+    );
+
+    // Pressing Enter still commits the typed query.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(commits.some((c) => c.serverQ === 'agent:offline-bot')).toBe(true);
+  });
+
+  it('cancels pending remote suggestions on plain Enter before debounce and while in flight', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+
+    // Scenario (a): press Enter before the 250ms debounce fires -> no provider call, listbox stays closed.
+    const providerA = vi.fn(() =>
+      Promise.resolve({ values: [{ value: 'deploy-frontend' }], total: 1 })
+    );
+    el.remoteValueSuggestions = providerA;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+
+    vi.advanceTimersByTime(300);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(providerA).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+
+    // Scenario (b): press Enter while remote promise is pending -> aborted, listbox stays closed,
+    // no aria-busy, and live region is not updated when the promise resolves.
+    let resolveB: ((v: { values: Array<{ value: string }>; total: number }) => void) | null = null;
+    let signalB: AbortSignal | null = null;
+    el.remoteValueSuggestions = (_key, _prefix, signal) => {
+      signalB = signal;
+      return new Promise((resolve) => {
+        resolveB = resolve;
+      });
+    };
+    await el.updateComplete;
+
+    input.value = 'agent:deploy';
+    input.setSelectionRange(12, 12);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')?.getAttribute('aria-busy')).toBe(
+      'true'
+    );
+
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(signalB!.aborted).toBe(true);
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+
+    resolveB!({ values: [{ value: 'deploy-frontend' }], total: 1 });
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[role="listbox"]')).toBeNull();
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe('');
+  });
+
+  it('preserves active highlight across remote replacement when same value+help remains', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = () => [
+      { value: 'deploy-alpha' },
+      { value: 'deploy-frontend', help: 'deleted · 3f9c' },
+    ];
+    let resolveRemote:
+      | ((v: { values: Array<{ value: string; help?: string }>; total: number }) => void)
+      | null = null;
+    el.remoteValueSuggestions = () =>
+      new Promise((resolve) => {
+        resolveRemote = resolve;
+      });
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Arrow down twice to highlight "deploy-frontend" (deleted · 3f9c).
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+
+    // Remote results place the highlighted item at index 0 -> highlight follows it.
+    resolveRemote!({
+      values: [{ value: 'deploy-frontend', help: 'deleted · 3f9c' }, { value: 'deploy-zeta' }],
+      total: 2,
+    });
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const opts = Array.from(el.shadowRoot?.querySelectorAll('[role="option"]') ?? []);
+    expect(opts[0].classList.contains('active')).toBe(true);
+    expect(opts[1].classList.contains('active')).toBe(false);
+  });
+
+  it('strips a leading unmatched double quote from prefix for both local and remote suggestions', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = (key) => (key === 'by' ? [{ value: 'Sam Taylor' }] : []);
+    const remoteProvider = vi.fn(() =>
+      Promise.resolve({ values: [{ value: 'Sam Taylor', help: 'sam@example.com' }], total: 1 })
+    );
+    el.remoteValueSuggestions = remoteProvider;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'by:"Sam';
+    input.setSelectionRange(7, 7);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Local suggestion matches despite the leading unmatched quote.
+    expect(el.shadowRoot?.querySelector('.option-label')?.textContent).toBe('Sam Taylor');
+
+    // Remote provider receives unquoted prefix "Sam".
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+    expect(remoteProvider).toHaveBeenCalledWith('by', 'Sam', expect.any(AbortSignal));
+
+    // Accepting replaces `"Sam` with `"Sam Taylor"` cleanly.
+    const opt = el.shadowRoot?.querySelector('[role="option"]') as HTMLElement;
+    opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+    expect(el.value).toBe('by:"Sam Taylor"');
+  });
 });
