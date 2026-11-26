@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -168,6 +169,8 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 	})
 
 	insertedEvents := make([]*store.UsageEvent, 0, len(uniqueEvents))
+	var rejectedRows []store.UsageIngestRowRejection
+	var rejectedEvents []*store.UsageEvent
 	dbDuplicates := 0
 
 	if len(uniqueEvents) > 0 {
@@ -197,9 +200,34 @@ ON CONFLICT (hub_id, event_id) DO NOTHING
 RETURNING event_id`, jsonbParam, jsonbParam))
 
 		for _, ev := range uniqueEvents {
+			// Wrap each row insert in a SAVEPOINT so a per-row DB/data error
+			// (e.g., Postgres invalid byte sequence 22021 or constraint error
+			// 23xxx) rolls back only that row and becomes a per-event rejection
+			// instead of aborting the whole batch transaction.
+			var spRes sql.Result
+			if err := drv.Exec(ctx, "SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
+				return nil, mapError(err)
+			}
 			inserted, err := insertUsageEventReturning(ctx, drv, insertSQL, ev)
 			if err != nil {
-				return nil, err
+				if isUsageEventRowDataError(err) {
+					if rbErr := drv.Exec(ctx, "ROLLBACK TO SAVEPOINT sp_usage_event", []any{}, &spRes); rbErr != nil {
+						return nil, mapError(rbErr)
+					}
+					if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); relErr != nil {
+						return nil, mapError(relErr)
+					}
+					rejectedRows = append(rejectedRows, store.UsageIngestRowRejection{
+						EventID: ev.EventID,
+						Reason:  err.Error(),
+					})
+					rejectedEvents = append(rejectedEvents, ev)
+					continue
+				}
+				return nil, mapError(err)
+			}
+			if err := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
+				return nil, mapError(err)
 			}
 			if inserted {
 				insertedEvents = append(insertedEvents, ev)
@@ -228,24 +256,38 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 				anomalousDelta++
 			}
 		}
-		var contig int64
-		if mhUpd.LastContiguousSeq != nil {
-			contig = *mhUpd.LastContiguousSeq
+		receivedSeqs := mhUpd.ReceivedSeqs
+		if len(rejectedEvents) > 0 && len(receivedSeqs) > 0 {
+			dropSeqCounts := make(map[int64]int, len(rejectedEvents))
+			for _, ev := range rejectedEvents {
+				if ev.RunID == mhUpd.RunID && ev.ProducerEpoch == mhUpd.ProducerEpoch && ev.ProducerSeq > 0 {
+					dropSeqCounts[ev.ProducerSeq]++
+				}
+			}
+			if len(dropSeqCounts) > 0 {
+				filtered := make([]int64, 0, len(receivedSeqs))
+				for _, seq := range receivedSeqs {
+					if dropSeqCounts[seq] > 0 {
+						dropSeqCounts[seq]--
+						continue
+					}
+					filtered = append(filtered, seq)
+				}
+				receivedSeqs = filtered
+			}
 		}
 		mh := &store.MeterHealth{
 			AgentID:              mhUpd.AgentID,
 			RunID:                mhUpd.RunID,
 			ProducerEpoch:        mhUpd.ProducerEpoch,
 			LastReceiptAt:        mhUpd.LastReceiptAt,
-			LastContiguousSeq:    contig,
 			MaxSeqSeen:           mhUpd.ProducerSeq,
-			MissingRanges:        mhUpd.MissingRanges,
 			LastSourceActivityAt: mhUpd.LastSourceActivityAt,
 			SupportedSignals:     mhUpd.SupportedSignals,
 			SchemaDriftDetected:  mhUpd.SchemaDriftDetected,
 			FinalState:           mhUpd.FinalState,
 		}
-		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, mhUpd.ReceivedSeqs, true); err != nil {
+		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, receivedSeqs); err != nil {
 			return nil, err
 		}
 	}
@@ -253,7 +295,32 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 	return &store.UsageIngestBatchResult{
 		Accepted:   len(insertedEvents),
 		Duplicates: intraDuplicates + dbDuplicates,
+		Rejected:   rejectedRows,
 	}, nil
+}
+
+// isUsageEventRowDataError reports whether err is a per-row data or integrity
+// constraint error (Postgres SQLSTATE class 22 data exception or class 23
+// integrity constraint violation; SQLite SQLITE_CONSTRAINT or SQLITE_MISMATCH)
+// that should reject only the offending event rather than failing the batch.
+// Transient/infrastructure errors (deadlocks 40P01, serialization 40001,
+// connection errors 08xxx, SQLITE_BUSY/LOCKED) return false so the batch fails
+// and the client retries.
+func isUsageEventRowDataError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		state := pgErr.SQLState()
+		return strings.HasPrefix(state, "22") || strings.HasPrefix(state, "23")
+	}
+	var sqliteErr interface{ Code() int }
+	if errors.As(err, &sqliteErr) {
+		primary := sqliteErr.Code() & 0xff
+		return primary == 19 || primary == 20 // SQLITE_CONSTRAINT, SQLITE_MISMATCH
+	}
+	return false
 }
 
 func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQL string, ev *store.UsageEvent) (bool, error) {
@@ -319,7 +386,7 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, insertSQL, args, rows); err != nil {
-		return false, mapError(err)
+		return false, err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -327,12 +394,12 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 	if rows.Next() {
 		var returnedEventID string
 		if err := rows.Scan(&returnedEventID); err != nil {
-			return false, mapError(err)
+			return false, err
 		}
 		inserted = returnedEventID != ""
 	}
 	if err := rows.Err(); err != nil {
-		return false, mapError(err)
+		return false, err
 	}
 	return inserted, nil
 }
@@ -672,87 +739,6 @@ func advanceIngestSeqState(
 	return nextContig, nextMax, cur
 }
 
-// advanceSeqState computes the monotonic (last_contiguous_seq, max_seq_seen,
-// missing_ranges) state from existing persisted values, an incoming update, and
-// any exact received sequence numbers in the current batch.
-//
-// Invariants enforced (§4.3, P1.1 review O6):
-//   - last_contiguous_seq and max_seq_seen only advance.
-//   - Within [1, existingMax], missing_ranges can only shrink (a stale writer
-//     can never re-introduce or expand a gap in already-observed sequences).
-//   - Any receivedSeqs fill existing gaps and advance last_contiguous_seq once
-//     gaps close.
-func advanceSeqState(
-	existingContig, existingMax int64,
-	existingMissing []store.SeqRange,
-	incomingContig, incomingMax int64,
-	incomingMissing []store.SeqRange,
-	receivedSeqs []int64,
-) (nextContig, nextMax int64, nextMissing []store.SeqRange) {
-	nextContig = existingContig
-	if incomingContig > nextContig {
-		nextContig = incomingContig
-	}
-	nextMax = existingMax
-	if incomingMax > nextMax {
-		nextMax = incomingMax
-	}
-	for _, seq := range receivedSeqs {
-		if seq > nextMax {
-			nextMax = seq
-		}
-	}
-
-	// Start with existing missing ranges in [1, existingMax].
-	cur := normalizeSeqRanges(existingMissing)
-	if incomingMissing != nil {
-		incNorm := normalizeSeqRanges(incomingMissing)
-		if existingMax > 0 {
-			// In the already-observed region [1, existingMax], missing_ranges
-			// may only shrink: intersect existing with incoming.
-			cur = intersectSeqRanges(cur, incNorm)
-			// When no receivedSeqs are supplied (e.g., direct UpsertMeterHealth),
-			// incoming gaps above existingMax are new information.
-			if len(receivedSeqs) == 0 && incomingMax > existingMax {
-				above := clipSeqRanges(incNorm, existingMax+1, incomingMax)
-				cur = normalizeSeqRanges(append(cur, above...))
-			}
-		} else if len(receivedSeqs) == 0 {
-			cur = incNorm
-		}
-	}
-
-	// Track emitted (nextMax) separately from received (receivedSeqs):
-	// whenever max_seq_seen advances (from a batch or heartbeat), every
-	// newly emitted sequence in (existingMax, nextMax] starts as missing
-	// until actually received (R1).
-	if (len(receivedSeqs) > 0 || incomingMissing == nil) && nextMax > existingMax {
-		cur = normalizeSeqRanges(append(cur, store.SeqRange{Start: existingMax + 1, End: nextMax}))
-	}
-	if len(receivedSeqs) > 0 {
-		cur = subtractSeqsFromRanges(cur, receivedSeqs)
-	}
-
-	// Prune anything <= nextContig.
-	cur = pruneRangesAtOrBelow(cur, nextContig)
-
-	// Advance nextContig ONLY up to the first missing sequence (never past
-	// unreceived emitted sequences).
-	if len(receivedSeqs) > 0 && nextMax > nextContig {
-		if len(cur) == 0 {
-			nextContig = nextMax
-		} else if cur[0].Start-1 > nextContig {
-			nextContig = cur[0].Start - 1
-		}
-		cur = pruneRangesAtOrBelow(cur, nextContig)
-	}
-
-	if len(cur) == 0 {
-		return nextContig, nextMax, nil
-	}
-	return nextContig, nextMax, cur
-}
-
 func normalizeSeqRanges(in []store.SeqRange) []store.SeqRange {
 	if len(in) == 0 {
 		return nil
@@ -785,54 +771,6 @@ func normalizeSeqRanges(in []store.SeqRange) []store.SeqRange {
 			}
 		} else {
 			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func intersectSeqRanges(a, b []store.SeqRange) []store.SeqRange {
-	if len(a) == 0 || len(b) == 0 {
-		return nil
-	}
-	var out []store.SeqRange
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		start := a[i].Start
-		if b[j].Start > start {
-			start = b[j].Start
-		}
-		end := a[i].End
-		if b[j].End < end {
-			end = b[j].End
-		}
-		if start <= end {
-			out = append(out, store.SeqRange{Start: start, End: end})
-		}
-		if a[i].End < b[j].End {
-			i++
-		} else {
-			j++
-		}
-	}
-	return out
-}
-
-func clipSeqRanges(in []store.SeqRange, lo, hi int64) []store.SeqRange {
-	if len(in) == 0 || hi < lo {
-		return nil
-	}
-	var out []store.SeqRange
-	for _, r := range in {
-		s := r.Start
-		if s < lo {
-			s = lo
-		}
-		e := r.End
-		if e > hi {
-			e = hi
-		}
-		if s <= e {
-			out = append(out, store.SeqRange{Start: s, End: e})
 		}
 	}
 	return out

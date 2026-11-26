@@ -210,15 +210,19 @@ func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {
 		go func(seq int64) {
 			defer wg.Done()
 			<-start
-			errs <- cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-				AgentID:           agentID,
-				RunID:             runID,
-				ProducerEpoch:     epoch,
-				LastReceiptAt:     t0.Add(time.Duration(seq) * time.Second),
-				LastContiguousSeq: seq,
-				MaxSeqSeen:        seq,
-				FinalState:        store.MeterHealthFinalStateOpen,
+			_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+				AgentID: agentID,
+				MeterHealth: &store.UsageMeterHealthUpdate{
+					AgentID:       agentID,
+					RunID:         runID,
+					ProducerEpoch: epoch,
+					LastReceiptAt: t0.Add(time.Duration(seq) * time.Second),
+					ProducerSeq:   seq,
+					ReceivedSeqs:  []int64{seq},
+					FinalState:    store.MeterHealthFinalStateOpen,
+				},
 			})
+			errs <- err
 		}(int64(i))
 	}
 	close(start)
@@ -234,4 +238,62 @@ func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {
 	require.Len(t, mhs, 1)
 	assert.Equal(t, int64(workers), mhs[0].LastContiguousSeq, "highest contiguous seq must be preserved across Postgres first-insert race")
 	assert.Equal(t, int64(workers), mhs[0].MaxSeqSeen)
+	assert.Empty(t, mhs[0].MissingRanges)
+}
+
+func TestUsageIngest_PerRowDBRejection_Postgres(t *testing.T) {
+	requirePostgres(t)
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+	require.Equal(t, dialect.Postgres, cs.client.Driver().Dialect())
+
+	projectID := createTestProject(t, cs, "pg-per-row-reject")
+	userID := createTestUser(t, cs, "pg-per-row-reject@example.com")
+	agentID := uuid.NewString()
+	runID := "run-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+	ts := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	good1 := makeStoreUsageEvent("hub-pg", "pg-good-1", runID, projectID, agentID, &userID, 1, ts, 100, 40, 10, 5)
+	// Postgres rejects NUL bytes in TEXT columns with SQLSTATE 22021.
+	badNUL := makeStoreUsageEvent("hub-pg", "pg-bad-nul", runID, projectID, agentID, &userID, 2, ts.Add(time.Second), 500, 500, 0, 0)
+	badNUL.Model = "claude\x00poison"
+	good3 := makeStoreUsageEvent("hub-pg", "pg-good-3", runID, projectID, agentID, &userID, 3, ts.Add(2*time.Second), 200, 60, 20, 10)
+
+	res, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{good1, badNUL, good3},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(3 * time.Second),
+			ProducerSeq:   3,
+			ReceivedSeqs:  []int64{1, 2, 3},
+		},
+	})
+	require.NoError(t, err, "Postgres NUL byte in one row must not abort the batch")
+	assert.Equal(t, 2, res.Accepted)
+	assert.Equal(t, 0, res.Duplicates)
+	require.Len(t, res.Rejected, 1)
+	assert.Equal(t, "pg-bad-nul", res.Rejected[0].EventID)
+
+	rollup, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), rollup.Events)
+	assert.Equal(t, int64(300), rollup.Input)
+	assert.Equal(t, int64(100), rollup.Output)
+
+	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	require.Len(t, mhs, 1)
+	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
 }

@@ -434,3 +434,106 @@ func TestUsageIngest_BrokerHarvestRoute(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, 1, resp.Accepted)
 }
+
+func TestUsageIngest_PoisonEventAndDefaultHubID(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	// Explicitly clear srv.HubID() to verify N2: capabilities,
+	// run_attribution, and usage_events all share the same "hub-local" fallback.
+	srv.SetHubID("")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	proj := &store.Project{ID: tid("usage-poison-proj"), Name: "usage-poison", Slug: "usage-poison"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:        tid("usage-poison-agent"),
+		Slug:      "usage-poison-agent",
+		Name:      "usage-poison-agent",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Harness: "claude",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-poison-1", nil)
+	require.NoError(t, err)
+
+	// Verify run_attribution got "hub-local" (N2).
+	attr, err := s.GetRunAttribution(ctx, "run-poison-1")
+	require.NoError(t, err)
+	assert.Equal(t, "hub-local", attr.HubID)
+
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	// Verify capabilities also advertises "hub-local" (N2).
+	capRec := doAgentUsageRequest(t, srv, http.MethodGet, telemetrycontract.UsageCapabilitiesAgentPath(ag.ID), tok, nil)
+	require.Equal(t, http.StatusOK, capRec.Code, capRec.Body.String())
+	var capResp telemetrycontract.UsageCapabilitiesResponse
+	require.NoError(t, json.Unmarshal(capRec.Body.Bytes(), &capResp))
+	assert.Equal(t, "hub-local", capResp.HubID)
+
+	// O1: A poison event with a NUL byte in Model must be rejected per-event as
+	// invalid_event while the other valid events in the batch succeed with 200.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ev1 := makeWireUsageEvent("", ag.ID, proj.ID, "run-poison-1", "evt-poison-good-1", 1, now, 100, 20)
+	evBad := makeWireUsageEvent("", ag.ID, proj.ID, "run-poison-1", "evt-poison-nul", 2, now.Add(time.Second), 999, 999)
+	evBad.Model = "claude\x00poison"
+	ev3 := makeWireUsageEvent("", ag.ID, proj.ID, "run-poison-1", "evt-poison-good-3", 3, now.Add(2*time.Second), 200, 30)
+
+	reqBody := telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{ev1, evBad, ev3},
+		RunID:         "run-poison-1",
+		ProducerEpoch: "ep-1",
+		ProducerSeq:   3,
+		// N1: producer-supplied missing_ranges must be ignored by the Hub.
+		MissingRanges: []telemetrycontract.UsageSeqRange{{Start: 99, End: 100}},
+	}
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, reqBody)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, 2, resp.Accepted)
+	assert.Equal(t, 0, resp.Duplicates)
+	require.Len(t, resp.Rejected, 1)
+	assert.Equal(t, 1, resp.Rejected[0].Index)
+	assert.Equal(t, "evt-poison-nul", resp.Rejected[0].EventID)
+	assert.Equal(t, telemetrycontract.UsageRejectInvalidEvent, resp.Rejected[0].Code)
+
+	// Replay is idempotent: 0 accepted, 2 duplicates, 1 rejected.
+	rec2 := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, reqBody)
+	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+	var resp2 telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, 0, resp2.Accepted)
+	assert.Equal(t, 2, resp2.Duplicates)
+	require.Len(t, resp2.Rejected, 1)
+
+	// Verify stored usage_events row has hub_id == "hub-local" and exact rollup.
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "test store must be CompositeStore")
+	entClient := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, cs.DB())))
+	row, err := entClient.UsageEvent.Query().
+		Where(usageevent.HubIDEQ("hub-local"), usageevent.EventIDEQ("evt-poison-good-1")).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "hub-local", row.HubID)
+
+	dayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	rollup, err := entClient.UsageRollupDaily.Query().
+		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(ag.ID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), rollup.Events)
+	assert.Equal(t, int64(300), rollup.Input)
+	assert.Equal(t, int64(50), rollup.Output)
+
+	// Verify meter_health: seq 2 is missing (rejected), producer's [99,100] ignored.
+	mhs, err := s.GetMeterHealth(ctx, ag.ID, "run-poison-1")
+	require.NoError(t, err)
+	require.Len(t, mhs, 1)
+	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
+}

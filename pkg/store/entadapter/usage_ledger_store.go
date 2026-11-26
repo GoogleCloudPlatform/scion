@@ -612,45 +612,17 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 	return inserted, errors.Join(rowErrs...)
 }
 
-// UpsertMeterHealth implements store.UsageLedgerStore.UpsertMeterHealth.
-// Enforces monotonic sequence, shrinking-only missing_ranges, first-insert
-// race safety, and one-way final_state progression per §4.3.
-func (s *UsageLedgerStore) UpsertMeterHealth(ctx context.Context, mh *store.MeterHealth) error {
-	if mh == nil || mh.AgentID == "" || mh.RunID == "" || mh.ProducerEpoch == "" {
-		return fmt.Errorf("%w: agent_id, run_id, and producer_epoch are required", store.ErrInvalidInput)
-	}
-	run := func(client *ent.Client) error {
-		return s.upsertMeterHealthTx(ctx, client, mh, 0, nil, false)
-	}
-	if s.inTx {
-		return run(s.client)
-	}
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return mapError(err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := run(tx.Client()); err != nil {
-		return err
-	}
-	return mapError(tx.Commit())
-}
-
 // upsertMeterHealthTx performs a race-safe monotonic upsert of meter_health
-// inside the caller's transaction. When anomalousDelta > 0, it is added to
-// existing.AnomalousCount instead of taking max(existing, mh.AnomalousCount).
-// When ingestMode is true (called from IngestUsageBatch), the Hub is the sole
-// authority on sequence gaps and contiguity: (existingMax, maxSeq] minus
-// receivedSeqs is always added to missing_ranges, producer-supplied
-// missing_ranges and last_contiguous_seq are ignored, and last_contiguous_seq
-// advances strictly through receivedSeqs.
+// inside IngestUsageBatch's transaction. The Hub is the sole authority on
+// sequence gaps and contiguity: (existingMax, maxSeq] minus receivedSeqs is
+// always added to missing_ranges, and last_contiguous_seq advances strictly
+// through receivedSeqs.
 func (s *UsageLedgerStore) upsertMeterHealthTx(
 	ctx context.Context,
 	client *ent.Client,
 	mh *store.MeterHealth,
 	anomalousDelta int64,
 	receivedSeqs []int64,
-	ingestMode bool,
 ) error {
 	lastReceipt := mh.LastReceiptAt
 	if lastReceipt.IsZero() {
@@ -690,20 +662,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	}
 
 	if existing == nil {
-		var initContig, initMax int64
-		var initMissing []store.SeqRange
-		if ingestMode {
-			initContig, initMax, initMissing = advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
-		} else {
-			initContig, initMax, initMissing = advanceSeqState(
-				0, 0, nil,
-				mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
-			)
-		}
-		initAnom := mh.AnomalousCount
-		if anomalousDelta > 0 {
-			initAnom = anomalousDelta
-		}
+		initContig, initMax, initMissing := advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
 		newID := uuid.New()
 		b := client.MeterHealth.Create().
 			SetID(newID).
@@ -714,7 +673,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 			SetLastContiguousSeq(initContig).
 			SetMaxSeqSeen(initMax).
 			SetNillableLastSourceActivityAt(lastSourceActivity).
-			SetAnomalousCount(initAnom).
+			SetAnomalousCount(anomalousDelta).
 			SetSchemaDriftDetected(mh.SchemaDriftDetected).
 			SetFinalState(finalState).
 			SetUpdatedAt(now)
@@ -749,26 +708,12 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	if lastReceipt.After(nextReceipt) {
 		nextReceipt = lastReceipt
 	}
-	var nextContig, nextMax int64
-	var nextMissing []store.SeqRange
-	if ingestMode {
-		nextContig, nextMax, nextMissing = advanceIngestSeqState(
-			existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
-			mh.MaxSeqSeen, receivedSeqs,
-		)
-	} else {
-		nextContig, nextMax, nextMissing = advanceSeqState(
-			existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
-			mh.LastContiguousSeq, mh.MaxSeqSeen, mh.MissingRanges, receivedSeqs,
-		)
-	}
+	nextContig, nextMax, nextMissing := advanceIngestSeqState(
+		existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
+		mh.MaxSeqSeen, receivedSeqs,
+	)
 
-	nextAnomalous := existing.AnomalousCount
-	if anomalousDelta > 0 {
-		nextAnomalous += anomalousDelta
-	} else if mh.AnomalousCount > nextAnomalous {
-		nextAnomalous = mh.AnomalousCount
-	}
+	nextAnomalous := existing.AnomalousCount + anomalousDelta
 	nextDrift := existing.SchemaDriftDetected || mh.SchemaDriftDetected
 	nextFinal := existing.FinalState
 	if nextFinal == store.MeterHealthFinalStateOpen &&

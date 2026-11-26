@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -78,7 +79,7 @@ func (s *Server) handleAgentUsageCapabilities(w http.ResponseWriter, r *http.Req
 		MaxBatchBytes:        telemetrycontract.UsageIngestMaxBatchBytes,
 		HeartbeatIntervalSec: telemetrycontract.DefaultUsageHeartbeatIntervalSec,
 		DrainIntervalSec:     telemetrycontract.DefaultUsageDrainIntervalSec,
-		HubID:                s.HubID(),
+		HubID:                s.usageLedgerHubID(),
 		RunID:                agent.RunID,
 	})
 }
@@ -218,11 +219,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
-	selfHubID := s.HubID()
-	effectiveHubID := selfHubID
-	if effectiveHubID == "" {
-		effectiveHubID = "hub-local"
-	}
+	effectiveHubID := s.usageLedgerHubID()
 
 	attrCache := make(map[string]*store.RunAttribution)
 	resolveAttribution := func(runID string) (*store.RunAttribution, string, string, error) {
@@ -267,11 +264,24 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 
 	rejected := make([]telemetrycontract.UsageIngestRejection, 0)
 	validEvents := make([]*store.UsageEvent, 0, len(req.Events))
+	eventIndexByID := make(map[string]int, len(req.Events))
 
 	for i := range req.Events {
 		ev := &req.Events[i]
 
 		if err := ev.Validate(); err != nil {
+			rejected = append(rejected, telemetrycontract.UsageIngestRejection{
+				Index:   i,
+				EventID: ev.EventID,
+				Code:    telemetrycontract.UsageRejectInvalidEvent,
+				Reason:  err.Error(),
+			})
+			continue
+		}
+
+		// Reject NUL bytes in free-text fields consistently across dialects
+		// (Postgres TEXT columns reject 0x00 with SQLSTATE 22021).
+		if err := checkUsageEventNoNULBytes(ev); err != nil {
 			rejected = append(rejected, telemetrycontract.UsageIngestRejection{
 				Index:   i,
 				EventID: ev.EventID,
@@ -293,7 +303,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		}
 
 		// Hub ID match (§4.1 item 3).
-		if ev.HubID != "" && selfHubID != "" && ev.HubID != selfHubID {
+		if ev.HubID != "" && ev.HubID != effectiveHubID {
 			rejected = append(rejected, telemetrycontract.UsageIngestRejection{
 				Index:   i,
 				EventID: ev.EventID,
@@ -427,6 +437,9 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		if storeEv.BrokerID == "" && brokerID != "" {
 			storeEv.BrokerID = brokerID
 		}
+		if _, exists := eventIndexByID[ev.EventID]; !exists {
+			eventIndexByID[ev.EventID] = i
+		}
 		validEvents = append(validEvents, storeEv)
 	}
 
@@ -447,6 +460,20 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	if len(res.Rejected) > 0 {
+		for _, r := range res.Rejected {
+			rejected = append(rejected, telemetrycontract.UsageIngestRejection{
+				Index:   eventIndexByID[r.EventID],
+				EventID: r.EventID,
+				Code:    telemetrycontract.UsageRejectInvalidEvent,
+				Reason:  r.Reason,
+			})
+		}
+		sort.Slice(rejected, func(i, j int) bool {
+			return rejected[i].Index < rejected[j].Index
+		})
 	}
 
 	writeJSON(w, http.StatusOK, telemetrycontract.UsageIngestResponse{
@@ -505,28 +532,54 @@ func buildMeterHealthUpdate(
 		}
 	}
 
-	var missing []store.SeqRange
-	if req.MissingRanges != nil {
-		missing = make([]store.SeqRange, len(req.MissingRanges))
-		for i, r := range req.MissingRanges {
-			missing[i] = store.SeqRange{Start: r.Start, End: r.End}
-		}
-	}
-
 	return &store.UsageMeterHealthUpdate{
 		AgentID:              agentID,
 		RunID:                mhRunID,
 		ProducerEpoch:        mhEpoch,
 		LastReceiptAt:        receivedAt,
 		ProducerSeq:          req.ProducerSeq,
-		LastContiguousSeq:    copyUsageInt64Ptr(req.LastContiguousSeq),
 		ReceivedSeqs:         receivedSeqs,
-		MissingRanges:        missing,
 		LastSourceActivityAt: lastSourceActivity,
 		SupportedSignals:     append([]string(nil), req.SupportedSignals...),
 		SchemaDriftDetected:  req.SchemaDriftDetected,
 		FinalState:           req.FinalState,
 	}, nil
+}
+
+func checkUsageEventNoNULBytes(ev *telemetrycontract.UsageEvent) error {
+	fields := []struct {
+		name string
+		val  string
+	}{
+		{"event_id", ev.EventID},
+		{"run_id", ev.RunID},
+		{"agent_id", ev.AgentID},
+		{"hub_id", ev.HubID},
+		{"model", ev.Model},
+		{"model_source", ev.ModelSource},
+		{"usage_source", ev.UsageSource},
+		{"source_kind", ev.SourceKind},
+		{"source_identity", ev.SourceIdentity},
+		{"source_event_id", ev.SourceEventID},
+		{"session_id", ev.SessionID},
+		{"status", ev.Status},
+		{"token_status", ev.TokenStatus},
+		{"reported_cost_currency", ev.ReportedCostCurrency},
+		{"reported_cost_source", ev.ReportedCostSource},
+		{"producer_epoch", ev.ProducerEpoch},
+		{"event_ts", ev.EventTS},
+	}
+	for _, f := range fields {
+		if strings.ContainsRune(f.val, 0) {
+			return fmt.Errorf("%s contains invalid NUL byte", f.name)
+		}
+	}
+	for _, mf := range ev.MalformedFields {
+		if strings.ContainsRune(mf, 0) {
+			return fmt.Errorf("malformed_fields contains invalid NUL byte")
+		}
+	}
+	return nil
 }
 
 func checkUsageEventSafeIntegers(ev *telemetrycontract.UsageEvent) error {

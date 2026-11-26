@@ -267,15 +267,15 @@ type RunAttributionConfig struct {
 
 // UsageMeterHealthUpdate describes a meter_health update applied atomically
 // inside IngestUsageBatch (for event batches and/or empty heartbeats).
+// The Hub is the sole authority on contiguity and sequence gaps; callers pass
+// ProducerSeq (highest emitted seq) and ReceivedSeqs (seqs actually received).
 type UsageMeterHealthUpdate struct {
 	AgentID              string
 	RunID                string
 	ProducerEpoch        string
 	LastReceiptAt        time.Time
 	ProducerSeq          int64
-	LastContiguousSeq    *int64
 	ReceivedSeqs         []int64
-	MissingRanges        []SeqRange
 	LastSourceActivityAt *time.Time
 	SupportedSignals     []string
 	SchemaDriftDetected  bool
@@ -295,11 +295,19 @@ type UsageIngestBatchInput struct {
 	MeterHealth *UsageMeterHealthUpdate
 }
 
+// UsageIngestRowRejection records a single event rejected at persistence time
+// due to a per-row data or constraint error (rather than failing the batch).
+type UsageIngestRowRejection struct {
+	EventID string
+	Reason  string
+}
+
 // UsageIngestBatchResult reports the counts of newly inserted vs duplicate
-// events persisted by IngestUsageBatch.
+// events persisted by IngestUsageBatch, plus any per-row DB rejections.
 type UsageIngestBatchResult struct {
 	Accepted   int
 	Duplicates int
+	Rejected   []UsageIngestRowRejection
 }
 
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
@@ -338,12 +346,6 @@ type UsageLedgerStore interface {
 	// tokenomics.usage_ledger is enabled and on every OFF -> ON transition.
 	// Returns the number of newly inserted rows.
 	BackfillActiveRunAttributions(ctx context.Context, hubID string) (int, error)
-
-	// UpsertMeterHealth upserts a meter_health row keyed by
-	// (agent_id, run_id, producer_epoch) with monotonic progression:
-	// last_contiguous_seq and max_seq_seen only advance, final_state moves
-	// open -> final|incomplete once.
-	UpsertMeterHealth(ctx context.Context, mh *MeterHealth) error
 
 	// GetMeterHealth returns all meter_health rows for (agentID, runID).
 	GetMeterHealth(ctx context.Context, agentID, runID string) ([]*MeterHealth, error)

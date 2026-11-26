@@ -135,12 +135,12 @@ type UsageIngestRequest struct {
 	// ProducerEpoch as of this batch/heartbeat.
 	ProducerSeq int64 `json:"producer_seq,omitempty"`
 
-	// LastContiguousSeq is the producer's optional contiguous sequence
-	// watermark (all seqs <= this value were produced without local drops).
+	// LastContiguousSeq is retained for wire compatibility and ignored by the
+	// Hub; the Hub is the sole authority on meter_health contiguity.
 	LastContiguousSeq *int64 `json:"last_contiguous_seq,omitempty"`
 
-	// MissingRanges optionally reports inclusive sequence gaps known to the
-	// producer (for example, local outbox overflow drops).
+	// MissingRanges is retained for wire compatibility and ignored by the Hub;
+	// the Hub is the sole authority on meter_health sequence gaps.
 	MissingRanges []UsageSeqRange `json:"missing_ranges,omitempty"`
 
 	// LastSourceActivityAt is the RFC 3339 timestamp of the last observed

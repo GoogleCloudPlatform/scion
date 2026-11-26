@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -472,22 +473,26 @@ func TestMeterHealth_FirstInsertRaceAndShrinkingMissingRanges(t *testing.T) {
 	epoch := "ep-race"
 	t0 := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 
-	// 1. Concurrent first-insert race: 8 goroutines upsert seqs 1..8 on a brand-new key.
+	// 1. Concurrent first-insert race: 8 goroutines ingest seqs 1..8 on a brand-new key.
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for i := 1; i <= 8; i++ {
 		wg.Add(1)
 		go func(seq int64) {
 			defer wg.Done()
-			errs <- cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-				AgentID:           agentID,
-				RunID:             runID,
-				ProducerEpoch:     epoch,
-				LastReceiptAt:     t0.Add(time.Duration(seq) * time.Second),
-				LastContiguousSeq: seq,
-				MaxSeqSeen:        seq,
-				FinalState:        store.MeterHealthFinalStateOpen,
+			_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+				AgentID: agentID,
+				MeterHealth: &store.UsageMeterHealthUpdate{
+					AgentID:       agentID,
+					RunID:         runID,
+					ProducerEpoch: epoch,
+					LastReceiptAt: t0.Add(time.Duration(seq) * time.Second),
+					ProducerSeq:   seq,
+					ReceivedSeqs:  []int64{seq},
+					FinalState:    store.MeterHealthFinalStateOpen,
+				},
 			})
+			errs <- err
 		}(int64(i))
 	}
 	wg.Wait()
@@ -501,29 +506,34 @@ func TestMeterHealth_FirstInsertRaceAndShrinkingMissingRanges(t *testing.T) {
 	require.Len(t, mhs, 1)
 	assert.Equal(t, int64(8), mhs[0].LastContiguousSeq, "highest contiguous seq must not be lost on first-insert race")
 	assert.Equal(t, int64(8), mhs[0].MaxSeqSeen)
+	assert.Empty(t, mhs[0].MissingRanges)
 
-	// 2. Shrinking-only missing_ranges (P1.1 review O6):
-	// Advance to max=15 with gap [11, 13].
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     epoch,
-		LastReceiptAt:     t0.Add(20 * time.Second),
-		LastContiguousSeq: 10,
-		MaxSeqSeen:        15,
-		MissingRanges:     []store.SeqRange{{Start: 11, End: 13}},
-	}))
+	// 2. Monotonic gaps: advance to max=15 delivering {9,10,14,15} -> gap [11, 13].
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: epoch,
+			LastReceiptAt: t0.Add(20 * time.Second),
+			ProducerSeq:   15,
+			ReceivedSeqs:  []int64{9, 10, 14, 15},
+		},
+	})
+	require.NoError(t, err)
 
-	// Stale writer tries to grow missing_ranges to [9, 14] at max=14 — must NOT grow [11, 13].
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     epoch,
-		LastReceiptAt:     t0.Add(15 * time.Second),
-		LastContiguousSeq: 8,
-		MaxSeqSeen:        14,
-		MissingRanges:     []store.SeqRange{{Start: 9, End: 14}},
-	}))
+	// Stale heartbeat at max=14 must NOT regress contiguity, max, or grow [11, 13].
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: epoch,
+			LastReceiptAt: t0.Add(15 * time.Second),
+			ProducerSeq:   14,
+		},
+	})
+	require.NoError(t, err)
 
 	mhs, err = cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
@@ -532,16 +542,19 @@ func TestMeterHealth_FirstInsertRaceAndShrinkingMissingRanges(t *testing.T) {
 	assert.Equal(t, int64(15), mhs[0].MaxSeqSeen)
 	assert.Equal(t, []store.SeqRange{{Start: 11, End: 13}}, mhs[0].MissingRanges, "stale writer must not grow missing_ranges")
 
-	// Writer shrinks gap to [12, 12] -> allowed.
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     epoch,
-		LastReceiptAt:     t0.Add(25 * time.Second),
-		LastContiguousSeq: 11,
-		MaxSeqSeen:        15,
-		MissingRanges:     []store.SeqRange{{Start: 12, End: 12}},
-	}))
+	// Receiving seqs 11 and 13 shrinks gap to [12, 12] and advances contiguous to 11.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: epoch,
+			LastReceiptAt: t0.Add(25 * time.Second),
+			ProducerSeq:   15,
+			ReceivedSeqs:  []int64{11, 13},
+		},
+	})
+	require.NoError(t, err)
 	mhs, err = cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(11), mhs[0].LastContiguousSeq)
@@ -773,7 +786,6 @@ func TestMeterHealth_HubAuthorityIgnoresProducerMissingRanges(t *testing.T) {
 			ProducerEpoch: "ep-a",
 			LastReceiptAt: t0.Add(time.Second),
 			ProducerSeq:   10,
-			MissingRanges: []store.SeqRange{{Start: 3, End: 4}},
 		},
 	})
 	require.NoError(t, err)
@@ -783,11 +795,11 @@ func TestMeterHealth_HubAuthorityIgnoresProducerMissingRanges(t *testing.T) {
 	require.Len(t, mhsA, 1)
 	assert.Equal(t, int64(2), mhsA[0].LastContiguousSeq)
 	assert.Equal(t, int64(10), mhsA[0].MaxSeqSeen)
-	assert.Equal(t, []store.SeqRange{{Start: 3, End: 10}}, mhsA[0].MissingRanges, "heartbeat with producer missing=[3,4] must still keep 3..10 (including 5..10) missing")
+	assert.Equal(t, []store.SeqRange{{Start: 3, End: 10}}, mhsA[0].MissingRanges, "heartbeat to 10 must keep 3..10 missing")
 
 	// Scenario B (RV1): from contiguous=4, max=10, missing=[5,10], a batch
-	// delivering {5} with producer-supplied missing=[3,4] must yield
-	// contiguous=5 and missing=[6,10] (never jumping contiguous to 10).
+	// delivering {5} must yield contiguous=5 and missing=[6,10] (never jumping
+	// contiguous to 10).
 	runB := "run-rv1-b-" + uuid.NewString()
 	seedRunForIngestTest(t, cs, projectID, agentID, runB, nil)
 
@@ -826,7 +838,6 @@ func TestMeterHealth_HubAuthorityIgnoresProducerMissingRanges(t *testing.T) {
 			LastReceiptAt: t0.Add(time.Second),
 			ProducerSeq:   10,
 			ReceivedSeqs:  []int64{5},
-			MissingRanges: []store.SeqRange{{Start: 3, End: 4}},
 		},
 	})
 	require.NoError(t, err)
@@ -836,5 +847,96 @@ func TestMeterHealth_HubAuthorityIgnoresProducerMissingRanges(t *testing.T) {
 	require.Len(t, mhsB, 1)
 	assert.Equal(t, int64(5), mhsB[0].LastContiguousSeq, "contiguous must advance only to 5, never jumping over 6..10")
 	assert.Equal(t, int64(10), mhsB[0].MaxSeqSeen)
-	assert.Equal(t, []store.SeqRange{{Start: 6, End: 10}}, mhsB[0].MissingRanges, "producer missing=[3,4] must never erase Hub-recorded gap [6,10]")
+	assert.Equal(t, []store.SeqRange{{Start: 6, End: 10}}, mhsB[0].MissingRanges, "Hub-recorded gap [6,10] must remain intact")
+}
+
+func TestUsageIngest_PerRowDBRejectionDoesNotFailBatch(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "ingest-per-row-reject")
+	userID := createTestUser(t, cs, "per-row-reject@example.com")
+	agentID := uuid.NewString()
+	runID := "run-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+	ts := time.Date(2026, 11, 25, 22, 0, 0, 0, time.UTC)
+	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	good1 := makeStoreUsageEvent("hub-test", "evt-good-1", runID, projectID, agentID, &userID, 1, ts, 100, 40, 10, 5)
+	// Violates the run_id foreign key constraint at the DB layer (simulating a
+	// per-row DB/data rejection that bypassed earlier validation).
+	badFK := makeStoreUsageEvent("hub-test", "evt-bad-fk", "run-does-not-exist", projectID, agentID, &userID, 2, ts.Add(time.Second), 999, 999, 0, 0)
+	good3 := makeStoreUsageEvent("hub-test", "evt-good-3", runID, projectID, agentID, &userID, 3, ts.Add(2*time.Second), 200, 60, 20, 10)
+
+	batch := &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{good1, badFK, good3},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(3 * time.Second),
+			ProducerSeq:   3,
+			ReceivedSeqs:  []int64{1, 3},
+		},
+	}
+
+	res1, err := cs.IngestUsageBatch(ctx, batch)
+	require.NoError(t, err, "one DB-rejected row must not fail the batch")
+	assert.Equal(t, 2, res1.Accepted)
+	assert.Equal(t, 0, res1.Duplicates)
+	require.Len(t, res1.Rejected, 1)
+	assert.Equal(t, "evt-bad-fk", res1.Rejected[0].EventID)
+	assert.NotEmpty(t, res1.Rejected[0].Reason)
+
+	// Replay the exact same batch: good events are duplicates, bad row is still
+	// rejected, and rollups/scope counters remain exact.
+	res2, err := cs.IngestUsageBatch(ctx, batch)
+	require.NoError(t, err)
+	assert.Equal(t, 0, res2.Accepted)
+	assert.Equal(t, 2, res2.Duplicates)
+	require.Len(t, res2.Rejected, 1)
+	assert.Equal(t, "evt-bad-fk", res2.Rejected[0].EventID)
+
+	// Verify rollups reflect ONLY the 2 good events (never the bad row).
+	rollup, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), rollup.Events)
+	assert.Equal(t, int64(300), rollup.Input)
+	assert.Equal(t, int64(100), rollup.Output)
+	assert.Equal(t, int64(30), rollup.CacheRead)
+	assert.Equal(t, int64(15), rollup.CacheWrite)
+
+	sc, err := client.UsageScopeCounterDaily.Query().
+		Where(
+			usagescopecounterdaily.ScopeKindEQ(store.UsageScopeKindProject),
+			usagescopecounterdaily.ScopeIDEQ(projectID),
+			usagescopecounterdaily.DayUtcEQ(dayUTC),
+		).Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(445), sc.TokensSummable)
+	assert.Equal(t, int64(2), sc.Calls)
+
+	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	require.Len(t, mhs, 1)
+	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
+}
+
+func TestIsUsageEventRowDataError(t *testing.T) {
+	assert.True(t, isUsageEventRowDataError(&pgconn.PgError{Code: "22021"}))  // invalid_byte_sequence (NUL byte)
+	assert.True(t, isUsageEventRowDataError(&pgconn.PgError{Code: "22001"}))  // string_data_right_truncation
+	assert.True(t, isUsageEventRowDataError(&pgconn.PgError{Code: "23503"}))  // foreign_key_violation
+	assert.True(t, isUsageEventRowDataError(&pgconn.PgError{Code: "23514"}))  // check_violation
+	assert.False(t, isUsageEventRowDataError(&pgconn.PgError{Code: "40001"})) // serialization_failure
+	assert.False(t, isUsageEventRowDataError(&pgconn.PgError{Code: "40P01"})) // deadlock_detected
+	assert.False(t, isUsageEventRowDataError(&pgconn.PgError{Code: "08006"})) // connection_failure
+	assert.False(t, isUsageEventRowDataError(nil))
 }
