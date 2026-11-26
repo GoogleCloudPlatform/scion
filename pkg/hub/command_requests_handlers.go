@@ -315,8 +315,6 @@ func (s *Server) buildExecContainerView(ctx context.Context, actor UserIdentity,
 	v := &messages.CommandRequestExecContainerView{
 		State:          string(res.State),
 		HomePersistent: res.HomePersistent,
-		// Wake-on-approve lands in P2; false until then (R2).
-		CanWake: false,
 	}
 	if res.State == ExecContainerStateSuspended && res.Agent != nil && actor != nil && !isManagedAgentRuntime(res.Agent.Runtime) {
 		v.CanWake = s.agentLifecycleAllowed(ctx, actor, res.Agent)

@@ -744,7 +744,7 @@ func TestCommandRequestGet_MessageIDFallbackAndDetailEnrichment(t *testing.T) {
 	assert.Equal(t, "Alice", detail1.ApproverName)
 	assert.Nil(t, detail1.PreviousVersionUnknown)
 	require.NotNil(t, detail1.ExecContainer)
-	assert.False(t, detail1.ExecContainer.CanWake, "R2: canWake must be false before P2 wake lands")
+	assert.False(t, detail1.ExecContainer.CanWake, "canWake is false when execution container is not suspended")
 
 	// O3: negative authorization checks on the message-ID lookup path.
 	// 1. Non-recipient (bob) GET by messageId -> 403 with no request/script/exec_container fields.
