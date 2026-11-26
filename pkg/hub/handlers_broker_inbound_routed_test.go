@@ -825,3 +825,65 @@ func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
+
+func TestHandleBrokerInboundRouted_SurfaceExternalRefWithoutLegacyFields(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Surface:      "slack",
+		ExternalRef:  "C0123ABC:1700000000.000100",
+		ParentRef:    "C0123ABC",
+		DisplayName:  "#eng-routed",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello routed without legacy fields",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	conv, err := env.store.GetConversationByExternalRef(ctx, "slack", "C0123ABC:1700000000.000100")
+	require.NoError(t, err)
+	assert.Equal(t, "C0123ABC", conv.ParentRef)
+	assert.Equal(t, "#eng-routed", conv.DisplayName)
+
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.alpha.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, conv.ID, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+}
+
+func TestHandleBrokerInboundRouted_LegacyChannelThreadIDOnly(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version:  messages.Version,
+			Channel:  "slack",
+			ThreadID: "C9999:1700000002.000300",
+			Sender:   "user:" + env.user.Email,
+			Msg:      "hello routed legacy binary",
+			Type:     messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.alpha.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.NotEmpty(t, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+	assert.Equal(t, "C9999:1700000002.000300", msgs.Items[0].ThreadID)
+}

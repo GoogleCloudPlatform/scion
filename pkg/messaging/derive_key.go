@@ -172,6 +172,7 @@ type conversationByKeyConfig struct {
 	topicLookup    TopicConversationLookup
 	surface        string
 	parentRef      string
+	displayName    string
 	defaultAgentID *string
 	participants   ParticipantEnsurer
 }
@@ -204,6 +205,11 @@ func WithSurface(s string) ConversationByKeyOption {
 // WithParentRef sets the parent_ref for the conversation.
 func WithParentRef(pr string) ConversationByKeyOption {
 	return func(c *conversationByKeyConfig) { c.parentRef = pr }
+}
+
+// WithDisplayName sets the display_name for the conversation when created.
+func WithDisplayName(name string) ConversationByKeyOption {
+	return func(c *conversationByKeyConfig) { c.displayName = name }
 }
 
 // WithDefaultAgentID sets the default_agent_id for the conversation.
@@ -305,6 +311,9 @@ func ResolveOrCreateConversationByKey(
 	}
 	if cfg.parentRef != "" {
 		conv.ParentRef = cfg.parentRef
+	}
+	if cfg.displayName != "" {
+		conv.DisplayName = cfg.displayName
 	}
 	if cfg.defaultAgentID != nil {
 		conv.DefaultAgentID = cfg.defaultAgentID

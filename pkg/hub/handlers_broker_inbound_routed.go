@@ -37,6 +37,7 @@ type routedInboundRequest struct {
 	Surface      string                      `json:"surface,omitempty"`
 	ExternalRef  string                      `json:"external_ref,omitempty"`
 	ParentRef    string                      `json:"parent_ref,omitempty"`
+	DisplayName  string                      `json:"display_name,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
 
 	// AttachmentIDs is not supported on this route yet; a request naming
@@ -528,6 +529,9 @@ func (s *Server) dispatchRoutedRecipient(
 		if params.req.ParentRef != "" {
 			keyOpts = append(keyOpts, messaging.WithParentRef(params.req.ParentRef))
 		}
+		if params.req.DisplayName != "" {
+			keyOpts = append(keyOpts, messaging.WithDisplayName(params.req.DisplayName))
+		}
 		agentID := agent.ID
 		keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
 		s.mu.RLock()
@@ -616,6 +620,11 @@ func (s *Server) dispatchRoutedRecipient(
 		ThreadID:      msg.ThreadID,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     params.now,
+	}
+	if storeMsg.Channel == "" && params.req.Surface != "" {
+		if ch, chErr := messaging.SurfaceToChannel(params.req.Surface); chErr == nil {
+			storeMsg.Channel = ch
+		}
 	}
 	if effectiveConv != nil {
 		storeMsg.ConversationID = effectiveConv.ConversationID

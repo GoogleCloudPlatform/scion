@@ -47,6 +47,7 @@ type inboundMessageRequest struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 
 	// AttachmentIDs names attachments stored as artifacts that the sender
 	// uploaded (POST /api/v1/broker/inbound/attachments). Each must be an
@@ -319,6 +320,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"external_ref requires surface to be set", nil)
 		return
 	}
+	if req.ParentRef != "" && req.ExternalRef == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"parent_ref requires external_ref to be set", nil)
+		return
+	}
 	// preDispatchConvResult is declared here so Phase 9b(ii) rendering can
 	// use it after the Phase 11 block and before dispatch.
 	var preDispatchConvResult *messaging.ConversationResult
@@ -327,6 +333,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
 		if req.ParentRef != "" {
 			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
+		}
+		if req.DisplayName != "" {
+			keyOpts = append(keyOpts, messaging.WithDisplayName(req.DisplayName))
 		}
 		if agent.ID != "" {
 			agentID := agent.ID
@@ -352,6 +361,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			preDispatchConvResult = convResult
+			req.Message.ConversationID = convResult.ConversationID
 			if req.Message.Metadata == nil {
 				req.Message.Metadata = make(map[string]string)
 			}
@@ -382,12 +392,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// and other native-DM messages.
 	senderUserID := resolveSenderUserID(r.Context(), s.store, req.Message.SenderID, req.Message.Sender)
 
-	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound
-	// messages. Skip broadcasts — they are ephemeral and do not belong to a
-	// conversation. Resolution errors return 409 BEFORE dispatch (DEF-135
-	// consequence 1: fail-closed, retry-safe).
+	// Phase 5 dual-write: resolve-or-create conversation for legacy broker-inbound
+	// messages that did not supply Phase 11 (surface + external_ref). Skip
+	// broadcasts — they are ephemeral and do not belong to a conversation.
+	// Skipping when preDispatchConvResult != nil avoids minting a spurious DM
+	// conversation when cut-over plugins omit legacy ThreadID.
 	var convFromPhase5 *messaging.ConversationResult
-	if !req.Message.Broadcasted {
+	if !req.Message.Broadcasted && preDispatchConvResult == nil {
 		var convErr error
 		convFromPhase5, convErr = s.resolvePhase5Conversation(r.Context(), req.Message.ThreadID, agent.ProjectID, senderUserID, agent.ID, req.Message.Channel)
 		if convErr != nil {
@@ -467,6 +478,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	if storeMsg.Channel == "" && req.Surface != "" {
+		if ch, chErr := messaging.SurfaceToChannel(req.Surface); chErr == nil {
+			storeMsg.Channel = ch
+		}
 	}
 	if agentReincarnating {
 		storeMsg.DispatchState = store.MessageDispatchDeferred

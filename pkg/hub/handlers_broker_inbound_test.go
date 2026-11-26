@@ -1074,3 +1074,241 @@ func parseCoAddrEnvelope(t *testing.T, deliveryText string) coAddrEnvelope {
 		"failed to unmarshal envelope JSON: %s", jsonStr)
 	return env
 }
+
+func TestHandleBrokerInbound_SurfaceExternalRefWithoutLegacyFields(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingBrokerInboundDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-surface"),
+		Email:       "p4-surface@example.com",
+		DisplayName: "P4 Surface User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-surface"),
+		Slug:      "p4-surface",
+		Name:      "P4 Surface",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-surface"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Cut-over plugin sends top-level surface/external_ref/parent_ref/display_name
+	// with NO legacy Channel or ThreadID on Message.
+	payload := inboundMessageRequest{
+		Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000100",
+		ParentRef:   "C0123ABC",
+		DisplayName: "#engineering",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from cut-over slack plugin",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Conversation was created with surface, external_ref, parent_ref, display_name.
+	conv, err := s.GetConversationByExternalRef(ctx, "slack", "C0123ABC:1700000000.000100")
+	require.NoError(t, err)
+	assert.Equal(t, "C0123ABC", conv.ParentRef)
+	assert.Equal(t, "#engineering", conv.DisplayName)
+	assert.Equal(t, "group", conv.Kind)
+
+	// No spurious Phase 5 DM conversation was minted.
+	allConvs, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	assert.Len(t, allConvs.Items, 1, "must not create a spurious DM conversation when Phase 11 resolves")
+
+	// Persisted message carries the resolved ConversationID and derived Channel.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, conv.ID, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+}
+
+func TestHandleBrokerInbound_LegacyChannelThreadIDOnly(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingBrokerInboundDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-legacy"),
+		Email:       "p4-legacy@example.com",
+		DisplayName: "P4 Legacy User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-legacy"),
+		Slug:      "p4-legacy",
+		Name:      "P4 Legacy",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-legacy"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Old plugin binary sends only legacy Channel + ThreadID (no Surface/ExternalRef).
+	payload := inboundMessageRequest{
+		Topic: "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "C9999:1700000001.000200",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from legacy plugin binary",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.NotEmpty(t, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+	assert.Equal(t, "C9999:1700000001.000200", msgs.Items[0].ThreadID)
+}
+
+func TestHandleBrokerInbound_ParentRefWithoutExternalRef(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-p4-parent"),
+		Email:       "p4-parent@example.com",
+		DisplayName: "P4 Parent User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-parent"),
+		Slug:      "p4-parent",
+		Name:      "P4 Parent",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-parent"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	payload := inboundMessageRequest{
+		Topic:     "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Surface:   "slack",
+		ParentRef: "C0123ABC",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "missing external_ref",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}

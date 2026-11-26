@@ -1429,3 +1429,82 @@ func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T)
 		})
 	}
 }
+
+type captureEventBus struct {
+	mu        sync.Mutex
+	published []*messages.StructuredMessage
+}
+
+func (c *captureEventBus) Publish(_ context.Context, _ string, msg *messages.StructuredMessage) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.published = append(c.published, msg)
+	return nil
+}
+
+func (c *captureEventBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return &noopBrokerSub{}, nil
+}
+
+func (c *captureEventBus) Close() error { return nil }
+
+type noopBrokerSub struct{}
+
+func (*noopBrokerSub) Unsubscribe() error { return nil }
+
+func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testing.T) {
+	s := newBrokerTestStore(t)
+	ctx := context.Background()
+	projectID := setupBrokerTestProject(t, s)
+
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ProjectID:   &projectID,
+		Kind:        "group",
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000100",
+		ParentRef:   "C0123ABC",
+		DisplayName: "#engineering",
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	capBus := &captureEventBus{}
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(capBus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+
+	orig := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Sender:         "agent:coder",
+		SenderID:       "agent-1",
+		Recipient:      "user:alice",
+		RecipientID:    "user-1",
+		Msg:            "build succeeded",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ThreadID:       "C0123ABC:1700000000.000100",
+		ConversationID: conv.ID,
+	}
+
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-1", orig))
+	require.NoError(t, proxy.PublishMessage(ctx, projectID, orig))
+
+	// Caller's struct must not be mutated.
+	assert.Nil(t, orig.Conversation)
+
+	capBus.mu.Lock()
+	defer capBus.mu.Unlock()
+	require.Len(t, capBus.published, 2)
+	for i, got := range capBus.published {
+		require.NotNil(t, got.Conversation, "publish %d must carry Conversation", i)
+		assert.Equal(t, "slack", got.Conversation.Surface)
+		assert.Equal(t, "C0123ABC:1700000000.000100", got.Conversation.ExternalRef)
+		assert.Equal(t, "C0123ABC", got.Conversation.ParentRef)
+		assert.Equal(t, "#engineering", got.Conversation.DisplayName)
+		// Legacy fields must remain populated alongside Conversation (P4 dual-population).
+		assert.Equal(t, "slack", got.Channel)
+		assert.Equal(t, "C0123ABC:1700000000.000100", got.ThreadID)
+		assert.Equal(t, conv.ID, got.ConversationID)
+	}
+}

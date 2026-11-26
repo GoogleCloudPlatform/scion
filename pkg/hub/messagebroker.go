@@ -282,16 +282,43 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 	return nil
 }
 
+// enrichConversation populates msg.Conversation from the conversations table
+// when msg.ConversationID is set and msg.Conversation is nil. It returns a
+// shallow copy so callers' structs are never mutated, and preserves all legacy
+// fields (Channel, ThreadID, etc.) untouched for older plugin binaries.
+func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
+	if msg == nil || msg.Conversation != nil || msg.ConversationID == "" || p.store == nil {
+		return msg
+	}
+	conv, err := p.store.GetConversation(ctx, msg.ConversationID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && p.log != nil {
+			p.log.Warn("failed to load conversation for broker publish",
+				"conversation_id", msg.ConversationID, "error", err)
+		}
+		return msg
+	}
+	cp := *msg
+	cp.Conversation = &messages.Conversation{
+		Surface:     conv.Surface,
+		ExternalRef: conv.ExternalRef,
+		ParentRef:   conv.ParentRef,
+		DisplayName: conv.DisplayName,
+	}
+	return &cp
+}
+
 // PublishMessage publishes a message to the appropriate broker topic based on
 // the message's recipient. This is the entry point for Hub handlers to route
 // messages through the broker instead of direct dispatch.
 func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
-	return p.bus.Publish(ctx, topic, msg)
+	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
 }
 
 // PublishBroadcast publishes a broadcast message to the project or global broadcast topic.
 func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
+	msg = p.enrichConversation(ctx, msg)
 	if projectID == "" {
 		return p.bus.Publish(ctx, eventbus.TopicGlobalBroadcast(), msg)
 	}
@@ -304,7 +331,7 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 // here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicUserMessages(projectID, userID)
-	return p.bus.Publish(ctx, topic, msg)
+	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
 }
 
 // PublishToGroup fans out a message to a parsed set of recipients, delegating
