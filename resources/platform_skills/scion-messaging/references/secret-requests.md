@@ -60,9 +60,16 @@ Example `req.json`:
   `SCION_*` and `GCE_METADATA_*` are reserved for `environment` secrets).
 - `description`: optional, up to 1000 characters. Descriptions are metadata
   visible to anyone with `agent.read` — never put secret values in them.
-- `type`: optional, `environment` (default), `file`, or `variable`.
+- `type`: optional, `on_demand` (default), `environment`, or `file`.
+  - **`on_demand` (default):** never placed in the container environment or
+    filesystem; read it inline each time you need it with
+    `$(scion secret get --value KEY)`. Prefer this for all tokens and API keys
+    used from commands you run.
+  - **`environment`:** use only when a tool must find the value in its
+    environment at the next restart.
+  - **`file`:** written to `target` on disk at start (requires `target`).
 - `target`: required when `type` is `file`; must be under `~/` and must not
-  contain `..`.
+  contain `..`. Not supported when `type` is `on_demand`.
 - `--secret-description` applies only with a single `--secret-request`; use
   `--secret-request-file` (or `-` for stdin) for multiple keys with
   descriptions.
