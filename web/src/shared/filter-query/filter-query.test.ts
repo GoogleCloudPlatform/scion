@@ -27,11 +27,14 @@ import {
   getActiveSingleKeyValue,
   getSuggestions,
   getViewSchema,
+  hasNonPhaseServerPredicate,
   hasServerOnlyAgentTerms,
   knownKeysFor,
   match,
   matchAgentQuery,
+  nonPhaseServerPredicateForQuery,
   parse,
+  refusalKeyForQuery,
   serverSubset,
   setSingleKeyInQuery,
   setSingleKeyInQueryWithNotice,
@@ -468,6 +471,39 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     const quotedStructured = parse('label:env=prod "foo phase:x" phase:running', known).query!;
     expect(drainServerQuery(quotedText, agentsSchema)).toBe('"foo phase:x"');
     expect(drainServerQuery(quotedStructured, agentsSchema)).toBe('label:env=prod "foo phase:x"');
+
+    // R2: hasNonPhaseServerPredicate, nonPhaseServerPredicateForQuery, and refusalKeyForQuery
+    // distinguish unrepresentable text/exclusion-only remainders from unfiltered queries.
+    const exclOnly = parse('phase:running -test', known).query!;
+    const keyLikeQuoted = parse('phase:running "label:x"', known).query!;
+    const textAndExcl = parse('phase:running api server -test', known).query!;
+    const phaseAndClient = parse('phase:running mode:owner', known).query!;
+    expect(drainServerQuery(exclOnly, agentsSchema)).toBe('');
+    expect(drainServerQuery(keyLikeQuoted, agentsSchema)).toBe('');
+    expect(drainServerQuery(textAndExcl, agentsSchema)).toBe('');
+
+    expect(hasNonPhaseServerPredicate(exclOnly, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(keyLikeQuoted, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(textAndExcl, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(phaseAndClient, agentsSchema)).toBe(false);
+    expect(hasNonPhaseServerPredicate(null, agentsSchema)).toBe(false);
+
+    expect(refusalKeyForQuery(null, agentsSchema)).toBe('');
+    expect(refusalKeyForQuery(phaseAndClient, agentsSchema)).toBe('');
+    expect(refusalKeyForQuery(exclOnly, agentsSchema)).toBe('-test');
+    expect(refusalKeyForQuery(parse('phase:stopped -test', known).query!, agentsSchema)).toBe(
+      '-test'
+    );
+    expect(refusalKeyForQuery(keyLikeQuoted, agentsSchema)).toBe('"label:x"');
+    expect(refusalKeyForQuery(textAndExcl, agentsSchema)).toBe('"api server" -test');
+
+    const exclPred = nonPhaseServerPredicateForQuery(exclOnly, agentsSchema, ctx);
+    expect(exclPred).not.toBeNull();
+    expect(exclPred!({ id: 'a', name: 'prod-bot', slug: 'prod-bot', phase: 'stopped' })).toBe(true);
+    expect(exclPred!({ id: 'b', name: 'test-bot', slug: 'test-bot', phase: 'running' })).toBe(
+      false
+    );
+    expect(nonPhaseServerPredicateForQuery(phaseAndClient, agentsSchema, ctx)).toBeNull();
   });
 });
 

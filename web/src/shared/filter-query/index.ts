@@ -49,11 +49,14 @@ export {
   canLiveAddAgent,
   clientEvaluableAgentQuery,
   drainServerQuery,
+  hasNonPhaseServerPredicate,
   hasScopeTermInQuery,
   hasServerOnlyAgentTerms,
   matchAgentQuery,
   nonPhasePredicateForQuery,
+  nonPhaseServerPredicateForQuery,
   phasePredicateForQuery,
+  refusalKeyForQuery,
   type AgentFilterContext,
 } from './agent-accessors.js';
 

@@ -125,12 +125,15 @@ import {
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
+  hasNonPhaseServerPredicate,
   hasServerOnlyAgentTerms,
   knownKeysFor,
   matchAgentQuery,
   nonPhasePredicateForQuery,
+  nonPhaseServerPredicateForQuery,
   parse as parseFilterQuery,
   phasePredicateForQuery,
+  refusalKeyForQuery,
   serverSubset,
   setSingleKeyInQueryWithNotice,
   validate as validateFilterQuery,
@@ -1403,6 +1406,7 @@ export class ScionPageProjectDetail extends LitElement {
       committedFilterPredicate: committedPred,
       committedNonPhasePredicate: nonPhasePredicateForQuery(cfq, ctx),
       committedPhasePredicate: phasePredicateForQuery(cfq),
+      localStatsPredicate: nonPhaseServerPredicateForQuery(cfq, PROJECT_AGENTS_FILTER_SCHEMA, ctx),
       serverQuery: this.committedServerQ,
     });
 
@@ -1685,10 +1689,7 @@ export class ScionPageProjectDetail extends LitElement {
       // getting its updates until an explicit `deleted` removes it).
       shouldAdd: (agent): boolean => {
         if (agent.projectId !== this.projectId) return false;
-        if (
-          this.loadedServerQ === '' &&
-          !hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)
-        ) {
+        if (!hasNonPhaseServerPredicate(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)) {
           return true;
         }
         return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
@@ -1975,6 +1976,11 @@ export class ScionPageProjectDetail extends LitElement {
         committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
         committedNonPhasePredicate: nonPhasePredicateForQuery(cfq, ctx),
         committedPhasePredicate: phasePredicateForQuery(cfq),
+        localStatsPredicate: nonPhaseServerPredicateForQuery(
+          cfq,
+          PROJECT_AGENTS_FILTER_SCHEMA,
+          ctx
+        ),
         serverQuery: this.committedServerQ,
         hasClientOnlyFilter: this.committedHasClientOnly,
       });
@@ -1994,7 +2000,7 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
     const serverQ = this.committedServerQ;
-    const refusalKey = drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA);
+    const refusalKey = refusalKeyForQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA);
     const plan = this.agentWindow.planRequest(trigger, refusalKey);
     if (plan === 'none') return;
     if (plan === 'page') {
@@ -2022,7 +2028,7 @@ export class ScionPageProjectDetail extends LitElement {
       viewEpoch !== this.viewEpoch &&
       this.agentWindow.planRequest(
         'view-change',
-        drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
+        refusalKeyForQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
       ) !== 'none'
     ) {
       await this.loadAgentsForView('view-change');
@@ -2082,7 +2088,7 @@ export class ScionPageProjectDetail extends LitElement {
       // Candidate ceiling: remember the refusal keyed on the phase-independent
       // query (matching the hub's unphased ceiling check) and drain instead.
       this.agentWindow.recordRefusal(
-        drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
+        refusalKeyForQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
       );
       this.agentWindow.endSortedRequest(ticket);
       epoch.close(); // the drain runs its own epoch.
@@ -2114,7 +2120,7 @@ export class ScionPageProjectDetail extends LitElement {
     // page's own copies (`this.agents`, the window).
     if (data.complete) {
       // The complete set: the response plus live creates it predates.
-      this.loadedServerQ = drainServerQuery(
+      this.loadedServerQ = refusalKeyForQuery(
         this.committedFilterQuery,
         PROJECT_AGENTS_FILTER_SCHEMA
       );
@@ -2676,6 +2682,7 @@ export class ScionPageProjectDetail extends LitElement {
       committedFilterPredicate: pred,
       committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
       committedPhasePredicate: phasePredicateForQuery(fq),
+      localStatsPredicate: nonPhaseServerPredicateForQuery(fq, PROJECT_AGENTS_FILTER_SCHEMA, ctx),
       serverQuery: nextQ,
       hasClientOnlyFilter: nextHasClientOnly,
     });
@@ -2722,11 +2729,19 @@ export class ScionPageProjectDetail extends LitElement {
           committedFilterPredicate: pred,
           committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
           committedPhasePredicate: phasePredicateForQuery(fq),
+          localStatsPredicate: nonPhaseServerPredicateForQuery(
+            fq,
+            PROJECT_AGENTS_FILTER_SCHEMA,
+            ctx
+          ),
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
         });
-        const nextDrainQ = drainServerQuery(fq, PROJECT_AGENTS_FILTER_SCHEMA);
-        if (this.loadedServerQ === nextDrainQ && !hasServerOnlyAgentTerms(fq, ctx)) {
+        const nextLoadedQ = refusalKeyForQuery(fq, PROJECT_AGENTS_FILTER_SCHEMA);
+        if (
+          (this.loadedServerQ === '' || this.loadedServerQ === nextLoadedQ) &&
+          !hasServerOnlyAgentTerms(fq, ctx)
+        ) {
           if (!this.agentWindow.isLocal || !this.hasAgentsResult) {
             this.onAgentViewStateChanged();
           }

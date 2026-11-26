@@ -176,6 +176,14 @@ export interface AgentListViewState {
    * complete-set drain (making `isSortedEligible` return false).
    */
   hasClientOnlyFilter?: boolean;
+  /**
+   * Non-phase, non-client-only server predicate used to filter `H` when
+   * computing local `stats` (and Stop-all). Ensures local counts match the
+   * hub's phase-independent stats population even when a drain could not push
+   * down an unrepresentable text- or exclusion-only remainder (e.g.
+   * `phase:running -test`).
+   */
+  localStatsPredicate?: ((agent: Agent) => boolean) | null;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -851,9 +859,11 @@ export class AgentListWindow extends EventTarget {
   get stats(): { total: number; running: number; incomplete: boolean } {
     if (this.isLocal) {
       const held = this.getHeldAgents();
+      const statsPred = this.viewState.localStatsPredicate;
+      const counted = statsPred ? held.filter(statsPred) : held;
       return {
-        total: held.length,
-        running: held.filter((a) => isAgentRunning(a)).length,
+        total: counted.length,
+        running: counted.filter((a) => isAgentRunning(a)).length,
         incomplete: this._state === 'capped',
       };
     }

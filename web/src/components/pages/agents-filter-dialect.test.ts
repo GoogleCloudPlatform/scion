@@ -1617,4 +1617,229 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(pPagedWin.updatesAvailable).toBe(true);
     pPaged.remove();
   });
+
+  it('R2: keeps path-equal counts, live-create filtering, and distinct 422 refusal keys for text/exclusion-only remainders', async () => {
+    const mk = (id: string, name: string, phase: Agent['phase']): Agent => ({
+      id,
+      name,
+      slug: name,
+      projectId: 'proj-r2',
+      phase,
+      updated: '2026-06-01T00:00:00Z',
+    });
+    const allAgents = [
+      mk('a-api-run', 'api server one', 'running'),
+      mk('a-api-stop', 'api server two', 'stopped'),
+      mk('a-api-test', 'api server test', 'running'),
+      mk('a-labelx-run', 'label:x-run', 'running'),
+      mk('a-test-run', 'test-runner', 'running'),
+    ];
+    const dispatchCreate = (agent: Agent): void => {
+      stateManager.seedAgents([agent], { partial: true });
+      stateManager.dispatchEvent(
+        new CustomEvent('agents-changed', {
+          detail: {
+            state: {},
+            data: {
+              upserted: [agent.id],
+              deleted: [],
+              resync: false,
+              projectId: agent.projectId,
+            },
+          },
+        })
+      );
+    };
+
+    const filterForQuery = (q: string): Agent[] => {
+      if (q.includes('"api server"') && q.includes('-test')) {
+        return allAgents.filter(
+          (a) =>
+            a.name.toLowerCase().includes('api server') && !a.name.toLowerCase().includes('test')
+        );
+      }
+      if (q.includes('"label:x"')) {
+        return allAgents.filter((a) => a.name.toLowerCase().includes('label:x'));
+      }
+      if (q.includes('-test')) {
+        return allAgents.filter((a) => !a.name.toLowerCase().includes('test'));
+      }
+      return allAgents;
+    };
+
+    const installFetch = (opts: { paged?: boolean; refuseQueries?: Set<string> } = {}) => {
+      const requestedFitQs: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const rawUrl =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+          const u = new URL(rawUrl, 'http://localhost');
+          if (u.pathname.endsWith('/agents')) {
+            const q = u.searchParams.get('q') ?? '';
+            const hasFit = u.searchParams.has('fit');
+            if (hasFit) requestedFitQs.push(q);
+            if (hasFit && opts.refuseQueries?.has(q)) {
+              return Promise.resolve(
+                new Response(JSON.stringify({ error: { code: 'too_many_candidates' } }), {
+                  status: 422,
+                  headers: { 'Content-Type': 'application/json' },
+                })
+              );
+            }
+            const matched = filterForQuery(q);
+            if (hasFit && opts.paged) {
+              const running = matched.filter((a) => a.phase === 'running');
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    agents: running.slice(0, 1),
+                    totalCount: running.length,
+                    complete: false,
+                    nextCursor: 'cur-next',
+                    stats: {
+                      total: matched.length,
+                      running: running.length,
+                      agents: matched.map((a) => [a.id, a.phase]),
+                    },
+                  }),
+                  { status: 200, headers: { 'Content-Type': 'application/json' } }
+                )
+              );
+            }
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  agents: matched,
+                  totalCount: matched.length,
+                  complete: true,
+                }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              )
+            );
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: 'proj-r2', name: 'Proj R2', slug: 'proj-r2' }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        })
+      );
+      return requestedFitQs;
+    };
+
+    const queries = [
+      { raw: 'phase:running -test', want: { total: 3, running: 2, incomplete: false } },
+      { raw: 'phase:running "label:x"', want: { total: 1, running: 1, incomplete: false } },
+      { raw: 'phase:running api server -test', want: { total: 2, running: 1, incomplete: false } },
+    ];
+
+    for (const { raw, want } of queries) {
+      const encoded = encodeURIComponent(raw);
+
+      // (ii) & (iii) Global page: sort=updated (fit), sort=name (drain), tree (drain), paged -> identical stats
+      for (const mode of ['fit', 'sort-name', 'tree', 'paged'] as const) {
+        installFetch({ paged: mode === 'paged' });
+        localStorage.clear();
+        if (mode === 'sort-name') {
+          localStorage.setItem('scion-sort-agents', JSON.stringify({ field: 'name', dir: 'asc' }));
+        } else if (mode === 'tree') {
+          localStorage.setItem('scion-view-agents', 'tree');
+        } else {
+          localStorage.setItem(
+            'scion-sort-agents',
+            JSON.stringify({ field: 'updated', dir: 'desc' })
+          );
+        }
+        window.history.replaceState(null, '', `/agents?q=${encoded}`);
+        const el = document.createElement('scion-page-agents') as ScionPageAgents;
+        document.body.appendChild(el);
+        await new Promise((r) => setTimeout(r, 25));
+        await el.updateComplete;
+        const win = (el as unknown as { agentWindow: AgentListWindow }).agentWindow;
+        expect(win.stats, `global ${mode} ${raw}`).toEqual(want);
+
+        // (i) SSE create of excluded stopped test-bot must not change counts
+        if (mode === 'fit') {
+          dispatchCreate(mk(`sse-excl-g-${raw}`, 'test-bot', 'stopped'));
+          await el.updateComplete;
+          expect(win.stats, `global fit SSE excluded ${raw}`).toEqual(want);
+        }
+        el.remove();
+      }
+
+      // (ii) & (iii) Project page: sort=updated (fit), sort=name (drain), tree (drain), paged -> identical stats
+      for (const mode of ['fit', 'sort-name', 'tree', 'paged'] as const) {
+        installFetch({ paged: mode === 'paged' });
+        localStorage.clear();
+        if (mode === 'sort-name') {
+          localStorage.setItem(
+            'scion-sort-project-agents-proj-r2',
+            JSON.stringify({ field: 'name', dir: 'asc' })
+          );
+        } else if (mode === 'tree') {
+          localStorage.setItem('scion-view-project-agents-proj-r2', 'tree');
+        } else {
+          localStorage.setItem(
+            'scion-sort-project-agents-proj-r2',
+            JSON.stringify({ field: 'updated', dir: 'desc' })
+          );
+        }
+        window.history.replaceState(null, '', `/projects/proj-r2?q=${encoded}`);
+        const el = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+        el.projectId = 'proj-r2';
+        document.body.appendChild(el);
+        await new Promise((r) => setTimeout(r, 25));
+        await el.updateComplete;
+        const win = (el as unknown as { agentWindow: AgentListWindow }).agentWindow;
+        expect(win.stats, `project ${mode} ${raw}`).toEqual(want);
+
+        // (i) SSE create of excluded stopped test-bot must not change counts
+        if (mode === 'fit') {
+          dispatchCreate(mk(`sse-excl-p-${raw}`, 'test-bot', 'stopped'));
+          await el.updateComplete;
+          expect(win.stats, `project fit SSE excluded ${raw}`).toEqual(want);
+        }
+        el.remove();
+      }
+    }
+
+    // (iv) Project page 422 refusal key: refusal for `phase:running -test` must not suppress
+    // the sorted fit attempt for unfiltered `""`, and vice versa.
+    localStorage.clear();
+    localStorage.setItem(
+      'scion-sort-project-agents-proj-r2',
+      JSON.stringify({ field: 'updated', dir: 'desc' })
+    );
+    const fitQs1 = installFetch({ refuseQueries: new Set(['phase:running -test']) });
+    window.history.replaceState(
+      null,
+      '',
+      `/projects/proj-r2?q=${encodeURIComponent('phase:running -test')}`
+    );
+    const pRef1 = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    pRef1.projectId = 'proj-r2';
+    document.body.appendChild(pRef1);
+    await new Promise((r) => setTimeout(r, 25));
+    await pRef1.updateComplete;
+    expect(fitQs1).toContain('phase:running -test');
+    const winRef1 = (pRef1 as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(winRef1.isSortedRefused('-test')).toBe(true);
+    expect(winRef1.isSortedRefused('')).toBe(false);
+    pRef1.remove();
+
+    const fitQs2 = installFetch({ refuseQueries: new Set(['']) });
+    window.history.replaceState(null, '', '/projects/proj-r2');
+    const pRef2 = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    pRef2.projectId = 'proj-r2';
+    document.body.appendChild(pRef2);
+    await new Promise((r) => setTimeout(r, 25));
+    await pRef2.updateComplete;
+    expect(fitQs2).toContain('');
+    const winRef2 = (pRef2 as unknown as { agentWindow: AgentListWindow }).agentWindow;
+    expect(winRef2.isSortedRefused('')).toBe(true);
+    expect(winRef2.isSortedRefused('-test')).toBe(false);
+    pRef2.remove();
+  });
 });

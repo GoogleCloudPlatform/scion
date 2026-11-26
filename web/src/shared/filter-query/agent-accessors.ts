@@ -15,7 +15,7 @@
  */
 
 import type { Agent } from '../types.js';
-import { serverSubset } from './canonical.js';
+import { canonical, serverSubset } from './canonical.js';
 import { match } from './match.js';
 import type { ValueSuggestionProvider } from './suggest.js';
 import type { FilterRow, Query, Term, ViewSchema } from './types.js';
@@ -175,6 +175,89 @@ export function nonPhasePredicateForQuery(
   if (nonPhaseTerms.length === 0 && !hasText) return null;
   const stripped: Query = { ...fq, terms: nonPhaseTerms };
   return (agent: Agent): boolean => matchAgentQuery(stripped, agent, ctx);
+}
+
+/**
+ * Returns true when `fq` has any non-phase server-evaluable predicate (any
+ * non-phase, non-client-only key term, or positive/excluded free text). When
+ * false, the query only constrains `phase:` and/or client-only keys (`mode:`),
+ * so the hub's phase-independent population is unfiltered.
+ */
+export function hasNonPhaseServerPredicate(fq: Query | null, schema: ViewSchema): boolean {
+  if (!fq) return false;
+  if (fq.mode !== 'structured') {
+    return Boolean(fq.text?.trim());
+  }
+  if (fq.text?.trim() || (fq.excludeText && fq.excludeText.length > 0)) {
+    return true;
+  }
+  return fq.terms.some((t) => {
+    const k = t.key.toLowerCase();
+    if (k === 'phase') return false;
+    const spec = schema.keys.find((ks) => ks.name.toLowerCase() === k);
+    return spec ? spec.exec !== 'client' : false;
+  });
+}
+
+/**
+ * Build a client-side predicate matching the hub's phase-independent stats
+ * population: all non-phase, non-client-only terms plus positive/excluded free
+ * text (server-only terms such as `is:` are stripped by `matchAgentQuery`
+ * because the server already applied them). Used to compute local `stats` and
+ * Stop-all counts over `H` when a drain could not push down a text- or
+ * exclusion-only remainder.
+ */
+export function nonPhaseServerPredicateForQuery(
+  fq: Query | null,
+  schema: ViewSchema,
+  ctx?: AgentFilterContext
+): ((agent: Agent) => boolean) | null {
+  if (!fq) return null;
+  if (fq.mode !== 'structured') {
+    return fq.text?.trim() ? (agent: Agent): boolean => matchAgentQuery(fq, agent, ctx) : null;
+  }
+  const serverNonPhaseTerms = fq.terms.filter((t) => {
+    const k = t.key.toLowerCase();
+    if (k === 'phase') return false;
+    const spec = schema.keys.find((ks) => ks.name.toLowerCase() === k);
+    return spec ? spec.exec !== 'client' : false;
+  });
+  const hasText = Boolean(fq.text?.trim()) || Boolean(fq.excludeText && fq.excludeText.length > 0);
+  if (serverNonPhaseTerms.length === 0 && !hasText) return null;
+  const stripped: Query = { ...fq, terms: serverNonPhaseTerms };
+  return (agent: Agent): boolean => matchAgentQuery(stripped, agent, ctx);
+}
+
+/**
+ * Deterministic key for the phase-independent server population of `fq` (used
+ * to key project 422 refusal memory and fit-loaded population identity). Unlike
+ * `drainServerQuery`, this never collapses unrepresentable text/exclusion-only
+ * remainders (such as `phase:running -test`) onto the unfiltered `''` key.
+ */
+export function refusalKeyForQuery(fq: Query | null, schema: ViewSchema): string {
+  if (!fq) return '';
+  if (fq.mode !== 'structured') {
+    return canonical(fq);
+  }
+  const serverNonPhaseTerms = fq.terms.filter((t) => {
+    const k = t.key.toLowerCase();
+    if (k === 'phase') return false;
+    const spec = schema.keys.find((ks) => ks.name.toLowerCase() === k);
+    return spec ? spec.exec !== 'client' : false;
+  });
+  if (
+    serverNonPhaseTerms.length === 0 &&
+    !fq.text?.trim() &&
+    (!fq.excludeText || fq.excludeText.length === 0)
+  ) {
+    return '';
+  }
+  return canonical({
+    mode: 'structured',
+    terms: serverNonPhaseTerms,
+    ...(fq.text ? { text: fq.text } : {}),
+    ...(fq.excludeText?.length ? { excludeText: fq.excludeText } : {}),
+  });
 }
 
 /**

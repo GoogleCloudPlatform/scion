@@ -87,12 +87,15 @@ import {
   getActiveSingleKeyValue,
   getViewSchema,
   hasClientOnlyKeys,
+  hasNonPhaseServerPredicate,
   hasServerOnlyAgentTerms,
   knownKeysFor,
   matchAgentQuery,
   nonPhasePredicateForQuery,
+  nonPhaseServerPredicateForQuery,
   parse as parseFilterQuery,
   phasePredicateForQuery,
+  refusalKeyForQuery,
   serverSubset,
   setSingleKeyInQueryWithNotice,
   validate as validateFilterQuery,
@@ -761,6 +764,7 @@ export class ScionPageAgents extends LitElement {
       committedFilterPredicate: cfq ? (a: Agent) => matchAgentQuery(cfq, a, ctx) : null,
       committedNonPhasePredicate: nonPhasePredicateForQuery(cfq, ctx),
       committedPhasePredicate: phasePredicateForQuery(cfq),
+      localStatsPredicate: nonPhaseServerPredicateForQuery(cfq, AGENTS_FILTER_SCHEMA, ctx),
       serverQuery: this.committedServerQ,
     };
   }
@@ -831,6 +835,7 @@ export class ScionPageAgents extends LitElement {
       committedFilterPredicate: pred,
       committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
       committedPhasePredicate: phasePredicateForQuery(fq),
+      localStatsPredicate: nonPhaseServerPredicateForQuery(fq, AGENTS_FILTER_SCHEMA, ctx),
       serverQuery: nextQ,
       hasClientOnlyFilter: nextHasClientOnly,
     });
@@ -874,13 +879,14 @@ export class ScionPageAgents extends LitElement {
           committedFilterPredicate: pred,
           committedNonPhasePredicate: nonPhasePredicateForQuery(fq, ctx),
           committedPhasePredicate: phasePredicateForQuery(fq),
+          localStatsPredicate: nonPhaseServerPredicateForQuery(fq, AGENTS_FILTER_SCHEMA, ctx),
           serverQuery: nextQ,
           hasClientOnlyFilter: nextHasClientOnly,
         });
-        const nextDrainQ = drainServerQuery(fq, AGENTS_FILTER_SCHEMA);
+        const nextLoadedQ = refusalKeyForQuery(fq, AGENTS_FILTER_SCHEMA);
         if (
           key === 'phase' &&
-          this.loadedServerQ === nextDrainQ &&
+          (this.loadedServerQ === '' || this.loadedServerQ === nextLoadedQ) &&
           !hasServerOnlyAgentTerms(fq, ctx)
         ) {
           this.onAgentViewStateChanged();
@@ -926,10 +932,7 @@ export class ScionPageAgents extends LitElement {
       // membership, so a brand-new SSE agent is not added under a filter.
       // An ID already held keeps getting its updates regardless.
       shouldAdd: (agent): boolean => {
-        if (
-          this.loadedServerQ === '' &&
-          !hasServerOnlyAgentTerms(this.committedFilterQuery, this.filterContext)
-        ) {
+        if (!hasNonPhaseServerPredicate(this.committedFilterQuery, AGENTS_FILTER_SCHEMA)) {
           return true;
         }
         return canLiveAddAgent(this.committedFilterQuery, agent, this.filterContext);
@@ -1127,7 +1130,7 @@ export class ScionPageAgents extends LitElement {
       // race an SSE `deleted`.
       if (complete) {
         const fq = this.committedFilterQuery;
-        const loadedQ = drainServerQuery(fq, AGENTS_FILTER_SCHEMA);
+        const loadedQ = refusalKeyForQuery(fq, AGENTS_FILTER_SCHEMA);
         this.loadedServerQ = loadedQ;
         this.agents = epoch.seed(data.agents || [], {
           partial: false,
