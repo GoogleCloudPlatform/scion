@@ -176,6 +176,62 @@ func TestProjectGitHubStatus_Output(t *testing.T) {
 	assert.Contains(t, buf.String(), "unverified (check unavailable)")
 }
 
+func TestProjectGitHubStatus_StripsControlChars(t *testing.T) {
+	prevFmt := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prevFmt })
+
+	instID := int64(4412)
+	adminBasis := "admin_binding"
+	projects := &fakeProjectGitHubProjects{
+		info: &hubclient.ProjectGitHub{
+			ProjectID: "proj-1",
+			App:       hubclient.ProjectGitHubApp{Configured: true, Slug: "scion-bot", WebHost: "github.com"},
+			Remote:    hubclient.ProjectGitHubRemote{Owner: "acme", Repo: "api", OnAppHost: true},
+			Association: hubclient.ProjectGitHubAssociation{
+				InstallationID: &instID,
+				AccountLogin:   "acme\x1b[31m-evil\x1b[0m",
+				Basis:          &adminBasis,
+				WriteAllowed:   true,
+				BoundBy:        "user-uuid",
+				BoundByName:    "Dana\x1b]0;pwn\x07 Admin",
+				BoundAt:        "2026-11-20T12:00:00Z",
+				Authorized:     true,
+				Verified:       true,
+			},
+			Status: &hubclient.GitHubAppProjectStatus{
+				State:        "error",
+				ErrorMessage: "bad\x1b[2Jtoken\x07",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	require.NoError(t, runProjectGitHubStatus(context.Background(), projects, "proj-1", &buf))
+	out := buf.String()
+	assert.NotContains(t, out, "\x1b", "ANSI/OSC escape sequences must be stripped")
+	assert.NotContains(t, out, "\x07", "BEL terminator must be stripped")
+	assert.Contains(t, out, "acme[31m-evil[0m (#4412)")
+	assert.Contains(t, out, "Dana]0;pwn Admin")
+	assert.Contains(t, out, "bad[2Jtoken")
+
+	// Also verify reason field in the unverified/unauthorized branch.
+	projects.info.Association = hubclient.ProjectGitHubAssociation{
+		InstallationID: &instID,
+		AccountLogin:   "acme\x1b]0;title\x07",
+		Authorized:     false,
+		Verified:       false,
+		ErrorCode:      "association_unverified",
+		Reason:         "check\x1b[31m failed\x1b[0m",
+	}
+	buf.Reset()
+	require.NoError(t, runProjectGitHubStatus(context.Background(), projects, "proj-1", &buf))
+	out = buf.String()
+	assert.NotContains(t, out, "\x1b")
+	assert.NotContains(t, out, "\x07")
+	assert.Contains(t, out, "unverified (check[31m failed[0m)")
+}
+
 func TestProjectGitHubBind_AutoSelectAndErrors(t *testing.T) {
 	prevFmt := outputFormat
 	outputFormat = ""

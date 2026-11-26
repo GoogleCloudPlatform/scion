@@ -87,7 +87,7 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 	if info.Association.InstallationID == nil {
 		_, _ = fmt.Fprintln(out, "Association:   not connected")
 	} else {
-		acct := info.Association.AccountLogin
+		acct := stripControlChars(info.Association.AccountLogin)
 		if acct != "" {
 			_, _ = fmt.Fprintf(out, "Installation:  %s (#%d)\n", acct, *info.Association.InstallationID)
 		} else {
@@ -100,9 +100,9 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 			}
 			switch basis {
 			case "admin_binding":
-				binder := info.Association.BoundByName
+				binder := stripControlChars(info.Association.BoundByName)
 				if binder == "" {
-					binder = info.Association.BoundBy
+					binder = stripControlChars(info.Association.BoundBy)
 				}
 				if binder != "" && info.Association.BoundAt != "" {
 					_, _ = fmt.Fprintf(out, "Authorized by: admin_binding (%s, %s)\n", binder, info.Association.BoundAt)
@@ -116,19 +116,19 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 			case "creator_pull":
 				_, _ = fmt.Fprintln(out, "Authorized by: creator_pull (read-only)")
 			default:
-				_, _ = fmt.Fprintf(out, "Authorized by: %s\n", basis)
+				_, _ = fmt.Fprintf(out, "Authorized by: %s\n", stripControlChars(basis))
 			}
 		} else if !info.Association.Verified {
-			_, _ = fmt.Fprintf(out, "Authorized:    unverified (%s)\n", info.Association.Reason)
+			_, _ = fmt.Fprintf(out, "Authorized:    unverified (%s)\n", stripControlChars(info.Association.Reason))
 		} else {
-			_, _ = fmt.Fprintf(out, "Authorized:    no (%s)\n", info.Association.Reason)
+			_, _ = fmt.Fprintf(out, "Authorized:    no (%s)\n", stripControlChars(info.Association.Reason))
 		}
 	}
 
 	if info.Status != nil && info.Status.State != "" {
-		_, _ = fmt.Fprintf(out, "Status:        %s", info.Status.State)
+		_, _ = fmt.Fprintf(out, "Status:        %s", stripControlChars(info.Status.State))
 		if info.Status.ErrorMessage != "" {
-			_, _ = fmt.Fprintf(out, " (%s)", info.Status.ErrorMessage)
+			_, _ = fmt.Fprintf(out, " (%s)", stripControlChars(info.Status.ErrorMessage))
 		}
 		_, _ = fmt.Fprintln(out)
 	}
