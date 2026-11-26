@@ -55,9 +55,8 @@ func TestDecode_HubTokenRoundTrip(t *testing.T) {
 // Formatting a Staged never prints a value.
 func TestStaged_FormattingWithholdsValues(t *testing.T) {
 	s := Staged{
-		HubToken:        hubTokenCanary,
-		VariableSecrets: map[string]string{"K": hubTokenCanary},
-		FileSecrets:     []FileSecret{{Name: "f", Target: "/x", Value: hubTokenCanary}},
+		HubToken:    hubTokenCanary,
+		FileSecrets: []FileSecret{{Name: "f", Target: "/x", Value: hubTokenCanary}},
 	}
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
 		if out := fmt.Sprintf(verb, s); strings.Contains(out, hubTokenCanary) {

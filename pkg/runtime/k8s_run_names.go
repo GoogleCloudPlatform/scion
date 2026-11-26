@@ -49,7 +49,7 @@ import (
 // pod name happens to end in a run token).
 
 const (
-	// runSecretPrefix names the env/variable/file Secret and the
+	// runSecretPrefix names the env/file Secret and the
 	// SecretProviderClass of a run (distinct kinds, as with the fixed
 	// names).
 	runSecretPrefix = "scion-run-secret-"
@@ -101,7 +101,7 @@ const neverVerifyStartObjects = time.Duration(math.MaxInt64)
 
 // k8sObjectNames are the names of one start's per-agent objects.
 type k8sObjectNames struct {
-	Secret string // env/variable/file Secret
+	Secret string // env/file Secret
 	Auth   string // ResolvedAuth file Secret
 	SPC    string // SecretProviderClass (GKE secrets path)
 }

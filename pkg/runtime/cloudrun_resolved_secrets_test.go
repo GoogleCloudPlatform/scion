@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,26 +30,27 @@ import (
 
 // Placeholder values only; none of these are real credentials.
 const (
-	crTestEnvSecretValue  = "placeholder-env-secret-value"
-	crTestFileSecretValue = "placeholder-file-secret-content"
-	crTestFileTarget      = "/home/scion/.config/example/creds.json"
-	crTestVarSecretValue  = "placeholder-variable-secret-value"
+	crTestEnvSecretValue      = "placeholder-env-secret-value"
+	crTestFileSecretValue     = "placeholder-file-secret-content"
+	crTestFileTarget          = "/home/scion/.config/example/creds.json"
+	crTestOnDemandSecretValue = "placeholder-ondemand-secret-value"
 )
 
 func crTestResolvedSecrets() []api.ResolvedSecret {
 	return []api.ResolvedSecret{
 		{Name: "api-key", Type: "environment", Target: "EXAMPLE_API_KEY", Value: crTestEnvSecretValue},
 		{Name: "creds", Type: "file", Target: crTestFileTarget, Value: crTestFileSecretValue},
-		{Name: "region", Type: "variable", Target: "EXAMPLE_REGION", Value: crTestVarSecretValue},
+		// on_demand secrets are never delivered in env or staged blob.
+		{Name: "region", Type: "on_demand", Target: "EXAMPLE_REGION", Value: crTestOnDemandSecretValue},
 		// Collides with a key already in cfg.Env: cfg.Env must win.
 		{Name: "dup", Type: "environment", Target: "PRESET_KEY", Value: "from-secret"},
 	}
 }
 
 // assertResolvedSecretsInEnv checks that env carries the env-type secret as a
-// plain variable, the file- and variable-type secrets inside the
-// staged-secrets blob, and
-// that a secret never overrides a key already present in cfg.Env.
+// plain variable, the file-type secret inside the staged-secrets blob,
+// ignores on_demand secrets, and that a secret never overrides a key already
+// present in cfg.Env.
 func assertResolvedSecretsInEnv(t *testing.T, env map[string]string) {
 	t.Helper()
 	if got := env["EXAMPLE_API_KEY"]; got != crTestEnvSecretValue {
@@ -68,11 +70,15 @@ func assertResolvedSecretsInEnv(t *testing.T, env map[string]string) {
 	if len(staged.FileSecrets) != 1 || staged.FileSecrets[0].Target != crTestFileTarget {
 		t.Fatalf("staged file secrets: %d entries, want one entry for %s", len(staged.FileSecrets), crTestFileTarget)
 	}
-	if got := staged.VariableSecrets["EXAMPLE_REGION"]; got != crTestVarSecretValue {
-		t.Errorf("variable-type secret EXAMPLE_REGION not staged (present=%v)", got != "")
-	}
 	if _, ok := env["EXAMPLE_REGION"]; ok {
-		t.Error("variable-type secret EXAMPLE_REGION must not be a plain env var")
+		t.Error("on_demand secret EXAMPLE_REGION must not be a plain env var")
+	}
+	raw, err := base64.StdEncoding.DecodeString(blob)
+	if err != nil {
+		t.Fatalf("base64 decode %s: %v", stagedsecrets.EnvVar, err)
+	}
+	if strings.Contains(string(raw), crTestOnDemandSecretValue) {
+		t.Error("on_demand secret value must not appear in staged secrets blob")
 	}
 }
 
@@ -319,7 +325,7 @@ func TestCloudRunSandboxRun_OversizedSecretFailsWithName(t *testing.T) {
 	}
 }
 
-// The staged-blob error names the largest file/variable secret, not the
+// The staged-blob error names the largest file secret, not the
 // first or the smallest.
 func TestApplyResolvedSecretsToEnv_StagedErrorNamesLargestSecret(t *testing.T) {
 	big := strings.Repeat("x", sandboxMaxEnvArgBytes+1)
@@ -328,12 +334,12 @@ func TestApplyResolvedSecretsToEnv_StagedErrorNamesLargestSecret(t *testing.T) {
 		ResolvedSecrets: []api.ResolvedSecret{
 			{Name: "small-file", Type: "file", Target: "/home/scion/small.txt", Value: "tiny"},
 			{Name: "large-file", Type: "file", Target: "/home/scion/large.bin", Value: big},
-			{Name: "small-var", Type: "variable", Target: "SMALL_VAR", Value: "also-tiny"},
+			{Name: "ignored-ondemand", Type: "on_demand", Target: "IGNORED_OD", Value: big + big},
 		},
 	}
 	_, err := applyResolvedSecretsToEnv(&cfg, sandboxEnvLimit, sandboxRuntimeEnvKeys...)
 	checkSizeError(t, err, `"large-file"`, "xxxxxxxx")
-	for _, small := range []string{`"small-file"`, `"small-var"`} {
+	for _, small := range []string{`"small-file"`, `"ignored-ondemand"`} {
 		if strings.Contains(err.Error(), small) {
 			t.Errorf("error names %s; want only the largest secret", small)
 		}
@@ -564,7 +570,7 @@ func TestCloudRunRun_FileSecretsUnderScionSecretsNotBlockedByReadOnlyMount(t *te
 	// Simulate sciontool init running stagedsecrets.Write against the agent's
 	// provisioned NFS home directory mounted at /home/scion.
 	homeOnShare := filepath.Join(agentDir, "home-"+crTestAgentID)
-	containerView := stagedsecrets.Staged{VariableSecrets: staged.VariableSecrets}
+	containerView := stagedsecrets.Staged{}
 	for _, fs := range staged.FileSecrets {
 		rel := strings.TrimPrefix(fs.Target, "/home/scion/")
 		if rel == fs.Target {

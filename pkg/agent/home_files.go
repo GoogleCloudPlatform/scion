@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
-	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -49,7 +48,8 @@ var reservedHomeFilePaths = []string{
 	path.Join(".scion", transportauth.TransportTokenFileName),
 	path.Join(".scion", transportauth.TransportTokenFileName+".tmp"),
 	path.Join(".scion", telemetryGCPCredentialsFileName),
-	path.Join(".scion", stagedsecrets.VariableSecretsFileName),
+	// Retired path, reserved so stale tooling or a template cannot reuse it with different meaning.
+	".scion/secrets.json",
 	homeprep.LinksRecordPath,
 	path.Join(".scion", config.SettingsFileName),
 	path.Join(".scion", projectkeys.ProjectIDFile),

@@ -12,7 +12,7 @@ import (
 // Kubernetes file staging and placement.
 //
 // Agent pods run as the image's non-root user. When a file (a file-type
-// secret, a harness auth file, or secrets.json) is mounted with subPath at a
+// secret or a harness auth file) is mounted with subPath at a
 // path inside the agent home and the parent directory is not in the image,
 // the container runtime creates that directory owned by root. The home sync
 // (tar over exec, running as the pod user) then cannot create entries in it,
@@ -77,17 +77,13 @@ func (r *KubernetesRuntime) useGKESecretsPath(config RunConfig) bool {
 func (r *KubernetesRuntime) k8sFileProjections(config RunConfig) []k8sFileProjection {
 	gke := r.useGKESecretsPath(config)
 	var out []k8sFileProjection
-	// The CSI path does not deliver variable secrets (unchanged behaviour).
-	for _, f := range stagedFiles(config, !gke) {
+	for _, f := range stagedFiles(config) {
 		vol := k8sAuthFilesVolume
-		switch f.Kind {
-		case stagedFileSecret:
+		if f.Kind == stagedFileSecret {
 			vol = k8sAgentSecretsVolume
 			if gke {
 				vol = k8sSecretsStoreVolume
 			}
-		case stagedVariablesFile:
-			vol = k8sAgentSecretsVolume
 		}
 		out = append(out, k8sFileProjection{Volume: vol, Key: f.Key, Target: f.Target})
 	}

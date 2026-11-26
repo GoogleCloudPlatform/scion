@@ -147,3 +147,40 @@ func TestBuildBootstrapEnv_StripsKeepIDUID(t *testing.T) {
 		t.Errorf(`env["SCION_HOST_UID"] = %q, want "1000" (unaffected by the stripped key)`, got)
 	}
 }
+
+// TestBuildBootstrapEnv_IgnoresOnDemandAndUnknown proves that on_demand and
+// unknown secret types are never placed into the Substrate bootstrap env or
+// secret collection.
+func TestBuildBootstrapEnv_IgnoresOnDemandAndUnknown(t *testing.T) {
+	const odVal = "FAKE-SUBSTRATE-ONDEMAND-must-not-deliver"
+	const unkVal = "FAKE-SUBSTRATE-UNKNOWN-must-not-deliver"
+	cfg := RunConfig{
+		UnixUsername: "scion",
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "env-ok"},
+			{Name: "OD_KEY", Type: "on_demand", Target: "OD_KEY", Value: odVal},
+			{Name: "UNK_KEY", Type: "future_type", Target: "UNK_KEY", Value: unkVal},
+		},
+	}
+
+	env := buildBootstrapEnv(cfg)
+	if env["API_KEY"] != "env-ok" {
+		t.Errorf(`env["API_KEY"] = %q, want "env-ok"`, env["API_KEY"])
+	}
+	for _, key := range []string{"OD_KEY", "UNK_KEY"} {
+		if v, ok := env[key]; ok {
+			t.Errorf("env[%q] = %q, want absent for non-deliverable secret type", key, v)
+		}
+	}
+	for k, v := range env {
+		if strings.Contains(v, odVal) || strings.Contains(v, unkVal) {
+			t.Errorf("non-deliverable secret value leaked into env[%q]", k)
+		}
+	}
+
+	for k, v := range substrateSecretCandidates(cfg) {
+		if v == odVal || v == unkVal {
+			t.Errorf("substrateSecretCandidates included non-deliverable secret %q", k)
+		}
+	}
+}

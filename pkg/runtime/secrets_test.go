@@ -16,7 +16,6 @@ package runtime
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,7 +89,7 @@ func TestPrepareContainerSecretEnv(t *testing.T) {
 		UnixUsername: "scion",
 		Env:          []string{"EXISTING=value"},
 		ResolvedSecrets: []api.ResolvedSecret{
-			{Name: "CONFIG", Type: "variable", Target: "config", Value: "json-data"},
+			{Name: "ON_DEMAND_KEY", Type: "on_demand", Target: "ON_DEMAND_KEY", Value: "must-not-stage"},
 			{
 				Name:   telemetryGCPCredentialsSecretName,
 				Type:   "file",
@@ -118,8 +117,8 @@ func TestPrepareContainerSecretEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode staged secrets: %v", err)
 	}
-	if staged.VariableSecrets["config"] != "json-data" {
-		t.Errorf("staged variable secrets = %#v", staged.VariableSecrets)
+	if len(staged.FileSecrets) != 1 || staged.FileSecrets[0].Name != telemetryGCPCredentialsSecretName {
+		t.Errorf("staged file secrets = %#v, want only telemetry credentials", staged.FileSecrets)
 	}
 
 	wantTelemetry := telemetryGCPCredentialsEnvVar + "=/home/scion/.config/gcp/sa.json"
@@ -127,15 +126,18 @@ func TestPrepareContainerSecretEnv(t *testing.T) {
 		t.Errorf("telemetry environment = %q, want %q", config.Env[2], wantTelemetry)
 	}
 
-	envOnly := RunConfig{
-		Env:             []string{"EXISTING=value"},
-		ResolvedSecrets: []api.ResolvedSecret{{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "secret"}},
+	envAndOnDemandOnly := RunConfig{
+		Env: []string{"EXISTING=value"},
+		ResolvedSecrets: []api.ResolvedSecret{
+			{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "secret"},
+			{Name: "ON_DEMAND_KEY", Type: "on_demand", Target: "ON_DEMAND_KEY", Value: "must-not-stage"},
+		},
 	}
-	if err := prepareContainerSecretEnv(&envOnly); err != nil {
-		t.Fatalf("prepareContainerSecretEnv with environment secret failed: %v", err)
+	if err := prepareContainerSecretEnv(&envAndOnDemandOnly); err != nil {
+		t.Fatalf("prepareContainerSecretEnv with environment/on_demand secrets failed: %v", err)
 	}
-	if len(envOnly.Env) != 1 || envOnly.Env[0] != "EXISTING=value" {
-		t.Errorf("environment-only secret changed staged environment: %v", envOnly.Env)
+	if len(envAndOnDemandOnly.Env) != 1 || envAndOnDemandOnly.Env[0] != "EXISTING=value" {
+		t.Errorf("environment/on_demand secrets changed staged environment: %v", envAndOnDemandOnly.Env)
 	}
 }
 
@@ -163,17 +165,10 @@ func TestSerializeSecrets(t *testing.T) {
 			Source: "project",
 		},
 		{
-			Name:   "CONFIG",
-			Type:   "variable",
-			Target: "config",
-			Value:  `{"a":"b"}`,
-			Source: "user",
-		},
-		{
-			Name:   "TOKEN",
-			Type:   "variable",
-			Target: "token",
-			Value:  "abc123",
+			Name:   "ON_DEMAND_SECRET",
+			Type:   "on_demand",
+			Target: "ON_DEMAND_SECRET",
+			Value:  "must-not-stage",
 			Source: "project",
 		},
 	}
@@ -192,7 +187,7 @@ func TestSerializeSecrets(t *testing.T) {
 		t.Fatalf("stagedsecrets.Decode failed: %v", err)
 	}
 
-	// Should have 2 file secrets (environment type is excluded)
+	// Should have 2 file secrets (environment and on_demand types are excluded)
 	if len(staged.FileSecrets) != 2 {
 		t.Fatalf("expected 2 file secrets, got %d", len(staged.FileSecrets))
 	}
@@ -222,22 +217,12 @@ func TestSerializeSecrets(t *testing.T) {
 	if string(data) != "raw-value-not-base64" {
 		t.Errorf("expected raw-value-not-base64, got %s", string(data))
 	}
-
-	// Should have 2 variable secrets
-	if len(staged.VariableSecrets) != 2 {
-		t.Fatalf("expected 2 variable secrets, got %d", len(staged.VariableSecrets))
-	}
-	if staged.VariableSecrets["config"] != `{"a":"b"}` {
-		t.Errorf("config value mismatch: got %q", staged.VariableSecrets["config"])
-	}
-	if staged.VariableSecrets["token"] != "abc123" {
-		t.Errorf("token value mismatch: got %q", staged.VariableSecrets["token"])
-	}
 }
 
-func TestSerializeSecrets_NoFileOrVariableSecrets(t *testing.T) {
+func TestSerializeSecrets_NoFileSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{Name: "KEY", Type: "environment", Target: "KEY", Value: "val"},
+		{Name: "OD_KEY", Type: "on_demand", Target: "OD_KEY", Value: "val"},
 	}
 
 	encoded, err := serializeSecrets("/home/scion", secrets)
@@ -245,7 +230,7 @@ func TestSerializeSecrets_NoFileOrVariableSecrets(t *testing.T) {
 		t.Fatalf("serializeSecrets failed: %v", err)
 	}
 	if encoded != "" {
-		t.Errorf("expected empty string for env-only secrets, got %q", encoded)
+		t.Errorf("expected empty string for env/on_demand-only secrets, got %q", encoded)
 	}
 }
 
@@ -330,10 +315,10 @@ func TestSerializeAndWriteRoundTrip(t *testing.T) {
 			Source: "user",
 		},
 		{
-			Name:   "CONFIG",
-			Type:   "variable",
-			Target: "app_config",
-			Value:  `{"db":"postgres"}`,
+			Name:   "ON_DEMAND_KEY",
+			Type:   "on_demand",
+			Target: "ON_DEMAND_KEY",
+			Value:  "must-not-be-written",
 			Source: "project",
 		},
 		{
@@ -369,17 +354,9 @@ func TestSerializeAndWriteRoundTrip(t *testing.T) {
 		t.Errorf("expected my-cert, got %q", string(content))
 	}
 
-	// Verify variable secret
-	data, err := os.ReadFile(filepath.Join(homeDir, ".scion", "secrets.json"))
-	if err != nil {
-		t.Fatalf("failed to read secrets.json: %v", err)
-	}
-	var vars map[string]string
-	if err := json.Unmarshal(data, &vars); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
-	}
-	if vars["app_config"] != `{"db":"postgres"}` {
-		t.Errorf("variable secret mismatch: got %q", vars["app_config"])
+	// Verify secrets.json is never created
+	if _, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json")); !os.IsNotExist(err) {
+		t.Errorf("secrets.json must not be created (stat err=%v)", err)
 	}
 }
 
@@ -453,7 +430,8 @@ func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 	secrets := []api.ResolvedSecret{
 		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
 		{Name: "DB_PASS", Type: "environment", Target: "DATABASE_PASSWORD", Value: "secret", Source: "project"},
-		{Name: "CONFIG", Type: "variable", Target: "config", Value: "json-data", Source: "user"},
+		{Name: "ON_DEMAND", Type: "on_demand", Target: "ON_DEMAND", Value: "must-not-inject", Source: "project"},
+		{Name: "UNKNOWN", Type: "future_type", Target: "UNKNOWN", Value: "must-not-inject-unknown", Source: "project"},
 		{Name: "CERT", Type: "file", Target: "/etc/cert.pem", Value: "data", Source: "user"},
 	}
 
@@ -480,9 +458,15 @@ func TestBuildCommonRunArgs_EnvironmentSecrets(t *testing.T) {
 		t.Errorf("expected environment secret DATABASE_PASSWORD in args, got: %s", argsStr)
 	}
 
-	// Variable and file secrets should NOT be injected as env vars
-	if containsArg(args, "-e", "config=json-data") {
-		t.Errorf("variable secret should not be injected as env var")
+	// on_demand, unknown, and file secrets must NOT be injected as env vars
+	if containsArg(args, "-e", "ON_DEMAND=must-not-inject") || strings.Contains(argsStr, "must-not-inject") {
+		t.Errorf("on_demand secret must not be injected as env var: %s", argsStr)
+	}
+	if containsArg(args, "-e", "UNKNOWN=must-not-inject-unknown") || strings.Contains(argsStr, "must-not-inject-unknown") {
+		t.Errorf("unknown-type secret must not be injected as env var: %s", argsStr)
+	}
+	if containsArg(args, "-e", "/etc/cert.pem=data") {
+		t.Errorf("file secret must not be injected as env var: %s", argsStr)
 	}
 }
 

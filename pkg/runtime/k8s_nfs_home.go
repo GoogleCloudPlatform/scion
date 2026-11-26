@@ -60,7 +60,6 @@ const (
 // Env vars set on NFS-home pods only.
 const (
 	homeLinksEnvVar         = "SCION_HOME_LINKS"
-	secretsFileEnvVar       = "SCION_SECRETS_FILE"
 	harnessOutputsDirEnvVar = "SCION_HARNESS_OUTPUTS_DIR"
 	harnessSecretsDirEnvVar = "SCION_HARNESS_SECRETS_DIR"
 )
@@ -173,9 +172,6 @@ func (r *KubernetesRuntime) nfsHomeEnv(config RunConfig) ([]corev1.EnvVar, error
 	env := []corev1.EnvVar{
 		{Name: harnessOutputsDirEnvVar, Value: k8sHarnessOutputsDir},
 		{Name: harnessSecretsDirEnvVar, Value: k8sHarnessSecretsDir},
-	}
-	if p := r.k8sStagedPathFor(config, "secrets.json"); p != "" {
-		env = append(env, corev1.EnvVar{Name: secretsFileEnvVar, Value: p})
 	}
 	return env, nil
 }
@@ -851,14 +847,16 @@ done`, "sh", home}
 
 // nfsHomeSyncExcludes returns what the home transfer of an NFS-home pod
 // leaves out: the shared home transfer set's excludes (homeTransferExcludes:
-// the link targets and the harness bundle's secrets and outputs). The
-// harness secrets are staged in memory (k8sHarnessSecretsDir) and the
-// outputs are regenerated in the pod (k8sHarnessOutputsDir).
+// the link targets and the harness bundle's secrets and outputs), plus the
+// retired .scion/secrets.json path unconditionally so a stale file from an
+// old run is never synced back. The harness secrets are staged in memory
+// (k8sHarnessSecretsDir) and the outputs are regenerated in the pod
+// (k8sHarnessOutputsDir).
 func (r *KubernetesRuntime) nfsHomeSyncExcludes(config RunConfig) []string {
 	if k8sHomeFileModeFor(config) != k8sHomeFilesLink {
-		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
+		return []string{harnessBundleSecretsRel, harnessBundleOutputsRel, cloudRunSecretsJSONHomeRel}
 	}
-	return homeTransferExcludes(config, !r.useGKESecretsPath(config))
+	return append(homeTransferExcludes(config), cloudRunSecretsJSONHomeRel)
 }
 
 // k8sHarnessSecretsDirCommand creates the in-memory harness secrets

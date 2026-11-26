@@ -16,7 +16,6 @@ package stagedsecrets
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,87 +68,21 @@ func TestWriteFileSecrets(t *testing.T) {
 	}
 }
 
-func TestWriteVariableSecrets(t *testing.T) {
+func TestWriteIgnoresLegacyVariableSecretsInJSON(t *testing.T) {
 	homeDir := t.TempDir()
-	staged := &Staged{VariableSecrets: map[string]string{
-		"config": `{"a":"b"}`,
-		"token":  "abc123",
-	}}
-
+	// A legacy blob containing variable_secrets decodes cleanly and never
+	// writes ~/.scion/secrets.json.
+	raw := `{"variable_secrets":{"config":"{\"a\":\"b\"}","token":"abc123"}}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(raw))
+	staged, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
 	if err := Write(homeDir, staged); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
-
-	secretsPath := filepath.Join(homeDir, ".scion", "secrets.json")
-	data, err := os.ReadFile(secretsPath)
-	if err != nil {
-		t.Fatalf("read secrets.json: %v", err)
-	}
-	var vars map[string]string
-	if err := json.Unmarshal(data, &vars); err != nil {
-		t.Fatalf("unmarshal secrets.json: %v", err)
-	}
-	if len(vars) != 2 || vars["config"] != `{"a":"b"}` || vars["token"] != "abc123" {
-		t.Errorf("variable secrets = %#v", vars)
-	}
-
-	info, err := os.Stat(secretsPath)
-	if err != nil {
-		t.Fatalf("stat secrets.json: %v", err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("file mode = %o, want 600", info.Mode().Perm())
-	}
-}
-
-func TestWriteNoVariables(t *testing.T) {
-	homeDir := t.TempDir()
-	if err := Write(homeDir, &Staged{}); err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
 	if _, err := os.Stat(filepath.Join(homeDir, ".scion", "secrets.json")); !os.IsNotExist(err) {
-		t.Error("secrets.json was created without variable secrets")
-	}
-}
-
-// TestWrite_RefusesSymlinkAtVariableSecretsPath proves a symlink planted at
-// <homeDir>/.scion/secrets.json (e.g. left over from a previous run on a
-// persisted home, or planted ahead of a restart) is refused rather than
-// written or chowned through: Write must return an error, and the symlink's
-// target file must be untouched.
-func TestWrite_RefusesSymlinkAtVariableSecretsPath(t *testing.T) {
-	homeDir := t.TempDir()
-	scionDir := filepath.Join(homeDir, ".scion")
-	if err := os.MkdirAll(scionDir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	victim := filepath.Join(homeDir, "victim")
-	if err := os.WriteFile(victim, []byte("untouched"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	secretsPath := filepath.Join(scionDir, "secrets.json")
-	if err := os.Symlink(victim, secretsPath); err != nil {
-		t.Fatal(err)
-	}
-
-	staged := &Staged{VariableSecrets: map[string]string{"token": "abc123"}}
-	if err := Write(homeDir, staged); err == nil {
-		t.Fatal("Write() = nil error, want a refusal for a symlinked secrets.json")
-	}
-
-	link, err := os.Readlink(secretsPath)
-	if err != nil {
-		t.Fatalf("secrets.json is no longer a symlink after the refused write: %v", err)
-	}
-	if link != victim {
-		t.Errorf("secrets.json symlink target = %q, want %q (unchanged)", link, victim)
-	}
-	content, err := os.ReadFile(victim)
-	if err != nil {
-		t.Fatalf("read victim: %v", err)
-	}
-	if string(content) != "untouched" {
-		t.Errorf("victim content = %q, want %q (unchanged)", content, "untouched")
+		t.Error("secrets.json must never be created")
 	}
 }
 
@@ -195,7 +128,7 @@ func TestWrite_RefusesSymlinkAtFileSecretTarget(t *testing.T) {
 }
 
 // TestWriteAs_SymlinkedScionDirRefusedBeforeChown proves that when
-// <homeDir>/.scion itself (not just secrets.json under it) is a symlink —
+// <homeDir>/.scion itself is a symlink —
 // e.g. left over from a previous run on a persisted home, or planted ahead
 // of a restart — Write refuses before ever creating, writing, or chowning
 // anything through it, and the symlink's target directory (including its
@@ -214,7 +147,9 @@ func TestWriteAs_SymlinkedScionDirRefusedBeforeChown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	staged := &Staged{VariableSecrets: map[string]string{"token": "abc123"}}
+	staged := &Staged{FileSecrets: []FileSecret{
+		{Name: "TOKEN", Target: filepath.Join(homeDir, ".scion", "token.txt"), Value: base64.StdEncoding.EncodeToString([]byte("abc123"))},
+	}}
 	if err := writeAs(homeDir, staged, os.Getuid(), os.Getgid()); err == nil {
 		t.Fatal("writeAs() = nil error, want a refusal for a symlinked .scion directory")
 	}
@@ -226,8 +161,8 @@ func TestWriteAs_SymlinkedScionDirRefusedBeforeChown(t *testing.T) {
 	if gotInfo.Mode() != wantInfo.Mode() {
 		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
 	}
-	if _, err := os.Stat(filepath.Join(victim, "secrets.json")); !os.IsNotExist(err) {
-		t.Errorf("secrets.json was written through the symlinked .scion directory")
+	if _, err := os.Stat(filepath.Join(victim, "token.txt")); !os.IsNotExist(err) {
+		t.Errorf("token.txt was written through the symlinked .scion directory")
 	}
 }
 
@@ -694,7 +629,6 @@ func TestWrite_ScionSecretsSubdirAndUnwritableTargetDiagnostic(t *testing.T) {
 				{Name: "API_KEY", Target: direct, Value: base64.StdEncoding.EncodeToString([]byte("v1"))},
 				{Name: "SA_JSON", Target: nested, Value: base64.StdEncoding.EncodeToString([]byte("v2"))},
 			},
-			VariableSecrets: map[string]string{"REGION": "us-central1"},
 		}
 		if err := Write(homeDir, staged); err != nil {
 			t.Fatalf("Write() = %v, want nil", err)

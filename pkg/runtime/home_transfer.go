@@ -44,9 +44,6 @@ type stagedFileKind int
 const (
 	// stagedFileSecret is a file-type resolved secret.
 	stagedFileSecret stagedFileKind = iota
-	// stagedVariablesFile is secrets.json, carrying the variable-type
-	// resolved secrets.
-	stagedVariablesFile
 	// stagedAuthFile is a file of the resolved harness auth.
 	stagedAuthFile
 )
@@ -55,7 +52,7 @@ const (
 // its secret path rather than through the agent home.
 type stagedFile struct {
 	Kind stagedFileKind
-	// Key names the file within its delivery: the secret name, "secrets.json",
+	// Key names the file within its delivery: the secret name,
 	// or "auth-file-<index into ResolvedAuth.Files>".
 	Key string
 	// Target is the absolute container path.
@@ -64,22 +61,14 @@ type stagedFile struct {
 
 // stagedFiles lists, in a stable order, the files config's resolved
 // secrets and auth deliver to the agent container: each file-type secret,
-// then secrets.json when there is a variable-type secret and withVariables
-// is set, then each auth file with a source.
-func stagedFiles(config RunConfig, withVariables bool) []stagedFile {
+// then each auth file with a source.
+func stagedFiles(config RunConfig) []stagedFile {
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	var out []stagedFile
-	hasVariable := false
 	for _, s := range config.ResolvedSecrets {
-		switch s.Type {
-		case "file":
+		if s.Type == "file" {
 			out = append(out, stagedFile{Kind: stagedFileSecret, Key: s.Name, Target: expandTildeTarget(s.Target, containerHome)})
-		case "variable":
-			hasVariable = true
 		}
-	}
-	if hasVariable && withVariables {
-		out = append(out, stagedFile{Kind: stagedVariablesFile, Key: "secrets.json", Target: path.Join(containerHome, ".scion", "secrets.json")})
 	}
 	if config.ResolvedAuth != nil {
 		for i, f := range config.ResolvedAuth.Files {
@@ -96,11 +85,10 @@ func stagedFiles(config RunConfig, withVariables bool) []stagedFile {
 // shared storage leaves out, as paths relative to the home: the home
 // targets of the staged files (stagedFiles, which reach the container by
 // their own path), then the harness bundle's secrets and outputs.
-// withVariables is whether the runtime delivers secrets.json.
-func homeTransferExcludes(config RunConfig, withVariables bool) []string {
+func homeTransferExcludes(config RunConfig) []string {
 	home := util.GetHomeDir(config.UnixUsername)
 	var out []string
-	for _, f := range stagedFiles(config, withVariables) {
+	for _, f := range stagedFiles(config) {
 		if !placedInK8sHome(f.Target, config.UnixUsername) {
 			continue
 		}

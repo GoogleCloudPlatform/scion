@@ -68,7 +68,7 @@ func TestHomeCommands(t *testing.T) {
 	const agentID = "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
 	t.Setenv(envHomeAgentID, agentID)
 	t.Setenv(envHomeStartID, "start-1")
-	t.Setenv(envHomeLinks, `[{"target":".scion/secrets.json","source":"/run/scion/agent-secrets/secrets.json","mode":"0600"}]`)
+	t.Setenv(envHomeLinks, `[{"target":".ssh/id_rsa","source":"/run/scion/agent-secrets/SSH_KEY","mode":"0600"}]`)
 	t.Setenv(envHomeSkeletonSrc, "")
 
 	out, err := runHome(t, "prepare", "--home", home, "--mem-dir", mem)

@@ -902,7 +902,7 @@ type AgentDetail struct {
 type RequiredSecret struct {
 	Key         string `json:"key" yaml:"key" koanf:"key"`
 	Description string `json:"description,omitempty" yaml:"description,omitempty" koanf:"description"`
-	Type        string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`       // "environment" (default), "variable", "file"
+	Type        string `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`       // "environment" (default), "file"
 	Target      string `json:"target,omitempty" yaml:"target,omitempty" koanf:"target"` // Projection target (defaults to Key for env type)
 	// AlternativeEnvKeys lists env var names that can satisfy this secret
 	// requirement as an alternative. If any of these env vars are present,
@@ -961,15 +961,15 @@ type HubSkillInjectionSetting struct {
 type SecretKeyInfo struct {
 	Description string `json:"description,omitempty"`
 	Source      string `json:"source"`         // "harness", "template", "settings"
-	Type        string `json:"type,omitempty"` // "environment" (default), "variable", "file"
+	Type        string `json:"type,omitempty"` // "environment" (default), "file"
 }
 
 // ResolvedSecret represents a secret that has been resolved from the Hub
 // and is ready for projection into an agent container.
 type ResolvedSecret struct {
 	Name   string `json:"name"`          // Secret key name
-	Type   string `json:"type"`          // environment, variable, file
-	Target string `json:"target"`        // Projection target (env var name, json key, or file path)
+	Type   string `json:"type"`          // environment, file
+	Target string `json:"target"`        // Projection target (env var name or file path)
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")

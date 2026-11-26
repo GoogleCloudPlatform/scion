@@ -208,7 +208,9 @@ func TestRunInit_InheritedResolvedAuthMarkerDoesNotExportLeftFile(t *testing.T) 
 
 	// Staged data without resolved-auth entries: the staging pass runs and
 	// stages nothing of its own.
-	data, err := json.Marshal(stagedsecrets.Staged{VariableSecrets: map[string]string{"EXAMPLE_VARIABLE": "v"}})
+	data, err := json.Marshal(stagedsecrets.Staged{FileSecrets: []stagedsecrets.FileSecret{
+		{Name: "EXAMPLE_FILE", Target: filepath.Join(t.TempDir(), "example.txt"), Value: base64.StdEncoding.EncodeToString([]byte("v"))},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}

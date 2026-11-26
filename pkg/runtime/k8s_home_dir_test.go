@@ -47,7 +47,6 @@ func TestBuildPod_HomeDir(t *testing.T) {
 					UnixUsername: tc.unixUsername,
 					ResolvedSecrets: []api.ResolvedSecret{
 						{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key-data", Source: "user"},
-						{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
 						{Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/creds.json", Value: "cred-data", Source: "user"},
 					},
 					ResolvedAuth: &api.ResolvedAuth{
@@ -82,8 +81,6 @@ func TestBuildPod_HomeDir(t *testing.T) {
 				assertNoMountsUnderHome(t, pod, tc.home)
 				placements := rt.k8sHomeFilePlacements(config)
 				assertPlacement(t, placements, tc.home+"/.ssh/id_rsa", "/run/scion/agent-secrets/SSH_KEY")
-				// Variable secrets are placed at <home>/.scion/secrets.json.
-				assertPlacement(t, placements, tc.home+"/.scion/secrets.json", "/run/scion/agent-secrets/secrets.json")
 				// ResolvedAuth files are placed under home too.
 				assertPlacement(t, placements, tc.home+"/.config/gcloud/adc.json", "/run/scion/auth-files/auth-file-0")
 				assertStagingMount(t, pod, "agent-secrets")

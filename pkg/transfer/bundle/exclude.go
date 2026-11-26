@@ -81,6 +81,7 @@ const homeHarnessOutputsRel = ".scion/harness/outputs"
 var HomeBaselineExcludes = []string{
 	".scion/scion-token",
 	".scion/scion-token.tmp",
+	// Retired path, reserved so stale tooling or a template cannot reuse it with different meaning.
 	".scion/secrets.json",
 	".scion/harness/secrets",
 	homeHarnessOutputsRel,
