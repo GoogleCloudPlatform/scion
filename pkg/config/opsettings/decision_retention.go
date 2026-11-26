@@ -176,13 +176,6 @@ func (c DecisionRetentionConfig) Equal(other DecisionRetentionConfig) bool {
 // HasWindow reports whether a hub-wide retention window is set.
 func (c DecisionRetentionConfig) HasWindow() bool { return c.RetentionDays > 0 }
 
-// HasAnyWindow reports whether the hub default or any project override sets a
-// positive retention window.
-func (c DecisionRetentionConfig) HasAnyWindow() bool {
-	_, ok := c.MinEffectiveDays()
-	return ok
-}
-
 // EffectiveDays returns the effective retention window in days for projectID:
 // override if present (keep_forever returns 0, false), else hub default, else
 // none (0, false).

@@ -31,8 +31,8 @@ func TestParseDecisionRetentionDoc_Defaults(t *testing.T) {
 	if cfg.Enabled {
 		t.Fatal("default Enabled must be false")
 	}
-	if cfg.HasWindow() || cfg.HasAnyWindow() {
-		t.Fatal("default HasWindow and HasAnyWindow must be false")
+	if _, ok := cfg.MinEffectiveDays(); cfg.HasWindow() || ok {
+		t.Fatal("default HasWindow and MinEffectiveDays must be false")
 	}
 }
 
@@ -103,7 +103,7 @@ func TestParseDecisionRetentionDoc_InvalidAndFailClosed(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error for %s, got %+v", tc.raw, cfg)
 			}
-			if cfg.Enabled || cfg.HasWindow() || cfg.HasAnyWindow() {
+			if _, ok := cfg.MinEffectiveDays(); cfg.Enabled || cfg.HasWindow() || ok {
 				t.Fatalf("failed parse must return disabled/no-window zero config, got %+v", cfg)
 			}
 			if tc.name != "malformed JSON" {
@@ -138,8 +138,8 @@ func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing
 	if err != nil {
 		t.Fatalf("ParseDecisionRetentionDoc: %v", err)
 	}
-	if !cfg.HasWindow() || !cfg.HasAnyWindow() {
-		t.Fatalf("expected HasWindow and HasAnyWindow true")
+	if !cfg.HasWindow() {
+		t.Fatalf("expected HasWindow true")
 	}
 	if d, ok := cfg.EffectiveDays(projDays); !ok || d != 45 {
 		t.Fatalf("EffectiveDays(projDays) = (%d, %v), want (45, true)", d, ok)
@@ -167,7 +167,7 @@ func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing
 		t.Fatalf("round-trip mismatch: got %+v (err=%v), want %+v", rt, err, cfg)
 	}
 
-	// 2. No hub default, only a days override -> HasWindow=false, HasAnyWindow=true.
+	// 2. No hub default, only a days override -> HasWindow=false, MinEffectiveDays=(60, true).
 	rawOverrideOnly := json.RawMessage(`{
 		"enabled": true,
 		"project_overrides": {
@@ -181,9 +181,6 @@ func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing
 	if cfg2.HasWindow() {
 		t.Fatal("expected HasWindow false when retention_days absent")
 	}
-	if !cfg2.HasAnyWindow() {
-		t.Fatal("expected HasAnyWindow true when a days override exists")
-	}
 	if d, ok := cfg2.EffectiveDays(projDays); !ok || d != 60 {
 		t.Fatalf("EffectiveDays(projDays) = (%d, %v), want (60, true)", d, ok)
 	}
@@ -194,7 +191,7 @@ func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing
 		t.Fatalf("MinEffectiveDays() = (%d, %v), want (60, true)", minD, ok)
 	}
 
-	// 3. No hub default, only keep_forever override -> HasAnyWindow=false.
+	// 3. No hub default, only keep_forever override -> MinEffectiveDays=(0, false).
 	rawHoldOnly := json.RawMessage(`{
 		"enabled": true,
 		"project_overrides": {
@@ -205,7 +202,7 @@ func TestParseDecisionRetentionDoc_ProjectOverridesAndEffectiveWindow(t *testing
 	if err != nil {
 		t.Fatalf("hold-only parse: %v", err)
 	}
-	if cfg3.HasAnyWindow() {
-		t.Fatal("expected HasAnyWindow false when only keep_forever overrides exist")
+	if minD, ok := cfg3.MinEffectiveDays(); ok || minD != 0 {
+		t.Fatalf("expected MinEffectiveDays (0, false) when only keep_forever overrides exist, got (%d, %v)", minD, ok)
 	}
 }
