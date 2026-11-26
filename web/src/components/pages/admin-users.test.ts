@@ -394,7 +394,7 @@ describe('scion-page-admin-users — invited users and role filter', () => {
     expect(roleAfter.getAttribute('value')).toBe('all');
   });
 
-  it('invite dialog explains the role is assigned at first sign-in, with no role picker', async () => {
+  it('invite dialog explains the role is assigned at first sign-in, with no hub role picker', async () => {
     element = (await createComponent([makeUser()])) as PageEl;
     const inviteBtn = Array.from(element.shadowRoot!.querySelectorAll('sl-button')).find(
       (b) => b.textContent?.trim() === 'Invite User'
@@ -403,7 +403,12 @@ describe('scion-page-admin-users — invited users and role filter', () => {
     inviteBtn.click();
     await element.updateComplete;
 
-    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]');
+    const inviteComp = element.shadowRoot!.querySelector('scion-invite-users-dialog') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    expect(inviteComp).not.toBeNull();
+    await inviteComp!.updateComplete;
+    const dialog = inviteComp!.shadowRoot!.querySelector('sl-dialog');
     expect(dialog).not.toBeNull();
     expect(
       dialog!.querySelector('.invite-role-hint')?.textContent?.replace(/\s+/g, ' ').trim()
@@ -595,7 +600,11 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     const base = createFetchHandler([makeUser()]);
     return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
-      if (init?.method === 'POST' && path.endsWith('/api/v1/admin/users/invite')) {
+      if (
+        init?.method === 'POST' &&
+        (path.endsWith('/api/v1/admin/users/invite/bulk') ||
+          path.endsWith('/api/v1/admin/users/invite'))
+      ) {
         return Promise.resolve(inviteRes());
       }
       if (init?.method === 'POST' && path.endsWith('/api/v1/users')) {
@@ -603,6 +612,11 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       }
       return base(url, init);
     };
+  }
+
+  function getInviteDialog(el: PageEl): HTMLElement | null {
+    const comp = el.shadowRoot!.querySelector('scion-invite-users-dialog');
+    return comp?.shadowRoot?.querySelector('sl-dialog') ?? null;
   }
 
   async function openDialogAndSubmit(
@@ -614,22 +628,31 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     ) as HTMLElement;
     inviteBtn.click();
     await el.updateComplete;
-    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+    const comp = el.shadowRoot!.querySelector('scion-invite-users-dialog') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await comp.updateComplete;
+    const dialog = comp.shadowRoot!.querySelector('sl-dialog')!;
+    const ta = dialog.querySelector('sl-textarea[label="Email addresses"]') as HTMLTextAreaElement;
+    expect(ta, 'Email addresses').not.toBeNull();
+    ta.value = fields.email;
+    ta.dispatchEvent(new Event('sl-input'));
+    await comp.updateComplete;
     const setInput = (label: string, value: string) => {
       const input = dialog.querySelector(`sl-input[label="${label}"]`) as HTMLInputElement;
       expect(input, label).not.toBeNull();
       input.value = value;
       input.dispatchEvent(new Event('sl-input'));
     };
-    setInput('Email address', fields.email);
     if (fields.displayName !== undefined) setInput('Display name (optional)', fields.displayName);
     if (fields.note !== undefined) setInput('Note (optional)', fields.note);
-    await el.updateComplete;
+    await comp.updateComplete;
     const submit = Array.from(dialog.querySelectorAll('sl-button')).find(
       (b) => b.textContent?.trim() === 'Invite User'
     ) as HTMLElement;
     submit.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
+    await comp.updateComplete;
     await el.updateComplete;
   }
 
@@ -658,20 +681,40 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     ) as HTMLElement;
     inviteBtn.click();
     await element.updateComplete;
-    const input = element.shadowRoot!.querySelector(
-      'sl-dialog[label="Invite User"] sl-input[label="Display name (optional)"]'
-    );
+    const comp = element.shadowRoot!.querySelector('scion-invite-users-dialog') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await comp.updateComplete;
+    const input = comp.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]');
     expect(input).not.toBeNull();
     expect(input!.hasAttribute('required')).toBe(false);
   });
 
-  it('without a display name, submits to the invite endpoint as before', async () => {
+  it('without a display name, submits to the bulk invite endpoint and shows per-address results', async () => {
     element = (await createComponent([makeUser()])) as PageEl;
     vi.stubGlobal(
       'fetch',
       vi.fn(
         withSubmitResponses(
-          () => jsonResponse({ id: 'u1', email: 'a@example.com', status: 'invited' }, 201),
+          () =>
+            jsonResponse({
+              batchId: 'b1',
+              invited: 1,
+              skipped: 0,
+              total: 1,
+              complete: true,
+              counts: {
+                created: 1,
+                already_invited: 0,
+                already_active: 0,
+                suspended: 0,
+                invalid: 0,
+                duplicate: 0,
+                failed: 0,
+                membership_failed: 0,
+              },
+              results: [{ index: 0, email: 'a@example.com', status: 'created', userId: 'u1' }],
+            }),
           () => jsonResponse({}, 500)
         )
       )
@@ -679,10 +722,11 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     await openDialogAndSubmit(element, { email: 'A@Example.com', displayName: '   ', note: 'n' });
     const posts = postCalls();
     expect(posts).toHaveLength(1);
-    expect(posts[0].path).toContain('/api/v1/admin/users/invite');
-    expect(posts[0].body).toEqual({ email: 'a@example.com', note: 'n' });
-    expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+    expect(posts[0].path).toContain('/api/v1/admin/users/invite/bulk');
+    expect(posts[0].body).toEqual({ emails: [{ email: 'A@Example.com', note: 'n' }] });
+    const dialog = getInviteDialog(element);
+    expect(dialog).not.toBeNull();
+    expect(dialog!.querySelector('scion-invite-batch-results')).not.toBeNull();
   });
 
   it('with a display name, submits to POST /api/v1/users without a role', async () => {
@@ -706,7 +750,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     expect(posts[0].path).toMatch(/\/api\/v1\/users$/);
     expect(posts[0].body).toEqual({ email: 'a@example.com', displayName: 'Alice' });
     expect(feedback(element)).toEqual({ variant: 'success', text: 'Invited a@example.com.' });
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+    expect(getInviteDialog(element)).toBeNull();
   });
 
   it('shows provisioning warnings as a non-blocking notice', async () => {
@@ -733,7 +777,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     expect(fb.variant).toBe('warning');
     expect(fb.text).toContain('Invited a@other.example.');
     expect(fb.text).toContain("outside the hub's authorized domains");
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).toBeNull();
+    expect(getInviteDialog(element)).toBeNull();
   });
 
   it('renders a 200 created:false replay as a notice, not an error', async () => {
@@ -777,7 +821,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       );
       await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
       expect(feedback(element)).toEqual({ variant: 'danger', text: message });
-      expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+      expect(getInviteDialog(element)).not.toBeNull();
     });
   }
 
@@ -794,7 +838,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     );
     await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
     expect(feedback(element)).toEqual({ variant: 'danger', text: 'User already exists.' });
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+    expect(getInviteDialog(element)).not.toBeNull();
   });
 
   it('sets the alert duration: warnings stay open, other notices close after 5 seconds', async () => {
@@ -880,7 +924,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
 
     vi.useFakeTimers();
     try {
-      const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
+      const dialog = getInviteDialog(element)!;
       const submit = Array.from(dialog.querySelectorAll('sl-button')).find(
         (b) => b.textContent?.trim() === 'Invite User'
       ) as HTMLElement;
@@ -1000,8 +1044,15 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     ) as HTMLElement;
     inviteBtn.click();
     await element.updateComplete;
-    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')!;
-    for (const label of ['Email address', 'Display name (optional)', 'Note (optional)']) {
+    const comp = element.shadowRoot!.querySelector('scion-invite-users-dialog') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await comp.updateComplete;
+    const dialog = comp.shadowRoot!.querySelector('sl-dialog')!;
+    expect(
+      (dialog.querySelector('sl-textarea[label="Email addresses"]') as HTMLTextAreaElement).value
+    ).toBe('');
+    for (const label of ['Display name (optional)', 'Note (optional)']) {
       const input = dialog.querySelector(`sl-input[label="${label}"]`) as HTMLInputElement;
       expect(input.value, label).toBe('');
     }
@@ -1033,7 +1084,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
       variant: 'danger',
       text: 'displayName must not contain control characters',
     });
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+    expect(getInviteDialog(element)).not.toBeNull();
   });
 
   it('shows a network failure and keeps the dialog open', async () => {
@@ -1048,7 +1099,7 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     );
     await openDialogAndSubmit(element, { email: 'a@example.com', displayName: 'A' });
     expect(feedback(element)).toEqual({ variant: 'danger', text: 'network down' });
-    expect(element.shadowRoot!.querySelector('sl-dialog[label="Invite User"]')).not.toBeNull();
+    expect(getInviteDialog(element)).not.toBeNull();
   });
 
   it('reports success when a 2xx body is not JSON', async () => {
@@ -1073,9 +1124,11 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     ) as HTMLElement;
     inviteBtn.click();
     await element.updateComplete;
-    const input = element.shadowRoot!.querySelector(
-      'sl-dialog[label="Invite User"] sl-input[label="Display name (optional)"]'
-    );
+    const comp = element.shadowRoot!.querySelector('scion-invite-users-dialog') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+    await comp.updateComplete;
+    const input = comp.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]');
     expect(input!.getAttribute('help-text')).toBe(
       'Replaced at first sign-in by the name from the sign-in provider, if it supplies one.'
     );
