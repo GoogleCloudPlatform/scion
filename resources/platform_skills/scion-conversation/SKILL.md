@@ -94,7 +94,14 @@ skill for the complete routing rules.
 scion conversation create "project-x coordination" --json
 ```
 
-Capture the returned ID and share it as `conv:<id>` with participants.
+Capture the returned ID and share it as `conv:<id>` with participants. For a
+user-facing group conversation, set the default agent right after creation so
+unmentioned user replies route to that agent (pass the agent slug for a
+project-scoped conversation, or the full agent UUID for a projectless group):
+
+```bash
+scion conversation set-default "conv:<id>" <agent-id-or-slug>
+```
 
 ### Catch up and manage membership
 
@@ -129,5 +136,8 @@ skill for reading and conversation administration.
 - Trying to send through `scion conversation`; use `scion message` instead.
 - Treating `scion conversation join` as idempotent; an existing participant
   produces HTTP 409.
+- Creating a user-facing group conversation without calling
+  `scion conversation set-default`, which leaves unmentioned user replies
+  without a default agent.
 - Creating a conversation for a one-off message; use `scion message @<agent>`
   for a direct message.

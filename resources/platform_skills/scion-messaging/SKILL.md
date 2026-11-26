@@ -162,7 +162,9 @@ user-facing format. Agent-only messages do not require it.
 - **Make commands easy to copy.** Put a short shell command you want the user to run
   in single backticks, such as `scion list`. The chat renders inline code with a
   copy button, so the user can copy it into a terminal. Use a fenced `bash` or `sh`
-  block for multiline commands. Keep explanation outside the code.
+  block for multiline commands. Keep explanation outside the code. For multi-step
+  operator instructions, state where each command runs, exact file paths, and any
+  required permissions outside the code block.
 - **Acknowledge, update, finish.** Acknowledge a user's task promptly, report
   meaningful milestones during longer work, and send the result when done. Avoid
   repeated status-only messages.
