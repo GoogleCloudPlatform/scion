@@ -170,6 +170,17 @@ func (r *pendingResumeRegistry) close() {
 	}
 }
 
+// has reports whether key currently holds a pending entry. Used in tests.
+func (r *pendingResumeRegistry) has(key string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.entries[key]
+	return ok
+}
+
 func (s *Server) effectivePendingResumeTTL() time.Duration {
 	if s.pendingResumeTTL > 0 {
 		return s.pendingResumeTTL

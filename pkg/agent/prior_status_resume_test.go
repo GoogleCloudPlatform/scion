@@ -351,12 +351,13 @@ func writeTestDeclarativeGenericHarnessConfig(t *testing.T, name, taskFlag strin
 
 // TestStart_WakeForMessage_TaskFlagHarness_DefersResumePrompt (T2) verifies
 // that on a message-triggered wake (WakeForMessage=true + OnDeferredResume):
-//   - task_flag harnesses (both ContainerScriptHarness and
-//     DeclarativeGenericHarness) start promptless with no task_flag in argv,
-//     invoke OnDeferredResume once with WakeResumeInstruction and
-//     ResumePromptForPriorStatus, omit SCION_INITIAL_TASK, and preserve
-//     prompt.md;
-//   - non-task_flag harnesses remain unchanged and do not invoke the callback.
+//   - task_flag ContainerScriptHarness configs start promptless with no
+//     task_flag in argv, invoke OnDeferredResume once with
+//     WakeResumeInstruction and ResumePromptForPriorStatus, omit
+//     SCION_INITIAL_TASK, and preserve prompt.md;
+//   - non-task_flag harnesses and custom DeclarativeGenericHarness configs
+//     with only command.task_flag (which do not inject a CLI resume prompt)
+//     remain unchanged and do not invoke the callback.
 func TestStart_WakeForMessage_TaskFlagHarness_DefersResumePrompt(t *testing.T) {
 	ts := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	prior := &api.PriorStatus{
@@ -381,11 +382,11 @@ func TestStart_WakeForMessage_TaskFlagHarness_DefersResumePrompt(t *testing.T) {
 			wantArgv:     []string{"gemini-cli", "--continue"},
 		},
 		{
-			name:           "declarative-generic task_flag harness defers prompt",
+			name:           "declarative-generic with command.task_flag only stays unchanged",
 			harnessName:    "custom-cli",
 			taskFlag:       "--prompt",
 			declarativeGen: true,
-			wantDeferred:   true,
+			wantDeferred:   false,
 			wantArgv:       []string{"custom-cli", "--continue"},
 		},
 		{
@@ -490,11 +491,12 @@ func TestStart_NonWakeResume_Unchanged(t *testing.T) {
 	completedPrior := &api.PriorStatus{Activity: "completed", Summary: "PR merged", At: ts}
 
 	tests := []struct {
-		name        string
-		harnessName string
-		taskFlag    string
-		prior       *api.PriorStatus
-		wantArgv    []string
+		name           string
+		harnessName    string
+		taskFlag       string
+		declarativeGen bool
+		prior          *api.PriorStatus
+		wantArgv       []string
 	}{
 		{
 			name:        "task_flag prior nil gets DefaultResumePrompt",
@@ -516,6 +518,22 @@ func TestStart_NonWakeResume_Unchanged(t *testing.T) {
 			taskFlag:    "--prompt-interactive",
 			prior:       completedPrior,
 			wantArgv:    []string{"gemini-cli", "--continue", "--prompt-interactive", harness.ResumePromptForPriorStatus(completedPrior)},
+		},
+		{
+			name:           "declarative-generic command.task_flag only stays promptless on manual resume",
+			harnessName:    "custom-cli",
+			taskFlag:       "--prompt",
+			declarativeGen: true,
+			prior:          nil,
+			wantArgv:       []string{"custom-cli", "--continue"},
+		},
+		{
+			name:           "declarative-generic command.task_flag only with prior completed stays promptless on manual resume",
+			harnessName:    "custom-cli",
+			taskFlag:       "--prompt",
+			declarativeGen: true,
+			prior:          completedPrior,
+			wantArgv:       []string{"custom-cli", "--continue"},
 		},
 		{
 			name:        "non-task_flag prior nil stays promptless",
@@ -545,7 +563,12 @@ func TestStart_NonWakeResume_Unchanged(t *testing.T) {
 			_, projectScionDir := newResumePhaseTestFixture(t, func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 				return nil, nil
 			})
-			hcDir := writeTestContainerScriptHarnessConfig(t, tc.harnessName, tc.taskFlag)
+			var hcDir string
+			if tc.declarativeGen {
+				hcDir = writeTestDeclarativeGenericHarnessConfig(t, tc.harnessName, tc.taskFlag)
+			} else {
+				hcDir = writeTestContainerScriptHarnessConfig(t, tc.harnessName, tc.taskFlag)
+			}
 
 			var got runtime.RunConfig
 			mgr := NewManager(&runtime.MockRuntime{

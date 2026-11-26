@@ -713,3 +713,92 @@ func TestManagerMessage_InterruptWithResumeSuffix(t *testing.T) {
 		}
 	})
 }
+
+// TestManagerMessage_BufferedWithResumeSuffix_SinglePaste verifies the real
+// production buffered handoff through AgentManager.Message(ctx, ..., false) ->
+// MessageBuffer.sendWithSuffix -> tmux load-buffer over MockRuntime.
+// Asserts (1) delivered together as one paste, then (2) message-before-suffix
+// order, including a second message arriving within the debounce window.
+func TestManagerMessage_BufferedWithResumeSuffix_SinglePaste(t *testing.T) {
+	const m1 = "first waking message"
+	const m2 = "second message inside debounce"
+	const suffix = "Resumed session after suspension to handle the message above."
+
+	var mu sync.Mutex
+	var pasted []string
+	pasteCh := make(chan string, 4)
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{
+				ID:          "agent-1",
+				Name:        "agent-1",
+				ContainerID: "ctr-1",
+				Phase:       "running",
+				Labels: map[string]string{
+					"scion.agent":      "true",
+					"scion.name":       "agent-1",
+					"scion.project_id": "proj-1",
+				},
+			}}, nil
+		},
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			return "", nil
+		},
+		ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, stdin io.Reader) (string, error) {
+			if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "load-buffer" {
+				data, _ := io.ReadAll(stdin)
+				text := string(data)
+				mu.Lock()
+				pasted = append(pasted, text)
+				mu.Unlock()
+				pasteCh <- text
+			}
+			return "", nil
+		},
+	}
+	mgr := NewManager(rt).(*AgentManager)
+	mgr.msgBuffer.bufferDelay = 40 * time.Millisecond
+	mgr.msgBuffer.waitReady = nil
+	t.Cleanup(func() { mgr.msgBuffer.Close() })
+
+	ctx1 := WithDeliveryMessageID(WithResumeSuffix(context.Background(), suffix), "msg-1")
+	if err := mgr.Message(ctx1, "agent-1", "proj-1", m1, false); err != nil {
+		t.Fatalf("first Message: %v", err)
+	}
+	ctx2 := WithDeliveryMessageID(context.Background(), "msg-2")
+	if err := mgr.Message(ctx2, "agent-1", "proj-1", m2, false); err != nil {
+		t.Fatalf("second Message: %v", err)
+	}
+
+	var got string
+	select {
+	case got = <-pasteCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for buffered tmux load-buffer paste")
+	}
+
+	// Ensure no second paste is emitted.
+	time.Sleep(80 * time.Millisecond)
+	mu.Lock()
+	count := len(pasted)
+	mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected exactly 1 tmux paste, got %d (%v)", count, pasted)
+	}
+
+	// Primary invariant: message(s) and resume suffix arrive together in one paste.
+	if !strings.Contains(got, m1) || !strings.Contains(got, m2) || !strings.Contains(got, suffix) {
+		t.Fatalf("paste missing expected content: %q", got)
+	}
+	// Secondary invariant: messages precede the resume instruction.
+	idx1 := strings.Index(got, m1)
+	idx2 := strings.Index(got, m2)
+	idxS := strings.Index(got, suffix)
+	if idx1 >= idx2 || idx2 >= idxS {
+		t.Fatalf("expected order m1 < m2 < suffix, got indices %d, %d, %d in %q", idx1, idx2, idxS, got)
+	}
+	want := m1 + "\n\n" + m2 + "\n\n" + suffix
+	if got != want {
+		t.Errorf("paste =\n  %q\nwant:\n  %q", got, want)
+	}
+}

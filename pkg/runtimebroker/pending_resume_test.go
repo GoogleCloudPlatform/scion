@@ -355,7 +355,11 @@ func TestPendingResume_DropOnLifecycleTransitions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := newWakeResumeFakeManager(t)
 			srv := newWakeResumeTestBroker(t, mgr)
-			srv.pendingResumeTTL = 80 * time.Millisecond
+			// Use a generous TTL so the timer cannot race the lifecycle
+			// request even under cold -race instrumentation; we verify the
+			// registry entry is dropped synchronously by the handler.
+			srv.pendingResumeTTL = 5 * time.Second
+			key := pendingResumeKey("agent-1", "proj-1")
 
 			w := doBrokerJSON(t, srv, http.MethodPost, "/api/v1/agents/agent-1/start?projectId=proj-1", map[string]any{
 				"resume":         true,
@@ -364,13 +368,19 @@ func TestPendingResume_DropOnLifecycleTransitions(t *testing.T) {
 			if w.Code != http.StatusOK && w.Code != http.StatusAccepted {
 				t.Fatalf("wake start status = %d", w.Code)
 			}
+			if !srv.pendingResume.has(key) {
+				t.Fatal("expected pending resume entry after wake start")
+			}
 
 			tc.action(t, srv, mgr)
 
+			if srv.pendingResume.has(key) {
+				t.Fatal("expected pending resume entry to be dropped after lifecycle transition")
+			}
 			select {
 			case unexpected := <-mgr.flushCh:
 				t.Fatalf("expected dropped pending resume not to fire, got %q", unexpected)
-			case <-time.After(160 * time.Millisecond):
+			default:
 			}
 		})
 	}
@@ -379,7 +389,8 @@ func TestPendingResume_DropOnLifecycleTransitions(t *testing.T) {
 		mgr := newWakeResumeFakeManager(t)
 		mgr.startErr = errors.New("container launch failed")
 		srv := newWakeResumeTestBroker(t, mgr)
-		srv.pendingResumeTTL = 50 * time.Millisecond
+		srv.pendingResumeTTL = 5 * time.Second
+		key := pendingResumeKey("agent-1", "proj-1")
 
 		w := doBrokerJSON(t, srv, http.MethodPost, "/api/v1/agents/agent-1/start?projectId=proj-1", map[string]any{
 			"resume":         true,
@@ -388,11 +399,13 @@ func TestPendingResume_DropOnLifecycleTransitions(t *testing.T) {
 		if w.Code == http.StatusOK {
 			t.Fatalf("expected start failure, got 200")
 		}
-
+		if srv.pendingResume.has(key) {
+			t.Fatal("expected failed start to drop pending resume entry")
+		}
 		select {
 		case unexpected := <-mgr.flushCh:
 			t.Fatalf("expected failed start to drop pending resume, got %q", unexpected)
-		case <-time.After(120 * time.Millisecond):
+		default:
 		}
 	})
 }
