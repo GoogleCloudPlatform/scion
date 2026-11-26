@@ -132,7 +132,7 @@ Clicking the **More actions** (`⋯`) button in a message's header, right-clicki
   - **Print / Save as PDF** for offline review.
   - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
   All exported content is HTML-escaped for safe rendering.
-- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands and easily forward snippets or whole discussions directly to your agents as contextual guidance. The built-in commands are `/status` (list the project's agents and their state), `/spawn <template> [name]` (create an agent), `/stop <agent>` (stop a running agent; it is not deleted), `/default <agent|clear>`, `/clear` and `/help`. In a DM with an agent, `/status`, `/spawn` and `/stop` act on that agent's project.
+- **Send-to-Agent Context**: Easily forward snippets or whole discussions directly to your agents as contextual guidance.
 
 #### Starred Messages
 With the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) on (on by default; an admin can turn it off), you can star messages in project space threads and in direct messages, with agents or with other users, to find them again later:

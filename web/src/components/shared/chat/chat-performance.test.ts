@@ -365,20 +365,18 @@ describe('composer input work', () => {
     document.body.append(composer);
     await composer.updateComplete;
     const mention = composer.shadowRoot.querySelector('scion-mention-autocomplete');
-    const slash = composer.shadowRoot.querySelector('scion-slash-autocomplete');
-    await Promise.all([mention.updateComplete, slash.updateComplete]);
+    expect(composer.shadowRoot.querySelector('scion-slash-autocomplete')).toBeNull();
+    await mention.updateComplete;
     const mentionRender = vi.spyOn(mention, 'render');
-    const slashRender = vi.spyOn(slash, 'render');
     const textarea = document.createElement('textarea');
     vi.spyOn(composer, 'getTextareaElement').mockReturnValue(textarea);
     for (const value of ['h', 'he', 'hello']) {
       textarea.value = value;
       composer.handleInput({ target: { value } });
       await composer.updateComplete;
-      await Promise.all([mention.updateComplete, slash.updateComplete]);
+      await mention.updateComplete;
     }
     expect(mentionRender).not.toHaveBeenCalled();
-    expect(slashRender).not.toHaveBeenCalled();
   });
 
   it('preserves grapheme counts and does not rebuild the agent menu while typing', async () => {

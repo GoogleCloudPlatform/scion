@@ -37,10 +37,8 @@ import { guard } from 'lit/directives/guard.js';
 import { live } from 'lit/directives/live.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
-import type { SlashCommandDetail } from './slash-autocomplete.js';
 import { blurElement, focusElement } from '../focus-moved.js';
 import './mention-autocomplete.js';
-import './slash-autocomplete.js';
 import { showToast } from '../../../utils/toast.js';
 import { LongPressController } from './long-press.js';
 import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
@@ -1296,9 +1294,6 @@ export class ScionChatComposer extends LitElement {
                 .members=${this.members}
                 @mention-accept=${this.handleMentionAccept}
               ></scion-mention-autocomplete>
-              <scion-slash-autocomplete
-                @slash-command=${this.handleSlashCommand}
-              ></scion-slash-autocomplete>
             </div>
             <div class="send-container">
               <sl-button
@@ -1568,9 +1563,8 @@ export class ScionChatComposer extends LitElement {
       this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
     }
 
-    // Feed the autocomplete components.
+    // Feed the mention autocomplete component.
     this.notifyMentionAutocompleteOfTextChange();
-    this.notifySlashAutocompleteOfTextChange();
   }
 
   /** Tell the mention-autocomplete component about the current text/cursor. */
@@ -1581,17 +1575,6 @@ export class ScionChatComposer extends LitElement {
     const textarea = this.getTextareaElement();
     if (autocomplete && textarea) {
       autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
-    }
-  }
-
-  /** Tell the slash-autocomplete component about the current text/cursor. */
-  private notifySlashAutocompleteOfTextChange(): void {
-    const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      | import('./slash-autocomplete.js').ScionSlashAutocomplete
-      | null;
-    if (slashAutocomplete) {
-      const cursorPos = this.getTextareaElement()?.selectionStart ?? this.text.length;
-      slashAutocomplete.handleInput(this.text, cursorPos);
     }
   }
 
@@ -1659,21 +1642,13 @@ export class ScionChatComposer extends LitElement {
 
   private handleKeydown(e: KeyboardEvent): void {
     // Backspace/Delete right at the edge of an accepted mention removes the
-    // whole token atomically, ahead of the slash/mention autocomplete's own
-    // key handling (neither of which claims these keys).
+    // whole token atomically, ahead of the mention autocomplete's own key
+    // handling (which does not claim these keys).
     if ((e.key === 'Backspace' || e.key === 'Delete') && this.tryAtomicMentionDelete(e)) {
       return;
     }
 
-    // Let slash command autocomplete handle keys first.
-    const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
-      | import('./slash-autocomplete.js').ScionSlashAutocomplete
-      | null;
-    if (slashAutocomplete?.handleKeydown(e)) {
-      return; // consumed by slash autocomplete
-    }
-
-    // Then let the mention autocomplete handle keys.
+    // Let the mention autocomplete handle keys first.
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
@@ -1750,37 +1725,13 @@ export class ScionChatComposer extends LitElement {
       if (ta) {
         ta.setSelectionRange(cursorPos, cursorPos);
       }
-      // An atomic delete bypasses the native input event both autocomplete
-      // components normally listen to. Tell them directly so their own
-      // bookkeeping (e.g. a dismissed-trigger position) doesn't go stale
-      // relative to the new text, and each stays closed rather than
-      // reopening on stale state (#1912).
+      // An atomic delete bypasses the native input event the mention
+      // autocomplete component normally listens to. Tell it directly so its
+      // own bookkeeping (e.g. a dismissed-trigger position) doesn't go stale
+      // relative to the new text, and it stays closed rather than reopening on
+      // stale state (#1912).
       this.notifyMentionAutocompleteOfTextChange();
-      this.notifySlashAutocompleteOfTextChange();
     });
-  }
-
-  private handleSlashCommand(e: CustomEvent<SlashCommandDetail>): void {
-    const { command } = e.detail;
-    // Extract args from the current text: `/command arg1 arg2`
-    const text = this.text.trim();
-    const spaceIdx = text.indexOf(' ');
-    const args = spaceIdx >= 0 ? text.slice(spaceIdx + 1).trim() : '';
-
-    this.dispatchEvent(
-      new CustomEvent('chat-slash-command', {
-        detail: { command, args },
-        bubbles: true,
-        composed: true,
-      })
-    );
-
-    // Clear the text input after dispatching.
-    this.text = '';
-    this.runeCount = 0;
-    this.resetMentionTracking();
-    this.clearDraft();
-    this.focusTextarea();
   }
 
   private handleMentionAccept(e: CustomEvent<MentionAcceptDetail>): void {
@@ -2704,7 +2655,6 @@ export class ScionChatComposer extends LitElement {
         ta.setSelectionRange(end, end);
       }
       this.notifyMentionAutocompleteOfTextChange();
-      this.notifySlashAutocompleteOfTextChange();
     });
     this.focusTextareaCaretEnd();
   }

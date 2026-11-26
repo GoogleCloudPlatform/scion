@@ -272,27 +272,6 @@ describe('composer — atomic mention delete', () => {
     expect(h.ta.selectionStart).toBe(3);
   });
 
-  it('notifies the slash autocomplete (not just the mention autocomplete) after an atomic delete', async () => {
-    const h = await mount();
-    await typeText(h, '@bo', 3);
-    await acceptCandidate(h, 0);
-    expect(h.el.text).toBe('@bob ');
-
-    const slash = h.el.shadowRoot.querySelector('scion-slash-autocomplete');
-    let calledWith: [string, number] | null = null;
-    const original = slash.handleInput.bind(slash);
-    slash.handleInput = (text: string, cursorPos: number) => {
-      calledWith = [text, cursorPos];
-      return original(text, cursorPos);
-    };
-
-    pressKey(h, 'Backspace', h.el.text.length);
-    await h.el.updateComplete;
-
-    expect(calledWith).not.toBeNull();
-    expect((calledWith as unknown as [string, number])[0]).toBe('');
-  });
-
   it('prepending a new mention before an already-accepted one keeps both routed (R1)', async () => {
     // Regression test for R1: a prefix/suffix diff that greedily matches the
     // "@" typed right before an accepted mention used to misplace the edit
