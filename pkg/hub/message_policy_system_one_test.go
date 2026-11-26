@@ -1119,7 +1119,7 @@ func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *test
 
 		// 3b. Uncovered sample surface -> 400.
 		badSurf := makeInlineReq("inst-ref-project")
-		badSurf.Sample.Surface = store.MessagePolicySurfaceAgentDM
+		badSurf.Sample.Surface = store.MessagePolicySurfaceGroupSet
 		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, badSurf)
 		require.Equal(t, http.StatusBadRequest, rec.Code)
 

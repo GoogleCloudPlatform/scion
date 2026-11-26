@@ -110,8 +110,9 @@ type unitPolicyEvalRow struct {
 }
 
 // verifySenderAuthorityCrossCheck enforces D5: the eval/credential project is
-// the sender's store project, cross-checked against the authenticated or
-// delegated actor identity.
+// always the sender's store project, cross-checked that the store agent record
+// matches the authenticated or delegated actor ID. A conflicting token project
+// claim never overrides the stored agent's ProjectID (O1).
 func verifySenderAuthorityCrossCheck(sender *store.Agent, senderIdent Identity) (string, error) {
 	if sender == nil || sender.ProjectID == "" {
 		return "", errors.New("message policy gate: missing sender agent or sender project")
@@ -121,16 +122,6 @@ func verifySenderAuthorityCrossCheck(sender *store.Agent, senderIdent Identity) 
 	}
 	if sender.ID != senderIdent.ID() {
 		return "", errors.New("message policy gate: sender agent ID does not match authenticated actor")
-	}
-	switch id := senderIdent.(type) {
-	case AgentIdentity:
-		if id.ProjectID() != "" && id.ProjectID() != sender.ProjectID {
-			return "", errors.New("message policy gate: sender agent project mismatch with authenticated identity")
-		}
-	case *DelegatedAgentIdentity:
-		if id.AgentProjectID() != "" && id.AgentProjectID() != sender.ProjectID {
-			return "", errors.New("message policy gate: delegated actor project mismatch with store agent")
-		}
 	}
 	return sender.ProjectID, nil
 }

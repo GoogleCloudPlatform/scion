@@ -2680,9 +2680,10 @@ func TestMessagePolicyGate_TwoAgentDirectConvNoExplicitRecipient_RoutesToExecute
 	})
 	require.NoError(t, err)
 
-	// Seed a catch-all enforce policy AND arm the store fault switch on
-	// ListMessagePolicies / CreateMessagePolicyDecision so reaching H2 (either
-	// covered or uncovered) would be immediately observable.
+	// Seed a catch-all enforce policy scoped strictly to H2 surfaces
+	// (agent_to_user / agent_to_conversation). ExecuteAgentDM now evaluates
+	// agent_dm policies in Slice B, so H2-only policies must not match or
+	// reject this DM, and the H2 uncovered fallback must never fire.
 	pol := &store.MessagePolicy{
 		ProjectID: f.project.ID,
 		Name:      "reject-everything-at-h2",
@@ -2699,7 +2700,6 @@ func TestMessagePolicyGate_TwoAgentDirectConvNoExplicitRecipient_RoutesToExecute
 		OnFailed:      messagepolicy.OutcomeReject,
 	}
 	require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
-	f.faultSwitch.Arm()
 
 	rr := f.sendOutbound(t, OutboundMessageRequest{
 		ConversationRef: "conv:" + agentDMConv.ID,
@@ -2713,9 +2713,8 @@ func TestMessagePolicyGate_TwoAgentDirectConvNoExplicitRecipient_RoutesToExecute
 	assert.Equal(t, f.peerAgent.ID, calls[0].Agent.ID)
 	assert.Zero(t, f.recordChannel.count(), "agent DM must not deliver through user channels")
 
-	// H2 was never reached at all (neither policy load nor H2 uncovered counter).
-	assert.Zero(t, f.faultWrapper.listCalls.Load(), "ExecuteAgentDM path must never reach H2 ListMessagePolicies")
-	assert.Zero(t, f.faultWrapper.decisionCalls.Load(), "ExecuteAgentDM path must never persist H2 policy decisions")
+	// H2-only policy did not match agent_dm and H2 uncovered counter never fired.
+	assert.Zero(t, f.faultWrapper.decisionCalls.Load(), "H2-only policy must not persist decisions on agent_dm")
 	assert.Zero(t, f.srv.messagePolicyUncovered.Load(), "ExecuteAgentDM path returns before H2 and must not hit H2 uncovered fallback")
 
 	msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 10})
