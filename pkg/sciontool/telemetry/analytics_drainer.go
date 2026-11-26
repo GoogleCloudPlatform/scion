@@ -737,14 +737,17 @@ func analyticsHubEndpoint() string {
 // value is "disabled"; only start enables it.
 type analyticsState struct {
 	native         *UsageAnalytics
+	sqliteNative   *UsageAnalytics
 	drainer        *AnalyticsDrainer
 	disabledReason string
 	// send counts drainer send retries for WP3 diagnostics (health.go).
 	send *countingSend
 
-	// outboxDir, hubOutboxDir and owner locate the outboxes under the AGENT
-	// home and name their owner (Pipeline.SetAnalyticsOutbox); resolver
-	// overrides the hub ID resolver (tests).
+	// agentHome, outboxDir, hubOutboxDir and owner locate the outboxes and
+	// tailer state under the AGENT home and name their owner
+	// (Pipeline.SetAnalyticsOutbox); resolver overrides the hub ID resolver
+	// (tests).
+	agentHome         string
 	outboxDir         string
 	hubOutboxDir      string
 	owner             *OutboxOwner
@@ -753,6 +756,7 @@ type analyticsState struct {
 	hubProbe          HubUsageProbeFunc
 	hubProbeInterval  time.Duration
 	supportedSignals  func() []string
+	schemaDrift       func() bool
 	onSuppressChanged func(bool)
 	isSuppressed      func() bool
 }
@@ -800,6 +804,7 @@ func (p *Pipeline) SetAnalyticsOutbox(agentHome string, uid, gid int) {
 	if p == nil {
 		return
 	}
+	p.analytics.agentHome = agentHome
 	p.analytics.outboxDir = AnalyticsOutboxDirFor(agentHome)
 	p.analytics.hubOutboxDir = HubAnalyticsOutboxDirFor(agentHome)
 	p.analytics.owner = &OutboxOwner{UID: uid, GID: gid}
@@ -901,11 +906,15 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		if hubErr != nil {
 			log.Error("Hub usage analytics outbox unavailable (continuing GCP-only): %v", hubErr)
 			a.native = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
+			a.sqliteNative = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceSQLiteNative)
 			a.drainer = NewAnalyticsDrainer(gcpOutbox, a.send.Send, resolver)
 		} else {
 			cfg := *a.hubSinkCfg
 			if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 				cfg.SupportedSignals = a.supportedSignals
+			}
+			if cfg.SchemaDriftDetected == nil && a.schemaDrift != nil {
+				cfg.SchemaDriftDetected = a.schemaDrift
 			}
 			applySuppress := func(v bool) {
 				hubOutbox.setHubSuppress(v)
@@ -916,13 +925,18 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 			a.native = NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 			a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 			a.native.setDirectOTelSuppressedFn(a.isSuppressed)
+			a.sqliteNative = NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+			a.sqliteNative.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+			a.sqliteNative.setDirectOTelSuppressedFn(a.isSuppressed)
 			hubSend := newCountingBatchSend(sink.SendBatch)
 			a.drainer = newDualAnalyticsDrainerWithSend(gcpOutbox, a.send.Send, hubOutbox, sink, hubSend.SendBatch, resolver)
 			applySuppress(cfg.SuppressDirectOTel)
 			native := a.native
+			sqliteNative := a.sqliteNative
 			a.drainer.onHubRevoked = func() {
 				applySuppress(false)
 				native.clearHubOutbox()
+				sqliteNative.clearHubOutbox()
 			}
 		}
 	case a.hubSinkCfg != nil:
@@ -938,6 +952,9 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 			cfg.SupportedSignals = a.supportedSignals
 		}
+		if cfg.SchemaDriftDetected == nil && a.schemaDrift != nil {
+			cfg.SchemaDriftDetected = a.schemaDrift
+		}
 		applySuppress := func(v bool) {
 			hubOutbox.setHubSuppress(v)
 			setSuppress(v)
@@ -947,13 +964,18 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		a.native = NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceNative)
 		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 		a.native.setDirectOTelSuppressedFn(a.isSuppressed)
+		a.sqliteNative = NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+		a.sqliteNative.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+		a.sqliteNative.setDirectOTelSuppressedFn(a.isSuppressed)
 		a.send = newCountingBatchSend(sink.SendBatch)
 		a.drainer = newHubAnalyticsDrainerWithSend(hubOutbox, sink, a.send.SendBatch, resolver)
 		applySuppress(cfg.SuppressDirectOTel)
 		native := a.native
+		sqliteNative := a.sqliteNative
 		a.drainer.onHubRevoked = func() {
 			applySuppress(false)
 			native.detach()
+			sqliteNative.detach()
 		}
 	default:
 		// GCP-only mode (probe negative): never create analytics-outbox-hub;
@@ -968,15 +990,19 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		}
 		a.native = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
 		a.native.setDirectOTelSuppressedFn(a.isSuppressed)
+		a.sqliteNative = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceSQLiteNative)
+		a.sqliteNative.setDirectOTelSuppressedFn(a.isSuppressed)
 		a.send = newCountingSend(gcp.SendAnalytics)
 		a.drainer = NewAnalyticsDrainer(gcpOutbox, a.send.Send, resolver)
 		a.drainer.hubOutboxDir = hubDir
 		a.drainer.hubOutboxOwner = a.owner
 		if a.hubProbe != nil {
 			native := a.native
+			sqliteNative := a.sqliteNative
 			a.drainer.onHubRevoked = func() {
 				setSuppress(false)
 				native.clearHubOutbox()
+				sqliteNative.clearHubOutbox()
 			}
 			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
 				applySuppress := func(v bool) {
@@ -986,6 +1012,9 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 				sink.cfg.OnSuppressChanged = applySuppress
 				if native != nil {
 					native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
+				}
+				if sqliteNative != nil {
+					sqliteNative.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 				}
 				applySuppress(cfg.SuppressDirectOTel)
 			})

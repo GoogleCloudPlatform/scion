@@ -124,6 +124,7 @@ func TestUsageEventValidate(t *testing.T) {
 		"malformed without fields":  func(e *UsageEvent) { e.TokenStatus = TokenStatusMalformed },
 		"fields without malformed":  func(e *UsageEvent) { e.MalformedFields = []string{"input_tokens"} },
 		"not reported with tokens":  func(e *UsageEvent) { e.TokenStatus = TokenStatusNotReported },
+		"unverified with tokens":    func(e *UsageEvent) { e.TokenStatus = TokenStatusUnverified },
 		"bad source time":           func(e *UsageEvent) { e.SourceTime = "yesterday" },
 		"interval without end":      func(e *UsageEvent) { e.IntervalStart, e.Temporality = FormatTS(testEventTS), TemporalityDelta },
 		"interval bad temporality": func(e *UsageEvent) {
@@ -151,6 +152,15 @@ func TestUsageEventValidate(t *testing.T) {
 	ok.TokenStatus, ok.MalformedFields = TokenStatusMalformed, []string{"cache_read_tokens"}
 	if err := ok.Validate(); err != nil {
 		t.Errorf("valid variant rejected: %v", err)
+	}
+	unv := validUsageEvent()
+	unv.Input, unv.Output, unv.CacheRead, unv.CacheWrite, unv.Reasoning = nil, nil, nil, nil, nil
+	unv.InputDerivation = ""
+	unv.ReasoningOverlapsOutput = nil
+	unv.Calls = 0
+	unv.TokenStatus = TokenStatusUnverified
+	if err := unv.Validate(); err != nil {
+		t.Errorf("valid unverified variant rejected: %v", err)
 	}
 }
 

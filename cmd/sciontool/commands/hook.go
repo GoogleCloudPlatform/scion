@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -360,6 +361,13 @@ func processHookData(data []byte) error {
 		return err
 	}
 
+	// Wake the live Antigravity SQLite tailer in sciontool init immediately
+	// after PostInvocation (model-end) without delaying the hook response.
+	if strings.EqualFold(event.Name, hooks.EventModelEnd) &&
+		os.Getenv("SCION_USAGE_SOURCE") == telemetrycontract.UsageSourceSQLiteNative {
+		telemetry.NotifyAgySQLiteWake(hookHomeDir())
+	}
+
 	runHookTelemetry(hubBudget, event, hubClient)
 	return nil
 }
@@ -564,12 +572,13 @@ func hookHomeDir() string {
 // every active sink's outbox (GCP and/or Hub, discovering Hub activation from
 // disk).
 func hookUsageAnalytics(cfg *telemetry.Config) *telemetry.UsageAnalytics {
-	if os.Getenv("SCION_USAGE_SOURCE") != telemetrycontract.UsageSourceHooks || !telemetry.AnalyticsEnabledForHooks(cfg) {
+	src := os.Getenv("SCION_USAGE_SOURCE")
+	if (src != telemetrycontract.UsageSourceHooks && src != telemetrycontract.UsageSourceSQLiteNative) || !telemetry.AnalyticsEnabledForHooks(cfg) {
 		return nil
 	}
 	// Opened lazily: only a model-end event pays for the open and flock.
 	// The directory is under the agent home (the hook runs as the agent user,
 	// HOME=<agent home>), the same home init resolves for the pipeline.
 	gcpEnabled := cfg != nil && cfg.IsCloudConfigured() && cfg.IsGCP()
-	return telemetry.NewLazyHookUsageAnalytics(hookHomeDir(), gcpEnabled, nil)
+	return telemetry.NewLazyHookUsageAnalyticsForSource(hookHomeDir(), gcpEnabled, nil, src)
 }

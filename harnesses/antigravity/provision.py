@@ -138,6 +138,25 @@ def _has_disk_oauth_token(ctx: scion_harness.ProvisionContext) -> bool:
     return os.path.isfile(path)
 
 
+def _select_usage_source() -> str:
+    """Select the Track 1 live usage source for Antigravity.
+
+    Prefers ``sqlite_native`` (PostInvocation owns calls; the in-process
+    sciontool SQLite tailer emits canonical tokens) when the container's
+    sciontool advertises ``sqlite_native`` in ``SCION_USAGE_SOURCES_SUPPORTED``.
+    Falls back to ``hooks`` (calls-only) for older sciontool binaries that do
+    not recognize ``sqlite_native`` so call metering keeps working unchanged.
+    """
+    supported = {
+        item.strip()
+        for item in os.environ.get("SCION_USAGE_SOURCES_SUPPORTED", "").split(",")
+        if item.strip()
+    }
+    if "sqlite_native" in supported:
+        return "sqlite_native"
+    return "hooks"
+
+
 def _resolve_location(ctx: scion_harness.ProvisionContext) -> str:
     """Return the Vertex AI location: GOOGLE_CLOUD_LOCATION, else
     GOOGLE_CLOUD_REGION, warning when both are set and differ
@@ -189,16 +208,12 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     has_token = False
     is_adc = False
     # Antigravity has no native OTel integration (config.yaml's
-    # capabilities.telemetry.native_emitter is "no"), so hooks are the only
-    # possible usage source, regardless of auth method. This is the D10
-    # opt-in: the fixture-backed mapping proving PreInvocation/PostInvocation
-    # granularity and confirming tokens are absent
-    # (pkg/sciontool/hooks/dialects/testdata/antigravity/) is what makes
-    # publishing hook usage for this harness allowed at all (design §9,
-    # ptone/scion#2053 phase 3d). Antigravity's PostInvocation carries no
-    # usage/token fields, so this declares calls-only; tokens are a
-    # follow-up if agy ever adds them to the hook payload.
-    env_overlay: dict[str, str] = {"SCION_USAGE_SOURCE": "hooks"}
+    # capabilities.telemetry.native_emitter is "no"). Prefer sqlite_native
+    # (PostInvocation hooks own calls; sciontool's read-only SQLite tailer
+    # emits canonical tokens with drift fallback to calls_only) when the
+    # container's sciontool advertises sqlite_native support, and fall back
+    # to hooks (calls-only) on older sciontool binaries.
+    env_overlay: dict[str, str] = {"SCION_USAGE_SOURCE": _select_usage_source()}
 
     if method == "vertex-ai":
         # vertex-ai is now the ADC path: validate version and wire ADC environment.

@@ -151,10 +151,8 @@ class AntigravityProvisionTest(unittest.TestCase):
     # calls-only.
 
     def test_api_key_auth_declares_hooks_usage_source(self) -> None:
-        # Clear ambient GOOGLE_CLOUD_* vars: env_fallback=True on the
-        # vertex-ai method means a real value leaking in from the test
-        # runner's own environment would otherwise outrank api-key
-        # (methods are tried in declaration order, vertex-ai first).
+        # Without SCION_USAGE_SOURCES_SUPPORTED (older sciontool binary),
+        # provision.py keeps backward compatibility by declaring "hooks".
         with tempfile.TemporaryDirectory() as tmp:
             with unittest.mock.patch.dict(
                 os.environ,
@@ -164,6 +162,7 @@ class AntigravityProvisionTest(unittest.TestCase):
                     "GOOGLE_CLOUD_LOCATION": "",
                     "GOOGLE_CLOUD_REGION": "",
                     "AGY_TOKEN": "",
+                    "SCION_USAGE_SOURCES_SUPPORTED": "",
                 },
             ):
                 env = _invoke(tmp, env_vars=["GEMINI_API_KEY"])
@@ -174,7 +173,11 @@ class AntigravityProvisionTest(unittest.TestCase):
             with unittest.mock.patch.object(provision, "_get_agy_version", return_value=(1, 2, 12)):
                 with unittest.mock.patch.dict(
                     os.environ,
-                    {"GOOGLE_CLOUD_PROJECT": "proj-1", "GOOGLE_CLOUD_REGION": "us-central1"},
+                    {
+                        "GOOGLE_CLOUD_PROJECT": "proj-1",
+                        "GOOGLE_CLOUD_REGION": "us-central1",
+                        "SCION_USAGE_SOURCES_SUPPORTED": "",
+                    },
                 ):
                     env = _invoke(
                         tmp,
@@ -185,12 +188,36 @@ class AntigravityProvisionTest(unittest.TestCase):
         self.assertEqual(env.get("AGY_ADC_AUTH"), "true")
 
     def test_no_auth_still_declares_hooks_usage_source(self) -> None:
-        # explicit "none" is a valid mode for antigravity (file-only or
-        # no-auth setups) -- the usage source is a property of the harness's
-        # hook wiring, not of whether auth resolved to something usable.
         with tempfile.TemporaryDirectory() as tmp:
-            env = _invoke(tmp, env_vars=[], explicit_type="none")
+            with unittest.mock.patch.dict(os.environ, {"SCION_USAGE_SOURCES_SUPPORTED": ""}):
+                env = _invoke(tmp, env_vars=[], explicit_type="none")
         self.assertEqual(env["SCION_USAGE_SOURCE"], "hooks")
+
+    def test_declares_sqlite_native_when_sciontool_supports_it(self) -> None:
+        # When sciontool advertises sqlite_native in SCION_USAGE_SOURCES_SUPPORTED,
+        # provision.py flips SCION_USAGE_SOURCE to sqlite_native across auth modes.
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.dict(
+                os.environ,
+                {
+                    "GEMINI_API_KEY": "test-key",
+                    "GOOGLE_CLOUD_PROJECT": "",
+                    "GOOGLE_CLOUD_LOCATION": "",
+                    "GOOGLE_CLOUD_REGION": "",
+                    "AGY_TOKEN": "",
+                    "SCION_USAGE_SOURCES_SUPPORTED": "native,hooks,sqlite_native",
+                },
+            ):
+                env = _invoke(tmp, env_vars=["GEMINI_API_KEY"])
+        self.assertEqual(env["SCION_USAGE_SOURCE"], "sqlite_native")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch.dict(
+                os.environ,
+                {"SCION_USAGE_SOURCES_SUPPORTED": "native,hooks,sqlite_native"},
+            ):
+                env = _invoke(tmp, env_vars=[], explicit_type="none")
+        self.assertEqual(env["SCION_USAGE_SOURCE"], "sqlite_native")
 
 
 class VertexLocationPrecedenceTest(unittest.TestCase):

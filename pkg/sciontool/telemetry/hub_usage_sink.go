@@ -69,6 +69,10 @@ type HubUsageSinkConfig struct {
 	// response with resp.SuppressDirectOTel (an omitted field decodes as false
 	// and un-suppresses direct container export).
 	OnSuppressChanged func(bool)
+	// SchemaDriftDetected reports whether the producer has latched a schema
+	// drift condition (e.g. unknown harness version or malformed decode) and
+	// degraded to calls_only.
+	SchemaDriftDetected func() bool
 }
 
 func (c HubUsageSinkConfig) maxBatchEvents() int {
@@ -164,6 +168,13 @@ func (s *HubUsageSink) supportedSignals() []string {
 	return append([]string(nil), sigs...)
 }
 
+func (s *HubUsageSink) schemaDriftDetected() bool {
+	if s.cfg.SchemaDriftDetected == nil {
+		return false
+	}
+	return s.cfg.SchemaDriftDetected()
+}
+
 func (s *HubUsageSink) ledgerMeta() (epoch string, seq int64) {
 	if s.outbox == nil {
 		return "", 0
@@ -187,6 +198,7 @@ func (s *HubUsageSink) EffectiveMaxBatchBytes() int {
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
+		SchemaDriftDetected:  s.schemaDriftDetected(),
 		FinalState:           telemetrycontract.MeterFinalStateIncomplete,
 	}
 	overhead := 256
@@ -309,6 +321,7 @@ func (s *HubUsageSink) sendGroup(
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
 		DirectOTelSuppressed: directSuppressed,
+		SchemaDriftDetected:  s.schemaDriftDetected(),
 	}
 
 	// Proactive re-encoded size check (O2): encoding/json HTML-escaping or
@@ -378,6 +391,7 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
+		SchemaDriftDetected:  s.schemaDriftDetected(),
 		FinalState:           finalState,
 	}
 	resp, err := s.cfg.Post(ctx, req)

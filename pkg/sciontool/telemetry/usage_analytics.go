@@ -145,6 +145,17 @@ func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *
 // marked active on disk. When gcpEnabled is false (Hub-only mode), it writes
 // only to the Hub outbox while it is marked active on disk.
 func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxOwner) *UsageAnalytics {
+	return NewLazyHookUsageAnalyticsForSource(agentHome, gcpEnabled, owner, telemetrycontract.UsageSourceHooks)
+}
+
+// NewLazyHookUsageAnalyticsForSource is like NewLazyHookUsageAnalytics but
+// stamps events with the caller-supplied usageSource (for example
+// UsageSourceSQLiteNative when PostInvocation hooks own calls alongside the
+// SQLite token tailer).
+func NewLazyHookUsageAnalyticsForSource(agentHome string, gcpEnabled bool, owner *OutboxOwner, usageSource string) *UsageAnalytics {
+	if usageSource == "" {
+		usageSource = telemetrycontract.UsageSourceHooks
+	}
 	gcpDir := AnalyticsOutboxDirFor(agentHome)
 	hubDir := HubAnalyticsOutboxDirFor(agentHome)
 	if !gcpEnabled {
@@ -154,7 +165,7 @@ func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxO
 			hubDir:      hubDir,
 			hubOwner:    owner,
 			hubOnly:     true,
-			usageSource: telemetrycontract.UsageSourceHooks,
+			usageSource: usageSource,
 			now:         time.Now,
 		}
 	}
@@ -164,7 +175,7 @@ func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxO
 		failOwner:   owner,
 		hubDir:      hubDir,
 		hubOwner:    owner,
-		usageSource: telemetrycontract.UsageSourceHooks,
+		usageSource: usageSource,
 		now:         time.Now,
 	}
 }

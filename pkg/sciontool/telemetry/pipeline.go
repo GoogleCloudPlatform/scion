@@ -77,6 +77,7 @@ type Pipeline struct {
 	meter              otelmetric.Meter
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
+	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
 	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health             healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
@@ -233,7 +234,7 @@ const (
 // It returns UsageActivated when a new deriver was stored, and otherwise the
 // reason it was skipped.
 func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
-	if source != UsageSourceNative {
+	if source != UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative {
 		return UsageActivationNotNative, nil
 	}
 	// Known limitation (predates ptone/scion#3391): the supervisor applies
@@ -254,6 +255,18 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 
 	if !p.running {
 		return UsageActivationNotRunning, nil
+	}
+	if source == telemetrycontract.UsageSourceSQLiteNative {
+		if os.Getenv("SCION_HARNESS") != "antigravity" {
+			return UsageActivationNoHarnessRule, nil
+		}
+		if p.agyTailer.Load() != nil {
+			return UsageActivationAlreadyActive, nil
+		}
+		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
+			return "", fmt.Errorf("starting antigravity sqlite tailer: %w", err)
+		}
+		return UsageActivated, nil
 	}
 	if current := p.usageDeriver.Load(); current != nil && len(current.rules) > 0 {
 		return UsageActivationAlreadyActive, nil
@@ -278,6 +291,24 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	// in-flight request that loaded the old no-op deriver derives nothing.
 	p.usageDeriver.Store(deriver)
 	return UsageActivated, nil
+}
+
+func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
+	agentHome := p.analytics.agentHome
+	if agentHome == "" {
+		agentHome, _ = os.UserHomeDir()
+	}
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:    agentHome,
+		WakeOwner:    p.analytics.owner,
+		Analytics:    p.analytics.sqliteNative,
+		SessionUsage: p.forwardSessionUsage,
+	})
+	if err := tailer.Start(ctx); err != nil {
+		return err
+	}
+	p.agyTailer.Store(tailer)
+	return nil
 }
 
 // Start starts the telemetry pipeline.
@@ -434,6 +465,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.analytics.supportedSignals = p.supportedUsageSignals
 	p.analytics.onSuppressChanged = p.setSuppressDirectOTel
 	p.analytics.isSuppressed = p.SuppressDirectOTel
+	p.analytics.schemaDrift = p.schemaDriftDetected
 	p.analytics.start(ctx, gcpExporter)
 
 	// Create receiver with span and metric handlers
@@ -484,6 +516,11 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 	p.cloudInitDegraded = cloudInitDegraded
 	p.running = true
+	if os.Getenv("SCION_HARNESS") == "antigravity" && os.Getenv("SCION_USAGE_SOURCE") == telemetrycontract.UsageSourceSQLiteNative {
+		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
+			log.Error("Failed to start antigravity SQLite tailer: %v", err)
+		}
+	}
 	if cloudInitDegraded {
 		p.deliveryState.Store("degraded")
 	} else {
@@ -650,6 +687,15 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	p.metricStateMu.Unlock()
 	if unconfirmed := p.spanDiagnostics.unconfirmed.Load() + p.metricDiagnostics.unconfirmed.Load() + p.logDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
 		errs = append(errs, fmt.Errorf("telemetry delivery unconfirmed for %d admitted records", unconfirmed))
+	}
+
+	// Final bounded drain of the Antigravity SQLite tailer before stopping the
+	// analytics outbox drainer so any final DB rows flushed as agy exited are
+	// appended and drained to the Hub.
+	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
 	}
 
 	// Final bounded analytics drain while the exporter is still open.

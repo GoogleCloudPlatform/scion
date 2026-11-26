@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -2076,27 +2077,27 @@ func loadHarnessEnvOverlay(ctx context.Context, harnessReq hooks.HarnessManifest
 // activated, the reason is logged so operators can tell why usage is absent.
 func activateOverlayUsageSource(ctx context.Context, pipeline *telemetry.Pipeline, overlay map[string]string, nativeTelemetryPolicy string) {
 	source, ok := overlay["SCION_USAGE_SOURCE"]
-	if !ok || source != telemetry.UsageSourceNative {
+	if !ok || (source != telemetry.UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative) {
 		return
 	}
-	if nativeTelemetryPolicy == "disabled" {
+	if source == telemetry.UsageSourceNative && nativeTelemetryPolicy == "disabled" {
 		log.Info("Native usage derivation not activated: native telemetry policy is disabled")
 		return
 	}
 	if pipeline == nil {
-		log.Info("Native usage derivation not activated: telemetry is not running")
+		log.Info("Usage source %q not activated: telemetry is not running", source)
 		return
 	}
 	outcome, err := pipeline.ActivateUsageSource(ctx, source)
 	if err != nil {
-		log.Error("Failed to activate usage source from harness env overlay: %v", err)
+		log.Error("Failed to activate usage source %q from harness env overlay: %v", source, err)
 		return
 	}
 	if outcome == telemetry.UsageActivated {
-		log.Info("Activated native usage derivation from harness env overlay")
+		log.Info("Activated %s usage collection from harness env overlay", source)
 		return
 	}
-	log.Info("Native usage derivation not activated: %s", outcome)
+	log.Info("Usage source %q not activated: %s", source, outcome)
 }
 
 func registerLifecycleTelemetryHandler(manager *hooks.LifecycleManager, providers *telemetry.Providers, redactor *telemetry.Redactor) *handlers.TelemetryHandler {

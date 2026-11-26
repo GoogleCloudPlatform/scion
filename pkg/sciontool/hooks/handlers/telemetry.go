@@ -607,7 +607,7 @@ func apiCallsAttrs(model, status string) []attribute.KeyValue {
 // unaffected by this gate (D4, narrow).
 func usageHookRecordingEnabled() bool {
 	v := os.Getenv("SCION_USAGE_SOURCE")
-	if v == "hooks" {
+	if v == telemetrycontract.UsageSourceHooks || v == telemetrycontract.UsageSourceSQLiteNative {
 		return true
 	}
 	// "native" is the expected value that intentionally suppresses hook usage
@@ -616,7 +616,7 @@ func usageHookRecordingEnabled() bool {
 	// The safe D10 default (no usage) still applies either way; this only
 	// makes an unrecognized value visible for debugging.
 	if v != "" && v != telemetry.UsageSourceNative {
-		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\" or \"native\"); hook usage stays suppressed", v)
+		log.Debug("SCION_USAGE_SOURCE=%q is not a recognized usage source (want \"hooks\", \"sqlite_native\", or \"native\"); hook usage stays suppressed", v)
 	}
 	return false
 }
