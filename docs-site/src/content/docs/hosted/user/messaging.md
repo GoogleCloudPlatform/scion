@@ -393,7 +393,7 @@ scion conversation leave "#sprint-planning"
 
 A direct conversation registers both participants, so DMs you send or receive appear in `scion conversation list`.
 
-An agent post into a group conversation or thread (by `conv:<id>` or thread ID) that @mentions no agent is delivered to the conversation's default agent, as a human post is (if the sender may message it, and never to the sender itself). When the post reaches no agent, the response sets `no_agent_woken` and `scion message` prints a one-line notice.
+An agent post into a group conversation or thread (by `conv:<id>` or thread ID) that @mentions no agent, and neither addresses (`user:`/email recipient, `recipient_id`) nor @mentions a human, is delivered to the conversation's default agent, as a human post is (if the sender may message it, and never to the sender itself). A group post targeting only a human skips the default agent, sets `no_agent_woken`, and causes `scion message` to print `No agent was woken by this post.` — the same one-line notice behavior used whenever a group post reaches no agent.
 
 For full flag details, see the [CLI Reference](/scion/reference/cli/#scion-conversation-alias-conv).
 
