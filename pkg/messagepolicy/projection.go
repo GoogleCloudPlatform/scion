@@ -107,6 +107,7 @@ type EvaluationProjection struct {
 	FallbackUsed    bool                        `json:"fallback_used,omitempty"`
 	FallbackCause   string                      `json:"fallback_cause,omitempty"`
 	CacheHit        bool                        `json:"cache_hit,omitempty"`
+	SourceEvalID    string                      `json:"source_eval_id,omitempty"`
 	RevalidationDue bool                        `json:"revalidation_due,omitempty"`
 	InputFields     []InputFieldProjection      `json:"input_fields,omitempty"`
 	Truncated       bool                        `json:"truncated,omitempty"`
@@ -116,6 +117,14 @@ type EvaluationProjection struct {
 // ProjectEvaluation converts a *systemone.Evaluation into its content-free
 // decision-record projection (consumer design §5.8). Returns nil when eval is nil.
 func ProjectEvaluation(eval *systemone.Evaluation) *EvaluationProjection {
+	return ProjectEvaluationWithSource(eval, "")
+}
+
+// ProjectEvaluationWithSource converts a *systemone.Evaluation into its
+// content-free decision-record projection, optionally recording sourceEvalID
+// for non-primary members of a planned System One evaluation group. Returns
+// nil when eval is nil.
+func ProjectEvaluationWithSource(eval *systemone.Evaluation, sourceEvalID string) *EvaluationProjection {
 	if eval == nil {
 		return nil
 	}
@@ -142,6 +151,7 @@ func ProjectEvaluation(eval *systemone.Evaluation) *EvaluationProjection {
 		FallbackUsed:    eval.FallbackUsed,
 		FallbackCause:   eval.FallbackCause,
 		CacheHit:        eval.CacheHit,
+		SourceEvalID:    strings.TrimSpace(sourceEvalID),
 		RevalidationDue: eval.RevalidationDue,
 		ElapsedMs:       elapsedMs,
 	}
@@ -241,7 +251,14 @@ func ProjectEvaluation(eval *systemone.Evaluation) *EvaluationProjection {
 // persistence on store.MessagePolicyDecision.Evaluation. Returns nil when eval
 // is nil.
 func MarshalEvaluationProjection(eval *systemone.Evaluation) json.RawMessage {
-	proj := ProjectEvaluation(eval)
+	return MarshalEvaluationProjectionWithSource(eval, "")
+}
+
+// MarshalEvaluationProjectionWithSource serializes
+// ProjectEvaluationWithSource(eval, sourceEvalID) as JSON for persistence on
+// store.MessagePolicyDecision.Evaluation. Returns nil when eval is nil.
+func MarshalEvaluationProjectionWithSource(eval *systemone.Evaluation, sourceEvalID string) json.RawMessage {
+	proj := ProjectEvaluationWithSource(eval, sourceEvalID)
 	if proj == nil {
 		return nil
 	}

@@ -49,6 +49,11 @@ type Classification struct {
 	// policy evaluated a system_one_rule (consumer design §5.8).
 	Evaluation *systemone.Evaluation
 
+	// SourceEvalID records the primary member's EvalID when this policy was
+	// evaluated as a non-primary member of a planned System One evaluation
+	// group. Empty for primary and ungrouped evaluations.
+	SourceEvalID string
+
 	// Judgments holds the typed flags/labels extracted from a successful
 	// System One evaluation for template substitution (consumer design §5.3).
 	Judgments Judgments
