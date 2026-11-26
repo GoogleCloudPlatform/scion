@@ -172,6 +172,7 @@ export function buildFixture() {
       body: {
         experiments: {
           'federation.project_visitors': false,
+          'hub.access_constraints': false,
           'hub.admin_managed_brokers': false,
           'hub.agent_edit_held': false,
           'hub.agent_secrets': false,

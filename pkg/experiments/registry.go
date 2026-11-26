@@ -703,6 +703,18 @@ const TokenomicsTokenBudgets = "tokenomics.token_budgets"
 // deletion custody holds, project.trajectory.read, and ATIF export. Default off.
 const TokenomicsTrajectoryCapture = "tokenomics.trajectory_capture"
 
+// AccessConstraints gates the access constraints management API and Web UI
+// (ptone/scion#9080). Server layer: while off, /api/v1/admin/access-constraints*
+// and /api/v1/admin/access-constraint-previews* answer 404. Stored access
+// constraints remain unconditionally enforced in authorization evaluation and
+// constraint-bearing group mutation guards even while this experiment is off
+// (so turning it off never widens access), and a startup warning is logged if
+// stored constraints exist while it is off. Offline recovery
+// (scion server recover-authz) remains available regardless of this flag.
+// Web layer: hides Access Constraints navigation, pages, and cross-links while
+// off.
+const AccessConstraints = "hub.access_constraints"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -1480,6 +1492,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8648",
 		Owner:       "@ptone",
+		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        AccessConstraints,
+		Title:       "Access constraints",
+		Description: "Enables the access constraints management API (/api/v1/admin/access-constraints* and /api/v1/admin/access-constraint-previews*) and Web UI. Server layer: while off, management and preview routes answer 404, while any stored access constraints remain unconditionally enforced in authorization and group-mutation guards (never widening access). Web layer: hides Access Constraints navigation, pages, and cross-links while off.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9080",
+		Owner:       "authz",
 		ReviewBy:    "2027-05-31",
 	},
 }

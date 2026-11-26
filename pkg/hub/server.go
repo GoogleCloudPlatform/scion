@@ -4203,23 +4203,24 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Build unified auth configuration
 	srv.authConfig = AuthConfig{
-		Mode:               "production",
-		DevAuthEnabled:     cfg.DevAuthToken != "",
-		DevAuthToken:       cfg.DevAuthToken,
-		DevUserCfg:         cfg.DevUserConfig,
-		DevUser:            newDevUserSource(cfg.DevUserConfig),
-		AgentTokenSvc:      srv.agentTokenService,
-		UserTokenSvc:       srv.userTokenService,
-		UATSvc:             srv.uatService,
-		BrokerAuthSvc:      srv.brokerAuthService,
-		ProxyAuthenticator: cfg.ProxyAuth,
-		FederationAuth:     &srv.federationAuth,
-		CredentialStore:    s,
-		HoldStore:          s,
-		UserStore:          s,
-		AuthMode:           cfg.AuthMode,
-		Debug:              cfg.Debug,
-		Logger:             srv.authLog,
+		Mode:                     "production",
+		DevAuthEnabled:           cfg.DevAuthToken != "",
+		DevAuthToken:             cfg.DevAuthToken,
+		DevUserCfg:               cfg.DevUserConfig,
+		DevUser:                  newDevUserSource(cfg.DevUserConfig),
+		AgentTokenSvc:            srv.agentTokenService,
+		UserTokenSvc:             srv.userTokenService,
+		UATSvc:                   srv.uatService,
+		BrokerAuthSvc:            srv.brokerAuthService,
+		ProxyAuthenticator:       cfg.ProxyAuth,
+		FederationAuth:           &srv.federationAuth,
+		CredentialStore:          s,
+		HoldStore:                s,
+		UserStore:                s,
+		AccessConstraintsEnabled: func() bool { return srv.experimentEnabled(experiments.AccessConstraints) },
+		AuthMode:                 cfg.AuthMode,
+		Debug:                    cfg.Debug,
+		Logger:                   srv.authLog,
 		// Sourced from srv.platformAuthSA (set above from cfg.PlatformAuthSA),
 		// not cfg.PlatformAuthSA directly, so this and Server.platformAuthSA
 		// can never diverge.
@@ -8667,11 +8668,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/role-bindings", s.guarded("/api/v1/admin/role-bindings", s.handleAdminRoleBindings))
 	s.mux.HandleFunc("/api/v1/admin/role-bindings/", s.guarded("/api/v1/admin/role-bindings/", s.handleAdminRoleBindingByID))
 	s.mux.HandleFunc("/api/v1/admin/permissions", s.guarded("/api/v1/admin/permissions", s.handleAdminPermissions))
-	s.mux.HandleFunc("/api/v1/admin/access-constraints", s.guarded("/api/v1/admin/access-constraints", s.handleAdminAccessConstraints))
-	s.mux.HandleFunc("GET /api/v1/admin/access-constraints/{id}/audit", s.guarded("GET /api/v1/admin/access-constraints/{id}/audit", s.handleAdminAccessConstraintAudit))
-	s.mux.HandleFunc("/api/v1/admin/access-constraints/", s.guarded("/api/v1/admin/access-constraints/", s.handleAdminAccessConstraintByID))
-	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.handleAdminAccessConstraintPreviews))
-	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.handleAdminAccessConstraintPreviews))
+	s.mux.HandleFunc("/api/v1/admin/access-constraints", s.guarded("/api/v1/admin/access-constraints", s.requireExperiment(experiments.AccessConstraints, s.handleAdminAccessConstraints)))
+	s.mux.HandleFunc("GET /api/v1/admin/access-constraints/{id}/audit", s.guarded("GET /api/v1/admin/access-constraints/{id}/audit", s.requireExperiment(experiments.AccessConstraints, s.handleAdminAccessConstraintAudit)))
+	s.mux.HandleFunc("/api/v1/admin/access-constraints/", s.guarded("/api/v1/admin/access-constraints/", s.requireExperiment(experiments.AccessConstraints, s.handleAdminAccessConstraintByID)))
+	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews", s.guarded("/api/v1/admin/access-constraint-previews", s.requireExperiment(experiments.AccessConstraints, s.handleAdminAccessConstraintPreviews)))
+	s.mux.HandleFunc("/api/v1/admin/access-constraint-previews/", s.guarded("/api/v1/admin/access-constraint-previews/", s.requireExperiment(experiments.AccessConstraints, s.handleAdminAccessConstraintPreviews)))
 	s.mux.HandleFunc("/api/v1/admin/effective-access", s.guarded("/api/v1/admin/effective-access", s.handleAdminEffectiveAccess))
 	s.mux.HandleFunc("/api/v1/admin/effective-permissions", s.guarded("/api/v1/admin/effective-permissions", s.requireExperiment(experiments.EffectivePermissions, s.handleAdminEffectivePermissions)))
 

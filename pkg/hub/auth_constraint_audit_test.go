@@ -266,7 +266,7 @@ func TestConstraintAuditNotFoundIgnoresHandlerSetHeaders(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, constraintAuditAuthTestPath, nil)
 			rec := httptest.NewRecorder()
 			preWrap(rec)
-			w := normalizeConstraintAuditAuthFailures(rec, req)
+			w := normalizeConstraintAuditAuthFailures(rec, req, nil)
 			if w == http.ResponseWriter(rec) {
 				t.Fatal("the audit route was not wrapped")
 			}
@@ -287,4 +287,33 @@ func TestConstraintAuditNotFoundIgnoresHandlerSetHeaders(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("flag off normalizes to route not found", func(t *testing.T) {
+		wantOff := httptest.NewRecorder()
+		preWrap(wantOff)
+		NotFound(wantOff, "route")
+
+		req := httptest.NewRequest(http.MethodGet, constraintAuditAuthTestPath, nil)
+		rec := httptest.NewRecorder()
+		preWrap(rec)
+		w := normalizeConstraintAuditAuthFailures(rec, req, func() bool { return false })
+		if w == http.ResponseWriter(rec) {
+			t.Fatal("the audit route was not wrapped")
+		}
+
+		w.Header().Set("X-Test-Auth-Added", "dropped")
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("handler body\n"))
+
+		if rec.Code != wantOff.Code {
+			t.Fatalf("status = %d, want %d; body: %s", rec.Code, wantOff.Code, rec.Body.String())
+		}
+		if !reflect.DeepEqual(rec.Header(), wantOff.Header()) {
+			t.Errorf("headers = %#v, want %#v", rec.Header(), wantOff.Header())
+		}
+		if rec.Body.String() != wantOff.Body.String() {
+			t.Errorf("body = %q, want %q", rec.Body.String(), wantOff.Body.String())
+		}
+	})
 }

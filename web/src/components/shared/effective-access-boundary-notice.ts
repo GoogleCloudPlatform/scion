@@ -40,6 +40,7 @@ import { apiFetch } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { stateManager } from '../../client/state.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
+import { accessConstraintsEnabled } from '../../utils/feature-flags.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -193,6 +194,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
     try {
       let url: string;
       if (this.contextType === 'project') {
+        if (!accessConstraintsEnabled()) return;
         url = `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}&pageSize=0`;
       } else {
         // The effective-access route checks hub.audit.read; read it from
@@ -243,6 +245,7 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
   }
 
   private getExplainHref(): string | null {
+    if (!accessConstraintsEnabled()) return null;
     if (this.contextType === 'project') {
       return `/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}`;
     }

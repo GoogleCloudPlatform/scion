@@ -27,6 +27,11 @@ import type { User } from '../../shared/types.js';
 import { clearAdminStatus } from '../../client/admin-status.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { AdminStatus } from '../../lib/admin-permissions.js';
+import {
+  ACCESS_CONSTRAINTS_FLAG,
+  resetServerFlagStateForTests,
+  setServerFlags,
+} from '../../utils/feature-flags.js';
 import type { ScionNav } from './nav.js';
 
 let adminStatusBody: AdminStatus | null = null;
@@ -80,6 +85,8 @@ describe('sidebar Admin section permission gating', () => {
     document.body.innerHTML = '';
     adminStatusBody = null;
     localStorage.clear();
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
   });
 
   it('shows the page a member holds a permission for, even though isAdmin is false', async () => {
@@ -114,5 +121,13 @@ describe('sidebar Admin section permission gating', () => {
     expect(links).toContain('/admin/quotas');
     expect(links).toContain('/admin/diagnostics');
     expect(links).toContain('/admin/maintenance');
+    expect(links).not.toContain('/admin/access-boundaries');
+  });
+
+  it('shows Access Constraints in admin nav only when hub.access_constraints is enabled', async () => {
+    adminStatusBody = { isAdmin: true, isSuperAdmin: true, permissions: [] };
+    setServerFlags({ [ACCESS_CONSTRAINTS_FLAG]: true });
+    const el = await mount({ id: 'u-admin', role: 'admin' });
+    expect(adminLinks(el)).toContain('/admin/access-boundaries');
   });
 });

@@ -50,7 +50,11 @@ import {
   type TerminalWorkspaceModule,
 } from './terminal-workspace-loader.js';
 import { showToast } from '../utils/toast.js';
-import { FLAT_BROKERS_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
+import {
+  ACCESS_CONSTRAINTS_FLAG,
+  FLAT_BROKERS_FLAG,
+  isFeatureEnabled,
+} from '../utils/feature-flags.js';
 import { resolveBrokerRoute } from './broker-routes.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { apiFetch } from './api.js';
@@ -911,6 +915,13 @@ const PROFILE_ROUTES = new Set([
  */
 const CHAT_ROUTES = new Set(['scion-page-chat']);
 
+/** Admin routes gated on the hub.access_constraints experiment. */
+const ACCESS_CONSTRAINTS_ROUTES = new Set([
+  'scion-page-admin-access-boundaries',
+  'scion-page-admin-access-boundary-detail',
+  'scion-page-admin-access-boundary-editor',
+]);
+
 /**
  * Routes that require admin role. Non-admin users are redirected to dashboard.
  */
@@ -1185,6 +1196,9 @@ function resolveRoute(path: string): RouteConfig {
   if (brokerRoute) return brokerRoute;
   for (const route of ROUTES) {
     if (route.pattern.test(path)) {
+      if (ACCESS_CONSTRAINTS_ROUTES.has(route.tag) && !isFeatureEnabled(ACCESS_CONSTRAINTS_FLAG)) {
+        return NOT_FOUND_ROUTE;
+      }
       return route;
     }
   }

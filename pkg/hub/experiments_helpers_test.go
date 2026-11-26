@@ -44,7 +44,7 @@ func testExperiment(name string, def bool, layers ...experiments.Layer) experime
 func routeRegistrationExperiments(t *testing.T) []experiments.Experiment {
 	t.Helper()
 	var out []experiments.Experiment
-	for _, name := range []string{experiments.FederationProjectVisitors, experiments.SecretRotation, experiments.WelcomeProject, experiments.GitHubTriggers, experiments.EffectivePermissions} {
+	for _, name := range []string{experiments.FederationProjectVisitors, experiments.SecretRotation, experiments.WelcomeProject, experiments.GitHubTriggers, experiments.EffectivePermissions, experiments.AccessConstraints} {
 		exp, ok := experiments.Default().Lookup(name)
 		if !ok {
 			t.Fatalf("experiment %q is not in the production registry", name)
@@ -92,4 +92,23 @@ func productionRegistryWithFixture(t *testing.T) *experiments.Registry {
 		t.Fatalf("NewRegistry: %v", err)
 	}
 	return reg
+}
+
+// setServerExperimentDefault flips one experiment's compiled default on srv's
+// registry via setExperimentRegistry without touching OperationalSettings.
+func setServerExperimentDefault(t *testing.T, srv *Server, name string, on bool) {
+	t.Helper()
+	cur := srv.experimentRegistry()
+	var active []experiments.Experiment
+	for _, e := range cur.All() {
+		if e.Name == name {
+			e.Default = on
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, cur.Retired())
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	srv.setExperimentRegistry(reg)
 }

@@ -73,6 +73,10 @@ At runtime, agents do not require static RoleBindings to be manually created. In
 
 ## AccessConstraints (Monotonic Restrictions)
 
+:::note[Experimental Feature]
+The Access Constraints management API (`/api/v1/admin/access-constraints*` and `/api/v1/admin/access-constraint-previews*`) and Web UI are gated behind the `hub.access_constraints` experiment (off by default; enable in **Admin → Server Config → Experiments** or with `scion hub experiments enable hub.access_constraints`). While the experiment is off, management routes return `404` and the Web UI hides Access Constraints surfaces, but **any constraints already stored in the database remain unconditionally enforced** (turning the flag off never widens access) and the Hub logs a startup warning if stored constraints exist. Offline recovery (`scion server recover-authz`) remains available regardless of the experiment state. See [Experiments](/scion/reference/experiments/#server-experiments-with-notes).
+:::
+
 An **AccessConstraint** is the underlying database and API representation of a user-facing **Access Boundary**. It acts as a monotonic restriction defining a **maximum-permissions boundary** (permission ceiling). It can only reduce (never widen) the authority granted by positive RoleBindings.
 
 An `AccessConstraint` contains the following fields:

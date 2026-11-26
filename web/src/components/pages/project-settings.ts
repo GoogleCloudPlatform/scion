@@ -85,6 +85,7 @@ import {
   type ProfileMessages,
 } from '../../shared/gcp-profile-defaults.js';
 import {
+  accessConstraintsEnabled,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
@@ -1169,6 +1170,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private async loadBoundaries(): Promise<void> {
+    if (!accessConstraintsEnabled()) return;
     this.boundaryLoading = true;
     this.boundaryError = '';
 
@@ -2767,15 +2769,19 @@ export class ScionPageProjectSettings extends LitElement {
 
       ${this.renderConfigSection()} ${this.renderMembersSection()} ${this.renderResourcesSection()}
       ${this.renderMessagingPolicySection()} ${this.renderGitHubAppSection()}
-      <scion-boundary-summary-notice
-        label="Access constraints affecting this project"
-        .groups=${this.boundaryGroups}
-        ?loading=${this.boundaryLoading}
-        error=${this.boundaryError}
-        filterUrl="/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(
-          this.projectId
-        )}"
-      ></scion-boundary-summary-notice>
+      ${accessConstraintsEnabled()
+        ? html`
+            <scion-boundary-summary-notice
+              label="Access constraints affecting this project"
+              .groups=${this.boundaryGroups}
+              ?loading=${this.boundaryLoading}
+              error=${this.boundaryError}
+              filterUrl="/admin/access-boundaries?scopeType=project&scopeId=${encodeURIComponent(
+                this.projectId
+              )}"
+            ></scion-boundary-summary-notice>
+          `
+        : nothing}
       ${this.pageData?.user
         ? html`
             <scion-subscription-manager

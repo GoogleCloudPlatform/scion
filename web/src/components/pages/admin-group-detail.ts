@@ -50,6 +50,7 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo } from '../../client/navigation.js';
 import { getGroup, listMembers, GroupsApiError } from '../../client/groups-api.js';
 import { formatRelativeTime } from '../../utils/time.js';
+import { accessConstraintsEnabled } from '../../utils/feature-flags.js';
 
 @customElement('scion-page-admin-group-detail')
 export class ScionPageAdminGroupDetail extends LitElement {
@@ -328,6 +329,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
   }
 
   private async loadBoundaries(): Promise<void> {
+    if (!accessConstraintsEnabled()) return;
     this.boundaryLoading = true;
     this.boundaryError = '';
 
@@ -488,15 +490,19 @@ export class ScionPageAdminGroupDetail extends LitElement {
         </div>
       </div>
 
-      <scion-boundary-summary-notice
-        label="Access constraints"
-        .groups=${this.boundaryGroups}
-        ?loading=${this.boundaryLoading}
-        error=${this.boundaryError}
-        filterUrl="/admin/access-boundaries?subjectKind=group&subjectId=${encodeURIComponent(
-          this.groupId
-        )}"
-      ></scion-boundary-summary-notice>
+      ${accessConstraintsEnabled()
+        ? html`
+            <scion-boundary-summary-notice
+              label="Access constraints"
+              .groups=${this.boundaryGroups}
+              ?loading=${this.boundaryLoading}
+              error=${this.boundaryError}
+              filterUrl="/admin/access-boundaries?subjectKind=group&subjectId=${encodeURIComponent(
+                this.groupId
+              )}"
+            ></scion-boundary-summary-notice>
+          `
+        : nothing}
 
       <scion-group-member-editor
         groupId=${this.group.id}

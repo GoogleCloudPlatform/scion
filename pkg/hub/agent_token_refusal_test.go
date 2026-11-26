@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,6 +143,7 @@ func serveAuditRoute(h http.Handler, set func(*http.Request)) rawResponse {
 // authentication are kept and nothing authentication set is.
 func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 	srv, s, _, project := setupCredentialTestServer(t)
+	setServerExperimentDefault(t, srv, experiments.AccessConstraints, true)
 	enforceRunScopeForRefusals(srv, s)
 	cases := agentTokenRefusalCases(t, srv, s, project)
 	h := withTestOuterHeader(srv.Handler())
@@ -179,6 +181,38 @@ func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 		assert.Equal(t, want, got)
 		assert.Empty(t, got.Header.Values("WWW-Authenticate"))
 	})
+}
+
+// TestUniformRefusalResponsesOnAuditRoute_FlagOff pins that when
+// hub.access_constraints is off (the default), a valid credential and every
+// refused agent-token case still receive identical responses (status, full
+// header map, and body) — the experiment gate's "route not found" 404.
+func TestUniformRefusalResponsesOnAuditRoute_FlagOff(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+	require.False(t, srv.experimentEnabled(experiments.AccessConstraints))
+	enforceRunScopeForRefusals(srv, s)
+	cases := agentTokenRefusalCases(t, srv, s, project)
+	h := withTestOuterHeader(srv.Handler())
+
+	want := serveAuditRoute(h, func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testDevToken) })
+	require.Equal(t, http.StatusNotFound, want.Status, want.Body)
+	require.Contains(t, want.Body, "route not found")
+	require.Equal(t, testOuterHeaderValue, want.Header.Get(testOuterHeader))
+	require.NotEmpty(t, want.Header.Get("Access-Control-Allow-Origin"))
+	require.Empty(t, want.Header.Values("WWW-Authenticate"))
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := serveAuditRoute(h, func(r *http.Request) {
+				r.Header.Set("X-Scion-Agent-Token", c.token)
+				if c.runHeader != "" {
+					r.Header.Set(AgentRunIDHeader, c.runHeader)
+				}
+			})
+			assert.Equal(t, want, got)
+			assert.Empty(t, got.Header.Values("WWW-Authenticate"))
+		})
+	}
 }
 
 // revokedRefreshRequest stores an agent and a revoked token for it and

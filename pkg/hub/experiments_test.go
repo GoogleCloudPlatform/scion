@@ -97,6 +97,7 @@ func TestResolvedExperiments_WebLayerOnlyFromOneSnapshot(t *testing.T) {
 		experiments.WelcomeProject:            false,
 		experiments.GitHubTriggers:            false,
 		experiments.EffectivePermissions:      false,
+		experiments.AccessConstraints:         false,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("resolvedExperiments() = %v, want %v", got, want)
