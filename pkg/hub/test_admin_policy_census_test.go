@@ -378,6 +378,7 @@ var viewAsMemberIdentityRebuildPolicy = map[string]viewAsMemberGate{
 	"brokerauth.go:resolveOnBehalfOf":                                   vamNotARequestGate("broker-authenticated on-behalf-of user (no web session)"),
 	"chat_member_fanout.go:fanOutThreadMessageToMembers":                vamNotARequestGate("chat member fanout checks each member via clamped AuthzService.CheckAccess"),
 	"chat_scheduled_send.go:checkScheduledFire":                         vamNotARequestGate("background worker; durable state must use real authority"),
+	"command_run_exec.go:executeCommandRun":                             vamNotARequestGate("background command-run executor re-checking approver lifecycle permission via clamped AuthzService (no web session)"),
 	"conduit_authz.go:conduitRenewalIdentity":                           vamNotARequestGate("background conduit renewal identity (no web session)"),
 	"conduit_relay_ops.go:relayUserIdentity":                            vamNotARequestGate("conduit relay credential identity (no web session)"),
 	"decisions_bell.go:expandDecisionBellTopic":                         vamNotARequestGate("background worker; durable state must use real authority"),

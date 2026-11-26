@@ -586,6 +586,9 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"resolveNFSSharedDir layout",
 		"resolveOutboundRouting messaging",
 		"resolveSecrets d.secretBackend",
+		// The conduit router (router.Resolve: whether the execution container
+		// session advertises exec routes and features), not a user or transport resolver.
+		"waitForConduitExecReady rtr",
 	}, tiPairs(census, "Resolve"), "every Resolve call (the GoogleIdentityResolver ones: Exchange, authenticateExternalBearer)")
 	assert.Equal(t, []string{
 		"Exchange s.validator",
