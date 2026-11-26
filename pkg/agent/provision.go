@@ -1449,7 +1449,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	if err := provisionFinish(m, opts, agentDir, agentHome, cfg); err != nil {
 		return cfg, err
 	}
-	if err := m.provisionK8sMoveBundleTarget(ctx, opts, projectDir, agentDir, agentHome); err != nil {
+	if err := m.provisionMoveBundleTarget(ctx, opts, projectDir, agentDir, agentHome); err != nil {
 		if opts.MoveReincarnationID != "" {
 			_ = removeAgentDirGuarded(projectAgentFilesGuard(ctx, projectDir, opts.Name, agentDir, agentHome), agentDir, "")
 		}

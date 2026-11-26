@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
@@ -63,17 +64,35 @@ type MoveBundleDurability struct {
 	Reason string
 }
 
+// MoveBundleRollbackPaths holds the host-side paths for a runtime's
+// move-bundle target home leaf (e.g. an NFS home share leaf) used by
+// CheckMoveMarkers and RemoveTargetLeaves during rollback deletes.
+type MoveBundleRollbackPaths struct {
+	ResolvedHostBase string
+	ExportAgentDir   string
+	HomeLeafPath     string
+	OK               bool
+}
+
 // MoveBundleRuntime defines the per-runtime hooks for portable move-bundle
-// transfers (durability check and host-side directory resolution for source
-// and target).
+// transfers: capability configuration, durability check, host-side directory
+// resolution, target provisioning, and marker-guarded rollback cleanup.
 //
 // Each supported runtime registers an implementation in
-// lookupMoveBundleRuntime. Adding a new durable runtime (such as Cloud Run or
-// Cloud Run Sandbox in Phase 2a part 2) only requires implementing this
-// interface, registering it in lookupMoveBundleRuntime, and adding the
-// concrete runtime type to moveBundleSupported in
-// pkg/runtimebroker/static_capabilities.go.
+// lookupMoveBundleRuntime. Provision, CheckMoveMarkers, RemoveNFSAgentFiles,
+// CheckMoveWorkspaceAbsent, capability advertisement, and precheck/export/import
+// all dispatch through this single registry keyed by runtime name.
 type MoveBundleRuntime interface {
+	// Configured reports whether this broker's global settings have the
+	// runtime configured for move-bundle transfers (used for capability
+	// advertisement).
+	Configured() bool
+
+	// UsesNFSWorkspaceTarget reports whether this runtime provisions a fresh
+	// per-agent workspace on an NFS export for WorkspaceSource="move-bundle"
+	// (used by CheckMoveWorkspaceAbsent).
+	UsesNFSWorkspaceTarget() bool
+
 	// CheckSourceDurability reports whether the agent's workspace and $HOME
 	// survive Stop and can be read on this broker. Called by precheck and
 	// export. Returns fs.ErrNotExist when the runtime is configured for
@@ -83,6 +102,20 @@ type MoveBundleRuntime interface {
 	// ResolveDirs resolves the host-side agent state dir, workspace dir, and
 	// home dir for precheck, export, import, and commit.
 	ResolveDirs(ctx context.Context, in MoveBundleRuntimeInput) (MoveBundleAgentDirs, error)
+
+	// ProvisionTarget prepares runtime-specific storage (e.g. NFS workspace
+	// dir, move marker, home-storage record, NFS home leaf, sentinel) when
+	// provisioning a target agent with WorkspaceSource="move-bundle".
+	ProvisionTarget(ctx context.Context, opts api.StartOptions, projectDir, agentDir, agentHome string) error
+
+	// RollbackPaths resolves runtime-specific home leaf paths for move
+	// rollback marker checks.
+	RollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error)
+
+	// RemoveTargetLeaves removes runtime-specific target leaves (e.g. NFS
+	// home leaf and staging siblings) during a marker-guarded move rollback
+	// delete (moveID != "").
+	RemoveTargetLeaves(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool)
 }
 
 // MoveBundleRuntimeSupported reports whether runtimeName has a registered
@@ -92,14 +125,24 @@ func MoveBundleRuntimeSupported(runtimeName string) bool {
 	return ok
 }
 
-// K8sMoveBundleConfigured reports whether this broker's global settings have
+// MoveBundleRuntimeConfigured reports whether runtimeName has a registered
+// MoveBundleRuntime whose broker-wide prerequisites are configured.
+func MoveBundleRuntimeConfigured(runtimeName string) bool {
+	rt, ok := lookupMoveBundleRuntime(runtimeName)
+	if !ok {
+		return false
+	}
+	return rt.Configured()
+}
+
+// k8sMoveBundleConfigured reports whether this broker's global settings have
 // Kubernetes NFS workspace storage, a usable claim-backed NFS home share, and
 // the K8s NFS home prerequisites configured (N1).
 //
 // Capability advertisement is a broker-wide approximation (reading global
 // settings with context.Background() without per-project overrides); precheck
 // and provision make the authoritative per-project decision.
-func K8sMoveBundleConfigured() bool {
+func k8sMoveBundleConfigured() bool {
 	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(context.Background())
 	if err != nil || gs == nil || gs.Server == nil {
 		return false
@@ -186,6 +229,14 @@ func ResolveMoveBundleDirsForRuntime(ctx context.Context, in MoveBundleRuntimeIn
 
 type localDiskMoveBundleRuntime struct{}
 
+func (localDiskMoveBundleRuntime) Configured() bool {
+	return true
+}
+
+func (localDiskMoveBundleRuntime) UsesNFSWorkspaceTarget() bool {
+	return false
+}
+
 func (localDiskMoveBundleRuntime) CheckSourceDurability(_ context.Context, _ MoveBundleRuntimeInput) (MoveBundleDurability, error) {
 	return MoveBundleDurability{Durable: true}, nil
 }
@@ -199,9 +250,43 @@ func (localDiskMoveBundleRuntime) ResolveDirs(ctx context.Context, in MoveBundle
 	})
 }
 
+func (localDiskMoveBundleRuntime) ProvisionTarget(_ context.Context, _ api.StartOptions, _, _, _ string) error {
+	return nil
+}
+
+func (localDiskMoveBundleRuntime) RollbackPaths(_ context.Context, _, _, _ string) (MoveBundleRollbackPaths, error) {
+	return MoveBundleRollbackPaths{}, nil
+}
+
+func (localDiskMoveBundleRuntime) RemoveTargetLeaves(_ context.Context, _, _, _, _ string) (projectfs.Deletion, string, bool) {
+	return projectfs.Deletion{}, "", false
+}
+
 // --- Kubernetes runtime (NFS workspace + NFS home) ---
 
 type kubernetesMoveBundleRuntime struct{}
+
+func (kubernetesMoveBundleRuntime) Configured() bool {
+	return k8sMoveBundleConfigured()
+}
+
+func (kubernetesMoveBundleRuntime) UsesNFSWorkspaceTarget() bool {
+	return true
+}
+
+func (kubernetesMoveBundleRuntime) RollbackPaths(ctx context.Context, projectID, agentName, hubAgentID string) (MoveBundleRollbackPaths, error) {
+	resolvedHostBase, exportAgentDir, homeLeafPath, ok, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)
+	return MoveBundleRollbackPaths{
+		ResolvedHostBase: resolvedHostBase,
+		ExportAgentDir:   exportAgentDir,
+		HomeLeafPath:     homeLeafPath,
+		OK:               ok,
+	}, err
+}
+
+func (kubernetesMoveBundleRuntime) RemoveTargetLeaves(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (projectfs.Deletion, string, bool) {
+	return removeK8sNFSAgentHome(ctx, projectID, agentName, hubAgentID, moveID)
+}
 
 const (
 	k8sNonDurablePodReason       = "workspace and home live only in the pod and are deleted on stop"
@@ -420,16 +505,28 @@ func resolveK8sNFSHomeDir(ctx context.Context, rec *homeStorageRecord, projectID
 	return resolvedHomeBase, filepath.Join(resolvedHomeBase, homeRel), filepath.Join(resolvedHomeBase, agentDirRel), nil
 }
 
-// provisionK8sMoveBundleTarget prepares the NFS workspace agent dir, empty
-// workspace, move marker, home-storage.json, and rendered NFS home leaf for a
-// Kubernetes target provisioned with WorkspaceSource="move-bundle" (design
-// §3.5 step 7, Phase 2a).
+// provisionMoveBundleTarget dispatches move-bundle target provisioning through
+// the registered MoveBundleRuntime for m.runtimeName().
+func (m *AgentManager) provisionMoveBundleTarget(ctx context.Context, opts api.StartOptions, projectDir, agentDir, agentHome string) error {
+	if opts.WorkspaceSource != api.WorkspaceSourceMoveBundle {
+		return nil
+	}
+	rt, ok := lookupMoveBundleRuntime(m.runtimeName())
+	if !ok {
+		return fmt.Errorf("move-bundle target provision: runtime %q is not supported", m.runtimeName())
+	}
+	return rt.ProvisionTarget(ctx, opts, projectDir, agentDir, agentHome)
+}
+
+// ProvisionTarget prepares the NFS workspace agent dir, empty workspace, move
+// marker, home-storage.json, and rendered NFS home leaf for a Kubernetes target
+// provisioned with WorkspaceSource="move-bundle" (design §3.5 step 7, Phase 2a).
 //
 // Uses the canonical NFS leaf helpers (ensureNFSLeafClaim for agent dir and
 // workspace; homeLeafOps.EnsureHome for home-<agentID>) so directory modes,
 // setgid bits, ACLs, and group ownership match Start.
-func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts api.StartOptions, _, agentDir, _ string) (retErr error) {
-	if !isKubernetesRuntime(m.runtimeName()) || opts.WorkspaceSource != api.WorkspaceSourceMoveBundle {
+func (kubernetesMoveBundleRuntime) ProvisionTarget(ctx context.Context, opts api.StartOptions, _, agentDir, _ string) (retErr error) {
+	if opts.WorkspaceSource != api.WorkspaceSourceMoveBundle {
 		return nil
 	}
 
@@ -493,11 +590,15 @@ func (m *AgentManager) provisionK8sMoveBundleTarget(ctx context.Context, opts ap
 
 	// 2. Resolve and record NFS home storage using the exact same
 	//    resolveHomeStorage helper Start uses.
+	runtimeName := agentRuntimeFromContext(ctx)
+	if runtimeName == "" {
+		runtimeName = "kubernetes"
+	}
 	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
 		Slug:         slug,
-		RuntimeName:  m.runtimeName(),
+		RuntimeName:  runtimeName,
 		Profile:      opts.Profile,
 		AgentID:      agentID,
 		ProjectID:    projectID,

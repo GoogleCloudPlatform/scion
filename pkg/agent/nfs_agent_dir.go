@@ -224,13 +224,17 @@ func (m *AgentManager) RemoveNFSAgentFiles(ctx context.Context, projectPath, pro
 		}
 	}
 	if moveID := deleteMoveReincarnationIDFrom(ctx); moveID != "" {
-		if d, homeParent, ok := m.removeK8sNFSAgentHome(ctx, projectID, agentName, deleteHubAgentIDFrom(ctx), moveID); ok {
-			ds = append(ds, d)
-			if d.Err != nil {
-				errs = append(errs, d.Err)
-			}
-			if homeParent != "" {
-				rollbackDirs = append(rollbackDirs, homeParent)
+		if m.Runtime != nil {
+			if mbRT, ok := lookupMoveBundleRuntime(m.Runtime.Name()); ok {
+				if d, homeParent, removedOK := mbRT.RemoveTargetLeaves(ctx, projectID, agentName, deleteHubAgentIDFrom(ctx), moveID); removedOK {
+					ds = append(ds, d)
+					if d.Err != nil {
+						errs = append(errs, d.Err)
+					}
+					if homeParent != "" {
+						rollbackDirs = append(rollbackDirs, homeParent)
+					}
+				}
 			}
 		}
 		// Single final cleanup pass (N3): remove .scion-move and empty export
@@ -374,8 +378,8 @@ func resolveK8sNFSHomeRollbackPaths(ctx context.Context, projectID, agentName, h
 // during a move rollback delete (moveID != ""). Refuses to remove home-<agentID>
 // or staging entries unless either the leaf itself or its parent carries
 // MoveMarkerFile == moveID (R3, N1). Normal deletes never call this function (R4).
-func (m *AgentManager) removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool) {
-	if moveID == "" || m.Runtime == nil || !isKubernetesRuntime(m.Runtime.Name()) {
+func removeK8sNFSAgentHome(ctx context.Context, projectID, agentName, hubAgentID, moveID string) (d projectfs.Deletion, homeParent string, ok bool) {
+	if moveID == "" {
 		return d, "", false
 	}
 	resolvedHostBase, exportAgentDir, homeLeafPath, resolved, err := resolveK8sNFSHomeRollbackPaths(ctx, projectID, agentName, hubAgentID)

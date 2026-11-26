@@ -127,28 +127,17 @@ func webPTYSupported(rt scionrt.Runtime) bool {
 // moveBundleSupported reports whether rt is a runtime for which this broker
 // supports portable workspace+$HOME bundle moves (ptone/scion#8960).
 //
-// Like webPTYSupported, it is an allow-list of concrete runtime
-// implementations (plus MockRuntime when its name maps to a supported
-// runtime) so degraded *ErrorRuntime placeholders, nil runtimes, and
-// unsupported runtimes (Cloud Run / Cloud Run Sandbox until Phase 2a part 2,
-// Substrate) do not advertise AgentMoveBundle.
+// Dispatches through the single agent.MoveBundleRuntimeConfigured registry
+// keyed by runtime name, while explicitly excluding nil runtimes and degraded
+// *ErrorRuntime placeholders.
 func moveBundleSupported(rt scionrt.Runtime) bool {
-	switch r := rt.(type) {
-	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.AppleContainerRuntime:
-		return true
-	case *scionrt.KubernetesRuntime:
-		return agent.K8sMoveBundleConfigured()
-	case *scionrt.MockRuntime:
-		if !agent.MoveBundleRuntimeSupported(r.Name()) {
-			return false
-		}
-		if r.Name() == "kubernetes" || r.Name() == "k8s" {
-			return agent.K8sMoveBundleConfigured()
-		}
-		return true
-	default:
+	if rt == nil {
 		return false
 	}
+	if _, isErr := rt.(*scionrt.ErrorRuntime); isErr {
+		return false
+	}
+	return agent.MoveBundleRuntimeConfigured(rt.Name())
 }
 
 // StaticCapabilityNames is StaticCapabilities as the capability names the
