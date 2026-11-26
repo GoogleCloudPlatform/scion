@@ -5441,18 +5441,22 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	// SuspendPolicy update: warn if the harness cannot resume (design §4.6),
-	// persist via SetAgentSuspendPolicy with in-transaction before/after audit,
-	// and report suspensionInFlight if a stop or suspend is already in flight
-	// (design §4.2 point 3). Always run writeSuspendPolicyTx when
-	// updates.SuspendPolicy != nil rather than trusting the handler-entry
-	// snapshot, so a concurrent clear cannot turn a "never" PATCH into a stale
-	// echo.
+	// persist via conditional SetAgentSuspendPolicy with in-transaction
+	// before/after audit when the value actually transitions, and report
+	// suspensionInFlight if a stop or suspend is already in flight (design §4.2
+	// point 3). Always run writeSuspendPolicyTx when updates.SuspendPolicy != nil
+	// rather than trusting the handler-entry snapshot, so concurrent PATCHes
+	// serialize on the row lock and derive audit + disposition from the atomic
+	// transition result.
 	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever {
-		if ok, harnessType, _ := s.harnessSupportsResume(ctx, agent); !ok {
-			if harnessType != "" {
+		if ok, harnessType, reason := s.harnessSupportsResume(ctx, agent); !ok {
+			switch {
+			case harnessType != "":
 				warnings = append(warnings, fmt.Sprintf("harness %q does not support resume; this agent is never auto-suspended so suspendPolicy=%q has no effect", harnessType, store.SuspendPolicyNever))
-			} else {
-				warnings = append(warnings, fmt.Sprintf("this agent's harness does not support resume; it is never auto-suspended so suspendPolicy=%q has no effect", store.SuspendPolicyNever))
+			case reason != "":
+				warnings = append(warnings, fmt.Sprintf("%s; suspendPolicy=%q may have no effect", reason, store.SuspendPolicyNever))
+			default:
+				warnings = append(warnings, fmt.Sprintf("unable to verify whether this agent's harness supports resume; suspendPolicy=%q may have no effect", store.SuspendPolicyNever))
 			}
 		}
 	}
@@ -5467,25 +5471,28 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		len(pendingExperimentOff) > 0
 
 	var suspensionInFlight bool
+	var suspendPolicyChanged bool
 	writeSuspendPolicyTx := func(tx store.Store) error {
-		cur, err := tx.GetAgent(ctx, agent.ID)
+		target := *updates.SuspendPolicy
+		changed, err := tx.SetAgentSuspendPolicy(ctx, agent.ID, target)
 		if err != nil {
 			return err
 		}
-		beforePolicy := cur.SuspendPolicy
-		if beforePolicy == "" {
-			beforePolicy = store.SuspendPolicyAuto
-		}
-		if err := tx.SetAgentSuspendPolicy(ctx, agent.ID, *updates.SuspendPolicy); err != nil {
-			return err
-		}
-		if beforePolicy != *updates.SuspendPolicy {
+		suspendPolicyChanged = changed
+		if changed {
+			// suspend_policy is a binary enum ("auto" / "never"), so a
+			// conditional transition to target came atomically from the other
+			// value.
+			beforePolicy := store.SuspendPolicyAuto
+			if target == store.SuspendPolicyAuto {
+				beforePolicy = store.SuspendPolicyNever
+			}
 			policyAudit := &store.MutationAuditRecord{
 				MutationType:  mutationTypeAgentSuspendPolicySet,
 				TargetType:    "agent",
 				TargetID:      agent.ID,
 				BeforeSummary: beforePolicy,
-				AfterSummary:  *updates.SuspendPolicy,
+				AfterSummary:  target,
 				Timestamp:     time.Now(),
 			}
 			auditActorFromContext(ctx).ApplyActor(policyAudit)
@@ -5494,7 +5501,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return fmt.Errorf("agent update suspend policy audit: %w", err)
 			}
 		}
-		if *updates.SuspendPolicy == store.SuspendPolicyNever {
+		if target == store.SuspendPolicyNever {
 			fresh, err := tx.GetAgent(ctx, agent.ID)
 			if err != nil {
 				return err
@@ -5529,6 +5536,17 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			return
 		}
 		agent.SuspendPolicy = *updates.SuspendPolicy
+		// Derive disposition.applied from the store's atomic transition result
+		// rather than the handler-entry snapshot.
+		if suspendPolicyChanged {
+			if *updates.SuspendPolicy == store.SuspendPolicyNever {
+				before.suspendPolicy = store.SuspendPolicyAuto
+			} else {
+				before.suspendPolicy = store.SuspendPolicyNever
+			}
+		} else {
+			before.suspendPolicy = *updates.SuspendPolicy
+		}
 	} else if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a

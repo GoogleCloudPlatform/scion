@@ -613,28 +613,49 @@ func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID s
 	return nil
 }
 
-// SetAgentSuspendPolicy sets suspend_policy to "auto" or "never". It is the
-// single-purpose post-create writer for the column and neither checks nor
+// SetAgentSuspendPolicy sets suspend_policy to "auto" or "never" if it differs
+// from the stored value, reporting whether the row actually transitioned. It is
+// the single-purpose post-create writer for the column and neither checks nor
 // bumps state_version. Refuses soft-deleted rows (deleted_at IS NULL).
-func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) error {
+//
+// Using a conditional UPDATE (WHERE id = ? AND deleted_at IS NULL AND
+// suspend_policy <> ?) makes the transition check atomic under Postgres
+// READ COMMITTED: concurrent writers serialize on the row lock and Postgres
+// re-evaluates the WHERE predicate against the committed row, so concurrent
+// opposite PATCHes cannot lose an audit record and concurrent identical PATCHes
+// cannot double-audit.
+func (s *AgentStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) (bool, error) {
 	if !store.IsValidSuspendPolicy(policy) {
-		return fmt.Errorf("%w: invalid suspend policy %q", store.ErrInvalidInput, policy)
+		return false, fmt.Errorf("%w: invalid suspend policy %q", store.ErrInvalidInput, policy)
 	}
 	uid, err := parseUUID(agentID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	n, err := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
+		Where(
+			agent.IDEQ(uid),
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyNEQ(agent.SuspendPolicy(policy)),
+		).
 		SetSuspendPolicy(agent.SuspendPolicy(policy)).
 		Save(ctx)
 	if err != nil {
-		return mapError(err)
+		return false, mapError(err)
 	}
-	if n == 0 {
-		return store.ErrNotFound
+	if n > 0 {
+		return true, nil
 	}
-	return nil
+	exists, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if !exists {
+		return false, store.ErrNotFound
+	}
+	return false, nil
 }
 
 // CountRunningNeverSuspendAgents returns counts of non-deleted running agents

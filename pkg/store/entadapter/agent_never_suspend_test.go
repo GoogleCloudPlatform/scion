@@ -305,28 +305,46 @@ func TestAgentStore_SetAgentSuspendPolicy_RunningCountsAndFilter(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, store.SuspendPolicyAuto, before.SuspendPolicy)
 
-		require.NoError(t, s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever))
+		changed, err := s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		require.NoError(t, err)
+		assert.False(t, changed, "same-value auto->auto must report changed=false")
+
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		require.NoError(t, err)
+		assert.True(t, changed, "auto->never must report changed=true")
 		afterNever, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.SuspendPolicyNever, afterNever.SuspendPolicy)
 		assert.Equal(t, before.StateVersion, afterNever.StateVersion, "SetAgentSuspendPolicy must not bump state_version")
 
-		require.NoError(t, s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto))
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		require.NoError(t, err)
+		assert.False(t, changed, "same-value never->never must report changed=false")
+
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		require.NoError(t, err)
+		assert.True(t, changed, "never->auto must report changed=true")
 		afterAuto, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.SuspendPolicyAuto, afterAuto.SuspendPolicy)
 		assert.Equal(t, before.StateVersion, afterAuto.StateVersion)
 
-		assert.ErrorIs(t, s.SetAgentSuspendPolicy(ctx, a.ID, "bogus"), store.ErrInvalidInput)
-		assert.ErrorIs(t, s.SetAgentSuspendPolicy(ctx, a.ID, ""), store.ErrInvalidInput)
-		assert.ErrorIs(t, s.SetAgentSuspendPolicy(ctx, uuid.New().String(), store.SuspendPolicyNever), store.ErrNotFound)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, "bogus")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, "")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		_, err = s.SetAgentSuspendPolicy(ctx, uuid.New().String(), store.SuspendPolicyNever)
+		assert.ErrorIs(t, err, store.ErrNotFound)
 
-		// Soft-deleted row must not be written by SetAgentSuspendPolicy.
+		// Soft-deleted row must not be written by SetAgentSuspendPolicy (even for same value).
 		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
 			SetDeletedAt(time.Now().UTC()).
 			Save(ctx)
 		require.NoError(t, err)
-		assert.ErrorIs(t, s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever), store.ErrNotFound)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		assert.ErrorIs(t, err, store.ErrNotFound)
 		afterDeleted, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, store.SuspendPolicyAuto, afterDeleted.SuspendPolicy, "soft-deleted row policy must remain unchanged")

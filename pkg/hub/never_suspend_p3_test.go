@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,7 +31,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -253,6 +254,153 @@ func TestNeverSuspend_PatchPolicy_AuthzAuditExperimentAndWarning(t *testing.T) {
 		require.NotEmpty(t, resp.Warnings, "non-resumable harness must return a warning")
 		assert.Contains(t, resp.Warnings[0], "does not support resume")
 	})
+
+	t.Run("same-value PATCH writes no audit record and omits suspendPolicy from disposition.applied", func(t *testing.T) {
+		sameAgent := &store.Agent{
+			ID: tid("ns-p3-same-val"), Slug: "ns-p3-same-val", Name: "ns-p3-same-val",
+			ProjectID: projectID, OwnerID: ownerID, CreatedBy: ownerID,
+			Phase: string(state.PhaseRunning), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, sameAgent))
+
+		// Same-value auto -> auto: 200, no audit record, not in disposition.applied.
+		recAuto := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+sameAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyAuto,
+		})
+		require.Equal(t, http.StatusOK, recAuto.Code, "body: %s", recAuto.Body.String())
+		var respAuto agentUpdateResponse
+		require.NoError(t, json.Unmarshal(recAuto.Body.Bytes(), &respAuto))
+		assert.Equal(t, store.SuspendPolicyAuto, respAuto.SuspendPolicy)
+		assert.NotContains(t, respAuto.Disposition.Applied, "suspendPolicy")
+
+		audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeAgentSuspendPolicySet,
+			TargetID:     sameAgent.ID,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, audits, "same-value auto->auto PATCH must write no audit record")
+
+		// Transition auto -> never: 1 audit record, suspendPolicy in disposition.applied.
+		recNever := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+sameAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, recNever.Code, "body: %s", recNever.Body.String())
+		var respNever agentUpdateResponse
+		require.NoError(t, json.Unmarshal(recNever.Body.Bytes(), &respNever))
+		assert.Contains(t, respNever.Disposition.Applied, "suspendPolicy")
+
+		// Same-value never -> never: still only 1 audit record, not in disposition.applied.
+		recNeverAgain := doRequestAsUser(t, srv, owner, http.MethodPatch, "/api/v1/agents/"+sameAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, recNeverAgain.Code, "body: %s", recNeverAgain.Body.String())
+		var respNeverAgain agentUpdateResponse
+		require.NoError(t, json.Unmarshal(recNeverAgain.Body.Bytes(), &respNeverAgain))
+		assert.Equal(t, store.SuspendPolicyNever, respNeverAgain.SuspendPolicy)
+		assert.NotContains(t, respNeverAgain.Disposition.Applied, "suspendPolicy")
+
+		audits, _, err = s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeAgentSuspendPolicySet,
+			TargetID:     sameAgent.ID,
+		})
+		require.NoError(t, err)
+		assert.Len(t, audits, 1, "same-value never->never PATCH must not write a second audit record")
+	})
+
+	t.Run("interleaved opposite PATCHes audit both transitions with exact before/after", func(t *testing.T) {
+		srv2, s2 := testServer(t)
+		setNeverSuspendExperiment(t, srv2, true)
+		p2ID := tid("ns-p3-race-proj")
+		require.NoError(t, s2.CreateProject(ctx, &store.Project{
+			ID: p2ID, Name: "NS P3 Race", Slug: "ns-p3-race",
+			GitRemote: "https://github.com/example/ns-p3-race.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		raceAgent := &store.Agent{
+			ID: tid("ns-p3-race-agent"), Slug: "ns-p3-race-agent", Name: "ns-p3-race-agent",
+			ProjectID: p2ID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseRunning), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s2.CreateAgent(ctx, raceAgent))
+
+		// Hook WithTx so the first PATCH (targeting "auto" on an initially "auto"
+		// row) pauses after reading the stale handler-entry snapshot ("auto")
+		// while a second PATCH (targeting "never") runs and commits "auto->never".
+		// When the first PATCH resumes, conditional SetAgentSuspendPolicy must
+		// observe the committed "never" row, transition "never->auto", write its
+		// audit record, and report suspendPolicy in disposition.applied.
+		enteredB := make(chan struct{})
+		releaseB := make(chan struct{})
+		hook, _ := installStoreFault(t, srv2, func(inner store.Store, _ *storeFaultSwitch) *interleaveWithTxStore {
+			return &interleaveWithTxStore{
+				Store:   inner,
+				entered: enteredB,
+				release: releaseB,
+			}
+		})
+		hook.armed.Store(true)
+
+		var wg sync.WaitGroup
+		var respB agentUpdateResponse
+		var codeB int
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			recB := doRequest(t, srv2, http.MethodPatch, "/api/v1/agents/"+raceAgent.ID, map[string]any{
+				"suspendPolicy": store.SuspendPolicyAuto,
+			})
+			codeB = recB.Code
+			_ = json.Unmarshal(recB.Body.Bytes(), &respB)
+		}()
+
+		// Wait until PATCH B has read its stale entry snapshot ("auto") and
+		// reached WithTx, then execute PATCH A ("auto->never") to completion.
+		<-enteredB
+		recA := doRequest(t, srv2, http.MethodPatch, "/api/v1/agents/"+raceAgent.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusOK, recA.Code, "body: %s", recA.Body.String())
+
+		// Let PATCH B run its transaction now that the row is "never".
+		close(releaseB)
+		wg.Wait()
+		require.Equal(t, http.StatusOK, codeB)
+		assert.Equal(t, store.SuspendPolicyAuto, respB.SuspendPolicy)
+		assert.Contains(t, respB.Disposition.Applied, "suspendPolicy",
+			"disposition.applied must reflect the atomic never->auto transition")
+
+		stored, err := s2.GetAgent(ctx, raceAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, stored.SuspendPolicy)
+
+		audits, _, err := s2.ListMutationAudits(ctx, store.MutationAuditFilter{
+			MutationType: mutationTypeAgentSuspendPolicySet,
+			TargetID:     raceAgent.ID,
+		})
+		require.NoError(t, err)
+		require.Len(t, audits, 2, "both auto->never and never->auto transitions must be audited")
+		transitions := map[string]int{}
+		for _, a := range audits {
+			transitions[a.BeforeSummary+"->"+a.AfterSummary]++
+		}
+		assert.Equal(t, 1, transitions[store.SuspendPolicyAuto+"->"+store.SuspendPolicyNever])
+		assert.Equal(t, 1, transitions[store.SuspendPolicyNever+"->"+store.SuspendPolicyAuto])
+	})
+}
+
+type interleaveWithTxStore struct {
+	store.Store
+	armed   atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *interleaveWithTxStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
+	if f.armed.CompareAndSwap(true, false) {
+		close(f.entered)
+		<-f.release
+	}
+	return f.Store.WithTx(ctx, fn)
 }
 
 func TestNeverSuspend_PatchSuspensionInFlight(t *testing.T) {
@@ -537,7 +685,6 @@ func TestNeverSuspend_FilterQueryAndMetric(t *testing.T) {
 
 		// Experiment on -> observes only the 1 running flagged agent.
 		setNeverSuspendExperiment(t, srv, true)
-		_ = experiments.NeverSuspend
 		pts := collect()
 		require.Len(t, pts, 1)
 		assert.Equal(t, int64(1), pts[0].Value)
