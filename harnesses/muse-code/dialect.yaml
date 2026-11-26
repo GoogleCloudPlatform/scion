@@ -69,6 +69,7 @@ mappings:
   # - `usage` is cumulative across steps within a `turn_id` (including failed
   #   follow-up steps that repeat the previous cumulative total); the telemetry
   #   handler converts it to per-step increments keyed by (session_id, turn_id).
+  #   Because Dockerfile does not pin a muse version, re-verify on muse upgrades.
   PostLLMCall:
     event: model-end
     input_tokens_inclusive: true

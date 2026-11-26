@@ -450,8 +450,9 @@ func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
 	telemetryHandler.Analytics = hookUsageAnalytics(cfg)
+	telemetryHandler.MuseTurnUsageStateRequired = true
 	if home := hookHomeDir(); home != "" {
-		telemetryHandler.TurnUsageStatePath = filepath.Join(home, ".scion", "muse-turn-usage.json")
+		telemetryHandler.MuseTurnUsageStatePath = filepath.Join(home, ".scion", "muse-turn-usage.json")
 	}
 	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {

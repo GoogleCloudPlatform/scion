@@ -81,13 +81,15 @@ type TelemetryHandler struct {
 	// hook command only when the GCP exporter is configured.
 	Analytics *telemetry.UsageAnalytics
 
-	// TurnUsageStatePath, if set, persists per-turn cumulative usage high-water
-	// marks across short-lived hook processes for dialects whose model-end
-	// usage is cumulative within a turn (muse-code). When empty, delta
-	// tracking is kept in memory on the handler.
-	TurnUsageStatePath string
-	turnUsageMu        sync.Mutex
-	turnUsageMem       *museTurnUsageState
+	// MuseTurnUsageStatePath, if set, persists Muse Code's per-turn cumulative
+	// usage high-water marks across short-lived hook processes. When
+	// MuseTurnUsageStateRequired is true and MuseTurnUsageStatePath is empty
+	// (or the state file cannot be used), muse-code model-end tokens fail
+	// closed to not_reported instead of falling back to an empty in-memory map.
+	MuseTurnUsageStatePath     string
+	MuseTurnUsageStateRequired bool
+	turnUsageMu                sync.Mutex
+	turnUsageMem               *museTurnUsageState
 
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)

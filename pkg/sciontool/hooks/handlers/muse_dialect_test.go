@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -188,7 +189,7 @@ func TestMuseDialect_CumulativeTurnDeltaAndFailedStep(t *testing.T) {
 		}
 		h := NewTelemetryHandler(nil, nil, nil, mp)
 		h.Analytics = analytics
-		h.TurnUsageStatePath = statePath
+		h.MuseTurnUsageStatePath = statePath
 		if err := h.Handle(ev); err != nil {
 			t.Fatalf("Handle: %v", err)
 		}
@@ -317,5 +318,213 @@ func TestMuseDialect_PostLLMCallMappingConfig(t *testing.T) {
 		if _, present := entry.Fields[forbidden]; present {
 			t.Errorf("PostLLMCall mapping.fields contains %q; extractTokens reads nested usage.* directly", forbidden)
 		}
+	}
+}
+
+// TestMuseTurnUsage_LRUEvictionInterleaved verifies R1: when more than
+// maxMuseTrackedTurns (64) subagent turns interleave with an active main turn,
+// LRU eviction refreshes the main turn on every step so its high-water mark is
+// never dropped and summed deltas equal the true cumulative (71,000, not the
+// 135,000 FIFO double-count). Exercised through both apply() and the file path.
+func TestMuseTurnUsage_LRUEvictionInterleaved(t *testing.T) {
+	const (
+		mainKey    = "sess-main:turn-main"
+		stepInc    = int64(1000)
+		iterations = maxMuseTrackedTurns + 6 // 70 > 64 triggers eviction cycles
+		wantTotal  = stepInc * int64(1+iterations)
+	)
+
+	t.Run("in-memory apply", func(t *testing.T) {
+		var st museTurnUsageState
+		cum := stepInc
+		sum := st.apply(mainKey, museTurnUsageTotals{Input: cum}).Input
+		if sum != stepInc {
+			t.Fatalf("step 0 delta = %d, want %d", sum, stepInc)
+		}
+		for i := 1; i <= iterations; i++ {
+			subKey := fmt.Sprintf("sess-sub-%d:turn-sub-%d", i, i)
+			st.apply(subKey, museTurnUsageTotals{Input: 500})
+			cum += stepInc
+			d := st.apply(mainKey, museTurnUsageTotals{Input: cum})
+			if d.Input != stepInc {
+				t.Fatalf("iter %d: main delta = %d, want %d (LRU must retain active main turn)", i, d.Input, stepInc)
+			}
+			sum += d.Input
+		}
+		if sum != wantTotal {
+			t.Errorf("summed main deltas = %d, want %d", sum, wantTotal)
+		}
+		if len(st.Turns) != maxMuseTrackedTurns || len(st.Order) != maxMuseTrackedTurns {
+			t.Errorf("state size turns=%d order=%d, want %d", len(st.Turns), len(st.Order), maxMuseTrackedTurns)
+		}
+	})
+
+	t.Run("file path across handlers", func(t *testing.T) {
+		scrubTelemetryEnv(t)
+		t.Setenv("SCION_HARNESS", "muse-code")
+		t.Setenv("SCION_USAGE_SOURCE", "hooks")
+
+		md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "muse-code"))
+		if err != nil {
+			t.Fatalf("LoadMappingDialect: %v", err)
+		}
+		statePath := filepath.Join(t.TempDir(), ".scion", "muse-turn-usage.json")
+
+		runStep := func(sessionID, turnID string, step int, rawInput int64) int64 {
+			ev, err := md.Parse(map[string]interface{}{
+				"hook_event_name": "PostLLMCall",
+				"session_id":      sessionID,
+				"turn_id":         turnID,
+				"step":            float64(step),
+				"request_id":      fmt.Sprintf("%s:%d:1", turnID, step),
+				"response_id":     fmt.Sprintf("resp_%s_%d", turnID, step),
+				"model":           "muse-spark",
+				"status":          "success",
+				"usage": map[string]interface{}{
+					"input_tokens":  float64(rawInput),
+					"output_tokens": float64(10),
+					"cached_tokens": float64(0),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+			h := NewTelemetryHandler(nil, nil, nil, mp)
+			h.MuseTurnUsageStatePath = statePath
+			if err := h.Handle(ev); err != nil {
+				t.Fatalf("Handle: %v", err)
+			}
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			return usageTokenTotals(rm)[telemetrycontract.TokenTypeInput]
+		}
+
+		cum := stepInc
+		sum := runStep("sess-main", "turn-main", 0, cum)
+		if sum != stepInc {
+			t.Fatalf("step 0 input = %d, want %d", sum, stepInc)
+		}
+		for i := 1; i <= iterations; i++ {
+			runStep(fmt.Sprintf("sess-sub-%d", i), fmt.Sprintf("turn-sub-%d", i), 0, 500)
+			cum += stepInc
+			d := runStep("sess-main", "turn-main", i, cum)
+			if d != stepInc {
+				t.Fatalf("iter %d: main file-path delta = %d, want %d", i, d, stepInc)
+			}
+			sum += d
+		}
+		if sum != wantTotal {
+			t.Errorf("file-path summed main deltas = %d, want %d", sum, wantTotal)
+		}
+	})
+}
+
+// TestMuseTurnUsage_UnwritableStateFailsClosed verifies O1: when the state file
+// cannot be used (unwritable path or required-but-empty path), turn-cumulative
+// totals are never published as a step delta; the call is still counted with
+// token_status=not_reported and all token fields nil.
+func TestMuseTurnUsage_UnwritableStateFailsClosed(t *testing.T) {
+	scrubTelemetryEnv(t)
+	t.Setenv("SCION_HARNESS", "muse-code")
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "muse-code"))
+	if err != nil {
+		t.Fatalf("LoadMappingDialect: %v", err)
+	}
+	records := loadMuseUsagePayloads(t)
+
+	// Blocking file at parent dir makes MkdirAll/OpenFile fail regardless of uid.
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unwritablePath := filepath.Join(blocker, "muse-turn-usage.json")
+
+	cases := []struct {
+		name     string
+		path     string
+		required bool
+	}{
+		{name: "unwritable state path", path: unwritablePath, required: true},
+		{name: "required but empty state path", path: "", required: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			defer func() { _ = mp.Shutdown(context.Background()) }()
+			analytics, outboxDir := hookAnalytics(t)
+
+			// Replay 2-step turn (records[1] step 0, records[2] step 1 cumulative).
+			for _, raw := range records[1:3] {
+				ev, err := md.Parse(raw)
+				if err != nil {
+					t.Fatalf("Parse: %v", err)
+				}
+				h := NewTelemetryHandler(nil, nil, nil, mp)
+				h.Analytics = analytics
+				h.MuseTurnUsageStatePath = tc.path
+				h.MuseTurnUsageStateRequired = tc.required
+				if err := h.Handle(ev); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+			}
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(context.Background(), &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if calls := apiCallTotal(rm); calls != 2 {
+				t.Errorf("gen_ai.api.calls = %d, want 2", calls)
+			}
+			if totals := usageTokenTotals(rm); len(totals) != 0 {
+				t.Errorf("usage tokens = %v, want empty (must not publish untracked cumulative totals)", totals)
+			}
+			staged := hookStagedEvents(t, outboxDir)
+			if len(staged) != 2 {
+				t.Fatalf("staged events = %d, want 2", len(staged))
+			}
+			for i, ev := range staged {
+				if ev.TokenStatus != telemetrycontract.TokenStatusNotReported {
+					t.Errorf("staged[%d].TokenStatus = %q, want not_reported", i, ev.TokenStatus)
+				}
+				if ev.Input != nil || ev.Output != nil || ev.CacheRead != nil || ev.CacheWrite != nil || ev.Reasoning != nil {
+					t.Errorf("staged[%d] must have nil tokens, got %+v", i, ev)
+				}
+			}
+		})
+	}
+}
+
+// TestMuseTurnUsage_CorruptStateFileRecovers verifies O2: a corrupt state file
+// resets cleanly and is replaced atomically via temp file + rename.
+func TestMuseTurnUsage_CorruptStateFileRecovers(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), ".scion", "muse-turn-usage.json")
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("{corrupt json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	delta, err := applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 400, Output: 50})
+	if err != nil {
+		t.Fatalf("applyMuseTurnUsageFile on corrupt file: %v", err)
+	}
+	if delta.Input != 400 || delta.Output != 50 {
+		t.Errorf("delta = %+v, want input=400 output=50", delta)
+	}
+	// Verify state file is now valid JSON and persists for step 1.
+	delta2, err := applyMuseTurnUsageFile(statePath, "s:t", museTurnUsageTotals{Input: 900, Output: 120})
+	if err != nil {
+		t.Fatalf("step 1 applyMuseTurnUsageFile: %v", err)
+	}
+	if delta2.Input != 500 || delta2.Output != 70 {
+		t.Errorf("step 1 delta = %+v, want input=500 output=70", delta2)
 	}
 }
