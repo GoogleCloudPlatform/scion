@@ -298,7 +298,7 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 				finishBeforeDispatch("wake_failed")
 				return
 			}
-			startCtx, cancelStart := context.WithDeadline(contextWithIdentity(ctx, approverIdent), wakeDeadline)
+			startCtx, cancelStart := context.WithDeadline(ctx, wakeDeadline)
 			startErr := s.startAgentCore(startCtx, agent, StartOpts{
 				Kind:               store.StartClaimWake,
 				Resume:             true,
