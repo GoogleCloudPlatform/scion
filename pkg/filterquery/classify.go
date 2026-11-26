@@ -18,6 +18,8 @@ import (
 	"strings"
 	"unicode"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -29,17 +31,30 @@ const (
 	MatchTierSubsequence = 3
 )
 
-// NormalizeMatchText NFC-normalizes and lowercases input, then recomposes NFC
-// to close over uppercase letters with combining marks whose lowercase has a
-// precomposed form (parity with web/src/utils/palette-match.ts).
-func NormalizeMatchText(input string) string {
-	return norm.NFC.String(strings.ToLower(norm.NFC.String(input)))
+// isJSWhitespace mirrors ECMAScript \s: Unicode Space_Separator plus
+// \t, \n, \v, \f, \r, \u2028, \u2029, and \uFEFF (BOM), excluding \u0085 (NEL).
+func isJSWhitespace(r rune) bool {
+	if r == '\uFEFF' {
+		return true
+	}
+	if r == '\u0085' {
+		return false
+	}
+	return unicode.IsSpace(r)
 }
 
-// NormalizeQuery trims whitespace, applies NormalizeMatchText, and collapses
-// every internal run of whitespace to a single ASCII space.
+// NormalizeMatchText NFC-normalizes and lowercases input with full Unicode
+// SpecialCasing (matching JS String.prototype.toLowerCase, including Greek
+// final sigma and Turkish dotted capital I expansion), then recomposes NFC
+// (parity with web/src/utils/palette-match.ts).
+func NormalizeMatchText(input string) string {
+	return norm.NFC.String(cases.Lower(language.Und).String(norm.NFC.String(input)))
+}
+
+// NormalizeQuery trims JS whitespace, applies NormalizeMatchText, and collapses
+// every internal run of JS whitespace to a single ASCII space.
 func NormalizeQuery(input string) string {
-	normed := NormalizeMatchText(strings.TrimSpace(input))
+	normed := NormalizeMatchText(strings.TrimFunc(input, isJSWhitespace))
 	if normed == "" {
 		return ""
 	}
@@ -47,7 +62,7 @@ func NormalizeQuery(input string) string {
 	b.Grow(len(normed))
 	inSpace := false
 	for _, r := range normed {
-		if unicode.IsSpace(r) {
+		if isJSWhitespace(r) {
 			if !inSpace {
 				b.WriteByte(' ')
 				inSpace = true

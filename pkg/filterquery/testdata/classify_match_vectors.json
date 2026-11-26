@@ -155,6 +155,30 @@
       "query": "caf\u00e9",
       "field": "Cafe\u0301-bot",
       "tier": 1
+    },
+    {
+      "name": "unicode Greek final sigma exact match",
+      "query": "\u03bf\u03b4\u03bf\u03c2",
+      "field": "\u039f\u0394\u039f\u03a3",
+      "tier": 0
+    },
+    {
+      "name": "unicode Turkish dotted capital I expansion parity",
+      "query": "ist",
+      "field": "\u0130stanbul",
+      "tier": 3
+    },
+    {
+      "name": "unicode BOM U+FEFF is JS whitespace separator",
+      "query": "deploy\ufefffrontend",
+      "field": "deploy-frontend",
+      "tier": 0
+    },
+    {
+      "name": "unicode NEL U+0085 is not JS whitespace separator",
+      "query": "deploy\u0085frontend",
+      "field": "deploy-frontend",
+      "tier": null
     }
   ]
 }
