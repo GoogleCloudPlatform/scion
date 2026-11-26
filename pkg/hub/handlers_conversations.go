@@ -1831,7 +1831,7 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 				if s.crossProjectMessagingEnabled() {
 					return peerAllowed, ""
 				}
-				return peerDenied403, "cross-project read denied: peer agent not found"
+				return peerDenied403, "peer agent no longer exists"
 			}
 			slog.Error("crossProjectPeerAllowed: database error looking up peer agent", "peer_id", peerID, "error", err)
 			return peerErr500, ""
@@ -1842,7 +1842,7 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 			if s.crossProjectMessagingEnabled() {
 				return peerAllowed, ""
 			}
-			return peerDenied403, "cross-project read denied: peer agent not found"
+			return peerDenied403, "peer agent no longer exists"
 		}
 		peerProjectID = peerAgent.ProjectID
 	}

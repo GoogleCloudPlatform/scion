@@ -78,7 +78,19 @@ func TestCrossProjectPeerAllowed_NilStampDeletedPeerIs403NeverA500(t *testing.T)
 
 	decision, reason := srv.crossProjectPeerAllowed(ctx, projA, "agent", agentB.ID, nil)
 	assert.Equal(t, peerDenied403, decision, "a deleted peer must never produce peerErr500")
-	assert.Contains(t, reason, "peer agent not found")
+	assert.Equal(t, "peer agent no longer exists", reason)
+	assert.NotContains(t, reason, "cross-project")
+}
+
+func TestCrossProjectPeerAllowed_NilStampDeletedSameProjectPeerWording(t *testing.T) {
+	srv, s, projA, _, agentA, _ := predicateSetup(t)
+	ctx := context.Background()
+	require.NoError(t, s.DeleteAgent(ctx, agentA.ID)) // hard delete same-project peer
+
+	decision, reason := srv.crossProjectPeerAllowed(ctx, projA, "agent", agentA.ID, nil)
+	assert.Equal(t, peerDenied403, decision, "deleted peer with no stamp remains denied when cross-project messaging is off")
+	assert.Equal(t, "peer agent no longer exists", reason)
+	assert.NotContains(t, reason, "cross-project")
 }
 
 // msg-attach-arch refinement (2026-09-30, ptone/scion#2282): with no stamp, a

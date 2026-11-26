@@ -688,7 +688,8 @@ func TestOffload_I10_LegacyUnstampedRow_SenderDeleted_FlagOff_403NeverA500(t *te
 	srv.handleGetConversationMessage(rr, req, dmConvID, legacy.ID)
 	require.Equal(t, http.StatusForbidden, rr.Code,
 		"deleted peer with no stamp must be 403, never 500, when cross-project messaging is off; body: %s", rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "peer agent not found")
+	assert.Contains(t, rr.Body.String(), "peer agent no longer exists")
+	assert.NotContains(t, rr.Body.String(), "cross-project")
 }
 
 // enableOffloadAndCPM sets both offload_threshold_runes and
