@@ -367,7 +367,7 @@ type CreateAgentRequest struct {
 
 	// ResolvedSecrets contains type-aware secrets resolved by the Hub.
 	// These are projected into the agent container based on their type
-	// (environment variable, file, or variable).
+	// (environment variable or file).
 	ResolvedSecrets []api.ResolvedSecret `json:"resolvedSecrets,omitempty"`
 
 	// CreatorName is the human-readable identity of who created this agent.

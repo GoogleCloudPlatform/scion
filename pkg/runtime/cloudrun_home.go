@@ -70,12 +70,14 @@ const (
 	cloudRunMemVolumeSizeLimit = "16Mi"
 )
 
-// The hub credential file (cloudRunHubTokenRel), its staging file and
-// secrets.json are never copied onto the share: the credential keeps its
-// staged-blob path, and secrets.json is written in the instance from the
-// blob. Paths are relative to the home.
+// The hub credential file (cloudRunHubTokenRel), its staging file, and the
+// retired secrets.json path are never copied onto the share: the credential
+// keeps its staged-blob path, and secrets.json is excluded as defense in depth
+// so a stale file from an old run is never synced back. Paths are relative to
+// the home.
 const (
 	cloudRunHubTokenTmpHomeRel = cloudRunHubTokenRel + ".tmp"
+	// Retired path, reserved so stale tooling or a template cannot reuse it with different meaning.
 	cloudRunSecretsJSONHomeRel = ".scion/secrets.json"
 )
 
@@ -144,13 +146,13 @@ func hasFlatCloudRunInstance(srv *config.V1ServerConfig) bool {
 
 // PortableHomeExcludes returns the home-relative paths that must never be
 // copied out of an agent's home onto shared storage or into a portable move
-// bundle: the shared home transfer set's excludes (homeTransferExcludes, with
-// secrets.json delivered), the hub credential file and its staging file,
-// secrets.json unconditionally, and the home reset marker. Callers copying or
-// bundling a home should also exclude temporary leftovers matched by
-// IsHomeTempName.
+// bundle: the shared home transfer set's excludes (homeTransferExcludes),
+// the hub credential file and its staging file, the retired secrets.json
+// path unconditionally (so a stale file from an old run is never synced
+// back), and the home reset marker. Callers copying or bundling a home
+// should also exclude temporary leftovers matched by IsHomeTempName.
 func PortableHomeExcludes(cfg RunConfig) []string {
-	return append(homeTransferExcludes(cfg, true),
+	return append(homeTransferExcludes(cfg),
 		cloudRunHubTokenRel,
 		cloudRunHubTokenTmpHomeRel,
 		cloudRunSecretsJSONHomeRel,

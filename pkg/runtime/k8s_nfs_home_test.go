@@ -138,7 +138,6 @@ func TestBuildPod_NFSHomeVersusPlainPod(t *testing.T) {
 		t.Errorf("plain %s = %q, want the home path", telemetryGCPCredentialsEnvVar, got)
 	}
 	want := map[string]string{
-		"SCION_SECRETS_FILE":          "/run/scion/agent-secrets/secrets.json",
 		telemetryGCPCredentialsEnvVar: "/run/scion/agent-secrets/" + telemetryGCPCredentialsSecretName,
 		"SCION_HARNESS_OUTPUTS_DIR":   "/run/scion/mem/outputs",
 		"SCION_HARNESS_SECRETS_DIR":   "/run/scion/mem/harness-secrets",
@@ -148,6 +147,9 @@ func TestBuildPod_NFSHomeVersusPlainPod(t *testing.T) {
 		if ne[k] != v {
 			t.Errorf("nfs %s = %q, want %q", k, ne[k], v)
 		}
+	}
+	if _, ok := ne["SCION_SECRETS_FILE"]; ok {
+		t.Error("SCION_SECRETS_FILE must not be set on NFS-home pods")
 	}
 	if _, ok := ne["SCION_HOME_LINKS"]; ok {
 		t.Error("the agent container must not receive SCION_HOME_LINKS; only home-prepare does")
@@ -489,7 +491,7 @@ func TestSyncArchiveCreateArgs_ExcludesLinkTargets(t *testing.T) {
 	src := filepath.Join(root, "src")
 	dest := filepath.Join(root, "dest")
 	files := []string{
-		".ssh/id_rsa", ".ssh/id_rsa.pub", ".scion/secrets.json", ".scion/agent.json",
+		".ssh/id_rsa", ".ssh/id_rsa.pub", ".scion/cert.pem", ".scion/agent.json",
 		"cfg/a[1]*.json", "cfg/a1x.json", "nested/.ssh/id_rsa",
 	}
 	for _, rel := range files {
@@ -504,7 +506,7 @@ func TestSyncArchiveCreateArgs_ExcludesLinkTargets(t *testing.T) {
 	if err := os.MkdirAll(dest, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	excludes := []string{".ssh/id_rsa", ".scion/secrets.json", "cfg/a[1]*.json"}
+	excludes := []string{".ssh/id_rsa", ".scion/cert.pem", "cfg/a[1]*.json"}
 	cmd := exec.Command("tar", syncArchiveCreateArgs(src, excludes...)...)
 	cmd.Env = append(os.Environ(), "COPYFILE_DISABLE=1")
 	archive, err := cmd.Output()
@@ -637,7 +639,7 @@ func TestRun_NFSHomeExcludesLinksAndVerifies(t *testing.T) {
 				}
 				return
 			}
-			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".scion/secrets.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs"}
+			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs"}
 			if !sameStrings(excludes, wantEx) {
 				t.Errorf("sync excludes = %v, want %v", excludes, wantEx)
 			}

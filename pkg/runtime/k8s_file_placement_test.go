@@ -97,7 +97,6 @@ func homeFileConfig() RunConfig {
 			{Name: "SSH_KEY", Type: "file", Target: "~/.ssh/id_rsa", Value: "key", Source: "user"},
 			{Name: "GEMINI_OAUTH", Type: "file", Target: "/home/scion/.gemini/oauth_creds.json", Value: "tok", Source: "user"},
 			{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: "cert", Source: "user"},
-			{Name: "CONFIG", Type: "variable", Target: "config", Value: "v", Source: "user"},
 		},
 		ResolvedAuth: &api.ResolvedAuth{
 			Files: []api.FileMapping{
@@ -144,19 +143,18 @@ func TestBuildPod_HomeFilesStagedNotMounted(t *testing.T) {
 			}
 			keys = append(keys, it.Key)
 		}
-		want := []string{"SSH_KEY", "GEMINI_OAUTH", "TLS_CERT", "secrets.json"}
+		want := []string{"SSH_KEY", "GEMINI_OAUTH", "TLS_CERT"}
 		if strings.Join(keys, ",") != strings.Join(want, ",") {
 			t.Errorf("agent-secrets items = %v, want %v", keys, want)
 		}
 	}
 
 	placements := rt.k8sHomeFilePlacements(config)
-	if len(placements) != 4 {
-		t.Fatalf("got %d placements, want 4: %+v", len(placements), placements)
+	if len(placements) != 3 {
+		t.Fatalf("got %d placements, want 3: %+v", len(placements), placements)
 	}
 	assertPlacement(t, placements, "/home/scion/.ssh/id_rsa", "/run/scion/agent-secrets/SSH_KEY")
 	assertPlacement(t, placements, "/home/scion/.gemini/oauth_creds.json", "/run/scion/agent-secrets/GEMINI_OAUTH")
-	assertPlacement(t, placements, "/home/scion/.scion/secrets.json", "/run/scion/agent-secrets/secrets.json")
 	assertPlacement(t, placements, "/home/scion/.config/gcloud/application_default_credentials.json", "/run/scion/auth-files/auth-file-0")
 
 	// Env vars that point at file targets keep their home paths.

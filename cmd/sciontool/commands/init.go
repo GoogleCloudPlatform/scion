@@ -553,7 +553,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 	transportCleared := stageTransportToken(targetUID, targetGID)
 
 	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
-	// serializes file and variable secrets into this single base64 blob
+	// serializes file secrets into this single base64 blob
 	// instead of bind-mounting them from the host filesystem. We decode and
 	// write them before anything else so they are available to hooks and
 	// the harness. This must happen before telemetry pipeline initialization
@@ -666,8 +666,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 		staged.ResolvedAuthEnv = nil
 		_ = os.Unsetenv(stagedsecrets.EnvVar)
-		log.Info("Staged %d file secret(s), %d variable secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
-			len(staged.FileSecrets), len(staged.VariableSecrets), harnessSecretCount, resolvedAuthCount)
+		log.Info("Staged %d file secret(s), %d harness secret(s) and %d resolved-auth env entr(ies)",
+			len(staged.FileSecrets), harnessSecretCount, resolvedAuthCount)
 
 		// Re-exec to purge SCION_STAGED_SECRETS from /proc/1/environ.
 		//

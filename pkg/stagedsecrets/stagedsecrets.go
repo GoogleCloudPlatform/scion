@@ -27,7 +27,7 @@ import (
 )
 
 // EnvVar is the environment variable used to pass serialized
-// file and variable secrets from the broker to the container. The value is
+// file secrets from the broker to the container. The value is
 // a base64-encoded JSON blob decoded by sciontool init.
 const EnvVar = "SCION_STAGED_SECRETS"
 
@@ -36,10 +36,6 @@ const EnvVar = "SCION_STAGED_SECRETS"
 // removes the file again at a clean exit. It carries no credential. The
 // runtimes reserve the name: an environment-type secret never supplies it.
 const HubTokenStagedEnvVar = "SCION_HUB_TOKEN_STAGED"
-
-// VariableSecretsFileName is the file under ~/.scion/ where variable secrets
-// are written by sciontool init and read into the agent environment.
-const VariableSecretsFileName = "secrets.json"
 
 // FileSecret describes a single file-type secret in the staged blob.
 type FileSecret struct {
@@ -50,8 +46,7 @@ type FileSecret struct {
 
 // Staged is the top-level structure serialized into SCION_STAGED_SECRETS.
 type Staged struct {
-	FileSecrets     []FileSecret      `json:"file_secrets,omitempty"`
-	VariableSecrets map[string]string `json:"variable_secrets,omitempty"`
+	FileSecrets []FileSecret `json:"file_secrets,omitempty"`
 	// HubToken is the agent's hub-issued credential, set only by runtimes
 	// whose instance cannot see the broker-written token file (Cloud Run).
 	// It is a dedicated field rather than a FileSecret so the payload
@@ -83,8 +78,8 @@ type HarnessSecret struct {
 // String withholds every value, so formatting a Staged never prints a
 // secret or the hub credential.
 func (s Staged) String() string {
-	return fmt.Sprintf("stagedsecrets.Staged{files:%d variables:%d hub_token:%t harness_secrets:%d resolved_auth_env:%d}",
-		len(s.FileSecrets), len(s.VariableSecrets), s.HubToken != "", len(s.HarnessSecrets), len(s.ResolvedAuthEnv))
+	return fmt.Sprintf("stagedsecrets.Staged{files:%d hub_token:%t harness_secrets:%d resolved_auth_env:%d}",
+		len(s.FileSecrets), s.HubToken != "", len(s.HarnessSecrets), len(s.ResolvedAuthEnv))
 }
 
 // GoString is String, for %#v.
@@ -107,11 +102,11 @@ func Decode(encoded string) (*Staged, error) {
 
 // Write writes decoded staged secrets to the filesystem inside
 // the container. File secrets are written to their target paths with 0600
-// permissions. Variable secrets are written to <homeDir>/.scion/secrets.json.
+// permissions.
 //
-// Every leaf this writes — a file secret's own Target, and secrets.json —
+// Every leaf this writes — a file secret's own Target —
 // goes through dirfd.WriteFileNoFollow: a workload-plantable symlink at
-// either path (e.g. left over from a previous run on a persisted home, or
+// that path (e.g. left over from a previous run on a persisted home, or
 // planted ahead of a restart) is refused outright rather than written or
 // chowned through, which this function otherwise does as root.
 // WriteFileNoFollow's own parent-directory walk (OpenParentNoFollow) is
@@ -243,27 +238,6 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		_ = dirfd.Close(dirFd)
 		if werr != nil {
 			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, werr)
-		}
-	}
-
-	if len(staged.VariableSecrets) > 0 {
-		scionDir := filepath.Join(homeDir, ".scion")
-		scionDirFd, _, err := dirfd.EnsureDirNoFollowUnderRoot(homeDir, scionDir, 0700, uid, gid)
-		if err != nil {
-			return fmt.Errorf("failed to create .scion directory: %w", err)
-		}
-		data, err := json.Marshal(staged.VariableSecrets)
-		if err != nil {
-			_ = dirfd.Close(scionDirFd)
-			return fmt.Errorf("failed to marshal secrets.json: %w", err)
-		}
-		// Anchored at scionDirFd (which may have resolved homeDir through a
-		// trusted ancestor symlink), not by re-resolving secretsPath as a
-		// string — see the file-secret leaf write above for why.
-		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, VariableSecretsFileName, filepath.Join(scionDir, VariableSecretsFileName), data, 0600, uid, gid, dirfd.RefuseSymlink, dirfd.Fchown)
-		_ = dirfd.Close(scionDirFd)
-		if werr != nil {
-			return fmt.Errorf("failed to write secrets.json: %w", werr)
 		}
 	}
 

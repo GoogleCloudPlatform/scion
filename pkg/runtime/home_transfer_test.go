@@ -24,8 +24,8 @@ import (
 
 // homeTransferParityConfigs covers the staged-file classification: file
 // secrets inside and outside the home (tilde and absolute targets),
-// variable secrets, auth files with and without a source, and external
-// references (the GKE CSI path).
+// on_demand secrets (ignored), auth files with and without a source, and
+// external references (the GKE CSI path).
 func homeTransferParityConfigs() map[string]RunConfig {
 	base := func() RunConfig {
 		return RunConfig{UnixUsername: "scion", HomeStorageBackend: HomeStorageNFS}
@@ -37,15 +37,15 @@ func homeTransferParityConfigs() map[string]RunConfig {
 		{Name: "a", Type: "file", Target: "~/.config/a.json", Value: "x"},
 		{Name: "b", Type: "file", Target: "/home/scion/.b", Value: "x"},
 		{Name: "outside", Type: "file", Target: "/etc/ssl/key.pem", Value: "x"},
-		{Name: "v", Type: "variable", Target: "V", Value: "x"},
+		{Name: "od", Type: "on_demand", Target: "OD", Value: "x"},
 		{Name: "e", Type: "environment", Target: "E", Value: "x"},
 	}
-	cfgs["file, variable and environment secrets"] = c
+	cfgs["file, on_demand and environment secrets"] = c
 
 	c = base()
 	c.ResolvedSecrets = []api.ResolvedSecret{
 		{Name: "ext", Type: "file", Target: "~/.ext.json", Value: "x", Ref: "projects/p/secrets/s"},
-		{Name: "v", Type: "variable", Target: "V", Value: "x"},
+		{Name: "od", Type: "on_demand", Target: "OD", Value: "x"},
 	}
 	cfgs["external reference"] = c
 
@@ -67,8 +67,8 @@ func homeTransferParityConfigs() map[string]RunConfig {
 // The Kubernetes NFS-home transfer and the Cloud Run home copy leave out
 // the same classification (one homeTransferExcludes): Kubernetes leaves out
 // exactly its link targets plus the harness bundle's secrets and outputs,
-// and Cloud Run leaves out the same set (secrets.json delivered) plus the
-// hub credential file, its staging file and secrets.json.
+// and Cloud Run leaves out the same set plus the hub credential file, its
+// staging file, the retired secrets.json path, and the home reset marker.
 func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
 	harness := []string{harnessBundleSecretsRel, harnessBundleOutputsRel}
 	for name, cfg := range homeTransferParityConfigs() {
@@ -80,13 +80,13 @@ func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
 			if !slices.Equal(k8s, want) {
 				t.Errorf("%s (gke=%v): kubernetes excludes %v, want link targets plus harness dirs %v", name, gke, k8s, want)
 			}
-			if shared := homeTransferExcludes(cfg, !r.useGKESecretsPath(cfg)); !slices.Equal(k8s, shared) {
+			if shared := homeTransferExcludes(cfg); !slices.Equal(k8s, shared) {
 				t.Errorf("%s (gke=%v): kubernetes excludes %v differ from homeTransferExcludes %v", name, gke, k8s, shared)
 			}
 		}
 
 		cr := cloudRunHomeExcludes(cfg)
-		want := append(homeTransferExcludes(cfg, true), cloudRunHubTokenRel, cloudRunHubTokenTmpHomeRel, cloudRunSecretsJSONHomeRel, cloudRunHomeResetMarker)
+		want := append(homeTransferExcludes(cfg), cloudRunHubTokenRel, cloudRunHubTokenTmpHomeRel, cloudRunSecretsJSONHomeRel, cloudRunHomeResetMarker)
 		if !slices.Equal(cr, want) {
 			t.Errorf("%s: cloudrun excludes %v, want %v", name, cr, want)
 		}
@@ -104,21 +104,15 @@ func TestHomeTransferExcludes_ParityWithKubernetes(t *testing.T) {
 }
 
 // The classification itself: in-home targets only, tilde expanded,
-// secrets.json only with a variable secret and withVariables, auth files
-// only with a source.
+// auth files only with a source.
 func TestHomeTransferExcludes_Classification(t *testing.T) {
 	cfgs := homeTransferParityConfigs()
-	got := homeTransferExcludes(cfgs["file, variable and environment secrets"], true)
-	want := []string{".config/a.json", ".b", ".scion/secrets.json", harnessBundleSecretsRel, harnessBundleOutputsRel}
+	got := homeTransferExcludes(cfgs["file, on_demand and environment secrets"])
+	want := []string{".config/a.json", ".b", harnessBundleSecretsRel, harnessBundleOutputsRel}
 	if !slices.Equal(got, want) {
 		t.Errorf("excludes = %v, want %v", got, want)
 	}
-	got = homeTransferExcludes(cfgs["file, variable and environment secrets"], false)
-	want = []string{".config/a.json", ".b", harnessBundleSecretsRel, harnessBundleOutputsRel}
-	if !slices.Equal(got, want) {
-		t.Errorf("excludes without variables = %v, want %v", got, want)
-	}
-	got = homeTransferExcludes(cfgs["auth files"], true)
+	got = homeTransferExcludes(cfgs["auth files"])
 	want = []string{".claude/.credentials.json", harnessBundleSecretsRel, harnessBundleOutputsRel}
 	if !slices.Equal(got, want) {
 		t.Errorf("auth excludes = %v, want %v", got, want)

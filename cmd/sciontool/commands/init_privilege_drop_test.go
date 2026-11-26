@@ -350,7 +350,7 @@ func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
 // TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild pins
 // init.go's stagedsecrets.Write failure branch as a hard error (return 1),
 // never a swallow-and-continue. A planted symlink at
-// <agentHome>/.scion/secrets.json (e.g. left over from a persisted home,
+// <agentHome>/.scion/cert.pem (e.g. left over from a persisted home,
 // simulating a restart) makes stagedsecrets.Write refuse — this proves
 // RunInit surfaces that refusal as a non-zero exit, reports the error phase,
 // leaves the symlink's target completely untouched, and never reaches the
@@ -372,11 +372,14 @@ func TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild(t *testin
 	if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(victim, filepath.Join(scionDir, "secrets.json")); err != nil {
+	targetPath := filepath.Join(scionDir, "cert.pem")
+	if err := os.Symlink(victim, targetPath); err != nil {
 		t.Fatal(err)
 	}
 
-	staged := stagedsecrets.Staged{VariableSecrets: map[string]string{"token": "abc123"}}
+	staged := stagedsecrets.Staged{FileSecrets: []stagedsecrets.FileSecret{
+		{Name: "TLS_CERT", Target: targetPath, Value: base64.StdEncoding.EncodeToString([]byte("abc123"))},
+	}}
 	data, err := json.Marshal(staged)
 	if err != nil {
 		t.Fatal(err)
@@ -385,15 +388,15 @@ func TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild(t *testin
 
 	got := RunInit([]string{"definitely-not-a-real-binary-xyz"}, InitRunOptions{DisableTermSignalForwarding: true})
 	if got == 0 {
-		t.Fatal("RunInit() = 0, want non-zero when stagedsecrets.Write refuses a symlinked secrets.json")
+		t.Fatal("RunInit() = 0, want non-zero when stagedsecrets.Write refuses a symlinked file-secret target")
 	}
 
-	link, err := os.Readlink(filepath.Join(scionDir, "secrets.json"))
+	link, err := os.Readlink(targetPath)
 	if err != nil {
-		t.Fatalf("secrets.json is no longer a symlink after the refused write: %v", err)
+		t.Fatalf("cert.pem is no longer a symlink after the refused write: %v", err)
 	}
 	if link != victim {
-		t.Errorf("secrets.json symlink target = %q, want %q (unchanged)", link, victim)
+		t.Errorf("cert.pem symlink target = %q, want %q (unchanged)", link, victim)
 	}
 	content, err := os.ReadFile(victim)
 	if err != nil {

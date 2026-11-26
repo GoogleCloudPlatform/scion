@@ -2655,7 +2655,7 @@ func prepareStagedSecretEnv(config *RunConfig, hubToken string) error {
 }
 
 // stagedExtras is what a runtime stages in the blob besides the resolved
-// file and variable secrets. Only the Cloud Run runtime sets any of it.
+// file secrets. Only the Cloud Run runtime sets any of it.
 type stagedExtras struct {
 	// HubToken is the agent's hub-issued credential (Staged.HubToken).
 	HubToken string
@@ -2746,7 +2746,7 @@ func (l envSizeLimit) unit() string {
 // flag). Keys this function adds itself (SCION_STAGED_SECRETS,
 // SCION_OTEL_GCP_CREDENTIALS) and any reservedKeys the runtime sets after
 // config.Env are treated the same way, so no env name is emitted twice.
-// File and variable secrets go into the SCION_STAGED_SECRETS blob via
+// File secrets go into the SCION_STAGED_SECRETS blob via
 // prepareContainerSecretEnv, which sciontool init writes out in the
 // container.
 //
@@ -2796,7 +2796,7 @@ func applyStagedSecretsToEnvExtras(config *RunConfig, limit envSizeLimit, extras
 			if extras.HubToken != "" {
 				carries = "; it also carries the agent's hub credential"
 			}
-			return nil, sizes, fmt.Errorf("file/variable secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
+			return nil, sizes, fmt.Errorf("file secrets do not fit: %s is %d bytes, over the %d-byte limit for one %s on this runtime (largest secret: %q%s)",
 				stagedsecrets.EnvVar, limit.size(key, val), limit.maxBytes, limit.unit(), largestStagedSecretName(config.ResolvedSecrets), carries)
 		}
 	}
@@ -2849,7 +2849,7 @@ func applyStagedSecretsToEnvExtras(config *RunConfig, limit envSizeLimit, extras
 // Field classes of the staged blob, as named in logs and oversize errors.
 const (
 	stagedClassHubToken       = "hub credential"
-	stagedClassFileSecrets    = "file and variable secrets"
+	stagedClassFileSecrets    = "file secrets"
 	stagedClassHarnessSecrets = "harness secrets"
 	stagedClassResolvedAuth   = "resolved auth"
 )
@@ -2883,7 +2883,7 @@ func measureStaged(staged stagedsecrets.Staged) (stagedSizes, error) {
 	if s.HubToken, err = size(stagedsecrets.Staged{HubToken: staged.HubToken}); err != nil {
 		return stagedSizes{}, err
 	}
-	if s.FileSecrets, err = size(stagedsecrets.Staged{FileSecrets: staged.FileSecrets, VariableSecrets: staged.VariableSecrets}); err != nil {
+	if s.FileSecrets, err = size(stagedsecrets.Staged{FileSecrets: staged.FileSecrets}); err != nil {
 		return stagedSizes{}, err
 	}
 	if s.HarnessSecrets, err = size(stagedsecrets.Staged{HarnessSecrets: staged.HarnessSecrets}); err != nil {
@@ -2910,12 +2910,12 @@ func (s stagedSizes) largestClass() string {
 	return class
 }
 
-// largestStagedSecretName returns the name of the largest file or variable
-// secret, i.e. the one most responsible for an oversized staged blob.
+// largestStagedSecretName returns the name of the largest file secret,
+// i.e. the one most responsible for an oversized staged blob.
 func largestStagedSecretName(secrets []api.ResolvedSecret) string {
 	name, size := "", -1
 	for _, s := range secrets {
-		if s.Type != "file" && s.Type != "variable" {
+		if s.Type != "file" {
 			continue
 		}
 		if len(s.Value) > size {
@@ -2925,9 +2925,9 @@ func largestStagedSecretName(secrets []api.ResolvedSecret) string {
 	return name
 }
 
-// serializeSecrets collects file and variable secrets into a single JSON blob,
+// serializeSecrets collects file secrets into a single JSON blob,
 // base64-encodes it, and returns the encoded string suitable for injection as
-// an environment variable. Returns "" when there are no file or variable secrets.
+// an environment variable. Returns "" when there are no file secrets.
 // The containerHome parameter is used to expand ~/ prefixes in file target paths.
 func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (string, error) {
 	return serializeStaged(containerHome, secrets, "")
@@ -2935,12 +2935,12 @@ func serializeSecrets(containerHome string, secrets []api.ResolvedSecret) (strin
 
 // serializeStaged is serializeSecrets that also carries hubToken in the
 // blob's dedicated HubToken field when it is non-empty; the blob is then
-// produced even with no file or variable secrets.
+// produced even with no file secrets.
 func serializeStaged(containerHome string, secrets []api.ResolvedSecret, hubToken string) (string, error) {
 	return encodeStaged(buildStaged(containerHome, secrets, stagedExtras{HubToken: hubToken}))
 }
 
-// buildStaged collects the file and variable secrets and the extras into
+// buildStaged collects the file secrets and the extras into
 // the staged blob's structure.
 func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stagedExtras) stagedsecrets.Staged {
 	staged := stagedsecrets.Staged{HubToken: extras.HubToken, HarnessSecrets: extras.HarnessSecrets, ResolvedAuthEnv: extras.ResolvedAuthEnv}
@@ -2979,23 +2979,12 @@ func buildStaged(containerHome string, secrets []api.ResolvedSecret, extras stag
 		}
 	}
 
-	// Collect variable secrets.
-	for _, s := range secrets {
-		if s.Type != "variable" {
-			continue
-		}
-		if staged.VariableSecrets == nil {
-			staged.VariableSecrets = make(map[string]string)
-		}
-		staged.VariableSecrets[s.Target] = s.Value
-	}
-
 	return staged
 }
 
 // stagedIsEmpty reports whether staged carries nothing, so no blob is set.
 func stagedIsEmpty(staged stagedsecrets.Staged) bool {
-	return len(staged.FileSecrets) == 0 && len(staged.VariableSecrets) == 0 &&
+	return len(staged.FileSecrets) == 0 &&
 		staged.HubToken == "" && len(staged.HarnessSecrets) == 0 && len(staged.ResolvedAuthEnv) == 0
 }
 

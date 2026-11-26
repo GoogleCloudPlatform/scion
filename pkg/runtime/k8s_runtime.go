@@ -1145,8 +1145,7 @@ func writeK8sRuntimeDebugFile(config RunConfig, namespace string, pod *corev1.Po
 }
 
 // createAgentSecret creates a K8s Secret containing all resolved secret values.
-// Environment-type secrets are stored as individual keys; variable-type secrets
-// are marshaled together as JSON under a "secrets.json" key. File-type secrets
+// Environment-type secrets are stored as individual keys. File-type secrets
 // are stored as individual keys named by secret name.
 // Returns the secret name, or empty string if no secrets need to be created.
 func (r *KubernetesRuntime) createAgentSecret(ctx context.Context, namespace, agentName string, secrets []api.ResolvedSecret, labels map[string]string) (string, error) {
@@ -1166,9 +1165,6 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	secretName := k8sAgentObjectNames(agentName, runID).Secret
 	data := make(map[string][]byte)
 
-	// Collect variable-type secrets for JSON aggregation
-	varSecrets := make(map[string]string)
-
 	for _, s := range secrets {
 		switch s.Type {
 		case "environment":
@@ -1179,17 +1175,7 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 				decoded = []byte(s.Value)
 			}
 			data[s.Name] = decoded
-		case "variable":
-			varSecrets[s.Target] = s.Value
 		}
-	}
-
-	if len(varSecrets) > 0 {
-		jsonData, err := json.Marshal(varSecrets)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal variable secrets: %w", err)
-		}
-		data["secrets.json"] = jsonData
 	}
 
 	if len(data) == 0 {
@@ -1620,7 +1606,7 @@ func toStringInterfaceMap(m map[string]string) map[string]interface{} {
 // no-run Delete also removes the per-run objects of the pod's own run.
 func (r *KubernetesRuntime) cleanupAgentSecrets(ctx context.Context, namespace, agentName string) {
 	secretNames := []string{
-		fmt.Sprintf("scion-agent-%s", agentName), // env/variable/file secrets (createAgentSecret)
+		fmt.Sprintf("scion-agent-%s", agentName), // env/file secrets (createAgentSecret)
 		fmt.Sprintf("scion-auth-%s", agentName),  // ResolvedAuth files (createAuthFileSecret)
 	}
 	for _, name := range secretNames {
@@ -2411,7 +2397,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			}
 		} else {
 			// Fallback path: K8s Secret with secretKeyRef for env, and a
-			// Secret volume for file-type secrets and secrets.json. The
+			// Secret volume for file-type secrets. The
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {

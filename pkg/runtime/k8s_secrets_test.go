@@ -190,35 +190,52 @@ func TestBuildPod_FallbackSecrets_File(t *testing.T) {
 	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.ssh/id_rsa", "/run/scion/agent-secrets/SSH_KEY")
 }
 
-func TestBuildPod_FallbackSecrets_Variable(t *testing.T) {
-	rt, _, _ := newTestK8sRuntime()
+func TestBuildPod_FallbackSecrets_IgnoresOnDemandAndUnknown(t *testing.T) {
+	rt, clientset, _ := newTestK8sRuntime()
+	ctx := context.Background()
 
 	config := RunConfig{
 		Name:         "test-agent",
 		Image:        "test:latest",
 		UnixUsername: "scion",
 		ResolvedSecrets: []api.ResolvedSecret{
-			{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
+			{Name: "ON_DEMAND_KEY", Type: "on_demand", Target: "ON_DEMAND_KEY", Value: "must-not-deliver", Source: "project"},
+			{Name: "UNKNOWN_KEY", Type: "future_type", Target: "UNKNOWN_KEY", Value: "must-not-deliver", Source: "project"},
 		},
 	}
 
-	pod, _ := rt.buildPod("default", config)
+	name, err := rt.createAgentSecret(ctx, "default", "test-agent", config.ResolvedSecrets, nil)
+	if err != nil {
+		t.Fatalf("createAgentSecret: %v", err)
+	}
+	if name != "" {
+		t.Errorf("createAgentSecret returned %q, want empty string for on_demand/unknown secrets", name)
+	}
+	list, err := clientset.CoreV1().Secrets("default").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list secrets: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("expected no K8s Secret created, got %d", len(list.Items))
+	}
 
-	// Should have agent-secrets volume
-	foundVolume := false
+	pod, err := rt.buildPod("default", config)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == "agent-secrets" {
-			foundVolume = true
+			t.Error("unexpected agent-secrets volume for on_demand/unknown secrets")
 		}
 	}
-	if !foundVolume {
-		t.Fatal("expected agent-secrets volume for variable secrets")
+	for _, e := range pod.Spec.Containers[0].Env {
+		if e.Name == "ON_DEMAND_KEY" || e.Name == "UNKNOWN_KEY" {
+			t.Errorf("unexpected env var %s for non-deliverable secret", e.Name)
+		}
 	}
-
-	// secrets.json targets the home: staged, then placed.
-	assertNoMountsUnderHome(t, pod, "/home/scion")
-	assertStagingMount(t, pod, "agent-secrets")
-	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.scion/secrets.json", "/run/scion/agent-secrets/secrets.json")
+	if placements := rt.k8sHomeFilePlacements(config); len(placements) != 0 {
+		t.Errorf("expected no home file placements, got %+v", placements)
+	}
 }
 
 func TestBuildPod_GKESecrets_Environment(t *testing.T) {
@@ -420,7 +437,7 @@ func TestCreateAgentSecret(t *testing.T) {
 		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "sk-123", Source: "user"},
 		{Name: "TLS_CERT", Type: "file", Target: "/etc/ssl/cert.pem", Value: base64.StdEncoding.EncodeToString([]byte("cert-content")), Source: "user"},
 		{Name: "RAW_FILE", Type: "file", Target: "/etc/ssl/raw.pem", Value: "raw-content", Source: "user"},
-		{Name: "CONFIG", Type: "variable", Target: "config", Value: `{"key":"val"}`, Source: "user"},
+		{Name: "ON_DEMAND", Type: "on_demand", Target: "ON_DEMAND", Value: "never-in-k8s-secret", Source: "project"},
 	}
 
 	labels := map[string]string{
@@ -454,13 +471,12 @@ func TestCreateAgentSecret(t *testing.T) {
 		t.Errorf("expected RAW_FILE=raw-content, got %s", string(secret.Data["RAW_FILE"]))
 	}
 
-	// Check secrets.json for variable secrets
-	var vars map[string]string
-	if err := json.Unmarshal(secret.Data["secrets.json"], &vars); err != nil {
-		t.Fatalf("failed to unmarshal secrets.json: %v", err)
+	// on_demand secrets and secrets.json must not appear in the K8s Secret
+	if _, ok := secret.Data["ON_DEMAND"]; ok {
+		t.Error("on_demand secret must not be stored in K8s Secret")
 	}
-	if vars["config"] != `{"key":"val"}` {
-		t.Errorf("expected config value, got %q", vars["config"])
+	if _, ok := secret.Data["secrets.json"]; ok {
+		t.Error("secrets.json must not be stored in K8s Secret")
 	}
 
 	// Check labels

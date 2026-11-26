@@ -118,7 +118,7 @@ func readlink(t *testing.T, p string) string {
 }
 
 var credLink = Link{Target: ".config/gcloud/creds.json", Source: "/run/scion/agent-secrets/creds", Mode: "0600"}
-var secretsLink = Link{Target: ".scion/secrets.json", Source: "/run/scion/agent-secrets/secrets.json", Mode: "0600"}
+var secretsLink = Link{Target: ".scion/cert.pem", Source: "/run/scion/agent-secrets/cert.pem", Mode: "0600"}
 
 func TestPrepare_FirstSeedThenSeedOver(t *testing.T) {
 	bothResolvers(t, func(t *testing.T) {
@@ -306,7 +306,7 @@ func TestPrepare_ConfinedBeneathHome(t *testing.T) {
 		require.NoError(t, err, "files behind the link are untouched")
 		_, err = os.Lstat(filepath.Join(out3, ".home-links.json"))
 		assert.True(t, os.IsNotExist(err))
-		_, err = os.Lstat(filepath.Join(out3, "secrets.json"))
+		_, err = os.Lstat(filepath.Join(out3, "cert.pem"))
 		assert.True(t, os.IsNotExist(err))
 	})
 }

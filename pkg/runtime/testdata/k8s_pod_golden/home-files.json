@@ -29,10 +29,6 @@
             {
               "key": "scion-telemetry-gcp-credentials",
               "path": "scion-telemetry-gcp-credentials"
-            },
-            {
-              "key": "secrets.json",
-              "path": "secrets.json"
             }
           ]
         }

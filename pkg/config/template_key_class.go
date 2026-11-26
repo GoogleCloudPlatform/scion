@@ -90,7 +90,7 @@ var reservedLifecycleEnvKeys = map[string]struct{}{
 	"SCION_HARNESS_OUTPUTS_DIR":  {},
 	"SCION_PROVISION_STATE_DIR":  {},
 	"SCION_SECRETS":              {},
-	"SCION_SECRETS_FILE":         {},
+	"SCION_SECRETS_FILE":         {}, // retired path, reserved so stale tooling or a template cannot reuse it with different meaning
 	"SCION_HUB_TOKEN_STAGED":     {},
 	"SCION_RESOLVED_AUTH_STAGED": {},
 }

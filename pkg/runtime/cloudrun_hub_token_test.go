@@ -309,7 +309,7 @@ func TestReadCloudRunHubToken_TooLarge(t *testing.T) {
 func TestStagedPayloadUnchangedWithoutHubToken(t *testing.T) {
 	want := `{"file_secrets":[{"name":"creds","target":"` + crTestFileTarget + `","value":"` +
 		base64.StdEncoding.EncodeToString([]byte(crTestFileSecretValue)) +
-		`"}],"variable_secrets":{"EXAMPLE_REGION":"` + crTestVarSecretValue + `"}}`
+		`"}]}`
 
 	decodeJSON := func(t *testing.T, blob string) []byte {
 		t.Helper()
@@ -450,7 +450,7 @@ func TestCloudRunRun_ExistingInstanceWithoutCredentialRecreated(t *testing.T) {
 // error says so (without the value).
 func TestCloudRunRun_OversizedBlobMentionsHubCredential(t *testing.T) {
 	cfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{
-		{Name: "big", Type: "variable", Target: "BIG", Value: strings.Repeat("v", cloudRunMaxEnvValueBytes)},
+		{Name: "big", Type: "file", Target: "/home/scion/big.bin", Value: strings.Repeat("v", cloudRunMaxEnvValueBytes)},
 	}}
 	_, err := applyStagedSecretsToEnv(&cfg, cloudRunEnvLimit, crHubTokenCanary)
 	if err == nil {

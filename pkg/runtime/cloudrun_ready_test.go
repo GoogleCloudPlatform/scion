@@ -469,7 +469,7 @@ func TestCloudRunRun_ExistingInstanceSpecDiffRecreated(t *testing.T) {
 	stagedCfg := func(value string) RunConfig {
 		cfg := readyRunCfg()
 		cfg.ResolvedSecrets = []api.ResolvedSecret{
-			{Name: "region", Type: "variable", Target: "EXAMPLE_REGION", Value: value},
+			{Name: "region", Type: "file", Target: "/home/scion/region.txt", Value: value},
 		}
 		return cfg
 	}

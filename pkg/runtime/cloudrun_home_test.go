@@ -126,7 +126,6 @@ func writeCRHomeFixture(t *testing.T) string {
 func crHomeFixtureSecrets(cfg *RunConfig) {
 	cfg.ResolvedSecrets = []api.ResolvedSecret{
 		{Name: "creds", Type: "file", Target: "~/.config/gcloud/creds.json", Value: "c2VjcmV0"},
-		{Name: "region", Type: "variable", Target: "EXAMPLE_REGION", Value: "us"},
 	}
 	cfg.ResolvedAuth = &api.ResolvedAuth{Files: []api.FileMapping{{SourcePath: "/nonexistent/creds", ContainerPath: "~/.claude/.credentials.json"}}}
 }
@@ -724,7 +723,7 @@ func TestStagedSizesLargestClass(t *testing.T) {
 // Without harness secrets, the docker/podman payload (prepareContainerSecretEnv)
 // carries no harness_secrets field.
 func TestStagedPayloadHasNoHarnessSecretsField(t *testing.T) {
-	cfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{{Name: "r", Type: "variable", Target: "R", Value: "v"}}}
+	cfg := RunConfig{UnixUsername: "scion", ResolvedSecrets: []api.ResolvedSecret{{Name: "r", Type: "file", Target: "/home/scion/r.txt", Value: "v"}}}
 	if err := prepareContainerSecretEnv(&cfg); err != nil {
 		t.Fatal(err)
 	}
