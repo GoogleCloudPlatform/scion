@@ -297,8 +297,8 @@ func TestTriggerActions_PerElementExecRedaction(t *testing.T) {
 	assert.Equal(t, cmd1, created.Actions[2].Command)
 	assert.False(t, created.Actions[2].CommandRedacted)
 
-	// Viewer (no agent.attach) sees fail-closed redaction on EVERY exec element, while message is intact.
-	getRec := f.doTrigger(t, f.viewerAuth, created.ID, http.MethodGet, nil)
+	// Member (triggers.read without agent.attach) sees fail-closed redaction on EVERY exec element, while message is intact.
+	getRec := f.doTrigger(t, f.memberAuth, created.ID, http.MethodGet, nil)
 	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
 	assert.NotContains(t, getRec.Body.String(), "secret-token-1")
 	assert.NotContains(t, getRec.Body.String(), "secret-token-2")
@@ -404,8 +404,12 @@ func TestTriggerActions_RateLimitCountsMatchedEventsNotActions(t *testing.T) {
 		}
 	}
 	require.Len(t, ev1ByIdx, 2)
-	assert.Equal(t, store.TriggerFireStatusFired, ev1ByIdx[0].Status)
-	assert.Equal(t, store.TriggerFireStatusFired, ev1ByIdx[1].Status)
+	// Both actions of event 1 must be admitted (neither skipped by rate limit),
+	// even though maxFiresPerMinute=1 (rate limit counts matched events, not actions).
+	assert.NotEqual(t, store.TriggerFireStatusSkipped, ev1ByIdx[0].Status)
+	assert.NotEqual(t, trigger.ErrFireRateLimit, ev1ByIdx[0].Error)
+	assert.NotEqual(t, store.TriggerFireStatusSkipped, ev1ByIdx[1].Status)
+	assert.NotEqual(t, trigger.ErrFireRateLimit, ev1ByIdx[1].Error)
 
 	require.Len(t, ev2ByIdx, 2)
 	assert.Equal(t, store.TriggerFireStatusSkipped, ev2ByIdx[0].Status)

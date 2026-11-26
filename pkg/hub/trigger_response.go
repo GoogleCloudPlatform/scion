@@ -548,6 +548,11 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 	var mirroredAction TriggerActionSpec
 	if actionsErr == nil && len(respActions) == 1 {
 		mirroredAction = respActions[0]
+	} else if actionsErr != nil && (tr.ActionType == store.TriggerActionExec || payloadHasExecContent(tr.ActionPayload)) {
+		mirroredAction = TriggerActionSpec{
+			Type:            tr.ActionType,
+			CommandRedacted: true,
+		}
 	}
 	var coalesceWindow string
 	if tr.CoalesceWindowSeconds > 0 {
