@@ -19,10 +19,13 @@ import (
 	"strings"
 )
 
+// DeliveryIntro is the intro line prepended before the message envelope
+// delimiters when delivering structured messages to agents.
+const DeliveryIntro = "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):"
+
 const (
 	beginDelimiter = "---BEGIN SCION MESSAGE---"
 	endDelimiter   = "---END SCION MESSAGE---"
-	deliveryIntro  = "You are receiving a message from the orchestration system:"
 )
 
 // Hub-set sender metadata keys for a message from a project visitor (a user
@@ -156,7 +159,7 @@ func FormatForDelivery(msg *StructuredMessage) string {
 		return msg.Msg
 	}
 
-	return deliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
+	return DeliveryIntro + "\n\n" + beginDelimiter + "\n" + string(jsonBytes) + "\n" + endDelimiter
 }
 
 // filterMetadata returns a copy of m containing only the keys in

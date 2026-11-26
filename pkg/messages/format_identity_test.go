@@ -57,7 +57,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Type:      TypeInstruction,
 				Urgent:    true,
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -79,7 +79,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Type:        TypeInstruction,
 				Broadcasted: true,
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -102,7 +102,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Channel:   "web",
 				ThreadID:  "abc-123",
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -125,7 +125,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Type:        TypeInstruction,
 				Attachments: []string{"src/auth.go", "src/middleware.go"},
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -153,7 +153,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 					"mention_position": "body",
 				},
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -178,7 +178,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Msg:        "review this",
 				Type:       TypeGroupSet,
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -192,7 +192,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 		{
 			name: "system_message",
 			msg:  NewSystemMessage("system", "agent:dev", "Port 8080 has been auto-exposed", SystemCategoryPortForward),
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"DYNAMIC\",\n" +
@@ -215,7 +215,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				Msg:       "implement auth",
 				Type:      TypeInstruction,
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -239,7 +239,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 					"telegram_chat_id": "secret-should-be-filtered",
 				},
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -267,7 +267,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 				ThreadID:    "thread-xyz",
 				Attachments: []string{"README.md"},
 			},
-			golden: "You are receiving a message from the orchestration system:\n\n" +
+			golden: "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 				"---BEGIN SCION MESSAGE---\n" +
 				"{\n" +
 				"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
@@ -293,7 +293,7 @@ func TestFormatForDelivery_ByteIdentity(t *testing.T) {
 			if tt.name == "system_message" {
 				tt.msg.Timestamp = "2026-08-01T10:00:00Z"
 				// Recompute golden with the fixed timestamp.
-				tt.golden = "You are receiving a message from the orchestration system:\n\n" +
+				tt.golden = "You are receiving a message from the orchestration system (read the scion-messaging skill before replying):\n\n" +
 					"---BEGIN SCION MESSAGE---\n" +
 					"{\n" +
 					"  \"timestamp\": \"2026-08-01T10:00:00Z\",\n" +
