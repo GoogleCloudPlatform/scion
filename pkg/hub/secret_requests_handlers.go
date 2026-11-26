@@ -259,36 +259,6 @@ func (s *Server) loadSecretRequestCard(w http.ResponseWriter, ctx context.Contex
 	return rows, chatKey, promptMsg, true
 }
 
-// isSecretRequestRecipient reports whether user is a recipient of the secret
-// request card (the DM target, or a participant of the thread/project).
-// answering is false for GET (read access) and true for fulfill/dismiss (N5).
-func (s *Server) isSecretRequestRecipient(ctx context.Context, user UserIdentity, chatKey string, promptMsg *store.Message, answering bool) bool {
-	if user == nil {
-		return false
-	}
-	if chatKey == "" {
-		if promptMsg != nil {
-			if promptMsg.RecipientID != "" && promptMsg.RecipientID == user.ID() {
-				return true
-			}
-			if promptMsg.ConversationID != "" && s.store != nil {
-				if parts, err := s.store.ListParticipants(ctx, promptMsg.ConversationID); err == nil {
-					for _, p := range parts {
-						if p.PrincipalKind == "user" && p.PrincipalID == user.ID() {
-							return true
-						}
-					}
-				}
-			}
-		}
-		return false
-	}
-	if strings.HasPrefix(chatKey, "dm:") {
-		return authorizeDMKeyParticipant(ctx, user, chatKey, chatSendPath(chatKey)) == nil
-	}
-	return s.authorizeDecisionChatKey(ctx, user, chatKey, answering) == nil
-}
-
 // checkSecretRequestAgentPerm checks whether user holds action (ActionRead or
 // ActionAttach) on the requesting agent. If the agent is hard-deleted, it falls
 // back to a synthetic resource scoped to the row's project so retained cards
@@ -440,6 +410,7 @@ func (s *Server) publishSecretRequestUpdated(ctx context.Context, row *store.Sec
 	}
 	view := secretRequestView(row, replacedBy)
 	s.publishActionUpdated(msgaction.KindSecretRequest, row.ProjectID, row.MessageID, chatKey, view)
+	s.publishDMActionInboxHint(ctx, chatKey, InboxCategoryAgentSecrets)
 }
 
 // handleSecretRequestGet serves GET /api/v1/secret-requests/{messageId}.
@@ -454,7 +425,7 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, false)
+	isRecipient := s.isMessageActionRecipient(ctx, user, chatKey, promptMsg, false)
 	_, canRead := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionRead)
 	if !isRecipient || !canRead {
 		reason := "not_recipient"
@@ -477,7 +448,7 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	canAnswer := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
+	canAnswer := s.isMessageActionRecipient(ctx, user, chatKey, promptMsg, true)
 	_, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	now := time.Now().UTC()
 	hasPending := false
@@ -545,7 +516,7 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 1: Authorize recipient + agent.attach.
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
+	isRecipient := s.isMessageActionRecipient(ctx, user, chatKey, promptMsg, true)
 	asker, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	if !isRecipient || !canAttach {
 		reason := "not_recipient"
@@ -1017,7 +988,7 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
+	isRecipient := s.isMessageActionRecipient(ctx, user, chatKey, promptMsg, true)
 	asker, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	if !isRecipient || !canAttach {
 		reason := "not_recipient"

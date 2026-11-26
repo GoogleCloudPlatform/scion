@@ -37,6 +37,7 @@ const (
 
 	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
 	InboxCategoryDecisions      = "decisions"
+	InboxCategoryAgentSecrets   = "agent_secrets"
 	InboxCategoryWaiting        = "waiting"
 	InboxCategoryReviews        = "reviews"
 	InboxCategoryPendingSecrets = "pending_secrets"

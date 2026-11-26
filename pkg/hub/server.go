@@ -2346,6 +2346,10 @@ type Server struct {
 	// maxProfileDecisionProjects so truncation paths can be pinned without
 	// seeding >200 projects.
 	maxProfileDecisionProjectsForTest int
+	// actionInboxMaxProjectsForTest and actionInboxScanCapForTest, when positive
+	// (tests only), override maxActionInboxProjects and actionInboxScanCap.
+	actionInboxMaxProjectsForTest int
+	actionInboxScanCapForTest     int
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
@@ -8575,6 +8579,9 @@ func (s *Server) registerRoutes() {
 	// Profile decisions roll-up across member projects (/users/me/decisions)
 	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.withDecisionsBellReconcile(s.handleUserMeDecisions)))
 	s.mux.HandleFunc("/api/v1/users/me/decisions/suggestions", s.guarded("/api/v1/users/me/decisions/suggestions", s.handleUserMeDecisionSuggestions))
+
+	// Profile secret requests roll-up across member projects and DMs (/users/me/secret-requests)
+	s.mux.HandleFunc("/api/v1/users/me/secret-requests", s.guarded("/api/v1/users/me/secret-requests", s.handleUserMeActionInbox(&secretRequestActionInboxKind{srv: s})))
 
 	// Profile inbox summary across categories (/users/me/inbox/summary)
 	s.mux.HandleFunc("/api/v1/users/me/inbox/summary", s.guarded("/api/v1/users/me/inbox/summary", s.handleUserMeInboxSummary))

@@ -285,6 +285,7 @@ func (s *Server) publishReplacedSecretRequests(ctx context.Context, res *store.S
 		}
 		view := secretRequestView(old, cr.Row)
 		s.publishActionUpdated(msgaction.KindSecretRequest, old.ProjectID, old.MessageID, chatKey, view)
+		s.publishDMActionInboxHint(ctx, chatKey, InboxCategoryAgentSecrets)
 	}
 }
 

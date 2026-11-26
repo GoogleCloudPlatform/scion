@@ -50,7 +50,7 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 			breakdown[hubclient.InboxBreakdownAgents],
 			breakdown[hubclient.InboxBreakdownProjects],
 		)
-	case "agent_secrets":
+	case hubclient.InboxCategoryAgentSecrets:
 		if count <= 0 {
 			return nil
 		}

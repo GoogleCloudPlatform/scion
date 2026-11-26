@@ -41,6 +41,7 @@ const (
 
 	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
 	InboxCategoryDecisions      = "decisions"
+	InboxCategoryAgentSecrets   = "agent_secrets"
 	InboxCategoryWaiting        = "waiting"
 	InboxCategoryReviews        = "reviews"
 	InboxCategoryPendingSecrets = "pending_secrets"
@@ -359,6 +360,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 	}
 	return []inboxSourceEntry{
 		{key: InboxCategoryPendingSecrets, run: s.inboxPendingSecretsCategory},
+		{key: InboxCategoryAgentSecrets, run: s.inboxAgentSecretsCategory},
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: s.inboxReviewsCategory},
 		{key: InboxCategoryChat, run: s.inboxChatCategory},
@@ -385,7 +387,7 @@ func (s *Server) buildInboxSummary(ctx context.Context, v inboxViewer, previews 
 	ctx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
 	defer cancel()
 
-	categories := make(map[string]InboxCategory, 5)
+	categories := make(map[string]InboxCategory, 6)
 	for _, src := range s.inboxSources() {
 		cctx, ccancel := context.WithTimeout(ctx, inboxCategoryTimeout)
 		cat := src.run(cctx, v, previews, chatFilter)

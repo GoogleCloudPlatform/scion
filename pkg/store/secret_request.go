@@ -320,6 +320,17 @@ type ListAgentSecretRequestsResult struct {
 	NextCursor string
 }
 
+// SecretRequestHistoryQuery configures ListResolvedSecretRequests.
+type SecretRequestHistoryQuery struct {
+	ProjectIDs      []string
+	ViewerID        string
+	FilterProjectID string
+	FilterAgentID   string
+	CursorTime      *time.Time
+	CursorID        string
+	Limit           int
+}
+
 // SecretRequestStore defines persistence operations for agent-to-human secret requests.
 type SecretRequestStore interface {
 	// CreateSecretRequestPrompt inserts the secret-request message and its
@@ -359,6 +370,15 @@ type SecretRequestStore interface {
 
 	// ListAgentSecretRequests lists an agent's own secret requests filtered by state.
 	ListAgentSecretRequests(ctx context.Context, opts *ListAgentSecretRequestsOptions) (*ListAgentSecretRequestsResult, error)
+
+	// ListOpenSecretRequests returns rows with status in (pending, fulfilling) and
+	// expires_at > now whose project_id is in projectIDs OR whose chat_key is a DM
+	// key ending in ":user:"+viewerID, newest first, at most limit rows.
+	ListOpenSecretRequests(ctx context.Context, projectIDs []string, viewerID string, now time.Time, limit int) ([]*SecretRequest, error)
+
+	// ListResolvedSecretRequests returns terminal, non-replaced rows in projectIDs
+	// (plus the viewer's DM keys), ordered (resolved_at DESC, id DESC) after cursor.
+	ListResolvedSecretRequests(ctx context.Context, q SecretRequestHistoryQuery) ([]*SecretRequest, error)
 
 	// ExpireSecretRequests transitions pending rows with expires_at <= now to
 	// expired and returns the transitioned rows.

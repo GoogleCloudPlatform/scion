@@ -168,6 +168,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/decisions":             "authenticated", // GET: caller's decisions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
 	"/api/v1/users/me/decisions/suggestions": "authenticated", // GET: caller's decision filter suggestions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
 
+	// ── Profile secret requests roll-up ────────────────────────────────
+	"/api/v1/users/me/secret-requests": "authenticated", // GET: caller's open/resolved secret requests across member projects and DMs; interactive session only
+
 	// ── Profile inbox summary ──────────────────────────────────────────
 	"/api/v1/users/me/inbox/summary": "authenticated", // GET: caller's inbox summary across categories; session or UAT with inbox:read
 

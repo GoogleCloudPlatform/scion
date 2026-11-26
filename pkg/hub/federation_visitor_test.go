@@ -296,6 +296,7 @@ var visitorRefusedProfileRoutes = []string{
 	"/api/v1/users/me/exec-container",
 	"/api/v1/users/me/decisions",
 	"/api/v1/users/me/decisions/suggestions",
+	"/api/v1/users/me/secret-requests",
 	"/api/v1/users/me/inbox/summary",
 }
 

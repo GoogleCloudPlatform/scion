@@ -553,3 +553,184 @@ func TestSecretRequestStore_DismissWhileFulfillingReturnsSubmitting(t *testing.T
 		t.Fatalf("expected row to remain fulfilling, got %q", got.Status)
 	}
 }
+
+func TestSecretRequestStore_ListOpenAndResolved(t *testing.T) {
+	ctx := context.Background()
+	cs, projA, agentA := newSecretRequestTestStore(t)
+
+	// Create a second project + agent outside projA.
+	projB := uuid.New().String()
+	if err := cs.CreateProject(ctx, &store.Project{ID: projB, Slug: "sr-proj-b", Name: "SR Proj B"}); err != nil {
+		t.Fatalf("create project B: %v", err)
+	}
+	agentB := uuid.New().String()
+	if err := cs.CreateAgent(ctx, &store.Agent{ID: agentB, Slug: "sr-agent-b", Name: "SR Agent B", ProjectID: projB}); err != nil {
+		t.Fatalf("create agent B: %v", err)
+	}
+
+	aliceID := uuid.New().String()
+	bobID := uuid.New().String()
+	dmAlice, err := messages.DMConversationKey("agent", agentB, "user", aliceID)
+	if err != nil {
+		t.Fatalf("dmAlice: %v", err)
+	}
+	dmBob, err := messages.DMConversationKey("agent", agentB, "user", bobID)
+	if err != nil {
+		t.Fatalf("dmBob: %v", err)
+	}
+
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Open pending in projA (t0).
+	openProjA, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projA, agentA, false, base,
+		messages.SecretRequest{Key: "KEY_OPEN_A", KeyNorm: "KEY_OPEN_A", SecretType: "environment"},
+	))
+	if err != nil {
+		t.Fatalf("create openProjA: %v", err)
+	}
+	rowOpenA := openProjA.Requests[0].Row
+
+	// 2. Open fulfilling in projA (t0+1s).
+	fulfillingIn := makeSecretRequestPromptInput(projA, agentA, false, base.Add(time.Second),
+		messages.SecretRequest{Key: "KEY_FULFILLING_A", KeyNorm: "KEY_FULFILLING_A", SecretType: "environment"},
+	)
+	fulfillingRes, err := cs.CreateSecretRequestPrompt(ctx, fulfillingIn)
+	if err != nil {
+		t.Fatalf("create fulfilling: %v", err)
+	}
+	rowFulfilling := fulfillingRes.Requests[0].Row
+	if _, err := cs.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: rowFulfilling.MessageID,
+		RowIDs:    []string{rowFulfilling.ID},
+		UserID:    aliceID,
+		UserName:  "Alice",
+		Now:       base.Add(2 * time.Second),
+	}); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	// 3. Expired pending in projA (expires_at <= now).
+	expiredIn := makeSecretRequestPromptInput(projA, agentA, false, base.Add(-2*time.Hour),
+		messages.SecretRequest{Key: "KEY_EXPIRED_A", KeyNorm: "KEY_EXPIRED_A", SecretType: "environment"},
+	)
+	expiredIn.TTL = time.Hour // expired 1h ago
+	if _, err := cs.CreateSecretRequestPrompt(ctx, expiredIn); err != nil {
+		t.Fatalf("create expired: %v", err)
+	}
+
+	// 4. Open DM in projB addressed to Alice (outside projA, should be visible to Alice via DM predicate).
+	dmAliceIn := makeSecretRequestPromptInput(projB, agentB, false, base.Add(3*time.Second),
+		messages.SecretRequest{Key: "KEY_DM_ALICE", KeyNorm: "KEY_DM_ALICE", SecretType: "environment"},
+	)
+	dmAliceIn.Message.ThreadID = dmAlice
+	dmAliceRes, err := cs.CreateSecretRequestPrompt(ctx, dmAliceIn)
+	if err != nil {
+		t.Fatalf("create dmAlice: %v", err)
+	}
+	rowDMAlice := dmAliceRes.Requests[0].Row
+
+	// 5. Open DM in projB addressed to Bob (must NOT appear for Alice).
+	dmBobIn := makeSecretRequestPromptInput(projB, agentB, false, base.Add(4*time.Second),
+		messages.SecretRequest{Key: "KEY_DM_BOB", KeyNorm: "KEY_DM_BOB", SecretType: "environment"},
+	)
+	dmBobIn.Message.ThreadID = dmBob
+	if _, err := cs.CreateSecretRequestPrompt(ctx, dmBobIn); err != nil {
+		t.Fatalf("create dmBob: %v", err)
+	}
+
+	// Verify ListOpenSecretRequests for Alice with member project [projA]:
+	openGot, err := cs.ListOpenSecretRequests(ctx, []string{projA}, aliceID, base.Add(5*time.Second), 10)
+	if err != nil {
+		t.Fatalf("ListOpenSecretRequests: %v", err)
+	}
+	if len(openGot) != 3 {
+		t.Fatalf("expected 3 open rows (dmAlice, fulfillingA, openA), got %d", len(openGot))
+	}
+	// Newest first: dmAlice (t+3s), fulfillingA (t+1s), openA (t+0s).
+	if openGot[0].ID != rowDMAlice.ID || openGot[1].ID != rowFulfilling.ID || openGot[2].ID != rowOpenA.ID {
+		t.Fatalf("unexpected open order: got [%s, %s, %s]", openGot[0].ID, openGot[1].ID, openGot[2].ID)
+	}
+
+	// Empty scope returns empty slice.
+	emptyGot, err := cs.ListOpenSecretRequests(ctx, nil, "", base.Add(5*time.Second), 10)
+	if err != nil || len(emptyGot) != 0 {
+		t.Fatalf("expected empty open result, got len=%d err=%v", len(emptyGot), err)
+	}
+
+	// Create resolved rows: dismissed (t+10s), replaced (excluded), fulfilled (t+20s).
+	// Dismiss rowOpenA at t+10s.
+	if _, err := cs.DismissSecretRequests(ctx, &store.DismissSecretRequestsInput{
+		MessageID: rowOpenA.MessageID,
+		UserID:    aliceID,
+		UserName:  "Alice",
+		Reason:    "nope",
+		Now:       base.Add(10 * time.Second),
+	}); err != nil {
+		t.Fatalf("dismiss: %v", err)
+	}
+
+	// Create and replace a key in projA (the replaced v1 must NOT appear in ListResolvedSecretRequests).
+	replV1, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projA, agentA, false, base.Add(11*time.Second),
+		messages.SecretRequest{Key: "KEY_REPL", KeyNorm: "KEY_REPL", SecretType: "environment"},
+	))
+	if err != nil {
+		t.Fatalf("create replV1: %v", err)
+	}
+	if _, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projA, agentA, true, base.Add(12*time.Second),
+		messages.SecretRequest{Key: "KEY_REPL", KeyNorm: "KEY_REPL", SecretType: "environment"},
+	)); err != nil {
+		t.Fatalf("create replV2: %v", err)
+	}
+	_ = replV1
+
+	// Withdraw dmAlice at t+20s.
+	if _, err := cs.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: agentB,
+		Keys:    []string{"KEY_DM_ALICE"},
+		Reason:  "no longer needed",
+		Now:     base.Add(20 * time.Second),
+	}); err != nil {
+		t.Fatalf("withdraw dmAlice: %v", err)
+	}
+
+	// ListResolvedSecretRequests for Alice: newest resolved_at first -> dmAlice (t+20s), rowOpenA (t+10s).
+	resPage1, err := cs.ListResolvedSecretRequests(ctx, store.SecretRequestHistoryQuery{
+		ProjectIDs: []string{projA},
+		ViewerID:   aliceID,
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("ListResolved page 1: %v", err)
+	}
+	if len(resPage1) != 1 || resPage1[0].ID != rowDMAlice.ID {
+		t.Fatalf("expected page 1 to contain dmAlice (%s), got %+v", rowDMAlice.ID, resPage1)
+	}
+
+	resPage2, err := cs.ListResolvedSecretRequests(ctx, store.SecretRequestHistoryQuery{
+		ProjectIDs: []string{projA},
+		ViewerID:   aliceID,
+		CursorTime: resPage1[0].ResolvedAt,
+		CursorID:   resPage1[0].ID,
+		Limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListResolved page 2: %v", err)
+	}
+	if len(resPage2) != 1 || resPage2[0].ID != rowOpenA.ID {
+		t.Fatalf("expected page 2 to contain rowOpenA (%s), got %+v", rowOpenA.ID, resPage2)
+	}
+
+	// FilterProjectID narrows to projB (only Alice's DM row in projB).
+	resFiltered, err := cs.ListResolvedSecretRequests(ctx, store.SecretRequestHistoryQuery{
+		ProjectIDs:      []string{projA},
+		ViewerID:        aliceID,
+		FilterProjectID: projB,
+		Limit:           10,
+	})
+	if err != nil {
+		t.Fatalf("ListResolved filtered: %v", err)
+	}
+	if len(resFiltered) != 1 || resFiltered[0].ID != rowDMAlice.ID {
+		t.Fatalf("expected filtered result to contain dmAlice, got %+v", resFiltered)
+	}
+}

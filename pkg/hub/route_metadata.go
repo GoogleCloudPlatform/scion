@@ -332,6 +332,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/decisions/suggestions", RouteID: "users.me.decisions.suggestions",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/secret-requests": {
+		Pattern: "/api/v1/users/me/secret-requests", RouteID: "users.me.secretRequests",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/inbox/summary": {
 		Pattern: "/api/v1/users/me/inbox/summary", RouteID: "users.me.inbox.summary",
 		Classification: RouteAuthenticated,

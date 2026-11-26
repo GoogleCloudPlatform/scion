@@ -164,6 +164,7 @@ func (SecretRequest) Indexes() []ent.Index {
 		index.Fields("status", "claimed_at"),
 		index.Fields("message_id", "position"),
 		index.Fields("project_id", "created_at"),
+		index.Fields("project_id", "resolved_at"),
 	}
 }
 

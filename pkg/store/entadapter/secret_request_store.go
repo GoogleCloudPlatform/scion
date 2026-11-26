@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
@@ -1183,6 +1184,151 @@ func (c *CompositeStore) ListAgentSecretRequests(ctx context.Context, opts *stor
 		Items:      items,
 		NextCursor: nextCursor,
 	}, nil
+}
+
+func secretRequestViewerScopePredicate(projectIDs []string, viewerID string) (predicate.SecretRequest, bool, error) {
+	projUIDs := make([]uuid.UUID, 0, len(projectIDs))
+	for _, pid := range projectIDs {
+		pid = strings.TrimSpace(pid)
+		if pid == "" {
+			continue
+		}
+		u, err := parseUUID(pid)
+		if err != nil {
+			return nil, false, err
+		}
+		projUIDs = append(projUIDs, u)
+	}
+	viewerID = strings.TrimSpace(viewerID)
+	hasProjects := len(projUIDs) > 0
+	hasViewer := viewerID != ""
+	if !hasProjects && !hasViewer {
+		return nil, false, nil
+	}
+	dmPred := secretrequest.And(
+		secretrequest.ChatKeyHasPrefix("dm:agent:"),
+		secretrequest.ChatKeyHasSuffix(":user:"+viewerID),
+	)
+	switch {
+	case hasProjects && hasViewer:
+		return secretrequest.Or(
+			secretrequest.ProjectIDIn(projUIDs...),
+			dmPred,
+		), true, nil
+	case hasProjects:
+		return secretrequest.ProjectIDIn(projUIDs...), true, nil
+	default:
+		return dmPred, true, nil
+	}
+}
+
+// ListOpenSecretRequests implements store.SecretRequestStore.
+func (c *CompositeStore) ListOpenSecretRequests(ctx context.Context, projectIDs []string, viewerID string, now time.Time, limit int) ([]*store.SecretRequest, error) {
+	scopePred, ok, err := secretRequestViewerScopePredicate(projectIDs, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []*store.SecretRequest{}, nil
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC().Truncate(time.Microsecond)
+
+	q := c.client.SecretRequest.Query().
+		Where(
+			secretrequest.StatusIn(secretrequest.StatusPending, secretrequest.StatusFulfilling),
+			secretrequest.ExpiresAtGT(now),
+			scopePred,
+		).
+		Order(
+			ent.Desc(secretrequest.FieldCreatedAt),
+			ent.Desc(secretrequest.FieldID),
+		)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	items := make([]*store.SecretRequest, len(rows))
+	for i, r := range rows {
+		items[i] = entSecretRequestToStore(r)
+	}
+	return items, nil
+}
+
+// ListResolvedSecretRequests implements store.SecretRequestStore.
+func (c *CompositeStore) ListResolvedSecretRequests(ctx context.Context, opts store.SecretRequestHistoryQuery) ([]*store.SecretRequest, error) {
+	scopePred, ok, err := secretRequestViewerScopePredicate(opts.ProjectIDs, opts.ViewerID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []*store.SecretRequest{}, nil
+	}
+
+	q := c.client.SecretRequest.Query().
+		Where(
+			secretrequest.StatusIn(
+				secretrequest.StatusFulfilled,
+				secretrequest.StatusDismissed,
+				secretrequest.StatusWithdrawn,
+				secretrequest.StatusExpired,
+			),
+			secretrequest.ResolvedAtNotNil(),
+			scopePred,
+		)
+
+	if pid := strings.TrimSpace(opts.FilterProjectID); pid != "" {
+		pUID, perr := parseUUID(pid)
+		if perr != nil {
+			return []*store.SecretRequest{}, nil
+		}
+		q = q.Where(secretrequest.ProjectIDEQ(pUID))
+	}
+	if aid := strings.TrimSpace(opts.FilterAgentID); aid != "" {
+		aUID, aerr := parseUUID(aid)
+		if aerr != nil {
+			return []*store.SecretRequest{}, nil
+		}
+		q = q.Where(secretrequest.AgentIDEQ(aUID))
+	}
+	if opts.CursorTime != nil && opts.CursorID != "" {
+		curUID, uerr := parseUUID(opts.CursorID)
+		if uerr != nil {
+			return nil, fmt.Errorf("%w: invalid cursor id", store.ErrInvalidInput)
+		}
+		curTime := opts.CursorTime.UTC()
+		q = q.Where(
+			secretrequest.Or(
+				secretrequest.ResolvedAtLT(curTime),
+				secretrequest.And(
+					secretrequest.ResolvedAtEQ(curTime),
+					secretrequest.IDLT(curUID),
+				),
+			),
+		)
+	}
+
+	q = q.Order(
+		ent.Desc(secretrequest.FieldResolvedAt),
+		ent.Desc(secretrequest.FieldID),
+	)
+	if opts.Limit > 0 {
+		q = q.Limit(opts.Limit)
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	items := make([]*store.SecretRequest, len(rows))
+	for i, r := range rows {
+		items[i] = entSecretRequestToStore(r)
+	}
+	return items, nil
 }
 
 // ExpireSecretRequests implements store.SecretRequestStore.

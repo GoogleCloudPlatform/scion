@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 458
+**Operations:** 459
 
 ## Table of Contents
 
@@ -240,6 +240,7 @@
 - [chat.decision.answer](#chatdecisionanswer) — Answer a decision prompt decision by choice id (the label is copied from the stored row) with optional surface (native, decisions_page or inbox). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a decision-response message, delivers it to the asking agent and publishes decision.updated. 404 while web.decisions is off
 - [chat.decisionprompt.answer](#chatdecisionpromptanswer) — Answer every actionable decision of a decision prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native, decisions_page or inbox). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one decision-response message in one transaction, delivers it to the asking agent and publishes decision.updated per row. 404 while web.decisions is off
 - [chat.secretrequest.read](#chatsecretrequestread) — Read a secret-request card (metadata and per-key status, never secret values) plus canRespond and reason. Requires a signed-in user session, recipient membership on the prompt's conversation, and agent.read on the requesting agent. 404 while hub.agent_secrets is off
+- [chat.usersecretrequests.list](#chatusersecretrequestslist) — List open or resolved secret-request cards across the caller's member projects and DMs, with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors and UATs get 403); each row requires recipient membership and agent.read on the requesting agent; answerable counts additionally require answering recipient membership and agent.attach. Unsupported methods get 405; 404 while hub.agent_secrets is off
 - [chat.commandrequest.read](#chatcommandrequestread) — Read a command-request row and its run view (never output), plus the approver's resolved execution container state for the named approver only. Requires an interactive human session and card recipient membership. 404 while hub.command_requests is off
 - [chat.commandrequest.approve](#chatcommandrequestapprove) — Approve a pending command request matching command_sha256, atomically transitioning pending -> approved and inserting a single queued command_runs row for the approver's execution container. Requires an interactive human session, same-origin CSRF check on cookie sessions, recipient membership, named approver match, and an eligible non-stopped execution container. 404 while hub.command_requests is off
 - [chat.secretrequest.fulfill](#chatsecretrequestfulfill) — Fulfill all pending keys of a secret-request card, storing each value at agent scope in the secret backend, notifying the requesting agent via a secret-response message, and emitting fulfilled audit events (never values). Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
@@ -9162,6 +9163,38 @@
 ### Tests
 
 - `pkg/hub:TestSecretRequests_EndToEnd`
+
+---
+
+## chat.usersecretrequests.list
+
+**Domain:** chat
+
+**Description:** List open or resolved secret-request cards across the caller's member projects and DMs, with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors and UATs get 403); each row requires recipient membership and agent.read on the requesting agent; answerable counts additionally require answering recipient membership and agent.attach. Unsupported methods get 405; 404 while hub.agent_secrets is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/secret-requests` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** project-collection
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestUserMeSecretRequests_AuthorizationAndScope`
 
 ---
 
