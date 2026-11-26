@@ -326,9 +326,9 @@ func TestDecisionRetention_DecisionsResponseRetentionField(t *testing.T) {
 }
 
 // TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit verifies that
-// RunManual (via sw.walk) re-reads policy per page, persists the running manual
-// run row after page 1 before page 2 begins, and stops immediately when a legal
-// hold (enabled=false) is set mid-run.
+// runDecisionRetentionManual wires per-page policy re-reads, persists the
+// running manual run row after page 1 before page 2 begins, and stops
+// immediately when a legal hold (enabled=false) is set mid-run.
 func TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit(t *testing.T) {
 	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
 	cs := s.(*entadapter.CompositeStore)
@@ -352,10 +352,8 @@ func TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit(t *testing.T) {
 		"test", 0, "managed")
 	require.NoError(t, err)
 
-	sw := newDecisionRetentionSweeper(cs.DecisionRetention(), true)
-	sw.policy = srv.decisionRetentionPolicyAt
 	sleepCalls := 0
-	sw.sleep = func(ctx context.Context, _ time.Duration) error {
+	srv.decisionRetention.sleepHook = func(ctx context.Context, _ time.Duration) error {
 		sleepCalls++
 		// Verify running manual run row is already persisted with page 1 counts.
 		midRuns, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{
@@ -377,22 +375,10 @@ func TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit(t *testing.T) {
 		return nil
 	}
 
-	start := time.Now().UTC()
-	p, err := srv.decisionRetentionPolicyAt(ctx, start)
+	var logBuf bytes.Buffer
+	run, res, err := srv.runDecisionRetentionManual(ctx, &logBuf, admin.ID)
 	require.NoError(t, err)
-	run := &store.DecisionRetentionRun{
-		Trigger:   store.DecisionRetentionTriggerManual,
-		DryRun:    false,
-		StartedAt: start,
-		Status:    store.DecisionRetentionStatusRunning,
-		Actor:     admin.ID,
-		Policy:    decisionRetentionRunPolicy(p),
-		Counts:    map[string]store.DecisionRetentionCounts{},
-	}
-	require.NoError(t, cs.DecisionRetention().SaveDecisionRetentionRun(ctx, run))
-
-	res, err := sw.RunManual(ctx, p, run, start.Add(time.Hour))
-	require.NoError(t, err)
+	require.NotNil(t, run)
 	assert.Equal(t, 1, sleepCalls)
 	assert.Equal(t, 1, res.Pages, "mid-run hold must stop manual run before page 2")
 	assert.Equal(t, 50, res.PurgedMessages)

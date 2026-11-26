@@ -172,9 +172,10 @@ func (s *Server) decisionRetentionPolicyAt(ctx context.Context, now time.Time) (
 
 // decisionRetentionState holds the Server's decision retention wiring.
 type decisionRetentionState struct {
-	mu      sync.Mutex
-	store   store.DecisionRetentionStore
-	running atomic.Bool
+	mu        sync.Mutex
+	store     store.DecisionRetentionStore
+	running   atomic.Bool
+	sleepHook func(context.Context, time.Duration) error // test seam for inter-page yield
 }
 
 // SetDecisionRetentionStore wires the decision retention store.

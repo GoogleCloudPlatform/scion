@@ -407,6 +407,9 @@ func (s *Server) runDecisionRetentionManual(ctx context.Context, logger io.Write
 
 	sw := newDecisionRetentionSweeper(st, s.isSQLiteStore())
 	sw.policy = s.decisionRetentionPolicyAt
+	if s.decisionRetention.sleepHook != nil {
+		sw.sleep = s.decisionRetention.sleepHook
+	}
 	start := sw.now()
 	p, err := s.decisionRetentionPolicyAt(ctx, start)
 	if err != nil {
