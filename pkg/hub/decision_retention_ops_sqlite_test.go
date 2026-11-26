@@ -248,8 +248,13 @@ func TestDecisionRetention_DecisionsResponseRetentionField(t *testing.T) {
 	projDef := createProject("resp-p-0", "resp-p-0")
 	projLong := createProject("resp-p-1", "resp-p-1")
 	projHold := createProject("resp-p-2", "resp-p-2")
-	for i, pid := range []string{projDef, projLong, projHold} {
-		// Seed one settled decision per project so ProjectsWithDecisions returns all 3.
+	// Non-member project (no membership binding for user) with a days override.
+	projNonMember := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projNonMember, Name: "resp-non-member", Slug: "resp-non-member", Created: time.Now().UTC(),
+	}))
+	for i, pid := range []string{projDef, projLong, projHold, projNonMember} {
+		// Seed one settled decision per project so ProjectsWithDecisions returns all member projects.
 		seedOldSettledDecision(t, ctx, cs, pid, uuid.NewString(), user.ID, fmt.Sprintf("R%d", i), 5*24*time.Hour)
 	}
 
@@ -290,15 +295,16 @@ func TestDecisionRetention_DecisionsResponseRetentionField(t *testing.T) {
 	assert.Nil(t, getJSON("/api/v1/projects/" + projDef + "/decisions?tab=made")["retention"])
 	assert.Nil(t, getJSON("/api/v1/users/me/decisions?tab=made&sort=recent")["retention"])
 
-	// 4. hub.decision_retention ON, enabled=true, hub default 30d, projLong=60d, projHold=keep_forever.
+	// 4. hub.decision_retention ON, enabled=true, hub default 30d, projLong=60d, projHold=keep_forever, projNonMember=45d.
 	setRet(fmt.Sprintf(`{
 		"enabled": true,
 		"retention_days": 30,
 		"project_overrides": {
 			%q: {"mode": "days", "days": 60},
-			%q: {"mode": "keep_forever"}
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 45}
 		}
-	}`, projLong, projHold))
+	}`, projLong, projHold, projNonMember))
 
 	// Project endpoints:
 	defRet, ok := getJSON("/api/v1/projects/" + projDef + "/decisions?tab=made")["retention"].(map[string]any)
@@ -317,14 +323,17 @@ func TestDecisionRetention_DecisionsResponseRetentionField(t *testing.T) {
 	for _, sortMode := range []string{"recent", "project"} {
 		profRet, ok := getJSON("/api/v1/users/me/decisions?tab=made&sort=" + sortMode)["retention"].(map[string]any)
 		require.True(t, ok, "profile sort=%s must have per-project retention map", sortMode)
-		assert.Len(t, profRet, 2, "only projects with active windows appear")
+		assert.Len(t, profRet, 2, "only member projects with active windows appear")
 		assert.Equal(t, map[string]any{"active": true, "days": float64(30)}, profRet[projDef])
 		assert.Equal(t, map[string]any{"active": true, "days": float64(60)}, profRet[projLong])
 		assert.Nil(t, profRet[projHold], "keep_forever project must be omitted from profile retention map")
+		assert.Nil(t, profRet[projNonMember], "non-member project must not appear in profile retention map")
 	}
 
-	// Profile Made filtered to keep_forever project -> retention absent.
+	// Profile Made filtered to keep_forever or non-member project -> retention absent.
 	assert.Nil(t, getJSON("/api/v1/users/me/decisions?tab=made&project=" + projHold)["retention"])
+	assert.Nil(t, getJSON("/api/v1/users/me/decisions?tab=made&project=" + projNonMember)["retention"],
+		"filtering /users/me/decisions to a non-member project must yield no retention entry")
 }
 
 // TestDecisionRetentionOps_ManualRunMidRunHoldAndPerPageAudit verifies that
