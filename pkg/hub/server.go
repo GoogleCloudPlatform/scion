@@ -2346,10 +2346,12 @@ type Server struct {
 	// maxProfileDecisionProjects so truncation paths can be pinned without
 	// seeding >200 projects.
 	maxProfileDecisionProjectsForTest int
-	// actionInboxMaxProjectsForTest and actionInboxScanCapForTest, when positive
-	// (tests only), override maxActionInboxProjects and actionInboxScanCap.
-	actionInboxMaxProjectsForTest int
-	actionInboxScanCapForTest     int
+	// actionInboxMaxProjectsForTest, actionInboxScanCapForTest, and
+	// actionInboxResolvedBatchForTest, when positive (tests only), override
+	// action-inbox pagination and scan caps.
+	actionInboxMaxProjectsForTest   int
+	actionInboxScanCapForTest       int
+	actionInboxResolvedBatchForTest int
 
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.

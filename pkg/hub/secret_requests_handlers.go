@@ -259,26 +259,11 @@ func (s *Server) loadSecretRequestCard(w http.ResponseWriter, ctx context.Contex
 	return rows, chatKey, promptMsg, true
 }
 
-// checkSecretRequestAgentPerm checks whether user holds action (ActionRead or
-// ActionAttach) on the requesting agent. If the agent is hard-deleted, it falls
-// back to a synthetic resource scoped to the row's project so retained cards
-// remain readable by project readers and never attachable.
+// checkSecretRequestAgentPerm delegates to checkMessageActionAgentPerm so the
+// card GET/fulfill/dismiss endpoints and the action-inbox memo share one
+// deleted-agent and permission policy.
 func (s *Server) checkSecretRequestAgentPerm(ctx context.Context, user UserIdentity, row *store.SecretRequest, action Action) (*store.Agent, bool) {
-	a, err := s.store.GetAgent(ctx, row.AgentID)
-	if err != nil || a == nil {
-		if action == ActionAttach {
-			return nil, false
-		}
-		d := s.authzService.CheckAccess(ctx, user, Resource{
-			Type:       "agent",
-			ID:         row.AgentID,
-			ParentType: "project",
-			ParentID:   row.ProjectID,
-		}, action)
-		return nil, d.Allowed
-	}
-	d := s.authzService.CheckAccess(ctx, user, agentResource(a), action)
-	return a, d.Allowed
+	return s.checkMessageActionAgentPerm(ctx, user, row.AgentID, row.ProjectID, action, nil, false)
 }
 
 func (s *Server) secretRequestViewsFor(ctx context.Context, rows []*store.SecretRequest) []SecretRequestView {
@@ -395,9 +380,9 @@ func secretRequestView(r *store.SecretRequest, replacedBy *store.SecretRequest) 
 	return v
 }
 
-func (s *Server) publishSecretRequestUpdated(ctx context.Context, row *store.SecretRequest, replacedBy *store.SecretRequest) {
+func (s *Server) publishSecretRequestRowUpdated(ctx context.Context, row *store.SecretRequest, replacedBy *store.SecretRequest) string {
 	if row == nil {
-		return
+		return ""
 	}
 	chatKey := row.ChatKey
 	if chatKey == "" {
@@ -406,10 +391,27 @@ func (s *Server) publishSecretRequestUpdated(ctx context.Context, row *store.Sec
 		}
 	}
 	if chatKey == "" {
-		return
+		return ""
 	}
 	view := secretRequestView(row, replacedBy)
 	s.publishActionUpdated(msgaction.KindSecretRequest, row.ProjectID, row.MessageID, chatKey, view)
+	return chatKey
+}
+
+func (s *Server) publishSecretRequestUpdated(ctx context.Context, row *store.SecretRequest, replacedBy *store.SecretRequest) {
+	if chatKey := s.publishSecretRequestRowUpdated(ctx, row, replacedBy); chatKey != "" {
+		s.publishDMActionInboxHint(ctx, chatKey, InboxCategoryAgentSecrets)
+	}
+}
+
+func (s *Server) publishSecretRequestsDMHintsOnce(ctx context.Context, hinted map[string]struct{}, msgID, chatKey string) {
+	if chatKey == "" {
+		return
+	}
+	if _, already := hinted[msgID]; already {
+		return
+	}
+	hinted[msgID] = struct{}{}
 	s.publishDMActionInboxHint(ctx, chatKey, InboxCategoryAgentSecrets)
 }
 
@@ -714,8 +716,10 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Publish live "submitting" state for each claimed row (N4).
+	claimHinted := make(map[string]struct{}, 1)
 	for _, row := range claimRes.Claimed {
-		s.publishSecretRequestUpdated(ctx, row, nil)
+		chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+		s.publishSecretRequestsDMHintsOnce(ctx, claimHinted, row.MessageID, chatKey)
 	}
 
 	// compensate deletes keys already written in this call and rolls back the
@@ -735,9 +739,11 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 				ClaimedAt: claimRes.ClaimedAt,
 			}); rerr == nil && n > 0 {
 				if restored, gerr := s.store.GetSecretRequestsByIDs(compCtx, claimRowIDs); gerr == nil {
+					rbHinted := make(map[string]struct{}, 1)
 					for _, id := range claimRowIDs {
 						if rr, ok := restored[id]; ok {
-							s.publishSecretRequestUpdated(compCtx, rr, nil)
+							chatKey := s.publishSecretRequestRowUpdated(compCtx, rr, nil)
+							s.publishSecretRequestsDMHintsOnce(compCtx, rbHinted, rr.MessageID, chatKey)
 						}
 					}
 				}
@@ -913,11 +919,13 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	for _, id := range claimRowIDs {
 		claimedSet[id] = true
 	}
+	fulfillHinted := make(map[string]struct{}, 1)
 	for _, row := range finRes.Rows {
 		if !claimedSet[row.ID] {
 			continue
 		}
-		s.publishSecretRequestUpdated(ctx, row, nil)
+		chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+		s.publishSecretRequestsDMHintsOnce(ctx, fulfillHinted, row.MessageID, chatKey)
 		details := map[string]string{
 			"secret_type": row.SecretType,
 		}
@@ -1192,8 +1200,10 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		})
 	}
 
+	dismissHinted := make(map[string]struct{}, 1)
 	for _, row := range res.Dismissed {
-		s.publishSecretRequestUpdated(ctx, row, nil)
+		chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+		s.publishSecretRequestsDMHintsOnce(ctx, dismissHinted, row.MessageID, chatKey)
 		details := map[string]string{"secret_type": row.SecretType}
 		if row.Target != "" {
 			details["target"] = row.Target
@@ -1307,8 +1317,10 @@ func (s *Server) handleAgentSecretRequestWithdraw(w http.ResponseWriter, r *http
 		return
 	}
 
+	withdrawHinted := make(map[string]struct{})
 	for _, row := range res.Withdrawn {
-		s.publishSecretRequestUpdated(ctx, row, nil)
+		chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+		s.publishSecretRequestsDMHintsOnce(ctx, withdrawHinted, row.MessageID, chatKey)
 		details := map[string]string{"secret_type": row.SecretType}
 		if row.Target != "" {
 			details["target"] = row.Target

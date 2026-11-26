@@ -58,8 +58,10 @@ func (s *Server) sweepSecretRequests(ctx context.Context, now time.Time) (int, i
 		if err != nil {
 			return expiredTotal, 0, err
 		}
+		expireHinted := make(map[string]struct{})
 		for _, row := range rows {
-			s.publishSecretRequestUpdated(ctx, row, nil)
+			chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+			s.publishSecretRequestsDMHintsOnce(ctx, expireHinted, row.MessageID, chatKey)
 			details := map[string]string{"secret_type": row.SecretType}
 			if row.Target != "" {
 				details["target"] = row.Target
@@ -94,8 +96,10 @@ func (s *Server) sweepSecretRequests(ctx context.Context, now time.Time) (int, i
 			if err != nil {
 				return expiredTotal, recoveredTotal, err
 			}
+			recoverHinted := make(map[string]struct{})
 			for _, row := range rows {
-				s.publishSecretRequestUpdated(ctx, row, nil)
+				chatKey := s.publishSecretRequestRowUpdated(ctx, row, nil)
+				s.publishSecretRequestsDMHintsOnce(ctx, recoverHinted, row.MessageID, chatKey)
 				details := map[string]string{"secret_type": row.SecretType}
 				if row.Target != "" {
 					details["target"] = row.Target

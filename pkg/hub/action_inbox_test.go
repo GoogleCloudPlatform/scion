@@ -416,14 +416,37 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 	assert.Equal(t, ActionInboxCounts{Answerable: 0, Open: 0}, outResp.Counts)
 	assert.Empty(t, outResp.Cards)
 
-	// 4. Resolved tab (AC-6): terminal non-replaced rows newest resolved_at first.
-	// Dismiss Card 1 at base+10s, withdraw Card 3 at base+20s, and replace a key (must be excluded).
+	// 4. Resolved tab (AC-6): terminal non-replaced rows newest resolved_at first,
+	// with per-row authorization enforced across cards, facets, and filter probes.
+	// Resolve Card 1 (t+10s), Card 3 (t+20s), Card 4 (Carol's DM in Project A, t+12s),
+	// Card 2 (Project B thread, t+14s), and Card 5 (DM from unreadable agentB to Alice, t+16s).
 	_, err = st.DismissSecretRequests(ctx, &store.DismissSecretRequestsInput{
 		MessageID: card1.Message.ID,
 		UserID:    f.alice.ID,
 		UserName:  f.alice.DisplayName,
 		Reason:    "not needed",
 		Now:       base.Add(10 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: f.agent.ID,
+		Keys:    []string{"CAROL_DM_KEY"},
+		Reason:  "carol dm withdrawn",
+		Now:     base.Add(12 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: agentB.ID,
+		Keys:    []string{"BOB_ONLY_KEY"},
+		Reason:  "bob thread withdrawn",
+		Now:     base.Add(14 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: agentB.ID,
+		Keys:    []string{"UNREADABLE_DM_KEY"},
+		Reason:  "unreadable dm withdrawn",
+		Now:     base.Add(16 * time.Second),
 	})
 	require.NoError(t, err)
 	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
@@ -441,15 +464,74 @@ func TestUserMeSecretRequests_AuthorizationAndScope(t *testing.T) {
 		{Key: "REPL_KEY", KeyNorm: "REPL_KEY", SecretType: "environment"},
 	}, true)
 
+	// Alice's Resolved tab: ONLY Card 3 (t+20s) and Card 1 (t+10s).
+	// Must exclude Card 4 (Carol's DM in Project A), Card 2 (Project B), and Card 5 (DM from unreadable agentB).
 	rrRes := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved", aliceTok)
 	require.Equal(t, http.StatusOK, rrRes.Code)
 	var resResp secretRequestsInboxResponse
 	require.NoError(t, json.Unmarshal(rrRes.Body.Bytes(), &resResp))
-	// Only Card 3 (withdrawn at t+20s) and Card 1 (dismissed at t+10s); replaced v1 excluded.
 	require.Len(t, resResp.Cards, 2)
 	assert.Equal(t, card3DMAlice.Message.ID, resResp.Cards[0].MessageID)
 	assert.Equal(t, card1.Message.ID, resResp.Cards[1].MessageID)
 	assert.Equal(t, ActionInboxCounts{Answerable: 1, Open: 1}, resResp.Counts, "open counts reflect remaining REPL_KEY v2")
+	for _, pf := range resResp.Facets.Projects {
+		assert.NotEqual(t, projB.ID, pf.ID, "resolved facets must not leak unreadable project B")
+	}
+	for _, af := range resResp.Facets.Agents {
+		assert.NotEqual(t, agentB.ID, af.ID, "resolved facets must not leak unreadable agent B")
+	}
+
+	// Alice cannot leak Card 4, Card 2, or Card 5 on Resolved via project, agent, or q filters.
+	for _, probePath := range []string{
+		userMeSecretRequestsPath + "?tab=resolved&q=CAROL_DM_KEY",
+		userMeSecretRequestsPath + "?tab=resolved&q=UNREADABLE_DM_KEY",
+		userMeSecretRequestsPath + "?tab=resolved&q=BOB_ONLY_KEY",
+		userMeSecretRequestsPath + "?tab=resolved&project=" + projB.ID,
+		userMeSecretRequestsPath + "?tab=resolved&agent=" + agentB.ID,
+	} {
+		rrProbe := doActionInboxBearerRequest(t, srv, http.MethodGet, probePath, aliceTok)
+		require.Equal(t, http.StatusOK, rrProbe.Code)
+		var probeResp secretRequestsInboxResponse
+		require.NoError(t, json.Unmarshal(rrProbe.Body.Bytes(), &probeResp))
+		assert.Empty(t, probeResp.Cards, "probe %s must return no cards", probePath)
+		assert.Empty(t, probeResp.Facets.Agents, "probe %s must return no agent facets", probePath)
+		assert.Empty(t, probeResp.Facets.Projects, "probe %s must return no project facets", probePath)
+	}
+	// Filtering Alice's Resolved tab by Project A returns only Card 1 (not Carol's DM Card 4).
+	rrAliceProjA := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved&project="+f.project.ID, aliceTok)
+	require.Equal(t, http.StatusOK, rrAliceProjA.Code)
+	var aliceProjAResp secretRequestsInboxResponse
+	require.NoError(t, json.Unmarshal(rrAliceProjA.Body.Bytes(), &aliceProjAResp))
+	require.Len(t, aliceProjAResp.Cards, 1)
+	assert.Equal(t, card1.Message.ID, aliceProjAResp.Cards[0].MessageID)
+
+	// Bob's Resolved tab: includes Card 2 (Project B thread) and excludes Card 4 (Carol's DM) and Card 5 (Alice's DM from agentB).
+	rrBobRes := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved", bobTok)
+	require.Equal(t, http.StatusOK, rrBobRes.Code)
+	var bobResResp secretRequestsInboxResponse
+	require.NoError(t, json.Unmarshal(rrBobRes.Body.Bytes(), &bobResResp))
+	require.Len(t, bobResResp.Cards, 1)
+	assert.Equal(t, "BOB_ONLY_KEY", bobResResp.Cards[0].Rows[0].Key)
+	for _, probePath := range []string{
+		userMeSecretRequestsPath + "?tab=resolved&q=CAROL_DM_KEY",
+		userMeSecretRequestsPath + "?tab=resolved&q=UNREADABLE_DM_KEY",
+		userMeSecretRequestsPath + "?tab=resolved&project=" + f.project.ID,
+	} {
+		rrProbe := doActionInboxBearerRequest(t, srv, http.MethodGet, probePath, bobTok)
+		require.Equal(t, http.StatusOK, rrProbe.Code)
+		var probeResp secretRequestsInboxResponse
+		require.NoError(t, json.Unmarshal(rrProbe.Body.Bytes(), &probeResp))
+		assert.Empty(t, probeResp.Cards, "bob probe %s must return no cards", probePath)
+	}
+
+	// Carol's Resolved tab: includes Card 4 (Carol's DM, t+12s) and Card 1 (Project A thread, t+10s).
+	rrCarolRes := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath+"?tab=resolved", carolTok)
+	require.Equal(t, http.StatusOK, rrCarolRes.Code)
+	var carolResResp secretRequestsInboxResponse
+	require.NoError(t, json.Unmarshal(rrCarolRes.Body.Bytes(), &carolResResp))
+	require.Len(t, carolResResp.Cards, 2)
+	assert.Equal(t, card4DMCarol.Message.ID, carolResResp.Cards[0].MessageID)
+	assert.Equal(t, card1.Message.ID, carolResResp.Cards[1].MessageID)
 
 	// 5. Caps: truncatedProjects and capped.
 	// Add Alice as member of Project B so she has 2 member projects, then set maxProjects=1.
@@ -620,6 +702,274 @@ func TestSecretRequest_DMUpdateEmitsInboxHint(t *testing.T) {
 		t.Fatalf("unexpected user inbox hint for thread secret request: %s", string(ev.Data))
 	case <-time.After(100 * time.Millisecond):
 	}
+	// Multi-key DM card dismiss emits exactly ONE inbox hint per message (not one per row).
+	dmMulti := seedDMSecretRequest(t, f.store, f.project.ID, f.agent.ID, f.agent.Name, f.alice.ID, base.Add(2*time.Second), []messages.SecretRequest{
+		{Key: "HINT_MULTI_1", KeyNorm: "HINT_MULTI_1", SecretType: "environment"},
+		{Key: "HINT_MULTI_2", KeyNorm: "HINT_MULTI_2", SecretType: "environment"},
+	})
+	aliceTok := f.sessionToken(t, f.alice)
+	dismissReq := httptest.NewRequest(http.MethodPost, "/api/v1/secret-requests/"+dmMulti.Message.ID+"/dismiss", strings.NewReader(`{"reason":"not needed"}`))
+	dismissReq.Header.Set("Authorization", "Bearer "+aliceTok)
+	dismissReq.Header.Set("Content-Type", "application/json")
+	dismissRR := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(dismissRR, dismissReq)
+	require.Equal(t, http.StatusOK, dismissRR.Code, dismissRR.Body.String())
+
+	select {
+	case ev := <-ch:
+		var hint InboxHint
+		require.NoError(t, json.Unmarshal(ev.Data, &hint))
+		assert.Equal(t, InboxCategoryAgentSecrets, hint.Category)
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected single agent_secrets inbox hint for 2-key DM dismiss")
+	}
+	select {
+	case ev := <-ch:
+		t.Fatalf("expected only one inbox hint for 2-key DM dismiss, got extra: %s", string(ev.Data))
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestUserMeSecretRequests_ResolvedPagination(t *testing.T) {
+	ctx := context.Background()
+	f := newSecretRequestsFixture(t, false)
+	st := f.store
+	srv := f.srv
+	enableHubExperiments(t, srv, st, map[string]bool{
+		experiments.InboxDashboard: true,
+		experiments.AgentSecrets:   true,
+	})
+
+	ownerRD, err := st.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+	require.NoError(t, err)
+	projAlpha := &store.Project{ID: api.NewUUID(), Slug: "alpha-page-" + api.NewUUID()[:8], Name: "Alpha Probe"}
+	require.NoError(t, st.CreateProject(ctx, projAlpha))
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		RoleDefinitionID: ownerRD.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          projAlpha.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.alice.ID,
+	})
+	require.NoError(t, err)
+	agentAlpha := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "alpha-page-agent",
+		Name:      "alpha-page-agent",
+		ProjectID: projAlpha.ID,
+		OwnerID:   f.alice.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, st.CreateAgent(ctx, agentAlpha))
+
+	topicMain := createUserProjectTopic(t, srv, f.project.ID, "pg-main", f.alice.ID)
+	topicAlpha := createUserProjectTopic(t, srv, projAlpha.ID, "pg-alpha", f.alice.ID)
+	aliceTok := f.sessionToken(t, f.alice)
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	walkAllPages := func(baseQuery string) (rowIDs []string, pages []secretRequestsInboxResponse) {
+		seen := make(map[string]bool)
+		cursor := ""
+		for i := 0; i < 20; i++ {
+			url := userMeSecretRequestsPath + "?" + baseQuery
+			if cursor != "" {
+				url += "&cursor=" + cursor
+			}
+			rr := doActionInboxBearerRequest(t, srv, http.MethodGet, url, aliceTok)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var resp secretRequestsInboxResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			pages = append(pages, resp)
+			for _, c := range resp.Cards {
+				for _, r := range c.Rows {
+					assert.False(t, seen[r.RowID], "duplicate row %s across pages for %s", r.RowID, baseQuery)
+					seen[r.RowID] = true
+					rowIDs = append(rowIDs, r.RowID)
+				}
+			}
+			if resp.NextCursor == "" {
+				return rowIDs, pages
+			}
+			cursor = resp.NextCursor
+		}
+		t.Fatalf("pagination did not terminate for %s", baseQuery)
+		return nil, nil
+	}
+
+	// Scenario 1: sort=recent with mixed per-row resolution times on one card.
+	// Card M has M_KEY_1 (withdrawn at t+30s) and M_KEY_2 (withdrawn at t+5s).
+	// Card N has N_KEY_1 (withdrawn at t+15s).
+	cardM := seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicMain, base, []messages.SecretRequest{
+		{Key: "M_KEY_1", KeyNorm: "M_KEY_1", SecretType: "environment"},
+		{Key: "M_KEY_2", KeyNorm: "M_KEY_2", SecretType: "environment"},
+	}, false)
+	cardN := seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicMain, base.Add(time.Second), []messages.SecretRequest{
+		{Key: "N_KEY_1", KeyNorm: "N_KEY_1", SecretType: "environment"},
+	}, false)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: f.agent.ID, Keys: []string{"M_KEY_2"}, Reason: "early", Now: base.Add(5 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: f.agent.ID, Keys: []string{"N_KEY_1"}, Reason: "middle", Now: base.Add(15 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: f.agent.ID, Keys: []string{"M_KEY_1"}, Reason: "late", Now: base.Add(30 * time.Second),
+	})
+	require.NoError(t, err)
+
+	// Scenario 2: sort=project with Secret Project (X, t+20s) and Alpha Probe (Y, t+10s).
+	cardX := seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicMain, base.Add(2*time.Second), []messages.SecretRequest{
+		{Key: "X_KEY", KeyNorm: "X_KEY", SecretType: "environment"},
+	}, false)
+	cardY := seedThreadSecretRequest(t, st, projAlpha.ID, agentAlpha.ID, agentAlpha.Name, topicAlpha, base.Add(3*time.Second), []messages.SecretRequest{
+		{Key: "Y_KEY", KeyNorm: "Y_KEY", SecretType: "environment"},
+	}, false)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: agentAlpha.ID, Keys: []string{"Y_KEY"}, Reason: "alpha", Now: base.Add(10 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = st.WithdrawSecretRequests(ctx, &store.WithdrawSecretRequestsInput{
+		AgentID: f.agent.ID, Keys: []string{"X_KEY"}, Reason: "secret", Now: base.Add(20 * time.Second),
+	})
+	require.NoError(t, err)
+
+	// Scenario 3: multi-row card straddling the scan batch boundary (batch size = 2, card has 3 rows).
+	cardStraddle := seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicMain, base.Add(4*time.Second), []messages.SecretRequest{
+		{Key: "STRADDLE_1", KeyNorm: "STRADDLE_1", SecretType: "environment"},
+		{Key: "STRADDLE_2", KeyNorm: "STRADDLE_2", SecretType: "environment"},
+		{Key: "STRADDLE_3", KeyNorm: "STRADDLE_3", SecretType: "environment"},
+	}, false)
+	_, err = st.DismissSecretRequests(ctx, &store.DismissSecretRequestsInput{
+		MessageID: cardStraddle.Message.ID,
+		UserID:    f.alice.ID,
+		UserName:  f.alice.DisplayName,
+		Reason:    "straddle",
+		Now:       base.Add(40 * time.Second),
+	})
+	require.NoError(t, err)
+
+	expectedIDs := []string{
+		cardStraddle.Requests[0].Row.ID, cardStraddle.Requests[1].Row.ID, cardStraddle.Requests[2].Row.ID,
+		cardM.Requests[0].Row.ID, cardM.Requests[1].Row.ID,
+		cardN.Requests[0].Row.ID,
+		cardX.Requests[0].Row.ID,
+		cardY.Requests[0].Row.ID,
+	}
+
+	// Unpaged baseline.
+	unpagedIDs, _ := walkAllPages("tab=resolved&limit=50")
+	assert.ElementsMatch(t, expectedIDs, unpagedIDs)
+
+	// Walk every page with limit=1 under sort=recent and small scan batch size (2) to force batch straddling.
+	srv.actionInboxResolvedBatchForTest = 2
+	defer func() { srv.actionInboxResolvedBatchForTest = 0 }()
+
+	recentIDs, recentPages := walkAllPages("tab=resolved&sort=recent&limit=1")
+	assert.ElementsMatch(t, expectedIDs, recentIDs, "sort=recent pagination must visit every row with no skips or duplicates")
+	// Page 1 must contain all 3 rows of cardStraddle despite batchSize=2.
+	require.NotEmpty(t, recentPages)
+	require.Len(t, recentPages[0].Cards, 1)
+	assert.Equal(t, cardStraddle.Message.ID, recentPages[0].Cards[0].MessageID)
+	assert.Len(t, recentPages[0].Cards[0].Rows, 3)
+
+	// Walk every page with limit=1 under sort=project: neither X nor Y is skipped.
+	projIDs, _ := walkAllPages("tab=resolved&sort=project&limit=1")
+	assert.ElementsMatch(t, expectedIDs, projIDs, "sort=project pagination must visit every row with no skips or duplicates")
+
+	// Within-page sort=project orders "Alpha Probe" (Y) before "Secret Project" when both land on the same page.
+	_, projWidePages := walkAllPages("tab=resolved&sort=project&limit=50")
+	require.Len(t, projWidePages, 1)
+	require.GreaterOrEqual(t, len(projWidePages[0].Cards), 2)
+	assert.Equal(t, projAlpha.ID, projWidePages[0].Cards[0].ProjectID)
+}
+
+func TestUserMeSecretRequests_AnswerableGuards(t *testing.T) {
+	ctx := context.Background()
+	f := newSecretRequestsFixture(t, false)
+	st := f.store
+	srv := f.srv
+	enableHubExperiments(t, srv, st, map[string]bool{
+		experiments.InboxDashboard: true,
+		experiments.AgentSecrets:   true,
+	})
+
+	// 1. User with agent.attach + agent.read + project.read, but WITHOUT project.chat_post:
+	//    readable == true, CanRespond (agent.attach) == true, answering-recipient == false.
+	//    Must give counts.open == 1, counts.answerable == 0, and inbox summary count == 0.
+	noPostRole := &store.RoleDefinition{
+		ID:            api.NewUUID(),
+		Name:          "attach-without-chat-post-" + api.NewUUID()[:8],
+		ScopeType:     store.RoleScopeProject,
+		PermissionIDs: []string{"project.read", "agent.read", "agent.attach"},
+	}
+	require.NoError(t, st.CreateRoleDefinition(ctx, noPostRole))
+
+	dave := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "dave@example.com",
+		DisplayName: "Dave",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, st.CreateUser(ctx, dave))
+	_, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		RoleDefinitionID: noPostRole.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.project.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      dave.ID,
+	})
+	require.NoError(t, err)
+
+	topicA := createUserProjectTopic(t, srv, f.project.ID, "guards-topic", f.alice.ID)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	card := seedThreadSecretRequest(t, st, f.project.ID, f.agent.ID, f.agent.Name, topicA, now, []messages.SecretRequest{
+		{Key: "GUARD_KEY", KeyNorm: "GUARD_KEY", SecretType: "environment"},
+	}, false)
+
+	daveTok := f.sessionToken(t, dave)
+	rrDave := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, daveTok)
+	require.Equal(t, http.StatusOK, rrDave.Code, rrDave.Body.String())
+	var daveResp secretRequestsInboxResponse
+	require.NoError(t, json.Unmarshal(rrDave.Body.Bytes(), &daveResp))
+	assert.Equal(t, ActionInboxCounts{Answerable: 0, Open: 1}, daveResp.Counts)
+	require.Len(t, daveResp.Cards, 1)
+	assert.False(t, daveResp.Cards[0].CanRespond)
+
+	rrDaveSum := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", daveTok)
+	require.Equal(t, http.StatusOK, rrDaveSum.Code)
+	var daveSum InboxSummaryResponse
+	require.NoError(t, json.Unmarshal(rrDaveSum.Body.Bytes(), &daveSum))
+	assert.Equal(t, 0, daveSum.Categories[InboxCategoryAgentSecrets].Count)
+
+	// 2. Claimed (fulfilling) row: open == 1, answerable == 0 in both list and summary.
+	row := card.Requests[0].Row
+	claim, err := st.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: row.MessageID,
+		RowIDs:    []string{row.ID},
+		UserID:    f.alice.ID,
+		UserName:  f.alice.DisplayName,
+		Now:       now.Add(time.Second),
+	})
+	require.NoError(t, err)
+	require.Len(t, claim.Claimed, 1)
+
+	aliceTok := f.sessionToken(t, f.alice)
+	rrAlice := doActionInboxBearerRequest(t, srv, http.MethodGet, userMeSecretRequestsPath, aliceTok)
+	require.Equal(t, http.StatusOK, rrAlice.Code)
+	var aliceResp secretRequestsInboxResponse
+	require.NoError(t, json.Unmarshal(rrAlice.Body.Bytes(), &aliceResp))
+	assert.Equal(t, ActionInboxCounts{Answerable: 0, Open: 1}, aliceResp.Counts)
+
+	rrAliceSum := doActionInboxBearerRequest(t, srv, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", aliceTok)
+	require.Equal(t, http.StatusOK, rrAliceSum.Code)
+	var aliceSum InboxSummaryResponse
+	require.NoError(t, json.Unmarshal(rrAliceSum.Body.Bytes(), &aliceSum))
+	assert.Equal(t, 0, aliceSum.Categories[InboxCategoryAgentSecrets].Count)
 }
 
 func TestInboxSummary_SecretsProjectsUnion(t *testing.T) {

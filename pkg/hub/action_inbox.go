@@ -131,6 +131,15 @@ type ActionInboxFacets struct {
 
 // ActionInboxResponse is the shared wire response for
 // GET /api/v1/users/me/<action-kind>.
+//
+// Facet and sort semantics differ slightly by tab:
+//   - On tab=open, Facets cover the full unfiltered readable open set (before
+//     project/agent/q filters), and sort=project orders globally across open cards.
+//   - On tab=resolved, pagination uses a (resolved_at DESC, id DESC) row keyset
+//     cursor (so a multi-row card whose rows resolved at different times may
+//     appear as fragments across adjacent pages), Facets cover the scanned,
+//     filtered rows emitted on the current page, and sort=project orders cards
+//     within the current page only.
 type ActionInboxResponse struct {
 	Counts            ActionInboxCounts  `json:"counts"`
 	FilteredCounts    *ActionInboxCounts `json:"filteredCounts,omitempty"`
@@ -315,27 +324,40 @@ func (sc *actionInboxScope) getAgent(ctx context.Context, agentID string) *store
 	return nil
 }
 
+// checkMessageActionAgentPerm checks whether user holds action on agentID.
+// When the agent has been hard-deleted (loadedAgent == nil after lookup),
+// ActionAttach is always denied and other actions (such as ActionRead) fall
+// back to a synthetic project-scoped agent resource so retained cards remain
+// readable by project readers.
+func (s *Server) checkMessageActionAgentPerm(ctx context.Context, user UserIdentity, agentID, projectID string, action Action, loadedAgent *store.Agent, agentWasLoaded bool) (*store.Agent, bool) {
+	a := loadedAgent
+	if !agentWasLoaded {
+		if fetched, err := s.store.GetAgent(ctx, agentID); err == nil {
+			a = fetched
+		}
+	}
+	if a == nil {
+		if action == ActionAttach {
+			return nil, false
+		}
+		d := s.authzService.CheckAccess(ctx, user, Resource{
+			Type:       "agent",
+			ID:         agentID,
+			ParentType: "project",
+			ParentID:   projectID,
+		}, action)
+		return nil, d.Allowed
+	}
+	d := s.authzService.CheckAccess(ctx, user, agentResource(a), action)
+	return a, d.Allowed
+}
+
 func (sc *actionInboxScope) checkAgentPerm(ctx context.Context, agentID, projectID string, action Action) bool {
 	key := agentPermMemoKey{agentID: agentID, projectID: projectID, action: action}
 	if cached, ok := sc.agentPermMemo[key]; ok {
 		return cached
 	}
-	a := sc.getAgent(ctx, agentID)
-	var allowed bool
-	if a == nil {
-		if action == ActionAttach {
-			allowed = false
-		} else {
-			allowed = sc.srv.authzService.CheckAccess(ctx, sc.user, Resource{
-				Type:       "agent",
-				ID:         agentID,
-				ParentType: "project",
-				ParentID:   projectID,
-			}, action).Allowed
-		}
-	} else {
-		allowed = sc.srv.authzService.CheckAccess(ctx, sc.user, agentResource(a), action).Allowed
-	}
+	_, allowed := sc.srv.checkMessageActionAgentPerm(ctx, sc.user, agentID, projectID, action, sc.getAgent(ctx, agentID), true)
 	sc.agentPermMemo[key] = allowed
 	return allowed
 }
@@ -944,7 +966,14 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Resolved tab.
+	// Resolved tab: row-keyset pagination over (resolved_at DESC, id DESC).
+	// Rows are emitted in keyset order until a readable, filter-matching row
+	// belonging to the (limit+1)-th distinct message is encountered (or the DB
+	// is exhausted / scanCap is reached). The next cursor points to the last
+	// emitted row so no row or card is ever skipped across pages; a multi-row
+	// message whose rows resolved at different times may continue as a fragment
+	// on a later page. sort=project orders cards within the current page only,
+	// and facets cover the emitted rows of the current page.
 	if params.limit == 0 {
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, ActionInboxResponse{
@@ -968,6 +997,9 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 	if batchSize > maxActionInboxLimit*2 {
 		batchSize = maxActionInboxLimit * 2
 	}
+	if s.actionInboxResolvedBatchForTest > 0 {
+		batchSize = s.actionInboxResolvedBatchForTest
+	}
 
 	var cur *actionCursor
 	if cursorEnv.Resolved != nil {
@@ -978,11 +1010,13 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 	scanned := 0
 	resolvedCapped := false
 	exhausted := false
-	matched := make([]authorizedActionRow, 0)
-	seenMessages := make(map[string]struct{})
+	hasMore := false
+	emitted := make([]authorizedActionRow, 0)
+	emittedMsgs := make(map[string]struct{})
+	var lastEmitted *actionInboxRow
 	var lastDBRow *actionInboxRow
 
-	for !exhausted && len(seenMessages) <= params.limit {
+	for !exhausted && !hasMore && !resolvedCapped {
 		remaining := scanCap - scanned
 		if remaining <= 0 {
 			resolvedCapped = true
@@ -1026,13 +1060,22 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 			if !actionRowMatchesFilters(row, params) {
 				continue
 			}
-			seenMessages[row.MessageID] = struct{}{}
-			matched = append(matched, authorizedActionRow{
+			if _, seen := emittedMsgs[row.MessageID]; !seen {
+				if len(emittedMsgs) >= params.limit {
+					// This row starts the (limit+1)-th distinct message; stop
+					// here and resume strictly after lastEmitted on the next page.
+					hasMore = true
+					break
+				}
+				emittedMsgs[row.MessageID] = struct{}{}
+			}
+			emitted = append(emitted, authorizedActionRow{
 				Row:        row,
 				Answerable: false,
 			})
+			lastEmitted = &rCopy
 		}
-		if resolvedCapped {
+		if hasMore || resolvedCapped {
 			break
 		}
 		if lastDBRow != nil {
@@ -1043,27 +1086,15 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	facets := buildActionInboxFacets(ctx, sc, matched)
-	groups := groupActionRowsByMessage(ctx, sc, matched, true)
+	facets := buildActionInboxFacets(ctx, sc, emitted)
+	groups := groupActionRowsByMessage(ctx, sc, emitted, true)
+	// Within-page ordering: sort=recent preserves recency; sort=project groups
+	// the page's cards by project name without altering the row-keyset cursor.
 	sortActionCardGroups(groups, params.sort)
 
-	hasMore := !exhausted || len(groups) > params.limit
-	if len(groups) > params.limit {
-		groups = groups[:params.limit]
-	}
-
-	pageRows := make([]authorizedActionRow, 0, len(groups))
-	var cursorRow *actionInboxRow
+	pageRows := make([]authorizedActionRow, 0, len(emitted))
 	for _, g := range groups {
-		for _, r := range g.rows {
-			pageRows = append(pageRows, r)
-			if cursorRow == nil ||
-				r.Row.ResolvedAt.Before(cursorRow.ResolvedAt) ||
-				(r.Row.ResolvedAt.Equal(cursorRow.ResolvedAt) && r.Row.ID < cursorRow.ID) {
-				rc := r.Row
-				cursorRow = &rc
-			}
-		}
+		pageRows = append(pageRows, g.rows...)
 	}
 
 	var cards any = []any{}
@@ -1076,8 +1107,15 @@ func (s *Server) serveUserMeActionInbox(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
+	var cursorRow *actionInboxRow
+	if hasMore {
+		cursorRow = lastEmitted
+	} else if resolvedCapped && !exhausted {
+		cursorRow = lastDBRow
+	}
+
 	var nextCursor string
-	if hasMore && cursorRow != nil && !cursorRow.ResolvedAt.IsZero() && cursorRow.ID != "" {
+	if cursorRow != nil && !cursorRow.ResolvedAt.IsZero() && cursorRow.ID != "" {
 		if tok, eerr := encodeActionInboxCursor(params, 0, &actionCursor{
 			Time: cursorRow.ResolvedAt.UTC(),
 			ID:   cursorRow.ID,

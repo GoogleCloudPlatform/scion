@@ -295,6 +295,7 @@ func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, r
 	}
 	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
 	defer cancel()
+	cleanupHinted := make(map[string]struct{})
 	for _, id := range order {
 		sr := byID[id]
 		if sr.Status != store.SecretRequestStatusWithdrawn ||
@@ -302,7 +303,8 @@ func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, r
 			sr.WithdrawnReason != "agent deleted" {
 			continue
 		}
-		s.publishSecretRequestUpdated(postCtx, sr, nil)
+		chatKey := s.publishSecretRequestRowUpdated(postCtx, sr, nil)
+		s.publishSecretRequestsDMHintsOnce(postCtx, cleanupHinted, sr.MessageID, chatKey)
 		details := map[string]string{"secret_type": sr.SecretType}
 		if sr.Target != "" {
 			details["target"] = sr.Target
