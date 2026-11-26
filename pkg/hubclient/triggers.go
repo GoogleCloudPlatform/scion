@@ -138,6 +138,21 @@ type WebhookEndpointRateLimitSpec struct {
 	Burst     int `json:"burst,omitempty"`
 }
 
+// WebhookEndpointRoutingHints configures optional RFC 6901 JSON pointers for
+// extracting event type, subject, and dedup key from a verified webhook body.
+type WebhookEndpointRoutingHints struct {
+	TypePath    string `json:"typePath,omitempty"`
+	SubjectPath string `json:"subjectPath,omitempty"`
+	DedupPath   string `json:"dedupPath,omitempty"`
+}
+
+// WebhookEndpointRoutingHintsPatch supports partial PATCH updates of routing hints.
+type WebhookEndpointRoutingHintsPatch struct {
+	TypePath    *string `json:"typePath,omitempty"`
+	SubjectPath *string `json:"subjectPath,omitempty"`
+	DedupPath   *string `json:"dedupPath,omitempty"`
+}
+
 // CreateWebhookEndpointRequest is the client-side request for creating a webhook endpoint.
 type CreateWebhookEndpointRequest struct {
 	Name                string                             `json:"name"`
@@ -145,6 +160,7 @@ type CreateWebhookEndpointRequest struct {
 	AuthMode            string                             `json:"auth,omitempty"`
 	AllowProjectAgents  bool                               `json:"allowProjectAgents,omitempty"`
 	SignatureMode       string                             `json:"signatureMode,omitempty"`
+	RoutingHints        *WebhookEndpointRoutingHints       `json:"routingHints,omitempty"`
 	MaxBodyBytes        int                                `json:"maxBodyBytes,omitempty"`
 	RateLimit           *WebhookEndpointRateLimitSpec      `json:"rateLimit,omitempty"`
 	ReplayWindowSeconds int                                `json:"replayWindowSeconds,omitempty"`
@@ -156,16 +172,17 @@ type CreateWebhookEndpointRequest struct {
 
 // UpdateWebhookEndpointRequest is the client-side request for PATCH /webhook-endpoints/{id}.
 type UpdateWebhookEndpointRequest struct {
-	Description         *string                       `json:"description,omitempty"`
-	Status              *string                       `json:"status,omitempty"`
-	BoundAgentID        *string                       `json:"boundAgentId,omitempty"`
-	BoundLifetime       *string                       `json:"boundLifetime,omitempty"`
-	AuthMode            *string                       `json:"auth,omitempty"`
-	AllowProjectAgents  *bool                         `json:"allowProjectAgents,omitempty"`
-	SignatureMode       *string                       `json:"signatureMode,omitempty"`
-	MaxBodyBytes        *int                          `json:"maxBodyBytes,omitempty"`
-	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
-	ReplayWindowSeconds *int                          `json:"replayWindowSeconds,omitempty"`
+	Description         *string                           `json:"description,omitempty"`
+	Status              *string                           `json:"status,omitempty"`
+	BoundAgentID        *string                           `json:"boundAgentId,omitempty"`
+	BoundLifetime       *string                           `json:"boundLifetime,omitempty"`
+	AuthMode            *string                           `json:"auth,omitempty"`
+	AllowProjectAgents  *bool                             `json:"allowProjectAgents,omitempty"`
+	SignatureMode       *string                           `json:"signatureMode,omitempty"`
+	RoutingHints        *WebhookEndpointRoutingHintsPatch `json:"routingHints,omitempty"`
+	MaxBodyBytes        *int                              `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec     `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds *int                              `json:"replayWindowSeconds,omitempty"`
 }
 
 // WebhookEndpointBoundAgent identifies the agent a webhook endpoint is bound to.
@@ -184,6 +201,7 @@ type WebhookEndpoint struct {
 	AuthMode            string                        `json:"auth"`
 	AllowProjectAgents  bool                          `json:"allowProjectAgents,omitempty"`
 	SignatureMode       string                        `json:"signatureMode"`
+	RoutingHints        *WebhookEndpointRoutingHints  `json:"routingHints,omitempty"`
 	MaxBodyBytes        int                           `json:"maxBodyBytes"`
 	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
 	ReplayWindowSeconds int                           `json:"replayWindowSeconds"`

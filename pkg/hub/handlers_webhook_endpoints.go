@@ -64,6 +64,7 @@ type CreateWebhookEndpointRequest struct {
 	AuthMode            string                             `json:"auth,omitempty"`
 	AllowProjectAgents  bool                               `json:"allowProjectAgents,omitempty"`
 	SignatureMode       string                             `json:"signatureMode,omitempty"`
+	RoutingHints        *store.WebhookRoutingHints         `json:"routingHints,omitempty"`
 	MaxBodyBytes        int                                `json:"maxBodyBytes,omitempty"`
 	RateLimit           *WebhookEndpointRateLimitSpec      `json:"rateLimit,omitempty"`
 	ReplayWindowSeconds int                                `json:"replayWindowSeconds,omitempty"`
@@ -74,19 +75,29 @@ type CreateWebhookEndpointRequest struct {
 	Trigger *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
 }
 
+// WebhookEndpointRoutingHintsPatch supports partial PATCH updates of
+// routingHints: nil fields preserve the existing path, empty strings clear it,
+// and non-empty strings set the new RFC 6901 pointer.
+type WebhookEndpointRoutingHintsPatch struct {
+	TypePath    *string `json:"typePath,omitempty"`
+	SubjectPath *string `json:"subjectPath,omitempty"`
+	DedupPath   *string `json:"dedupPath,omitempty"`
+}
+
 // UpdateWebhookEndpointRequest is the request body for PATCH /webhook-endpoints/{id}
-// (Stage 2 §4.4, §7.1, §7.3, §7.4).
+// (Stage 2 §4.4, §7.1, §7.2, §7.3, §7.4).
 type UpdateWebhookEndpointRequest struct {
-	Description         *string                       `json:"description,omitempty"`
-	Status              *string                       `json:"status,omitempty"`
-	BoundAgentID        *string                       `json:"boundAgentId,omitempty"`
-	BoundLifetime       *string                       `json:"boundLifetime,omitempty"`
-	AuthMode            *string                       `json:"auth,omitempty"`
-	AllowProjectAgents  *bool                         `json:"allowProjectAgents,omitempty"`
-	SignatureMode       *string                       `json:"signatureMode,omitempty"`
-	MaxBodyBytes        *int                          `json:"maxBodyBytes,omitempty"`
-	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
-	ReplayWindowSeconds *int                          `json:"replayWindowSeconds,omitempty"`
+	Description         *string                           `json:"description,omitempty"`
+	Status              *string                           `json:"status,omitempty"`
+	BoundAgentID        *string                           `json:"boundAgentId,omitempty"`
+	BoundLifetime       *string                           `json:"boundLifetime,omitempty"`
+	AuthMode            *string                           `json:"auth,omitempty"`
+	AllowProjectAgents  *bool                             `json:"allowProjectAgents,omitempty"`
+	SignatureMode       *string                           `json:"signatureMode,omitempty"`
+	RoutingHints        *WebhookEndpointRoutingHintsPatch `json:"routingHints,omitempty"`
+	MaxBodyBytes        *int                              `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec     `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds *int                              `json:"replayWindowSeconds,omitempty"`
 }
 
 // handleWebhookEndpoints routes requests under
@@ -315,13 +326,36 @@ func validateWebhookEndpointSignatureMode(raw string) (string, error) {
 	if sigMode == "" {
 		return store.WebhookSignatureModeScionV1, nil
 	}
-	// P4b extends this switch with github_v1 and stripe_v1.
 	switch sigMode {
-	case store.WebhookSignatureModeScionV1:
+	case store.WebhookSignatureModeScionV1,
+		store.WebhookSignatureModeGitHubV1,
+		store.WebhookSignatureModeStripeV1:
 		return sigMode, nil
 	default:
-		return "", fmt.Errorf("unsupported signatureMode %q (supported: %s)", sigMode, store.WebhookSignatureModeScionV1)
+		return "", fmt.Errorf("unsupported signatureMode %q (supported: %s, %s, %s)",
+			sigMode,
+			store.WebhookSignatureModeScionV1,
+			store.WebhookSignatureModeGitHubV1,
+			store.WebhookSignatureModeStripeV1)
 	}
+}
+
+func normalizeAndValidateWebhookRoutingHints(h *store.WebhookRoutingHints) (*store.WebhookRoutingHints, error) {
+	if h == nil {
+		return nil, nil
+	}
+	norm := &store.WebhookRoutingHints{
+		TypePath:    strings.TrimSpace(h.TypePath),
+		SubjectPath: strings.TrimSpace(h.SubjectPath),
+		DedupPath:   strings.TrimSpace(h.DedupPath),
+	}
+	if err := trigger.ValidateRoutingHints(norm); err != nil {
+		return nil, err
+	}
+	if norm.IsEmpty() {
+		return nil, nil
+	}
+	return norm, nil
 }
 
 func validateWebhookEndpointMaxBodyBytes(v int) (int, error) {
@@ -423,6 +457,11 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ValidationError(w, err.Error(), nil)
 		return
 	}
+	routingHints, err := normalizeAndValidateWebhookRoutingHints(req.RoutingHints)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 	maxBodyBytes, err := validateWebhookEndpointMaxBodyBytes(req.MaxBodyBytes)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
@@ -480,6 +519,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ReplayWindowSeconds: replayWindow,
 		ConfigVersion:       1,
 		SignatureMode:       sigMode,
+		RoutingHints:        routingHints,
 		SecretVersion:       secretVersion,
 		Status:              store.WebhookEndpointStatusActive,
 		BoundAgentID:        boundAgentID,
@@ -849,6 +889,25 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		updated.SignatureMode = sigMode
 		mask.SignatureMode = true
 	}
+	if req.RoutingHints != nil {
+		// Pre-validate any explicitly provided non-empty pointers before WithTx;
+		// the authoritative merge against current.RoutingHints runs inside WithTx.
+		probe := &store.WebhookRoutingHints{}
+		if req.RoutingHints.TypePath != nil {
+			probe.TypePath = strings.TrimSpace(*req.RoutingHints.TypePath)
+		}
+		if req.RoutingHints.SubjectPath != nil {
+			probe.SubjectPath = strings.TrimSpace(*req.RoutingHints.SubjectPath)
+		}
+		if req.RoutingHints.DedupPath != nil {
+			probe.DedupPath = strings.TrimSpace(*req.RoutingHints.DedupPath)
+		}
+		if err := trigger.ValidateRoutingHints(probe); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		mask.RoutingHints = true
+	}
 	if req.MaxBodyBytes != nil {
 		maxBody, err := validateWebhookEndpointMaxBodyBytes(*req.MaxBodyBytes)
 		if err != nil {
@@ -901,7 +960,7 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 
 	if !mask.Description && !mask.Status && !mask.Binding &&
 		!mask.AuthMode && !mask.AllowProjectAgents && !mask.SignatureMode &&
-		!mask.MaxBodyBytes && !mask.RatePerSecond && !mask.RateBurst &&
+		!mask.RoutingHints && !mask.MaxBodyBytes && !mask.RatePerSecond && !mask.RateBurst &&
 		!mask.ReplayWindowSeconds {
 		writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, *ep))
 		return
@@ -955,6 +1014,26 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 		if mask.SignatureMode {
 			next.SignatureMode = updated.SignatureMode
+		}
+		if mask.RoutingHints {
+			var merged store.WebhookRoutingHints
+			if current.RoutingHints != nil {
+				merged = *current.RoutingHints
+			}
+			if req.RoutingHints.TypePath != nil {
+				merged.TypePath = strings.TrimSpace(*req.RoutingHints.TypePath)
+			}
+			if req.RoutingHints.SubjectPath != nil {
+				merged.SubjectPath = strings.TrimSpace(*req.RoutingHints.SubjectPath)
+			}
+			if req.RoutingHints.DedupPath != nil {
+				merged.DedupPath = strings.TrimSpace(*req.RoutingHints.DedupPath)
+			}
+			if merged.IsEmpty() {
+				next.RoutingHints = nil
+			} else {
+				next.RoutingHints = &merged
+			}
 		}
 		if mask.MaxBodyBytes {
 			next.MaxBodyBytes = updated.MaxBodyBytes

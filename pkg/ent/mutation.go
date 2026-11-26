@@ -149252,6 +149252,7 @@ type WebhookEndpointMutation struct {
 	config_version           *int
 	addconfig_version        *int
 	signature_mode           *string
+	routing_hints            *string
 	status                   *string
 	bound_agent_id           *uuid.UUID
 	bound_lifetime           *string
@@ -150193,6 +150194,42 @@ func (m *WebhookEndpointMutation) ResetSignatureMode() {
 	m.signature_mode = nil
 }
 
+// SetRoutingHints sets the "routing_hints" field.
+func (m *WebhookEndpointMutation) SetRoutingHints(s string) {
+	m.routing_hints = &s
+}
+
+// RoutingHints returns the value of the "routing_hints" field in the mutation.
+func (m *WebhookEndpointMutation) RoutingHints() (r string, exists bool) {
+	v := m.routing_hints
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRoutingHints returns the old "routing_hints" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldRoutingHints(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRoutingHints is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRoutingHints requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRoutingHints: %w", err)
+	}
+	return oldValue.RoutingHints, nil
+}
+
+// ResetRoutingHints resets all changes to the "routing_hints" field.
+func (m *WebhookEndpointMutation) ResetRoutingHints() {
+	m.routing_hints = nil
+}
+
 // SetStatus sets the "status" field.
 func (m *WebhookEndpointMutation) SetStatus(s string) {
 	m.status = &s
@@ -150630,7 +150667,7 @@ func (m *WebhookEndpointMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *WebhookEndpointMutation) Fields() []string {
-	fields := make([]string, 0, 27)
+	fields := make([]string, 0, 28)
 	if m.fixture_root_id != nil {
 		fields = append(fields, webhookendpoint.FieldFixtureRootID)
 	}
@@ -150684,6 +150721,9 @@ func (m *WebhookEndpointMutation) Fields() []string {
 	}
 	if m.signature_mode != nil {
 		fields = append(fields, webhookendpoint.FieldSignatureMode)
+	}
+	if m.routing_hints != nil {
+		fields = append(fields, webhookendpoint.FieldRoutingHints)
 	}
 	if m.status != nil {
 		fields = append(fields, webhookendpoint.FieldStatus)
@@ -150756,6 +150796,8 @@ func (m *WebhookEndpointMutation) Field(name string) (ent.Value, bool) {
 		return m.ConfigVersion()
 	case webhookendpoint.FieldSignatureMode:
 		return m.SignatureMode()
+	case webhookendpoint.FieldRoutingHints:
+		return m.RoutingHints()
 	case webhookendpoint.FieldStatus:
 		return m.Status()
 	case webhookendpoint.FieldBoundAgentID:
@@ -150819,6 +150861,8 @@ func (m *WebhookEndpointMutation) OldField(ctx context.Context, name string) (en
 		return m.OldConfigVersion(ctx)
 	case webhookendpoint.FieldSignatureMode:
 		return m.OldSignatureMode(ctx)
+	case webhookendpoint.FieldRoutingHints:
+		return m.OldRoutingHints(ctx)
 	case webhookendpoint.FieldStatus:
 		return m.OldStatus(ctx)
 	case webhookendpoint.FieldBoundAgentID:
@@ -150971,6 +151015,13 @@ func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSignatureMode(v)
+		return nil
+	case webhookendpoint.FieldRoutingHints:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRoutingHints(v)
 		return nil
 	case webhookendpoint.FieldStatus:
 		v, ok := value.(string)
@@ -151281,6 +151332,9 @@ func (m *WebhookEndpointMutation) ResetField(name string) error {
 		return nil
 	case webhookendpoint.FieldSignatureMode:
 		m.ResetSignatureMode()
+		return nil
+	case webhookendpoint.FieldRoutingHints:
+		m.ResetRoutingHints()
 		return nil
 	case webhookendpoint.FieldStatus:
 		m.ResetStatus()

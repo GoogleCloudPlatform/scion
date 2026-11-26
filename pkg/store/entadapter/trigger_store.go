@@ -115,6 +115,32 @@ func cursorAdvancesTimeID(rowTime time.Time, rowID string, cursorTime time.Time,
 // WebhookEndpoint conversions & operations
 // ============================================================================
 
+func marshalWebhookRoutingHints(h *store.WebhookRoutingHints) (string, error) {
+	if h == nil || h.IsEmpty() {
+		return "", nil
+	}
+	b, err := json.Marshal(h)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func unmarshalWebhookRoutingHints(raw string) *store.WebhookRoutingHints {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var h store.WebhookRoutingHints
+	if err := json.Unmarshal([]byte(raw), &h); err != nil {
+		return nil
+	}
+	if h.IsEmpty() {
+		return nil
+	}
+	return &h
+}
+
 func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 	var boundAgentID string
 	if e.BoundAgentID != nil {
@@ -142,6 +168,7 @@ func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 		SecretRotatedAt:     e.SecretRotatedAt,
 		ConfigVersion:       e.ConfigVersion,
 		SignatureMode:       e.SignatureMode,
+		RoutingHints:        unmarshalWebhookRoutingHints(e.RoutingHints),
 		Status:              e.Status,
 		BoundAgentID:        boundAgentID,
 		BoundLifetime:       e.BoundLifetime,
@@ -218,6 +245,11 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		updatedAt = ep.UpdatedAt.UTC().Truncate(time.Microsecond)
 	}
 
+	routingHintsJSON, err := marshalWebhookRoutingHints(ep.RoutingHints)
+	if err != nil {
+		return store.ErrInvalidInput
+	}
+
 	create := s.client.WebhookEndpoint.Create().
 		SetID(uid).
 		SetNillableFixtureRootID(fixtureRoot).
@@ -236,6 +268,7 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		SetSecretVersion(secretVersion).
 		SetConfigVersion(configVersion).
 		SetSignatureMode(sigMode).
+		SetRoutingHints(routingHintsJSON).
 		SetStatus(status).
 		SetBoundLifetime(ep.BoundLifetime).
 		SetReceiveCount(ep.ReceiveCount).
@@ -454,6 +487,13 @@ func (s *TriggerStore) UpdateWebhookEndpoint(ctx context.Context, ep *store.Webh
 	}
 	if fields.SignatureMode {
 		u.SetSignatureMode(ep.SignatureMode)
+	}
+	if fields.RoutingHints {
+		rhJSON, rhErr := marshalWebhookRoutingHints(ep.RoutingHints)
+		if rhErr != nil {
+			return store.ErrInvalidInput
+		}
+		u.SetRoutingHints(rhJSON)
 	}
 	if fields.MaxBodyBytes {
 		u.SetMaxBodyBytes(ep.MaxBodyBytes)

@@ -963,6 +963,10 @@ func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 		return messaging.ExternalVerifiedHMACSHA256Body
 	case store.WebhookSignatureModeScionV1, messaging.ExternalVerifiedScionV1:
 		return messaging.ExternalVerifiedScionV1
+	case store.WebhookSignatureModeGitHubV1, messaging.ExternalVerifiedGitHubV1:
+		return messaging.ExternalVerifiedGitHubV1
+	case store.WebhookSignatureModeStripeV1, messaging.ExternalVerifiedStripeV1:
+		return messaging.ExternalVerifiedStripeV1
 	case store.WebhookAuthModeHubToken, messaging.ExternalVerifiedHubToken:
 		return messaging.ExternalVerifiedHubToken
 	default:
@@ -1135,6 +1139,8 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 		attrs := maps.Clone(ev.Attributes)
 		if verified != messaging.ExternalVerifiedScionV1 &&
 			verified != messaging.ExternalVerifiedHubToken &&
+			verified != messaging.ExternalVerifiedGitHubV1 &&
+			verified != messaging.ExternalVerifiedStripeV1 &&
 			verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
 			// §8.1a: generic webhook modes other than scion_v1 strip header-derived
 			// attributes. Stage 3 GitHub App deliveries (§4.1, §4.3) keep "delivery"

@@ -36,6 +36,10 @@ var (
 	triggerWebhookDescription              string
 	triggerWebhookAuth                     string
 	triggerWebhookAllowProjectAgents       bool
+	triggerWebhookSignatureMode            string
+	triggerWebhookTypePath                 string
+	triggerWebhookSubjectPath              string
+	triggerWebhookDedupPath                string
 	triggerWebhookReplayWindow             int
 	triggerWebhookRate                     int
 	triggerWebhookBurst                    int
@@ -58,6 +62,9 @@ var (
 	triggerWebhookUpdateAuth               string
 	triggerWebhookUpdateAllowProjectAgents bool
 	triggerWebhookUpdateSignatureMode      string
+	triggerWebhookUpdateTypePath           string
+	triggerWebhookUpdateSubjectPath        string
+	triggerWebhookUpdateDedupPath          string
 	triggerWebhookUpdateRate               int
 	triggerWebhookUpdateBurst              int
 	triggerWebhookUpdateMaxBody            string
@@ -99,31 +106,70 @@ Data visibility & payload limits:
     transcript; agent-owned endpoints are isolated so the secret only reaches
     triggers on that agent's own endpoint.
 
-Sender signing contract (scion_v1):
-  Senders sign the newline-delimited canonical string:
-    signed = "v1\n" + t + "\n" + X-Scion-Delivery + "\n" + X-Scion-Event + "\n" + X-Scion-Subject + "\n" + body
-  (use an empty string for any optional X-Scion-* header not sent; t must be
-  within 300 seconds of Hub time) and send:
-    X-Scion-Signature: t=<unix_seconds>,v1=<hex_hmac_sha256>
+Sender signing contracts and examples:
 
-Example (curl + openssl):
-  HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
-  SECRET="<one-time-secret>"
-  TS="$(date +%s)"
-  DELIVERY="$(uuidgen)"
-  EVENT=""
-  SUBJECT="service/api"
-  BODY='{"status":"ok","commit":"abc1234"}'
-  SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
-  curl -fsS -X POST "$HOOK_URL" \
-    -H "Content-Type: application/json" \
-    -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
-    -H "X-Scion-Delivery: ${DELIVERY}" \
-    -H "X-Scion-Subject: ${SUBJECT}" \
-    --data-raw "$BODY"
+  1. scion_v1 (default; replay-protected):
+     Senders sign the newline-delimited canonical string:
+       signed = "v1\n" + t + "\n" + X-Scion-Delivery + "\n" + X-Scion-Event + "\n" + X-Scion-Subject + "\n" + body
+     (use an empty string for any optional X-Scion-* header not sent; t must be
+     within --replay-window seconds of Hub time, default 300s) and send:
+       X-Scion-Signature: t=<unix_seconds>,v1=<hex_hmac_sha256>
+
+     Example (curl + openssl):
+       HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
+       SECRET="<one-time-secret>"
+       TS="$(date +%s)"
+       DELIVERY="$(uuidgen)"
+       EVENT=""
+       SUBJECT="service/api"
+       BODY='{"status":"ok","commit":"abc1234"}'
+       SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       curl -fsS -X POST "$HOOK_URL" \
+         -H "Content-Type: application/json" \
+         -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
+         -H "X-Scion-Delivery: ${DELIVERY}" \
+         -H "X-Scion-Subject: ${SUBJECT}" \
+         --data-raw "$BODY"
+
+  2. github_v1 (GitHub repository webhooks; message triggers only, not replay-protected):
+     GitHub signs only the raw body with HMAC-SHA256 in X-Hub-Signature-256;
+     X-GitHub-Event sets event.type to webhook.<event> and X-GitHub-Delivery
+     provides deduplication. Use --subject-path (e.g. /repository/full_name) to
+     lift a subject from the signed JSON body.
+
+     Example (curl + openssl):
+       HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
+       SECRET="<one-time-secret>"
+       DELIVERY="$(uuidgen)"
+       BODY='{"action":"opened","repository":{"full_name":"org/repo"}}'
+       SIG="$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       curl -fsS -X POST "$HOOK_URL" \
+         -H "Content-Type: application/json" \
+         -H "X-Hub-Signature-256: sha256=${SIG}" \
+         -H "X-GitHub-Event: issues" \
+         -H "X-GitHub-Delivery: ${DELIVERY}" \
+         --data-raw "$BODY"
+
+  3. stripe_v1 (Stripe webhooks; replay-protected):
+     Senders sign "<t>.<body>" with HMAC-SHA256 and send Stripe-Signature.
+     Default routing hints lift event.type from /type, dedup from /id, and
+     subject from /data/object/id (override with --type-path/--dedup-path/--subject-path).
+
+     Example (curl + openssl):
+       HOOK_URL="https://hub.example.com/api/v1/hooks/<endpoint-id>"
+       SECRET="<one-time-secret>"
+       TS="$(date +%s)"
+       BODY='{"id":"evt_123","type":"invoice.payment_succeeded","data":{"object":{"id":"in_456"}}}'
+       SIG="$(printf '%s.%s' "$TS" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+       curl -fsS -X POST "$HOOK_URL" \
+         -H "Content-Type: application/json" \
+         -H "Stripe-Signature: t=${TS},v1=${SIG}" \
+         --data-raw "$BODY"
 
   Note: X-Scion-Event: <name> sets event.type to webhook.<name>; match it with
   scion trigger create --type webhook.<name> (default triggers match webhook.received).
+  X-GitHub-Event (for github_v1) and --type-path (for routing hints) set
+  event.type to webhook.<name> in the same way.
   Do not send an Authorization header to an HMAC endpoint — an invalid credential
   is refused with 401 before the HMAC signature is checked.`,
 	RunE: runTriggerWebhookCreate,
@@ -327,6 +373,13 @@ func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointReques
 	if authMode != "" && authMode != "hmac" && authMode != "hub_token" {
 		return nil, newUsageError("--auth must be hmac or hub_token, got %q", authMode)
 	}
+	sigMode := strings.TrimSpace(triggerWebhookSignatureMode)
+	if sigMode != "" && sigMode != "scion_v1" && sigMode != "github_v1" && sigMode != "stripe_v1" {
+		return nil, newUsageError("--signature-mode must be scion_v1, github_v1, or stripe_v1, got %q", sigMode)
+	}
+	typePath := strings.TrimSpace(triggerWebhookTypePath)
+	subjectPath := strings.TrimSpace(triggerWebhookSubjectPath)
+	dedupPath := strings.TrimSpace(triggerWebhookDedupPath)
 	maxBodyBytes, err := parseTriggerByteSize(triggerWebhookMaxBody)
 	if err != nil {
 		return nil, newUsageError("invalid --max-body: %v", err)
@@ -366,8 +419,16 @@ func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointReques
 		Description:         triggerWebhookDescription,
 		AuthMode:            authMode,
 		AllowProjectAgents:  triggerWebhookAllowProjectAgents,
+		SignatureMode:       sigMode,
 		MaxBodyBytes:        maxBodyBytes,
 		ReplayWindowSeconds: triggerWebhookReplayWindow,
+	}
+	if typePath != "" || subjectPath != "" || dedupPath != "" {
+		req.RoutingHints = &hubclient.WebhookEndpointRoutingHints{
+			TypePath:    typePath,
+			SubjectPath: subjectPath,
+			DedupPath:   dedupPath,
+		}
 	}
 	if triggerWebhookRate > 0 || triggerWebhookBurst > 0 {
 		req.RateLimit = &hubclient.WebhookEndpointRateLimitSpec{
@@ -532,6 +593,17 @@ func printWebhookEndpointDetail(ep *hubclient.WebhookEndpoint) {
 	fmt.Printf("  Status:         %s\n", triggerTerminalText(ep.Status, false))
 	fmt.Printf("  URL:            %s\n", triggerTerminalText(ep.URL, false))
 	fmt.Printf("  Signature Mode: %s\n", triggerTerminalText(ep.SignatureMode, false))
+	if ep.RoutingHints != nil {
+		if ep.RoutingHints.TypePath != "" {
+			fmt.Printf("  Type Path:      %s\n", triggerTerminalText(ep.RoutingHints.TypePath, false))
+		}
+		if ep.RoutingHints.SubjectPath != "" {
+			fmt.Printf("  Subject Path:   %s\n", triggerTerminalText(ep.RoutingHints.SubjectPath, false))
+		}
+		if ep.RoutingHints.DedupPath != "" {
+			fmt.Printf("  Dedup Path:     %s\n", triggerTerminalText(ep.RoutingHints.DedupPath, false))
+		}
+	}
 	fmt.Printf("  Secret Version: %d\n", ep.SecretVersion)
 	if ep.SecretRotatedAt != nil {
 		fmt.Printf("  Secret Rotated: %s\n", clitime.Format(*ep.SecretRotatedAt, clitime.Full))
@@ -664,10 +736,27 @@ func buildUpdateWebhookEndpointRequest(cmd *cobra.Command) (*hubclient.UpdateWeb
 	}
 	if cmd.Flags().Changed("signature-mode") {
 		sigMode := strings.TrimSpace(triggerWebhookUpdateSignatureMode)
-		if sigMode == "" {
-			return nil, newUsageError("--signature-mode cannot be empty")
+		if sigMode != "scion_v1" && sigMode != "github_v1" && sigMode != "stripe_v1" {
+			return nil, newUsageError("--signature-mode must be scion_v1, github_v1, or stripe_v1, got %q", sigMode)
 		}
 		req.SignatureMode = &sigMode
+		changed = true
+	}
+	if cmd.Flags().Changed("type-path") || cmd.Flags().Changed("subject-path") || cmd.Flags().Changed("dedup-path") {
+		rh := &hubclient.WebhookEndpointRoutingHintsPatch{}
+		if cmd.Flags().Changed("type-path") {
+			v := strings.TrimSpace(triggerWebhookUpdateTypePath)
+			rh.TypePath = &v
+		}
+		if cmd.Flags().Changed("subject-path") {
+			v := strings.TrimSpace(triggerWebhookUpdateSubjectPath)
+			rh.SubjectPath = &v
+		}
+		if cmd.Flags().Changed("dedup-path") {
+			v := strings.TrimSpace(triggerWebhookUpdateDedupPath)
+			rh.DedupPath = &v
+		}
+		req.RoutingHints = rh
 		changed = true
 	}
 	if cmd.Flags().Changed("rate") || cmd.Flags().Changed("burst") {
@@ -727,7 +816,7 @@ func buildUpdateWebhookEndpointRequest(cmd *cobra.Command) (*hubclient.UpdateWeb
 		}
 	}
 	if !changed {
-		return nil, newUsageError("specify at least one field to update (--description, --status, --auth, --allow-project-agents, --signature-mode, --rate, --burst, --max-body, --replay-window, --bind, --unbind, --persistent, --agent-lifetime)")
+		return nil, newUsageError("specify at least one field to update (--description, --status, --auth, --allow-project-agents, --signature-mode, --type-path, --subject-path, --dedup-path, --rate, --burst, --max-body, --replay-window, --bind, --unbind, --persistent, --agent-lifetime)")
 	}
 	return req, nil
 }
@@ -836,7 +925,10 @@ func bindTriggerWebhookUpdateFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&triggerWebhookUpdateStatus, "status", "", "Updated endpoint status (active or disabled)")
 	cmd.Flags().StringVar(&triggerWebhookUpdateAuth, "auth", "", "Updated authentication mode (hmac or hub_token)")
 	cmd.Flags().BoolVar(&triggerWebhookUpdateAllowProjectAgents, "allow-project-agents", false, "Allow any agent in the same project to send to this hub_token endpoint (use --allow-project-agents=false to disable)")
-	cmd.Flags().StringVar(&triggerWebhookUpdateSignatureMode, "signature-mode", "", "Updated signature mode (e.g. scion_v1)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateSignatureMode, "signature-mode", "", "Updated signature mode (scion_v1, github_v1, or stripe_v1)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateTypePath, "type-path", "", "Updated RFC 6901 JSON pointer for event type (pass \"\" to clear)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateSubjectPath, "subject-path", "", "Updated RFC 6901 JSON pointer for event subject (pass \"\" to clear)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateDedupPath, "dedup-path", "", "Updated RFC 6901 JSON pointer for delivery dedup key (pass \"\" to clear)")
 	cmd.Flags().IntVar(&triggerWebhookUpdateRate, "rate", 0, "Updated per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
 	cmd.Flags().IntVar(&triggerWebhookUpdateBurst, "burst", 0, "Updated per-endpoint ingress burst limit (0 = hub default 60)")
 	cmd.Flags().StringVar(&triggerWebhookUpdateMaxBody, "max-body", "", "Updated per-endpoint max body size in bytes, KiB, or MiB (e.g. 16384, 64KiB, or 1MiB; max 1MiB)")
@@ -861,6 +953,10 @@ func init() {
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDescription, "description", "", "Optional endpoint description")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAuth, "auth", "", "Authentication mode (hmac or hub_token; default hmac)")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookAllowProjectAgents, "allow-project-agents", false, "Allow any agent in the same project to send to this hub_token endpoint")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookSignatureMode, "signature-mode", "", "HMAC signature verification mode (scion_v1, github_v1, or stripe_v1; default scion_v1)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookTypePath, "type-path", "", "RFC 6901 JSON pointer into verified body for event type (e.g. /type)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookSubjectPath, "subject-path", "", "RFC 6901 JSON pointer into verified body for event subject (e.g. /data/object/id)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDedupPath, "dedup-path", "", "RFC 6901 JSON pointer into verified body for delivery dedup key (e.g. /id)")
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookReplayWindow, "replay-window", 0, "Timestamp replay tolerance in seconds (30-900; default 300)")
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookRate, "rate", 0, "Per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookBurst, "burst", 0, "Per-endpoint ingress burst limit (0 = hub default 60)")

@@ -200,12 +200,13 @@ func TestIngress_MetricsRecordsClosedSetOutcomes(t *testing.T) {
 	ing.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	// 4. Secret unavailable (503).
+	// 4. Secret unavailable (503) for a syntactically valid signed request.
 	ing.InvalidateEndpoint(epID)
 	secretErr = assert.AnError
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epID, strings.NewReader(`{"ok":true}`))
 	req.RemoteAddr = "198.51.100.11:4000"
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(trigger.HeaderSignature, trigger.SignScionV1("any-secret", now.Unix(), "", "", "", []byte(`{"ok":true}`)))
 	rec = httptest.NewRecorder()
 	ing.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)

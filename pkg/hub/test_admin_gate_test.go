@@ -930,8 +930,9 @@ var tiaKeyMaterialSites = map[string]string{
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
-	"trigger/github/seams.go:VerifyWebhookSignature:crypto/hmac.New":                                "exempt: canonical GitHub webhook HMAC-SHA256 verifier (shared with githubapp.VerifyWebhookSignature); signs no hub credential",
+	"trigger/source/hmac.go:VerifyHMACSHA256Hex:crypto/hmac.New":                                    "exempt: canonical prefixed HMAC-SHA256 verifier (shared by githubapp.VerifyWebhookSignature, trigger/github, and trigger github_v1); signs no hub credential",
 	"trigger/signature.go:computeScionV1MAC:crypto/hmac.New":                                        "exempt: computes/verifies inbound webhook scion_v1 HMAC-SHA256 with per-endpoint secret; signs no hub credential",
+	"trigger/verifier_stripe_v1.go:computeStripeV1MAC:crypto/hmac.New":                              "exempt: computes/verifies inbound webhook stripe_v1 HMAC-SHA256 with per-endpoint secret; signs no hub credential",
 }
 
 // Every signing-key source in pkg/hub (all subpackages) is classified:
