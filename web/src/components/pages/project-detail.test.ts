@@ -144,17 +144,25 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
     expect(headerActionsText(element)).toContain('Metrics');
   });
 
-  it('shows Clone with project read and hub create (member)', async () => {
+  it('shows Clone with project update and hub create (owner/admin)', async () => {
     element = await createComponent({
-      projectCaps: { actions: ['read'] },
+      projectCaps: { actions: ['read', 'update'] },
       hubCaps: { actions: ['list', 'create'] },
     });
     expect(hasClone(element)).toBe(true);
   });
 
+  it('hides Clone with only project read and hub create (member)', async () => {
+    element = await createComponent({
+      projectCaps: { actions: ['read'] },
+      hubCaps: { actions: ['list', 'create'] },
+    });
+    expect(hasClone(element)).toBe(false);
+  });
+
   it('hides Clone without hub create (viewer)', async () => {
     element = await createComponent(
-      { projectCaps: { actions: ['read'] }, hubCaps: { actions: ['list'] } },
+      { projectCaps: { actions: ['read', 'update'] }, hubCaps: { actions: ['list'] } },
       'viewer'
     );
     expect(hasClone(element)).toBe(false);
@@ -162,7 +170,7 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
     expect(headerActionsText(element)).toContain('Metrics');
   });
 
-  it('hides Clone without project read even with hub create', async () => {
+  it('hides Clone without project update even with hub create', async () => {
     element = await createComponent({
       projectCaps: { actions: [] },
       hubCaps: { actions: ['create'] },
@@ -171,13 +179,13 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
   });
 
   it('hides Clone when hub caps cannot be loaded (fail-closed)', async () => {
-    element = await createComponent({ projectCaps: { actions: ['read'] } });
+    element = await createComponent({ projectCaps: { actions: ['read', 'update'] } });
     expect(hasClone(element)).toBe(false);
   });
 
   it('admin with hub create gets the Clone / Create Template dropdown', async () => {
     element = await createComponent(
-      { projectCaps: { actions: ['read'] }, hubCaps: { actions: ['create'] } },
+      { projectCaps: { actions: ['read', 'update'] }, hubCaps: { actions: ['create'] } },
       'admin'
     );
     const text = headerActionsText(element);
@@ -187,7 +195,7 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
 
   it('hides Create Template without hub create, regardless of admin role string', async () => {
     element = await createComponent(
-      { projectCaps: { actions: ['read'] }, hubCaps: { actions: [] } },
+      { projectCaps: { actions: ['read', 'update'] }, hubCaps: { actions: [] } },
       'admin'
     );
     const text = headerActionsText(element);

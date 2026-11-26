@@ -505,9 +505,10 @@ func TestFixtureProvenance_CloneAndRegisterStamp(t *testing.T) {
 	require.Equal(t, want, fpProject(t, e.store, fxProject).Fixture)
 	humanProject := fpCreateGitProject(t, e, e.humanTok, "fp-clone-human-src")
 
-	// Each principal needs read access to the source it clones.
-	grantProjectRole(t, e.store, e.human.ID, fxProject, store.ProjectRoleMember)
-	grantProjectRole(t, e.store, e.fx.Identity.ID, humanProject, store.ProjectRoleMember)
+	// Each principal needs update access (project admin) to the source it
+	// clones.
+	grantProjectRole(t, e.store, e.human.ID, fxProject, store.ProjectRoleAdmin)
+	grantProjectRole(t, e.store, e.fx.Identity.ID, humanProject, store.ProjectRoleAdmin)
 
 	humanClone := fpCloneProject(t, e, e.humanTok, fxProject, "fp-clone-by-human")
 	assert.True(t, fpProject(t, e.store, humanClone).Fixture.IsZero(), "a real user's clone of a stamped project is unstamped")

@@ -46,7 +46,7 @@ permissions). Available scopes:
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role. It is not a read/write alias and does not include `project:read` or `project:list` |
 | `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
 | `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in, or mutates, a project's chat threads and groups with `inbox:write`, and your own account must hold `project.chat_post` there (without `inbox:write`, chat `_capabilities` withholds write actions, including `delete_own`, with `reason` set to `token_scope`) |
-| `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
+| `project:clone` | Clone a project, together with `project:update` and `project:create` on a hub token; your user must hold `project.update` on the source project (its owners and admins do) and `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
 | `agent:list` | List agents |
@@ -503,7 +503,7 @@ The same per-request checks apply, with these limits:
   interactive sign-in. Naming an existing project by id also needs `project:update` on it.
   Registering a project with an embedded broker needs an interactive sign-in; a token registers
   brokers with `POST /api/v1/brokers`.
-  Cloning a project also needs `project:read` on the source project and `project:clone`;
+  Cloning a project also needs `project:update` on the source project and `project:clone`;
   selecting `project:clone` needs `project.clone`, which the built-in super-admin role carries.
 - **Roles, role bindings and access constraints.** These admit only a hub token. Creating,
   importing or duplicating a custom role needs `role:create`, updating one `role:update`, and

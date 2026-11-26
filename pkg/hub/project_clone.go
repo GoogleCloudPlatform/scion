@@ -461,8 +461,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 }
 
 // authorizeProjectClone checks, before any source content is read or
-// copied, that the caller can read the source project and create projects
-// at hub scope. The create check is projectCreateDecision, the same
+// copied, that the caller can update the source project and create projects
+// at hub scope. A clone copies the source's Sensitive environment variables,
+// its active pre-start hook, and its templates and harness configs into a
+// project the caller owns, so read access (a viewer or member) is not
+// enough: the caller needs project.update on the source, which its owners
+// and admins and hub admins hold. The create check is projectCreateDecision, the same
 // admission project create and project register apply. A user access token
 // must also carry the project:clone selector, eligible for its boundary; a
 // session needs no project.clone binding. It writes the HTTP error response
@@ -480,16 +484,16 @@ func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWrite
 		return errors.New("non-user identity")
 	}
 
-	// 1. Caller must be able to read the source project.
+	// 1. Caller must be able to update the source project.
 	decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
 		Type:    "project",
 		ID:      src.ID,
 		OwnerID: src.OwnerID,
-	}, ActionRead)
+	}, ActionUpdate)
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Insufficient permission to read source project", nil)
-		return errors.New("forbidden: cannot read source")
+			"Insufficient permission to clone the source project: cloning needs project owner or admin access to it", nil)
+		return errors.New("forbidden: cannot update source")
 	}
 
 	// 2. A token must carry project:clone (see projectCloneTokenDenial).
@@ -514,7 +518,7 @@ func (s *Server) authorizeProjectClone(ctx context.Context, w http.ResponseWrite
 // project.clone and project.clone must be eligible for the token's boundary
 // kind. The check reads only the token's ceiling and boundary; it does not
 // look up a project.clone binding. authorizeProjectClone makes the live
-// checks: project.read on the source and project.create at the hub. Other
+// checks: project.update on the source and project.create at the hub. Other
 // identities return "".
 func projectCloneTokenDenial(identity Identity) string {
 	scoped, ok := identity.(*ScopedUserIdentity)

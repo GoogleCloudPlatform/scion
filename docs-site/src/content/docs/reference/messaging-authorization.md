@@ -625,7 +625,7 @@ POST /api/v1/projects/{pid}/agents/{aid}/action/set_message_mode
 | Super-admin | ALLOWED | |
 | Project owner | ALLOWED | |
 | Lineage owner (user in agent's ancestry) | ALLOWED | |
-| Full-role agent (same project) | ALLOWED | Full role includes `set_message_mode` scope |
+| Full-role agent (same project, ancestor of target) | ALLOWED | Full role includes `set_message_mode` scope; restricted to descendants (peers and self are denied with `403`) |
 | Agent callers (non-full role) | DENIED | Insufficient role |
 | Project admin (non-owner) | DENIED | Admin cannot unseal `none` agents |
 | UATs (any scope) | DENIED | No UAT scope exists for this action |
@@ -689,8 +689,9 @@ For more on the permission model, see the
 This permission is intentionally restricted:
 
 - **Agent scope** (`project:agent:set_message_mode`) is granted to full-role
-  agents only. Full-role agents can change message mode for any agent within
-  the same project. Agents with lesser roles cannot hold this scope.
+  agents only. Full-role agents can change message mode only for their own
+  descendants within the same project (peers and self are denied with `403`).
+  Agents with lesser roles cannot hold this scope.
 - **UAT scope** (`agent:set_message_mode`): a user access token changes message
   mode only with this scope selected, only for an agent inside the token's
   boundary, and only when its holder may change the mode with a session: the

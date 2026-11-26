@@ -524,12 +524,13 @@ func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 }
 
 // TestProjectCloneToken_RequiresSourceReadCloneAndCreate pins that a clone
-// by token needs, each independently: project.read on the source
-// (project:read plus live access to the source project), the project:clone
-// selector, and project.create through the hub collection admission
-// (project:create on a hub boundary). Only a super-admin can mint
-// project:clone. A session needs project.read on the source and
-// project.create, and no project.clone binding.
+// by token needs, each independently: project.update on the source
+// (project:update plus live owner or admin access to the source project: a
+// clone copies its Sensitive variables and active pre-start hook, so read
+// access is not enough), the project:clone selector, and project.create
+// through the hub collection admission (project:create on a hub boundary).
+// Only a super-admin can mint project:clone. A session needs project.update
+// on the source and project.create, and no project.clone binding.
 func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	f := newPCTFixture(t, "pct-clone")
 	src := projectOpsProject(t, f.s, "pct-clone-src")
@@ -546,14 +547,14 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	pctRequireMintRefused(t, pctMintErr(f.srv, f.holder, projectBoundary(src), "project:clone"), "project:clone on a project boundary")
 
 	t.Run("admitted with all three selectors", func(t *testing.T) {
-		key := projectOpsMint(t, f.srv, super, hubBoundary(), "project:read", "project:clone", "project:create", "agent:read")
+		key := projectOpsMint(t, f.srv, super, hubBoundary(), "project:read", "project:update", "project:clone", "project:create", "agent:read")
 		rec := clone(key, "pct clone ok")
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 		pctAssertCreated(t, f.s, api.Slugify("pct clone ok"), super)
 	})
 
 	t.Run("each selector is required", func(t *testing.T) {
-		// The checks run in order: source read, the clone selector, then
+		// The checks run in order: source update, the clone selector, then
 		// project creation. Each case is refused by the check for its
 		// missing selector, named in the response.
 		for _, tc := range []struct {
@@ -561,9 +562,9 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 			scopes  []string
 			refusal string
 		}{
-			{"project:read", []string{"project:clone", "project:create", "agent:read"}, "read source project"},
-			{"project:clone", []string{"project:read", "project:create", "agent:read"}, "clone projects"},
-			{"project:create", []string{"project:read", "project:clone", "agent:read"}, "create projects"},
+			{"project:update", []string{"project:read", "project:clone", "project:create", "agent:read"}, "clone the source project"},
+			{"project:clone", []string{"project:read", "project:update", "project:create", "agent:read"}, "clone projects"},
+			{"project:create", []string{"project:read", "project:update", "project:clone", "agent:read"}, "create projects"},
 		} {
 			key := projectOpsMint(t, f.srv, super, hubBoundary(), tc.scopes...)
 			name := "pct clone no " + tc.missing
@@ -573,21 +574,30 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 		}
 	})
 
-	t.Run("source read needs live access to the source project", func(t *testing.T) {
+	t.Run("source update needs live admin access to the source project", func(t *testing.T) {
 		// Only a super-admin can mint project:clone, and a super-admin
-		// reads every project, so this case uses a token identity with a
-		// stored ceiling: the holder is a hub member with a role on src and
-		// none on other.
+		// updates every project, so this case uses token identities with a
+		// stored ceiling: f.holder is a hub member with the member role on
+		// src and none on other; tokenAdmin is a hub member with the admin
+		// role on src (owners and admins hold project.update).
 		other := projectOpsProject(t, f.s, "pct-clone-other")
-		u, err := f.s.GetUser(context.Background(), f.holder)
-		require.NoError(t, err)
-		token := NewScopedUserIdentityWithBoundary(authUser(u), hubBoundary(), nil, "pct-clone-cred",
-			permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read", "project.clone", "project.create", "agent.read"}})
+		ceiling := permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read", "project.update", "project.clone", "project.create", "agent.read"}}
+		tokenFor := func(userID string) Identity {
+			u, err := f.s.GetUser(context.Background(), userID)
+			require.NoError(t, err)
+			return NewScopedUserIdentityWithBoundary(authUser(u), hubBoundary(), nil, "pct-clone-cred-"+userID, ceiling)
+		}
+		token := tokenFor(f.holder)
 		rec := requestAsIdentity(t, f.srv, token, http.MethodPost, "/api/v1/projects/"+other+"/clone", CloneProjectRequest{Name: "pct clone other"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone other"), "token without a role on the source")
-		assert.Contains(t, rec.Body.String(), "read source project")
+		assert.Contains(t, rec.Body.String(), "clone the source project")
 		rec = requestAsIdentity(t, f.srv, token, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone member"})
-		require.Equal(t, http.StatusCreated, rec.Code, "the same token on a source it can read: %s", rec.Body.String())
+		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone member"), "token whose user only has the member role on the source")
+		assert.Contains(t, rec.Body.String(), "clone the source project")
+		tokenAdmin := projectOpsUser(t, f.s, "pct-clone-token-admin", false)
+		projectOpsGrant(t, f.s, tokenAdmin, src, store.ProjectRoleAdmin)
+		rec = requestAsIdentity(t, f.srv, tokenFor(tokenAdmin), http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone admin"})
+		require.Equal(t, http.StatusCreated, rec.Code, "the same ceiling for a user administering the source: %s", rec.Body.String())
 	})
 
 	t.Run("refused on a project boundary", func(t *testing.T) {
@@ -596,10 +606,10 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 		key := projectOpsMint(t, f.srv, super, projectBoundary(src), "project:read", "agent:read")
 		pctAssertRefused(t, f.s, clone(key, "pct clone ptok"), api.Slugify("pct clone ptok"), "project token")
 		// A stored project-boundary row on the source carrying all three
-		// selectors reads the source and carries project:clone, and is
+		// selectors updates the source and carries project:clone, and is
 		// refused by its boundary at the project creation check, a
 		// hub-level request.
-		stored := uatpInsertLegacyToken(t, f.s, super, src, []string{"project:read", "project:clone", "project:create", "agent:read"})
+		stored := uatpInsertLegacyToken(t, f.s, super, src, []string{"project:read", "project:update", "project:clone", "project:create", "agent:read"})
 		rec := clone(stored, "pct clone stored")
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone stored"), "stored project-boundary row")
 		assert.Contains(t, rec.Body.String(), "create projects")
@@ -607,23 +617,31 @@ func TestProjectCloneToken_RequiresSourceReadCloneAndCreate(t *testing.T) {
 	})
 
 	t.Run("refused when the token does not cover the owner role", func(t *testing.T) {
-		key := projectOpsMint(t, f.srv, super, hubBoundary(), "project:read", "project:clone", "project:create")
+		key := projectOpsMint(t, f.srv, super, hubBoundary(), "project:read", "project:update", "project:clone", "project:create")
 		rec := clone(key, "pct clone partial")
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone partial"), "token without agent:read")
 		assert.Contains(t, rec.Body.String(), ownerGrantDenyText)
 	})
 
-	t.Run("sessions need source read and project.create only", func(t *testing.T) {
-		rec := pctSession(t, f.srv, f.s, f.holder, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone session"})
-		require.Equal(t, http.StatusCreated, rec.Code, "hub member session with a source role: %s", rec.Body.String())
-		pctAssertCreated(t, f.s, api.Slugify("pct clone session"), f.holder)
+	t.Run("sessions need source update and project.create only", func(t *testing.T) {
+		admin := projectOpsUser(t, f.s, "pct-clone-session-admin", false)
+		projectOpsGrant(t, f.s, admin, src, store.ProjectRoleAdmin)
+		rec := pctSession(t, f.srv, f.s, admin, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone session"})
+		require.Equal(t, http.StatusCreated, rec.Code, "hub member session administering the source: %s", rec.Body.String())
+		pctAssertCreated(t, f.s, api.Slugify("pct clone session"), admin)
+		reader := projectOpsUser(t, f.s, "pct-clone-reader", false)
+		projectOpsGrant(t, f.s, reader, src, store.ProjectRoleMember)
+		rec = pctSession(t, f.srv, f.s, reader, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone reader"})
+		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone reader"), "session with only the member role on the source")
+		assert.Contains(t, rec.Body.String(), "clone the source project")
 		stranger := projectOpsUser(t, f.s, "pct-clone-stranger", false)
 		rec = pctSession(t, f.srv, f.s, stranger, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone stranger"})
-		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone stranger"), "session without source read")
+		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone stranger"), "session without source access")
 		plain := newPlainUser(t, f.s, "pct-clone-plain")
-		projectOpsGrant(t, f.s, plain.ID, src, store.ProjectRoleMember)
+		projectOpsGrant(t, f.s, plain.ID, src, store.ProjectRoleAdmin)
 		rec = pctSession(t, f.srv, f.s, plain.ID, http.MethodPost, clonePath, CloneProjectRequest{Name: "pct clone plain"})
 		pctAssertRefused(t, f.s, rec, api.Slugify("pct clone plain"), "session without project.create")
+		assert.Contains(t, rec.Body.String(), "create projects")
 	})
 }
 

@@ -64,7 +64,7 @@
 - [project.list](#projectlist) — List projects within the caller's authorized scope. A user access token needs project:list on either boundary: a project token lists only its boundary project
 - [project.update](#projectupdate) — Update project settings and metadata
 - [project.register](#projectregister) — Register a project from an external source. Register checks project.create as a collection-level create at the hub scope; a token needs project:create on a hub boundary. An existing project named by id or matched by slug needs project.update on it. The embedded-broker form (a broker in the request body) is session-only (CREDENTIAL_MANAGEMENT): a token or any other non-session credential is refused before any lookup or write
-- [project.clone](#projectclone) — Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
+- [project.clone](#projectclone) — Clone a project into a new project owned by the caller. The caller needs project.update on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
 - [schedule.event.list](#scheduleeventlist) — List scheduled events or recurring schedules in a project
 - [schedule.event.read](#scheduleeventread) — Read a scheduled event, a recurring schedule or a schedule's run history
 - [schedule.event.create](#scheduleeventcreate) — Create a scheduled event or recurring schedule of any event type. A user access token needs scheduled_event:create and passes the event type's target checks
@@ -2885,7 +2885,7 @@
 
 **Domain:** project
 
-**Description:** Clone a project into a new project owned by the caller. The caller needs project.read on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
+**Description:** Clone a project into a new project owned by the caller. The caller needs project.update on the source and project.create as a collection-level create at the hub scope; a token also needs the project:clone selector
 
 ### Entry Points
 
