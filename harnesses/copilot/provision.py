@@ -409,7 +409,11 @@ def _resolve_protocol(env: dict[str, str] | None) -> str:
     return _DEFAULT_OTEL_PROTOCOL
 
 
-def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
+def _build_telemetry_env(
+    env: dict[str, str] | None,
+    *,
+    loopback_only: bool = False,
+) -> dict[str, str]:
     """Build env vars that direct Copilot CLI's native OTel emitter to sciontool.
 
     This always targets the local receiver -- see _resolve_endpoint.
@@ -431,7 +435,7 @@ def _build_telemetry_env(env: dict[str, str] | None) -> dict[str, str]:
         "OTEL_EXPORTER_OTLP_ENDPOINT": _resolve_endpoint(env),
         "OTEL_EXPORTER_OTLP_PROTOCOL": _resolve_protocol(env),
         "OTEL_METRICS_EXPORTER": "otlp",
-        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_LOGS_EXPORTER": "none" if loopback_only else "otlp",
         "OTEL_METRIC_EXPORT_INTERVAL": "30000",
         "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "delta",
     }
@@ -822,15 +826,12 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         extra = {"config_file_written": True}
 
     # --- Telemetry: inject native OTel env vars when enabled ----------------
-    telemetry_payload = ctx.telemetry
-    telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
-    env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
-    if not isinstance(env_overlay, dict):
-        env_overlay = None
+    tel = scion_harness.resolve_native_telemetry(ctx)
+    env_overlay = tel.source_env or None
 
-    telemetry_enabled = _telemetry_enabled(telemetry if isinstance(telemetry, dict) else None)
+    telemetry_enabled = tel.enabled
     if telemetry_enabled:
-        otel_env = _build_telemetry_env(env_overlay)
+        otel_env = _build_telemetry_env(env_overlay, loopback_only=tel.loopback_only)
         env.update(otel_env)
         ctx.info(f"telemetry: injected {len(otel_env)} OTel env var(s)")
     # SCION_NATIVE_TELEMETRY_POLICY lets the env guard (hooks/envoverlay.go)

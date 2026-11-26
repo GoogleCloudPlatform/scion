@@ -17,6 +17,7 @@ package commands
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestProbeAndConfigureUsageIngest_Negative(t *testing.T) {
@@ -372,4 +378,159 @@ func TestBuildHubUsageSinkConfig_PrefersLaunchIDOverProbeRunID(t *testing.T) {
 			t.Errorf("cfg.RunID = %q, want %q", cfg.RunID, "run-from-probe")
 		}
 	})
+}
+
+// TestDefaultConfig_HubCapabilityEnablesLoopbackNativeUsageEndToEnd verifies
+// ptone/scion#9492 end-to-end from a truly default telemetry configuration
+// (no SCION_TELEMETRY_* or cloud env vars set): telemetry.New() creates the
+// pipeline, the positive Hub capability probe wires the Hub usage sink and sets
+// SCION_USAGE_HUB_INGEST=1, Pipeline.Start() starts the loopback receiver with
+// cloud export off, ActivateUsageSource("native") (as triggered by the
+// provisioner's env overlay) enables native derivation, and a Claude OTLP
+// api_request log sent over loopback reaches the httptest Hub usage ingest
+// endpoint with exact token counts.
+func TestDefaultConfig_HubCapabilityEnablesLoopbackNativeUsageEndToEnd(t *testing.T) {
+	t.Cleanup(telemetry.SetTelemetryTestSandboxed())
+	t.Setenv("HOME", t.TempDir())
+	for _, k := range []string{
+		telemetry.EnvEnabled,
+		telemetry.EnvCloudEnabled,
+		telemetry.EnvEndpoint,
+		telemetry.EnvCloudProvider,
+		telemetry.EnvProjectID,
+		telemetry.EnvGCPCredentials,
+		telemetry.EnvUsageHubIngest,
+		"SCION_USAGE_SOURCE",
+	} {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(telemetry.EnvGRPCPort, "0")
+	t.Setenv(telemetry.EnvHTTPPort, "0")
+	t.Setenv("SCION_AGENT_ID", "agent-e2e")
+	t.Setenv("SCION_HARNESS", "claude")
+
+	var mu sync.Mutex
+	var gotEvents []telemetrycontract.UsageEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agents/agent-e2e/usage/capabilities":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageCapabilitiesResponse{
+				UsageIngestEnabled:   true,
+				MaxBatchEvents:       500,
+				MaxBatchBytes:        262144,
+				HeartbeatIntervalSec: 60,
+				DrainIntervalSec:     1,
+				HubID:                "hub-e2e",
+				RunID:                "run-e2e-1",
+			})
+		case "/api/v1/agents/agent-e2e/usage/events":
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			gotEvents = append(gotEvents, req.Events...)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// Truly default telemetry.New() — no explicit SCION_TELEMETRY_ENABLED or cloud config.
+	p := telemetry.New()
+	if p == nil {
+		t.Fatal("telemetry.New() = nil on default config, want pipeline")
+	}
+	if !p.Config().Enabled || p.Config().CloudEnabledExplicit {
+		t.Fatalf("precondition: want default Enabled=true CloudEnabledExplicit=false, got %+v", p.Config())
+	}
+	p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+
+	newClient := func() *hub.Client {
+		return hub.NewClientWithConfig(srv.URL, "tok-e2e", "agent-e2e")
+	}
+	ctx := context.Background()
+	if ok := probeAndConfigureUsageIngest(ctx, p, newClient); !ok {
+		t.Fatal("probeAndConfigureUsageIngest = false, want true")
+	}
+	if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "1" {
+		t.Fatalf("%s = %q, want \"1\"", telemetry.EnvUsageHubIngest, got)
+	}
+
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Pipeline.Start: %v", err)
+	}
+	if p.Config().CloudEnabled {
+		t.Error("CloudEnabled = true after default Start without cloud config, want false")
+	}
+	if got := p.DeliveryState(); got != "running" {
+		t.Errorf("DeliveryState() = %q, want running", got)
+	}
+
+	// Simulate pre-start provisioner selecting SCION_USAGE_SOURCE=native in its env overlay.
+	outcome, err := p.ActivateUsageSource(ctx, telemetry.UsageSourceNative)
+	if err != nil {
+		t.Fatalf("ActivateUsageSource: %v", err)
+	}
+	if outcome != telemetry.UsageActivated {
+		t.Fatalf("ActivateUsageSource = %q, want %q", outcome, telemetry.UsageActivated)
+	}
+
+	// Emit a native Claude OTLP api_request log to sciontool's loopback gRPC receiver.
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("127.0.0.1:%d", p.Config().GRPCPort),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	logClient := collogspb.NewLogsServiceClient(conn)
+	if _, err := logClient.Export(ctx, &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{
+				Scope: &commonpb.InstrumentationScope{Name: "com.anthropic.claude_code.events"},
+				LogRecords: []*logspb.LogRecord{{
+					TimeUnixNano: uint64(time.Now().UTC().UnixNano()),
+					Attributes: []*commonpb.KeyValue{
+						{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
+						{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-haiku-4-5-20251001"}}},
+						{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 120}}},
+						{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 30}}},
+						{Key: "cache_read_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 500}}},
+					},
+				}},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("OTLP gRPC Export: %v", err)
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		t.Fatalf("Pipeline.Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotEvents) != 1 {
+		t.Fatalf("Hub received %d usage events, want 1", len(gotEvents))
+	}
+	ev := gotEvents[0]
+	if ev.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("ev.Model = %q, want claude-haiku-4-5-20251001", ev.Model)
+	}
+	if ev.Input == nil || *ev.Input != 120 || ev.Output == nil || *ev.Output != 30 || ev.CacheRead == nil || *ev.CacheRead != 500 {
+		t.Errorf("unexpected token counts: input=%v output=%v cache_read=%v", ev.Input, ev.Output, ev.CacheRead)
+	}
 }

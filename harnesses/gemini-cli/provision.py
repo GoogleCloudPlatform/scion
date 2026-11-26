@@ -267,10 +267,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
     env = _build_env_overlay(resolved.method, resolved.env_key, ctx.warn)
-    telemetry = ctx.telemetry
-    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
-    enabled = isinstance(config, dict) and config.get("enabled", True)
-    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    tel = scion_harness.resolve_native_telemetry(ctx)
+    enabled = tel.enabled
+    source_env = tel.source_env
     port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")

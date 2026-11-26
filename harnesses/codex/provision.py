@@ -171,7 +171,11 @@ def _telemetry_enabled(telemetry: Any) -> bool:
     return bool(enabled)
 
 
-def _telemetry_output_env(telemetry: dict[str, Any] | None) -> dict[str, str]:
+def _telemetry_output_env(
+    telemetry: dict[str, Any] | None,
+    *,
+    enabled: bool | None = None,
+) -> dict[str, str]:
     """The telemetry-derived entries of outputs/env.json (ptone/scion#2053
     phase 3c). SCION_USAGE_SOURCE is set only when telemetry is enabled:
     codex's usage (gen_ai.api.calls / scion.usage.tokens) is derived by
@@ -179,7 +183,8 @@ def _telemetry_output_env(telemetry: dict[str, Any] | None) -> dict[str, str]:
     log event. This is narrow to usage only (D4): tool, session and turn
     hook telemetry are unaffected, and unset here means no usage is
     published at all (D10)."""
-    enabled = _telemetry_enabled(telemetry)
+    if enabled is None:
+        enabled = _telemetry_enabled(telemetry)
     env = {"SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled"}
     if enabled:
         env["SCION_USAGE_SOURCE"] = "native"
@@ -201,7 +206,12 @@ def _telemetry_provider(telemetry: Any, env: dict[str, str] | None) -> str:
     return staged_provider or configured_provider
 
 
-def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -> str:
+def _build_otel_section(
+    telemetry: dict[str, Any],
+    env: dict[str, str] | None,
+    *,
+    loopback_only: bool = False,
+) -> str:
     endpoint = _resolve_endpoint(telemetry, env)
     environment = _resolve_otel_environment(telemetry, env)
     provider = _telemetry_provider(telemetry, env)
@@ -212,13 +222,18 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
     # codex's raw metric attributes today, so forwarding them just to have
     # them dropped is pointless, and Codex's own usage now reaches the
     # dashboard through the native log-event deriver instead (see
-    # _telemetry_output_env's SCION_USAGE_SOURCE). Logs and traces are
-    # unaffected: this is narrow to metrics, the same as the usage-source
-    # switch is narrow to usage.
+    # _telemetry_output_env's SCION_USAGE_SOURCE). In loopback-only Hub
+    # metering mode, traces and metrics stay off as well so only the usage
+    # log stream is exported to sciontool's loopback receiver.
     metrics_line = (
         'metrics_exporter = "none"'
-        if provider == "gcp"
+        if loopback_only or provider == "gcp"
         else f'metrics_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"'
+    )
+    trace_line = (
+        'trace_exporter = "none"'
+        if loopback_only
+        else f'trace_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"'
     )
 
     lines = [
@@ -227,7 +242,7 @@ def _build_otel_section(telemetry: dict[str, Any], env: dict[str, str] | None) -
         "log_user_prompt = false",
         metrics_line,
         f'exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
-        f'trace_exporter."{exporter_key}".endpoint = "{scion_harness.toml_escape(endpoint)}"',
+        trace_line,
     ]
 
     return "\n".join(lines) + "\n"
@@ -353,6 +368,9 @@ def _reconcile_codex_toml(
     env: dict[str, str] | None,
     reasoning_effort: str | None = None,
     model: str | None = None,
+    *,
+    telemetry_enabled: bool | None = None,
+    loopback_only: bool = False,
 ) -> None:
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
@@ -362,7 +380,9 @@ def _reconcile_codex_toml(
         with open(config_path, "r", encoding="utf-8") as f:
             original = f.read()
 
-    otel_section = (_build_otel_section(telemetry or {}, env) if _telemetry_enabled(telemetry)
+    if telemetry_enabled is None:
+        telemetry_enabled = _telemetry_enabled(telemetry)
+    otel_section = (_build_otel_section(telemetry or {}, env, loopback_only=loopback_only) if telemetry_enabled
                      else '[otel]\nexporter = "none"\nmetrics_exporter = "none"\ntrace_exporter = "none"\n')
 
     def _with_reconciled_otel(base: str) -> str:
@@ -725,11 +745,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     reasoning_effort = _resolve_reasoning_effort(ctx)
 
-    telemetry_payload = ctx.telemetry
-    telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
-    env_overlay = telemetry_payload.get("env") if isinstance(telemetry_payload, dict) else None
-    if not isinstance(env_overlay, dict):
-        env_overlay = None
+    tel = scion_harness.resolve_native_telemetry(ctx)
+    telemetry = tel.config
+    env_overlay = tel.source_env or None
 
     # SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
     # and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before
@@ -744,17 +762,19 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     _reconcile_codex_toml(
         ctx,
-        telemetry if isinstance(telemetry, dict) else None,
+        telemetry,
         env_overlay,
         reasoning_effort=reasoning_effort,
         model=model or None,
+        telemetry_enabled=tel.enabled,
+        loopback_only=tel.loopback_only,
     )
 
     extra: dict[str, Any] | None = None
     if resolved.method == "auth-file":
         extra = {"auth_file_written": True}
     env: dict[str, str] = {"CODEX_HOME": os.path.join(ctx.home, ".codex")}
-    env.update(_telemetry_output_env(telemetry))
+    env.update(_telemetry_output_env(telemetry, enabled=tel.enabled))
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     scion_harness.apply_mcp_translated(

@@ -794,6 +794,9 @@ func RunInit(args []string, opts InitRunOptions) int {
 		probeAndConfigureUsageIngest(telemetryCtx, pipeline, hub.NewClient)
 		if err := pipeline.Start(telemetryCtx); err != nil {
 			log.Error("Failed to start telemetry: %v", err)
+			// Reset SCION_USAGE_HUB_INGEST so harness provisioners do not point
+			// native OTel exporters at a loopback receiver that failed to start.
+			_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
 			telemetryCancel()
 			// Continue anyway - telemetry failure shouldn't block agent
 		} else {

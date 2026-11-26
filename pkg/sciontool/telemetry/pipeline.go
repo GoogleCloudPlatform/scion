@@ -54,26 +54,27 @@ type Pipeline struct {
 	// ports the receiver actually bound (they differ when config asks for
 	// port 0). Set by Start once the receiver listens; config itself is
 	// never mutated so a restart re-binds against the configured ports.
-	loopbackConfig   atomic.Pointer[Config]
-	receiver         *Receiver
-	exporter         *CloudExporter
-	policy           *receiverPolicy
-	mu               sync.Mutex
-	running          bool
-	shutdownErr      error        // preserves a completed one-shot SDK shutdown failure
-	deliveryState    atomic.Value // string; readable without taking the lifecycle mutex
-	diagnosticMu     sync.Mutex
-	diagnosticLast   time.Time
-	diagnosticCancel context.CancelFunc
-	diagnosticDone   chan struct{}
-	healthCancel     context.CancelFunc
-	exportErrors     otelmetric.Int64Counter
-	meter            otelmetric.Meter
-	retryConfig      RetryConfig
-	usageDeriver     atomic.Pointer[UsageDeriver]
-	analytics        analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
-	health           healthEmitter  // telemetry.health events (health.go)
-	sessionUsageSink atomic.Pointer[SessionUsageSink]
+	loopbackConfig    atomic.Pointer[Config]
+	receiver          *Receiver
+	exporter          *CloudExporter
+	policy            *receiverPolicy
+	mu                sync.Mutex
+	running           bool
+	cloudInitDegraded bool         // true when cloud export failed/misconfigured at Start while Hub usage sink kept the pipeline running
+	shutdownErr       error        // preserves a completed one-shot SDK shutdown failure
+	deliveryState     atomic.Value // string; readable without taking the lifecycle mutex
+	diagnosticMu      sync.Mutex
+	diagnosticLast    time.Time
+	diagnosticCancel  context.CancelFunc
+	diagnosticDone    chan struct{}
+	healthCancel      context.CancelFunc
+	exportErrors      otelmetric.Int64Counter
+	meter             otelmetric.Meter
+	retryConfig       RetryConfig
+	usageDeriver      atomic.Pointer[UsageDeriver]
+	analytics         analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
+	health            healthEmitter  // telemetry.health events (health.go)
+	sessionUsageSink  atomic.Pointer[SessionUsageSink]
 	// apiOutcomeObserver receives model API outcomes (api_outcome.go).
 	apiOutcomeObserver atomic.Pointer[APIOutcomeObserver]
 	intakeMu           sync.Mutex
@@ -279,6 +280,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		)
 	}
 
+	cloudInitDegraded := false
 	// Create cloud exporter if configured
 	if p.config.IsCloudConfigured() {
 		// Log credential source for diagnostics. ADC (Application Default
@@ -298,9 +300,23 @@ func (p *Pipeline) Start(ctx context.Context) error {
 
 		exporter, err := NewCloudExporter(ctx, p.config)
 		if err != nil {
-			p.deliveryState.Store("failed")
-			p.logDeliverySnapshot(true)
-			return fmt.Errorf("failed to create cloud exporter: %w", err)
+			if p.analytics.hubSinkCfg != nil {
+				// Hub usage metering must not depend on the cloud exporter starting:
+				// disable cloud export, surface degraded delivery state in telemetry
+				// health/diagnostics, and continue starting the Hub usage sink,
+				// outbox, and loopback receiver.
+				cloudInitDegraded = true
+				p.config.CloudEnabled = false
+				slog.Error("telemetry cloud exporter failed to start; continuing with Hub usage metering only",
+					"error", err,
+					"provider", p.config.CloudProvider,
+					"delivery_state", "degraded",
+				)
+			} else {
+				p.deliveryState.Store("failed")
+				p.logDeliverySnapshot(true)
+				return fmt.Errorf("failed to create cloud exporter: %w", err)
+			}
 		} else {
 			p.exporter = exporter
 			p.attachGCPAsyncLogErrorHook(exporter.gcpExporter)
@@ -327,14 +343,33 @@ func (p *Pipeline) Start(ctx context.Context) error {
 				"provider", p.config.CloudProvider,
 			)
 		case p.config.CloudEnabled && p.config.CloudEnabledExplicit:
-			// Cloud export was asked for explicitly but has nowhere to go:
-			// a real misconfiguration, so the pipeline refuses to start.
-			p.deliveryState.Store("failed")
-			p.logDeliverySnapshot(true)
-			if p.config.IsGCP() && p.config.ProjectID == "" {
-				slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
+			if p.analytics.hubSinkCfg != nil {
+				// Cloud export was asked for explicitly without a destination,
+				// but Hub usage metering is active: surface the misconfiguration
+				// via degraded delivery state and continue running the Hub sink
+				// and loopback receiver.
+				cloudInitDegraded = true
+				p.config.CloudEnabled = false
+				if p.config.IsGCP() && p.config.ProjectID == "" {
+					slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID; continuing with Hub usage metering only",
+						"env_checked", EnvProjectID,
+						"delivery_state", "degraded",
+					)
+				} else {
+					slog.Warn("telemetry cloud export explicitly enabled without a configured destination; continuing with Hub usage metering only",
+						"delivery_state", "degraded",
+					)
+				}
+			} else {
+				// Cloud export was asked for explicitly but has nowhere to go:
+				// a real misconfiguration, so the pipeline refuses to start.
+				p.deliveryState.Store("failed")
+				p.logDeliverySnapshot(true)
+				if p.config.IsGCP() && p.config.ProjectID == "" {
+					slog.Warn("telemetry cloud export disabled — GCP mode requires a project ID", "env_checked", EnvProjectID)
+				}
+				return fmt.Errorf("cloud telemetry enabled but destination is not configured")
 			}
-			return fmt.Errorf("cloud telemetry enabled but destination is not configured")
 		case p.config.CloudEnabled:
 			// Cloud export is on only by default and no destination is
 			// configured: leave it off and run the local pipeline, the
@@ -409,8 +444,13 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.usageDeriver.Store(deriver)
 	}
 
+	p.cloudInitDegraded = cloudInitDegraded
 	p.running = true
-	p.deliveryState.Store("running")
+	if cloudInitDegraded {
+		p.deliveryState.Store("degraded")
+	} else {
+		p.deliveryState.Store("running")
+	}
 	p.startDiagnosticSnapshots(ctx)
 	p.startHealth(ctx, gcpExporter, p.analytics.handles())
 	// After startHealth, so the first snapshot shows this run's analytics.
@@ -606,7 +646,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	}
 
 	p.running = false
-	if len(errs) > 0 || p.shutdownErr != nil {
+	if len(errs) > 0 || p.shutdownErr != nil || p.cloudInitDegraded {
 		p.deliveryState.Store("degraded")
 	} else {
 		if p.config != nil && !p.config.CloudEnabled {

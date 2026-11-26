@@ -307,6 +307,184 @@ class TelemetryProvisionTest(unittest.TestCase):
         self.assertEqual(copilot_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
         self.assertEqual(grok_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
 
+    def _invoke_with_env(self, harness, telemetry_config, port,
+                         port_env_key='SCION_OTEL_GRPC_PORT',
+                         extra_staged_env=None, process_env=None,
+                         well_known_gcp_credentials=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            bundle = home / '.scion' / 'harness'
+            (bundle / 'inputs').mkdir(parents=True)
+            if well_known_gcp_credentials:
+                (home / '.scion' / 'telemetry-gcp-credentials.json').write_text('{}')
+            spec = importlib.util.spec_from_file_location('provision', ROOT / harness / 'provision.py')
+            module = importlib.util.module_from_spec(spec)
+            env_patch = {'HOME': tmp}
+            if process_env:
+                env_patch.update(process_env)
+            with patch.dict(os.environ, env_patch, clear=False):
+                # Ensure ambient SCION_USAGE_HUB_INGEST / SCION_TELEMETRY_ENABLED
+                # don't leak from the outer environment unless explicitly set.
+                for key in ('SCION_USAGE_HUB_INGEST', 'SCION_TELEMETRY_ENABLED'):
+                    if not process_env or key not in process_env:
+                        os.environ.pop(key, None)
+                spec.loader.exec_module(module)
+                ctx = module.scion_harness.ProvisionContext(harness, {
+                    'harness_bundle_dir': str(bundle),
+                    'harness_config': {'no_auth': {'behavior': 'allow'}},
+                    'agent_workspace': str(home / 'workspace'),
+                })
+                source_env = {port_env_key: str(port)}
+                source_env.update(extra_staged_env or {})
+                (bundle / 'inputs' / 'telemetry.json').write_text(json.dumps({
+                    'telemetry': telemetry_config,
+                    'env': source_env,
+                }))
+                ctx.select_auth = lambda _: module.scion_harness.ResolvedAuth('none')
+                module.provision(ctx)
+                env = json.loads((bundle / 'outputs' / 'env.json').read_text())
+                config = None
+                if harness == 'gemini-cli':
+                    config = json.loads((home / '.gemini' / 'settings.json').read_text())['telemetry']
+                if harness == 'codex':
+                    config = (home / '.codex' / 'config.toml').read_text()
+                return env, config
+
+    def test_hub_usage_ingest_auto_enables_loopback_only_on_default_config(self):
+        # ptone/scion#9492: with default/unset telemetry (telemetry: null) and
+        # SCION_USAGE_HUB_INGEST=1, covered harnesses auto-enable loopback-only
+        # native OTel to sciontool with no cloud provider required and no prompt
+        # logging enabled.
+        claude_env, _ = self._invoke_with_env(
+            'claude', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(claude_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(claude_env['CLAUDE_CODE_ENABLE_TELEMETRY'], '1')
+        self.assertEqual(claude_env['OTEL_LOGS_EXPORTER'], 'otlp')
+        self.assertEqual(claude_env['OTEL_METRICS_EXPORTER'], 'none')
+        self.assertEqual(claude_env['OTEL_TRACES_EXPORTER'], 'none')
+        self.assertEqual(claude_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
+        self.assertEqual(claude_env['SCION_USAGE_SOURCE'], 'native')
+        self.assertNotIn('OTEL_LOG_USER_PROMPTS', claude_env)
+
+        codex_env, codex_cfg = self._invoke_with_env(
+            'codex', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(codex_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(codex_env['SCION_USAGE_SOURCE'], 'native')
+        self.assertIn('exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', codex_cfg)
+        self.assertIn('metrics_exporter = "none"', codex_cfg)
+        self.assertIn('trace_exporter = "none"', codex_cfg)
+        self.assertIn('log_user_prompt = false', codex_cfg)
+
+        gemini_env, gemini_cfg = self._invoke_with_env(
+            'gemini-cli', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(gemini_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(gemini_env['GEMINI_TELEMETRY_ENABLED'], 'true')
+        self.assertEqual(gemini_env['GEMINI_TELEMETRY_TARGET'], 'local')
+        self.assertEqual(gemini_env['GEMINI_TELEMETRY_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
+        self.assertEqual(gemini_env['GEMINI_TELEMETRY_LOG_PROMPTS'], 'false')
+        self.assertEqual(gemini_env['GEMINI_TELEMETRY_TRACES_ENABLED'], 'false')
+        self.assertEqual(gemini_env['SCION_USAGE_SOURCE'], 'native')
+        self.assertTrue(gemini_cfg['enabled'])
+        self.assertFalse(gemini_cfg['logPrompts'])
+        self.assertFalse(gemini_cfg['traces'])
+
+        copilot_env, _ = self._invoke_with_env(
+            'copilot', None, 14318, port_env_key='SCION_OTEL_HTTP_PORT',
+            process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(copilot_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(copilot_env['COPILOT_OTEL_ENABLED'], 'true')
+        self.assertEqual(copilot_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
+        self.assertEqual(copilot_env['OTEL_METRICS_EXPORTER'], 'otlp')
+        self.assertEqual(copilot_env['OTEL_LOGS_EXPORTER'], 'none')
+        self.assertEqual(copilot_env['SCION_USAGE_SOURCE'], 'native')
+
+        # grok-build has no native usage rule in sciontool yet; stays off.
+        grok_env, _ = self._invoke_with_env(
+            'grok-build', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(grok_env['SCION_NATIVE_TELEMETRY_POLICY'], 'disabled')
+        self.assertNotIn('GROK_TELEMETRY_ENABLED', grok_env)
+
+    def test_hub_usage_ingest_off_preserves_default_disabled(self):
+        for flag in (None, '0'):
+            proc_env = {'SCION_USAGE_HUB_INGEST': flag} if flag is not None else {}
+            for harness, port_key, port in (
+                ('claude', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('codex', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('gemini-cli', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('copilot', 'SCION_OTEL_HTTP_PORT', 4318),
+            ):
+                with self.subTest(flag=flag, harness=harness):
+                    env, _ = self._invoke_with_env(
+                        harness, None, port, port_env_key=port_key, process_env=proc_env,
+                    )
+                    self.assertEqual(env['SCION_NATIVE_TELEMETRY_POLICY'], 'disabled')
+                    self.assertNotIn('SCION_USAGE_SOURCE', env)
+
+    def test_claude_enabled_true_without_cloud_provider_uses_loopback_when_hub_active(self):
+        # Gate 1 scenario: telemetry.enabled=true with no cloud provider must
+        # succeed in loopback-only mode when SCION_USAGE_HUB_INGEST=1, and keep
+        # failing when SCION_USAGE_HUB_INGEST=0.
+        env, _ = self._invoke_with_env(
+            'claude', {'enabled': True}, 14317,
+            process_env={'SCION_USAGE_HUB_INGEST': '1'},
+        )
+        self.assertEqual(env['CLAUDE_CODE_ENABLE_TELEMETRY'], '1')
+        self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
+        self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'none')
+        self.assertEqual(env['SCION_USAGE_SOURCE'], 'native')
+
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke_with_env(
+                'claude', {'enabled': True}, 14317,
+                process_env={'SCION_USAGE_HUB_INGEST': '0'},
+            )
+
+        # Safety invariant preserved: if GCP credentials are present without an
+        # explicit cloud provider, Claude still aborts even with Hub ingest on.
+        with self.assertRaisesRegex(Exception, 'explicit telemetry cloud provider required'):
+            self._invoke_with_env(
+                'claude', {'enabled': True}, 14317,
+                process_env={'SCION_USAGE_HUB_INGEST': '1'},
+                well_known_gcp_credentials=True,
+            )
+
+    def test_explicit_telemetry_disabled_overrides_hub_usage_ingest(self):
+        # Explicit telemetry.enabled=false at any layer (telemetry.json, staged
+        # env, or process env) must override SCION_USAGE_HUB_INGEST=1.
+        cases = (
+            ('telemetry_json_false', {'enabled': False}, {}, {'SCION_USAGE_HUB_INGEST': '1'}),
+            ('staged_env_false', None, {'SCION_TELEMETRY_ENABLED': 'false'}, {'SCION_USAGE_HUB_INGEST': '1'}),
+            ('process_env_false', None, {}, {'SCION_USAGE_HUB_INGEST': '1', 'SCION_TELEMETRY_ENABLED': 'false'}),
+        )
+        for name, tel_cfg, staged_env, proc_env in cases:
+            for harness, port_key, port in (
+                ('claude', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('codex', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('gemini-cli', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('copilot', 'SCION_OTEL_HTTP_PORT', 4318),
+            ):
+                with self.subTest(case=name, harness=harness):
+                    env, cfg = self._invoke_with_env(
+                        harness, tel_cfg, port, port_env_key=port_key,
+                        extra_staged_env=staged_env, process_env=proc_env,
+                    )
+                    self.assertEqual(env['SCION_NATIVE_TELEMETRY_POLICY'], 'disabled')
+                    self.assertNotIn('SCION_USAGE_SOURCE', env)
+                    if harness == 'claude':
+                        self.assertEqual(env['CLAUDE_CODE_ENABLE_TELEMETRY'], '0')
+                    elif harness == 'codex':
+                        self.assertIn('exporter = "none"', cfg)
+                    elif harness == 'gemini-cli':
+                        self.assertEqual(env['GEMINI_TELEMETRY_ENABLED'], 'false')
+                        self.assertFalse(cfg['enabled'])
+                    elif harness == 'copilot':
+                        self.assertNotIn('COPILOT_OTEL_ENABLED', env)
+
 
 if __name__ == '__main__':
     unittest.main()
