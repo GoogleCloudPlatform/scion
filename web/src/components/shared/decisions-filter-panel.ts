@@ -40,6 +40,7 @@ import {
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionActorView,
   type ProjectDecisionConversationView,
+  type ProjectDecisionProjectRef,
 } from '../../client/project-decisions.js';
 import {
   getViewSchema,
@@ -182,7 +183,13 @@ export class ScionDecisionsFilterPanel extends LitElement {
   /** Optional extra tags (reserved for `scope="profile"` in P5). */
   @property({ attribute: false }) extraTags: DecisionsFilterTag[] = [];
 
-  /** When true on the project page, renders `<scion-filter-box view="decisions">` (ptone/scion#8985). */
+  /** Selected project ID (`scope="profile"`). */
+  @property({ type: String }) project = '';
+
+  /** Project facet options from the Hub response (`scope="profile"`). */
+  @property({ attribute: false }) projects: ProjectDecisionProjectRef[] = [];
+
+  /** When true, renders `<scion-filter-box>` with the decisions or profile-decisions schema (ptone/scion#8985). */
   @property({ type: Boolean }) queryDialect = false;
 
   @state() private open = false;
@@ -480,7 +487,11 @@ export class ScionDecisionsFilterPanel extends LitElement {
   }
 
   private get useFilterBox(): boolean {
-    return this.queryDialect && this.scope === 'project' && this.supportsSearch;
+    return this.queryDialect && this.supportsSearch;
+  }
+
+  private get dialectView(): 'decisions' | 'profile-decisions' {
+    return this.scope === 'profile' ? 'profile-decisions' : 'decisions';
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
@@ -488,6 +499,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     if (
       changed.has('q') ||
       changed.has('searchText') ||
+      changed.has('project') ||
       changed.has('conversation') ||
       changed.has('agent') ||
       changed.has('user') ||
@@ -496,6 +508,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     ) {
       if (
         changed.has('q') ||
+        changed.has('project') ||
         changed.has('conversation') ||
         changed.has('agent') ||
         changed.has('user') ||
@@ -508,11 +521,12 @@ export class ScionDecisionsFilterPanel extends LitElement {
       }
     } else if (
       !this.dialectUserEdited &&
-      (changed.has('agents') ||
+      (changed.has('projects') ||
+        changed.has('agents') ||
         changed.has('conversations') ||
         changed.has('answerers') ||
         changed.has('currentUserId')) &&
-      (this.conversation || this.agent || this.user || this.provenance)
+      (this.project || this.conversation || this.agent || this.user || this.provenance)
     ) {
       this.dialectDraft = this.synthesizeDialectQuery();
     }
@@ -522,14 +536,19 @@ export class ScionDecisionsFilterPanel extends LitElement {
   }
 
   /**
-   * Formats legacy separate URL params (`agent=`, `conversation=`, `user=`,
-   * `provenance=`) as filter query terms alongside `q` so old links show their
-   * equivalent terms in `<scion-filter-box>` on load (design-8985 §3.4).
-   * When an agent name or conversation label collides or is absent from the
-   * facet list, emits the exact ID/key so a later commit does not widen the filter.
+   * Formats legacy separate URL params (`project=`, `agent=`, `conversation=`,
+   * `user=`, `provenance=`) as filter query terms alongside `q` so old links
+   * show their equivalent terms in `<scion-filter-box>` on load (design-8985 §3.4).
+   * When a project slug, agent name, or conversation label collides or is absent
+   * from the facet list, emits the exact ID/key so a later commit does not widen
+   * the filter.
    */
   private synthesizeDialectQuery(): string {
     const parts: string[] = [];
+    if (this.scope === 'profile' && this.project) {
+      const proj = this.projects.find((p) => p.id === this.project || p.slug === this.project);
+      parts.push(`project:${formatValue(proj?.slug || this.project)}`);
+    }
     if (this.conversation) {
       const conv = this.conversations.find((c) => c.key === this.conversation);
       const uniqueLabel =
@@ -616,6 +635,11 @@ export class ScionDecisionsFilterPanel extends LitElement {
         }
         return out;
       }
+      case 'project':
+        return this.projects.map((p) => ({
+          value: p.slug || p.id,
+          ...(p.name && p.name !== p.slug ? { help: p.name } : {}),
+        }));
       default:
         return [];
     }
@@ -623,7 +647,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
   private madeOnlyPendingWarning(raw: string): string {
     if (this.tab !== 'pending' || !raw.trim()) return '';
-    const schema = getViewSchema('decisions');
+    const schema = getViewSchema(this.dialectView);
     if (!schema) return '';
     const parsed = parse(raw, knownKeysFor(schema));
     if (parsed.error || !parsed.query || parsed.query.mode !== 'structured') return '';
@@ -676,8 +700,9 @@ export class ScionDecisionsFilterPanel extends LitElement {
     return html`
       <div class="fpanel dialect-panel" data-decisions-filter-panel data-scope=${this.scope}>
         <div class="dialect-row">
+          <slot name="dialect-leading"></slot>
           <scion-filter-box
-            view="decisions"
+            view=${this.dialectView}
             placeholder="Filter decisions… (try agent:deploy by:me)"
             .value=${this.dialectDraft}
             .valueSuggestions=${this.provideDialectValueSuggestions}

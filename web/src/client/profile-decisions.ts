@@ -25,6 +25,7 @@ import {
   DecisionsApiError,
   MAX_DECISIONS_CONVERSATION_BYTES,
   isValidDecisionCalendarDate,
+  normalizeDecisionsFilterQuery,
   normalizeDecisionsSearchQuery,
   parseDecisionsUrlState,
   type DecisionsUrlState,
@@ -145,6 +146,7 @@ export interface ProfileDecisionsQueryOptions {
   cursor?: string | undefined;
   limit?: number | undefined;
   filter?: ProfileMadeDecisionsFilter | undefined;
+  dialect?: boolean | undefined;
 }
 
 /** Validated URL filter/tab/sort state for `/profile/decisions` (D10, R6). */
@@ -246,10 +248,11 @@ function cleanSortValue(
  * dropping invalid values and filling per-tab default `sort` (D10, R6).
  */
 export function parseProfileDecisionsUrlState(
-  search: string | URLSearchParams
+  search: string | URLSearchParams,
+  opts?: { dialect?: boolean }
 ): ProfileDecisionsUrlState {
   const params = typeof search === 'string' ? new URLSearchParams(search) : search;
-  const base = parseDecisionsUrlState(params);
+  const base = parseDecisionsUrlState(params, opts);
   const sort = cleanSortValue(params.get('sort'), base.tab);
   const project = cleanProfileProjectValue(params.get('project'));
 
@@ -265,7 +268,10 @@ export function parseProfileDecisionsUrlState(
  * string (without leading `?`) suitable for `replaceSearch()` (D10, R6).
  * Both `tab` and `sort` (including defaults) are always included in the URL.
  */
-export function buildProfileDecisionsUrlSearch(state: Partial<ProfileDecisionsUrlState>): string {
+export function buildProfileDecisionsUrlSearch(
+  state: Partial<ProfileDecisionsUrlState>,
+  opts?: { dialect?: boolean }
+): string {
   const params = new URLSearchParams();
   const tab: 'pending' | 'made' = state.tab === 'made' ? 'made' : 'pending';
   const sort = cleanSortValue(state.sort, tab);
@@ -276,7 +282,9 @@ export function buildProfileDecisionsUrlSearch(state: Partial<ProfileDecisionsUr
   const project = cleanProfileProjectValue(state.project);
   if (project) params.set('project', project);
 
-  const q = normalizeDecisionsSearchQuery(state.q);
+  const q = opts?.dialect
+    ? normalizeDecisionsFilterQuery(state.q)
+    : normalizeDecisionsSearchQuery(state.q);
   if (q) params.set('q', q);
 
   const conversation = cleanConversationValue(state.conversation);
@@ -322,7 +330,9 @@ export function buildProfileDecisionsQuery(options: ProfileDecisionsQueryOptions
   }
 
   if (options.filter) {
-    const q = normalizeDecisionsSearchQuery(options.filter.q);
+    const q = options.dialect
+      ? normalizeDecisionsFilterQuery(options.filter.q)
+      : normalizeDecisionsSearchQuery(options.filter.q);
     if (q) params.set('q', q);
 
     const conversation = cleanConversationValue(options.filter.conversation);
@@ -461,6 +471,7 @@ export async function fetchProfilePendingDecisions(
     limit?: number | undefined;
     filter?: ProfileSharedDecisionsFilter | undefined;
     signal?: AbortSignal | undefined;
+    dialect?: boolean | undefined;
   } = {}
 ): Promise<ProfilePendingDecisionsResponse> {
   return recordPageFetchForProbe(async () => {
@@ -470,6 +481,7 @@ export async function fetchProfilePendingDecisions(
       cursor: options.cursor,
       limit: options.limit,
       filter: options.filter,
+      dialect: options.dialect,
     });
     const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
     if (!res.ok) {
@@ -508,6 +520,7 @@ export async function fetchProfileMadeDecisions(
     cursor?: string | undefined;
     limit?: number | undefined;
     signal?: AbortSignal | undefined;
+    dialect?: boolean | undefined;
   } = {}
 ): Promise<ProfileMadeDecisionsResponse> {
   return recordPageFetchForProbe(async () => {
@@ -518,6 +531,7 @@ export async function fetchProfileMadeDecisions(
       cursor: options.cursor,
       limit: options.limit,
       filter,
+      dialect: options.dialect,
     });
     const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
     if (!res.ok) {

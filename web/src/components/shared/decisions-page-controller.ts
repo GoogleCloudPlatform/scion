@@ -62,6 +62,7 @@ import {
   parse as parseFilterQuery,
   validate as validateFilterQuery,
 } from '../../shared/filter-query/index.js';
+import { formatValue } from '../../shared/filter-query/canonical.js';
 
 /**
  * Validates a `q=` query string against the `decisions` filter query schema
@@ -305,7 +306,7 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnFlagsChanged = (): void => {
     const next = decisionsEnabled();
-    const nextDialect = this.adapter.scope === 'project' && filtersQueryDialectEnabled();
+    const nextDialect = filtersQueryDialectEnabled();
     const dialectChanged = nextDialect !== this.queryDialect;
     this.queryDialect = nextDialect;
     if (next === this.enabled) {
@@ -390,7 +391,7 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   hostConnected(): void {
-    this.queryDialect = this.adapter.scope === 'project' && filtersQueryDialectEnabled();
+    this.queryDialect = filtersQueryDialectEnabled();
     this.extractRouteState();
     this.enabled = decisionsEnabled();
     this.notify();
@@ -468,7 +469,7 @@ export class DecisionsPageController implements ReactiveController {
 
     const search = query ? `?${query}` : window.location.search;
     if (this.adapter.scope === 'profile') {
-      const parsed = parseProfileDecisionsUrlState(search);
+      const parsed = parseProfileDecisionsUrlState(search, { dialect: this.queryDialect });
       this.activeTab = parsed.tab;
       this.sort = parsed.sort;
       if (parsed.tab === 'pending') {
@@ -518,18 +519,21 @@ export class DecisionsPageController implements ReactiveController {
   syncUrlState(): void {
     const nextQs =
       this.adapter.scope === 'profile'
-        ? buildProfileDecisionsUrlSearch({
-            tab: this.activeTab,
-            sort: this.sort,
-            project: this.filterProject,
-            q: this.filterQ,
-            conversation: this.filterConversation,
-            agent: this.filterAgent,
-            user: this.filterUser,
-            provenance: this.filterProvenance,
-            from: this.filterFrom,
-            to: this.filterTo,
-          })
+        ? buildProfileDecisionsUrlSearch(
+            {
+              tab: this.activeTab,
+              sort: this.sort,
+              project: this.filterProject,
+              q: this.filterQ,
+              conversation: this.filterConversation,
+              agent: this.filterAgent,
+              user: this.filterUser,
+              provenance: this.filterProvenance,
+              from: this.filterFrom,
+              to: this.filterTo,
+            },
+            { dialect: this.queryDialect }
+          )
         : buildDecisionsUrlSearch(
             {
               tab: this.activeTab,
@@ -724,7 +728,9 @@ export class DecisionsPageController implements ReactiveController {
     if (!this.queryDialect) return false;
     const raw = normalizeDecisionsFilterQuery(this.filterQ, isValidDecisionsDialectQuery);
     if (!raw) return false;
-    const schema = getViewSchema('decisions');
+    const schema = getViewSchema(
+      this.adapter.scope === 'profile' ? 'profile-decisions' : 'decisions'
+    );
     if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
     const parsed = parseFilterQuery(raw, knownKeysFor(schema));
     if (parsed.error || !parsed.query) return false;
@@ -1430,12 +1436,28 @@ export class DecisionsPageController implements ReactiveController {
     const cleaned = cleanProfileProjectValue(projectId);
     if (!cleaned) return;
     const flushedSearch = this.flushDebouncedSearchIfPending();
-    const projectChanged = cleaned !== this.filterProject;
-    this.filterProject = cleaned;
-    this.sort = 'recent';
-    this.madeSortOverride = null;
-    if (projectChanged || flushedSearch) {
-      this.invalidateInFlightPendingLoad();
+    if (this.queryDialect) {
+      const proj = this.knownProjectsById.get(cleaned);
+      const projTerm = `project:${formatValue(proj?.slug || cleaned)}`;
+      const existing = normalizeDecisionsFilterQuery(this.filterQ);
+      const nextQ = existing ? `${projTerm} ${existing}` : projTerm;
+      const changed = nextQ !== this.filterQ || Boolean(this.filterProject) || flushedSearch;
+      this.filterProject = '';
+      this.filterQ = nextQ;
+      this.searchDraft = nextQ;
+      this.sort = 'recent';
+      this.madeSortOverride = null;
+      if (changed) {
+        this.invalidateInFlightPendingLoad();
+      }
+    } else {
+      const projectChanged = cleaned !== this.filterProject;
+      this.filterProject = cleaned;
+      this.sort = 'recent';
+      this.madeSortOverride = null;
+      if (projectChanged || flushedSearch) {
+        this.invalidateInFlightPendingLoad();
+      }
     }
     this.madeNextCursor = '';
     this.madePagedBeyondFirst = false;
@@ -1525,11 +1547,16 @@ export class DecisionsPageController implements ReactiveController {
     }
     const nextQ = normalizeDecisionsFilterQuery(rawQ, isValidDecisionsDialectQuery);
     const hadLegacy = Boolean(
-      this.filterConversation || this.filterAgent || this.filterUser || this.filterProvenance
+      this.filterProject ||
+      this.filterConversation ||
+      this.filterAgent ||
+      this.filterUser ||
+      this.filterProvenance
     );
     const changed = nextQ !== this.filterQ || hadLegacy;
     this.filterQ = nextQ;
     this.searchDraft = nextQ;
+    this.filterProject = '';
     this.filterConversation = '';
     this.filterAgent = '';
     this.filterUser = '';
