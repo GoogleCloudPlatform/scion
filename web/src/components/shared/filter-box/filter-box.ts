@@ -306,6 +306,9 @@ export class ScionFilterBox extends LitElement {
     }
 
     .listbox-footer {
+      position: sticky;
+      bottom: 0;
+      background: var(--scion-surface-raised, var(--scion-surface));
       font-size: 0.72rem;
       color: var(--scion-text-muted);
       padding: 0.3rem 0.5rem 0.15rem;
