@@ -66,15 +66,9 @@ type harnessConfigIndex struct {
 }
 
 // deriveHarnessConfigIndex derives a harness-config's index from the bytes
-// of its config.yaml (with no agent-plugins.yaml sidecar).
+// of its config.yaml (with no sidecars).
 func deriveHarnessConfigIndex(configYAML []byte, present bool, name string) harnessConfigIndex {
-	return deriveHarnessConfigIndexWithSidecar(configYAML, present, nil, false, name)
-}
-
-// deriveHarnessConfigIndexWithSidecar derives a harness-config's index from
-// its config.yaml and optional agent-plugins.yaml sidecar.
-func deriveHarnessConfigIndexWithSidecar(configYAML []byte, present bool, sidecarYAML []byte, sidecarPresent bool, name string) harnessConfigIndex {
-	return deriveHarnessConfigIndexWithSidecars(configYAML, present, sidecarYAML, sidecarPresent, nil, false, name)
+	return deriveHarnessConfigIndexWithSidecars(configYAML, present, nil, false, nil, false, name)
 }
 
 // deriveHarnessConfigIndexWithSidecars derives a harness-config's index from
