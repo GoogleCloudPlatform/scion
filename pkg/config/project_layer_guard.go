@@ -84,6 +84,7 @@ var projectTierRoots = map[string]rootClass{
 	"use_host_credentials":                    classDeny,
 	"auto_inject_gcloud_adc":                  classDeny,
 	"managed_agents":                          classDeny,
+	"agent_policy":                            classDeny,
 	"quotas":                                  classDeny,
 	"agent_secrets":                           classDeny,
 	"broker_policy":                           classDeny,
