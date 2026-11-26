@@ -83,7 +83,7 @@ func seedReviewArtifact(t *testing.T, st Store, scope, ownerKind, ownerRef, titl
 	return id
 }
 
-func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
+func TestReviewOnLatestSummary_BasicOrderingAndCapping(t *testing.T) {
 	f := newFixture(t, false)
 	f.host.allow(userU, "project-2", PermissionRead, PermissionCreate)
 
@@ -102,9 +102,9 @@ func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
 	ctx := context.WithValue(context.Background(), principalKey{}, userU)
 
 	// previews=2 returns count=3, capped=false, newest 2 items.
-	count, capped, items, err := f.svc.ReviewPendingSummary(ctx, 2)
+	count, capped, items, err := f.svc.ReviewOnLatestSummary(ctx, 2)
 	if err != nil {
-		t.Fatalf("ReviewPendingSummary: %v", err)
+		t.Fatalf("ReviewOnLatestSummary: %v", err)
 	}
 	if count != 3 || capped {
 		t.Fatalf("got count=%d capped=%v, want 3 false", count, capped)
@@ -114,9 +114,9 @@ func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
 	}
 
 	// previews=0 returns count=3 and empty items.
-	count, capped, items, err = f.svc.ReviewPendingSummary(ctx, 0)
+	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 0)
 	if err != nil {
-		t.Fatalf("ReviewPendingSummary(0): %v", err)
+		t.Fatalf("ReviewOnLatestSummary(0): %v", err)
 	}
 	if count != 3 || capped || len(items) != 0 {
 		t.Fatalf("got count=%d capped=%v len=%d, want 3 false 0", count, capped, len(items))
@@ -124,9 +124,9 @@ func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
 
 	// Token boundary denial on project-2 excludes idMid.
 	f.host.deny(userU, "project-2", PermissionRead)
-	count, capped, items, err = f.svc.ReviewPendingSummary(ctx, 5)
+	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 5)
 	if err != nil {
-		t.Fatalf("ReviewPendingSummary(denied): %v", err)
+		t.Fatalf("ReviewOnLatestSummary(denied): %v", err)
 	}
 	if count != 2 || capped {
 		t.Fatalf("got count=%d capped=%v, want 2 false", count, capped)
@@ -139,23 +139,23 @@ func TestReviewPendingSummary_BasicOrderingAndCapping(t *testing.T) {
 	origScan := maxListScan
 	maxListScan = 2
 	t.Cleanup(func() { maxListScan = origScan })
-	count, capped, items, err = f.svc.ReviewPendingSummary(ctx, 5)
+	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 5)
 	if err != nil {
-		t.Fatalf("ReviewPendingSummary(capped): %v", err)
+		t.Fatalf("ReviewOnLatestSummary(capped): %v", err)
 	}
 	if !capped {
 		t.Fatalf("expected capped=true when scan budget reached; got count=%d items=%d", count, len(items))
 	}
 
 	// Unauthenticated caller returns empty without error.
-	count, capped, items, err = f.svc.ReviewPendingSummary(context.Background(), 3)
+	count, capped, items, err = f.svc.ReviewOnLatestSummary(context.Background(), 3)
 	if err != nil || count != 0 || capped || len(items) != 0 {
 		t.Fatalf("unauthenticated: got (%d, %v, %d, %v)", count, capped, len(items), err)
 	}
 
 	// Unconfigured backend returns ErrBackendUnavailable.
 	unconfigured := NewService(f.host)
-	if _, _, _, err := unconfigured.ReviewPendingSummary(ctx, 3); err != ErrBackendUnavailable {
+	if _, _, _, err := unconfigured.ReviewOnLatestSummary(ctx, 3); err != ErrBackendUnavailable {
 		t.Fatalf("expected ErrBackendUnavailable, got %v", err)
 	}
 }

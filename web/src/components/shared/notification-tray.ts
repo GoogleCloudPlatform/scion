@@ -796,7 +796,7 @@ export class ScionNotificationTray extends LitElement {
     }
 
     const decisions = isDecisionsWaiting(n);
-    const title = decisions ? 'Decisions waiting' : this.browserNotificationTitle(n.status);
+    const title = decisions ? 'Decisions waiting' : this.browserNotificationTitle(n);
     // The Notification API shows the body as plain text.
     const excerpt = reviewSummaryExcerpt(n);
     new window.Notification(title, {
@@ -806,8 +806,8 @@ export class ScionNotificationTray extends LitElement {
     });
   }
 
-  private browserNotificationTitle(status: string): string {
-    switch (status) {
+  private browserNotificationTitle(n: Notification): string {
+    switch (n.status) {
       case 'COMPLETED':
         return 'Agent Completed';
       case 'WAITING_FOR_INPUT':
@@ -816,8 +816,10 @@ export class ScionNotificationTray extends LitElement {
         return 'Agent Limits Exceeded';
       case SCHEDULE_BLOCKED_STATUS:
         return 'Schedule Blocked';
-      case ARTIFACT_REVIEW_SUBMITTED_STATUS:
-        return 'Review Submitted';
+      case ARTIFACT_REVIEW_SUBMITTED_STATUS: {
+        const match = /\(v(\d+)\b/.exec(n.message);
+        return match ? `Review submitted on v${match[1]}` : 'Review submitted';
+      }
       case ARTIFACT_REVIEW_REQUESTED_STATUS:
         return 'Review requested';
       case ARTIFACT_REVIEW_DISMISSED_STATUS:

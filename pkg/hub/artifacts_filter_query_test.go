@@ -61,7 +61,7 @@ func TestArtifactsList_FilterQueryDialect(t *testing.T) {
 		[]artifacts.Grant{{ID: tid("fq-own-home"), ArtifactID: ownID, SubjectKind: artifacts.SubjectScope,
 			SubjectRef: p1.ID, Permission: artifacts.GrantRead, CreatedAt: now}},
 	))
-	projID := seedListedArtifact(t, st, "is:review literal", p1.ID, artifacts.PrincipalKindAgent, agent1.ID)
+	projID := seedListedArtifact(t, st, "is:reviewed literal", p1.ID, artifacts.PrincipalKindAgent, agent1.ID)
 	sharedID := seedListedArtifact(t, st, "shared-beta", p2.ID, artifacts.PrincipalKindAgent, agent2.ID,
 		principalGrant(artifacts.PrincipalKindUser, user.ID))
 	_ = seedListedArtifact(t, st, "private-beta", p2.ID, artifacts.PrincipalKindUser, other.ID)
@@ -72,7 +72,7 @@ func TestArtifactsList_FilterQueryDialect(t *testing.T) {
 	}
 
 	// Structured queries work end-to-end.
-	assert.Equal(t, sortedIDs(ownID), list(artifactListPath+"&q="+url.QueryEscape("is:review")), "is:review")
+	assert.Equal(t, sortedIDs(ownID), list(artifactListPath+"&q="+url.QueryEscape("is:reviewed")), "is:reviewed")
 	assert.Equal(t, sortedIDs(ownID), list(artifactListPath+"&q="+url.QueryEscape("is:mine")), "is:mine")
 	assert.Equal(t, sortedIDs(sharedID), list(artifactListPath+"&q="+url.QueryEscape("is:shared")), "is:shared")
 	assert.Equal(t, sortedIDs(ownID, projID), list(artifactListPath+"&q="+url.QueryEscape("project:"+p1.Slug)), "authorized project slug")

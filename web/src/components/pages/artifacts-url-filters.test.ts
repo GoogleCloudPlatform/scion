@@ -16,7 +16,7 @@
 
 /**
  * Artifacts list page URL filter hydration and `history.replaceState` sync
- * for Inbox drill-in links (`/artifacts?review_pending=1&owner=me`, design §6.5, AC12).
+ * for Inbox drill-in links (`/artifacts?review_on_latest=1&owner=me`, design §6.5, AC12).
  */
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -86,18 +86,23 @@ describe('artifacts list page URL filter hydration', () => {
       .map((u) => new URL(u, 'http://x').searchParams);
   }
 
-  it('migrates ?review_pending=1&owner=me to ?q=is:mine is:review on mount', async () => {
-    window.history.replaceState(null, '', '/artifacts?review_pending=1&owner=me');
-    const el = await mount();
+  it('migrates ?review_on_latest=1&owner=me and legacy ?review_pending=1&owner=me to ?q=is:mine is:reviewed on mount', async () => {
+    for (const legacyParam of ['review_on_latest', 'review_pending']) {
+      window.history.replaceState(null, '', `/artifacts?${legacyParam}=1&owner=me`);
+      const el = await mount();
 
-    const params = listParams()[0];
-    expect(params.get('q')).toBe('is:mine is:review');
+      const params = listParams().at(-1)!;
+      expect(params.get('q')).toBe('is:mine is:reviewed');
 
-    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
-    expect(box.value).toBe('is:review is:mine');
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review is:mine');
-    expect(new URLSearchParams(window.location.search).has('review_pending')).toBe(false);
-    expect(new URLSearchParams(window.location.search).has('owner')).toBe(false);
+      const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+        value: string;
+      };
+      expect(box.value).toBe('is:reviewed is:mine');
+      expect(new URLSearchParams(window.location.search).get('q')).toBe('is:reviewed is:mine');
+      expect(new URLSearchParams(window.location.search).has(legacyParam)).toBe(false);
+      expect(new URLSearchParams(window.location.search).has('owner')).toBe(false);
+      el.remove();
+    }
   });
 
   it('keeps ?q= in sync via history.replaceState when quick-filter chips change', async () => {
@@ -113,24 +118,24 @@ describe('artifacts list page URL filter hydration', () => {
       return btn;
     };
 
-    chipByText('Review pending').click();
+    chipByText('Review on latest').click();
     await settle(el);
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:reviewed');
     expect(replaceSpy).toHaveBeenCalled();
 
     chipByText('Owned by me').click();
     await settle(el);
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine is:review');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine is:reviewed');
 
     // Enabling "Shared with me" replaces is:mine with is:shared.
     chipByText('Shared with me').click();
     await settle(el);
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:shared is:review');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:shared is:reviewed');
 
     // Clicking active chips toggles them off and clears ?q=.
     chipByText('Shared with me').click();
     await settle(el);
-    chipByText('Review pending').click();
+    chipByText('Review on latest').click();
     await settle(el);
     expect(window.location.search).toBe('');
   });

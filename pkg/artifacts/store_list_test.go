@@ -133,7 +133,7 @@ func TestStoreListCandidates(t *testing.T) {
 		}
 
 		review := q
-		review.ReviewPending = true
+		review.ReviewOnLatest = true
 		if got, want := candidateTitles(t, st, review), []string{"member project"}; !slices.Equal(got, want) {
 			t.Errorf("review pending = %q, want %q", got, want)
 		}

@@ -126,7 +126,7 @@ export const ROWS: Record<string, AgentRowSpec> = {
   },
   'R1B-10': {
     role: 'aowner, powner',
-    title: 'after the review: owner still the agent, Review pending, controls unchanged',
+    title: 'after the review: owner still the agent, Review on latest, controls unchanged',
     needsAgent: true,
   },
   'R1B-11': {

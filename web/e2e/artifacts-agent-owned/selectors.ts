@@ -48,7 +48,7 @@ export const AO_SELECTORS = {
   ownerDeletedBadge: 'scion-page-artifact-detail scion-detail-header sl-badge.owner-deleted',
   /** The struck owner name in the meta (artifact-detail.ts goneOwner). */
   ownerGone: `${AA.headerMeta} .owner-gone`,
-  /** Review pending badge in the header (artifact-detail.ts renderHeader). */
+  /** Review on latest badge in the header (artifact-detail.ts renderHeader). */
   reviewPending: 'scion-page-artifact-detail scion-detail-header sl-badge[variant="warning"]',
   /** Review editor (artifact-detail.ts renderReview). */
   reviewEditor: 'scion-page-artifact-detail scion-code-editor.review-editor .cm-content',

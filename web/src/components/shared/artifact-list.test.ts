@@ -37,7 +37,7 @@ function item(id: string, extra: Partial<ArtifactListItem> = {}): ArtifactListIt
     currentSeq: 2,
     createdAt: '2026-10-05T12:00:00Z',
     updatedAt: '2026-10-05T12:00:00Z',
-    reviewPending: false,
+    reviewOnLatest: false,
     ...extra,
   };
 }
@@ -89,7 +89,7 @@ describe('artifact list', () => {
     const { el, urls } = await mountList({
       'cursor=c1': { artifacts: [item('c')] },
       'mine=1': {
-        artifacts: [item('a', { key: 'k-a' }), item('b', { reviewPending: true })],
+        artifacts: [item('a', { key: 'k-a' }), item('b', { reviewOnLatest: true })],
         nextCursor: 'c1',
       },
     });
@@ -99,7 +99,7 @@ describe('artifact list', () => {
     expect(rows[0].textContent).toContain('k-a');
     expect(rows[0].textContent).toContain('v2');
     expect(rows[0].textContent).toContain('agent-01… (agent)');
-    expect(rows[1].querySelector('sl-badge')!.textContent).toContain('Review pending');
+    expect(rows[1].querySelector('sl-badge')!.textContent).toContain('Review on latest');
     expect(rows[0].querySelector('a.title')!.getAttribute('href')).toBe(
       '/projects/p-1/artifacts/a'
     );
@@ -117,7 +117,7 @@ describe('artifact list', () => {
   it('S1: a row whose owner was deleted has the Owner deleted badge and a struck owner', async () => {
     const { el } = await mountList({
       'mine=1': {
-        artifacts: [item('a', { ownerDeleted: true, reviewPending: true }), item('b')],
+        artifacts: [item('a', { ownerDeleted: true, reviewOnLatest: true }), item('b')],
       },
     });
     const [gone, live] = Array.from(el.shadowRoot!.querySelectorAll('tbody tr'));
@@ -125,8 +125,8 @@ describe('artifact list', () => {
     const badge = gone!.querySelector('sl-badge.owner-deleted')!;
     expect(badge.textContent).toContain('Owner deleted');
     expect(badge.querySelector('sl-icon')!.getAttribute('name')).toBe('person-x');
-    // Beside Review pending, not instead of it.
-    expect(gone!.textContent).toContain('Review pending');
+    // Beside Review on latest, not instead of it.
+    expect(gone!.textContent).toContain('Review on latest');
     // The deleted agent's name cannot be looked up: its short id, struck through.
     // Only the name is struck through; the (agent) tag stays outside (mock S1).
     expect(gone!.querySelector('.owner-gone')!.textContent).toBe('agent-01…');

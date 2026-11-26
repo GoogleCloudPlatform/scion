@@ -117,10 +117,11 @@ type ArtifactResponse struct {
 	// woken, or remains suspended (ptone/scion#8946). Omitted for running
 	// agents and non-agent owners.
 	ReviewDelivery *ReviewDeliveryInfo `json:"reviewDelivery,omitempty"`
-	// ReviewState, on a GET of the artifact or of one of its versions while
-	// hub.artifacts_review_requests or hub.artifacts_review_drafts is enabled,
-	// reports the caller's review request and draft state (ptone/scion#9296).
-	// Omitted while both experiments are off.
+	// ReviewState, on a GET of the artifact or of one of its versions,
+	// reports the artifact's review state for the caller (ptone/scion#9296).
+	// RequestedOfMe is populated only while hub.artifacts_review_requests is on;
+	// MyDraft and DraftsInProgress are populated only while
+	// hub.artifacts_review_drafts is on.
 	ReviewState *ReviewStateInfo `json:"reviewState,omitempty"`
 }
 
@@ -133,7 +134,8 @@ type ReviewDraftSummary struct {
 
 // ReviewStateInfo carries viewer-specific review state on ArtifactResponse.
 type ReviewStateInfo struct {
-	RequestedOfMe    *ReviewRequestInfo  `json:"requestedOfMe"`
+	ReviewOnLatest   bool                `json:"reviewOnLatest"`
+	RequestedOfMe    *ReviewRequestInfo  `json:"requestedOfMe,omitempty"`
 	MyDraft          *ReviewDraftSummary `json:"myDraft,omitempty"`
 	DraftsInProgress int                 `json:"draftsInProgress,omitempty"`
 }

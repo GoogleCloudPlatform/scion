@@ -261,7 +261,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "count": 2,
       "capped": false,
       "countsTowardTotal": true,
-      "href": "/artifacts?review_pending=1&owner=me",
+      "href": "/artifacts?review_on_latest=1&owner=me",
       "breakdown": {"toAddress": 1, "requested": 1},
       "previews": [
         {
@@ -336,7 +336,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · core-api · expires in 2h")
 		assert.Contains(t, out, "Reviews             2   scion notifications")
 		assert.Contains(t, out, "  2 pending reviews")
-		assert.Contains(t, out, "/artifacts?review_pending=1&owner=me")
+		assert.Contains(t, out, "/artifacts?review_on_latest=1&owner=me")
 		assert.Contains(t, out, "• [to address] API Migration Spec · core-api · 1h ago")
 		assert.Contains(t, out, "• [requested] UI Design Doc · web · from alice · 30m ago")
 		assert.Contains(t, out, "Chat               14")
@@ -388,7 +388,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "count": 0,
       "capped": false,
       "countsTowardTotal": true,
-      "href": "/artifacts?review_pending=1&owner=me",
+      "href": "/artifacts?review_on_latest=1&owner=me",
       "previews": []
     },
     "chat": {
@@ -471,7 +471,7 @@ func TestInboxCmd_ChatMentionsAndPreviewsFlags(t *testing.T) {
 				"decisions":       map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/decisions?tab=pending", "previews": []any{}},
 				"waiting":         map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/agents", "previews": []any{}},
 				"pending_secrets": map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/secrets", "previews": []any{}},
-				"reviews":         map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/artifacts?review_pending=1&owner=me", "previews": []any{}},
+				"reviews":         map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/artifacts?review_on_latest=1&owner=me", "previews": []any{}},
 				"chat": map[string]any{
 					"state":             "ok",
 					"count":             5,

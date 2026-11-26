@@ -74,7 +74,7 @@ function makeSummary(
         count: 0,
         capped: false,
         countsTowardTotal: true,
-        href: '/artifacts?review_pending=1&owner=me',
+        href: '/artifacts?review_on_latest=1&owner=me',
         previews: [],
       },
       chat: {

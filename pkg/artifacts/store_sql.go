@@ -1146,7 +1146,7 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	b.WriteString(" AND " + notAttachmentScope("a.scope_kind"))
 	b.WriteString(" AND a.deleted_at IS NULL AND (a.expires_at IS NULL OR a.expires_at > ?)")
 	*args = append(*args, now)
-	if q.ReviewPending {
+	if q.ReviewOnLatest {
 		b.WriteString(" AND v.kind = ?")
 		*args = append(*args, VersionKindReview)
 	}
@@ -1265,7 +1265,7 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 	if term.Negate {
 		for _, v := range term.Values {
 			switch v {
-			case "review":
+			case "reviewed":
 				b.WriteString(" AND (v.kind IS NULL OR v.kind <> ?)")
 				*args = append(*args, VersionKindReview)
 			case "requested":
@@ -1300,7 +1300,7 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 	var clauseArgs []any
 	for _, v := range term.Values {
 		switch v {
-		case "review":
+		case "reviewed":
 			clauses = append(clauses, "v.kind = ?")
 			clauseArgs = append(clauseArgs, VersionKindReview)
 		case "requested":

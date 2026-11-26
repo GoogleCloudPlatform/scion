@@ -58,7 +58,7 @@ var maxListScan = 500
 // whether its current version is a review awaiting the owner.
 type ArtifactListItem struct {
 	ArtifactInfo
-	ReviewPending bool `json:"reviewPending"`
+	ReviewOnLatest bool `json:"reviewOnLatest"`
 	// ReviewRequested is true when hub.artifacts_review_requests is enabled
 	// and the caller has an open review request on this artifact.
 	ReviewRequested bool `json:"reviewRequested,omitempty"`
@@ -105,16 +105,16 @@ type ArtifactListResponse struct {
 
 // listParams is a validated list request.
 type listParams struct {
-	rawQuery      string
-	canonicalQ    string
-	reviewPending bool
-	requested     bool
-	drafts        bool
-	ownedOnly     bool
-	scope         string
-	sharedOnly    bool
-	limit         int
-	cursor        string
+	rawQuery       string
+	canonicalQ     string
+	reviewOnLatest bool
+	requested      bool
+	drafts         bool
+	ownedOnly      bool
+	scope          string
+	sharedOnly     bool
+	limit          int
+	cursor         string
 }
 
 // invalidCursorMessage is the message of the 400 invalid_cursor answer for
@@ -134,7 +134,7 @@ const impossibleScopeID = "00000000-0000-0000-0000-000000000000"
 func (p listParams) binding() string {
 	v := url.Values{}
 	v.Set("q", p.canonicalQ)
-	v.Set("review_pending", strconv.FormatBool(p.reviewPending))
+	v.Set("review_on_latest", strconv.FormatBool(p.reviewOnLatest))
 	if p.requested {
 		v.Set("requested", "true")
 	}
@@ -163,10 +163,20 @@ func parseListParams(q url.Values) (listParams, string) {
 		return p, "q must be valid text"
 	}
 	p.rawQuery = rawQ
+	switch q.Get("review_on_latest") {
+	case "", "0", "false":
+	case "1", "true":
+		p.reviewOnLatest = true
+	default:
+		return p, "review_on_latest must be 1 or 0"
+	}
+	// Hidden alias for older CLIs so review_pending=1 does not silently return all rows.
 	switch q.Get("review_pending") {
 	case "", "0", "false":
 	case "1", "true":
-		p.reviewPending = true
+		if q.Get("review_on_latest") == "" {
+			p.reviewOnLatest = true
+		}
 	default:
 		return p, "review_pending must be 1 or 0"
 	}
@@ -317,7 +327,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	reviewDraftsEnabled := s.featureEnabled(ctx, FeatureReviewDrafts)
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: ownedOnly,
-		ReviewPending: p.reviewPending, RequestedOnly: p.requested,
+		ReviewOnLatest: p.reviewOnLatest, RequestedOnly: p.requested,
 		ReviewRequestsEnabled: reviewRequestsEnabled, DraftsOnly: p.drafts,
 		ReviewDraftsEnabled: reviewDraftsEnabled, HomeScope: p.scope, ScopeShares: scopeShares,
 		SharedOnly: p.sharedOnly, Query: queryTerms, After: after,
@@ -388,15 +398,15 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		if q.SharedOnly && q.HomeScope == "" && access != AccessShared {
 			continue
 		}
-		reviewPending := c.CurrentKind == VersionKindReview
+		reviewOnLatest := c.CurrentKind == VersionKindReview
 		reviewRequested := q.ReviewRequestsEnabled && c.RequestedByMe
 		reviewInDraft := q.ReviewDraftsEnabled && c.MyDraft
-		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, reviewRequested, reviewInDraft, access) {
+		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewOnLatest, reviewRequested, reviewInDraft, access) {
 			continue
 		}
 		items = append(items, ArtifactListItem{
 			ArtifactInfo:    artifactInfo(&c.Artifact),
-			ReviewPending:   reviewPending,
+			ReviewOnLatest:  reviewOnLatest,
 			ReviewRequested: reviewRequested,
 			ReviewInDraft:   reviewInDraft,
 			Access:          access,
@@ -521,10 +531,10 @@ func queryRequiresProjectShared(qt *QueryTerms) bool {
 }
 
 // matchesQueryIsTerms evaluates global-list `is:` terms against a row's
-// resolved ReviewPending and Access classification (required for `is:shared`
+// resolved ReviewOnLatest and Access classification (required for `is:shared`
 // and `-is:shared`, since AccessShared depends on host.Authorize per home
 // project).
-func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested, reviewInDraft bool, access string) bool {
+func matchesQueryIsTerms(qt *QueryTerms, reviewOnLatest, reviewRequested, reviewInDraft bool, access string) bool {
 	for _, t := range qt.Terms {
 		if t.Field != "is" {
 			continue
@@ -532,8 +542,8 @@ func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested, reviewI
 		matched := false
 		for _, v := range t.Values {
 			switch v {
-			case "review":
-				if reviewPending {
+			case "reviewed":
+				if reviewOnLatest {
 					matched = true
 				}
 			case "requested":
@@ -775,11 +785,11 @@ func (s *Service) markDeletedScopes(ctx context.Context, b backend, items []Arti
 	return nil
 }
 
-// ReviewPendingSummary returns the count of live, unexpired, non-attachment
+// ReviewOnLatestSummary returns the count of live, unexpired, non-attachment
 // artifacts owned by the caller of ctx whose current version is a submitted
 // review awaiting owner action, whether the collect scan budget (maxListScan)
 // was reached, and up to previews newest items.
-func (s *Service) ReviewPendingSummary(ctx context.Context, previews int) (count int, capped bool, items []ArtifactListItem, err error) {
+func (s *Service) ReviewOnLatestSummary(ctx context.Context, previews int) (count int, capped bool, items []ArtifactListItem, err error) {
 	if previews < 0 {
 		previews = 0
 	}
@@ -793,10 +803,10 @@ func (s *Service) ReviewPendingSummary(ctx context.Context, previews int) (count
 		return 0, false, []ArtifactListItem{}, nil
 	}
 	all, next, err := s.collect(ctx, host, b, CandidateQuery{
-		PrincipalKind: kind,
-		PrincipalRef:  ref,
-		OwnedOnly:     true,
-		ReviewPending: true,
+		PrincipalKind:  kind,
+		PrincipalRef:   ref,
+		OwnedOnly:      true,
+		ReviewOnLatest: true,
 	}, maxListScan)
 	if err != nil {
 		return 0, false, nil, err

@@ -362,7 +362,7 @@ test('edits become suggestions, comments work by button and shortcut, and the re
     .locator('scion-page-artifact-detail .edit-footer sl-button', { hasText: 'Save review' })
     .click();
   await expect(
-    page.locator('scion-page-artifact-detail sl-badge', { hasText: 'Review pending' })
+    page.locator('scion-page-artifact-detail sl-badge', { hasText: 'Review on latest' })
   ).toBeVisible();
   const v = await currentVersion(a.id);
   expect(v.kind).toBe('review');

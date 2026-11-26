@@ -77,11 +77,11 @@ func TestListFilterQueryDialect_GlobalAndPureText(t *testing.T) {
 		t.Errorf("pure-text nonexistent:key = %v, want empty", got)
 	}
 
-	if got := qList("is:review"); !slices.Equal(got, want(aMine)) {
-		t.Errorf("is:review = %v, want %v", got, want(aMine))
+	if got := qList("is:reviewed"); !slices.Equal(got, want(aMine)) {
+		t.Errorf("is:reviewed = %v, want %v", got, want(aMine))
 	}
-	if got := qList("-is:review"); !slices.Equal(got, want(aProj, aShared)) {
-		t.Errorf("-is:review = %v, want %v", got, want(aProj, aShared))
+	if got := qList("-is:reviewed"); !slices.Equal(got, want(aProj, aShared)) {
+		t.Errorf("-is:reviewed = %v, want %v", got, want(aProj, aShared))
 	}
 	if got := qList("is:mine"); !slices.Equal(got, want(aMine)) {
 		t.Errorf("is:mine = %v, want %v", got, want(aMine))
@@ -95,11 +95,11 @@ func TestListFilterQueryDialect_GlobalAndPureText(t *testing.T) {
 	if got := qList("-is:shared"); !slices.Equal(got, want(aMine, aProj)) {
 		t.Errorf("-is:shared = %v, want %v", got, want(aMine, aProj))
 	}
-	if got := qList("is:review,shared"); !slices.Equal(got, want(aMine, aShared)) {
-		t.Errorf("is:review,shared = %v, want %v", got, want(aMine, aShared))
+	if got := qList("is:reviewed,shared"); !slices.Equal(got, want(aMine, aShared)) {
+		t.Errorf("is:reviewed,shared = %v, want %v", got, want(aMine, aShared))
 	}
-	if got := qList("-is:review,shared"); !slices.Equal(got, want(aProj)) {
-		t.Errorf("-is:review,shared = %v, want %v", got, want(aProj))
+	if got := qList("-is:reviewed,shared"); !slices.Equal(got, want(aProj)) {
+		t.Errorf("-is:reviewed,shared = %v, want %v", got, want(aProj))
 	}
 	if got := qList("project:proj-one"); !slices.Equal(got, want(aMine, aProj)) {
 		t.Errorf("project:proj-one = %v, want %v", got, want(aMine, aProj))
@@ -123,9 +123,9 @@ func TestListFilterQueryDialect_GlobalAndPureText(t *testing.T) {
 		t.Errorf("project:proj-one -draft = %v, want %v", got, want(aMine))
 	}
 	// Legacy params ANDed with q.
-	gotAnded := listIDs(f.list(&userU, listPath+"&owner=me&q="+url.QueryEscape("is:review")))
+	gotAnded := listIDs(f.list(&userU, listPath+"&owner=me&q="+url.QueryEscape("is:reviewed")))
 	if !slices.Equal(gotAnded, want(aMine)) {
-		t.Errorf("owner=me AND is:review = %v, want %v", gotAnded, want(aMine))
+		t.Errorf("owner=me AND is:reviewed = %v, want %v", gotAnded, want(aMine))
 	}
 }
 
@@ -134,6 +134,9 @@ func TestListFilterQueryDialect_ProjectScoped(t *testing.T) {
 
 	aHomed := f.publish(agentA, "homed.md", []byte("1"), "title=Homed").Artifact.ID
 	aShared := f.publish(agentX, "shared.md", []byte("2"), "title=Shared").Artifact.ID
+	if _, err := f.db.Exec(`UPDATE artifact_version SET kind = ? WHERE artifact_id = ?`, VersionKindReview, aHomed); err != nil {
+		t.Fatal(err)
+	}
 	// Grant project-1 read access to aShared (shared with project-1).
 	if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
 		VALUES (?, ?, 'scope', ?, 'read', ?)`, "g-shared-p1", aShared, "project-1",
@@ -148,21 +151,29 @@ func TestListFilterQueryDialect_ProjectScoped(t *testing.T) {
 	if got := listIDs(f.list(&userU, base+"&q="+url.QueryEscape("-is:shared"))); !slices.Equal(got, []string{aHomed}) {
 		t.Errorf("project -is:shared = %v, want [%s]", got, aHomed)
 	}
+	if got := listIDs(f.list(&userU, base+"&q="+url.QueryEscape("is:reviewed"))); !slices.Equal(got, []string{aHomed}) {
+		t.Errorf("project is:reviewed = %v, want [%s]", got, aHomed)
+	}
+	if got := listIDs(f.list(&userU, base+"&q="+url.QueryEscape("-is:reviewed"))); !slices.Equal(got, []string{aShared}) {
+		t.Errorf("project -is:reviewed = %v, want [%s]", got, aShared)
+	}
 	// Caller without read access in project-1 gets empty 200 for is:shared.
 	if got := listIDs(f.list(&outside, base+"&q="+url.QueryEscape("is:shared"))); len(got) != 0 {
 		t.Errorf("unauthorized project is:shared = %v, want empty", got)
 	}
-	// is:mine is not in the project schema -> 400 invalid_filter_query.
-	rec := f.do(&userU, http.MethodGet, base+"&q="+url.QueryEscape("is:mine"), nil, nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("project is:mine status = %d, want 400", rec.Code)
-	}
-	var errResp errorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
-		t.Fatal(err)
-	}
-	if errResp.Error.Code != "invalid_filter_query" {
-		t.Errorf("error code = %q, want invalid_filter_query", errResp.Error.Code)
+	// is:mine and legacy is:review are not in the project schema -> 400 invalid_filter_query.
+	for _, bad := range []string{"is:mine", "is:review"} {
+		rec := f.do(&userU, http.MethodGet, base+"&q="+url.QueryEscape(bad), nil, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("project %s status = %d, want 400", bad, rec.Code)
+		}
+		var errResp errorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+			t.Fatal(err)
+		}
+		if errResp.Error.Code != "invalid_filter_query" {
+			t.Errorf("project %s error code = %q, want invalid_filter_query", bad, errResp.Error.Code)
+		}
 	}
 }
 
@@ -174,9 +185,10 @@ func TestListFilterQueryDialect_ValidationErrorsAndCursorBinding(t *testing.T) {
 	for _, bad := range []string{
 		"is:",
 		"is:bogus",
+		"is:review",
 		"is:mine is:shared",
 		"is:mine,shared",
-		"is:review OR is:mine",
+		"is:reviewed OR is:mine",
 		strings.Repeat("a", 201),
 	} {
 		rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(bad), nil, nil)
@@ -207,12 +219,12 @@ func TestListFilterQueryDialect_ValidationErrorsAndCursorBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	page1 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("is:review project:proj-one"))
+	page1 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("is:reviewed project:proj-one"))
 	if len(page1.Artifacts) != 1 || page1.NextCursor == "" {
 		t.Fatalf("page1 = %+v, want 1 item and nextCursor", page1)
 	}
 	// Page 2 with reordered/uppercased query must accept the cursor.
-	page2 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("PROJECT:PROJ-ONE IS:REVIEW")+"&cursor="+url.QueryEscape(page1.NextCursor))
+	page2 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("PROJECT:PROJ-ONE IS:REVIEWED")+"&cursor="+url.QueryEscape(page1.NextCursor))
 	if len(page2.Artifacts) != 1 {
 		t.Fatalf("page2 = %+v, want 1 item", page2)
 	}
@@ -248,7 +260,7 @@ func TestListCandidates_UnknownQueryFieldReturnsError(t *testing.T) {
 
 // TestListCandidates_FilterQuerySQLPushdown verifies that ListCandidates
 // pushes filter-query terms down into SQL itself (not merely via collect()
-// post-filtering), including is:review, -is:review (with NULL current_seq),
+// post-filtering), including is:reviewed, -is:reviewed (with NULL current_seq),
 // is:mine, -is:mine, project:, negated project:, project-scoped is:shared,
 // and text/excludeText.
 func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
@@ -297,13 +309,13 @@ func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
 		want  []string
 	}{
 		{
-			name:  "is:review",
-			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"review"}}}},
+			name:  "is:reviewed",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"reviewed"}}}},
 			want:  []string{"mine-review-p1", "other-review-p2"},
 		},
 		{
-			name:  "-is:review includes NULL v.kind",
-			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"review"}, Negate: true}}},
+			name:  "-is:reviewed includes NULL v.kind",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"reviewed"}, Negate: true}}},
 			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "other-pub-p2"},
 		},
 		{
@@ -317,13 +329,13 @@ func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
 			want:  []string{"other-pub-p2", "other-review-p2"},
 		},
 		{
-			name:  "is:review,mine comma OR",
-			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "review"}}}},
+			name:  "is:reviewed,mine comma OR",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "reviewed"}}}},
 			want:  []string{"mine-null-ver-p1", "mine-pub-p1", "mine-review-p1", "other-review-p2"},
 		},
 		{
-			name:  "-is:review,mine negated comma OR",
-			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "review"}, Negate: true}}},
+			name:  "-is:reviewed,mine negated comma OR",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"mine", "reviewed"}, Negate: true}}},
 			want:  []string{"other-pub-p2"},
 		},
 		{

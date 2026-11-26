@@ -106,7 +106,7 @@ scion artifact list --mine --query report
   note; the current one is marked `*`. Numbers can skip (a refused review keeps
   its number).
 - `list` prints one page of the artifacts you can read, newest first; `--all`
-  follows every page. Filter with `--mine`, `--shared`, `--review-pending`,
+  follows every page. Filter with `--mine`, `--shared`, `--reviewed`,
   `--query <text>` or `--project-id <project-id>`.
 
 ### Check an HTML artifact
@@ -186,7 +186,7 @@ file and line (`@<seq>` for a specific review, `--format json` for scripts).
 `get --clean` gives the text with every mark rejected, `--accept` with every
 mark accepted, and `--kind publish` the newest version that is not a review.
 Apply or answer the marks, then publish the result with `--version-of`. The
-artifact shows *Review pending* until an ordinary version is current again.
+artifact shows *Review on latest* until an ordinary version is current again.
 
 ## Send a reference in a message
 

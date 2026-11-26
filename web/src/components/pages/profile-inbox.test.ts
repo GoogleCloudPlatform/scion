@@ -58,7 +58,7 @@ function makeSummary(
       breakdown: { agents: 0, projects: 0 },
     }),
     reviews: makeCat({
-      href: '/artifacts?review_pending=1&owner=me',
+      href: '/artifacts?review_on_latest=1&owner=me',
       breakdown: { toAddress: 0, requested: 0 },
     }),
     chat: makeCat({
@@ -152,7 +152,7 @@ describe('<scion-page-profile-inbox>', () => {
       }),
       reviews: makeCat({
         count: 3,
-        href: '/artifacts?review_pending=1&owner=me',
+        href: '/artifacts?review_on_latest=1&owner=me',
         breakdown: { toAddress: 2, requested: 1 },
       }),
       chat: makeCat({
@@ -248,20 +248,19 @@ describe('<scion-page-profile-inbox>', () => {
       [{ text: '50+ pending secrets', href: '/profile/secrets' }]
     );
     checkCard('reviews', 'Reviews', '3', '3 pending reviews', [
-      { text: '3 pending reviews', href: '/artifacts?review_pending=1&owner=me' },
+      { text: '3 pending reviews', href: '/artifacts?review_on_latest=1&owner=me' },
     ]);
     checkCard('chat', 'Chat', '5', '5 unread conversations, 2 with mentions', [
       { text: '5 unread conversations', href: '/chat' },
     ]);
 
-    // AC-16: no rendered link targets Phase 3 or Phase 4 unhydrated filter routes.
+    // AC-16: no rendered link targets unhydrated filter routes.
     const allLinks = Array.from(page.shadowRoot?.querySelectorAll('a[href]') ?? []);
     for (const a of allLinks) {
       const href = a.getAttribute('href') ?? '';
       expect(href).not.toContain('/chat?filter=');
       expect(href).not.toContain('requested=1');
       expect(href).not.toContain('drafts=1');
-      expect(href).not.toContain('review_on_latest=1');
     }
     expect(Object.values(INBOX_LINK_HREFS)).toEqual([]);
   });
@@ -292,7 +291,7 @@ describe('<scion-page-profile-inbox>', () => {
         count: 0,
         countsTowardTotal: false,
         errorCode: 'timeout',
-        href: '/artifacts?review_pending=1&owner=me',
+        href: '/artifacts?review_on_latest=1&owner=me',
       }),
       chat: makeCat({
         state: 'ok',

@@ -812,8 +812,8 @@ type CandidateQuery struct {
 	ScopeRefs []string
 	// OwnedOnly keeps only rows the principal owns; grants are ignored.
 	OwnedOnly bool
-	// ReviewPending keeps only rows whose current version is a review.
-	ReviewPending bool
+	// ReviewOnLatest keeps only rows whose current version is a review.
+	ReviewOnLatest bool
 	// RequestedOnly keeps only rows with an open review request addressed to
 	// the caller (when ReviewRequestsEnabled is true; matches nothing when
 	// false).

@@ -40,7 +40,7 @@ import (
 // is decided when it runs the command, as for every reference. A user owner
 // gets an in-app notification instead, for a review by an authorized
 // reviewer other than the owner (notifyArtifactReviewSummary); the artifact
-// page shows the review-pending state as well.
+// page shows the review-on-latest state as well.
 //
 // Suspension handling (ptone/scion#8946):
 //   - System-suspended (idle/stalled under lifecycle.idle_suspend): auto-wakes

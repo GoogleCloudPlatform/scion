@@ -58,17 +58,52 @@ func TestListArtifactsPassesOptions(t *testing.T) {
 		{Artifacts: []hubclient.ArtifactListItem{listItem("a1", "Report", "shared", 2)}, NextCursor: "c1"},
 	}}
 	var out bytes.Buffer
-	opts := hubclient.ListArtifactsOptions{Query: "rep", ReviewPending: true, OwnedOnly: true, Limit: 5, Scope: "proj-1", Shared: true}
+	opts := hubclient.ListArtifactsOptions{Query: "rep", ReviewOnLatest: true, OwnedOnly: true, Limit: 5, Scope: "proj-1", Shared: true}
 	require.NoError(t, listArtifacts(context.Background(), svc, &out, listArtifactsParams{Options: opts}))
 	require.Len(t, svc.calls, 1)
 	assert.Equal(t, opts, svc.calls[0])
 	got := out.String()
 	assert.Contains(t, got, "REF")
+	assert.Contains(t, got, "STATE")
 	assert.Contains(t, got, "scion://artifact/a1")
 	assert.Contains(t, got, "Report")
 	assert.Contains(t, got, "v2")
 	assert.Contains(t, got, "shared")
 	assert.Contains(t, got, "More artifacts follow; use --all to list them, or --cursor c1 for the next page.")
+}
+
+// TestListArtifactsFlagsAndStateColumn: --reviewed replaces --review-pending,
+// the STATE column comma-joins review states instead of suffixing ACCESS, and
+// JSON output uses reviewOnLatest.
+func TestListArtifactsFlagsAndStateColumn(t *testing.T) {
+	assert.NotNil(t, artifactListCmd.Flags().Lookup("reviewed"), "--reviewed flag must be registered")
+	assert.Nil(t, artifactListCmd.Flags().Lookup("review-pending"), "--review-pending flag must be removed")
+
+	both := listItem("a1", "Both", "owned", 2)
+	both.ReviewOnLatest = true
+	both.ReviewRequested = true
+	onlyLatest := listItem("a2", "Latest", "project", 3)
+	onlyLatest.ReviewOnLatest = true
+	none := listItem("a3", "Plain", "shared", 1)
+
+	svc := &listPagesService{pages: []hubclient.ArtifactListResponse{
+		{Artifacts: []hubclient.ArtifactListItem{both, onlyLatest, none}},
+	}}
+	var out bytes.Buffer
+	require.NoError(t, listArtifacts(context.Background(), svc, &out, listArtifactsParams{}))
+	got := out.String()
+	assert.Contains(t, got, "STATE")
+	assert.Contains(t, got, "review on latest, review requested")
+	assert.Contains(t, got, "review on latest")
+	assert.NotContains(t, got, "review pending")
+
+	svcJSON := &listPagesService{pages: []hubclient.ArtifactListResponse{
+		{Artifacts: []hubclient.ArtifactListItem{onlyLatest}},
+	}}
+	out.Reset()
+	require.NoError(t, listArtifacts(context.Background(), svcJSON, &out, listArtifactsParams{JSON: true}))
+	assert.Contains(t, out.String(), `"reviewOnLatest": true`)
+	assert.NotContains(t, out.String(), `"reviewPending"`)
 }
 
 // TestListArtifactsAllFollowsCursor: --all follows nextCursor to the last

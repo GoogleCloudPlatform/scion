@@ -16,7 +16,7 @@
 
 /**
  * Artifacts list page: gated on hub.artifacts, lists GET
- * /api/v1/artifacts?mine=1 with search, review-pending and owned-by-me
+ * /api/v1/artifacts?mine=1 with search, review-on-latest and owned-by-me
  * filters and "Load more" paging; rows open the artifact page; the empty
  * state offers buttons, not CLI commands.
  */
@@ -52,7 +52,7 @@ function item(n: number, extra: Partial<ArtifactListItem> = {}): ArtifactListIte
     currentSeq: 1,
     createdAt: '2026-10-05T12:00:00Z',
     updatedAt: '2026-10-05T12:00:00Z',
-    reviewPending: false,
+    reviewOnLatest: false,
     ...extra,
   };
 }
@@ -167,7 +167,7 @@ describe('artifacts list page', () => {
       key: 'weekly-report',
       title: 'Weekly',
     });
-    const review = item(2, { reviewPending: true, title: 'Design notes' });
+    const review = item(2, { reviewOnLatest: true, title: 'Design notes' });
     const m = mockFetch(
       { '': { artifacts: [mine, review] } },
       {
@@ -193,7 +193,7 @@ describe('artifacts list page', () => {
     expect(r[1].textContent).toContain('docs-writer');
     expect(r[1].textContent).toContain('(agent)');
     expect(r[1].textContent).toContain('Web Frontend');
-    expect(r[1].querySelector('sl-badge')!.textContent).toContain('Review pending');
+    expect(r[1].querySelector('sl-badge')!.textContent).toContain('Review on latest');
 
     // The caller is never looked up; names are fetched once each.
     expect(m.urls.filter((u) => u.startsWith('/api/v1/users/'))).toHaveLength(0);
@@ -207,7 +207,7 @@ describe('artifacts list page', () => {
         '': {
           artifacts: [
             item(1, { ownerRef: goneAgent, ownerDeleted: true }),
-            item(2, { ownerRef: 'agent-named', ownerDeleted: true, reviewPending: true }),
+            item(2, { ownerRef: 'agent-named', ownerDeleted: true, reviewOnLatest: true }),
             item(3),
           ],
         },
@@ -217,13 +217,13 @@ describe('artifacts list page', () => {
     const el = await mount(true);
     const [r1, r2, r3] = rows(el);
     const cells = (r: HTMLTableRowElement): HTMLTableCellElement[] => Array.from(r.cells);
-    // Status column: the badge, beside Review pending.
+    // Status column: the badge, beside Review on latest.
     expect(cells(r1!)[5]!.querySelector('sl-badge.owner-deleted')!.textContent).toContain(
       'Owner deleted'
     );
     expect(cells(r1!)[5]!.textContent).not.toContain('—');
     expect(cells(r2!)[5]!.textContent).toContain('Owner deleted');
-    expect(cells(r2!)[5]!.textContent).toContain('Review pending');
+    expect(cells(r2!)[5]!.textContent).toContain('Review on latest');
     // A name that can no longer be looked up falls back to the short id.
     expect(cells(r1!)[2]!.querySelector('.owner-gone')!.textContent).toBe('9d0e1f2a…');
     expect(cells(r2!)[2]!.querySelector('.owner-gone')!.textContent).toBe('summary-agent');
@@ -282,7 +282,7 @@ describe('artifacts list page', () => {
     expect(buttons[1].getAttribute('href')).toContain('/reference/artifacts/');
   });
 
-  it('filters by search (debounced), review pending and owned by me', async () => {
+  it('filters by search (debounced), review on latest and owned by me', async () => {
     const m = mockFetch({ '': { artifacts: [item(1)] } });
     const el = await mount(true);
 
@@ -304,17 +304,17 @@ describe('artifacts list page', () => {
     expect(listUrls(m)).toHaveLength(2);
 
     const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
-    const reviewChip = chips.find((c) => c.textContent?.includes('Review pending'))!;
+    const reviewChip = chips.find((c) => c.textContent?.includes('Review on latest'))!;
     reviewChip.click();
     await settle(el);
     last = listUrls(m).at(-1)!;
-    expect(last.get('q')).toBe('is:review "notes q3"');
+    expect(last.get('q')).toBe('is:reviewed "notes q3"');
 
     const ownedChip = chips.find((c) => c.textContent?.includes('Owned by me'))!;
     ownedChip.click();
     await settle(el);
     last = listUrls(m).at(-1)!;
-    expect(last.get('q')).toBe('is:mine is:review "notes q3"');
+    expect(last.get('q')).toBe('is:mine is:reviewed "notes q3"');
   });
 
   it('says no match, not "no artifacts", when filters exclude everything', async () => {
@@ -949,44 +949,45 @@ describe('artifacts list page unified filter box', () => {
 
     const chips = Array.from(el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip'));
     expect(chips.map((c) => c.textContent?.trim())).toEqual([
-      'Review pending',
+      'Review on latest',
       'Owned by me',
       'Shared with me',
     ]);
     expect(chips.every((c) => c.getAttribute('aria-pressed') === 'false')).toBe(true);
 
-    // Click "Review pending" -> adds is:review and reloads with q=is:review (no legacy params).
+    // Click "Review on latest" -> adds is:reviewed and reloads with q=is:reviewed (no legacy params).
     chips[0].click();
     await settle(el);
-    expect(box.value).toBe('is:review');
+    expect(box.value).toBe('is:reviewed');
     expect(chips[0].getAttribute('aria-pressed')).toBe('true');
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:reviewed');
     let last = listUrls(m).at(-1)!;
-    expect(last.get('q')).toBe('is:review');
+    expect(last.get('q')).toBe('is:reviewed');
+    expect(last.get('review_on_latest')).toBeNull();
     expect(last.get('review_pending')).toBeNull();
 
-    // Click "Owned by me" -> adds is:mine alongside is:review.
+    // Click "Owned by me" -> adds is:mine alongside is:reviewed.
     chips[1].click();
     await settle(el);
-    expect(box.value).toBe('is:mine is:review');
+    expect(box.value).toBe('is:mine is:reviewed');
     expect(chips[0].getAttribute('aria-pressed')).toBe('true');
     expect(chips[1].getAttribute('aria-pressed')).toBe('true');
 
-    // Click "Shared with me" -> replaces mutually exclusive is:mine with is:shared, keeping is:review.
+    // Click "Shared with me" -> replaces mutually exclusive is:mine with is:shared, keeping is:reviewed.
     chips[2].click();
     await settle(el);
-    expect(box.value).toBe('is:shared is:review');
+    expect(box.value).toBe('is:shared is:reviewed');
     expect(chips[1].getAttribute('aria-pressed')).toBe('false');
     expect(chips[2].getAttribute('aria-pressed')).toBe('true');
     last = listUrls(m).at(-1)!;
-    expect(last.get('q')).toBe('is:review is:shared');
+    expect(last.get('q')).toBe('is:reviewed is:shared');
     expect(last.get('shared')).toBeNull();
     expect(last.get('owner')).toBeNull();
 
-    // Clicking "Shared with me" again toggles it off, leaving is:review.
+    // Clicking "Shared with me" again toggles it off, leaving is:reviewed.
     chips[2].click();
     await settle(el);
-    expect(box.value).toBe('is:review');
+    expect(box.value).toBe('is:reviewed');
   });
 
   it('restores ?q= from the URL on load and updates on filter-commit', async () => {
@@ -1002,29 +1003,31 @@ describe('artifacts list page unified filter box', () => {
     box.dispatchEvent(
       new CustomEvent('filter-commit', {
         detail: {
-          value: 'is:review report',
+          value: 'is:reviewed report',
           query: {
             mode: 'structured',
-            terms: [{ key: 'is', values: ['review'], negate: false, offset: 0, length: 9 }],
+            terms: [{ key: 'is', values: ['reviewed'], negate: false, offset: 0, length: 11 }],
             text: 'report',
           },
-          serverQ: 'is:review report',
+          serverQ: 'is:reviewed report',
         },
         bubbles: true,
         composed: true,
       })
     );
     await settle(el);
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review report');
-    expect(listUrls(m).at(-1)!.get('q')).toBe('is:review report');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:reviewed report');
+    expect(listUrls(m).at(-1)!.get('q')).toBe('is:reviewed report');
   });
 
   it('toggles is: flags while preserving other terms and quoted text', () => {
     const schema = getViewSchema('artifacts') as ViewSchema;
-    expect(hasIsFlagInQuery('is:review project:p1', 'review', schema)).toBe(true);
-    expect(hasIsFlagInQuery('-is:review project:p1', 'review', schema)).toBe(false);
-    expect(toggleIsFlagInQuery('', 'review', [], schema)).toBe('is:review');
-    expect(toggleIsFlagInQuery('is:review project:p1', 'review', [], schema)).toBe('project:p1');
+    expect(hasIsFlagInQuery('is:reviewed project:p1', 'reviewed', schema)).toBe(true);
+    expect(hasIsFlagInQuery('-is:reviewed project:p1', 'reviewed', schema)).toBe(false);
+    expect(toggleIsFlagInQuery('', 'reviewed', [], schema)).toBe('is:reviewed');
+    expect(toggleIsFlagInQuery('is:reviewed project:p1', 'reviewed', [], schema)).toBe(
+      'project:p1'
+    );
     expect(toggleIsFlagInQuery('is:mine project:p1', 'shared', ['mine'], schema)).toBe(
       'is:shared project:p1'
     );
@@ -1037,12 +1040,12 @@ describe('artifacts list page unified filter box', () => {
     const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
       value: string;
     };
-    expect(box.value).toBe('is:review is:mine');
+    expect(box.value).toBe('is:reviewed is:mine');
     const paramsAfterMount = new URLSearchParams(window.location.search);
-    expect(paramsAfterMount.get('q')).toBe('is:review is:mine');
+    expect(paramsAfterMount.get('q')).toBe('is:reviewed is:mine');
     expect(paramsAfterMount.get('review_pending')).toBeNull();
     expect(paramsAfterMount.get('owner')).toBeNull();
-    expect(listUrls(m)[0].get('q')).toBe('is:mine is:review');
+    expect(listUrls(m)[0].get('q')).toBe('is:mine is:reviewed');
 
     // Clear the filter via filter-commit and simulate a reload (remount).
     box.dispatchEvent(

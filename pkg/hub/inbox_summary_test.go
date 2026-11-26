@@ -455,7 +455,7 @@ func TestUserMeInboxSummary_SourceErrorIsolation(t *testing.T) {
 					State:             InboxStateError,
 					Count:             0,
 					CountsTowardTotal: false,
-					Href:              "/artifacts?review_pending=1&owner=me",
+					Href:              "/artifacts?review_on_latest=1&owner=me",
 					ErrorCode:         inboxCategoryErrorCode(ctx, errors.New("boom")),
 					Previews:          []any{},
 				}
@@ -598,7 +598,7 @@ func TestUserMeInboxSummary_SingleflightCoalescing(t *testing.T) {
 			},
 		},
 		{key: InboxCategoryWaiting, run: inboxDisabledCategory("/agents")},
-		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
+		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_on_latest=1&owner=me")},
 		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
 		{key: InboxCategoryDecisions, run: inboxDisabledCategory("/profile/decisions?tab=pending")},
 	}
@@ -659,7 +659,7 @@ func TestUserMeInboxSummary_SingleflightDistinctTokensDoNotCoalesce(t *testing.T
 			},
 		},
 		{key: InboxCategoryWaiting, run: inboxDisabledCategory("/agents")},
-		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
+		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_on_latest=1&owner=me")},
 		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
 		{key: InboxCategoryDecisions, run: inboxDisabledCategory("/profile/decisions?tab=pending")},
 	}

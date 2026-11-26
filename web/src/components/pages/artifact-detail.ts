@@ -1519,7 +1519,7 @@ export class ScionPageArtifactDetail extends LitElement {
 
   /**
    * A return to the tab re-reads the version list (at most every 30 s), so
-   * a version published meanwhile shows in the list and the Review pending
+   * a version published meanwhile shows in the list and the Review on latest
    * badge (ptone/scion#6851) without reloading the page. Nothing is re-read
    * while editing or reviewing.
    */
@@ -3350,7 +3350,7 @@ export class ScionPageArtifactDetail extends LitElement {
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>
-              <sl-icon name="chat-dots"></sl-icon>&nbsp;Review pending
+              <sl-icon name="chat-dots"></sl-icon>&nbsp;Review on latest
             </sl-badge>`
           : nothing}
         ${this.requestedOfMe
@@ -4233,7 +4233,7 @@ export class ScionPageArtifactDetail extends LitElement {
       !(v.createdByKind === a.ownerKind && v.createdByRef === a.ownerRef);
     return html`<sl-alert class="review-banner" variant="warning" open>
       <sl-icon slot="icon" name="chat-dots"></sl-icon>
-      <strong>Review pending.</strong>
+      <strong>Review on latest version.</strong>
       ${this.createdBy(v) || 'A reviewer'} left ${what}${base ? ` on v${base.seq}` : ''}.
       ${notified ? `${owner} was notified; ` : ''}the badge clears when a new version is published.
     </sl-alert>`;

@@ -51,7 +51,7 @@ function item(id: string, title: string, scopeRef = 'proj-1', currentSeq = 1) {
     currentSeq,
     createdAt: '2026-10-07T10:00:00Z',
     updatedAt: '2026-10-07T10:00:00Z',
-    reviewPending: false,
+    reviewOnLatest: false,
   };
 }
 

@@ -126,7 +126,7 @@ scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./design-v2/
 
 ### Web
 
-The **Artifacts** item in the sidebar (under *Management*) lists the artifacts you own, those shared with you and those published in your projects. Search by title or key, or narrow the list with *Review pending*, *Owned by me* and *Shared with me*. A project's **Artifacts** view lists the artifacts of that one project, including those other projects shared with it.
+The **Artifacts** item in the sidebar (under *Management*) lists the artifacts you own, those shared with you and those published in your projects. Search by title or key, or narrow the list with *Review on latest*, *Owned by me* and *Shared with me*. A project's **Artifacts** view lists the artifacts of that one project, including those other projects shared with it.
 
 Opening an artifact shows its page with three tabs:
 
@@ -173,7 +173,7 @@ When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/
 - Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
 :::
 
-While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
+While a review is the current version, the artifact shows a *Review on latest* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 
 **Review** is shown to people who may publish versions of the artifact and to people given review access (see [Share an artifact](#share-an-artifact)). Use **Edit** for a plain edit instead of a review.
 
@@ -225,7 +225,7 @@ scion artifact get scion://artifact/5f1c2d3e-... --accept    # every mark accept
 scion artifact get scion://artifact/5f1c2d3e-... --kind publish  # the newest non-review version
 ```
 
-Apply or answer the marks, then publish the resolved text as the next version with `--version-of`. The *Review pending* badge clears once an ordinary version is current again.
+Apply or answer the marks, then publish the resolved text as the next version with `--version-of`. The *Review on latest* badge clears once an ordinary version is current again.
 
 ## Share an artifact
 

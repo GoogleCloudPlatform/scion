@@ -375,7 +375,7 @@ async function snapshot(
     ownerGone: headerRendered ? await text(AO.ownerGone) : null,
     ownerDeletedBadge: headerRendered ? await isShown(page.locator(AO.ownerDeletedBadge)) : false,
     reviewPending: headerRendered
-      ? await isShown(page.locator(AO.reviewPending).filter({ hasText: 'Review pending' }))
+      ? await isShown(page.locator(AO.reviewPending).filter({ hasText: 'Review on latest' }))
       : false,
     versionLabel: headerRendered ? await text(AA.versionMenu) : null,
     previewRendered,
@@ -1264,7 +1264,7 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
         .toBe(2);
       const after = await snapshot('member', 'R1B-09 after');
       r.ui.snapshotAfter = after;
-      expect.soft(after.reviewPending, 'Review pending badge').toBe(true);
+      expect.soft(after.reviewPending, 'Review on latest badge').toBe(true);
       expect.soft(after.versionLabel, 'version menu on v2').toContain('v2');
       const versions = await api(
         'member',
@@ -1302,7 +1302,7 @@ test.describe.serial('agent-owned artifact access per role (R1-B)', () => {
           uploadVersion: false,
         });
         expect.soft(snap.historyEdit, `${key}: History Edit hidden`).toBe(false);
-        expect.soft(snap.reviewPending, `${key}: Review pending`).toBe(true);
+        expect.soft(snap.reviewPending, `${key}: Review on latest`).toBe(true);
         await expectOwnerLabel(key, await expectedOwnerLabel(key, r), r);
         const c = await caps(key, r);
         expect.soft(c.ownerKind, `${key}: owner kind`).toBe('agent');

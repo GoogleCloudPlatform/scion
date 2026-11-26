@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	inboxReviewsHref = "/artifacts?review_pending=1&owner=me"
+	inboxReviewsHref = "/artifacts?review_on_latest=1&owner=me"
 
 	// InboxReviewKind* are the valid values for InboxReviewPreview.Kind.
 	InboxReviewKindToAddress = "to_address"
@@ -104,7 +104,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 	svc := s.artifactRefResolver()
 
 	// 1. Owned artifacts whose current version is a submitted review awaiting owner action.
-	toAddressCount, toAddressCapped, toAddressItems, err := svc.ReviewPendingSummary(ctx, previews)
+	toAddressCount, toAddressCapped, toAddressItems, err := svc.ReviewOnLatestSummary(ctx, previews)
 	if err != nil {
 		return inboxReviewsErrorCategory(ctx, err)
 	}

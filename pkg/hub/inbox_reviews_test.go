@@ -114,7 +114,7 @@ func decodeReviewPreviews(t *testing.T, cat InboxCategory) []InboxReviewPreview 
 }
 
 // TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup verifies AC3 and
-// AC5: toAddress matches /artifacts?mine=1&owner=me&review_pending=1,
+// AC5: toAddress matches /artifacts?mine=1&owner=me&review_on_latest=1,
 // requested dedupes by ResourceID and drops unreadable/deleted artifacts,
 // breakdown and total match, and previews are newest-first with the exact
 // ReviewPreview shape.
@@ -134,7 +134,7 @@ func TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup(t *testing.T) {
 
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 
-	// 2 owned artifacts with review_pending=1 -> toAddress = 2.
+	// 2 owned artifacts with review_on_latest=1 -> toAddress = 2.
 	toAddrOld := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, owner.ID, "Owned Review Old", artifacts.VersionKindReview, base.Add(1*time.Minute))
 	toAddrNew := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, owner.ID, "Owned Review New", artifacts.VersionKindReview, base.Add(4*time.Minute))
 	// Owned publish-only artifact -> excluded.
@@ -168,8 +168,8 @@ func TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup(t *testing.T) {
 	reqAcked := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, otherID, "Acked Doc", artifacts.VersionKindPublish, base)
 	seedReviewRequestNotification(t, s, owner.ID, p1.ID, reqAcked, "Dave", base.Add(9*time.Minute), true)
 
-	// AC3 parity check: GET /api/v1/artifacts?mine=1&owner=me&review_pending=1 length == reviews.breakdown.toAddress.
-	listResp := decodeArtifactList(t, userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts?mine=1&owner=me&review_pending=1", nil))
+	// AC3 parity check: GET /api/v1/artifacts?mine=1&owner=me&review_on_latest=1 length == reviews.breakdown.toAddress.
+	listResp := decodeArtifactList(t, userArtifactRequest(t, srv, owner, http.MethodGet, "/api/v1/artifacts?mine=1&owner=me&review_on_latest=1", nil))
 	require.Len(t, listResp.Artifacts, 2)
 
 	// Fetch summary with default previews=3.
@@ -181,7 +181,7 @@ func TestUserMeInboxSummary_ReviewsCountsParityPreviewsAndDedup(t *testing.T) {
 	assert.Equal(t, 4, rev.Count)
 	assert.Equal(t, 4, resp.Total)
 	assert.False(t, rev.Capped)
-	assert.Equal(t, "/artifacts?review_pending=1&owner=me", rev.Href)
+	assert.Equal(t, "/artifacts?review_on_latest=1&owner=me", rev.Href)
 	assert.Equal(t, map[string]int{"toAddress": len(listResp.Artifacts), "requested": 2}, rev.Breakdown)
 
 	// AC5: newest first, capped at 3:

@@ -216,13 +216,16 @@ func TestReviewRequestsGateOff(t *testing.T) {
 		t.Fatalf("POST dismiss gate off = %d, want 404", rec.Code)
 	}
 
-	// GET artifact omits reviewState.
+	// GET artifact omits requestedOfMe while gate is off (reviewState.reviewOnLatest is ungated).
 	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID, "user", "bob", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET artifact = %d", rec.Code)
 	}
-	if strings.Contains(rec.Body.String(), `"reviewState"`) {
-		t.Errorf("reviewState should be absent while gate is off: %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), `"requestedOfMe"`) {
+		t.Errorf("requestedOfMe should be absent while gate is off: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"reviewOnLatest":false`) {
+		t.Errorf("reviewOnLatest should be present while gate is off: %s", rec.Body.String())
 	}
 
 	// List omits reviewRequested and requested=1 / is:requested match nothing.
