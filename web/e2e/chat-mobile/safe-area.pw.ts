@@ -271,7 +271,9 @@ async function assertNoContentInInsets(page: Page, insets: Insets): Promise<void
             if (el.children.length > 0 || el.tagName === 'SLOT') continue;
             const cs = getComputedStyle(el);
             const rect = el.getBoundingClientRect();
+            const srOnly = cs.clip === 'rect(0px, 0px, 0px, 0px)' || cs.clipPath === 'inset(50%)';
             const visible =
+              !srOnly &&
               cs.display !== 'none' &&
               cs.visibility !== 'hidden' &&
               rect.width > 0 &&
