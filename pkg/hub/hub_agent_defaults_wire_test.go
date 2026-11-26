@@ -305,6 +305,11 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 		},
 		AutoExposePorts: func() *bool { b := true; return &b }(),
 		CreateKSA:       true,
+		LimitCeilings: &api.LimitCeilings{
+			MaxTurns:      50,
+			MaxModelCalls: 150,
+			MaxDuration:   "90m",
+		},
 	}
 
 	blob, err := json.Marshal(&RemoteAgentConfig{HubAgentDefaults: sent})
@@ -332,9 +337,11 @@ func TestRemoteHubAgentDefaults_WireCompatibleWithBroker(t *testing.T) {
 		*got.HubAgentDefaults.Resources != *want.Resources ||
 		got.HubAgentDefaults.AutoExposePorts == nil ||
 		!*got.HubAgentDefaults.AutoExposePorts ||
-		!got.HubAgentDefaults.CreateKSA {
-		t.Errorf("wire round-trip mismatch:\n sent %+v\n got  %+v (resources %+v)",
-			want, got.HubAgentDefaults, got.HubAgentDefaults.Resources)
+		!got.HubAgentDefaults.CreateKSA ||
+		got.HubAgentDefaults.LimitCeilings == nil ||
+		*got.HubAgentDefaults.LimitCeilings != *sent.LimitCeilings {
+		t.Errorf("wire round-trip mismatch:\n sent %+v\n got  %+v (resources %+v, ceilings %+v)",
+			want, got.HubAgentDefaults, got.HubAgentDefaults.Resources, got.HubAgentDefaults.LimitCeilings)
 	}
 }
 

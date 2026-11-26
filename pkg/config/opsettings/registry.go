@@ -392,6 +392,14 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &DecisionRetentionSettings{} },
 		},
+		{
+			// agent_limits is durable via DB but has no settings.yaml
+			// representation. Absent DB row = no ceilings. Seeding skips this
+			// section (KoanfPaths nil).
+			Name:       AgentLimitsSectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &AgentLimitsSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -658,6 +666,9 @@ func compileSchemas() {
 		// decision_retention schema is hand-written -- runtime state with no
 		// $defs in settings-v1.schema.json.
 		DecisionRetentionSectionName: decisionRetentionSchema(),
+		// agent_limits schema is hand-written -- runtime state with no
+		// $defs in settings-v1.schema.json.
+		AgentLimitsSectionName: agentLimitsSchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1178,6 +1189,11 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 			}
 		}
 		return errs
+	case AgentLimitsSectionName:
+		if _, err := ParseAgentLimitsDoc(doc); err != nil {
+			return []config.ValidationError{{Message: err.Error()}}
+		}
+		return nil
 	default:
 		return nil
 	}

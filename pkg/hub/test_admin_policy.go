@@ -538,9 +538,10 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"artifacts":         testAdminPolicyDeny,
 	"profiling":         testAdminPolicyDeny,
 
-	"agent_delegation_policy": testAdminPolicyDeny,
-	"chat_retention":          testAdminPolicyDeny,
-	"decision_retention":      testAdminPolicyDeny,
+	"agent_delegation_policy":         testAdminPolicyDeny,
+	"chat_retention":                  testAdminPolicyDeny,
+	"decision_retention":              testAdminPolicyDeny,
+	opsettings.AgentLimitsSectionName: testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -777,6 +778,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.TokenomicsUsageLedger:        testAdminPolicyDeny,
 	experiments.TokenomicsTokenBudgets:       testAdminPolicyDeny,
 	experiments.TokenomicsTrajectoryCapture:  testAdminPolicyDeny,
+	experiments.AgentPolicyLimitCeilings:     testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

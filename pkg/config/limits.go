@@ -14,7 +14,11 @@
 
 package config
 
-import "github.com/GoogleCloudPlatform/scion/pkg/api"
+import (
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+)
 
 // FillDefaultLimits fills each limit cfg leaves unset from the default
 // limits, highest tier first: hub (the hub agent_defaults, may be nil), then
@@ -58,4 +62,53 @@ func FillDefaultLimits(cfg *api.ScionConfig, hub *api.HubAgentDefaults, settings
 			cfg.MaxDuration = settingsDuration
 		}
 	}
+}
+
+// ClampLimits enforces Hub agent_limits ceilings on cfg after FillDefaultLimits
+// has run. For each limit with a configured ceiling (> 0):
+//   - If cfg left the limit unset (nil / ""), the ceiling becomes the effective
+//     value (not reported in clamped, because no configured value was
+//     overridden).
+//   - If cfg carries an explicit unlimited (0 / "0"), a negative/unparsable
+//     value, or a value exceeding the ceiling, cfg is clamped to the ceiling
+//     and the canonical field name ("max_turns", "max_model_calls",
+//     "max_duration") is appended to clamped.
+//
+// A nil cfg or empty ceilings is a no-op returning nil.
+func ClampLimits(cfg *api.ScionConfig, ceilings *api.LimitCeilings) (clamped []string) {
+	if cfg == nil || ceilings.IsEmpty() {
+		return nil
+	}
+
+	if ceilings.MaxTurns > 0 {
+		if cfg.MaxTurns == nil {
+			cfg.MaxTurns = api.IntPtr(ceilings.MaxTurns)
+		} else if *cfg.MaxTurns <= 0 || *cfg.MaxTurns > ceilings.MaxTurns {
+			cfg.MaxTurns = api.IntPtr(ceilings.MaxTurns)
+			clamped = append(clamped, "max_turns")
+		}
+	}
+
+	if ceilings.MaxModelCalls > 0 {
+		if cfg.MaxModelCalls == nil {
+			cfg.MaxModelCalls = api.IntPtr(ceilings.MaxModelCalls)
+		} else if *cfg.MaxModelCalls <= 0 || *cfg.MaxModelCalls > ceilings.MaxModelCalls {
+			cfg.MaxModelCalls = api.IntPtr(ceilings.MaxModelCalls)
+			clamped = append(clamped, "max_model_calls")
+		}
+	}
+
+	if ceilingStr := strings.TrimSpace(ceilings.MaxDuration); ceilingStr != "" {
+		if ceilingDur := api.ParseDuration(ceilingStr); ceilingDur > 0 {
+			curStr := strings.TrimSpace(cfg.MaxDuration)
+			if curStr == "" {
+				cfg.MaxDuration = ceilingStr
+			} else if curDur := api.ParseDuration(curStr); curDur <= 0 || curDur > ceilingDur {
+				cfg.MaxDuration = ceilingStr
+				clamped = append(clamped, "max_duration")
+			}
+		}
+	}
+
+	return clamped
 }

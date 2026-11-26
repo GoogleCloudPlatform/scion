@@ -2086,6 +2086,11 @@ type RemoteHubAgentDefaults struct {
 	// service account while hub.k8s_workload_identity_setup is enabled
 	// (api.HubAgentDefaults.CreateKSA; ptone/scion#7966).
 	CreateKSA bool `json:"createKSA,omitempty"`
+	// LimitCeilings carries the Hub's operational agent_limits ceilings
+	// (api.HubAgentDefaults.LimitCeilings; ptone/scion#9371). Omitted when
+	// the agent_policy.limit_ceilings experiment is off or no ceilings are
+	// configured.
+	LimitCeilings *api.LimitCeilings `json:"limitCeilings,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -2208,11 +2213,15 @@ type RemoteAgentInfo struct {
 	// The broker's effective configuration (runtimebroker.AgentResponse,
 	// WP1 slice 3): untrusted broker strings, validated by
 	// brokerEffectiveConfigOf before the hub records them.
-	TemplateHash          string `json:"templateHash,omitempty"`
-	Harness               string `json:"harness,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
-	BrokerBuild           string `json:"brokerBuild,omitempty"`
+	TemplateHash          string   `json:"templateHash,omitempty"`
+	Harness               string   `json:"harness,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	HarnessConfigRevision string   `json:"harnessConfigRevision,omitempty"`
+	BrokerBuild           string   `json:"brokerBuild,omitempty"`
+	MaxTurns              int      `json:"maxTurns,omitempty"`
+	MaxModelCalls         int      `json:"maxModelCalls,omitempty"`
+	MaxDuration           string   `json:"maxDuration,omitempty"`
+	LimitsClampedBy       []string `json:"limitsClampedBy,omitempty"`
 }
 
 // Server is the Hub API HTTP server.
@@ -6206,6 +6215,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// takes s.mu; it returns the zero value in file mode, where the wire field
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+	dispatcher.SetAgentLimitsProvider(s.agentLimitCeilings)
 
 	// Hub telemetry default and template job config (ptone/scion#4222).
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)

@@ -882,6 +882,10 @@ func (o *OperationalSettings) update(
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
 		return 0, false, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
 	}
+	// Cross-section validation between agent_limits ceilings and agent_defaults.
+	if errs := o.validateAgentLimitsCrossSection(section, doc); len(errs) > 0 {
+		return 0, false, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
+	}
 
 	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)
 	if err != nil {
@@ -2495,6 +2499,58 @@ func (o *OperationalSettings) AgentDelegationPolicy() (opsettings.AgentDelegatio
 		return opsettings.AgentDelegationPolicySettings{}, fmt.Errorf("agent_delegation_policy settings: unreadable document")
 	}
 	return opsettings.ParseAgentDelegationPolicyDoc(state.Value)
+}
+
+// AgentLimits returns the Hub-level run-limit ceilings (the "agent_limits"
+// section). An absent or unreadable document returns the zero value (no
+// ceilings).
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) AgentLimits() opsettings.AgentLimitsSettings {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.AgentLimitsSectionName]
+	if !ok || state.Malformed {
+		return opsettings.AgentLimitsSettings{}
+	}
+	limits, err := opsettings.ParseAgentLimitsDoc(state.Value)
+	if err != nil {
+		return opsettings.AgentLimitsSettings{}
+	}
+	return limits
+}
+
+// validateAgentLimitsCrossSection enforces that agent_defaults limit defaults
+// do not exceed (or set unlimited while a ceiling exists for) agent_limits
+// ceilings when either section is written.
+func (o *OperationalSettings) validateAgentLimitsCrossSection(section string, doc json.RawMessage) []config.ValidationError {
+	switch section {
+	case opsettings.AgentLimitsSectionName:
+		limits, err := opsettings.ParseAgentLimitsDoc(doc)
+		if err != nil || limits.IsEmpty() {
+			return nil
+		}
+		if rawDefaults, ok := o.rawSection("agent_defaults"); ok {
+			if errs := opsettings.ValidateAgentDefaultsDocAgainstLimits(rawDefaults, limits); len(errs) > 0 {
+				return errs
+			}
+		}
+		snap := o.Snapshot()
+		return opsettings.ValidateAgentDefaultsAgainstLimits(opsettings.AgentDefaultsSettings{
+			DefaultMaxTurns:      snap.DefaultMaxTurns,
+			DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
+			DefaultMaxDuration:   snap.DefaultMaxDuration,
+		}, limits)
+	case "agent_defaults":
+		limits := o.AgentLimits()
+		if limits.IsEmpty() {
+			return nil
+		}
+		return opsettings.ValidateAgentDefaultsDocAgainstLimits(doc, limits)
+	default:
+		return nil
+	}
 }
 
 // Artifacts returns the resolved artifact service settings (the

@@ -1873,6 +1873,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			allValidationErrors[secName] = errs
 		}
 	}
+	// Validate agent_defaults and agent_limits against each other using the
+	// effective post-request values before writing any section so a violation
+	// returns a clean 422 with no partial writes across sections.
+	validateAgentLimitsSectionDocs(ops, sectionDocs, allValidationErrors)
 	if len(allValidationErrors) > 0 {
 		writeSettingsValidation(w, "", sortedSectionValidationEntries(allValidationErrors), nil)
 		return
@@ -3632,9 +3636,10 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
-	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
-	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
-	"decision_retention":      settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
+	"agent_delegation_policy":         settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":                  settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
+	"decision_retention":              settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
+	opsettings.AgentLimitsSectionName: settingsTokenRefused, // hub-operator run-limit ceilings
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

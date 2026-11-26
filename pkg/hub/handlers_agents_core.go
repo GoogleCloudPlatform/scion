@@ -2398,6 +2398,16 @@ func (s *Server) createAgentInProject(
 			ValidationError(w, "Config contains invalid count limits", map[string]interface{}{"fields": issues})
 			return
 		}
+		if ceilings := s.agentLimitCeilings(); ceilings.MaxTurns > 0 {
+			if err := validateCreateMaxTurnsAgainstCeiling(req.Config.MaxTurns, ceilings); err != nil {
+				writeError(w, http.StatusBadRequest, ErrCodeLimitExceedsHubCeiling, err.Error(), map[string]interface{}{
+					"field":     "max_turns",
+					"ceiling":   ceilings.MaxTurns,
+					"requested": *req.Config.MaxTurns,
+				})
+				return
+			}
+		}
 	}
 
 	// Harness-config resolution (request > project annotation > template

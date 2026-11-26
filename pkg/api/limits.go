@@ -102,3 +102,31 @@ func FormatCountLimit(p *int) string {
 	}
 	return strconv.Itoa(*p)
 }
+
+// LimitCeilings carries Hub-operator upper bounds on agent run limits.
+// A zero count or empty duration means no ceiling for that field.
+// When a ceiling is set (> 0), effective limits are clamped into [1, ceiling]:
+// explicit 0 / "0" (unlimited) and unset values are clamped/filled to the
+// ceiling.
+type LimitCeilings struct {
+	MaxTurns      int    `json:"maxTurns,omitempty"`
+	MaxModelCalls int    `json:"maxModelCalls,omitempty"`
+	MaxDuration   string `json:"maxDuration,omitempty"`
+}
+
+// IsEmpty reports whether no ceiling is set. Safe on a nil receiver.
+func (c *LimitCeilings) IsEmpty() bool {
+	if c == nil {
+		return true
+	}
+	return c.MaxTurns <= 0 && c.MaxModelCalls <= 0 && c.MaxDuration == ""
+}
+
+// Clone returns a copy of c, or nil when c is nil.
+func (c *LimitCeilings) Clone() *LimitCeilings {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	return &cp
+}

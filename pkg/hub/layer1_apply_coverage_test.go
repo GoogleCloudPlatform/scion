@@ -387,6 +387,10 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 				p, err := o.AgentDelegationPolicy()
 				return []any{p.Removes("hub", "agent.read"), err == nil}
 			}},
+		"agent_limits": {section: opsettings.AgentLimitsSectionName, doc: `{"max_turns":50}`,
+			observe: func(_ *Server, o *OperationalSettings) any {
+				return o.AgentLimits()
+			}},
 	}
 	for path, doc := range telemetryProbeDocs {
 		p[path] = layer1LiveProbe{section: "telemetry", doc: doc, observe: observeTelemetry}

@@ -163,11 +163,15 @@ type AgentLaunchReportInfo struct {
 	// the broker build (sent only when the start resolved the
 	// configuration). Older brokers omit them, and the hub then records
 	// nothing.
-	TemplateHash          string `json:"templateHash,omitempty"`
-	Harness               string `json:"harness,omitempty"`
-	Model                 string `json:"model,omitempty"`
-	HarnessConfigRevision string `json:"harnessConfigRevision,omitempty"`
-	BrokerBuild           string `json:"brokerBuild,omitempty"`
+	TemplateHash          string   `json:"templateHash,omitempty"`
+	Harness               string   `json:"harness,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	HarnessConfigRevision string   `json:"harnessConfigRevision,omitempty"`
+	BrokerBuild           string   `json:"brokerBuild,omitempty"`
+	MaxTurns              int      `json:"maxTurns,omitempty"`
+	MaxModelCalls         int      `json:"maxModelCalls,omitempty"`
+	MaxDuration           string   `json:"maxDuration,omitempty"`
+	LimitsClampedBy       []string `json:"limitsClampedBy,omitempty"`
 }
 
 // AgentLaunchReportResult is ApplyLaunchReport's answer (design §3.2),

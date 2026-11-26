@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -329,5 +330,120 @@ func TestReadPersistedAgentLimits(t *testing.T) {
 	l, ok := readPersistedAgentLimits(dir)
 	if !ok || !reflect.DeepEqual(l, agentLimits{MaxTurns: api.IntPtr(4), MaxDuration: "4m"}) {
 		t.Errorf("readPersistedAgentLimits = %+v, %v", l, ok)
+	}
+}
+
+func startEnvCtxWithInfo(t *testing.T, ctx context.Context, projectScionDir string, mutate func(*api.StartOptions)) (runtime.RunConfig, *api.AgentInfo) {
+	t.Helper()
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	opts := api.StartOptions{
+		Name:        "env-agent",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	info, err := NewManager(mockRT).Start(ctx, opts)
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	return captured, info
+}
+
+func TestStart_LimitCeilingsClampTemplateUnlimitedAndReportEffective(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	mustWrite(t, globalTemplatePath(project), `{"default_harness_config": "test-harness", "max_turns": 0}`)
+
+	ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+		LimitCeilings: &api.LimitCeilings{MaxTurns: 50},
+	})
+	rc, info := startEnvCtxWithInfo(t, ctx, project, nil)
+	wantLimitEnv(t, "clamped template unlimited", rc, "50", "", "")
+
+	if info.EffectiveMaxTurns != 50 {
+		t.Errorf("EffectiveMaxTurns = %d, want 50", info.EffectiveMaxTurns)
+	}
+	if !reflect.DeepEqual(info.LimitsClampedBy, []string{"max_turns"}) {
+		t.Errorf("LimitsClampedBy = %v, want [max_turns]", info.LimitsClampedBy)
+	}
+	hasClampWarn := false
+	for _, w := range info.RelayedWarnings {
+		if strings.Contains(strings.ToLower(w), "clamped") && strings.Contains(w, "max_turns=50") {
+			hasClampWarn = true
+		}
+	}
+	if !hasClampWarn {
+		t.Errorf("RelayedWarnings = %v, want clamped warning mentioning max_turns=50", info.RelayedWarnings)
+	}
+
+	// Ceilings are never persisted into scion-agent.json; the template's 0 stays.
+	cfg, _ := persistedEnvAgentConfig(t, project)
+	if !api.IntPtrEqual(cfg.MaxTurns, api.IntPtr(0)) {
+		t.Errorf("persisted MaxTurns = %s, want 0 (ceiling must not be persisted)", api.FormatCountLimit(cfg.MaxTurns))
+	}
+}
+
+func TestStart_LimitCeilingsFillWhenNothingSet(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+
+	ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+		LimitCeilings: &api.LimitCeilings{MaxTurns: 50, MaxModelCalls: 120, MaxDuration: "45m"},
+	})
+	rc, info := startEnvCtxWithInfo(t, ctx, project, nil)
+	wantLimitEnv(t, "nothing set fills ceilings", rc, "50", "120", "45m")
+	if info.EffectiveMaxTurns != 50 || info.EffectiveMaxModelCalls != 120 || info.EffectiveMaxDuration != "45m" {
+		t.Errorf("effective limits = (%d, %d, %q), want (50, 120, 45m)",
+			info.EffectiveMaxTurns, info.EffectiveMaxModelCalls, info.EffectiveMaxDuration)
+	}
+	if len(info.LimitsClampedBy) != 0 {
+		t.Errorf("LimitsClampedBy = %v, want empty when nothing was overridden", info.LimitsClampedBy)
+	}
+	wantPersistedLimits(t, "after ceiling fill", project, 0, 0, "")
+}
+
+func TestStart_LimitCeilingsClampStoredOverCeiling(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	// First start without ceilings persists max_turns=100.
+	startEnvCtx(t, context.Background(), project, func(o *api.StartOptions) {
+		o.InlineConfig = &api.ScionConfig{MaxTurns: api.IntPtr(100)}
+	})
+
+	// Next start with ceiling=50 clamps the stored value to 50.
+	ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+		LimitCeilings: &api.LimitCeilings{MaxTurns: 50},
+	})
+	rc, info := startEnvCtxWithInfo(t, ctx, project, nil)
+	wantLimitEnv(t, "stored over ceiling clamped", rc, "50", "", "")
+	if info.EffectiveMaxTurns != 50 || !reflect.DeepEqual(info.LimitsClampedBy, []string{"max_turns"}) {
+		t.Errorf("effective = %d, clampedBy = %v, want 50 / [max_turns]", info.EffectiveMaxTurns, info.LimitsClampedBy)
+	}
+	wantPersistedLimits(t, "persisted value unchanged", project, 100, 0, "")
+}
+
+func TestEffectiveLimitsFromConfig_NormalizesUnlimitedDuration(t *testing.T) {
+	for _, raw := range []string{"", "0", "0s", "-5m", "bogus"} {
+		_, _, dur := effectiveLimitsFromConfig(&api.ScionConfig{MaxDuration: raw})
+		if dur != "" {
+			t.Errorf("MaxDuration=%q: got %q, want empty", raw, dur)
+		}
+	}
+	turns, calls, dur := effectiveLimitsFromConfig(&api.ScionConfig{
+		MaxTurns:      api.IntPtr(0),
+		MaxModelCalls: api.IntPtr(25),
+		MaxDuration:   "30m",
+	})
+	if turns != 0 || calls != 25 || dur != "30m" {
+		t.Errorf("got (%d, %d, %q), want (0, 25, 30m)", turns, calls, dur)
 	}
 }
