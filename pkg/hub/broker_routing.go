@@ -245,10 +245,12 @@ func (e *errAgentIdleSuspending) asSuspendedAgent() *store.Agent {
 	return &cp
 }
 
-// errNoWakeRecovery is returned by a syncAutoWake hook when it was invoked
-// after a synchronous container-not-running broker error, re-read the agent,
-// and determined no wake recovery applies; dispatchWithBrokerRetry then
-// returns the original broker error without retrying.
+// errNoWakeRecovery is an internal sentinel returned by a syncAutoWake hook
+// when it re-reads the agent and finds it running and deliverable (no wake
+// recovery applies). dispatchWithBrokerRetry handles it internally — retrying
+// once when invoked from markAgentForDispatch (nothing dispatched yet), or
+// returning the original broker error when invoked after a container-not-running
+// broker error — so this sentinel never surfaces to callers or message rows.
 var errNoWakeRecovery = errors.New("no wake recovery applicable")
 
 // isContainerNotRunningDispatchError reports whether a synchronous broker
@@ -313,14 +315,18 @@ func isPreDispatchDeliveryError(err error) bool {
 	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr) || errors.As(err, &notMsgErr)
 }
 
-// markAgentForDispatch runs MarkAgentDelivery under the row lock whenever
+// markAgentForDispatch first checks any in-memory hub auto-suspend tracker on
+// marker (for every dispatch caller, regardless of experiment state) and
+// rejects with *errAgentIdleSuspending when active. Otherwise, whenever
 // lifecycle.idle_suspend is enabled OR the target snapshot already carries an
-// idle-suspend claim, updates *agent with the fresh store snapshot (including
-// store-clock IdleSuspendClaimActive), fails closed on any store error, and
-// rejects dispatch with *errAgentIdleSuspending if an idle-suspend claim is
-// active or a previously running/starting target moved out of running/starting
-// since the caller's read. When the experiment is off and the row carries no
-// claim, it returns nil immediately without touching the store (AC 8).
+// idle-suspend claim, it runs MarkAgentDelivery under the row lock, updates
+// *agent with the fresh store snapshot (including store-clock
+// IdleSuspendClaimActive), fails closed on any store error, and rejects
+// dispatch with *errAgentIdleSuspending if an idle-suspend claim is active or
+// a previously running/starting target moved out of running/starting since the
+// caller's read. When no local auto-suspend is tracked, the experiment is off,
+// and the row carries no claim, it returns nil immediately without touching the
+// store (AC 8).
 func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent *store.Agent) error {
 	if marker == nil {
 		return &errDeliveryMarkFailed{err: errors.New("delivery marker store is nil")}
@@ -468,6 +474,14 @@ func dispatchWithBrokerRetry(
 					defer cancelNew()
 				}
 				if wakeErr != nil {
+					if errors.Is(wakeErr, errNoWakeRecovery) {
+						// The target is running and deliverable again (for example,
+						// an in-flight auto-suspend aborted right after
+						// markAgentForDispatch). Nothing has been dispatched yet,
+						// so retry once instead of surfacing the internal sentinel.
+						backoff = brokerRetryInitialBackoff
+						continue
+					}
 					return wakeErr
 				}
 				if newCtx != nil {

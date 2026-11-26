@@ -1948,7 +1948,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	wakePrimary := false
 	autoWakePrimary := !primaryReincarnating && primaryAgent.DeletedAt.IsZero() &&
 		s.shouldQueueAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID)
-	if !primaryReincarnating && (state.Phase(primaryAgent.Phase) == state.PhaseSuspended || s.isHubAutoSuspending(primaryAgent) || s.isStoppingForSuspend(primaryAgent) || autoWakePrimary) &&
+	if !primaryReincarnating && (state.Phase(primaryAgent.Phase) == state.PhaseSuspended || s.isHubAutoSuspending(primaryAgent) || autoWakePrimary) &&
 		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake || autoWakePrimary) {
 		switch {
 		case autoWakePrimary:
@@ -2380,7 +2380,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					}
 					canAutoWake := s.shouldQueueAutoWake(target) && !s.agentHeldOrUnknown(ctx, target.ID)
 					canExplicitWake := opts.Wake && !s.agentHeldOrUnknown(ctx, target.ID) &&
-						(s.isHubAutoSuspending(target) || s.isStoppingForSuspend(target) || state.Phase(store.EffectiveRestingPhase(target)) == state.PhaseSuspended) &&
+						(s.isHubAutoSuspending(target) || state.Phase(store.EffectiveRestingPhase(target)) == state.PhaseSuspended) &&
 						s.agentLifecycleAllowed(ctx, user, target)
 					if !canAutoWake && !canExplicitWake {
 						if s.validateAgentDeliverable(target) == nil {

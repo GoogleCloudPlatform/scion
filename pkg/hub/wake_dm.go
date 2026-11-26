@@ -97,7 +97,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	if isShellAgent(agent) {
 		return nil, shellAgentNotMessageableError(agent)
 	}
-	if agent != nil && (agent.IdleSuspendClaimActive || s.autoSuspending.isActive(agent.ID) || s.isStoppingForSuspend(agent)) {
+	if s.isHubAutoSuspending(agent) || (agent != nil && agent.IdleSuspendClaimUntil != nil && !deletionActive(agent) && !reincarnationInFlight(agent)) {
 		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, startInProgressDMError(agent, err)
 		}

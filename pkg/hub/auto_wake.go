@@ -64,6 +64,20 @@ const (
 	autoWakeAwait
 )
 
+// isHubAutoSuspending reports whether agent has an in-flight hub auto-suspend
+// (either an active idle-suspend claim on the store row or an in-flight
+// auto-suspend tracked on this replica) and is not deleted, deleting, or
+// reincarnating. Plain user/creator stops and suspends return false.
+func (s *Server) isHubAutoSuspending(agent *store.Agent) bool {
+	if agent == nil || !agent.DeletedAt.IsZero() || deletionActive(agent) || reincarnationInFlight(agent) {
+		return false
+	}
+	if agent.IdleSuspendClaimActive {
+		return true
+	}
+	return s != nil && s.autoSuspending.isActive(agent.ID)
+}
+
 // autoWakeModeOf classifies agent as read by a synchronous sender (see
 // autoWakeMode). It requires the lifecycle.idle_suspend experiment and a
 // suspend reason that auto-wakes; holds are checked by the callers. A
@@ -73,41 +87,11 @@ const (
 // resting phase need not be consulted. Both non-none modes go through
 // wakeOrAwaitStart, which resumes a suspended target and waits on a
 // starting one.
-// isHubAutoSuspending reports whether agent has an in-flight hub auto-suspend
-// (either an active idle-suspend claim on the store row or an in-flight
-// auto-suspend tracked on this replica).
-func (s *Server) isHubAutoSuspending(agent *store.Agent) bool {
-	if agent == nil {
-		return false
-	}
-	if agent.IdleSuspendClaimActive {
-		return true
-	}
-	return s != nil && s.autoSuspending.isActive(agent.ID)
-}
-
-// isStoppingForSuspend reports whether agent is in phase=stopping under a stop
-// run-intent (not a deletion or reincarnation). Callers that wait for stopping
-// to settle must still re-check the settled phase and suspend_reason before
-// waking so explicit user stops/suspends are never auto-woken.
-func (s *Server) isStoppingForSuspend(agent *store.Agent) bool {
-	if agent == nil || !agent.DeletedAt.IsZero() {
-		return false
-	}
-	if state.Phase(agent.Phase) != state.PhaseStopping {
-		return false
-	}
-	if deletionActive(agent) || reincarnationInFlight(agent) {
-		return false
-	}
-	return agent.RunIntent == store.RunIntentStopped || (s != nil && s.autoSuspending.isActive(agent.ID))
-}
-
 func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
 	if agent == nil {
 		return autoWakeNone
 	}
-	if s.isHubAutoSuspending(agent) || s.isStoppingForSuspend(agent) {
+	if s.isHubAutoSuspending(agent) {
 		if !s.experimentEnabled(experiments.IdleSuspend) {
 			return autoWakeNone
 		}
@@ -143,35 +127,28 @@ func (s *Server) shouldAutoWake(agent *store.Agent) bool {
 // shouldQueueAutoWake reports whether a background-queued delivery path
 // (mention fan-out, web chat secondaries, notifications) should queue behind
 // runAutoWake: either the agent is already hub-suspended (shouldAutoWake), or
-// a hub auto-suspend / suspend-driven stopping transition is actively stopping
-// its container. Unlike a starting target (whose container is coming up and
-// accepts broker-buffered messages), a stopping target must settle and resume
-// before dispatch.
+// a hub auto-suspend is actively stopping its container. Unlike a starting
+// target (whose container is coming up and accepts broker-buffered messages),
+// an auto-suspending target must settle and resume before dispatch.
 func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 	if s.shouldAutoWake(agent) {
 		return true
 	}
-	return (s.isHubAutoSuspending(agent) || s.isStoppingForSuspend(agent)) && s != nil && s.experimentEnabled(experiments.IdleSuspend)
-}
-
-// syncAutoWakeForDM waits for an in-flight hub auto-suspend to settle and
-// resumes a hub-suspended target when dispatchMarkedAgentMessage observes
-// *errAgentIdleSuspending on a synchronous DM path.
-func (s *Server) syncAutoWakeForDM(wakeCtx context.Context, agent *store.Agent) error {
-	return s.syncWakeForDM(wakeCtx, agent, false, nil)
+	return s.isHubAutoSuspending(agent) && s != nil && s.experimentEnabled(experiments.IdleSuspend)
 }
 
 // syncWakeForDM handles mid-dispatch wake recovery on synchronous DM paths
 // when either markAgentForDispatch observes an in-flight auto-suspend /
 // phase change or DispatchAgentMessage fails with a container-not-running
 // error. It re-reads the target from the store, enforces hold and
-// authorization checks, waits for any in-flight auto-suspend or stopping
-// phase to settle, and wakes the target when either auto-wake applies or
-// allowExplicitWake is true with lifecycle permission.
+// authorization checks, waits for any in-flight hub auto-suspend to settle,
+// and wakes the target when either auto-wake applies or allowExplicitWake is
+// true with lifecycle permission.
 //
 // When the target is still running and not auto-suspending (so no wake
-// recovery applies), it returns errNoWakeRecovery so the caller preserves
-// the original broker error without retrying.
+// recovery applies), it returns errNoWakeRecovery so the caller either
+// retries once (from markAgentForDispatch) or preserves the original broker
+// error without retrying.
 func (s *Server) syncWakeForDM(wakeCtx context.Context, agent *store.Agent, allowExplicitWake bool, senderIdentity Identity) error {
 	if agent == nil {
 		return errNoWakeRecovery
@@ -194,7 +171,7 @@ func (s *Server) syncWakeForDM(wakeCtx context.Context, agent *store.Agent, allo
 		}
 		return nil
 	}
-	suspendingOrSuspended := s.isHubAutoSuspending(agent) || s.isStoppingForSuspend(agent) ||
+	suspendingOrSuspended := s.isHubAutoSuspending(agent) ||
 		state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended
 	if allowExplicitWake && suspendingOrSuspended {
 		if denial := s.wakeResumeDenial(wakeCtx, senderIdentity, agent); denial != nil {
@@ -347,8 +324,7 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	if err != nil || current == nil {
 		return nil, &AgentDMError{Code: ErrCodeAgentNotRunning, Message: "agent could not be read for auto-wake", HTTPStatus: http.StatusConflict}
 	}
-	if current.IdleSuspendClaimActive || current.IdleSuspendClaimUntil != nil ||
-		s.autoSuspending.isActive(current.ID) || s.isStoppingForSuspend(current) {
+	if s.isHubAutoSuspending(current) || (current.IdleSuspendClaimUntil != nil && !deletionActive(current) && !reincarnationInFlight(current)) {
 		if err := s.waitForHubAutoSuspendToSettle(ctx, current); err != nil {
 			return nil, startInProgressDMError(current, err)
 		}

@@ -463,7 +463,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		claimActive := s.isHubAutoSuspending(input.TargetAgent) || s.isStoppingForSuspend(input.TargetAgent)
+		claimActive := s.isHubAutoSuspending(input.TargetAgent)
 		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || claimActive))
 		switch {
 		case holdErr != nil:
@@ -1105,13 +1105,12 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 
 // wakeResumeDenial applies the rule that resuming a suspended agent to
 // deliver a message requires the lifecycle permission that starting the
-// agent requires (agentLifecycleAllowed). It returns a 403 error when target
-// is suspended and identity lacks that permission, and nil otherwise. A
-// target in any other phase needs no resume, so the rule does not apply.
+// agent requires (agentLifecycleAllowed). It returns a 403 error when target's
+// effective resting phase is suspended or a hub auto-suspend is in flight and
+// identity lacks that permission, and nil otherwise.
 func (s *Server) wakeResumeDenial(ctx context.Context, identity Identity, target *store.Agent) *AgentDMError {
 	if state.Phase(store.EffectiveRestingPhase(target)) != state.PhaseSuspended &&
-		!s.isHubAutoSuspending(target) &&
-		!s.isStoppingForSuspend(target) {
+		!s.isHubAutoSuspending(target) {
 		return nil
 	}
 	if s.agentLifecycleAllowed(ctx, identity, target) {

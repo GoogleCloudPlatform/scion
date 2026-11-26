@@ -177,8 +177,7 @@ func idleSuspendSettleBudget() time.Duration {
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
-	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil ||
-		s.autoSuspending.isActive(agent.ID) || s.isStoppingForSuspend(agent)) {
+	if s.isHubAutoSuspending(agent) || (agent != nil && agent.IdleSuspendClaimUntil != nil && !deletionActive(agent) && !reincarnationInFlight(agent)) {
 		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, err
 		}
@@ -207,16 +206,18 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 	return nil, s.awaitStartInProgress(ctx, agent)
 }
 
+// idleSuspendSettleMaxPollInterval caps exponential backoff when polling the
+// store for a cross-replica idle-suspend claim to settle.
+const idleSuspendSettleMaxPollInterval = time.Second
+
 // waitForHubAutoSuspendToSettle waits, bounded by idleSuspendSettleBudget (and
-// any tighter caller deadline on ctx), for an in-flight idle-suspend claim,
-// in-flight local hub auto-suspend (stalled or idle), or suspend-driven
-// stopping phase to settle, refreshing *agent to the settled row.
+// any tighter caller deadline on ctx), for an in-flight local hub auto-suspend
+// (stalled or idle, via channel notification with no polling) or a cross-replica
+// idle-suspend claim (via bounded exponential-backoff polling) to settle,
+// refreshing *agent to the settled row.
 func (s *Server) waitForHubAutoSuspendToSettle(ctx context.Context, agent *store.Agent) error {
 	if agent == nil {
 		return store.ErrNotFound
-	}
-	if agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil {
-		return s.waitForIdleSuspendToSettle(ctx, agent)
 	}
 	wctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
 	defer cancel()
@@ -234,57 +235,29 @@ func (s *Server) waitForHubAutoSuspendToSettle(ctx context.Context, agent *store
 			return store.ErrNotFound
 		}
 		*agent = *fresh
-		if fresh.IdleSuspendClaimActive {
+		if fresh.IdleSuspendClaimActive || fresh.IdleSuspendClaimUntil != nil {
 			return s.waitForIdleSuspendToSettle(wctx, agent)
-		}
-		if s.isStoppingForSuspend(agent) {
-			return s.waitForStoppingToSettle(wctx, agent)
 		}
 		return nil
 	}
-	if s.isStoppingForSuspend(agent) {
-		return s.waitForStoppingToSettle(wctx, agent)
+	if agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil {
+		return s.waitForIdleSuspendToSettle(wctx, agent)
 	}
 	return nil
-}
-
-// waitForStoppingToSettle polls the store until agent leaves phase=stopping
-// (or a deletion/reincarnation claims it), bounded by ctx and
-// idleSuspendSettleBudget, refreshing *agent to the settled row.
-func (s *Server) waitForStoppingToSettle(ctx context.Context, agent *store.Agent) error {
-	wctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
-	defer cancel()
-	ticker := time.NewTicker(scheduledWakePollInterval)
-	defer ticker.Stop()
-	for {
-		fresh, err := s.store.GetAgent(wctx, agent.ID)
-		if err != nil {
-			return fmt.Errorf("failed to check agent status while stopping: %w", err)
-		}
-		if fresh == nil {
-			return store.ErrNotFound
-		}
-		*agent = *fresh
-		if state.Phase(fresh.Phase) != state.PhaseStopping || deletionActive(fresh) || reincarnationInFlight(fresh) {
-			return nil
-		}
-		select {
-		case <-wctx.Done():
-			return errIdleSuspendInProgressNotSettled
-		case <-ticker.C:
-		}
-	}
 }
 
 // waitForIdleSuspendToSettle waits, up to idleSuspendSettleBudget (the claim
 // lease, bounded by any tighter caller deadline on ctx), for an active
 // idle-suspend claim on agent to clear (evaluated against the store clock via
-// MarkAgentDelivery), refreshing *agent to the settled row.
+// MarkAgentDelivery), refreshing *agent to the settled row. Polls use bounded
+// exponential backoff from scheduledWakePollInterval up to
+// idleSuspendSettleMaxPollInterval.
 func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Agent) error {
 	ctx, cancel := context.WithTimeout(ctx, idleSuspendSettleBudget())
 	defer cancel()
-	ticker := time.NewTicker(scheduledWakePollInterval)
-	defer ticker.Stop()
+	pollInterval := scheduledWakePollInterval
+	timer := time.NewTimer(pollInterval)
+	defer timer.Stop()
 	for {
 		fresh, claimActive, err := s.store.MarkAgentDelivery(ctx, agent.ID)
 		if err != nil {
@@ -305,10 +278,23 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 			// idleSuspendAbandonAfter and the agent is deliverable again.
 			return errIdleSuspendInProgressNotSettled
 		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(pollInterval)
 		select {
 		case <-ctx.Done():
 			return errIdleSuspendInProgressNotSettled
-		case <-ticker.C:
+		case <-timer.C:
+		}
+		if pollInterval < idleSuspendSettleMaxPollInterval {
+			pollInterval *= 2
+			if pollInterval > idleSuspendSettleMaxPollInterval {
+				pollInterval = idleSuspendSettleMaxPollInterval
+			}
 		}
 	}
 }
