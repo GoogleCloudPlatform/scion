@@ -137,20 +137,141 @@ var entRunIDSetters = map[string]bool{
 }
 
 // wantEntRunIDSetterCallers is every function outside the generated ent
-// code that calls an ent run_id setter: the two agent run writes behind
-// the store's run methods, the delete engine's soft finish
-// (applyAgentDeletionFields, which writes the run only for a
+// code that calls an ent run_id setter on the Agent entity (or on a
+// receiver that cannot be proven to be a non-Agent ent entity): the two
+// agent run writes behind the store's run methods and the delete engine's
+// soft finish (applyAgentDeletionFields, which writes the run only for a
 // DeletionFields.SoftFinishRunID, which FinalizeAgentDeletion's soft mode
-// alone accepts, ptone/scion#5016), the agent credential insert, the
-// broker-reported run upsert and the runtime orphan upsert (each its own
-// run_id column).
+// alone accepts, ptone/scion#5016).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_deletion_store.go applyAgentDeletionFields",
 	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
 	"pkg/store/entadapter/agent_store.go AgentStore.swapAgentRunID",
-	"pkg/store/entadapter/broker_reported_run_store.go AgentStore.RecordBrokerReportedRuns",
-	"pkg/store/entadapter/credential_store.go createAgentCredential",
-	"pkg/store/entadapter/runtime_orphan_store.go AgentStore.RecordRuntimeOrphans",
+}
+
+// nonAgentEntClientParam reports whether paramName is a parameter of fn
+// typed as *ent.<Entity>Client for a non-Agent ent entity (e.g.
+// *ent.AgentCredentialClient). Returns false for *ent.AgentClient and for
+// any other type.
+func nonAgentEntClientParam(fn *ast.FuncDecl, paramName string) bool {
+	if fn == nil || fn.Type == nil || fn.Type.Params == nil {
+		return false
+	}
+	for _, field := range fn.Type.Params.List {
+		matched := false
+		for _, id := range field.Names {
+			if id.Name == paramName {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		star, ok := field.Type.(*ast.StarExpr)
+		if !ok {
+			return false
+		}
+		sel, ok := star.X.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		pkgIdent, ok := sel.X.(*ast.Ident)
+		if !ok || pkgIdent.Name != "ent" {
+			return false
+		}
+		return strings.HasSuffix(sel.Sel.Name, "Client") && sel.Sel.Name != "AgentClient"
+	}
+	return false
+}
+
+// isNonAgentEntRunIDChain reports whether the call/selector chain e starts
+// from a provably non-Agent ent builder, either as <x>.<Entity>.<Op>()
+// where <Entity> != "Agent" (e.g. client.MeterHealth.Create(),
+// s.client.BrokerReportedRun.Create()) or as <param>.<Op>() where <param>
+// is a parameter of fn typed as *ent.<NonAgent>Client (e.g.
+// *ent.AgentCredentialClient). Everything else — including Agent builders,
+// local variables, and unknown receivers — returns false so the guard
+// reports it conservatively.
+func isNonAgentEntRunIDChain(fn *ast.FuncDecl, e ast.Expr) bool {
+	for {
+		switch x := e.(type) {
+		case *ast.CallExpr:
+			e = x.Fun
+		case *ast.SelectorExpr:
+			switch x.Sel.Name {
+			case "Create", "CreateBulk", "Update", "UpdateOne", "UpdateOneID":
+				if inner, ok := x.X.(*ast.SelectorExpr); ok {
+					return inner.Sel.Name != "Agent"
+				}
+				if id, ok := x.X.(*ast.Ident); ok {
+					return nonAgentEntClientParam(fn, id.Name)
+				}
+				return false
+			}
+			e = x.X
+		default:
+			return false
+		}
+	}
+}
+
+// agentEntRunIDSetterCallers returns "file Func" for every non-test
+// function in the module outside pkg/ent that references a selector in
+// entRunIDSetters without starting from a provably non-Agent ent builder.
+func agentEntRunIDSetterCallers(t *testing.T) []string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "web": true, "docs-site": true,
+		"extras": true, "vendor": true, ".scion": true, filepath.Join("pkg", "ent"): true,
+	}
+	var refs []string
+	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: SkipDir only for module-level directories (.git, node_modules, web, docs-site, extras, vendor, .scion, pkg/ent), none under pkg/hub, so it covers every directory below pkg/hub.
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, _ := filepath.Rel(root, path)
+		if d.IsDir() {
+			if skipDirs[rel] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			found := false
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && entRunIDSetters[sel.Sel.Name] {
+					if !isNonAgentEntRunIDChain(fn, sel.X) {
+						found = true
+					}
+				}
+				return !found
+			})
+			if found {
+				refs = append(refs, filepath.ToSlash(rel)+" "+funcKey(fn))
+			}
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	sort.Strings(refs)
+	return refs
 }
 
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
@@ -162,7 +283,7 @@ var wantEntRunIDSetterCallers = []string{
 // TestAgentRunIDSoftFinishWritersAreAClosedSet), so a new store method (or
 // direct ent use anywhere in the module) that writes it fails here.
 func TestAgentRunIDStoreWritersAreAClosedSet(t *testing.T) {
-	assert.Equal(t, wantEntRunIDSetterCallers, moduleReferences(t, entRunIDSetters, filepath.Join("pkg", "ent")))
+	assert.Equal(t, wantEntRunIDSetterCallers, agentEntRunIDSetterCallers(t))
 
 	// An agent upsert could write run_id through its conflict update
 	// (UpdateNewValues) without naming a run_id setter, so nothing outside
@@ -423,6 +544,70 @@ func TestAgentRunIDWritersAreAClosedSet(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "run-current", got.RunID)
 	})
+}
+
+// TestIsNonAgentEntRunIDChain pins the AST filter used by
+// TestAgentRunIDStoreWritersAreAClosedSet: direct chains on non-Agent ent
+// builders (and *ent.<NonAgent>Client parameters) are excluded, while Agent
+// builders, *ent.AgentClient parameters, and local variables are reported.
+func TestIsNonAgentEntRunIDChain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{
+			name: "meter health create chain is non-agent",
+			src:  "func f(client *ent.Client) { client.MeterHealth.Create().SetAgentID(a).SetRunID(r) }",
+			want: true,
+		},
+		{
+			name: "usage event create chain is non-agent",
+			src:  "func f(client *ent.Client) { client.UsageEvent.Create().SetRunID(r) }",
+			want: true,
+		},
+		{
+			name: "agent credential client param is non-agent",
+			src:  "func f(c *ent.AgentCredentialClient) { c.Create().SetRunID(r) }",
+			want: true,
+		},
+		{
+			name: "agent update chain is agent",
+			src:  "func f(tx *ent.Client) { tx.Agent.Update().SetRunID(r) }",
+			want: false,
+		},
+		{
+			name: "agent create chain is agent",
+			src:  "func f(client *ent.Client) { client.Agent.Create().SetRunID(r) }",
+			want: false,
+		},
+		{
+			name: "agent client param is agent",
+			src:  "func f(c *ent.AgentClient) { c.UpdateOneID(id).SetRunID(r) }",
+			want: false,
+		},
+		{
+			name: "builder param is conservatively reported",
+			src:  "func f(upd *ent.AgentUpdateOne) { upd.SetRunID(r) }",
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := parser.ParseFile(token.NewFileSet(), "x.go", "package x\n"+tc.src+"\n", parser.SkipObjectResolution)
+			require.NoError(t, err)
+			fn := f.Decls[0].(*ast.FuncDecl)
+			var recv ast.Expr
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetRunID" {
+					recv = sel.X
+					return false
+				}
+				return true
+			})
+			require.NotNil(t, recv)
+			assert.Equal(t, tc.want, isNonAgentEntRunIDChain(fn, recv))
+		})
+	}
 }
 
 // TestChainFromAgentCreate pins the matcher agentUpsertCalls relies on.
