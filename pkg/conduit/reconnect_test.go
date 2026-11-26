@@ -194,9 +194,13 @@ func (h *reconnectHarness) noCeiling() {
 // before the Reconnector arms its backoff or reconnect-window timer.
 func (h *reconnectHarness) waitTimer(d time.Duration) {
 	h.t.Helper()
-	if !h.clk.WaitForTimer(waitTimeout, h.clk.Now().Add(d)) {
+	if !h.tryWaitTimer(d) {
 		h.t.Fatalf("redial timer for %v was not armed (pending %d)", d, h.clk.Pending())
 	}
+}
+
+func (h *reconnectHarness) tryWaitTimer(d time.Duration) bool {
+	return h.clk.WaitForTimer(waitTimeout, h.clk.Now().Add(d))
 }
 
 // connect lets the next dial succeed and returns both ends.
@@ -483,13 +487,12 @@ func TestReconnectHarnessWaitTimerIgnoresLingeringTimers(t *testing.T) {
 		t.Fatal("Decide not called")
 	}
 
-	waited := make(chan struct{})
+	waited := make(chan bool, 1)
 	go func() {
-		defer close(waited)
-		h.waitTimer(time.Second)
+		waited <- h.tryWaitTimer(time.Second)
 	}()
 
-	// With only the lingering 1h timer armed (Pending() == 1), waitTimer
+	// With only the lingering 1h timer armed (Pending() == 1), tryWaitTimer
 	// must not return before Decide releases and Reconnector arms its 1s
 	// backoff timer.
 	select {
@@ -500,8 +503,11 @@ func TestReconnectHarnessWaitTimerIgnoresLingeringTimers(t *testing.T) {
 
 	close(releaseDecide)
 	select {
-	case <-waited:
-	case <-time.After(waitTimeout):
+	case ok := <-waited:
+		if !ok {
+			t.Fatalf("redial timer for %v was not armed (pending %d)", time.Second, h.clk.Pending())
+		}
+	case <-time.After(2 * waitTimeout):
 		t.Fatal("waitTimer did not return after redial timer was armed")
 	}
 	stale.Stop()
