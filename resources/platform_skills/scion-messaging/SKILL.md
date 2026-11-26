@@ -162,7 +162,9 @@ user-facing format. Agent-only messages do not require it.
 - **Make commands easy to copy.** Put a short shell command you want the user to run
   in single backticks, such as `scion list`. The chat renders inline code with a
   copy button, so the user can copy it into a terminal. Use a fenced `bash` or `sh`
-  block for multiline commands. Keep explanation outside the code.
+  block for multiline commands. Keep explanation outside the code. For multi-step
+  operator instructions, state where each command runs, exact file paths, and any
+  required permissions outside the code block.
 - **Acknowledge, update, finish.** Acknowledge a user's task promptly, report
   meaningful milestones during longer work, and send the result when done. Avoid
   repeated status-only messages.
@@ -248,11 +250,13 @@ Report completion, a blocker, or a result that unblocks the next step.
   explicitly handed off. A delayed reply is not a reason to ask another agent to
   relay the request, create a multi-hop relay chain, or duplicate the same
   escalation to the user.
-- When intentionally waiting for input or another agent, signal
-  `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
+- Signal `sciontool status blocked "<reason>"` while a local background job is
+  running or during a brief wait; do not poll agents with sleep loops. When no
+  local background job is running and you are waiting on remote child agents,
+  human replies, or new work, signal `sciontool status idle "<reason>"` so Scion
+  can suspend the container — any new message or notification wakes you. For
   external work without completion notifications, follow `scion-scheduler` guidance
-  on scheduled callbacks. When you have no further work after sending or answering
-  a message, signal `sciontool status idle "<reason>"`; any new message wakes you.
+  on scheduled callbacks.
 
 ## Preserve Markdown when sending
 

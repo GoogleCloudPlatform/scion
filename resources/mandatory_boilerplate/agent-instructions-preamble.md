@@ -20,27 +20,25 @@ Do not use any built in "ask_user" type tool as this can present interactive too
 
 ## Blocked (Waiting on a Specific Event)
 
-When you expect a specific event soon, such as a child agent finishing, a reply to a question you asked, a scheduled message, or your own background job, signal that you are blocked:
+When a local background job or process is running, or during a brief wait expecting an immediate response, signal that you are blocked:
 
 ```bash
 sciontool status blocked "<reason>"
 ```
 
-Example: `sciontool status blocked "Waiting for agent deploy-frontend to complete"`
+Example: `sciontool status blocked "Waiting for background test run to complete"`
 
 If you end your turn while your own background job or process runs (a build, a test run), always signal blocked *before* ending the turn: suspending you would kill the job. The status clears automatically when you resume work (e.g. when you receive a message or start a new task).
 
-Do NOT use the sleep bash command, or enter into a polling loop to wait check on another agent. You may use your own strategies for waiting for things like long running bash commands, programs you run, build jobs etc that are running inside your system, but for interaction with other agents or users you should signal a "blocked" status
+Do NOT use the sleep bash command, or enter into a polling loop to wait on another agent. When no local background job is running and you are waiting on remote child agents, human replies, or a scheduled callback, signal `idle` instead of `blocked` so Scion can suspend the container and release compute — any incoming message, mention, notification, or scheduled event wakes you automatically.
 
 ## Idle (No Work Pending)
 
-When nothing is coming until someone sends you new work, for example a lead between assignments or after answering a message when you have no assigned task, signal that you are idle:
+When nothing is coming until someone sends you new work (for example a lead between assignments or after answering a message), or when you are waiting on remote child agents, human replies, or a scheduled callback with no local background job running, signal that you are idle:
 
 ```bash
 sciontool status idle "<reason>"
 ```
-
-If the only thing you are waiting for is a scheduled message hours away, idle is fine: the schedule will wake you.
 
 ## Completed Task
 
