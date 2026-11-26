@@ -247,6 +247,76 @@ func TestReviewRequestsGateOff(t *testing.T) {
 	}
 }
 
+func TestReviewRequestsGateOffWithExistingRow(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+	h.gateOn = true
+
+	// Create an open review request while the gate is on.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "please review"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST review-requests gate on = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Turn the gate off with the open request row still in the database.
+	h.gateOn = false
+
+	// Positive requested filters must return 0 rows.
+	for _, url := range []string{
+		"/api/v1/artifacts?mine=1&requested=1",
+		"/api/v1/artifacts?mine=1&q=is:requested",
+		"/api/v1/artifacts?mine=1&scope=proj-1&q=is:requested",
+	} {
+		rec = doJSON(svc, http.MethodGet, url, "user", "bob", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", url, rec.Code, rec.Body.String())
+		}
+		var lr ArtifactListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &lr); err != nil {
+			t.Fatalf("unmarshal %s: %v", url, err)
+		}
+		if len(lr.Artifacts) != 0 {
+			t.Errorf("GET %s gate off with existing row returned %d items, want 0", url, len(lr.Artifacts))
+		}
+	}
+
+	// Negated requested filters must still return the artifact.
+	for _, url := range []string{
+		"/api/v1/artifacts?mine=1&q=-is:requested",
+		"/api/v1/artifacts?mine=1&scope=proj-1&q=-is:requested",
+	} {
+		rec = doJSON(svc, http.MethodGet, url, "user", "bob", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", url, rec.Code, rec.Body.String())
+		}
+		var lr ArtifactListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &lr); err != nil {
+			t.Fatalf("unmarshal %s: %v", url, err)
+		}
+		if len(lr.Artifacts) != 1 || lr.Artifacts[0].ID != artID {
+			t.Errorf("GET %s gate off with existing row returned %d items, want 1 (%s)", url, len(lr.Artifacts), artID)
+		}
+	}
+
+	// List must omit reviewRequested even though the row exists.
+	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts?mine=1", "user", "bob", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET list = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"reviewRequested"`) {
+		t.Errorf("reviewRequested should be absent while gate is off with existing row: %s", rec.Body.String())
+	}
+
+	// GET artifact must omit reviewState even though the row exists.
+	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID, "user", "bob", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET artifact = %d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"reviewState"`) {
+		t.Errorf("reviewState should be absent while gate is off with existing row: %s", rec.Body.String())
+	}
+}
+
 func TestReviewRequestsAuthorization(t *testing.T) {
 	svc, h, _, artID := newReviewRequestFixture(t)
 
