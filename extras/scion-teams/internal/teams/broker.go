@@ -298,7 +298,7 @@ func (b *TeamsBroker) Unsubscribe(pattern string) error {
 
 // Publish implements MessageBrokerPluginInterface.Publish.
 // Routes outbound messages to Teams conversations using the priority chain:
-//  1. ThreadID match — look up conversation reference for that thread.
+//  1. Resolved Conversation ExternalRef (or ParentRef / legacy ThreadID) match — look up conversation reference.
 //  2. Metadata teams_conversation_id — explicit target.
 //  3. ConversationContext — last context for sender+project+agent.
 //  4. ChannelLinks broadcast — all channels linked to the project.
@@ -316,9 +316,9 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 		}
 	}
 
-	// Channel filtering: if the message targets a specific channel that
-	// isn't ours, skip it.
-	if msg.Channel != "" && msg.Channel != "teams" {
+	// Surface filtering: if the message targets a specific surface that
+	// isn't ours (including "native" / "web"), skip it.
+	if !plugin.MatchesSurface(msg, "teams") {
 		return nil
 	}
 
@@ -373,11 +373,19 @@ func (b *TeamsBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	store := b.store
 	b.mu.Unlock()
 
-	// Priority 1: ThreadID match.
-	if msg.ThreadID != "" && store != nil {
-		ref, err := store.GetConversationReference(ctx, msg.ThreadID)
+	// Priority 1: Resolved conversation target (Conversation.ExternalRef /
+	// ParentRef, falling back to legacy ThreadID).
+	convTarget := plugin.ResolveConversationTarget(msg)
+	if convTarget.ExternalRef != "" && store != nil {
+		ref, err := store.GetConversationReference(ctx, convTarget.ExternalRef)
 		if err != nil {
-			b.log.Warn("Error looking up conversation reference", "thread_id", msg.ThreadID, "error", err)
+			b.log.Warn("Error looking up conversation reference", "external_ref", convTarget.ExternalRef, "error", err)
+		}
+		if ref == nil && convTarget.ParentRef != "" && convTarget.ParentRef != convTarget.ExternalRef {
+			ref, err = store.GetConversationReference(ctx, convTarget.ParentRef)
+			if err != nil {
+				b.log.Warn("Error looking up parent conversation reference", "parent_ref", convTarget.ParentRef, "error", err)
+			}
 		}
 		if ref != nil {
 			targets = append(targets, sendTarget{
