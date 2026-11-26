@@ -35,6 +35,7 @@ import {
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../utils/feature-flags.js';
+import { agentToFilterRow } from './filter-query/agent-accessors.js';
 
 function hubError(status: number, code: string, message: string): Response {
   return new Response(JSON.stringify({ error: { code, message } }), {
@@ -157,5 +158,25 @@ describe('never-suspend helpers', () => {
   it('includes agent name in force-suspend confirmation messages', () => {
     expect(forceSuspendConfirmMessage('lead-agent')).toContain('lead-agent');
     expect(forceKeepSuspendedConfirmMessage('lead-agent')).toContain('lead-agent');
+  });
+
+  it('exposes suspendPolicy to client-side filter-query evaluation', () => {
+    const flaggedRow = agentToFilterRow({
+      id: 'a1',
+      name: 'lead',
+      projectId: 'p1',
+      template: 'default',
+      phase: 'running',
+      suspendPolicy: 'never',
+    });
+    const autoRow = agentToFilterRow({
+      id: 'a2',
+      name: 'worker',
+      projectId: 'p1',
+      template: 'default',
+      phase: 'running',
+    });
+    expect(flaggedRow.values('suspendPolicy')).toEqual(['never']);
+    expect(autoRow.values('suspendPolicy')).toEqual(['auto']);
   });
 });
