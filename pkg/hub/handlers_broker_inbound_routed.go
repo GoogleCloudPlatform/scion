@@ -527,6 +527,13 @@ func (s *Server) dispatchRoutedRecipient(
 	var effectiveConv *messaging.ConversationResult
 
 	if params.req.Surface != "" && params.req.ExternalRef != "" {
+		convKey, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, params.req.ExternalRef)
+		if keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
+			result.Status = "conversation_not_resolved"
+			result.Error = "invalid external_ref for thread conversation"
+			return result
+		}
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(params.req.Surface))
 		if params.req.ParentRef != "" {
@@ -544,7 +551,7 @@ func (s *Server) dispatchRoutedRecipient(
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			ctx, s.store, s.messageLog, params.req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+			ctx, s.store, s.messageLog, convKey, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(ctx, routedInboundRoute, reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))

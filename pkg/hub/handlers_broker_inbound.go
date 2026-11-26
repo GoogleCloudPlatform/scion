@@ -332,6 +332,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// use it after the Phase 11 block and before dispatch.
 	var preDispatchConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
+		convKey, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef)
+		if keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("broker.phase11")
+			log.Error("conversation key derivation failed", "error", keyErr)
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "invalid external_ref for thread conversation", nil)
+			return
+		}
 		var keyOpts []messaging.ConversationByKeyOption
 		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
 		if req.ParentRef != "" {
@@ -351,7 +358,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 		}
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+			r.Context(), s.store, log, convKey, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(r.Context(), logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(r.Context()))

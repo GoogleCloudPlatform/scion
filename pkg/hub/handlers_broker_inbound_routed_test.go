@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -848,7 +849,9 @@ func TestHandleBrokerInboundRouted_SurfaceExternalRefWithoutLegacyFields(t *test
 
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 
-	conv, err := env.store.GetConversationByExternalRef(ctx, "slack", "C0123ABC:1700000000.000100")
+	wantExtRef, err := messaging.ThreadConversationExternalRef(env.project.ID, "C0123ABC:1700000000.000100")
+	require.NoError(t, err)
+	conv, err := env.store.GetConversationByExternalRef(ctx, "slack", wantExtRef)
 	require.NoError(t, err)
 	assert.Equal(t, "C0123ABC", conv.ParentRef)
 	assert.Equal(t, "#eng-routed", conv.DisplayName)

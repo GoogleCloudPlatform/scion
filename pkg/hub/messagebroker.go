@@ -282,11 +282,75 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 	return nil
 }
 
+// translateConversationForBroker translates a stored conversation row into the
+// surface-native Conversation attached to outbound broker messages (Phase 11).
+//
+// Hub-derived internal keys ("thread:<project>:<ref>", "dm:...") are never
+// emitted as Conversation.ExternalRef:
+//   - Conversations on an external surface whose ExternalRef has the canonical
+//     "thread:<project>:<ref>" form emit the translated surface-native <ref>.
+//   - Native conversations, direct/dm:* conversations, and any ref that cannot
+//     be translated safely return nil so Conversation is omitted and plugins
+//     fall back to legacy Channel/ThreadID (while ConversationID is preserved).
+func translateConversationForBroker(conv *store.Conversation) *messages.Conversation {
+	if conv == nil {
+		return nil
+	}
+	if conv.Surface == "" || conv.Surface == "native" {
+		return nil
+	}
+	if conv.Kind == "direct" || strings.HasPrefix(conv.ExternalRef, "dm:") {
+		return nil
+	}
+	if conv.ExternalRef == "" {
+		return nil
+	}
+	extRef := conv.ExternalRef
+	if strings.HasPrefix(extRef, "thread:") {
+		_, nativeRef, err := messaging.ParseThreadConversationExternalRef(extRef)
+		if err != nil || nativeRef == "" {
+			return nil
+		}
+		extRef = nativeRef
+	}
+	return &messages.Conversation{
+		Surface:     conv.Surface,
+		ExternalRef: extRef,
+		ParentRef:   conv.ParentRef,
+		DisplayName: conv.DisplayName,
+	}
+}
+
+// deriveBrokerInboundThreadKey maps a plugin-supplied surface-native
+// external_ref onto the canonical "thread:<projectID>:<externalRef>" key
+// derived by the outbound thread path (messaging.DeriveConversationKey), so
+// inbound and outbound messages on the same external thread share one
+// conversation row. Already-canonical "thread:" refs are returned as-is;
+// "dm:" refs are rejected because 1:1 DMs resolve via Phase 5 instead.
+func deriveBrokerInboundThreadKey(projectID, externalRef string) (string, error) {
+	if strings.HasPrefix(externalRef, "thread:") {
+		return externalRef, nil
+	}
+	key, kind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:  externalRef,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if kind != "group" {
+		return "", fmt.Errorf("external_ref %q resolved to %q conversation, expected group thread", externalRef, kind)
+	}
+	return key, nil
+}
+
 // enrichConversation populates msg.Conversation from the conversations table
 // when msg.ConversationID is set. It always overwrites any pre-existing
-// Conversation from the authoritative store row, returns a shallow copy so
-// callers' structs are never mutated, and preserves all legacy fields
-// (Channel, ThreadID, etc.) untouched for older plugin binaries.
+// Conversation from the authoritative store row (translating stored thread
+// keys to surface-native refs or omitting Conversation for native/DM rows),
+// returns a shallow copy so callers' structs are never mutated, and preserves
+// ConversationID and all legacy fields (Channel, ThreadID, etc.) untouched for
+// older plugin binaries.
 func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
 	if msg == nil || msg.ConversationID == "" || p.store == nil {
 		return msg
@@ -300,12 +364,7 @@ func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messag
 		return msg
 	}
 	cp := *msg
-	cp.Conversation = &messages.Conversation{
-		Surface:     conv.Surface,
-		ExternalRef: conv.ExternalRef,
-		ParentRef:   conv.ParentRef,
-		DisplayName: conv.DisplayName,
-	}
+	cp.Conversation = translateConversationForBroker(conv)
 	return &cp
 }
 

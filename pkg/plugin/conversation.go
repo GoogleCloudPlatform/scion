@@ -20,14 +20,18 @@ import "github.com/GoogleCloudPlatform/scion/pkg/messages"
 // from an outbound StructuredMessage for broker plugin routing (Phase 11).
 //
 // Contract for broker plugins (P4 dual-population):
-//   - On outbound Publish(), call ResolveConversationTarget(msg) (and, for
-//     plugins that filter by channel such as Slack/Discord/Teams,
-//     MatchesSurface(msg, "<surface>")).
+//   - On outbound Publish(), the hub translates stored thread keys
+//     ("thread:<project>:<ref>") on external surfaces into surface-native
+//     Conversation.ExternalRef values (<ref>), and omits Conversation (nil)
+//     for native conversations, direct (dm:*) conversations, and any ref that
+//     cannot be safely translated. ConversationID is always preserved.
+//   - Call ResolveConversationTarget(msg) (and, for plugins that filter by
+//     channel such as Slack/Discord/Teams, MatchesSurface(msg, "<surface>")).
 //   - While legacy msg.Channel is populated (P4), spoke selection follows
 //     msg.Channel (the hub's per-message routing decision, including reply
-//     affinity). A Conversation with Surface=="native" (DMs, native threads,
-//     agent-to-agent observer copies) never filters out a message and never
-//     supplies an external target ref.
+//     affinity). Absent or native Conversations (DMs, native threads,
+//     agent-to-agent observer copies) never filter out a message and never
+//     supply an external target ref.
 //   - When msg.Conversation is present with a non-native surface, Surface,
 //     ExternalRef, ParentRef and DisplayName come from it; when absent or
 //     native, Surface falls back to msg.Channel and ExternalRef falls back to
@@ -35,7 +39,15 @@ import "github.com/GoogleCloudPlatform/scion/pkg/messages"
 //   - On inbound HTTP delivery (/api/v1/broker/inbound and
 //     /api/v1/broker/inbound/routed), embed InboundConversation (surface,
 //     external_ref, optional parent_ref and display_name) at the top level of
-//     the request JSON so the hub resolves or creates the conversation row.
+//     the request JSON for threaded/channel conversations. The hub maps
+//     (surface, external_ref) onto the canonical thread:<project>:<ref> key
+//     so inbound and outbound threads share one conversation. 1:1 surface DMs
+//     without a thread omit external_ref so Phase 5 resolves the shared direct
+//     dm: conversation.
+//   - Exception: scion-chat-app delivers inbound messages through the
+//     user-authenticated agent-message API (/api/v1/agents/{id}/message)
+//     rather than /api/v1/broker/inbound and is therefore a documented
+//     exception to inbound (surface, external_ref) resolution.
 type ConversationTarget struct {
 	ConversationID string
 	Surface        string
