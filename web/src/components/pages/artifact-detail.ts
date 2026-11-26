@@ -137,6 +137,7 @@ import {
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
 import '../shared/artifact-move-dialog.js';
+import '../shared/artifact-transfer-dialog.js';
 import '../shared/artifact-share-dialog.js';
 import { capabilitiesFrom, showManageAccess } from '../shared/artifact-access-sections.js';
 import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
@@ -623,6 +624,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private shareOpen = false;
   /** The Move dialog is open (ptone/scion#4583). */
   @state() private moveOpen = false;
+  /** The Transfer ownership dialog is open (experiment hub.artifacts_transfer). */
+  @state() private transferOpen = false;
   /** The Retention and access dialog is open. */
   @state() private retentionOpen = false;
   /** The Manage access dialog is open (experiment web.artifact_manage_access). */
@@ -1568,11 +1571,16 @@ export class ScionPageArtifactDetail extends LitElement {
     }
   }
 
-  /** Looks up the names of the owner and of the versions' publishers. */
+  /** Looks up the names of the owner, former owner, and the versions' publishers. */
   private resolveNames(): void {
     const refs: [string, string][] = [];
     const a = this.data?.artifact;
-    if (a) refs.push([a.ownerKind, a.ownerRef]);
+    if (a) {
+      refs.push([a.ownerKind, a.ownerRef]);
+      if (a.formerOwnerKind && a.formerOwnerRef) {
+        refs.push([a.formerOwnerKind, a.formerOwnerRef]);
+      }
+    }
     for (const v of this.versions) {
       if (v.createdByKind && v.createdByRef) refs.push([v.createdByKind, v.createdByRef]);
     }
@@ -1666,6 +1674,28 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Delete… is offered exactly when the hub reports canRetire. */
   private get canRetire(): boolean {
     return this.data?.canRetire === true;
+  }
+
+  /** Transfer… is offered exactly when the hub reports canTransfer. */
+  private get canTransfer(): boolean {
+    return this.data?.canTransfer === true;
+  }
+
+  /** Display label for the artifact's home project. */
+  private get currentProjectName(): string {
+    const id = this.homeProject.trim();
+    if (!id) return '';
+    const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+    return resolved.label || id;
+  }
+
+  /** Formats the former owner in the header's "Transferred from …" meta item. */
+  private formerOwnerLabel(kind: string, ref: string): string {
+    if (kind === 'agent') {
+      const name = this.names.get(`${kind}:${ref}`) || shortId(ref);
+      return `agent ${name}`;
+    }
+    return this.label(kind, ref);
   }
 
   /**
@@ -2904,6 +2934,24 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-move-dialog>`
         : nothing}
+      ${this.canTransfer || this.transferOpen
+        ? html`<scion-artifact-transfer-dialog
+            .artifact=${this.data.artifact}
+            .ownerName=${this.names.get(
+              `${this.data.artifact.ownerKind}:${this.data.artifact.ownerRef}`
+            ) || shortId(this.data.artifact.ownerRef)}
+            .projectName=${this.currentProjectName}
+            .shareAuthority=${this.data.shareAuthority ?? ''}
+            ?open=${this.transferOpen}
+            @artifact-changed=${(e: CustomEvent<ArtifactResponse>): void =>
+              this.onTransferred(e.detail)}
+            @artifact-reloaded=${(e: CustomEvent<ArtifactResponse>): void =>
+              this.onTransferReloaded(e.detail)}
+            @artifact-transfer-closed=${(): void => {
+              this.transferOpen = false;
+            }}
+          ></scion-artifact-transfer-dialog>`
+        : nothing}
       ${this.renderDraftDialogs()}
       <scion-chat-file-preview
         .target=${this.previewFile}
@@ -2930,6 +2978,24 @@ export class ScionPageArtifactDetail extends LitElement {
   private onMoved(moved: Artifact): void {
     this.moveOpen = false;
     navigateTo(artifactPagePath(moved, 0, this.origin));
+  }
+
+  /** Applies the hub's recomputed ArtifactResponse after ownership transfer. */
+  private onTransferred(updated: ArtifactResponse): void {
+    this.transferOpen = false;
+    this.applyTransferResponse(updated);
+    showToast(`Transferred ownership of “${updated.artifact.title}”.`, 'success');
+  }
+
+  /** Applies a reloaded ArtifactResponse (e.g. after 409 owner_changed). */
+  private onTransferReloaded(updated: ArtifactResponse): void {
+    this.applyTransferResponse(updated);
+  }
+
+  private applyTransferResponse(updated: ArtifactResponse): void {
+    const version = this.showsCurrent ? updated.version : (this.data?.version ?? updated.version);
+    this.data = version ? { ...updated, version } : { ...updated };
+    this.resolveNames();
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
@@ -3021,7 +3087,12 @@ export class ScionPageArtifactDetail extends LitElement {
     const hasActions =
       !this.editing &&
       !this.reviewing &&
-      (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
+      (!!v ||
+        this.canEdit ||
+        this.canReview ||
+        accessActions ||
+        this.canTransfer ||
+        this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
     return html`
@@ -3041,6 +3112,12 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         <div slot="meta" class="meta">
           <span>Owner: ${a.ownerDeleted ? this.goneOwner(a.ownerKind, a.ownerRef) : owner}</span>
+          ${a.formerOwnerKind && a.formerOwnerRef && a.transferredAt
+            ? html`<span class="transferred-from">
+                Transferred from ${this.formerOwnerLabel(a.formerOwnerKind, a.formerOwnerRef)} ·
+                ${formatInstant(a.transferredAt)}
+              </span>`
+            : nothing}
           ${v ? this.renderVersionInfo(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
@@ -3158,6 +3235,18 @@ export class ScionPageArtifactDetail extends LitElement {
                     >
                       <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
                       Move…
+                    </sl-button>`
+                  : nothing}
+                ${this.canTransfer
+                  ? html`<sl-button
+                      size="small"
+                      class="transfer"
+                      @click=${(): void => {
+                        this.transferOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      Transfer…
                     </sl-button>`
                   : nothing}
                 ${this.canRetire
