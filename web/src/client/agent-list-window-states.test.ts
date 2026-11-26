@@ -23,6 +23,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import type { Agent } from '../shared/types.js';
 import {
+  drainServerQuery,
+  getViewSchema,
+  knownKeysFor,
+  parse as parseFilterQuery,
+} from '../shared/filter-query/index.js';
+import {
   AgentListWindow,
   cappedTotalText,
   failedTotalText,
@@ -57,6 +63,7 @@ function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewStat
     pageSize: 25,
     view: 'list',
     serverQuery: '',
+    committedNonPhasePredicate: null,
     ...partial,
   };
 }
@@ -460,23 +467,42 @@ describe('AgentListWindow states — sorted-mode refusal per committed label', (
     expect(win.planRequest('page-load', '')).toBe('fit');
   });
 
-  it('keys 422 refusal on the phase-stripped server query so phase-chip switches do not retry fit', () => {
+  it('keys 422 refusal on the parsed phase-stripped query (preserving quoted text like "foo phase:x")', () => {
+    const schema = getViewSchema('project_agents')!;
+    const keyOf = (raw: string): string => {
+      const parsed = parseFilterQuery(raw, knownKeysFor(schema));
+      return drainServerQuery(parsed.query ?? null, schema);
+    };
+
     const { win } = setup();
-    win.recordRefusal('label:env=prod phase:running');
-    expect(win.isSortedRefused('label:env=prod phase:running')).toBe(true);
-    expect(win.isSortedRefused('label:env=prod phase:stopped')).toBe(true);
-    expect(win.isSortedRefused('label:env=prod -phase:error')).toBe(true);
-    expect(win.isSortedRefused('label:env=prod')).toBe(true);
-    expect(win.planRequest('label-commit', 'label:env=prod phase:stopped')).toBe('drain');
+    win.recordRefusal(keyOf('label:env=prod phase:running'));
+    expect(win.isSortedRefused(keyOf('label:env=prod phase:running'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('label:env=prod phase:stopped'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('label:env=prod -phase:error'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('label:env=prod'))).toBe(true);
+    expect(win.planRequest('label-commit', keyOf('label:env=prod phase:stopped'))).toBe('drain');
 
     // Different non-phase terms are not refused and get a fresh fit attempt.
-    expect(win.isSortedRefused('label:env=staging phase:running')).toBe(false);
-    expect(win.planRequest('label-commit', 'label:env=staging phase:running')).toBe('fit');
+    expect(win.isSortedRefused(keyOf('label:env=staging phase:running'))).toBe(false);
+    expect(win.planRequest('label-commit', keyOf('label:env=staging phase:running'))).toBe('fit');
+
+    // Quoted text containing "phase:" is NOT stripped from the refusal key.
+    const quotedKey = keyOf('label:env=prod "foo phase:x"');
+    expect(quotedKey).toBe('label:env=prod "foo phase:x"');
+    win.recordRefusal(quotedKey);
+    expect(win.isSortedRefused(keyOf('label:env=prod "foo phase:x"'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('label:env=prod "foo phase:x" phase:running'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('label:env=prod "foo"'))).toBe(false);
+
+    // Pure-text query containing "phase:" is also preserved intact.
+    win.recordRefusal(keyOf('"foo phase:x"'));
+    expect(win.isSortedRefused(keyOf('"foo phase:x"'))).toBe(true);
+    expect(win.isSortedRefused(keyOf('"foo"'))).toBe(false);
 
     // Phase-only refusal keys to empty string and covers all phase-only queries.
-    win.recordRefusal('phase:running');
-    expect(win.isSortedRefused('')).toBe(true);
-    expect(win.isSortedRefused('phase:stopped')).toBe(true);
+    win.recordRefusal(keyOf('phase:running'));
+    expect(win.isSortedRefused(keyOf(''))).toBe(true);
+    expect(win.isSortedRefused(keyOf('phase:stopped'))).toBe(true);
   });
 });
 

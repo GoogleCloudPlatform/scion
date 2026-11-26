@@ -45,6 +45,7 @@ function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewStat
     pageSize: 3,
     view: 'list',
     serverQuery: '',
+    committedNonPhasePredicate: null,
     ...partial,
   };
 }

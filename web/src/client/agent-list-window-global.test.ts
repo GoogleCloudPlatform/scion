@@ -49,6 +49,7 @@ function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewStat
     pageSize: 25,
     view: 'list',
     serverQuery: '',
+    committedNonPhasePredicate: null,
     ...partial,
   };
 }
@@ -231,6 +232,7 @@ describe('AgentListWindow — add rule override', () => {
       {
         serverQuery: 'label:env=prod',
         committedFilterPredicate: (a) => a.labels?.env === 'prod',
+        committedNonPhasePredicate: (a) => a.labels?.env === 'prod',
       },
       { isAddable: () => scopeAll }
     );

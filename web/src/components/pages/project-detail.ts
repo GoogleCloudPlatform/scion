@@ -489,6 +489,7 @@ export class ScionPageProjectDetail extends LitElement {
       pageSize: this.pagerPageSize,
       view: listViewOf(this.viewMode),
       serverQuery: '',
+      committedNonPhasePredicate: null,
     },
     getProjectId: () => this.projectId,
     isAddable: (agent: Agent): boolean => {
@@ -1993,7 +1994,8 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
     const serverQ = this.committedServerQ;
-    const plan = this.agentWindow.planRequest(trigger, serverQ);
+    const refusalKey = drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA);
+    const plan = this.agentWindow.planRequest(trigger, refusalKey);
     if (plan === 'none') return;
     if (plan === 'page') {
       await this.agentWindow.refresh();
@@ -2006,7 +2008,7 @@ export class ScionPageProjectDetail extends LitElement {
       adopted =
         plan === 'fit'
           ? await this.loadFitAgents(trigger, serverQ)
-          : await this.drainProjectAgents(trigger, serverQ);
+          : await this.drainProjectAgents(trigger);
     } finally {
       this.endLoadingIndicator();
     }
@@ -2018,7 +2020,10 @@ export class ScionPageProjectDetail extends LitElement {
     if (
       adopted &&
       viewEpoch !== this.viewEpoch &&
-      this.agentWindow.planRequest('view-change', this.committedServerQ) !== 'none'
+      this.agentWindow.planRequest(
+        'view-change',
+        drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
+      ) !== 'none'
     ) {
       await this.loadAgentsForView('view-change');
     }
@@ -2074,11 +2079,14 @@ export class ScionPageProjectDetail extends LitElement {
     if (this.isStaleAgentsLoad(gen)) return false;
 
     if (response.status === 422) {
-      // Candidate ceiling: remember the refusal and drain instead.
-      this.agentWindow.recordRefusal(serverQ);
+      // Candidate ceiling: remember the refusal keyed on the phase-independent
+      // query (matching the hub's unphased ceiling check) and drain instead.
+      this.agentWindow.recordRefusal(
+        drainServerQuery(this.committedFilterQuery, PROJECT_AGENTS_FILTER_SCHEMA)
+      );
       this.agentWindow.endSortedRequest(ticket);
       epoch.close(); // the drain runs its own epoch.
-      return await this.drainProjectAgents(trigger, serverQ, gen);
+      return await this.drainProjectAgents(trigger, gen);
     }
 
     if (!response.ok) {
@@ -2135,7 +2143,6 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private async drainProjectAgents(
     trigger: AgentsViewTrigger,
-    _serverQ: string,
     carriedGen?: number
   ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;

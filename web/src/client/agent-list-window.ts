@@ -157,11 +157,12 @@ export interface AgentListViewState {
   committedFilterPredicate?: ((agent: Agent) => boolean) | null;
   /**
    * Non-phase projection of `committedFilterPredicate` (all terms except
-   * `phase`), mirroring the hub's phase-independent stats population. Used to
-   * gate membership in `memberIndex`: a phase transition alone never evicts a
-   * member from `memberIndex`, while a failing non-phase predicate does.
+   * `phase`), mirroring the hub's phase-independent stats population. Required:
+   * pass `null` when no non-phase terms are active. Used to gate membership in
+   * `memberIndex`: a phase transition alone never evicts a member from
+   * `memberIndex`, while a failing non-phase predicate does.
    */
-  committedNonPhasePredicate?: ((agent: Agent) => boolean) | null;
+  committedNonPhasePredicate: ((agent: Agent) => boolean) | null;
   /**
    * Phase-only projection of `committedFilterPredicate`, used for off-page
    * `unknown` deltas that carry only `phase` (without labels or name), for
@@ -399,32 +400,22 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Normalize a server query for 422 refusal memory by stripping `phase:` /
-   * `-phase:` terms: the hub's project candidate ceiling is decided on the
-   * phase-independent filter (`unphasedAgentFilter`), so queries differing
-   * only in `phase:` always receive the same 422 decision.
+   * Whether the server refused sorted mode (422) for this refusal key.
+   * Callers pass the phase-independent server query derived from the parsed
+   * query (e.g. `drainServerQuery`), because the hub's project candidate
+   * ceiling ignores `phase:` terms.
    */
-  private refusalKeyFor(serverQuery: string): string {
-    return serverQuery
-      .trim()
-      .split(/\s+/)
-      .filter((tok) => tok !== '' && !/^-?phase:/i.test(tok))
-      .join(' ');
-  }
-
-  /** Whether the server refused sorted mode (422) for this server query (ignoring `phase:` terms). */
-  isSortedRefused(serverQuery: string): boolean {
-    return this.refusedQuery !== null && this.refusedQuery === this.refusalKeyFor(serverQuery);
+  isSortedRefused(refusalKey: string): boolean {
+    return this.refusedQuery !== null && this.refusedQuery === refusalKey.trim();
   }
 
   /**
-   * Remember a 422 refusal of sorted mode for this server query (keyed on its
-   * phase-independent form). No sorted request is planned again until a query
-   * with different non-phase terms is committed; that query gets one sorted
-   * attempt of its own.
+   * Remember a 422 refusal of sorted mode for this phase-independent refusal
+   * key. No sorted request is planned again until a query with a different
+   * refusal key is committed; that query gets one sorted attempt of its own.
    */
-  recordRefusal(serverQuery: string): void {
-    this.refusedQuery = this.refusalKeyFor(serverQuery);
+  recordRefusal(refusalKey: string): void {
+    this.refusedQuery = refusalKey.trim();
   }
 
   /**
@@ -1095,22 +1086,12 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * Whether an agent belongs in the phase-independent stats population
-   * (mirroring the hub's `statsFilter` with `phase:` terms removed). When
-   * `committedNonPhasePredicate` is explicitly set (including `null` for a
-   * phase-only query), it governs membership; otherwise, if no
-   * `committedPhasePredicate` is active, falls back to `committedFilterPredicate`.
+   * (mirroring the hub's `statsFilter` with `phase:` terms removed).
    */
   private passesCommittedNonPhase(agent: Agent): boolean {
-    if (this.viewState.committedNonPhasePredicate !== undefined) {
-      return (
-        !this.viewState.committedNonPhasePredicate ||
-        this.viewState.committedNonPhasePredicate(agent)
-      );
-    }
-    if (this.viewState.committedPhasePredicate) {
-      return true;
-    }
-    return this.passesCommittedFilter(agent);
+    return (
+      !this.viewState.committedNonPhasePredicate || this.viewState.committedNonPhasePredicate(agent)
+    );
   }
 
   /** The committed query's add rule (mirroring the server's phase-independent stats population): the project match (or `isAddable`) plus `passesCommittedNonPhase`. */

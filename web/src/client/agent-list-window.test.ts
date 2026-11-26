@@ -52,6 +52,7 @@ function makeViewState(partial: Partial<AgentListViewState> = {}): AgentListView
     pageSize: 2,
     view: 'list',
     serverQuery: '',
+    committedNonPhasePredicate: null,
     ...partial,
   };
 }
@@ -394,6 +395,7 @@ describe('AgentListWindow — paged state', () => {
       viewState: makeViewState({
         serverQuery: 'label:env=prod',
         committedFilterPredicate: (a) => a.labels?.env === 'prod',
+        committedNonPhasePredicate: (a) => a.labels?.env === 'prod',
       }),
       getAgent: (id) => known.get(id),
       getProjectId: () => 'p-1',
@@ -733,6 +735,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
       viewState: makeViewState({
         serverQuery: 'label:env=prod',
         committedFilterPredicate: (a) => a.labels?.env === 'prod',
+        committedNonPhasePredicate: (a) => a.labels?.env === 'prod',
       }),
       getAgent: (id) => known.get(id),
     });
