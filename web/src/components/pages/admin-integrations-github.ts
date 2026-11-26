@@ -15,8 +15,10 @@
  */
 
 import { LitElement, html, css } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
+import type { AdminStatus } from '../../lib/admin-permissions.js';
+import type { PageData } from '../../shared/types.js';
 import {
   GITHUB_ADMIN_SECTIONS,
   type GitHubAdminSection,
@@ -26,6 +28,9 @@ export { GITHUB_ADMIN_SECTIONS } from './admin-integrations-github-sections.js';
 
 @customElement('scion-admin-integrations-github')
 export class ScionAdminIntegrationsGitHub extends LitElement {
+  @property({ type: Object }) adminStatus: AdminStatus | null = null;
+  @property({ type: Object }) pageData?: PageData;
+
   @state() private loadedSections = new Set<string>();
   @state() private loadErrors = new Map<string, string>();
   @state() private appConfigured = false;
@@ -92,10 +97,26 @@ export class ScionAdminIntegrationsGitHub extends LitElement {
     }
   }
 
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    if (changed.has('adminStatus') || changed.has('pageData')) {
+      for (const el of this.sectionElements.values()) {
+        this.syncSectionContext(el);
+      }
+    }
+  }
+
   private syncSectionContext(el: HTMLElement): void {
-    const target = el as HTMLElement & { appConfigured?: boolean; configSaveCounter?: number };
+    const target = el as HTMLElement & {
+      appConfigured?: boolean;
+      configSaveCounter?: number;
+      adminStatus?: AdminStatus | null;
+      pageData?: PageData | undefined;
+    };
     target.appConfigured = this.appConfigured;
     target.configSaveCounter = this.configSaveCounter;
+    target.adminStatus = this.adminStatus;
+    target.pageData = this.pageData;
   }
 
   private getOrCreateSectionElement(section: GitHubAdminSection): HTMLElement {

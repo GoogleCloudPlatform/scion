@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { hasAnyPermission, type AdminStatus } from '../../lib/admin-permissions.js';
+import type { PageData } from '../../shared/types.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, githubTriggersEnabled } from '../../utils/feature-flags.js';
 
 export interface GitHubRepoRoutingProject {
@@ -52,6 +55,8 @@ function splitOwnerRepo(fullRepo: string): [string, string] | null {
 export class ScionAdminGitHubRouting extends LitElement {
   @property({ type: Boolean }) appConfigured = false;
   @property({ type: Number }) configSaveCounter = 0;
+  @property({ type: Object }) adminStatus: AdminStatus | null = null;
+  @property({ type: Object }) pageData?: PageData;
 
   @state() private enabled = false;
   @state() private entries: GitHubRepoRoutingEntry[] = [];
@@ -59,11 +64,15 @@ export class ScionAdminGitHubRouting extends LitElement {
   @state() private refreshing = false;
   @state() private error: string | null = null;
   @state() private readOnly = false;
+  @state() private forbiddenRead = false;
+  @state() private loadedAdminStatus: AdminStatus | null = null;
   @state() private selectedInstallation = '';
   @state() private savingKeys = new Set<string>();
 
   private loadedOnce = false;
-  private flagsChangedHandler = () => {
+  private loadSeq = 0;
+  private adminStatusUserId: string | null = null;
+  private flagsChangedHandler = (): void => {
     this.syncEnabledState();
   };
 
@@ -241,6 +250,7 @@ export class ScionAdminGitHubRouting extends LitElement {
     super.connectedCallback();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.flagsChangedHandler);
     this.syncEnabledState();
+    void this.loadAdminStatusForUser();
   }
 
   override disconnectedCallback(): void {
@@ -250,6 +260,9 @@ export class ScionAdminGitHubRouting extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
+    if (changed.has('pageData') || changed.has('adminStatus')) {
+      void this.loadAdminStatusForUser();
+    }
     const savedWhileConfigured =
       this.enabled &&
       changed.has('configSaveCounter') &&
@@ -258,6 +271,32 @@ export class ScionAdminGitHubRouting extends LitElement {
     if (savedWhileConfigured) {
       void this.loadRouting({ refresh: true });
     }
+  }
+
+  private async loadAdminStatusForUser(): Promise<void> {
+    if (this.adminStatus !== null) return;
+    const userId = this.pageData?.user?.id ?? null;
+    if (!userId) {
+      this.adminStatusUserId = null;
+      this.loadedAdminStatus = null;
+      return;
+    }
+    if (userId === this.adminStatusUserId) return;
+    this.adminStatusUserId = userId;
+    const status = await loadAdminStatus(userId);
+    if (this.adminStatusUserId === userId) {
+      this.loadedAdminStatus = status;
+    }
+  }
+
+  private get effectiveAdminStatus(): AdminStatus | null {
+    return this.adminStatus ?? this.loadedAdminStatus;
+  }
+
+  private get isReadOnly(): boolean {
+    if (this.readOnly) return true;
+    const status = this.effectiveAdminStatus;
+    return status !== null && !hasAnyPermission(status, ['hub.github_app.update']);
   }
 
   private syncEnabledState(): void {
@@ -274,6 +313,7 @@ export class ScionAdminGitHubRouting extends LitElement {
 
   async loadRouting(options?: { refresh?: boolean; preserveError?: boolean }): Promise<void> {
     if (!this.enabled) return;
+    const seq = ++this.loadSeq;
     const isRefresh = Boolean(options?.refresh);
     if (isRefresh) {
       this.refreshing = true;
@@ -287,16 +327,22 @@ export class ScionAdminGitHubRouting extends LitElement {
       const res = await apiFetch('/api/v1/github-app/repo-routing', {
         suppressAccessDeniedToast: true,
       });
+      if (seq !== this.loadSeq) return;
       if (res.status === 403) {
-        this.readOnly = true;
+        this.forbiddenRead = true;
+        this.entries = [];
         this.error = null;
         return;
       }
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to load repository routing');
+        const msg = await extractApiError(res, 'Failed to load repository routing');
+        if (seq !== this.loadSeq) return;
+        this.error = msg;
         return;
       }
       const data = (await res.json()) as GitHubRepoRoutingEntry[];
+      if (seq !== this.loadSeq) return;
+      this.forbiddenRead = false;
       this.entries = Array.isArray(data) ? data : [];
       if (
         this.selectedInstallation &&
@@ -305,10 +351,13 @@ export class ScionAdminGitHubRouting extends LitElement {
         this.selectedInstallation = '';
       }
     } catch {
+      if (seq !== this.loadSeq) return;
       this.error = 'Failed to load repository routing';
     } finally {
-      this.loading = false;
-      this.refreshing = false;
+      if (seq === this.loadSeq) {
+        this.loading = false;
+        this.refreshing = false;
+      }
     }
   }
 
@@ -334,7 +383,7 @@ export class ScionAdminGitHubRouting extends LitElement {
   }
 
   private async handlePrimaryChange(entry: GitHubRepoRoutingEntry, e: Event): Promise<void> {
-    if (this.readOnly) return;
+    if (this.isReadOnly) return;
     const target = e.currentTarget as HTMLElement & { value?: string };
     const nextPrimary = typeof target.value === 'string' ? target.value : '';
     const currentPrimary = entry.primary_project_id ?? '';
@@ -403,10 +452,7 @@ export class ScionAdminGitHubRouting extends LitElement {
           res,
           'Selected project is no longer a candidate for this repository.'
         );
-        this.error =
-          errInfo.code === 'not_a_candidate'
-            ? errInfo.message
-            : errInfo.message || 'Selected project is no longer a candidate for this repository.';
+        this.error = errInfo.message;
         target.value = currentPrimary;
         await this.loadRouting({ refresh: true, preserveError: true });
         return;
@@ -447,7 +493,7 @@ export class ScionAdminGitHubRouting extends LitElement {
     return `${entry.primary_project_id} (stale)`;
   }
 
-  private renderStatus(entry: GitHubRepoRoutingEntry) {
+  private renderStatus(entry: GitHubRepoRoutingEntry): TemplateResult {
     const multiProject = entry.projects.length > 1 && entry.status !== 'ok';
     return html`
       <div class="status-cell">
@@ -470,8 +516,8 @@ export class ScionAdminGitHubRouting extends LitElement {
     `;
   }
 
-  private renderPrimaryCell(entry: GitHubRepoRoutingEntry) {
-    if (this.readOnly) {
+  private renderPrimaryCell(entry: GitHubRepoRoutingEntry): TemplateResult {
+    if (this.isReadOnly) {
       return html`<span data-primary-readonly>${this.primaryProjectLabel(entry)}</span>`;
     }
 
@@ -489,7 +535,9 @@ export class ScionAdminGitHubRouting extends LitElement {
         data-routing-select=${key}
         .value=${currentValue}
         ?disabled=${this.savingKeys.has(key)}
-        @sl-change=${(e: Event) => this.handlePrimaryChange(entry, e)}
+        @sl-change=${(e: Event): void => {
+          void this.handlePrimaryChange(entry, e);
+        }}
       >
         <sl-option value="">— fan out to all —</sl-option>
         ${hasStaleSelection && entry.primary_project_id
@@ -504,7 +552,7 @@ export class ScionAdminGitHubRouting extends LitElement {
     `;
   }
 
-  override render() {
+  override render(): TemplateResult | typeof nothing {
     if (!this.enabled) {
       return nothing;
     }
@@ -525,7 +573,7 @@ export class ScionAdminGitHubRouting extends LitElement {
                     label="Filter by installation"
                     data-installation-filter
                     .value=${this.selectedInstallation}
-                    @sl-change=${(e: Event) => this.handleInstallationFilterChange(e)}
+                    @sl-change=${(e: Event): void => this.handleInstallationFilterChange(e)}
                   >
                     <sl-option value="">All installations</sl-option>
                     ${installations.map(
@@ -539,7 +587,9 @@ export class ScionAdminGitHubRouting extends LitElement {
               variant="default"
               ?loading=${this.refreshing}
               ?disabled=${this.loading}
-              @click=${() => this.loadRouting({ refresh: true })}
+              @click=${(): void => {
+                void this.loadRouting({ refresh: true });
+              }}
             >
               <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
               Refresh
@@ -547,7 +597,16 @@ export class ScionAdminGitHubRouting extends LitElement {
           </div>
         </div>
 
-        ${this.readOnly
+        ${this.forbiddenRead
+          ? html`<div class="status-message info" data-routing-forbidden-read>
+              <sl-icon name="lock"></sl-icon>
+              <span>
+                You do not have permission to view repository routing (requires
+                <code>hub.github_app.read</code>).
+              </span>
+            </div>`
+          : nothing}
+        ${!this.forbiddenRead && this.isReadOnly
           ? html`<div class="status-message info" data-routing-readonly>
               <sl-icon name="lock"></sl-icon>
               <span>
@@ -561,70 +620,72 @@ export class ScionAdminGitHubRouting extends LitElement {
           : nothing}
         ${this.loading
           ? html`<div class="loading-row"><sl-spinner></sl-spinner></div>`
-          : rows.length === 0
-            ? html`<p class="empty-hint">
-                No repositories are associated with a GitHub App installation.
-              </p>`
-            : html`
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Repository</th>
-                        <th>Projects</th>
-                        <th>Primary project</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${rows.map(
-                        (entry) => html`
-                          <tr data-routing-row=${rowKey(entry)}>
-                            <td>
-                              <div class="mono">${entry.repo}</div>
-                              ${installations.length > 1
-                                ? html`<div class="repo-meta">
-                                    Installation #${entry.installation_id}
-                                  </div>`
-                                : nothing}
-                            </td>
-                            <td>
-                              ${entry.projects.length === 0
-                                ? html`<span class="empty-hint">—</span>`
-                                : html`
-                                    <div class="projects-list">
-                                      ${entry.projects.map(
-                                        (proj) => html`
-                                          <span class="project-item" data-project-id=${proj.id}>
-                                            <a
-                                              href="/projects/${encodeURIComponent(
-                                                proj.id
-                                              )}/settings"
-                                              >${proj.name || proj.id}</a
-                                            >
-                                            ${proj.has_github_triggers
-                                              ? html`<sl-badge
-                                                  variant="primary"
-                                                  pill
-                                                  data-has-github-triggers
-                                                  >triggers</sl-badge
-                                                >`
-                                              : nothing}
-                                          </span>
-                                        `
-                                      )}
-                                    </div>
-                                  `}
-                            </td>
-                            <td>${this.renderPrimaryCell(entry)}</td>
-                            <td>${this.renderStatus(entry)}</td>
-                          </tr>
-                        `
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              `}
+          : this.forbiddenRead
+            ? nothing
+            : rows.length === 0
+              ? html`<p class="empty-hint">
+                  No repositories are associated with a GitHub App installation.
+                </p>`
+              : html`
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Repository</th>
+                          <th>Projects</th>
+                          <th>Primary project</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${rows.map(
+                          (entry) => html`
+                            <tr data-routing-row=${rowKey(entry)}>
+                              <td>
+                                <div class="mono">${entry.repo}</div>
+                                ${installations.length > 1
+                                  ? html`<div class="repo-meta">
+                                      Installation #${entry.installation_id}
+                                    </div>`
+                                  : nothing}
+                              </td>
+                              <td>
+                                ${entry.projects.length === 0
+                                  ? html`<span class="empty-hint">—</span>`
+                                  : html`
+                                      <div class="projects-list">
+                                        ${entry.projects.map(
+                                          (proj) => html`
+                                            <span class="project-item" data-project-id=${proj.id}>
+                                              <a
+                                                href="/projects/${encodeURIComponent(
+                                                  proj.id
+                                                )}/settings"
+                                                >${proj.name || proj.id}</a
+                                              >
+                                              ${proj.has_github_triggers
+                                                ? html`<sl-badge
+                                                    variant="primary"
+                                                    pill
+                                                    data-has-github-triggers
+                                                    >triggers</sl-badge
+                                                  >`
+                                                : nothing}
+                                            </span>
+                                          `
+                                        )}
+                                      </div>
+                                    `}
+                              </td>
+                              <td>${this.renderPrimaryCell(entry)}</td>
+                              <td>${this.renderStatus(entry)}</td>
+                            </tr>
+                          `
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                `}
       </div>
     `;
   }

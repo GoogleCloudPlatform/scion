@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import {
   resetServerFlagStateForTests,
   setServerFlags,
@@ -89,6 +90,7 @@ describe('scion-admin-github-routing', () => {
   beforeEach(() => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    clearAdminStatus();
   });
 
   afterEach(() => {
@@ -96,6 +98,7 @@ describe('scion-admin-github-routing', () => {
     element = null;
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    clearAdminStatus();
     vi.restoreAllMocks();
   });
 
@@ -340,7 +343,46 @@ describe('scion-admin-github-routing', () => {
     expect(shadowText(element)).toContain('— fan out to all —');
   });
 
-  it('renders read-only notice when initial GET returns 403', async () => {
+  it('renders read-only up front when admin status lacks hub.github_app.update', async () => {
+    enableGitHubTriggers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.includes('/api/v1/auth/admin-status')) {
+          return jsonResponse({
+            isAdmin: true,
+            isSuperAdmin: false,
+            permissions: ['hub.github_app.read'],
+          });
+        }
+        return jsonResponse(SAMPLE_ENTRIES);
+      })
+    );
+
+    element = document.createElement('scion-admin-github-routing') as ScionAdminGitHubRouting;
+    element.pageData = {
+      path: '/admin/integrations/github',
+      title: 'Integrations',
+      user: {
+        id: 'user-ro',
+        email: 'reader@example.com',
+        name: 'Reader',
+        role: 'member',
+      },
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(queryAll(element!, '[data-routing-row]')).toHaveLength(3);
+      expect(query(element!, '[data-routing-readonly]')).not.toBeNull();
+    });
+
+    expect(queryAll(element, '[data-routing-select]')).toHaveLength(0);
+    expect(queryAll(element, '[data-primary-readonly]')).toHaveLength(3);
+  });
+
+  it('renders read-permission message without empty state when initial GET returns 403', async () => {
     enableGitHubTriggers();
 
     element = await mount(() =>
@@ -348,8 +390,53 @@ describe('scion-admin-github-routing', () => {
     );
 
     await vi.waitFor(() => {
-      expect(query(element!, '[data-routing-readonly]')).not.toBeNull();
+      expect(query(element!, '[data-routing-forbidden-read]')).not.toBeNull();
     });
+    expect(query(element, '[data-routing-forbidden-read]')?.textContent).toContain(
+      'hub.github_app.read'
+    );
     expect(queryAll(element, '[data-routing-select]')).toHaveLength(0);
+    expect(shadowText(element)).not.toContain('No repositories');
+  });
+
+  it('ignores stale GET responses when a newer loadRouting completes first', async () => {
+    enableGitHubTriggers();
+    let resolveFirst!: (res: Response) => void;
+    let callCount = 0;
+
+    element = await mount(() => {
+      callCount++;
+      if (callCount === 1) {
+        return new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return jsonResponse([SAMPLE_ENTRIES[0]]);
+    });
+
+    await vi.waitFor(() => {
+      expect(callCount).toBe(1);
+    });
+
+    // Trigger a newer refresh that resolves immediately
+    const refreshPromise = element.loadRouting({ refresh: true });
+    await refreshPromise;
+    await element.updateComplete;
+
+    expect(queryAll(element, '[data-routing-row]')).toHaveLength(1);
+    expect(query(element, '[data-routing-row="4412:acme/api"]')).not.toBeNull();
+
+    // Now resolve the slow earlier GET with all 3 entries — it must be ignored
+    resolveFirst(
+      new Response(JSON.stringify(SAMPLE_ENTRIES), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    await element.updateComplete;
+
+    expect(queryAll(element, '[data-routing-row]')).toHaveLength(1);
+    expect(query(element, '[data-routing-row="4412:acme/api"]')).not.toBeNull();
   });
 });
