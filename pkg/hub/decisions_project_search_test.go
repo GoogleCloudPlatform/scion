@@ -154,7 +154,7 @@ func TestProjectDecisions_SearchAndFilterValidation(t *testing.T) {
 	} {
 		code, body := f.get(t, f.bob, params)
 		assert.Equal(t, http.StatusBadRequest, code, "%s: %s", name, body)
-		assert.Contains(t, body, ErrCodeInvalidFilterQuery, "%s: %s", name, body)
+		assert.Contains(t, string(body), ErrCodeInvalidFilterQuery, "%s: %s", name, body)
 	}
 	for name, params := range map[string]url.Values{
 		"two runes":           {"q": {"ro"}},
