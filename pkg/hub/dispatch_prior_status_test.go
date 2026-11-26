@@ -378,3 +378,56 @@ func TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff(t
 	require.NotNil(t, client.lastRestartExtras.PriorStatus)
 	assert.Equal(t, ps, client.lastRestartExtras.PriorStatus)
 }
+
+// TestApplyStartExtras_WakeForMessage (T10a) verifies that WakeForMessage is
+// serialized as wakeForMessage only when true.
+func TestApplyStartExtras_WakeForMessage(t *testing.T) {
+	payload := map[string]any{}
+	applyStartExtras(payload, StartExtras{})
+	assert.NotContains(t, payload, "wakeForMessage", "false WakeForMessage sends nothing")
+
+	applyStartExtras(payload, StartExtras{WakeForMessage: true})
+	assert.Equal(t, true, payload["wakeForMessage"])
+}
+
+// TestExecDispatchStart_PreservesWakeForMessageAcrossDeferredHandoff (T10b)
+// verifies that StartDispatchArgs round-trips wakeForMessage and the owning
+// node's execDispatchStart forwards it into StartExtras.WakeForMessage.
+func TestExecDispatchStart_PreservesWakeForMessageAcrossDeferredHandoff(t *testing.T) {
+	ctx := context.Background()
+
+	raw, err := MarshalDispatchArgs(&StartDispatchArgs{
+		Resume:         true,
+		WakeForMessage: true,
+	})
+	require.NoError(t, err)
+	got, err := UnmarshalStartArgs(raw)
+	require.NoError(t, err)
+	assert.True(t, got.WakeForMessage)
+	assert.True(t, got.Resume)
+
+	d, client, ag := autoExposeDispatchFixture(t)
+	srv, _ := testServerOnMigratedStore(t, d.store)
+	srv.SetDispatcher(d)
+
+	ownerID := tid("deferred-wake-msg-owner")
+	createTestUserWithProjectRole(t, d.store, ownerID, "deferred-wake-msg-owner@example.com", ag.ProjectID, store.ProjectRoleMember)
+	ag.ID = tid("deferred-wake-msg-agent")
+	ag.OwnerID = ownerID
+	ag.Phase = string(state.PhaseStarting)
+	ag.AppliedConfig = &store.AgentAppliedConfig{
+		CreateInputs: &store.AgentCreateInputs{},
+	}
+	require.NoError(t, d.store.CreateAgent(ctx, ag))
+
+	_, err = srv.execDispatchStart(ctx, store.BrokerDispatch{
+		ID:        "disp-start-wake-msg",
+		BrokerID:  ag.RuntimeBrokerID,
+		AgentID:   ag.ID,
+		ProjectID: ag.ProjectID,
+		Op:        "start",
+		Args:      raw,
+	})
+	require.NoError(t, err)
+	assert.True(t, client.lastStartExtras.WakeForMessage, "owner execDispatchStart must forward WakeForMessage into StartExtras")
+}
