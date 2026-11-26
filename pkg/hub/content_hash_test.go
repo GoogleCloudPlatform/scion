@@ -52,15 +52,16 @@ func setContentHashV2Experiment(t *testing.T, srv *Server, on bool) {
 	}
 }
 
-// TestContentHashV2Experiment_RegisteredDefaultOff pins hub.content_hash_v2
-// as a server-layer experiment that is off unless an operator turns it on.
-func TestContentHashV2Experiment_RegisteredDefaultOff(t *testing.T) {
+// TestContentHashV2Experiment_RegisteredDefaultOn pins hub.content_hash_v2
+// as a server-layer experiment that is on by default unless an operator turns
+// it off.
+func TestContentHashV2Experiment_RegisteredDefaultOn(t *testing.T) {
 	e, ok := experiments.Default().Lookup(experiments.ContentHashV2)
 	if !ok {
 		t.Fatalf("experiment %q not registered", experiments.ContentHashV2)
 	}
-	if e.Default || !e.HasLayer(experiments.LayerServer) || e.Issue != "ptone/scion#5658" {
-		t.Errorf("hub.content_hash_v2 metadata = %+v, want default off, server layer, issue ptone/scion#5658", e)
+	if !e.Default || !e.HasLayer(experiments.LayerServer) || e.Issue != "ptone/scion#5658" {
+		t.Errorf("hub.content_hash_v2 metadata = %+v, want default on, server layer, issue ptone/scion#5658", e)
 	}
 }
 
@@ -85,16 +86,16 @@ func TestComputeContentHashMatchesTransfer(t *testing.T) {
 	v1, v2 := transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos)
 
 	srv := &Server{}
+	if got := srv.computeContentHash(files); got != v2 {
+		t.Errorf("experiment default on: computeContentHash = %q, want v2 %q", got, v2)
+	}
+	setContentHashV2Experiment(t, srv, false)
 	if got := srv.computeContentHash(files); got != v1 {
 		t.Errorf("experiment off: computeContentHash = %q, want v1 %q", got, v1)
 	}
 	setContentHashV2Experiment(t, srv, true)
 	if got := srv.computeContentHash(files); got != v2 {
-		t.Errorf("experiment on: computeContentHash = %q, want v2 %q", got, v2)
-	}
-	setContentHashV2Experiment(t, srv, false)
-	if got := srv.computeContentHash(files); got != v1 {
-		t.Errorf("experiment off again: computeContentHash = %q, want v1 %q", got, v1)
+		t.Errorf("experiment on again: computeContentHash = %q, want v2 %q", got, v2)
 	}
 	var nilSrv *Server
 	if got := nilSrv.computeContentHash(files); got != v1 {
@@ -103,8 +104,8 @@ func TestComputeContentHashMatchesTransfer(t *testing.T) {
 	if got := computeSkillContentHash(files); got != v1 {
 		t.Errorf("computeSkillContentHash = %q, want v1 %q", got, v1)
 	}
-	if got := defaultContentHash(files); got != v1 {
-		t.Errorf("defaultContentHash = %q, want v1 %q while the experiment defaults off", got, v1)
+	if got := defaultContentHash(files); got != v2 {
+		t.Errorf("defaultContentHash = %q, want v2 %q while the experiment defaults on", got, v2)
 	}
 }
 

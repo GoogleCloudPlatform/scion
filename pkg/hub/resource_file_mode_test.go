@@ -266,6 +266,7 @@ func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	ctx := context.Background()
 	stor, rt := modeBackends()[0].new(t)
 	srv, s := newCommitTestServer(t, stor)
+	setContentHashV2Experiment(t, srv, false)
 	client := startModeHub(t, srv, rt)
 	cache, err := templatecache.New(t.TempDir(), templatecache.DefaultMaxSize)
 	require.NoError(t, err)
@@ -293,9 +294,9 @@ func TestTemplateFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	require.NoError(t, err)
 	v2, err := client.Templates().Finalize(ctx, id, &hubclient.TemplateManifest{Version: "1.0", Files: modeManifestFiles(files)}, v1.ContentHash, "")
 	require.NoError(t, err)
-	// hub.content_hash_v2 is off (the default): the recorded v1 hash does
-	// not change, and the broker's cache key, built from the manifest, must
-	// still see the new mode (ptone/scion#5658).
+	// hub.content_hash_v2 is explicitly disabled above: the recorded v1 hash
+	// does not change, and the broker's cache key, built from the manifest,
+	// must still see the new mode (ptone/scion#5658).
 	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: with hub.content_hash_v2 off a mode-only commit keeps the content hash")
 	// The commit is neither refused by the content-hash precondition nor
 	// skipped as unchanged: the row records the new mode.
@@ -445,6 +446,7 @@ func TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	ctx := context.Background()
 	stor, rt := modeBackends()[0].new(t)
 	srv, s := newCommitTestServer(t, stor)
+	setContentHashV2Experiment(t, srv, false)
 	client := startModeHub(t, srv, rt)
 	cache, err := templatecache.New(t.TempDir(), templatecache.DefaultMaxSize)
 	require.NoError(t, err)
@@ -472,9 +474,9 @@ func TestHarnessConfigFileMode_ChmodOnlyCommitRehydrates(t *testing.T) {
 	require.NoError(t, err)
 	v2, err := client.HarnessConfigs().Finalize(ctx, id, &hubclient.HarnessConfigManifest{Version: "1.0", Files: modeManifestFiles(files)}, "", "")
 	require.NoError(t, err)
-	// hub.content_hash_v2 is off (the default): the recorded v1 hash does
-	// not change, and the broker's cache key, built from the manifest, must
-	// still see the new mode (ptone/scion#5658).
+	// hub.content_hash_v2 is explicitly disabled above: the recorded v1 hash
+	// does not change, and the broker's cache key, built from the manifest,
+	// must still see the new mode (ptone/scion#5658).
 	require.Equal(t, v1.ContentHash, v2.ContentHash, "precondition: with hub.content_hash_v2 off a mode-only commit keeps the content hash")
 	for _, f := range getHC(t, s, id).Files {
 		if f.Path == "provision.py" {
