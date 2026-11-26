@@ -714,6 +714,15 @@ func TestPipeline_HubSinkEnablesOutboxWithoutGCPExporter(t *testing.T) {
 	if _, ok, reason := p.AnalyticsDiagnostics(); !ok || reason != "" {
 		t.Fatalf("AnalyticsDiagnostics() = ok:%v reason:%q, want ok:true reason:\"\" without GCP exporter", ok, reason)
 	}
+	if _, err := os.Stat(AnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
+		t.Errorf("Hub-only mode must not create GCP outbox dir %q", AnalyticsOutboxDirFor(agentHome))
+	}
+	if _, err := os.Stat(HubAnalyticsOutboxDirFor(agentHome)); err != nil {
+		t.Errorf("Hub-only mode must create Hub outbox dir %q: %v", HubAnalyticsOutboxDirFor(agentHome), err)
+	}
+	if !IsHubOutboxActive(agentHome) {
+		t.Errorf("Hub-only mode must mark Hub outbox active on disk")
+	}
 
 	// Verify hook helper also enables when EnvUsageHubIngest=1 without GCP exporter.
 	if AnalyticsEnabledForHooks(cfg) {
@@ -997,11 +1006,29 @@ func TestHubUsageSink_CrossRunWALReplayPreservesOriginalRunID(t *testing.T) {
 	}
 }
 
-// R4: dual-run fan-out with independent cursors. When both GCP Cloud Logging
-// and Hub sink are active, both receive every event, and failure/rejection in
-// one sink never blocks or dead-letters the other.
+// Dual-run with independent per-sink outboxes: both GCP Cloud Logging and Hub
+// sink receive every event via appender teeing, and failure/rejection in one
+// sink never blocks, overflows, or dead-letters the other.
 func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
-	t.Run("both sinks receive every event", func(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-dual")
+
+	makeObs := func(id string) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   id,
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(10),
+			Output:          int64Ptr(5),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	t.Run("both sinks receive every event via tee", func(t *testing.T) {
 		var mu sync.Mutex
 		var hubIDs []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1020,19 +1047,21 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		var wantIDs []string
+		gcpOutbox := testOutbox(t)
+		hubOutbox := testOutbox(t)
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 		for i := 1; i <= 3; i++ {
-			ev := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:dual-%d", i), int64(i)), AppendWritten)
-			wantIDs = append(wantIDs, ev.EventID)
+			if out, err := dual.Record(makeObs(fmt.Sprintf("cmp1:dual-%d", i))); err != nil || out != AppendWritten {
+				t.Fatalf("Record[%d] = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
 		}
 
 		gcp := &capture{}
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-dual",
 		})
-		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
 
 		d.RunOnce(context.Background())
 
@@ -1045,20 +1074,27 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		if len(gotHub) != 3 {
 			t.Fatalf("hub received %d events, want 3", len(gotHub))
 		}
-		for i, want := range wantIDs {
-			if got := decodeUsage(t, gcp.lines[i]).EventID; got != want {
-				t.Errorf("gcp[%d] = %q, want %q", i, got, want)
-			}
-			if gotHub[i] != want {
-				t.Errorf("hub[%d] = %q, want %q", i, gotHub[i], want)
+		for i := range gcp.lines {
+			gcpID := decodeUsage(t, gcp.lines[i]).EventID
+			if gotHub[i] != gcpID {
+				t.Errorf("hub[%d] = %q, want %q (matching GCP event_id)", i, gotHub[i], gcpID)
 			}
 		}
-		if o.Stats().PendingBytes != 0 {
-			t.Errorf("PendingBytes = %d after both sinks drained, want 0", o.Stats().PendingBytes)
+		if gcpOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("gcp PendingBytes = %d, want 0", gcpOutbox.Stats().PendingBytes)
+		}
+		if hubOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("hub PendingBytes = %d, want 0", hubOutbox.Stats().PendingBytes)
+		}
+		if gcpOutbox.Stats().Delivered != 3 {
+			t.Errorf("gcp Delivered = %d, want 3 (no double counting)", gcpOutbox.Stats().Delivered)
+		}
+		if hubOutbox.Stats().Delivered != 3 {
+			t.Errorf("hub Delivered = %d, want 3", hubOutbox.Stats().Delivered)
 		}
 	})
 
-	t.Run("GCP failure does not block Hub and ready file stays until GCP recovers", func(t *testing.T) {
+	t.Run("GCP failure does not block Hub and GCP recovers independently", func(t *testing.T) {
 		var mu sync.Mutex
 		var hubIDs []string
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1077,20 +1113,26 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:gcp-fail-1", 1), AppendWritten)
-		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:gcp-fail-2", 2), AppendWritten)
+		gcpOutbox := testOutbox(t)
+		hubOutbox := testOutbox(t)
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
+		if _, err := dual.Record(makeObs("cmp1:gcp-fail-1")); err != nil {
+			t.Fatalf("Record 1: %v", err)
+		}
+		if _, err := dual.Record(makeObs("cmp1:gcp-fail-2")); err != nil {
+			t.Fatalf("Record 2: %v", err)
+		}
 
 		gcp := &capture{fail: errors.New("cloud logging down")}
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-dual-2",
 		})
-		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
 		clock := time.Date(2026, 11, 25, 19, 0, 0, 0, time.UTC)
 		d.now = func() time.Time { return clock }
 
-		// First tick: GCP fails, Hub still delivers both events.
+		// First tick: GCP fails, Hub still delivers both events and drains its own outbox to 0.
 		d.RunOnce(context.Background())
 		mu.Lock()
 		gotHub := len(hubIDs)
@@ -1101,8 +1143,11 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		if len(gcp.lines) != 0 {
 			t.Fatalf("gcp delivered %d events while down, want 0", len(gcp.lines))
 		}
-		if o.Stats().PendingBytes == 0 {
-			t.Fatal("PendingBytes must remain non-zero while GCP cursor is behind")
+		if gcpOutbox.Stats().PendingBytes == 0 {
+			t.Fatal("gcp PendingBytes must remain non-zero while GCP is failing")
+		}
+		if hubOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("hub PendingBytes = %d, want 0 (independent of GCP)", hubOutbox.Stats().PendingBytes)
 		}
 
 		// Recover GCP and advance clock past GCP backoff: GCP delivers both events without re-sending to Hub.
@@ -1118,8 +1163,8 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		if gotHubAfter != 2 {
 			t.Errorf("hub received %d events total, want 2 (no duplicate delivery)", gotHubAfter)
 		}
-		if o.Stats().PendingBytes != 0 {
-			t.Errorf("PendingBytes = %d after both cursors caught up, want 0", o.Stats().PendingBytes)
+		if gcpOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("gcp PendingBytes = %d after recovery, want 0", gcpOutbox.Stats().PendingBytes)
 		}
 	})
 
@@ -1136,7 +1181,6 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			// Reject index 0 permanently on Hub.
 			var rej []telemetrycontract.UsageIngestRejection
 			if len(req.Events) > 0 {
 				rej = append(rej, telemetrycontract.UsageIngestRejection{
@@ -1154,37 +1198,55 @@ func TestDualAnalyticsDrainer_FanOutAndIsolation(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hub-fail-1", 1), AppendWritten)
-		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hub-fail-2", 2), AppendWritten)
+		gcpOutbox := testOutbox(t)
+		hubOutbox := testOutbox(t)
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
+		if _, err := dual.Record(makeObs("cmp1:hub-fail-1")); err != nil {
+			t.Fatalf("Record 1: %v", err)
+		}
+		if _, err := dual.Record(makeObs("cmp1:hub-fail-2")); err != nil {
+			t.Fatalf("Record 2: %v", err)
+		}
 
 		gcp := &capture{}
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-dual-3",
 		})
-		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
 		clock := time.Date(2026, 11, 25, 19, 10, 0, 0, time.UTC)
 		d.now = func() time.Time { return clock }
 
-		// First tick: Hub is 503, GCP still receives both events cleanly.
+		// First tick: Hub is 503, GCP still receives both events cleanly and its PendingBytes is 0.
 		d.RunOnce(context.Background())
 		if len(gcp.lines) != 2 {
 			t.Fatalf("gcp delivered %d events while Hub was down, want 2", len(gcp.lines))
 		}
-		if o.Stats().PendingBytes == 0 {
-			t.Fatal("PendingBytes must remain non-zero while Hub cursor is behind")
+		if gcpOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("gcp PendingBytes = %d, want 0 (independent of Hub)", gcpOutbox.Stats().PendingBytes)
+		}
+		if hubOutbox.Stats().PendingBytes == 0 {
+			t.Fatal("hub PendingBytes must remain non-zero while Hub is failing")
 		}
 
-		// Hub recovers and rejects event 0: Hub advances past it, ready file cleaned up, GCP already got both.
+		// Hub recovers and rejects event 0: Hub dead-letters only in hubOutbox; GCP dead letters stay 0.
 		hubFail.Store(false)
 		clock = clock.Add(5 * time.Second)
 		d.RunOnce(context.Background())
 		if len(gcp.lines) != 2 {
 			t.Errorf("gcp lines = %d, want 2", len(gcp.lines))
 		}
-		if o.Stats().PendingBytes != 0 {
-			t.Errorf("PendingBytes = %d after both cursors finished, want 0", o.Stats().PendingBytes)
+		if gcpOutbox.Stats().DeadLetters != 0 || gcpOutbox.Stats().PersistedDeadLetters != 0 {
+			t.Errorf("gcp DeadLetters = %d (persisted %d), want 0", gcpOutbox.Stats().DeadLetters, gcpOutbox.Stats().PersistedDeadLetters)
+		}
+		if hubOutbox.Stats().DeadLetters != 1 || hubOutbox.Stats().PersistedDeadLetters != 1 {
+			t.Errorf("hub DeadLetters = %d (persisted %d), want 1", hubOutbox.Stats().DeadLetters, hubOutbox.Stats().PersistedDeadLetters)
+		}
+		if hubOutbox.Stats().Delivered != 1 {
+			t.Errorf("hub Delivered = %d, want 1", hubOutbox.Stats().Delivered)
+		}
+		if hubOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("hub PendingBytes = %d after Hub caught up, want 0", hubOutbox.Stats().PendingBytes)
 		}
 	})
 }
@@ -1377,11 +1439,178 @@ func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *te
 	})
 }
 
-// R1(a) & R1(b): in dual-run mode at a small outbox cap, a persistently failing
-// Hub sink (404 capability revoked OR 500 outage) must never cause the healthy
-// GCP Cloud Logging export to overflow or drop events.
+// Scenario 1 (Option B): in dual-run mode at a small cap (16 KiB), a Hub that
+// permanently rejects every event (either via per-event rejections in 200 or via
+// whole-batch HTTP 400/422 PermanentSendError) must dead-letter ONLY in the Hub
+// outbox. The GCP outbox must deliver 200/200 with zero overflow, zero dead
+// letters, and accurate per-sink health counters (no double counting).
+func TestDualAnalyticsDrainer_HubRejectionsNeverStarveGCPOrPolluteCounters(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-reject")
+
+	makeObs := func(i int) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   fmt.Sprintf("cmp1:rej-%d", i),
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(int64(i)),
+			Output:          int64Ptr(5),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "per-event rejections (HTTP 200 with all indices rejected)",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				var req telemetrycontract.UsageIngestRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				rej := make([]telemetrycontract.UsageIngestRejection, len(req.Events))
+				for i, ev := range req.Events {
+					rej[i] = telemetrycontract.UsageIngestRejection{
+						Index:   i,
+						EventID: ev.EventID,
+						Code:    telemetrycontract.UsageRejectUnknownRun,
+						Reason:  "unknown run",
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{
+					Accepted: 0,
+					Rejected: rej,
+				})
+			},
+		},
+		{
+			name: "whole-batch HTTP 422 permanent error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_, _ = w.Write([]byte("unprocessable entity"))
+			},
+		},
+		{
+			name: "whole-batch HTTP 400 permanent error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte("bad request"))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+
+			const capBytes = 16 << 10
+			gcpOutbox := testOutbox(t)
+			gcpOutbox.maxPending = capBytes
+			hubOutbox := testOutbox(t)
+			hubOutbox.maxPending = capBytes
+
+			dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
+			gcp := &capture{}
+			sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+				Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+				RunID: "run-reject",
+			})
+			d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
+
+			for i := 1; i <= 200; i++ {
+				if out, err := dual.Record(makeObs(i)); err != nil || out != AppendWritten {
+					t.Fatalf("Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+				}
+				d.RunOnce(context.Background())
+			}
+
+			if len(gcp.lines) != 200 {
+				t.Fatalf("gcp received %d/200 events, want 200/200", len(gcp.lines))
+			}
+			gcpStats := gcpOutbox.Stats()
+			if gcpStats.Overflow != 0 || gcpStats.PersistedOverflow != 0 {
+				t.Errorf("gcp overflow = %d (persisted %d), want 0", gcpStats.Overflow, gcpStats.PersistedOverflow)
+			}
+			if gcpStats.DeadLetters != 0 || gcpStats.PersistedDeadLetters != 0 {
+				t.Errorf("gcp deadLetters = %d (persisted %d), want 0", gcpStats.DeadLetters, gcpStats.PersistedDeadLetters)
+			}
+			if gcpStats.Delivered != 200 {
+				t.Errorf("gcp Delivered = %d, want 200 (no double counting)", gcpStats.Delivered)
+			}
+			if gcpStats.PendingBytes != 0 || gcpStats.RetainedBytes != 0 {
+				t.Errorf("gcp PendingBytes=%d RetainedBytes=%d, want 0", gcpStats.PendingBytes, gcpStats.RetainedBytes)
+			}
+
+			// Verify health counters reported for the GCP pipeline are completely unpolluted.
+			hc := analyticsHandles{native: dual, drainer: d, send: newCountingSend(gcp.send)}.counters(time.Now())
+			if hc.Delivered != 200 {
+				t.Errorf("health Delivered = %d, want 200", hc.Delivered)
+			}
+			if hc.DeadLetters != 0 || hc.DeadLettersTotal != 0 {
+				t.Errorf("health DeadLetters = %d (total %d), want 0", hc.DeadLetters, hc.DeadLettersTotal)
+			}
+			if hc.Overflow != 0 || hc.OverflowTotal != 0 {
+				t.Errorf("health Overflow = %d (total %d), want 0", hc.Overflow, hc.OverflowTotal)
+			}
+
+			// Hub outbox absorbed all rejections and bounded itself at its own cap.
+			hubStats := hubOutbox.Stats()
+			if hubStats.Delivered != 0 {
+				t.Errorf("hub Delivered = %d, want 0", hubStats.Delivered)
+			}
+			if hubStats.DeadLetters == 0 || hubStats.PersistedDeadLetters == 0 {
+				t.Errorf("hub DeadLetters = %d (persisted %d), want > 0", hubStats.DeadLetters, hubStats.PersistedDeadLetters)
+			}
+			if hubStats.Overflow == 0 || hubStats.PersistedOverflow == 0 {
+				t.Errorf("hub Overflow = %d (persisted %d), want > 0 once Hub dead_letter.jsonl hits 16 KiB cap", hubStats.Overflow, hubStats.PersistedOverflow)
+			}
+			if hubStats.DeadLetters+hubStats.Overflow != 200 {
+				t.Errorf("hub DeadLetters(%d) + Overflow(%d) = %d, want 200", hubStats.DeadLetters, hubStats.Overflow, hubStats.DeadLetters+hubStats.Overflow)
+			}
+			if hubStats.RetainedBytes > capBytes+1024 {
+				t.Errorf("hub RetainedBytes = %d exceeds cap %d (+finalize slack)", hubStats.RetainedBytes, capBytes)
+			}
+			if _, err := os.Stat(filepath.Join(gcpOutbox.Dir(), "dead_letter.jsonl")); !os.IsNotExist(err) {
+				t.Errorf("GCP outbox must not have dead_letter.jsonl")
+			}
+			if _, err := os.Stat(filepath.Join(hubOutbox.Dir(), "dead_letter.jsonl")); err != nil {
+				t.Errorf("Hub outbox must have dead_letter.jsonl: %v", err)
+			}
+		})
+	}
+}
+
+// Scenario 2 (Option B): in dual-run mode at a small outbox cap, a persistently
+// failing Hub sink (404 revoked, 500 outage, or unreachable) must never cause
+// the healthy GCP Cloud Logging export to overflow or drop events, and the Hub
+// outbox stays bounded by its own cap.
 func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
-	t.Run("404 capability revoked stops Hub cursor and GCP receives 200/200", func(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-fail")
+
+	makeObs := func(prefix string, i int) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   fmt.Sprintf("cmp1:%s-%d", prefix, i),
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(int64(i)),
+			Output:          int64Ptr(5),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	t.Run("404 capability revoked stops Hub sink and GCP receives 200/200", func(t *testing.T) {
 		var hubCalls atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hubCalls.Add(1)
@@ -1390,17 +1619,24 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		o.maxPending = 16 << 10 // 16 KiB cap (reviewer's exact probe)
+		gcpOutbox := testOutbox(t)
+		gcpOutbox.maxPending = 16 << 10
+		hubOutbox := testOutbox(t)
+		hubOutbox.maxPending = 16 << 10
+
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 		gcp := &capture{}
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-404",
 		})
-		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
+		d.onHubRevoked = func() { dual.clearHubOutbox() }
 
 		for i := 1; i <= 200; i++ {
-			mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:rev-%d", i), int64(i)), AppendWritten)
+			if out, err := dual.Record(makeObs("rev", i)); err != nil || out != AppendWritten {
+				t.Fatalf("Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
 			d.RunOnce(context.Background())
 		}
 
@@ -1410,15 +1646,21 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		if got := hubCalls.Load(); got != 1 {
 			t.Errorf("hubCalls = %d, want 1 (must stop after first 404, not retry forever)", got)
 		}
+		if isHubOutboxActiveDir(hubOutbox.Dir()) {
+			t.Error("expected Hub outbox active marker to be removed on 404 revocation")
+		}
+		if dual.HubOutbox() != nil {
+			t.Error("expected native producer to detach Hub outbox after 404 revocation")
+		}
 		if len(gcp.lines) != 200 {
 			t.Errorf("gcp received %d/200 events, want 200/200", len(gcp.lines))
 		}
-		stats := o.Stats()
+		stats := gcpOutbox.Stats()
 		if stats.Overflow != 0 || stats.PersistedOverflow != 0 {
-			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
+			t.Errorf("gcp overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
 		}
 		if stats.PendingBytes != 0 {
-			t.Errorf("PendingBytes = %d, want 0 after Hub cursor unregistered", stats.PendingBytes)
+			t.Errorf("gcp PendingBytes = %d, want 0", stats.PendingBytes)
 		}
 	})
 
@@ -1430,13 +1672,13 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hubonly-404", 1), AppendWritten)
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		hubOutbox := testOutbox(t)
+		mustAppend(t, hubOutbox, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hubonly-404", 1), AppendWritten)
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-hubonly-404",
 		})
-		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+		d := NewHubAnalyticsDrainer(hubOutbox, sink, trustedHub("hub-1"))
 		clock := time.Date(2026, 11, 25, 20, 0, 0, 0, time.UTC)
 		d.now = func() time.Time { return clock }
 
@@ -1449,12 +1691,15 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		if !d.HubRevoked() {
 			t.Fatal("expected HubRevoked() = true after 404 in Hub-only mode")
 		}
+		if isHubOutboxActiveDir(hubOutbox.Dir()) {
+			t.Error("expected Hub outbox active marker to be removed on 404 in Hub-only mode")
+		}
 		if got := hubCalls.Load(); got != 1 {
 			t.Errorf("hubCalls = %d, want 1 (must not retry forever)", got)
 		}
 	})
 
-	t.Run("persistent 500 Hub reclaims Hub lag and GCP receives 200/200 with recorded gap", func(t *testing.T) {
+	t.Run("persistent 500 Hub overflows only Hub outbox and GCP receives 200/200", func(t *testing.T) {
 		var hubDown atomic.Bool
 		hubDown.Store(true)
 		var mu sync.Mutex
@@ -1479,33 +1724,56 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		o := testOutbox(t)
-		o.maxPending = 16 << 10 // 16 KiB cap (reviewer's exact probe)
+		const capBytes = 16 << 10
+		gcpOutbox := testOutbox(t)
+		gcpOutbox.maxPending = capBytes
+		hubOutbox := testOutbox(t)
+		hubOutbox.maxPending = capBytes
+
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 		gcp := &capture{}
-		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-500",
 		})
-		d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
 		clock := time.Date(2026, 11, 25, 20, 0, 0, 0, time.UTC)
 		d.now = func() time.Time { return clock }
 
 		for i := 1; i <= 200; i++ {
-			mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:500-%d", i), int64(i)), AppendWritten)
+			if out, err := dual.Record(makeObs("500", i)); err != nil || out != AppendWritten {
+				t.Fatalf("Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
 			d.RunOnce(context.Background())
 		}
 
 		if len(gcp.lines) != 200 {
 			t.Fatalf("gcp received %d/200 events while Hub returned 500, want 200/200", len(gcp.lines))
 		}
-		stats := o.Stats()
-		if stats.Overflow != 0 || stats.PersistedOverflow != 0 {
-			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
+		gcpStats := gcpOutbox.Stats()
+		if gcpStats.Overflow != 0 || gcpStats.PersistedOverflow != 0 {
+			t.Errorf("gcp overflow = %d (persisted %d), want 0", gcpStats.Overflow, gcpStats.PersistedOverflow)
+		}
+		if gcpStats.PendingBytes != 0 {
+			t.Errorf("gcp PendingBytes = %d, want 0", gcpStats.PendingBytes)
+		}
+		if d.Backoff() != 0 {
+			t.Errorf("GCP Backoff() = %v, want 0 while GCP is healthy", d.Backoff())
+		}
+		if d.HubBackoff() == 0 {
+			t.Error("HubBackoff() = 0, want > 0 while Hub is failing")
 		}
 
-		// When Hub recovers, client does NOT send MissingRanges (Hub is sole
-		// authority for meter_health gaps via emitted-vs-received sequences),
-		// and delivered events begin past seq 1 after reclamation.
+		hubStats := hubOutbox.Stats()
+		if hubStats.Overflow == 0 || hubStats.PersistedOverflow == 0 {
+			t.Errorf("hub overflow = %d (persisted %d), want > 0 at 16 KiB cap", hubStats.Overflow, hubStats.PersistedOverflow)
+		}
+		if hubStats.RetainedBytes > capBytes+1024 {
+			t.Errorf("hub RetainedBytes = %d exceeds cap %d (+finalize slack)", hubStats.RetainedBytes, capBytes)
+		}
+
+		// When Hub recovers, it drains its buffered events with no MissingRanges
+		// (Hub is sole authority on meter_health gaps via seqs).
 		hubDown.Store(false)
 		clock = clock.Add(10 * time.Minute)
 		d.RunOnce(context.Background())
@@ -1515,177 +1783,265 @@ func TestDualAnalyticsDrainer_FailingHubNeverOverflowsGCP(t *testing.T) {
 		if len(recoveredReqs) == 0 {
 			t.Fatal("expected Hub request after recovery")
 		}
-		var minDeliveredSeq int64
 		for _, req := range recoveredReqs {
 			if len(req.MissingRanges) != 0 {
 				t.Errorf("client must not send MissingRanges (Hub is sole gap authority), got %+v", req.MissingRanges)
 			}
-			for _, ev := range req.Events {
-				if minDeliveredSeq == 0 || ev.ProducerSeq < minDeliveredSeq {
-					minDeliveredSeq = ev.ProducerSeq
-				}
-			}
 		}
-		if minDeliveredSeq <= 1 {
-			t.Errorf("minDeliveredSeq = %d, want > 1 after lag reclamation", minDeliveredSeq)
+		if hubOutbox.Stats().PendingBytes != 0 {
+			t.Errorf("hub PendingBytes = %d after recovery, want 0", hubOutbox.Stats().PendingBytes)
+		}
+	})
+
+	t.Run("unreachable Hub overflows only Hub outbox and GCP receives 200/200", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		closedURL := srv.URL
+		srv.Close() // immediately unreachable (connection refused)
+
+		const capBytes = 16 << 10
+		gcpOutbox := testOutbox(t)
+		gcpOutbox.maxPending = capBytes
+		hubOutbox := testOutbox(t)
+		hubOutbox.maxPending = capBytes
+
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
+		gcp := &capture{}
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+			Post:  httptestPostFunc(closedURL, "agent-1", "tok-1"),
+			RunID: "run-unreach",
+		})
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
+
+		for i := 1; i <= 200; i++ {
+			if out, err := dual.Record(makeObs("unreach", i)); err != nil || out != AppendWritten {
+				t.Fatalf("Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
+			d.RunOnce(context.Background())
+		}
+
+		if len(gcp.lines) != 200 {
+			t.Fatalf("gcp received %d/200 events while Hub was unreachable, want 200/200", len(gcp.lines))
+		}
+		if gcpOutbox.Stats().Overflow != 0 {
+			t.Errorf("gcp overflow = %d, want 0", gcpOutbox.Stats().Overflow)
+		}
+		hubStats := hubOutbox.Stats()
+		if hubStats.Overflow == 0 {
+			t.Errorf("hub overflow = %d, want > 0", hubStats.Overflow)
+		}
+		if hubStats.RetainedBytes > capBytes+1024 {
+			t.Errorf("hub RetainedBytes = %d exceeds cap %d (+finalize slack)", hubStats.RetainedBytes, capBytes)
 		}
 	})
 }
 
-// RV1 concurrency test (-race): reclaimSecondaryLagLocked running concurrently
-// under the outbox lock must never advance cursor.hub past lines that
-// DrainBatchCursor currently has in flight, and advanceCursorNamed must never
-// race with reclaim.
-func TestDualAnalyticsDrainer_ReclaimDuringInFlightDrainRace(t *testing.T) {
-	inFlightStarted := make(chan struct{})
-	releaseHub := make(chan struct{})
-	var startOnce, releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseHub) }) }
-	t.Cleanup(release)
-	var mu sync.Mutex
-	var deliveredSeqs []int64
+// Scenario 3 (Option B): appends from a second process (simulating short-lived
+// `sciontool hook` subprocesses via separate NewLazyHookUsageAnalytics /
+// OpenAnalyticsOutbox handles) tee into both active outboxes, respect each cap
+// independently, and react to Hub active marker creation/removal on disk.
+func TestDualAnalyticsDrainer_SecondProcessHookAppendsTeeAndRespectCaps(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-hooks")
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req telemetrycontract.UsageIngestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
+	makeObs := func(prefix string, i int) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   fmt.Sprintf("cmp1:%s-%d", prefix, i),
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(int64(i)),
+			Output:          int64Ptr(5),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
 		}
-		if len(req.Events) > 0 {
-			startOnce.Do(func() {
-				close(inFlightStarted)
-				<-releaseHub
-			})
+	}
+
+	t.Run("hook subprocesses tee to both outboxes when both healthy", func(t *testing.T) {
+		var mu sync.Mutex
+		var hubIDs []string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			mu.Lock()
 			for _, ev := range req.Events {
-				deliveredSeqs = append(deliveredSeqs, ev.ProducerSeq)
+				hubIDs = append(hubIDs, ev.EventID)
 			}
 			mu.Unlock()
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
-	}))
-	defer srv.Close()
-
-	o := testOutbox(t)
-	o.maxPending = 8 << 10 // 8 KiB cap to force reclaim attempts
-	o.lockWait = contentionLockWait
-	gcp := &capture{}
-	sink := NewHubUsageSink(o, HubUsageSinkConfig{
-		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
-		RunID: "run-race",
-	})
-	d := NewDualAnalyticsDrainer(o, gcp.send, sink, trustedHub("hub-1"))
-
-	// Seed ready-1.jsonl with 2 events and let GCP drain it (primFile = 2)
-	// while keeping Hub blocked mid-POST on ready-1.jsonl.
-	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:race-1", 1), AppendWritten)
-	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:race-2", 2), AppendWritten)
-
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		d.RunOnce(context.Background())
-	}()
-
-	<-inFlightStarted
-
-	// While DrainBatchCursor has ready-1.jsonl in flight, concurrently hammer
-	// AppendUsage to push retainedBytes past maxPending and trigger reclaim.
-	appendDone := make(chan struct{})
-	go func() {
-		defer close(appendDone)
-		for i := 3; i <= 40; i++ {
-			_, _ = o.AppendUsage(draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:race-%d", i), int64(i)))
-		}
-	}()
-	<-appendDone
-
-	// Verify cursor.hub was NOT advanced past ready-1.jsonl while it was in flight.
-	hubFile, _, err := o.readCursorNamed(HubAnalyticsCursorName)
-	if err != nil {
-		t.Fatalf("readCursorNamed: %v", err)
-	}
-	if hubFile > 1 {
-		t.Fatalf("cursor.hub advanced to file %d while ready-1.jsonl was still in flight", hubFile)
-	}
-	if _, err := os.Stat(filepath.Join(o.Dir(), readyName(1))); err != nil {
-		t.Fatalf("ready-1.jsonl was deleted while still in flight: %v", err)
-	}
-
-	// Release the in-flight Hub POST and verify clean completion with no race.
-	release()
-	<-drainDone
-
-	hubFileAfter, _, err := o.readCursorNamed(HubAnalyticsCursorName)
-	if err != nil {
-		t.Fatalf("readCursorNamed after drain: %v", err)
-	}
-	if hubFileAfter < 2 {
-		t.Errorf("cursor.hub = %d after ready-1.jsonl ACK, want >= 2", hubFileAfter)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(deliveredSeqs) < 2 || deliveredSeqs[0] != 1 || deliveredSeqs[1] != 2 {
-		t.Errorf("deliveredSeqs = %v, want [1, 2, ...]", deliveredSeqs)
-	}
-}
-
-// R2: cursor registration is persisted in cursors.json so a second
-// OpenAnalyticsOutbox handle (simulating a hook subprocess) computes the same
-// activeCursors() and retainedBytes(), enforcing maxPending via dual-run lag
-// reclamation instead of letting ready files grow unbounded.
-func TestDualAnalyticsDrainer_SecondHandleReclaimsLagAndRespectsMaxPending(t *testing.T) {
-	t.Run("second handle appends under failing Hub stay within maxPending", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte("hub down"))
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
 		}))
 		defer srv.Close()
 
-		dir := filepath.Join(t.TempDir(), "outbox")
-		oDrainer, err := OpenAnalyticsOutbox(dir)
+		home := t.TempDir()
+		gcpOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
 		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(drainer): %v", err)
+			t.Fatalf("OpenAnalyticsOutbox(gcp): %v", err)
 		}
-		oDrainer.maxPending = 16 << 10
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
+		}
+		gcp := &capture{}
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-hooks",
+		})
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
+
+		// Each iteration creates a fresh lazy hook handle (simulating separate processes).
+		for i := 1; i <= 5; i++ {
+			hook := NewLazyHookUsageAnalytics(home, true, nil)
+			if out, err := hook.Record(makeObs("hk-ok", i)); err != nil || out != AppendWritten {
+				t.Fatalf("hook.Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
+		}
+
+		d.RunOnce(context.Background())
+
+		if len(gcp.lines) != 5 {
+			t.Fatalf("gcp received %d/5 events, want 5", len(gcp.lines))
+		}
+		mu.Lock()
+		gotHub := append([]string(nil), hubIDs...)
+		mu.Unlock()
+		if len(gotHub) != 5 {
+			t.Fatalf("hub received %d/5 events, want 5", len(gotHub))
+		}
+		for i := range gcp.lines {
+			if gotHub[i] != decodeUsage(t, gcp.lines[i]).EventID {
+				t.Errorf("event[%d] mismatch: gcp=%q hub=%q", i, decodeUsage(t, gcp.lines[i]).EventID, gotHub[i])
+			}
+		}
+	})
+
+	t.Run("hook subprocesses under failing Hub respect each cap independently", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		const capBytes = 16 << 10
+		home := t.TempDir()
+		gcpOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(gcp): %v", err)
+		}
+		gcpOutbox.maxPending = capBytes
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
+		}
+		hubOutbox.maxPending = capBytes
 
 		gcp := &capture{}
-		sink := NewHubUsageSink(oDrainer, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
-			RunID: "run-r2",
+			RunID: "run-hooks-500",
 		})
-		d := NewDualAnalyticsDrainer(oDrainer, gcp.send, sink, trustedHub("hub-1"))
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
 
-		// Second independent handle simulating short-lived `sciontool hook` subprocesses.
-		oHook, err := OpenAnalyticsOutbox(dir)
+		// Separate outbox handles (simulating a second process) with the same 16 KiB cap.
+		gcpHookOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
 		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(hook): %v", err)
+			t.Fatalf("OpenAnalyticsOutbox(gcpHook): %v", err)
 		}
-		oHook.maxPending = 16 << 10
+		gcpHookOutbox.maxPending = capBytes
+		hubHookOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(hubHook): %v", err)
+		}
+		hubHookOutbox.maxPending = capBytes
+		hookDual := NewDualUsageAnalytics(gcpHookOutbox, hubHookOutbox, telemetrycontract.UsageSourceHooks)
 
 		for i := 1; i <= 200; i++ {
-			mustAppend(t, oHook, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:hook-%d", i), int64(i)), AppendWritten)
+			if out, err := hookDual.Record(makeObs("hk-500", i)); err != nil || out != AppendWritten {
+				t.Fatalf("hookDual.Record(%d) = (%v, %v), want (AppendWritten, nil)", i, out, err)
+			}
 			d.RunOnce(context.Background())
 		}
 
 		if len(gcp.lines) != 200 {
 			t.Fatalf("gcp received %d/200 events, want 200/200", len(gcp.lines))
 		}
-		stats := oHook.Stats()
-		if stats.Overflow != 0 || stats.PersistedOverflow != 0 {
-			t.Errorf("overflow = %d (persisted %d), want 0", stats.Overflow, stats.PersistedOverflow)
+		if gcpOutbox.Stats().PersistedOverflow != 0 {
+			t.Errorf("gcp PersistedOverflow = %d, want 0", gcpOutbox.Stats().PersistedOverflow)
 		}
-		if stats.RetainedBytes > 16<<10 {
-			t.Errorf("RetainedBytes = %d > maxPending %d (second handle failed to reclaim lagging Hub cursor)", stats.RetainedBytes, 16<<10)
+		hubStats := hubOutbox.Stats()
+		if hubStats.PersistedOverflow == 0 {
+			t.Errorf("hub PersistedOverflow = %d, want > 0 at 16 KiB cap", hubStats.PersistedOverflow)
 		}
-		if _, err := os.Stat(filepath.Join(dir, analyticsCursorsFile)); err != nil {
-			t.Errorf("expected %s on disk: %v", analyticsCursorsFile, err)
+		if hubStats.RetainedBytes > capBytes+1024 {
+			t.Errorf("hub RetainedBytes = %d exceeds cap %d (+finalize slack)", hubStats.RetainedBytes, capBytes)
 		}
 	})
 
-	t.Run("Hub-only mode with stale legacy cursor file uses cursor.hub on second handle", func(t *testing.T) {
+	t.Run("hook subprocesses stop teeing to Hub after 404 revocation and respect Hub-only mode", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		home := t.TempDir()
+		gcpOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(gcp): %v", err)
+		}
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
+		}
+		gcp := &capture{}
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID: "run-hooks-404",
+		})
+		d := NewDualAnalyticsDrainer(gcpOutbox, gcp.send, sink, trustedHub("hub-1"))
+
+		// Before 404: hook writes to both.
+		hook1 := NewLazyHookUsageAnalytics(home, true, nil)
+		if _, err := hook1.Record(makeObs("hk-rev", 1)); err != nil {
+			t.Fatalf("hook1.Record: %v", err)
+		}
+		d.RunOnce(context.Background())
+		if !d.HubRevoked() {
+			t.Fatal("expected HubRevoked() = true")
+		}
+		seqBefore := hubOutbox.Stats().Appended
+		ledgerBefore, err := hubOutbox.LedgerSnapshot()
+		if err != nil {
+			t.Fatalf("LedgerSnapshot before: %v", err)
+		}
+
+		// After 404: active marker is gone, so a new hook subprocess writes ONLY to GCP.
+		hook2 := NewLazyHookUsageAnalytics(home, true, nil)
+		if _, err := hook2.Record(makeObs("hk-rev", 2)); err != nil {
+			t.Fatalf("hook2.Record: %v", err)
+		}
+		d.RunOnce(context.Background())
+		if len(gcp.lines) != 2 {
+			t.Fatalf("gcp received %d/2 events, want 2", len(gcp.lines))
+		}
+		ledgerAfter, err := hubOutbox.LedgerSnapshot()
+		if err != nil {
+			t.Fatalf("LedgerSnapshot after: %v", err)
+		}
+		if ledgerAfter.LastSeq != ledgerBefore.LastSeq || hubOutbox.Stats().Appended != seqBefore {
+			t.Errorf("Hub outbox received append after 404 revocation: seq %d -> %d", ledgerBefore.LastSeq, ledgerAfter.LastSeq)
+		}
+
+		// Hub-only hook after revocation is a no-op and does not error.
+		hubOnlyHook := NewLazyHookUsageAnalytics(home, false, nil)
+		if out, err := hubOnlyHook.Record(makeObs("hk-rev", 3)); err != nil || out != 0 {
+			t.Errorf("hubOnlyHook.Record after revocation = (%v, %v), want (0, nil)", out, err)
+		}
+	})
+
+	t.Run("Hub-only hook subprocess writes only to Hub outbox and never creates GCP outbox", func(t *testing.T) {
 		var mu sync.Mutex
 		var delivered int
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1702,35 +2058,25 @@ func TestDualAnalyticsDrainer_SecondHandleReclaimsLagAndRespectsMaxPending(t *te
 		}))
 		defer srv.Close()
 
-		dir := filepath.Join(t.TempDir(), "outbox")
-		oDrainer, err := OpenAnalyticsOutbox(dir)
+		home := t.TempDir()
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
 		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(drainer): %v", err)
+			t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
 		}
-		// Seed a stale legacy "cursor" file at (1, 0) on disk.
-		if err := oDrainer.writeCursorNamed("cursor", 1, 0); err != nil {
-			t.Fatalf("write legacy cursor: %v", err)
-		}
-
-		sink := NewHubUsageSink(oDrainer, HubUsageSinkConfig{
+		sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
-			RunID: "run-r2-hubonly",
+			RunID: "run-hubonly-hook",
 		})
-		d := NewHubAnalyticsDrainer(oDrainer, sink, trustedHub("hub-1"))
+		d := NewHubAnalyticsDrainer(hubOutbox, sink, trustedHub("hub-1"))
 
-		// Second handle opens the same outbox and must read cursors.json -> ["cursor.hub"].
-		oHook, err := OpenAnalyticsOutbox(dir)
-		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(hook): %v", err)
+		hook := NewLazyHookUsageAnalytics(home, false, nil)
+		if out, err := hook.Record(makeObs("hk-hubonly", 1)); err != nil || out != AppendWritten {
+			t.Fatalf("hook.Record = (%v, %v), want (AppendWritten, nil)", out, err)
 		}
-		if got := oHook.activeCursors(); len(got) != 1 || got[0] != HubAnalyticsCursorName {
-			t.Fatalf("second handle activeCursors() = %v, want [%q]", got, HubAnalyticsCursorName)
-		}
-		mustAppend(t, oHook, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:hubonly-stale-1", 10), AppendWritten)
 		d.RunOnce(context.Background())
 
-		if got := oHook.Stats().PendingBytes; got != 0 {
-			t.Errorf("second handle PendingBytes = %d, want 0", got)
+		if _, err := os.Stat(AnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+			t.Errorf("Hub-only hook must not create GCP outbox dir %q", AnalyticsOutboxDirFor(home))
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -1740,10 +2086,15 @@ func TestDualAnalyticsDrainer_SecondHandleReclaimsLagAndRespectsMaxPending(t *te
 	})
 }
 
-// O1: periodic re-probe from a GCP-only drainer activates the Hub sink in
-// dual-run mode (with cursor.hub) when capabilities turn positive, without
-// disrupting the GCP drain.
+// Scenario 4 (Option B): periodic re-probe from a GCP-only drainer creates no
+// Hub outbox while probe is negative; when capabilities turn positive, it opens
+// the sibling Hub outbox, marks it active on disk, and wires both native and
+// hook producers to tee into both outboxes without disrupting GCP delivery.
 func TestDualAnalyticsDrainer_PeriodicReprobeActivatesHubSink(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-reprobe")
+
 	var probeCalls atomic.Int32
 	var mu sync.Mutex
 	var hubDelivered []string
@@ -1764,9 +2115,15 @@ func TestDualAnalyticsDrainer_PeriodicReprobeActivatesHubSink(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	o := testOutbox(t)
+	home := t.TempDir()
+	gcpOutbox, err := OpenAnalyticsOutbox(AnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(gcp): %v", err)
+	}
+	native := NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
 	gcp := &capture{}
-	d := NewAnalyticsDrainer(o, gcp.send, trustedHub("hub-1"))
+	d := NewAnalyticsDrainer(gcpOutbox, gcp.send, trustedHub("hub-1"))
+	d.hubOutboxDir = HubAnalyticsOutboxDirFor(home)
 	clock := time.Date(2026, 11, 25, 21, 0, 0, 0, time.UTC)
 	d.now = func() time.Time { return clock }
 
@@ -1778,28 +2135,62 @@ func TestDualAnalyticsDrainer_PeriodicReprobeActivatesHubSink(t *testing.T) {
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-reprobe",
 		}, nil
-	}, 60*time.Second, nil, nil)
+	}, 60*time.Second, nil, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
+		native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
+	})
 
-	// Tick 1 (t=0): probe #1 returns 503; GCP still delivers event 1.
-	mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:rp-1", 1), AppendWritten)
+	makeObs := func(id string) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   id,
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(10),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	// Tick 1 (t=0): probe #1 returns 503; no Hub outbox created; GCP delivers event 1.
+	if _, err := native.Record(makeObs("cmp1:rp-1")); err != nil {
+		t.Fatalf("Record 1: %v", err)
+	}
 	d.RunOnce(context.Background())
 	if len(gcp.lines) != 1 {
 		t.Fatalf("gcp lines = %d, want 1", len(gcp.lines))
 	}
+	if _, err := os.Stat(HubAnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+		t.Fatal("Hub outbox dir must not be created while probe is negative")
+	}
 
-	// Tick 2 (t+60s): probe #2 returns 200; Hub sink activates in dual-run mode
-	// and both GCP and Hub receive event 2.
+	// Tick 2 (t+60s): probe #2 returns 200; Hub outbox is created & marked active.
 	clock = clock.Add(60 * time.Second)
-	ev2 := mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:rp-2", 2), AppendWritten)
+	d.RunOnce(context.Background())
+	if !IsHubOutboxActive(home) {
+		t.Fatal("expected Hub outbox active marker after positive re-probe")
+	}
+
+	// Record event 2 via native producer and event 3 via a fresh hook subprocess handle.
+	if _, err := native.Record(makeObs("cmp1:rp-2")); err != nil {
+		t.Fatalf("Record 2: %v", err)
+	}
+	hook := NewLazyHookUsageAnalytics(home, true, nil)
+	if _, err := hook.Record(makeObs("cmp1:rp-3")); err != nil {
+		t.Fatalf("hook.Record 3: %v", err)
+	}
 	d.RunOnce(context.Background())
 
-	if len(gcp.lines) != 2 {
-		t.Fatalf("gcp lines = %d, want 2", len(gcp.lines))
+	if len(gcp.lines) != 3 {
+		t.Fatalf("gcp lines = %d, want 3", len(gcp.lines))
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(hubDelivered) != 1 || hubDelivered[0] != ev2.EventID {
-		t.Errorf("hubDelivered = %v, want [%q]", hubDelivered, ev2.EventID)
+	if len(hubDelivered) != 2 {
+		t.Fatalf("hubDelivered = %v, want 2 events (rp-2 and rp-3)", hubDelivered)
+	}
+	if hubDelivered[0] != decodeUsage(t, gcp.lines[1]).EventID || hubDelivered[1] != decodeUsage(t, gcp.lines[2]).EventID {
+		t.Errorf("hubDelivered = %v, want [%q, %q]", hubDelivered, decodeUsage(t, gcp.lines[1]).EventID, decodeUsage(t, gcp.lines[2]).EventID)
 	}
 }
 
@@ -1899,82 +2290,246 @@ func TestHubUsageSink_SingleRunIDSourceNoEpochOscillation(t *testing.T) {
 	}
 }
 
-// O4: Hub sink always uses cursor.hub in both dual-run and Hub-only modes.
-func TestHubUsageSink_AlwaysUsesCursorHub(t *testing.T) {
-	t.Run("dual-run to Hub-only restart resumes from cursor.hub without skipping", func(t *testing.T) {
-		dir := filepath.Join(t.TempDir(), "outbox")
-		var hubDown atomic.Bool
-		hubDown.Store(true)
-		var mu sync.Mutex
-		var hubIDs []string
+// Scenario 5 (Option B): kill/restart replay from BOTH outboxes across a run
+// change keeps stable event IDs and preserves the original run_id for replayed
+// events while rotating the producer epoch for the new run.
+func TestDualOutbox_KillRestartReplayPreservesEventIDAndRunID(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
 
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if hubDown.Load() {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			var req telemetrycontract.UsageIngestRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			mu.Lock()
-			for _, ev := range req.Events {
-				hubIDs = append(hubIDs, ev.EventID)
-			}
-			mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
-		}))
-		defer srv.Close()
+	makeObs := func(id string) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   id,
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(42),
+			Output:          int64Ptr(7),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
 
-		// Process 1: dual-run; GCP drains all 3 events, Hub fails so cursor.hub stays behind.
-		o1, err := OpenAnalyticsOutbox(dir)
-		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(1): %v", err)
-		}
-		var wantIDs []string
-		for i := 1; i <= 3; i++ {
-			ev := mustAppend(t, o1, draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:o4-%d", i), int64(i)), AppendWritten)
-			wantIDs = append(wantIDs, ev.EventID)
-		}
-		gcp := &capture{}
-		sink1 := NewHubUsageSink(o1, HubUsageSinkConfig{
-			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
-			RunID: "run-o4",
-		})
-		d1 := NewDualAnalyticsDrainer(o1, gcp.send, sink1, trustedHub("hub-1"))
-		d1.RunOnce(context.Background())
-		if len(gcp.lines) != 3 {
-			t.Fatalf("gcp received %d, want 3", len(gcp.lines))
-		}
+	home := t.TempDir()
+	gcpDir := AnalyticsOutboxDirFor(home)
+	hubDir := HubAnalyticsOutboxDirFor(home)
 
-		// Process 2: restarts in Hub-only mode (GCP config removed); Hub recovers.
-		hubDown.Store(false)
-		o2, err := OpenAnalyticsOutbox(dir)
-		if err != nil {
-			t.Fatalf("OpenAnalyticsOutbox(2): %v", err)
-		}
-		sink2 := NewHubUsageSink(o2, HubUsageSinkConfig{
-			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
-			RunID: "run-o4",
-		})
-		d2 := NewHubAnalyticsDrainer(o2, sink2, trustedHub("hub-1"))
-		if sent := d2.RunOnce(context.Background()); sent != 3 {
-			t.Fatalf("Hub-only restart sent %d, want 3 (must resume from cursor.hub, not GCP cursor)", sent)
-		}
-		if _, err := os.Stat(filepath.Join(dir, HubAnalyticsCursorName)); err != nil {
-			t.Errorf("expected %s file to exist: %v", HubAnalyticsCursorName, err)
+	// Process 1 (run-1): append 2 events to both outboxes, then crash before delivery.
+	t.Setenv("SCION_LAUNCH_ID", "run-1")
+	gcp1, err := OpenAnalyticsOutbox(gcpDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(gcp1): %v", err)
+	}
+	hub1, err := OpenAnalyticsOutbox(hubDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hub1): %v", err)
+	}
+	dual1 := NewDualUsageAnalytics(gcp1, hub1, telemetrycontract.UsageSourceNative)
+	if _, err := dual1.Record(makeObs("cmp1:kr-1")); err != nil {
+		t.Fatalf("Record 1: %v", err)
+	}
+	if _, err := dual1.Record(makeObs("cmp1:kr-2")); err != nil {
+		t.Fatalf("Record 2: %v", err)
+	}
+	// Fail both sinks on tick 1 so ready files stay undelivered on disk.
+	gcpFail := &capture{fail: errors.New("gcp down")}
+	downSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	sink1 := NewHubUsageSink(hub1, HubUsageSinkConfig{
+		Post:  httptestPostFunc(downSrv.URL, "agent-1", "tok-1"),
+		RunID: "run-1",
+	})
+	d1 := NewDualAnalyticsDrainer(gcp1, gcpFail.send, sink1, trustedHub("hub-1"))
+	d1.RunOnce(context.Background())
+	downSrv.Close()
+
+	// Process 2 (run-2): reopen both outboxes from disk, append 1 new event in run-2, drain both.
+	t.Setenv("SCION_LAUNCH_ID", "run-2")
+	var mu sync.Mutex
+	var hubReqs []telemetrycontract.UsageIngestRequest
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
 		mu.Lock()
-		defer mu.Unlock()
-		if len(hubIDs) != 3 {
-			t.Fatalf("hubIDs = %v, want 3 events", hubIDs)
-		}
-		for i, want := range wantIDs {
-			if hubIDs[i] != want {
-				t.Errorf("hubIDs[%d] = %q, want %q", i, hubIDs[i], want)
-			}
-		}
+		hubReqs = append(hubReqs, req)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv2.Close()
+
+	gcp2, err := OpenAnalyticsOutbox(gcpDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(gcp2): %v", err)
+	}
+	hub2, err := OpenAnalyticsOutbox(hubDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hub2): %v", err)
+	}
+	dual2 := NewDualUsageAnalytics(gcp2, hub2, telemetrycontract.UsageSourceNative)
+	if _, err := dual2.Record(makeObs("cmp1:kr-3")); err != nil {
+		t.Fatalf("Record 3: %v", err)
+	}
+
+	gcpOK := &capture{}
+	sink2 := NewHubUsageSink(hub2, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv2.URL, "agent-1", "tok-1"),
+		RunID: "run-2",
 	})
+	d2 := NewDualAnalyticsDrainer(gcp2, gcpOK.send, sink2, trustedHub("hub-1"))
+	d2.RunOnce(context.Background())
+
+	if len(gcpOK.lines) != 3 {
+		t.Fatalf("gcp replayed %d events, want 3", len(gcpOK.lines))
+	}
+	gcpEvs := make([]telemetrycontract.UsageEvent, 3)
+	for i, line := range gcpOK.lines {
+		gcpEvs[i] = decodeUsage(t, line)
+	}
+
+	mu.Lock()
+	var hubEvs []telemetrycontract.UsageEvent
+	for _, req := range hubReqs {
+		for _, ev := range req.Events {
+			// Request-level RunID must match every event's RunID (grouped by run_id, epoch).
+			if req.RunID != ev.RunID {
+				t.Errorf("hub req.RunID = %q != ev.RunID = %q", req.RunID, ev.RunID)
+			}
+			hubEvs = append(hubEvs, ev)
+		}
+	}
+	mu.Unlock()
+	if len(hubEvs) != 3 {
+		t.Fatalf("hub replayed %d events, want 3", len(hubEvs))
+	}
+
+	// Verify stable EventIDs across GCP and Hub, preserved run-1 on replayed events,
+	// and rotated epoch on run-2 in both outboxes.
+	for i := 0; i < 3; i++ {
+		if gcpEvs[i].EventID != hubEvs[i].EventID {
+			t.Errorf("event[%d] EventID mismatch: gcp=%q hub=%q", i, gcpEvs[i].EventID, hubEvs[i].EventID)
+		}
+	}
+	for _, label := range []struct {
+		name string
+		evs  []telemetrycontract.UsageEvent
+	}{
+		{"gcp", gcpEvs},
+		{"hub", hubEvs},
+	} {
+		if label.evs[0].RunID != "run-1" || label.evs[1].RunID != "run-1" || label.evs[2].RunID != "run-2" {
+			t.Errorf("%s run_ids = [%q, %q, %q], want [run-1, run-1, run-2]", label.name, label.evs[0].RunID, label.evs[1].RunID, label.evs[2].RunID)
+		}
+		if label.evs[0].ProducerEpoch != label.evs[1].ProducerEpoch {
+			t.Errorf("%s run-1 epochs differ: %q vs %q", label.name, label.evs[0].ProducerEpoch, label.evs[1].ProducerEpoch)
+		}
+		if label.evs[2].ProducerEpoch == label.evs[0].ProducerEpoch {
+			t.Errorf("%s run-2 did not rotate ProducerEpoch (%q)", label.name, label.evs[2].ProducerEpoch)
+		}
+		if label.evs[2].ProducerSeq != 1 {
+			t.Errorf("%s run-2 ProducerSeq = %d, want 1", label.name, label.evs[2].ProducerSeq)
+		}
+	}
+}
+
+// Restarting from dual-run into Hub-only mode while Hub was behind GCP resumes
+// cleanly from the independent Hub outbox without skipping any events.
+func TestDualToHubOnlyRestart_IndependentHubOutboxResumesCleanly(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_LAUNCH_ID", "run-o4")
+
+	home := t.TempDir()
+	gcpDir := AnalyticsOutboxDirFor(home)
+	hubDir := HubAnalyticsOutboxDirFor(home)
+
+	var hubDown atomic.Bool
+	hubDown.Store(true)
+	var mu sync.Mutex
+	var hubIDs []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hubDown.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		for _, ev := range req.Events {
+			hubIDs = append(hubIDs, ev.EventID)
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	defer srv.Close()
+
+	// Process 1: dual-run; GCP drains all 3 events, Hub fails so Hub outbox keeps them.
+	gcp1, err := OpenAnalyticsOutbox(gcpDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(gcp1): %v", err)
+	}
+	hub1, err := OpenAnalyticsOutbox(hubDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hub1): %v", err)
+	}
+	dual1 := NewDualUsageAnalytics(gcp1, hub1, telemetrycontract.UsageSourceNative)
+	for i := 1; i <= 3; i++ {
+		if _, err := dual1.Record(UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   fmt.Sprintf("cmp1:o4-%d", i),
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(int64(i)),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}); err != nil {
+			t.Fatalf("Record %d: %v", i, err)
+		}
+	}
+	gcp := &capture{}
+	sink1 := NewHubUsageSink(hub1, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-o4",
+	})
+	d1 := NewDualAnalyticsDrainer(gcp1, gcp.send, sink1, trustedHub("hub-1"))
+	d1.RunOnce(context.Background())
+	if len(gcp.lines) != 3 {
+		t.Fatalf("gcp received %d, want 3", len(gcp.lines))
+	}
+
+	// Process 2: restarts in Hub-only mode (GCP config removed); Hub recovers and delivers all 3.
+	hubDown.Store(false)
+	hub2, err := OpenAnalyticsOutbox(hubDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hub2): %v", err)
+	}
+	sink2 := NewHubUsageSink(hub2, HubUsageSinkConfig{
+		Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID: "run-o4",
+	})
+	d2 := NewHubAnalyticsDrainer(hub2, sink2, trustedHub("hub-1"))
+	if sent := d2.RunOnce(context.Background()); sent != 3 {
+		t.Fatalf("Hub-only restart sent %d, want 3", sent)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(hubIDs) != 3 {
+		t.Fatalf("hubIDs = %v, want 3 events", hubIDs)
+	}
+	for i := range gcp.lines {
+		if hubIDs[i] != decodeUsage(t, gcp.lines[i]).EventID {
+			t.Errorf("hubIDs[%d] = %q, want %q", i, hubIDs[i], decodeUsage(t, gcp.lines[i]).EventID)
+		}
+	}
 }

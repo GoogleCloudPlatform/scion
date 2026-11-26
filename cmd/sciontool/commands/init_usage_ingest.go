@@ -28,7 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-const usageCapabilitiesProbeTimeout = 5 * time.Second
+const usageCapabilitiesProbeTimeout = 2 * time.Second
 
 // Bounded init-time retry settings for transient capability probe failures
 // (e.g. Hub restarting or returning 503). Vars rather than consts so unit

@@ -41,3 +41,30 @@ func TestHookUsageAnalyticsLazyAgentHomeOutbox(t *testing.T) {
 		t.Error("hook analytics must be off unless SCION_USAGE_SOURCE=hooks")
 	}
 }
+
+func TestHookUsageAnalytics_HubOnlyAndDualRunDiscovery(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv(telemetry.EnvUsageHubIngest, "1")
+
+	// Hub-only config (no GCP exporter): does no I/O at construction and never
+	// creates the GCP outbox directory.
+	hubOnlyCfg := &telemetry.Config{Enabled: true, CloudEnabled: false}
+	if !telemetry.AnalyticsEnabledForHooks(hubOnlyCfg) {
+		t.Fatal("AnalyticsEnabledForHooks = false in Hub-only mode, want true")
+	}
+	a := hookUsageAnalytics(hubOnlyCfg)
+	if a == nil {
+		t.Fatal("hookUsageAnalytics returned nil in Hub-only mode")
+	}
+	if _, err := os.Stat(telemetry.AnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+		t.Error("hookUsageAnalytics must not create GCP outbox dir in Hub-only mode")
+	}
+	if _, err := os.Stat(telemetry.HubAnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+		t.Error("hookUsageAnalytics must not touch Hub outbox before a usage event")
+	}
+	if a.Outbox() != nil {
+		t.Error("Hub-only hook Outbox() should be nil when Hub outbox is not marked active on disk")
+	}
+}

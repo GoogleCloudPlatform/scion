@@ -98,7 +98,10 @@ func TestProbeAndConfigureUsageIngest_Negative(t *testing.T) {
 				t.Errorf("AnalyticsDiagnostics() = ok:%v reason:%q, want ok:false reason:%q", ok, reason, telemetry.AnalyticsDisabledNoGCPExporter)
 			}
 			if _, err := os.Stat(telemetry.AnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
-				t.Error("outbox directory should not be created when probe is negative and no GCP exporter is configured")
+				t.Error("GCP outbox directory should not be created when probe is negative and no GCP exporter is configured")
+			}
+			if _, err := os.Stat(telemetry.HubAnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
+				t.Error("Hub outbox directory should not be created when probe is negative")
 			}
 		})
 	}
@@ -330,7 +333,10 @@ func TestProbeAndConfigureUsageIngest_Transient503Then200(t *testing.T) {
 			t.Errorf("%s = %q, want \"0\"", telemetry.EnvUsageHubIngest, got)
 		}
 		if _, err := os.Stat(telemetry.AnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
-			t.Error("outbox directory should not be created in Hub-only mode when init probe failed")
+			t.Error("GCP outbox directory should not be created in Hub-only mode when init probe failed")
+		}
+		if _, err := os.Stat(telemetry.HubAnalyticsOutboxDirFor(agentHome)); !os.IsNotExist(err) {
+			t.Error("Hub outbox directory should not be created in Hub-only mode when init probe failed")
 		}
 		mu.Lock()
 		gotProbes, gotIngests := probeCalls, ingestCalls

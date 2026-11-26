@@ -67,7 +67,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -92,26 +91,24 @@ const (
 // removed at finalize (a commit never takes this long).
 const analyticsTmpSweepAge = time.Hour
 
-// AnalyticsOutboxDirName is the outbox directory under the agent home's
-// .scion directory.
+// AnalyticsOutboxDirName is the GCP analytics outbox directory under the agent
+// home's .scion directory.
 const AnalyticsOutboxDirName = "analytics-outbox"
 
-// HubAnalyticsCursorName is the independent cursor file used by the Hub usage
-// sink when running alongside the GCP Cloud Logging drain (dual-run fan-out).
-const HubAnalyticsCursorName = "cursor.hub"
+// HubAnalyticsOutboxDirName is the sibling outbox directory under the agent
+// home's .scion directory used by the Scion Hub usage ingest sink. Keeping a
+// separate WAL directory per sink isolates caps, cursors, dead-letter files,
+// and health counters during dual-run.
+const HubAnalyticsOutboxDirName = "analytics-outbox-hub"
 
-// analyticsCursorsFile persists the active primary and secondary cursor names
-// under the outbox lock so every process opening the outbox (including hook
-// subprocesses) computes the same activeCursors(), retainedBytes(), and
-// dual-run lag reclamation.
-const analyticsCursorsFile = "cursors.json"
+// hubOutboxActiveMarker is a small marker file inside the Hub outbox directory
+// written while the Hub usage sink is active and removed on 404 revocation or
+// when a run starts with a negative capability probe. Short-lived hook
+// subprocesses stat this marker to discover whether to tee events to the Hub
+// outbox without relying on a frozen process environment.
+const hubOutboxActiveMarker = "active"
 
-type outboxCursorRegistry struct {
-	Primary   string   `json:"primary"`
-	Secondary []string `json:"secondary,omitempty"`
-}
-
-// AnalyticsOutboxDirFor returns the outbox directory for the AGENT home
+// AnalyticsOutboxDirFor returns the GCP outbox directory for the AGENT home
 // (<home>/.scion/analytics-outbox), or "" if home is empty. Both producers
 // must pass the agent home: sciontool init (which runs as root with
 // HOME=/root) passes its resolved agent home, and hook processes (which run
@@ -122,6 +119,54 @@ func AnalyticsOutboxDirFor(home string) string {
 		return ""
 	}
 	return filepath.Join(home, ".scion", AnalyticsOutboxDirName)
+}
+
+// HubAnalyticsOutboxDirFor returns the Hub usage outbox directory for the
+// AGENT home (<home>/.scion/analytics-outbox-hub), or "" if home is empty.
+func HubAnalyticsOutboxDirFor(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".scion", HubAnalyticsOutboxDirName)
+}
+
+// IsHubOutboxActive reports whether the Hub usage outbox for home is currently
+// marked active on disk.
+func IsHubOutboxActive(home string) bool {
+	return isHubOutboxActiveDir(HubAnalyticsOutboxDirFor(home))
+}
+
+func isHubOutboxActiveDir(hubDir string) bool {
+	if hubDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(hubDir, hubOutboxActiveMarker))
+	return err == nil
+}
+
+// ClearHubOutboxActive removes the Hub outbox active marker in hubDir if
+// present, without creating hubDir.
+func ClearHubOutboxActive(hubDir string) {
+	if hubDir == "" {
+		return
+	}
+	if err := os.Remove(filepath.Join(hubDir, hubOutboxActiveMarker)); err == nil {
+		_ = syncDir(hubDir)
+	}
+}
+
+func (o *AnalyticsOutbox) markHubActive() {
+	if o == nil {
+		return
+	}
+	_ = o.writeFileAtomic(hubOutboxActiveMarker, []byte("1\n"))
+}
+
+func (o *AnalyticsOutbox) clearHubActive() {
+	if o == nil {
+		return
+	}
+	ClearHubOutboxActive(o.dir)
 }
 
 // OutboxOwner is the agent user that must own every outbox file. When the
@@ -255,251 +300,6 @@ type AnalyticsOutbox struct {
 	// crashAt, when set, makes appendUsage stop right after the named step
 	// ("intent" or "line") without cleaning up, simulating a crash (tests).
 	crashAt string
-
-	// cursorMu guards primaryCursor, secondaryCursors, and inFlightCursorFile.
-	// By default primaryCursor is "cursor" (GCP-only). Hub-only mode sets
-	// primaryCursor to HubAnalyticsCursorName ("cursor.hub"). Dual-run mode
-	// keeps "cursor" as primary and registers HubAnalyticsCursorName in
-	// secondaryCursors so ready files are retained until both cursors advance
-	// past them (or the secondary cursor is reclaimed/disabled to protect the
-	// primary path). inFlightCursorFile is a process-local (in-memory) guard
-	// recording the ready file number currently being drained by
-	// DrainBatchCursor for a cursor (0 when idle), so in-process
-	// reclaimSecondaryLagLocked skips that file. Cross-process reclaim (e.g.
-	// from a hook subprocess) cannot see inFlightCursorFile; that is benign
-	// because advanceCursorLocked is monotonic under the outbox lock, an open
-	// fd continues reading on Unix, and the Hub deduplicates by event_id.
-	cursorMu           sync.Mutex
-	primaryCursor      string
-	secondaryCursors   []string
-	inFlightCursorFile map[string]int64
-}
-
-func (o *AnalyticsOutbox) setInFlightCursorFile(cursorName string, fileNum int64) {
-	if o == nil || cursorName == "" {
-		return
-	}
-	o.cursorMu.Lock()
-	defer o.cursorMu.Unlock()
-	if fileNum <= 0 {
-		delete(o.inFlightCursorFile, cursorName)
-		return
-	}
-	if o.inFlightCursorFile == nil {
-		o.inFlightCursorFile = make(map[string]int64)
-	}
-	o.inFlightCursorFile[cursorName] = fileNum
-}
-
-func (o *AnalyticsOutbox) inFlightFileFor(cursorName string) int64 {
-	if o == nil || cursorName == "" {
-		return 0
-	}
-	o.cursorMu.Lock()
-	defer o.cursorMu.Unlock()
-	return o.inFlightCursorFile[cursorName]
-}
-
-// SetPrimaryCursor switches the primary cursor file (e.g. to
-// HubAnalyticsCursorName in Hub-only mode) and persists the cursor registry to
-// cursors.json under the outbox lock so other processes (such as hook
-// subprocesses) see the same active cursor set. When upgrading an existing
-// legacy outbox that has "cursor" on disk but no cursor.hub yet, it seeds
-// cursor.hub from "cursor" (clamped to the oldest remaining ready file so
-// undelivered ready files are never skipped).
-func (o *AnalyticsOutbox) SetPrimaryCursor(name string) {
-	if o == nil || name == "" {
-		return
-	}
-	o.cursorMu.Lock()
-	o.primaryCursor = name
-	o.secondaryCursors = nil
-	o.cursorMu.Unlock()
-
-	if unlock, lerr := o.lock(); lerr == nil {
-		defer unlock()
-		if name == "cursor" {
-			// Reset to default GCP-only layout: remove cursors.json if present
-			// so legacy/GCP-only outboxes keep their original file layout.
-			if err := os.Remove(o.path(analyticsCursorsFile)); err == nil {
-				_ = o.fsyncDir(o.dir)
-			}
-			return
-		}
-		if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
-			if cf, co, rerr := o.readCursorNamed("cursor"); rerr == nil && (cf > 0 || co > 0) {
-				if files, ferr := o.readyFiles(); ferr == nil && len(files) > 0 && files[0] < cf {
-					// Ready files older than "cursor" still exist (e.g. from a
-					// prior dual-run where the primary cursor moved ahead while
-					// the Hub cursor had not yet ACKed): start at the oldest
-					// remaining ready file so nothing is skipped.
-					cf, co = files[0], 0
-				}
-				_ = o.writeCursorNamed(name, cf, co)
-			}
-		}
-		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: name})
-	}
-}
-
-// EnableSecondaryCursor registers an independent cursor file (such as
-// HubAnalyticsCursorName) and persists the cursor registry to cursors.json
-// under the outbox lock so every process retains ready files until all active
-// cursors advance past them and enforces dual-run lag reclamation.
-func (o *AnalyticsOutbox) EnableSecondaryCursor(name string) {
-	if o == nil || name == "" {
-		return
-	}
-	o.cursorMu.Lock()
-	prim := o.primaryCursor
-	if prim == "" {
-		prim = "cursor"
-	}
-	if name == prim {
-		o.cursorMu.Unlock()
-		return
-	}
-	exists := false
-	for _, existing := range o.secondaryCursors {
-		if existing == name {
-			exists = true
-			break
-		}
-	}
-	if !exists {
-		o.secondaryCursors = append(o.secondaryCursors, name)
-	}
-	secCopy := append([]string(nil), o.secondaryCursors...)
-	o.cursorMu.Unlock()
-
-	// Ensure the secondary cursor file and cursors.json exist on disk under
-	// the outbox lock so hook subprocesses and restarts observe dual-run state.
-	if unlock, lerr := o.lock(); lerr == nil {
-		defer unlock()
-		if _, serr := os.Stat(o.path(name)); errors.Is(serr, os.ErrNotExist) {
-			_ = o.writeCursorNamed(name, 0, 0)
-		}
-		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: prim, Secondary: secCopy})
-	}
-}
-
-// DisableSecondaryCursor unregisters a secondary cursor (e.g. when the Hub
-// usage capability is revoked mid-run with 404), updates cursors.json under
-// the outbox lock, and deletes any ready files that the remaining active
-// cursors have already advanced past.
-func (o *AnalyticsOutbox) DisableSecondaryCursor(name string) {
-	if o == nil || name == "" {
-		return
-	}
-	o.cursorMu.Lock()
-	prim := o.primaryCursor
-	if prim == "" {
-		prim = "cursor"
-	}
-	filtered := o.secondaryCursors[:0]
-	for _, existing := range o.secondaryCursors {
-		if existing != name {
-			filtered = append(filtered, existing)
-		}
-	}
-	o.secondaryCursors = filtered
-	secCopy := append([]string(nil), o.secondaryCursors...)
-	o.cursorMu.Unlock()
-
-	if unlock, lerr := o.lock(); lerr == nil {
-		_ = o.writeCursorRegistryLocked(outboxCursorRegistry{Primary: prim, Secondary: secCopy})
-		unlock()
-	}
-
-	// Clean up ready files already passed by all remaining active cursors.
-	if files, err := o.readyFiles(); err == nil {
-		removed := false
-		for _, n := range files {
-			if past, perr := o.allCursorsPast(n); perr == nil && past {
-				if os.Remove(o.path(readyName(n))) == nil {
-					removed = true
-				}
-			}
-		}
-		if removed {
-			_ = syncDir(o.dir)
-		}
-	}
-}
-
-func (o *AnalyticsOutbox) writeCursorRegistryLocked(reg outboxCursorRegistry) error {
-	if reg.Primary == "" {
-		reg.Primary = "cursor"
-	}
-	b, err := json.Marshal(reg)
-	if err != nil {
-		return err
-	}
-	return o.writeFileAtomic(analyticsCursorsFile, b)
-}
-
-func (o *AnalyticsOutbox) readCursorRegistry() (outboxCursorRegistry, bool) {
-	if o == nil || o.dir == "" {
-		return outboxCursorRegistry{}, false
-	}
-	b, err := os.ReadFile(o.path(analyticsCursorsFile))
-	if err != nil {
-		return outboxCursorRegistry{}, false
-	}
-	var reg outboxCursorRegistry
-	if json.Unmarshal(b, &reg) != nil {
-		return outboxCursorRegistry{}, false
-	}
-	if reg.Primary == "" {
-		reg.Primary = "cursor"
-	}
-	return reg, true
-}
-
-func (o *AnalyticsOutbox) getPrimaryCursor() string {
-	if reg, ok := o.readCursorRegistry(); ok {
-		return reg.Primary
-	}
-	o.cursorMu.Lock()
-	defer o.cursorMu.Unlock()
-	if o.primaryCursor == "" {
-		return "cursor"
-	}
-	return o.primaryCursor
-}
-
-func (o *AnalyticsOutbox) getSecondaryCursors() []string {
-	if reg, ok := o.readCursorRegistry(); ok {
-		if len(reg.Secondary) == 0 {
-			return nil
-		}
-		return append([]string(nil), reg.Secondary...)
-	}
-	o.cursorMu.Lock()
-	defer o.cursorMu.Unlock()
-	if len(o.secondaryCursors) == 0 {
-		return nil
-	}
-	return append([]string(nil), o.secondaryCursors...)
-}
-
-func (o *AnalyticsOutbox) activeCursors() []string {
-	if reg, ok := o.readCursorRegistry(); ok {
-		out := make([]string, 0, 1+len(reg.Secondary))
-		out = append(out, reg.Primary)
-		out = append(out, reg.Secondary...)
-		return out
-	}
-	o.cursorMu.Lock()
-	defer o.cursorMu.Unlock()
-	prim := o.primaryCursor
-	if prim == "" {
-		prim = "cursor"
-	}
-	out := make([]string, 0, 1+len(o.secondaryCursors))
-	out = append(out, prim)
-	out = append(out, o.secondaryCursors...)
-	return out
 }
 
 // readyFile is what Drain reads a ready file through.
@@ -861,19 +661,6 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	retained, err := o.retainedBytes()
 	if err != nil {
 		return 0, err
-	}
-	if retained+int64(len(line))+1 > o.maxPending {
-		// In dual-run mode, a lagging secondary cursor (cursor.hub) must never
-		// starve the primary (GCP) path. Reclaim ready files already delivered
-		// by the primary cursor, advancing the secondary cursor and recording
-		// the skipped sequence range so meter_health reflects the gap.
-		if len(o.getSecondaryCursors()) > 0 {
-			if reclaimed, rerr := o.reclaimSecondaryLagLocked(int64(len(line)) + 1); rerr == nil && reclaimed {
-				if r2, rerr2 := o.retainedBytes(); rerr2 == nil {
-					retained = r2
-				}
-			}
-		}
 	}
 	if retained+int64(len(line))+1 > o.maxPending {
 		committed = true
@@ -1761,22 +1548,16 @@ func (o *AnalyticsOutbox) nextReadyNumber() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Never hand out a number any active cursor still points into (a stale
-	// cursor at offset > 0 after an interrupted quarantine or delete), nor one
-	// a ready or quarantine file already uses.
-	var next int64
-	for _, cname := range o.activeCursors() {
-		cursorFile, cursorOffset, err := o.readCursorNamed(cname)
-		if err != nil {
-			return 0, err
-		}
-		candidate := cursorFile
-		if cursorOffset > 0 {
-			candidate = cursorFile + 1
-		}
-		if candidate > next {
-			next = candidate
-		}
+	// Never hand out a number the cursor still points into (a stale cursor at
+	// offset > 0 after an interrupted quarantine or delete), nor one a ready or
+	// quarantine file already uses.
+	cursorFile, cursorOffset, err := o.readCursor()
+	if err != nil {
+		return 0, err
+	}
+	next := cursorFile
+	if cursorOffset > 0 {
+		next = cursorFile + 1
 	}
 	if len(files) > 0 && files[len(files)-1] >= next {
 		next = files[len(files)-1] + 1
@@ -1898,137 +1679,40 @@ func (o *AnalyticsOutbox) keptBytes() (int64, error) {
 }
 
 func (o *AnalyticsOutbox) readCursor() (file, offset int64, err error) {
-	return o.readCursorNamed("cursor")
-}
-
-func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
-	return o.writeCursorNamed("cursor", file, offset)
-}
-
-func (o *AnalyticsOutbox) readCursorNamed(name string) (file, offset int64, err error) {
-	if name == "" {
-		name = "cursor"
-	}
-	s, err := o.readTrimmed(name)
+	s, err := o.readTrimmed("cursor")
 	if err != nil || s == "" {
 		return 0, 0, err
 	}
 	a, b, ok := strings.Cut(s, " ")
 	if !ok {
-		return 0, 0, fmt.Errorf("analytics outbox: malformed %s %q", name, s)
+		return 0, 0, fmt.Errorf("analytics outbox: malformed cursor %q", s)
 	}
 	if file, err = strconv.ParseInt(a, 10, 64); err == nil {
 		offset, err = strconv.ParseInt(b, 10, 64)
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("analytics outbox: malformed %s %q", name, s)
+		return 0, 0, fmt.Errorf("analytics outbox: malformed cursor %q", s)
 	}
 	return file, offset, nil
 }
 
-func (o *AnalyticsOutbox) writeCursorNamed(name string, file, offset int64) error {
-	if name == "" {
-		name = "cursor"
-	}
-	return o.writeFileAtomic(name, []byte(fmt.Sprintf("%d %d", file, offset)))
+func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
+	return o.writeFileAtomic("cursor", []byte(fmt.Sprintf("%d %d", file, offset)))
 }
 
-// advanceCursorNamed updates cursor name to (file, offset) under the outbox
-// lock, only if it moves forward relative to the currently persisted position.
-// Taking the outbox lock serializes cursor advances with reclaimSecondaryLagLocked
-// so concurrent reclaim and drain never race or rewind the cursor.
-func (o *AnalyticsOutbox) advanceCursorNamed(name string, file, offset int64) error {
+// advanceCursor updates the cursor to (file, offset) under the outbox lock,
+// only if it moves forward relative to the currently persisted position.
+func (o *AnalyticsOutbox) advanceCursor(file, offset int64) error {
 	unlock, err := o.lock()
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	return o.advanceCursorLocked(name, file, offset)
-}
-
-func (o *AnalyticsOutbox) advanceCursorLocked(name string, file, offset int64) error {
-	curFile, curOffset, err := o.readCursorNamed(name)
+	curFile, curOffset, err := o.readCursor()
 	if err == nil && (curFile > file || (curFile == file && curOffset > offset)) {
 		return nil
 	}
-	return o.writeCursorNamed(name, file, offset)
-}
-
-// reclaimSecondaryLagLocked advances lagging secondary cursors past the oldest
-// ready files already delivered by the primary cursor and deletes those files
-// until retainedBytes()+neededBytes <= maxPending (or no such files remain).
-// For in-process callers it skips any ready file that DrainBatchCursor
-// currently has in flight (process-local guard; cross-process deletion from a
-// hook subprocess is benign because advanceCursorLocked is monotonic, an open
-// fd keeps reading on Unix, and the Hub deduplicates by event_id). The Hub is
-// the sole authority for meter_health gaps (via emitted-vs-received sequences),
-// so no client-side missing ranges are recorded or sent. Caller holds the
-// outbox lock.
-func (o *AnalyticsOutbox) reclaimSecondaryLagLocked(neededBytes int64) (bool, error) {
-	sec := o.getSecondaryCursors()
-	if len(sec) == 0 {
-		return false, nil
-	}
-	primFile, _, err := o.readCursorNamed(o.getPrimaryCursor())
-	if err != nil {
-		return false, err
-	}
-	files, err := o.readyFiles()
-	if err != nil {
-		return false, err
-	}
-	reclaimed := false
-	for _, n := range files {
-		if n >= primFile {
-			break
-		}
-		// Never advance a secondary cursor past or delete a ready file that
-		// DrainBatchCursor currently has in flight.
-		blockedByInFlight := false
-		for _, sc := range sec {
-			if inFlight := o.inFlightFileFor(sc); inFlight > 0 && n >= inFlight {
-				blockedByInFlight = true
-				break
-			}
-		}
-		if blockedByInFlight {
-			break
-		}
-		for _, sc := range sec {
-			scFile, _, rerr := o.readCursorNamed(sc)
-			if rerr != nil || scFile > n {
-				continue
-			}
-			if werr := o.advanceCursorLocked(sc, n+1, 0); werr != nil {
-				return reclaimed, werr
-			}
-		}
-		if err := os.Remove(o.path(readyName(n))); err == nil || errors.Is(err, os.ErrNotExist) {
-			reclaimed = true
-		}
-		if ret, rerr := o.retainedBytes(); rerr == nil && ret+neededBytes <= o.maxPending {
-			break
-		}
-	}
-	if reclaimed {
-		_ = o.fsyncDir(o.dir)
-	}
-	return reclaimed, nil
-}
-
-// allCursorsPast reports whether every active cursor has moved strictly past
-// ready file n, meaning ready-n.jsonl is safe to remove.
-func (o *AnalyticsOutbox) allCursorsPast(n int64) (bool, error) {
-	for _, cname := range o.activeCursors() {
-		cf, _, err := o.readCursorNamed(cname)
-		if err != nil {
-			return false, err
-		}
-		if cf <= n {
-			return false, nil
-		}
-	}
-	return true, nil
+	return o.writeCursor(file, offset)
 }
 
 // AnalyticsSendFunc delivers one final event line. A nil error means the
@@ -2053,26 +1737,15 @@ type BatchSendOutcome struct {
 // on the next drain.
 type AnalyticsBatchSendFunc func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error)
 
-// DrainBatch sends ready lines in order from the primary cursor in batches
-// bounded by maxEvents and maxBytes. See DrainBatchCursor for independent
-// cursor support.
+// DrainBatch sends ready lines in order from the cursor in batches bounded by
+// maxEvents and maxBytes (JSON array payload bytes excluding outer envelope),
+// committing the cursor under the outbox lock after each acknowledged batch
+// and deleting a ready file once fully sent. It stops at the first transient
+// send error without advancing the cursor, so the next drain replays the exact
+// same bytes and event IDs. Called only from the pipeline's drainer goroutine.
 func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
-	return o.DrainBatchCursor(ctx, "cursor", maxEvents, maxBytes, send)
-}
-
-// DrainBatchCursor sends ready lines in order from cursorName in batches
-// bounded by maxEvents and maxBytes (JSON array payload bytes excluding outer
-// envelope), committing cursorName after each acknowledged batch and deleting
-// a ready file once every active cursor has moved past it. It stops at the
-// first transient send error without advancing cursorName, so the next drain
-// replays the exact same bytes and event IDs. Called only from the pipeline's
-// drainer goroutine.
-func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName string, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
 	if o == nil {
 		return 0, errNilOutbox
-	}
-	if cursorName == "" {
-		cursorName = "cursor"
 	}
 	if maxEvents <= 0 {
 		maxEvents = telemetrycontract.UsageIngestMaxBatchEvents
@@ -2084,38 +1757,23 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 	if err != nil {
 		return 0, err
 	}
-	curFile, curOffset, err := o.readCursorNamed(cursorName)
+	curFile, curOffset, err := o.readCursor()
 	if err != nil {
 		return 0, err
 	}
 	sent := 0
-	defer o.setInFlightCursorFile(cursorName, 0)
 	for _, n := range files {
 		if n < curFile {
-			// Fully sent for this cursor; remove only once all cursors are past n.
-			if past, perr := o.allCursorsPast(n); perr == nil && past {
-				_ = os.Remove(o.path(readyName(n)))
-			}
+			// Fully sent before a crash interrupted the delete.
+			_ = os.Remove(o.path(readyName(n)))
 			continue
 		}
-		// Mark ready file n as in-flight (process-local guard) before opening
-		// so in-process reclaimSecondaryLagLocked skips it while its lines are
-		// being read and posted.
-		o.setInFlightCursorFile(cursorName, n)
 		offset := int64(0)
 		if n == curFile {
 			offset = curOffset
 		}
 		f, err := o.openFile(o.path(readyName(n)))
 		if err != nil {
-			o.setInFlightCursorFile(cursorName, 0)
-			if errors.Is(err, os.ErrNotExist) {
-				// File was reclaimed by dual-run lag protection right before
-				// in-flight was marked.
-				if cf, _, rerr := o.readCursorNamed(cursorName); rerr == nil && cf > n {
-					continue
-				}
-			}
 			return sent, fmt.Errorf("analytics outbox: %w", err)
 		}
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
@@ -2161,7 +1819,7 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 					}
 				}
 			}
-			if werr := o.advanceCursorNamed(cursorName, n, batchEndOffset); werr != nil {
+			if werr := o.advanceCursor(n, batchEndOffset); werr != nil {
 				return werr
 			}
 			batch = batch[:0]
@@ -2182,7 +1840,7 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 					offset += int64(len(line))
 					batchEndOffset = offset
 					if len(batch) == 0 {
-						if err := o.advanceCursorNamed(cursorName, n, offset); err != nil {
+						if err := o.advanceCursor(n, offset); err != nil {
 							_ = f.Close()
 							return sent, err
 						}
@@ -2225,38 +1883,30 @@ func (o *AnalyticsOutbox) DrainBatchCursor(ctx context.Context, cursorName strin
 		}
 		_ = f.Close()
 		if truncated {
-			if err := o.advanceCursorNamed(cursorName, n+1, 0); err != nil {
+			if err := o.advanceCursor(n+1, 0); err != nil {
 				return sent, err
 			}
-			o.setInFlightCursorFile(cursorName, 0)
-			if past, perr := o.allCursorsPast(n); perr == nil && past {
-				o.quarantined.Add(1)
-				target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
-				if _, err := os.Stat(target); err == nil {
-					target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
-				}
-				if err := os.Rename(o.path(readyName(n)), target); err != nil {
-					return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
-				}
-				if err := syncDir(o.dir); err != nil {
-					return sent, err
-				}
+			o.quarantined.Add(1)
+			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+			if _, err := os.Stat(target); err == nil {
+				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
 			}
-			continue
-		}
-		if err := o.advanceCursorNamed(cursorName, n+1, 0); err != nil {
-			return sent, err
-		}
-		o.setInFlightCursorFile(cursorName, 0)
-		if past, perr := o.allCursorsPast(n); perr != nil {
-			return sent, perr
-		} else if past {
-			if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return sent, fmt.Errorf("analytics outbox: %w", err)
+			if err := os.Rename(o.path(readyName(n)), target); err != nil {
+				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
 			}
 			if err := syncDir(o.dir); err != nil {
 				return sent, err
 			}
+			continue
+		}
+		if err := o.advanceCursor(n+1, 0); err != nil {
+			return sent, err
+		}
+		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if err := syncDir(o.dir); err != nil {
+			return sent, err
 		}
 	}
 	return sent, nil
@@ -2281,11 +1931,8 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 	sent := 0
 	for _, n := range files {
 		if n < curFile {
-			// Fully sent before a crash interrupted the delete; remove only
-			// once all active cursors have moved past n.
-			if past, perr := o.allCursorsPast(n); perr == nil && past {
-				_ = os.Remove(o.path(readyName(n)))
-			}
+			// Fully sent before a crash interrupted the delete.
+			_ = os.Remove(o.path(readyName(n)))
 			continue
 		}
 		offset := int64(0)
@@ -2355,34 +2002,28 @@ func (o *AnalyticsOutbox) Drain(ctx context.Context, send AnalyticsSendFunc) (in
 			if err := o.writeCursor(n+1, 0); err != nil {
 				return sent, err
 			}
-			if past, perr := o.allCursorsPast(n); perr == nil && past {
-				o.quarantined.Add(1)
-				target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
-				if _, err := os.Stat(target); err == nil {
-					// Never overwrite kept bytes.
-					target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
-				}
-				if err := os.Rename(o.path(readyName(n)), target); err != nil {
-					return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
-				}
-				if err := syncDir(o.dir); err != nil {
-					return sent, err
-				}
+			o.quarantined.Add(1)
+			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+			if _, err := os.Stat(target); err == nil {
+				// Never overwrite kept bytes.
+				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+			}
+			if err := os.Rename(o.path(readyName(n)), target); err != nil {
+				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+			}
+			if err := syncDir(o.dir); err != nil {
+				return sent, err
 			}
 			continue
 		}
 		if err := o.writeCursor(n+1, 0); err != nil {
 			return sent, err
 		}
-		if past, perr := o.allCursorsPast(n); perr != nil {
-			return sent, perr
-		} else if past {
-			if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return sent, fmt.Errorf("analytics outbox: %w", err)
-			}
-			if err := syncDir(o.dir); err != nil {
-				return sent, err
-			}
+		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if err := syncDir(o.dir); err != nil {
+			return sent, err
 		}
 	}
 	return sent, nil
@@ -2685,69 +2326,9 @@ func (o *AnalyticsOutbox) pendingBytes() (int64, time.Time, error) {
 	if err != nil {
 		return 0, time.Time{}, err
 	}
-	type cursorPos struct{ file, offset int64 }
-	cursors := make([]cursorPos, 0, len(o.activeCursors()))
-	for _, cname := range o.activeCursors() {
-		cf, co, err := o.readCursorNamed(cname)
-		if err != nil {
-			return 0, time.Time{}, err
-		}
-		cursors = append(cursors, cursorPos{cf, co})
-	}
-	// Compute the slowest active cursor once so PendingBytes stays non-zero
-	// until every active sink has delivered each ready file.
-	var minFile, minOffset int64
-	for i, c := range cursors {
-		if i == 0 || c.file < minFile || (c.file == minFile && c.offset < minOffset) {
-			minFile, minOffset = c.file, c.offset
-		}
-	}
-	for _, n := range files {
-		if n < minFile {
-			continue
-		}
-		info, err := os.Stat(o.path(readyName(n)))
-		if err != nil {
-			continue
-		}
-		size := info.Size()
-		if n == minFile {
-			size -= minOffset
-		}
-		if size > 0 {
-			total += size
-			note(info)
-		}
-	}
-	return total, oldest, nil
-}
-
-// pendingBytesForCursor reports undelivered bytes (staging, finalizing, and
-// ready files past cursorName) for a single consumer cursor.
-func (o *AnalyticsOutbox) pendingBytesForCursor(cursorName string) (int64, error) {
-	if o == nil {
-		return 0, errNilOutbox
-	}
-	var total int64
-	if info, err := os.Stat(o.path("staging.jsonl")); err == nil && info.Size() > 0 {
-		total += info.Size()
-	}
-	finalizing, err := o.finalizingFiles()
+	curFile, curOffset, err := o.readCursor()
 	if err != nil {
-		return 0, err
-	}
-	for _, name := range finalizing {
-		if info, err := os.Stat(o.path(name)); err == nil {
-			total += info.Size()
-		}
-	}
-	files, err := o.readyFiles()
-	if err != nil {
-		return 0, err
-	}
-	curFile, curOffset, err := o.readCursorNamed(cursorName)
-	if err != nil {
-		return 0, err
+		return 0, time.Time{}, err
 	}
 	for _, n := range files {
 		if n < curFile {
@@ -2763,9 +2344,10 @@ func (o *AnalyticsOutbox) pendingBytesForCursor(cursorName string) (int64, error
 		}
 		if size > 0 {
 			total += size
+			note(info)
 		}
 	}
-	return total, nil
+	return total, oldest, nil
 }
 
 func (o *AnalyticsOutbox) readTrimmed(name string) (string, error) {

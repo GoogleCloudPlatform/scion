@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -114,29 +115,34 @@ func NewHealthzHubIDResolver(endpoint string, client *http.Client) HubIDResolver
 
 // AnalyticsDrainer periodically finalizes and sends outbox events.
 type AnalyticsDrainer struct {
+	// outbox is the GCP analytics outbox (nil in Hub-only mode).
 	outbox  *AnalyticsOutbox
 	send    AnalyticsSendFunc
 	resolve HubIDResolver
 
-	// hubSink, when non-nil, drains finalized usage batches and periodic empty
-	// meter-health heartbeats to the Scion Hub. When both send (GCP) and
-	// hubSink are set (dual-run fan-out), they track independent cursors
-	// ("cursor" and hubCursorName) and independent backoffs so a failure in
-	// one sink never blocks or dead-letters the other.
+	// hubOutbox and hubSink, when non-nil, drain finalized usage batches and
+	// periodic empty meter-health heartbeats to the Scion Hub from an
+	// independent WAL directory (analytics-outbox-hub). When both GCP (outbox)
+	// and Hub (hubOutbox) are active (dual-run), each sink has its own cap,
+	// cursor, dead-letter file, health counters, and retry backoff so a
+	// failure or overflow in one sink can never affect the other.
+	hubOutbox         *AnalyticsOutbox
 	hubSink           *HubUsageSink
 	batchSend         AnalyticsBatchSendFunc
-	hubCursorName     string
 	heartbeatInterval time.Duration
 	lastHubContact    time.Time
 
 	// hubProbe, when set on a GCP-only drainer whose initial probe was
-	// negative, periodically re-probes the Hub and activates dual-run when
-	// capabilities turn positive without disrupting the GCP drain.
+	// negative, periodically re-probes the Hub and opens the sibling Hub
+	// outbox when capabilities turn positive without disrupting the GCP drain.
 	hubProbe         HubUsageProbeFunc
 	probeInterval    time.Duration
 	lastProbe        time.Time
+	hubOutboxDir     string
+	hubOutboxOwner   *OutboxOwner
 	supportedSignals func() []string
-	onHubActivated   func(HubUsageSinkConfig, *HubUsageSink)
+	onHubActivated   func(HubUsageSinkConfig, *AnalyticsOutbox, *HubUsageSink)
+	onHubRevoked     func()
 
 	interval time.Duration
 	now      func() time.Time
@@ -175,11 +181,10 @@ type AnalyticsDrainer struct {
 	done   chan struct{}
 }
 
-// NewAnalyticsDrainer builds a drainer for outbox. With a nil resolve the
-// drainer never verifies a hub, so it finalizes nothing (provisional lines
+// NewAnalyticsDrainer builds a GCP-only drainer for outbox. With a nil resolve
+// the drainer never verifies a hub, so it finalizes nothing (provisional lines
 // are held); already-final ready lines still drain.
 func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
-	outbox.SetPrimaryCursor("cursor")
 	bounded := func(ctx context.Context, line []byte) error {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
 		defer cancel()
@@ -194,11 +199,11 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 	}
 }
 
-// SetHubProbe configures periodic capability re-probing on a drainer whose
-// initial probe was negative. When probe returns a non-nil config, the Hub
-// sink is activated in dual-run mode (with cursor.hub) alongside any existing
-// GCP drain without interrupting GCP delivery.
-func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Duration, supportedSignals func() []string, onActivated func(HubUsageSinkConfig, *HubUsageSink)) {
+// SetHubProbe configures periodic capability re-probing on a GCP-only drainer
+// whose initial probe was negative. When probe returns a non-nil config, the
+// drainer opens the sibling Hub outbox, marks it active on disk, and activates
+// dual-run without interrupting GCP delivery.
+func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Duration, supportedSignals func() []string, onActivated func(HubUsageSinkConfig, *AnalyticsOutbox, *HubUsageSink)) {
 	if d == nil || probe == nil {
 		return
 	}
@@ -213,27 +218,30 @@ func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Du
 	d.mu.Unlock()
 }
 
-// NewHubAnalyticsDrainer builds a drainer that ships finalized usage batches
-// and periodic empty meter-health heartbeats to the Scion Hub via sink.
-func NewHubAnalyticsDrainer(outbox *AnalyticsOutbox, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
+// NewHubAnalyticsDrainer builds a Hub-only drainer that ships finalized usage
+// batches and periodic empty meter-health heartbeats to the Scion Hub from
+// hubOutbox via sink.
+func NewHubAnalyticsDrainer(hubOutbox *AnalyticsOutbox, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
 	if sink == nil {
 		return nil
 	}
-	return newHubAnalyticsDrainerWithSend(outbox, sink, sink.SendBatch, resolve)
+	if hubOutbox == nil {
+		hubOutbox = sink.outbox
+	}
+	return newHubAnalyticsDrainerWithSend(hubOutbox, sink, sink.SendBatch, resolve)
 }
 
-func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink, batchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
-	outbox.SetPrimaryCursor(HubAnalyticsCursorName)
+func newHubAnalyticsDrainerWithSend(hubOutbox *AnalyticsOutbox, sink *HubUsageSink, batchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	hubOutbox.markHubActive()
 	bounded := func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
 		defer cancel()
 		return batchSend(sctx, lines)
 	}
 	return &AnalyticsDrainer{
-		outbox:            outbox,
+		hubOutbox:         hubOutbox,
 		hubSink:           sink,
 		batchSend:         bounded,
-		hubCursorName:     HubAnalyticsCursorName,
 		resolve:           resolve,
 		interval:          sink.cfg.drainInterval(),
 		heartbeatInterval: sink.cfg.heartbeatInterval(),
@@ -241,22 +249,22 @@ func newHubAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, sink *HubUsageSink,
 	}
 }
 
-// NewDualAnalyticsDrainer builds a drainer that fans out every finalized event
-// to BOTH the GCP Cloud Logging sink (gcpSend, primary "cursor") and the Hub
-// usage sink (sink, independent "cursor.hub") with isolated retry backoffs so
-// neither sink can block or dead-letter the other.
-func NewDualAnalyticsDrainer(outbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
+// NewDualAnalyticsDrainer builds a drainer that drains both the GCP Cloud
+// Logging outbox (gcpOutbox, gcpSend) and the independent Hub usage outbox
+// (sink.outbox, sink) with completely isolated caps, cursors, dead-letter
+// files, health counters, and retry backoffs.
+func NewDualAnalyticsDrainer(gcpOutbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, sink *HubUsageSink, resolve HubIDResolver) *AnalyticsDrainer {
 	if sink == nil {
-		return NewAnalyticsDrainer(outbox, gcpSend, resolve)
+		return NewAnalyticsDrainer(gcpOutbox, gcpSend, resolve)
 	}
-	if gcpSend == nil {
-		return NewHubAnalyticsDrainer(outbox, sink, resolve)
+	if gcpSend == nil || gcpOutbox == nil {
+		return NewHubAnalyticsDrainer(sink.outbox, sink, resolve)
 	}
-	return newDualAnalyticsDrainerWithSend(outbox, gcpSend, sink, sink.SendBatch, resolve)
+	return newDualAnalyticsDrainerWithSend(gcpOutbox, gcpSend, sink.outbox, sink, sink.SendBatch, resolve)
 }
 
-func newDualAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, sink *HubUsageSink, hubBatchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
-	outbox.EnableSecondaryCursor(HubAnalyticsCursorName)
+func newDualAnalyticsDrainerWithSend(gcpOutbox *AnalyticsOutbox, gcpSend AnalyticsSendFunc, hubOutbox *AnalyticsOutbox, sink *HubUsageSink, hubBatchSend AnalyticsBatchSendFunc, resolve HubIDResolver) *AnalyticsDrainer {
+	hubOutbox.markHubActive()
 	boundedGCP := func(ctx context.Context, line []byte) error {
 		sctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
 		defer cancel()
@@ -272,16 +280,34 @@ func newDualAnalyticsDrainerWithSend(outbox *AnalyticsOutbox, gcpSend AnalyticsS
 		interval = di
 	}
 	return &AnalyticsDrainer{
-		outbox:            outbox,
+		outbox:            gcpOutbox,
 		send:              boundedGCP,
+		hubOutbox:         hubOutbox,
 		hubSink:           sink,
 		batchSend:         boundedHub,
-		hubCursorName:     HubAnalyticsCursorName,
 		resolve:           resolve,
 		interval:          interval,
 		heartbeatInterval: sink.cfg.heartbeatInterval(),
 		now:               time.Now,
 	}
+}
+
+// HubOutbox returns the Hub usage outbox managed by this drainer, or nil when
+// the Hub sink is not active.
+func (d *AnalyticsDrainer) HubOutbox() *AnalyticsOutbox {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.hubOutbox
+}
+
+func (d *AnalyticsDrainer) primaryOutbox() *AnalyticsOutbox {
+	if d.outbox != nil {
+		return d.outbox
+	}
+	return d.HubOutbox()
 }
 
 // ObservedHubID returns the hub ID this process resolved, whatever the
@@ -377,13 +403,14 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	// lines are finalized only under a hub this process verified, and a
 	// home now under a different hub is recorded as relocated once a
 	// later resolution confirms it (see analyticsRelocationConfirm).
-	if !d.resolved && d.resolve != nil && !d.now().Before(d.resolveAfter) {
+	primary := d.primaryOutbox()
+	if !d.resolved && d.resolve != nil && primary != nil && !d.now().Before(d.resolveAfter) {
 		rctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
 		id, err := d.resolve(rctx)
 		cancel()
 		pinned := ""
 		if err == nil {
-			pinned, err = d.outbox.PinHubID(id)
+			pinned, err = primary.PinHubID(id)
 		}
 		confirmed := err == nil && pinned == id
 		if err == nil && pinned != id {
@@ -396,7 +423,7 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			case d.now().Before(d.candidateSince.Add(analyticsRelocationConfirm)):
 				d.resolveAfter = d.candidateSince.Add(analyticsRelocationConfirm)
 			default:
-				err = d.outbox.recordRelocation(id)
+				err = primary.recordRelocation(id)
 				confirmed = err == nil
 			}
 		}
@@ -418,6 +445,11 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			d.resolveBackoff, d.resolveAfter = 0, time.Time{}
 			d.candidate, d.candidateSince = "", time.Time{}
 			d.resolved = true
+			if pinned == id {
+				if hubOutbox := d.HubOutbox(); hubOutbox != nil && hubOutbox != primary {
+					_, _ = hubOutbox.PinHubID(id)
+				}
+			}
 			d.hubMu.Lock()
 			d.observedHub = id
 			if pinned == id {
@@ -429,10 +461,13 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			}
 		}
 	}
-	if verified := d.VerifiedHubID(); verified != "" {
+	finalizeOutbox := func(o *AnalyticsOutbox, verified string) {
+		if o == nil || verified == "" {
+			return
+		}
 		// Re-checked under the outbox lock (another process may have
 		// recorded a relocation since this one verified).
-		if _, err := d.outbox.finalize(ctx, verified); err != nil {
+		if _, err := o.finalize(ctx, verified); err != nil {
 			switch {
 			case errors.Is(err, ErrAnalyticsOutboxRelocated), errors.Is(err, ErrAnalyticsHubNotVerified), ctx.Err() != nil:
 				log.Debug("Analytics drainer: finalize: %v", err)
@@ -440,7 +475,7 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 				// Unexpected: finalize (rotation or commit) failed (counted
 				// in FinalizeFailures); warn at most every
 				// analyticsBackoffMax.
-				d.outbox.finalizeFailures.Add(1)
+				o.finalizeFailures.Add(1)
 				if now := d.now(); d.lastFinalizeWarn.IsZero() || now.Sub(d.lastFinalizeWarn) >= analyticsBackoffMax {
 					d.lastFinalizeWarn = now
 					log.Warn("Analytics drainer: finalize failed; provisional usage stays held: %v", err)
@@ -448,11 +483,18 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			}
 		}
 	}
+	if verified := d.VerifiedHubID(); verified != "" {
+		finalizeOutbox(d.outbox, verified)
+		if hubOutbox := d.HubOutbox(); hubOutbox != nil && !d.HubRevoked() {
+			finalizeOutbox(hubOutbox, verified)
+		}
+	}
 
-	// Periodic re-probe while Hub sink is inactive (O1). Run before the GCP
-	// drain so that if capabilities turn positive on this tick, cursor.hub is
-	// registered before GCP deletes the ready files it drains.
-	if !final && d.hubSink == nil && ctx.Err() == nil {
+	// Periodic re-probe while Hub sink is inactive in dual-run mode (O1).
+	// When capabilities turn positive, open the sibling Hub outbox, mark it
+	// active on disk, and attach it to the native producer without disrupting
+	// the GCP drain.
+	if !final && d.hubSink == nil && d.send != nil && ctx.Err() == nil {
 		d.mu.Lock()
 		probe := d.hubProbe
 		revoked := d.hubRevoked
@@ -463,42 +505,54 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		}
 		supSigs := d.supportedSignals
 		onAct := d.onHubActivated
+		hubDir := d.hubOutboxDir
+		hubOwner := d.hubOutboxOwner
 		d.mu.Unlock()
 		if due {
 			pctx, cancel := context.WithTimeout(ctx, analyticsHubIDTimeout)
 			cfg, perr := probe(pctx)
 			cancel()
 			if perr == nil && cfg != nil && cfg.Post != nil {
-				c := *cfg
-				if c.SupportedSignals == nil && supSigs != nil {
-					c.SupportedSignals = supSigs
+				if hubDir == "" && d.outbox != nil {
+					hubDir = filepath.Join(filepath.Dir(d.outbox.Dir()), HubAnalyticsOutboxDirName)
 				}
-				sink := NewHubUsageSink(d.outbox, c)
-				if sink != nil {
-					if d.send != nil {
-						d.outbox.EnableSecondaryCursor(HubAnalyticsCursorName)
-					} else {
-						d.outbox.SetPrimaryCursor(HubAnalyticsCursorName)
+				hubOutbox, oerr := openAnalyticsOutboxTolerant(hubDir, hubOwner)
+				if oerr != nil {
+					log.Warn("Analytics drainer: opening Hub outbox %q after re-probe failed: %v", hubDir, oerr)
+				} else {
+					c := *cfg
+					if c.SupportedSignals == nil && supSigs != nil {
+						c.SupportedSignals = supSigs
 					}
-					d.hubSink = sink
-					d.batchSend = func(bctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
-						sctx, scancel := context.WithTimeout(bctx, analyticsSendTimeout)
-						defer scancel()
-						return sink.SendBatch(sctx, lines)
+					sink := NewHubUsageSink(hubOutbox, c)
+					if sink != nil {
+						hubOutbox.markHubActive()
+						if verified := d.VerifiedHubID(); verified != "" {
+							_, _ = hubOutbox.PinHubID(verified)
+							finalizeOutbox(hubOutbox, verified)
+						}
+						d.mu.Lock()
+						d.hubOutbox = hubOutbox
+						d.mu.Unlock()
+						d.hubSink = sink
+						d.batchSend = func(bctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
+							sctx, scancel := context.WithTimeout(bctx, analyticsSendTimeout)
+							defer scancel()
+							return sink.SendBatch(sctx, lines)
+						}
+						d.heartbeatInterval = sink.cfg.heartbeatInterval()
+						if onAct != nil {
+							onAct(c, hubOutbox, sink)
+						}
+						log.Info("Analytics drainer: Hub usage ingest activated after re-probe")
 					}
-					d.hubCursorName = HubAnalyticsCursorName
-					d.heartbeatInterval = sink.cfg.heartbeatInterval()
-					if onAct != nil {
-						onAct(c, sink)
-					}
-					log.Info("Analytics drainer: Hub usage ingest activated after re-probe")
 				}
 			}
 		}
 	}
 
 	sent := 0
-	if d.send != nil {
+	if d.outbox != nil && d.send != nil {
 		d.mu.Lock()
 		waiting := d.now().Before(d.retryAfter)
 		d.mu.Unlock()
@@ -521,30 +575,28 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 		}
 	}
 
-	if d.hubSink != nil {
+	if hubOutbox := d.HubOutbox(); hubOutbox != nil && d.hubSink != nil {
 		d.mu.Lock()
 		revoked := d.hubRevoked
 		hubWaiting := d.now().Before(d.hubRetryAfter)
+		onRevoked := d.onHubRevoked
 		d.mu.Unlock()
 		if !revoked {
 			var hubDrainErr error
 			hubSent := 0
-			hubCursor := d.hubCursorName
-			if hubCursor == "" {
-				hubCursor = HubAnalyticsCursorName
-			}
 			revokeHub := func() {
 				log.Warn("Analytics drainer: Hub usage ingest returned 404 (capability revoked); disabling Hub sink")
 				d.mu.Lock()
 				d.hubRevoked = true
 				d.hubBackoff, d.hubRetryAfter = 0, time.Time{}
 				d.mu.Unlock()
-				if d.send != nil {
-					d.outbox.DisableSecondaryCursor(hubCursor)
+				hubOutbox.clearHubActive()
+				if onRevoked != nil {
+					onRevoked()
 				}
 			}
 			if !hubWaiting {
-				hubSent, hubDrainErr = d.outbox.DrainBatchCursor(ctx, hubCursor, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
+				hubSent, hubDrainErr = hubOutbox.DrainBatch(ctx, d.hubSink.cfg.maxBatchEvents(), d.hubSink.EffectiveMaxBatchBytes(), d.batchSend)
 				sent += hubSent
 				if errors.Is(hubDrainErr, ErrUsageIngestRevoked) {
 					revokeHub()
@@ -574,7 +626,7 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 					finalState := telemetrycontract.MeterFinalStateFinal
 					if hubDrainErr != nil {
 						finalState = telemetrycontract.MeterFinalStateIncomplete
-					} else if pending, perr := d.outbox.pendingBytesForCursor(hubCursor); perr != nil || pending > 0 {
+					} else if pending, _, perr := hubOutbox.pendingBytes(); perr != nil || pending > 0 {
 						finalState = telemetrycontract.MeterFinalStateIncomplete
 					}
 					hctx, cancel := context.WithTimeout(ctx, analyticsSendTimeout)
@@ -615,7 +667,18 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 	}
 
 	if !final && ctx.Err() == nil && d.now().Sub(d.lastExpiry) >= analyticsIndexExpiryEvery {
-		if _, err := d.outbox.ExpireIndex(); err == nil {
+		expiredOK := true
+		if d.outbox != nil {
+			if _, err := d.outbox.ExpireIndex(); err != nil {
+				expiredOK = false
+			}
+		}
+		if hubOutbox := d.HubOutbox(); hubOutbox != nil {
+			if _, err := hubOutbox.ExpireIndex(); err != nil {
+				expiredOK = false
+			}
+		}
+		if expiredOK {
 			d.lastExpiry = d.now()
 		}
 	}
@@ -633,18 +696,29 @@ func (d *AnalyticsDrainer) HubRevoked() bool {
 	return d.hubRevoked
 }
 
-// Backoff reports the current retry backoff (zero when healthy). When both
-// GCP and Hub sinks are active, it returns the larger active backoff.
+// Backoff reports the primary sink's current retry backoff (zero when healthy):
+// GCP's backoff when GCP is active (GCP-only or dual-run), or the Hub sink's
+// backoff in Hub-only mode.
 func (d *AnalyticsDrainer) Backoff() time.Duration {
 	if d == nil {
 		return 0
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.hubBackoff > d.backoff {
-		return d.hubBackoff
+	if d.send != nil {
+		return d.backoff
 	}
-	return d.backoff
+	return d.hubBackoff
+}
+
+// HubBackoff reports the Hub usage sink's current retry backoff (zero when healthy).
+func (d *AnalyticsDrainer) HubBackoff() time.Duration {
+	if d == nil {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.hubBackoff
 }
 
 // analyticsHubEndpoint is the hub endpoint sciontool uses, from the agent
@@ -668,10 +742,11 @@ type analyticsState struct {
 	// send counts drainer send retries for WP3 diagnostics (health.go).
 	send *countingSend
 
-	// outboxDir and owner locate the outbox under the AGENT home and name
-	// its owner (Pipeline.SetAnalyticsOutbox); resolver overrides the hub
-	// ID resolver (tests).
+	// outboxDir, hubOutboxDir and owner locate the outboxes under the AGENT
+	// home and name their owner (Pipeline.SetAnalyticsOutbox); resolver
+	// overrides the hub ID resolver (tests).
 	outboxDir        string
+	hubOutboxDir     string
 	owner            *OutboxOwner
 	resolver         HubIDResolver
 	hubSinkCfg       *HubUsageSinkConfig
@@ -724,6 +799,7 @@ func (p *Pipeline) SetAnalyticsOutbox(agentHome string, uid, gid int) {
 		return
 	}
 	p.analytics.outboxDir = AnalyticsOutboxDirFor(agentHome)
+	p.analytics.hubOutboxDir = HubAnalyticsOutboxDirFor(agentHome)
 	p.analytics.owner = &OutboxOwner{UID: uid, GID: gid}
 }
 
@@ -746,6 +822,21 @@ func (p *Pipeline) AnalyticsOutboxDir() string {
 	return p.analytics.native.Dir() // nil-safe; the evidence dir when failed
 }
 
+func (a *analyticsState) resolvedDirs() (gcpDir, hubDir string) {
+	gcpDir = a.outboxDir
+	if gcpDir == "" {
+		// Not set by init (tests, or a pipeline run as the agent user):
+		// this process's own home.
+		home, _ := os.UserHomeDir()
+		gcpDir = AnalyticsOutboxDirFor(home)
+	}
+	hubDir = a.hubOutboxDir
+	if hubDir == "" && gcpDir != "" {
+		hubDir = filepath.Join(filepath.Dir(gcpDir), HubAnalyticsOutboxDirName)
+	}
+	return gcpDir, hubDir
+}
+
 // start enables analytics when either the Hub usage sink or the GCP exporter
 // is active. Any failure leaves analytics disabled with a reason; it never
 // fails the pipeline.
@@ -757,6 +848,10 @@ func (a *analyticsState) start(ctx context.Context, gcp *GCPExporter) {
 		// Hub-only mode (no GCP exporter) does not late-activate after a
 		// negative init probe: without producers wired at startup, heartbeats
 		// would falsely advertise a healthy idle meter while usage is dropped.
+		// Clear any stale active marker from an earlier run without creating
+		// the Hub outbox directory.
+		_, hubDir := a.resolvedDirs()
+		ClearHubOutboxActive(hubDir)
 		a.disabledReason = AnalyticsDisabledNoGCPExporter
 		return
 	}
@@ -771,23 +866,7 @@ func (a *analyticsState) probeInterval() time.Duration {
 }
 
 func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
-	dir := a.outboxDir
-	if dir == "" {
-		// Not set by init (tests, or a pipeline run as the agent user):
-		// this process's own home.
-		home, _ := os.UserHomeDir()
-		dir = AnalyticsOutboxDirFor(home)
-	}
-	outbox, err := openAnalyticsOutboxTolerant(dir, a.owner)
-	if err != nil {
-		// No outbox: nothing can be delivered, but every accepted
-		// increment still leaves evidence (append_failed in dir when it
-		// exists, else the per-process invalid counter).
-		a.disabledReason = "outbox_unavailable"
-		a.native = newFailedUsageAnalytics(dir, a.owner, err, telemetrycontract.UsageSourceNative)
-		log.Error("Usage analytics disabled: %v", err)
-		return
-	}
+	gcpDir, hubDir := a.resolvedDirs()
 	resolver := a.resolver
 	if resolver == nil && a.hubSinkCfg != nil && a.hubSinkCfg.HubID != "" {
 		hubID := a.hubSinkCfg.HubID
@@ -796,39 +875,82 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 	if resolver == nil {
 		resolver = NewHealthzHubIDResolver(analyticsHubEndpoint(), nil)
 	}
-	a.native = NewUsageAnalytics(outbox, telemetrycontract.UsageSourceNative)
+
 	switch {
 	case a.hubSinkCfg != nil && gcp != nil:
-		// Dual-run fan-out (design §6 B2 / §9.3): keep container-direct Cloud
-		// Logging active alongside the Hub sink using independent cursors.
-		cfg := *a.hubSinkCfg
-		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
-			cfg.SupportedSignals = a.supportedSignals
+		// Dual-run (design §6 B2 / §11 P10.1): keep container-direct Cloud
+		// Logging active alongside the Hub sink using two completely
+		// independent outboxes (analytics-outbox and analytics-outbox-hub).
+		gcpOutbox, err := openAnalyticsOutboxTolerant(gcpDir, a.owner)
+		if err != nil {
+			a.disabledReason = "outbox_unavailable"
+			a.native = newFailedUsageAnalytics(gcpDir, a.owner, err, telemetrycontract.UsageSourceNative)
+			log.Error("Usage analytics disabled: %v", err)
+			return
 		}
-		sink := NewHubUsageSink(outbox, cfg)
-		a.native.runID = cfg.RunID
-		a.native.onRecord = sink.NoteActivity
 		a.send = newCountingSend(gcp.SendAnalytics)
-		hubSend := newCountingBatchSend(sink.SendBatch)
-		a.drainer = newDualAnalyticsDrainerWithSend(outbox, a.send.Send, sink, hubSend.SendBatch, resolver)
+		hubOutbox, hubErr := openAnalyticsOutboxTolerant(hubDir, a.owner)
+		if hubErr != nil {
+			log.Error("Hub usage analytics outbox unavailable (continuing GCP-only): %v", hubErr)
+			a.native = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
+			a.drainer = NewAnalyticsDrainer(gcpOutbox, a.send.Send, resolver)
+		} else {
+			cfg := *a.hubSinkCfg
+			if cfg.SupportedSignals == nil && a.supportedSignals != nil {
+				cfg.SupportedSignals = a.supportedSignals
+			}
+			sink := NewHubUsageSink(hubOutbox, cfg)
+			a.native = NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
+			a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+			hubSend := newCountingBatchSend(sink.SendBatch)
+			a.drainer = newDualAnalyticsDrainerWithSend(gcpOutbox, a.send.Send, hubOutbox, sink, hubSend.SendBatch, resolver)
+			native := a.native
+			a.drainer.onHubRevoked = func() {
+				native.clearHubOutbox()
+			}
+		}
 	case a.hubSinkCfg != nil:
+		// Hub-only mode (no GCP exporter): only analytics-outbox-hub exists.
+		hubOutbox, err := openAnalyticsOutboxTolerant(hubDir, a.owner)
+		if err != nil {
+			a.disabledReason = "outbox_unavailable"
+			a.native = newFailedUsageAnalytics(hubDir, a.owner, err, telemetrycontract.UsageSourceNative)
+			log.Error("Usage analytics disabled: %v", err)
+			return
+		}
 		cfg := *a.hubSinkCfg
 		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 			cfg.SupportedSignals = a.supportedSignals
 		}
-		sink := NewHubUsageSink(outbox, cfg)
-		a.native.runID = cfg.RunID
-		a.native.onRecord = sink.NoteActivity
+		sink := NewHubUsageSink(hubOutbox, cfg)
+		a.native = NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceNative)
+		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 		a.send = newCountingBatchSend(sink.SendBatch)
-		a.drainer = newHubAnalyticsDrainerWithSend(outbox, sink, a.send.SendBatch, resolver)
+		a.drainer = newHubAnalyticsDrainerWithSend(hubOutbox, sink, a.send.SendBatch, resolver)
 	default:
+		// GCP-only mode (probe negative): never create analytics-outbox-hub;
+		// clear any stale active marker from an earlier run.
+		ClearHubOutboxActive(hubDir)
+		gcpOutbox, err := openAnalyticsOutboxTolerant(gcpDir, a.owner)
+		if err != nil {
+			a.disabledReason = "outbox_unavailable"
+			a.native = newFailedUsageAnalytics(gcpDir, a.owner, err, telemetrycontract.UsageSourceNative)
+			log.Error("Usage analytics disabled: %v", err)
+			return
+		}
+		a.native = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
 		a.send = newCountingSend(gcp.SendAnalytics)
-		a.drainer = NewAnalyticsDrainer(outbox, a.send.Send, resolver)
+		a.drainer = NewAnalyticsDrainer(gcpOutbox, a.send.Send, resolver)
+		a.drainer.hubOutboxDir = hubDir
+		a.drainer.hubOutboxOwner = a.owner
 		if a.hubProbe != nil {
 			native := a.native
-			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, sink *HubUsageSink) {
+			a.drainer.onHubRevoked = func() {
+				native.clearHubOutbox()
+			}
+			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
 				if native != nil {
-					native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+					native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 				}
 			})
 		}
@@ -859,13 +981,27 @@ func (a *analyticsState) stop(ctx context.Context) {
 	a.drainer = nil
 }
 
-// AnalyticsLedger returns the analytics outbox's on-disk ledger snapshot
-// and in-process counters; ok is false when analytics is disabled.
+// AnalyticsLedger returns the primary analytics outbox's on-disk ledger
+// snapshot and in-process counters; ok is false when analytics is disabled.
 func (p *Pipeline) AnalyticsLedger() (disk OutboxLedger, mem AnalyticsOutboxStats, ok bool, err error) {
 	if p == nil || p.analytics.native == nil {
 		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
 	}
 	o := p.analytics.native.Outbox()
+	if o == nil {
+		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
+	}
+	disk, err = o.LedgerSnapshot()
+	return disk, o.MemoryStats(), true, err
+}
+
+// HubAnalyticsLedger returns the Hub usage outbox's on-disk ledger snapshot
+// and in-process counters; ok is false when the Hub sink is not active.
+func (p *Pipeline) HubAnalyticsLedger() (disk OutboxLedger, mem AnalyticsOutboxStats, ok bool, err error) {
+	if p == nil || p.analytics.drainer == nil {
+		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
+	}
+	o := p.analytics.drainer.HubOutbox()
 	if o == nil {
 		return OutboxLedger{}, AnalyticsOutboxStats{}, false, nil
 	}
