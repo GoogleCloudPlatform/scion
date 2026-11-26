@@ -1138,7 +1138,9 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('1 of 3', {
         timeout: 15_000,
       });
-      await expect(filterInput).toHaveValue('agent:release-bot');
+      // Two agents share the name "release-bot", so the legacy ?agent=<uuid>
+      // keeps the unambiguous UUID in the filter box.
+      await expect(filterInput).toHaveValue(`agent:${REL_AGENT_UUID}`);
       await expect(pageEl.locator('sl-details[data-waiting-others]')).toHaveAttribute(
         'summary',
         'Waiting on others (0 of 2)'
