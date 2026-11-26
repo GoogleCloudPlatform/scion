@@ -104,7 +104,12 @@ import {
   type Query as FilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
-import { expandGraphMatchesWithAncestors, type GraphFilterResult } from './agent-graph-filter.js';
+import {
+  collectMissingAncestorIds,
+  expandGraphMatchesWithAncestors,
+  fetchMissingGraphAncestors,
+  type GraphFilterResult,
+} from './agent-graph-filter.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
@@ -602,6 +607,11 @@ export class ScionPageAgents extends LitElement {
 
   private boundOnAgentsResync = (): void => {
     this.agentWindow.markResync();
+    this.cancelGraphAncestorsFetch();
+    this.attemptedGraphAncestorIds.clear();
+    if (this.viewMode === 'graph') {
+      this.graphContextVersion++;
+    }
   };
 
   /**
@@ -748,6 +758,12 @@ export class ScionPageAgents extends LitElement {
     stateManager.removeEventListener('agent-created', this.boundOnAgentCreated);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
+    this.cancelGraphAncestorsFetch();
+  }
+
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    this.maybeFetchMissingGraphAncestors();
   }
 
   /** The window's view state from the page's persisted fields and active filter query. */
@@ -943,6 +959,8 @@ export class ScionPageAgents extends LitElement {
     });
     if (merged !== this.agents) {
       this.agents = merged;
+    } else if (this.hasGraphContextChange(detail)) {
+      this.graphContextVersion++;
     }
   }
 
@@ -1702,11 +1720,22 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
+  /** Bumped when store-resolved graph context ancestors are seeded or change via SSE. */
+  @state()
+  private graphContextVersion = 0;
+
+  /** Ancestor IDs already requested via `?ids=` in this scope/session (avoids retry loops). */
+  private attemptedGraphAncestorIds = new Set<string>();
+
+  /** In-flight ancestor fetch controllers, aborted on disconnect or resync. */
+  private graphAncestorAborts = new Set<AbortController>();
+
   /** Memoised graph filter result (matches ∪ ancestors + contextIds). */
   private graphFilterCache: {
     agents: Agent[];
     matched: Agent[];
     hasActiveFilter: boolean;
+    contextVersion: number;
     result: GraphFilterResult;
   } | null = null;
 
@@ -1715,15 +1744,86 @@ export class ScionPageAgents extends LitElement {
       this.graphFilterCache &&
       this.graphFilterCache.agents === this.agents &&
       this.graphFilterCache.matched === matched &&
-      this.graphFilterCache.hasActiveFilter === hasActiveFilter
+      this.graphFilterCache.hasActiveFilter === hasActiveFilter &&
+      this.graphFilterCache.contextVersion === this.graphContextVersion
     ) {
       return this.graphFilterCache.result;
     }
     const result = expandGraphMatchesWithAncestors(this.agents, matched, hasActiveFilter, (id) =>
       stateManager.getAgent(id)
     );
-    this.graphFilterCache = { agents: this.agents, matched, hasActiveFilter, result };
+    this.graphFilterCache = {
+      agents: this.agents,
+      matched,
+      hasActiveFilter,
+      contextVersion: this.graphContextVersion,
+      result,
+    };
     return result;
+  }
+
+  private hasGraphContextChange(detail: AgentsChangedDetail): boolean {
+    if (this.viewMode !== 'graph' || !this.graphFilterCache) return false;
+    const contextIds = this.graphFilterCache.result.contextIds;
+    if (contextIds.size === 0 && this.attemptedGraphAncestorIds.size === 0) return false;
+    for (const id of detail.upserted) {
+      if (contextIds.has(id) || this.attemptedGraphAncestorIds.has(id)) return true;
+    }
+    for (const id of detail.deleted) {
+      if (contextIds.has(id)) return true;
+    }
+    return false;
+  }
+
+  private cancelGraphAncestorsFetch(): void {
+    for (const controller of this.graphAncestorAborts) {
+      controller.abort();
+    }
+    this.graphAncestorAborts.clear();
+  }
+
+  private maybeFetchMissingGraphAncestors(): void {
+    if (this.viewMode !== 'graph' || !this.hasActiveFilter || this.agentWindow.state === 'paged') {
+      return;
+    }
+    const matched = this.agentWindow.display;
+    if (matched.length === 0) return;
+
+    const deleted = stateManager.getDeletedAgentIds();
+    const skip =
+      deleted.size > 0
+        ? new Set<string>([...this.attemptedGraphAncestorIds, ...deleted])
+        : this.attemptedGraphAncestorIds;
+    const missing = collectMissingAncestorIds(
+      this.agents,
+      matched,
+      (id) => stateManager.getAgent(id),
+      skip
+    );
+    if (missing.length === 0) return;
+
+    for (const id of missing) {
+      this.attemptedGraphAncestorIds.add(id);
+    }
+
+    const controller = new AbortController();
+    this.graphAncestorAborts.add(controller);
+    void fetchMissingGraphAncestors('/api/v1/agents', missing, { signal: controller.signal })
+      .then((seededCount) => {
+        if (seededCount > 0 && this.isConnected && !controller.signal.aborted) {
+          this.graphContextVersion++;
+        }
+      })
+      .catch((err) => {
+        if (controller.signal.aborted || this.isAbortError(err)) {
+          for (const id of missing) {
+            this.attemptedGraphAncestorIds.delete(id);
+          }
+        }
+      })
+      .finally(() => {
+        this.graphAncestorAborts.delete(controller);
+      });
   }
 
   /**

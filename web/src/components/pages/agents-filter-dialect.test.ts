@@ -1890,9 +1890,16 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
           urls.push(url);
           if (url.includes('/agents')) {
             const parsed = new URL(url, 'http://localhost');
+            const idsParam = parsed.searchParams.get('ids');
             const q = parsed.searchParams.get('q') ?? '';
-            // Simulate server-side ?q= filtering (which strips non-matching ancestors).
-            const rows = q.includes('harness:antigravity') ? [childAgent] : allAgents;
+            let rows = allAgents;
+            if (idsParam) {
+              const wanted = new Set(idsParam.split(',').filter(Boolean));
+              rows = allAgents.filter((a) => wanted.has(a.id));
+            } else if (q.includes('harness:antigravity')) {
+              // Simulate server-side ?q= filtering (which strips non-matching ancestors).
+              rows = [childAgent];
+            }
             return Promise.resolve(
               new Response(
                 JSON.stringify({ agents: rows, complete: true, totalCount: rows.length }),
@@ -1916,9 +1923,16 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       return urls;
     };
 
+    const resetStore = (): void => {
+      // Force a scope transition so stateManager clears all cached agents.
+      stateManager.setScope({ type: 'project', projectId: `reset-${Math.random()}` });
+    };
+
     const assertTreeContext = async (tree: ScionAgentTreeView): Promise<void> => {
-      await tree.updateComplete;
-      expect(tree.agents.map((a) => a.id).sort()).toEqual(['a-child', 'a-parent']);
+      await vi.waitFor(async () => {
+        await tree.updateComplete;
+        expect(tree.agents.map((a) => a.id).sort()).toEqual(['a-child', 'a-parent']);
+      });
       expect(Array.from(tree.contextIds ?? [])).toEqual(['a-parent']);
       const parentLink = tree.shadowRoot!.querySelector<HTMLAnchorElement>(
         'a.node[data-agent-id="a-parent"]'
@@ -1936,8 +1950,47 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
       expect(tree.shadowRoot!.querySelector('a.node[data-agent-id="a-unrelated"]')).toBeNull();
     };
 
-    // 1. Global /agents inline Graph view with ?q=phase:running (ancestors in held set)
-    installGraphFetch();
+    // 1. Cold load of /agents inline Graph view with server-narrowed ?q=harness:antigravity
+    resetStore();
+    const globalColdUrls = installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-agents', 'graph');
+    window.history.replaceState(null, '', '/agents?q=harness%3Aantigravity');
+    const agentsCold = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(agentsCold);
+    await vi.waitFor(() => {
+      expect(agentsCold.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    const coldGlobalTree = agentsCold.shadowRoot!.querySelector(
+      'scion-agent-tree-view'
+    ) as ScionAgentTreeView;
+    await assertTreeContext(coldGlobalTree);
+    expect(globalColdUrls.some((u) => u.includes('ids=a-parent') && !u.includes('q='))).toBe(true);
+
+    // Live SSE deletion of a store-resolved context ancestor invalidates the graph cache.
+    stateManager.seedAgents([parentAgent], { partial: true });
+    const deleteDetail = {
+      upserted: [] as string[],
+      deleted: ['a-parent'],
+      unknown: new Map(),
+      generation: 1,
+    };
+    (stateManager as unknown as { state: { agents: Map<string, Agent> } }).state.agents.delete(
+      'a-parent'
+    );
+    stateManager.dispatchEvent(
+      new CustomEvent('agents-changed', { detail: { state: {}, data: deleteDetail } })
+    );
+    await vi.waitFor(async () => {
+      await agentsCold.updateComplete;
+      await coldGlobalTree.updateComplete;
+      expect(coldGlobalTree.agents.map((a) => a.id)).toEqual(['a-child']);
+    });
+    agentsCold.remove();
+
+    // 2. Cold load of /agents inline Graph view with ?q=phase:running (ancestors in held set)
+    resetStore();
+    const globalPhaseUrls = installGraphFetch();
     localStorage.clear();
     localStorage.setItem('scion-view-agents', 'graph');
     window.history.replaceState(null, '', '/agents?q=phase%3Arunning');
@@ -1950,9 +2003,11 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await assertTreeContext(
       agentsPage.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
     );
+    expect(globalPhaseUrls.some((u) => u.includes('ids='))).toBe(false);
     agentsPage.remove();
 
-    // 2. Global /agents inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    // 3. Global /agents inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    resetStore();
     installGraphFetch();
     localStorage.clear();
     localStorage.setItem('scion-view-agents', 'graph');
@@ -1984,8 +2039,34 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     );
     agentsNarrow.remove();
 
-    // 3. Project /projects/:id inline Graph view with ?q=phase:running (ancestors in held set)
-    installGraphFetch();
+    // 4. Cold load of /projects/:id inline Graph view with server-narrowed ?q=harness:antigravity
+    resetStore();
+    const projColdUrls = installGraphFetch();
+    localStorage.clear();
+    localStorage.setItem('scion-view-project-agents', 'graph');
+    window.history.replaceState(null, '', '/projects/proj-g?q=harness%3Aantigravity');
+    const projCold = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    projCold.projectId = 'proj-g';
+    document.body.appendChild(projCold);
+    await vi.waitFor(() => {
+      expect(projCold.shadowRoot?.querySelector('scion-agent-tree-view')).not.toBeNull();
+    });
+    await assertTreeContext(
+      projCold.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
+    );
+    expect(
+      projColdUrls.some(
+        (u) =>
+          u.includes('/api/v1/projects/proj-g/agents') &&
+          u.includes('ids=a-parent') &&
+          !u.includes('q=')
+      )
+    ).toBe(true);
+    projCold.remove();
+
+    // 5. Cold load of /projects/:id inline Graph view with ?q=phase:running (ancestors in held set)
+    resetStore();
+    const projPhaseUrls = installGraphFetch();
     localStorage.clear();
     localStorage.setItem('scion-view-project-agents', 'graph');
     window.history.replaceState(null, '', '/projects/proj-g?q=phase%3Arunning');
@@ -1999,9 +2080,11 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await assertTreeContext(
       projPage.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView
     );
+    expect(projPhaseUrls.some((u) => u.includes('ids='))).toBe(false);
     projPage.remove();
 
-    // 4. Project /projects/:id inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    // 6. Project /projects/:id inline Graph view narrowing from unfiltered to server-filtered harness:antigravity
+    resetStore();
     installGraphFetch();
     localStorage.clear();
     localStorage.setItem('scion-view-project-agents', 'graph');

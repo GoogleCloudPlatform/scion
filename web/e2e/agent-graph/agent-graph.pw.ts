@@ -141,13 +141,23 @@ async function installMockGraphHub(page: Page): Promise<void> {
       });
     }
     if (p === '/api/v1/agents' || p === '/api/v1/projects/proj-1/agents') {
+      const idsParam = url.searchParams.get('ids');
+      const q = url.searchParams.get('q') ?? '';
+      let rows = MOCK_AGENTS;
+      if (idsParam) {
+        const wanted = new Set(idsParam.split(',').filter(Boolean));
+        rows = MOCK_AGENTS.filter((a) => wanted.has(a.id));
+      } else if (q.includes('harness:antigravity')) {
+        // Simulate server-side ?q= narrowing (non-matching ancestors omitted).
+        rows = MOCK_AGENTS.filter((a) => a.harnessConfig === 'antigravity');
+      }
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          agents: MOCK_AGENTS,
+          agents: rows,
           complete: true,
-          totalCount: MOCK_AGENTS.length,
+          totalCount: rows.length,
         }),
       });
     }
@@ -267,7 +277,7 @@ async function assertInlineGraphContextAncestors(page: Page, url: string): Promi
     .toBeCloseTo(1, 2);
 }
 
-test('renders dimmed context ancestors in /agents inline Graph view when filtered', async ({
+test('renders dimmed context ancestors in /agents inline Graph view on cold load with server-narrowed q', async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -275,10 +285,10 @@ test('renders dimmed context ancestors in /agents inline Graph view when filtere
   });
   await installMockGraphHub(page);
 
-  await assertInlineGraphContextAncestors(page, '/agents?q=phase:running');
+  await assertInlineGraphContextAncestors(page, '/agents?q=harness:antigravity');
 });
 
-test('renders dimmed context ancestors in /projects/:id inline Graph view when filtered', async ({
+test('renders dimmed context ancestors in /projects/:id inline Graph view on cold load with server-narrowed q', async ({
   page,
 }) => {
   await page.addInitScript(() => {
@@ -286,5 +296,5 @@ test('renders dimmed context ancestors in /projects/:id inline Graph view when f
   });
   await installMockGraphHub(page);
 
-  await assertInlineGraphContextAncestors(page, '/projects/proj-1?q=phase:running');
+  await assertInlineGraphContextAncestors(page, '/projects/proj-1?q=harness:antigravity');
 });

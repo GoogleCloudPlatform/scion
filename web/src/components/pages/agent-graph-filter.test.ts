@@ -25,8 +25,10 @@ import {
 } from '../../shared/filter-query/index.js';
 import {
   agentToGraphFilterRow,
+  collectMissingAncestorIds,
   expandGraphMatchesWithAncestors,
   extractSingleProjectScope,
+  fetchMissingGraphAncestors,
   filterGraphAgents,
   makeGraphValueSuggestions,
   migrateProjectParamToQuery,
@@ -224,6 +226,66 @@ describe('agent-graph-filter pure helpers', () => {
     const resolved = expandGraphMatchesWithAncestors([leaf], [leaf], true, (id) => lookup.get(id));
     expect(resolved.agents.map((a) => a.id).sort()).toEqual(['leaf', 'mid', 'root']);
     expect(Array.from(resolved.contextIds).sort()).toEqual(['mid', 'root']);
+  });
+
+  it('collectMissingAncestorIds finds multi-hop missing ancestors and skips known/principal/skip IDs', () => {
+    // Both root and mid are missing from [leaf] and lookup; user:u1 is skipped.
+    expect(collectMissingAncestorIds([leaf], [leaf]).sort()).toEqual(['mid', 'root']);
+
+    // When mid is already in the store, only root is still missing (discovered transitively).
+    const storeMid = new Map<string, Agent>([[mid.id, mid]]);
+    expect(collectMissingAncestorIds([leaf], [leaf], (id) => storeMid.get(id))).toEqual(['root']);
+
+    // Already-attempted IDs in skipIds are not returned again.
+    expect(collectMissingAncestorIds([leaf], [leaf], undefined, new Set(['root', 'mid']))).toEqual(
+      []
+    );
+
+    // When all ancestors are in allAgents, nothing is missing.
+    expect(collectMissingAncestorIds(all, [leaf])).toEqual([]);
+  });
+
+  it('fetchMissingGraphAncestors requests sorted ?ids= without ?q= and seeds partial rows', async () => {
+    vi.stubGlobal(
+      'EventSource',
+      class {
+        close(): void {}
+        addEventListener(): void {}
+      }
+    );
+    stateManager.setScope({ type: 'project', projectId: `reset-${Math.random()}` });
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        urls.push(url);
+        const parsed = new URL(url, 'http://localhost');
+        const ids = (parsed.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+        const rows = all.filter((a) => ids.includes(a.id));
+        return Promise.resolve(
+          new Response(JSON.stringify({ agents: rows }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+    try {
+      const seeded = await fetchMissingGraphAncestors('/api/v1/agents', ['root', 'mid', 'root']);
+      expect(seeded).toBe(2);
+      expect(urls).toHaveLength(1);
+      const reqUrl = new URL(urls[0], 'http://localhost');
+      expect(reqUrl.pathname).toBe('/api/v1/agents');
+      expect(reqUrl.searchParams.get('sort')).toBe('created');
+      expect(reqUrl.searchParams.get('ids')).toBe('root,mid');
+      expect(reqUrl.searchParams.get('q')).toBeNull();
+      expect(stateManager.getAgent('root')?.id).toBe('root');
+      expect(stateManager.getAgent('mid')?.id).toBe('mid');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('provides dynamic value suggestions from loaded agents', () => {
