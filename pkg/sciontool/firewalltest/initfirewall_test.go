@@ -34,8 +34,14 @@ type stubConfig struct {
 	hostAliases        map[string]string   // alias -> IP
 	domainIPs          map[string][]string // domain -> IPs (overrides default)
 	curlIPv6Succeeds   bool
+	githubMetaBody     string // overrides default /meta JSON response when non-empty or githubMetaEmpty is true
+	githubMetaEmpty    bool   // return empty stdout from /meta fetch
+	githubMetaExitCode int    // non-zero curl exit code for /meta fetch
+	forceFallbackJQ    bool   // exercise the shell jq fallback even when host jq is installed
 	extraEnv           []string
 }
+
+const defaultGitHubMetaJSON = `{"verifiable_password_authentication":true,"hooks":["192.30.252.0/22"],"web":["140.82.112.0/20","185.199.108.0/22"],"api":["140.82.112.0/20","20.201.28.148/32"],"git":["192.30.252.0/22","140.82.112.0/20"],"packages":["185.199.108.0/22"],"actions":["4.148.0.0/16"]}`
 
 type runResult struct {
 	exitCode int
@@ -85,16 +91,27 @@ func runInitFirewall(t *testing.T, cfg stubConfig) runResult {
 		}
 	}
 
-	// Use real jq if available; otherwise install a minimal stub for the two jq calls.
-	if jqPath, err := exec.LookPath("jq"); err == nil {
+	// Use real jq if available (unless testing the fallback stub); otherwise
+	// install a minimal stub that drains stdin before exiting so
+	// `echo "$gh_ranges" | jq ...` under `set -o pipefail` cannot fail with
+	// SIGPIPE (exit 141).
+	if jqPath, err := exec.LookPath("jq"); err == nil && !cfg.forceFallbackJQ {
 		if err := os.Symlink(jqPath, filepath.Join(binDir, "jq")); err != nil {
 			t.Fatalf("symlink jq: %v", err)
 		}
 	} else {
 		writeExecutable(t, filepath.Join(binDir, "jq"), fmt.Sprintf(`#!/bin/sh
 echo "jq $*" >> %q
+input=$(cat)
 if [ "$1" = "-e" ]; then
-    exit 0
+    case "$input" in
+        *'"web"'*'"api"'*'"git"'*|*'"web"'*'"git"'*'"api"'*|*'"api"'*'"web"'*'"git"'*|*'"api"'*'"git"'*'"web"'*|*'"git"'*'"web"'*'"api"'*|*'"git"'*'"api"'*'"web"'*)
+            exit 0
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
 fi
 printf '140.82.112.0/20\n'
 `, logFile))
@@ -220,6 +237,14 @@ esac
 	if cfg.curlIPv6Succeeds {
 		curlV6Exit = "0"
 	}
+	metaBody := cfg.githubMetaBody
+	if metaBody == "" && !cfg.githubMetaEmpty {
+		metaBody = defaultGitHubMetaJSON
+	}
+	metaFile := filepath.Join(tmp, "github-meta.json")
+	if err := os.WriteFile(metaFile, []byte(metaBody), 0o644); err != nil {
+		t.Fatalf("write github-meta.json: %v", err)
+	}
 	writeExecutable(t, filepath.Join(binDir, "curl"), fmt.Sprintf(`#!/bin/sh
 echo "curl $*" >> %q
 has_v6=0
@@ -232,8 +257,8 @@ for arg in "$@"; do
 done
 case "$url" in
     https://api.github.com/meta)
-        printf '{"web":["140.82.112.0/20"],"api":["140.82.112.0/20"],"git":["192.30.252.0/22"]}\n'
-        exit 0
+        cat %q
+        exit %d
         ;;
     https://api.github.com/zen)
         printf 'Keep it logically awesome.\n'
@@ -249,7 +274,7 @@ case "$url" in
         exit 7
         ;;
 esac
-`, logFile, curlV6Exit))
+`, logFile, metaFile, cfg.githubMetaExitCode, curlV6Exit))
 
 	// Fake /proc root
 	procRoot := filepath.Join(tmp, "proc")
@@ -680,4 +705,121 @@ func TestInitFirewall_IPv6VerificationFailureAborts(t *testing.T) {
 	if res.exitCode == 0 {
 		t.Fatalf("expected non-zero exit when IPv6 verification curl -6 unexpectedly succeeds")
 	}
+}
+
+func TestInitFirewall_GitHubMeta(t *testing.T) {
+	t.Run("realistic_meta_adds_web_api_git_cidrs", func(t *testing.T) {
+		res := runInitFirewall(t, stubConfig{
+			ipv6Ifaces: map[string]string{"eth0": "1"},
+		})
+		if res.exitCode != 0 {
+			t.Fatalf("expected exit 0, got %d\noutput:\n%s", res.exitCode, res.output)
+		}
+		for _, cidr := range []string{
+			"140.82.112.0/20",
+			"185.199.108.0/22",
+			"20.201.28.148/32",
+			"192.30.252.0/22",
+		} {
+			want := "ipset -exist add allowed-domains " + cidr
+			if !hasCall(res.calls, want) {
+				t.Errorf("missing expected ipset call %q\ncalls:\n%s", want, strings.Join(res.calls, "\n"))
+			}
+		}
+		// Unrelated /meta fields (e.g., actions) must not be added to allowed-domains.
+		if hasCallContaining(res.calls, "4.148.0.0/16") {
+			t.Errorf("unexpected actions CIDR added to ipset:\n%s", strings.Join(res.calls, "\n"))
+		}
+	})
+
+	t.Run("rate_limit_response_fails", func(t *testing.T) {
+		res := runInitFirewall(t, stubConfig{
+			ipv6Ifaces:     map[string]string{"eth0": "1"},
+			githubMetaBody: `{"message":"API rate limit exceeded for 203.0.113.10.","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#rate-limiting"}`,
+		})
+		if res.exitCode == 0 {
+			t.Fatalf("expected non-zero exit on rate-limited /meta response\noutput:\n%s", res.output)
+		}
+		if !strings.Contains(res.output, "ERROR: GitHub API response missing required fields") {
+			t.Errorf("expected missing-required-fields error, got:\n%s", res.output)
+		}
+		if hasCallPrefix(res.calls, "ipset -exist add allowed-domains ") {
+			t.Errorf("must not add any CIDRs on rate-limited /meta response:\n%s", strings.Join(res.calls, "\n"))
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "missing_web", body: `{"api":["140.82.112.0/20"],"git":["192.30.252.0/22"]}`},
+		{name: "missing_api", body: `{"web":["140.82.112.0/20"],"git":["192.30.252.0/22"]}`},
+		{name: "missing_git", body: `{"web":["140.82.112.0/20"],"api":["140.82.112.0/20"]}`},
+	} {
+		t.Run(tc.name+"_fails", func(t *testing.T) {
+			res := runInitFirewall(t, stubConfig{
+				ipv6Ifaces:     map[string]string{"eth0": "1"},
+				githubMetaBody: tc.body,
+			})
+			if res.exitCode == 0 {
+				t.Fatalf("expected non-zero exit for %s\noutput:\n%s", tc.name, res.output)
+			}
+			if !strings.Contains(res.output, "ERROR: GitHub API response missing required fields") {
+				t.Errorf("expected missing-required-fields error for %s, got:\n%s", tc.name, res.output)
+			}
+		})
+	}
+
+	t.Run("empty_response_fails", func(t *testing.T) {
+		res := runInitFirewall(t, stubConfig{
+			ipv6Ifaces:      map[string]string{"eth0": "1"},
+			githubMetaEmpty: true,
+		})
+		if res.exitCode == 0 {
+			t.Fatalf("expected non-zero exit on empty /meta response\noutput:\n%s", res.output)
+		}
+		if !strings.Contains(res.output, "ERROR: Failed to fetch GitHub IP ranges") {
+			t.Errorf("expected fetch failure error, got:\n%s", res.output)
+		}
+	})
+
+	t.Run("invalid_cidr_in_meta_fails_closed", func(t *testing.T) {
+		if _, err := exec.LookPath("jq"); err != nil {
+			t.Skip("real jq required to extract custom CIDRs from /meta")
+		}
+		res := runInitFirewall(t, stubConfig{
+			ipv6Ifaces:     map[string]string{"eth0": "1"},
+			githubMetaBody: `{"web":["140.82.112.0/20"],"api":["999.0.0.0/20"],"git":["192.30.252.0/22"]}`,
+		})
+		if res.exitCode == 0 {
+			t.Fatalf("expected non-zero exit on invalid CIDR in /meta\noutput:\n%s", res.output)
+		}
+		if !strings.Contains(res.output, "ERROR: Invalid CIDR range from GitHub meta: 999.0.0.0/20") {
+			t.Errorf("expected invalid CIDR error, got:\n%s", res.output)
+		}
+		if hasCallContaining(res.calls, "999.0.0.0/20") {
+			t.Errorf("invalid CIDR must not be passed to ipset:\n%s", strings.Join(res.calls, "\n"))
+		}
+	})
+
+	t.Run("fallback_jq_drains_stdin_and_checks_fields", func(t *testing.T) {
+		okRes := runInitFirewall(t, stubConfig{
+			ipv6Ifaces:      map[string]string{"eth0": "1"},
+			forceFallbackJQ: true,
+		})
+		if okRes.exitCode != 0 {
+			t.Fatalf("expected exit 0 with fallback jq on valid meta, got %d\noutput:\n%s", okRes.exitCode, okRes.output)
+		}
+		badRes := runInitFirewall(t, stubConfig{
+			ipv6Ifaces:      map[string]string{"eth0": "1"},
+			forceFallbackJQ: true,
+			githubMetaBody:  `{"message":"API rate limit exceeded"}`,
+		})
+		if badRes.exitCode == 0 {
+			t.Fatalf("expected non-zero exit with fallback jq on rate-limit response\noutput:\n%s", badRes.output)
+		}
+		if !strings.Contains(badRes.output, "ERROR: GitHub API response missing required fields") {
+			t.Errorf("expected missing-required-fields error from fallback jq, got:\n%s", badRes.output)
+		}
+	})
 }

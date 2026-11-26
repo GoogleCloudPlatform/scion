@@ -78,6 +78,18 @@ func runInitFirewall(t *testing.T, digResponses map[string]digResult) firewallRu
 	ipsetLogPath := filepath.Join(logDir, "ipset.log")
 	ipsetSeenPath := filepath.Join(logDir, "ipset-seen.log")
 
+	// Symlink only core POSIX utilities needed by init-firewall.sh and stubs so
+	// PATH is strictly restricted to binDir and can never reach host curl/wget.
+	for _, util := range []string{"awk", "basename", "cat", "dirname", "grep", "sort", "xargs"} {
+		p, err := exec.LookPath(util)
+		if err != nil {
+			t.Fatalf("required host utility %q not found: %v", util, err)
+		}
+		if err := os.Symlink(p, filepath.Join(binDir, util)); err != nil {
+			t.Fatalf("symlink %s: %v", util, err)
+		}
+	}
+
 	writeStub(t, binDir, "iptables-save", `exit 0`)
 	writeStub(t, binDir, "iptables", `exit 0`)
 	writeStub(t, binDir, "ip6tables", `exit 0`)
@@ -105,15 +117,35 @@ fi
 exit 0`, ipsetLogPath, ipsetSeenPath, ipsetSeenPath, ipsetSeenPath))
 	writeStub(t, binDir, "ip", `echo "default via 172.17.0.1 dev eth0"`)
 	writeStub(t, binDir, "aggregate", `cat`)
-	writeStub(t, binDir, "jq", `case "$1" in
-  -e) exit 0 ;;
+	// Prefer real jq when installed so JSON validation runs against the stubbed
+	// /meta payload. When falling back to a shell stub, always drain stdin first
+	// so `echo "$gh_ranges" | jq ...` under `set -o pipefail` cannot fail with
+	// SIGPIPE (exit 141) if the stub exits before echo finishes writing.
+	if jqPath, err := exec.LookPath("jq"); err == nil {
+		if err := os.Symlink(jqPath, filepath.Join(binDir, "jq")); err != nil {
+			t.Fatalf("symlink jq: %v", err)
+		}
+	} else {
+		writeStub(t, binDir, "jq", `input=$(cat)
+case "$1" in
+  -e)
+    case "$input" in
+      *'"web"'*'"api"'*'"git"'*|*'"web"'*'"git"'*'"api"'*|*'"api"'*'"web"'*'"git"'*|*'"api"'*'"git"'*'"web"'*|*'"git"'*'"web"'*'"api"'*|*'"git"'*'"api"'*'"web"'*)
+        exit 0
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
   -r) echo "140.82.112.0/20" ;;
   *) exit 1 ;;
 esac`)
+	}
 	writeStub(t, binDir, "curl", `for arg in "$@"; do
   case "$arg" in
     https://api.github.com/meta)
-      echo '{"web":["140.82.112.0/20"],"api":["140.82.112.0/20"],"git":["140.82.112.0/20"]}'
+      echo '{"web":["140.82.112.0/20"],"api":["192.30.252.0/22"],"git":["185.199.108.0/22"]}'
       exit 0
       ;;
     https://example.com)
@@ -161,7 +193,7 @@ esac`, digLogPath, getentCases.String()))
 
 	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = []string{
-		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PATH=" + binDir,
 		"HOME=" + t.TempDir(),
 		"SCION_FW_PROC_ROOT=" + procRoot,
 		"SCION_FW_RESOLV_CONF=" + resolvPath,
