@@ -113,7 +113,7 @@ Environment variables override any settings file value and are the most convenie
 | `SCION_OTEL_GCP_CREDENTIALS` | — | (auto) | Path to a GCP service account key JSON file; set automatically by the broker from the `scion-telemetry-gcp-credentials` secret |
 | `SCION_TELEMETRY_CLOUD_PROVIDER` | — | (auto) | Cloud backend: `gcp` for GCP-native export; auto-detected when credentials file is present |
 | `SCION_HUB_USAGE_OTEL_CARDINALITY` | — (Hub process) | `agent` | Attribution label cardinality for Hub-re-emitted canonical usage counters: `agent` (`scion_project_id`, `scion_agent_id`, `scion_agent_slug`) or `project` (`scion_project_id` only; recommended for large fleets). See [Observability](/scion/hosted/single-node/observability/#hub-usage-otel-re-emission). |
-| `SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT` | — (Hub process) | `20000` | Per-instrument OTel SDK `AggregationLimit` (`1`..`250000`) for Hub-re-emitted `gen_ai.api.calls` and `scion.usage.tokens`. |
+| `SCION_HUB_OTEL_CARDINALITY_LIMIT` | — (Hub process) | `20000` | MeterProvider-wide per-instrument OTel SDK cardinality limit applied to **all** Hub metric instruments (`2000`..`250000`; values `< 2000` warn and fall back to `20000`). |
 
 #### Client certificates (mTLS)
 

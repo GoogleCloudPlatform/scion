@@ -498,7 +498,7 @@ func TestUsageOTel_ExceedingSDKDefaultCardinalityLimitNoOverflow(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	mpOpts := append(
 		[]sdkmetric.Option{sdkmetric.WithReader(reader)},
-		hubmetrics.UsageMetricViews(hubmetrics.DefaultUsageOTelCardinalityLimit)...,
+		hubmetrics.HubCardinalityLimitOptions(hubmetrics.DefaultHubOTelCardinalityLimit)...,
 	)
 	mp := sdkmetric.NewMeterProvider(mpOpts...)
 	t.Cleanup(func() { _ = mp.Shutdown(ctx) })

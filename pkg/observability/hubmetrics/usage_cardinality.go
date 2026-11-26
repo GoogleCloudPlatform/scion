@@ -29,86 +29,95 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// EnvHubUsageOTelCardinalityLimit configures the per-instrument OTel SDK
-// cardinality limit (AggregationLimit) for Hub-re-emitted canonical usage
-// counters (gen_ai.api.calls and scion.usage.tokens). Cumulative counters keep
-// every observed attribute set in memory until process restart; the OTel SDK
-// default of 2000 overflows at ~400 (agent, model) pairs and drops attribution
-// labels into otel.metric.overflow=true.
+// EnvHubOTelCardinalityLimit configures the OTel SDK per-instrument cardinality
+// limit applied across all Hub metric instruments on the Hub MeterProvider
+// (metric.WithCardinalityLimit).
 //
-// Default: 20000 attribute sets per instrument (~4,000 (agent, model) pairs ×
-// 5 token_types per replica lifetime, ~8-16 MiB bounded RAM across both
-// counters). Large multi-tenant fleets should set
-// SCION_HUB_USAGE_OTEL_CARDINALITY=project.
+// Cumulative counters retain every observed attribute set in memory until Hub
+// process restart; the OTel Go SDK default of 2000 overflows agent-level usage
+// counters (gen_ai.api.calls, scion.usage.tokens) at ~400 (agent, model) pairs
+// and folds excess series into otel.metric.overflow=true.
+//
+// Values below MinHubOTelCardinalityLimit (2000, the OTel SDK default) are
+// rejected so configuring this knob can never lower other Hub instruments below
+// the SDK default. Default: 20000 (max 250000). Because the limit applies to
+// every instrument on the MeterProvider, worst-case memory scales with both the
+// usage counters and any other high-cardinality Hub instruments; large
+// multi-tenant fleets should set SCION_HUB_USAGE_OTEL_CARDINALITY=project.
 const (
-	EnvHubUsageOTelCardinalityLimit  = "SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT"
-	DefaultUsageOTelCardinalityLimit = 20000
-	MaxUsageOTelCardinalityLimit     = 250000
+	EnvHubOTelCardinalityLimit     = "SCION_HUB_OTEL_CARDINALITY_LIMIT"
+	MinHubOTelCardinalityLimit     = 2000
+	DefaultHubOTelCardinalityLimit = 20000
+	MaxHubOTelCardinalityLimit     = 250000
 
 	hubUsageInstrumentationScope = "github.com/GoogleCloudPlatform/scion/pkg/hub"
 	otelOverflowAttrKey          = attribute.Key("otel.metric.overflow")
 	overflowWarnInterval         = 5 * time.Minute
 )
 
-// ParseUsageOTelCardinalityLimit parses a bounded positive integer cardinality
-// limit in [1, MaxUsageOTelCardinalityLimit]. Empty input returns
-// DefaultUsageOTelCardinalityLimit with ok=true. Invalid or out-of-range values
-// return DefaultUsageOTelCardinalityLimit with ok=false.
-func ParseUsageOTelCardinalityLimit(raw string) (int, bool) {
+// ParseHubOTelCardinalityLimit parses a bounded integer cardinality limit in
+// [MinHubOTelCardinalityLimit, MaxHubOTelCardinalityLimit]. Empty input returns
+// DefaultHubOTelCardinalityLimit with ok=true. Invalid, non-numeric, or
+// out-of-range values (including values below the OTel SDK default of 2000)
+// return DefaultHubOTelCardinalityLimit with ok=false.
+func ParseHubOTelCardinalityLimit(raw string) (int, bool) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return DefaultUsageOTelCardinalityLimit, true
+		return DefaultHubOTelCardinalityLimit, true
 	}
 	n, err := strconv.Atoi(trimmed)
-	if err != nil || n < 1 || n > MaxUsageOTelCardinalityLimit {
-		return DefaultUsageOTelCardinalityLimit, false
+	if err != nil || n < MinHubOTelCardinalityLimit || n > MaxHubOTelCardinalityLimit {
+		return DefaultHubOTelCardinalityLimit, false
 	}
 	return n, true
 }
 
-// UsageOTelCardinalityLimitFromEnv reads EnvHubUsageOTelCardinalityLimit,
-// logging a warning and falling back to DefaultUsageOTelCardinalityLimit on
-// invalid or out-of-range values.
-func UsageOTelCardinalityLimitFromEnv() int {
-	raw := os.Getenv(EnvHubUsageOTelCardinalityLimit)
-	limit, ok := ParseUsageOTelCardinalityLimit(raw)
+// HubOTelCardinalityLimitFromEnv reads EnvHubOTelCardinalityLimit, logging a
+// warning and falling back to DefaultHubOTelCardinalityLimit on invalid or
+// out-of-range values (including values below MinHubOTelCardinalityLimit).
+func HubOTelCardinalityLimitFromEnv() int {
+	raw := os.Getenv(EnvHubOTelCardinalityLimit)
+	limit, ok := ParseHubOTelCardinalityLimit(raw)
 	if !ok {
-		slog.Warn("hub metrics: invalid usage OTel cardinality limit; falling back to default",
-			"env", EnvHubUsageOTelCardinalityLimit,
+		slog.Warn("hub metrics: invalid OTel cardinality limit; falling back to default",
+			"env", EnvHubOTelCardinalityLimit,
 			"value", raw,
+			"min", MinHubOTelCardinalityLimit,
 			"default", limit,
-			"max", MaxUsageOTelCardinalityLimit,
+			"max", MaxHubOTelCardinalityLimit,
 		)
 	}
 	return limit
 }
 
-// WithUsageCardinalityLimit overrides the per-instrument AggregationLimit for
-// Hub-re-emitted gen_ai.api.calls and scion.usage.tokens counters. Values <= 0
-// fall back to UsageOTelCardinalityLimitFromEnv().
-func WithUsageCardinalityLimit(limit int) Option {
+// WithCardinalityLimit overrides the MeterProvider-wide OTel SDK cardinality
+// limit applied to all Hub metric instruments. Values <= 0 fall back to
+// HubOTelCardinalityLimitFromEnv(). Values in (0, MinHubOTelCardinalityLimit)
+// are clamped up to MinHubOTelCardinalityLimit so other Hub instruments can
+// never be lowered below the SDK default; values above
+// MaxHubOTelCardinalityLimit are clamped to MaxHubOTelCardinalityLimit.
+func WithCardinalityLimit(limit int) Option {
 	return func(o *options) {
-		if limit > 0 {
-			if limit > MaxUsageOTelCardinalityLimit {
-				limit = MaxUsageOTelCardinalityLimit
-			}
-			o.usageCardinalityLimit = limit
+		if limit <= 0 {
+			return
 		}
+		if limit < MinHubOTelCardinalityLimit {
+			limit = MinHubOTelCardinalityLimit
+		}
+		if limit > MaxHubOTelCardinalityLimit {
+			limit = MaxHubOTelCardinalityLimit
+		}
+		o.cardinalityLimit = limit
 	}
 }
 
-// UsageMetricViews returns the OTel SDK MeterProvider options that configure
-// the per-instrument cardinality limit (metric.WithCardinalityLimit) for
-// Hub-re-emitted gen_ai.api.calls and scion.usage.tokens counters. Production
-// NewMeterProvider attaches these options automatically; tests using
-// ManualReader can pass UsageMetricViews(...) to build a provider identically
-// to production.
-func UsageMetricViews(limit int) []metric.Option {
-	if limit <= 0 {
-		limit = DefaultUsageOTelCardinalityLimit
-	}
-	if limit > MaxUsageOTelCardinalityLimit {
-		limit = MaxUsageOTelCardinalityLimit
+// HubCardinalityLimitOptions returns the OTel SDK MeterProvider options that
+// configure the provider-wide per-instrument cardinality limit
+// (metric.WithCardinalityLimit) for all Hub metric instruments. Production
+// NewMeterProvider attaches these options automatically.
+func HubCardinalityLimitOptions(limit int) []metric.Option {
+	if limit < MinHubOTelCardinalityLimit || limit > MaxHubOTelCardinalityLimit {
+		limit = DefaultHubOTelCardinalityLimit
 	}
 	return []metric.Option{
 		metric.WithCardinalityLimit(limit),
@@ -143,7 +152,7 @@ func (t *usageOverflowTracker) observe(rm *metricdata.ResourceMetrics) {
 	}
 	t.mu.Unlock()
 	if shouldWarn {
-		slog.Warn("hub metrics: usage OTel counter hit SDK cardinality limit (otel.metric.overflow=true); raise SCION_HUB_USAGE_OTEL_CARDINALITY_LIMIT or switch SCION_HUB_USAGE_OTEL_CARDINALITY=project",
+		slog.Warn("hub metrics: usage OTel counter hit SDK cardinality limit (otel.metric.overflow=true); raise SCION_HUB_OTEL_CARDINALITY_LIMIT or switch SCION_HUB_USAGE_OTEL_CARDINALITY=project",
 			"metric", metricName,
 			"overflow_value", overflowVal,
 			"overflow_exports", total,

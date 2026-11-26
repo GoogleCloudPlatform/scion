@@ -87,9 +87,9 @@ type options struct {
 	// otlp configures an optional operator-managed OTLP gRPC metrics sink.
 	// When nil, NewMeterProvider falls back to LoadOTLPConfigFromEnv().
 	otlp *OTLPConfig
-	// usageCardinalityLimit overrides the per-instrument AggregationLimit for
-	// Hub-re-emitted usage counters (gen_ai.api.calls, scion.usage.tokens).
-	usageCardinalityLimit int
+	// cardinalityLimit overrides the MeterProvider-wide OTel SDK cardinality
+	// limit applied to all Hub metric instruments (min 2000, default 20000).
+	cardinalityLimit int
 }
 
 // PartialError is returned alongside a usable *metric.MeterProvider when one
@@ -247,9 +247,9 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 		return nil, fmt.Errorf("no hub metrics exporter constructed")
 	}
 
-	usageLimit := o.usageCardinalityLimit
-	if usageLimit <= 0 {
-		usageLimit = UsageOTelCardinalityLimitFromEnv()
+	cardinalityLimit := o.cardinalityLimit
+	if cardinalityLimit <= 0 {
+		cardinalityLimit = HubOTelCardinalityLimitFromEnv()
 	}
 
 	mpOpts := make([]metric.Option, 0, 1+len(readers)+2)
@@ -257,7 +257,7 @@ func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) 
 	for _, r := range readers {
 		mpOpts = append(mpOpts, metric.WithReader(r))
 	}
-	mpOpts = append(mpOpts, UsageMetricViews(usageLimit)...)
+	mpOpts = append(mpOpts, HubCardinalityLimitOptions(cardinalityLimit)...)
 	mpOpts = append(mpOpts, groupDropViews()...)
 
 	mp := metric.NewMeterProvider(mpOpts...)

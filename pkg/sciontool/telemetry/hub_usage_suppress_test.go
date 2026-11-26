@@ -727,3 +727,100 @@ func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T
 		}
 	})
 }
+
+func TestHookPath_DirectOTelSuppressedFromMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gcpEnabled bool
+	}{
+		{name: "gcp_enabled_tee", gcpEnabled: true},
+		{name: "hub_only", gcpEnabled: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", "agent-hook-1")
+			t.Setenv("SCION_PROJECT_ID", "proj-hook-1")
+			t.Setenv("SCION_RUN_ID", "run-hook-1")
+			t.Setenv("SCION_HARNESS", "claude")
+
+			home := t.TempDir()
+			hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+			if err != nil {
+				t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
+			}
+			var reqs []telemetrycontract.UsageIngestRequest
+			sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+				RunID: "run-hook-1",
+				HubID: "hub-hook-1",
+				Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					reqs = append(reqs, req)
+					return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)}, nil
+				},
+			})
+			d := NewDualAnalyticsDrainer(nil, nil, sink, func(context.Context) (string, error) { return "hub-hook-1", nil })
+			hubOutbox.setHubSuppress(true)
+
+			inTok := int64(100)
+			outTok := int64(25)
+			now := time.Now().UTC()
+			makeHookObs := func(id string) UsageObservation {
+				return UsageObservation{
+					SourceKind:      "claude.api_request",
+					Identity:        telemetrycontract.SourceIdentityComposite,
+					SourceEventID:   id,
+					SourceTime:      now,
+					EventTime:       now,
+					Model:           "claude-sonnet-4-6",
+					Status:          telemetrycontract.StatusSuccess,
+					Calls:           1,
+					Input:           &inTok,
+					Output:          &outTok,
+					InputDerivation: telemetrycontract.InputDerivationReported,
+					TokenStatus:     telemetrycontract.TokenStatusReported,
+					MalformedFields: []string{},
+				}
+			}
+
+			// 1. With suppress.hub marker present, hook subprocess stamps direct_otel_suppressed=true.
+			hookSuppressed := NewLazyHookUsageAnalytics(home, tc.gcpEnabled, nil)
+			if out, err := hookSuppressed.Record(makeHookObs("hook-ev-suppressed")); err != nil || out != AppendWritten {
+				t.Fatalf("hookSuppressed.Record = (%v, %v), want (AppendWritten, nil)", out, err)
+			}
+
+			// 2. Remove suppress.hub marker; next hook subprocess stamps false/absent.
+			hubOutbox.setHubSuppress(false)
+			hookUnsuppressed := NewLazyHookUsageAnalytics(home, tc.gcpEnabled, nil)
+			if out, err := hookUnsuppressed.Record(makeHookObs("hook-ev-unsuppressed")); err != nil || out != AppendWritten {
+				t.Fatalf("hookUnsuppressed.Record = (%v, %v), want (AppendWritten, nil)", out, err)
+			}
+
+			// Drain hubOutbox via HubUsageSink + drainer and verify per-event stamps
+			// and per-group request flags.
+			d.RunOnce(context.Background())
+
+			var seenSuppressed, seenUnsuppressed bool
+			for _, req := range reqs {
+				for _, ev := range req.Events {
+					suppressed := ev.DirectOTelSuppressed != nil && *ev.DirectOTelSuppressed
+					if req.DirectOTelSuppressed != suppressed {
+						t.Fatalf("event %s: req.DirectOTelSuppressed=%v != event stamp=%v", ev.EventID, req.DirectOTelSuppressed, suppressed)
+					}
+					switch ev.SourceEventID {
+					case "hook-ev-suppressed":
+						if !suppressed {
+							t.Fatalf("hook-ev-suppressed: expected direct_otel_suppressed=true, got %v", ev.DirectOTelSuppressed)
+						}
+						seenSuppressed = true
+					case "hook-ev-unsuppressed":
+						if suppressed {
+							t.Fatalf("hook-ev-unsuppressed: expected direct_otel_suppressed absent/false, got true")
+						}
+						seenUnsuppressed = true
+					}
+				}
+			}
+			if !seenSuppressed || !seenUnsuppressed {
+				t.Fatalf("did not observe both hook events in drained batches (seenSuppressed=%v, seenUnsuppressed=%v, reqs=%d)", seenSuppressed, seenUnsuppressed, len(reqs))
+			}
+		})
+	}
+}

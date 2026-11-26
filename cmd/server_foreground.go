@@ -648,7 +648,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		log.Print(obs.Tracing.LogLine())
 
 		// Wire hub OTel metrics export to Cloud Monitoring and/or operator OTLP.
-		if obs.Metrics.Enabled || hubmetrics.HasOTLPEndpointEnv() {
+		otlpEndpointConfigured := hubmetrics.HasOTLPEndpointEnv()
+		if otlpEndpointConfigured {
+			obs.OTLPMetrics = &hubexport.OTLPMetricsStatus{
+				Configured: true,
+				Endpoint:   strings.TrimSpace(os.Getenv("SCION_OTEL_ENDPOINT")),
+			}
+		}
+		if obs.Metrics.Enabled || otlpEndpointConfigured {
 			gcpMetricsProjectID := ""
 			if obs.Metrics.Enabled {
 				gcpMetricsProjectID = obs.Metrics.Project.ID
@@ -660,18 +667,29 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					if partialErr.GCPErr != nil && obs.Metrics.Enabled {
 						obs.Metrics = obs.Metrics.Failed(partialErr.GCPErr)
 					}
-					if partialErr.OTLPErr != nil {
-						log.Printf("WARNING: hub OTLP metrics export disabled: %v", partialErr.OTLPErr)
+					if obs.OTLPMetrics != nil {
+						if partialErr.OTLPErr != nil {
+							obs.OTLPMetrics.Enabled = false
+							obs.OTLPMetrics.Reason = fmt.Sprintf("exporter could not be created: %v", partialErr.OTLPErr)
+						} else {
+							obs.OTLPMetrics.Enabled = true
+							obs.OTLPMetrics.Reason = "SCION_OTEL_ENDPOINT configured"
+						}
 					}
 				} else {
 					if obs.Metrics.Enabled {
 						obs.Metrics = obs.Metrics.Failed(mpErr)
-					} else {
-						log.Printf("WARNING: hub OTLP metrics export disabled: %v", mpErr)
+					}
+					if obs.OTLPMetrics != nil {
+						obs.OTLPMetrics.Enabled = false
+						obs.OTLPMetrics.Reason = fmt.Sprintf("exporter could not be created: %v", mpErr)
 					}
 					log.Printf("WARNING: hub metrics/OTLP configured but no exporter started; Hub usage OTel re-emission and container suppression are inactive")
 					mp = nil
 				}
+			} else if obs.OTLPMetrics != nil {
+				obs.OTLPMetrics.Enabled = true
+				obs.OTLPMetrics.Reason = "SCION_OTEL_ENDPOINT configured"
 			}
 			if mp != nil {
 				exit.addFlush(mp.Shutdown)
@@ -707,6 +725,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 		log.Print(obs.Metrics.LogLine())
+		if obs.OTLPMetrics != nil {
+			log.Print(obs.OTLPMetrics.LogLine())
+		}
 		hubSrv.SetObservabilityExportStatus(obs)
 		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 

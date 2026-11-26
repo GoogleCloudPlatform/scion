@@ -273,9 +273,10 @@ func (u *UsageOTelMetrics) Close() error {
 // each newly inserted usage_events row after the ingest transaction commits.
 //
 // Invariants enforced:
-//   - Attribution labels (scion_project_id, scion_agent_id, scion_agent_slug,
-//     harness) are stamped strictly from run_attribution (attrByRun), never
-//     from the ingest payload.
+//   - Identity and harness labels (scion_project_id, scion_agent_id,
+//     scion_agent_slug, harness) are stamped strictly from run_attribution
+//     (attrByRun), never from the ingest payload; model and status come from
+//     the committed event row.
 //   - Unknown (nil) token fields are never emitted as 0.
 //   - Only the closed telemetrycontract.TokenTypes allowlist is emitted
 //     (input, output, cache_read, cache_write, reasoning); cache_write_1h is

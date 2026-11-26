@@ -227,3 +227,17 @@ func TestDecision_Failed(t *testing.T) {
 		t.Errorf("LogLine = %q", d.LogLine())
 	}
 }
+
+func TestOTLPMetricsStatus_LogLine(t *testing.T) {
+	if got := (OTLPMetricsStatus{}).LogLine(); got != "Hub OTLP metrics export: off (not configured)" {
+		t.Errorf("unconfigured LogLine = %q", got)
+	}
+	on := OTLPMetricsStatus{Configured: true, Enabled: true, Endpoint: "collector:4317"}
+	if got := on.LogLine(); got != "Hub OTLP metrics export: on (endpoint: collector:4317)" {
+		t.Errorf("enabled LogLine = %q", got)
+	}
+	failed := OTLPMetricsStatus{Configured: true, Enabled: false, Endpoint: "collector:4317", Reason: "exporter could not be created: dial failed"}
+	if got := failed.LogLine(); got != "WARNING: Hub OTLP metrics export: off (exporter could not be created: dial failed)" {
+		t.Errorf("failed LogLine = %q", got)
+	}
+}

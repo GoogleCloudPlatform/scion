@@ -278,22 +278,30 @@ func TestNewMeterProvider_GCPFailureWithValidOTLPReturnsPartialErrorAndWarns(t *
 }
 
 func TestUsageCardinalityLimitAndOverflowDetection(t *testing.T) {
-	if got, ok := ParseUsageOTelCardinalityLimit(""); !ok || got != DefaultUsageOTelCardinalityLimit {
-		t.Fatalf("empty limit = (%d, %v), want (%d, true)", got, ok, DefaultUsageOTelCardinalityLimit)
+	if got, ok := ParseHubOTelCardinalityLimit(""); !ok || got != DefaultHubOTelCardinalityLimit {
+		t.Fatalf("empty limit = (%d, %v), want (%d, true)", got, ok, DefaultHubOTelCardinalityLimit)
 	}
-	if got, ok := ParseUsageOTelCardinalityLimit("50000"); !ok || got != 50000 {
+	if got, ok := ParseHubOTelCardinalityLimit("2000"); !ok || got != 2000 {
+		t.Fatalf("2000 = (%d, %v), want (2000, true)", got, ok)
+	}
+	if got, ok := ParseHubOTelCardinalityLimit("50000"); !ok || got != 50000 {
 		t.Fatalf("50000 = (%d, %v), want (50000, true)", got, ok)
 	}
-	for _, bad := range []string{"0", "-5", "abc", "9999999"} {
-		if got, ok := ParseUsageOTelCardinalityLimit(bad); ok || got != DefaultUsageOTelCardinalityLimit {
-			t.Fatalf("ParseUsageOTelCardinalityLimit(%q) = (%d, %v), want (%d, false)", bad, got, ok, DefaultUsageOTelCardinalityLimit)
+	// Values below the OTel SDK default (2000), non-numeric, or above max must be
+	// rejected and fall back to DefaultHubOTelCardinalityLimit so this knob can
+	// never lower other Hub instruments' limits.
+	for _, bad := range []string{"0", "-5", "1", "500", "1999", "abc", "9999999"} {
+		if got, ok := ParseHubOTelCardinalityLimit(bad); ok || got != DefaultHubOTelCardinalityLimit {
+			t.Fatalf("ParseHubOTelCardinalityLimit(%q) = (%d, %v), want (%d, false)", bad, got, ok, DefaultHubOTelCardinalityLimit)
 		}
 	}
 
-	// Verify overflow detection + rate-limited warning using a small limit of 5.
+	// Verify overflow detection + rate-limited warning using a small SDK limit of 5.
 	reader := sdkmetric.NewManualReader()
-	opts := append([]sdkmetric.Option{sdkmetric.WithReader(reader)}, UsageMetricViews(5)...)
-	mp := sdkmetric.NewMeterProvider(opts...)
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithCardinalityLimit(5),
+	)
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 
 	c, err := mp.Meter(hubUsageInstrumentationScope).Int64Counter("scion.usage.tokens")
@@ -324,4 +332,107 @@ func TestUsageCardinalityLimitAndOverflowDetection(t *testing.T) {
 	if warnings := strings.Count(logBuf.String(), "otel.metric.overflow=true"); warnings != 1 {
 		t.Fatalf("expected 1 rate-limited overflow warning, got %d in %q", warnings, logBuf.String())
 	}
+}
+
+func TestNewMeterProvider_CardinalityLimitClampsLowAndExceedsSDKDefault(t *testing.T) {
+	countOTLPPoints := func(reqs []*colmetricpb.ExportMetricsServiceRequest, metricName string) (totalPoints int, overflowPoints int) {
+		for _, req := range reqs {
+			for _, rm := range req.GetResourceMetrics() {
+				for _, sm := range rm.GetScopeMetrics() {
+					for _, m := range sm.GetMetrics() {
+						if m.GetName() != metricName {
+							continue
+						}
+						for _, dp := range m.GetSum().GetDataPoints() {
+							totalPoints++
+							for _, kv := range dp.GetAttributes() {
+								if kv.GetKey() == "otel.metric.overflow" && kv.GetValue().GetBoolValue() {
+									overflowPoints++
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return totalPoints, overflowPoints
+	}
+
+	t.Run("low env value below 2000 is rejected and does not overflow unrelated instruments", func(t *testing.T) {
+		addr, fake := startFakeOTLPMetricsServer(t)
+		t.Setenv(EnvHubOTelCardinalityLimit, "5")
+
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		ctx := context.Background()
+		mp, err := NewMeterProvider(ctx, "",
+			WithInstanceID("hub-low-limit"),
+			WithOTLPConfig(OTLPConfig{Endpoint: addr, Insecure: true}),
+			WithExportInterval(time.Hour),
+		)
+		if err != nil {
+			t.Fatalf("NewMeterProvider: %v", err)
+		}
+		c, err := mp.Meter("github.com/GoogleCloudPlatform/scion/pkg/dbmetrics").Int64Counter("scion.db.pool.unrelated")
+		if err != nil {
+			t.Fatalf("Int64Counter: %v", err)
+		}
+		const nSets = 25
+		for i := 0; i < nSets; i++ {
+			c.Add(ctx, 1, otelmetric.WithAttributes(attribute.Int("idx", i)))
+		}
+		flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := mp.Shutdown(flushCtx); err != nil {
+			t.Fatalf("mp.Shutdown: %v", err)
+		}
+
+		if !strings.Contains(logBuf.String(), EnvHubOTelCardinalityLimit) {
+			t.Fatalf("expected warning log for invalid low %s, got %q", EnvHubOTelCardinalityLimit, logBuf.String())
+		}
+		fake.mu.Lock()
+		total, overflow := countOTLPPoints(fake.requests, "scion.db.pool.unrelated")
+		fake.mu.Unlock()
+		if overflow != 0 || total != nSets {
+			t.Fatalf("unrelated instrument points = %d (overflow=%d), want %d (overflow=0)", total, overflow, nSets)
+		}
+	})
+
+	t.Run("production NewMeterProvider exceeds 2000 SDK default without overflow", func(t *testing.T) {
+		addr, fake := startFakeOTLPMetricsServer(t)
+		t.Setenv(EnvHubOTelCardinalityLimit, "")
+
+		ctx := context.Background()
+		mp, err := NewMeterProvider(ctx, "",
+			WithInstanceID("hub-high-card"),
+			WithOTLPConfig(OTLPConfig{Endpoint: addr, Insecure: true}),
+			WithExportInterval(time.Hour),
+		)
+		if err != nil {
+			t.Fatalf("NewMeterProvider: %v", err)
+		}
+		c, err := mp.Meter(hubUsageInstrumentationScope).Int64Counter("scion.usage.tokens")
+		if err != nil {
+			t.Fatalf("Int64Counter: %v", err)
+		}
+		const nSets = 2100
+		for i := 0; i < nSets; i++ {
+			c.Add(ctx, 1, otelmetric.WithAttributes(attribute.Int("idx", i)))
+		}
+		flushCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := mp.Shutdown(flushCtx); err != nil {
+			t.Fatalf("mp.Shutdown: %v", err)
+		}
+
+		fake.mu.Lock()
+		total, overflow := countOTLPPoints(fake.requests, "scion.usage.tokens")
+		fake.mu.Unlock()
+		if overflow != 0 || total != nSets {
+			t.Fatalf("scion.usage.tokens points = %d (overflow=%d), want %d (overflow=0)", total, overflow, nSets)
+		}
+	})
 }
