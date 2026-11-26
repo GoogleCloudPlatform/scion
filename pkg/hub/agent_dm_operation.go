@@ -26,6 +26,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -188,6 +190,16 @@ type AgentDMInput struct {
 	// HTTP adapter can log its acceptance record ("message received for
 	// delivery") only after validation succeeds (ptone/scion#4650).
 	OnAdmitted func()
+
+	// Unexported copy-provenance and pre-effect mention fields (M3 Slice B).
+	// copyIntent is the sole mode discriminator: set to true ONLY by
+	// deliverAgentMentionCopy (enforced by TestCopyIntent_ASTGuard).
+	copyIntent                bool
+	copyAdmission             *derivedAdmission
+	mentionExplicit           []string
+	mentionParentConv         *messaging.ConversationResult
+	mentionParentConvVerified bool
+	mentionHumanMembers       []chatMemberEntry
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -267,6 +279,12 @@ type AgentDMResult struct {
 	// BoundAttachments are the artifact attachments bound to the message
 	// (ptone/scion#4596): the references of AttachRefs that bound.
 	BoundAttachments []AttachmentRef
+
+	// Unexported pre-resolved mention plan and derived copy admission handed
+	// back to E3a/E3b adapters so delivery consumes the exact set planned by
+	// the origin gate without re-resolving (M3 Slice B, Contract §6).
+	copyPlan      *resolvedMentionPlan
+	copyAdmission *derivedAdmission
 }
 
 // AgentDMError is a typed error from the shared DM operation. It carries
@@ -302,7 +320,23 @@ func (e *AgentDMError) Error() string { return e.Message }
 //
 // Returns (*AgentDMResult, nil) on success or ambiguous delivery, or
 // (nil, *AgentDMError) on pre-flight failure.
-func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*AgentDMResult, *AgentDMError) {
+func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (dmRes *AgentDMResult, dmErr *AgentDMError) {
+	var (
+		dmPolicyRes h2PolicyOutcome
+		dmCopyPlan  *resolvedMentionPlan
+	)
+	defer func() {
+		if dmPolicyRes.copyAdmission != nil {
+			if dmRes != nil && dmErr == nil {
+				dmRes.copyPlan = dmCopyPlan
+				dmRes.copyAdmission = dmPolicyRes.copyAdmission
+			} else {
+				dmPolicyRes.copyAdmission.Close()
+			}
+		} else if dmRes != nil && dmErr == nil && dmCopyPlan != nil {
+			dmRes.copyPlan = dmCopyPlan
+		}
+	}()
 	// ── Phase 0: Input validation ───────────────────────────────────────
 	// Guard against nil pointer dereferences from malformed caller input.
 	if input == nil || input.SenderAgent == nil || input.TargetAgent == nil || input.SenderIdentity == nil {
@@ -420,6 +454,77 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// resolution and actual dispatch errors are handled post-persistence.
 	if dmErr := s.checkDispatchAvailability(input); dmErr != nil {
 		return nil, dmErr
+	}
+
+	// 5b. Message policy gate (origin mode) or derived admission verify (copy
+	// mode) — M3 Slice B (Contract §§5B, 6, 8). Placed strictly after rate,
+	// authz, foreign attachment rejection, and dispatch pre-check, and strictly
+	// before migration and Phase 1b. Independent of wake/auto-suspend internals.
+	if input.copyIntent {
+		if s.experimentEnabled(experiments.MessagePolicies) {
+			if admErr := s.verifyCopyAdmissionAtDelivery(ctx, input); admErr != nil {
+				return nil, &AgentDMError{
+					Code:       ErrCodeMessageDenied,
+					Message:    admErr.Error(),
+					HTTPStatus: http.StatusForbidden,
+				}
+			}
+		}
+	} else {
+		dmCopyPlan = s.resolveMentionCopyTargets(ctx, agentMentionFanoutInput{
+			Sender:                input.SenderAgent,
+			SenderIdent:           input.SenderIdentity,
+			Primary:               input.TargetAgent,
+			Msg:                   input.Msg,
+			Type:                  input.Type,
+			Explicit:              input.mentionExplicit,
+			ParentConv:            input.mentionParentConv,
+			ParentConvVerified:    input.mentionParentConvVerified,
+			Channel:               input.Channel,
+			HumanMembers:          input.mentionHumanMembers,
+			HasPendingAttachments: len(input.AttachRefs) > 0,
+		})
+		if s.experimentEnabled(experiments.MessagePolicies) {
+			convKind := "direct"
+			if input.ConvResult != nil && input.ConvResult.Kind == "group" {
+				convKind = "group"
+			}
+			originSnap := h2FactSnapshot{
+				surface:         messagepolicy.SurfaceAgentDM,
+				projectID:       input.SenderAgent.ProjectID,
+				senderID:        input.SenderAgent.ID,
+				senderSlug:      input.SenderAgent.Slug,
+				recipientKind:   "agent",
+				recipientID:     input.TargetAgent.ID,
+				recipientSlug:   input.TargetAgent.Slug,
+				msgType:         input.Type,
+				introBody:       input.Msg,
+				msgBody:         input.Msg,
+				urgent:          input.Urgent,
+				attachmentCount: len(input.Attachments) + len(input.AttachRefs),
+				convKind:        convKind,
+				convID:          input.ConversationID,
+			}
+			var copyTargets []resolvedCopyTarget
+			if dmCopyPlan != nil {
+				copyTargets = dmCopyPlan.AuthorizedOrdered
+			}
+			var rej *originPolicyRejection
+			dmPolicyRes, rej = s.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+				sender:              input.SenderAgent,
+				senderIdent:         input.SenderIdentity,
+				originSnap:          originSnap,
+				copyTargets:         copyTargets,
+				copyBody:            input.Msg,
+				copyAttachmentCount: len(input.AttachRefs),
+				copyUrgent:          false,
+				preloadedHumans:     input.mentionHumanMembers,
+				humansLoaded:        input.mentionHumanMembers != nil,
+			})
+			if rej != nil {
+				return nil, rej.toAgentDMError()
+			}
+		}
 	}
 
 	// Migration gate (design agent-reincarnate §3.7, Amendment A25 2a.2):
@@ -624,6 +729,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		return nil, persistFailedDMError()
 	}
 	s.logMessageEnteredPending(pendingPathAgentDM, storeMsg)
+	s.recordAdmittedH2PolicyDecisions(ctx, &dmPolicyRes, msgID)
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
 	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)

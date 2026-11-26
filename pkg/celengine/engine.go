@@ -589,6 +589,52 @@ func (p Program) Kind() Kind {
 	return p.kind
 }
 
+// ReferencesIdent reports whether p's checked AST contains an identifier
+// reference matching any of names. It is conservative: a missing checked AST,
+// empty identifier name, or malformed identifier node returns (true, err).
+func (p Program) ReferencesIdent(names ...string) (bool, error) {
+	if p.checked == nil {
+		return true, errors.New("celengine: program has no checked AST")
+	}
+	rep := p.checked.NativeRep()
+	if rep == nil || rep.Expr() == nil {
+		return true, errors.New("celengine: program has empty checked AST")
+	}
+	if len(names) == 0 {
+		return false, nil
+	}
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name == "" {
+			return true, errors.New("celengine: empty identifier name")
+		}
+		wanted[name] = struct{}{}
+	}
+	found := false
+	var walkErr error
+	celast.MatchDescendants(celast.NavigateAST(rep), func(n celast.NavigableExpr) bool {
+		if found || walkErr != nil {
+			return false
+		}
+		if n.Kind() == celast.IdentKind {
+			ident := n.AsIdent()
+			if ident == "" {
+				walkErr = errors.New("celengine: empty identifier node in checked AST")
+				return false
+			}
+			if _, ok := wanted[ident]; ok {
+				found = true
+				return true
+			}
+		}
+		return false
+	})
+	if walkErr != nil {
+		return true, walkErr
+	}
+	return found, nil
+}
+
 // nowFunc is the clock used to measure Program.Eval elapsed wall-clock time;
 // internal tests override it to exercise the post-eval elapsed > EvalTimeout
 // backstop deterministically.

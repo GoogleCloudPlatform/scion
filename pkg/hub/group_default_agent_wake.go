@@ -77,16 +77,103 @@ type groupDefaultWakeInput struct {
 	ParentAttachments []AttachmentRef
 	// Channel is the post's delivery channel.
 	Channel string
+	// Resolved is the single pre-effect resolution of the group default agent
+	// computed before the origin message policy gate (Contract §6).
+	Resolved *resolvedDefaultWakePlan
+	// CopyAdmission is the pre-effect derived admission minted by the origin
+	// message policy gate.
+	CopyAdmission *derivedAdmission
+}
+
+// resolvedDefaultWakePlan holds the single pre-effect resolution of a group
+// conversation's default agent.
+type resolvedDefaultWakePlan struct {
+	EarlyResult *messages.MentionResult
+	Target      *resolvedCopyTarget
+}
+
+// resolveDefaultWakeCopyTarget performs side-effect-free resolution of the
+// group conversation's default agent (read-only lookup + dry-run pairwise
+// authorization) once, before the origin message policy gate (Contract §6).
+func (s *Server) resolveDefaultWakeCopyTarget(
+	ctx context.Context,
+	sender *store.Agent,
+	senderIdent Identity,
+	conv *messaging.ConversationResult,
+	msg string,
+	msgType string,
+	hasMentions bool,
+	addressedToHuman bool,
+	humanMembers []chatMemberEntry,
+) *resolvedDefaultWakePlan {
+	plan := &resolvedDefaultWakePlan{}
+	if sender == nil || senderIdent == nil || conv == nil || conv.Kind != "group" {
+		return plan
+	}
+	if !mentionFanoutTypes[msgType] || hasMentions {
+		return plan
+	}
+	if addressedToHuman || s.groupPostMentionsHuman(ctx, sender.ProjectID, msg, humanMembers) {
+		return plan
+	}
+
+	gd, err := s.resolveGroupDefaultAgent(ctx, conv.ConversationID, sender.ProjectID)
+	if err != nil {
+		s.messageLog.Error("group default agent: lookup failed",
+			"conversation_id", conv.ConversationID, "error", err)
+		plan.EarlyResult = &messages.MentionResult{Status: "error", Error: "default agent lookup failed"}
+		return plan
+	}
+	if gd.Agent == nil {
+		if gd.UnreachableSlug != "" {
+			plan.EarlyResult = &messages.MentionResult{
+				Slug:   gd.UnreachableSlug,
+				Status: defaultAgentStatusUnreachable,
+				Error:  "the conversation's default agent no longer exists",
+			}
+		}
+		return plan
+	}
+	def := gd.Agent
+	if def.ID == sender.ID {
+		plan.EarlyResult = &messages.MentionResult{Slug: def.Slug, Status: defaultAgentStatusSelf}
+		return plan
+	}
+
+	if allowed, _, _ := s.authorizeAgentMessage(ctx, senderIdent, def, false); !allowed {
+		plan.EarlyResult = &messages.MentionResult{
+			Slug:          def.Slug,
+			Status:        "unauthorized",
+			Error:         "message delivery denied",
+			AgentPhase:    def.Phase,
+			SuspendReason: def.SuspendReason,
+		}
+		return plan
+	}
+
+	parent := conv
+	if parent.ExternalRef == "" && gd.ExternalRef != "" {
+		withRef := *parent
+		withRef.ExternalRef = gd.ExternalRef
+		parent = &withRef
+	}
+	plan.Target = &resolvedCopyTarget{
+		Agent:              def,
+		Position:           "default_agent",
+		ParentConv:         parent,
+		ParentConvVerified: true,
+	}
+	return plan
 }
 
 // wakeGroupDefaultAgent delivers an agent's group post to the
-// conversation's default agent when the post @mentions no agent and
-// neither addresses nor @mentions a human. It returns nil when no
-// default agent applies (not a group post, an excluded type, an agent
-// mention present, addressed to or mentioning a human, or no default
-// set); otherwise the result of the attempt. A refused delivery is
-// reported in the result and never fails the post.
+// conversation's pre-resolved default agent when the post @mentions no agent
+// and neither addresses nor @mentions a human. It never re-resolves the
+// default agent (Contract §6).
 func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeInput) *messages.MentionResult {
+	if in.CopyAdmission != nil {
+		defer in.CopyAdmission.Close()
+	}
 	if in.Sender == nil || in.SenderIdent == nil || in.Conv == nil || in.Conv.Kind != "group" {
 		return nil
 	}
@@ -96,35 +183,20 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 	if in.AddressedToHuman || s.groupPostMentionsHuman(ctx, in.Sender.ProjectID, in.Msg, in.HumanMembers) {
 		return nil
 	}
-
-	gd, err := s.resolveGroupDefaultAgent(ctx, in.Conv.ConversationID, in.Sender.ProjectID)
-	if err != nil {
-		s.messageLog.Error("group default agent: lookup failed",
-			"conversation_id", in.Conv.ConversationID, "error", err)
-		return &messages.MentionResult{Status: "error", Error: "default agent lookup failed"}
-	}
-	if gd.Agent == nil {
-		if gd.UnreachableSlug != "" {
-			return &messages.MentionResult{Slug: gd.UnreachableSlug, Status: defaultAgentStatusUnreachable,
-				Error: "the conversation's default agent no longer exists"}
-		}
+	if in.Resolved == nil {
 		return nil
 	}
-	def := gd.Agent
-	if def.ID == in.Sender.ID {
-		return &messages.MentionResult{Slug: def.Slug, Status: defaultAgentStatusSelf}
+	if in.Resolved.EarlyResult != nil {
+		res := *in.Resolved.EarlyResult
+		return &res
 	}
-
-	// The copy lands in the group conversation itself: the default agent
-	// is configured on this conversation, so it belongs there whether the
-	// sender named the conversation by ID or by thread key. A conversation
-	// resolved by thread key carries no external_ref, so the stored one
-	// is used for the copy's thread key.
-	parent := in.Conv
-	if parent.ExternalRef == "" && gd.ExternalRef != "" {
-		withRef := *parent
-		withRef.ExternalRef = gd.ExternalRef
-		parent = &withRef
+	if in.Resolved.Target == nil || in.Resolved.Target.Agent == nil {
+		return nil
+	}
+	def := in.Resolved.Target.Agent
+	parent := in.Resolved.Target.ParentConv
+	if parent == nil {
+		parent = in.Conv
 	}
 
 	aggregateCtx, cancel := context.WithTimeout(ctx, mentionFanoutAggregateTimeout)
@@ -139,6 +211,7 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 		ParentMessageID:    in.ParentMessageID,
 		ParentAttachments:  in.ParentAttachments,
 		Channel:            in.Channel,
+		CopyAdmission:      in.CopyAdmission,
 	}, def, "default_agent")
 	s.messageLog.Info("group default agent delivery",
 		"sender_id", in.Sender.ID,

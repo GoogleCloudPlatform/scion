@@ -376,15 +376,18 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, messagepolicy.ModeShadow, mode)
 
-	// Coverage metadata exposes M1 enforced surfaces and uncovered agent paths.
+	// Coverage metadata exposes enforced surfaces (H2 + Slice B) and uncovered agent paths.
 	cov := messagepolicy.Coverage()
 	assert.Equal(t, []string{
 		messagepolicy.SurfaceAgentToUser,
 		messagepolicy.SurfaceAgentToConversation,
+		messagepolicy.SurfaceAgentDM,
+		messagepolicy.SurfaceMentionDelivery,
 	}, cov.EnforcedSurfaces)
-	assert.Contains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceAgentDM)
 	assert.Contains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceGroupSet)
-	assert.Contains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceMentionDelivery)
+	assert.Contains(t, cov.UncoveredAgentPaths, "broadcast")
+	assert.NotContains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceAgentDM)
+	assert.NotContains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceMentionDelivery)
 
 	// Non-empty system_one_rule requires explicit on_uncertain (lead decision).
 	s1 := validAuthoringSpec()
@@ -397,11 +400,9 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 
 	// Uncovered surfaces refused with surface_not_covered.
 	for _, uncovered := range []string{
-		messagepolicy.SurfaceAgentDM,
 		messagepolicy.SurfaceGroupPost,
 		messagepolicy.SurfaceGroupSet,
 		messagepolicy.SurfaceMentionFanout,
-		messagepolicy.SurfaceMentionDelivery,
 		"broadcast",
 	} {
 		sp := validAuthoringSpec()
@@ -412,20 +413,30 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 		assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, vErr.Code)
 	}
 
-	// Agent recipient selectors refused with surface_not_covered.
+	// Covered agent-recipient surfaces and selectors are accepted when reachable.
+	for _, surf := range []string{messagepolicy.SurfaceAgentDM, messagepolicy.SurfaceMentionDelivery} {
+		sp := validAuthoringSpec()
+		sp.Scope.Surfaces = []string{surf}
+		sp.Scope.Recipient.Kinds = []string{"agent"}
+		sp.Scope.Recipient.AgentIDs = []string{"agent-1"}
+		_, err := ev.ValidateAuthoring(ctx, sp)
+		require.NoError(t, err, "surface=%s", surf)
+	}
+
+	// Agent recipient selectors on non-agent surfaces are unreachable (validation_error).
 	agentKindSpec := validAuthoringSpec()
 	agentKindSpec.Scope.Recipient.Kinds = []string{"agent"}
 	_, err = ev.ValidateAuthoring(ctx, agentKindSpec)
 	vErr = nil
 	require.ErrorAs(t, err, &vErr)
-	assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, vErr.Code)
+	assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
 
 	agentIDsSpec := validAuthoringSpec()
 	agentIDsSpec.Scope.Recipient.AgentIDs = []string{"agent-1"}
 	_, err = ev.ValidateAuthoring(ctx, agentIDsSpec)
 	vErr = nil
 	require.ErrorAs(t, err, &vErr)
-	assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, vErr.Code)
+	assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
 
 	// Recipient kinds unreachable from the listed surfaces refused with validation_error (O3).
 	unreachableCases := []struct {

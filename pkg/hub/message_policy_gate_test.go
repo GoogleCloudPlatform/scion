@@ -86,6 +86,7 @@ type mpgFaultStore struct {
 	failListProjectMembers atomic.Bool
 	failListParticipants   atomic.Bool
 	failCreateMessage      atomic.Bool
+	failGetConvByExtRef    atomic.Bool
 }
 
 func (f *mpgFaultStore) ListMessagePolicies(ctx context.Context, filter store.MessagePolicyFilter, opts store.ListOptions) (*store.ListResult[store.MessagePolicy], error) {
@@ -134,6 +135,13 @@ func (f *mpgFaultStore) CreateMessage(ctx context.Context, msg *store.Message) e
 		return errors.New("injected CreateMessage fault")
 	}
 	return f.Store.CreateMessage(ctx, msg)
+}
+
+func (f *mpgFaultStore) GetConversationByExternalRef(ctx context.Context, surface, externalRef string) (*store.Conversation, error) {
+	if f.failGetConvByExtRef.Load() {
+		return nil, errors.New("injected GetConversationByExternalRef fault")
+	}
+	return f.Store.GetConversationByExternalRef(ctx, surface, externalRef)
 }
 
 // mpgRecordingChannel captures channel deliveries on the direct user path.

@@ -150,37 +150,54 @@ type agentMentionFanoutInput struct {
 	// GetUser per member) on the same request. Nil means the caller did not
 	// resolve it, and dropHumanMentionResults fetches it itself if needed.
 	HumanMembers []chatMemberEntry
+
+	// HasPendingAttachments is true during pre-effect resolution when the
+	// origin send carries artifact attachments (AttachRefs) that will be bound
+	// after persistence, allowing empty-body attachment-only copies to be
+	// planned before persistence.
+	HasPendingAttachments bool
+
+	// CopyAdmission is the pre-effect derived admission minted by the origin
+	// message policy gate. Passed through to ExecuteAgentDM in copy mode.
+	CopyAdmission *derivedAdmission
 }
 
-// fanOutAgentMentions extracts @-mentions from an agent-authored message
-// that has already been delivered to its primary recipient, resolves them
-// against agents in the sender's own project, and delivers one TypeMention
-// to each authorized, non-suppressed recipient via ExecuteAgentDM. It
-// returns a MentionResult per attempted mention name; the primary recipient
-// and self-mentions never appear in the result.
-//
-// This function never blocks or fails the caller's primary delivery: every
-// error is captured in the corresponding MentionResult, and the whole call
-// is bounded well under a typical client's own request timeout.
-func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutInput) []messages.MentionResult {
-	// Every production call site always supplies both; this guard is a
-	// cheap defensive backstop against a future caller mistake, not a
-	// documented input contract. A nil in.Sender would panic below, at its
-	// first field dereference (.Slug). A nil in.SenderIdent would not panic
-	// — authorizeAgentMessage already treats a nil identity as unauthorized
-	// and denies before any store work — but short-circuiting it here too
-	// keeps this function's contract for the two fields symmetric and
-	// avoids that per-mention "unauthorized" round trip.
+// resolvedCopyTarget is one authorized, resolved copy recipient (either a
+// @mention copy or a group default-agent wake copy).
+type resolvedCopyTarget struct {
+	Agent              *store.Agent
+	Position           string // "body" or "default_agent"
+	ParentConv         *messaging.ConversationResult
+	ParentConvVerified bool
+}
+
+// resolvedMentionPlan holds the single pre-effect resolution of @mentions for
+// an agent-authored send. Both the message policy planner/admission and
+// deliverResolvedAgentMentions consume this exact plan without re-resolving.
+type resolvedMentionPlan struct {
+	Results           []messages.MentionResult
+	Targets           map[string]*store.Agent
+	UnauthorizedSlugs map[string]*store.Agent
+	AuthorizedOrdered []resolvedCopyTarget
+	LookupFailed      bool
+}
+
+// resolveMentionCopyTargets performs side-effect-free @mention extraction,
+// self-mention drop, project agent lookup, ResolveMentions dedupe and cap,
+// human-mention drop, and dry-run pairwise authorization once, before the
+// origin message policy gate (Contract §6).
+func (s *Server) resolveMentionCopyTargets(ctx context.Context, in agentMentionFanoutInput) *resolvedMentionPlan {
+	plan := &resolvedMentionPlan{}
 	if in.Sender == nil || in.SenderIdent == nil {
-		return nil
+		return plan
 	}
 	if !mentionFanoutTypes[in.Type] {
-		return nil
+		return plan
 	}
 
 	names := messages.DedupMentionNames(in.Explicit, messages.ExtractProseMentionsWithOptions(in.Msg, s.mentionOptions()))
 	if len(names) == 0 {
-		return nil
+		return plan
 	}
 
 	// Drop a self-mention before resolution, not after: MaxMentionRecipients
@@ -188,7 +205,7 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	// sender wrote for itself should never eat one of those slots.
 	names = dropSelfMentionName(names, in.Sender.Slug)
 	if len(names) == 0 {
-		return nil
+		return plan
 	}
 	primarySlug := ""
 	if in.Primary != nil && in.Primary.ProjectID == in.Sender.ProjectID {
@@ -197,23 +214,19 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 
 	projectAgents, err := listAllProjectAgents(ctx, s.store, in.Sender.ProjectID)
 	if err != nil {
-		// Report every agent mention as failed rather than dropping them:
-		// the caller must be able to tell "lookup failed" from "no such
-		// agent". With no known agents, ResolveMentions de-duplicates,
-		// skips the primary and reports every name as not_found; names
-		// that address a human member are dropped as on the success path,
-		// and the rest are relabelled as errors. Nothing is dispatched.
 		s.messageLog.Error("mention fan-out: failed to list project agents",
 			"sender_id", in.Sender.ID, "project_id", in.Sender.ProjectID, "error", err)
 		failed := messages.ResolveMentions(names, nil, primarySlug)
 		failed = s.dropHumanMentionResults(ctx, in.Sender.ProjectID, failed, in.HumanMembers)
 		if len(failed) == 0 {
-			return nil
+			return plan
 		}
 		for i := range failed {
 			failed[i].Status, failed[i].Error = "error", "mention resolution unavailable"
 		}
-		return failed
+		plan.Results = failed
+		plan.LookupFailed = true
+		return plan
 	}
 
 	agentInfos := make([]messages.AgentInfo, 0, len(projectAgents))
@@ -226,29 +239,84 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 
 	results := messages.ResolveMentions(names, agentInfos, primarySlug)
 	if len(results) == 0 {
-		return nil
+		return plan
 	}
 
-	// A name that resolves to no agent might still address a human project
-	// member by their display-name slug or email — that is not an error,
-	// just a different kind of recipient this function does not handle (the
-	// human-mention path already exists separately). Only pay for the
-	// project's human-member list when there is at least one unresolved
-	// name to check it against, so a body whose every mention is an agent
-	// costs nothing extra. Reuses in.HumanMembers when the caller already
-	// resolved it instead of fetching it again.
 	results = s.dropHumanMentionResults(ctx, in.Sender.ProjectID, results, in.HumanMembers)
 	if len(results) == 0 {
-		return nil
+		return plan
 	}
 
-	// Only explicit mentions can name agents on a message without text. A
-	// copy of such a message (an attachment-only one, ptone/scion#6146) is
-	// still useful when it delivers the parent's artifact attachments
-	// (ParentAttachments); with none, it would reach the agents empty, so
-	// it is not made. Resolution has already dropped the primary, self- and
-	// human mentions and marked unknown names; each mention that would have
-	// been delivered reports why instead.
+	if in.Msg == "" && len(in.ParentAttachments) == 0 && !in.HasPendingAttachments {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		plan.Results = results
+		return plan
+	}
+
+	plan.Results = results
+	plan.Targets = make(map[string]*store.Agent, len(results))
+	plan.UnauthorizedSlugs = make(map[string]*store.Agent)
+	seenTargetIDs := make(map[string]bool, len(results))
+	for i := range results {
+		if results[i].Status != "delivered" {
+			continue
+		}
+		slugKey := strings.ToLower(results[i].Slug)
+		target, ok := agentBySlug[slugKey]
+		if !ok || target == nil {
+			continue
+		}
+		allowed, _, _ := s.authorizeAgentMessage(ctx, in.SenderIdent, target, false)
+		if !allowed {
+			plan.UnauthorizedSlugs[slugKey] = target
+			continue
+		}
+		plan.Targets[slugKey] = target
+		if !seenTargetIDs[target.ID] {
+			seenTargetIDs[target.ID] = true
+			plan.AuthorizedOrdered = append(plan.AuthorizedOrdered, resolvedCopyTarget{
+				Agent:              target,
+				Position:           "body",
+				ParentConv:         in.ParentConv,
+				ParentConvVerified: in.ParentConvVerified,
+			})
+		}
+	}
+	return plan
+}
+
+// fanOutAgentMentions resolves and delivers @-mentions for direct unit tests.
+// Production send paths call resolveMentionCopyTargets once before the policy
+// gate and then deliverResolvedAgentMentions with that exact resolved plan.
+func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutInput) []messages.MentionResult {
+	resolved := s.resolveMentionCopyTargets(ctx, in)
+	return s.deliverResolvedAgentMentions(ctx, in, resolved)
+}
+
+// deliverResolvedAgentMentions delivers copies for an already-resolved mention
+// plan without re-resolving mentions (Contract §6).
+func (s *Server) deliverResolvedAgentMentions(ctx context.Context, in agentMentionFanoutInput, resolved *resolvedMentionPlan) []messages.MentionResult {
+	if in.Sender == nil || in.SenderIdent == nil || resolved == nil || len(resolved.Results) == 0 {
+		return nil
+	}
+	// Close the admission when mention fan-out finishes (only when there are
+	// actual mention results; an empty fan-out leaves the admission open for
+	// mutually exclusive default-agent wake).
+	if in.CopyAdmission != nil {
+		defer in.CopyAdmission.Close()
+	}
+
+	results := make([]messages.MentionResult, len(resolved.Results))
+	copy(results, resolved.Results)
+
+	if resolved.LookupFailed {
+		return results
+	}
+
 	if in.Msg == "" && len(in.ParentAttachments) == 0 {
 		for i := range results {
 			if results[i].Status == "delivered" {
@@ -286,8 +354,19 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 			continue
 		}
 
-		target, ok := agentBySlug[strings.ToLower(results[i].Slug)]
-		if !ok {
+		slugKey := strings.ToLower(results[i].Slug)
+		if unauthTarget, wasUnauth := resolved.UnauthorizedSlugs[slugKey]; wasUnauth {
+			results[i].Status = "unauthorized"
+			results[i].Error = "message delivery denied"
+			if unauthTarget != nil {
+				results[i].AgentPhase = unauthTarget.Phase
+			}
+			counts["unauthorized"]++
+			continue
+		}
+
+		target, ok := resolved.Targets[slugKey]
+		if !ok || target == nil {
 			results[i].Status = "error"
 			results[i].Error = "agent resolved but not found for dispatch"
 			counts["error"]++
@@ -376,6 +455,18 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 			AgentPhase: target.Phase, SuspendReason: target.SuspendReason}
 	}
 
+	// When message policies are enabled, verify the pre-effect derived
+	// admission and Seam A facts fingerprint BEFORE resolving/creating a DM
+	// conversation or recording an attachment addressee, so a refused copy
+	// leaves zero side effects (R5, Contract §8).
+	if s.experimentEnabled(experiments.MessagePolicies) {
+		if admErr := s.verifyCopyAdmissionPreflight(aggregateCtx, in, target, position); admErr != nil {
+			s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
+			return mentionCopyOutcome{Status: "error", Error: admErr.Error(),
+				AgentPhase: target.Phase, SuspendReason: target.SuspendReason}
+		}
+	}
+
 	convResult, convID, threadID, registerAfter, convOK := s.resolveMentionConversation(aggregateCtx, in, target)
 	if !convOK {
 		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
@@ -444,6 +535,11 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		// and gets the mention once ready (AgentDMWakeQueued).
 		SkipPhaseGate:       true,
 		AttachmentAddressee: addresseeRow,
+		// Trusted copy-intent provenance (Contract §5B): ONLY
+		// deliverAgentMentionCopy may set copyIntent; ExecuteAgentDM uses
+		// copyIntent alone as the mode discriminator.
+		copyIntent:    true,
+		copyAdmission: in.CopyAdmission,
 	})
 	dispatchCancel()
 	switch {
