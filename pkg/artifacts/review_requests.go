@@ -503,8 +503,9 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		}
 		if grantOpt != nil {
 			// Invalidate cached grants so subsequent reviewers in the same batch
-			// see the updated grant list.
+			// see the updated grant list, and emit the grant decision log.
 			grantsLoaded = false
+			s.logGrantPut(r, a, grantOpt.Grant, grantOpt.Put, grantOpt.Actor.Authority)
 		}
 
 		if outcome == ReviewRequestOutcomeCreated {

@@ -44,6 +44,10 @@ request with --withdraw (requires the hub.artifacts_review_requests experiment).
 Each --user flag accepts a user ID, user:<id>, or email address. Repeat
 --user to request reviews from up to 10 users at once.
 
+Note: --withdraw resolves the request ID through the artifact's review-requests
+list view, so a requester who has lost publish access cannot withdraw a request
+from the CLI.
+
 Examples:
   scion artifact request-review scion://artifact/5f1c2d3e-... --user alice@example.com
   scion artifact request-review scion://artifact/5f1c2d3e-... --user <user-id> --note "Please check section 3"

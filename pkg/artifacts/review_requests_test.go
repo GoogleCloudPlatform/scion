@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1391,5 +1392,166 @@ func TestMidBatchArtifactErrorPreservesEarlierResults(t *testing.T) {
 		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("first-reviewer ErrNotFound = %d %s, want 404", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDecisionLogReviewRequestRaisedGrant(t *testing.T) {
+	svc, h, st, artID := newReviewRequestFixture(t)
+	h.resolveMap["eve"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+	h.names["user:eve"] = "Eve"
+	h.resolveMap["frank"] = &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}}
+	h.names["user:frank"] = "Frank"
+
+	// Give Frank an existing read grant so raising him emits grant_changed.
+	if gRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:frank", Permission: GrantRead}); gRec.Code != http.StatusCreated {
+		t.Fatalf("grant frank read = %d %s", gRec.Code, gRec.Body.String())
+	}
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	svc.SetLogger(func() *slog.Logger { return logger })
+	takeGrantLogs := func() []map[string]any {
+		t.Helper()
+		raw := buf.String()
+		buf.Reset()
+		var out []map[string]any
+		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+			if line == "" {
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				t.Fatalf("decode log %q: %v", line, err)
+			}
+			if act, _ := m[logKeyAction].(string); act == logActionGrantCreated || act == logActionGrantChanged {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+
+	// 1. Owner raise (no existing grant for Carol) -> logs grant_created with authority=owner.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:carol"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner raise carol = %d %s", rec.Code, rec.Body.String())
+	}
+	entries := takeGrantLogs()
+	checkEntry(t, "owner raise", one(t, "owner raise", entries), "INFO", map[string]any{
+		logKeyAction:      logActionGrantCreated,
+		logKeyAuthority:   AuthorityOwner,
+		logKeyPrincipalID: "alice",
+		logKeySubjectKind: SubjectPrincipal,
+		logKeySubjectRef:  "user:carol",
+		logKeyPermission:  GrantReview,
+	})
+
+	// 2. Raise over an existing read grant (Frank) -> logs grant_changed with authority=owner.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:frank"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner raise frank = %d %s", rec.Code, rec.Body.String())
+	}
+	entries = takeGrantLogs()
+	checkEntry(t, "raise over read", one(t, "raise over read", entries), "INFO", map[string]any{
+		logKeyAction:      logActionGrantChanged,
+		logKeyAuthority:   AuthorityOwner,
+		logKeyPrincipalID: "alice",
+		logKeySubjectKind: SubjectPrincipal,
+		logKeySubjectRef:  "user:frank",
+		logKeyPermission:  GrantReview,
+	})
+
+	// 3. Reviewer who already has review grant (Bob) -> logs nothing.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("existing review bob = %d %s", rec.Code, rec.Body.String())
+	}
+	if entries = takeGrantLogs(); len(entries) != 0 {
+		t.Errorf("existing review grant should log nothing, got %+v", entries)
+	}
+
+	// 4. Steward raise on an agent-owned artifact -> logs grant_created with steward authority.
+	pubReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=agent.md&title=Agent+Doc&scope=proj-1", strings.NewReader("# Agent\n"))
+	pubReq = withPrincipal(pubReq, principal{PrincipalKindAgent, "agent-1", "proj-1"})
+	pubRec := httptest.NewRecorder()
+	svc.ServeHTTP(pubRec, pubReq)
+	if pubRec.Code != http.StatusCreated {
+		t.Fatalf("agent publish = %d %s", pubRec.Code, pubRec.Body.String())
+	}
+	var agentPub ArtifactResponse
+	_ = json.Unmarshal(pubRec.Body.Bytes(), &agentPub)
+	agentArtID := agentPub.Artifact.ID
+
+	pAlice := principal{PrincipalKindUser, "alice", ""}
+	h.allowSteward(pAlice, "agent-1", "proj-1", StewardClauseDelegator)
+	// Give Alice write access so she can publish (and request review) as steward.
+	if gRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:alice", Permission: GrantWrite}); gRec.Code != http.StatusCreated {
+		t.Fatalf("grant alice write on agent art = %d %s", gRec.Code, gRec.Body.String())
+	}
+	_ = st
+	takeGrantLogs()
+
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:eve"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("steward raise eve = %d %s", rec.Code, rec.Body.String())
+	}
+	entries = takeGrantLogs()
+	checkEntry(t, "steward raise", one(t, "steward raise", entries), "INFO", map[string]any{
+		logKeyAction:      logActionGrantCreated,
+		logKeyAuthority:   AuthorityStewardDelegator,
+		logKeyPrincipalID: "alice",
+		logKeySubjectKind: SubjectPrincipal,
+		logKeySubjectRef:  "user:eve",
+		logKeyPermission:  GrantReview,
+		logKeyOwnerKind:   PrincipalKindAgent,
+	})
+}
+
+type failingAuthorizeSubject struct {
+	err error
+}
+
+func (s *failingAuthorizeSubject) Permits(_ context.Context, _ string, _ string) (bool, error) {
+	return true, nil
+}
+
+func (s *failingAuthorizeSubject) Authorize(_ context.Context, _ string, _ string) (bool, error) {
+	return false, s.err
+}
+
+func TestReapReviewRequestsPrincipalCanReviewErrorFailSafe(t *testing.T) {
+	_, h, st, artID := newReviewRequestFixture(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	ownerActor := &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner}
+
+	// Create an open request for Carol (no review grant, so a working Authorize
+	// would report canReview=false and expire it).
+	rr, _, err := st.CreateOrRemindReviewRequest(ctx, ReviewRequest{
+		ArtifactID: artID, ReviewerKind: PrincipalKindUser, ReviewerRef: "carol",
+		RequesterKind: PrincipalKindUser, RequesterRef: "alice", Access: ReviewRequestAccessExisting,
+	}, 24*time.Hour, t0, ownerActor, nil)
+	if err != nil {
+		t.Fatalf("create carol: %v", err)
+	}
+
+	// ResolveRecipient succeeds and returns a subject whose Authorize errors,
+	// so principalCanReview itself returns rerr != nil.
+	h.resolveMap["carol"] = &failingAuthorizeSubject{err: errors.New("policy backend unavailable")}
+	res, err := ReapReviewRequests(ctx, st, h, t0.Add(24*time.Hour), 50, nil)
+	if err == nil {
+		t.Fatalf("expected error from ReapReviewRequests when principalCanReview fails, got nil (res=%+v)", res)
+	}
+	if res.Errors == 0 || res.Expired != 0 {
+		t.Fatalf("reap with principalCanReview error = %+v, want Errors>0 Expired=0", res)
+	}
+	got, gerr := st.GetOpenReviewRequest(ctx, artID, PrincipalKindUser, "carol")
+	if gerr != nil || got.ID != rr.ID {
+		t.Fatalf("request must stay open when principalCanReview errors: got=%+v err=%v", got, gerr)
 	}
 }

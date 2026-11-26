@@ -188,10 +188,13 @@ type ReviewRequestKey struct {
 
 // ReviewRequestGrantOption asks CreateOrRemindReviewRequest to write or raise
 // a principal review grant inside the same lockLiveArtifact transaction.
+// Put is populated on return with the GrantPut outcome (created, changed, or
+// unchanged) so the caller can emit the matching decision-log entry.
 type ReviewRequestGrantOption struct {
 	Grant     *Grant
 	MaxGrants int
 	Actor     *Actor
+	Put       GrantPut
 }
 
 // CreateOrRemindReviewRequest implements Store.
@@ -239,9 +242,11 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 		if g.CreatedAt.IsZero() {
 			g.CreatedAt = at
 		}
-		if _, _, err := s.putGrantTx(ctx, tx, g, grantOpt.MaxGrants, false, grantOpt.Actor, false, at); err != nil {
+		put, _, err := s.putGrantTx(ctx, tx, g, grantOpt.MaxGrants, false, grantOpt.Actor, false, at)
+		if err != nil {
 			return ReviewRequest{}, "", err
 		}
+		grantOpt.Put = put
 		raisedGrantID = g.ID
 	}
 
