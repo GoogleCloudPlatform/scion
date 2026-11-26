@@ -370,6 +370,10 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &ChatRetentionPreviewExecutor{srv: s}, nil
 	case entadapter.ChatRetentionRunKey:
 		return &ChatRetentionRunExecutor{srv: s}, nil
+	case entadapter.DecisionRetentionPreviewKey:
+		return &DecisionRetentionPreviewExecutor{srv: s}, nil
+	case entadapter.DecisionRetentionRunKey:
+		return &DecisionRetentionRunExecutor{srv: s}, nil
 	case entadapter.NFSOrphanScanKey:
 		return &NFSOrphanScanExecutor{srv: s}, nil
 	case "pull-images":

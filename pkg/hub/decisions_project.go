@@ -162,6 +162,15 @@ type ProjectDecisionLogEntryView struct {
 	ConversationAvailable  bool                       `json:"conversationAvailable"`
 }
 
+// DecisionRetentionInfo describes the effective settled-decision retention
+// policy for a project (design-8984 §3.5). Present only when the
+// hub.decision_retention experiment is on, retention is enabled, and the
+// project has an effective window.
+type DecisionRetentionInfo struct {
+	Active bool `json:"active"`
+	Days   int  `json:"days"`
+}
+
 // ProjectPendingDecisionsResponse is the response of GET /api/v1/projects/{id}/decisions?tab=pending.
 // Counts are never filtered; FilteredCounts is present when q, conversation
 // or agent narrows the list (design D6).
@@ -172,6 +181,7 @@ type ProjectPendingDecisionsResponse struct {
 	Agents         []ProjectDecisionActorView        `json:"agents"`
 	Answerers      []ProjectDecisionActorView        `json:"answerers"`
 	Conversations  []ProjectDecisionConversationView `json:"conversations"`
+	Retention      *DecisionRetentionInfo            `json:"retention,omitempty"`
 	NextCursor     string                            `json:"nextCursor,omitempty"`
 }
 
@@ -182,7 +192,51 @@ type ProjectMadeDecisionsResponse struct {
 	Agents        []ProjectDecisionActorView        `json:"agents"`
 	Answerers     []ProjectDecisionActorView        `json:"answerers"`
 	Conversations []ProjectDecisionConversationView `json:"conversations"`
+	Retention     *DecisionRetentionInfo            `json:"retention,omitempty"`
 	NextCursor    string                            `json:"nextCursor,omitempty"`
+}
+
+// projectDecisionRetentionInfo returns the effective retention info for
+// projectID from cached operational settings (0 DB queries), or nil when the
+// experiment is off, retention is disabled, or the project has no window.
+func (s *Server) projectDecisionRetentionInfo(projectID string) *DecisionRetentionInfo {
+	if projectID == "" || !s.experimentEnabled(experiments.DecisionRetention) {
+		return nil
+	}
+	cfg := s.decisionRetentionConfig()
+	if !cfg.Enabled {
+		return nil
+	}
+	days, ok := cfg.EffectiveDays(projectID)
+	if !ok {
+		return nil
+	}
+	return &DecisionRetentionInfo{Active: true, Days: days}
+}
+
+// profileDecisionRetentionInfo returns per-project retention info for all
+// projects in projectIDs that have an active retention window, or nil when
+// none do (or when the experiment is off / retention is disabled).
+func (s *Server) profileDecisionRetentionInfo(projectIDs []string) map[string]DecisionRetentionInfo {
+	if len(projectIDs) == 0 || !s.experimentEnabled(experiments.DecisionRetention) {
+		return nil
+	}
+	cfg := s.decisionRetentionConfig()
+	if !cfg.Enabled {
+		return nil
+	}
+	var out map[string]DecisionRetentionInfo
+	for _, pid := range projectIDs {
+		days, ok := cfg.EffectiveDays(pid)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]DecisionRetentionInfo)
+		}
+		out[pid] = DecisionRetentionInfo{Active: true, Days: days}
+	}
+	return out
 }
 
 // pendingPromptCursor is the keyset cursor for tab=pending: section 0 is
@@ -854,11 +908,15 @@ func (s *Server) decisionsCore(
 			filteredCounts = &fc
 		}
 		if pq.profile {
-			return s.finishProfilePendingDecisions(ctx, set, pq, counts, filteredCounts, classified, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+			return s.finishProfilePendingDecisions(ctx, set, pq, targetProjectIDs, counts, filteredCounts, classified, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
 		}
 		pagePrompts, nextCursor, err := paginateClassifiedPrompts(classified, pq.pendingCursor, pq.limit)
 		if err != nil {
 			return nil, err
+		}
+		var projectID string
+		if len(set.projectIDs) > 0 {
+			projectID = set.projectIDs[0]
 		}
 		return ProjectPendingDecisionsResponse{
 			Counts:         counts,
@@ -867,6 +925,7 @@ func (s *Server) decisionsCore(
 			Agents:         agentsFacet,
 			Answerers:      answerersFacet,
 			Conversations:  conversationsFacet,
+			Retention:      s.projectDecisionRetentionInfo(projectID),
 			NextCursor:     nextCursor,
 		}, nil
 	}
@@ -922,12 +981,17 @@ func (s *Server) decisionsCore(
 	if err != nil {
 		return nil, err
 	}
+	var projectID string
+	if len(set.projectIDs) > 0 {
+		projectID = set.projectIDs[0]
+	}
 	return ProjectMadeDecisionsResponse{
 		Counts:        counts,
 		Entries:       s.buildProjectDecisionLogViews(ctx, wcs, set, rawEntries),
 		Agents:        agentsFacet,
 		Answerers:     answerersFacet,
 		Conversations: conversationsFacet,
+		Retention:     s.projectDecisionRetentionInfo(projectID),
 		NextCursor:    nextCursor,
 	}, nil
 }

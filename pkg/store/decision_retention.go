@@ -76,10 +76,18 @@ func (c *DecisionRetentionCounts) Add(o DecisionRetentionCounts) {
 	c.Answers += o.Answers
 }
 
+// DecisionRetentionProjectOverride is the per-project override recorded in a
+// run's policy snapshot.
+type DecisionRetentionProjectOverride struct {
+	Mode string `json:"mode"`
+	Days *int   `json:"days,omitempty"`
+}
+
 // DecisionRetentionPolicy is the policy a run applied, recorded on its row.
 type DecisionRetentionPolicy struct {
-	RetentionDays int       `json:"retention_days"`
-	Cutoff        time.Time `json:"cutoff"`
+	RetentionDays    int                                         `json:"retention_days,omitempty"`
+	Cutoff           time.Time                                   `json:"cutoff"`
+	ProjectOverrides map[string]DecisionRetentionProjectOverride `json:"project_overrides,omitempty"`
 }
 
 // DecisionRetentionRun is one decision_retention_runs row: the audit record of
@@ -143,6 +151,11 @@ type DecisionRetentionStore interface {
 	// pruned at ref_count <= 0, and recomputed when the purged row was the
 	// newest contributor. Chat messages and decision_key_counters are kept.
 	PurgeDecisionMessages(ctx context.Context, messageIDs []string, cutoffByProject map[string]time.Time) (DecisionRetentionPurgeResult, error)
+
+	// PreviewDecisionMessages evaluates whole-message eligibility for messageIDs
+	// using the exact same rules as PurgeDecisionMessages without taking row
+	// locks or deleting any rows.
+	PreviewDecisionMessages(ctx context.Context, messageIDs []string, cutoffByProject map[string]time.Time) (DecisionRetentionPurgeResult, error)
 
 	// GetDecisionRetentionCursor returns the persisted cursor from
 	// hub_settings["decision_retention_cursor"], or a zero cursor when absent.

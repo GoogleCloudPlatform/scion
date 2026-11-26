@@ -304,7 +304,8 @@ func TestDecisionRetentionJob_MidTickHoldAndPerPageRunAudit(t *testing.T) {
 		return nil
 	}
 
-	p := srv.decisionRetentionPolicyAt(time.Now())
+	p, err := srv.decisionRetentionPolicyAt(ctx, time.Now())
+	require.NoError(t, err)
 	res, err := sw.RunTick(ctx, p)
 	require.NoError(t, err)
 	assert.True(t, res.Ran)
@@ -383,7 +384,9 @@ func TestDecisionRetentionJob_MultiPageWalkAcrossTicks(t *testing.T) {
 	}
 
 	// Tick 1: purges first 50 rows and stops on budget.
-	res1, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	p1, err := srv.decisionRetentionPolicyAt(ctx, fakeNow)
+	require.NoError(t, err)
+	res1, err := sw.RunTick(ctx, p1)
 	require.NoError(t, err)
 	assert.True(t, res1.Ran)
 	assert.Equal(t, 1, res1.Pages)
@@ -394,7 +397,9 @@ func TestDecisionRetentionJob_MultiPageWalkAcrossTicks(t *testing.T) {
 	// Advance fake clock past tick_interval_minutes and run Tick 2.
 	fakeNow = fakeNow.Add(2 * time.Minute)
 	sw.sleep = func(_ context.Context, _ time.Duration) error { return nil }
-	res2, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	p2, err := srv.decisionRetentionPolicyAt(ctx, fakeNow)
+	require.NoError(t, err)
+	res2, err := sw.RunTick(ctx, p2)
 	require.NoError(t, err)
 	assert.True(t, res2.Ran)
 	assert.Equal(t, 1, res2.Pages)
@@ -519,7 +524,9 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 	}
 
 	// Day 1: scans first 50 ineligible backlog rows and stops on budget.
-	res1, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	pDay1, err := srv.decisionRetentionPolicyAt(ctx, fakeNow)
+	require.NoError(t, err)
+	res1, err := sw.RunTick(ctx, pDay1)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res1.Pages)
 	assert.Equal(t, 0, res1.PurgedMessages)
@@ -539,7 +546,9 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 	// the remaining 10 ineligible + 15 eligible rows, purges all 15 eligible
 	// rows, and reaches the cutoff.
 	fakeNow = baseNow.Add(25 * time.Hour)
-	res2, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	pDay2, err := srv.decisionRetentionPolicyAt(ctx, fakeNow)
+	require.NoError(t, err)
+	res2, err := sw.RunTick(ctx, pDay2)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res2.Pages)
 	assert.Equal(t, eligibleCount, res2.PurgedMessages, "eligible rows behind backlog must not be starved")
@@ -558,7 +567,9 @@ func TestDecisionRetentionJob_CursorDoesNotResetBeforeReachingCutoff(t *testing.
 	// Day 3 (+50h): now ReachedCutoff is true AND >24h elapsed since day1ResetAt,
 	// so the cursor resets to the start of the walk and revisits the backlog.
 	fakeNow = baseNow.Add(50 * time.Hour)
-	res3, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	pDay3, err := srv.decisionRetentionPolicyAt(ctx, fakeNow)
+	require.NoError(t, err)
+	res3, err := sw.RunTick(ctx, pDay3)
 	require.NoError(t, err)
 	assert.Equal(t, 1, res3.Pages)
 	assert.Equal(t, 50, res3.SkippedMessages, "after reset, walk revisits backlog from start")
@@ -625,4 +636,93 @@ func TestDecisionRetentionJob_ReconcileInterruptedRuns(t *testing.T) {
 	gotLive := byID[live.ID]
 	assert.Equal(t, store.DecisionRetentionStatusRunning, gotLive.Status)
 	assert.Nil(t, gotLive.FinishedAt)
+}
+
+// TestDecisionRetentionJob_PerProjectOverridesKeepForeverAndDeletedIgnored
+// proves that the retention job:
+//  1. honors per-project days overrides (shorter or longer than hub default);
+//  2. holds projects with keep_forever even when a hub default exists;
+//  3. activates when no hub default exists but a live project has a days override;
+//  4. ignores overrides belonging to deleted projects (no scan / no run row when
+//     only a deleted project has an override and there is no hub default).
+func TestDecisionRetentionJob_PerProjectOverridesKeepForeverAndDeletedIgnored(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projDefault := uuid.NewString()
+	projLong := uuid.NewString()
+	projHold := uuid.NewString()
+	projDeleted := uuid.NewString()
+	for i, pid := range []string{projDefault, projLong, projHold, projDeleted} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("ret-ov-%d", i), Slug: fmt.Sprintf("ret-ov-%d", i), Created: time.Now().UTC(),
+		}))
+	}
+	require.NoError(t, cs.DeleteProject(ctx, projDeleted))
+
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	// Seed decisions across the 3 live projects.
+	_, decDef45 := seedOldSettledDecision(t, ctx, cs, projDefault, agentID, userID, "DEF45", 45*24*time.Hour)
+	_, decLong45 := seedOldSettledDecision(t, ctx, cs, projLong, agentID, userID, "LONG45", 45*24*time.Hour)
+	_, decLong75 := seedOldSettledDecision(t, ctx, cs, projLong, agentID, userID, "LONG75", 75*24*time.Hour)
+	_, decHold90 := seedOldSettledDecision(t, ctx, cs, projHold, agentID, userID, "HOLD90", 90*24*time.Hour)
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.DecisionRetention)),
+		"test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+
+	// Case 1: No hub default, only deleted project has a days override -> job ignores it (inactive, 0 runs).
+	docDeletedOnly := fmt.Sprintf(`{"enabled":true,"project_overrides":{%q:{"mode":"days","days":30}},"sweep":{"tick_interval_minutes":1}}`, projDeleted)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName, json.RawMessage(docDeletedOnly), "test", 0, "managed")
+	require.NoError(t, err)
+	srv.decisionRetentionHandler()(ctx)
+
+	runs, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, runs, "deleted-project-only override must be ignored by job")
+
+	// Case 2: No hub default, only projLong has 60d override -> purges ONLY decLong75.
+	docOverrideOnly := fmt.Sprintf(`{"enabled":true,"project_overrides":{%q:{"mode":"days","days":60}},"sweep":{"tick_interval_minutes":1}}`, projLong)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName, json.RawMessage(docOverrideOnly), "test", ops.SectionRevision(opsettings.DecisionRetentionSectionName), "managed")
+	require.NoError(t, err)
+	srv.decisionRetentionHandler()(ctx)
+
+	_, err = cs.GetDecision(ctx, decLong75)
+	assert.ErrorIs(t, err, store.ErrNotFound, "projLong 75d decision must be purged by 60d override")
+	for _, kept := range []string{decDef45, decLong45, decHold90} {
+		_, err = cs.GetDecision(ctx, kept)
+		assert.NoError(t, err, "decision %s must remain when only projLong has an override", kept)
+	}
+
+	// Case 3: Hub default 30d + projLong 60d + projHold keep_forever -> purges decDef45, keeps decLong45 & decHold90.
+	// Reset cursor & run history so the new tick runs immediately from the start.
+	require.NoError(t, cs.DecisionRetention().SaveDecisionRetentionCursor(ctx, store.DecisionRetentionCursor{}))
+	_, err = cs.DecisionRetention().PruneDecisionRetentionRuns(ctx, time.Now().UTC().Add(time.Hour))
+	require.NoError(t, err)
+
+	docMixed := fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 30,
+		"project_overrides": {
+			%q: {"mode": "days", "days": 60},
+			%q: {"mode": "keep_forever"}
+		},
+		"sweep": {"tick_interval_minutes": 1}
+	}`, projLong, projHold)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName, json.RawMessage(docMixed), "test", ops.SectionRevision(opsettings.DecisionRetentionSectionName), "managed")
+	require.NoError(t, err)
+	srv.decisionRetentionHandler()(ctx)
+
+	_, err = cs.GetDecision(ctx, decDef45)
+	assert.ErrorIs(t, err, store.ErrNotFound, "projDefault 45d decision must be purged by 30d hub default")
+	_, err = cs.GetDecision(ctx, decLong45)
+	assert.NoError(t, err, "projLong 45d decision must be kept by 60d override")
+	_, err = cs.GetDecision(ctx, decHold90)
+	assert.NoError(t, err, "projHold 90d decision must be held by keep_forever override")
 }

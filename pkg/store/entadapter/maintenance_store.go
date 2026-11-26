@@ -100,6 +100,14 @@ const ChatRetentionPreviewKey = "chat-retention-preview"
 // retention sweep.
 const ChatRetentionRunKey = "chat-retention-run"
 
+// DecisionRetentionPreviewKey is the maintenance operation key of the
+// settled-decision retention preview (dry run with per-project counts).
+const DecisionRetentionPreviewKey = "decision-retention-preview"
+
+// DecisionRetentionRunKey is the maintenance operation key of a manual
+// settled-decision retention sweep.
+const DecisionRetentionRunKey = "decision-retention-run"
+
 // NFSOrphanScanKey is the maintenance operation key of an on-demand
 // report-only scan for orphaned agent directories on NFS project storage
 // (ptone/scion#7932).
@@ -210,6 +218,18 @@ var defaultSeedOperations = []store.MaintenanceOperation{
 		Key:         ChatRetentionRunKey,
 		Title:       "Chat Retention Run",
 		Description: `Runs the chat retention sweep once, now, with the saved settings: it permanently deletes the messages of conversations and topics deleted more than deleted_conversation_grace_days ago and, when a retention window is set, the messages older than the window, with their dependent rows and the bytes of attachments left with no message. It is the same sweep as the background ticks, without their per-tick time budget; the pause between chunks stays, so a large backlog takes hours. It waits for a running sweep tick to finish first. The run is recorded in the chat retention run history (Admin > Server Config) with the counts per project, the policy and who ran it. Refused while the retention sweep is not enabled. Takes no parameters. Take a database backup first. Available only while the hub.chat_retention experiment is on.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         DecisionRetentionPreviewKey,
+		Title:       "Decision Retention Preview",
+		Description: `Shows what the settled-decision retention sweep would delete under the saved hub default and per-project overrides, without deleting anything. It walks the same settled candidates and applies the exact whole-message eligibility rule and per-project cutoffs as the sweep. The result is recorded as a dry-run preview in the decision retention run history (Admin > Server Config), with per-project decision and answer counts, the policy and who ran it; it never holds a decision ID, answer ID or content. Works whether or not the sweep is enabled. Takes no parameters. Available only while the hub.decision_retention experiment is on. Safe to re-run.`,
+		Category:    store.MaintenanceCategoryOperation,
+	},
+	{
+		Key:         DecisionRetentionRunKey,
+		Title:       "Decision Retention Run",
+		Description: `Runs the settled-decision retention sweep once, now, with the saved hub default and per-project overrides: it permanently deletes whole prompt messages whose every decision is settled and inactive past its project's effective window, along with their answers, and updates the decision facet summary. It walks from the beginning without the per-tick time budget and waits for any running sweep tick to finish first. The run is recorded in the decision retention run history (Admin > Server Config) with per-project counts, the policy and who ran it. Refused while decision retention is not enabled or has no active retention window. Takes no parameters. Take a database backup first. Available only while the hub.decision_retention experiment is on.`,
 		Category:    store.MaintenanceCategoryOperation,
 	},
 	{

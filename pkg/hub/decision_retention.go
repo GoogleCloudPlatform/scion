@@ -74,27 +74,66 @@ const (
 	decisionRetentionInterruptedError = "interrupted by hub restart"
 )
 
-// decisionRetentionPolicy is the policy snapshot of one tick.
+// decisionRetentionPolicy is the policy snapshot of one tick, preview, or
+// manual run.
 type decisionRetentionPolicy struct {
-	// Active is true iff experiment is on && enabled && a window is set.
+	// Active is true iff experiment is on && enabled && at least one project
+	// has an effective window (hub default or a live days override).
 	Active bool
 	Config opsettings.DecisionRetentionConfig
 	Now    time.Time
-	// Cutoff is now - retention_days; zero when not active.
-	Cutoff time.Time
+	// GlobalCutoff is now - min(window in use); zero when no window is set.
+	GlobalCutoff time.Time
 }
 
 func newDecisionRetentionPolicy(experimentOn bool, cfg opsettings.DecisionRetentionConfig, now time.Time) decisionRetentionPolicy {
+	minDays, hasWindow := cfg.MinEffectiveDays()
 	p := decisionRetentionPolicy{
-		Active: experimentOn && cfg.Enabled && cfg.HasWindow(),
+		Active: experimentOn && cfg.Enabled && hasWindow,
 		Config: cfg,
 		Now:    now.UTC(),
 	}
 	if !p.Active {
 		return p
 	}
-	p.Cutoff = p.Now.Add(-time.Duration(cfg.RetentionDays) * 24 * time.Hour)
+	p.GlobalCutoff = p.Now.Add(-time.Duration(minDays) * 24 * time.Hour)
 	return p
+}
+
+// CutoffForProject returns the retention cutoff timestamp for projectID under
+// p, or (zero, false) when p is inactive, the project is held (keep_forever),
+// or no effective window applies.
+func (p decisionRetentionPolicy) CutoffForProject(projectID string) (time.Time, bool) {
+	if !p.Active {
+		return time.Time{}, false
+	}
+	days, ok := p.Config.EffectiveDays(projectID)
+	if !ok {
+		return time.Time{}, false
+	}
+	return p.Now.Add(-time.Duration(days) * 24 * time.Hour), true
+}
+
+func decisionRetentionRunPolicy(p decisionRetentionPolicy) store.DecisionRetentionPolicy {
+	out := store.DecisionRetentionPolicy{
+		RetentionDays: p.Config.RetentionDays,
+		Cutoff:        p.GlobalCutoff.UTC(),
+	}
+	if len(p.Config.ProjectOverrides) > 0 {
+		out.ProjectOverrides = make(map[string]store.DecisionRetentionProjectOverride, len(p.Config.ProjectOverrides))
+		for pid, ov := range p.Config.ProjectOverrides {
+			var days *int
+			if ov.Days != nil {
+				d := *ov.Days
+				days = &d
+			}
+			out.ProjectOverrides[pid] = store.DecisionRetentionProjectOverride{
+				Mode: ov.Mode,
+				Days: days,
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) decisionRetentionConfig() opsettings.DecisionRetentionConfig {
@@ -104,8 +143,31 @@ func (s *Server) decisionRetentionConfig() opsettings.DecisionRetentionConfig {
 	return opsettings.DefaultDecisionRetentionConfig()
 }
 
-func (s *Server) decisionRetentionPolicyAt(now time.Time) decisionRetentionPolicy {
-	return newDecisionRetentionPolicy(s.experimentEnabled(experiments.DecisionRetention), s.decisionRetentionConfig(), now)
+// decisionRetentionConfigForJob returns the resolved decision_retention config
+// with overrides for deleted projects stripped so the job and maintenance ops
+// ignore them (design-8984 §3.1).
+func (s *Server) decisionRetentionConfigForJob(ctx context.Context) (opsettings.DecisionRetentionConfig, error) {
+	cfg := s.decisionRetentionConfig()
+	if len(cfg.ProjectOverrides) == 0 {
+		return cfg, nil
+	}
+	live, err := s.filterLiveProjectOverrides(ctx, cfg.ProjectOverrides)
+	if err != nil {
+		return opsettings.DecisionRetentionConfig{}, err
+	}
+	cfg.ProjectOverrides = live
+	return cfg, nil
+}
+
+func (s *Server) decisionRetentionPolicyAt(ctx context.Context, now time.Time) (decisionRetentionPolicy, error) {
+	if !s.experimentEnabled(experiments.DecisionRetention) {
+		return decisionRetentionPolicy{Now: now.UTC()}, nil
+	}
+	cfg, err := s.decisionRetentionConfigForJob(ctx)
+	if err != nil {
+		return decisionRetentionPolicy{Now: now.UTC()}, err
+	}
+	return newDecisionRetentionPolicy(true, cfg, now), nil
 }
 
 // decisionRetentionState holds the Server's decision retention wiring.
@@ -150,10 +212,11 @@ func (s *Server) tryDecisionRetentionLock(ctx context.Context) (func(), bool, er
 // startup after SetDecisionRetentionStore.
 //
 // When this process acquires LockDecisionRetention, no replica is actively
-// executing a sweep or manual run, so every running row started before this
-// process's startTime is marked failed. If another replica currently holds the
-// lock, only locked-trigger rows older than decisionRetentionRunMaxAge are
-// failed (previews take no lock and use startTime).
+// executing a sweep, manual run, or preview, so every running row started
+// before this process's startTime is marked failed. If another replica
+// currently holds the lock, only rows older than decisionRetentionRunMaxAge
+// are failed so a live run on the lock-holding replica is not prematurely
+// marked failed.
 func (s *Server) ReconcileInterruptedDecisionRetentionRuns(ctx context.Context) int {
 	st := s.decisionRetentionStore()
 	if st == nil {
@@ -180,20 +243,15 @@ func (s *Server) ReconcileInterruptedDecisionRetentionRuns(ctx context.Context) 
 		lockedBefore = started
 	}
 
-	total := 0
-	for _, step := range []struct {
-		triggers []string
-		before   time.Time
-	}{
-		{[]string{store.DecisionRetentionTriggerPreview}, started},
-		{[]string{store.DecisionRetentionTriggerSweep, store.DecisionRetentionTriggerManual}, lockedBefore},
-	} {
-		n, err := st.FailRunningDecisionRetentionRuns(ctx, step.triggers, step.before, decisionRetentionInterruptedError, now)
-		if err != nil {
-			slog.Warn("decision retention: reconcile interrupted runs", "triggers", step.triggers, "error", err)
-			continue
-		}
-		total += n
+	allTriggers := []string{
+		store.DecisionRetentionTriggerSweep,
+		store.DecisionRetentionTriggerManual,
+		store.DecisionRetentionTriggerPreview,
+	}
+	total, err := st.FailRunningDecisionRetentionRuns(ctx, allTriggers, lockedBefore, decisionRetentionInterruptedError, now)
+	if err != nil {
+		slog.Warn("decision retention: reconcile interrupted runs", "triggers", allTriggers, "error", err)
+		return 0
 	}
 	if total > 0 {
 		slog.Warn("decision retention: marked interrupted runs failed", "count", total)
@@ -210,7 +268,11 @@ func (s *Server) decisionRetentionHandler() func(ctx context.Context) {
 		if st == nil {
 			return
 		}
-		p := s.decisionRetentionPolicyAt(time.Now())
+		p, err := s.decisionRetentionPolicyAt(ctx, time.Now())
+		if err != nil {
+			slog.Error("decision retention: failed to resolve policy", "error", err)
+			return
+		}
 		if !p.Active {
 			return
 		}
@@ -232,7 +294,7 @@ func (s *Server) decisionRetentionHandler() func(ctx context.Context) {
 				"decisions", res.Purged.Decisions, "answers", res.Purged.Answers,
 				"messages", res.PurgedMessages, "skipped_messages", res.SkippedMessages,
 				"pages", res.Pages, "max_tx_ms", res.MaxTx.Milliseconds(),
-				"reached_cutoff", res.ReachedCutoff, "cutoff", p.Cutoff)
+				"reached_cutoff", res.ReachedCutoff, "global_cutoff", p.GlobalCutoff)
 		}
 	}
 }
@@ -246,7 +308,7 @@ type decisionRetentionSweeper struct {
 	// policy, when non-nil, is re-read before each page so a mid-tick hold
 	// (experiment off, enabled=false, or cleared window) stops further pages
 	// immediately instead of waiting for the next tick.
-	policy func(now time.Time) decisionRetentionPolicy
+	policy func(ctx context.Context, now time.Time) (decisionRetentionPolicy, error)
 }
 
 func newDecisionRetentionSweeper(st store.DecisionRetentionStore, isSQLite bool) *decisionRetentionSweeper {
@@ -304,7 +366,7 @@ func decisionRetentionBudgetEnd(start time.Time, remaining time.Duration, hasDea
 // when p is inactive or tick_interval_minutes has not yet elapsed.
 func (sw *decisionRetentionSweeper) RunTick(ctx context.Context, p decisionRetentionPolicy) (decisionRetentionTickResult, error) {
 	var res decisionRetentionTickResult
-	if !p.Active || p.Cutoff.IsZero() {
+	if !p.Active || p.GlobalCutoff.IsZero() {
 		return res, nil
 	}
 	cfg := p.Config
@@ -383,10 +445,7 @@ func (sw *decisionRetentionSweeper) sweepAndRecord(
 		}
 	}
 
-	run.Policy = store.DecisionRetentionPolicy{
-		RetentionDays: p.Config.RetentionDays,
-		Cutoff:        p.Cutoff.UTC(),
-	}
+	run.Policy = decisionRetentionRunPolicy(p)
 	run.FinishedAt = &now
 	alreadyFailed := run.Status == store.DecisionRetentionStatusFailed
 	switch {
@@ -427,20 +486,23 @@ func (sw *decisionRetentionSweeper) walk(
 	if pageSize < decisionRetentionMinPage {
 		pageSize = opsettings.DecisionRetentionDefaultPageSize
 	}
-	globalCutoff := p.Cutoff.UTC()
+	globalCutoff := p.GlobalCutoff.UTC()
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if sw.policy != nil {
-			curP := sw.policy(sw.now())
-			if !curP.Active || curP.Cutoff.IsZero() {
+			curP, pErr := sw.policy(ctx, sw.now())
+			if pErr != nil {
+				return pErr
+			}
+			if !curP.Active || curP.GlobalCutoff.IsZero() {
 				return nil
 			}
 			*p = curP
 			cfg = curP.Config
-			globalCutoff = curP.Cutoff.UTC()
+			globalCutoff = curP.GlobalCutoff.UTC()
 			if cfg.PageSize >= decisionRetentionMinPage && pageSize > cfg.PageSize {
 				pageSize = cfg.PageSize
 			}
@@ -463,21 +525,31 @@ func (sw *decisionRetentionSweeper) walk(
 			return nil
 		}
 
-		// Collect distinct message IDs and per-project cutoffs.
+		// Collect distinct message IDs and per-project cutoffs, applying each
+		// project's effective window in Go (design-8984 §3.3). Projects held
+		// via keep_forever or without a window are skipped.
 		seenMsg := make(map[string]bool, len(cands))
 		msgIDs := make([]string, 0, len(cands))
 		cutoffByProject := make(map[string]time.Time)
 		for _, c := range cands {
+			cutoff, ok := p.CutoffForProject(c.ProjectID)
+			if !ok || !c.CreatedAt.Before(cutoff) {
+				continue
+			}
 			if !seenMsg[c.MessageID] {
 				seenMsg[c.MessageID] = true
 				msgIDs = append(msgIDs, c.MessageID)
 			}
-			cutoffByProject[c.ProjectID] = globalCutoff
+			cutoffByProject[c.ProjectID] = cutoff
 		}
 
-		t0 := sw.now()
-		pr, err := sw.store.PurgeDecisionMessages(pctx, msgIDs, cutoffByProject)
-		tx := sw.now().Sub(t0)
+		var pr store.DecisionRetentionPurgeResult
+		var tx time.Duration
+		if len(msgIDs) > 0 {
+			t0 := sw.now()
+			pr, err = sw.store.PurgeDecisionMessages(pctx, msgIDs, cutoffByProject)
+			tx = sw.now().Sub(t0)
+		}
 		cancel()
 		if err != nil {
 			return err
@@ -503,10 +575,7 @@ func (sw *decisionRetentionSweeper) walk(
 		// Persist cumulative counts after every purged page so a mid-tick
 		// crash never leaves committed deletions without an audit record.
 		if pr.PurgedMessages > 0 {
-			run.Policy = store.DecisionRetentionPolicy{
-				RetentionDays: p.Config.RetentionDays,
-				Cutoff:        p.Cutoff.UTC(),
-			}
+			run.Policy = decisionRetentionRunPolicy(*p)
 			if run.Status != store.DecisionRetentionStatusFailed {
 				run.Status = store.DecisionRetentionStatusRunning
 			}

@@ -66,6 +66,7 @@ type ProfilePendingDecisionsResponse struct {
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
+	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 	NextCursor        string                            `json:"nextCursor,omitempty"`
 }
 
@@ -79,6 +80,7 @@ type ProfileMadeDecisionsResponse struct {
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
+	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 	NextCursor        string                            `json:"nextCursor,omitempty"`
 }
 
@@ -92,6 +94,7 @@ type ProfileMadeByProjectDecisionsResponse struct {
 	Conversations     []ProjectDecisionConversationView `json:"conversations"`
 	Projects          []ProjectDecisionProjectRef       `json:"projects"`
 	TruncatedProjects bool                              `json:"truncatedProjects"`
+	Retention         map[string]DecisionRetentionInfo  `json:"retention,omitempty"`
 }
 
 // profileDecisionCursor binds a profile decisions cursor to the caller, tab,
@@ -791,6 +794,7 @@ func (s *Server) finishProfilePendingDecisions(
 	ctx context.Context,
 	set *decisionScopeSet,
 	pq projectDecisionsQuery,
+	targetProjectIDs []string,
 	counts ProjectDecisionCounts,
 	filteredCounts *ProjectDecisionCounts,
 	classified []classifiedOpenPrompt,
@@ -839,6 +843,7 @@ func (s *Server) finishProfilePendingDecisions(
 		Conversations:     conversationsFacet,
 		Projects:          projectsFacet,
 		TruncatedProjects: pq.truncatedProjects,
+		Retention:         s.profileDecisionRetentionInfo(targetProjectIDs),
 		NextCursor:        nextCursor,
 	}, nil
 }
@@ -994,6 +999,7 @@ func (s *Server) finishProfileMadeDecisions(
 	conversationsFacet []ProjectDecisionConversationView,
 	projectsFacet []ProjectDecisionProjectRef,
 ) (any, error) {
+	retention := s.profileDecisionRetentionInfo(targetProjectIDs)
 	if pq.sort == DecisionsSortProject {
 		groups, err := s.profileMadeByProjectGroups(ctx, wcs, set, targetProjectIDs, listKeys, filter, pq.limit)
 		if err != nil {
@@ -1007,6 +1013,7 @@ func (s *Server) finishProfileMadeDecisions(
 			Conversations:     conversationsFacet,
 			Projects:          projectsFacet,
 			TruncatedProjects: pq.truncatedProjects,
+			Retention:         retention,
 		}, nil
 	}
 
@@ -1035,6 +1042,7 @@ func (s *Server) finishProfileMadeDecisions(
 		Conversations:     conversationsFacet,
 		Projects:          projectsFacet,
 		TruncatedProjects: pq.truncatedProjects,
+		Retention:         retention,
 		NextCursor:        nextCursor,
 	}, nil
 }

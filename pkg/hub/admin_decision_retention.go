@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -44,25 +46,27 @@ type decisionRetentionSweepJSON struct {
 }
 
 type decisionRetentionRunJSON struct {
-	ID            string                        `json:"id"`
-	Trigger       string                        `json:"trigger"`
-	DryRun        bool                          `json:"dry_run"`
-	StartedAt     time.Time                     `json:"started_at"`
-	FinishedAt    *time.Time                    `json:"finished_at"`
-	Status        string                        `json:"status"`
-	Actor         string                        `json:"actor,omitempty"`
-	Error         string                        `json:"error,omitempty"`
-	Projects      int                           `json:"projects"`
-	Totals        store.DecisionRetentionCounts `json:"totals"`
-	RetentionDays int                           `json:"retention_days"`
+	ID            string                                   `json:"id"`
+	Trigger       string                                   `json:"trigger"`
+	DryRun        bool                                     `json:"dry_run"`
+	StartedAt     time.Time                                `json:"started_at"`
+	FinishedAt    *time.Time                               `json:"finished_at"`
+	Status        string                                   `json:"status"`
+	Actor         string                                   `json:"actor,omitempty"`
+	Error         string                                   `json:"error,omitempty"`
+	Projects      int                                      `json:"projects"`
+	Totals        store.DecisionRetentionCounts            `json:"totals"`
+	Counts        map[string]store.DecisionRetentionCounts `json:"counts,omitempty"`
+	RetentionDays int                                      `json:"retention_days"`
 }
 
 type decisionRetentionResponse struct {
-	Enabled       bool                       `json:"enabled"`
-	RetentionDays *int                       `json:"retention_days"`
-	Sweep         decisionRetentionSweepJSON `json:"sweep"`
-	Revision      int64                      `json:"revision"`
-	Runs          []decisionRetentionRunJSON `json:"runs"`
+	Enabled          bool                                            `json:"enabled"`
+	RetentionDays    *int                                            `json:"retention_days"`
+	ProjectOverrides map[string]opsettings.DecisionRetentionOverride `json:"project_overrides"`
+	Sweep            decisionRetentionSweepJSON                      `json:"sweep"`
+	Revision         int64                                           `json:"revision"`
+	Runs             []decisionRetentionRunJSON                      `json:"runs"`
 }
 
 type decisionRetentionSweepPut struct {
@@ -72,10 +76,11 @@ type decisionRetentionSweepPut struct {
 }
 
 type decisionRetentionPutRequest struct {
-	Enabled          *bool                      `json:"enabled,omitempty"`
-	RetentionDays    *int                       `json:"retention_days,omitempty"`
-	Sweep            *decisionRetentionSweepPut `json:"sweep,omitempty"`
-	ExpectedRevision *int64                     `json:"expected_revision,omitempty"`
+	Enabled          *bool                                           `json:"enabled,omitempty"`
+	RetentionDays    *int                                            `json:"retention_days,omitempty"`
+	ProjectOverrides map[string]opsettings.DecisionRetentionOverride `json:"project_overrides,omitempty"`
+	Sweep            *decisionRetentionSweepPut                      `json:"sweep,omitempty"`
+	ExpectedRevision *int64                                          `json:"expected_revision,omitempty"`
 }
 
 // handleAdminDecisionRetention handles GET/PUT /api/v1/admin/decision-retention,
@@ -114,10 +119,14 @@ func decisionRetentionRunJSONFor(r store.DecisionRetentionRun) decisionRetention
 		t := r.FinishedAt.UTC()
 		out.FinishedAt = &t
 	}
-	for _, c := range r.Counts {
+	for pid, c := range r.Counts {
 		out.Totals.Add(c)
 		if c.Decisions > 0 || c.Answers > 0 {
 			out.Projects++
+			if out.Counts == nil {
+				out.Counts = make(map[string]store.DecisionRetentionCounts)
+			}
+			out.Counts[pid] = c
 		}
 	}
 	return out
@@ -130,8 +139,13 @@ func (s *Server) writeDecisionRetentionResponse(ctx context.Context, w http.Resp
 		cfg = ops.DecisionRetention()
 		rev = ops.SectionRevision(opsettings.DecisionRetentionSectionName)
 	}
+	overrides := make(map[string]opsettings.DecisionRetentionOverride, len(cfg.ProjectOverrides))
+	for k, v := range cfg.ProjectOverrides {
+		overrides[k] = v.Clone()
+	}
 	resp := decisionRetentionResponse{
-		Enabled: cfg.Enabled,
+		Enabled:          cfg.Enabled,
+		ProjectOverrides: overrides,
 		Sweep: decisionRetentionSweepJSON{
 			PageSize:            cfg.PageSize,
 			TickBudgetSeconds:   cfg.TickBudgetSeconds,
@@ -185,10 +199,10 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 	cur := ops.DecisionRetention()
 	curRev := ops.SectionRevision(opsettings.DecisionRetentionSectionName)
 
-	if fp.has("enabled") || fp.has("retention_days") {
+	if fp.has("enabled") || fp.has("retention_days") || fp.has("project_overrides") {
 		if body.ExpectedRevision == nil {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"expected_revision is required when changing enabled or retention_days", nil)
+				"expected_revision is required when changing enabled, retention_days, or project_overrides", nil)
 			return
 		}
 	}
@@ -198,7 +212,7 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	next := cur
+	next := cur.Clone()
 	if body.Enabled != nil {
 		next.Enabled = *body.Enabled
 	} else if fp.has("enabled") {
@@ -215,6 +229,16 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 		next.RetentionDays = d
 	} else if fp.has("retention_days") {
 		next.RetentionDays = 0
+	}
+	if fp.has("project_overrides") {
+		if len(body.ProjectOverrides) == 0 {
+			next.ProjectOverrides = nil
+		} else {
+			next.ProjectOverrides = make(map[string]opsettings.DecisionRetentionOverride, len(body.ProjectOverrides))
+			for k, v := range body.ProjectOverrides {
+				next.ProjectOverrides[k] = v.Clone()
+			}
+		}
 	}
 	if fp.has("sweep") {
 		def := opsettings.DefaultDecisionRetentionConfig()
@@ -236,6 +260,22 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Validate all fields (including UUID syntax and override bounds) before
+	// pruning overrides for deleted projects.
+	if _, err := next.Settings().Resolve(); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+		return
+	}
+	if len(next.ProjectOverrides) > 0 {
+		pruned, err := s.filterLiveProjectOverrides(r.Context(), next.ProjectOverrides)
+		if err != nil {
+			slog.Error("PUT decision retention: failed to verify projects for overrides", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to verify projects for retention overrides", nil)
+			return
+		}
+		next.ProjectOverrides = pruned
+	}
+
 	settings := next.Settings()
 	if _, err := settings.Resolve(); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
@@ -254,7 +294,7 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	changed := next != cur
+	changed := !next.Equal(cur)
 	if changed {
 		if err := s.auditDecisionRetentionChange(r.Context(), gcpIAMAuditMutation, cur, next); err != nil {
 			slog.Error("PUT decision retention: audit record failed; settings not changed", "error", err)
@@ -289,13 +329,73 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 	s.writeDecisionRetentionResponse(r.Context(), w)
 }
 
+// filterLiveProjectOverrides returns a copy of overrides containing only
+// projects that still exist in s.store, dropping overrides for deleted
+// projects (design-8984 §3.1).
+func (s *Server) filterLiveProjectOverrides(
+	ctx context.Context,
+	overrides map[string]opsettings.DecisionRetentionOverride,
+) (map[string]opsettings.DecisionRetentionOverride, error) {
+	if len(overrides) == 0 || s.store == nil {
+		return nil, nil
+	}
+	ids := make([]string, 0, len(overrides))
+	for pid := range overrides {
+		ids = append(ids, pid)
+	}
+	sort.Strings(ids)
+	live := make(map[string]bool, len(ids))
+	for start := 0; start < len(ids); start += profileProjectSummariesBatchSize {
+		end := start + profileProjectSummariesBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: batch}, store.ListOptions{Limit: len(batch), SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range res.Items {
+			live[p.ID] = true
+		}
+	}
+	out := make(map[string]opsettings.DecisionRetentionOverride, len(live))
+	for pid, ov := range overrides {
+		if live[pid] {
+			out[pid] = ov.Clone()
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
 func decisionRetentionAuditSummary(c opsettings.DecisionRetentionConfig) string {
 	days := "null"
 	if c.HasWindow() {
 		days = strconv.Itoa(c.RetentionDays)
 	}
-	return fmt.Sprintf("enabled=%t,retention_days=%s,page_size=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
-		c.Enabled, days, c.PageSize, c.TickBudgetSeconds, c.TickIntervalMinutes)
+	overrides := "none"
+	if len(c.ProjectOverrides) > 0 {
+		pids := make([]string, 0, len(c.ProjectOverrides))
+		for pid := range c.ProjectOverrides {
+			pids = append(pids, pid)
+		}
+		sort.Strings(pids)
+		parts := make([]string, 0, len(pids))
+		for _, pid := range pids {
+			ov := c.ProjectOverrides[pid]
+			if ov.Mode == opsettings.DecisionRetentionOverrideModeDays && ov.Days != nil {
+				parts = append(parts, fmt.Sprintf("%s:%dd", pid, *ov.Days))
+			} else {
+				parts = append(parts, fmt.Sprintf("%s:%s", pid, ov.Mode))
+			}
+		}
+		overrides = strings.Join(parts, ";")
+	}
+	return fmt.Sprintf("enabled=%t,retention_days=%s,project_overrides=%s,page_size=%d,tick_budget_seconds=%d,tick_interval_minutes=%d",
+		c.Enabled, days, overrides, c.PageSize, c.TickBudgetSeconds, c.TickIntervalMinutes)
 }
 
 func (s *Server) auditDecisionRetentionChange(ctx context.Context, mutation string, cur, next opsettings.DecisionRetentionConfig) error {
