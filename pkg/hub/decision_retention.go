@@ -138,6 +138,7 @@ func (s *Server) decisionRetentionHandler() func(ctx context.Context) {
 		defer s.decisionRetention.running.Store(false)
 
 		sw := newDecisionRetentionSweeper(st, s.isSQLiteStore())
+		sw.policy = s.decisionRetentionPolicyAt
 		res, err := sw.RunTick(ctx, p)
 		if err != nil {
 			slog.Error("decision retention: tick failed", "error", err,
@@ -160,6 +161,10 @@ type decisionRetentionSweeper struct {
 	isSQLite bool
 	now      func() time.Time
 	sleep    func(ctx context.Context, d time.Duration) error
+	// policy, when non-nil, is re-read before each page so a mid-tick hold
+	// (experiment off, enabled=false, or cleared window) stops further pages
+	// immediately instead of waiting for the next tick.
+	policy func(now time.Time) decisionRetentionPolicy
 }
 
 func newDecisionRetentionSweeper(st store.DecisionRetentionStore, isSQLite bool) *decisionRetentionSweeper {
@@ -267,7 +272,7 @@ func (sw *decisionRetentionSweeper) sweepAndRecord(
 			cursor.Position = store.DecisionRetentionPosition{}
 			cursorDirty = true
 		}
-		tickErr = sw.walk(ctx, p, &cursor, run, res, budgetEnd, &cursorDirty)
+		tickErr = sw.walk(ctx, &p, &cursor, run, res, budgetEnd, &cursorDirty)
 	}
 
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), decisionRetentionFinalWriteTimeout)
@@ -313,7 +318,7 @@ func (sw *decisionRetentionSweeper) sweepAndRecord(
 
 func (sw *decisionRetentionSweeper) walk(
 	ctx context.Context,
-	p decisionRetentionPolicy,
+	p *decisionRetentionPolicy,
 	cursor *store.DecisionRetentionCursor,
 	run *store.DecisionRetentionRun,
 	res *decisionRetentionTickResult,
@@ -330,6 +335,18 @@ func (sw *decisionRetentionSweeper) walk(
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if sw.policy != nil {
+			curP := sw.policy(sw.now())
+			if !curP.Active || curP.Cutoff.IsZero() {
+				return nil
+			}
+			*p = curP
+			cfg = curP.Config
+			globalCutoff = curP.Cutoff.UTC()
+			if cfg.PageSize >= decisionRetentionMinPage && pageSize > cfg.PageSize {
+				pageSize = cfg.PageSize
+			}
 		}
 		if !sw.now().Before(budgetEnd) {
 			res.BudgetExhausted = true
@@ -384,6 +401,25 @@ func (sw *decisionRetentionSweeper) walk(
 			acc := run.Counts[pid]
 			acc.Add(c)
 			run.Counts[pid] = acc
+		}
+
+		// Persist cumulative counts after every purged page so a mid-tick
+		// crash never leaves committed deletions without an audit record.
+		if pr.PurgedMessages > 0 {
+			run.Policy = store.DecisionRetentionPolicy{
+				RetentionDays: p.Config.RetentionDays,
+				Cutoff:        p.Cutoff.UTC(),
+			}
+			if run.Status != store.DecisionRetentionStatusFailed {
+				run.Status = store.DecisionRetentionStatusRunning
+			}
+			run.FinishedAt = nil
+			rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), decisionRetentionFinalWriteTimeout)
+			saveErr := sw.store.SaveDecisionRetentionRun(rctx, run)
+			rcancel()
+			if saveErr != nil {
+				return saveErr
+			}
 		}
 
 		if len(cands) < pageSize {

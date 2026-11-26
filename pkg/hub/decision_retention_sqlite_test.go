@@ -247,3 +247,171 @@ func TestDecisionRetentionViews_PurgedPromptAndDanglingReplacedBy(t *testing.T) 
 	assert.Equal(t, store.DecisionStatusReplaced, v.Status)
 	assert.Nil(t, v.ReplacedBy, "dangling replaced_by_id must omit ReplacedBy link without failing")
 }
+
+// TestDecisionRetentionJob_MidTickHoldAndPerPageRunAudit verifies:
+//  1. (O4) After page 1 commits, the run row is already persisted in the DB
+//     with status=running and page 1's exact counts before page 2 begins.
+//  2. (O3) Flipping enabled=false from the sleep hook between page 1 and page 2
+//     stops the tick immediately so no further page is purged.
+func TestDecisionRetentionJob_MidTickHoldAndPerPageRunAudit(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "ret-hold", Slug: "ret-hold", Created: time.Now().UTC(),
+	}))
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	const total = 60 // page_size=50 -> page 1 purges 50, page 2 would purge 10
+	decIDs := make([]string, total)
+	for i := 0; i < total; i++ {
+		_, decIDs[i] = seedOldSettledDecision(t, ctx, cs, projID, agentID, userID, fmt.Sprintf("H%02d", i), 60*24*time.Hour)
+	}
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.DecisionRetention)),
+		"test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	sw := newDecisionRetentionSweeper(cs.DecisionRetention(), true)
+	sw.policy = srv.decisionRetentionPolicyAt
+	sleepCalls := 0
+	sw.sleep = func(ctx context.Context, _ time.Duration) error {
+		sleepCalls++
+		// O4: verify page 1's committed deletions are already audited in DB mid-tick.
+		midRuns, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, midRuns, 1, "run row must be persisted after page 1 before sleep returns")
+		assert.Equal(t, store.DecisionRetentionStatusRunning, midRuns[0].Status)
+		assert.Nil(t, midRuns[0].FinishedAt)
+		assert.Equal(t, int64(50), midRuns[0].Counts[projID].Decisions)
+		assert.Equal(t, int64(50), midRuns[0].Counts[projID].Answers)
+
+		// O3: set legal hold (enabled=false) mid-tick.
+		_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+			json.RawMessage(`{"enabled":false,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+			"test", ops.SectionRevision(opsettings.DecisionRetentionSectionName), "managed")
+		require.NoError(t, err)
+		return nil
+	}
+
+	p := srv.decisionRetentionPolicyAt(time.Now())
+	res, err := sw.RunTick(ctx, p)
+	require.NoError(t, err)
+	assert.True(t, res.Ran)
+	assert.Equal(t, 1, sleepCalls)
+	assert.Equal(t, 1, res.Pages, "hold set in sleep hook must stop tick before page 2")
+	assert.Equal(t, 50, res.PurgedMessages)
+	assert.False(t, res.ReachedCutoff)
+
+	// Exactly 10 decisions must remain untouched.
+	remaining := 0
+	for _, id := range decIDs {
+		if _, err := cs.GetDecision(ctx, id); err == nil {
+			remaining++
+		}
+	}
+	assert.Equal(t, 10, remaining, "page 2 rows must not be purged after mid-tick hold")
+
+	runs, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, store.DecisionRetentionStatusPartial, runs[0].Status)
+	assert.NotNil(t, runs[0].FinishedAt)
+	assert.Equal(t, int64(50), runs[0].Counts[projID].Decisions)
+}
+
+// TestDecisionRetentionJob_MultiPageWalkAcrossTicks verifies that a sweep
+// interrupted by tick budget persists its (created_at, id) cursor and resumes
+// on the next tick to purge the remaining rows (including tied created_at rows)
+// while accumulating counts into the same 24h sweep run row.
+func TestDecisionRetentionJob_MultiPageWalkAcrossTicks(t *testing.T) {
+	srv, s := testServerWithOps(t, nil)
+	cs := s.(*entadapter.CompositeStore)
+	srv.SetDecisionRetentionStore(cs.DecisionRetention())
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: projID, Name: "ret-multi", Slug: "ret-multi", Created: time.Now().UTC(),
+	}))
+	agentID := uuid.NewString()
+	userID := uuid.NewString()
+
+	const total = 65
+	tiedTime := time.Now().UTC().Add(-60 * 24 * time.Hour).Truncate(time.Microsecond)
+	decIDs := make([]string, total)
+	db := cs.DB()
+	for i := 0; i < total; i++ {
+		_, decIDs[i] = seedOldSettledDecision(t, ctx, cs, projID, agentID, userID, fmt.Sprintf("M%02d", i), 60*24*time.Hour)
+		// Force identical created_at across all 65 rows so the cross-tick cursor
+		// must tie-break by id across the 50/15 page boundary.
+		uid := uuid.MustParse(decIDs[i])
+		_, err := db.ExecContext(ctx, "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?", tiedTime, tiedTime, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", tiedTime, uid)
+		require.NoError(t, err)
+	}
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.DecisionRetention)),
+		"test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+	_, err = ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_budget_seconds":10,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	fakeNow := time.Now().UTC()
+	sw := newDecisionRetentionSweeper(cs.DecisionRetention(), true)
+	sw.policy = srv.decisionRetentionPolicyAt
+	sw.now = func() time.Time { return fakeNow }
+	// Advance clock past tick_budget_seconds inside sleep after page 1 so Tick 1 stops with BudgetExhausted.
+	sw.sleep = func(_ context.Context, _ time.Duration) error {
+		fakeNow = fakeNow.Add(15 * time.Second)
+		return nil
+	}
+
+	// Tick 1: purges first 50 rows and stops on budget.
+	res1, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	require.NoError(t, err)
+	assert.True(t, res1.Ran)
+	assert.Equal(t, 1, res1.Pages)
+	assert.Equal(t, 50, res1.PurgedMessages)
+	assert.True(t, res1.BudgetExhausted)
+	assert.False(t, res1.ReachedCutoff)
+
+	// Advance fake clock past tick_interval_minutes and run Tick 2.
+	fakeNow = fakeNow.Add(2 * time.Minute)
+	sw.sleep = func(_ context.Context, _ time.Duration) error { return nil }
+	res2, err := sw.RunTick(ctx, srv.decisionRetentionPolicyAt(fakeNow))
+	require.NoError(t, err)
+	assert.True(t, res2.Ran)
+	assert.Equal(t, 1, res2.Pages)
+	assert.Equal(t, 15, res2.PurgedMessages)
+	assert.True(t, res2.ReachedCutoff)
+
+	// All 65 decisions must be purged.
+	for _, id := range decIDs {
+		_, err := cs.GetDecision(ctx, id)
+		assert.ErrorIs(t, err, store.ErrNotFound, "decision %s should have been purged across ticks", id)
+	}
+
+	// Same 24h sweep run row accumulates all 65 decisions/answers and finishes OK.
+	runs, err := cs.DecisionRetention().ListDecisionRetentionRuns(ctx, store.DecisionRetentionRunFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	assert.Equal(t, store.DecisionRetentionStatusOK, runs[0].Status)
+	assert.Equal(t, int64(total), runs[0].Counts[projID].Decisions)
+	assert.Equal(t, int64(total), runs[0].Counts[projID].Answers)
+}
