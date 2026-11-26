@@ -105,6 +105,9 @@ const (
 	// refused the agent's configuration (for example an image outside
 	// allowed_image_prefixes or resources above max_resources).
 	LaunchCodeAgentPolicyRefused = "agent_policy_refused"
+	// LaunchCodeWorkspaceNotPermitted: the agent's workspace path is not
+	// permitted on this hosted server or runtime broker.
+	LaunchCodeWorkspaceNotPermitted = "workspace_not_permitted"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed local

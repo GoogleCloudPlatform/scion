@@ -677,6 +677,7 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		// A non-enum reason is dropped whole, so no preempted/evicted suffix.
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "preempted by ns-secret/agent-secret-pod", "the agent pod was preempted, evicted or deleted while starting"},
 		{api.LaunchCodeLaunchTimeout, api.LaunchStepAwaitingCapacity, "", "launch timed out waiting for the agent pod to be ready"},
+		{api.LaunchCodeWorkspaceNotPermitted, api.LaunchStepLaunching, "", "the agent workspace path is not permitted"},
 		// A reason that is not an enum (free text) is never reported.
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "back-off restarting ns-secret/agent-secret-pod", "the agent container keeps crashing on start"},
 	} {

@@ -17,11 +17,14 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -40,17 +43,27 @@ func (d *HTTPAgentDispatcher) SetHostedHarnessConfigCheck(check func(ctx context
 	d.hostedHarnessConfigCheck = check
 }
 
+// SetHostedWorkspaceResolver sets the resolver hostedConfigPrecheck uses to
+// verify stored absolute workspaces on a hosted hub
+// (Server.projectWorkspaceResolved). Nil fails closed for absolute workspaces.
+func (d *HTTPAgentDispatcher) SetHostedWorkspaceResolver(resolver func(project *store.Project) (projectfs.Resolved, error)) {
+	d.hostedWorkspaceResolver = resolver
+}
+
 // hostedConfigPrecheck refuses a dispatch on a hosted hub when the agent's
 // stored inline config (written by the member who created or updated the
-// agent), the project-scope hub harness config it is dispatched with, or a
-// harness config bundled in the project-scope hub template it uses, names
-// host resources, so config stored before the check existed is
-// refused at its next dispatch. The runtime kind is the one the target
-// broker reports for the agent's profile (hostedRuntimeKind); when it is not
-// known, rules that depend on it are left to the broker.
+// agent), the project-scope hub harness config it is dispatched with, a
+// harness config bundled in the project-scope hub template it uses, or its
+// stored absolute workspace path is not permitted, so config stored before
+// the check existed is refused at its next dispatch. The runtime kind is the
+// one the target broker reports for the agent's profile (hostedRuntimeKind);
+// when it is not known, rules that depend on it are left to the broker.
 func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *store.Agent) error {
 	if !d.hostedMode || agent == nil || agent.AppliedConfig == nil {
 		return nil
+	}
+	if err := d.hostedWorkspacePrecheck(ctx, agent); err != nil {
+		return err
 	}
 	kind := hostedRuntimeKind(ctx, d.store, agent)
 	if err := hostedConfigRefusal(agent.AppliedConfig.InlineConfig, kind); err != nil {
@@ -65,6 +78,81 @@ func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *s
 		return hostedCheckRefusal(d.hostedTemplateCheck(ctx, agent.AppliedConfig.TemplateID, kind))
 	}
 	return nil
+}
+
+// hostedWorkspacePrecheck verifies that a stored absolute workspace path on a
+// hosted hub matches the project's resolved workspace from the layout
+// authority. Pre-existing rows whose stored absolute workspace does not match
+// are refused before dispatch with a typed workspace_not_permitted error.
+func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent *store.Agent) error {
+	raw := agent.AppliedConfig.Workspace
+	if raw == "" || !isAbsWorkspace(raw) {
+		return nil
+	}
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return err
+	}
+	ws := effectiveDispatchWorkspace(raw, projectInfo.projectPath)
+	if !isAbsWorkspace(ws) {
+		return nil
+	}
+	var project *store.Project
+	if agent.ProjectID != "" {
+		p, getErr := d.store.GetProject(ctx, agent.ProjectID)
+		if getErr == nil {
+			project = p
+		}
+	}
+	var want projectfs.Resolved
+	var resolveErr error
+	if d.hostedWorkspaceResolver != nil {
+		want, resolveErr = d.hostedWorkspaceResolver(project)
+	} else {
+		resolveErr = errors.New("project workspace resolver is not configured")
+	}
+	if resolveErr != nil || want.HostPath == "" || !sameWorkspacePath(ws, want.HostPath) {
+		slog.Warn("Hosted dispatch refused: stored absolute workspace does not match resolved project workspace",
+			"agent_id", agent.ID,
+			"project_id", agent.ProjectID,
+			"code", api.LaunchCodeWorkspaceNotPermitted)
+		return &RuntimeTargetRefusal{
+			Code:    api.LaunchCodeWorkspaceNotPermitted,
+			Status:  http.StatusBadRequest,
+			Message: "stored absolute workspace does not match the project workspace",
+			Details: map[string]interface{}{"field": "workspace"},
+		}
+	}
+	return nil
+}
+
+// isAbsWorkspace reports whether p is an absolute Unix or Windows path
+// (including drive-letter and UNC paths even when checked on Unix).
+func isAbsWorkspace(p string) bool {
+	if p == "" {
+		return false
+	}
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, `\`) {
+		return true
+	}
+	if len(p) >= 2 && p[1] == ':' && ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) {
+		return true
+	}
+	return false
+}
+
+// sameWorkspacePath reports whether a and b refer to the same path, compared
+// cleaned and, when both resolve, with symlinks evaluated.
+func sameWorkspacePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
 }
 
 // hostedCheckRefusal maps a stored harness-config or template check's

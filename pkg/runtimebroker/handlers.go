@@ -2268,6 +2268,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeHostedConfigRefusalDetails(w, re, nil)
 				return
 			}
+			if workspaceNotPermittedFrom(err) {
+				markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+				writeWorkspaceNotPermitted(w, nil)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
@@ -2346,6 +2351,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		agentPolicyErr, isAgentPolicyRefusal := agentPolicyErrorFrom(err)
+		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		isEmptyGenericCmd := emptyGenericCommandFrom(err)
@@ -2358,6 +2364,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusBadRequest, hostedErr.Error())
 		case isAgentPolicyRefusal:
 			markAttemptFailed(agentPolicyRefusedStatus, agentPolicyErr.PublicMessage())
+		case isWorkspaceNotPermitted:
+			markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
@@ -2456,6 +2464,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeHostedConfigRefusalDetails(w, hostedErr, nil)
 		case isAgentPolicyRefusal:
 			writeAgentPolicyRefused(w, agentPolicyErr, opCreateAgent, nil)
+		case isWorkspaceNotPermitted:
+			writeWorkspaceNotPermitted(w, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case isResourceRefusal:
@@ -4562,6 +4572,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ue, unusable := unusableProvisionerFrom(err)
 		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		agentPolicyErr, isAgentPolicyRefusal := agentPolicyErrorFrom(err)
+		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
@@ -4572,6 +4583,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeHostedConfigRefusalDetails(w, hostedErr, details)
 		case isAgentPolicyRefusal:
 			writeAgentPolicyRefused(w, agentPolicyErr, "start agent", details)
+		case isWorkspaceNotPermitted:
+			writeWorkspaceNotPermitted(w, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case isResourceRefusal:

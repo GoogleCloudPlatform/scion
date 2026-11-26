@@ -1231,6 +1231,15 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		agentDir = dir
 
 		if filepath.IsAbs(opts.Workspace) {
+			if opts.HostedMode {
+				roots, err := hostedExplicitWorkspaceRoots(ctx, projectDir)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, newWorkspaceNotPermittedError(err))
+				}
+				if _, err := runtime.ValidateWorkspaceSource(opts.Workspace, roots...); err != nil {
+					return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, newWorkspaceNotPermittedError(err))
+				}
+			}
 			// Upstream review (GoogleCloudPlatform/scion#2037, comment
 			// 4121261313): split the existence check from the directory
 			// check, so a workspace path that exists but is a regular file
@@ -2356,6 +2365,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			absWorkspace, err := filepath.Abs(workspace)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
+			}
+			if api.IsHostedModeFromContext(ctx) {
+				roots, err := hostedExplicitWorkspaceRoots(ctx, projectDir)
+				if err != nil {
+					return "", "", nil, newWorkspaceNotPermittedError(err)
+				}
+				if _, err := runtime.ValidateWorkspaceSource(absWorkspace, roots...); err != nil {
+					return "", "", nil, newWorkspaceNotPermittedError(err)
+				}
 			}
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)
