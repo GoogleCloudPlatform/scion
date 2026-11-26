@@ -285,3 +285,40 @@ describe('admin-permissions: federation page', () => {
     expect(hasAnyPermission(other, NAV_PERMISSION_MAP['/admin/federation'])).toBe(false);
   });
 });
+
+describe('admin-permissions: integrations page (M2.1)', () => {
+  it('admits either hub.integrations.read or hub.github_app.read on nav and route', () => {
+    expect(NAV_PERMISSION_MAP['/admin/integrations']).toEqual([
+      'hub.integrations.read',
+      'hub.github_app.read',
+    ]);
+    expect(ROUTE_PERMISSION_MAP['scion-page-admin-integrations']).toEqual([
+      'hub.integrations.read',
+      'hub.github_app.read',
+    ]);
+  });
+
+  it('admits a github-only role (hub.github_app.read without hub.integrations.read)', () => {
+    const ghOnly = adminWithPermissions('hub.github_app.read', 'hub.github_app.update');
+    expect(hasAnyPermission(ghOnly, NAV_PERMISSION_MAP['/admin/integrations'])).toBe(true);
+    expect(hasAnyPermission(ghOnly, ROUTE_PERMISSION_MAP['scion-page-admin-integrations'])).toBe(
+      true
+    );
+  });
+
+  it('admits an integrations-only role (hub.integrations.read without hub.github_app.read)', () => {
+    const chatOnly = adminWithPermissions('hub.integrations.read');
+    expect(hasAnyPermission(chatOnly, NAV_PERMISSION_MAP['/admin/integrations'])).toBe(true);
+    expect(hasAnyPermission(chatOnly, ROUTE_PERMISSION_MAP['scion-page-admin-integrations'])).toBe(
+      true
+    );
+  });
+
+  it('denies a role with neither hub.integrations.read nor hub.github_app.read', () => {
+    const neither = adminWithPermissions('quota.read');
+    expect(hasAnyPermission(neither, NAV_PERMISSION_MAP['/admin/integrations'])).toBe(false);
+    expect(hasAnyPermission(neither, ROUTE_PERMISSION_MAP['scion-page-admin-integrations'])).toBe(
+      false
+    );
+  });
+});

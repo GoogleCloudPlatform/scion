@@ -7254,7 +7254,7 @@ describe('GitHub App moved out of Server Config (M2.1)', () => {
     expect(link).not.toBeNull();
   });
 
-  it('omits server.github_app from both DB and file mode main save payloads', async () => {
+  it('omits server.github_app from the real PUT /api/v1/admin/server-config body in both DB and file tiers', async () => {
     for (const tier of ['db', 'file'] as const) {
       const base = makeBaseConfig({ settings_tier: tier });
       const config = {
@@ -7264,10 +7264,26 @@ describe('GitHub App moved out of Server Config (M2.1)', () => {
           github_app: { app_id: 42, webhooks_enabled: true },
         },
       };
-      element = await createComponent(createFetchHandler(config));
-      const el = element as any;
-      const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
-      expect(payload.server?.github_app).toBeUndefined();
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      await markDirty(element);
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeDefined();
+      (saveBtn as HTMLElement).click();
+      await vi.waitFor(() => {
+        expect(captured).not.toBeNull();
+      });
+      const server = captured!.server as Record<string, unknown> | undefined;
+      expect(server?.github_app).toBeUndefined();
       element.remove();
     }
   });

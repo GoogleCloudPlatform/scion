@@ -15,6 +15,7 @@
  */
 
 export interface IntegrationTabContext {
+  canReadIntegrations: boolean;
   canReadGitHubApp: boolean;
 }
 
@@ -39,7 +40,7 @@ export const INTEGRATION_TABS: readonly IntegrationTab[] = [
     icon: 'chat-dots',
     tag: 'scion-admin-integrations-chat',
     load: () => import('./admin-integrations-chat.js'),
-    visible: () => true,
+    visible: (ctx) => ctx.canReadIntegrations,
   },
   {
     id: 'github',

@@ -15,10 +15,13 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
 import { pushUrl, replaceUrl } from '../../client/navigation.js';
+import { hasAnyPermission } from '../../lib/admin-permissions.js';
+import type { PageData } from '../../shared/types.js';
 import {
   INTEGRATION_TABS,
   legacyIntegrationRedirect,
@@ -35,7 +38,12 @@ export {
 
 @customElement('scion-page-admin-integrations')
 export class ScionPageAdminIntegrations extends LitElement {
-  @state() private probing = true;
+  /** Page data from the router (provides current user id for admin-status lookup). */
+  @property({ type: Object }) pageData?: PageData;
+
+  @state() private statusResolved = false;
+  @state() private probingGitHub = true;
+  @state() private canReadIntegrations = true;
   @state() private canReadGitHubApp = false;
   @state() private activeTabId = 'chat';
   @state() private subPath: string | null = null;
@@ -124,7 +132,10 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private get visibleTabs(): IntegrationTab[] {
-    const ctx = { canReadGitHubApp: this.canReadGitHubApp };
+    const ctx = {
+      canReadIntegrations: this.canReadIntegrations,
+      canReadGitHubApp: this.canReadGitHubApp,
+    };
     return INTEGRATION_TABS.filter((tab) => tab.visible(ctx));
   }
 
@@ -145,15 +156,29 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private async initTabs(): Promise<void> {
-    this.probing = true;
-    // Start loading an unconditionally visible active tab (e.g. Chat) in
-    // parallel with the GitHub App visibility probe so Chat views don't wait
-    // on the probe round trip in series.
-    const activeTabDef = INTEGRATION_TABS.find((t) => t.id === this.activeTabId);
-    const preloadPromise = activeTabDef?.visible({ canReadGitHubApp: false })
-      ? this.ensureActiveTabLoaded()
-      : null;
+    const userId = this.pageData?.user?.id;
+    if (userId) {
+      const adminStatus = await loadAdminStatus(userId);
+      if (adminStatus) {
+        this.canReadIntegrations = hasAnyPermission(adminStatus, ['hub.integrations.read']);
+      }
+    }
+    this.statusResolved = true;
 
+    // On a Chat detail route (/admin/integrations/chat/{name}) the tab bar is
+    // not rendered, so skip the GitHub probe and load Chat immediately.
+    if (this.subPath !== null && this.activeTabId === 'chat' && this.canReadIntegrations) {
+      this.probingGitHub = false;
+      await this.ensureActiveTabLoaded();
+      return;
+    }
+
+    // If the currently requested tab is already visible (e.g. Chat), start
+    // loading and rendering it immediately without waiting for the GitHub probe.
+    const activeAlreadyVisible = this.visibleTabs.some((t) => t.id === this.activeTabId);
+    const preloadPromise = activeAlreadyVisible ? this.ensureActiveTabLoaded() : null;
+
+    this.probingGitHub = true;
     try {
       const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
       // Hide the GitHub tab only when the caller is unauthorized (401/403).
@@ -163,7 +188,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     } catch {
       this.canReadGitHubApp = true;
     } finally {
-      this.probing = false;
+      this.probingGitHub = false;
     }
 
     // Ensure activeTabId is actually visible to the caller; fall back to first visible tab.
@@ -263,12 +288,18 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   override render() {
-    if (this.probing) {
-      return html`<div class="loading-container"><sl-spinner></sl-spinner></div>`;
-    }
-
     const tabs = this.visibleTabs;
     const activeTab = tabs.find((t) => t.id === this.activeTabId) ?? tabs[0];
+
+    // Wait only until we know whether the active tab can render (e.g. a
+    // GitHub-only caller waiting for the GitHub probe). Chat list/detail views
+    // render immediately without waiting on GET /api/v1/github-app.
+    if (
+      !this.statusResolved ||
+      (this.probingGitHub && (!activeTab || activeTab.id !== this.activeTabId))
+    ) {
+      return html`<div class="loading-container"><sl-spinner></sl-spinner></div>`;
+    }
 
     // Detail sub-route (e.g. /admin/integrations/chat/{name}): render the Chat
     // detail view directly so its breadcrumb sits at the top of the page.

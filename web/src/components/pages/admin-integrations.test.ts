@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { clearAdminStatus } from '../../client/admin-status.js';
 import type { ScionAdminIntegrationsChat } from './admin-integrations-chat.js';
 import { integrationSettingsPayload } from './admin-integrations.js';
 
@@ -949,6 +950,7 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
   afterEach(() => {
     element?.remove();
     element = null;
+    clearAdminStatus();
     Object.defineProperty(window, 'location', {
       value: originalLocation,
       writable: true,
@@ -1124,6 +1126,133 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
     element = document.createElement('scion-page-admin-integrations');
     document.body.appendChild(element);
 
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual([
+        'chat',
+        'github',
+      ]);
+    });
+  });
+
+  it('R1: github-only caller (hub.github_app.read, no hub.integrations.read) sees only the GitHub tab', async () => {
+    stubLocation('/admin/integrations');
+    const base = createFetchHandler(makeDiscordDetail());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                isAdmin: true,
+                isSuperAdmin: false,
+                permissions: ['hub.github_app.read'],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (path.endsWith('/api/v1/github-app')) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ configured: true, app_id: 42 }), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-integrations');
+    (element as unknown as { pageData: unknown }).pageData = {
+      path: '/admin/integrations',
+      title: 'Integrations',
+      user: { id: 'u-gh-only', email: 'gh@example.com', name: 'GH Admin', role: 'admin' },
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual(['github']);
+      expect(element!.shadowRoot?.querySelector('scion-admin-integrations-github')).not.toBeNull();
+    });
+  });
+
+  it('R1: integrations-only caller (hub.integrations.read, 403 on github-app) sees only the Chat tab', async () => {
+    stubLocation('/admin/integrations');
+    const base = createFetchHandler(makeDiscordDetail());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/auth/admin-status')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                isAdmin: true,
+                isSuperAdmin: false,
+                permissions: ['hub.integrations.read'],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        if (path.endsWith('/api/v1/github-app')) {
+          return Promise.resolve(new Response('forbidden', { status: 403 }));
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-integrations');
+    (element as unknown as { pageData: unknown }).pageData = {
+      path: '/admin/integrations',
+      title: 'Integrations',
+      user: { id: 'u-chat-only', email: 'chat@example.com', name: 'Chat Admin', role: 'admin' },
+    };
+    document.body.appendChild(element);
+
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual(['chat']);
+      expect(element!.shadowRoot?.querySelector('scion-admin-integrations-chat')).not.toBeNull();
+    });
+  });
+
+  it('renders Chat immediately without waiting on a slow GET /api/v1/github-app probe', async () => {
+    stubLocation('/admin/integrations/chat');
+    const base = createFetchHandler(makeDiscordDetail());
+    let releaseProbe!: (res: Response) => void;
+    const pendingProbe = new Promise<Response>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request, init?: RequestInit) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          return pendingProbe;
+        }
+        return base(url, init);
+      })
+    );
+
+    element = document.createElement('scion-page-admin-integrations');
+    document.body.appendChild(element);
+
+    // Chat mounts while the GitHub probe is still unresolved.
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual(['chat']);
+      expect(element!.shadowRoot?.querySelector('scion-admin-integrations-chat')).not.toBeNull();
+    });
+
+    // Once the probe resolves 200, the GitHub tab appears alongside Chat.
+    releaseProbe(
+      new Response(JSON.stringify({ configured: true, app_id: 42 }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
     await vi.waitFor(() => {
       expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual([
         'chat',

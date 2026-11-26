@@ -501,6 +501,24 @@ describe('scion-admin-github-app-config', () => {
     expect(warn?.textContent).toContain('overriding the stored hub secret');
   });
 
+  it('shows stored secret source without override warning when secret is active', async () => {
+    element = await mount((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.includes('/api/v1/admin/server-config')) {
+        return jsonResponse({ settings_tier: 'db' });
+      }
+      return jsonResponse({
+        ...LOADED_APP,
+        private_key_source: 'secret',
+        private_key_overrides_secret: false,
+      });
+    });
+
+    const sourceEl = query(element, '[data-github-app-key-source]');
+    expect(sourceEl?.textContent).toContain('GITHUB_APP_PRIVATE_KEY');
+    expect(query(element, '[data-github-app-key-override-warning]')).toBeNull();
+  });
+
   it('R1: hosted DB hub (settings_tier=db, layer0_editable absent/false) keeps Layer-1 App ID editable with env badge and sends app_id on save', async () => {
     const puts: Array<Record<string, unknown>> = [];
     element = await mount((url, init) => {
