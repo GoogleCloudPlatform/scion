@@ -1345,7 +1345,7 @@ export interface EnvVar {
 /**
  * Secret type enumeration
  */
-export type SecretType = 'environment' | 'variable' | 'file';
+export type SecretType = 'environment' | 'file' | 'on_demand';
 
 /**
  * Secret metadata from the Hub API (GET /api/v1/secrets)
@@ -1359,7 +1359,7 @@ export interface Secret {
   scope: ResourceScope;
   scopeId: string;
   description?: string;
-  injectionMode: InjectionMode;
+  injectionMode?: InjectionMode;
   allowProgeny?: boolean;
   version: number;
   secretRef?: string;

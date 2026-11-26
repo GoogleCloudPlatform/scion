@@ -52,7 +52,7 @@ export interface AgentSecretDraftRow {
   injectionMode: InjectionMode;
 }
 
-/** Creates a blank secret row with the hub's defaults (environment, as_needed). */
+/** Creates a blank secret row with the agent-scope default (environment, always). */
 export function emptyAgentSecretRow(): AgentSecretDraftRow {
   return {
     id: `secret-row-${++nextAgentSecretRowId}`,
@@ -60,7 +60,7 @@ export function emptyAgentSecretRow(): AgentSecretDraftRow {
     value: '',
     type: 'environment',
     target: '',
-    injectionMode: 'as_needed',
+    injectionMode: 'always',
   };
 }
 
@@ -96,7 +96,7 @@ export function reservedSecretKeyError(key: string): string | null {
   return null;
 }
 
-const VALID_TYPES: ReadonlySet<string> = new Set(['environment', 'file', 'variable']);
+const VALID_TYPES: ReadonlySet<string> = new Set(['environment', 'file', 'on_demand']);
 const VALID_INJECTION_MODES: ReadonlySet<string> = new Set(['as_needed', 'always']);
 
 /**
@@ -145,7 +145,7 @@ export function validateAgentSecretRows(rows: readonly AgentSecretDraftRow[]): s
 
     const secretType = row.type || 'environment';
     if (!VALID_TYPES.has(secretType)) {
-      errors.push(`Secret type for key ${key} must be environment, variable, or file.`);
+      errors.push(`Secret type for key ${key} must be environment, file, or on_demand.`);
     }
 
     const target = row.target.trim();
@@ -155,6 +155,10 @@ export function validateAgentSecretRows(rows: readonly AgentSecretDraftRow[]): s
       errors.push(
         `Secret target "${effectiveTarget}" is reserved for scion's own control-plane environment variables.`
       );
+    }
+
+    if (secretType === 'on_demand' && target && target !== key) {
+      errors.push(`On-demand secret "${key}" does not accept a custom target.`);
     }
 
     if (secretType === 'file') {
@@ -187,15 +191,20 @@ export function toCreateAgentSecrets(rows: readonly AgentSecretDraftRow[]): Agen
     if (isAgentSecretRowEmpty(row)) continue;
     const key = row.key.trim();
     if (!key) continue;
+    const secretType: SecretType = row.type || 'environment';
     const item: AgentSecretInput = {
       key,
       value: row.value,
-      type: row.type || 'environment',
-      injectionMode: row.injectionMode || 'as_needed',
+      type: secretType,
     };
-    const target = row.target.trim();
-    if (target) {
-      item.target = target;
+    if (secretType === 'environment') {
+      // Agent-scope environment secrets are always injected (no delivery selector).
+      item.injectionMode = 'always';
+    } else if (secretType === 'file') {
+      const target = row.target.trim();
+      if (target) {
+        item.target = target;
+      }
     }
     out.push(item);
   }

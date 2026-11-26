@@ -42,7 +42,7 @@ async function installMockSecretRequestHub(
   card: {
     messageId: string;
     key: string;
-    secretType: 'environment' | 'file' | 'variable';
+    secretType: 'environment' | 'file' | 'on_demand';
   }
 ): Promise<FulfillRecord[]> {
   await installEventSourceStub(page);
@@ -297,16 +297,16 @@ test('file secret row loads UTF-8 file via file picker, stays masked, and submit
   });
 });
 
-test('variable secret row masks natively as password input, hides value from AX tree, and reveals textarea on Show', async ({
+test('on_demand secret row masks natively as password input, hides value from AX tree, and reveals textarea on Show', async ({
   page,
 }) => {
   const fulfills = await installMockSecretRequestHub(page, {
-    messageId: 'msg-var-1',
+    messageId: 'msg-od-1',
     key: 'API_CONFIG',
-    secretType: 'variable',
+    secretType: 'on_demand',
   });
 
-  await page.goto('/secret-requests/msg-var-1', { waitUntil: 'domcontentloaded' });
+  await page.goto('/secret-requests/msg-od-1', { waitUntil: 'domcontentloaded' });
 
   const input = page.locator('input[data-key="API_CONFIG"]');
   await expect(input).toBeVisible();
@@ -364,7 +364,7 @@ test('variable secret row masks natively as password input, hides value from AX 
   expect(fulfills[0].body.values).toEqual({ API_CONFIG: multilineVar });
 });
 
-for (const secretType of ['file', 'variable'] as const) {
+for (const secretType of ['file', 'on_demand'] as const) {
   test(`trusted dragTo of multi-line text onto ${secretType} row preserves newlines`, async ({
     page,
   }) => {
@@ -411,7 +411,7 @@ test('keyboard.insertText with LF and CRLF preserves newlines verbatim', async (
     const fulfills = await installMockSecretRequestHub(page, {
       messageId: `msg-insert-${idx}`,
       key: 'INSERT_KEY',
-      secretType: 'variable',
+      secretType: 'on_demand',
     });
 
     await page.goto(`/secret-requests/msg-insert-${idx}`, { waitUntil: 'domcontentloaded' });
@@ -510,7 +510,7 @@ test('multi-line paste then one Backspace clears captured value and disables Sub
   await expect(page.getByRole('button', { name: 'Submit' })).toBeDisabled();
 });
 
-for (const secretType of ['environment', 'variable', 'file'] as const) {
+for (const secretType of ['environment', 'on_demand', 'file'] as const) {
   test(`all-CRLF Show -> edit -> Hide -> Submit preserves CRLF on ${secretType} row`, async ({
     page,
   }) => {
@@ -595,7 +595,7 @@ test('plain LF Show -> edit -> Hide -> Submit keeps LF unchanged', async ({ page
   const fulfills = await installMockSecretRequestHub(page, {
     messageId: 'msg-lf-edit',
     key: 'LF_KEY',
-    secretType: 'variable',
+    secretType: 'on_demand',
   });
   await page.goto('/secret-requests/msg-lf-edit', { waitUntil: 'domcontentloaded' });
 
@@ -625,7 +625,7 @@ test('plain LF Show -> edit -> Hide -> Submit keeps LF unchanged', async ({ page
 
 async function installDynamicMockSecretRequestHub(
   page: Page,
-  secretType: 'environment' | 'file' | 'variable',
+  secretType: 'environment' | 'file' | 'on_demand',
   key: string
 ): Promise<Map<string, FulfillRecord['body']>> {
   await installEventSourceStub(page);
@@ -768,7 +768,7 @@ type MatrixPath =
   | 'revealed-typing-edit'
   | 'file-load';
 
-for (const secretType of ['environment', 'variable', 'file'] as const) {
+for (const secretType of ['environment', 'on_demand', 'file'] as const) {
   test(`exact-bytes matrix for ${secretType} row across all entry paths and line-ending payloads`, async ({
     page,
   }) => {

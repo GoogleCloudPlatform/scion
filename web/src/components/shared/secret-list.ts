@@ -87,6 +87,7 @@ export class ScionSecretList extends LitElement {
   @state() private dialogValue = '';
   @state() private dialogDescription = '';
   @state() private dialogType: SecretType = 'environment';
+  private dialogInitialType: SecretType = 'environment';
   @state() private dialogTarget = '';
   @state() private dialogInjectionMode: InjectionMode = 'as_needed';
   @state() private dialogAllowProgeny = false;
@@ -193,6 +194,33 @@ export class ScionSecretList extends LitElement {
         background: var(--scion-bg-subtle, #f1f5f9);
         border-radius: var(--scion-radius, 0.5rem);
       }
+
+      .type-label-with-help {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+
+      .type-help-icon {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted);
+        cursor: help;
+        vertical-align: middle;
+      }
+
+      .secret-type-tooltip {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        text-align: left;
+        max-width: 24rem;
+        line-height: 1.4;
+      }
+
+      .secret-type-tooltip code {
+        font-family: var(--scion-font-mono);
+        font-size: 0.9em;
+      }
     `,
   ];
 
@@ -257,8 +285,9 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = '';
     this.dialogType = 'environment';
+    this.dialogInitialType = 'environment';
     this.dialogTarget = '';
-    this.dialogInjectionMode = 'as_needed';
+    this.dialogInjectionMode = this.scope === 'agent' ? 'always' : 'as_needed';
     this.dialogAllowProgeny = false;
     this.dialogError = null;
     this.dialogOpen = true;
@@ -271,8 +300,10 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = secret.description || '';
     this.dialogType = secret.type;
+    this.dialogInitialType = secret.type;
     this.dialogTarget = secret.target || '';
-    this.dialogInjectionMode = secret.injectionMode || 'as_needed';
+    this.dialogInjectionMode =
+      secret.injectionMode || (this.scope === 'agent' ? 'always' : 'as_needed');
     this.dialogAllowProgeny = secret.allowProgeny || false;
     this.dialogError = null;
     this.dialogOpen = true;
@@ -285,8 +316,10 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = secret.description || '';
     this.dialogType = secret.type;
+    this.dialogInitialType = secret.type;
     this.dialogTarget = secret.target || '';
-    this.dialogInjectionMode = secret.injectionMode || 'as_needed';
+    this.dialogInjectionMode =
+      secret.injectionMode || (this.scope === 'agent' ? 'always' : 'as_needed');
     this.dialogAllowProgeny = secret.allowProgeny || false;
     this.dialogError = null;
     this.dialogOpen = true;
@@ -320,13 +353,26 @@ export class ScionSecretList extends LitElement {
       let body: Record<string, unknown>;
       let method: string;
 
+      const effectiveTarget =
+        this.dialogType === 'on_demand'
+          ? undefined
+          : this.dialogType === 'environment' && this.dialogInitialType === 'file'
+            ? key
+            : this.dialogTarget || undefined;
+      const effectiveInjectionMode =
+        this.dialogType === 'environment'
+          ? this.scope === 'agent'
+            ? 'always'
+            : this.dialogInjectionMode
+          : undefined;
+
       if (isEditSettings) {
         // PATCH: metadata-only update, no value
         body = {
           description: this.dialogDescription,
           type: this.dialogType,
-          target: this.dialogTarget || undefined,
-          injectionMode: this.dialogInjectionMode,
+          target: effectiveTarget,
+          injectionMode: effectiveInjectionMode,
           allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
         };
         method = 'PATCH';
@@ -341,8 +387,8 @@ export class ScionSecretList extends LitElement {
           scope: this.scope,
           description: this.dialogDescription || undefined,
           type: this.dialogType,
-          target: this.dialogTarget || undefined,
-          injectionMode: this.dialogInjectionMode,
+          target: effectiveTarget,
+          injectionMode: effectiveInjectionMode,
           allowProgeny: this.scope === 'user' ? this.dialogAllowProgeny : undefined,
         };
         method = 'PUT';
@@ -709,12 +755,14 @@ export class ScionSecretList extends LitElement {
         </td>
         ${this.scope === 'user' ? html`<td>${this.renderState(entry)}</td>` : nothing}
         <td>
-          <span class="type-badge ${type}">${type}</span>
+          <span class="type-badge ${type}">${type === 'on_demand' ? 'on demand' : type}</span>
         </td>
         <td>
-          ${injectionMode === 'as_needed'
-            ? html`<span class="badge inject-as-needed">as needed</span>`
-            : html`<span class="badge inject-always">always</span>`}
+          ${type === 'on_demand'
+            ? html`<span class="meta-text">—</span>`
+            : injectionMode === 'as_needed'
+              ? html`<span class="badge inject-as-needed">as needed</span>`
+              : html`<span class="badge inject-always">always</span>`}
         </td>
         ${this.scope === 'user'
           ? html`<td>
@@ -1029,20 +1077,48 @@ export class ScionSecretList extends LitElement {
               </div>`}
 
           <sl-select
-            label="Type"
+            data-field="type"
             value=${this.dialogType}
             @sl-change=${(e: Event) => {
-              this.dialogType = (e.target as HTMLSelectElement).value as SecretType;
+              const nextType = (e.target as HTMLSelectElement).value as SecretType;
+              const prevType = this.dialogType;
+              this.dialogType = nextType;
+              if (nextType !== prevType) {
+                this.dialogTarget = '';
+              }
             }}
           >
-            <sl-option value="environment">Environment Variable</sl-option>
-            <sl-option value="variable">Runtime Variable</sl-option>
+            <span slot="label" class="type-label-with-help">
+              Type
+              <sl-tooltip hoist data-testid="secret-type-tooltip">
+                <div slot="content" class="secret-type-tooltip">
+                  <div><strong>Environment:</strong> injected as an env var at start.</div>
+                  <div><strong>File:</strong> written to the target path at start.</div>
+                  <div>
+                    <strong>On demand:</strong> never placed in the container — the agent reads it
+                    with <code>scion secret get --value KEY</code> and sees it in
+                    <code>scion secret list</code>.
+                  </div>
+                </div>
+                <sl-icon
+                  name="info-circle"
+                  class="type-help-icon"
+                  tabindex="0"
+                  aria-label="Secret type help"
+                ></sl-icon>
+              </sl-tooltip>
+            </span>
+            <sl-option value="environment">Environment variable</sl-option>
             <sl-option value="file">File</sl-option>
+            ${this.scope === 'project' || this.scope === 'agent'
+              ? html`<sl-option value="on_demand">On demand (fetched by CLI)</sl-option>`
+              : nothing}
           </sl-select>
 
           ${this.dialogType === 'file'
             ? html`
                 <sl-input
+                  data-field="target"
                   label="Target Path"
                   placeholder="e.g. /home/agent/.ssh/id_rsa"
                   value=${this.dialogTarget}
@@ -1064,22 +1140,26 @@ export class ScionSecretList extends LitElement {
             }}
           ></sl-textarea>
 
-          <div class="radio-field">
-            <span class="radio-field-label">Inject</span>
-            <sl-radio-group
-              value=${this.dialogInjectionMode}
-              @sl-change=${(e: Event) => {
-                this.dialogInjectionMode = (e.target as HTMLInputElement).value as InjectionMode;
-              }}
-            >
-              <sl-radio-button value="always">Always</sl-radio-button>
-              <sl-radio-button value="as_needed">As needed</sl-radio-button>
-            </sl-radio-group>
-            <span class="radio-field-help">
-              "As needed" injects only when the agent configuration requests this value.
-            </span>
-          </div>
-
+          ${this.dialogType === 'environment' && this.scope !== 'agent'
+            ? html`
+                <div class="radio-field" data-testid="injection-mode-field">
+                  <span class="radio-field-label">Inject</span>
+                  <sl-radio-group
+                    value=${this.dialogInjectionMode}
+                    @sl-change=${(e: Event) => {
+                      this.dialogInjectionMode = (e.target as HTMLInputElement)
+                        .value as InjectionMode;
+                    }}
+                  >
+                    <sl-radio-button value="always">Always</sl-radio-button>
+                    <sl-radio-button value="as_needed">As needed</sl-radio-button>
+                  </sl-radio-group>
+                  <span class="radio-field-help">
+                    "As needed" injects only when the agent configuration requests this value.
+                  </span>
+                </div>
+              `
+            : nothing}
           ${this.scope === 'user'
             ? html`
                 <sl-switch

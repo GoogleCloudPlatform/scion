@@ -1249,10 +1249,11 @@ describe('scion-chat-secret-request', () => {
     );
   });
 
-  it('renders variable rows as native password input when masked and textarea only when Show is on', async () => {
+  it('renders on_demand rows as native password input when masked, shows On demand badge, and reveals textarea only when Show is on', async () => {
     const el = await mountCard({
-      rows: [makeRow({ rowId: 'r-var', key: 'API_CONFIG', secretType: 'variable' })],
+      rows: [makeRow({ rowId: 'r-od', key: 'API_CONFIG', secretType: 'on_demand' })],
     });
+    expect(el.shadowRoot!.querySelector('.type-badge')?.textContent?.trim()).toBe('On demand');
     const input = q(el.shadowRoot!, 'input[data-key="API_CONFIG"]') as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.type).toBe('password');
@@ -1282,6 +1283,19 @@ describe('scion-chat-secret-request', () => {
     expect(maskedAgain).not.toBeNull();
     expect(maskedAgain.type).toBe('password');
     expect(toggleBtn.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('renders historical secret-request rows carrying "variable" as "On demand"', async () => {
+    const el = await mountCard({
+      rows: [
+        makeRow({
+          rowId: 'r-legacy',
+          key: 'LEGACY_KEY',
+          secretType: 'variable' as unknown as SecretRequestView['secretType'],
+        }),
+      ],
+    });
+    expect(el.shadowRoot!.querySelector('.type-badge')?.textContent?.trim()).toBe('On demand');
   });
 
   it('ignores a second synchronous click on Submit while a fulfill POST is in flight', async () => {
@@ -1331,7 +1345,7 @@ describe('scion-chat-secret-request', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['environment', 'variable'] as const)(
+  it.each(['environment', 'on_demand'] as const)(
     'preserves CR/LF on masked paste and never merges newlines on Hide+type for %s rows',
     async (secretType) => {
       const fetchMock = vi
@@ -1875,7 +1889,7 @@ describe('scion-chat-secret-request', () => {
             makeRow({
               rowId: 'row-1',
               key: 'REV_PASTE',
-              secretType: 'variable',
+              secretType: 'on_demand',
               status: 'fulfilled',
               fulfilled: {
                 at: '2026-11-24T00:05:00Z',
@@ -1894,7 +1908,7 @@ describe('scion-chat-secret-request', () => {
 
     // 1. Empty row -> Show -> paste CRLF -> preserves CRLF
     const el1 = await mountCard({
-      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
+      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'on_demand' })],
     });
     (q(el1.shadowRoot!, '.toggle-visibility') as HTMLButtonElement).click();
     await settle(el1);
@@ -1921,7 +1935,7 @@ describe('scion-chat-secret-request', () => {
 
     // 2. LF value -> Show -> paste "\r\nX" at end -> becomes mixed readonly and submits verbatim
     const el2 = await mountCard({
-      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'variable' })],
+      rows: [makeRow({ rowId: 'row-1', key: 'REV_PASTE', secretType: 'on_demand' })],
     });
     const input2 = q(el2.shadowRoot!, 'input[data-key="REV_PASTE"]') as HTMLInputElement;
     const lfPaste = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;

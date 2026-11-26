@@ -166,7 +166,7 @@ async function openSecretsTabAndAddRow(
   opts: {
     agentName: string;
     key: string;
-    type?: 'environment' | 'file' | 'variable';
+    type?: 'environment' | 'file' | 'on_demand';
     target?: string;
   }
 ): Promise<void> {
@@ -240,7 +240,7 @@ test('masked typing hides plaintext from DOM and AX tree and one click on Start 
       key: 'GITHUB_TOKEN',
       value: 'ghp_typed_secret_canary_9110',
       type: 'environment',
-      injectionMode: 'as_needed',
+      injectionMode: 'always',
     },
   ]);
 });
@@ -252,7 +252,7 @@ for (const [label, secretType, payload, target] of [
     '-----BEGIN PRIVATE KEY-----\ncreate-lf-canary\n-----END PRIVATE KEY-----',
     '~/.ssh/id_ed25519',
   ],
-  ['CRLF variable', 'variable', 'LINE1\r\ncreate-crlf-canary\r\nLINE3', undefined],
+  ['CRLF on_demand', 'on_demand', 'LINE1\r\ncreate-crlf-canary\r\nLINE3', undefined],
 ] as const) {
   test(`masked multi-line paste (${label}) hides plaintext from DOM/AX tree and submits exact bytes`, async ({
     page,
@@ -339,7 +339,7 @@ test('keyboard.insertText with LF and CRLF submits exact bytes', async ({ page }
     await openSecretsTabAndAddRow(page, {
       agentName: `insert-${label}`,
       key: 'INSERT_KEY',
-      type: 'variable',
+      type: 'on_demand',
     });
 
     const input = page.locator('input[data-key="INSERT_KEY"]');
@@ -430,7 +430,53 @@ test('file row Load from file preserves UTF-8 BOM and CRLF verbatim while stayin
       value: fileContent,
       type: 'file',
       target: '/etc/ssl/cert.pem',
-      injectionMode: 'as_needed',
     },
   ]);
+});
+
+test('create form at 1280px fits More Details tabs without horizontal scroll and enforces Secrets tab UX', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await installMockCreateAgentHub(page);
+  await page.goto('/agents/new?advanced=1', { waitUntil: 'domcontentloaded' });
+
+  const secretsTab = page.locator('[data-testid="tab-secrets"]');
+  await expect(secretsTab).toBeVisible();
+
+  // Verify the tab bar does not scroll horizontally at 1280px.
+  const tabNavMetrics = await page
+    .locator('scion-agent-config-form sl-tab-group')
+    .evaluate((el) => {
+      const nav = el.shadowRoot?.querySelector<HTMLElement>('[part="nav"]');
+      if (!nav) return null;
+      return { scrollWidth: nav.scrollWidth, clientWidth: nav.clientWidth };
+    });
+  expect(tabNavMetrics).not.toBeNull();
+  expect(tabNavMetrics!.scrollWidth).toBeLessThanOrEqual(tabNavMetrics!.clientWidth);
+
+  await secretsTab.click();
+  await page.locator('[data-testid="add-secret-row"]').click();
+  const row = page.locator('[data-testid="secret-row"]').first();
+  await expect(row).toBeVisible();
+
+  // Type tooltip present, no delivery selector, Target hidden for environment.
+  await expect(row.locator('[data-testid="secret-type-tooltip"]')).toBeVisible();
+  await expect(row.locator('[data-field="injectionMode"]')).toHaveCount(0);
+  await expect(row.locator('[data-field="target"]')).toHaveCount(0);
+
+  // Switch to File -> Target appears.
+  const typeSelect = row.locator('sl-select[data-field="type"]');
+  await typeSelect.evaluate((el: HTMLElement & { value: string }) => {
+    el.value = 'file';
+    el.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+  });
+  await expect(row.locator('[data-field="target"]')).toBeVisible();
+
+  // Switch to On demand -> Target disappears.
+  await typeSelect.evaluate((el: HTMLElement & { value: string }) => {
+    el.value = 'on_demand';
+    el.dispatchEvent(new Event('sl-change', { bubbles: true, composed: true }));
+  });
+  await expect(row.locator('[data-field="target"]')).toHaveCount(0);
 });

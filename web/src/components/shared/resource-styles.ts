@@ -179,7 +179,7 @@ export const resourceStyles = css`
     color: var(--sl-color-primary-700, #1d4ed8);
   }
 
-  .type-badge.variable {
+  .type-badge.on_demand {
     background: var(--sl-color-success-100, #dcfce7);
     color: var(--sl-color-success-700, #15803d);
   }

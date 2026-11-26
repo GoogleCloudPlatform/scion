@@ -34,17 +34,16 @@ describe('agent-create-secrets validation and serialization', () => {
     expect(toCreateAgentSecrets(rows)).toEqual([]);
   });
 
-  it('serializes valid environment, file, and variable secrets', () => {
+  it('serializes valid environment, file, and on_demand secrets', () => {
     const rows = [
-      row({ key: 'GITHUB_TOKEN', value: 'ghp_123', type: 'environment', injectionMode: 'always' }),
+      row({ key: 'GITHUB_TOKEN', value: 'ghp_123', type: 'environment' }),
       row({
         key: 'DEPLOY_KEY',
         value: '-----BEGIN KEY-----\nabc\n-----END KEY-----',
         type: 'file',
         target: '~/.ssh/id_ed25519',
-        injectionMode: 'as_needed',
       }),
-      row({ key: 'API_CFG', value: '{"a":1}', type: 'variable', target: 'api_cfg' }),
+      row({ key: 'API_CFG', value: '{"a":1}', type: 'on_demand' }),
     ];
     expect(validateAgentSecretRows(rows)).toEqual([]);
     const serialized = toCreateAgentSecrets(rows);
@@ -60,19 +59,33 @@ describe('agent-create-secrets validation and serialization', () => {
         value: '-----BEGIN KEY-----\nabc\n-----END KEY-----',
         type: 'file',
         target: '~/.ssh/id_ed25519',
-        injectionMode: 'as_needed',
       },
       {
         key: 'API_CFG',
         value: '{"a":1}',
-        type: 'variable',
-        target: 'api_cfg',
-        injectionMode: 'as_needed',
+        type: 'on_demand',
       },
     ]);
     for (const item of serialized) {
       expect(item).not.toHaveProperty('id');
     }
+  });
+
+  it('rejects retired variable type and custom target on on_demand secrets', () => {
+    expect(
+      validateAgentSecretRows([
+        row({
+          key: 'OLD_VAR',
+          value: 'x',
+          type: 'variable' as unknown as AgentSecretDraftRow['type'],
+        }),
+      ])
+    ).toEqual([expect.stringContaining('must be environment, file, or on_demand')]);
+    expect(
+      validateAgentSecretRows([
+        row({ key: 'API_CFG', value: 'x', type: 'on_demand', target: 'OTHER_KEY' }),
+      ])
+    ).toEqual([expect.stringContaining('does not accept a custom target')]);
   });
 
   it('rejects reserved SCION_* and GCE_METADATA_* env keys and targets', () => {
