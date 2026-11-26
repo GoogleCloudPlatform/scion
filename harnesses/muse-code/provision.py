@@ -395,7 +395,13 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     # --- Auth selection -------------------------------------------------------
     resolved = ctx.select_auth(AUTH)
 
-    env: dict[str, str] = {}
+    # Muse Code has no native OTel usage signal (config.yaml's
+    # capabilities.telemetry.native_emitter is "no"), so its model calls and
+    # tokens are published from PostLLMCall hooks (dialect.yaml + per-turn
+    # cumulative delta normalization in pkg/sciontool/hooks/handlers).
+    # Verified live against muse 1.4.25-R9361.1; see
+    # pkg/sciontool/hooks/dialects/testdata/muse-code/.
+    env: dict[str, str] = {"SCION_USAGE_SOURCE": "hooks"}
 
     if resolved.method == "api-key" and resolved.env_key:
         api_key = ctx.read_secret(resolved.env_key)

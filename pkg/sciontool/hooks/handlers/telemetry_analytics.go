@@ -28,6 +28,9 @@ import (
 // invocationNum (advances within a turn) names one main-loop invocation.
 // Pi (pi 1.3.0): (message_id, response_id, timestamp) from assistant
 // message_end names one completed model request.
+// Muse Code (muse 1.4.25 fixture): (request_id, response_id) from PostLLMCall
+// names one completed or terminally failed model request (`request_id` is
+// "<turn_id>:<step>:<attempt>", present on both success and failure).
 func hookSourceIdentity(event *hooks.Event) (identity, sourceEventID string) {
 	switch event.Dialect {
 	case "antigravity":
@@ -45,6 +48,13 @@ func hookSourceIdentity(event *hooks.Event) (identity, sourceEventID string) {
 		if msgID != "" || respID != "" || ts != "" {
 			return telemetrycontract.SourceIdentityComposite,
 				telemetry.CompositeSourceEventID("hook", event.Dialect, event.RawName, msgID, respID, ts)
+		}
+	case "muse-code":
+		reqID := rawScalar(event.Data.Raw, "request_id")
+		respID := rawScalar(event.Data.Raw, "response_id")
+		if reqID != "" || respID != "" {
+			return telemetrycontract.SourceIdentityComposite,
+				telemetry.CompositeSourceEventID("hook", event.Dialect, event.RawName, reqID, respID)
 		}
 	}
 	return telemetrycontract.SourceIdentityNone, ""
@@ -90,6 +100,10 @@ func hookUsageObservation(event *hooks.Event, now time.Time) telemetry.UsageObse
 	if dialect == "" {
 		dialect = "unknown"
 	}
+	inputDerivation := telemetrycontract.InputDerivationReported
+	if event.Data.InputTokensDerived {
+		inputDerivation = telemetrycontract.InputDerivationDerived
+	}
 	obs := telemetry.UsageObservation{
 		SourceKind:              "hook." + dialect + ".model_end",
 		EventTime:               now,
@@ -103,7 +117,7 @@ func hookUsageObservation(event *hooks.Event, now time.Time) telemetry.UsageObse
 		CacheWrite:              positive(event.Data.CacheWriteTokens),
 		Reasoning:               positive(event.Data.ReasoningTokens),
 		ReasoningOverlapsOutput: true,
-		InputDerivation:         telemetrycontract.InputDerivationReported,
+		InputDerivation:         inputDerivation,
 		TokenStatus:             telemetrycontract.TokenStatusNotReported,
 	}
 	if obs.Input != nil || obs.Output != nil || obs.CacheRead != nil || obs.CacheWrite != nil || obs.Reasoning != nil {

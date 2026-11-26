@@ -81,6 +81,16 @@ type TelemetryHandler struct {
 	// hook command only when the GCP exporter is configured.
 	Analytics *telemetry.UsageAnalytics
 
+	// MuseTurnUsageStatePath, if set, persists Muse Code's per-turn cumulative
+	// usage high-water marks across short-lived hook processes. When
+	// MuseTurnUsageStateRequired is true and MuseTurnUsageStatePath is empty
+	// (or the state file cannot be used), muse-code model-end tokens fail
+	// closed to not_reported instead of falling back to an empty in-memory map.
+	MuseTurnUsageStatePath     string
+	MuseTurnUsageStateRequired bool
+	turnUsageMu                sync.Mutex
+	turnUsageMem               *museTurnUsageState
+
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
 	toolCalls    metric.Int64Counter
@@ -196,6 +206,11 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 	if h == nil || event == nil {
 		return nil
 	}
+
+	// Normalize cumulative per-turn usage (muse-code PostLLMCall) into a
+	// per-step increment before spans, logs, aggregator, counters, or
+	// analytics read event.Data token fields.
+	event = h.normalizeMuseTurnUsage(event)
 
 	if h.metricsDebug && isMetricRelevantEvent(event.Name) {
 		log.TaggedInfo("metrics",

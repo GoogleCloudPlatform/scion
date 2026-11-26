@@ -6,6 +6,7 @@
     "env_var": "META_API_KEY"
   },
   "env": {
-    "META_API_KEY": "test-meta-api-key"
+    "META_API_KEY": "test-meta-api-key",
+    "SCION_USAGE_SOURCE": "hooks"
   }
 }

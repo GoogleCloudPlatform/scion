@@ -191,11 +191,12 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 ctx = scion_harness.ProvisionContext("muse-code", manifest)
                 provision.provision(ctx)
 
-            # Check env.json was written with the API key.
+            # Check env.json was written with the API key and SCION_USAGE_SOURCE=hooks.
             env_json = _read_json(
                 os.path.join(tmp, "bundle", "outputs", "env.json")
             )
             self.assertEqual(env_json.get("META_API_KEY"), "test-meta-api-key-123")
+            self.assertEqual(env_json.get("SCION_USAGE_SOURCE"), "hooks")
 
             # Check resolved-auth.json.
             auth_json = _read_json(
@@ -222,6 +223,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertEqual(auth_json["method"], "none")
+            env_json = _read_json(
+                os.path.join(tmp, "bundle", "outputs", "env.json")
+            )
+            self.assertEqual(env_json.get("SCION_USAGE_SOURCE"), "hooks")
 
     def test_model_alias_resolution(self) -> None:
         """SCION_MODEL tier names resolve through model_aliases."""
@@ -243,6 +248,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertEqual(auth_json["method"], "none")
+            env_json = _read_json(
+                os.path.join(tmp, "bundle", "outputs", "env.json")
+            )
+            self.assertEqual(env_json.get("SCION_USAGE_SOURCE"), "hooks")
             self.assertTrue(any("model=muse-spark-1.2" in m for m in messages), messages)
 
     def test_model_passthrough_for_unknown(self) -> None:
@@ -479,7 +488,7 @@ class MuseCodeProvisionTest(unittest.TestCase):
             self.assertEqual(env_json["META_API_KEY"], "my-secret-key")
 
     def test_env_output_empty_for_no_auth(self) -> None:
-        """env.json is empty when no auth is resolved."""
+        """env.json carries only SCION_USAGE_SOURCE=hooks when no auth is resolved."""
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             os.makedirs(home)
@@ -494,7 +503,7 @@ class MuseCodeProvisionTest(unittest.TestCase):
             env_json = _read_json(
                 os.path.join(tmp, "bundle", "outputs", "env.json")
             )
-            self.assertEqual(env_json, {})
+            self.assertEqual(env_json, {"SCION_USAGE_SOURCE": "hooks"})
 
     def test_mcp_sse_mapped_to_streamable_http(self) -> None:
         """SSE transport servers are mapped to streamable_http."""
@@ -572,6 +581,10 @@ class MuseCodeProvisionTest(unittest.TestCase):
                 os.path.join(tmp, "bundle", "outputs", "resolved-auth.json")
             )
             self.assertEqual(auth_json["method"], "none")
+            env_json = _read_json(
+                os.path.join(tmp, "bundle", "outputs", "env.json")
+            )
+            self.assertEqual(env_json.get("SCION_USAGE_SOURCE"), "hooks")
 
     def test_provision_idempotent(self) -> None:
         """Running provision twice produces the same result."""

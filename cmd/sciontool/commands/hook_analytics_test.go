@@ -5,10 +5,13 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 )
 
@@ -66,5 +69,50 @@ func TestHookUsageAnalytics_HubOnlyAndDualRunDiscovery(t *testing.T) {
 	}
 	if a.Outbox() != nil {
 		t.Error("Hub-only hook Outbox() should be nil when Hub outbox is not marked active on disk")
+	}
+}
+
+// TestRunHookTelemetry_CreatesMuseTurnUsageStateFile exercises the production
+// wiring in runHookTelemetry (hook.go): with HOME set to a temp dir, one
+// muse-code model-end event must create $HOME/.scion/muse-turn-usage.json so
+// subsequent steps compute per-step deltas instead of failing closed.
+func TestRunHookTelemetry_CreatesMuseTurnUsageStateFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_TELEMETRY_ENABLED", "true")
+	t.Setenv("SCION_HARNESS", "muse-code")
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_TELEMETRY_CLOUD_ENABLED", "false")
+	t.Setenv("SCION_OTEL_ENDPOINT", "")
+
+	ev := &hooks.Event{
+		Name:    hooks.EventModelEnd,
+		RawName: "PostLLMCall",
+		Dialect: "muse-code",
+		Data: hooks.EventData{
+			SessionID:          "sess-wire-1",
+			Model:              "muse-spark",
+			InputTokens:        600,
+			OutputTokens:       120,
+			CachedTokens:       200,
+			ReasoningTokens:    40,
+			InputTokensDerived: true,
+			Raw: map[string]interface{}{
+				"turn_id":     "turn-wire-1",
+				"request_id":  "turn-wire-1:0:1",
+				"response_id": "resp_wire_0",
+			},
+		},
+	}
+
+	runHookTelemetry(context.Background(), ev, nil)
+
+	statePath := filepath.Join(home, ".scion", "muse-turn-usage.json")
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("expected muse turn usage state file at %s: %v", statePath, err)
+	}
+	if !strings.Contains(string(raw), "sess-wire-1:turn-wire-1") {
+		t.Errorf("state file %s = %s, want entry for sess-wire-1:turn-wire-1", statePath, raw)
 	}
 }

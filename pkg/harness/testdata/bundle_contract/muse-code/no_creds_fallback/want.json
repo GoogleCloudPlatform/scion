@@ -3,5 +3,7 @@
   "resolved_auth": {
     "method": "none"
   },
-  "env": {}
+  "env": {
+    "SCION_USAGE_SOURCE": "hooks"
+  }
 }
