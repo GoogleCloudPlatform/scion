@@ -72,7 +72,7 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	_, err := s.SetAgentRunID(ctx, agent.ID, runID, nil)
 	require.NoError(t, err)
 
-	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	agentToken := srv.generateRecordedAgentToken(t, agent.ID, project.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 
 	postMetrics := func(t *testing.T, payload metricsPayloadRequest) (int, string) {
 		t.Helper()

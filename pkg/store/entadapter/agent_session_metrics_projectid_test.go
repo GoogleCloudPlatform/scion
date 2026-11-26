@@ -122,8 +122,13 @@ func TestAgentSessionMetricsAutoMigrate_ProjectIDKeepsGroveIDColumn(t *testing.T
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 
-	assert.Equal(t, oldAgentSessionMetricsDDL, sqliteObjectSQL(t, db, "agent_session_metrics"),
-		"AutoMigrate must not alter the agent_session_metrics table shape")
+	migratedSQL := sqliteObjectSQL(t, db, "agent_session_metrics")
+	assert.Contains(t, migratedSQL, "`grove_id` text NOT NULL",
+		"AutoMigrate must keep the physical grove_id column")
+	assert.NotContains(t, migratedSQL, "project_id",
+		"AutoMigrate must not add or rename to a physical project_id column")
+	assert.Contains(t, migratedSQL, "`converted_at` datetime NULL",
+		"AutoMigrate must add the nullable converted_at column cleanly")
 	assert.Equal(t, oldAgentSessionMetricsGroveIDIndexDDL, sqliteObjectSQL(t, db, "agentsessionmetrics_grove_id"),
 		"AutoMigrate must not alter the agentsessionmetrics_grove_id index")
 	assert.Equal(t, oldAgentSessionMetricsAgentIDIndexDDL, sqliteObjectSQL(t, db, "agentsessionmetrics_agent_id"))
