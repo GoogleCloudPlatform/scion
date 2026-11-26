@@ -28,7 +28,7 @@ Scion list views share a Gmail/GitHub-style `key:value` filter query dialect.
 
 ### `agents` (Agents list)
 
-Text search matches agent **name** or **slug** (case-insensitive substring).
+Text search matches agent **name** or **slug** (case-insensitive substring). On `GET /api/v1/agents` in sorted mode (`sort=created|updated`), `stats`, the `fit` probe, and `complete: true` rows ignore `phase:` terms in `q`, so a `q=phase:running&fit=N` caller can receive non-running rows when `complete` is `true` and must filter `phase` locally.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring).
 
 ### `project_agents` (Project agents list)
 
-Text search matches agent **name** or **slug** (case-insensitive substring). Scoped to the current project (`project:` and `is:` are not exposed).
+Text search matches agent **name** or **slug** (case-insensitive substring). Scoped to the current project (`project:` and `is:` are not exposed). On `GET /api/v1/projects/:id/agents` in sorted mode, `stats`, the `fit` probe, and `complete: true` rows likewise ignore `phase:` terms in `q`.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
