@@ -246,7 +246,32 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 	}
 
 	remindExisting := func(existing ReviewRequest) (ReviewRequest, string, error) {
+		nextAccess := existing.Access
+		nextGrantID := existing.GrantID
+		if raisedGrantID != "" {
+			nextAccess = ReviewRequestAccessRaised
+			nextGrantID = raisedGrantID
+		}
 		if existing.RemindedAt != nil && at.Sub(*existing.RemindedAt) < remindCooldown {
+			if raisedGrantID != "" {
+				res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
+					SET access = ?, grant_id = ?, updated_at = ?
+					WHERE id = ? AND state = ?`),
+					nextAccess, nullString(nextGrantID), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
+				if err != nil {
+					return ReviewRequest{}, "", fmt.Errorf("artifacts: update raised grant on review request: %w", err)
+				}
+				n, err := res.RowsAffected()
+				if err != nil {
+					return ReviewRequest{}, "", fmt.Errorf("artifacts: update raised grant on review request: %w", err)
+				}
+				if n == 0 {
+					return ReviewRequest{}, "", ErrRequestClosed
+				}
+				existing.Access = nextAccess
+				existing.GrantID = nextGrantID
+				existing.UpdatedAt = at
+			}
 			if err := tx.Commit(); err != nil {
 				return ReviewRequest{}, "", fmt.Errorf("artifacts: commit review request unchanged: %w", err)
 			}
@@ -257,9 +282,9 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 			nextNote = req.Note
 		}
 		res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
-			SET note = ?, reminded_at = ?, updated_at = ?
+			SET note = ?, access = ?, grant_id = ?, reminded_at = ?, updated_at = ?
 			WHERE id = ? AND state = ?`),
-			nextNote, s.timeArg(at), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
+			nextNote, nextAccess, nullString(nextGrantID), s.timeArg(at), s.timeArg(at), existing.ID, ReviewRequestStateOpen)
 		if err != nil {
 			return ReviewRequest{}, "", fmt.Errorf("artifacts: remind review request: %w", err)
 		}
@@ -283,6 +308,8 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 			return ReviewRequest{}, "", fmt.Errorf("artifacts: commit review request remind: %w", err)
 		}
 		existing.Note = nextNote
+		existing.Access = nextAccess
+		existing.GrantID = nextGrantID
 		existing.RemindedAt = &at
 		existing.UpdatedAt = at
 		return existing, ReviewRequestOutcomeReminded, nil

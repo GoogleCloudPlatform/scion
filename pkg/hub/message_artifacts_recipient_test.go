@@ -240,19 +240,27 @@ func TestDirectUserRecipient(t *testing.T) {
 type moduleFuncKey struct{ path, function string }
 
 // recipientCheckSymbols are the non-access-granting named-principal check
-// entry points (the send-time recipient warning, the open-review access
-// filter, the lost-access review-draft reaper, and the review-request
-// existing-access eligibility check), each with the only functions in the
-// module that may call it.
+// entry points:
+//   - RecipientMayNotRead: send-time recipient warning;
+//   - readableOpenReviews: open-review access filter;
+//   - ReapLostAccessReviewDrafts: lost-access review-draft reaper;
+//   - classifyReviewer: review-request reviewer eligibility classifier
+//     (returns only a classification; any raised grant is written separately
+//     under the caller's own adminAuthorityWith);
+//   - ReapReviewRequests: lost-access review-request reaper (definitive deny
+//     only);
+//   - handleListReviewRequests: advisory reviewerCanReview on publisher GET.
+//
+// Each entry lists the only functions in the module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
 	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
 	"ResolveRecipient": {
-		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:              true,
-		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:        true,
-		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}:   true,
-		{"pkg/artifacts/review_drafts.go", "ReapReviewRequests"}:           true,
-		{"pkg/artifacts/review_requests.go", "handleCreateReviewRequests"}: true,
-		{"pkg/artifacts/review_requests.go", "handleListReviewRequests"}:   true,
+		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:            true,
+		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:      true,
+		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}: true,
+		{"pkg/artifacts/review_drafts.go", "ReapReviewRequests"}:         true,
+		{"pkg/artifacts/review_requests.go", "classifyReviewer"}:         true,
+		{"pkg/artifacts/review_requests.go", "handleListReviewRequests"}: true,
 	},
 	"readableOpenReviews": {{"pkg/artifacts/review_sessions.go", "checkOpenReviews"}: true},
 	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
@@ -314,14 +322,16 @@ func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
 // TestArtifactRecipientCheckIsWarningOnly pins, across the whole module,
 // that the named-principal recipient check never grants access or serves
 // content — it may only feed the sender's warning, filter open reviews,
-// withhold/remove the principal's own data on a definitive deny, or refuse a
-// caller-initiated request on the principal's behalf:
+// classify review-request eligibility (without escaping the subject), compute
+// advisory reviewerCanReview on publisher GET, or withhold/remove the
+// principal's own data on a definitive deny:
 // RecipientMayNotRead is called only by artifactRecipientWarning, whose
 // result admitMessageArtifacts only appends to the warning;
 // ResolveRecipient only by RecipientMayNotRead, readableOpenReviews,
-// ReapLostAccessReviewDrafts, and the review-request existing-access check
-// (handleCreateReviewRequests, ptone/scion#9296); and the hub's recipient
-// identity and chain walk only from the resolved recipient's own methods.
+// ReapLostAccessReviewDrafts, ReapReviewRequests, classifyReviewer (whose
+// subject flows only into a nil check and principalCanReview), and
+// handleListReviewRequests; and the hub's recipient identity and chain
+// walk only from the resolved recipient's own methods.
 func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 	seen := map[string]int{}
 	forEachModuleGoFile(t, func(path string, f *ast.File) {
@@ -371,6 +381,87 @@ func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 				}
 				checkOnlyFeedsWarning(t, fd, id.Name)
 			}
+		}
+		return true
+	})
+
+	// classifyReviewer uses ResolveRecipient's subject only for a nil check
+	// and as an argument to principalCanReview; it never escapes.
+	var classifyFD *ast.FuncDecl
+	forEachModuleGoFile(t, func(path string, f *ast.File) {
+		if path != "pkg/artifacts/review_requests.go" {
+			return
+		}
+		for _, decl := range f.Decls {
+			if d, ok := decl.(*ast.FuncDecl); ok && d.Name.Name == "classifyReviewer" {
+				classifyFD = d
+			}
+		}
+	})
+	if classifyFD == nil || classifyFD.Body == nil {
+		t.Fatal("pkg/artifacts/review_requests.go:classifyReviewer not found")
+	}
+	var subjectChecked bool
+	ast.Inspect(classifyFD.Body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Rhs) != 1 || len(as.Lhs) < 1 {
+			return true
+		}
+		if call, ok := as.Rhs[0].(*ast.CallExpr); ok && extractCallSymbol(call) == "ResolveRecipient" {
+			id, ok := as.Lhs[0].(*ast.Ident)
+			if !ok {
+				t.Errorf("classifyReviewer assigns ResolveRecipient subject to a non-identifier")
+				return true
+			}
+			subjectChecked = true
+			checkSubjectOnlyFeedsCanReview(t, classifyFD, id.Name)
+		}
+		return true
+	})
+	if !subjectChecked {
+		t.Errorf("classifyReviewer did not assign a ResolveRecipient result")
+	}
+}
+
+// checkSubjectOnlyFeedsCanReview fails unless every use of variable name in fd
+// is its own definition, a comparison against nil, or a direct argument to
+// principalCanReview.
+func checkSubjectOnlyFeedsCanReview(t *testing.T, fd *ast.FuncDecl, name string) {
+	t.Helper()
+	allowed := map[*ast.Ident]bool{}
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.BinaryExpr:
+			if id, ok := v.X.(*ast.Ident); ok && id.Name == name {
+				if y, ok := v.Y.(*ast.Ident); ok && y.Name == "nil" {
+					allowed[id] = true
+				}
+			}
+			if id, ok := v.Y.(*ast.Ident); ok && id.Name == name {
+				if x, ok := v.X.(*ast.Ident); ok && x.Name == "nil" {
+					allowed[id] = true
+				}
+			}
+		case *ast.CallExpr:
+			if extractCallSymbol(v) == "principalCanReview" {
+				for _, arg := range v.Args {
+					if id, ok := arg.(*ast.Ident); ok && id.Name == name {
+						allowed[id] = true
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			for _, lhs := range v.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
+					allowed[id] = true // its own definition
+				}
+			}
+		}
+		return true
+	})
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && id.Name == name && !allowed[id] {
+			t.Errorf("classifyReviewer uses ResolveRecipient subject %q outside nil check and principalCanReview", name)
 		}
 		return true
 	})

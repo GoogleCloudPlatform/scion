@@ -978,22 +978,71 @@ func TestWithdrawReviewRequestPermissionsAndLifecycle(t *testing.T) {
 	fakeOwnedByAgent.OwnerKind = PrincipalKindAgent
 	fakeOwnedByAgent.OwnerRef = "agent-1"
 	b, _ := svc.backend()
-	ctx := context.Background()
-	_, allowedOther, err := svc.withdrawAuthority(ctx, b, &fakeOwnedByAgent, &ReviewRequest{
+	pAgent1 := principal{PrincipalKindAgent, "agent-1", "proj-1"}
+	agentCtx := withPrincipal(httptest.NewRequest(http.MethodPost, "/", nil), pAgent1).Context()
+	_, allowedOther, err := svc.withdrawAuthority(agentCtx, b, &fakeOwnedByAgent, &ReviewRequest{
 		RequesterKind: PrincipalKindUser, RequesterRef: "alice",
 	}, PrincipalKindAgent, "agent-1")
 	if err != nil || allowedOther {
 		t.Errorf("agent withdrawing user's request on agent-owned artifact = %v, %v; want false, nil", allowedOther, err)
 	}
-	actorOwn, allowedOwn, err := svc.withdrawAuthority(ctx, b, &fakeOwnedByAgent, &ReviewRequest{
+	actorOwn, allowedOwn, err := svc.withdrawAuthority(agentCtx, b, &fakeOwnedByAgent, &ReviewRequest{
 		RequesterKind: PrincipalKindAgent, RequesterRef: "agent-1",
 	}, PrincipalKindAgent, "agent-1")
 	if err != nil || !allowedOwn || actorOwn == nil {
 		t.Errorf("agent withdrawing its own request = %v, %v; want true, nil", allowedOwn, err)
 	}
+	// Agent whose credential lacks artifact.request_review cannot withdraw even its own request.
+	h.deny(pAgent1, "proj-1", PermissionRequestReview)
+	_, allowedAgentDenied, err := svc.withdrawAuthority(agentCtx, b, &fakeOwnedByAgent, &ReviewRequest{
+		RequesterKind: PrincipalKindAgent, RequesterRef: "agent-1",
+	}, PrincipalKindAgent, "agent-1")
+	delete(h.denied, PrincipalRef(PrincipalKindAgent, "agent-1")+" proj-1 "+PermissionRequestReview)
+	if err != nil || allowedAgentDenied {
+		t.Errorf("agent lacking artifact.request_review withdrawing own request = %v, %v; want false, nil", allowedAgentDenied, err)
+	}
 	_ = agentArt
 
-	// Owner (Alice) withdraws Carol's request -> 200, RequestClosed + inbox hint fired, raised grant kept.
+	// R1 credential-ceiling tests:
+	// Give Carol write access so she can publish and create a review request for Bob.
+	if gRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: SubjectPrincipal, SubjectRef: "user:carol", Permission: GrantWrite}); gRec.Code != http.StatusOK {
+		t.Fatalf("upgrade carol to write = %d %s", gRec.Code, gRec.Body.String())
+	}
+	carolReqRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "carol",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "carol asks bob"})
+	if carolReqRec.Code != http.StatusOK {
+		t.Fatalf("carol create request = %d %s", carolReqRec.Code, carolReqRec.Body.String())
+	}
+	var carolCreateResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(carolReqRec.Body.Bytes(), &carolCreateResp)
+	carolReqID := carolCreateResp.Requests[0].Request.ID
+
+	// (a) Owner (Alice) with a credential lacking artifact.manage withdrawing
+	// another publisher's (Carol's) request -> 403.
+	pAlice := principal{PrincipalKindUser, "alice", ""}
+	h.deny(pAlice, "proj-1", PermissionManage)
+	wAliceDenied := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+carolReqID+"/withdraw", "user", "alice", nil)
+	delete(h.denied, PrincipalRef(PrincipalKindUser, "alice")+" proj-1 "+PermissionManage)
+	if wAliceDenied.Code != http.StatusForbidden {
+		t.Errorf("owner lacking artifact.manage withdrawing other's request = %d %s, want 403", wAliceDenied.Code, wAliceDenied.Body.String())
+	}
+
+	// (b) Requester (Carol) with a credential lacking artifact.request_review
+	// withdrawing her own request -> 403; full session -> 200.
+	pCarol := principal{PrincipalKindUser, "carol", ""}
+	h.deny(pCarol, "proj-1", PermissionRequestReview)
+	wCarolDenied := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+carolReqID+"/withdraw", "user", "carol", nil)
+	delete(h.denied, PrincipalRef(PrincipalKindUser, "carol")+" proj-1 "+PermissionRequestReview)
+	if wCarolDenied.Code != http.StatusForbidden {
+		t.Errorf("requester lacking artifact.request_review withdrawing own request = %d %s, want 403", wCarolDenied.Code, wCarolDenied.Body.String())
+	}
+	wCarolOK := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+carolReqID+"/withdraw", "user", "carol", nil)
+	if wCarolOK.Code != http.StatusOK {
+		t.Errorf("requester with full session withdrawing own request = %d %s, want 200", wCarolOK.Code, wCarolOK.Body.String())
+	}
+
+	// Owner (Alice) with full session withdraws Carol's request -> 200, RequestClosed + inbox hint fired, raised grant kept.
 	h.inboxHints = nil
 	h.closedAcks = nil
 	wrec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests/"+reqID+"/withdraw", "user", "alice", nil)
@@ -1229,5 +1278,118 @@ func TestReapReviewRequestsTTLAndLostAccessAndLookupErrorFailSafe(t *testing.T) 
 	res, err = ReapReviewRequests(ctx, st, h, t0.Add(150*24*time.Hour), 50, nil)
 	if err != nil || res.Purged != 2 {
 		t.Fatalf("day 150 purge = %+v, %v; want Purged=2", res, err)
+	}
+}
+
+func TestRaiseGrantOnRemindAndUnchanged(t *testing.T) {
+	svc, _, st, artID := newReviewRequestFixture(t)
+	ctx := context.Background()
+	ownerActor := &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner}
+
+	// 1. Create request for Bob (already has review grant -> access=existing, grant_id="").
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "initial"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	var cResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &cResp)
+	if cResp.Requests[0].Access != ReviewRequestAccessExisting {
+		t.Fatalf("initial access = %q, want existing", cResp.Requests[0].Access)
+	}
+	reqID := cResp.Requests[0].Request.ID
+
+	revokeBob := func() {
+		t.Helper()
+		grants, err := st.ListGrants(ctx, artID)
+		if err != nil {
+			t.Fatalf("ListGrants: %v", err)
+		}
+		for _, g := range grants {
+			if g.SubjectRef == "user:bob" {
+				if err := st.DeleteGrant(ctx, artID, g.ID, ownerActor); err != nil {
+					t.Fatalf("DeleteGrant: %v", err)
+				}
+			}
+		}
+	}
+
+	// 2. Revoke Bob's review grant; admin Alice re-requests (reminded) ->
+	// response and row both report access=raised and grant_id set.
+	revokeBob()
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "re-request"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("remind raise = %d %s", rec.Code, rec.Body.String())
+	}
+	var remResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &remResp)
+	if remResp.Requests[0].Outcome != ReviewRequestOutcomeReminded || remResp.Requests[0].Access != ReviewRequestAccessRaised {
+		t.Fatalf("remind raise result = %+v, want reminded + access=raised", remResp.Requests[0])
+	}
+	row1, err := st.GetReviewRequest(ctx, artID, reqID)
+	if err != nil || row1.Access != ReviewRequestAccessRaised || row1.GrantID == "" {
+		t.Fatalf("stored row after remind raise = %+v, %v; want access=raised + non-empty GrantID", row1, err)
+	}
+
+	// 3. Revoke Bob's review grant again; admin Alice re-requests within 24h cooldown (unchanged) ->
+	// response and row both report access=raised and new grant_id set.
+	revokeBob()
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unchanged raise = %d %s", rec.Code, rec.Body.String())
+	}
+	var unchResp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &unchResp)
+	if unchResp.Requests[0].Outcome != ReviewRequestOutcomeUnchanged || unchResp.Requests[0].Access != ReviewRequestAccessRaised {
+		t.Fatalf("unchanged raise result = %+v, want unchanged + access=raised", unchResp.Requests[0])
+	}
+	row2, err := st.GetReviewRequest(ctx, artID, reqID)
+	if err != nil || row2.Access != ReviewRequestAccessRaised || row2.GrantID == "" || row2.GrantID == row1.GrantID {
+		t.Fatalf("stored row after unchanged raise = %+v, %v; want access=raised + new GrantID", row2, err)
+	}
+}
+
+type failOnNthCreateStore struct {
+	Store
+	failAt int
+	calls  int
+	err    error
+}
+
+func (s *failOnNthCreateStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRequest, remindCooldown time.Duration, now time.Time, actor *Actor, grantOpt *ReviewRequestGrantOption) (ReviewRequest, string, error) {
+	s.calls++
+	if s.calls >= s.failAt {
+		return ReviewRequest{}, "", s.err
+	}
+	return s.Store.CreateOrRemindReviewRequest(ctx, req, remindCooldown, now, actor, grantOpt)
+}
+
+func TestMidBatchArtifactErrorPreservesEarlierResults(t *testing.T) {
+	svc, _, st, artID := newReviewRequestFixture(t)
+
+	// Artifact-level ErrNotFound on the 2nd reviewer returns 200 with reviewer 1
+	// created and reviewer 2 refused (unavailable).
+	svc.SetStore(&failOnNthCreateStore{Store: st, failAt: 2, err: ErrNotFound})
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob", "user:carol"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mid-batch ErrNotFound = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var resp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Requests) != 2 ||
+		resp.Requests[0].Outcome != ReviewRequestOutcomeCreated ||
+		resp.Requests[1].Outcome != ReviewRequestOutcomeRefused || resp.Requests[1].Code != CodeUnavailable {
+		t.Fatalf("mid-batch ErrNotFound results = %+v", resp.Requests)
+	}
+
+	// Artifact-level ErrNotFound on the 1st reviewer still returns 404.
+	svc.SetStore(&failOnNthCreateStore{Store: st, failAt: 1, err: ErrNotFound})
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("first-reviewer ErrNotFound = %d %s, want 404", rec.Code, rec.Body.String())
 	}
 }

@@ -54,7 +54,56 @@ const (
 	CodeAgentCannotRequestRev      = "agent_cannot_request_review"
 	CodeInteractiveSessionRequired = "interactive_session_required"
 	CodeUseReviewRequests          = "use_review_requests"
+	CodeUnavailable                = "unavailable"
+	CodeTooManyGrants              = "too_many_grants"
 )
+
+// reviewerClass is the non-access-granting classification returned by
+// classifyReviewer for one candidate reviewer in POST /review-requests.
+type reviewerClass int
+
+const (
+	reviewerClassUnavailable reviewerClass = iota
+	reviewerClassCanReview
+	reviewerClassNeedsRaise
+)
+
+// classifyReviewer runs steps 3 (ResolveRecipient), 4 (MayNotifyReviewer), and
+// 5a (principalCanReview) for one candidate user reviewer and returns only a
+// classification. The resolved RecipientSubject never leaves this function and
+// is used only for a nil check and principalCanReview.
+func classifyReviewer(
+	ctx context.Context,
+	auth RecipientAuthority,
+	notifier ReviewRequestNotifier,
+	a *Artifact,
+	reviewerUserID string,
+	now time.Time,
+	loadGrants func() ([]Grant, error),
+) (reviewerClass, error) {
+	subject, err := auth.ResolveRecipient(ctx, PrincipalKindUser, reviewerUserID)
+	if err != nil {
+		return reviewerClassUnavailable, err
+	}
+	if subject == nil {
+		return reviewerClassUnavailable, nil
+	}
+	visible, err := notifier.MayNotifyReviewer(ctx, reviewerUserID)
+	if err != nil {
+		return reviewerClassUnavailable, err
+	}
+	if !visible {
+		return reviewerClassUnavailable, nil
+	}
+	canReview, err := principalCanReview(ctx, subject, a, PrincipalKindUser, reviewerUserID, now, loadGrants)
+	if err != nil {
+		return reviewerClassUnavailable, err
+	}
+	if canReview {
+		return reviewerClassCanReview, nil
+	}
+	return reviewerClassNeedsRaise, nil
+}
 
 // CreateReviewRequestsBody is the JSON body of POST /api/v1/artifacts/{id}/review-requests.
 type CreateReviewRequestsBody struct {
@@ -343,61 +392,29 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		// Step 3: resolve active user via RecipientAuthority.
-		subject, err := auth.ResolveRecipient(ctx, PrincipalKindUser, t.userID)
+		// Steps 3, 4, and 5a via classifyReviewer (non-access-granting).
+		class, err := classifyReviewer(ctx, auth, notifier, a, t.userID, now, loadGrants)
 		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: resolve reviewer failed", "error", err)
+			slog.ErrorContext(ctx, "artifacts: classify reviewer failed", "error", err)
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     "unavailable",
+				Code:     CodeUnavailable,
 			})
 			continue
 		}
-		if subject == nil {
+		if class == reviewerClassUnavailable {
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
 				Code:     CodeReviewerUnavailable,
-			})
-			continue
-		}
-
-		// Step 4: anti-spam visibility for user requesters.
-		visible, err := notifier.MayNotifyReviewer(ctx, t.userID)
-		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: reviewer visibility check failed", "error", err)
-			results = append(results, ReviewRequestResult{
-				Reviewer: t.principal,
-				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     "unavailable",
-			})
-			continue
-		}
-		if !visible {
-			results = append(results, ReviewRequestResult{
-				Reviewer: t.principal,
-				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     CodeReviewerUnavailable,
-			})
-			continue
-		}
-
-		// Step 5a: reviewer already can review -> access=existing.
-		canReview, err := principalCanReview(ctx, subject, a, PrincipalKindUser, t.userID, now, loadGrants)
-		if err != nil {
-			slog.ErrorContext(ctx, "artifacts: reviewer access check failed", "error", err)
-			results = append(results, ReviewRequestResult{
-				Reviewer: t.principal,
-				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     "unavailable",
 			})
 			continue
 		}
 
 		reqAccess := ReviewRequestAccessExisting
 		var grantOpt *ReviewRequestGrantOption
-		if !canReview {
+		if class == reviewerClassNeedsRaise {
 			// Step 5b: user requester who may administer raises the reviewer's
 			// principal grant to review in the same transaction.
 			admAuth, aerr := checkAdmin()
@@ -406,7 +423,7 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 				results = append(results, ReviewRequestResult{
 					Reviewer: t.principal,
 					Outcome:  ReviewRequestOutcomeRefused,
-					Code:     "unavailable",
+					Code:     CodeUnavailable,
 				})
 				continue
 			}
@@ -443,32 +460,44 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			Note:          req.Note,
 			Access:        reqAccess,
 		}, reviewRequestRemindCooldown, now, actor, grantOpt)
-		if errors.Is(err, ErrNotFound) {
-			writeNotFound(w)
-			return
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStewardPrecondition) {
+			if len(results) == 0 {
+				writeNotFound(w)
+				return
+			}
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeUnavailable,
+			})
+			continue
 		}
 		if errors.Is(err, ErrNothingToReview) {
-			writeError(w, http.StatusConflict, CodeNothingToReview, "a review request needs an artifact with a published version")
-			return
+			if len(results) == 0 {
+				writeError(w, http.StatusConflict, CodeNothingToReview, "a review request needs an artifact with a published version")
+				return
+			}
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeNothingToReview,
+			})
+			continue
 		}
 		if errors.Is(err, ErrTooManyGrants) {
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     "too_many_grants",
+				Code:     CodeTooManyGrants,
 			})
 			continue
-		}
-		if errors.Is(err, ErrStewardPrecondition) {
-			writeNotFound(w)
-			return
 		}
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: create review request failed", "error", err)
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
-				Code:     "unavailable",
+				Code:     CodeUnavailable,
 			})
 			continue
 		}
@@ -718,22 +747,26 @@ func (s *Service) handleWithdrawReviewRequest(w http.ResponseWriter, r *http.Req
 }
 
 // withdrawAuthority decides whether principal (kind, ref) may withdraw rr on
-// artifact a (design §4.4):
-//   - An agent may withdraw only requests it made (even if it owns a).
-//   - A user may withdraw if they are the request's requester, the artifact
-//     owner, or hold admin/steward authority on a.
+// artifact a (design §4.4), enforcing the caller's credential ceiling:
+//   - An agent (Phase 4) may withdraw only requests it made, and only when its
+//     credential permits artifact.request_review in a's home scope.
+//   - A user requester may withdraw their own request when their credential
+//     permits artifact.request_review in a's home scope.
+//   - Otherwise, a user (including the artifact owner) must hold admin or
+//     steward authority via adminAuthorityWith (which checks artifact.manage).
 func (s *Service) withdrawAuthority(ctx context.Context, b backend, a *Artifact, rr *ReviewRequest, kind, ref string) (*Actor, bool, error) {
 	if kind == PrincipalKindAgent {
-		if rr.RequesterKind == PrincipalKindAgent && rr.RequesterRef == ref {
+		// Phase 4 agent branch: agents may withdraw only requests they made,
+		// subject to the same artifact.request_review credential check.
+		if rr.RequesterKind == PrincipalKindAgent && rr.RequesterRef == ref &&
+			s.host.Permits(ctx, a.ScopeRef, PermissionRequestReview) {
 			return &Actor{Kind: kind, Ref: ref, Authority: AuthorityPublisher}, true, nil
 		}
 		return nil, false, nil
 	}
-	if rr.RequesterKind == kind && rr.RequesterRef == ref {
+	if rr.RequesterKind == kind && rr.RequesterRef == ref &&
+		s.host.Permits(ctx, a.ScopeRef, PermissionRequestReview) {
 		return &Actor{Kind: kind, Ref: ref, Authority: AuthorityPublisher}, true, nil
-	}
-	if a.OwnerKind == kind && a.OwnerRef == ref {
-		return &Actor{Kind: kind, Ref: ref, Authority: AuthorityOwner}, true, nil
 	}
 	admAuth, err := s.adminAuthorityWith(ctx, a, func() ([]Grant, error) {
 		return b.store.ListGrants(ctx, a.ID)

@@ -2035,14 +2035,14 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.review.request.withdraw",
 		Domain:      "artifact",
-		Description: "Withdraw an open review request on an artifact (ptone/scion#9296, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off, when the caller cannot read the artifact, or when the request does not exist; allowed for the request's requester, the artifact owner, and anyone who may administer the artifact (an agent may withdraw only requests it made); 409 request_closed if the request is no longer open; raised grants are left in place",
+		Description: "Withdraw an open review request on an artifact (ptone/scion#9296, ptone/scion#9307); 404 while the hub.artifacts_review_requests experiment is off, when the caller cannot read the artifact, or when the request does not exist; allowed for the request's requester when their credential permits artifact.request_review in the artifact's home scope (agents may withdraw only requests they made, subject to the same check), or for the artifact owner, admin grantee, or steward via adminAuthorityWith (which requires artifact.manage in the home scope); 409 request_closed if the request is no longer open; raised grants are left in place",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-requests/{rid}/withdraw", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "artifact-home-project",
-		BasePermission:   "artifact.read",
+		BasePermission:   "artifact.request_review",
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
