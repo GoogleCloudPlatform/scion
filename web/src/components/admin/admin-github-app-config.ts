@@ -46,6 +46,7 @@ import {
   envValueFor,
   formatEnvValue,
   hasInEffect,
+  isLayer1Only,
 } from '../pages/admin-server-config-env-values.js';
 
 interface RateLimitInfo {
@@ -77,7 +78,7 @@ interface SectionMeta {
 
 interface ServerConfigMetaResponse {
   settings_tier?: 'db' | 'file';
-  layer1_only?: boolean;
+  layer0_editable?: boolean;
   env_overrides?: string[];
   env_values?: Record<string, EnvKeyValue>;
   section_metadata?: Record<string, SectionMeta>;
@@ -120,7 +121,7 @@ export class ScionAdminGitHubAppConfig extends LitElement {
 
   // Server-config metadata for env overrides, section origin/revision, and Reset to bootstrap
   @state() private settingsTier: 'db' | 'file' | null = null;
-  @state() private layer1Only = false;
+  @state() private layer0Editable = false;
   @state() private envOverrides: string[] = [];
   @state() private envValues: Record<string, EnvKeyValue> = {};
   @state() private sectionMeta: SectionMeta | null = null;
@@ -295,13 +296,17 @@ export class ScionAdminGitHubAppConfig extends LitElement {
     void Promise.all([this.loadGitHubAppConfig(false), this.loadServerConfigMeta()]);
   }
 
+  private get layer1Only(): boolean {
+    return isLayer1Only(this.settingsTier, this.layer0Editable);
+  }
+
   private get envKeys(): Set<string> {
     return new Set(this.envOverrides);
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
-    if (this.layer1Only && !GITHUB_APP_LAYER1_KEYS.has(koanfKey)) {
-      return 'bootstrap';
+    if (this.layer1Only) {
+      return GITHUB_APP_LAYER1_KEYS.has(koanfKey) ? null : 'bootstrap';
     }
     if (this.envKeys.has(koanfKey)) {
       return 'env';
@@ -454,7 +459,7 @@ export class ScionAdminGitHubAppConfig extends LitElement {
       if (!res.ok) return;
       const data = (await res.json()) as ServerConfigMetaResponse;
       this.settingsTier = data.settings_tier ?? null;
-      this.layer1Only = Boolean(data.layer1_only);
+      this.layer0Editable = data.layer0_editable === true;
       this.envOverrides = Array.isArray(data.env_overrides) ? data.env_overrides : [];
       this.envValues = data.env_values ?? {};
       this.sectionMeta = data.section_metadata?.github_app ?? null;

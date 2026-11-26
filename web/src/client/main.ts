@@ -31,10 +31,7 @@ import { applyBranding, BRANDING_STYLE_ID } from './branding.js';
 import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { legacyAgentRedirect } from './agent-routes.js';
-import {
-  legacyIntegrationRedirect,
-  legacyServerConfigGitHubRedirect,
-} from '../components/pages/admin-integrations-tabs.js';
+import { legacyIntegrationRedirect } from '../components/pages/admin-integrations-tabs.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
@@ -1282,16 +1279,6 @@ async function renderRoute(path: string, options?: RouteNavigationOptions): Prom
   if (redirected) {
     pathname = redirected;
     path = redirected;
-    window.history.replaceState({}, '', browserPath(path));
-    noteShownEntry();
-  }
-  const serverConfigRedirect = legacyServerConfigGitHubRedirect(
-    pathname,
-    path.includes('?') ? path.slice(path.indexOf('?')) : window.location.search
-  );
-  if (serverConfigRedirect) {
-    pathname = serverConfigRedirect;
-    path = serverConfigRedirect;
     window.history.replaceState({}, '', browserPath(path));
     noteShownEntry();
   }

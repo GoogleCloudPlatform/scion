@@ -41,6 +41,19 @@ export interface EnvKeyValue {
   saved_differs?: boolean;
 }
 
+/**
+ * Hosted DB-backed hubs only accept Layer-1 keys, so everything else is
+ * read-only there. Workstation hubs (layer0_editable === true) also write
+ * Layer-0 and file-only keys to settings.yaml, so only env-pinned keys are
+ * locked. Shared between Server Config and the GitHub App config card.
+ */
+export function isLayer1Only(
+  settingsTier: string | null | undefined,
+  layer0Editable: boolean | null | undefined
+): boolean {
+  return settingsTier === 'db' && layer0Editable !== true;
+}
+
 /** The placeholder the server sends for a secret (maskedValue in pkg/hub). */
 export const MASKED_ENV_VALUE = '********';
 

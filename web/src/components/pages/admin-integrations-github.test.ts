@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { GITHUB_ADMIN_SECTIONS } from './admin-integrations-github-sections.js';
+import { owningSection } from './__fixtures__/settings-registry.js';
 import type { ScionAdminGitHubAppConfig } from '../admin/admin-github-app-config.js';
 import type { ScionAdminGitHubInstallations } from '../admin/admin-github-installations.js';
 import type { ScionAdminGitHubAssociations } from '../admin/admin-github-associations.js';
@@ -500,7 +501,7 @@ describe('scion-admin-github-app-config', () => {
     expect(warn?.textContent).toContain('overriding the stored hub secret');
   });
 
-  it('R3(a): env_overrides renders App ID read-only with env badge and omits app_id on save', async () => {
+  it('R1: hosted DB hub (settings_tier=db, layer0_editable absent/false) keeps Layer-1 App ID editable with env badge and sends app_id on save', async () => {
     const puts: Array<Record<string, unknown>> = [];
     element = await mount((url, init) => {
       const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
@@ -509,7 +510,7 @@ describe('scion-admin-github-app-config', () => {
           settings_tier: 'db',
           env_overrides: ['server.github_app.app_id'],
           env_values: {
-            'server.github_app.app_id': { value: '999999', in_effect: true, saved_differs: false },
+            'server.github_app.app_id': { value: '999999', in_effect: false, saved_differs: true },
           },
           section_metadata: { github_app: { source: 'db', origin: 'managed', revision: 2 } },
         });
@@ -521,22 +522,137 @@ describe('scion-admin-github-app-config', () => {
     });
 
     await vi.waitFor(() => {
-      expect(query(element!, '.read-only-value.env-value-primary')).not.toBeNull();
+      expect(query(element!, '.env-badge')).not.toBeNull();
     });
-    expect(query(element, '.read-only-value.env-value-primary')?.textContent?.trim()).toBe(
-      '999999'
-    );
-    expect(query(element, '.env-badge')?.textContent).toContain('Overridden by environment');
-    expect(query(element, '.read-only-badge')?.textContent).toContain(
-      'Set via environment variable'
-    );
+    expect(query(element, '.read-only-value')).toBeNull();
+    expect(query(element, 'sl-input[inputmode="numeric"]')).not.toBeNull();
 
     saveButton(element).click();
     await vi.waitFor(() => {
       expect(puts).toHaveLength(1);
     });
-    expect('app_id' in puts[0]!).toBe(false);
-    expect(puts[0]!.api_base_url).toBe('https://ghe.example.com/api/v3');
+    expect(puts[0]!.app_id).toBe(123);
+  });
+
+  for (const tierCase of [
+    { name: 'workstation DB (layer0_editable: true)', settings_tier: 'db', layer0_editable: true },
+    { name: 'file tier (settings_tier: file)', settings_tier: 'file', layer0_editable: false },
+  ] as const) {
+    it(`R1/R3(a): ${tierCase.name} with env_overrides renders App ID read-only with env badge and omits app_id on save`, async () => {
+      const puts: Array<Record<string, unknown>> = [];
+      element = await mount((url, init) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.includes('/api/v1/admin/server-config')) {
+          return jsonResponse({
+            settings_tier: tierCase.settings_tier,
+            layer0_editable: tierCase.layer0_editable,
+            env_overrides: ['server.github_app.app_id'],
+            env_values: {
+              'server.github_app.app_id': {
+                value: '999999',
+                in_effect: true,
+                saved_differs: false,
+              },
+            },
+            section_metadata: {
+              github_app: { source: tierCase.settings_tier, origin: 'managed', revision: 2 },
+            },
+          });
+        }
+        if (init?.method === 'PUT') {
+          puts.push(JSON.parse(init.body as string) as Record<string, unknown>);
+        }
+        return jsonResponse(LOADED_APP);
+      });
+
+      await vi.waitFor(() => {
+        expect(query(element!, '.read-only-value.env-value-primary')).not.toBeNull();
+      });
+      expect(query(element, '.read-only-value.env-value-primary')?.textContent?.trim()).toBe(
+        '999999'
+      );
+      expect(query(element, '.env-badge')?.textContent).toContain('Overridden by environment');
+      expect(query(element, '.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+
+      saveButton(element).click();
+      await vi.waitFor(() => {
+        expect(puts).toHaveLength(1);
+      });
+      expect('app_id' in puts[0]!).toBe(false);
+      expect(puts[0]!.api_base_url).toBe('https://ghe.example.com/api/v3');
+    });
+  }
+
+  it('N8: every shown editable field is sent when cleared and every non-secret key is in the github_app registry', async () => {
+    const puts: Array<Record<string, unknown>> = [];
+    element = await mount((url, init) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (path.includes('/api/v1/admin/server-config')) {
+        return jsonResponse({ settings_tier: 'db' });
+      }
+      if (init?.method === 'PUT') {
+        puts.push(JSON.parse(init.body as string) as Record<string, unknown>);
+      }
+      return jsonResponse(LOADED_APP);
+    });
+
+    const el = element as unknown as Record<string, unknown> & {
+      requestUpdate: () => void;
+      updateComplete: Promise<boolean>;
+    };
+    const proto = Object.getPrototypeOf(el);
+    const spy = vi.spyOn(proto, 'readOnlyReason');
+    el.requestUpdate();
+    await el.updateComplete;
+    const shown = new Set<string>();
+    spy.mock.calls.forEach((call, i) => {
+      if (spy.mock.results[i]?.value === null) shown.add(call[0] as string);
+    });
+    spy.mockRestore();
+
+    const CLEAR: Record<
+      string,
+      { clear: (target: Record<string, unknown>) => void; expected: unknown }
+    > = {
+      'server.github_app.app_id': { clear: (t) => (t.githubAppId = 0), expected: 0 },
+      'server.github_app.api_base_url': {
+        clear: (t) => (t.githubAppApiBaseUrl = ''),
+        expected: '',
+      },
+      'server.github_app.webhooks_enabled': {
+        clear: (t) => (t.githubAppWebhooksEnabled = false),
+        expected: false,
+      },
+      'server.github_app.installation_url': {
+        clear: (t) => (t.githubAppInstallationUrl = ''),
+        expected: '',
+      },
+    };
+
+    const ghShown = [...shown].filter((k) => k.startsWith('server.github_app.')).sort();
+    expect(ghShown.length).toBeGreaterThan(0);
+    expect(ghShown.filter((k) => !(k in CLEAR))).toEqual([]);
+    for (const key of ghShown) CLEAR[key]!.clear(el);
+    await el.updateComplete;
+
+    saveButton(element).click();
+    await vi.waitFor(() => {
+      expect(puts).toHaveLength(1);
+    });
+
+    const body = puts[0]!;
+    for (const key of ghShown) {
+      const leaf = key.slice('server.github_app.'.length);
+      expect(leaf in body, `${key} missing from PUT payload`).toBe(true);
+      expect(body[leaf], key).toEqual(CLEAR[key]!.expected);
+    }
+    const unknown = Object.keys(body)
+      .filter((k) => k !== 'private_key' && k !== 'webhook_secret')
+      .map((k) => `server.github_app.${k}`)
+      .filter((k) => owningSection(k) !== 'github_app');
+    expect(unknown).toEqual([]);
   });
 
   it('R3(b): managed github_app section in DB tier offers Reset to bootstrap and calls DELETE', async () => {
@@ -733,7 +849,12 @@ describe('scion-admin-github-associations', () => {
       'scion-admin-github-associations'
     ) as ScionAdminGitHubAssociations;
     document.body.appendChild(element);
+    await element.updateComplete;
 
+    expect(urls).toEqual([]);
+    expect(shadowText(element)).toContain('Configure the GitHub App above');
+
+    element.appConfigured = true;
     await vi.waitFor(() => {
       expect(shadowText(element!)).toContain('acme/api');
     });

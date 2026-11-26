@@ -78,17 +78,6 @@ export function legacyIntegrationRedirect(pathname: string): string | null {
 }
 
 /**
- * Legacy deep-link redirect for /admin/server-config?tab=github-app.
- */
-export function legacyServerConfigGitHubRedirect(pathname: string, search: string): string | null {
-  if (pathname !== '/admin/server-config') return null;
-  if (new URLSearchParams(search).get('tab') === 'github-app') {
-    return '/admin/integrations/github';
-  }
-  return null;
-}
-
-/**
  * Parses an /admin/integrations route into its tab id and optional sub-path
  * (e.g. /admin/integrations/chat/telegram -> { tabId: 'chat', subPath: 'telegram' }).
  * Only the chat tab supports detail sub-paths.

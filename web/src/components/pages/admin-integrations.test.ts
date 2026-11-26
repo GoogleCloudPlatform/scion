@@ -940,6 +940,7 @@ describe('scion-page-admin-integrations — plugin Update relocation notice and 
 
 describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () => {
   let element: HTMLElement | null = null;
+  const originalLocation = window.location;
 
   beforeAll(async () => {
     await import('./admin-integrations.js');
@@ -948,6 +949,11 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
   afterEach(() => {
     element?.remove();
     element = null;
+    Object.defineProperty(window, 'location', {
+      value: originalLocation,
+      writable: true,
+      configurable: true,
+    });
     vi.restoreAllMocks();
   });
 
@@ -955,6 +961,7 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
     Object.defineProperty(window, 'location', {
       value: { pathname, search: '' },
       writable: true,
+      configurable: true,
     });
     vi.spyOn(window.history, 'replaceState').mockImplementation((_s, _t, url) => {
       if (typeof url === 'string') {
@@ -989,12 +996,14 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
 
     element = document.createElement('scion-page-admin-integrations');
     document.body.appendChild(element);
-    await new Promise((r) => setTimeout(r, 150));
-    await (element as unknown as { updateComplete: Promise<boolean> }).updateComplete;
 
-    const tabs = queryAll(element, 'sl-tab').map((t) => t.getAttribute('panel'));
-    expect(tabs).toEqual(['chat', 'github']);
-    expect(element.shadowRoot?.querySelector('scion-admin-integrations-chat')).not.toBeNull();
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual([
+        'chat',
+        'github',
+      ]);
+      expect(element!.shadowRoot?.querySelector('scion-admin-integrations-chat')).not.toBeNull();
+    });
   });
 
   it('hides the GitHub tab when GET /api/v1/github-app returns 403', async () => {
@@ -1013,11 +1022,10 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
 
     element = document.createElement('scion-page-admin-integrations');
     document.body.appendChild(element);
-    await new Promise((r) => setTimeout(r, 150));
-    await (element as unknown as { updateComplete: Promise<boolean> }).updateComplete;
 
-    const tabs = queryAll(element, 'sl-tab').map((t) => t.getAttribute('panel'));
-    expect(tabs).toEqual(['chat']);
+    await vi.waitFor(() => {
+      expect(queryAll(element!, 'sl-tab').map((t) => t.getAttribute('panel'))).toEqual(['chat']);
+    });
   });
 
   it('redirects legacy /admin/integrations/{name} to /admin/integrations/chat/{name} and renders Chat detail', async () => {
@@ -1038,21 +1046,21 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
 
     element = document.createElement('scion-page-admin-integrations');
     document.body.appendChild(element);
-    await new Promise((r) => setTimeout(r, 150));
-    await (element as unknown as { updateComplete: Promise<boolean> }).updateComplete;
 
-    expect(window.location.pathname).toBe('/admin/integrations/chat/discord');
-    const chatEl = element.shadowRoot?.querySelector(
-      'scion-admin-integrations-chat'
-    ) as HTMLElement | null;
-    expect(chatEl).not.toBeNull();
-    expect((chatEl as unknown as { integrationName: string | null }).integrationName).toBe(
-      'discord'
-    );
+    await vi.waitFor(() => {
+      expect(window.location.pathname).toBe('/admin/integrations/chat/discord');
+      const chatEl = element!.shadowRoot?.querySelector(
+        'scion-admin-integrations-chat'
+      ) as HTMLElement | null;
+      expect(chatEl).not.toBeNull();
+      expect((chatEl as unknown as { integrationName: string | null }).integrationName).toBe(
+        'discord'
+      );
+    });
   });
 
   it('legacyIntegrationRedirect redirects unknown segments and leaves tab ids untouched', async () => {
-    const { legacyIntegrationRedirect, legacyServerConfigGitHubRedirect, parseIntegrationsRoute } =
+    const { legacyIntegrationRedirect, parseIntegrationsRoute } =
       await import('./admin-integrations-tabs.js');
     expect(legacyIntegrationRedirect('/admin/integrations/telegram')).toBe(
       '/admin/integrations/chat/telegram'
@@ -1071,11 +1079,6 @@ describe('scion-page-admin-integrations — tab shell and routing (M2.1)', () =>
       tabId: 'github',
       subPath: null,
     });
-    // Server Config ?tab=github-app deep link redirects to Integrations -> GitHub.
-    expect(legacyServerConfigGitHubRedirect('/admin/server-config', '?tab=github-app')).toBe(
-      '/admin/integrations/github'
-    );
-    expect(legacyServerConfigGitHubRedirect('/admin/server-config', '?tab=general')).toBeNull();
   });
 
   it('403 on /admin/integrations/github falls back to /admin/integrations/chat using replaceState without adding history', async () => {

@@ -56,7 +56,6 @@ import {
   renderSectionErrorSummary,
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
-import { navigateTo } from '../../client/navigation.js';
 import './admin-experiments.js';
 import './admin-chat-retention.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -87,6 +86,7 @@ import {
   envValuesUnder,
   formatEnvValue,
   hasInEffect,
+  isLayer1Only,
 } from './admin-server-config-env-values.js';
 import {
   type EnvNotInEffectCause,
@@ -2662,7 +2662,7 @@ export class ScionPageAdminServerConfig extends LitElement {
    * and file-only keys to settings.yaml, so only env-pinned keys are locked.
    */
   private get layer1Only(): boolean {
-    return this.settingsTier === 'db' && !this.layer0Editable;
+    return isLayer1Only(this.settingsTier, this.layer0Editable);
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
@@ -4395,15 +4395,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="moved-notice" data-github-app-moved-notice>
         <sl-icon name="info-circle"></sl-icon>
         <span>GitHub App settings moved to <strong>Integrations → GitHub</strong>.</span>
-        <sl-button
-          size="small"
-          variant="default"
-          href="/admin/integrations/github"
-          @click=${(e: Event) => {
-            e.preventDefault();
-            navigateTo('/admin/integrations/github');
-          }}
-        >
+        <sl-button size="small" variant="default" href="/admin/integrations/github">
           Open
         </sl-button>
       </div>

@@ -5981,28 +5981,6 @@ describe('scion-page-admin-server-config', () => {
       },
     };
 
-    /**
-     * Fields on the GitHub App tab. They are saved by the tab's own button
-     * (PUT /api/v1/github-app), not by Save & Reload, so they are checked
-     * against that request.
-     */
-    const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
-      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
-      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
-      'server.github_app.api_base_url': {
-        clear: (el) => (el.githubAppApiBaseUrl = ''),
-        expected: '',
-      },
-      'server.github_app.webhooks_enabled': {
-        clear: (el) => (el.githubAppWebhooksEnabled = false),
-        expected: false,
-      },
-      'server.github_app.installation_url': {
-        clear: (el) => (el.githubAppInstallationUrl = ''),
-        expected: '',
-      },
-    };
-
     const READ_ONLY_PROBE = 'readOnlyReason';
 
     /**
@@ -6063,12 +6041,11 @@ describe('scion-page-admin-server-config', () => {
       opts: { mutate?: (payload: Record<string, unknown>) => void } = {}
     ): Promise<{ shown: string[]; payload: Record<string, unknown> }> {
       const { el, shown, puts } = await renderShownKeys(config);
-      const mainShown = shown.filter((k) => !(k in GITHUB_APP_CLEAR));
       expect(
-        mainShown.filter((k) => !(k in CLEAR)),
+        shown.filter((k) => !(k in CLEAR)),
         'shown fields with no CLEAR entry (list the field and send it from the builder)'
       ).toEqual([]);
-      for (const key of mainShown) CLEAR[key]!.clear(el);
+      for (const key of shown) CLEAR[key]!.clear(el);
       await clickSave(el, 'Save & Reload');
       const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
       expect(put).toBeDefined();
@@ -6077,7 +6054,7 @@ describe('scion-page-admin-server-config', () => {
 
       const notSent: string[] = [];
       const wrongValue: string[] = [];
-      for (const key of mainShown) {
+      for (const key of shown) {
         const spec = CLEAR[key]!;
         const { present, value } = valueAtPath(payload, spec.bodyPath ?? key.split('.'));
         if (!present) notSent.push(key);

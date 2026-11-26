@@ -146,6 +146,14 @@ export class ScionPageAdminIntegrations extends LitElement {
 
   private async initTabs(): Promise<void> {
     this.probing = true;
+    // Start loading an unconditionally visible active tab (e.g. Chat) in
+    // parallel with the GitHub App visibility probe so Chat views don't wait
+    // on the probe round trip in series.
+    const activeTabDef = INTEGRATION_TABS.find((t) => t.id === this.activeTabId);
+    const preloadPromise = activeTabDef?.visible({ canReadGitHubApp: false })
+      ? this.ensureActiveTabLoaded()
+      : null;
+
     try {
       const res = await apiFetch('/api/v1/github-app', { suppressAccessDeniedToast: true });
       // Hide the GitHub tab only when the caller is unauthorized (401/403).
@@ -174,6 +182,9 @@ export class ScionPageAdminIntegrations extends LitElement {
       }
     }
 
+    if (preloadPromise) {
+      await preloadPromise;
+    }
     await this.ensureActiveTabLoaded();
   }
 

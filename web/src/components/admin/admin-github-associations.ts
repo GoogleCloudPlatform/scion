@@ -15,7 +15,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 
@@ -41,12 +41,16 @@ interface AssociationReportResponse {
 
 @customElement('scion-admin-github-associations')
 export class ScionAdminGitHubAssociations extends LitElement {
+  @property({ type: Boolean }) appConfigured = false;
+
   @state() private entries: AssociationReportEntry[] = [];
-  @state() private loading = true;
+  @state() private loading = false;
   @state() private refreshing = false;
   @state() private error: string | null = null;
   @state() private truncated = false;
   @state() private generatedAt: string | null = null;
+
+  private loadedWhenConfigured = false;
 
   static override styles = css`
     :host {
@@ -159,7 +163,22 @@ export class ScionAdminGitHubAssociations extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadReport(false);
+    if (this.appConfigured && !this.loadedWhenConfigured) {
+      this.loadedWhenConfigured = true;
+      void this.loadReport(false);
+    }
+  }
+
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    if (changed.has('appConfigured')) {
+      if (this.appConfigured && !this.loadedWhenConfigured) {
+        this.loadedWhenConfigured = true;
+        void this.loadReport(false);
+      } else if (!this.appConfigured) {
+        this.loadedWhenConfigured = false;
+      }
+    }
   }
 
   async loadReport(refresh: boolean): Promise<void> {
@@ -212,7 +231,7 @@ export class ScionAdminGitHubAssociations extends LitElement {
             size="small"
             variant="default"
             ?loading=${this.refreshing}
-            ?disabled=${this.loading}
+            ?disabled=${this.loading || !this.appConfigured}
             @click=${() => this.loadReport(true)}
           >
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -226,59 +245,65 @@ export class ScionAdminGitHubAssociations extends LitElement {
               Report truncated: only the first subset of projects is shown.
             </div>`
           : nothing}
-        ${this.loading
-          ? html`<div class="loading-row"><sl-spinner></sl-spinner></div>`
-          : this.entries.length === 0
-            ? html`<p class="empty-hint">
-                No projects are associated with a GitHub App installation.
-              </p>`
-            : html`
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Project</th>
-                        <th>Repository</th>
-                        <th>Basis</th>
-                        <th>Write</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${this.entries.map(
-                        (entry) => html`
-                          <tr>
-                            <td>
-                              <a href="/projects/${encodeURIComponent(entry.project_id)}/settings"
-                                >${entry.project_name || entry.project_id}</a
-                              >
-                            </td>
-                            <td class="mono">${this.formatRepo(entry.git_remote)}</td>
-                            <td>${entry.basis || '—'}</td>
-                            <td>
-                              ${entry.authorized
-                                ? entry.write_allowed
-                                  ? 'yes'
-                                  : 'read-only'
-                                : '—'}
-                            </td>
-                            <td>
-                              ${entry.authorized
-                                ? html`<sl-badge variant="success">authorized</sl-badge>`
-                                : html`<sl-badge variant="danger"
-                                    >${entry.reason || entry.error_code || 'unauthorized'}</sl-badge
-                                  >`}
-                            </td>
-                          </tr>
-                        `
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-                ${this.generatedAt
-                  ? html`<div class="meta-footer">Updated ${this.generatedAt}</div>`
-                  : nothing}
-              `}
+        ${!this.appConfigured
+          ? html`<p class="empty-hint">
+              Configure the GitHub App above to inspect project associations.
+            </p>`
+          : this.loading
+            ? html`<div class="loading-row"><sl-spinner></sl-spinner></div>`
+            : this.entries.length === 0
+              ? html`<p class="empty-hint">
+                  No projects are associated with a GitHub App installation.
+                </p>`
+              : html`
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Project</th>
+                          <th>Repository</th>
+                          <th>Basis</th>
+                          <th>Write</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${this.entries.map(
+                          (entry) => html`
+                            <tr>
+                              <td>
+                                <a href="/projects/${encodeURIComponent(entry.project_id)}/settings"
+                                  >${entry.project_name || entry.project_id}</a
+                                >
+                              </td>
+                              <td class="mono">${this.formatRepo(entry.git_remote)}</td>
+                              <td>${entry.basis || '—'}</td>
+                              <td>
+                                ${entry.authorized
+                                  ? entry.write_allowed
+                                    ? 'yes'
+                                    : 'read-only'
+                                  : '—'}
+                              </td>
+                              <td>
+                                ${entry.authorized
+                                  ? html`<sl-badge variant="success">authorized</sl-badge>`
+                                  : html`<sl-badge variant="danger"
+                                      >${entry.reason ||
+                                      entry.error_code ||
+                                      'unauthorized'}</sl-badge
+                                    >`}
+                              </td>
+                            </tr>
+                          `
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  ${this.generatedAt
+                    ? html`<div class="meta-footer">Updated ${this.generatedAt}</div>`
+                    : nothing}
+                `}
       </div>
     `;
   }
