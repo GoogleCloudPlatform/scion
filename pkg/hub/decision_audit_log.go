@@ -26,7 +26,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
@@ -38,13 +37,10 @@ import (
 // Decide → emitDecisionAudit (sampling unchanged) → optional perf-trace
 // decorator → decisionAuditLogger.EmitDecisionAudit. The logger records
 // only: it never changes a Decision, never blocks on I/O and never calls the
-// store. The only activation control is the registered server-layer
-// experiment hub.authorization_decision_audit_v2 (default off), evaluated
-// per record. In-domain records are mapped to the existing
-// authorization/decide envelope and handed to an auditevent.SlogSink over a
-// logging.AsyncHandler, which validates, snapshots and enqueues without
-// blocking. Every record that is not enqueued is counted by disposition,
-// never logged.
+// store. In-domain records are mapped to the existing authorization/decide
+// envelope and handed to an auditevent.SlogSink over a logging.AsyncHandler,
+// which validates, snapshots and enqueues without blocking. Every record
+// that is not enqueued is counted by disposition, never logged.
 
 // decisionAuditDisposition is the closed set of per-record outcomes
 // (design C1.4). Each is counted together with the decision result.
@@ -57,8 +53,6 @@ const (
 	// accept it (writer full, closed or rejected, or the handler disabled
 	// for the level). The writer counts the writer-side reason.
 	decisionAuditNotEnqueued
-	// decisionAuditDisabled: the experiment is off (the status quo).
-	decisionAuditDisabled
 	// decisionAuditExcludedResource: resource type outside {project, agent}.
 	decisionAuditExcludedResource
 	// decisionAuditExcludedScope: the resource carries containment or a
@@ -96,7 +90,6 @@ const (
 var decisionAuditDispositionNames = [decisionAuditDispositionCount]string{
 	decisionAuditEnqueued:            "enqueued",
 	decisionAuditNotEnqueued:         "not_enqueued",
-	decisionAuditDisabled:            "disabled",
 	decisionAuditExcludedResource:    "excluded_resource",
 	decisionAuditExcludedScope:       "excluded_scope",
 	decisionAuditExcludedPrincipal:   "excluded_principal",
@@ -130,7 +123,7 @@ type DecisionAuditMetricsRecorder interface {
 }
 
 // decisionAuditCounts holds the always-present in-process counts by
-// (disposition, result), at most 11 × 2 series, plus an optional recorder.
+// (disposition, result), at most 10 × 2 series, plus an optional recorder.
 type decisionAuditCounts struct {
 	counts   [decisionAuditDispositionCount][2]atomic.Uint64
 	recorder atomic.Pointer[decisionAuditRecorderBox]
@@ -179,9 +172,10 @@ type decisionAuditLogger struct {
 	// record the handler would discard is counted not_enqueued rather than
 	// enqueued (SlogSink.Emit returns nil for a disabled level). Optional.
 	handler slog.Handler
-	// enabled reports whether the experiment is on; nil means off.
-	enabled func() bool
-	counts  *decisionAuditCounts
+	// mapFn overrides mapDecisionEnvelope in tests (for example to inject a
+	// stage-0 mapping panic); production leaves it nil.
+	mapFn  func(context.Context, *store.DecisionAuditRecord) (auditevent.EnvelopeV1, decisionAuditDisposition)
+	counts *decisionAuditCounts
 }
 
 var _ DecisionAuditEmitter = (*decisionAuditLogger)(nil)
@@ -203,11 +197,11 @@ func (l *decisionAuditLogger) EmitDecisionAudit(ctx context.Context, rec *store.
 		l.countSafely(disposition, allow)
 	}()
 
-	if l.enabled == nil || !l.enabled() {
-		disposition = decisionAuditDisabled
-		return
+	mapFn := l.mapFn
+	if mapFn == nil {
+		mapFn = mapDecisionEnvelope
 	}
-	env, d := mapDecisionEnvelope(ctx, rec)
+	env, d := mapFn(ctx, rec)
 	if d != decisionAuditEnqueued {
 		disposition = d
 		return
@@ -385,8 +379,7 @@ func NewOTelDecisionAuditMetrics(mp metric.MeterProvider) (*OTelDecisionAuditMet
 	c, err := mp.Meter(instrumentationScope).Int64Counter(MetricDecisionAuditRecords,
 		metric.WithUnit("{record}"),
 		metric.WithDescription("Authorization decision records seen by the decision log, by disposition "+
-			"(enqueued, not_enqueued, disabled, excluded_*, invalid) and result (allow, deny). "+
-			"Counted even while decision logging is disabled."))
+			"(enqueued, not_enqueued, excluded_*, invalid) and result (allow, deny)."))
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +424,6 @@ func (s *Server) initDecisionAuditLog() error {
 	s.decisionAuditLogger = &decisionAuditLogger{
 		sink:    sink,
 		handler: h,
-		enabled: func() bool { return s.experimentEnabled(experiments.AuthorizationDecisionAuditV2) },
 		counts:  &decisionAuditCounts{},
 	}
 	return nil

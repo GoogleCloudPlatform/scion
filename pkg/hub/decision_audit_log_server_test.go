@@ -34,7 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -64,17 +64,6 @@ func newDecisionLogServer(t *testing.T, capture slog.Handler) (*Server, store.St
 	// request ID used as the correlation ID.
 	srv.SetRequestLogger(slog.New(slog.DiscardHandler))
 	return srv, s
-}
-
-func setDecisionLogFlag(t *testing.T, srv *Server, on bool) {
-	t.Helper()
-	ops := srv.GetOperationalSettings()
-	require.NotNil(t, ops)
-	rev := ops.ExperimentsSnapshot().Revision
-	doc := fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.AuthorizationDecisionAuditV2, on)
-	_, err := ops.Update(context.Background(), "experiments", json.RawMessage(doc), "test", rev, "managed")
-	require.NoError(t, err)
-	require.Equal(t, on, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2))
 }
 
 // seedDecisionLogProject creates a project, a member with project read and
@@ -154,7 +143,6 @@ func TestDecisionLog_P1_3_ProductionConstructorStopAll(t *testing.T) {
 	srv, s := newDecisionLogServer(t, capture)
 	member, _, projectID := seedDecisionLogProject(t, s)
 	admin := seedDecisionLogAdmin(t, s)
-	setDecisionLogFlag(t, srv, true)
 	counts := srv.decisionAuditLogger.counts
 
 	allowRec, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
@@ -216,67 +204,12 @@ func TestDecisionLog_P1_3_ProductionConstructorStopAll(t *testing.T) {
 	assert.Equal(t, snap.Enqueued, snap.Written, "every enqueued record was written: %+v", snap)
 }
 
-// P1-4. Flag off (the default): zero records, disabled counted.
-func TestDecisionLog_P1_4_FlagOffRecordsNothing(t *testing.T) {
-	capture := &decisionLogCapture{}
-	srv, s := newDecisionLogServer(t, capture)
-	member, outsider, projectID := seedDecisionLogProject(t, s)
-	require.False(t, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2), "default must be off")
-
-	rec, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-	rec, _ = userRequest(t, srv, outsider, http.MethodGet, membersPath(projectID), nil, nil)
-	require.Equal(t, http.StatusForbidden, rec.Code)
-
-	// Explicitly off after having been on behaves the same.
-	setDecisionLogFlag(t, srv, true)
-	setDecisionLogFlag(t, srv, false)
-	rec, _ = userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	require.NoError(t, srv.CloseAuditWriter(context.Background()))
-	assert.Empty(t, capture.records())
-	counts := srv.decisionAuditLogger.counts
-	assert.GreaterOrEqual(t, counts.get(decisionAuditDisabled, true), uint64(2))
-	assert.GreaterOrEqual(t, counts.get(decisionAuditDisabled, false), uint64(1))
-	for d := decisionAuditDisposition(0); d < decisionAuditDispositionCount; d++ {
-		if d == decisionAuditDisabled {
-			continue
-		}
-		assert.Zero(t, counts.get(d, true)+counts.get(d, false), "disposition %s", d)
-	}
-	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
-}
-
-// The experiment fails closed: a malformed experiments row (even one that
-// names the flag) means disabled, through the production constructor.
-func TestDecisionLog_MalformedExperimentsRowFailsClosed(t *testing.T) {
-	capture := &decisionLogCapture{}
-	srv, s := newDecisionLogServer(t, capture)
-	member, _, projectID := seedDecisionLogProject(t, s)
-	_, err := s.UpsertHubSetting(context.Background(), "experiments",
-		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:"yes"}}`, experiments.AuthorizationDecisionAuditV2)), "other-replica", 0, "managed")
-	require.NoError(t, err)
-	_, err = srv.GetOperationalSettings().Refresh(context.Background())
-	require.NoError(t, err)
-	require.True(t, srv.GetOperationalSettings().ExperimentsSnapshot().Malformed, "fixture must be malformed")
-	require.False(t, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2))
-
-	rec, _ := userRequest(t, srv, member, http.MethodGet, membersPath(projectID), nil, nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.NoError(t, srv.CloseAuditWriter(context.Background()))
-	assert.Empty(t, capture.records())
-	assert.GreaterOrEqual(t, srv.decisionAuditLogger.counts.get(decisionAuditDisabled, true), uint64(1))
-	assert.Zero(t, srv.auditWriter.Snapshot().Enqueued)
-}
-
 // P1-5 production-constructor case: a decision outside the resource domain
 // is counted excluded_resource and not logged.
 func TestDecisionLog_P1_5_ExcludedResourceThroughServer(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
 	member, _, _ := seedDecisionLogProject(t, s)
-	setDecisionLogFlag(t, srv, true)
 
 	identity := NewAuthenticatedUser(member.ID, member.Email, member.DisplayName, member.Role, "web")
 	ctx := logging.ContextWithRequestMeta(contextWithIdentity(context.Background(), identity),
@@ -475,15 +408,16 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 
 	// Normalize the fixture first (review N7): the admin stop-all stops the
 	// running fixture agents, so run it once now and the baseline and the
-	// measured phase see the same store state.
+	// measured phase see the same store state. Detach the emitter for the
+	// baseline so capture.block is not entered until the full-writer phase.
+	srv.authzService.SetDecisionAuditEmitter(nil)
+	faultyAuthz.SetDecisionAuditEmitter(nil)
 	require.Equal(t, http.StatusOK, stopAllStatuses()[0], "normalizing stop-all")
 
-	// Baseline: flag off (status quo).
+	// Baseline: no decision emitter attached.
 	baseline := make([]Decision, len(probes))
 	for i, p := range probes {
-		before := moved(decisionAuditDisabled)
 		baseline[i] = run(p, fmt.Sprintf("dl6-base-%d", i))
-		require.Equal(t, before+1, moved(decisionAuditDisabled), "%s: baseline counted disabled exactly once", p.name)
 		require.Equal(t, p.wantAllowed, baseline[i].Allowed, "%s: expected outcome: %+v", p.name, baseline[i])
 	}
 	require.False(t, baseline[0].Allowed == baseline[1].Allowed, "probes must cover both allow and deny")
@@ -497,8 +431,10 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	require.Equal(t, []int{http.StatusOK, http.StatusForbidden}, stopAllStatuses(), "baseline stop-all results")
 	require.Equal(t, http.StatusForbidden, uatStatus(), "baseline UAT gate deny on stop-all")
 
-	// Flag on; block the worker in the inner handler, then fill the queue.
-	setDecisionLogFlag(t, srv, true)
+	// Re-attach production decision logger; block the worker in the inner
+	// handler, then fill the queue.
+	srv.authzService.SetDecisionAuditEmitter(l)
+	faultyAuthz.SetDecisionAuditEmitter(l)
 	run(probes[0], "dl6-fill-0")
 	require.Equal(t, uint64(1), l.counts.get(decisionAuditEnqueued, true),
 		"fail fast: the first record must be enqueued before waiting on the worker")
@@ -542,11 +478,12 @@ func TestDecisionLog_P1_6_OutcomesUnchangedWithWriterBlockedAndFull(t *testing.T
 	l.sink = savedSink
 	assert.Equal(t, before+1, moved(decisionAuditNotEnqueued), "sink panic counted not_enqueued")
 
-	savedEnabled := l.enabled
-	l.enabled = func() bool { panic("injected mapping fault") }
+	l.mapFn = func(context.Context, *store.DecisionAuditRecord) (auditevent.EnvelopeV1, decisionAuditDisposition) {
+		panic("injected mapping fault")
+	}
 	before = moved(decisionAuditInvalid)
 	require.NotPanics(t, func() { assertParity("mapping panic", baseline[1], run(probes[1], "dl6-panic-map")) })
-	l.enabled = savedEnabled
+	l.mapFn = nil
 	assert.Equal(t, before+1, moved(decisionAuditInvalid), "mapping panic counted invalid")
 
 	// 3. No shared mutation: everything reachable from the Decision and the
@@ -599,7 +536,6 @@ func TestDecisionLog_P1_7_HealthReportsWriterFailures(t *testing.T) {
 		assert.False(t, strings.HasPrefix(key, "authorization_decision_audit_"), "retired key %s present", key)
 	}
 
-	setDecisionLogFlag(t, srv, true)
 	admin := seedDecisionLogAdmin(t, s)
 	for i := 0; i < 2; i++ {
 		rec, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
@@ -649,7 +585,6 @@ func TestDecisionLog_P1_7_HealthReportsWriterFailures(t *testing.T) {
 func TestDecisionLog_P1_9_ShutdownClosesWriterAfterDrain(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, _ := newDecisionLogServer(t, capture)
-	setDecisionLogFlag(t, srv, true)
 
 	drainStarted := make(chan struct{})
 	inHandler := make(chan struct{})
@@ -705,7 +640,6 @@ func TestDecisionLog_P1_9_CleanupVariants(t *testing.T) {
 	t.Run("background-only cleanup leaves the writer open", func(t *testing.T) {
 		capture := &decisionLogCapture{}
 		srv, _ := newDecisionLogServer(t, capture)
-		setDecisionLogFlag(t, srv, true)
 		require.NoError(t, srv.CleanupBackgroundResources(context.Background()))
 		require.False(t, srv.auditWriter.Snapshot().Closed)
 		rec := inDomainDecisionRecord()
@@ -729,7 +663,6 @@ func TestDecisionLog_P1_11_BodyFreeAndSentinels(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
 	member, _, projectID := seedDecisionLogProject(t, s)
-	setDecisionLogFlag(t, srv, true)
 
 	const canary = "CANARY-7f3a"
 	body := []byte(`{"secret":"` + canary + `-body","token":"` + canary + `-token"}`)

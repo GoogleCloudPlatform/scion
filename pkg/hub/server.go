@@ -3947,10 +3947,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.wireAgentDelegation()
 
 	// Wire decision logging (remaining-audit P1): an async, non-blocking
-	// writer over the process default handler captured here. Activation is
-	// the default-off experiment hub.authorization_decision_audit_v2,
-	// checked per record. With server.hub.perf_trace on, records pass
-	// through a counting decorator first (perftrace_audit.go).
+	// writer over the process default handler captured here. Always on.
+	// With server.hub.perf_trace on, records pass through a counting
+	// decorator first (perftrace_audit.go).
 	if err := srv.initDecisionAuditLog(); err != nil {
 		return nil, err
 	}

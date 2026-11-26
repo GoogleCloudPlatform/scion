@@ -27,7 +27,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 )
 
@@ -65,12 +64,10 @@ func sendMissingTimestampBrokerRequest(srv *Server) *httptest.ResponseRecorder {
 // T5: an HMAC failure gives exactly one broker/auth_failure record whose
 // correlation_id is the X-Request-ID, at warning; a registration gives
 // exactly one broker/register; a successful broker request (auth_success,
-// legacy DEBUG) gives no envelope. The decision experiment is off (the
-// default) throughout.
+// legacy DEBUG) gives no envelope.
 func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 	capture := &decisionLogCapture{}
 	srv, s := newDecisionLogServer(t, capture)
-	require.False(t, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2), "default must be off")
 	brokerID, signReq := setupSignedBrokerRequest(t, srv.brokerAuthService, s)
 
 	forged := signReq(http.MethodGet, "/api/v1/runtime-brokers", nil)
@@ -180,7 +177,6 @@ func TestBrokerEnvelope_AuthFailureFloodDoesNotStarveDecisionsOrLifecycle(t *tes
 	srv, s := newDecisionLogServer(t, capture)
 	admin := seedDecisionLogAdmin(t, s)
 	member := newHubMemberUser(t, s, "flood-register-member")
-	setDecisionLogFlag(t, srv, true)
 
 	released := false
 	t.Cleanup(func() {
@@ -250,7 +246,6 @@ func TestBrokerEnvelope_FailedJoinFloodDoesNotStarveDecisionsOrLifecycle(t *test
 	srv, s := newDecisionLogServer(t, capture)
 	admin := seedDecisionLogAdmin(t, s)
 	member := newHubMemberUser(t, s, "join-flood-register-member")
-	setDecisionLogFlag(t, srv, true)
 
 	released := false
 	t.Cleanup(func() {
@@ -327,26 +322,4 @@ func TestBrokerEnvelope_FailedJoinFloodDoesNotStarveDecisionsOrLifecycle(t *test
 	assert.Equal(t, "join", joinLines[0]["action"])
 	assert.Equal(t, "commit", joinLines[0]["phase"])
 	assert.Equal(t, "succeeded", joinLines[0]["outcome"])
-}
-
-// T7: the converted events are not gated on the decision experiment; with
-// hub.authorization_decision_audit_v2 explicitly off they are still
-// emitted.
-func TestBrokerEnvelope_T7_NotGatedOnDecisionExperiment(t *testing.T) {
-	capture := &decisionLogCapture{}
-	srv, _ := newDecisionLogServer(t, capture)
-	setDecisionLogFlag(t, srv, true)
-	setDecisionLogFlag(t, srv, false)
-
-	rec := sendMissingTimestampBrokerRequest(srv)
-	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	id := rec.Header().Get("X-Request-ID")
-	require.NotEmpty(t, id)
-
-	require.NoError(t, srv.CloseAuditWriter(context.Background()))
-	got := brokerFamilyRecords(capture.recordsFor(id))
-	require.Len(t, got, 1, "all: %v", capture.records())
-	assert.Equal(t, "auth_failure", got[0]["action"])
-	assert.Equal(t, "missing_credentials", auditGroup(t, got[0], "payload")["failure_code"])
-	assert.Equal(t, map[string]any{"kind": "runtime_broker", "id": "t6-claimed-broker"}, auditGroup(t, got[0], "resource"))
 }

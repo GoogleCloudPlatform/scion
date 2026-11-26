@@ -211,7 +211,7 @@ Token requests are not logged on every request at the default log level. What th
 
 Only the `GCP token audit event` is logged on the `hub.audit` subsystem. The `gcp_service_account.use` refusal line and the `actAs` `SA assignment audit event` are not, so filtering on `hub.audit` misses refusals.
 
-The `gcp_service_account.use` decision is not written to the authorization decision log (experiment `hub.authorization_decision_audit_v2`), which records decisions on projects and agents only.
+The `gcp_service_account.use` decision is not written to the authorization decision log, which records decisions on projects and agents only.
 
 Some agents get Google tokens without calling these endpoints, so no Hub log records those mints; they appear only in Google Cloud's audit logs:
 

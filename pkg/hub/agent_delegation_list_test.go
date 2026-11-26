@@ -822,7 +822,7 @@ func TestDecisionLog_ListFilterRecordExcludedByKind(t *testing.T) {
 
 	sink := auditevent.NewCaptureSink()
 	counts := &decisionAuditCounts{}
-	logger := &decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts}
+	logger := &decisionAuditLogger{sink: sink, counts: counts}
 	logger.EmitDecisionAudit(decisionCtx(), rec)
 	assert.Empty(t, sink.Records())
 	assert.Equal(t, uint64(1), counts.get(decisionAuditExcludedRecordKind, true))

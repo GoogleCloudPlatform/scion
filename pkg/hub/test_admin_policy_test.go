@@ -463,7 +463,7 @@ func TestTestAdminPolicy_SettingsWriteGuard(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Equal(t, testAdminReasonPolicyDenied, taReason(t, rec))
 	rec = httptest.NewRecorder()
-	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, nil, []string{experiments.AuthorizationDecisionAuditV2}))
+	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, nil, []string{experiments.AgentEdit}))
 	rec = httptest.NewRecorder()
 	assert.True(t, srv.rejectTestAdminSettingsWrite(rec, r, nil, nil), "an empty write is refused")
 	rec = httptest.NewRecorder()
@@ -565,38 +565,6 @@ func TestTestAdminSink_FailClosed(t *testing.T) {
 	issuer2 := taUser(t, s, "tsa-fc-iss2", store.SystemRoleSuperAdmin)
 	rec = doRequestAsUser(t, srv, issuer2, http.MethodPost, taPath, taBody(testAdminRoleHubAdmin))
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-}
-
-// Turning the decision audit experiment off (by a human) does not reduce
-// the sink lines an admin-kind request writes.
-func TestTestAdminSink_DecisionAuditExperimentIndependent(t *testing.T) {
-	srv, s, buf := tsaServer(t)
-	issuer := taUser(t, s, "tsa-exp-iss", store.SystemRoleSuperAdmin)
-	resp := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
-	setExperiment := func(on bool) {
-		rec := doRequestAsUser(t, srv, issuer, http.MethodGet, "/api/v1/admin/experiments", nil)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		var cur adminExperimentsResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cur))
-		rec = doRequestAsUser(t, srv, issuer, http.MethodPut, "/api/v1/admin/experiments", map[string]any{
-			"overrides": map[string]any{experiments.AuthorizationDecisionAuditV2: on}, "expected_revision": cur.Revision})
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		require.Equal(t, on, srv.experimentEnabled(experiments.AuthorizationDecisionAuditV2))
-	}
-	batch := func() int {
-		before := len(tsaSinkLines(buf, ""))
-		doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/users/"+issuer.ID, nil)
-		doRequestWithToken(t, srv, resp.AccessToken, http.MethodGet, "/api/v1/admin/server-config", nil)
-		return len(tsaSinkLines(buf, "")) - before
-	}
-	setExperiment(true)
-	on := batch()
-	setExperiment(false)
-	off := batch()
-	assert.Equal(t, on, off, "the sink does not depend on the decision audit experiment")
-	assert.GreaterOrEqual(t, off, 5, "two request lines, two response lines and a policy denial")
-	_, err := verifyTestAdminAuditChain(strings.NewReader(buf.String()))
-	require.NoError(t, err)
 }
 
 // No token appears in any sink line or log line written while identities

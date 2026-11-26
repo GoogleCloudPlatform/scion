@@ -228,7 +228,7 @@ func TestMapDecisionEnvelope_NegativeDomain(t *testing.T) {
 			// Through the logger: counted, nothing captured.
 			sink := auditevent.NewCaptureSink()
 			counts := &decisionAuditCounts{}
-			l := &decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts}
+			l := &decisionAuditLogger{sink: sink, counts: counts}
 			l.EmitDecisionAudit(ctx, rec)
 			require.Empty(t, sink.Records())
 			require.Equal(t, uint64(1), counts.get(tc.want, rec.Result == "allow"))
@@ -255,19 +255,10 @@ func (h levelHandler) Enabled(_ context.Context, l slog.Level) bool { return l >
 func TestDecisionAuditLogger_Dispositions(t *testing.T) {
 	ctx := decisionCtx()
 
-	t.Run("disabled", func(t *testing.T) {
-		sink := auditevent.NewCaptureSink()
-		counts := &decisionAuditCounts{}
-		for _, enabled := range []func() bool{nil, func() bool { return false }} {
-			(&decisionAuditLogger{sink: sink, enabled: enabled, counts: counts}).EmitDecisionAudit(ctx, inDomainDecisionRecord())
-		}
-		require.Empty(t, sink.Records())
-		require.Equal(t, uint64(2), counts.get(decisionAuditDisabled, true))
-	})
 	t.Run("enqueued", func(t *testing.T) {
 		sink := auditevent.NewCaptureSink()
 		counts := &decisionAuditCounts{}
-		(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts}).EmitDecisionAudit(ctx, inDomainDecisionRecord())
+		(&decisionAuditLogger{sink: sink, counts: counts}).EmitDecisionAudit(ctx, inDomainDecisionRecord())
 		require.Len(t, sink.Records(), 1)
 		require.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, true))
 	})
@@ -276,7 +267,7 @@ func TestDecisionAuditLogger_Dispositions(t *testing.T) {
 		counts := &decisionAuditCounts{}
 		rec := inDomainDecisionRecord()
 		rec.Result = "deny"
-		(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts}).EmitDecisionAudit(ctx, rec)
+		(&decisionAuditLogger{sink: sink, counts: counts}).EmitDecisionAudit(ctx, rec)
 		require.Equal(t, 1, sink.calls)
 		require.Equal(t, uint64(1), counts.get(decisionAuditNotEnqueued, false))
 	})
@@ -284,26 +275,32 @@ func TestDecisionAuditLogger_Dispositions(t *testing.T) {
 		sink := auditevent.NewCaptureSink()
 		counts := &decisionAuditCounts{}
 		h := levelHandler{Handler: slog.DiscardHandler, min: slog.LevelWarn}
-		l := &decisionAuditLogger{sink: sink, handler: h, enabled: func() bool { return true }, counts: counts}
+		l := &decisionAuditLogger{sink: sink, handler: h, counts: counts}
 		l.EmitDecisionAudit(ctx, inDomainDecisionRecord()) // allow → info, below warn
 		require.Empty(t, sink.Records())
 		require.Equal(t, uint64(1), counts.get(decisionAuditNotEnqueued, true))
 	})
 	t.Run("sink panic is recovered as not_enqueued", func(t *testing.T) {
 		counts := &decisionAuditCounts{}
-		l := &decisionAuditLogger{sink: panickingAuditSink{}, enabled: func() bool { return true }, counts: counts}
+		l := &decisionAuditLogger{sink: panickingAuditSink{}, counts: counts}
 		require.NotPanics(t, func() { l.EmitDecisionAudit(ctx, inDomainDecisionRecord()) })
 		require.Equal(t, uint64(1), counts.get(decisionAuditNotEnqueued, true))
 	})
-	t.Run("enabled panic is recovered as invalid", func(t *testing.T) {
+	t.Run("mapping panic is recovered as invalid", func(t *testing.T) {
 		counts := &decisionAuditCounts{}
-		l := &decisionAuditLogger{sink: auditevent.NewCaptureSink(), enabled: func() bool { panic("snapshot") }, counts: counts}
+		l := &decisionAuditLogger{
+			sink: auditevent.NewCaptureSink(),
+			mapFn: func(context.Context, *store.DecisionAuditRecord) (auditevent.EnvelopeV1, decisionAuditDisposition) {
+				panic("mapping fault")
+			},
+			counts: counts,
+		}
 		require.NotPanics(t, func() { l.EmitDecisionAudit(ctx, inDomainDecisionRecord()) })
 		require.Equal(t, uint64(1), counts.get(decisionAuditInvalid, true))
 	})
 	t.Run("nil record", func(t *testing.T) {
 		counts := &decisionAuditCounts{}
-		l := &decisionAuditLogger{sink: auditevent.NewCaptureSink(), enabled: func() bool { return true }, counts: counts}
+		l := &decisionAuditLogger{sink: auditevent.NewCaptureSink(), counts: counts}
 		require.NotPanics(t, func() { l.EmitDecisionAudit(ctx, nil) })
 		require.Equal(t, uint64(1), counts.get(decisionAuditInvalid, false))
 	})
@@ -330,7 +327,7 @@ func TestDecisionAuditCounts_RecorderAndClosedLabelSet(t *testing.T) {
 		require.False(t, seen[name], "duplicate disposition %s", name)
 		seen[name] = true
 	}
-	require.Len(t, seen, 11)
+	require.Len(t, seen, 10)
 }
 
 // The sampling policy is unchanged by decision logging: with an allow rate
@@ -342,14 +339,14 @@ func TestDecisionLog_SamplingPolicyUnchanged(t *testing.T) {
 	sink := auditevent.NewCaptureSink()
 	counts := &decisionAuditCounts{}
 	service := &AuthzService{DecisionAuditSampleRate: 0}
-	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts})
+	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, counts: counts})
 	request := AuthzRequest{Resource: Resource{Type: "project", ID: "proj-1"}, Action: ActionRead}
 	allow := Decision{Allowed: true, Reason: "allow", PrincipalID: "user-1", PrincipalKind: PrincipalKindUser, principalDecorated: true, PermissionID: "project.read"}
 	before := allow
 
 	service.emitDecisionAudit(ctx, request, allow)
 	require.Empty(t, sink.Records(), "unsampled allow stays skipped")
-	require.Zero(t, counts.get(decisionAuditEnqueued, true)+counts.get(decisionAuditDisabled, true))
+	require.Zero(t, counts.get(decisionAuditEnqueued, true))
 
 	deny := allow
 	deny.Allowed, deny.Reason = false, "deny"
@@ -385,13 +382,13 @@ func TestDecisionAuditLogger_PanickingRecorderContained(t *testing.T) {
 	counts.setRecorder(panickingDecisionMetrics{})
 	sink := auditevent.NewCaptureSink()
 	service := &AuthzService{DecisionAuditSampleRate: 1.0}
-	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, enabled: func() bool { return true }, counts: counts})
+	service.SetDecisionAuditEmitter(&decisionAuditLogger{sink: sink, counts: counts})
 	request := AuthzRequest{Resource: Resource{Type: "project", ID: "proj-1"}, Action: ActionRead}
 	decision := Decision{Allowed: true, Reason: "allow", PrincipalID: "user-1", PrincipalKind: PrincipalKindUser, principalDecorated: true, PermissionID: "project.read"}
 	require.NotPanics(t, func() { service.emitDecisionAudit(decisionCtx(), request, decision) })
 	require.Len(t, sink.Records(), 1)
 	require.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, true))
 
-	(&decisionAuditLogger{enabled: nil, counts: counts}).EmitDecisionAudit(decisionCtx(), inDomainDecisionRecord())
-	require.Equal(t, uint64(1), counts.get(decisionAuditDisabled, true))
+	(&decisionAuditLogger{sink: nil, counts: counts}).EmitDecisionAudit(decisionCtx(), inDomainDecisionRecord())
+	require.Equal(t, uint64(1), counts.get(decisionAuditNotEnqueued, true))
 }
