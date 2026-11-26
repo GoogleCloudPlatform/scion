@@ -68,11 +68,19 @@ interface RecurringSchedule {
   errorCount: number;
 }
 
+interface DurableQueueStatus {
+  kind: string;
+  pending: number;
+  leased: number;
+  oldestAgeSeconds: number;
+}
+
 interface SchedulerResponse {
   status?: string;
   scheduler?: SchedulerInfo;
   scheduledEvents?: ScheduledEvent[] | null;
   recurringSchedules?: RecurringSchedule[] | null;
+  durableQueues?: DurableQueueStatus[] | null;
   serverTime?: string;
 }
 
@@ -537,8 +545,49 @@ export class ScionPageAdminScheduler extends LitElement {
 
     return html`
       ${this.renderOverview(scheduler)} ${this.renderRecurringHandlers(scheduler.recurringHandlers)}
-      ${this.renderEventHandlers(scheduler.eventHandlers)} ${this.renderRecurringSchedules()}
+      ${this.renderEventHandlers(scheduler.eventHandlers)}
+      ${this.renderDurableQueues(this.data.durableQueues)} ${this.renderRecurringSchedules()}
       ${this.renderScheduledEvents(events)}
+    `;
+  }
+
+  private renderDurableQueues(queues: DurableQueueStatus[] | null | undefined) {
+    if (!queues) return nothing;
+    return html`
+      <div class="section" data-durable-queues-section>
+        <h2 class="section-title">Durable Queues</h2>
+        <p class="section-description">
+          Queue depth, active leases, and oldest item age for hub durable queues.
+        </p>
+        ${queues.length === 0
+          ? html`<div class="empty-inline">No durable queues reported.</div>`
+          : html`
+              <div class="table-container">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Queue Kind</th>
+                      <th>Pending</th>
+                      <th>Leased</th>
+                      <th>Oldest Age</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${queues.map(
+                      (q) => html`
+                        <tr data-durable-queue-row=${q.kind}>
+                          <td class="mono">${q.kind}</td>
+                          <td>${formatNumber(q.pending)}</td>
+                          <td>${formatNumber(q.leased)}</td>
+                          <td>${q.oldestAgeSeconds.toFixed(1)}s</td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            `}
+      </div>
     `;
   }
 

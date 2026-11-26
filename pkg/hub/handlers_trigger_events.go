@@ -223,3 +223,131 @@ func (s *Server) streamTriggerEventPayload(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, body)
 }
+
+// handleTriggerFires routes requests under
+// /api/v1/projects/{projectId}/trigger-fires (Stage 2 §9.2).
+func (s *Server) handleTriggerFires(w http.ResponseWriter, r *http.Request, projectID, firePath string) {
+	s.requireExperiment(experiments.Triggers, func(w http.ResponseWriter, r *http.Request) {
+		identity := GetIdentityFromContext(r.Context())
+		if identity == nil {
+			Unauthorized(w)
+			return
+		}
+		if !checkAgentReadScope(w, r) {
+			return
+		}
+		if agentIdentity := GetAgentIdentityFromContext(r.Context()); agentIdentity != nil {
+			if agentIdentity.ProjectID() != projectID {
+				Forbidden(w)
+				return
+			}
+		}
+
+		if firePath != "" {
+			NotFound(w, "Trigger fire")
+			return
+		}
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if !s.authorizeTriggerAccess(w, r, projectID, ActionList) {
+			return
+		}
+
+		s.listTriggerFires(w, r, projectID)
+	})(w, r)
+}
+
+func (s *Server) listTriggerFires(w http.ResponseWriter, r *http.Request, projectID string) {
+	ctx := r.Context()
+	query := r.URL.Query()
+
+	triggerID := strings.TrimSpace(query.Get("triggerId"))
+	if triggerID != "" {
+		if _, parseErr := uuid.Parse(triggerID); parseErr != nil {
+			// Allow callers to filter by a trigger name they can read without
+			// revealing triggers owned by other principals.
+			resolved := ""
+			if tr, err := s.store.GetTriggerByName(ctx, projectID, triggerID); err == nil && tr != nil {
+				if s.triggerAccessDecision(ctx, projectID, ActionRead, triggerRowOf(tr)).allowed {
+					resolved = tr.ID
+				}
+			}
+			if resolved == "" {
+				ValidationError(w, "unknown trigger", nil)
+				return
+			}
+			triggerID = resolved
+		}
+	}
+
+	eventID := strings.TrimSpace(query.Get("eventId"))
+	if eventID != "" {
+		if _, parseErr := uuid.Parse(eventID); parseErr != nil {
+			ValidationError(w, "invalid eventId", nil)
+			return
+		}
+	}
+
+	status := strings.TrimSpace(query.Get("status"))
+	if status != "" {
+		switch status {
+		case store.TriggerFireStatusCoalescing,
+			store.TriggerFireStatusDeferred,
+			store.TriggerFireStatusFiring,
+			store.TriggerFireStatusWaiting,
+			store.TriggerFireStatusFired,
+			store.TriggerFireStatusFailed,
+			store.TriggerFireStatusRefused,
+			store.TriggerFireStatusSkipped,
+			store.TriggerFireStatusExpired:
+		default:
+			ValidationError(w, fmt.Sprintf("invalid status %q", status), nil)
+			return
+		}
+	}
+
+	var since *time.Time
+	if sinceRaw := strings.TrimSpace(query.Get("since")); sinceRaw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, sinceRaw)
+		if err != nil {
+			ValidationError(w, "invalid since timestamp (expected RFC3339)", nil)
+			return
+		}
+		utc := parsed.UTC()
+		since = &utc
+	}
+
+	filter := store.TriggerFireFilter{
+		ProjectID: projectID,
+		TriggerID: triggerID,
+		EventID:   eventID,
+		Status:    status,
+		Since:     since,
+	}
+	scope := ""
+	if isAgentCaller(ctx) {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil || identity.ID() == "" {
+			Unauthorized(w)
+			return
+		}
+		filter.VisibleToAgentID = identity.ID()
+		scope = "caller"
+	}
+
+	result, err := s.store.ListTriggerFires(ctx, filter, listOptionsFromQuery(query))
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ListTriggerFiresResponse{
+		Scope:      scope,
+		Fires:      s.buildTriggerFireResponses(ctx, result.Items),
+		NextCursor: result.NextCursor,
+		TotalCount: result.TotalCount,
+		ServerTime: time.Now().UTC(),
+	})
+}

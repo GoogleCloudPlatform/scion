@@ -453,3 +453,17 @@ export const TOKENOMICS_USAGE_LEDGER_FLAG = 'tokenomics.usage_ledger';
 export function usageLedgerEnabled(): boolean {
   return isFeatureEnabled(TOKENOMICS_USAGE_LEDGER_FLAG);
 }
+
+/**
+ * Triggers and webhook endpoints (hub.triggers, ptone/scion#8064):
+ * gates the Project Triggers page (/projects/:id/triggers) and the Triggers
+ * header button on Project Detail. Presentation only: the hub enforces
+ * `hub.triggers` on all webhook-endpoint, trigger, trigger-event, and
+ * trigger-fire routes (404 while off). Default OFF.
+ */
+export const TRIGGERS_FLAG = 'hub.triggers';
+
+/** Whether the Project Triggers UI is enabled in this session. */
+export function triggersEnabled(): boolean {
+  return isFeatureEnabled(TRIGGERS_FLAG);
+}

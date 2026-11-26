@@ -2866,6 +2866,12 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		s.handleTriggerEvents(w, r, projectID, eventPath)
 		return
 	}
+	if subPath == "trigger-fires" || strings.HasPrefix(subPath, "trigger-fires/") {
+		firePath := strings.TrimPrefix(subPath, "trigger-fires")
+		firePath = strings.TrimPrefix(firePath, "/")
+		s.handleTriggerFires(w, r, projectID, firePath)
+		return
+	}
 	if subPath == "webhook-endpoints" || strings.HasPrefix(subPath, "webhook-endpoints/") {
 		endpointPath := strings.TrimPrefix(subPath, "webhook-endpoints")
 		endpointPath = strings.TrimPrefix(endpointPath, "/")

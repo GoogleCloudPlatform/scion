@@ -238,6 +238,7 @@ type TriggerFireResponse struct {
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
 	Subject        string            `json:"subject,omitempty"`
+	ActionType     string            `json:"actionType,omitempty"`
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`
 	TargetAgentID  string            `json:"targetAgentId,omitempty"`
@@ -248,13 +249,16 @@ type TriggerFireResponse struct {
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
 	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
 	NotBefore      *time.Time        `json:"notBefore,omitempty"`
+	DeferredAt     *time.Time        `json:"deferredAt,omitempty"`
 	ExecSummary    *ExecSummary      `json:"execSummary,omitempty"`
 	StartedAt      time.Time         `json:"startedAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }
 
-// ListTriggerFiresResponse is the paginated response of GET /triggers/{id}/history.
+// ListTriggerFiresResponse is the paginated response of GET /triggers/{id}/history
+// and GET /trigger-fires.
 type ListTriggerFiresResponse struct {
+	Scope      string                `json:"scope,omitempty"`
 	Fires      []TriggerFireResponse `json:"fires"`
 	NextCursor string                `json:"nextCursor,omitempty"`
 	TotalCount int                   `json:"totalCount"`
@@ -607,6 +611,7 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		EventID:        tf.EventID,
 		ProjectID:      tf.ProjectID,
 		Subject:        tf.Subject,
+		ActionType:     tf.ActionType,
 		Status:         tf.Status,
 		ResultRef:      tf.ResultRef,
 		TargetAgentID:  tf.TargetAgentID,
@@ -617,6 +622,7 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		DecidedDialect: decidedDialect,
 		RuleTrace:      decodeTriggerFireRuleTrace(tf.RuleTrace),
 		NotBefore:      tf.NotBefore,
+		DeferredAt:     tf.DeferredAt,
 		StartedAt:      tf.StartedAt,
 		FinishedAt:     tf.FinishedAt,
 	}

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 453
+**Operations:** 454
 
 ## Table of Contents
 
@@ -83,7 +83,7 @@
 - [webhookendpoint.rotatesecret](#webhookendpointrotatesecret) — Rotate a webhook endpoint's HMAC signing secret, writing version n+1 before bumping secret_version and keeping version n valid for a 24h grace window. Returns the new secret once. Agent callers may rotate only endpoints they own
 - [webhookendpoint.send](#webhookendpointsend) — Send an authenticated webhook event to a hub_token-mode endpoint on POST /api/v1/hooks/{id}. Handler-internal entry point: the route itself stays exempt for the anonymous HMAC posture via isWebhookIngressRequest, while requests carrying a credential are validated by UnifiedAuthMiddleware and authorized here via webhookEndpointAccessDecision(send)
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
-- [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
+- [trigger.list](#triggerlist) — List triggers, trigger events, or trigger fires in a project. Agent callers see only triggers they hold, fires of triggers they hold, and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
 - [trigger.render](#triggerrender) — Dry-run compile and render a trigger's template slots against a stored trigger event without firing or exercising recorded authority. Requires trigger.read on the trigger and read visibility on the event (agents without visibility on the event receive 404)
 - [trigger.create](#triggercreate) — Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id="") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action or a dispatch_agent action with ackComment requires github_trigger.comment (users only in Stage 3; agents cannot author github.comment triggers or ackComment because github_trigger.comment has no agent scope); all actions pass their target checks
@@ -3645,7 +3645,7 @@
 
 **Domain:** trigger
 
-**Description:** List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
+**Description:** List triggers, trigger events, or trigger fires in a project. Agent callers see only triggers they hold, fires of triggers they hold, and events received on endpoints they own or fired by triggers they hold (scope=caller)
 
 ### Entry Points
 
@@ -3653,6 +3653,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{projectId}/triggers` |
 | http_route | GET | `/api/v1/projects/{projectId}/trigger-events` |
+| http_route | GET | `/api/v1/projects/{projectId}/trigger-fires` |
 
 **Principals:** `user`, `agent`
 
