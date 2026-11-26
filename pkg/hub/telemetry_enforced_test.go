@@ -38,9 +38,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func ensureTestOps(t *testing.T, srv *Server, s store.Store) *OperationalSettings {
+	t.Helper()
+	if ops := srv.operationalSettings.Load(); ops != nil {
+		return ops
+	}
+	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(t.Context())
+	require.NoError(t, err)
+	ops.server = srv
+	srv.SetOperationalSettings(ops)
+	ApplySnapshot(srv, ops.Snapshot())
+	return ops
+}
+
 func setTelemetryEnforcementExperiment(t *testing.T, srv *Server, s store.Store, on bool) {
 	t.Helper()
 	ctx := t.Context()
+	ops := ensureTestOps(t, srv, s)
 	expDoc, err := json.Marshal(map[string]any{
 		"overrides": map[string]bool{
 			experiments.AgentPolicyTelemetryEnforcement: on,
@@ -49,16 +64,14 @@ func setTelemetryEnforcementExperiment(t *testing.T, srv *Server, s store.Store,
 	require.NoError(t, err)
 	_, err = s.UpsertHubSetting(ctx, "experiments", json.RawMessage(expDoc), "test", -1, "managed")
 	require.NoError(t, err)
-	if ops := srv.OperationalSettings(); ops != nil {
-		require.NoError(t, ops.ReloadFromStore(ctx))
-		srv.ApplySnapshot(ops.Snapshot())
-	}
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	ApplySnapshot(srv, ops.Snapshot())
 }
 
 func TestTelemetryEnforced_AdminSettingsDB(t *testing.T) {
 	srv, s := testServer(t)
-	ops := srv.OperationalSettings()
-	require.NotNil(t, ops)
+	ops := ensureTestOps(t, srv, s)
 
 	putConfig := func(body string) *httptest.ResponseRecorder {
 		rr := httptest.NewRecorder()
@@ -75,15 +88,15 @@ func TestTelemetryEnforced_AdminSettingsDB(t *testing.T) {
 	// Turn experiment on.
 	setTelemetryEnforcementExperiment(t, srv, s, true)
 
-	// Enforced=true with enabled=false is refused with 400 validation error.
+	// Enforced=true with enabled=false is refused with 422 validation error.
 	rr = putConfig(`{"telemetry":{"enabled":false,"enforced":true}}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "telemetry.enforced requires telemetry.enabled=true")
 	assert.False(t, srv.telemetryEnforced())
 
-	// Enforced=true with enabled omitted is refused with 400 validation error.
+	// Enforced=true with enabled omitted is refused with 422 validation error.
 	rr = putConfig(`{"telemetry":{"enforced":true}}`)
-	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "telemetry.enforced requires telemetry.enabled=true")
 	assert.False(t, srv.telemetryEnforced())
 
@@ -175,61 +188,98 @@ func TestTelemetryEnforced_ProjectSettingsPut(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
 		json.RawMessage(`{"telemetryEnabled":null}`))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &settings))
-	assert.Nil(t, settings.TelemetryEnabled)
+	var cleared hubclient.ProjectSettings
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cleared))
+	assert.Nil(t, cleared.TelemetryEnabled)
 }
 
 func TestTelemetryEnforced_DispatchPolicy(t *testing.T) {
-	f := newTiersFixture(t, tiersBrokerCapable)
-	f.d.SetTelemetryEnforcedProvider(f.srv.telemetryEnforced)
+	srv, s := testServer(t)
 	ctx := t.Context()
 
-	agent := f.newAgent(t, ctx, "enforced-dispatch", nil)
+	on := true
+	srv.mu.Lock()
+	srv.config.TelemetryConfig = &api.TelemetryConfig{
+		Enabled: &on,
+		Cloud:   &api.TelemetryCloudConfig{Endpoint: "hub-default.example.com:4317"},
+	}
+	srv.mu.Unlock()
+
+	project := &store.Project{
+		ID: tid("enforced-proj"), Name: "Enforced Project", Slug: "enforced-proj",
+		OwnerID: "dev@localhost", GitRemote: "https://example.com/enforced/repo.git",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "false"},
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{
+		ID: tid("enforced-broker"), Name: "enforced-broker", Slug: "enforced-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{TemplateTiers: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name,
+		LocalPath: "/home/user/enforced/.scion", Status: store.BrokerStatusOnline,
+	}))
+
+	client := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
+	d.SetHubTelemetryProvider(srv.hubTelemetryDefault)
+	d.SetTelemetryEnforcedProvider(srv.telemetryEnforced)
+	d.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
+
+	ac := srv.buildAppliedConfig(CreateAgentRequest{Workspace: "/tmp/enforced-ws"}, "dev@localhost", AgentRoleBaseline)
+	ag := &store.Agent{
+		ID: tid("enforced-dispatch"), Name: "enforced-dispatch", Slug: "enforced-dispatch",
+		ProjectID: project.ID, OwnerID: "dev@localhost",
+		RuntimeBrokerID: broker.ID, AppliedConfig: ac,
+	}
+	require.NoError(t, srv.deriveAgentConfig(ctx, ag, project, nil))
 
 	// Experiment off + TelemetryEnforced=true: byte-identical to today (project false wins).
-	f.srv.mu.Lock()
-	f.srv.config.TelemetryEnforced = true
-	f.srv.mu.Unlock()
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
 
-	req, err := f.d.buildCreateRequest(ctx, agent, "test")
+	req, err := d.buildCreateRequest(ctx, ag, "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config.TelemetryPolicy)
 	assert.False(t, *req.Config.TelemetryPolicy, "experiment off must leave project policy untouched")
 
 	// Experiment on + TelemetryEnforced=false: byte-identical to today (project false wins).
-	setTelemetryEnforcementExperiment(t, f.srv, f.s, true)
-	f.srv.mu.Lock()
-	f.srv.config.TelemetryEnforced = false
-	f.srv.mu.Unlock()
+	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = false
+	srv.mu.Unlock()
 
-	req, err = f.d.buildCreateRequest(ctx, agent, "test")
+	req, err = d.buildCreateRequest(ctx, ag, "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config.TelemetryPolicy)
 	assert.False(t, *req.Config.TelemetryPolicy, "enforced=false must leave project policy untouched")
 
 	// Experiment on + TelemetryEnforced=true: forces TelemetryPolicy=true on create, start, and restart.
-	f.srv.mu.Lock()
-	f.srv.config.TelemetryEnforced = true
-	f.srv.mu.Unlock()
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
 
-	req, err = f.d.buildCreateRequest(ctx, agent, "test")
+	req, err = d.buildCreateRequest(ctx, ag, "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config.TelemetryPolicy)
 	assert.True(t, *req.Config.TelemetryPolicy, "enforced=true must override project false on create")
 
-	require.NoError(t, f.d.DispatchAgentStart(ctx, agent, "go"))
-	require.NotNil(t, f.client.lastStartExtras.TelemetryPolicy)
-	assert.True(t, *f.client.lastStartExtras.TelemetryPolicy, "enforced=true must override project false on start")
+	require.NoError(t, d.DispatchAgentStart(ctx, ag, "go", false))
+	require.NotNil(t, client.lastStartExtras.TelemetryPolicy)
+	assert.True(t, *client.lastStartExtras.TelemetryPolicy, "enforced=true must override project false on start")
 
-	require.NoError(t, f.d.DispatchAgentRestart(ctx, agent))
-	require.NotNil(t, f.client.lastRestartExtras.TelemetryPolicy)
-	assert.True(t, *f.client.lastRestartExtras.TelemetryPolicy, "enforced=true must override project false on restart")
+	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
+	require.NotNil(t, client.lastRestartExtras.TelemetryPolicy)
+	assert.True(t, *client.lastRestartExtras.TelemetryPolicy, "enforced=true must override project false on restart")
 
 	// Project with no annotation (nil) also gets TelemetryPolicy=true when enforced.
-	delete(f.project.Annotations, projectSettingTelemetryEnabled)
-	require.NoError(t, f.s.UpdateProject(ctx, f.project))
+	delete(project.Annotations, projectSettingTelemetryEnabled)
+	require.NoError(t, s.UpdateProject(ctx, project))
 
-	req, err = f.d.buildCreateRequest(ctx, agent, "test")
+	req, err = d.buildCreateRequest(ctx, ag, "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config.TelemetryPolicy)
 	assert.True(t, *req.Config.TelemetryPolicy, "enforced=true must set TelemetryPolicy=true when project policy is unset")
@@ -251,8 +301,7 @@ func TestTelemetryEnforced_E2E_ProjectFalseOverridesToEnabled(t *testing.T) {
 	}
 
 	srv, s := testServer(t)
-	ops := srv.OperationalSettings()
-	require.NotNil(t, ops)
+	ops := ensureTestOps(t, srv, s)
 	ctx := t.Context()
 
 	// 1. Enable experiment and save telemetry.enforced=true via admin opsettings API.
@@ -315,14 +364,17 @@ func TestTelemetryEnforced_E2E_ProjectFalseOverridesToEnabled(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-gemini")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-claude")
 	require.NoError(t, os.MkdirAll(hcDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(hcDir, "config.yaml"),
-		[]byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(
+		"harness: claude\nuser: scion\nimage: test-image:latest\n"+
+			"provisioner:\n  type: container-script\n  interface_version: 1\n  command: [\"python3\", \"/home/scion/.scion/harness/provision.py\"]\n",
+	), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(hcDir, "provision.py"), []byte("#!/usr/bin/env python3\n"), 0o755))
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
 	require.NoError(t, os.MkdirAll(tplDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(tplDir, "scion-agent.json"),
-		[]byte(`{"default_harness_config": "test-gemini"}`), 0o644))
+		[]byte(`{"default_harness_config": "test-claude"}`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: local
 profiles:
@@ -335,7 +387,7 @@ profiles:
 	agentHome := filepath.Join(agentDir, "home")
 	require.NoError(t, os.MkdirAll(agentHome, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
-		[]byte(`{"harness": "gemini", "harness_config": "test-gemini", "telemetry": {"enabled": false}}`), 0o644))
+		[]byte(`{"harness": "claude", "harness_config": "test-claude", "telemetry": {"enabled": false}}`), 0o644))
 
 	// Mirror runtimebroker.resolveTelemetryOverride: TelemetryPolicy takes precedence
 	// and rewrites SCION_TELEMETRY_ENABLED in env.

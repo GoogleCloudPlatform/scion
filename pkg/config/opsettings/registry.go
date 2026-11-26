@@ -30,6 +30,12 @@ type Section struct {
 	Name       string
 	Schema     *jsonschema.Schema
 	KoanfPaths []string
+	// DBOnlyKeys are dotted key paths owned by this section in database-backed
+	// operational settings only (no settings.yaml or env-var representation).
+	// They are indexed for OwningSection/IsLayer1Key/ClassifyKeys so PUT
+	// /api/v1/admin/server-config accepts them as Layer-1 keys, without adding
+	// them to KoanfPaths (seeding, settings-v1.schema.json, or env contract).
+	DBOnlyKeys []string
 	New        func() any
 
 	// RestartRequired lists the koanf paths of this section whose saved
@@ -190,6 +196,7 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.resource",
 			},
+			DBOnlyKeys:      []string{"telemetry.enforced"},
 			New:             func() any { return &TelemetrySettings{} },
 			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval"},
 		},
@@ -413,6 +420,9 @@ func ensureIndexes() {
 		s := &Registry[i]
 		sectionIndex[s.Name] = s
 		for _, kp := range s.KoanfPaths {
+			keyIndex[kp] = s.Name
+		}
+		for _, kp := range s.DBOnlyKeys {
 			keyIndex[kp] = s.Name
 		}
 	}
