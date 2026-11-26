@@ -719,9 +719,10 @@ func TestReincarnatePatch_UserNeedsUpdateForPatch(t *testing.T) {
 		}
 		assertAgentUntouched(t, s, disp, agent.ID, before)
 
-		// Admitted arm: the same user with agent.update may patch.
+		// Admitted arm: the same user with agent.update may apply non-image
+		// patches (image changes also require agent.attach, ptone/scion#3402).
 		grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
-		req = reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true, Image: "other:v1", Role: "readonly"})
+		req = reincarnateRequest(t, agent.ID, identity, ReincarnateAgentRequest{DryRun: true, Model: "other-model", Role: "readonly"})
 		rec = httptest.NewRecorder()
 		srv.handleReincarnateAgent(rec, req, agent.ID)
 		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
