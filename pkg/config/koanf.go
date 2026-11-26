@@ -133,6 +133,9 @@ func loadSettingsFromDirTier(dir string, projectTier bool) (*Settings, error) {
 	// load does not fail for it.
 	raw := koanf.New(".")
 	if _, err := loadSettingsFileConverting(raw, dir, nil, projectTier); err == nil {
+		if projectTier {
+			stripDeniedProjectRoots(raw, settingsHierarchySources(dir))
+		}
 		if settingsUnused, err := decodeCollectingUnused(raw, settingsProbeStruct(false)); err == nil {
 			warnSettingsUnusedKeys(raw, settingsUnused, func() bool {
 				hasVersioned, _ := detectDirSettingsFormat(dir)

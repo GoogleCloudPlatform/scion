@@ -82,6 +82,9 @@ func loadSingleDirSettingsView(dir string, projectTier bool) (*Settings, error) 
 	if _, err := loadSettingsFileConverting(k, dir, legacy, projectTier); err != nil {
 		return nil, err
 	}
+	if projectTier {
+		stripDeniedProjectRoots(k, settingsHierarchySources(dir))
+	}
 	res := &versionedLoadResult{
 		k:                         k,
 		fileHubProjectID:          k.String(projectkeys.ConfigHubProjectIDKey),
