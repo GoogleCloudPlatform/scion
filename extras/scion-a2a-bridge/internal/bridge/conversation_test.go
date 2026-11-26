@@ -90,8 +90,10 @@ func TestBrokerServer_Publish_ConversationAndBridgeSemantics(t *testing.T) {
 		t.Fatalf("expected 3 forwarded messages, got %d", len(received))
 	}
 
+	// Native conversation does not populate external Surface/ExternalRef,
+	// while ConversationID is preserved and the bridge still receives the message.
 	t0 := plugin.ResolveConversationTarget(received[0])
-	if t0.Surface != "native" || t0.ExternalRef != "direct:p1:u1:coder" {
+	if t0.ConversationID != "conv-1" || t0.Surface != "" || t0.ExternalRef != "" {
 		t.Errorf("unexpected resolved target[0]: %+v", t0)
 	}
 	t1 := plugin.ResolveConversationTarget(received[1])

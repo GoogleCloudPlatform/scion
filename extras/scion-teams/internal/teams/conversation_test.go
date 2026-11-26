@@ -109,16 +109,40 @@ func TestTeamsBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 2b. Outbound targeting native webchat surface is ignored.
+	// 2b. Foreign non-empty Channel ("web") is skipped by Teams.
 	err = broker.Publish(ctx, "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
-		Msg:       "native message",
+		Msg:       "webchat message",
 		Type:      messages.TypeInstruction,
+		Channel:   "web",
 		Conversation: &messages.Conversation{
 			Surface:     "native",
 			ExternalRef: "thread:p1:topic-1",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2c. Defeat scenario (b): agent-to-agent observer copy with native DM conv
+	// (Channel == "") is delivered to ShowAgentToAgent links, not dropped.
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID:   "19:parent-chan@thread.tacv2",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: true,
+	}))
+	err = broker.Publish(ctx, "scion.project.p1.agent.reviewer.messages", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "agent:reviewer",
+		Msg:            "agent-to-agent observer copy",
+		Type:           messages.TypeInstruction,
+		ObserverOnly:   true,
+		ConversationID: "conv-a2a",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:agent:a2",
 		},
 	})
 	require.NoError(t, err)
@@ -143,7 +167,7 @@ func TestTeamsBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, delivered, 3)
+	require.Len(t, delivered, 4)
 	assert.Contains(t, delivered, "/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
 	assert.Contains(t, delivered, "/v3/conversations/19:parent-chan@thread.tacv2/activities")
 	assert.Contains(t, delivered, "/v3/conversations/19:legacy@thread.tacv2/activities")

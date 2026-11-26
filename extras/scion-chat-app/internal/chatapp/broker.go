@@ -101,10 +101,11 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		return nil
 	}
 
-	// Surface filtering: ignore messages targeted at another surface
-	// (including "native" / "web"). Untargeted messages (empty surface)
-	// continue to flow.
-	if !plugin.MatchesSurface(msg, b.surfaceName()) {
+	// Single surface/channel gate: match configured routing key (ChannelName,
+	// e.g. "googlechat") against Channel, and canonical surface "gchat" against
+	// Conversation.Surface. Native/web user DMs and untargeted observer copies
+	// are always relayed (matching pre-P4 behavior).
+	if !b.shouldRelay(msg) {
 		return nil
 	}
 
@@ -177,38 +178,23 @@ func (b *BrokerServer) ChannelName() string {
 	return b.channelName
 }
 
-// surfaceName returns the canonical conversation surface name for this broker
-// ("gchat" by default, or the configured plugin_name).
-func (b *BrokerServer) surfaceName() string {
-	if name := b.ChannelName(); name != "" {
-		return name
+// shouldRelay reports whether msg should be handled by this chat-app instance.
+// It matches the configured routing key (ChannelName, e.g. "googlechat")
+// against msg.Channel, and the canonical surface "gchat" against
+// msg.Conversation.Surface. Native/web messages and untargeted observer copies
+// are always relayed (matching pre-P4 behavior).
+func (b *BrokerServer) shouldRelay(msg *messages.StructuredMessage) bool {
+	if msg == nil {
+		return true
 	}
-	return "gchat"
-}
-
-// chatAppInboundConversation builds the Conversation addressing for an inbound
-// message sent from the chat app to the Hub.
-func chatAppInboundConversation(surface, spaceID, threadID string) *messages.Conversation {
-	if surface == "" {
-		surface = "gchat"
+	routingKey := b.ChannelName()
+	if msg.Channel != "" {
+		return msg.Channel == "web" || msg.Channel == "gchat" || (routingKey != "" && msg.Channel == routingKey)
 	}
-	if threadID != "" {
-		conv := &messages.Conversation{
-			Surface:     surface,
-			ExternalRef: threadID,
-		}
-		if spaceID != "" && spaceID != threadID {
-			conv.ParentRef = spaceID
-		}
-		return conv
+	if msg.Conversation != nil && msg.Conversation.Surface != "" && msg.Conversation.Surface != "native" {
+		return msg.Conversation.Surface == "gchat" || (routingKey != "" && msg.Conversation.Surface == routingKey)
 	}
-	if spaceID != "" {
-		return &messages.Conversation{
-			Surface:     surface,
-			ExternalRef: spaceID,
-		}
-	}
-	return nil
+	return true
 }
 
 // Subscribe registers a topic pattern for receiving messages.

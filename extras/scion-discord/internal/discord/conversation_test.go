@@ -65,20 +65,40 @@ func TestDiscordBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, sentChannelIDs(f.transport), 1)
 
-	// 3. Native conversation surface is ignored by external Discord plugin.
+	// 3. Defeat scenario (a): reply affinity — Channel:"discord" + native DM
+	// conversation + Recipient:user must deliver to the user's Discord channel
+	// (not be dropped by Surface:"native" and not try to post to "dm:...").
+	err = f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:" + dmTestEmail,
+		Msg:            "reply affinity DM",
+		Type:           messages.TypeInstruction,
+		Channel:        "discord",
+		ConversationID: "conv-dm-affinity",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:user:u1",
+		},
+	})
+	require.NoError(t, err)
+	assert.Len(t, sentChannelIDs(f.transport), 2)
+
+	// 3b. Foreign non-empty Channel ("web") is skipped by Discord.
 	err = f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:" + dmTestEmail,
-		Msg:       "native webchat message",
+		Msg:       "webchat message",
 		Type:      messages.TypeInstruction,
+		Channel:   "web",
 		Conversation: &messages.Conversation{
 			Surface:     "native",
 			ExternalRef: "thread:p1:topic-1",
 		},
 	})
 	require.NoError(t, err)
-	assert.Len(t, sentChannelIDs(f.transport), 1)
+	assert.Len(t, sentChannelIDs(f.transport), 2)
 
 	// 4. Legacy fallback (older hub sends Channel/ThreadID without Conversation).
 	err = f.broker.Publish(context.Background(), topic, &messages.StructuredMessage{
@@ -91,7 +111,10 @@ func TestDiscordBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 		ThreadID:  "666666666666666666",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"555555555555555555", "666666666666666666"}, sentChannelIDs(f.transport))
+	got := sentChannelIDs(f.transport)
+	require.Len(t, got, 3)
+	assert.Equal(t, "555555555555555555", got[0])
+	assert.Equal(t, "666666666666666666", got[2])
 }
 
 func TestDiscordBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {

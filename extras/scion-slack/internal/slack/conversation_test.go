@@ -106,20 +106,48 @@ func TestSlackBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, getPosted(), 1)
 
-	// 3. Native conversation surface is ignored by external Slack plugin.
+	// 3. Defeat scenario (b): agent-to-agent observer copy with native DM conversation
+	// (Channel == "") must be delivered to ShowAgentToAgent links, not dropped.
+	require.NoError(t, b.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ChannelID:        "C_OBS_LINK",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: true,
+	}))
+	err = b.Publish(context.Background(), "scion.project.p1.agent.reviewer.messages", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "agent:reviewer",
+		Msg:            "agent-to-agent observer copy",
+		Type:           messages.TypeInstruction,
+		ObserverOnly:   true,
+		ConversationID: "conv-a2a",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:agent:a2",
+		},
+	})
+	require.NoError(t, err)
+	posted = getPosted()
+	require.Len(t, posted, 2)
+	assert.Equal(t, "C_OBS_LINK", posted[1].Channel)
+	assert.Equal(t, "", posted[1].ThreadTS)
+
+	// 3b. Foreign non-empty Channel ("web") is skipped by Slack.
 	err = b.Publish(context.Background(), "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
-		Msg:       "native webchat message",
+		Msg:       "webchat message",
 		Type:      messages.TypeInstruction,
+		Channel:   "web",
 		Conversation: &messages.Conversation{
 			Surface:     "native",
 			ExternalRef: "thread:p1:topic-1",
 		},
 	})
 	require.NoError(t, err)
-	assert.Len(t, getPosted(), 1)
+	assert.Len(t, getPosted(), 2)
 
 	// 4. Legacy fallback (older hub sends Channel/ThreadID without Conversation).
 	err = b.Publish(context.Background(), "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
@@ -133,9 +161,9 @@ func TestSlackBroker_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	posted = getPosted()
-	require.Len(t, posted, 2)
-	assert.Equal(t, "C9999XYZ", posted[1].Channel)
-	assert.Equal(t, "1700000002.000200", posted[1].ThreadTS)
+	require.Len(t, posted, 3)
+	assert.Equal(t, "C9999XYZ", posted[2].Channel)
+	assert.Equal(t, "1700000002.000200", posted[2].ThreadTS)
 }
 
 func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {

@@ -977,9 +977,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return fmt.Errorf("telegram v2 broker not configured")
 	}
 
-	if !plugin.MatchesSurface(msg, "telegram") {
-		return nil
-	}
+	// Telegram v2 relays all messages (no channel filter, matching pre-P4 behavior).
 
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)

@@ -82,12 +82,40 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	assert.Equal(t, int64(0), tgSrv.sentMessages[1].MessageThreadID)
 	tgSrv.mu.Unlock()
 
-	// 2. Conversation targeting another surface ("discord") is ignored.
+	// 2. Defeat scenario (c): Channel:"web" user DM with native DM conversation
+	// is relayed by Telegram v2 (matching pre-P4 no-filter behavior) via
+	// metadata/recipient routing without parsing "dm:..." as a Telegram chat ID.
+	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "web user DM relayed by telegram",
+		Type:           messages.TypeInstruction,
+		Channel:        "web",
+		ThreadID:       "dm:agent:a1:user:u1",
+		ConversationID: "conv-web-dm",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:user:u1",
+		},
+		Metadata: map[string]string{
+			"telegram_chat_id": "-100777888",
+		},
+	})
+	require.NoError(t, err)
+	tgSrv.mu.Lock()
+	require.Len(t, tgSrv.sentMessages, 3)
+	assert.Equal(t, int64(-100777888), tgSrv.sentMessages[2].ChatID)
+	assert.Equal(t, int64(0), tgSrv.sentMessages[2].MessageThreadID)
+	tgSrv.mu.Unlock()
+
+	// 3. Foreign-surface ExternalRef (e.g. Discord snowflake) is never parsed
+	// as a Telegram chat ID.
 	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "agent:coder",
 		Recipient: "user:alice",
-		Msg:       "discord message",
+		Msg:       "discord message without telegram route",
 		Type:      messages.TypeInstruction,
 		Conversation: &messages.Conversation{
 			Surface:     "discord",
@@ -96,24 +124,7 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
-	assert.Len(t, tgSrv.sentMessages, 2)
-	tgSrv.mu.Unlock()
-
-	// 3. Native conversation surface is ignored by external Telegram plugin.
-	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
-		Version:   messages.Version,
-		Sender:    "agent:coder",
-		Recipient: "user:alice",
-		Msg:       "native webchat message",
-		Type:      messages.TypeInstruction,
-		Conversation: &messages.Conversation{
-			Surface:     "native",
-			ExternalRef: "thread:p1:topic-1",
-		},
-	})
-	require.NoError(t, err)
-	tgSrv.mu.Lock()
-	assert.Len(t, tgSrv.sentMessages, 2)
+	assert.Len(t, tgSrv.sentMessages, 3)
 	tgSrv.mu.Unlock()
 
 	// 4. Legacy fallback (older hub sends Channel/ThreadID/Metadata without Conversation).
@@ -131,9 +142,9 @@ func TestTelegramBrokerV2_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
-	require.Len(t, tgSrv.sentMessages, 3)
-	assert.Equal(t, int64(-100999888), tgSrv.sentMessages[2].ChatID)
-	assert.Equal(t, int64(77), tgSrv.sentMessages[2].MessageThreadID)
+	require.Len(t, tgSrv.sentMessages, 4)
+	assert.Equal(t, int64(-100999888), tgSrv.sentMessages[3].ChatID)
+	assert.Equal(t, int64(77), tgSrv.sentMessages[3].MessageThreadID)
 	tgSrv.mu.Unlock()
 }
 
@@ -164,23 +175,28 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	assert.Equal(t, int64(-100111222), tgSrv.sentMessages[0].ChatID)
 	tgSrv.mu.Unlock()
 
-	// 2. Other surface and native surface are ignored.
-	for _, surf := range []string{"slack", "native"} {
-		err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
-			Version:   messages.Version,
-			Sender:    "agent:coder",
-			Recipient: "user:alice",
-			Msg:       "ignored " + surf,
-			Type:      messages.TypeInstruction,
-			Conversation: &messages.Conversation{
-				Surface:     surf,
-				ExternalRef: "-100111222",
-			},
-		})
-		require.NoError(t, err)
-	}
+	// 2. Defeat scenario (c): Channel:"web" user DM with native conversation
+	// is relayed by Telegram v1 (no channel filter, matching pre-P4 behavior).
+	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:alice",
+		Msg:       "v1 web DM relayed",
+		Type:      messages.TypeInstruction,
+		Channel:   "web",
+		ThreadID:  "dm:agent:a1:user:u1",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:user:u1",
+		},
+		Metadata: map[string]string{
+			"telegram_chat_id": "-100333444",
+		},
+	})
+	require.NoError(t, err)
 	tgSrv.mu.Lock()
-	assert.Len(t, tgSrv.sentMessages, 1)
+	assert.Len(t, tgSrv.sentMessages, 2)
+	assert.Equal(t, int64(-100333444), tgSrv.sentMessages[1].ChatID)
 	tgSrv.mu.Unlock()
 
 	// 3. Legacy fallback via metadata.
@@ -197,8 +213,8 @@ func TestTelegramBrokerV1_Publish_ConversationRoutingAndFallback(t *testing.T) {
 	})
 	require.NoError(t, err)
 	tgSrv.mu.Lock()
-	require.Len(t, tgSrv.sentMessages, 2)
-	assert.Equal(t, int64(-100333444), tgSrv.sentMessages[1].ChatID)
+	require.Len(t, tgSrv.sentMessages, 3)
+	assert.Equal(t, int64(-100333444), tgSrv.sentMessages[2].ChatID)
 	tgSrv.mu.Unlock()
 }
 

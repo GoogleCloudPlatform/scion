@@ -82,6 +82,11 @@ func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID in
 	if target.ExternalRef == "" {
 		return 0, false, 0
 	}
+	// Never parse a foreign surface's external_ref (e.g. a Discord snowflake)
+	// as a Telegram chat/thread ID; fall through to recipient/project routing.
+	if target.Surface != "" && target.Surface != "telegram" {
+		return 0, false, 0
+	}
 	if parts := strings.SplitN(target.ExternalRef, ":", 2); len(parts) == 2 {
 		cid, err1 := strconv.ParseInt(parts[0], 10, 64)
 		tid, err2 := strconv.ParseInt(parts[1], 10, 64)
@@ -454,10 +459,7 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 		return fmt.Errorf("telegram broker not configured")
 	}
 
-	if !plugin.MatchesSurface(msg, "telegram") {
-		return nil
-	}
-
+	// Telegram relays all messages (no channel filter, matching pre-P4 behavior).
 	// Dedup: skip if we've already sent this exact message recently.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {

@@ -64,14 +64,6 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
 //	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	if msg != nil && !plugin.MatchesSurface(msg, "gchat") {
-		n.log.Debug("ignoring message for non-gchat surface",
-			"topic", topic,
-			"surface", plugin.ResolveConversationTarget(msg).Surface,
-		)
-		return nil
-	}
-
 	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		n.log.Debug("ignoring unrecognized topic", "topic", topic, "error", err)

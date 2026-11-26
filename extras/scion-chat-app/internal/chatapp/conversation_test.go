@@ -37,11 +37,12 @@ func TestChatApp_PublishAndRelay_ConversationRoutingAndFallback(t *testing.T) {
 	}
 
 	if err := store.SetSpaceLink(&state.SpaceLink{
-		SpaceID:     "spaces/AAQAx",
-		Platform:    "googlechat",
-		ProjectID:   "project-abc",
-		ProjectSlug: "my-project",
-		LinkedBy:    "test",
+		SpaceID:          "spaces/AAQAx",
+		Platform:         "googlechat",
+		ProjectID:        "project-abc",
+		ProjectSlug:      "my-project",
+		LinkedBy:         "test",
+		ShowAgentToAgent: true,
 	}); err != nil {
 		t.Fatalf("setting space link: %v", err)
 	}
@@ -103,26 +104,51 @@ func TestChatApp_PublishAndRelay_ConversationRoutingAndFallback(t *testing.T) {
 		t.Fatalf("expected slack message to be ignored, got %d total deliveries", len(fm.messages))
 	}
 
-	// 2b. Outbound targeting native webchat surface is ignored (both via Publish and direct HandleBrokerMessage).
-	nativeMsg := &messages.StructuredMessage{
-		Version:     messages.Version,
-		Sender:      "agent:coder",
-		RecipientID: "hub-user-1",
-		Msg:         "native message",
-		Type:        messages.TypeInstruction,
+	// 2b. Defeat scenario (c): Channel:"web" user DM with native DM conversation
+	// MUST be relayed (matching pre-P4 behavior: user-targeted messages are always relayed).
+	webDM := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		RecipientID:    "hub-user-1",
+		Msg:            "web user DM",
+		Type:           messages.TypeInstruction,
+		Channel:        "web",
+		ThreadID:       "dm:agent:a1:user:hub-user-1",
+		ConversationID: "conv-web-dm",
 		Conversation: &messages.Conversation{
 			Surface:     "native",
-			ExternalRef: "thread:project-abc:topic-1",
+			ExternalRef: "dm:agent:a1:user:hub-user-1",
 		},
 	}
-	if err := broker.Publish(ctx, topic, nativeMsg); err != nil {
-		t.Fatalf("Publish (native surface) failed: %v", err)
+	if err := broker.Publish(ctx, topic, webDM); err != nil {
+		t.Fatalf("Publish (web user DM) failed: %v", err)
 	}
-	if err := relay.HandleBrokerMessage(ctx, topic, nativeMsg); err != nil {
-		t.Fatalf("HandleBrokerMessage (native surface) failed: %v", err)
+	if len(fm.messages) != 2 {
+		t.Fatalf("expected web user DM to be relayed, got %d total deliveries", len(fm.messages))
 	}
-	if len(fm.messages) != 1 {
-		t.Fatalf("expected native message to be ignored, got %d total deliveries", len(fm.messages))
+
+	// 2c. Defeat scenario (b): agent-to-agent observer copy with native DM conv
+	// (Channel == "") MUST be relayed to ShowAgentToAgent links.
+	a2aTopic := "scion.project.project-abc.agent.reviewer.messages"
+	a2aMsg := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "agent:reviewer",
+		Msg:            "a2a observer copy",
+		Type:           messages.TypeInstruction,
+		ObserverOnly:   true,
+		ConversationID: "conv-a2a",
+		Conversation: &messages.Conversation{
+			Surface:     "native",
+			ExternalRef: "dm:agent:a1:agent:a2",
+		},
+	}
+	if err := broker.Publish(ctx, a2aTopic, a2aMsg); err != nil {
+		t.Fatalf("Publish (a2a observer) failed: %v", err)
+	}
+	if len(fm.messages) != 3 {
+		t.Fatalf("expected a2a observer copy to be relayed, got %d total deliveries", len(fm.messages))
 	}
 
 	// 3. Legacy fallback (older hub sends Channel/ThreadID without Conversation).
@@ -138,41 +164,82 @@ func TestChatApp_PublishAndRelay_ConversationRoutingAndFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Publish (legacy fallback) failed: %v", err)
 	}
-	if len(fm.messages) != 2 {
-		t.Fatalf("expected 2 total deliveries after legacy fallback, got %d", len(fm.messages))
+	if len(fm.messages) != 4 {
+		t.Fatalf("expected 4 total deliveries after legacy fallback, got %d", len(fm.messages))
 	}
-	if fm.messages[1].ThreadID != "spaces/AAQAx/threads/thread-legacy" {
-		t.Errorf("expected legacy ThreadID spaces/AAQAx/threads/thread-legacy, got %q", fm.messages[1].ThreadID)
+	if fm.messages[3].ThreadID != "spaces/AAQAx/threads/thread-legacy" {
+		t.Errorf("expected legacy ThreadID spaces/AAQAx/threads/thread-legacy, got %q", fm.messages[3].ThreadID)
 	}
 }
 
-func TestChatAppInboundConversation(t *testing.T) {
-	// Threaded message populates surface, external_ref, and parent_ref.
-	conv := chatAppInboundConversation("", "spaces/AAQAx", "spaces/AAQAx/threads/T1")
-	if conv == nil {
-		t.Fatal("expected non-nil Conversation for threaded message")
+func TestChatApp_R3_PluginNameGoogleChatSingleGate(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if err := st.SetSpaceLink(&state.SpaceLink{
+		SpaceID:     "spaces/AAQAx",
+		ProjectID:   "project-abc",
+		ProjectSlug: "my-project",
+		Platform:    "googlechat",
+		LinkedBy:    "test",
+	}); err != nil {
+		t.Fatalf("SetSpaceLink: %v", err)
 	}
-	if conv.Surface != "gchat" {
-		t.Errorf("expected surface gchat, got %q", conv.Surface)
-	}
-	if conv.ExternalRef != "spaces/AAQAx/threads/T1" {
-		t.Errorf("expected external_ref spaces/AAQAx/threads/T1, got %q", conv.ExternalRef)
-	}
-	if conv.ParentRef != "spaces/AAQAx" {
-		t.Errorf("expected parent_ref spaces/AAQAx, got %q", conv.ParentRef)
-	}
-
-	// Space-level message (no thread) populates surface and external_ref without parent_ref.
-	spaceConv := chatAppInboundConversation("gchat", "spaces/AAQAx", "")
-	if spaceConv == nil {
-		t.Fatal("expected non-nil Conversation for space-level message")
-	}
-	if spaceConv.Surface != "gchat" || spaceConv.ExternalRef != "spaces/AAQAx" || spaceConv.ParentRef != "" {
-		t.Errorf("unexpected space-level Conversation: %+v", spaceConv)
+	if err := st.SetUserMapping(&state.UserMapping{
+		PlatformUserID: "users/12345",
+		Platform:       "googlechat",
+		HubUserID:      "hub-user-1",
+		HubUserEmail:   "alice@example.com",
+		RegisteredBy:   "auto",
+	}); err != nil {
+		t.Fatalf("SetUserMapping: %v", err)
 	}
 
-	// Neither space nor thread returns nil.
-	if empty := chatAppInboundConversation("gchat", "", ""); empty != nil {
-		t.Errorf("expected nil Conversation when space and thread are empty, got %+v", empty)
+	fm := &fakeMessenger{}
+	relay := NewNotificationRelay(st, fm, slog.Default())
+	broker := NewBrokerServer(relay.HandleBrokerMessage, slog.Default())
+	// Documented plugin_name in README is "googlechat" while canonical surface is "gchat".
+	if err := broker.Configure(map[string]string{"plugin_name": "googlechat"}); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	topic := "scion.project.project-abc.user.hub-user-1.messages"
+
+	// 1. Affinity reply carrying Channel:"googlechat" (routing key) must be relayed.
+	if err := broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      "agent:coder",
+		RecipientID: "hub-user-1",
+		Msg:         "affinity reply on googlechat",
+		Type:        messages.TypeInstruction,
+		Channel:     "googlechat",
+		ThreadID:    "spaces/AAQAx/threads/t1",
+	}); err != nil {
+		t.Fatalf("Publish(Channel=googlechat): %v", err)
+	}
+
+	// 2. Reply carrying Conversation.Surface:"gchat" (canonical surface) must be relayed.
+	if err := broker.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:     messages.Version,
+		Sender:      "agent:coder",
+		RecipientID: "hub-user-1",
+		Msg:         "conversation reply on gchat",
+		Type:        messages.TypeInstruction,
+		Conversation: &messages.Conversation{
+			Surface:     "gchat",
+			ExternalRef: "spaces/AAQAx/threads/t2",
+			ParentRef:   "spaces/AAQAx",
+		},
+	}); err != nil {
+		t.Fatalf("Publish(Surface=gchat): %v", err)
+	}
+
+	if len(fm.messages) != 2 {
+		t.Fatalf("expected both Channel=googlechat and Surface=gchat replies to be relayed, got %d", len(fm.messages))
+	}
+	if fm.messages[0].ThreadID != "spaces/AAQAx/threads/t1" {
+		t.Errorf("msg 0 ThreadID = %q, want spaces/AAQAx/threads/t1", fm.messages[0].ThreadID)
+	}
+	if fm.messages[1].ThreadID != "spaces/AAQAx/threads/t2" {
+		t.Errorf("msg 1 ThreadID = %q, want spaces/AAQAx/threads/t2", fm.messages[1].ThreadID)
 	}
 }
