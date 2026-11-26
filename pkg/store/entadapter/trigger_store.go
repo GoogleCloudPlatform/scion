@@ -3191,11 +3191,17 @@ func (s *TriggerStore) GetTriggerFire(ctx context.Context, id string) (*store.Tr
 
 func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.TriggerFireFilter, opts store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
 	query := s.client.TriggerFire.Query()
+	var (
+		pid    uuid.UUID
+		hasPID bool
+	)
 	if filter.ProjectID != "" {
-		pid, err := parseUUID(filter.ProjectID)
+		var err error
+		pid, err = parseUUID(filter.ProjectID)
 		if err != nil {
 			return nil, err
 		}
+		hasPID = true
 		query.Where(triggerfire.ProjectIDEQ(pid))
 	}
 	if filter.TriggerID != "" {
@@ -3214,6 +3220,25 @@ func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.Trigge
 	}
 	if filter.Status != "" {
 		query.Where(triggerfire.StatusEQ(filter.Status))
+	}
+	if filter.Since != nil && !filter.Since.IsZero() {
+		query.Where(triggerfire.StartedAtGTE(filter.Since.UTC()))
+	}
+	if filter.VisibleToAgentID != "" {
+		agentID := filter.VisibleToAgentID
+		query.Where(predicate.TriggerFire(func(sel *entsql.Selector) {
+			d := sel.Dialect()
+			tr := entsql.Dialect(d).Table(trigger.Table).As("tr")
+			conds := append(
+				[]*entsql.Predicate{entsql.ColumnsEQ(tr.C(trigger.FieldID), sel.C(triggerfire.FieldTriggerID))},
+				triggerRecordedAuthoritySQLPredicates(tr, store.DelegationPrincipalAgent, agentID)...,
+			)
+			if hasPID {
+				conds = append(conds, entsql.EQ(tr.C(trigger.FieldProjectID), pid))
+			}
+			sub := entsql.Dialect(d).Select(tr.C(trigger.FieldID)).From(tr).Where(entsql.And(conds...))
+			sel.Where(entsql.Exists(sub))
+		}))
 	}
 
 	var (

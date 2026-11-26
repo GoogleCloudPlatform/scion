@@ -371,10 +371,12 @@ type TriggerFire struct {
 
 // TriggerFireFilter selects trigger fire rows in ListTriggerFires.
 type TriggerFireFilter struct {
-	ProjectID string
-	TriggerID string
-	EventID   string
-	Status    string
+	ProjectID        string
+	TriggerID        string
+	EventID          string
+	Status           string
+	Since            *time.Time
+	VisibleToAgentID string
 }
 
 // TriggerSubjectClaim represents the per-(trigger, subject) live-subject claim

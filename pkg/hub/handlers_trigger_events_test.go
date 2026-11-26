@@ -48,6 +48,22 @@ func (f *triggersTestFixture) doTriggerEvents(t *testing.T, identity Identity, s
 	return rec
 }
 
+func (f *triggersTestFixture) doTriggerFires(t *testing.T, identity Identity, subPath, method string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	routeSubPath, query, hasQuery := strings.Cut(subPath, "?")
+	path := "/api/v1/projects/" + f.projectID + "/trigger-fires"
+	if routeSubPath != "" {
+		path += "/" + routeSubPath
+	}
+	if hasQuery {
+		path += "?" + query
+	}
+	req := authoredRequest(t, identity, method, path, body)
+	rec := httptest.NewRecorder()
+	f.srv.handleTriggerFires(rec, req, f.projectID, routeSubPath)
+	return rec
+}
+
 func TestTriggerEventsExperimentOff_Returns404(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	enableTriggersExperimentForTest(t, f.srv, false)
@@ -64,6 +80,9 @@ func TestTriggerEventsExperimentOff_Returns404(t *testing.T) {
 		}},
 		{"GET /trigger-events/{id}", func() *httptest.ResponseRecorder {
 			return f.doTriggerEvents(t, f.ownerAuth, "some-id", http.MethodGet, nil)
+		}},
+		{"GET /trigger-fires", func() *httptest.ResponseRecorder {
+			return f.doTriggerFires(t, f.ownerAuth, "", http.MethodGet, nil)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -477,4 +496,251 @@ func TestTriggerEventsAndHistory_AuthzMatrix(t *testing.T) {
 
 func triggerTestTimePtr(t time.Time) *time.Time {
 	return &t
+}
+
+func TestProjectTriggerFires_PaginationFilteringAndAuthz(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	// Create owner endpoint and two owner triggers.
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "fires-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	tr1Rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "fires-tr-1",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "one"},
+	})
+	require.Equal(t, http.StatusCreated, tr1Rec.Code, tr1Rec.Body.String())
+	var tr1 TriggerResponse
+	require.NoError(t, json.Unmarshal(tr1Rec.Body.Bytes(), &tr1))
+
+	tr2Rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "fires-tr-2",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "two"},
+	})
+	require.Equal(t, http.StatusCreated, tr2Rec.Code, tr2Rec.Body.String())
+	var tr2 TriggerResponse
+	require.NoError(t, json.Unmarshal(tr2Rec.Body.Bytes(), &tr2))
+
+	// Agent A creates its own endpoint and trigger.
+	epARec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "agent-a-fires-ep"})
+	require.Equal(t, http.StatusCreated, epARec.Code, epARec.Body.String())
+	var epA WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epARec.Body.Bytes(), &epA))
+
+	trARec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-a-fires-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epA.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.agentA.ID, Message: "self"},
+	})
+	require.Equal(t, http.StatusCreated, trARec.Code, trARec.Body.String())
+	var trA TriggerResponse
+	require.NoError(t, json.Unmarshal(trARec.Body.Bytes(), &trA))
+
+	baseTime := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	ev1 := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  f.projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   ep.ID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + ep.ID,
+		DedupKey:   "fires-deliv-1",
+		OccurredAt: baseTime,
+		ReceivedAt: baseTime,
+		Status:     store.TriggerEventStatusProcessed,
+		CreatedAt:  baseTime,
+	}
+	ev2 := &store.TriggerEvent{
+		ID:         api.NewUUID(),
+		ProjectID:  f.projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epA.ID,
+		Type:       "webhook.received",
+		Subject:    "webhook:" + epA.ID,
+		DedupKey:   "fires-deliv-2",
+		OccurredAt: baseTime.Add(2 * time.Minute),
+		ReceivedAt: baseTime.Add(2 * time.Minute),
+		Status:     store.TriggerEventStatusProcessed,
+		CreatedAt:  baseTime.Add(2 * time.Minute),
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev1))
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev2))
+
+	waitUntil := baseTime.Add(time.Hour)
+	notBefore := baseTime.Add(5 * time.Minute)
+	deferredAt := baseTime.Add(time.Minute)
+
+	fire1 := &store.TriggerFire{
+		ID:         api.NewUUID(),
+		ProjectID:  f.projectID,
+		TriggerID:  tr1.ID,
+		EventID:    ev1.ID,
+		Subject:    ev1.Subject,
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerFireStatusFired,
+		ResultRef:  "msg-1",
+		LeaseUntil: baseTime.Add(time.Minute),
+		StartedAt:  baseTime,
+		FinishedAt: triggerTestTimePtr(baseTime.Add(2 * time.Second)),
+		CreatedAt:  baseTime,
+	}
+	fire2 := &store.TriggerFire{
+		ID:         api.NewUUID(),
+		ProjectID:  f.projectID,
+		TriggerID:  tr2.ID,
+		EventID:    ev1.ID,
+		Subject:    ev1.Subject,
+		ActionType: store.TriggerActionMessage,
+		Status:     store.TriggerFireStatusDeferred,
+		NotBefore:  &notBefore,
+		DeferredAt: &deferredAt,
+		LeaseUntil: baseTime.Add(2 * time.Minute),
+		StartedAt:  baseTime.Add(time.Minute),
+		CreatedAt:  baseTime.Add(time.Minute),
+	}
+	fireA := &store.TriggerFire{
+		ID:            api.NewUUID(),
+		ProjectID:     f.projectID,
+		TriggerID:     trA.ID,
+		EventID:       ev2.ID,
+		Subject:       ev2.Subject,
+		ActionType:    store.TriggerActionMessage,
+		Status:        store.TriggerFireStatusWaiting,
+		TargetAgentID: f.agentA.ID,
+		WaitUntil:     &waitUntil,
+		Attempts:      1,
+		LeaseUntil:    baseTime.Add(3 * time.Minute),
+		StartedAt:     baseTime.Add(2 * time.Minute),
+		CreatedAt:     baseTime.Add(2 * time.Minute),
+	}
+	for _, tf := range []*store.TriggerFire{fire1, fire2, fireA} {
+		claimed, _, err := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, claimed)
+	}
+
+	// Method not allowed and subpath 404.
+	assert.Equal(t, http.StatusMethodNotAllowed, f.doTriggerFires(t, f.ownerAuth, "", http.MethodPost, nil).Code)
+	assert.Equal(t, http.StatusNotFound, f.doTriggerFires(t, f.ownerAuth, "extra", http.MethodGet, nil).Code)
+
+	// Invalid query params return 400.
+	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?status=bogus", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?since=not-a-time", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?triggerId=nonexistent-name", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?eventId=not-a-uuid", http.MethodGet, nil).Code)
+
+	// Keyset pagination across all 3 fires.
+	page1Rec := f.doTriggerFires(t, f.ownerAuth, "?limit=2", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, page1Rec.Code, page1Rec.Body.String())
+	var page1 ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(page1Rec.Body.Bytes(), &page1))
+	assert.Equal(t, "", page1.Scope)
+	assert.Equal(t, 3, page1.TotalCount)
+	require.Len(t, page1.Fires, 2)
+	assert.NotEmpty(t, page1.NextCursor)
+	assert.False(t, page1.ServerTime.IsZero())
+	// Ordered newest first: fireA, fire2.
+	assert.Equal(t, fireA.ID, page1.Fires[0].ID)
+	assert.Equal(t, store.TriggerActionMessage, page1.Fires[0].ActionType)
+	require.NotNil(t, page1.Fires[0].WaitUntil)
+	assert.Equal(t, fire2.ID, page1.Fires[1].ID)
+	require.NotNil(t, page1.Fires[1].NotBefore)
+	require.NotNil(t, page1.Fires[1].DeferredAt)
+
+	page2Rec := f.doTriggerFires(t, f.ownerAuth, "?limit=2&cursor="+url.QueryEscape(page1.NextCursor), http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, page2Rec.Code, page2Rec.Body.String())
+	var page2 ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(page2Rec.Body.Bytes(), &page2))
+	require.Len(t, page2.Fires, 1)
+	assert.Equal(t, fire1.ID, page2.Fires[0].ID)
+	assert.Empty(t, page2.NextCursor)
+
+	// Filter by triggerId (UUID and name), status, since, eventId.
+	byTrRec := f.doTriggerFires(t, f.ownerAuth, "?triggerId="+tr1.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, byTrRec.Code)
+	var byTr ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(byTrRec.Body.Bytes(), &byTr))
+	require.Len(t, byTr.Fires, 1)
+	assert.Equal(t, fire1.ID, byTr.Fires[0].ID)
+
+	byTrNameRec := f.doTriggerFires(t, f.ownerAuth, "?triggerId=fires-tr-2", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, byTrNameRec.Code)
+	var byTrName ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(byTrNameRec.Body.Bytes(), &byTrName))
+	require.Len(t, byTrName.Fires, 1)
+	assert.Equal(t, fire2.ID, byTrName.Fires[0].ID)
+
+	byStatusRec := f.doTriggerFires(t, f.ownerAuth, "?status=waiting", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, byStatusRec.Code)
+	var byStatus ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(byStatusRec.Body.Bytes(), &byStatus))
+	require.Len(t, byStatus.Fires, 1)
+	assert.Equal(t, fireA.ID, byStatus.Fires[0].ID)
+
+	bySinceRec := f.doTriggerFires(t, f.ownerAuth, "?since="+url.QueryEscape(baseTime.Add(time.Minute).Format(time.RFC3339)), http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, bySinceRec.Code)
+	var bySince ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(bySinceRec.Body.Bytes(), &bySince))
+	assert.Len(t, bySince.Fires, 2)
+
+	byEventRec := f.doTriggerFires(t, f.ownerAuth, "?eventId="+ev1.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, byEventRec.Code)
+	var byEvent ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(byEventRec.Body.Bytes(), &byEvent))
+	assert.Len(t, byEvent.Fires, 2)
+
+	// Authz matrix: owner/admin/member -> 200; viewer -> 403.
+	for _, tc := range []struct {
+		name string
+		auth Identity
+		want int
+	}{
+		{"owner", f.ownerAuth, http.StatusOK},
+		{"admin", f.adminAuth, http.StatusOK},
+		{"member", f.memberAuth, http.StatusOK},
+		{"viewer", f.viewerAuth, http.StatusForbidden},
+	} {
+		assert.Equal(t, tc.want, f.doTriggerFires(t, tc.auth, "", http.MethodGet, nil).Code, tc.name)
+	}
+
+	// UAT scopes and project boundary.
+	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.projectID}
+	wrongBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.otherProjID}
+	assert.Equal(t, http.StatusForbidden, f.doTriggerFires(t, scheduleTestUAT(t, f.ownerAuth, projBoundary, "project:read"), "", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusOK, f.doTriggerFires(t, scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:list"), "", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusForbidden, f.doTriggerFires(t, scheduleTestUAT(t, f.ownerAuth, projBoundary, "trigger:read"), "", http.MethodGet, nil).Code)
+	assert.Equal(t, http.StatusForbidden, f.doTriggerFires(t, scheduleTestUAT(t, f.ownerAuth, wrongBoundary, "trigger:list"), "", http.MethodGet, nil).Code)
+
+	// Agent callers see only fires of triggers they hold (scope="caller").
+	assert.Equal(t, http.StatusForbidden, f.doTriggerFires(t, f.agentNoneJWT, "", http.MethodGet, nil).Code)
+
+	agentARec := f.doTriggerFires(t, f.agentAAuth, "", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, agentARec.Code, agentARec.Body.String())
+	var agentAFires ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(agentARec.Body.Bytes(), &agentAFires))
+	assert.Equal(t, "caller", agentAFires.Scope)
+	require.Len(t, agentAFires.Fires, 1)
+	assert.Equal(t, fireA.ID, agentAFires.Fires[0].ID)
+
+	// Agent A filtering by owner's trigger UUID sees 0 fires; filtering by owner's trigger name returns 400 (no name leak).
+	agentAProbeUUID := f.doTriggerFires(t, f.agentAAuth, "?triggerId="+tr1.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, agentAProbeUUID.Code)
+	var probeUUID ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(agentAProbeUUID.Body.Bytes(), &probeUUID))
+	assert.Empty(t, probeUUID.Fires)
+
+	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.agentAAuth, "?triggerId=fires-tr-1", http.MethodGet, nil).Code)
+
+	// Agent B holds no triggers -> 0 fires.
+	agentBRec := f.doTriggerFires(t, f.agentBAuth, "", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, agentBRec.Code)
+	var agentBFires ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(agentBRec.Body.Bytes(), &agentBFires))
+	assert.Equal(t, "caller", agentBFires.Scope)
+	assert.Empty(t, agentBFires.Fires)
 }

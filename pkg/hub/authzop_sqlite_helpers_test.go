@@ -1330,6 +1330,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/triggers/{id}/resume":                 {"projectId": f.project, "id": f.triggerPaused},
 		"/api/v1/projects/{projectId}/trigger-events":                       {"projectId": f.project},
 		"/api/v1/projects/{projectId}/trigger-events/{id}":                  {"projectId": f.project, "id": f.triggerEvent},
+		"/api/v1/projects/{projectId}/trigger-fires":                        {"projectId": f.project},
 
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---

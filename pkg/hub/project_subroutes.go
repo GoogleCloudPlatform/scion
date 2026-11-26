@@ -72,6 +72,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"schedules":                projectSubRouteSchedules,
 	"triggers":                 projectSubRouteTriggers,
 	"trigger-events":           projectSubRouteTriggers,
+	"trigger-fires":            projectSubRouteTriggers,
 	"webhook-endpoints":        projectSubRouteTriggers,
 	"metrics-summary":          projectSubRouteMetrics,
 	"metrics":                  projectSubRouteMetrics,
