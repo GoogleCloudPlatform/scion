@@ -147,3 +147,24 @@ export async function openGeneralThread(page: Page): Promise<void> {
 export async function currentPanel(page: Page): Promise<string | null> {
   return page.locator('.v2-panels').getAttribute('data-panel');
 }
+
+/**
+ * Click the terminal pane's "Open in chat" action.
+ *
+ * At narrow toolbar widths (`<= 520px`), the inline chat button moves into the
+ * `.toolbar-overflow` dropdown (`sl-menu-item[value="chat"]`); on wider
+ * viewports, the inline `button[aria-label="Chat with <agent>"]` stays visible.
+ */
+export async function clickTerminalPaneChatAction(page: Page, agentName: string): Promise<void> {
+  const inlineBtn = page.locator(`button[aria-label="Chat with ${agentName}"]:visible`).first();
+  const overflowBtn = page.locator('button.toolbar-overflow-btn:visible').first();
+  await expect(inlineBtn.or(overflowBtn)).toBeVisible({ timeout: 15_000 });
+  if (await inlineBtn.isVisible()) {
+    await inlineBtn.click();
+    return;
+  }
+  await overflowBtn.click();
+  const chatItem = page.locator('.toolbar-overflow sl-menu-item[value="chat"]').first();
+  await expect(chatItem).toBeVisible({ timeout: 15_000 });
+  await chatItem.click();
+}

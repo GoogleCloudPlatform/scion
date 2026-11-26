@@ -21,7 +21,7 @@
  */
 
 import { test, expect, type Page } from '@playwright/test';
-import { openChatRail, openGeneralThread } from './fixture.js';
+import { clickTerminalPaneChatAction, openChatRail, openGeneralThread } from './fixture.js';
 import { PROJECT_A } from './mock-api.js';
 
 const USER_ID = '99999999-9999-4999-8999-999999999999';
@@ -151,7 +151,7 @@ test('the terminal pane chat button opens the agent DM whole', async ({ page }) 
     AGENT_ID
   );
   await expect(page).toHaveURL(`/terminals/${AGENT_ID}`);
-  await page.locator(`button[aria-label="Chat with ${AGENT_NAME}"]:visible`).first().click();
+  await clickTerminalPaneChatAction(page, AGENT_NAME);
   await expectWholeAgentDM(page);
 });
 

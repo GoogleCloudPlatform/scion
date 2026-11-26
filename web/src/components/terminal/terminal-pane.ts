@@ -380,6 +380,14 @@ export class ScionTerminalPane extends LitElement {
       display: none;
     }
 
+    .toolbar-container {
+      position: relative;
+      z-index: 20;
+      flex-shrink: 0;
+      container-type: inline-size;
+      container-name: terminal-toolbar;
+    }
+
     .toolbar {
       display: flex;
       align-items: center;
@@ -389,6 +397,76 @@ export class ScionTerminalPane extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       flex-shrink: 0;
       min-height: 40px;
+      box-sizing: border-box;
+    }
+
+    .toolbar-tail {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .toolbar-status-badge {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .toolbar-overflow {
+      display: none;
+      flex-shrink: 0;
+    }
+
+    .toolbar-overflow sl-menu {
+      --sl-panel-background-color: var(--scion-surface-raised, #ffffff);
+      --sl-panel-border-color: var(--scion-border, #e2e8f0);
+      min-width: 180px;
+    }
+
+    .toolbar-overflow-agent-label {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @container terminal-toolbar (max-width: 520px) {
+      .toolbar {
+        gap: 0.375rem;
+        padding: 0.375rem 0.5rem;
+      }
+
+      .toolbar .separator,
+      .toolbar .agent-name,
+      .toolbar .pane-action-btn:not(.toolbar-overflow-btn),
+      .toolbar .spacer,
+      .toolbar .port-btn,
+      .toolbar .port-dropdown,
+      .toolbar .capture-auth-btn,
+      .toolbar .reconnect-btn,
+      .toolbar .status-label {
+        display: none;
+      }
+
+      .toolbar .toggle-group button {
+        width: 36px;
+      }
+
+      .toolbar .toolbar-tail {
+        margin-left: auto;
+        gap: 0.375rem;
+      }
+
+      .toolbar .toolbar-overflow {
+        display: inline-flex;
+      }
+    }
+
+    @container terminal-toolbar (max-width: 360px) {
+      .toolbar .toolbar-status-badge {
+        display: none;
+      }
     }
 
     .back-link {
@@ -2932,6 +3010,92 @@ export class ScionTerminalPane extends LitElement {
     return html`<scion-breadcrumb class="toolbar-crumbs" .crumbs=${crumbs}></scion-breadcrumb>`;
   }
 
+  private get connectionStatusLabel(): string {
+    return this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected';
+  }
+
+  private handleOverflowSelect(value: string): void {
+    if (value === 'graph') {
+      this.openInGraph();
+    } else if (value === 'chat') {
+      this.openInChat();
+    } else if (value === 'capture-auth') {
+      if (!this.captureAuthLoading) void this.openCaptureAuthScopeDialog();
+    } else if (value === 'reconnect') {
+      if (!this.reconnectDisabled) this.handleReconnect();
+    } else if (value.startsWith('port:')) {
+      const port = value.slice('port:'.length);
+      window.open(
+        `/api/v1/agents/${encodeURIComponent(this.agentId)}/ports/${encodeURIComponent(port)}/proxy/`,
+        '_blank',
+        'noopener'
+      );
+    }
+  }
+
+  private renderToolbarOverflow() {
+    const displayName = this.agentName || this.agentId;
+    const showGraph = Boolean(this.projectId);
+    const showChat = Boolean(this.userId && isFeatureEnabled('web.native_chat'));
+    const showReconnect = !this.connected && !this.idle;
+    return html`
+      <sl-dropdown class="toolbar-overflow" hoist placement="bottom-end">
+        <button
+          slot="trigger"
+          type="button"
+          class="pane-action-btn toolbar-overflow-btn"
+          title="More actions"
+          aria-label="More actions"
+        >
+          <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
+        </button>
+        <sl-menu
+          @sl-select=${(e: CustomEvent<{ item: { value: string } }>) =>
+            this.handleOverflowSelect(e.detail.item.value)}
+        >
+          ${displayName
+            ? html`<sl-menu-label class="toolbar-overflow-agent-label"
+                >${displayName}${this.agentDisplayStatus
+                  ? ` · ${this.agentDisplayStatus.replace(/_/g, ' ')}`
+                  : ''}</sl-menu-label
+              >`
+            : nothing}
+          ${showGraph
+            ? html`<sl-menu-item value="graph">
+                <sl-icon slot="prefix" name="diagram-3" aria-hidden="true"></sl-icon>
+                Open in graph
+              </sl-menu-item>`
+            : nothing}
+          ${showChat
+            ? html`<sl-menu-item value="chat">
+                <sl-icon slot="prefix" name="chat-dots" aria-hidden="true"></sl-icon>
+                Open in chat
+              </sl-menu-item>`
+            : nothing}
+          ${this.exposedPorts.map(
+            (p) =>
+              html`<sl-menu-item value=${`port:${p.port}`}>
+                <sl-icon slot="prefix" name="box-arrow-up-right" aria-hidden="true"></sl-icon>
+                Open :${p.port}${p.label ? ` — ${p.label}` : ''}
+              </sl-menu-item>`
+          )}
+          ${this.showCaptureAuth
+            ? html`<sl-menu-item value="capture-auth" ?disabled=${this.captureAuthLoading}>
+                <sl-icon slot="prefix" name="key" aria-hidden="true"></sl-icon>
+                ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
+              </sl-menu-item>`
+            : nothing}
+          ${showReconnect
+            ? html`<sl-menu-item value="reconnect" ?disabled=${this.reconnectDisabled}>
+                <sl-icon slot="prefix" name="arrow-clockwise" aria-hidden="true"></sl-icon>
+                ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
+              </sl-menu-item>`
+            : nothing}
+        </sl-menu>
+      </sl-dropdown>
+    `;
+  }
+
   /** The agent name in the header, with its length for the .agent-name minimum width. */
   private renderAgentName(name: string) {
     return html`<span class="agent-name" style="--agent-name-chars: ${[...name].length}"
@@ -3046,6 +3210,7 @@ export class ScionTerminalPane extends LitElement {
 
     // prettier-ignore
     return html`
+      <div class="toolbar-container">
       <div class="toolbar">
         ${this.renderBackLinks()}
         <div class="separator"></div>
@@ -3102,31 +3267,41 @@ export class ScionTerminalPane extends LitElement {
               </button>
             `
           : ''}
-        ${this.agent
-          ? agentStatusBadge(this.agent, {
-              status: this.agentDisplayStatus,
-              size: 'small',
-            })
-          : html`<scion-status-badge
-              status=${this.agentDisplayStatus}
-              tooltip=${ifDefined(activityTooltip(this.agentDisplayStatus))}
-              size="small"
-            ></scion-status-badge>`}
-        <div class="status-indicator">
-          <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-          ${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
+        <div class="toolbar-tail">
+          <span class="toolbar-status-badge">
+            ${this.agent
+              ? agentStatusBadge(this.agent, {
+                  status: this.agentDisplayStatus,
+                  size: 'small',
+                })
+              : html`<scion-status-badge
+                  status=${this.agentDisplayStatus}
+                  tooltip=${ifDefined(activityTooltip(this.agentDisplayStatus))}
+                  size="small"
+                ></scion-status-badge>`}
+          </span>
+          <div
+            class="status-indicator"
+            title=${this.connectionStatusLabel}
+            aria-label=${this.connectionStatusLabel}
+          >
+            <span class="status-dot ${this.connected ? 'connected' : ''}" aria-hidden="true"></span>
+            <span class="status-label">${this.connectionStatusLabel}</span>
+          </div>
+          ${!this.connected && !this.idle
+            ? html`
+                <button
+                  class="reconnect-btn"
+                  ?disabled=${this.reconnectDisabled}
+                  @click=${() => this.handleReconnect()}
+                >
+                  ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
+                </button>
+              `
+            : ''}
+          ${this.renderToolbarOverflow()}
         </div>
-        ${!this.connected && !this.idle
-          ? html`
-              <button
-                class="reconnect-btn"
-                ?disabled=${this.reconnectDisabled}
-                @click=${() => this.handleReconnect()}
-              >
-                ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
-              </button>
-            `
-          : ''}
+      </div>
       </div>
       <div class="stopping-notice ${this.agentStopping ? '' : 'idle'}" role="status">
         ${this.agentStopping ? 'Agent is stopping…' : nothing}
