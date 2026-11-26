@@ -208,6 +208,10 @@ function pathname(page: Page): string {
 }
 
 async function pick(page: Page, name: string): Promise<void> {
+  // On a narrow viewport with a terminal shown, Jump to agent is in the
+  // drawer the pane's menu button opens.
+  const menu = page.locator('scion-terminal-pane:not([hidden]) .menu-btn');
+  if (await menu.isVisible()) await menu.click();
   await paletteButton(page).click();
   await paletteOption(page, name).click();
   await expect(paletteDialog(page)).toBeHidden();

@@ -21,6 +21,7 @@ import {
   TERMINAL_DROPDOWN_SELECT_EVENT,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
+  TERMINAL_PANE_MENU_EVENT,
   getTerminalWorkspaceSnapshot,
   resetTerminalWorkspaceEventsForTests,
   type TerminalDropdownSelectDetail,
@@ -350,6 +351,287 @@ describe('compact pane headers in 4-up and narrow layouts (ptone/scion#4324)', (
     root.layoutManager.zoom(pane.session!.state.key);
     await flush();
     expect(pane.compactHeader).toBe(false);
+  });
+});
+
+describe('the phone drawer', () => {
+  let root: TerminalWorkspaceRoot;
+  let registry: TerminalSessionRegistry;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    stubWebSocketAndEventSource();
+    registry = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'c' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  async function mount(): Promise<ScionTerminalPane> {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(registry, AGENT_ID);
+    await flush();
+    return paneFor(root, AGENT_ID);
+  }
+
+  const rail = (): HTMLElement => root.element.querySelector<HTMLElement>('.terminal-rail')!;
+  const header = (): Element => root.element.querySelector('scion-header')!;
+  const toggle = (pane: ScionTerminalPane): void => {
+    pane.dispatchEvent(
+      new CustomEvent(TERMINAL_PANE_MENU_EVENT, { bubbles: true, composed: true })
+    );
+  };
+
+  it('is off on a wide viewport', async () => {
+    const pane = await mount();
+    expect(root.element.dataset.phoneDrawer).toBe('off');
+    expect(pane.phoneChrome).toBe(false);
+    expect(header().parentElement).toBe(root.element);
+    expect(rail().inert).toBe(false);
+  });
+
+  it('on a narrow viewport with a terminal shown, holds the header and the list, closed and inert', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    expect(pane.phoneChrome).toBe(true);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(header().parentElement).toBe(rail());
+    expect(rail().inert).toBe(true);
+  });
+
+  it('the pane menu event toggles it, a modal dialog over an inert pane area', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    const area = root.element.querySelector<HTMLElement>('.terminal-pane-area')!;
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    expect(rail().inert).toBe(false);
+    expect(rail().getAttribute('role')).toBe('dialog');
+    expect(rail().getAttribute('aria-modal')).toBe('true');
+    expect(area.inert).toBe(true);
+    expect(pane.drawerOpen).toBe(true);
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(rail().inert).toBe(true);
+    expect(rail().hasAttribute('role')).toBe(false);
+    expect(area.inert).toBe(false);
+    expect(pane.drawerOpen).toBe(false);
+  });
+
+  it('Escape closes an open drawer, and is left alone while it is closed', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    const closed = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    pane.dispatchEvent(closed);
+    expect(closed.defaultPrevented).toBe(false);
+    toggle(pane);
+    const open = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    rail().dispatchEvent(open);
+    expect(open.defaultPrevented).toBe(true);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+  });
+
+  it('closing the last terminal with the drawer open puts the list and the header back', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    pane.session!.close();
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('off');
+    expect(header().parentElement).toBe(root.element);
+    expect(rail().inert).toBe(false);
+    expect(rail().hasAttribute('role')).toBe(false);
+  });
+
+  it('hiding the workspace closes the drawer without reparenting the header', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    root.show(false);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(header().parentElement).toBe(rail());
+    expect(root.element.querySelector<HTMLElement>('.terminal-pane-area')!.inert).toBe(false);
+    root.show(true);
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(header().parentElement).toBe(rail());
+  });
+
+  it('opening the drawer makes workspace banners inert and blurs the deep active element', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    const testBanner = root.element.querySelector<HTMLElement>('.terminal-test-hub-banner')!;
+    const viewAsBanner = root.element.querySelector<HTMLElement>(
+      '.terminal-view-as-member-banner'
+    )!;
+
+    // Simulate xterm's helper textarea inside the pane's shadow root holding focus.
+    const helper = document.createElement('textarea');
+    helper.className = 'xterm-helper-textarea';
+    pane.shadowRoot!.append(helper);
+    helper.focus();
+    const blurSpy = vi.spyOn(helper, 'blur');
+
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    expect(testBanner.inert).toBe(true);
+    expect(viewAsBanner.inert).toBe(true);
+    expect(blurSpy).toHaveBeenCalledTimes(1);
+
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(testBanner.inert).toBe(false);
+    expect(viewAsBanner.inert).toBe(false);
+  });
+
+  it('selecting a terminal via TERMINAL_DROPDOWN_SELECT_EVENT closes the open drawer and un-inerts the pane area', async () => {
+    const AGENT_B = '22222222-2222-4222-8222-222222222222';
+    mockNarrowViewport();
+    const paneA = await mount();
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_B, { deferConnect: true }));
+    await flush();
+
+    const area = root.element.querySelector<HTMLElement>('.terminal-pane-area')!;
+    toggle(paneA);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    expect(area.inert).toBe(true);
+
+    window.dispatchEvent(
+      new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
+        detail: { agentId: AGENT_B },
+      })
+    );
+    await flush();
+
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(area.inert).toBe(false);
+
+    // Selecting the already-shown terminal also closes the drawer cleanly.
+    const paneB = paneFor(root, AGENT_B);
+    toggle(paneB);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    window.dispatchEvent(
+      new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
+        detail: { agentId: AGENT_B },
+      })
+    );
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(area.inert).toBe(false);
+  });
+
+  it('Escape inside an open sl-dropdown inside the drawer keeps the drawer open', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const dropdown = document.createElement('sl-dropdown');
+    dropdown.setAttribute('open', '');
+    rail().append(dropdown);
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    dropdown.dispatchEvent(esc);
+
+    expect(esc.defaultPrevented).toBe(false);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    dropdown.remove();
+  });
+
+  it('Escape inside the rail place menu closes the menu while keeping the phone drawer open', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const placeBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    placeBtn.click();
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    expect(placeMenu.hidden).toBe(false);
+
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    placeMenu.dispatchEvent(esc);
+
+    expect(esc.defaultPrevented).toBe(true);
+    expect(placeMenu.hidden).toBe(true);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+  });
+
+  it('refresh() keeps an open place menu open on wide viewports', async () => {
+    await mount();
+    const widePlaceBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    widePlaceBtn.click();
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    expect(placeMenu.hidden).toBe(false);
+    (root as unknown as { refresh(): void }).refresh();
+    expect(placeMenu.hidden).toBe(false);
+  });
+
+  it('refresh() keeps an open place menu open inside an open phone drawer, while closing the drawer or leaving drawer mode closes it', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    const placeBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    placeBtn.click();
+    expect(placeMenu.hidden).toBe(false);
+    (root as unknown as { refresh(): void }).refresh();
+    expect(placeMenu.hidden).toBe(false);
+
+    // Closing the drawer closes the place menu.
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(placeMenu.hidden).toBe(true);
+
+    // Leaving drawer mode (closing the last terminal) also closes the place menu.
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!.click();
+    expect(placeMenu.hidden).toBe(false);
+    pane.session!.close();
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('off');
+    expect(placeMenu.hidden).toBe(true);
+  });
+
+  it('re-inserting detached banners while the header is inside the drawer does not throw', async () => {
+    mockNarrowViewport();
+    await mount();
+    expect(header().parentElement).toBe(rail());
+
+    const testBanner = root.element.querySelector<HTMLElement>('.terminal-test-hub-banner')!;
+    const viewAsBanner = root.element.querySelector<HTMLElement>(
+      '.terminal-view-as-member-banner'
+    )!;
+    testBanner.remove();
+    viewAsBanner.remove();
+
+    expect(() => root.setCurrentPath('/terminals/next')).not.toThrow();
+    expect(() => root.setUser(null)).not.toThrow();
+    expect(testBanner.parentElement).toBe(root.element);
+    expect(viewAsBanner.parentElement).toBe(root.element);
   });
 });
 

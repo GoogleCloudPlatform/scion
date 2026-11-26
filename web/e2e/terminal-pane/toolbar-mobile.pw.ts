@@ -21,9 +21,14 @@ const agentId = '11111111-1111-4111-8111-111111111111';
 
 async function setupNarrowPane(
   page: Page,
-  options: { keyBar: boolean; compactHeader?: boolean; activity?: string }
+  options: { keyBar: boolean; compactHeader?: boolean; phoneChrome?: boolean; activity?: string }
 ): Promise<void> {
-  const { keyBar, compactHeader = true, activity = 'waiting_for_input' } = options;
+  const {
+    keyBar,
+    compactHeader = true,
+    phoneChrome = false,
+    activity = 'waiting_for_input',
+  } = options;
   await page.addInitScript((enabled: boolean) => {
     window.__SCION_FEATURES__ = {
       'web.terminal_key_bar': enabled,
@@ -64,12 +69,16 @@ async function setupNarrowPane(
     .poll(() => page.evaluate(() => window.paneFixture.session.state.connection))
     .toBe('connected');
 
-  await page.evaluate((compact: boolean) => {
-    const pane = window.paneFixture.pane;
-    pane.compactHeader = compact;
-    pane.userId = 'fixture-user';
-    pane.requestUpdate();
-  }, compactHeader);
+  await page.evaluate(
+    ({ compact, phone }: { compact: boolean; phone: boolean }) => {
+      const pane = window.paneFixture.pane;
+      pane.compactHeader = compact;
+      pane.phoneChrome = phone;
+      pane.userId = 'fixture-user';
+      pane.requestUpdate();
+    },
+    { compact: compactHeader, phone: phoneChrome }
+  );
   await page.waitForTimeout(50);
 }
 
@@ -145,6 +154,148 @@ for (const width of [390, 375, 320]) {
     });
   }
 }
+
+test('phoneChrome does not overflow in connected, disconnected, or reconnecting states at 320px/375px/390px', async ({
+  page,
+}) => {
+  await setupNarrowPane(page, { keyBar: true, phoneChrome: true });
+
+  for (const width of [390, 375, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForTimeout(30);
+    // Connected state
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+    await expect(page.locator('.menu-btn')).toBeVisible();
+
+    // Disconnected state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        idle: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = false;
+      pane.idle = false;
+      pane.attempting = false;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+
+    // Reconnecting... state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        idle: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = false;
+      pane.idle = false;
+      pane.attempting = true;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+
+    // Verify Reconnecting... lives inside .toolbar-overflow
+    await page.locator('.toolbar-overflow-btn').click();
+    await expect(page.locator('.toolbar-overflow sl-menu-item[value="reconnect"]')).toContainText(
+      'Reconnecting...'
+    );
+    await page.keyboard.press('Escape');
+
+    // Restore connected state for next width
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = true;
+      pane.attempting = false;
+      pane.requestUpdate();
+    });
+  }
+});
+
+test('phoneChrome preserves Back-to-Project and Back-to-Agent navigation in error and loading states at 320px/390px without overflow', async ({
+  page,
+}) => {
+  await setupNarrowPane(page, { keyBar: false, phoneChrome: true });
+
+  await page.evaluate(() => {
+    const navPaths: string[] = [];
+    (window as unknown as { __navPaths: string[] }).__navPaths = navPaths;
+    window.addEventListener('nav-click', (e) => {
+      const detail = (e as CustomEvent<{ path?: string }>).detail;
+      if (detail?.path) navPaths.push(detail.path);
+    });
+  });
+
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+
+    // Error state with no terminal instance
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        loading: boolean;
+        terminal: unknown;
+        projectId: string;
+        session: { state: { error: string | null } };
+        requestUpdate: () => void;
+      };
+      pane.loading = false;
+      pane.terminal = null;
+      pane.projectId = 'project with space';
+      pane.session.state.error = 'Agent is unavailable';
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+
+    const overflowBtn = page.locator('.toolbar-overflow-btn');
+    await expect(overflowBtn).toBeVisible();
+    await overflowBtn.click();
+    const projectItem = page.locator('.toolbar-overflow sl-menu-item[value="project"]');
+    const agentItem = page.locator('.toolbar-overflow sl-menu-item[value="agent"]');
+    await expect(projectItem).toBeVisible();
+    await expect(agentItem).toBeVisible();
+    await projectItem.click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { __navPaths: string[] }).__navPaths.at(-1))
+      )
+      .toBe('/projects/project%20with%20space');
+
+    // Loading state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        loading: boolean;
+        requestUpdate: () => void;
+      };
+      pane.loading = true;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+
+    await expect(overflowBtn).toBeVisible();
+    await overflowBtn.click();
+    await expect(projectItem).toBeVisible();
+    await expect(agentItem).toBeVisible();
+    await agentItem.click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { __navPaths: string[] }).__navPaths.at(-1))
+      )
+      .toBe(`/agents/${encodeURIComponent(agentId)}`);
+  }
+});
 
 test('desktop viewport keeps inline controls visible and hides overflow menu', async ({ page }) => {
   await setupNarrowPane(page, { keyBar: false, compactHeader: false });
