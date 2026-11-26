@@ -3089,18 +3089,20 @@ describe('touch key bar', () => {
     expect(terminal.instances[0].blur).not.toHaveBeenCalled();
   });
 
-  it('disables the sending keys while disconnected without moving focus or consuming armed Ctrl', async () => {
+  it('disables all bar keys while disconnected without moving focus or changing modifier state', async () => {
     await mountTouch();
     await press('Ctrl');
     expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+    expect(key('Alt').getAttribute('aria-pressed')).toBe('false');
 
     FakeSocket.instances[0].onclose?.({ code: 1006 });
     await page.updateComplete;
     // aria-disabled, not disabled: a disabled button may not dispatch the
     // mousedown that keepFocus prevents, and the tap would close the keyboard.
-    expect(key('Esc').getAttribute('aria-disabled')).toBe('true');
-    expect(key('Esc').disabled).toBe(false);
-    expect(key('Ctrl').hasAttribute('aria-disabled')).toBe(false);
+    for (const label of ['Esc', 'Ctrl', 'Alt']) {
+      expect(key(label).getAttribute('aria-disabled')).toBe('true');
+      expect(key(label).disabled).toBe(false);
+    }
 
     const other = document.createElement('input');
     document.body.append(other);
@@ -3108,9 +3110,13 @@ describe('touch key bar', () => {
       other.focus();
       terminal.instances[0].focus.mockClear();
       await press('Esc');
+      await press('Ctrl');
+      await press('Alt');
       expect(sent()).toEqual([]);
       expect(terminal.instances[0].focus).not.toHaveBeenCalled();
       expect(key('Ctrl').getAttribute('aria-pressed')).toBe('true');
+      expect(key('Ctrl').classList.contains('locked')).toBe(false);
+      expect(key('Alt').getAttribute('aria-pressed')).toBe('false');
     } finally {
       other.remove();
     }

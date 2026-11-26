@@ -2045,19 +2045,18 @@ export class ScionTerminalPane extends LitElement {
    * up in onData like an on-screen keyboard character.
    */
   private pressBarKey(entry: (typeof KEY_BAR_KEYS)[number]): void {
+    const terminal = this.terminal;
+    if (!terminal || !this.connected) return;
     // A bar key acts on this pane, so when another pane's terminal or a
     // text input has focus, the next typed key must land here instead (several
     // panes can show at once). When nothing takes typed text the user closed
     // the keyboard, e.g. to read with the arrows or PgUp, so it stays closed.
+    if (this.typingFocusIsElsewhere()) terminal.focus();
     if ('modifier' in entry) {
-      if (this.terminal && this.typingFocusIsElsewhere()) this.terminal.focus();
       if (entry.modifier === 'ctrl') this.ctrlState = nextModifierState(this.ctrlState);
       else this.altState = nextModifierState(this.altState);
       return;
     }
-    const terminal = this.terminal;
-    if (!terminal || !this.connected) return;
-    if (this.typingFocusIsElsewhere()) terminal.focus();
     if ('char' in entry) {
       terminal.input(entry.char);
       return;
@@ -2132,7 +2131,7 @@ export class ScionTerminalPane extends LitElement {
             class=${state && state !== 'off' ? state : ''}
             aria-label=${state === 'locked' ? `${entry.aria}, locked` : entry.aria}
             aria-pressed=${state ? String(state !== 'off') : nothing}
-            aria-disabled=${!state && !this.connected ? 'true' : nothing}
+            aria-disabled=${!this.connected ? 'true' : nothing}
             @click=${() => this.pressBarKey(entry)}
           >
             ${entry.label}
