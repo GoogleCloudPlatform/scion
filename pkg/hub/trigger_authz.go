@@ -865,9 +865,9 @@ func checkTriggerExecCapsInTx(
 			}
 			acts, aErr := triggerActions(tr)
 			if aErr != nil {
-				// O3: count a corrupt active row conservatively as one exec when
+				// O3 / O-d: count a corrupt active row as a floor of one exec when
 				// its scalar action_type or raw actions column matched the exec
-				// filter, so corrupt rows cannot leak exec cap headroom.
+				// filter (a corrupt list could have held up to MaxTriggerActions).
 				if tr.ActionType == store.TriggerActionExec || tr.ActionsCorrupt {
 					existingProjExecs++
 					if tid := execPayloadTarget(tr.ActionPayload); tid != "" {

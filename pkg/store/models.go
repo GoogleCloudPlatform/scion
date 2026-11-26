@@ -4199,7 +4199,7 @@ type ScheduledExecRun struct {
 	EventID       string // non-empty for schedule-owned runs; empty for trigger-owned runs
 	FireID        string // non-empty for trigger-owned runs; empty for schedule-owned runs
 	ScheduleID    string // empty for a one-shot event or a trigger-owned run
-	OverlapKey    string // overlap scope ("schedule:<id>" or "trigger:<id>")
+	OverlapKey    string // overlap scope ("schedule:<id>" or "trigger:<id>:<action_index>")
 	ProjectID     string
 	TargetAgentID string
 

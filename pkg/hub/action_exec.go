@@ -59,11 +59,14 @@ import (
 //  5. Attach target (agentId / launch_id): resolved to authoritative UUID agentId
 //     at authoring (never falls back to agentName at fire) and pinned to
 //     target.RunID via callAgentControlPinned.
-//  6. Overlap & subject claim: overlap_key="trigger:<triggerID>" (never
-//     schedule_id) in DB + ExecStartRequest.ScheduleID=triggerID in sciontool;
-//     subject mode "reuse" refused at authoring; "skip" acquires a
-//     trigger_subject_claims row bound to target.ID at admission and held until
-//     FinishScheduledExecRun finishes the run in the same transaction.
+//  6. Overlap & subject claim: overlap_key="trigger:<triggerID>:<actionIndex>"
+//     (never schedule_id) in DB + ExecStartRequest.ScheduleID in sciontool
+//     (triggerID for actionIndex 0; deterministic UUID v5 derived from overlap_key
+//     for actionIndex > 0 so sibling exec actions targeting the same agent do not
+//     collide on agent_overlap); subject mode "reuse" refused at authoring;
+//     "skip" acquires a trigger_subject_claims row keyed by
+//     (trigger_id, action_index, subject), bound to target.ID at admission and
+//     held until FinishScheduledExecRun finishes the run in the same transaction.
 //
 // B. Every authority check:
 //  1. Authoring (POST/PATCH /triggers, POST /triggers/{id}/resume):
@@ -317,18 +320,25 @@ func (a *execAction) Authorize(
 		triggerCtx = built
 
 		// Per-trigger exec fire rate cap (own cap, separate from schedule quotas).
+		// Count only exec rows from other events so non-exec siblings and earlier
+		// exec actions of the same matched event never rate-limit later exec siblings (O-c).
 		if req.Authority.DefinitionID != "" {
-			recentCount, countErr := a.srv.store.CountTriggerFiresSince(
+			excludeEventID := ""
+			if req.Event != nil {
+				excludeEventID = req.Event.ID
+			}
+			recentCount, countErr := a.srv.store.CountTriggerActionFiresSince(
 				ctx,
 				req.Authority.DefinitionID,
+				store.TriggerActionExec,
+				excludeEventID,
 				time.Now().Add(-time.Minute),
 				store.TriggerFireStatusSkipped,
 			)
 			if countErr != nil {
 				return nil, nil, fmt.Errorf("exec trigger fire: count recent fires: %w", countErr)
 			}
-			// The current firing row is already persisted in trigger_fires.
-			if recentCount > triggerExecMaxFiresPerMinute {
+			if recentCount >= triggerExecMaxFiresPerMinute {
 				return nil, nil, a.skipExecFire(ctx, req, p, execReasonRateLimit, "rate_limit")
 			}
 		}

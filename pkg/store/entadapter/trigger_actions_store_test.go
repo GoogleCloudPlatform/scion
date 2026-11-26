@@ -387,3 +387,138 @@ func TestTriggerActionsStore_SiblingExecOverlapKeysAdmitted(t *testing.T) {
 	err := admit(ev2.ID, 0, agentA)
 	require.ErrorIs(t, err, store.ErrScheduledExecOverlap, "repeated fire of the same exec action index must still refuse overlap")
 }
+
+// TestTriggerActionsStore_RateDecisionPersistsAcrossPasses lifts review 2's
+// R2-bis store probe (both skip-then-window-slide and admit-then-later-event)
+// on SQLite and real Postgres 17.
+func TestTriggerActionsStore_RateDecisionPersistsAcrossPasses(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	projID := uuid.NewString()
+	trigID := uuid.NewString()
+	evF := uuid.NewString()
+	evE := uuid.NewString()
+	start := time.Now().UTC().Truncate(time.Microsecond)
+
+	claim := func(ev string, idx int, at time.Time) *store.TriggerFire {
+		tf := &store.TriggerFire{
+			ID:          uuid.NewString(),
+			ProjectID:   projID,
+			TriggerID:   trigID,
+			EventID:     ev,
+			Subject:     "pr-1",
+			ActionType:  store.TriggerActionMessage,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  at.Add(10 * time.Minute),
+			StartedAt:   at,
+			CreatedAt:   at,
+		}
+		ok, _, err := cs.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, ok)
+		return tf
+	}
+
+	// Case 1: Skip-then-admit across window slide (review 2 probe).
+	f0 := claim(evF, 0, start.Add(-59*time.Second))
+	_, err := cs.FinishTriggerFire(ctx, f0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-59*time.Second))
+	require.NoError(t, err)
+
+	ea0 := claim(evE, 0, start)
+	n0, err := cs.CountRecentTriggerFires(ctx, trigID, time.Now().UTC().Add(-time.Minute), ea0.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n0, "pass 1: E a0 counts F -> rate limited at max=1")
+	_, err = cs.FinishTriggerFire(ctx, ea0.ID, store.TriggerFireStatusSkipped, "", "", "rate limit", start)
+	require.NoError(t, err)
+
+	ea1 := claim(evE, 1, start.Add(time.Millisecond))
+	// Pass 2: window slides past F (using since after F.Created).
+	n1, err := cs.CountRecentTriggerFires(ctx, trigID, start.Add(-30*time.Second), ea1.ID)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, n1, 1, "pass 2: E a1 must reuse E a0's durable rate-limit skip decision")
+
+	// Case 2: Admit-then-skip across deferral > 60s.
+	trigID2 := uuid.NewString()
+	evA := uuid.NewString()
+	evG := uuid.NewString()
+	claimOn := func(tid, ev string, idx int, at time.Time) *store.TriggerFire {
+		tf := &store.TriggerFire{
+			ID:          uuid.NewString(),
+			ProjectID:   projID,
+			TriggerID:   tid,
+			EventID:     ev,
+			Subject:     "pr-2",
+			ActionType:  store.TriggerActionMessage,
+			ActionIndex: idx,
+			Status:      store.TriggerFireStatusFiring,
+			LeaseUntil:  at.Add(10 * time.Minute),
+			StartedAt:   at,
+			CreatedAt:   at,
+		}
+		ok, _, cErr := cs.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, ok)
+		return tf
+	}
+	a0 := claimOn(trigID2, evA, 0, start.Add(-70*time.Second))
+	_, err = cs.FinishTriggerFire(ctx, a0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-70*time.Second))
+	require.NoError(t, err)
+	// Event G arrives >60s later and is admitted.
+	g0 := claimOn(trigID2, evG, 0, start.Add(-5*time.Second))
+	_, err = cs.FinishTriggerFire(ctx, g0.ID, store.TriggerFireStatusFired, "", "", "", start.Add(-5*time.Second))
+	require.NoError(t, err)
+	// Event A's deferred action 1 is re-checked in pass 2: must reuse A a0's durable admit decision (0).
+	a1 := claimOn(trigID2, evA, 1, start)
+	nA1, err := cs.CountRecentTriggerFires(ctx, trigID2, start.Add(-time.Minute), a1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, nA1, "pass 2: deferred E a1 must reuse E a0's durable admit decision")
+}
+
+// TestTriggerActionsStore_CountTriggerActionFiresSince_MixedExecTrigger verifies O-c
+// on SQLite and real Postgres 17: only exec rows from other events are counted.
+func TestTriggerActionsStore_CountTriggerActionFiresSince_MixedExecTrigger(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t.Logf("dialect=%s", cs.client.Driver().Dialect())
+
+	projID := uuid.NewString()
+	trigID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 5 events x (7 message + 1 exec) = 35 message rows + 5 exec rows.
+	var lastEv string
+	for e := 0; e < 5; e++ {
+		evID := uuid.NewString()
+		lastEv = evID
+		for idx := 0; idx < 8; idx++ {
+			actType := store.TriggerActionMessage
+			if idx == 7 {
+				actType = store.TriggerActionExec
+			}
+			tf := &store.TriggerFire{
+				ID:          uuid.NewString(),
+				ProjectID:   projID,
+				TriggerID:   trigID,
+				EventID:     evID,
+				Subject:     "s",
+				ActionType:  actType,
+				ActionIndex: idx,
+				Status:      store.TriggerFireStatusFired,
+				LeaseUntil:  now.Add(10 * time.Minute),
+				StartedAt:   now,
+				CreatedAt:   now,
+			}
+			ok, _, err := cs.ClaimTriggerFire(ctx, tf)
+			require.NoError(t, err)
+			require.True(t, ok)
+		}
+	}
+
+	// Excluding lastEv, there are 4 exec rows (not 35+4).
+	n, err := cs.CountTriggerActionFiresSince(ctx, trigID, store.TriggerActionExec, lastEv, now.Add(-time.Minute), store.TriggerFireStatusSkipped)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n, "exec rate cap must count only exec rows from other events")
+}

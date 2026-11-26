@@ -241,7 +241,6 @@ type TriggerFireResponse struct {
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
 	ActionIndex    int               `json:"actionIndex"`
-	ActionType     string            `json:"actionType,omitempty"`
 	Subject        string            `json:"subject,omitempty"`
 	ActionType     string            `json:"actionType,omitempty"`
 	Status         string            `json:"status"`
@@ -633,7 +632,6 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		EventID:        tf.EventID,
 		ProjectID:      tf.ProjectID,
 		ActionIndex:    tf.ActionIndex,
-		ActionType:     tf.ActionType,
 		Subject:        tf.Subject,
 		ActionType:     tf.ActionType,
 		Status:         tf.Status,

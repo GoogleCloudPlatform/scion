@@ -220,13 +220,30 @@ func (m *memTriggerStore) RecordTriggerFire(_ context.Context, id string, firedA
 	for _, tr := range m.triggers {
 		if tr.ID == id {
 			tr.FireCount++
-			if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused {
+			if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused || status == store.TriggerFireStatusExpired {
 				tr.ErrorCount++
 			}
 			t := firedAt
 			tr.LastFireAt = &t
 			tr.LastFireStatus = status
 			tr.LastFireError = errMsg
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+func (m *memTriggerStore) RecordTriggerFireErrorDelta(_ context.Context, id string, firedAt time.Time, status, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, tr := range m.triggers {
+		if tr.ID == id {
+			tr.ErrorCount++
+			if tr.LastFireAt == nil || !firedAt.Before(*tr.LastFireAt) {
+				t := firedAt
+				tr.LastFireAt = &t
+				tr.LastFireStatus = status
+				tr.LastFireError = errMsg
+			}
 			return nil
 		}
 	}
@@ -619,6 +636,9 @@ func (m *memTriggerStore) ListTriggerFires(_ context.Context, filter store.Trigg
 	return &store.ListResult[store.TriggerFire]{Items: items, TotalCount: len(items)}, nil
 }
 func (m *memTriggerStore) CountTriggerFiresSince(context.Context, string, time.Time, ...string) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) CountTriggerActionFiresSince(context.Context, string, string, string, time.Time, ...string) (int, error) {
 	return 0, nil
 }
 func (m *memTriggerStore) CountRecentTriggerFires(context.Context, string, time.Time, string) (int, error) {

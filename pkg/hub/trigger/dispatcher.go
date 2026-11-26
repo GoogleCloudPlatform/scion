@@ -963,47 +963,77 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			continue
 		}
 
+		isErrStatus := func(s string) bool {
+			return s == store.TriggerFireStatusFailed ||
+				s == store.TriggerFireStatusRefused ||
+				s == store.TriggerFireStatusExpired
+		}
 		var (
-			trigRecordedCount   int
-			trigAggStatus       string
-			trigAggErr          string
-			trigAggTime         time.Time
-			alreadyCountedEvent bool
+			trigRecordedCount    int
+			trigAggStatus        string
+			trigAggErr           string
+			trigAggTime          time.Time
+			priorTerminalCounted bool
+			priorHadError        bool
 		)
+		notePriorTerminal := func(existing *store.TriggerFire) {
+			if existing == nil {
+				return
+			}
+			if isErrStatus(existing.Status) {
+				priorHadError = true
+			}
+			// Distinguish an already-flushed prior pass from a crash between
+			// FinishTriggerFire and flushTrigCounters: if FireCount is still 0
+			// or LastFireAt predates existing.FinishedAt, the prior pass crashed
+			// before flushing, so this retry should still flush fire_count.
+			if tr.FireCount > 0 && tr.LastFireAt != nil {
+				if existing.FinishedAt == nil || !tr.LastFireAt.Before(existing.FinishedAt.UTC()) {
+					priorTerminalCounted = true
+				}
+			}
+		}
 		recordTrigOutcome := func(status, errMsg string, at time.Time) {
 			trigRecordedCount++
 			if at.After(trigAggTime) {
 				trigAggTime = at
 			}
-			isErr := func(s string) bool {
-				return s == store.TriggerFireStatusFailed ||
-					s == store.TriggerFireStatusRefused ||
-					s == store.TriggerFireStatusExpired
-			}
 			switch {
 			case trigAggStatus == "":
 				trigAggStatus = status
 				trigAggErr = errMsg
-			case isErr(status):
-				if !isErr(trigAggStatus) {
+			case isErrStatus(status):
+				if !isErrStatus(trigAggStatus) {
 					trigAggStatus = status
 					trigAggErr = errMsg
 				}
-			case status == store.TriggerFireStatusFired && !isErr(trigAggStatus):
+			case status == store.TriggerFireStatusFired && !isErrStatus(trigAggStatus):
 				trigAggStatus = status
 				trigAggErr = ""
 			}
 		}
 		flushTrigCounters := func() {
-			if trigRecordedCount == 0 || alreadyCountedEvent {
+			if trigRecordedCount == 0 {
 				return
 			}
 			writeCtx, cancelWrite := storeWriteContext(ctx)
-			if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
-				d.logger.Warn("trigger: failed to update trigger fire counters",
-					"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
+			defer cancelWrite()
+			if !priorTerminalCounted {
+				if rErr := d.store.RecordTriggerFire(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
+					d.logger.Warn("trigger: failed to update trigger fire counters",
+						"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
+				}
+				return
 			}
-			cancelWrite()
+			// O-b: later pass for an already-counted matched event flushes only
+			// an error delta when a deferred/retried sibling records the event's
+			// first error outcome (never double-counting fire_count).
+			if isErrStatus(trigAggStatus) && !priorHadError {
+				if rErr := d.store.RecordTriggerFireErrorDelta(writeCtx, tr.ID, trigAggTime, trigAggStatus, trigAggErr); rErr != nil {
+					d.logger.Warn("trigger: failed to update trigger fire error delta",
+						"triggerID", tr.ID, "eventID", ev.ID, "error", rErr)
+				}
+			}
 		}
 
 		// Shared per-(trigger, event) rate-limit decision so all sibling actions
@@ -1045,8 +1075,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, ErrFireStaleEvent, d.now().UTC())
-					} else {
-						alreadyCountedEvent = true
+					} else if tr.FireCount > 0 {
+						priorTerminalCounted = true
+						priorHadError = true
 					}
 					continue
 				}
@@ -1068,8 +1099,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					}
 					if claimedDirect {
 						recordTrigOutcome(store.TriggerFireStatusRefused, reason, d.now().UTC())
-					} else {
-						alreadyCountedEvent = true
+					} else if tr.FireCount > 0 {
+						priorTerminalCounted = true
+						priorHadError = true
 					}
 					continue
 				}
@@ -1234,7 +1266,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 						if existing.Status != store.TriggerFireStatusCoalescing &&
 							existing.Status != store.TriggerFireStatusDeferred &&
 							existing.Status != store.TriggerFireStatusFiring {
-							alreadyCountedEvent = true
+							notePriorTerminal(existing)
 						}
 					}
 					continue

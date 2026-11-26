@@ -1802,6 +1802,30 @@ func (s *TriggerStore) RecordTriggerFire(ctx context.Context, id string, firedAt
 	return mapError(err)
 }
 
+func (s *TriggerStore) RecordTriggerFireErrorDelta(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	firedAt = firedAt.UTC()
+	now := time.Now().UTC()
+	if err := s.client.Trigger.UpdateOneID(uid).AddErrorCount(1).SetUpdated(now).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	last := s.client.Trigger.Update().
+		Where(trigger.ID(uid), trigger.Or(trigger.LastFireAtIsNil(), trigger.LastFireAtLTE(firedAt))).
+		SetLastFireAt(firedAt).
+		SetLastFireStatus(status).
+		SetUpdated(now)
+	if errMsg != "" {
+		last.SetLastFireError(errMsg)
+	} else {
+		last.ClearLastFireError()
+	}
+	_, err = last.Save(ctx)
+	return mapError(err)
+}
+
 func (s *TriggerStore) DeleteTrigger(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -3502,6 +3526,10 @@ func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client,
 }
 
 func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error) {
+	return s.CountTriggerActionFiresSince(ctx, triggerID, "", "", since, excludeStatuses...)
+}
+
+func (s *TriggerStore) CountTriggerActionFiresSince(ctx context.Context, triggerID, actionType, excludeEventID string, since time.Time, excludeStatuses ...string) (int, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
 		return 0, err
@@ -3509,6 +3537,16 @@ func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID str
 	preds := []predicate.TriggerFire{
 		triggerfire.TriggerIDEQ(tid),
 		triggerfire.CreatedGTE(since.UTC()),
+	}
+	if actionType != "" {
+		preds = append(preds, triggerfire.ActionTypeEQ(actionType))
+	}
+	if excludeEventID != "" {
+		eid, parseErr := parseUUID(excludeEventID)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		preds = append(preds, triggerfire.EventIDNEQ(eid))
 	}
 	if len(excludeStatuses) > 0 {
 		preds = append(preds, triggerfire.StatusNotIn(excludeStatuses...))
@@ -3548,29 +3586,48 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 		q = q.Where(triggerfire.IDNEQ(exID))
 		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
 		if getErr == nil {
-			// Use the caller event's canonical ordering key: the earliest
-			// non-skipped fire row for (trigger_id, callerRow.EventID). This
-			// guarantees all sibling actions of one matched event see the exact
-			// same count even if another event's action-0 row is inserted
-			// between this event's action 0 and action 1 (action-arrays §3.5).
-			callerCreated := callerRow.Created.UTC()
-			callerOrderID := exID
-			earliestRow, earErr := s.client.TriggerFire.Query().
+			// R2-bis: derive the per-(trigger, event) rate-limit decision from
+			// durable sibling rows first so it survives across HandleItem passes
+			// (reuse deferral, crash, or lease re-handle).
+			siblings, sibErr := s.client.TriggerFire.Query().
 				Where(
 					triggerfire.TriggerIDEQ(tid),
 					triggerfire.EventIDEQ(callerRow.EventID),
-					triggerfire.StatusNEQ(store.TriggerFireStatusSkipped),
 				).
 				Order(
 					ent.Asc(triggerfire.FieldCreated),
 					ent.Asc(triggerfire.FieldID),
 				).
-				First(ctx)
-			if earErr == nil {
-				callerCreated = earliestRow.Created.UTC()
-				callerOrderID = earliestRow.ID
-			} else if !ent.IsNotFound(earErr) {
-				return 0, mapError(earErr)
+				All(ctx)
+			if sibErr != nil {
+				return 0, mapError(sibErr)
+			}
+			callerCreated := callerRow.Created.UTC()
+			callerOrderID := exID
+			anchorSet := false
+			for _, sib := range siblings {
+				if sib.Status != store.TriggerFireStatusSkipped && !anchorSet {
+					callerCreated = sib.Created.UTC()
+					callerOrderID = sib.ID
+					anchorSet = true
+				}
+				if sib.ID == exID {
+					continue
+				}
+				if sib.Status == store.TriggerFireStatusSkipped && sib.Error == "rate limit" {
+					// A sibling of this matched event was already rate-limited:
+					// reuse that durable skip decision across passes.
+					return store.MaxTriggerFiresPerMinute, nil
+				}
+				if sib.Status == store.TriggerFireStatusFired ||
+					sib.Status == store.TriggerFireStatusWaiting ||
+					sib.Status == store.TriggerFireStatusFailed ||
+					(sib.Status == store.TriggerFireStatusSkipped &&
+						(sib.Error == "concurrency limit" || sib.Error == "project trigger-agent cap")) {
+					// A sibling of this matched event already passed the rate-limit
+					// check: reuse that durable admit decision across passes.
+					return 0, nil
+				}
 			}
 			q = q.Where(
 				triggerfire.EventIDNEQ(callerRow.EventID),

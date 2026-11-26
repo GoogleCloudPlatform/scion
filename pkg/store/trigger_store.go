@@ -492,6 +492,11 @@ type TriggerStore interface {
 	UpdateTrigger(ctx context.Context, tr *Trigger, fields TriggerFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 	UpdateTriggerStatus(ctx context.Context, id, status, reason string) error
 	RecordTriggerFire(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error
+	// RecordTriggerFireErrorDelta increments error_count by 1 without
+	// incrementing fire_count, and updates last_fire_* if firedAt is newer.
+	// Used when a later dispatcher pass for an already-counted matched event
+	// records the event's first error outcome (action-arrays §3.5).
+	RecordTriggerFireErrorDelta(ctx context.Context, id string, firedAt time.Time, status, errMsg string) error
 	DeleteTrigger(ctx context.Context, id string) error
 	DeleteTriggersByProject(ctx context.Context, projectID string) (int, error)
 
@@ -533,6 +538,10 @@ type TriggerStore interface {
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error)
+	// CountTriggerActionFiresSince counts trigger_fires rows for triggerID with
+	// action_type == actionType (when non-empty), event_id != excludeEventID
+	// (when non-empty), created >= since, and status not in excludeStatuses.
+	CountTriggerActionFiresSince(ctx context.Context, triggerID, actionType, excludeEventID string, since time.Time, excludeStatuses ...string) (int, error)
 	// CountRecentTriggerFires counts distinct matched events in trigger_fires
 	// for triggerID with created > since and status <> 'skipped', excluding
 	// the caller's own event (derived from excludeFireID when non-empty) so
