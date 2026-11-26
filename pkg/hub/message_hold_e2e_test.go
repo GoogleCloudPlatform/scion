@@ -489,9 +489,8 @@ func newHoldE2EFixture(t *testing.T) *holdE2EFixture {
 	f.launched = got
 
 	setHoldTestSettings(t, f.srv, map[string]bool{
-		conduitExperiment:             true,
-		experiments.ConduitDeliver:    true,
-		experiments.ChatScheduledSend: true,
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: true,
 	})
 
 	ep := NewChannelEventPublisher()
@@ -2400,10 +2399,9 @@ func TestHoldA2_Round1_OPT1_DecisionResponsePreservesAgentLineAndMetadata(t *tes
 	require.NoError(t, wcs.Init())
 	f.srv.SetWebChatStore(wcs)
 	setHoldTestSettings(t, f.srv, map[string]bool{
-		conduitExperiment:             true,
-		experiments.ConduitDeliver:    true,
-		experiments.Decisions:         true,
-		experiments.ChatScheduledSend: true,
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: true,
+		experiments.Decisions:      true,
 	})
 
 	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
@@ -2559,10 +2557,9 @@ func TestHoldDecisionDismissResponseRedriveRebuildsAgentLineAndMetadata(t *testi
 	require.NoError(t, wcs.Init())
 	f.srv.SetWebChatStore(wcs)
 	setHoldTestSettings(t, f.srv, map[string]bool{
-		conduitExperiment:             true,
-		experiments.ConduitDeliver:    true,
-		experiments.Decisions:         true,
-		experiments.ChatScheduledSend: true,
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: true,
+		experiments.Decisions:      true,
 	})
 	f.srv.decisionClock = func() time.Time { return time.Now().UTC().Add(store.DecisionDismissMinAge + time.Minute) }
 
@@ -2944,10 +2941,9 @@ func (s *holdIdleMarkInterceptStore) MarkAgentDelivery(ctx context.Context, agen
 func configureHoldIdleSuspendGate(t *testing.T, f *holdE2EFixture, expEnabled, settingEnabled bool) {
 	t.Helper()
 	setHoldTestSettings(t, f.srv, map[string]bool{
-		conduitExperiment:             true,
-		experiments.ConduitDeliver:    true,
-		experiments.ChatScheduledSend: true,
-		experiments.IdleSuspend:       expEnabled,
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: true,
+		experiments.IdleSuspend:    expEnabled,
 	})
 	f.srv.mu.Lock()
 	f.srv.config.AutoSuspendIdle = settingEnabled

@@ -387,7 +387,7 @@ test.describe('on a phone, a long-press on Send offers Send with interruption', 
     await typeDraft(page, 'urgent: stop that');
 
     await longPress(page, page.locator('.send-btn').first());
-    await expectSheet(page, ['Send with interruption']);
+    await expectSheet(page, ['Send with interruption', 'Schedule send…']);
     expect(sends.posts()).toBe(0);
     expect(await chatSends(page)).toEqual([]);
     expect(await draftValue(page)).toBe('urgent: stop that');

@@ -20,7 +20,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,7 +28,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -393,17 +391,6 @@ type scheduledSendFixture struct {
 	dispatcher *brokerMockDispatcher
 }
 
-func setScheduledSendExperiment(t *testing.T, srv *Server, enabled bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatScheduledSend, enabled)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-}
-
 func newScheduledSendFixture(t *testing.T) *scheduledSendFixture {
 	t.Helper()
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
@@ -449,8 +436,6 @@ func newScheduledSendFixtureOn(t *testing.T, srv *Server, s store.Store, alice, 
 		DefaultAgent: agent.Slug,
 	}))
 	setTopicConversationID(t, db, s, topicID, project.ID)
-
-	setScheduledSendExperiment(t, srv, true)
 
 	return &scheduledSendFixture{
 		srv: srv, store: s, wcs: wcs, sms: scheduledMessageStoreFrom(wcs), db: db,

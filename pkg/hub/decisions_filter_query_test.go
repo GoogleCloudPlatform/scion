@@ -38,8 +38,7 @@ import (
 func setDecisionsExperiments(t *testing.T, srv *Server, decisionsOn bool) {
 	t.Helper()
 	setExperimentOverrides(t, srv, map[string]bool{
-		experiments.ChatScheduledSend: true,
-		experiments.Decisions:         decisionsOn,
+		experiments.Decisions: decisionsOn,
 	})
 	require.Equal(t, decisionsOn, srv.experimentEnabled(experiments.Decisions))
 }

@@ -16,20 +16,11 @@
 
 /**
  * Scheduled send in native chat (ptone/scion#3666): the hub API for a
- * user's own scheduled messages in a conversation, and the experiment that
- * gates it. Only the sender ever sees a scheduled message.
+ * user's own scheduled messages in a conversation. Only the sender ever
+ * sees a scheduled message.
  */
 
 import { apiFetch, extractApiError } from './api.js';
-import { isFeatureEnabled } from '../utils/feature-flags.js';
-
-/** The experiment gating scheduled send (web and hub). */
-export const CHAT_SCHEDULED_SEND_EXPERIMENT = 'web.chat_scheduled_send';
-
-/** Whether scheduled send is offered in this browser session. */
-export function scheduledSendEnabled(): boolean {
-  return isFeatureEnabled(CHAT_SCHEDULED_SEND_EXPERIMENT);
-}
 
 /**
  * Whether a conversation supports scheduled send: topics and direct

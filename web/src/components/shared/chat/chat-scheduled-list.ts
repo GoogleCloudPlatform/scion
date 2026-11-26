@@ -68,7 +68,7 @@ export class ScionChatScheduledList extends LitElement {
   @property({ type: String })
   conversationKey = '';
 
-  /** Whether scheduled send is available here (experiment on, a topic). */
+  /** Whether scheduled send is available here (topics and DMs). */
   @property({ type: Boolean })
   enabled = false;
 

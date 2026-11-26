@@ -1448,10 +1448,9 @@ func TestTriggerDispatchE2E_ConduitDeliverAwaitingSessionSkipsHoldAndFailsLoud(t
 	ctx := context.Background()
 
 	setHoldTestSettings(t, f.srv, map[string]bool{
-		conduitExperiment:             true,
-		experiments.ConduitDeliver:    true,
-		experiments.ChatScheduledSend: true,
-		experiments.Triggers:          true,
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: true,
+		experiments.Triggers:       true,
 	})
 	require.True(t, f.srv.conduitDeliverEnabled(), "precondition: hub.conduit_deliver must be enabled")
 

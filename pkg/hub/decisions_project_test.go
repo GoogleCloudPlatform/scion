@@ -1411,7 +1411,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 
 	// Wire OperationalSettings to the real SQLite store pre-seeded with both retired
 	// experiment overrides set to true (simulating an upgraded hub before enablement).
-	seedRaw := json.RawMessage(`{"overrides":{"web.chat_choices":true,"web.project_decisions":true,"web.chat_scheduled_send":true}}`)
+	seedRaw := json.RawMessage(`{"overrides":{"web.chat_choices":true,"web.project_decisions":true}}`)
 	_, err := f.store.UpsertHubSetting(ctx, "experiments", seedRaw, "seed@example.com", 0, "managed")
 	require.NoError(t, err)
 	ops := NewOperationalSettings(f.store, emptyKoanf(), emptyKoanf())

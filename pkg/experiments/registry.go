@@ -241,12 +241,6 @@ const Artifacts = "hub.artifacts"
 // deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
-// ChatScheduledSend gates scheduled send in native web chat: the Schedule
-// send menu item and pending-message banners in the web UI, the hub's
-// /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
-// the delivery sweeper, which holds pending messages while it is off.
-const ChatScheduledSend = "web.chat_scheduled_send"
-
 // Decisions gates agent decision prompts, cards, routes, pages, CLI listing
 // and coalesced bell notifications (ptone/scion#7514, ptone/scion#8223):
 // agent sends carrying decisions (refused with experiment_disabled while off),
@@ -1083,17 +1077,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-03-31",
 	},
 	{
-		Name:        ChatScheduledSend,
-		Title:       "Scheduled send in chat",
-		Description: "Adds Schedule send to the chat Send button menu: the message is held by the hub and sent as the user at the chosen time; until then only the sender sees it, with a Cancel button. Gates the menu item and banners (LayerWeb), the hub's scheduled-message routes, which answer 404 while it is off, and delivery (LayerServer): while it is off, pending messages are held, neither sent nor failed. A message found due more than 60 minutes late (for example after the experiment was off) is not sent; it fails as missed and the sender can send it now.",
-		Default:     false,
-		Layers:      []Layer{LayerWeb, LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#3666",
-		Owner:       "native-chat",
-		ReviewBy:    "2027-01-31",
-	},
-	{
 		Name:        Decisions,
 		Title:       "Decisions",
 		Description: "Lets an agent ask a user to decide between concrete choices: a prompt carries one or more keyed decisions, which web chat shows as cards with one button per choice; clicking records the answer and sends it back to the agent, and each project and profile gets a Decisions page showing open prompts waiting on the viewer and the append-only log of decisions made, even after chat retention purges the originating messages, plus a coalesced Decisions waiting bell notification. Gates sending decisions (400 experiment_disabled while off), the hub's decision, answer, agent, project and profile decision routes (404 while off), the decision fields of chat history, and the bell notification (LayerServer), and the chat cards, project and profile Decisions pages, header/sidebar badges and Profile Settings card (LayerWeb). Every prompt also carries a markdown copy of its decisions, so other surfaces and clients with it off still show them. Stored decisions and answers are kept while it is off.",
@@ -1539,6 +1522,8 @@ var compiledRetired = []string{
 	"web.gcs_links",
 	// Graduated: starred messages in native chat are always on (ptone/scion#9485).
 	"web.chat_starred_messages",
+	// Graduated: scheduled send in native chat is always on (ptone/scion#9484).
+	"web.chat_scheduled_send",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

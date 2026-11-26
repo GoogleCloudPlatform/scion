@@ -74,7 +74,7 @@ func newDecisionsFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob 
 
 func setDecisionsExperiment(t *testing.T, srv *Server, enabled bool) {
 	t.Helper()
-	setExperimentOverrides(t, srv, map[string]bool{experiments.ChatScheduledSend: true, experiments.Decisions: enabled})
+	setExperimentOverrides(t, srv, map[string]bool{experiments.Decisions: enabled})
 	require.Equal(t, enabled, srv.experimentEnabled(experiments.Decisions))
 }
 
