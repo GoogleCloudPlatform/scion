@@ -202,6 +202,38 @@ func (s *Server) gcpServiceAccountEmailRefusal(ctx context.Context, email string
 	return "", "", false, nil
 }
 
+// gcpServiceAccountRefusal is the row-aware counterpart of
+// gcpServiceAccountEmailRefusal for callers that already hold a stored
+// GCPServiceAccount row. It always refuses the Hub's own GCP service account,
+// and refuses any Runtime Broker's configured or observed host service account
+// except on Hub-created passthrough translation records
+// (store.IsHostSATranslationRecord), whose email equals their bound broker's
+// host SA and which carry their own dedicated refusals on direct-reference
+// surfaces.
+func (s *Server) gcpServiceAccountRefusal(ctx context.Context, sa *store.GCPServiceAccount) (code, msg string, refused bool, err error) {
+	if sa == nil {
+		return "", "", false, nil
+	}
+	if s.isHubOwnServiceAccountEmail(sa.Email) {
+		return ErrCodeIdentityReserved,
+			"the Hub's own GCP service account cannot be registered or used as an agent identity",
+			true, nil
+	}
+	if store.IsHostSATranslationRecord(sa) {
+		return "", "", false, nil
+	}
+	isBrokerHost, err := s.isBrokerHostServiceAccountEmail(ctx, sa.Email)
+	if err != nil {
+		return "", "", false, err
+	}
+	if isBrokerHost {
+		return ErrCodeIdentityReserved,
+			"a Runtime Broker's host GCP service account cannot be registered or used as an agent identity",
+			true, nil
+	}
+	return "", "", false, nil
+}
+
 // refuseReservedHookExecutionIdentity refuses a lifecycle-hook write whose
 // executionIdentity references a reserved GCP service account (the Hub's own
 // identity or a Runtime Broker's host identity). Returns true after writing
@@ -215,7 +247,7 @@ func (s *Server) refuseReservedHookExecutionIdentity(w http.ResponseWriter, ctx 
 	if err != nil || sa == nil {
 		return false
 	}
-	code, msg, refused, err := s.gcpServiceAccountEmailRefusal(ctx, sa.Email)
+	code, msg, refused, err := s.gcpServiceAccountRefusal(ctx, sa)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return true

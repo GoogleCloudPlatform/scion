@@ -586,7 +586,7 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 		return &saAssignDenial{kind: saAssignDenyForbidden}
 	}
 
-	code, msg, refused, err := s.gcpServiceAccountEmailRefusal(ctx, sa.Email)
+	code, msg, refused, err := s.gcpServiceAccountRefusal(ctx, sa)
 	if err != nil {
 		slog.Error("service-account assignment denied: failed to check reserved identity",
 			"surface", surface, "sa_id", sa.ID, "targetSA", sa.Email, "error", err)

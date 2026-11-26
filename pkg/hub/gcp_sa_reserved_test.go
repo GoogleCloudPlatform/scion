@@ -1078,6 +1078,20 @@ func TestGCPTokenMintPaths_RefuseBrokerHostIdentityAndPreserveTranslationRecord(
 
 		_, err = srv.admissibleGCPServiceAccount(ctx, gcpID, projectID, "other-broker")
 		assert.ErrorIs(t, err, errGCPSABrokerMismatch)
+
+		// Row-aware refusal skips the broker-host match for translation records
+		// so direct-reference surfaces emit their own dedicated refusal, while
+		// still refusing the Hub's own SA even on a translation record.
+		_, _, refused, err := srv.gcpServiceAccountRefusal(ctx, transSA)
+		require.NoError(t, err)
+		assert.False(t, refused)
+
+		hubTransSA := *transSA
+		hubTransSA.Email = "hub-sa@hub-proj.iam.gserviceaccount.com"
+		code, _, refused, err := srv.gcpServiceAccountRefusal(ctx, &hubTransSA)
+		require.NoError(t, err)
+		assert.True(t, refused)
+		assert.Equal(t, ErrCodeIdentityReserved, code)
 	})
 }
 

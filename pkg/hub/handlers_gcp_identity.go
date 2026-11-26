@@ -793,7 +793,7 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // route, where a hub-scoped account is checked against every broker on the
 // hub (hubSAMappingWarnings) and other scopes get no warning.
 func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
-	code, msg, refused, err := s.gcpServiceAccountEmailRefusal(r.Context(), sa.Email)
+	code, msg, refused, err := s.gcpServiceAccountRefusal(r.Context(), sa)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

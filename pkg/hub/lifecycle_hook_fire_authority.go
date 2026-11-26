@@ -170,7 +170,7 @@ func (s *Server) authorizeHookFire(ctx context.Context, hook *store.LifecycleHoo
 	}
 
 	// 5. The account is still admissible as this hook's identity.
-	_, msg, refused, err := s.gcpServiceAccountEmailRefusal(ctx, sa.Email)
+	_, msg, refused, err := s.gcpServiceAccountRefusal(ctx, sa)
 	if err != nil {
 		return hookFireDeny(HookFireIdentityNotAdmissible, fmt.Sprintf("check reserved service account: %v", err))
 	}
