@@ -83,16 +83,28 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 	// correct project instead of the broker's local project.
 	srv, mgr := newTestServerWithProvisionCapture()
 
-	body := `{
-		"name": "hub-managed-agent",
-		"id": "agent-uuid-123",
-		"slug": "hub-managed-agent",
-		"projectId": "project-abc",
-		"projectSlug": "my-hub-project",
-		"provisionOnly": true,
-		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
-	}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		t.Fatalf("failed to get global dir: %v", err)
+	}
+	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
+
+	bodyBytes, err := json.Marshal(CreateAgentRequest{
+		Name:          "hub-managed-agent",
+		ID:            "agent-uuid-123",
+		Slug:          "hub-managed-agent",
+		ProjectID:     "project-abc",
+		ProjectSlug:   "my-hub-project",
+		ProvisionOnly: true,
+		Config: &CreateAgentConfig{
+			Template:  "claude",
+			Workspace: filepath.Join(expectedPath, "workspace"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(bodyBytes)))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -106,12 +118,6 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		t.Fatal("expected Provision to be called")
 	}
 
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		t.Fatalf("failed to get global dir: %v", err)
-	}
-
-	expectedPath := filepath.Join(globalDir, "projects", "my-hub-project")
 	if mgr.lastOpts.ProjectPath != expectedPath {
 		t.Errorf("expected ProjectPath %q, got %q", expectedPath, mgr.lastOpts.ProjectPath)
 	}

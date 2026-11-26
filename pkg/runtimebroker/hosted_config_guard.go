@@ -20,6 +20,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // checkHostedRequestConfig refuses member-written config in a create or
@@ -92,4 +93,18 @@ func hostedConfigRefusalFrom(err error) (*hostedguard.RefusalError, bool) {
 // what wraps it can name broker paths.
 func writeHostedConfigRefusalDetails(w http.ResponseWriter, re *hostedguard.RefusalError, details map[string]interface{}) {
 	writeError(w, http.StatusBadRequest, hostedguard.ErrorCode, re.Error(), details)
+}
+
+// workspaceNotPermittedFrom reports whether err is (or wraps) a typed
+// workspace_not_permitted LaunchFailure raised on a hosted broker.
+func workspaceNotPermittedFrom(err error) bool {
+	var lf *scionrt.LaunchFailure
+	return errors.As(err, &lf) && lf.Code == api.LaunchCodeWorkspaceNotPermitted
+}
+
+// writeWorkspaceNotPermitted writes a hosted explicit-workspace refusal as a
+// 400 with the workspace_not_permitted code and fixed public text (never
+// leaking broker host paths).
+func writeWorkspaceNotPermitted(w http.ResponseWriter, details map[string]interface{}) {
+	writeError(w, http.StatusBadRequest, api.LaunchCodeWorkspaceNotPermitted, launchFailureText[api.LaunchCodeWorkspaceNotPermitted], details)
 }

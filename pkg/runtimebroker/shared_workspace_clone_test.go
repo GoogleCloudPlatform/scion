@@ -130,6 +130,7 @@ const sharedWorkspaceCloneJSON = `"sharedWorkspace": true,
 
 func TestCreateAgent_SharedWorkspaceClone_PassedThrough(t *testing.T) {
 	srv, mgr := newTestServerWithGitCloneCapture()
+	srv.config.WorkstationMode = true
 	body := `{"name": "shared-agent", "config": {"template": "claude", "workspace": "` + t.TempDir() + `", ` + sharedWorkspaceCloneJSON + `}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

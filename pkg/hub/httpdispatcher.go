@@ -265,6 +265,9 @@ type HTTPAgentDispatcher struct {
 	// hostedTemplateCheck checks the bundled harness configs of the hub
 	// template a hosted dispatch uses (SetHostedTemplateCheck).
 	hostedTemplateCheck func(ctx context.Context, templateID, runtimeKind string) error
+	// hostedWorkspaceResolver resolves a hub-managed project's expected
+	// workspace path for hosted dispatch validation (SetHostedWorkspaceResolver).
+	hostedWorkspaceResolver func(project *store.Project) (projectfs.Resolved, error)
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.

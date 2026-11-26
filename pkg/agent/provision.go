@@ -1231,6 +1231,15 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		agentDir = dir
 
 		if filepath.IsAbs(opts.Workspace) {
+			if opts.HostedMode {
+				roots, err := hostedExplicitWorkspaceRoots(ctx, opts.ProjectPath, projectDir)
+				if err != nil {
+					return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, newWorkspaceNotPermittedError(err))
+				}
+				if _, err := runtime.ValidateWorkspaceSource(opts.Workspace, roots...); err != nil {
+					return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, newWorkspaceNotPermittedError(err))
+				}
+			}
 			// Upstream review (GoogleCloudPlatform/scion#2037, comment
 			// 4121261313): split the existence check from the directory
 			// check, so a workspace path that exists but is a regular file
@@ -2011,6 +2020,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	ownWorkspace := api.GitCloneFromContext(ctx) != nil || api.IsEmptyPerAgentWorkspaceFromContext(ctx) || api.IsSharedWorkspaceFromContext(ctx) || moveBundle
 	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
 		return "", "", nil, err
+	}
+	if api.IsHostedModeFromContext(ctx) && workspace != "" && filepath.IsAbs(workspace) {
+		if err := validateHostedAbsoluteWorkspace(ctx, projectPath, projectDir, workspace); err != nil {
+			return "", "", nil, err
+		}
 	}
 
 	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)

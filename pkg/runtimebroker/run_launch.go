@@ -962,6 +962,7 @@ var launchFailureText = map[string]string{
 	api.LaunchCodeUnschedulable:                        "the agent pod cannot be scheduled",
 	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
 	api.LaunchCodeLaunchTimeout:                        "launch timed out waiting for the agent pod to be ready",
+	api.LaunchCodeWorkspaceNotPermitted:                "the agent workspace path is not permitted",
 }
 
 // maxLaunchReasonLen bounds the runtime reason a failure message carries.

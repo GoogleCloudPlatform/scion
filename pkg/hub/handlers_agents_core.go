@@ -1849,6 +1849,15 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Hosted hubs do not accept caller-supplied absolute workspace paths for
+	// any project type; callers pass a project-relative subdirectory instead.
+	if !s.workstation && req.Workspace != "" && isAbsWorkspace(req.Workspace) {
+		ValidationError(w, "absolute workspace paths are not accepted on this hub; pass a project-relative subdirectory", map[string]interface{}{
+			"field": "workspace",
+		})
+		return
+	}
+
 	// Resolve effective agent role using the authority lattice.
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.

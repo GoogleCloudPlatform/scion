@@ -68,6 +68,7 @@ var launchCodeLabels = map[string]string{
 	api.LaunchCodeGitConfigRefused:                     "the repository's git config sets keys agents may not be given",
 	api.LaunchCodeHostedConfigRefused:                  "the hosted server does not allow this member-written config",
 	api.LaunchCodeAgentPolicyRefused:                   "the broker's agent policy refused this configuration",
+	api.LaunchCodeWorkspaceNotPermitted:                "the agent workspace path is not permitted",
 	api.BrokerErrCodeSkillResolution:                   "a required skill could not be resolved",
 	api.BrokerErrCodeStorageMigrationRequired:          "the agent's storage settings must be migrated first",
 	api.LaunchCodeImagePullFailed:                      "the agent image could not be pulled",

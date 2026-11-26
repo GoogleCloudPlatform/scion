@@ -1147,6 +1147,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeHostedConfigRefusal(w, err)
 			return
 		}
+		if !s.config.WorkstationMode && req.Config != nil && req.Config.Workspace != "" {
+			if err := agent.ValidateHostedAbsoluteWorkspace(ctx, req.ProjectPath, req.Config.Workspace); err != nil {
+				span.SetStatus(codes.Error, api.LaunchCodeWorkspaceNotPermitted)
+				writeWorkspaceNotPermitted(w, nil)
+				return
+			}
+		}
 	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
@@ -2214,6 +2221,12 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.writeHarnessPolicyRefusal(w, d, "provision agent", req.ID, nil)
 				return
 			}
+			if workspaceNotPermittedFrom(err) {
+				markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+				span.SetStatus(codes.Error, api.LaunchCodeWorkspaceNotPermitted)
+				writeWorkspaceNotPermitted(w, nil)
+				return
+			}
 			// Design §3.4 Amendment A4.2: Reprovision wraps every refusal in
 			// agent.ErrReprovisionRefused (workspace preconditions, running-container
 			// check). Surface those as 409 Conflict rather than a generic 500 so
@@ -2346,6 +2359,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
 		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		agentPolicyErr, isAgentPolicyRefusal := agentPolicyErrorFrom(err)
+		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		isEmptyGenericCmd := emptyGenericCommandFrom(err)
@@ -2358,6 +2372,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(http.StatusBadRequest, hostedErr.Error())
 		case isAgentPolicyRefusal:
 			markAttemptFailed(agentPolicyRefusedStatus, agentPolicyErr.PublicMessage())
+		case isWorkspaceNotPermitted:
+			markAttemptFailed(http.StatusBadRequest, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
@@ -2456,6 +2472,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeHostedConfigRefusalDetails(w, hostedErr, nil)
 		case isAgentPolicyRefusal:
 			writeAgentPolicyRefused(w, agentPolicyErr, opCreateAgent, nil)
+		case isWorkspaceNotPermitted:
+			writeWorkspaceNotPermitted(w, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case isResourceRefusal:
@@ -4562,6 +4580,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ue, unusable := unusableProvisionerFrom(err)
 		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		agentPolicyErr, isAgentPolicyRefusal := agentPolicyErrorFrom(err)
+		isWorkspaceNotPermitted := workspaceNotPermittedFrom(err)
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
@@ -4572,6 +4591,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeHostedConfigRefusalDetails(w, hostedErr, details)
 		case isAgentPolicyRefusal:
 			writeAgentPolicyRefused(w, agentPolicyErr, "start agent", details)
+		case isWorkspaceNotPermitted:
+			writeWorkspaceNotPermitted(w, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case isResourceRefusal:
@@ -5823,6 +5844,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if pe, ok := agentPolicyErrorFrom(err); ok {
 			writeAgentPolicyRefused(w, pe, "restart agent", details)
+			return
+		}
+		if workspaceNotPermittedFrom(err) {
+			writeWorkspaceNotPermitted(w, details)
 			return
 		}
 		if se, ok := storageMigrationRequiredFrom(err); ok {

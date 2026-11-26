@@ -6094,6 +6094,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHostedMode(!s.config.Workstation)
 	dispatcher.SetHostedHarnessConfigCheck(s.checkStoredHostedHarnessConfig)
 	dispatcher.SetHostedTemplateCheck(s.checkStoredHostedTemplate)
+	dispatcher.SetHostedWorkspaceResolver(s.projectWorkspaceResolved)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {
@@ -7762,6 +7763,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// identity before serving traffic.
 	if _, err := s.ScanReservedGCPServiceAccounts(ctx); err != nil {
 		slog.Warn("startup scan for reserved GCP service accounts completed with errors", "error", err)
+	}
+
+	// Read-only one-shot scan at hosted Hub startup logging agent IDs whose
+	// stored absolute workspace does not match their resolved project workspace.
+	if !s.workstation {
+		if _, err := s.ScanHostedExplicitWorkspaces(ctx); err != nil {
+			slog.Warn("startup scan for hosted explicit workspaces completed with errors", "error", err)
+		}
 	}
 
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,

@@ -241,6 +241,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err := checkStartStorageRefusals(ctx, preDir, refusalProfile); err != nil {
 		return nil, err
 	}
+	// Refuse a hosted request carrying an out-of-root absolute workspace
+	// before any filesystem side effects (such as RecordRunOwner creating
+	// directories under an uninitialized ProjectPath).
+	if opts.HostedMode && opts.Workspace != "" && filepath.IsAbs(opts.Workspace) {
+		if err := validateHostedAbsoluteWorkspace(ctx, opts.ProjectPath, projectDir, opts.Workspace); err != nil {
+			return nil, err
+		}
+	}
 
 	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
 	// mints one per create/start dispatch; local/CLI mode and older hubs
@@ -392,6 +400,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	if opts.HostedMode {
+		ctx = api.ContextWithHostedMode(ctx)
+	}
 	// Collect the warnings for template environment keys GetAgent ignores
 	// (ptone/scion#4524); they join the start warnings below.
 	ctx, templateEnvWarns := withTemplateEnvWarnings(ctx)
@@ -2185,8 +2196,11 @@ authDone:
 		roots = []string{effectiveWorkspace}
 	} else {
 		var rootsErr error
-		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+		roots, rootsErr = workspaceSourceRootsForMode(ctx, explicitWorkspace, opts.HostedMode, effectiveWorkspace, settings, opts.ProjectPath, projectDir)
 		if rootsErr != nil {
+			if explicitWorkspace && opts.HostedMode {
+				return nil, newWorkspaceNotPermittedError(rootsErr)
+			}
 			return nil, rootsErr
 		}
 		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
@@ -2195,6 +2209,9 @@ authDone:
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
 	if err != nil {
+		if explicitWorkspace && opts.HostedMode {
+			return nil, newWorkspaceNotPermittedError(err)
+		}
 		// A global agent provisioned before <projectDir>/workspace existed
 		// (or one whose persisted workspace was otherwise never brought
 		// under it) is intentionally refused here on resume, now that the
@@ -4156,7 +4173,14 @@ func resolvedPathWithin(p, root string) bool {
 // resume, rather than being re-classified as git and checked against a
 // repo root it was never provisioned relative to.
 func workspaceSourceRoots(explicitWorkspace bool, effectiveWorkspace string, settings *config.VersionedSettings, projectDir string) ([]string, error) {
+	return workspaceSourceRootsForMode(context.Background(), explicitWorkspace, false, effectiveWorkspace, settings, "", projectDir)
+}
+
+func workspaceSourceRootsForMode(ctx context.Context, explicitWorkspace, hostedMode bool, effectiveWorkspace string, settings *config.VersionedSettings, projectPath, projectDir string) ([]string, error) {
 	if explicitWorkspace {
+		if hostedMode {
+			return hostedExplicitWorkspaceRoots(ctx, projectPath, projectDir)
+		}
 		return nil, nil
 	}
 	if isGitWorkspaceProject(projectDir) {
