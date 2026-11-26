@@ -179,11 +179,9 @@ func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
 		seedSettledAndOpenHistoryForQueryCount(t, f, cs, numProjects, settledPerProject, openProjects)
 		ctx := context.Background()
 
-		// First HTTP call on a fresh server includes 3 extra queries from the
-		// throttled auth-middleware users.last_seen update (SELECT user,
-		// UPDATE users SET last_seen, post-update SELECT). Subsequent calls
-		// within the throttle window run the 10 steady-state queries matching
-		// waitingOnYouTotal and Scale S warm measurements.
+		// newCountingDecisionsFixture disables async userActivity last_seen
+		// writes so both the first (cold) and second (warm) HTTP calls have
+		// deterministic Decisions-only query counts.
 		counter.Reset(true)
 		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=pending&limit=0", nil)
 		resp := decodeProfilePendingDecisions(t, rr)
@@ -225,12 +223,12 @@ func TestDecisionsQueryCount_LimitZeroAndWaitingOnYouTotal(t *testing.T) {
 		assert.Equal(t, bell5p10h, bell40p10h, "waitingOnYouTotal query count must be constant across 5 vs 40 projects")
 		assert.Equal(t, bell5p10h, bell5p300h, "waitingOnYouTotal query count must be constant across 10 vs 300 history rows/project")
 		// Owner exit criterion (design-scale §1): quiet-user limit=0 probe
-		// (steady-state warm) and bell waitingOnYouTotal stay <= 12 queries.
-		// The very first HTTP request on a fresh server adds 3 throttled
-		// users.last_seen update queries (<= 15).
+		// (both cold first request and steady-state warm) and bell
+		// waitingOnYouTotal stay <= 12 queries (async userActivity last_seen
+		// writes are disabled by newCountingDecisionsFixture).
 		assert.LessOrEqual(t, bell40p10h, int64(12), "quiet-user waitingOnYouTotal must stay <= 12 queries (design-scale §1)")
 		assert.LessOrEqual(t, lzW40p10h, int64(12), "quiet-user HTTP limit=0 (warm) must stay <= 12 queries (design-scale §1)")
-		assert.LessOrEqual(t, lzC40p10h, int64(15), "quiet-user HTTP limit=0 (cold first request with throttled last_seen) must stay <= 15 queries")
+		assert.LessOrEqual(t, lzC40p10h, int64(12), "quiet-user HTTP limit=0 (cold) must stay <= 12 queries (design-scale §1)")
 	})
 
 	t.Run("one_open_project_constant_in_total_projects_and_history", func(t *testing.T) {

@@ -562,6 +562,10 @@ func TestDecisionsScale_TrayOpen(t *testing.T) {
 				counter = newBellQueryCountingDriver(base.Driver())
 				cs = entadapter.NewCompositeStore(ent.NewClient(ent.Driver(counter)))
 				srv, s := testServerOnMigratedStore(t, cs)
+				if srv.userActivity != nil {
+					srv.userActivity.Close(context.Background())
+					srv.userActivity = nil
+				}
 				alice, bob, project := setupDemoPolicyOn(t, srv, s)
 				f = newDecisionsFixtureOn(t, srv, s, alice, bob, project)
 			} else {

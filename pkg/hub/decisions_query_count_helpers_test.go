@@ -132,6 +132,12 @@ func newCountingDecisionsFixture(t *testing.T) (*decisionsFixture, *entadapter.C
 	counter := newBellQueryCountingDriver(base.Driver())
 	cs := entadapter.NewCompositeStore(ent.NewClient(ent.Driver(counter)))
 	srv, s := testServerOnMigratedStore(t, cs)
+	// Disable async user last_seen updates so the background UserActivityTracker
+	// goroutine cannot race with query-count measurement windows (ptone/scion#9388).
+	if srv.userActivity != nil {
+		srv.userActivity.Close(context.Background())
+		srv.userActivity = nil
+	}
 	alice, bob, project := setupDemoPolicyOn(t, srv, s)
 	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)
 	return f, cs, counter
@@ -174,6 +180,12 @@ func newCountingDecisionsFixtureForScale(t *testing.T) (*decisionsFixture, *enta
 		_ = adminCS.Close()
 	})
 	srv, s := testServerOnMigratedStore(t, cs)
+	// Disable async user last_seen updates so the background UserActivityTracker
+	// goroutine cannot race with query-count measurement windows (ptone/scion#9388).
+	if srv.userActivity != nil {
+		srv.userActivity.Close(context.Background())
+		srv.userActivity = nil
+	}
 	alice, bob, project := setupDemoPolicyOn(t, srv, s)
 	f := newDecisionsFixtureOn(t, srv, s, alice, bob, project)
 	return f, cs, counter
