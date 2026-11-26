@@ -17,10 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
@@ -40,9 +37,10 @@ type ProjectGitHubResponse struct {
 
 // ProjectGitHubAppInfo reports non-sensitive GitHub App configuration state.
 type ProjectGitHubAppInfo struct {
-	Configured bool   `json:"configured"`
-	Slug       string `json:"slug"`
-	WebHost    string `json:"web_host"`
+	Configured      bool   `json:"configured"`
+	Slug            string `json:"slug"`
+	WebHost         string `json:"web_host"`
+	InstallationURL string `json:"installation_url,omitempty"`
 }
 
 // ProjectGitHubRemoteInfo reports the project's parsed GitHub remote.
@@ -53,15 +51,17 @@ type ProjectGitHubRemoteInfo struct {
 }
 
 // ProjectGitHubAssociationInfo reports the project's GitHub App installation
-// association and authorization status from cached/local state.
+// association and authorization status from bounded/cached evaluation.
 type ProjectGitHubAssociationInfo struct {
 	InstallationID *int64  `json:"installation_id"`
 	AccountLogin   string  `json:"account_login"`
 	Basis          *string `json:"basis"`
 	WriteAllowed   bool    `json:"write_allowed"`
 	BoundBy        string  `json:"bound_by,omitempty"`
+	BoundByName    string  `json:"bound_by_name,omitempty"`
 	BoundAt        string  `json:"bound_at,omitempty"`
 	Authorized     bool    `json:"authorized"`
+	Verified       bool    `json:"verified"`
 	ErrorCode      string  `json:"error_code"`
 	Reason         string  `json:"reason"`
 }
@@ -69,18 +69,21 @@ type ProjectGitHubAssociationInfo struct {
 // ProjectGitHubPermissionsInfo reports requested, App-granted, and effective
 // token permissions plus any caps applied during token minting.
 type ProjectGitHubPermissionsInfo struct {
-	Mode       string            `json:"mode"`
-	Requested  map[string]string `json:"requested"`
-	AppGranted map[string]string `json:"app_granted"`
-	Effective  map[string]string `json:"effective"`
-	Capped     []string          `json:"capped"`
-	CapReasons map[string]string `json:"cap_reasons"`
+	Mode          string            `json:"mode"`
+	AppGrantKnown bool              `json:"app_grant_known"`
+	Requested     map[string]string `json:"requested"`
+	AppGranted    map[string]string `json:"app_granted"`
+	Effective     map[string]string `json:"effective"`
+	Capped        []string          `json:"capped"`
+	CapReasons    map[string]string `json:"cap_reasons"`
 }
 
 // ProjectGitHubCapabilities reports the caller's server-computed capabilities
 // on this project's GitHub integration.
 type ProjectGitHubCapabilities struct {
 	Bind            bool `json:"bind"`
+	Unbind          bool `json:"unbind"`
+	Check           bool `json:"check"`
 	EditPermissions bool `json:"edit_permissions"`
 	EditExtraRepos  bool `json:"edit_extra_repos"`
 	Discover        bool `json:"discover"`
@@ -98,8 +101,10 @@ var projectGitHubPermissionKeys = []string{
 }
 
 // handleProjectGitHub handles GET /api/v1/projects/{id}/github.
-// It returns a read-only overview of the project's GitHub App integration
-// without making any outbound GitHub API calls.
+// It resolves App identity through ensureGitHubAppIdentity (at most one
+// GET /app per process lifetime with failure backoff) and association status
+// through evaluateGitHubAssociationCached (bounded by the report and access
+// caches).
 func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, project *store.Project) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -110,34 +115,44 @@ func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, pro
 
 	cfg, keyStatus := s.githubAppPrivateKeyStatus(ctx)
 	webHost := githubapp.WebHostForAPIBaseURL(cfg.APIBaseURL)
-	slug, _, _ := s.peekGitHubAppMentionIdentities()
+	configured := cfg.AppID != 0 && keyStatus.hasPrivateKey
 
-	appGranted := make(map[string]string)
-	if cfg.AppID > 0 {
-		if id, _, _ := s.githubAppIdentity.snapshot(cfg.AppID); id != nil {
-			for k, v := range id.Permissions {
-				appGranted[k] = v
-			}
+	// Resolve App identity through the same bounded path minting and admin
+	// GET /github-app use (at most one GET /app per process with backoff).
+	var (
+		appGranted    map[string]string
+		appGrantKnown bool
+		slug          = normalizeGitHubMentionHandle(cfg.AppSlug)
+	)
+	if id, hasID := s.GitHubAppIdentity(ctx); hasID && id != nil {
+		appGrantKnown = true
+		appGranted = make(map[string]string, len(id.Permissions))
+		for k, v := range id.Permissions {
+			appGranted[k] = v
+		}
+		if slug == "" {
+			slug = id.Slug
 		}
 	}
 
 	owner, repo, onAppHost := githubapp.RemoteOwnerRepo(project.GitRemote, webHost)
-	assoc := s.resolveProjectGitHubAssociationCached(ctx, project, webHost, owner, repo, onAppHost)
-	perms := computeProjectGitHubPermissions(project, assoc, owner, repo, appGranted)
+	assoc := s.resolveProjectGitHubAssociation(ctx, project)
+	perms := computeProjectGitHubPermissions(project, assoc, owner, repo, appGranted, appGrantKnown)
 	caps := s.computeProjectGitHubCapabilities(r, project)
 
+	appInfo := ProjectGitHubAppInfo{
+		Configured: configured,
+		Slug:       slug,
+		WebHost:    webHost,
+	}
+	if caps.Discover {
+		appInfo.InstallationURL = cfg.InstallationURL
+	}
+
 	writeJSON(w, http.StatusOK, ProjectGitHubResponse{
-		ProjectID: project.ID,
-		App: ProjectGitHubAppInfo{
-			Configured: cfg.AppID != 0 && keyStatus.hasPrivateKey,
-			Slug:       slug,
-			WebHost:    webHost,
-		},
-		Remote: ProjectGitHubRemoteInfo{
-			Owner:     owner,
-			Repo:      repo,
-			OnAppHost: onAppHost,
-		},
+		ProjectID:   project.ID,
+		App:         appInfo,
+		Remote:      ProjectGitHubRemoteInfo{Owner: owner, Repo: repo, OnAppHost: onAppHost},
 		Association: assoc,
 		Status:      project.GitHubAppStatus,
 		Permissions: perms,
@@ -145,141 +160,32 @@ func (s *Server) handleProjectGitHub(w http.ResponseWriter, r *http.Request, pro
 	})
 }
 
-// resolveProjectGitHubAssociationCached resolves association status from the
-// cached association report entry and local/in-memory state only, never making
-// an outbound GitHub API call.
-func (s *Server) resolveProjectGitHubAssociationCached(
-	ctx context.Context,
-	project *store.Project,
-	webHost, owner, repo string,
-	onAppHost bool,
-) ProjectGitHubAssociationInfo {
-	if project == nil || project.GitHubInstallationID == nil {
-		return ProjectGitHubAssociationInfo{}
-	}
-
-	instID := *project.GitHubInstallationID
+// resolveProjectGitHubAssociation builds ProjectGitHubAssociationInfo from the
+// shared cached association evaluator.
+func (s *Server) resolveProjectGitHubAssociation(ctx context.Context, project *store.Project) ProjectGitHubAssociationInfo {
+	eval, _ := s.evaluateGitHubAssociationCached(ctx, project, true)
 	info := ProjectGitHubAssociationInfo{
-		InstallationID: &instID,
+		InstallationID: eval.InstallationID,
+		AccountLogin:   eval.AccountLogin,
+		WriteAllowed:   eval.WriteAllowed,
+		Authorized:     eval.Authorized,
+		Verified:       eval.Verified,
+		ErrorCode:      eval.ErrorCode,
+		Reason:         eval.Reason,
 	}
-
-	inst, instErr := s.store.GetGitHubInstallation(ctx, instID)
-	if instErr == nil && inst != nil {
-		info.AccountLogin = inst.AccountLogin
-	}
-
-	// Prefer a fresh, non-dirty entry from the association report cache.
-	if entry, ok := s.githubAssociationReportCache.lookupFreshProject(project.ID, instID, timeNow()); ok {
-		info.Authorized = entry.Authorized
-		info.WriteAllowed = entry.WriteAllowed
-		info.ErrorCode = entry.ErrorCode
-		info.Reason = entry.Reason
-		if entry.Basis != "" {
-			basis := entry.Basis
-			info.Basis = &basis
-		}
-		populateAdminBindingDetails(project, instID, &info)
-		return info
-	}
-
-	// Report cache is cold or dirty for this project: evaluate local checks and
-	// in-memory access cache without making any outbound GitHub HTTP call.
-	if !onAppHost {
-		info.ErrorCode = githubAppErrAssociationUnauthorized
-		info.Reason = fmt.Sprintf("the project's git remote is not an owner/repo on the configured GitHub host %q", webHost)
-		return info
-	}
-
-	if instErr != nil {
-		if errors.Is(instErr, store.ErrNotFound) {
-			info.ErrorCode = githubAppErrAssociationUnauthorized
-			info.Reason = fmt.Sprintf("installation %d not found", instID)
-		} else {
-			info.ErrorCode = githubAppErrAssociationCheckFailed
-			info.Reason = "installation lookup failed"
-		}
-		return info
-	}
-	if inst == nil || inst.Status != store.GitHubInstallationStatusActive {
-		status := "missing"
-		if inst != nil {
-			status = inst.Status
-		}
-		info.ErrorCode = githubAppErrAssociationUnauthorized
-		info.Reason = fmt.Sprintf("installation %d is %s", instID, status)
-		return info
-	}
-	if inst.AccountLogin == "" || !strings.EqualFold(inst.AccountLogin, owner) {
-		info.ErrorCode = githubAppErrAssociationUnauthorized
-		info.Reason = fmt.Sprintf("installation %d belongs to account %q, not the remote owner %q", instID, inst.AccountLogin, owner)
-		return info
-	}
-
-	bound, err := s.githubAdminBindingValid(ctx, project, instID)
-	if err != nil {
-		info.ErrorCode = githubAppErrAssociationCheckFailed
-		info.Reason = "binding admin lookup failed"
-		return info
-	}
-	if bound {
-		basis := githubAssociationBasisAdminBinding
-		info.Authorized = true
+	if eval.Basis != "" {
+		basis := eval.Basis
 		info.Basis = &basis
-		info.WriteAllowed = true
-		populateAdminBindingDetails(project, instID, &info)
-		return info
 	}
-
-	creatorToken, hasToken, err := s.lookupCreatorGitHubToken(ctx, project)
-	if err != nil {
-		info.ErrorCode = githubAppErrAssociationCheckFailed
-		info.Reason = "creator GitHub token lookup failed"
-		return info
+	if eval.InstallationID != nil {
+		s.populateAdminBindingDetails(ctx, project, *eval.InstallationID, &info)
 	}
-	if !hasToken {
-		info.ErrorCode = githubAppErrAssociationUnauthorized
-		info.Reason = "no admin binding and the project creator has no GitHub token to verify repository access"
-		return info
-	}
-
-	key := githubAccessCacheKey(project.ID, instID, s.githubAppAPIBase(), owner, repo, project.CreatedBy, creatorToken)
-	if access, denied, cached := s.githubAccessCache.get(key); cached {
-		switch {
-		case denied:
-			info.ErrorCode = githubAppErrAssociationUnauthorized
-			info.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
-		case access.Push:
-			basis := githubAssociationBasisCreatorPush
-			info.Authorized = true
-			info.Basis = &basis
-			info.WriteAllowed = true
-		case access.Pull:
-			basis := githubAssociationBasisCreatorPull
-			info.Authorized = true
-			info.Basis = &basis
-			info.WriteAllowed = false
-		default:
-			info.ErrorCode = githubAppErrAssociationUnauthorized
-			info.Reason = fmt.Sprintf("the project creator's GitHub identity has no access to %s/%s", owner, repo)
-		}
-		return info
-	}
-
-	if project.GitHubAppStatus != nil &&
-		project.GitHubAppStatus.State == store.GitHubAppStateError &&
-		strings.HasPrefix(project.GitHubAppStatus.ErrorCode, "association_") {
-		info.ErrorCode = project.GitHubAppStatus.ErrorCode
-		info.Reason = project.GitHubAppStatus.ErrorMessage
-		return info
-	}
-
-	info.Reason = "creator repository access has not been verified yet"
 	return info
 }
 
-// populateAdminBindingDetails fills BoundBy and BoundAt when the association
-// basis is admin_binding.
-func populateAdminBindingDetails(project *store.Project, instID int64, info *ProjectGitHubAssociationInfo) {
+// populateAdminBindingDetails fills BoundBy, BoundByName, and BoundAt when the
+// association basis is admin_binding.
+func (s *Server) populateAdminBindingDetails(ctx context.Context, project *store.Project, instID int64, info *ProjectGitHubAssociationInfo) {
 	if info.Basis == nil || *info.Basis != githubAssociationBasisAdminBinding {
 		return
 	}
@@ -298,6 +204,15 @@ func populateAdminBindingDetails(project *store.Project, instID int64, info *Pro
 	if !b.BoundAt.IsZero() {
 		info.BoundAt = b.BoundAt.UTC().Format(time.RFC3339)
 	}
+	if b.BoundBy != "" {
+		if u, err := s.store.GetUser(ctx, b.BoundBy); err == nil && u != nil {
+			if u.DisplayName != "" {
+				info.BoundByName = u.DisplayName
+			} else if u.Email != "" {
+				info.BoundByName = u.Email
+			}
+		}
+	}
 }
 
 func computeProjectGitHubPermissions(
@@ -305,6 +220,7 @@ func computeProjectGitHubPermissions(
 	assoc ProjectGitHubAssociationInfo,
 	owner, repo string,
 	appGranted map[string]string,
+	appGrantKnown bool,
 ) ProjectGitHubPermissionsInfo {
 	mode := "default"
 	var requestedPerms githubapp.TokenPermissions
@@ -331,41 +247,47 @@ func computeProjectGitHubPermissions(
 			WriteAllowed: assoc.WriteAllowed,
 			Basis:        basis,
 		}
-		effPerms, usedDefaults, ok := effectiveGitHubTokenPermissions(project, grant, appGranted)
-		if ok {
-			effectiveMap = githubapp.TokenPermissionsToMap(effPerms)
-		}
-
-		for _, key := range projectGitHubPermissionKeys {
-			reqLevel := requestedMap[key]
-			if reqLevel == "" {
-				continue
+		// When default mode is active and App identity is not yet known, do not
+		// report false app_grant caps; leave effective/capped empty and let
+		// app_grant_known=false explain why.
+		if mode == "custom" || appGrantKnown {
+			effPerms, usedDefaults, ok := effectiveGitHubTokenPermissions(project, grant, appGranted)
+			if ok {
+				effectiveMap = githubapp.TokenPermissionsToMap(effPerms)
 			}
-			effLevel := effectiveMap[key]
-			if githubPermLevelRank(effLevel) < githubPermLevelRank(reqLevel) {
-				capped = append(capped, key)
-				if usedDefaults {
-					if githubPermLevelRank(appGranted[key]) < githubPermLevelRank(reqLevel) {
-						capReasons[key] = "app_grant"
-					} else if !grant.WriteAllowed {
-						capReasons[key] = "association_read_only"
+
+			for _, key := range projectGitHubPermissionKeys {
+				reqLevel := requestedMap[key]
+				if reqLevel == "" {
+					continue
+				}
+				effLevel := effectiveMap[key]
+				if githubPermLevelRank(effLevel) < githubPermLevelRank(reqLevel) {
+					capped = append(capped, key)
+					if usedDefaults {
+						if githubPermLevelRank(appGranted[key]) < githubPermLevelRank(reqLevel) {
+							capReasons[key] = "app_grant"
+						} else if !grant.WriteAllowed {
+							capReasons[key] = "association_read_only"
+						} else {
+							capReasons[key] = "app_grant"
+						}
 					} else {
-						capReasons[key] = "app_grant"
+						capReasons[key] = "association_read_only"
 					}
-				} else {
-					capReasons[key] = "association_read_only"
 				}
 			}
 		}
 	}
 
 	return ProjectGitHubPermissionsInfo{
-		Mode:       mode,
-		Requested:  requestedMap,
-		AppGranted: appGranted,
-		Effective:  effectiveMap,
-		Capped:     capped,
-		CapReasons: capReasons,
+		Mode:          mode,
+		AppGrantKnown: appGrantKnown,
+		Requested:     requestedMap,
+		AppGranted:    appGranted,
+		Effective:     effectiveMap,
+		Capped:        capped,
+		CapReasons:    capReasons,
 	}
 }
 
@@ -389,11 +311,17 @@ func (s *Server) computeProjectGitHubCapabilities(r *http.Request, project *stor
 
 	canUpdateProject := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate).Allowed
 	canHubGitHubAppUpdate := s.routePermissionDecision(r, githubInstallationBindPermission).outcome == routePermissionAllowed
+	// project.github.installation.bind and hub.github_app.update admit hub-boundary
+	// credentials (and interactive sessions), never project-scoped UATs.
+	cred := credentialContextForIdentity(identity)
+	hubBoundaryAdmitted := cred.Boundary == nil || cred.Boundary.Kind == "" || cred.Boundary.Kind == BoundaryKindHub
 
 	return ProjectGitHubCapabilities{
-		Bind:            canUpdateProject && canHubGitHubAppUpdate,
+		Bind:            canUpdateProject && canHubGitHubAppUpdate && hubBoundaryAdmitted,
+		Unbind:          canUpdateProject,
+		Check:           canUpdateProject,
 		EditPermissions: canUpdateProject,
 		EditExtraRepos:  canUpdateProject,
-		Discover:        canHubGitHubAppUpdate,
+		Discover:        canHubGitHubAppUpdate && hubBoundaryAdmitted,
 	}
 }

@@ -100,8 +100,14 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 			}
 			switch basis {
 			case "admin_binding":
-				if info.Association.BoundBy != "" && info.Association.BoundAt != "" {
-					_, _ = fmt.Fprintf(out, "Authorized by: admin_binding (%s, %s)\n", info.Association.BoundBy, info.Association.BoundAt)
+				binder := info.Association.BoundByName
+				if binder == "" {
+					binder = info.Association.BoundBy
+				}
+				if binder != "" && info.Association.BoundAt != "" {
+					_, _ = fmt.Fprintf(out, "Authorized by: admin_binding (%s, %s)\n", binder, info.Association.BoundAt)
+				} else if binder != "" {
+					_, _ = fmt.Fprintf(out, "Authorized by: admin_binding (%s)\n", binder)
 				} else {
 					_, _ = fmt.Fprintln(out, "Authorized by: admin_binding")
 				}
@@ -112,6 +118,8 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 			default:
 				_, _ = fmt.Fprintf(out, "Authorized by: %s\n", basis)
 			}
+		} else if !info.Association.Verified {
+			_, _ = fmt.Fprintf(out, "Authorized:    unverified (%s)\n", info.Association.Reason)
 		} else {
 			_, _ = fmt.Fprintf(out, "Authorized:    no (%s)\n", info.Association.Reason)
 		}
@@ -126,6 +134,9 @@ func runProjectGitHubStatus(ctx context.Context, projects hubclient.ProjectServi
 	}
 
 	_, _ = fmt.Fprintf(out, "\nToken Permissions (mode: %s)\n", info.Permissions.Mode)
+	if !info.Permissions.AppGrantKnown && info.Permissions.AppGranted == nil {
+		_, _ = fmt.Fprintln(out, "Note: App permissions not yet loaded.")
+	}
 	tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "PERMISSION\tREQUESTED\tAPP GRANT\tEFFECTIVE\tNOTE")
 	for _, row := range projectGitHubPermRows {

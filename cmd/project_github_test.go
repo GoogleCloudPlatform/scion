@@ -97,12 +97,14 @@ func TestProjectGitHubStatus_Output(t *testing.T) {
 				Basis:          &basis,
 				WriteAllowed:   false,
 				Authorized:     true,
+				Verified:       true,
 			},
 			Status: &hubclient.GitHubAppProjectStatus{
 				State: "ok",
 			},
 			Permissions: hubclient.ProjectGitHubPermissions{
-				Mode: "custom",
+				Mode:          "custom",
+				AppGrantKnown: true,
 				Requested: map[string]string{
 					"contents": "write",
 					"issues":   "write",
@@ -140,6 +142,38 @@ func TestProjectGitHubStatus_Output(t *testing.T) {
 	assert.Contains(t, out, "Token Permissions (mode: custom)")
 	assert.Contains(t, out, "association is read-only")
 	assert.Contains(t, out, "app not granted write")
+
+	// Also verify bound_by_name, unverified state, and unloaded app permissions.
+	adminBasis := "admin_binding"
+	projects.info.Association = hubclient.ProjectGitHubAssociation{
+		InstallationID: &instID,
+		AccountLogin:   "acme",
+		Basis:          &adminBasis,
+		WriteAllowed:   true,
+		BoundBy:        "user-uuid",
+		BoundByName:    "Dana Admin",
+		BoundAt:        "2026-11-20T12:00:00Z",
+		Authorized:     true,
+		Verified:       true,
+	}
+	projects.info.Permissions.AppGrantKnown = false
+	projects.info.Permissions.AppGranted = nil
+	buf.Reset()
+	require.NoError(t, runProjectGitHubStatus(context.Background(), projects, "proj-1", &buf))
+	assert.Contains(t, buf.String(), "admin_binding (Dana Admin, 2026-11-20T12:00:00Z)")
+	assert.Contains(t, buf.String(), "App permissions not yet loaded.")
+
+	projects.info.Association = hubclient.ProjectGitHubAssociation{
+		InstallationID: &instID,
+		AccountLogin:   "acme",
+		Authorized:     false,
+		Verified:       false,
+		ErrorCode:      "association_unverified",
+		Reason:         "check unavailable",
+	}
+	buf.Reset()
+	require.NoError(t, runProjectGitHubStatus(context.Background(), projects, "proj-1", &buf))
+	assert.Contains(t, buf.String(), "unverified (check unavailable)")
 }
 
 func TestProjectGitHubBind_AutoSelectAndErrors(t *testing.T) {

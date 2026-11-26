@@ -262,6 +262,7 @@ export interface ProjectGitHubInfo {
     configured: boolean;
     slug: string;
     web_host: string;
+    installation_url?: string;
   };
   remote: {
     owner: string;
@@ -274,22 +275,27 @@ export interface ProjectGitHubInfo {
     basis: 'admin_binding' | 'creator_push' | 'creator_pull' | null;
     write_allowed: boolean;
     bound_by?: string;
+    bound_by_name?: string;
     bound_at?: string;
     authorized: boolean;
+    verified: boolean;
     error_code: string;
     reason: string;
   };
   status: GitHubAppProjectStatus | null;
   permissions: {
     mode: 'default' | 'custom';
+    app_grant_known: boolean;
     requested: Record<string, string>;
-    app_granted: Record<string, string>;
+    app_granted: Record<string, string> | null;
     effective: Record<string, string>;
     capped: string[];
     cap_reasons: Record<string, string>;
   };
   can: {
     bind: boolean;
+    unbind: boolean;
+    check: boolean;
     edit_permissions: boolean;
     edit_extra_repos: boolean;
     discover: boolean;

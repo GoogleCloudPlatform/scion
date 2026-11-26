@@ -144,17 +144,13 @@ func (s *githubAppService) ListInstallations(ctx context.Context, opts *ListGitH
 	if err != nil {
 		return nil, err
 	}
-	var wrapper struct {
-		Installations []GitHubInstallation `json:"installations"`
-	}
 	decoded, err := apiclient.DecodeRequired[struct {
 		Installations []GitHubInstallation `json:"installations"`
 	}](resp)
 	if err != nil {
 		return nil, err
 	}
-	wrapper.Installations = decoded.Installations
-	return wrapper.Installations, nil
+	return decoded.Installations, nil
 }
 
 func (s *githubAppService) GetConfig(ctx context.Context) (*GitHubAppConfig, error) {

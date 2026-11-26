@@ -35,9 +35,10 @@ type ProjectGitHub struct {
 
 // ProjectGitHubApp describes non-sensitive GitHub App configuration.
 type ProjectGitHubApp struct {
-	Configured bool   `json:"configured"`
-	Slug       string `json:"slug"`
-	WebHost    string `json:"web_host"`
+	Configured      bool   `json:"configured"`
+	Slug            string `json:"slug"`
+	WebHost         string `json:"web_host"`
+	InstallationURL string `json:"installation_url,omitempty"`
 }
 
 // ProjectGitHubRemote describes the project's parsed GitHub remote.
@@ -54,8 +55,10 @@ type ProjectGitHubAssociation struct {
 	Basis          *string `json:"basis"`
 	WriteAllowed   bool    `json:"write_allowed"`
 	BoundBy        string  `json:"bound_by,omitempty"`
+	BoundByName    string  `json:"bound_by_name,omitempty"`
 	BoundAt        string  `json:"bound_at,omitempty"`
 	Authorized     bool    `json:"authorized"`
+	Verified       bool    `json:"verified"`
 	ErrorCode      string  `json:"error_code"`
 	Reason         string  `json:"reason"`
 }
@@ -63,18 +66,21 @@ type ProjectGitHubAssociation struct {
 // ProjectGitHubPermissions describes requested, App-granted, and effective
 // token permissions plus any caps applied.
 type ProjectGitHubPermissions struct {
-	Mode       string            `json:"mode"`
-	Requested  map[string]string `json:"requested"`
-	AppGranted map[string]string `json:"app_granted"`
-	Effective  map[string]string `json:"effective"`
-	Capped     []string          `json:"capped"`
-	CapReasons map[string]string `json:"cap_reasons"`
+	Mode          string            `json:"mode"`
+	AppGrantKnown bool              `json:"app_grant_known"`
+	Requested     map[string]string `json:"requested"`
+	AppGranted    map[string]string `json:"app_granted"`
+	Effective     map[string]string `json:"effective"`
+	Capped        []string          `json:"capped"`
+	CapReasons    map[string]string `json:"cap_reasons"`
 }
 
 // ProjectGitHubCapabilities describes caller capabilities on the project's
 // GitHub integration.
 type ProjectGitHubCapabilities struct {
 	Bind            bool `json:"bind"`
+	Unbind          bool `json:"unbind"`
+	Check           bool `json:"check"`
 	EditPermissions bool `json:"edit_permissions"`
 	EditExtraRepos  bool `json:"edit_extra_repos"`
 	Discover        bool `json:"discover"`

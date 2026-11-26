@@ -31,7 +31,12 @@ const GITHUB_PROJECT = {
 function makeProjectGitHub(overrides?: Partial<ProjectGitHubInfo>): ProjectGitHubInfo {
   return {
     project_id: 'proj-gh-1',
-    app: { configured: true, slug: 'scion-bot', web_host: 'github.com' },
+    app: {
+      configured: true,
+      slug: 'scion-bot',
+      web_host: 'github.com',
+      installation_url: 'https://github.com/apps/scion-bot/installations/new',
+    },
     remote: { owner: 'Acme', repo: 'api', on_app_host: true },
     association: {
       installation_id: 4412,
@@ -39,6 +44,7 @@ function makeProjectGitHub(overrides?: Partial<ProjectGitHubInfo>): ProjectGitHu
       basis: 'creator_pull',
       write_allowed: false,
       authorized: true,
+      verified: true,
       error_code: '',
       reason: '',
     },
@@ -48,6 +54,7 @@ function makeProjectGitHub(overrides?: Partial<ProjectGitHubInfo>): ProjectGitHu
     },
     permissions: {
       mode: 'custom',
+      app_grant_known: true,
       requested: { contents: 'write', issues: 'write', metadata: 'read' },
       app_granted: { contents: 'write', issues: 'read', metadata: 'read' },
       effective: { contents: 'read', issues: 'read', metadata: 'read' },
@@ -59,6 +66,8 @@ function makeProjectGitHub(overrides?: Partial<ProjectGitHubInfo>): ProjectGitHu
     },
     can: {
       bind: true,
+      unbind: true,
+      check: true,
       edit_permissions: true,
       edit_extra_repos: true,
       discover: true,
@@ -228,7 +237,14 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     const elDenied = await mountSettings(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
-          can: { bind: false, edit_permissions: true, edit_extra_repos: true, discover: false },
+          can: {
+            bind: false,
+            unbind: true,
+            check: true,
+            edit_permissions: true,
+            edit_extra_repos: true,
+            discover: false,
+          },
         }),
       })
     );
@@ -238,13 +254,128 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     const elAllowed = await mountSettings(
       createFetchHandler({
         githubInfo: makeProjectGitHub({
-          can: { bind: true, edit_permissions: true, edit_extra_repos: true, discover: true },
+          can: {
+            bind: true,
+            unbind: true,
+            check: true,
+            edit_permissions: true,
+            edit_extra_repos: true,
+            discover: true,
+          },
         }),
       })
     );
     expect(
       elAllowed.shadowRoot!.querySelector('[data-testid="github-bind-button"]')
     ).not.toBeNull();
+  });
+
+  it('hides all write buttons on a connected project when can flags are all false', async () => {
+    const el = await mountSettings(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          can: {
+            bind: false,
+            unbind: false,
+            check: false,
+            edit_permissions: false,
+            edit_extra_repos: false,
+            discover: false,
+          },
+        }),
+      })
+    );
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-testid="github-app-section"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="github-bind-button"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-check-button"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-remove-button"]')).toBeNull();
+    expect(root.querySelector('[data-testid="github-configure-link"]')).toBeNull();
+  });
+
+  it('shows unloaded App permissions note, neutral unverified copy, bound_by_name, and install link', async () => {
+    const elUnloaded = await mountSettings(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          association: {
+            installation_id: 4412,
+            account_login: 'acme',
+            basis: null,
+            write_allowed: false,
+            authorized: false,
+            verified: false,
+            error_code: 'association_unverified',
+            reason: 'GitHub App association could not be verified.',
+          },
+          permissions: {
+            mode: 'default',
+            app_grant_known: false,
+            requested: { contents: 'write', metadata: 'read' },
+            app_granted: null,
+            effective: {},
+            capped: [],
+            cap_reasons: {},
+          },
+        }),
+      })
+    );
+    const rootUnloaded = elUnloaded.shadowRoot!;
+    expect(
+      rootUnloaded.querySelector('[data-testid="github-app-perms-unloaded"]')?.textContent
+    ).toContain('App permissions not yet loaded');
+    const unverifiedEl = rootUnloaded.querySelector(
+      '[data-testid="github-association-unverified"]'
+    );
+    expect(unverifiedEl?.textContent).toContain('Unverified');
+    expect(rootUnloaded.textContent).not.toContain('Not authorized');
+    expect(rootUnloaded.textContent).not.toContain('App not granted');
+    elUnloaded.remove();
+
+    const elBound = await mountSettings(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          association: {
+            installation_id: 4412,
+            account_login: 'acme',
+            basis: 'admin_binding',
+            write_allowed: true,
+            bound_by: 'user-uuid-123',
+            bound_by_name: 'Dana Admin',
+            bound_at: '2026-11-20T12:00:00Z',
+            authorized: true,
+            verified: true,
+            error_code: '',
+            reason: '',
+          },
+        }),
+      })
+    );
+    expect(elBound.shadowRoot!.textContent?.replace(/\s+/g, ' ')).toContain(
+      'Bound by Dana Admin on'
+    );
+    elBound.remove();
+
+    const elUnassoc = await mountSettings(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          association: {
+            installation_id: null,
+            account_login: '',
+            basis: null,
+            write_allowed: false,
+            authorized: false,
+            verified: true,
+            error_code: '',
+            reason: '',
+          },
+        }),
+      })
+    );
+    const installLink = elUnassoc.shadowRoot!.querySelector(
+      '[data-testid="github-install-link"]'
+    ) as HTMLAnchorElement | null;
+    expect(installLink).not.toBeNull();
+    expect(installLink?.href).toBe('https://github.com/apps/scion-bot/installations/new');
   });
 
   it('filters candidates, prompts with confirm dialog copy, and sends PUT bind', async () => {
@@ -260,6 +391,7 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
             basis: null,
             write_allowed: false,
             authorized: false,
+            verified: true,
             error_code: '',
             reason: '',
           },

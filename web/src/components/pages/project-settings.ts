@@ -3012,8 +3012,11 @@ export class ScionPageProjectSettings extends LitElement {
     const installationId = assoc?.installation_id ?? this.githubAppInstallationId;
     const hasInstallation = installationId != null;
     const canBind = info?.can.bind === true;
+    const canUnbind = info?.can.unbind === true;
+    const canCheck = info?.can.check === true;
     const canDiscover = info?.can.discover === true;
     const webHost = info?.app.web_host || 'github.com';
+    const installationUrl = info?.app.installation_url || '';
 
     const stateIcon = (s: string | undefined) => {
       switch (s) {
@@ -3048,16 +3051,21 @@ export class ScionPageProjectSettings extends LitElement {
     const renderAuthorizedBy = () => {
       if (!assoc) return '';
       if (!assoc.authorized) {
+        if (assoc.verified === false) {
+          return html`<span data-testid="github-association-unverified"
+            >Unverified${assoc.reason ? ` — ${assoc.reason}` : ''}</span
+          >`;
+        }
         return html`<span>Not authorized${assoc.reason ? ` — ${assoc.reason}` : ''}</span>`;
       }
       switch (assoc.basis) {
-        case 'admin_binding':
+        case 'admin_binding': {
+          const binder = assoc.bound_by_name || assoc.bound_by || 'hub admin';
           return html`<span
             >Bound by
-            ${assoc.bound_by || 'hub admin'}${assoc.bound_at
-              ? ` on ${formatInstantWithZone(assoc.bound_at)}`
-              : ''}</span
+            ${binder}${assoc.bound_at ? ` on ${formatInstantWithZone(assoc.bound_at)}` : ''}</span
           >`;
+        }
         case 'creator_push':
           return html`<span>Creator proof (write allowed)</span>`;
         case 'creator_pull':
@@ -3099,6 +3107,7 @@ export class ScionPageProjectSettings extends LitElement {
       const perms = info?.permissions;
       if (!perms) return '';
       const cappedSet = new Set(perms.capped ?? []);
+      const appGrantKnown = perms.app_grant_known !== false && perms.app_granted != null;
       return html`
         <div class="github-permissions">
           <div class="github-perm-header">
@@ -3107,6 +3116,11 @@ export class ScionPageProjectSettings extends LitElement {
               ${perms.mode === 'custom' ? 'Custom' : 'Default'}
             </span>
           </div>
+          ${!appGrantKnown
+            ? html`<p class="field-help" data-testid="github-app-perms-unloaded">
+                App permissions not yet loaded.
+              </p>`
+            : ''}
           <table class="github-perm-table" data-testid="github-permissions-table">
             <thead>
               <tr>
@@ -3120,7 +3134,7 @@ export class ScionPageProjectSettings extends LitElement {
             <tbody>
               ${GITHUB_PERMISSION_ROWS.map((row) => {
                 const requested = perms.requested?.[row.key] || '';
-                const appGrant = perms.app_granted?.[row.key] || '';
+                const appGrant = appGrantKnown ? perms.app_granted?.[row.key] || '' : '';
                 const effective = perms.effective?.[row.key] || '';
                 const isCapped = cappedSet.has(row.key);
                 const capReason = formatGitHubCapReason(perms.cap_reasons?.[row.key], requested);
@@ -3170,6 +3184,21 @@ export class ScionPageProjectSettings extends LitElement {
                   ? html` <p>Checking for GitHub App installation…</p> `
                   : html`
                       <p>No GitHub App installation is connected to this project.</p>
+                      ${canDiscover && installationUrl
+                        ? html`
+                            <p class="field-help">
+                              <a
+                                href=${installationUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                data-testid="github-install-link"
+                              >
+                                Install the GitHub App
+                              </a>
+                              on your organization or account, then bind or discover it here.
+                            </p>
+                          `
+                        : ''}
                       <div
                         style="margin-top: 0.75rem; display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;"
                       >
@@ -3256,54 +3285,72 @@ export class ScionPageProjectSettings extends LitElement {
                   `
                 : ''}
               ${renderPermissionsTable()}
-
-              <div
-                style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;"
-              >
-                ${canBind && assoc?.basis !== 'admin_binding'
-                  ? html`
-                      <sl-button
-                        variant="primary"
-                        size="small"
-                        data-testid="github-bind-button"
-                        ?loading=${this.githubBindBusy}
-                        ?disabled=${this.githubBindBusy || this.githubAppLoading}
-                        @click=${() => this.startBindGitHubInstallation()}
-                      >
-                        Bind installation
-                      </sl-button>
-                    `
-                  : ''}
-                <sl-button
-                  variant="default"
-                  size="small"
-                  ?loading=${this.githubAppLoading}
-                  ?disabled=${this.githubAppLoading}
-                  @click=${() => this.checkGitHubStatus()}
-                >
-                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                  ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
-                </sl-button>
-                <a
-                  href=${`https://${webHost}/settings/installations/${installationId}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style="text-decoration: none;"
-                >
-                  <sl-button variant="text" size="small">
-                    <sl-icon slot="prefix" name="gear"></sl-icon>
-                    Configure Installation
-                  </sl-button>
-                </a>
-                <sl-button
-                  variant="text"
-                  size="small"
-                  @click=${() => this.removeGitHubInstallation()}
-                >
-                  <sl-icon slot="prefix" name="x-circle"></sl-icon>
-                  Remove
-                </sl-button>
-              </div>
+              ${(canBind && assoc?.basis !== 'admin_binding') || canCheck || canUnbind
+                ? html`
+                    <div
+                      style="margin-top: 1rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;"
+                    >
+                      ${canBind && assoc?.basis !== 'admin_binding'
+                        ? html`
+                            <sl-button
+                              variant="primary"
+                              size="small"
+                              data-testid="github-bind-button"
+                              ?loading=${this.githubBindBusy}
+                              ?disabled=${this.githubBindBusy || this.githubAppLoading}
+                              @click=${() => this.startBindGitHubInstallation()}
+                            >
+                              Bind installation
+                            </sl-button>
+                          `
+                        : ''}
+                      ${canCheck
+                        ? html`
+                            <sl-button
+                              variant="default"
+                              size="small"
+                              data-testid="github-check-button"
+                              ?loading=${this.githubAppLoading}
+                              ?disabled=${this.githubAppLoading}
+                              @click=${() => this.checkGitHubStatus()}
+                            >
+                              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                              ${status?.state === 'unchecked' ? 'Check Status' : 'Recheck Status'}
+                            </sl-button>
+                          `
+                        : ''}
+                      ${canCheck || canUnbind || canBind
+                        ? html`
+                            <a
+                              href=${`https://${webHost}/settings/installations/${installationId}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style="text-decoration: none;"
+                              data-testid="github-configure-link"
+                            >
+                              <sl-button variant="text" size="small">
+                                <sl-icon slot="prefix" name="gear"></sl-icon>
+                                Configure Installation
+                              </sl-button>
+                            </a>
+                          `
+                        : ''}
+                      ${canUnbind
+                        ? html`
+                            <sl-button
+                              variant="text"
+                              size="small"
+                              data-testid="github-remove-button"
+                              @click=${() => this.removeGitHubInstallation()}
+                            >
+                              <sl-icon slot="prefix" name="x-circle"></sl-icon>
+                              Remove
+                            </sl-button>
+                          `
+                        : ''}
+                    </div>
+                  `
+                : ''}
               ${renderBindPicker()}
             `}
       </div>
