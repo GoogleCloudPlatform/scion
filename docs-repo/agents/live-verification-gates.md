@@ -1,6 +1,6 @@
 # Live verification and hosted-mode hardening gates
 
-For running or evaluating live hosted or workstation verification suites, use the `live-verification-testing` skill (`skills/live-verification-testing/SKILL.md` in `scion-frontiers/scion-repo-contrib`, once provisioned). When a design specifies a numbered real-hub gate or acceptance checklist, cover every numbered scenario in the first gate script (and compare the gate output against the design's acceptance criteria during review) rather than a narrower subset.
+For running or evaluating live hosted or workstation verification suites, use the `live-verification-testing` skill (`skills/live-verification-testing/SKILL.md` in `scion-frontiers/scion-repo-contrib`, once provisioned). When a design specifies a numbered real-hub gate or acceptance checklist, aim to cover every numbered scenario on the initial gate run (and compare gate output against the design's acceptance criteria during review) to avoid a second pass over omitted scenarios.
 
 When a PR hardens hosted or production-like modes by refusing convenience behavior that remains legitimate in workstation mode, apply these seven gate checks before merge:
 
