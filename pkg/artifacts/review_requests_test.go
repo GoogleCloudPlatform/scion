@@ -310,13 +310,16 @@ func TestReviewRequestsGateOffWithExistingRow(t *testing.T) {
 		t.Errorf("reviewRequested should be absent while gate is off with existing row: %s", rec.Body.String())
 	}
 
-	// GET artifact must omit reviewState even though the row exists.
+	// GET artifact must omit requestedOfMe even though the row exists (reviewOnLatest is ungated).
 	rec = doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID, "user", "bob", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET artifact = %d %s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(rec.Body.String(), `"reviewState"`) {
-		t.Errorf("reviewState should be absent while gate is off with existing row: %s", rec.Body.String())
+	if strings.Contains(rec.Body.String(), `"requestedOfMe"`) {
+		t.Errorf("requestedOfMe should be absent while gate is off with existing row: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"reviewOnLatest":false`) {
+		t.Errorf("reviewOnLatest should be present while gate is off with existing row: %s", rec.Body.String())
 	}
 }
 
