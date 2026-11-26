@@ -113,7 +113,7 @@ if [ "$1" = "-e" ]; then
             ;;
     esac
 fi
-printf '140.82.112.0/20\n'
+printf '140.82.112.0/20\n185.199.108.0/22\n20.201.28.148/32\n192.30.252.0/22\n'
 `, logFile))
 	}
 
@@ -809,6 +809,17 @@ func TestInitFirewall_GitHubMeta(t *testing.T) {
 		})
 		if okRes.exitCode != 0 {
 			t.Fatalf("expected exit 0 with fallback jq on valid meta, got %d\noutput:\n%s", okRes.exitCode, okRes.output)
+		}
+		for _, cidr := range []string{
+			"140.82.112.0/20",
+			"185.199.108.0/22",
+			"20.201.28.148/32",
+			"192.30.252.0/22",
+		} {
+			want := "ipset -exist add allowed-domains " + cidr
+			if !hasCall(okRes.calls, want) {
+				t.Errorf("missing expected ipset call %q with fallback jq\ncalls:\n%s", want, strings.Join(okRes.calls, "\n"))
+			}
 		}
 		badRes := runInitFirewall(t, stubConfig{
 			ipv6Ifaces:      map[string]string{"eth0": "1"},

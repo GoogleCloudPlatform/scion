@@ -138,7 +138,7 @@ case "$1" in
         ;;
     esac
     ;;
-  -r) echo "140.82.112.0/20" ;;
+  -r) printf '140.82.112.0/20\n192.30.252.0/22\n185.199.108.0/22\n' ;;
   *) exit 1 ;;
 esac`)
 	}
@@ -225,6 +225,11 @@ func TestInitFirewall_AllDomainsResolve_StatsigAnthropicRemoved(t *testing.T) {
 	}
 	if !strings.Contains(res.ipsetLog, "add allowed-domains 160.79.104.10") {
 		t.Errorf("expected api.anthropic.com IP in ipset log, got:\n%s", res.ipsetLog)
+	}
+	for _, cidr := range []string{"140.82.112.0/20", "192.30.252.0/22", "185.199.108.0/22"} {
+		if !strings.Contains(res.ipsetLog, "add allowed-domains "+cidr) {
+			t.Errorf("expected GitHub CIDR %s in ipset log, got:\n%s", cidr, res.ipsetLog)
+		}
 	}
 }
 
