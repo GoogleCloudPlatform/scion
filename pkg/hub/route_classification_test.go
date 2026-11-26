@@ -167,6 +167,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/experiments":                             "hub-admin:experiments",
 	"/api/v1/admin/profiling":                               "hub-admin:profiling",
 	"/api/v1/admin/chat-retention":                          "hub-admin:chat-retention",
+	"/api/v1/admin/decision-retention":                      "hub-admin:decision-retention",
 	"/api/v1/admin/system-one/adapters":                     "hub-admin:system-one",
 	"/api/v1/admin/system-one/instances":                    "hub-admin:system-one",
 	"/api/v1/admin/system-one/instances/":                   "hub-admin:system-one",
