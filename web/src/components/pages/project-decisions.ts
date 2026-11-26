@@ -171,6 +171,7 @@ export class ScionPageProjectDecisions extends LitElement {
     }).then((res) => ({
       values: res.values,
       total: res.total,
+      emptyLabel: key === 'agent' ? 'agents' : key === 'by' ? 'answerers' : 'conversations',
     }));
   };
 

@@ -52,19 +52,6 @@ const REMOTE_SUGGEST_DEBOUNCE_MS = 250;
 const MAX_VISIBLE_SUGGESTIONS = 12;
 const EMPTY_QUERY: Query = { mode: 'text', text: '' };
 
-function pluralKeyLabel(key: string): string {
-  switch (key.toLowerCase()) {
-    case 'agent':
-      return 'agents';
-    case 'by':
-      return 'answerers';
-    case 'conversation':
-      return 'conversations';
-    default:
-      return 'values';
-  }
-}
-
 @customElement('scion-filter-box')
 export class ScionFilterBox extends LitElement {
   @property({ type: String })
@@ -131,7 +118,7 @@ export class ScionFilterBox extends LitElement {
   private remoteTotal: number | null = null;
 
   @state()
-  private remoteKey = '';
+  private remoteEmptyLabel = 'values';
 
   @state()
   private remotePrefix = '';
@@ -634,7 +621,7 @@ export class ScionFilterBox extends LitElement {
   }
 
   private formatNoMatchText(): string {
-    const noun = pluralKeyLabel(this.remoteKey);
+    const noun = this.remoteEmptyLabel || 'values';
     const trimmed = this.remotePrefix.trim();
     return trimmed ? `No ${noun} match \u2018${trimmed}\u2019` : `No ${noun} found`;
   }
@@ -647,7 +634,7 @@ export class ScionFilterBox extends LitElement {
     if (!ctx) return;
 
     const gen = ++this.remoteGen;
-    this.remoteKey = ctx.key;
+    this.remoteEmptyLabel = 'values';
     this.remotePrefix = ctx.prefix;
 
     this.remoteTimer = setTimeout(() => {
@@ -682,16 +669,27 @@ export class ScionFilterBox extends LitElement {
           if (this.remoteAbort === ac) this.remoteAbort = null;
           const values = Array.isArray(raw) ? raw : raw.values;
           const total = Array.isArray(raw) ? values.length : (raw.total ?? values.length);
+          if (!Array.isArray(raw) && raw.emptyLabel) {
+            this.remoteEmptyLabel = raw.emptyLabel;
+          }
+          const prevActive = this.activeIndex >= 0 ? this.suggestions[this.activeIndex] : undefined;
           const built = buildSuggestionsFromValues(
             values,
             ctx.replaceStart,
             ctx.replaceEnd,
             MAX_VISIBLE_SUGGESTIONS
           );
+          let nextActive = -1;
+          if (prevActive) {
+            nextActive = built.findIndex(
+              (item) =>
+                item.label === prevActive.label && (item.help ?? '') === (prevActive.help ?? '')
+            );
+          }
           this.remoteLoading = false;
           this.remoteError = false;
           this.suggestions = built;
-          this.activeIndex = -1;
+          this.activeIndex = nextActive;
           this.remoteEmpty = built.length === 0;
           this.remoteTotal = total > built.length ? total : null;
           this.open = true;
@@ -786,6 +784,7 @@ export class ScionFilterBox extends LitElement {
       if (e.key === 'Tab') {
         this.open = false;
         this.suppressExpectedValueError = false;
+        this.cancelRemoteSuggestions();
         return;
       }
     }
@@ -794,6 +793,7 @@ export class ScionFilterBox extends LitElement {
       e.preventDefault();
       this.open = false;
       this.suppressExpectedValueError = false;
+      this.cancelRemoteSuggestions();
       this.evaluateAndEmit(this.value, true);
     }
   }
