@@ -759,7 +759,7 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 	base := time.Now().UTC().Truncate(time.Second).Add(-10 * time.Minute)
 	peerID := mustCreateActiveUser(t, f.s, "inbox-star-peer")
 
-	seedWebThread := func(proj *store.Project, name string, at time.Time, msgCount int, markRead bool) (string, []string) {
+	seedWebThread := func(proj *store.Project, name string, at time.Time, msgCount int, markRead bool) (string, string, []string) {
 		topicID := api.NewUUID()
 		convID := seedConversation(t, f.s, "native", topicID, "channel")
 		require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
@@ -795,32 +795,38 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 		if markRead {
 			require.NoError(t, f.wcs.SetReadState(ctx, f.member, topicID, lastID))
 		}
-		return topicID, msgIDs
+		return topicID, convID, msgIDs
+	}
+
+	starMsg := func(msgID, convKey, convID, projectID string) {
+		t.Helper()
+		_, _, err := stars.AddMessageStar(ctx, f.member, StarTarget{
+			MessageID: msgID,
+			ProjectID: projectID,
+			Selector: StarSelector{
+				ConversationKey: convKey,
+				Channel:         "web",
+				ConversationID:  convID,
+				ThreadID:        convKey,
+			},
+		})
+		require.NoError(t, err)
 	}
 
 	// Read thread in projC with 2 starred messages.
-	topicC, msgsC := seedWebThread(projC, "starred-thread-c", base.Add(1*time.Minute), 2, true)
+	topicC, convC, msgsC := seedWebThread(projC, "starred-thread-c", base.Add(1*time.Minute), 2, true)
 	for _, mid := range msgsC {
-		_, err := stars.AddMessageStar(ctx, MessageStar{
-			UserID: f.member, MessageID: mid, ConversationKey: topicC, ProjectID: projC.ID,
-		})
-		require.NoError(t, err)
+		starMsg(mid, topicC, convC, projC.ID)
 	}
 
 	// Read user DM with 1 starred message (contributes 0 projects).
 	userDMKey, userDMMsg := h.seedUserDM(projA.ID, f.member, peerID, "starred user dm", base.Add(2*time.Minute))
 	require.NoError(t, f.wcs.SetReadState(ctx, f.member, userDMKey, userDMMsg))
-	_, err = stars.AddMessageStar(ctx, MessageStar{
-		UserID: f.member, MessageID: userDMMsg, ConversationKey: userDMKey, ProjectID: "",
-	})
-	require.NoError(t, err)
+	starMsg(userDMMsg, userDMKey, "", "")
 
 	// Starred message in hidden project (must be excluded by authorizer).
-	topicHidden, msgsHidden := seedWebThread(projHidden, "secret-thread", base.Add(3*time.Minute), 1, true)
-	_, err = stars.AddMessageStar(ctx, MessageStar{
-		UserID: f.member, MessageID: msgsHidden[0], ConversationKey: topicHidden, ProjectID: projHidden.ID,
-	})
-	require.NoError(t, err)
+	topicHidden, convHidden, msgsHidden := seedWebThread(projHidden, "secret-thread", base.Add(3*time.Minute), 1, true)
+	starMsg(msgsHidden[0], topicHidden, convHidden, projHidden.ID)
 
 	memberUser, err := f.s.GetUserByID(ctx, f.member)
 	require.NoError(t, err)
@@ -843,11 +849,8 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 
 	// Case 2: Add unread thread in projA and unread agent DM in projB, plus star on projA thread.
 	// Union projects = {projA, projB, projC} -> 3 projects, 4 starred messages, 2 unread conversations.
-	topicA, msgsA := seedWebThread(projA, "unread-thread-a", base.Add(4*time.Minute), 1, false)
-	_, err = stars.AddMessageStar(ctx, MessageStar{
-		UserID: f.member, MessageID: msgsA[0], ConversationKey: topicA, ProjectID: projA.ID,
-	})
-	require.NoError(t, err)
+	topicA, convA, msgsA := seedWebThread(projA, "unread-thread-a", base.Add(4*time.Minute), 1, false)
+	starMsg(msgsA[0], topicA, convA, projA.ID)
 	h.seedAgentDM(f.member, f.agentB, "unread agent dm", base.Add(5*time.Minute))
 
 	resp = h.decodeSummary(doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
