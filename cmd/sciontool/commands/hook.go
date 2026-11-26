@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"time"
 
@@ -449,6 +450,9 @@ func runHookTelemetry(hubBudget context.Context, event *hooks.Event, hubClient *
 
 	telemetryHandler := handlers.NewTelemetryHandler(tp, lp, redactor, mp)
 	telemetryHandler.Analytics = hookUsageAnalytics(cfg)
+	if home := hookHomeDir(); home != "" {
+		telemetryHandler.TurnUsageStatePath = filepath.Join(home, ".scion", "muse-turn-usage.json")
+	}
 	wireSessionMetrics(hubBudget, telemetryHandler, hubClient, hookHomeDir())
 	if err := telemetryHandler.Handle(event); err != nil {
 		log.Debug("Hook telemetry handler: %v", err)

@@ -52,17 +52,30 @@ mappings:
   # Model lifecycle (enables max_model_calls enforcement).
   PreLLMCall:
     event: model-start
-  # A failed model call carries error ("API error 400: ..."). Muse 1.4.20
+  # A failed model call carries error ("API error 400: ..."). Muse 1.4.20+
   # fires no Stop for a turn that fails this way (fixture:
   # pkg/sciontool/hooks/dialects/testdata/muse-code), so this is the only
   # hook that carries the reason.
+  #
+  # Verified against muse 1.4.25-R9361.1 (Meta /responses endpoint):
+  # - Tokens arrive nested under `usage` (`input_tokens`, `output_tokens`,
+  #   `cached_tokens`/`cache_read_tokens`, `cache_write_tokens`,
+  #   `reasoning_tokens`), extracted by the shared extractTokens fallback
+  #   (dialects/common.go) so the token keys are deliberately omitted from
+  #   `fields:` here.
+  # - `usage.input_tokens` is inclusive of cache read/write tokens;
+  #   `input_tokens_inclusive: true` converts it to canonical exclusive input.
+  # - `usage.output_tokens` is already inclusive of `reasoning_tokens`.
+  # - `usage` is cumulative across steps within a `turn_id` (including failed
+  #   follow-up steps that repeat the previous cumulative total); the telemetry
+  #   handler converts it to per-step increments keyed by (session_id, turn_id).
   PostLLMCall:
     event: model-end
+    input_tokens_inclusive: true
     fields:
+      model: model
+      session_id: session_id
       error: error
-      input_tokens: input_tokens
-      output_tokens: output_tokens
-      cached_tokens: cached_tokens
 
   # Permission events.
   PermissionRequest:

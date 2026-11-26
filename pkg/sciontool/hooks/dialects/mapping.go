@@ -36,6 +36,12 @@ type MappingEntrySpec struct {
 	// Uncounted marks the event as one that model-call accounting does
 	// not count (hooks.EventData.Uncounted).
 	Uncounted bool `yaml:"uncounted,omitempty"`
+	// InputTokensInclusive indicates that the harness's input_tokens field
+	// includes cache read and cache write tokens. When true, Parse converts
+	// EventData.InputTokens to canonical exclusive uncached input by
+	// subtracting CachedTokens and CacheWriteTokens (clamped at 0) and marks
+	// EventData.InputTokensDerived.
+	InputTokensInclusive bool `yaml:"input_tokens_inclusive,omitempty"`
 }
 
 // MappingConditionSpec is a test on one payload field, named by a dotted
@@ -169,6 +175,14 @@ func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error
 
 	// Run common token and file path extraction (shared with all dialects).
 	extractTokens(data, &event.Data)
+	if entry != nil && entry.InputTokensInclusive && event.Data.InputTokens > 0 {
+		uncached := event.Data.InputTokens - event.Data.CachedTokens - event.Data.CacheWriteTokens
+		if uncached < 0 {
+			uncached = 0
+		}
+		event.Data.InputTokens = uncached
+		event.Data.InputTokensDerived = true
+	}
 	extractFilePath(data, &event.Data)
 
 	return event, nil

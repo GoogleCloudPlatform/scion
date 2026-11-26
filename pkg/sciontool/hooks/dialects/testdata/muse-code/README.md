@@ -6,6 +6,27 @@ registration of `harnesses/muse-code/home/.config/muse/settings.json`. The
 mock served a one-model catalog at `/muse-code/models` and answered model
 calls with 400. A second prompt was typed.
 
+`session-usage-1.4.25.jsonl`: Muse Code 1.4.25 (`1.4.25-R9361.1`, dev.meta.ai
+installer), `muse exec --yolo --base-url <mock> --model muse-spark 'Say hello'`
+against a local credential-free OpenAI Responses SSE mock at `/responses`
+(with `/muse-code/models` serving `muse-spark`). Six `PostLLMCall` records
+from four live runs (UUIDs scrubbed to `0000000N-0000-4000-8000-...`, sorted
+keys; all wire fields and token counts verbatim):
+
+1. Single streaming call with cached and reasoning tokens (`input_tokens: 1000`
+   inclusive of `cached_tokens: 250`, `output_tokens: 300` inclusive of
+   `reasoning_tokens: 80`).
+2. Two-step tool loop on one `turn_id` (`step: 0` tool call `input=800,
+   cached=200, output=120, reasoning=40`; `step: 1` final answer reporting
+   **turn-cumulative** totals `input=2000, cached=800, output=270,
+   reasoning=70`, whereas `session.jsonl` `model_completed` recorded the
+   per-step `1200/600/150/30`).
+3. Two-step turn where `step: 0` succeeds and `step: 1` fails with HTTP 400:
+   `step: 1` repeats `step: 0`'s cumulative `usage` (`800/200/120/40`) with
+   `status: "failed"`, `error: "API error 400: ..."`, `response_id: null`.
+4. Subagent (`goal-reminder`) `PostLLMCall` carrying its own `session_id` and
+   `turn_id`.
+
 A failed turn fires **no `Stop`**: `UserPromptSubmit`, `PreLLMCall`,
 `PostLLMCall` with `error: "API error 400: ..."` (one more
 `PreLLMCall`/`PostLLMCall` pair comes from muse's internal

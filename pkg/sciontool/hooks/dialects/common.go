@@ -32,9 +32,11 @@ func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 	if v := getInt64(data, "cached_tokens"); v > 0 {
 		ed.CachedTokens = v
 	}
-	// Claude uses cache_read_input_tokens
+	// Claude uses cache_read_input_tokens; Muse Code also emits cache_read_tokens
 	if ed.CachedTokens == 0 {
-		if v := getInt64(data, "cache_read_input_tokens"); v > 0 {
+		if v := getInt64(data, "cache_read_tokens"); v > 0 {
+			ed.CachedTokens = v
+		} else if v := getInt64(data, "cache_read_input_tokens"); v > 0 {
 			ed.CachedTokens = v
 		}
 	}
@@ -78,7 +80,9 @@ func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
 					ed.CachedTokens = v
 				}
 				if ed.CachedTokens == 0 {
-					if v := getInt64(usage, "cache_read_input_tokens"); v > 0 {
+					if v := getInt64(usage, "cache_read_tokens"); v > 0 {
+						ed.CachedTokens = v
+					} else if v := getInt64(usage, "cache_read_input_tokens"); v > 0 {
 						ed.CachedTokens = v
 					}
 				}
