@@ -546,6 +546,10 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		// (internal/hubtestutil, scanned through guardScanSubdirs), not a
 		// user or transport resolver.
 		"RecordAttrs a.Value",
+		// The telemetry settings document's validation
+		// (opsettings.TelemetrySettings.Resolve), not a user or
+		// transport resolver.
+		"Snapshot ts",
 		// The conduit router (router.Resolve: whether the agent has a
 		// deliver-message or any session for its run), not a user or transport resolver.
 		"agentConduitDeliverSessionState rtr",

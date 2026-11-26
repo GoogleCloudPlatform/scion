@@ -336,6 +336,9 @@ func extractSubtree(k *koanf.Koanf, prefix string) (json.RawMessage, error) {
 	return extractSubtreeExcluding(k, prefix, nil)
 }
 
+// extractSubtreeExcluding extracts the koanf subtree under prefix as JSON,
+// omitting any top-level keys of that subtree listed in excludePaths (DB-only
+// keys are flat today).
 func extractSubtreeExcluding(k *koanf.Koanf, prefix string, excludePaths []string) (json.RawMessage, error) {
 	sub := k.Cut(prefix)
 	raw := sub.Raw()
