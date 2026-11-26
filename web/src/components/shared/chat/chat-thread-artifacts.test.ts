@@ -478,7 +478,7 @@ describe('scion-chat-thread artifact references', () => {
   });
 
   it('does not refresh when the artifacts experiment is off', async () => {
-    window.__SCION_FEATURES__ = {};
+    window.__SCION_FEATURES__ = { 'hub.artifacts': false };
     apiFetch.mockResolvedValue(history({ items: [] }));
     await mount();
     apiFetch.mockClear();

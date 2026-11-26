@@ -255,6 +255,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: false,
     };
   });
 
@@ -269,6 +270,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACTS_REVIEW_DRAFTS_FLAG]: false,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: false,
     };
     const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
     mockHub(state);
@@ -774,6 +776,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     window.__SCION_FEATURES__ = {
       [ARTIFACTS_FLAG]: true,
       [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: false,
     };
   });
 

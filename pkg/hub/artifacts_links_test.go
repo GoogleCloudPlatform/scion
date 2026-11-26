@@ -128,9 +128,7 @@ func TestArtifactsShareLinkOnRoutes(t *testing.T) {
 	srv.SetOperationalSettings(artifactsOps(t, `{"enabled":false}`))
 	assert.Equal(t, http.StatusNotFound, anonymous(srv, http.MethodGet, created.URL).Code, "settings off")
 	srv.SetOperationalSettings(artifactsOps(t, ""))
-	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
-	require.NoError(t, err)
-	srv.experiments = reg
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	assert.Equal(t, http.StatusNotFound, anonymous(srv, http.MethodGet, created.URL).Code, "experiment off")
 }
 

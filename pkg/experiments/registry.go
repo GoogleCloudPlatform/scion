@@ -1179,7 +1179,7 @@ var compiled = []Experiment{
 	{
 		Name:        ArtifactReviewEditor,
 		Title:       "Graphical review editor",
-		Description: "Opens a Markdown artifact review in a graphical editor that shows marks inline, records typing, deleting and replacing as suggestions, and has a Graphical and Source toggle. Needs hub.artifacts. Web only; the hub saves and checks reviews the same way whether or not it is on. Do not turn it on before the page script policy (ptone/scion#5912) is deployed on the hub.",
+		Description: "Opens a Markdown artifact review in a graphical editor that shows marks inline, records typing, deleting and replacing as suggestions, and has a Graphical and Source toggle. Needs hub.artifacts and the page script policy (ptone/scion#5912). Web only; the hub saves and checks reviews the same way whether or not it is on.",
 		Default:     true,
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,

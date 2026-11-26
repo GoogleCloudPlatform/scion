@@ -189,7 +189,11 @@ async function mount(
   flag: boolean,
   path = `/projects/p-1/artifacts/${ID}`
 ): Promise<ScionPageArtifactDetail> {
-  window.__SCION_FEATURES__ = { 'hub.artifacts': flag };
+  window.__SCION_FEATURES__ = {
+    'hub.artifacts': flag,
+    'web.artifact_review_editor': false,
+    'web.artifact_manage_access': false,
+  };
   const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
   el.pageData = { path } as ScionPageArtifactDetail['pageData'];
   document.body.appendChild(el);
@@ -2158,7 +2162,11 @@ describe('artifact page: refresh, origin and version labels', () => {
 
   /** Mounts the page as user u-1, so a version by u-1 shows as "You". */
   async function mountAs(path = `/projects/p-1/artifacts/${ID}`): Promise<ScionPageArtifactDetail> {
-    window.__SCION_FEATURES__ = { 'hub.artifacts': true };
+    window.__SCION_FEATURES__ = {
+      'hub.artifacts': true,
+      'web.artifact_review_editor': false,
+      'web.artifact_manage_access': false,
+    };
     const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
     el.pageData = { path, user: { id: 'u-1' } } as ScionPageArtifactDetail['pageData'];
     document.body.appendChild(el);
