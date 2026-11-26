@@ -213,6 +213,38 @@ func TestStalledAutoSuspend_DM_StoppingPhase_WakesAndDelivers(t *testing.T) {
 	assert.Equal(t, int32(1), disp.msgCalls.Load())
 }
 
+// TestStalledAutoSuspend_DM_StoppingPhaseWithoutLocalTracker_WakesAndDelivers
+// verifies the cross-replica stopping window: phase=stopping with
+// run_intent=stopped and no local autoSuspending entry still waits for the
+// stop to settle to suspended(stalled), then wakes and delivers once.
+func TestStalledAutoSuspend_DM_StoppingPhaseWithoutLocalTracker_WakesAndDelivers(t *testing.T) {
+	srv, s, sender, target, disp := setupStalledDMFixtures(t, true)
+
+	_, err := s.SetRunIntent(context.Background(), target.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseStopping),
+	}))
+	stoppingRow, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	require.False(t, srv.autoSuspending.isActive(target.ID))
+
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+			Phase:         string(state.PhaseSuspended),
+			SuspendReason: string(state.SuspendReasonStalled),
+		})
+	}()
+
+	res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, stoppingRow, "hello cross-replica stopping"))
+	require.Nil(t, dmErr, "DM to stopping agent with stopped intent must settle, wake, and deliver")
+	require.NotNil(t, res)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	assert.Len(t, disp.getStartCalls(), 1)
+	assert.Equal(t, int32(1), disp.msgCalls.Load())
+}
+
 // TestStalledAutoSuspend_DM_PostStopBrokerContainerNotRunning_WakesAndRetriesOnce
 // verifies Window C: the caller read phase=running before stalled auto-suspend
 // finished, and DispatchAgentMessage fails synchronously with "container ...
@@ -462,6 +494,8 @@ func TestStalledAutoSuspend_DM_AuthzAndExclusions(t *testing.T) {
 		require.NoError(t, err)
 		deletingRow, err := s.GetAgent(context.Background(), target.ID)
 		require.NoError(t, err)
+		assert.False(t, srv.isStoppingForSuspend(deletingRow), "deleting row must never be classified as stopping-for-suspend")
+		assert.Equal(t, autoWakeNone, srv.autoWakeModeOf(deletingRow), "deleting row must never enter auto-wake")
 
 		res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, deletingRow, "deleting target"))
 		assert.Nil(t, res)
