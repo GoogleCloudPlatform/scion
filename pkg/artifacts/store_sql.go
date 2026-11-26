@@ -101,6 +101,10 @@ const ledgerPostgres = `CREATE TABLE IF NOT EXISTS artifact_migrations (
 type sqlStore struct {
 	db      *sql.DB
 	dialect dialect
+	// beforeOrphanUpdate, when non-nil (tests only), runs in setOwnerOrphaned
+	// after selecting candidate artifact IDs and before the per-row UPDATE loop,
+	// so tests can simulate a concurrent ownership change in that window.
+	beforeOrphanUpdate func(tx *sql.Tx) error
 }
 
 // rebind rewrites ? placeholders to $1..$N for Postgres. Queries in this

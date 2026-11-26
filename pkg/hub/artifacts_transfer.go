@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -244,19 +243,14 @@ func (s *Server) notifyArtifactTransfer(ctx context.Context, n artifacts.Transfe
 }
 
 func (s *Server) transferActorLabel(ctx context.Context, userID string) string {
-	if userID == "" {
-		return "a steward"
-	}
-	u, err := s.store.GetUser(ctx, userID)
-	if err == nil && u != nil {
-		if name := strings.TrimSpace(u.DisplayName); name != "" {
-			return name
-		}
-		if email := strings.TrimSpace(u.Email); email != "" {
-			return email
+	if userID != "" {
+		if u, err := s.store.GetUser(ctx, userID); err == nil && u != nil {
+			if label := cleanNotificationText(u.DisplayName, reviewerLabelMaxRunes); label != "" {
+				return label
+			}
 		}
 	}
-	return userID
+	return "a steward"
 }
 
 func (s *Server) agentSlugOrID(ctx context.Context, agentID string) string {

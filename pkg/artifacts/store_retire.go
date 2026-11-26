@@ -436,6 +436,11 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("artifacts: find owner's artifacts: %w", err)
 	}
+	if s.beforeOrphanUpdate != nil {
+		if err := s.beforeOrphanUpdate(tx); err != nil {
+			return 0, err
+		}
+	}
 	var value any
 	if orphaned {
 		value = s.timeArg(now)

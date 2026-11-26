@@ -18,6 +18,7 @@ package artifacts
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sync"
 	"testing"
@@ -351,25 +352,52 @@ func TestStoreTransferOwner_ConcurrentAndReconcilerRace(t *testing.T) {
 				t.Fatalf("concurrent transfers: wins=%d ownerChanged=%d errs=%v", wins, ownerChanged, errs)
 			}
 
-			// Reconciler race / restore invariant (S11, I5):
-			// Running SetOwnerOrphaned for oldAgent after transfer does NOT mark a orphaned,
-			// and running SetOwnerOrphaned(..., false) (restore oldAgent) does NOT change owner.
-			changed, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: oldAgent}, true, time.Now(), 10)
+			// Reconciler race (S11): simulate an ownership transfer landing in the
+			// gap between setOwnerOrphaned's SELECT by old owner and its per-row
+			// UPDATE. The UPDATE's AND owner_kind = ? AND owner_ref = ? guard must
+			// prevent re-marking the transferred row orphaned or writing a false event.
+			raceOld := uuid.NewString()
+			raceNew := uuid.NewString()
+			raceArt := seedAgentArtifact(t, st, raceOld, "project-1", "", "user-s1")
+			sqlSt := st.(*sqlStore)
+			sqlSt.beforeOrphanUpdate = func(tx *sql.Tx) error {
+				_, err := tx.ExecContext(ctx, sqlSt.rebind(`UPDATE artifact SET owner_ref = ? WHERE id = ?`), raceNew, raceArt.ID)
+				return err
+			}
+			changed, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: raceOld}, true, time.Now(), 10)
+			sqlSt.beforeOrphanUpdate = nil
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("SetOwnerOrphaned: %v", err)
 			}
 			if len(changed) != 0 {
-				t.Errorf("SetOwnerOrphaned(oldAgent, true) changed %v, want empty", changed)
+				t.Errorf("SetOwnerOrphaned(raceOld, true) changed %v after in-gap transfer; want empty", changed)
 			}
-			got, err := st.GetArtifact(ctx, a.ID)
+			got, err := st.GetArtifact(ctx, raceArt.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got.OrphanedAt != nil {
-				t.Errorf("artifact was marked orphaned after transfer")
+				t.Errorf("artifact was falsely marked orphaned after in-gap transfer")
 			}
-			if got.OwnerRef == oldAgent {
-				t.Errorf("owner reverted to oldAgent")
+			if got.OwnerRef != raceNew {
+				t.Errorf("owner = %q, want %q", got.OwnerRef, raceNew)
+			}
+			for _, ev := range eventsOf(t, st, raceArt.ID) {
+				if ev.Action == EventOrphaned {
+					t.Errorf("unexpected orphaned event written after in-gap transfer: %+v", ev)
+				}
+			}
+
+			// Restore invariant (I5): restoring raceOld does not return ownership.
+			if _, err := st.SetOwnerOrphaned(ctx, Owner{Kind: PrincipalKindAgent, Ref: raceOld}, false, time.Now(), 10); err != nil {
+				t.Fatal(err)
+			}
+			got, err = st.GetArtifact(ctx, raceArt.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.OwnerRef != raceNew {
+				t.Errorf("owner after restore = %q, want %q", got.OwnerRef, raceNew)
 			}
 		})
 	}
