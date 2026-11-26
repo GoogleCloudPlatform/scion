@@ -561,7 +561,7 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		warning := formatTriggerPresetWideningWarning(reasons)
 		_, _ = fmt.Fprintln(os.Stderr, warning)
 		if triggerPresetApplyStrict {
-			return fmt.Errorf("trigger preset widens eligibility (refused by --strict): %s", strings.Join(reasons, "; "))
+			return errors.New("preset apply refused by --strict")
 		}
 	}
 

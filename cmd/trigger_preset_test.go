@@ -607,7 +607,7 @@ func TestTriggerPresetCLI_ApplyWideningWarningAndStrict(t *testing.T) {
 			}
 			if tc.wantErr {
 				require.Error(t, runErr)
-				assert.Contains(t, runErr.Error(), "--strict")
+				assert.EqualError(t, runErr, "preset apply refused by --strict")
 			} else {
 				require.NoError(t, runErr)
 			}
