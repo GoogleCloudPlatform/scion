@@ -24,14 +24,19 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/agydecode"
 	"github.com/spf13/cobra"
 )
 
 func detectLocalAgyVersion(ctx context.Context) string {
+	agyBin, err := rootexec.Resolve("agy")
+	if err != nil {
+		return ""
+	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	out, err := procreap.OutputManaged(exec.CommandContext(cctx, "agy", "--version"))
+	out, err := procreap.OutputManaged(exec.CommandContext(cctx, agyBin, "--version"))
 	if err != nil {
 		return ""
 	}
