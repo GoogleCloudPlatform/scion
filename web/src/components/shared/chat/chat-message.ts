@@ -57,6 +57,7 @@ import {
 import {
   agentSecretsEnabled,
   codeSpanMentionsEnabled,
+  commandRequestsEnabled,
   decisionsEnabled,
   FEATURE_FLAGS_CHANGED_EVENT,
   isFeatureEnabled,
@@ -79,10 +80,15 @@ import {
 import './chat-decisions.js';
 import './chat-decision-response.js';
 import './chat-secret-request.js';
+import './chat-command-request.js';
 import {
   fetchSecretRequestCard,
   type SecretRequestCardResponse,
 } from '../../../client/secret-requests.js';
+import {
+  fetchCommandRequestDetail,
+  type CommandRequestDetailResponse,
+} from '../../../client/command-requests.js';
 import { ANSWERABLE } from '../../../client/decision-prompts.js';
 import type { AskerAnswerability } from '../../../client/decision-prompts.js';
 import type {
@@ -1727,6 +1733,35 @@ export class ScionChatMessage extends LitElement {
       flex-shrink: 0;
     }
 
+    .command-request-intro {
+      margin: 0 0 0.5rem;
+      color: var(--scion-text);
+      font-size: var(--chat-fs-base, 0.9375rem);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .command-request-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.65rem 0.85rem;
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      background: var(--scion-surface);
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-secondary);
+    }
+
+    .command-request-status.error {
+      background: var(--scion-error-bg);
+      color: var(--scion-error-text);
+    }
+
+    .command-request-status sl-icon {
+      flex-shrink: 0;
+    }
+
     /* A choice card needs room for its buttons (design §4.1). */
     .bubble.decision {
       max-width: min(100%, 640px);
@@ -2815,10 +2850,28 @@ export class ScionChatMessage extends LitElement {
   private secretRequestAbort: AbortController | null = null;
   private secretRequestLoadedMsgId = '';
 
+  /** Loaded command-request detail for `messageType === 'command-request'`. */
+  @state()
+  private commandRequestDetail: CommandRequestDetailResponse | null = null;
+
+  @state()
+  private commandRequestLoading = false;
+
+  @state()
+  private commandRequestError = '';
+
+  @state()
+  private commandRequestErrorStatus = 0;
+
+  private commandRequestAbort: AbortController | null = null;
+  private commandRequestLoadedMsgId = '';
+
   private readonly handleFeatureFlagsChanged = (): void => {
     const codeSpans = codeSpanMentionsEnabled();
-    const cardMode = this.showsDecisionCard || this.showsSecretRequestCard;
+    const cardMode =
+      this.showsDecisionCard || this.showsSecretRequestCard || this.showsCommandRequestCard;
     this.syncSecretRequestCard();
+    this.syncCommandRequestCard();
     if (codeSpans !== this.renderedCodeSpanMentions || cardMode !== this.renderedCardMode) {
       this.renderedCodeSpanMentions = codeSpans;
       this.renderedCardMode = cardMode;
@@ -2827,7 +2880,11 @@ export class ScionChatMessage extends LitElement {
         : '';
       void this.renderContent();
     }
-    if (this.messageType === 'secret-request' || this.messageType === 'secret-response') {
+    if (
+      this.messageType === 'secret-request' ||
+      this.messageType === 'secret-response' ||
+      this.messageType === 'command-request'
+    ) {
       this.requestUpdate();
     }
   };
@@ -2837,13 +2894,15 @@ export class ScionChatMessage extends LitElement {
     this.renderRoot.addEventListener('pointerdown', this.boundRecordContextPress, true);
     this.addEventListener('pointerdown', this.boundHostContextPress, true);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFeatureFlagsChanged);
-    this.renderedCardMode = this.showsDecisionCard || this.showsSecretRequestCard;
+    this.renderedCardMode =
+      this.showsDecisionCard || this.showsSecretRequestCard || this.showsCommandRequestCard;
     this.renderedCodeSpanMentions = codeSpanMentionsEnabled();
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     this.renderedKnownMentionSlugsKey = this.renderedCodeSpanMentions
       ? knownMentionSlugsKey(this.effectiveKnownMentionSlugs())
       : '';
     this.syncSecretRequestCard();
+    this.syncCommandRequestCard();
     void this.renderContent();
   }
 
@@ -2856,6 +2915,9 @@ export class ScionChatMessage extends LitElement {
     this.secretRequestAbort?.abort();
     this.secretRequestAbort = null;
     this.secretRequestLoadedMsgId = '';
+    this.commandRequestAbort?.abort();
+    this.commandRequestAbort = null;
+    this.commandRequestLoadedMsgId = '';
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
@@ -2934,6 +2996,7 @@ export class ScionChatMessage extends LitElement {
     }
     if (changed.has('messageType') || changed.has('messageId') || changed.has('deletedAt')) {
       this.syncSecretRequestCard();
+      this.syncCommandRequestCard();
     }
   }
 
@@ -2965,7 +3028,8 @@ export class ScionChatMessage extends LitElement {
   }
 
   override updated(changed: Map<string, unknown>): void {
-    const cardMode = this.showsDecisionCard || this.showsSecretRequestCard;
+    const cardMode =
+      this.showsDecisionCard || this.showsSecretRequestCard || this.showsCommandRequestCard;
     const codeSpans = codeSpanMentionsEnabled();
     const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     const knownMentionSlugsKeyNow = codeSpans
@@ -3338,6 +3402,55 @@ export class ScionChatMessage extends LitElement {
     return this.messageType === 'secret-response' && agentSecretsEnabled();
   }
 
+  /**
+   * Whether this message renders as an inline command-request card (design §4.11):
+   * `messageType === 'command-request'` with `hub.command_requests` enabled.
+   */
+  private get showsCommandRequestCard(): boolean {
+    return (
+      this.messageType === 'command-request' &&
+      Boolean(this.messageId) &&
+      !this.deletedAt &&
+      commandRequestsEnabled()
+    );
+  }
+
+  private syncCommandRequestCard(force = false): void {
+    if (!this.showsCommandRequestCard) {
+      this.commandRequestAbort?.abort();
+      this.commandRequestAbort = null;
+      this.commandRequestDetail = null;
+      this.commandRequestLoading = false;
+      this.commandRequestError = '';
+      this.commandRequestErrorStatus = 0;
+      this.commandRequestLoadedMsgId = '';
+      return;
+    }
+    if (!force && this.commandRequestLoadedMsgId === this.messageId) {
+      return;
+    }
+    this.commandRequestAbort?.abort();
+    const controller = new AbortController();
+    this.commandRequestAbort = controller;
+    const msgId = this.messageId;
+    this.commandRequestLoadedMsgId = msgId;
+    this.commandRequestLoading = true;
+    this.commandRequestError = '';
+    this.commandRequestErrorStatus = 0;
+    this.commandRequestDetail = null;
+
+    void fetchCommandRequestDetail(msgId, { signal: controller.signal }).then((res) => {
+      if (controller.signal.aborted || this.messageId !== msgId) return;
+      this.commandRequestLoading = false;
+      if (!res.ok) {
+        this.commandRequestError = res.message;
+        this.commandRequestErrorStatus = res.status;
+        return;
+      }
+      this.commandRequestDetail = res.detail;
+    });
+  }
+
   private syncSecretRequestCard(force = false): void {
     if (!this.showsSecretRequestCard) {
       this.secretRequestAbort?.abort();
@@ -3374,8 +3487,10 @@ export class ScionChatMessage extends LitElement {
     });
   }
 
-  /** The text the bubble renders: the intro alone under an action card, or fallback body on secret-request load error. */
+  /** The text the bubble renders: the intro alone under an action card, or fallback body on secret-request load error.
+   * For command requests (audit L4), the intro is never rendered as Markdown — it is rendered as plain text inside `renderCommandRequestCard()`. */
   private get displayBody(): string {
+    if (this.showsCommandRequestCard) return '';
     if (this.showsDecisionCard) return this.decisionIntro ?? '';
     if (this.showsSecretRequestCard) {
       if (this.secretRequestError) return this.body;
@@ -3672,7 +3787,8 @@ export class ScionChatMessage extends LitElement {
     // attachments render without an empty text bubble above them.
     const decisionCard = this.showsDecisionCard;
     const secretRequestCard = this.showsSecretRequestCard && !isDeleted;
-    const hasActionCard = decisionCard || secretRequestCard;
+    const commandRequestCard = this.showsCommandRequestCard && !isDeleted;
+    const hasActionCard = decisionCard || secretRequestCard || commandRequestCard;
     const attachmentOnly =
       !hasActionCard &&
       !(this.body ?? '').trim() &&
@@ -3743,7 +3859,9 @@ export class ScionChatMessage extends LitElement {
                     ? this.renderDecisionCard()
                     : secretRequestCard
                       ? this.renderSecretRequestCard()
-                      : nothing}${this.renderActionsButton()}
+                      : commandRequestCard
+                        ? this.renderCommandRequestCard()
+                        : nothing}${this.renderActionsButton()}
                 </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
@@ -4072,6 +4190,36 @@ export class ScionChatMessage extends LitElement {
         }
       }}
     ></scion-chat-secret-request>`;
+  }
+
+  private renderCommandRequestCard(): TemplateResult {
+    if (this.commandRequestLoading) {
+      return html`<div class="command-request-status" role="status">
+        <sl-spinner></sl-spinner>
+        <span>Loading command request…</span>
+      </div>`;
+    }
+    if (this.commandRequestError || !this.commandRequestDetail) {
+      return html`<div class="command-request-status error" role="alert">
+        <sl-icon name="exclamation-circle" aria-hidden="true"></sl-icon>
+        <span>${this.commandRequestError || 'Unable to load command request.'}</span>
+        ${this.commandRequestErrorStatus !== 403 && this.commandRequestErrorStatus !== 404
+          ? html`<sl-button size="small" @click=${(): void => this.syncCommandRequestCard(true)}>
+              Retry
+            </sl-button>`
+          : nothing}
+      </div>`;
+    }
+    const detail = this.commandRequestDetail;
+    return html`${detail.intro
+        ? html`<p class="command-request-intro" data-testid="command-request-intro">
+            ${detail.intro}
+          </p>`
+        : nothing}<scion-chat-command-request
+        .detail=${detail}
+        .currentUserId=${this.currentUserId}
+        surface="native"
+      ></scion-chat-command-request>`;
   }
 
   private renderSecretResponse(): TemplateResult {

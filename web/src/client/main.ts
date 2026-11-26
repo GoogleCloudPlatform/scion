@@ -846,6 +846,12 @@ const ROUTES: RouteConfig[] = [
     tag: 'scion-page-secret-request',
     load: () => import('../components/pages/secret-request.js'),
   },
+  {
+    // Standalone command request page (experiment hub.command_requests; renders 404 when off).
+    pattern: /^\/command-requests\/[^/]+$/,
+    tag: 'scion-page-command-request',
+    load: () => import('../components/pages/command-request.js'),
+  },
   // Chat mode routes (Phase 5 — top-level chat)
   {
     pattern: /^\/chat$/,
