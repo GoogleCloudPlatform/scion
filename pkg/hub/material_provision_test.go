@@ -96,6 +96,71 @@ func TestProvisionCredentials_LimitedToSkillFetchKeys(t *testing.T) {
 	assert.Zero(t, rec.resolves, "Resolve is never called")
 }
 
+// TestProvisionCredentials_AllowsOnDemandExcludesUnknownType verifies that
+// resolveProvisionCredentials allows project on_demand secrets (broker-side
+// consumer, never forwarded to the agent container) while excluding unknown
+// and internal secret types before FetchValues.
+func TestProvisionCredentials_AllowsOnDemandExcludesUnknownType(t *testing.T) {
+	t.Run("on_demand_fetched_and_sent", func(t *testing.T) {
+		m, rec, _ := newProvisionCredsFixture(t, "pc-od-allow", ldOptions{})
+		m.secret(t, "GITHUB_TOKEN", "od-gh-token-val", store.SecretTypeOnDemand, store.ScopeProject, m.agent.ProjectID)
+
+		got := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": "od-gh-token-val"}, got)
+		assert.Equal(t, []string{"GITHUB_TOKEN"}, fetchedNames(rec))
+	})
+
+	t.Run("unknown_type_not_fetched_or_sent", func(t *testing.T) {
+		m, rec, _ := newProvisionCredsFixture(t, "pc-unknown-excl", ldOptions{})
+		// Seed a real, authorized project GITHUB_TOKEN row.
+		m.secret(t, "GITHUB_TOKEN", "real-authorized-val", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+
+		// Control: with its real environment type, this exact stored row is
+		// authorized, fetched, and sent.
+		ctrl := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Equal(t, map[string]string{"GITHUB_TOKEN": "real-authorized-val"}, ctrl)
+		assert.Equal(t, []string{"GITHUB_TOKEN"}, fetchedNames(rec))
+
+		// Reset spy and rewrite only SecretType on the real authorized row in
+		// List (preserving its real ID/Scope/ScopeID so authorize would allow
+		// it if the type filter were missing).
+		rec.mu.Lock()
+		rec.fetched = nil
+		rec.mu.Unlock()
+		orig := m.d.secretBackend
+		m.d.SetSecretBackend(&rewriteTypeListSecretBackend{
+			SecretBackend: orig,
+			targetName:    "GITHUB_TOKEN",
+			newType:       "unknown_future_type",
+		})
+
+		got := m.d.resolveProvisionCredentials(context.Background(), m.agent, "DispatchAgentStart")
+		assert.Nil(t, got)
+		assert.Empty(t, fetchedNames(rec), "unknown-type secret must never be passed to FetchValues")
+	})
+}
+
+type rewriteTypeListSecretBackend struct {
+	secret.SecretBackend
+	targetName string
+	newType    string
+}
+
+func (b *rewriteTypeListSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	metas, err := b.SecretBackend.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if filter.Scope == store.ScopeProject {
+		for i := range metas {
+			if metas[i].Name == b.targetName {
+				metas[i].SecretType = b.newType
+			}
+		}
+	}
+	return metas, nil
+}
+
 // TestProvisionCredentials_UserScopeTokenNotSent: only project scope is
 // sent. A matching user-scope (owner), hub-scope or broker-scope secret is
 // neither fetched nor sent, alone or beside a project secret of the same

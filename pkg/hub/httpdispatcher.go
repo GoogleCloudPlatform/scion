@@ -1322,23 +1322,32 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// GITHUB_TOKEN, causing git clone failures (#1165).
 		// Defense in depth: deliverGitHubToken also strips non-installation GitHub tokens downstream.
 		if !usesInstallationGitHubToken(agent) && agent.ProjectID != "" && d.secretBackend != nil {
-			projectValue := ""
-			if !isShellAgent(agent) {
-				projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+			var tok noAuthGitToken
+			if d.authzService != nil {
+				// Use the same metadata-first selection route as start/restart
+				// so non-deliverable rows (e.g. on_demand) are never value-read
+				// and higher-precedence on_demand rows shadow lower scopes
+				// identically on create and start.
+				candidates, _, selErr := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, PurposeDispatch), agent)
+				if selErr != nil {
+					if d.debug {
+						d.log.Debug("NoAuth: failed to select GITHUB_TOKEN", "agent_id", agent.ID, "error", selErr)
+					}
+				} else {
+					tok = pickNoAuthGitTokenFrom(candidates)
+				}
+			} else {
+				// Fallback when AuthzService is nil (unit tests without authz).
+				projectValue := ""
+				if !isShellAgent(agent) {
+					projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+				}
+				userValue := ""
+				if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
+					userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
+				}
+				tok = pickNoAuthGitToken(projectValue, userValue)
 			}
-
-			// Fall back to the creating user's profile-level GITHUB_TOKEN,
-			// mirroring the cascade in resolveCloneToken. Users who store
-			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
-			// would otherwise still hit the NoAuth suppression bug (#1165).
-			// The owner's row is held to the same start-time user-scope
-			// checks as Resolve (ownerCloneTokenAllowed) before its value
-			// is read; a refused row is not used.
-			userValue := ""
-			if projectValue == "" && agent.OwnerID != "" && d.ownerCloneTokenAllowed(ctx, agent) {
-				userValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeUser, agent.OwnerID)
-			}
-			tok := pickNoAuthGitToken(projectValue, userValue)
 			applyNoAuthGitToken(req.ResolvedEnv, &req.EnvClassifications, tok)
 			req.noAuthProjectToken = tok.projectBound()
 		}
@@ -3595,8 +3604,8 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				if sv.InjectionMode != store.InjectionModeAsNeeded {
 					continue
 				}
-				// Only environment-type secrets map to env vars.
-				if sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "" {
+				// Only environment-type deliverable secrets map to env vars.
+				if !secret.DeliverableType(sv.SecretType) || (sv.SecretType != store.SecretTypeEnvironment && sv.SecretType != "") {
 					continue
 				}
 				target := sv.Target
@@ -5796,6 +5805,11 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {
+		// Allowlist defense in depth: never deliver non-deliverable types
+		// (such as on_demand or internal) even if a custom backend returned one.
+		if !secret.DeliverableType(sv.SecretType) {
+			continue
+		}
 		// Defense in depth for rows that predate the create/patch reserved-
 		// target check, or that reached the store through some other path:
 		// drop any environment-type secret whose target is reserved for
@@ -5808,9 +5822,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			continue
 		}
 		// Only skip as_needed environment-type secrets (handled by the
-		// two-pass env-gather flow). File-type and variable-type secrets
-		// should always be placed regardless of injection mode — the
-		// as_needed concept does not apply to them.
+		// two-pass env-gather flow). File-type secrets are always placed
+		// regardless of injection mode — the as_needed concept does not apply
+		// to them.
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
 			// Collect the target key name so the broker's autodetect can
 			// consider it when selecting auth type (closes #1447).

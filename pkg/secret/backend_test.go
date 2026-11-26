@@ -847,7 +847,6 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 			{"OWN_KEY", "own-value", TypeEnvironment},
 			{"PROGENY_KEY", "progeny-value", TypeEnvironment},
 			{"FILE_KEY", "file-value", TypeFile},
-			{"VAR_KEY", "var-value", TypeOnDemand},
 		} {
 			sv, ok := byName[want.name]
 			if !ok {
@@ -860,6 +859,9 @@ func TestMaterialSelection_BackendParity(t *testing.T) {
 			if sv.SecretType != want.typ {
 				t.Errorf("%s: expected type %q, got %q", want.name, want.typ, sv.SecretType)
 			}
+		}
+		if _, ok := byName["VAR_KEY"]; ok {
+			t.Errorf("expected on_demand secret VAR_KEY to be excluded from resolved secrets")
 		}
 
 		missing := SecretMeta{ID: tid("parity-missing"), Name: "GHOST", Scope: ScopeProject, ScopeID: "project-1", Version: 1}

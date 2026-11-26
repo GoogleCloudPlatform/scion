@@ -23,22 +23,42 @@ func TestNormalizeSecretRequests_OnDemandAndLegacyVariable(t *testing.T) {
 	reqs, err := NormalizeSecretRequests("secret_requests", []SecretRequestInput{
 		{Key: "DEFAULT_KEY"},
 		{Key: "ON_DEMAND_KEY", Type: SecretRequestTypeOnDemand},
-		{Key: "LEGACY_VAR_KEY", Type: SecretRequestTypeVariable},
+		{Key: "ON_DEMAND_SAME_TARGET", Type: SecretRequestTypeOnDemand, Target: "ON_DEMAND_SAME_TARGET"},
+		{Key: "LEGACY_VAR_KEY", Type: "variable"},
+		{Key: "ENV_KEY", Type: SecretRequestTypeEnvironment},
 	})
 	if err != nil {
 		t.Fatalf("NormalizeSecretRequests failed: %v", err)
 	}
-	if len(reqs) != 3 {
-		t.Fatalf("got %d requests, want 3", len(reqs))
+	if len(reqs) != 5 {
+		t.Fatalf("got %d requests, want 5", len(reqs))
 	}
-	if reqs[0].SecretType != SecretRequestTypeEnvironment {
-		t.Errorf("empty type normalized to %q, want %q", reqs[0].SecretType, SecretRequestTypeEnvironment)
+	if reqs[0].SecretType != SecretRequestTypeOnDemand {
+		t.Errorf("empty type normalized to %q, want %q", reqs[0].SecretType, SecretRequestTypeOnDemand)
 	}
-	if reqs[1].SecretType != SecretRequestTypeOnDemand {
-		t.Errorf("on_demand type normalized to %q, want %q", reqs[1].SecretType, SecretRequestTypeOnDemand)
+	if reqs[1].SecretType != SecretRequestTypeOnDemand || reqs[1].Target != "" {
+		t.Errorf("on_demand normalized to (%q, target=%q), want (%q, \"\")", reqs[1].SecretType, reqs[1].Target, SecretRequestTypeOnDemand)
 	}
-	if reqs[2].SecretType != SecretRequestTypeOnDemand {
-		t.Errorf("legacy variable type normalized to %q, want %q", reqs[2].SecretType, SecretRequestTypeOnDemand)
+	if reqs[2].SecretType != SecretRequestTypeOnDemand || reqs[2].Target != "" {
+		t.Errorf("on_demand with target==key normalized to (%q, target=%q), want (%q, \"\")", reqs[2].SecretType, reqs[2].Target, SecretRequestTypeOnDemand)
+	}
+	if reqs[3].SecretType != SecretRequestTypeOnDemand {
+		t.Errorf("legacy variable type normalized to %q, want %q", reqs[3].SecretType, SecretRequestTypeOnDemand)
+	}
+	if reqs[4].SecretType != SecretRequestTypeEnvironment {
+		t.Errorf("environment type normalized to %q, want %q", reqs[4].SecretType, SecretRequestTypeEnvironment)
+	}
+
+	// Non-key target is rejected for on_demand (both explicit and default).
+	for _, tc := range []SecretRequestInput{
+		{Key: "OD_BAD_TARGET", Type: SecretRequestTypeOnDemand, Target: "OTHER_TARGET"},
+		{Key: "DEFAULT_BAD_TARGET", Target: "OTHER_TARGET"},
+		{Key: "LEGACY_BAD_TARGET", Type: "variable", Target: "OTHER_TARGET"},
+	} {
+		_, err = NormalizeSecretRequests("secret_requests", []SecretRequestInput{tc})
+		if err == nil {
+			t.Errorf("expected error for %+v with non-key target", tc)
+		}
 	}
 
 	_, err = NormalizeSecretRequests("secret_requests", []SecretRequestInput{

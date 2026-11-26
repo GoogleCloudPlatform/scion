@@ -88,10 +88,10 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 		hub(telemetryCredentialFileName, TypeFile, testTelemetryTarget, ""),
 		hub("HUB_OTHER_TELEMETRY_FILE", TypeFile, "/home/scion/.scion/other/telemetry-gcp-credentials.json", ""),
 		hub("SHADOWED", TypeOnDemand, "", store.InjectionModeAlways),
-		{Name: "SHADOWED", Value: "broker-SHADOWED", SecretType: TypeOnDemand, Scope: ScopeRuntimeBroker, ScopeID: "broker-1"},
+		{Name: "SHADOWED", Value: "broker-SHADOWED", SecretType: TypeEnvironment, Scope: ScopeRuntimeBroker, ScopeID: "broker-1"},
 		{Name: "BROKER_FILE", Value: "broker-file", SecretType: TypeFile, Target: "/etc/broker-file", Scope: ScopeRuntimeBroker, ScopeID: "broker-1"},
 		{Name: "PROJECT_ENV_AS_NEEDED", Value: "project-env", SecretType: TypeEnvironment, Scope: ScopeProject, ScopeID: "project-1", InjectionMode: store.InjectionModeAsNeeded},
-		{Name: "PROJECT_VARIABLE", Value: "project-variable", SecretType: TypeOnDemand, Scope: ScopeProject, ScopeID: "project-1"},
+		{Name: "PROJECT_ON_DEMAND", Value: "project-on-demand", SecretType: TypeOnDemand, Scope: ScopeProject, ScopeID: "project-1"},
 		{Name: "PROJECT_FILE", Value: "project-file", SecretType: TypeFile, Target: "/etc/project-file", Scope: ScopeProject, ScopeID: "project-1"},
 		{Name: "USER_FILE", Value: "user-file", SecretType: TypeFile, Target: "/etc/user-file", Scope: ScopeUser, ScopeID: "user-1"},
 	} {
@@ -114,9 +114,9 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 			t.Errorf("%s: got %+v (present %v), want the hub row delivered", name, sv.SecretMeta, ok)
 		}
 	}
-	for _, name := range []string{"HUB_VARIABLE", "HUB_FILE", "HUB_OTHER_TELEMETRY_FILE"} {
+	for _, name := range []string{"HUB_VARIABLE", "HUB_FILE", "HUB_OTHER_TELEMETRY_FILE", "PROJECT_ON_DEMAND"} {
 		if _, ok := got[name]; ok {
-			t.Errorf("%s: delivered, want the hub row excluded", name)
+			t.Errorf("%s: delivered, want the row excluded", name)
 		}
 	}
 	if sv := got["SHADOWED"]; sv.Scope != ScopeRuntimeBroker || sv.Value != "broker-SHADOWED" {
@@ -125,7 +125,6 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 	for name, scope := range map[string]string{
 		"BROKER_FILE":           ScopeRuntimeBroker,
 		"PROJECT_ENV_AS_NEEDED": ScopeProject,
-		"PROJECT_VARIABLE":      ScopeProject,
 		"PROJECT_FILE":          ScopeProject,
 		"USER_FILE":             ScopeUser,
 	} {
@@ -133,8 +132,8 @@ func runHubScopeResolveCases(t *testing.T, newBackend func(t *testing.T) hubScop
 			t.Errorf("%s: got %+v (present %v), want the %s row unchanged", name, sv.SecretMeta, ok, scope)
 		}
 	}
-	if len(got) != 9 {
-		t.Errorf("resolved %d secrets, want 9: %v", len(got), got)
+	if len(got) != 8 {
+		t.Errorf("resolved %d secrets, want 8: %v", len(got), got)
 	}
 }
 

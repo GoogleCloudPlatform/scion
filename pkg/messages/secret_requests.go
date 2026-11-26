@@ -48,9 +48,6 @@ const (
 	SecretRequestTypeEnvironment = "environment"
 	SecretRequestTypeFile        = "file"
 	SecretRequestTypeOnDemand    = "on_demand"
-	// SecretRequestTypeVariable is the retired legacy type accepted by
-	// NormalizeSecretRequests and mapped to SecretRequestTypeOnDemand.
-	SecretRequestTypeVariable = "variable"
 )
 
 // secretRequestKeyRe matches valid secret keys (uppercase/lowercase letters,
@@ -198,11 +195,11 @@ func NormalizeSecretRequests(root string, in []SecretRequestInput) ([]SecretRequ
 
 		secretType := strings.TrimSpace(item.Type)
 		if secretType == "" {
-			secretType = SecretRequestTypeEnvironment
+			secretType = SecretRequestTypeOnDemand
 		}
 		switch secretType {
 		case SecretRequestTypeEnvironment, SecretRequestTypeFile, SecretRequestTypeOnDemand:
-		case SecretRequestTypeVariable:
+		case "variable": // retired legacy type mapped to on_demand
 			secretType = SecretRequestTypeOnDemand
 		default:
 			add(p+".type", DecisionErrInvalid, "type must be one of: environment, file, on_demand")
@@ -216,6 +213,12 @@ func NormalizeSecretRequests(root string, in []SecretRequestInput) ([]SecretRequ
 			case utf8.RuneCountInString(target) > MaxSecretRequestTargetLen:
 				add(p+".target", DecisionErrTooLong, "target is at most %d characters", MaxSecretRequestTargetLen)
 			}
+		}
+		if secretType == SecretRequestTypeOnDemand {
+			if target != "" && target != key {
+				add(p+".target", DecisionErrInvalid, "target is not supported when type is \"on_demand\"")
+			}
+			target = ""
 		}
 		if secretType == SecretRequestTypeFile {
 			if target == "" {

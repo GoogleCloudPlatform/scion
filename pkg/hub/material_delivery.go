@@ -503,13 +503,14 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	noAuth := launchesWithoutCredentials(agent)
 
 	var kept []secretDeliveryCandidate
-	// shadowedRank records the highest scope rank at which a non-deliverable,
+	// shadowed records the highest scope rank at which a non-deliverable,
 	// non-internal secret (such as on_demand or an unknown type) occupies a
 	// key name. That row is never fetched or delivered, and it shadows any
-	// lower-precedence scope row of the same name and blocks progeny fill.
-	// Internal rows and hub rows excluded by HubSecretDeliverable do not
-	// shadow (matching HubSecretDeliverable's contract).
-	var shadowedRank map[string]int
+	// lower-precedence scope row matching by name or effective env target and
+	// blocks progeny fill. Internal rows and hub rows excluded by
+	// HubSecretDeliverable do not shadow (matching HubSecretDeliverable's
+	// contract).
+	var shadowed secret.ShadowedKeys
 	for scopeRank, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
 		if err != nil {
@@ -517,11 +518,6 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 		}
 		for _, m := range metas {
 			if m.SecretType == store.SecretTypeInternal {
-				continue
-			}
-			// An agent without credentials: only the git token candidates
-			// are considered, in every scope including the owner's.
-			if noAuth && !noAuthKeepsSecretCandidate(sc.scope, m.Name) {
 				continue
 			}
 			// The same hub-scope rule as the backends' Resolve, applied
@@ -533,11 +529,17 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 					continue
 				}
 			}
+			// Record non-deliverable, non-internal rows (e.g. on_demand) in
+			// shadowed before the NoAuth candidate filter so an agent-scope
+			// on_demand GITHUB_TOKEN shadows lower-scope tokens on both start
+			// and create without reading any value.
 			if !secret.DeliverableType(m.SecretType) {
-				if shadowedRank == nil {
-					shadowedRank = make(map[string]int)
-				}
-				shadowedRank[m.Name] = scopeRank
+				shadowed.Record(m.Name, scopeRank)
+				continue
+			}
+			// An agent without credentials: only the git token candidates
+			// are considered, in every scope including the owner's.
+			if noAuth && !noAuthKeepsSecretCandidate(sc.scope, m.Name) {
 				continue
 			}
 			if sc.scope != store.ScopeUser {
@@ -571,7 +573,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			if !secret.DeliverableType(m.SecretType) {
 				continue
 			}
-			if _, shadowed := shadowedRank[m.Name]; shadowed {
+			if shadowed.ShadowsProgeny(m) {
 				continue
 			}
 			if !check(m) {
@@ -583,13 +585,11 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 
 	// Drop any lower-precedence scope candidate shadowed by a higher-precedence
 	// non-deliverable row before FetchValues so its value is never read.
-	if len(shadowedRank) > 0 && len(kept) > 0 {
+	if len(shadowed) > 0 && len(kept) > 0 {
 		filtered := kept[:0]
 		for _, c := range kept {
-			if !c.progeny {
-				if sr, ok := shadowedRank[c.meta.Name]; ok && sr > c.scopeRank {
-					continue
-				}
+			if !c.progeny && shadowed.ShadowsScope(c.meta, c.scopeRank) {
+				continue
 			}
 			filtered = append(filtered, c)
 		}

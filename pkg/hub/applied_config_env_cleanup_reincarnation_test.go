@@ -89,8 +89,8 @@ func newReincarnationCleanupFixture(t *testing.T, name string) *reincarnationCle
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 	backend := &cleanupTestSecretBackend{byScope: map[string][]secret.SecretMeta{
-		"user/" + ownerID: {{Name: "USER_SECRET", SecretType: "variable"}},
-		"hub/test-hub":    {{Name: "HUB_SECRET", SecretType: "variable"}},
+		"user/" + ownerID: {{Name: "USER_SECRET", SecretType: store.SecretTypeEnvironment}},
+		"hub/test-hub":    {{Name: "HUB_SECRET", SecretType: store.SecretTypeEnvironment}},
 	}}
 	return &reincarnationCleanupFixture{store: s, backend: backend, agent: agent}
 }

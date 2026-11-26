@@ -59,7 +59,7 @@ type AgentSecretInput struct {
 	Key           string `json:"key"`
 	Value         string `json:"value"` // base64-encoded when Encoding == "base64"; raw UTF-8 otherwise
 	Encoding      string `json:"encoding,omitempty"`
-	Type          string `json:"type,omitempty"` // environment (default) | file | variable
+	Type          string `json:"type,omitempty"` // environment (default) | file | on_demand
 	Target        string `json:"target,omitempty"`
 	InjectionMode string `json:"injectionMode,omitempty"`
 	Description   string `json:"description,omitempty"`
@@ -236,13 +236,11 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 		if secretType == "" {
 			secretType = store.SecretTypeEnvironment
 		}
-		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeFile:
-		default:
+		if msg, ok := validateSecretTypeInput(secretType); !ok {
 			return nil, &secretValidationError{
 				status:  http.StatusBadRequest,
 				code:    ErrCodeValidationError,
-				message: "type must be one of: environment, file",
+				message: msg,
 				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].type", i), "key": in.Key, "value": secretType},
 			}
 		}
@@ -250,6 +248,34 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 		target := in.Target
 		if target == "" {
 			target = in.Key
+		}
+		injectionMode := in.InjectionMode
+		if injectionMode != "" && injectionMode != store.InjectionModeAsNeeded && injectionMode != store.InjectionModeAlways {
+			return nil, &secretValidationError{
+				status:  http.StatusBadRequest,
+				code:    ErrCodeValidationError,
+				message: "injectionMode must be \"always\" or \"as_needed\"",
+				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].injectionMode", i), "key": in.Key, "value": injectionMode},
+			}
+		}
+		if secretType == store.SecretTypeOnDemand {
+			var fErr *onDemandFieldError
+			target, injectionMode, fErr = validateOnDemandFields(store.ScopeAgent, in.Key, in.Target, injectionMode, false)
+			if fErr != nil {
+				details := map[string]interface{}{
+					"field": fmt.Sprintf("secrets[%d].%s", i, fErr.field),
+					"key":   in.Key,
+				}
+				if v, ok := fErr.details["value"]; ok {
+					details["value"] = v
+				}
+				return nil, &secretValidationError{
+					status:  http.StatusBadRequest,
+					code:    ErrCodeValidationError,
+					message: fErr.message,
+					details: details,
+				}
+			}
 		}
 		if secretType == store.SecretTypeEnvironment && secret.IsReservedEnvTarget(target) {
 			return nil, &secretValidationError{
@@ -275,16 +301,6 @@ func (s *Server) validateCreateAgentSecrets(inputs []AgentSecretInput) ([]valida
 					message: "file secret target must be an absolute path (or start with ~/)",
 					details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].target", i), "key": in.Key, "value": target},
 				}
-			}
-		}
-
-		injectionMode := in.InjectionMode
-		if injectionMode != "" && injectionMode != store.InjectionModeAsNeeded && injectionMode != store.InjectionModeAlways {
-			return nil, &secretValidationError{
-				status:  http.StatusBadRequest,
-				code:    ErrCodeValidationError,
-				message: "injectionMode must be \"always\" or \"as_needed\"",
-				details: map[string]interface{}{"field": fmt.Sprintf("secrets[%d].injectionMode", i), "key": in.Key, "value": injectionMode},
 			}
 		}
 

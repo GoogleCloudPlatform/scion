@@ -117,6 +117,16 @@ func githubTokenShaped(v string) bool {
 	return false
 }
 
+// isProvisionCredentialSecretType reports whether a secret of type t may be
+// fetched as a broker-side ProvisionCredential for gh:// skill resolution.
+// on_demand is intentionally allowed here alongside environment, "" and file
+// because ProvisionCredentials are a broker-side consumer never forwarded to
+// the agent container environment (see pkg/runtimebroker/handlers.go).
+// Internal and unknown types are excluded on metadata before FetchValues.
+func isProvisionCredentialSecretType(t string) bool {
+	return secret.DeliverableType(t) || t == store.SecretTypeOnDemand
+}
+
 // resolveProvisionCredentials returns the provision credentials for agent:
 // its project-scope secrets whose names are in the key set of its merged
 // skill references (ghCredentialKeysForSkills), each one authorized as a
@@ -175,7 +185,7 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	var kept []secret.SecretMeta
 	var refused []string
 	for _, m := range projectSecrets {
-		if m.SecretType == store.SecretTypeInternal || !wanted[m.Name] {
+		if !isProvisionCredentialSecretType(m.SecretType) || !wanted[m.Name] {
 			continue
 		}
 		allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, store.ScopeProject, agent.ProjectID)

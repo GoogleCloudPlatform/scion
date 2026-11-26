@@ -788,7 +788,7 @@ func TestSecretRequests_WriteValidationGuards(t *testing.T) {
 	// 4. Reserved env targets (SCION_* and GCE_METADATA_*).
 	for _, reserved := range []string{"SCION_AUTH_TOKEN", "GCE_METADATA_HOST"} {
 		rrRes := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
-			{Key: reserved, Description: "reserved env"},
+			{Key: reserved, Description: "reserved env", Type: messages.SecretRequestTypeEnvironment},
 		}, false)
 		require.Equal(t, http.StatusBadRequest, rrRes.Code, "key=%s body=%s", reserved, rrRes.Body.String())
 	}

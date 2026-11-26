@@ -224,7 +224,14 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 		scopes = append(scopes, scopeEntry{scope: store.ScopeAgent, scopeID: opts.AgentID})
 	}
 
-	for _, sc := range scopes {
+	type resolveCandidate struct {
+		secret    store.Secret
+		scopeRank int
+	}
+	var candidates []resolveCandidate
+	var shadowed ShadowedKeys
+
+	for scopeRank, sc := range scopes {
 		secrets, err := b.store.ListSecrets(ctx, store.SecretFilter{
 			Scope:   sc.scope,
 			ScopeID: sc.scopeID,
@@ -245,6 +252,13 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
 				continue
 			}
+			// Non-deliverable, non-internal rows (e.g. on_demand) are never
+			// fetched and shadow lower-precedence candidates matching by name
+			// or effective env target.
+			if !DeliverableType(s.SecretType) {
+				shadowed.Record(s.Key, scopeRank)
+				continue
+			}
 			// The owner path: a user-scope row of userID is held to the
 			// caller's UserScopeCheck before its value is read. A rejected
 			// row is skipped, so a lower-scope row with the same key stays
@@ -252,49 +266,71 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
 				continue
 			}
+			candidates = append(candidates, resolveCandidate{secret: s, scopeRank: scopeRank})
+		}
+	}
 
-			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
-			if errors.Is(err, store.ErrNotFound) {
-				continue // deleted since it was listed
-			}
-			if err != nil {
-				return nil, err
-			}
-			value, err := b.decryptPayload(rawValue, s.SecretRef)
-			if err != nil {
-				failures = append(failures, ResolveFailure{Key: s.Key, Scope: sc.scope, Kind: DecryptFailureKind(err)})
-				continue
-			}
+	for _, c := range candidates {
+		s := c.secret
+		if shadowed.ShadowsScope(*fromStoreSecretMeta(&s), c.scopeRank) {
+			continue
+		}
 
-			secretType := s.SecretType
-			if secretType == "" {
-				secretType = store.SecretTypeEnvironment
-			}
-			target := s.Target
-			if target == "" {
-				target = s.Key
-			}
+		rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // deleted since it was listed
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Re-check the stored record after reading the value so a concurrent
+		// type or generation change (e.g. environment -> on_demand between
+		// ListSecrets and GetSecretValue) can never deliver the new value
+		// under the stale listed type.
+		cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if recordGenerationChanged(cur, *fromStoreSecretMeta(&s)) || !DeliverableType(cur.SecretType) {
+			continue
+		}
+		value, err := b.decryptPayload(rawValue, s.SecretRef)
+		if err != nil {
+			failures = append(failures, ResolveFailure{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)})
+			continue
+		}
 
-			merged[s.Key] = SecretWithValue{
-				SecretMeta: SecretMeta{
-					ID:            s.ID,
-					Name:          s.Key,
-					SecretType:    secretType,
-					Target:        target,
-					Scope:         sc.scope,
-					ScopeID:       sc.scopeID,
-					Description:   s.Description,
-					InjectionMode: s.InjectionMode,
-					SecretRef:     s.SecretRef,
-					AllowProgeny:  s.AllowProgeny,
-					Version:       s.Version,
-					Created:       s.Created,
-					Updated:       s.Updated,
-					CreatedBy:     s.CreatedBy,
-					UpdatedBy:     s.UpdatedBy,
-				},
-				Value: value,
-			}
+		secretType := s.SecretType
+		if secretType == "" {
+			secretType = store.SecretTypeEnvironment
+		}
+		target := s.Target
+		if target == "" {
+			target = s.Key
+		}
+
+		merged[s.Key] = SecretWithValue{
+			SecretMeta: SecretMeta{
+				ID:            s.ID,
+				Name:          s.Key,
+				SecretType:    secretType,
+				Target:        target,
+				Scope:         s.Scope,
+				ScopeID:       s.ScopeID,
+				Description:   s.Description,
+				InjectionMode: s.InjectionMode,
+				SecretRef:     s.SecretRef,
+				AllowProgeny:  s.AllowProgeny,
+				Version:       s.Version,
+				Created:       s.Created,
+				Updated:       s.Updated,
+				CreatedBy:     s.CreatedBy,
+				UpdatedBy:     s.UpdatedBy,
+			},
+			Value: value,
 		}
 	}
 
@@ -312,12 +348,15 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if _, exists := merged[s.Key]; exists {
 				continue
 			}
-			// Skip internal secrets
-			if s.SecretType == store.SecretTypeInternal {
+			// Skip internal and non-deliverable secrets
+			if s.SecretType == store.SecretTypeInternal || !DeliverableType(s.SecretType) {
 				continue
 			}
 
 			meta := fromStoreSecretMeta(&s)
+			if shadowed.ShadowsProgeny(*meta) {
+				continue
+			}
 
 			// Verify access via the policy engine. With no checker configured,
 			// a progeny secret is excluded rather than included by default:
@@ -333,6 +372,16 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			}
 			if err != nil {
 				return nil, err
+			}
+			cur, err := b.store.GetSecret(ctx, s.Key, s.Scope, s.ScopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if recordGenerationChanged(cur, *meta) || !DeliverableType(cur.SecretType) {
+				continue
 			}
 			value, err := b.decryptPayload(rawValue, s.SecretRef)
 			if err != nil {

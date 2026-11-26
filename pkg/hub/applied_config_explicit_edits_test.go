@@ -317,7 +317,7 @@ func TestApplyAgentUpdate_SecretNamedEnvKeyStrippedByCleanup(t *testing.T) {
 	secretBackend := &cleanupTestSecretBackend{
 		byScope: map[string][]secret.SecretMeta{
 			"user/" + updated.OwnerID: {
-				{Name: "OWNER_SECRET", SecretType: "variable"},
+				{Name: "OWNER_SECRET", SecretType: store.SecretTypeEnvironment},
 			},
 		},
 	}

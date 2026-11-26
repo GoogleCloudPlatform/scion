@@ -46,6 +46,7 @@ import (
 
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -402,9 +403,9 @@ func (a *AuthzService) ownerUnsharedRowNames(ctx context.Context, ownerID string
 		return out
 	}
 	for _, sec := range secrets {
-		// Hub-internal secrets are skipped, as start and the read skip
-		// them (rootSharedSecretNames).
-		if sec.SecretType == store.SecretTypeInternal {
+		// Non-deliverable secrets (internal, on_demand, etc.) are not
+		// delivered at start.
+		if !secret.DeliverableType(sec.SecretType) {
 			continue
 		}
 		if sec.AllowProgeny {
@@ -589,7 +590,7 @@ func (a *AuthzService) launchDeliveryUATFacts(ctx context.Context, ag *store.Age
 	}}
 	for i := range rows {
 		r := &rows[i]
-		if r.Scope != store.ScopeUser || r.ScopeID != ag.OwnerID || !r.AllowProgeny {
+		if r.Scope != store.ScopeUser || r.ScopeID != ag.OwnerID || !r.AllowProgeny || !secret.DeliverableType(r.SecretType) {
 			continue
 		}
 		facts.OwnerSharedRows++

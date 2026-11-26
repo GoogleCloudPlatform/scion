@@ -794,7 +794,7 @@ type SetSecretRequest struct {
 	ScopeID       string `json:"scopeId,omitempty"`
 	Description   string `json:"description,omitempty"`
 	InjectionMode string `json:"injectionMode,omitempty"` // "always" or "as_needed" (default: as_needed)
-	Type          string `json:"type,omitempty"`          // environment (default), variable, file
+	Type          string `json:"type,omitempty"`          // environment (default), file, on_demand
 	Target        string `json:"target,omitempty"`        // Projection target (defaults to key)
 	AllowProgeny  bool   `json:"allowProgeny,omitempty"`  // Allow creator's progeny agents to access (user scope only)
 }
@@ -1223,6 +1223,69 @@ func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) b
 	return false
 }
 
+const retiredVariableSecretTypeMessage = "type \"variable\" was removed; use \"on_demand\" instead"
+
+// validateSecretTypeInput validates a non-empty secret type supplied to a
+// secret-writing endpoint. It returns ("", true) when valid, or a validation
+// error message and false when rejected.
+func validateSecretTypeInput(secretType string) (string, bool) {
+	switch secretType {
+	case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
+		return "", true
+	case "variable":
+		return retiredVariableSecretTypeMessage, false
+	default:
+		return "type must be one of: environment, file, on_demand", false
+	}
+}
+
+type onDemandFieldError struct {
+	field   string
+	message string
+	details map[string]interface{}
+}
+
+// validateOnDemandFields enforces §3.7 field rules for on_demand secrets across
+// all secret-writing endpoints:
+//   - scope must be project or agent;
+//   - target must be empty or equal to key;
+//   - injectionMode must be empty or "as_needed" (never "always");
+//   - allowProgeny must be false.
+//
+// On success it returns the normalized target (key) and injectionMode
+// ("as_needed").
+func validateOnDemandFields(scope, key, target, injectionMode string, allowProgeny bool) (string, string, *onDemandFieldError) {
+	if scope != store.ScopeProject && scope != store.ScopeAgent {
+		return "", "", &onDemandFieldError{
+			field:   "scope",
+			message: "on_demand secrets are only supported at project and agent scope",
+			details: map[string]interface{}{"field": "scope", "scope": scope},
+		}
+	}
+	if target != "" && target != key {
+		return "", "", &onDemandFieldError{
+			field:   "target",
+			message: "target is not supported for on_demand secrets",
+			details: map[string]interface{}{"field": "target", "value": target},
+		}
+	}
+	if injectionMode != "" && injectionMode != store.InjectionModeAsNeeded {
+		return "", "", &onDemandFieldError{
+			field:   "injectionMode",
+			message: "injectionMode \"always\" is not supported for on_demand secrets",
+			details: map[string]interface{}{"field": "injectionMode", "value": injectionMode},
+		}
+	}
+	if allowProgeny {
+		return "", "", &onDemandFieldError{
+			field:   "allowProgeny",
+			message: "allowProgeny is only supported on user-scoped secrets",
+			details: map[string]interface{}{"field": "allowProgeny", "scope": scope},
+		}
+	}
+	return key, store.InjectionModeAsNeeded, nil
+}
+
 func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	ctx := r.Context()
 
@@ -1267,21 +1330,17 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if secretType == "" {
 		secretType = store.SecretTypeEnvironment
 	}
-	switch secretType {
-	case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-		// valid
-	case "variable":
-		ValidationError(w, "type \"variable\" was removed; use \"on_demand\" instead", map[string]interface{}{
+	if msg, ok := validateSecretTypeInput(secretType); !ok {
+		ValidationError(w, msg, map[string]interface{}{
 			"field": "type",
 			"value": secretType,
 		})
 		return
-	default:
-		ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{
-			"field": "type",
-			"value": secretType,
-		})
-		return
+	}
+
+	scope := req.Scope
+	if scope == "" {
+		scope = store.ScopeUser
 	}
 
 	// Default target to key
@@ -1292,22 +1351,12 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	injectionMode := req.InjectionMode
 	if secretType == store.SecretTypeOnDemand {
-		if req.Target != "" && req.Target != key {
-			ValidationError(w, "target is not supported for on_demand secrets", map[string]interface{}{
-				"field": "target",
-				"value": req.Target,
-			})
+		var fErr *onDemandFieldError
+		target, injectionMode, fErr = validateOnDemandFields(scope, key, req.Target, req.InjectionMode, req.AllowProgeny)
+		if fErr != nil {
+			ValidationError(w, fErr.message, fErr.details)
 			return
 		}
-		if req.InjectionMode != "" && req.InjectionMode != store.InjectionModeAsNeeded {
-			ValidationError(w, "injectionMode \"always\" is not supported for on_demand secrets", map[string]interface{}{
-				"field": "injectionMode",
-				"value": req.InjectionMode,
-			})
-			return
-		}
-		target = key
-		injectionMode = store.InjectionModeAsNeeded
 	}
 
 	if !validateEnvSecretTarget(w, secretType, target) {
@@ -1331,18 +1380,6 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 			BadRequest(w, "secret value exceeds 64KB limit")
 			return
 		}
-	}
-
-	scope := req.Scope
-	if scope == "" {
-		scope = store.ScopeUser
-	}
-	if secretType == store.SecretTypeOnDemand && scope != store.ScopeProject && scope != store.ScopeAgent {
-		ValidationError(w, "on_demand secrets are only supported at project and agent scope", map[string]interface{}{
-			"field": "scope",
-			"scope": scope,
-		})
-		return
 	}
 
 	scopeID, resolvedAgent, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, req.ScopeID, true)
@@ -1435,17 +1472,8 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 
 	// Validate type if provided
 	if req.Type != "" {
-		switch req.Type {
-		case store.SecretTypeEnvironment, store.SecretTypeFile, store.SecretTypeOnDemand:
-			// valid
-		case "variable":
-			ValidationError(w, "type \"variable\" was removed; use \"on_demand\" instead", map[string]interface{}{
-				"field": "type",
-				"value": req.Type,
-			})
-			return
-		default:
-			ValidationError(w, "type must be one of: environment, file, on_demand", map[string]interface{}{
+		if msg, ok := validateSecretTypeInput(req.Type); !ok {
+			ValidationError(w, msg, map[string]interface{}{
 				"field": "type",
 				"value": req.Type,
 			})
@@ -1475,40 +1503,35 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Determine the effective secret type for target and on_demand validation
+	// Determine the effective secret type for target and on_demand validation.
+	// Also fetch existing metadata when changing type at a disallowed scope so
+	// a PATCH cannot change out of on_demand at a disallowed scope (§3.4).
 	effectiveType := req.Type
 	var existingMeta *secret.SecretMeta
-	if effectiveType == "" && (req.Target != "" || req.InjectionMode != "") {
-		// Fetch stored type to validate target/injectionMode against it
+	if (effectiveType == "" && (req.Target != "" || req.InjectionMode != "")) ||
+		(req.Type != "" && scope != store.ScopeProject && scope != store.ScopeAgent) {
+		// Fetch stored type to validate target/injectionMode/type-change against it
 		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		existingMeta = existing
-		effectiveType = existing.SecretType
-	}
-
-	if effectiveType == store.SecretTypeOnDemand {
-		if scope != store.ScopeProject && scope != store.ScopeAgent {
+		if effectiveType == "" {
+			effectiveType = existing.SecretType
+		}
+		if existing.SecretType == store.SecretTypeOnDemand && scope != store.ScopeProject && scope != store.ScopeAgent {
 			ValidationError(w, "on_demand secrets are only supported at project and agent scope", map[string]interface{}{
 				"field": "scope",
 				"scope": scope,
 			})
 			return
 		}
-		if req.InjectionMode == store.InjectionModeAlways {
-			ValidationError(w, "injectionMode \"always\" is not supported for on_demand secrets", map[string]interface{}{
-				"field": "injectionMode",
-				"value": req.InjectionMode,
-			})
-			return
-		}
-		if req.Target != "" && req.Target != key {
-			ValidationError(w, "target is not supported for on_demand secrets", map[string]interface{}{
-				"field": "target",
-				"value": req.Target,
-			})
+	}
+
+	if effectiveType == store.SecretTypeOnDemand {
+		if _, _, fErr := validateOnDemandFields(scope, key, req.Target, req.InjectionMode, req.AllowProgeny != nil && *req.AllowProgeny); fErr != nil {
+			ValidationError(w, fErr.message, fErr.details)
 			return
 		}
 	}
@@ -1636,7 +1659,7 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 type AgentSetSecretRequest struct {
 	Value    string `json:"value"`              // Secret value (base64-encoded by default; use Encoding:"raw" for literal text)
 	Encoding string `json:"encoding,omitempty"` // "base64" (default) or "raw" (value is literal text, no decoding)
-	Type     string `json:"type,omitempty"`     // environment (default), variable, file
+	Type     string `json:"type,omitempty"`     // environment (default), file, on_demand
 	Target   string `json:"target,omitempty"`   // Injection target path
 	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
 	Scope    string `json:"scope,omitempty"`    // "project" (default), "user", or "agent"
@@ -1882,11 +1905,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if secretType == "" {
 		secretType = store.SecretTypeEnvironment
 	}
-	switch secretType {
-	case store.SecretTypeEnvironment, store.SecretTypeFile:
-		// valid (on_demand agent-PUT validation is Phase 2)
-	default:
-		ValidationError(w, "type must be one of: environment, file", map[string]interface{}{
+	if msg, ok := validateSecretTypeInput(secretType); !ok {
+		ValidationError(w, msg, map[string]interface{}{
 			"field": "type",
 			"value": secretType,
 		})
@@ -1897,6 +1917,16 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	target := req.Target
 	if target == "" {
 		target = key
+	}
+
+	injectionMode := ""
+	if secretType == store.SecretTypeOnDemand {
+		var fErr *onDemandFieldError
+		target, injectionMode, fErr = validateOnDemandFields(scope, key, req.Target, "", req.AllowProgeny != nil && *req.AllowProgeny)
+		if fErr != nil {
+			ValidationError(w, fErr.message, fErr.details)
+			return
+		}
 	}
 
 	if scope == store.ScopeAgent {
@@ -1980,15 +2010,16 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	createdBy := fmt.Sprintf("agent:%s", agentID)
 
 	input := &secret.SetSecretInput{
-		Name:         key,
-		Value:        string(decoded),
-		SecretType:   secretType,
-		Target:       target,
-		Scope:        scope,
-		ScopeID:      scopeID,
-		AllowProgeny: allowProgeny,
-		CreatedBy:    createdBy,
-		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
+		Name:          key,
+		Value:         string(decoded),
+		SecretType:    secretType,
+		Target:        target,
+		Scope:         scope,
+		ScopeID:       scopeID,
+		InjectionMode: injectionMode,
+		AllowProgeny:  allowProgeny,
+		CreatedBy:     createdBy,
+		UpdatedBy:     fmt.Sprintf("agent:%s", agentID),
 	}
 	if scope == store.ScopeAgent {
 		input.ProjectID = projectID
@@ -2918,15 +2949,37 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		if secretType == "" {
 			secretType = store.SecretTypeEnvironment
 		}
-		switch secretType {
-		case store.SecretTypeEnvironment, store.SecretTypeFile:
-		default:
-			ValidationError(w, "type must be one of: environment, file", map[string]interface{}{"field": "type", "value": secretType})
+		if msg, ok := validateSecretTypeInput(secretType); !ok {
+			ValidationError(w, msg, map[string]interface{}{"field": "type", "value": secretType})
+			return
+		}
+		if req.InjectionMode != "" && req.InjectionMode != store.InjectionModeAlways && req.InjectionMode != store.InjectionModeAsNeeded {
+			ValidationError(w, "injectionMode must be \"always\" or \"as_needed\"", map[string]interface{}{
+				"field":   "injectionMode",
+				"value":   req.InjectionMode,
+				"allowed": []string{"always", "as_needed"},
+			})
 			return
 		}
 		target := req.Target
 		if target == "" {
 			target = key
+		}
+		injectionMode := req.InjectionMode
+		if secretType == store.SecretTypeOnDemand {
+			var fErr *onDemandFieldError
+			target, injectionMode, fErr = validateOnDemandFields(scope, key, req.Target, req.InjectionMode, req.AllowProgeny)
+			if fErr != nil {
+				ValidationError(w, fErr.message, fErr.details)
+				return
+			}
+		}
+		if req.AllowProgeny && scope != store.ScopeUser {
+			ValidationError(w, "allowProgeny is only supported on user-scoped secrets", map[string]interface{}{
+				"field": "allowProgeny",
+				"scope": scope,
+			})
+			return
 		}
 		if !validateEnvSecretTarget(w, secretType, target) {
 			return
@@ -2959,7 +3012,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			Scope:         scope,
 			ScopeID:       scopeID,
 			Description:   req.Description,
-			InjectionMode: req.InjectionMode,
+			InjectionMode: injectionMode,
 		}
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			input.CreatedBy = userIdent.ID()
