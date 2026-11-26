@@ -184,4 +184,105 @@ describe('scion-trigger-list', () => {
     expect(whereEl?.rowErrors[0]?.line).toBe(1);
     expect(whereEl?.rowErrors[0]?.column).toBe(6);
   });
+
+  it('sends only changed fields on edit PATCH so rename/description never re-attributes authority (R1, O2)', async () => {
+    const existing: TriggerDefinition = {
+      id: 'tr-agent',
+      projectId: 'proj-1',
+      name: 'agent-rule',
+      description: 'orig desc',
+      source: { kind: 'webhook', id: 'ep-1' },
+      match: {
+        types: ['webhook.received'],
+        rules: [{ dialect: 'cel', expr: 'event.attributes.env == "prod"' }],
+      },
+      action: { type: 'message', agentId: 'ag-1', message: 'ping' },
+      subject: { mode: 'new' },
+      maxFiresPerMinute: 30,
+      status: 'active',
+      authorizationRevision: 4,
+      fireCount: 0,
+      errorCount: 0,
+      createdAt: '2026-11-20T10:00:00Z',
+      updatedAt: '2026-11-20T10:00:00Z',
+    };
+
+    const patchBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (init?.method === 'PATCH') {
+          const rawBody = typeof init.body === 'string' ? init.body : '';
+          patchBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(jsonResponse(existing));
+        }
+        return Promise.resolve(jsonResponse({ triggers: [existing], totalCount: 1 }));
+      })
+    );
+
+    const el = document.createElement('scion-trigger-list') as ScionTriggerList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // 1. Rename-only edit: must send ONLY { name, expectedRevision }.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-agent"]') as HTMLElement).click();
+    await el.updateComplete;
+    const nameInput = el.shadowRoot?.querySelector('[data-trigger-name-input]') as HTMLInputElement;
+    nameInput.value = 'agent-rule-renamed';
+    nameInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[0]).toEqual({
+      name: 'agent-rule-renamed',
+      expectedRevision: 4,
+    });
+
+    // 2. Description-only edit: must NOT send source, match, action, or subject.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-agent"]') as HTMLElement).click();
+    await el.updateComplete;
+    const descInput = el.shadowRoot?.querySelector(
+      '[data-trigger-description-input]'
+    ) as HTMLInputElement;
+    descInput.value = 'updated desc';
+    descInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(patchBodies[1]).toEqual({
+      description: 'updated desc',
+      expectedRevision: 4,
+    });
+
+    // 3. Edit one CEL row + clear maxFiresPerMinute: sends match and maxFiresPerMinute: 0, NOT action/source/subject.
+    (el.shadowRoot?.querySelector('[data-edit-trigger="tr-agent"]') as HTMLElement).click();
+    await el.updateComplete;
+    const whereEditor = el.shadowRoot?.querySelector('scion-trigger-where-editor');
+    whereEditor?.dispatchEvent(
+      new CustomEvent('rules-changed', {
+        detail: { rules: [{ dialect: 'cel', expr: 'event.attributes.env == "staging"' }] },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    const fpmInput = el.shadowRoot?.querySelector('[data-trigger-max-fpm]') as HTMLInputElement;
+    fpmInput.value = '';
+    fpmInput.dispatchEvent(new Event('sl-input', { bubbles: true }));
+    await el.updateComplete;
+    (el.shadowRoot?.querySelector('[data-submit-trigger]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(Object.keys(patchBodies[2]).sort()).toEqual([
+      'expectedRevision',
+      'match',
+      'maxFiresPerMinute',
+    ]);
+    expect(patchBodies[2]['maxFiresPerMinute']).toBe(0);
+    expect(patchBodies[2]['action']).toBeUndefined();
+    expect(patchBodies[2]['source']).toBeUndefined();
+  });
 });

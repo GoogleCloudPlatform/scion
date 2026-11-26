@@ -47,7 +47,10 @@ import {
 import {
   ensureExtensionLoaded,
   getFormAuthoring,
+  getRegisteredSourceKinds,
+  getSourceKind,
   type FormAuthoringOutput,
+  type SourceIdMode,
 } from './source-extensions.js';
 import { createDefaultMessageAction } from './action-editor.js';
 import './where-editor.js';
@@ -109,6 +112,8 @@ export class ScionTriggerList extends LitElement {
   @state() private formMaxFiresPerMinute = '';
   @state() private formMaxConcurrentDispatches = '';
   @state() private formAuthoringPane: 'form' | 'cel' = 'cel';
+  @state() private formAuthoringValid = true;
+  @state() private formAuthoringErrors: string[] = [];
   @state() private formPresetId = '';
 
   // Preview (render) dialog state
@@ -293,13 +298,69 @@ export class ScionTriggerList extends LitElement {
     }
   }
 
+  private sourceIdModeFor(kind: string): SourceIdMode {
+    if (kind === 'webhook') return 'endpoint';
+    const reg = getSourceKind(kind);
+    if (reg) return reg.sourceIdMode;
+    // Unregistered non-webhook kinds default to 'none' (empty source.id) so
+    // app-shaped sources work even if only form-authoring was registered.
+    return 'none';
+  }
+
+  private handleSourceKindChange(nextKind: string): void {
+    const kind = nextKind.trim() || 'webhook';
+    this.formSourceKind = kind;
+    const mode = this.sourceIdModeFor(kind);
+    if (mode === 'none') {
+      this.formSourceId = '';
+    } else if (mode === 'endpoint' && !this.formSourceId) {
+      this.formSourceId = this.endpoints[0]?.id ?? '';
+    }
+    if (!this.editingTrigger) {
+      const reg = getSourceKind(kind);
+      if (kind === 'webhook') {
+        this.formTypes = ['webhook.received'];
+      } else if (reg?.defaultTypes) {
+        this.formTypes = [...reg.defaultTypes];
+      } else {
+        this.formTypes = [];
+      }
+    }
+    const kindReg = getSourceKind(kind);
+    if (kindReg?.load) {
+      void ensureExtensionLoaded(kindReg)
+        .then(() => this.requestUpdate())
+        .catch(() => {
+          // Evicted on failure; retryable.
+        });
+    }
+    const ext = getFormAuthoring(kind);
+    this.formAuthoringPane = ext ? 'form' : 'cel';
+    this.formAuthoringValid = true;
+    this.formAuthoringErrors = [];
+    if (ext) {
+      void ensureExtensionLoaded(ext)
+        .then(() => this.requestUpdate())
+        .catch(() => {
+          // Evicted on failure; retryable.
+        });
+    }
+  }
+
   openCreateDialog(sourceKind = 'webhook', presetId = ''): void {
     this.editingTrigger = null;
     this.formName = '';
     this.formDescription = '';
     this.formSourceKind = sourceKind || 'webhook';
-    this.formSourceId = this.formSourceKind === 'webhook' ? (this.endpoints[0]?.id ?? '') : '';
-    this.formTypes = this.formSourceKind === 'webhook' ? ['webhook.received'] : [];
+    const mode = this.sourceIdModeFor(this.formSourceKind);
+    this.formSourceId = mode === 'endpoint' ? (this.endpoints[0]?.id ?? '') : '';
+    const kindReg = getSourceKind(this.formSourceKind);
+    this.formTypes =
+      this.formSourceKind === 'webhook'
+        ? ['webhook.received']
+        : kindReg?.defaultTypes
+          ? [...kindReg.defaultTypes]
+          : [];
     this.formTypeDraft = '';
     this.formRules = [];
     this.formMatchForm = undefined;
@@ -313,11 +374,24 @@ export class ScionTriggerList extends LitElement {
     this.formPresetId = presetId;
     this.formError = null;
     this.whereRowErrors = {};
+    this.formAuthoringValid = true;
+    this.formAuthoringErrors = [];
 
+    if (kindReg?.load) {
+      void ensureExtensionLoaded(kindReg)
+        .then(() => this.requestUpdate())
+        .catch(() => {
+          // Evicted on failure; retryable.
+        });
+    }
     const formExt = getFormAuthoring(this.formSourceKind);
     this.formAuthoringPane = formExt ? 'form' : 'cel';
     if (formExt) {
-      void ensureExtensionLoaded(formExt).then(() => this.requestUpdate());
+      void ensureExtensionLoaded(formExt)
+        .then(() => this.requestUpdate())
+        .catch(() => {
+          // Evicted on failure; retryable.
+        });
     }
     this.dialogOpen = true;
   }
@@ -346,11 +420,17 @@ export class ScionTriggerList extends LitElement {
     this.formPresetId = '';
     this.formError = null;
     this.whereRowErrors = {};
+    this.formAuthoringValid = true;
+    this.formAuthoringErrors = [];
 
     const formExt = getFormAuthoring(this.formSourceKind);
     this.formAuthoringPane = formExt && tr.match.form ? 'form' : 'cel';
     if (formExt) {
-      void ensureExtensionLoaded(formExt).then(() => this.requestUpdate());
+      void ensureExtensionLoaded(formExt)
+        .then(() => this.requestUpdate())
+        .catch(() => {
+          // Evicted on failure; retryable.
+        });
     }
     this.dialogOpen = true;
   }
@@ -360,6 +440,13 @@ export class ScionTriggerList extends LitElement {
     this.formRules = out.rules.map((r) => ({ ...r }));
     this.formMatchForm = out.form;
     this.formMatchFormDropped = false;
+    this.formAuthoringValid = out.valid !== false;
+    this.formAuthoringErrors = Array.isArray(out.errors) ? [...out.errors] : [];
+    if (out.subject) {
+      this.formSubjectMode = out.subject.mode || 'new';
+      this.formSubjectExpr = out.subject.expr ?? '';
+      this.formCoalesceWindow = out.subject.coalesceWindow ?? '';
+    }
     if (out.suggestedActions && out.suggestedActions.length > 0 && !this.editingTrigger) {
       this.formActions = out.suggestedActions.map((a) => ({ ...a }));
     }
@@ -387,14 +474,110 @@ export class ScionTriggerList extends LitElement {
     this.formTypes = this.formTypes.filter((t) => t !== typeVal);
   }
 
+  private isReadOnlyActionType(type: string | undefined): boolean {
+    return type !== 'message' && type !== 'dispatch_agent';
+  }
+
+  private buildDiffPatchBody(
+    orig: TriggerDefinition,
+    effectiveSourceId: string,
+    matchPayload: Record<string, unknown>,
+    subjectPayload: Record<string, unknown>
+  ): Record<string, unknown> {
+    const body: Record<string, unknown> = {
+      expectedRevision: orig.authorizationRevision,
+    };
+
+    const nextName = this.formName.trim();
+    if (nextName !== orig.name) {
+      body['name'] = nextName;
+    }
+
+    const nextDesc = this.formDescription.trim();
+    if (nextDesc !== (orig.description ?? '')) {
+      body['description'] = nextDesc;
+    }
+
+    if (this.formSourceKind !== orig.source.kind || effectiveSourceId !== orig.source.id) {
+      body['source'] = {
+        kind: this.formSourceKind,
+        id: effectiveSourceId,
+      };
+    }
+
+    const origTypes = orig.match.types ?? [];
+    const origRules = orig.match.rules ?? [];
+    const typesChanged = JSON.stringify(this.formTypes) !== JSON.stringify(origTypes);
+    const rulesChanged = JSON.stringify(this.formRules) !== JSON.stringify(origRules);
+    const formChanged =
+      this.formMatchFormDropped ||
+      JSON.stringify(this.formMatchForm ?? null) !== JSON.stringify(orig.match.form ?? null);
+    if (typesChanged || rulesChanged || formChanged) {
+      body['match'] = matchPayload;
+    }
+
+    const origMode = orig.subject.mode || 'new';
+    const origExpr = orig.subject.expr ?? '';
+    const origWindow = orig.subject.coalesce_window ?? '';
+    const nextMode = this.formSubjectMode || 'new';
+    const nextExpr = this.formSubjectExpr.trim();
+    const nextWindow = nextMode === 'reuse' ? this.formCoalesceWindow.trim() : '';
+    if (nextMode !== origMode || nextExpr !== origExpr || nextWindow !== origWindow) {
+      body['subject'] = subjectPayload;
+    }
+
+    const origActions = getTriggerActions(orig);
+    const actionsChanged = JSON.stringify(this.formActions) !== JSON.stringify(origActions);
+    const firstAction = this.formActions[0];
+    if (actionsChanged) {
+      // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions[]`,
+      // preserving read-only/exec rows unchanged (O1 default-safety).
+      if (this.multiActionEnabled) {
+        const hasReadOnly = this.formActions.some((a) => this.isReadOnlyActionType(a.type));
+        if (!hasReadOnly) {
+          body['actions'] = this.formActions;
+        }
+      } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
+        body['action'] = firstAction;
+      }
+    }
+
+    // O2: allow clearing limits back to 0 when the user empties the input.
+    const rawFpm = this.formMaxFiresPerMinute.trim();
+    const nextFpm = rawFpm === '' ? 0 : parseInt(rawFpm, 10);
+    if (Number.isFinite(nextFpm) && nextFpm >= 0 && nextFpm !== (orig.maxFiresPerMinute ?? 0)) {
+      body['maxFiresPerMinute'] = nextFpm;
+    }
+
+    const rawConc = this.formMaxConcurrentDispatches.trim();
+    const nextConc = rawConc === '' ? 0 : parseInt(rawConc, 10);
+    if (
+      Number.isFinite(nextConc) &&
+      nextConc >= 0 &&
+      firstAction?.type === 'dispatch_agent' &&
+      nextConc !== (orig.maxConcurrentDispatches ?? 0)
+    ) {
+      body['maxConcurrentDispatches'] = nextConc;
+    }
+
+    return body;
+  }
+
   private async submitTriggerForm(): Promise<void> {
     if (!this.projectId) return;
     if (!this.formName.trim()) {
       this.formError = 'Name is required.';
       return;
     }
-    if (!this.formSourceId.trim()) {
+    const mode = this.sourceIdModeFor(this.formSourceKind);
+    const effectiveSourceId = mode === 'none' ? '' : this.formSourceId.trim();
+    if (mode === 'endpoint' && !effectiveSourceId) {
       this.formError = 'Source endpoint is required.';
+      return;
+    }
+    const formExt = getFormAuthoring(this.formSourceKind);
+    if (formExt && this.formAuthoringPane === 'form' && !this.formAuthoringValid) {
+      this.formError = this.formAuthoringErrors.join('; ') || 'Fix the form errors before saving.';
       return;
     }
 
@@ -419,36 +602,45 @@ export class ScionTriggerList extends LitElement {
       subjectPayload['coalesce_window'] = this.formCoalesceWindow.trim();
     }
 
-    const body: Record<string, unknown> = {
-      name: this.formName.trim(),
-      description: this.formDescription.trim(),
-      source: {
-        kind: this.formSourceKind,
-        id: this.formSourceId.trim(),
-      },
-      match: matchPayload,
-      subject: subjectPayload,
-    };
-
-    // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions: this.formActions`.
-    // Until P9 merges on the Hub, send the single `action` object (avoiding sending exec action edits).
-    const firstAction = this.formActions[0];
-    if (this.multiActionEnabled) {
-      body['actions'] = this.formActions;
-    } else if (firstAction && firstAction.type !== 'exec') {
-      body['action'] = firstAction;
-    }
-
-    const maxFpm = parseInt(this.formMaxFiresPerMinute, 10);
-    if (Number.isFinite(maxFpm) && maxFpm >= 0) {
-      body['maxFiresPerMinute'] = maxFpm;
-    }
-    const maxConc = parseInt(this.formMaxConcurrentDispatches, 10);
-    if (Number.isFinite(maxConc) && maxConc >= 0 && firstAction?.type === 'dispatch_agent') {
-      body['maxConcurrentDispatches'] = maxConc;
-    }
+    let body: Record<string, unknown>;
     if (this.editingTrigger) {
-      body['expectedRevision'] = this.editingTrigger.authorizationRevision;
+      // R1: diff against the loaded trigger so rename/description edits never
+      // touch source/match/action/subject or re-attribute recorded authority.
+      body = this.buildDiffPatchBody(
+        this.editingTrigger,
+        effectiveSourceId,
+        matchPayload,
+        subjectPayload
+      );
+    } else {
+      body = {
+        name: this.formName.trim(),
+        description: this.formDescription.trim(),
+        source: {
+          kind: this.formSourceKind,
+          id: effectiveSourceId,
+        },
+        match: matchPayload,
+        subject: subjectPayload,
+      };
+
+      // P9 HOOK (ptone/scion#9065): when multiActionEnabled is true, send `actions[]`.
+      // Until P9 merges on the Hub, send the single `action` object.
+      const firstAction = this.formActions[0];
+      if (this.multiActionEnabled) {
+        body['actions'] = this.formActions.filter((a) => !this.isReadOnlyActionType(a.type));
+      } else if (firstAction && !this.isReadOnlyActionType(firstAction.type)) {
+        body['action'] = firstAction;
+      }
+
+      const maxFpm = parseInt(this.formMaxFiresPerMinute, 10);
+      if (Number.isFinite(maxFpm) && maxFpm > 0) {
+        body['maxFiresPerMinute'] = maxFpm;
+      }
+      const maxConc = parseInt(this.formMaxConcurrentDispatches, 10);
+      if (Number.isFinite(maxConc) && maxConc > 0 && firstAction?.type === 'dispatch_agent') {
+        body['maxConcurrentDispatches'] = maxConc;
+      }
     }
 
     this.saving = true;
@@ -517,7 +709,13 @@ export class ScionTriggerList extends LitElement {
     this.previewEventId = '';
 
     try {
-      const evUrl = `/api/v1/projects/${encodeURIComponent(this.projectId)}/trigger-events?sourceId=${encodeURIComponent(tr.source.id)}&limit=1`;
+      const evParams = new URLSearchParams({ limit: '1' });
+      if (tr.source.id) {
+        evParams.set('sourceId', tr.source.id);
+      } else if (tr.source.kind) {
+        evParams.set('source', tr.source.kind);
+      }
+      const evUrl = `/api/v1/projects/${encodeURIComponent(this.projectId)}/trigger-events?${evParams.toString()}`;
       const evRes = await apiFetch(evUrl);
       if (!evRes.ok) {
         this.previewError = await extractApiError(evRes, `HTTP ${evRes.status}`);
@@ -864,6 +1062,7 @@ export class ScionTriggerList extends LitElement {
               label="Description"
               placeholder="Optional description"
               .value=${this.formDescription}
+              data-trigger-description-input
               @sl-input=${(e: Event) => {
                 this.formDescription = (e.target as HTMLInputElement).value;
               }}
@@ -871,49 +1070,59 @@ export class ScionTriggerList extends LitElement {
           </div>
 
           <div class="field-grid">
-            <sl-input
+            <sl-select
               label="Source kind"
               size="small"
+              hoist
               .value=${this.formSourceKind}
               data-trigger-source-kind
-              @sl-input=${(e: Event) => {
-                this.formSourceKind = (e.target as HTMLInputElement).value.trim() || 'webhook';
-                const ext = getFormAuthoring(this.formSourceKind);
-                this.formAuthoringPane = ext ? 'form' : 'cel';
-                if (ext) {
-                  void ensureExtensionLoaded(ext).then(() => this.requestUpdate());
-                }
+              @sl-change=${(e: Event) => {
+                this.handleSourceKindChange((e.target as HTMLSelectElement).value);
               }}
-            ></sl-input>
-            ${this.formSourceKind === 'webhook' && this.endpoints.length > 0
-              ? html`
-                  <sl-select
-                    label="Webhook endpoint"
-                    size="small"
-                    hoist
-                    .value=${this.formSourceId}
-                    data-trigger-source-id
-                    @sl-change=${(e: Event) => {
-                      this.formSourceId = (e.target as HTMLSelectElement).value;
-                    }}
-                  >
-                    ${this.endpoints.map(
-                      (ep) => html`<sl-option value=${ep.id}>${ep.name}</sl-option>`
-                    )}
-                  </sl-select>
-                `
-              : html`
-                  <sl-input
-                    label="Source ID"
-                    size="small"
-                    placeholder="endpoint or source ID"
-                    .value=${this.formSourceId}
-                    data-trigger-source-id
-                    @sl-input=${(e: Event) => {
-                      this.formSourceId = (e.target as HTMLInputElement).value;
-                    }}
-                  ></sl-input>
-                `}
+            >
+              <sl-option value="webhook">Webhook endpoint</sl-option>
+              ${getRegisteredSourceKinds().map(
+                ({ sourceKind, entry }) =>
+                  html`<sl-option value=${sourceKind}>${entry.label}</sl-option>`
+              )}
+              ${this.formSourceKind !== 'webhook' && !getSourceKind(this.formSourceKind)
+                ? html`<sl-option value=${this.formSourceKind}>${this.formSourceKind}</sl-option>`
+                : nothing}
+            </sl-select>
+            ${this.sourceIdModeFor(this.formSourceKind) === 'none'
+              ? nothing
+              : this.sourceIdModeFor(this.formSourceKind) === 'endpoint' &&
+                  this.endpoints.length > 0
+                ? html`
+                    <sl-select
+                      label="Webhook endpoint"
+                      size="small"
+                      hoist
+                      .value=${this.formSourceId}
+                      data-trigger-source-id
+                      @sl-change=${(e: Event) => {
+                        this.formSourceId = (e.target as HTMLSelectElement).value;
+                      }}
+                    >
+                      ${this.endpoints.map(
+                        (ep) => html`<sl-option value=${ep.id}>${ep.name}</sl-option>`
+                      )}
+                    </sl-select>
+                  `
+                : html`
+                    <sl-input
+                      label=${this.sourceIdModeFor(this.formSourceKind) === 'endpoint'
+                        ? 'Webhook endpoint ID'
+                        : 'Source ID'}
+                      size="small"
+                      placeholder="endpoint or source ID"
+                      .value=${this.formSourceId}
+                      data-trigger-source-id
+                      @sl-input=${(e: Event) => {
+                        this.formSourceId = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>
+                  `}
           </div>
 
           ${formExt
@@ -1050,6 +1259,7 @@ export class ScionTriggerList extends LitElement {
               min="0"
               max="600"
               .value=${this.formMaxFiresPerMinute}
+              data-trigger-max-fpm
               @sl-input=${(e: Event) => {
                 this.formMaxFiresPerMinute = (e.target as HTMLInputElement).value;
               }}
@@ -1061,11 +1271,23 @@ export class ScionTriggerList extends LitElement {
               min="0"
               max="50"
               .value=${this.formMaxConcurrentDispatches}
+              data-trigger-max-concurrent
               @sl-input=${(e: Event) => {
                 this.formMaxConcurrentDispatches = (e.target as HTMLInputElement).value;
               }}
             ></sl-input>
           </div>
+          ${formExt &&
+          this.formAuthoringPane === 'form' &&
+          !this.formAuthoringValid &&
+          this.formAuthoringErrors.length > 0
+            ? html`
+                <sl-alert variant="warning" open data-form-authoring-errors>
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${this.formAuthoringErrors.map((msg) => html`<div>${msg}</div>`)}
+                </sl-alert>
+              `
+            : nothing}
         </div>
 
         <sl-button
@@ -1080,6 +1302,8 @@ export class ScionTriggerList extends LitElement {
           slot="footer"
           variant="primary"
           ?loading=${this.saving}
+          ?disabled=${this.saving ||
+          (Boolean(formExt) && this.formAuthoringPane === 'form' && !this.formAuthoringValid)}
           data-submit-trigger
           @click=${() => this.submitTriggerForm()}
         >

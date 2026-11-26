@@ -110,6 +110,70 @@ describe('scion-trigger-fire-list', () => {
       '[data-fire-agent-link="agent-uuid-1234"]'
     ) as HTMLAnchorElement;
     expect(agentLink).toBeTruthy();
-    expect(agentLink.getAttribute('href')).toBe('/projects/proj-1/agents/agent-uuid-1234');
+    expect(agentLink.getAttribute('href')).toBe('/agents/agent-uuid-1234');
+  });
+
+  it('ignores stale out-of-order responses when filters change rapidly (O3)', async () => {
+    let resolveFirst!: (res: Response) => void;
+    let callCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) {
+          return new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve(
+          jsonResponse({
+            fires: [
+              {
+                id: 'f-fresh',
+                triggerId: 'tr-2',
+                eventId: 'ev-2',
+                projectId: 'proj-1',
+                status: 'fired',
+                startedAt: '2026-11-20T10:00:00Z',
+              },
+            ],
+            totalCount: 1,
+          })
+        );
+      })
+    );
+
+    const el = document.createElement('scion-trigger-fire-list') as ScionTriggerFireList;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Trigger a second load before the first resolves.
+    const secondLoad = el.loadFires(false);
+    await secondLoad;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[data-fire-row="f-fresh"]')).toBeTruthy();
+
+    // Now resolve the first (stale) request — it must NOT overwrite f-fresh.
+    resolveFirst(
+      jsonResponse({
+        fires: [
+          {
+            id: 'f-stale',
+            triggerId: 'tr-1',
+            eventId: 'ev-1',
+            projectId: 'proj-1',
+            status: 'failed',
+            startedAt: '2026-11-20T09:00:00Z',
+          },
+        ],
+        totalCount: 1,
+      })
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('[data-fire-row="f-fresh"]')).toBeTruthy();
+    expect(el.shadowRoot?.querySelector('[data-fire-row="f-stale"]')).toBeNull();
   });
 });

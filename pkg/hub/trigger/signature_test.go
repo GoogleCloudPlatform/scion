@@ -221,3 +221,23 @@ func TestWebhookEventVerificationMode(t *testing.T) {
 		t.Fatalf("nil attrs and nil endpoint: got %q", got)
 	}
 }
+
+func TestVerifyScionV1Signature_WebUICurlExampleVector(t *testing.T) {
+	// Matches the exact canonical string and openssl HMAC vector tested in
+	// web/src/components/triggers/webhook-endpoint-list.test.ts (R2), including
+	// a body ending in a trailing newline.
+	const (
+		secret   = "test-secret-key"
+		ts       = int64(1700000000)
+		delivery = "deliv-42"
+		event    = ""
+		subject  = "service/api"
+		body     = "{\"status\":\"ok\"}\n"
+		wantHex  = "bab6dadd269fac38afc019afc0b0f443a054772d5b0ba57837135717351de9de"
+	)
+	now := time.Unix(ts+5, 0)
+	sigHeader := "t=1700000000,v1=" + wantHex
+	if !VerifyScionV1Signature(secret, now, sigHeader, delivery, event, subject, []byte(body)) {
+		t.Fatalf("VerifyScionV1Signature rejected the Web UI curl example vector (want %s)", SignScionV1(secret, ts, delivery, event, subject, []byte(body)))
+	}
+}

@@ -71,6 +71,8 @@ export class ScionTriggerEventList extends LitElement {
   @state() private detailEvent: TriggerEventDetail | null = null;
   @state() private detailFires: TriggerFire[] = [];
 
+  private loadSeq = 0;
+
   static override styles = [
     resourceStyles,
     css`
@@ -176,6 +178,7 @@ export class ScionTriggerEventList extends LitElement {
 
   async loadEvents(append: boolean): Promise<void> {
     if (!this.projectId) return;
+    const seq = ++this.loadSeq;
     if (append) {
       this.loadingMore = true;
     } else {
@@ -193,11 +196,13 @@ export class ScionTriggerEventList extends LitElement {
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/trigger-events?${params.toString()}`
       );
+      if (seq !== this.loadSeq) return;
       if (!res.ok) {
         this.error = await extractApiError(res, `HTTP ${res.status}`);
         return;
       }
       const data = (await res.json()) as ListTriggerEventsResponse;
+      if (seq !== this.loadSeq) return;
       const pageItems = Array.isArray(data.events) ? data.events : [];
       this.events = append ? [...this.events, ...pageItems] : pageItems;
       this.nextCursor = data.nextCursor ?? '';
@@ -208,14 +213,21 @@ export class ScionTriggerEventList extends LitElement {
       for (const k of kinds) {
         const reg = getEventColumnsRegistration(k);
         if (reg?.load) {
-          void ensureExtensionLoaded(reg).then(() => this.requestUpdate());
+          void ensureExtensionLoaded(reg)
+            .then(() => this.requestUpdate())
+            .catch(() => {
+              // Evicted on failure; retryable on next load.
+            });
         }
       }
     } catch (err) {
+      if (seq !== this.loadSeq) return;
       this.error = err instanceof Error ? err.message : 'Failed to load events';
     } finally {
-      this.loading = false;
-      this.loadingMore = false;
+      if (seq === this.loadSeq) {
+        this.loading = false;
+        this.loadingMore = false;
+      }
     }
   }
 
@@ -242,7 +254,11 @@ export class ScionTriggerEventList extends LitElement {
 
       const detailExt = getEventDetail(ev.source.kind);
       if (detailExt?.load) {
-        void ensureExtensionLoaded(detailExt).then(() => this.requestUpdate());
+        void ensureExtensionLoaded(detailExt)
+          .then(() => this.requestUpdate())
+          .catch(() => {
+            // Evicted on failure; retryable on next open.
+          });
       }
 
       if (firesRes.ok) {

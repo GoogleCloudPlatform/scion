@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -631,7 +632,9 @@ func TestProjectTriggerFires_PaginationFilteringAndAuthz(t *testing.T) {
 	// Invalid query params return 400.
 	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?status=bogus", http.MethodGet, nil).Code)
 	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?since=not-a-time", http.MethodGet, nil).Code)
-	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?triggerId=nonexistent-name", http.MethodGet, nil).Code)
+	unknownRec := f.doTriggerFires(t, f.ownerAuth, "?triggerId=nonexistent-name", http.MethodGet, nil)
+	assert.Equal(t, http.StatusBadRequest, unknownRec.Code)
+	assert.Contains(t, unknownRec.Body.String(), "unknown trigger")
 	assert.Equal(t, http.StatusBadRequest, f.doTriggerFires(t, f.ownerAuth, "?eventId=not-a-uuid", http.MethodGet, nil).Code)
 
 	// Keyset pagination across all 3 fires.
@@ -743,4 +746,12 @@ func TestProjectTriggerFires_PaginationFilteringAndAuthz(t *testing.T) {
 	require.NoError(t, json.Unmarshal(agentBRec.Body.Bytes(), &agentBFires))
 	assert.Equal(t, "caller", agentBFires.Scope)
 	assert.Empty(t, agentBFires.Fires)
+
+	// Cross-project agent -> 403 Forbidden (O8).
+	otherProjAgent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: api.NewUUID()},
+		ProjectID: f.otherProjID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
+	assert.Equal(t, http.StatusForbidden, f.doTriggerFires(t, otherProjAgent, "", http.MethodGet, nil).Code)
 }

@@ -29,12 +29,14 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { paginateAll } from '../../client/paginate-all.js';
 import { current, projectTrail, projectsRoot, type Named } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, triggersEnabled } from '../../utils/feature-flags.js';
 import '../shared/breadcrumb.js';
 import './not-found.js';
+import '../triggers/source-providers.js';
 import {
   ensureExtensionLoaded,
   getRegisteredSourceCards,
@@ -196,7 +198,11 @@ export class ScionPageProjectTriggers extends LitElement {
     this.extractRouteParams();
     for (const { entry } of getRegisteredSourceCards()) {
       if (entry.load) {
-        void ensureExtensionLoaded(entry).then(() => this.requestUpdate());
+        void ensureExtensionLoaded(entry)
+          .then(() => this.requestUpdate())
+          .catch(() => {
+            // Evicted on failure; retryable on next boot.
+          });
       }
     }
     void this.loadProjectAndAgents();
@@ -257,21 +263,28 @@ export class ScionPageProjectTriggers extends LitElement {
 
   private async loadAgents(): Promise<void> {
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/agents?limit=200`
-      );
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        agents?: Array<{ id: string; name: string; status?: string }>;
-      };
+      const items = await paginateAll<ProjectAgentOption>({
+        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/agents`,
+        pageSize: 100,
+        parsePage: (raw) => {
+          const data = raw as {
+            agents?: Array<{ id: string; name: string; status?: string }>;
+            nextCursor?: string;
+          };
+          const pageItems = Array.isArray(data.agents)
+            ? data.agents.map((a) =>
+                a.status !== undefined
+                  ? { id: a.id, name: a.name, status: a.status }
+                  : { id: a.id, name: a.name }
+              )
+            : [];
+          return data.nextCursor
+            ? { items: pageItems, nextCursor: data.nextCursor }
+            : { items: pageItems };
+        },
+      });
       if (!this.isConnected) return;
-      this.agents = Array.isArray(data.agents)
-        ? data.agents.map((a) =>
-            a.status !== undefined
-              ? { id: a.id, name: a.name, status: a.status }
-              : { id: a.id, name: a.name }
-          )
-        : [];
+      this.agents = items;
     } catch {
       // Non-blocking: fall back to free-text agent input if unavailable.
     }

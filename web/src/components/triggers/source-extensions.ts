@@ -18,9 +18,11 @@
  * Generic source-extension registry for the Project Triggers page
  * (Stage 2 P6 / GAR G7 interface contract).
  *
- * Source providers register cards, form-authoring panes, event table columns,
- * and event detail sections keyed by `sourceKind`. Each provider owns its own
- * experiment check via `isEnabled` and may lazy-load its module via `load`.
+ * Source providers register source kinds, cards, form-authoring panes, event
+ * table columns, and event detail sections keyed by `sourceKind`. Each provider
+ * owns its own experiment check via `isEnabled` and may lazy-load its module
+ * via `load`. Note: `render` may be invoked before `load()` resolves, so
+ * providers that lazy-load a custom element should render safely while loading.
  */
 
 import type { TemplateResult, nothing } from 'lit';
@@ -30,6 +32,26 @@ import type {
   TriggerEventSummary,
   TriggerMatchRuleSpec,
 } from './types.js';
+
+export type SourceIdMode = 'endpoint' | 'none' | 'free';
+
+export interface SourceKindRegistration {
+  /** Human-readable label shown in the source kind selector. */
+  label: string;
+  /**
+   * Controls how `source.id` is authored in the Rules dialog:
+   * - `'endpoint'`: pick a webhook endpoint (required)
+   * - `'none'`: hide the source ID field and send `""`
+   * - `'free'`: free-text source ID input
+   */
+  sourceIdMode: SourceIdMode;
+  /** Default event types applied when selecting this source kind on create. */
+  defaultTypes?: string[];
+  /** Provider-owned experiment/feature gate. */
+  isEnabled?: () => boolean;
+  /** Optional lazy loader invoked once before rendering. */
+  load?: () => Promise<unknown>;
+}
 
 export interface SourceCardContext {
   projectId: string;
@@ -45,11 +67,23 @@ export interface SourceCardRegistration {
   render: (ctx: SourceCardContext) => TemplateResult | typeof nothing;
 }
 
+export interface FormAuthoringSubject {
+  mode: string;
+  expr?: string;
+  coalesceWindow?: string;
+}
+
 export interface FormAuthoringOutput {
   types: string[];
   rules: TriggerMatchRuleSpec[];
   form: unknown;
   suggestedActions?: TriggerActionSpec[];
+  /** Subject policy compiled by the form (applied on both create and edit). */
+  subject?: FormAuthoringSubject;
+  /** Whether the form state is valid; while false, the dialog disables Save. */
+  valid: boolean;
+  /** Optional validation errors displayed when `valid` is false. */
+  errors?: string[];
 }
 
 export interface FormAuthoringContext {
@@ -97,11 +131,25 @@ export interface EventDetailRegistration {
   render: (event: TriggerEventDetail) => TemplateResult | typeof nothing;
 }
 
+const sourceKinds = new Map<string, SourceKindRegistration>();
 const sourceCards = new Map<string, SourceCardRegistration>();
 const formAuthorings = new Map<string, FormAuthoringRegistration>();
 const eventColumns = new Map<string, EventColumnsRegistration>();
 const eventDetails = new Map<string, EventDetailRegistration>();
 const loadedEntries = new WeakMap<object, Promise<void>>();
+
+/**
+ * Registers a selectable source kind in the Rules create/edit dialog.
+ * Returns an unregister function.
+ */
+export function registerSourceKind(sourceKind: string, entry: SourceKindRegistration): () => void {
+  sourceKinds.set(sourceKind, entry);
+  return () => {
+    if (sourceKinds.get(sourceKind) === entry) {
+      sourceKinds.delete(sourceKind);
+    }
+  };
+}
 
 /**
  * Registers a source card in the Triggers page Sources header.
@@ -169,7 +217,9 @@ function isRegistrationEnabled(entry: { isEnabled?: () => boolean }): boolean {
 }
 
 /**
- * Lazily invokes a registration's `load()` hook at most once per registration object.
+ * Lazily invokes a registration's `load()` hook at most once on success.
+ * If `load()` rejects, the failed promise is evicted so subsequent attempts
+ * can retry cleanly.
  */
 export function ensureExtensionLoaded(
   entry: { load?: () => Promise<unknown> } | undefined
@@ -177,9 +227,41 @@ export function ensureExtensionLoaded(
   if (!entry?.load) return Promise.resolve();
   const existing = loadedEntries.get(entry);
   if (existing) return existing;
-  const p = Promise.resolve(entry.load()).then(() => undefined);
+  const loader = entry.load;
+  const p = Promise.resolve()
+    .then(() => loader())
+    .then(
+      () => undefined,
+      (err) => {
+        if (loadedEntries.get(entry) === p) {
+          loadedEntries.delete(entry);
+        }
+        throw err;
+      }
+    );
   loadedEntries.set(entry, p);
   return p;
+}
+
+/** Returns all currently enabled source kinds in registration order. */
+export function getRegisteredSourceKinds(): Array<{
+  sourceKind: string;
+  entry: SourceKindRegistration;
+}> {
+  const out: Array<{ sourceKind: string; entry: SourceKindRegistration }> = [];
+  for (const [sourceKind, entry] of sourceKinds.entries()) {
+    if (isRegistrationEnabled(entry)) {
+      out.push({ sourceKind, entry });
+    }
+  }
+  return out;
+}
+
+/** Returns the enabled source-kind registration for `sourceKind`, if any. */
+export function getSourceKind(sourceKind: string): SourceKindRegistration | undefined {
+  const entry = sourceKinds.get(sourceKind);
+  if (!entry || !isRegistrationEnabled(entry)) return undefined;
+  return entry;
 }
 
 /** Returns all currently enabled source cards in registration order. */
@@ -230,6 +312,7 @@ export function getEventDetail(sourceKind: string): EventDetailRegistration | un
  * @internal test-only: clears all registered source extensions.
  */
 export function clearSourceExtensionsForTests(): void {
+  sourceKinds.clear();
   sourceCards.clear();
   formAuthorings.clear();
   eventColumns.clear();

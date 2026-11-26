@@ -19,6 +19,8 @@ import { resetServerFlagStateForTests, setServerFlags } from '../../utils/featur
 import { clearSourceExtensionsForTests } from '../triggers/source-extensions.js';
 import './project-triggers.js';
 import type { ScionPageProjectTriggers } from './project-triggers.js';
+import './project-detail.js';
+import type { ScionPageProjectDetail } from './project-detail.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -104,5 +106,43 @@ describe('scion-page-project-triggers', () => {
     };
     expect(triggerList.pendingCreateSource).toBe('custom-src');
     expect(triggerList.pendingCreatePreset).toBe('p-1');
+  });
+
+  it('shows the Triggers header button on project-detail only when hub.triggers is on (O5)', async () => {
+    window.history.replaceState({}, '', '/projects/proj-1');
+    class MockEventSource {
+      addEventListener(): void {}
+      removeEventListener(): void {}
+      close(): void {}
+    }
+    vi.stubGlobal('EventSource', MockEventSource);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes('/agents')) {
+          return Promise.resolve(jsonResponse({ agents: [], totalCount: 0 }));
+        }
+        return Promise.resolve(jsonResponse({ id: 'proj-1', name: 'Alpha Project' }));
+      })
+    );
+
+    setServerFlags({ 'hub.triggers': false });
+    const detail = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    document.body.appendChild(detail);
+    await new Promise((r) => setTimeout(r, 40));
+    await detail.updateComplete;
+
+    expect(detail.shadowRoot?.querySelector('[data-triggers-button]')).toBeNull();
+
+    // Flip flag ON -> header button appears.
+    resetServerFlagStateForTests();
+    delete window.__SCION_FEATURES__;
+    setServerFlags({ 'hub.triggers': true });
+    await detail.updateComplete;
+
+    const btn = detail.shadowRoot?.querySelector('[data-triggers-button]');
+    expect(btn).toBeTruthy();
+    const link = detail.shadowRoot?.querySelector('[data-triggers-link]') as HTMLAnchorElement;
+    expect(link?.getAttribute('href')).toBe('/projects/proj-1/triggers');
   });
 });

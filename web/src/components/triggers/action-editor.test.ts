@@ -88,4 +88,24 @@ describe('scion-trigger-action-editor', () => {
 
     expect(el.shadowRoot?.querySelectorAll('[data-action-row]')).toHaveLength(2);
   });
+
+  it('renders github.comment and unknown action types read-only instead of message fields (O7)', async () => {
+    const el = document.createElement('scion-trigger-action-editor') as ScionTriggerActionEditor;
+    el.actions = [
+      {
+        type: 'github.comment',
+        target: 'pull_request',
+        body: 'Automated review started',
+        replyInThread: true,
+      },
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const ro = el.shadowRoot?.querySelector('[data-action-readonly="0"]');
+    expect(ro).toBeTruthy();
+    expect(ro?.getAttribute('data-action-readonly-type')).toBe('github.comment');
+    expect(ro?.textContent).toContain('Automated review started');
+    expect(el.shadowRoot?.querySelector('[data-action-message="0"]')).toBeNull();
+  });
 });

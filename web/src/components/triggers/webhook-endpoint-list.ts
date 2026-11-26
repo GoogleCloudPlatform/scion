@@ -78,6 +78,7 @@ export class ScionWebhookEndpointList extends LitElement {
   @state() private secretDialogTitle = '';
   @state() private revealedSecret: string | null = null;
   @state() private revealedEndpointUrl = '';
+  @state() private revealedSignatureMode = '';
   @state() private revealedGraceExpires = '';
   @state() private copiedField: 'url' | 'secret' | 'curl' | null = null;
 
@@ -212,6 +213,7 @@ export class ScionWebhookEndpointList extends LitElement {
   private clearSecretState(): void {
     this.revealedSecret = null;
     this.revealedEndpointUrl = '';
+    this.revealedSignatureMode = '';
     this.revealedGraceExpires = '';
     this.secretDialogTitle = '';
     this.copiedField = null;
@@ -357,6 +359,7 @@ export class ScionWebhookEndpointList extends LitElement {
       if (wasCreate && data.secret) {
         this.secretDialogTitle = `Webhook Endpoint Created: ${data.name}`;
         this.revealedEndpointUrl = data.url;
+        this.revealedSignatureMode = data.signatureMode || 'scion_v1';
         this.revealedSecret = data.secret;
         this.revealedGraceExpires = '';
         this.secretDialogOpen = true;
@@ -409,6 +412,7 @@ export class ScionWebhookEndpointList extends LitElement {
       this.rotateTarget = null;
       this.secretDialogTitle = `Secret Rotated: ${data.name}`;
       this.revealedEndpointUrl = data.url;
+      this.revealedSignatureMode = data.signatureMode || target.signatureMode || 'scion_v1';
       this.revealedSecret = data.secret;
       this.revealedGraceExpires = data.graceWindowExpires ?? '';
       this.secretDialogOpen = true;
@@ -464,18 +468,7 @@ export class ScionWebhookEndpointList extends LitElement {
   }
 
   private buildCurlExample(url: string, secret: string): string {
-    return [
-      `TS=$(date +%s)`,
-      `DELIV=$(uuidgen 2>/dev/null || date +%s%N)`,
-      `BODY='{"hello":"world"}'`,
-      `SIG=$(printf 'v1.%s.%s.%s' "$TS" "$DELIV" "$BODY" | openssl dgst -sha256 -hmac '${secret}' | awk '{print $2}')`,
-      `curl -X POST '${url}' \\`,
-      `  -H 'Content-Type: application/json' \\`,
-      `  -H "X-Scion-Timestamp: $TS" \\`,
-      `  -H "X-Scion-Delivery: $DELIV" \\`,
-      `  -H "X-Scion-Signature: v1=$SIG" \\`,
-      `  -d "$BODY"`,
-    ].join('\n');
+    return buildScionV1CurlExample(url, secret);
   }
 
   private affectedTriggersFor(ep: WebhookEndpoint | null): TriggerDefinition[] {
@@ -873,25 +866,31 @@ export class ScionWebhookEndpointList extends LitElement {
                   </div>
                 </div>
 
-                <div>
-                  <div
-                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;"
-                  >
-                    <span class="endpoint-desc">Example signed sender (curl + openssl)</span>
-                    <sl-button
-                      size="small"
-                      variant="text"
-                      @click=${() => this.copyToClipboard(curlSnippet, 'curl')}
-                    >
-                      <sl-icon
-                        slot="prefix"
-                        name=${this.copiedField === 'curl' ? 'check' : 'copy'}
-                      ></sl-icon>
-                      ${this.copiedField === 'curl' ? 'Copied' : 'Copy snippet'}
-                    </sl-button>
-                  </div>
-                  <pre class="curl-example">${curlSnippet}</pre>
-                </div>
+                ${this.revealedSignatureMode === 'scion_v1'
+                  ? html`
+                      <div>
+                        <div
+                          style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.25rem;"
+                        >
+                          <span class="endpoint-desc"
+                            >Example signed sender (scion_v1, curl + openssl)</span
+                          >
+                          <sl-button
+                            size="small"
+                            variant="text"
+                            @click=${() => this.copyToClipboard(curlSnippet, 'curl')}
+                          >
+                            <sl-icon
+                              slot="prefix"
+                              name=${this.copiedField === 'curl' ? 'check' : 'copy'}
+                            ></sl-icon>
+                            ${this.copiedField === 'curl' ? 'Copied' : 'Copy snippet'}
+                          </sl-button>
+                        </div>
+                        <pre class="curl-example" data-curl-example>${curlSnippet}</pre>
+                      </div>
+                    `
+                  : nothing}
               `
             : nothing}
         </div>
@@ -991,6 +990,31 @@ export class ScionWebhookEndpointList extends LitElement {
       </sl-dialog>
     `;
   }
+}
+
+/**
+ * Builds the scion_v1 curl + openssl sender example matching `cmd/trigger_webhook.go`
+ * and `pkg/hub/trigger/signature.go` (`VerifyScionV1SignatureWithWindow`).
+ *
+ * Canonical string: `"v1\n" + t + "\n" + delivery + "\n" + event + "\n" + subject + "\n" + body`.
+ */
+export function buildScionV1CurlExample(url: string, secret: string): string {
+  return [
+    `HOOK_URL="${url}"`,
+    `SECRET="${secret}"`,
+    `TS="$(date +%s)"`,
+    `DELIVERY="$(uuidgen 2>/dev/null || date +%s%N)"`,
+    `EVENT=""`,
+    `SUBJECT="service/api"`,
+    `BODY='{"status":"ok","commit":"abc1234"}'`,
+    `SIG="$(printf 'v1\\n%s\\n%s\\n%s\\n%s\\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"`,
+    `curl -fsS -X POST "$HOOK_URL" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -H "X-Scion-Signature: t=\${TS},v1=\${SIG}" \\`,
+    `  -H "X-Scion-Delivery: \${DELIVERY}" \\`,
+    `  -H "X-Scion-Subject: \${SUBJECT}" \\`,
+    `  --data-raw "$BODY"`,
+  ].join('\n');
 }
 
 declare global {

@@ -71,6 +71,8 @@ export class ScionTriggerFireList extends LitElement {
   @state() private filterSince = '';
   @state() private filterReason = '';
 
+  private loadSeq = 0;
+
   static override styles = [
     resourceStyles,
     css`
@@ -163,6 +165,7 @@ export class ScionTriggerFireList extends LitElement {
 
   async loadFires(append: boolean): Promise<void> {
     if (!this.projectId) return;
+    const seq = ++this.loadSeq;
     if (append) {
       this.loadingMore = true;
     } else {
@@ -180,20 +183,25 @@ export class ScionTriggerFireList extends LitElement {
       const res = await apiFetch(
         `/api/v1/projects/${encodeURIComponent(this.projectId)}/trigger-fires?${params.toString()}`
       );
+      if (seq !== this.loadSeq) return;
       if (!res.ok) {
         this.error = await extractApiError(res, `HTTP ${res.status}`);
         return;
       }
       const data = (await res.json()) as ListTriggerFiresResponse;
+      if (seq !== this.loadSeq) return;
       const pageItems = Array.isArray(data.fires) ? data.fires : [];
       this.fires = append ? [...this.fires, ...pageItems] : pageItems;
       this.nextCursor = data.nextCursor ?? '';
       this.totalCount = data.totalCount ?? this.fires.length;
     } catch (err) {
+      if (seq !== this.loadSeq) return;
       this.error = err instanceof Error ? err.message : 'Failed to load fire history';
     } finally {
-      this.loading = false;
-      this.loadingMore = false;
+      if (seq === this.loadSeq) {
+        this.loading = false;
+        this.loadingMore = false;
+      }
     }
   }
 
@@ -250,9 +258,7 @@ export class ScionTriggerFireList extends LitElement {
             ? html`
                 <a
                   class="agent-link"
-                  href="/projects/${encodeURIComponent(this.projectId)}/agents/${encodeURIComponent(
-                    fire.resultRef
-                  )}"
+                  href="/agents/${encodeURIComponent(fire.resultRef)}"
                   data-fire-agent-link=${fire.resultRef}
                 >
                   Agent ${fire.resultRef.slice(0, 8)}
@@ -338,10 +344,10 @@ export class ScionTriggerFireList extends LitElement {
         </sl-select>
 
         <sl-input
-          label="Outcome reason"
+          label="Outcome reason (loaded rows)"
           size="small"
           clearable
-          placeholder="Filter error or reason..."
+          placeholder="Filter loaded rows..."
           .value=${this.filterReason}
           data-filter-fire-reason
           @sl-input=${(e: Event) => {

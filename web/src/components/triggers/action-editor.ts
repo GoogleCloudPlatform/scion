@@ -611,6 +611,24 @@ export class ScionTriggerActionEditor extends LitElement {
     `;
   }
 
+  private renderReadOnlyOtherAction(action: TriggerActionSpec, index: number) {
+    return html`
+      <div
+        class="redacted-box"
+        data-action-readonly=${index}
+        data-action-readonly-type=${action.type}
+      >
+        <strong>${action.type}</strong>
+        ${action.target ? html` — target: ${action.target}` : nothing}
+        ${action.replyInThread ? html` (reply in thread)` : nothing}
+        ${action.body ? html`<div style="margin-top: 0.375rem;">${action.body}</div>` : nothing}
+      </div>
+      <div class="help-text">
+        This action type is displayed read-only here and preserved unchanged on edit.
+      </div>
+    `;
+  }
+
   override render() {
     const rows = this.actions.length > 0 ? this.actions : [createDefaultMessageAction()];
     return html`
@@ -631,15 +649,16 @@ export class ScionTriggerActionEditor extends LitElement {
           : nothing}
       </div>
       <div class="action-list">
-        ${rows.map(
-          (action, index) => html`
+        ${rows.map((action, index) => {
+          const isEditableType = action.type === 'message' || action.type === 'dispatch_agent';
+          return html`
             <div class="action-card" data-action-row=${index}>
               <div class="action-card-top">
                 ${this.multiActionEnabled || rows.length > 1
                   ? html`<span class="order-badge">${index + 1}</span>`
                   : nothing}
-                ${action.type === 'exec'
-                  ? html`<sl-badge variant="neutral">exec</sl-badge>`
+                ${!isEditableType
+                  ? html`<sl-badge variant="neutral">${action.type}</sl-badge>`
                   : html`
                       <sl-radio-group
                         label="Action type"
@@ -688,10 +707,12 @@ export class ScionTriggerActionEditor extends LitElement {
                 ? this.renderDispatchFields(action, index)
                 : action.type === 'exec'
                   ? this.renderExecReadOnly(action, index)
-                  : this.renderMessageFields(action, index)}
+                  : action.type === 'message'
+                    ? this.renderMessageFields(action, index)
+                    : this.renderReadOnlyOtherAction(action, index)}
             </div>
-          `
-        )}
+          `;
+        })}
       </div>
     `;
   }
