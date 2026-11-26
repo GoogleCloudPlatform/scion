@@ -456,7 +456,6 @@ export interface ProjectMessagingPolicy {
  * Hub-level messaging settings (GET /api/v1/admin/messaging).
  */
 export interface HubMessagingSettings {
-  conversation_envelope_switch: boolean;
   cross_project_messaging_enabled: boolean;
   revision: number;
 }

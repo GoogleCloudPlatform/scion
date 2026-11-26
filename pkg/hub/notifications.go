@@ -39,16 +39,15 @@ import (
 // notification subscriptions, stores notification records, and dispatches
 // messages to subscriber agents.
 type NotificationDispatcher struct {
-	store            store.Store
-	events           EventPublisher
-	getDispatcher    func() AgentDispatcher // lazy getter; dispatcher may be set after startup
-	log              *slog.Logger
-	messageLog       *slog.Logger        // dedicated message audit logger (nil = disabled)
-	brokerProxy      *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
-	writeDenyEnabled func() bool         // G2 write-deny switch callback (nil = OFF)
-	stopCh           chan struct{}
-	stopOnce         sync.Once
-	wg               sync.WaitGroup
+	store         store.Store
+	events        EventPublisher
+	getDispatcher func() AgentDispatcher // lazy getter; dispatcher may be set after startup
+	log           *slog.Logger
+	messageLog    *slog.Logger        // dedicated message audit logger (nil = disabled)
+	brokerProxy   *MessageBrokerProxy // broker plugin proxy (nil = no broker, use ChannelRegistry)
+	stopCh        chan struct{}
+	stopOnce      sync.Once
+	wg            sync.WaitGroup
 
 	// channelRegistryFn returns the external notification channel registry
 	// in use (nil fn or nil registry = disabled). The Server sets it so a
@@ -631,21 +630,19 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	structuredMsg.RecipientID = subscriber.ID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
-	// Phase 9f: render delivery envelope for notification dispatches.
+	// Render delivery envelope for notification dispatches.
 	// No persisted row and no conversation exist for agent-to-agent
 	// state-change notifications, so MessageID and ConvResult are
 	// honestly absent.
-	if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
-		var ts time.Time
-		if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
-			ts = t
-		}
-		structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-			ConvResult: nil,
-			Msg:        structuredMsg,
-			CreatedAt:  ts,
-		})
+	var ts time.Time
+	if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
+		ts = t
 	}
+	structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+		ConvResult: nil,
+		Msg:        structuredMsg,
+		CreatedAt:  ts,
+	})
 
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
@@ -750,16 +747,15 @@ func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
 // persistsViaInbox reports whether the notifier itself must write the inbox
 // row for sub. Without a broker it always does. With a broker, the broker's
 // deliverToUser persists the published message instead — except for a
-// federated (non-UUID) subscriber while G2 write-deny is ON: deliverToUser
-// cannot resolve a DM conversation for a non-UUID principal and, under
-// write-deny, drops the message, whereas createInboxMessage carries the G2
-// exemption for exactly this population. The rule is canPersistUserDM,
-// shared with deliverToUser.
+// federated (non-UUID) subscriber: deliverToUser cannot resolve a DM
+// conversation for a non-UUID principal and drops the message, whereas
+// createInboxMessage carries the exemption for this population. The rule is
+// canPersistUserDM, shared with deliverToUser.
 func (nd *NotificationDispatcher) persistsViaInbox(sub *store.NotificationSubscription) bool {
 	if nd.brokerProxy == nil {
 		return true
 	}
-	return !canPersistUserDM(sub.SubscriberID, nd.writeDenyEnabled != nil && nd.writeDenyEnabled())
+	return !canPersistUserDM(sub.SubscriberID)
 }
 
 // notificationMessageBody picks the body for a user notification message.
@@ -901,14 +897,10 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		convResult, convErr := messaging.ResolveOrCreateDMConversation(ctx, nd.store, nd.store, nd.log,
 			"agent", agent.ID, "user", sub.SubscriberID)
 		if convErr != nil {
-			if nd.writeDenyEnabled != nil && nd.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("notif.inbox")
-				nd.log.Error("conversation resolution failed for inbox notification",
-					"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
-				return
-			}
-			nd.log.Warn("conversation resolution failed for inbox notification (write-deny OFF, continuing)",
+			messaging.WriteDenialMetrics.Inc("notif.inbox")
+			nd.log.Error("conversation resolution failed for inbox notification",
 				"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
+			return
 		} else {
 			storeMsg.ConversationID = convResult.ConversationID
 			recordMsg.ConversationID = convResult.ConversationID

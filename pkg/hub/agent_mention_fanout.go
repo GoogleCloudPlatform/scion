@@ -523,14 +523,9 @@ func (s *Server) resolveMentionConversation(ctx context.Context, in agentMention
 	dmConv, convErr := messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog,
 		"agent", in.Sender.ID, "agent", target.ID)
 	if convErr != nil {
-		if s.writeDenyEnabled() {
-			s.messageLog.Error("mention fan-out: DM conversation resolution failed, denying the mention",
-				"sender_id", in.Sender.ID, "target_id", target.ID, "error", convErr)
-			return nil, "", "", false, false
-		}
-		s.messageLog.Warn("mention fan-out: DM conversation resolution failed, continuing without one",
+		s.messageLog.Error("mention fan-out: DM conversation resolution failed, denying the mention",
 			"sender_id", in.Sender.ID, "target_id", target.ID, "error", convErr)
-		return nil, "", "", false, true
+		return nil, "", "", false, false
 	}
 	return dmConv, dmConv.ConversationID, dmConv.ExternalRef, false, true
 }

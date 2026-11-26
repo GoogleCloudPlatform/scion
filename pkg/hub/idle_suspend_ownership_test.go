@@ -105,7 +105,6 @@ func isoEnableSharedConduitRedrive(t *testing.T, srvA, srvB *Server) registry.St
 		srv.conduitGrants = newConduitGrantKeys(&memoryConduitGrantKeyStore{}, time.Now)
 		fakeStore := newFakeHubSettingStore()
 		fakeStore.seed("experiments", raw)
-		fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 		ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 		_, err := ops.Refresh(ctx)
 		require.NoError(t, err)

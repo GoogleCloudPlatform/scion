@@ -94,9 +94,6 @@ func TestNotificationDispatcher_RealBrokerFederatedSubscriberWriteDenyOnce(t *te
 	const userID = "fed-user@example.org"
 	env.useUserSubscription(t, userID, "COMPLETED")
 	bus := env.startRealBrokerProxy(t)
-	writeDeny := func() bool { return true }
-	env.nd.writeDenyEnabled = writeDeny
-	env.nd.brokerProxy.writeDenyEnabled = writeDeny
 	sse := env.countUserMessageSSE(t, userID)
 
 	env.nd.Start()
@@ -356,10 +353,9 @@ func TestSubscribeProjectUserMessages_NoInProcessSpoke(t *testing.T) {
 
 func TestCanPersistUserDM(t *testing.T) {
 	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
-	assert.True(t, canPersistUserDM(id, true))
-	assert.True(t, canPersistUserDM("fed@example.org", false))
-	assert.False(t, canPersistUserDM("fed@example.org", true))
-	assert.False(t, canPersistUserDM(strings.ToUpper(id), true),
+	assert.True(t, canPersistUserDM(id))
+	assert.False(t, canPersistUserDM("fed@example.org"))
+	assert.False(t, canPersistUserDM(strings.ToUpper(id)),
 		"DM keys only accept canonical UUIDs")
 }
 
@@ -472,7 +468,6 @@ func TestDeliverToUser_NonCanonicalRecipientDropsOnlyWithDeterminedKinds(t *test
 			s := newBrokerTestStore(t)
 			projectID := setupBrokerTestProject(t, s)
 			p := newNoticeTestProxy(t, s, &brokerMockDispatcher{})
-			p.writeDenyEnabled = func() bool { return true }
 
 			msg := messages.NewInstruction(tc.sender, "user:"+nonCanonical, "hello")
 			msg.SenderID = "a1b2c3d4-0000-4000-8000-000000000001"

@@ -47,20 +47,15 @@ type starFixture struct {
 	db    *sql.DB
 }
 
-// setStarsExperiment sets web.chat_starred_messages and the conversation
-// read switch through operational settings.
-func setStarsExperiment(t *testing.T, srv *Server, enabled, readSwitch bool) {
+// setStarsExperiment sets web.chat_starred_messages through operational settings.
+func setStarsExperiment(t *testing.T, srv *Server, enabled, _ bool) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatStarredMessages, enabled)))
-	fakeStore.seed("messaging", json.RawMessage(fmt.Sprintf(`{"conversation_envelope_switch":%t}`, readSwitch)))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	_, err := ops.Refresh(context.Background())
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
-	if ops := srv.GetOperationalSettings(); ops != nil {
-		require.Equal(t, readSwitch, ops.ConversationEnvelopeSwitch())
-	}
 	require.Equal(t, enabled, srv.experimentEnabled(experiments.ChatStarredMessages))
 }
 

@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -593,10 +594,10 @@ func TestWebAPI_LogStreamNotCompressed(t *testing.T) {
 
 func TestWebAPI_MessageStreamNotCompressed(t *testing.T) {
 	env := newCompressHubEnv(t, nil)
-	// Without operational settings the stream applies no conversation
-	// filter, so a published message reaches the dev user directly.
-	env.srv.operationalSettings.Store(nil)
 	agent := createTestAgent(t, env.store)
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", DevUserID)
+	require.NoError(t, err)
+	dmConvID := seedConversation(t, env.store, "native", dmKey, "direct")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -608,7 +609,8 @@ func TestWebAPI_MessageStreamNotCompressed(t *testing.T) {
 	// message is re-published until the first one arrives.
 	requireStreamLine(t, resp.Body, "event: message", func() {
 		env.events.PublishRaw("agent."+agent.ID+".message", UserMessageEvent{
-			ID: "m1", AgentID: agent.ID, ProjectID: agent.ProjectID, Msg: strings.Repeat("hello ", 300), Type: "instruction",
+			ID: "m1", AgentID: agent.ID, ProjectID: agent.ProjectID, ConversationID: dmConvID,
+			Msg: strings.Repeat("hello ", 300), Type: "instruction",
 			SenderID: DevUserID, RecipientID: agent.ID,
 		})
 	})

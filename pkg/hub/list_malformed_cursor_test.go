@@ -70,6 +70,12 @@ func TestPaginatedLists_MalformedCursorReturns400(t *testing.T) {
 		ID: agentID, Slug: "cursor-agent", Name: "Cursor Agent", ProjectID: projectID,
 		Phase: string(state.PhaseStopped), CreatedBy: DevUserID, OwnerID: DevUserID,
 	}))
+	agentDMKey, err := messages.DMConversationKey("agent", agentID, "user", DevUserID)
+	require.NoError(t, err)
+	_, err = s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: agentDMKey, DriftState: "active",
+	})
+	require.NoError(t, err)
 
 	// DM reads authorize on the canonical DM key, which names a real user
 	// principal (the dev identity's kind is "dev", never a DM participant).

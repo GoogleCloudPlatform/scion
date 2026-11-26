@@ -34,18 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// disableWriteDenySwitch turns the conversation envelope switch off on srv.
-func disableWriteDenySwitch(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":false}`))
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-	require.False(t, srv.writeDenyEnabled(), "write-deny must be off")
-}
-
 // externalRefFixture is the routed inbound fixture plus a conversation that
 // a chat thread reference already names in another project.
 type externalRefFixture struct {
@@ -198,37 +186,6 @@ func TestBrokerInbound_ExternalRefOfOtherProjectNotReused(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), `"status":"conversation_not_resolved"`)
 		assert.Equal(t, routedBodyWithoutMessageIDs(t, unresolved), routedBodyWithoutMessageIDs(t, rec),
 			"same answer as an unresolved conversation")
-		f.requireNothingDelivered(t)
-	})
-}
-
-// TestBrokerInbound_ExternalRefMismatchRefusedWithWriteDenyOff: with the
-// conversation envelope switch off, other resolution failures continue
-// without a conversation, but a reference of another project is still
-// refused with the same answer.
-func TestBrokerInbound_ExternalRefMismatchRefusedWithWriteDenyOff(t *testing.T) {
-	t.Run("inbound", func(t *testing.T) {
-		f := newExternalRefFixture(t)
-		unresolved := f.postLegacyInbound(t, f.surface, "thread:bad")
-		require.Equal(t, http.StatusConflict, unresolved.Code)
-
-		disableWriteDenySwitch(t, f.srv)
-		rec := f.postLegacyInbound(t, f.surface, f.ref)
-		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
-		assert.Equal(t, unresolved.Body.String(), rec.Body.String())
-		f.requireNothingDelivered(t)
-	})
-
-	t.Run("routed", func(t *testing.T) {
-		f := newExternalRefFixture(t)
-		unresolved := f.postRoutedInbound(t, f.surface, "thread:bad")
-		require.Equal(t, http.StatusConflict, unresolved.Code)
-
-		disableWriteDenySwitch(t, f.srv)
-		rec := f.postRoutedInbound(t, f.surface, f.ref)
-		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
-		assert.True(t, strings.Contains(rec.Body.String(), `"status":"conversation_not_resolved"`), "body: %s", rec.Body.String())
-		assert.Equal(t, routedBodyWithoutMessageIDs(t, unresolved), routedBodyWithoutMessageIDs(t, rec))
 		f.requireNothingDelivered(t)
 	})
 }
@@ -705,17 +662,11 @@ func TestAgentMessage_ChatIntegrationRefOfOtherProjectNotReused(t *testing.T) {
 	before, err := f.st.GetConversation(ctx, owned.ID)
 	require.NoError(t, err)
 
-	enableWriteDenySwitch(t, f.srv)
 	unresolved := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, surface, "thread:bad", ""))
 	require.Equal(t, http.StatusConflict, unresolved.status, unresolved.body)
 
-	for _, writeDeny := range []bool{true, false} {
-		if !writeDeny {
-			disableWriteDenySwitch(t, f.srv)
-		}
-		got := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, surface, ref, "C0OTHERPROJ"))
-		requireSameAnswer(t, unresolved, got)
-	}
+	got := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, surface, ref, "C0OTHERPROJ"))
+	requireSameAnswer(t, unresolved, got)
 
 	assert.Empty(t, dispatcher.getCalls(), "nothing dispatched")
 	msgs, err := f.st.ListMessages(ctx, store.MessageFilter{AgentID: f.aa.ID}, store.ListOptions{Limit: 10})

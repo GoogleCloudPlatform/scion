@@ -881,7 +881,6 @@ func TestMessageLog_DeliverToUser_NotPersisted_OneRecord(t *testing.T) {
 	projectID := setupBrokerTestProject(t, s)
 	sender := setupBrokerTestAgent(t, s, projectID, "rec-dtu-sender", "running")
 	proxy, buf := newRecordTestProxy(t, s, &brokerMockDispatcher{})
-	proxy.writeDenyEnabled = func() bool { return true }
 
 	msg := messages.NewInstruction("agent:"+sender.Slug, "user:alice", "records not persisted")
 	msg.SenderID = sender.ID
@@ -955,9 +954,6 @@ func TestMessageLog_UserNotification_DirectInbox_OneRecord(t *testing.T) {
 		const userID = "fed-rec-user"
 		env.useUserSubscription(t, userID, "COMPLETED")
 		_ = env.startRealBrokerProxy(t)
-		writeDeny := func() bool { return true }
-		env.nd.writeDenyEnabled = writeDeny
-		env.nd.brokerProxy.writeDenyEnabled = writeDeny
 
 		logger, buf := newJSONMessageLogger()
 		env.nd.messageLog = logger

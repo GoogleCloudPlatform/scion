@@ -157,7 +157,7 @@ func TestDeliveryCapability_RecipientNotInStandingGetsNone(t *testing.T) {
 // recipient the file was not delivered.
 func TestPlan_OldBrokerGetsNotDeliveredLine(t *testing.T) {
 	f := newSendFixture(t)
-	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": true}`))
+	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{}`))
 	_, call := f.sendWithFile(t, "report.txt", "x")
 	plan := call.StructuredMessage.AttachmentPlan
 	require.Len(t, plan, 1)
@@ -173,7 +173,7 @@ func TestPlan_OldBrokerGetsNotDeliveredLine(t *testing.T) {
 func TestPlan_EnvelopeAndIssueAgree(t *testing.T) {
 	f := newSendFixture(t)
 	f.enableBrokerDelivery(t)
-	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": true}`))
+	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{}`))
 	_, call := f.sendWithFile(t, "report.txt", "x")
 	wire := f.issue(call)
 	require.Len(t, wire, 1)
@@ -197,21 +197,6 @@ func TestPlan_PlainMessageGetsPathLines(t *testing.T) {
 	require.Contains(t, text, "Attachment: ~/.scion/inbox/m1/a.txt")
 	require.Contains(t, text, "Attachment not delivered: b.txt (2.0 KiB): the recipient's runtime cannot receive attachments. Ask the sender to resend it.")
 	require.NotContains(t, text, "c.txt")
-}
-
-func TestPlan_LegacyEnvelopeGetsPaths(t *testing.T) {
-	f := newSendFixture(t)
-	f.enableBrokerDelivery(t)
-	// The envelope switch is off: the broker formats the legacy envelope
-	// from the structured message.
-	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": false}`))
-	_, call := f.sendWithFile(t, "report.txt", "x")
-	require.Empty(t, call.StructuredMessage.DeliveryText)
-	// The dispatched message carries no inbox path; the copy the dispatcher
-	// sends to the broker carries the deliverable one.
-	path := call.StructuredMessage.AttachmentPlan[0].InboxPath
-	require.NotContains(t, call.StructuredMessage.Attachments, path)
-	require.Contains(t, legacyAttachmentCopy(call.StructuredMessage).Attachments, path)
 }
 
 // TestDeliveryCapability_ObserverCopyGetsNone (K7): an observer copy of a
@@ -403,7 +388,7 @@ func (c *wireCaptureClient) MessageAgent(ctx context.Context, _, _, _, _, messag
 func TestWebSend_AgentRecipientGetsFile(t *testing.T) {
 	f := newSendFixture(t)
 	f.enableBrokerDelivery(t)
-	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": true}`))
+	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{}`))
 	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
 	id := f.uploadAs(t, f.ua, f.projA.ID, "web.txt", "web bytes")
 	f.sendWith(t, f.ua, f.topicA, id)
@@ -617,30 +602,36 @@ func TestSetDispatcher_InstallsAttachmentIssuer(t *testing.T) {
 	require.True(t, ok, "SetDispatcher installs the attachment issuer")
 }
 
-// TestPlan_LegacyCopiesCarryOnlyTheirOwnPaths: with the envelope switch
-// off, a web send that @mentions an agent: the messages the hub dispatches
-// carry no inbox paths; the copy the dispatcher sends for each carries its
-// own plan's deliverable paths once; a withheld entry puts none in it.
-func TestPlan_LegacyCopiesCarryOnlyTheirOwnPaths(t *testing.T) {
-	f, c := newMentionFixture(t)
-	f.enableBrokerDelivery(t)
-	f.srv.SetOperationalSettings(artifactsOpsWith(t, "", `{"conversation_envelope_switch": false}`))
-	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.target.Slug}))
-	id := f.uploadAs(t, f.ua, f.projA.ID, "web.txt", "web bytes")
-	got := f.send(t, f.ua, f.topicA, map[string]interface{}{"content": "hello @cee", "attachments": []string{id}})
-	require.Equal(t, http.StatusCreated, got.status, got.body)
-	primary := f.lastDispatch(t, f.target)
-	require.Empty(t, primary.StructuredMessage.Attachments, "the dispatched message is not changed by the plan")
-	sent := legacyAttachmentCopy(primary.StructuredMessage)
-	require.Equal(t, []string{primary.StructuredMessage.AttachmentPlan[0].InboxPath}, sent.Attachments)
-	require.Empty(t, primary.StructuredMessage.Attachments, "the copy does not alias the message")
-	mention := f.lastDispatch(t, c)
-	require.Empty(t, mention.StructuredMessage.Attachments, "the mention copy does not inherit the primary's paths")
-	sentMention := legacyAttachmentCopy(mention.StructuredMessage)
-	require.Equal(t, []string{mention.StructuredMessage.AttachmentPlan[0].InboxPath}, sentMention.Attachments, "its own path, once")
+// TestLegacyAttachmentCopy pins the dispatcher's legacy-copy helper for
+// unrendered messages carrying an AttachmentPlan: (a) deliverable inbox paths
+// appear in the copy without mutating the original (no aliasing), (b) a
+// withheld entry adds no path, and (c) a message that already has DeliveryText
+// rendered is returned unchanged.
+func TestLegacyAttachmentCopy(t *testing.T) {
+	deliverablePath := "~/.scion/inbox/a1/web.txt"
+	orig := &messages.StructuredMessage{
+		Msg: "hello",
+		AttachmentPlan: []messages.AttachmentPlanEntry{
+			{Name: "web.txt", InboxPath: deliverablePath, State: messages.AttachmentDeliverable},
+		},
+	}
+
+	cp := legacyAttachmentCopy(orig)
+	require.NotSame(t, orig, cp)
+	require.Equal(t, []string{deliverablePath}, cp.Attachments)
+	require.Empty(t, orig.Attachments, "the copy must not alias or mutate the original message")
 
 	// A withheld entry puts no path in the copy sent.
-	withheld := *mention.StructuredMessage
-	withheld.AttachmentPlan = []messages.AttachmentPlanEntry{{Name: "web.txt", InboxPath: "~/.scion/inbox/x/web.txt", State: messages.AttachmentWithheld}}
+	withheld := *orig
+	withheld.AttachmentPlan = []messages.AttachmentPlanEntry{
+		{Name: "web.txt", InboxPath: "~/.scion/inbox/x/web.txt", State: messages.AttachmentWithheld},
+	}
 	require.Empty(t, legacyAttachmentCopy(&withheld).Attachments)
+
+	// A message with DeliveryText already rendered is returned unchanged.
+	rendered := *orig
+	rendered.DeliveryText = "---BEGIN SCION MESSAGE---\n{}\n---END SCION MESSAGE---"
+	gotRendered := legacyAttachmentCopy(&rendered)
+	require.Same(t, &rendered, gotRendered)
+	require.Empty(t, gotRendered.Attachments)
 }

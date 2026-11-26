@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -361,6 +362,17 @@ func TestAgentFullHistory_Messages(t *testing.T) {
 	agent, err := s.GetAgent(ctx, agentID)
 	require.NoError(t, err)
 
+	// Non-web channel queries apply agentFullHistoryDecision (web/empty
+	// channel queries always scope to the caller's own DM conversation).
+	now := time.Now()
+	for _, m := range []*store.Message{
+		{ID: uuid.NewString(), ProjectID: agent.ProjectID, Sender: "user:alice", SenderID: alice.ID, Recipient: "agent:privacy-agent", RecipientID: agentID, Msg: "discord alice", Type: "instruction", Channel: "discord", AgentID: agentID, CreatedAt: now},
+		{ID: uuid.NewString(), ProjectID: agent.ProjectID, Sender: "agent:privacy-agent", SenderID: agentID, Recipient: "user:alice", RecipientID: alice.ID, Msg: "discord reply", Type: "state-change", Channel: "discord", AgentID: agentID, CreatedAt: now},
+		{ID: uuid.NewString(), ProjectID: agent.ProjectID, Sender: "user:carol", SenderID: tid("msg-carol"), Recipient: "agent:privacy-agent", RecipientID: agentID, Msg: "discord carol", Type: "instruction", Channel: "discord", AgentID: agentID, CreatedAt: now},
+	} {
+		require.NoError(t, s.CreateMessage(ctx, m))
+	}
+
 	dave := &store.User{
 		ID: tid("msg-dave"), Email: "dave@msg.test", DisplayName: "Dave",
 		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
@@ -383,7 +395,7 @@ func TestAgentFullHistory_Messages(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := requestAsIdentity(t, srv, tc.identity, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
+			rec := requestAsIdentity(t, srv, tc.identity, http.MethodGet, "/api/v1/agents/"+agentID+"/messages?channel=discord", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 			var result store.ListResult[store.Message]
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &result))
@@ -404,10 +416,15 @@ func TestAgentFullHistory_Messages(t *testing.T) {
 }
 
 // streamMessagesAs opens GET /agents/{id}/messages/stream as identity,
-// publishes a non-participant message and a marker message addressed to
-// marker until the marker arrives, and returns the stream body.
+// publishes a non-participant message and a marker message in the caller's DM
+// conversation until the marker arrives, and returns the stream body.
 func streamMessagesAs(t *testing.T, srv *Server, events *ChannelEventPublisher, identity UserIdentity, agentID, marker string) string {
 	t.Helper()
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", identity.ID())
+	require.NoError(t, err)
+	dmConvID := seedConversation(t, srv.store, "native", dmKey, "direct")
+	otherConvID := uuid.NewString()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agentID+"/messages/stream", nil)
@@ -423,10 +440,10 @@ func streamMessagesAs(t *testing.T, srv *Server, events *ChannelEventPublisher, 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && !strings.Contains(rec.String(), "marker-message") {
 		events.PublishRaw(subject, UserMessageEvent{
-			ID: uuid.NewString(), SenderID: tid("stream-carol"), RecipientID: agentID, Msg: "carol-message",
+			ID: uuid.NewString(), SenderID: tid("stream-carol"), RecipientID: agentID, ConversationID: otherConvID, Msg: "carol-message",
 		})
 		events.PublishRaw(subject, UserMessageEvent{
-			ID: uuid.NewString(), SenderID: agentID, RecipientID: marker, Msg: "marker-message",
+			ID: uuid.NewString(), SenderID: agentID, RecipientID: marker, ConversationID: dmConvID, Msg: "marker-message",
 		})
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -437,9 +454,9 @@ func streamMessagesAs(t *testing.T, srv *Server, events *ChannelEventPublisher, 
 	return body
 }
 
-// TestAgentFullHistory_MessagesStream pins the same rule on the message
-// stream: agent.attach holders receive every message, other readers only
-// messages they participate in.
+// TestAgentFullHistory_MessagesStream verifies that GET /agents/{id}/messages/stream
+// scopes delivery to the caller's own DM conversation with the agent, even for
+// the owner.
 func TestAgentFullHistory_MessagesStream(t *testing.T) {
 	srv, s, alice, bob, agentID := setupMessagePrivacyTest(t)
 	events := NewChannelEventPublisher()
@@ -448,9 +465,9 @@ func TestAgentFullHistory_MessagesStream(t *testing.T) {
 	agent, err := s.GetAgent(context.Background(), agentID)
 	require.NoError(t, err)
 
-	t.Run("owner sees every message", func(t *testing.T) {
+	t.Run("owner sees only its own DM conversation", func(t *testing.T) {
 		body := streamMessagesAs(t, srv, events, authUser(alice), agentID, alice.ID)
-		assert.Contains(t, body, "carol-message")
+		assert.NotContains(t, body, "carol-message")
 	})
 	t.Run("UAT without agent:attach sees only its own", func(t *testing.T) {
 		uat := NewScopedUserIdentity(authUser(alice), agent.ProjectID, []string{"agent:read", "agent:lifecycle"})

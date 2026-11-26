@@ -33,7 +33,7 @@ var hubMessagingCmd = &cobra.Command{
 	Long: `View and update Hub-level messaging settings.
 
 These settings control hub-wide messaging features including the
-conversation envelope switch and cross-project messaging enable flag.
+cross-project messaging enable flag.
 
 Requires Hub admin privileges.`,
 }
@@ -45,7 +45,6 @@ var hubMessagingGetCmd = &cobra.Command{
 	Long: `Display the current Hub messaging settings.
 
 Shows:
-  - conversation_envelope_switch: whether the conversation envelope is active
   - cross_project_messaging_enabled: whether cross-project agent messaging is enabled
   - revision: settings revision (used for CAS on updates)`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -69,9 +68,6 @@ Shows:
 		}
 
 		fmt.Printf("Hub Messaging Settings (revision %d):\n", settings.Revision)
-		if settings.ConversationEnvelopeSwitch != nil {
-			fmt.Printf("  conversation_envelope_switch:    %v\n", *settings.ConversationEnvelopeSwitch)
-		}
 		if settings.CrossProjectMessagingEnabled != nil {
 			fmt.Printf("  cross_project_messaging_enabled: %v\n", *settings.CrossProjectMessagingEnabled)
 		}
@@ -81,7 +77,6 @@ Shows:
 
 var (
 	hubMessagingSetCrossProject *bool
-	hubMessagingSetEnvelope     *bool
 	hubMessagingSetRevision     int64
 )
 
@@ -96,10 +91,7 @@ for compare-and-swap (CAS) protection against concurrent edits.
 
 Examples:
   # Enable cross-project messaging
-  scion hub messaging set --cross-project-enabled=true --revision 3
-
-  # Disable conversation envelope
-  scion hub messaging set --envelope-switch=false`,
+  scion hub messaging set --cross-project-enabled=true --revision 3`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, client, err := loadHubClient()
 		if err != nil {
@@ -125,10 +117,6 @@ Examples:
 			}
 			req.ExpectedRevision = &rev
 		}
-		if cmd.Flags().Changed("envelope-switch") {
-			val := *hubMessagingSetEnvelope
-			req.ConversationEnvelopeSwitch = &val
-		}
 
 		result, err := client.Messaging().UpdateHubMessagingSettings(ctx, req)
 		if err != nil {
@@ -142,9 +130,6 @@ Examples:
 		}
 
 		fmt.Printf("Hub Messaging Settings updated (revision %d):\n", result.Revision)
-		if result.ConversationEnvelopeSwitch != nil {
-			fmt.Printf("  conversation_envelope_switch:    %v\n", *result.ConversationEnvelopeSwitch)
-		}
 		if result.CrossProjectMessagingEnabled != nil {
 			fmt.Printf("  cross_project_messaging_enabled: %v\n", *result.CrossProjectMessagingEnabled)
 		}
@@ -158,6 +143,5 @@ func init() {
 	hubMessagingCmd.AddCommand(hubMessagingSetCmd)
 
 	hubMessagingSetCrossProject = hubMessagingSetCmd.Flags().Bool("cross-project-enabled", false, "Enable/disable cross-project messaging")
-	hubMessagingSetEnvelope = hubMessagingSetCmd.Flags().Bool("envelope-switch", true, "Enable/disable conversation envelope")
 	hubMessagingSetCmd.Flags().Int64Var(&hubMessagingSetRevision, "revision", 0, "Expected revision for CAS (required for cross-project changes)")
 }

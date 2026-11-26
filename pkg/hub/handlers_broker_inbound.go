@@ -346,13 +346,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 				return
 			}
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("broker.phase11")
-				log.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-				return
-			}
-			log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			messaging.WriteDenialMetrics.Inc("broker.phase11")
+			log.Error("conversation resolution failed", "error", convErr)
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+			return
 		} else {
 			preDispatchConvResult = convResult
 			if req.Message.Metadata == nil {
@@ -387,8 +384,8 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound
 	// messages. Skip broadcasts — they are ephemeral and do not belong to a
-	// conversation. Resolution errors under write-deny now return 409 BEFORE
-	// dispatch (DEF-135 consequence 1: fail-closed, retry-safe).
+	// conversation. Resolution errors return 409 BEFORE dispatch (DEF-135
+	// consequence 1: fail-closed, retry-safe).
 	var convFromPhase5 *messaging.ConversationResult
 	if !req.Message.Broadcasted {
 		var convErr error
@@ -398,13 +395,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			if req.Message.ThreadID != "" {
 				metricKey = "broker.thread"
 			}
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc(metricKey)
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-				return
-			}
-			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			messaging.WriteDenialMetrics.Inc(metricKey)
+			s.messageLog.Error("conversation resolution failed", "error", convErr)
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+			return
 		}
 	}
 
@@ -442,12 +436,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// the empty-string gate.
 	if effectiveConv != nil {
 		if err := messaging.ValidateAttributed(effectiveConv.ConversationID); err != nil {
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("broker.validate")
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
-				return
-			}
-			s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+			messaging.WriteDenialMetrics.Inc("broker.validate")
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+			return
 		}
 	}
 
@@ -567,47 +558,43 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Phase 9b(ii): render the delivery envelope before dispatch when the
-	// envelope switch is ON. The message ID is pre-generated here (same UUID
-	// that will be persisted). effectiveConv may be nil for broadcasts or
-	// when resolution was skipped — the renderer correctly omits the
-	// conversation key (honest absence per §4.3).
-	if s.writeDenyEnabled() {
-		renderInput := messaging.RenderDeliveryInput{
-			MessageID:  brokerInboundMsgID,
-			ConvResult: effectiveConv,
-			Msg:        req.Message,
-			CreatedAt:  now,
-			Plan:       req.Message.AttachmentPlan,
-		}
-		// Additive mention routing: read co-addressees from broker metadata
-		// so the delivery envelope includes the "to" field listing all
-		// engaged agents. This mirrors what handlers_chat_v2.go:1304-1313
-		// and :1420-1427 do for native chat.
-		if req.Message.Metadata != nil {
-			if coAddrJSON, ok := req.Message.Metadata["mention_co_addressees"]; ok {
-				var slugs []string
-				if json.Unmarshal([]byte(coAddrJSON), &slugs) == nil && len(slugs) > 0 {
-					addrs := make([]messaging.Addressee, 0, len(slugs))
-					for _, slug := range slugs {
-						addrs = append(addrs, messaging.Addressee{
-							PrincipalKind: "agent",
-							PrincipalID:   slug,
-							Via:           messaging.ViaBodyMention,
-							DeliveryState: messaging.DeliveryPending,
-						})
-					}
-					renderInput.CoAddressees = addrs
+	// Render the delivery envelope before dispatch. The message ID is
+	// pre-generated here (same UUID that will be persisted). effectiveConv may
+	// be nil for broadcasts or when resolution was skipped — the renderer
+	// correctly omits the conversation key (honest absence per §4.3).
+	renderInput := messaging.RenderDeliveryInput{
+		MessageID:  brokerInboundMsgID,
+		ConvResult: effectiveConv,
+		Msg:        req.Message,
+		CreatedAt:  now,
+		Plan:       req.Message.AttachmentPlan,
+	}
+	// Additive mention routing: read co-addressees from broker metadata
+	// so the delivery envelope includes the "to" field listing all
+	// engaged agents. This mirrors what handlers_chat_v2.go does for native chat.
+	if req.Message.Metadata != nil {
+		if coAddrJSON, ok := req.Message.Metadata["mention_co_addressees"]; ok {
+			var slugs []string
+			if json.Unmarshal([]byte(coAddrJSON), &slugs) == nil && len(slugs) > 0 {
+				addrs := make([]messaging.Addressee, 0, len(slugs))
+				for _, slug := range slugs {
+					addrs = append(addrs, messaging.Addressee{
+						PrincipalKind: "agent",
+						PrincipalID:   slug,
+						Via:           messaging.ViaBodyMention,
+						DeliveryState: messaging.DeliveryPending,
+					})
 				}
+				renderInput.CoAddressees = addrs
 			}
 		}
-		// Set IsMention for mention-type messages (secondary recipients
-		// in the additive model).
-		if req.Message.Type == messages.TypeMention {
-			renderInput.IsMention = true
-		}
-		req.Message.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
+	// Set IsMention for mention-type messages (secondary recipients
+	// in the additive model).
+	if req.Message.Type == messages.TypeMention {
+		renderInput.IsMention = true
+	}
+	req.Message.DeliveryText = messaging.RenderDeliveryText(renderInput)
 
 	// The hub's message record, written before the gate and the dispatch
 	// outcome (see logMessageRecord); the delivered line below is an event.
@@ -829,8 +816,8 @@ func resolveSenderUserID(ctx context.Context, st store.Store, senderID, sender s
 // Returns (nil, nil) when resolution is inapplicable (e.g. missing
 // senderUserID for a DM, or empty agentID).
 // Returns (result, nil) on success.
-// Returns (nil, err) when resolution fails — the caller must handle
-// write-deny semantics.
+// Returns (nil, err) when resolution fails — the caller must deny the
+// message rather than dispatching without a conversation.
 func (s *Server) resolvePhase5Conversation(
 	ctx context.Context,
 	threadID, projectID, senderUserID, agentID, channel string,

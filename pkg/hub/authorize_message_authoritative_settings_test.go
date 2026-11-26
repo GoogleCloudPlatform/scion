@@ -209,7 +209,7 @@ func TestAuthoritativeSettings_FieldOmittedDenies(t *testing.T) {
 
 	settingStore := newFakeHubSettingStore()
 	// Messaging section exists but cross_project_messaging_enabled is not set.
-	settingStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch": true}`))
+	settingStore.seed("messaging", json.RawMessage(`{"offload_threshold_runes": 0}`))
 	ops := NewOperationalSettings(settingStore, emptyKoanf(), emptyKoanf())
 	if _, err := ops.Refresh(ctx); err != nil {
 		t.Fatalf("ops refresh: %v", err)
@@ -495,7 +495,7 @@ func TestReadAuthoritativeCrossProjectEnabled_SectionAbsent(t *testing.T) {
 func TestReadAuthoritativeCrossProjectEnabled_FieldOmitted(t *testing.T) {
 	ctx := context.Background()
 	st := newFakeHubSettingStore()
-	st.seed("messaging", json.RawMessage(`{"conversation_envelope_switch": true}`))
+	st.seed("messaging", json.RawMessage(`{"offload_threshold_runes": 0}`))
 	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
 
 	result := ops.ReadAuthoritativeCrossProjectEnabled(ctx)

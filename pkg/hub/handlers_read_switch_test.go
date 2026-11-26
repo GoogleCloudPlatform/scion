@@ -222,24 +222,6 @@ func (s *rsWebChatStore) UnreadMentionKeys(context.Context, string, []string) (m
 // Route: GET /api/v1/chat/conversations/{key}/messages
 // ==========================================================================
 
-func TestReadSwitch_S1_DM_FlagOff(t *testing.T) {
-	srv, _ := testServer(t)
-	// No OperationalSettings → flag OFF (nil ops → legacy path).
-	agentUUID := tid("s1-agent-off")
-	key := makeDMKey(agentUUID, DevUserID)
-
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 0 {
-		t.Errorf("flag OFF: expected fallback delta 0, got %d", delta)
-	}
-}
-
 func TestReadSwitch_S1_DM_FlagOn_ConversationResolved(t *testing.T) {
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
@@ -313,31 +295,6 @@ func TestReadSwitch_S1_DM_SevenPartKey_FlagOn(t *testing.T) {
 	// validDMKey rejects the 7-part key → 400 Bad Request.
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestReadSwitch_S1_Thread_FlagOff(t *testing.T) {
-	srv, s := testServer(t)
-	// No OperationalSettings → flag OFF.
-
-	projectID := rsProject(t, s, "s1-thread-off-project")
-	threadKey := "thread-key-off-" + tid("s1-thread-off")
-
-	// Set up webChatStore with a topic so the handler can look it up for authz.
-	wcs := &rsWebChatStore{topics: map[string]*WebChatTopic{
-		threadKey: {ID: threadKey, ProjectID: projectID, Name: "test-thread"},
-	}}
-	srv.SetWebChatStore(wcs)
-
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 0 {
-		t.Errorf("flag OFF thread: expected fallback delta 0, got %d", delta)
 	}
 }
 
@@ -447,24 +404,6 @@ func TestReadSwitch_S1_Thread_FlagOn_WcsNil(t *testing.T) {
 // Route: GET /api/v1/messages?agent={id}
 // ==========================================================================
 
-func TestReadSwitch_S2_FlagOff(t *testing.T) {
-	srv, s := testServer(t)
-	// No OperationalSettings → flag OFF.
-	projectID := rsProject(t, s, "s2-off-project")
-	agentID := rsAgent(t, s, "s2-agent-off", projectID)
-
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 0 {
-		t.Errorf("flag OFF: expected fallback delta 0, got %d", delta)
-	}
-}
-
 func TestReadSwitch_S2_FlagOn_ConversationResolved(t *testing.T) {
 	srv, s := testServer(t)
 	enableReadSwitch(t, srv)
@@ -559,69 +498,6 @@ func TestReadSwitch_S2_FlagOn_SlugAgentParam(t *testing.T) {
 	}
 }
 
-func TestReadSwitch_S2_FlagOff_SlugReturnsEmpty(t *testing.T) {
-	// Pin: with the read-switch OFF, a slug-valued `agent` query parameter
-	// yields NO messages, even when messages for that agent exist and the
-	// caller is their recipient.
-	//
-	// The chain: handleMessages sets filter.AgentID = agentID (the raw query
-	// param). The store layer's ListMessages uses AgentIDEQ(filter.AgentID)
-	// to match against the messages.agent_id column, which only ever
-	// receives UUID values. A slug never matches.
-	//
-	// This test uses a UUID-valued control to prove that the message IS
-	// retrievable — ruling out "empty store" as the explanation for the
-	// empty result with the slug.
-	srv, s := testServer(t)
-	// No OperationalSettings → flag OFF.
-
-	projectID := rsProject(t, s, "s2-slug-empty-project")
-	agentID := rsAgent(t, s, "s2-agent-slug-empty", projectID)
-
-	// Create a message from the agent to the dev user.
-	msg := &store.Message{
-		ID:          tid("s2-slug-msg"),
-		ProjectID:   projectID,
-		Sender:      "agent:" + agentID,
-		SenderID:    agentID,
-		Recipient:   "user:" + DevUserID,
-		RecipientID: DevUserID,
-		AgentID:     agentID,
-		Msg:         "test message for slug filter test",
-		Type:        "output",
-		Channel:     "web",
-	}
-	if err := s.CreateMessage(context.Background(), msg); err != nil {
-		t.Fatalf("CreateMessage: %v", err)
-	}
-
-	// Control: UUID-valued filter returns the message.
-	recUUID := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
-	if recUUID.Code != http.StatusOK {
-		t.Fatalf("UUID query: expected 200, got %d: %s", recUUID.Code, recUUID.Body.String())
-	}
-	var resultUUID store.ListResult[store.Message]
-	if err := json.Unmarshal(recUUID.Body.Bytes(), &resultUUID); err != nil {
-		t.Fatalf("UUID query: unmarshal: %v", err)
-	}
-	if len(resultUUID.Items) == 0 {
-		t.Fatal("UUID query: expected at least 1 message, got 0 — control failed")
-	}
-
-	// Test: slug-valued filter returns nothing.
-	recSlug := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent=s2-agent-slug-empty", nil)
-	if recSlug.Code != http.StatusOK {
-		t.Fatalf("slug query: expected 200, got %d: %s", recSlug.Code, recSlug.Body.String())
-	}
-	var resultSlug store.ListResult[store.Message]
-	if err := json.Unmarshal(recSlug.Body.Bytes(), &resultSlug); err != nil {
-		t.Fatalf("slug query: unmarshal: %v", err)
-	}
-	if len(resultSlug.Items) != 0 {
-		t.Errorf("slug query: expected 0 messages (slug never matches agent_id column), got %d", len(resultSlug.Items))
-	}
-}
-
 func TestReadSwitch_S2_FlagOn_NoAgentParam(t *testing.T) {
 	// When no agent query param is provided, the agentID=="" guard at the
 	// start of the read-switch block is false → entire block skipped.
@@ -644,24 +520,6 @@ func TestReadSwitch_S2_FlagOn_NoAgentParam(t *testing.T) {
 // S3 — handleAgentMessages
 // Route: GET /api/v1/agents/{id}/messages
 // ==========================================================================
-
-func TestReadSwitch_S3_FlagOff(t *testing.T) {
-	srv, s := testServer(t)
-	// No OperationalSettings → flag OFF.
-	projectID := rsProject(t, s, "s3-off-project")
-	agentID := rsAgent(t, s, "s3-agent-off", projectID)
-
-	delta := fallbackDelta(func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 0 {
-		t.Errorf("flag OFF: expected fallback delta 0, got %d", delta)
-	}
-}
 
 func TestReadSwitch_S3_FlagOn_ThreadID_ConversationResolved(t *testing.T) {
 	srv, s := testServer(t)
@@ -995,67 +853,6 @@ func TestG3_AC1_Regression_SwitchOn_Resolvable(t *testing.T) {
 	}
 }
 
-// AC-G3-3 — Switch OFF: behaviour is byte-for-byte unchanged.
-// With no OperationalSettings, all three sites use the legacy filter.
-func TestG3_AC3_SwitchOff_Unchanged(t *testing.T) {
-	srv, s := testServer(t)
-	// No enableReadSwitch → flag OFF.
-
-	projectID := rsProject(t, s, "g3-ac3-project")
-	agentID := rsAgent(t, s, "g3-ac3-agent", projectID)
-
-	// Create a message with the old-style filter fields.
-	key := makeDMKey(agentID, DevUserID)
-	msg := &store.Message{
-		ID:          tid("g3-ac3-msg"),
-		ProjectID:   projectID,
-		Sender:      "agent:" + agentID,
-		SenderID:    agentID,
-		Recipient:   "user:" + DevUserID,
-		RecipientID: DevUserID,
-		AgentID:     agentID,
-		Msg:         "switch-off test message",
-		Type:        "output",
-		Channel:     "web",
-		ThreadID:    key,
-	}
-	if err := s.CreateMessage(context.Background(), msg); err != nil {
-		t.Fatalf("CreateMessage: %v", err)
-	}
-
-	// S1: conversation history — old path (Channel=web, ThreadID=key).
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+key+"/messages", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("S1 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var histResp chatHistoryResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &histResp); err != nil {
-		t.Fatalf("S1: unmarshal: %v", err)
-	}
-	found := false
-	for _, m := range histResp.Messages {
-		if m.ID == msg.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("S1 flag OFF: expected to find the test message via legacy filter")
-	}
-
-	// S2: messages by agent — old path (no ConversationID in filter).
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+agentID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("S2 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// S3: agent messages — old path.
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agentID+"/messages", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("S3 flag OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
 // AC-G3-4 — DM key with a part count other than 5 produces an explicit error
 // distinguishable from "no such conversation". validDMKey's regex catches
 // non-5-part keys at the HTTP layer (400 Bad Request), which is distinguishable
@@ -1187,110 +984,6 @@ func TestG3_D_ChannelConstraintPreserved(t *testing.T) {
 }
 
 // ==========================================================================
-// G3-e — SwitchBypassCounter tests
-// ==========================================================================
-
-// bypassDelta captures a specific SwitchBypassMetrics accessor before calling
-// fn, then returns the delta. Same pattern as fallbackDelta.
-func bypassDelta(accessor func() int64, fn func()) int64 {
-	before := accessor()
-	fn()
-	return accessor() - before
-}
-
-func TestG3_E_Bypass_SlugParam(t *testing.T) {
-	srv, _ := testServer(t)
-	enableReadSwitch(t, srv)
-
-	delta := bypassDelta(messaging.SwitchBypassMetrics.SlugParam, func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent=my-agent-slug", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("slug_param: expected bypass delta 1, got %d", delta)
-	}
-}
-
-func TestG3_E_Bypass_AgentNotFound(t *testing.T) {
-	srv, _ := testServer(t)
-	enableReadSwitch(t, srv)
-
-	// Valid UUID that does not exist in the store.
-	fakeAgentID := tid("g3-e-agent-notfound")
-
-	delta := bypassDelta(messaging.SwitchBypassMetrics.AgentNotFound, func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages?agent="+fakeAgentID, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("agent_not_found: expected bypass delta 1, got %d", delta)
-	}
-}
-
-func TestG3_E_Bypass_NonDMKey(t *testing.T) {
-	srv, _ := testServer(t)
-	enableReadSwitch(t, srv)
-
-	// No agent param → no DM key to derive.
-	delta := bypassDelta(messaging.SwitchBypassMetrics.NonDMKey, func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/messages", nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("non_dm_key: expected bypass delta 1, got %d", delta)
-	}
-}
-
-func TestG3_E_Bypass_WcsNil(t *testing.T) {
-	srv, _ := testServer(t)
-	enableReadSwitch(t, srv)
-	// Deliberately do NOT set webChatStore.
-
-	threadKey := "thread-key-wcsnil-" + tid("g3-e-wcsnil")
-
-	delta := bypassDelta(messaging.SwitchBypassMetrics.WcsNil, func() {
-		rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+threadKey+"/messages", nil)
-		// wcs nil → returns empty 200 before reaching switch block.
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("wcs_nil: expected bypass delta 1, got %d", delta)
-	}
-}
-
-func TestG3_E_Bypass_NonWebChannel(t *testing.T) {
-	srv, s := testServer(t)
-	enableReadSwitch(t, srv)
-
-	projectID := rsProject(t, s, "g3-e-nonweb-project")
-	agentID := rsAgent(t, s, "g3-e-agent-nonweb", projectID)
-
-	delta := bypassDelta(messaging.SwitchBypassMetrics.NonWebChannel, func() {
-		url := fmt.Sprintf("/api/v1/agents/%s/messages?channel=discord", agentID)
-		rec := doRequest(t, srv, http.MethodGet, url, nil)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
-	})
-
-	if delta != 1 {
-		t.Errorf("non_web_channel: expected bypass delta 1, got %d", delta)
-	}
-}
-
-// ==========================================================================
 // G3-f — thread query on project-less agent must not serve DM results
 // ==========================================================================
 
@@ -1357,78 +1050,5 @@ func TestG3_F_ThreadOnProjectlessAgent_SwitchOn(t *testing.T) {
 	// Verify the code is distinguishable from conversation_not_resolved.
 	if errResp.Error.Code == ErrCodeConversationNotResolved {
 		t.Error("thread_project_required must be distinguishable from conversation_not_resolved")
-	}
-}
-
-func TestG3_F_ThreadOnProjectlessAgent_SwitchOff(t *testing.T) {
-	// With the switch OFF, the conversation-resolution block is not entered.
-	// The handler uses the legacy filter (AgentID, etc.) with no conversation
-	// scoping. A thread_id param is not used in the filter — the caller gets
-	// all messages for the agent, which is the old behaviour. The key
-	// invariant: the result is NOT DM-scoped.
-	srv, s := testServer(t)
-	// No enableReadSwitch → flag OFF.
-
-	// Create a sentinel "no project" entry (see SwitchOn variant).
-	nilProject := &store.Project{
-		ID:      "00000000-0000-0000-0000-000000000000",
-		Name:    "nil-project-off",
-		Slug:    "nil-project-off",
-		OwnerID: DevUserID,
-	}
-	if err := s.CreateProject(context.Background(), nilProject); err != nil {
-		t.Fatalf("CreateProject(nil): %v", err)
-	}
-	agentID := rsAgent(t, s, "g3-f-agent-noproj-off", "00000000-0000-0000-0000-000000000000")
-
-	// Create two messages: one DM, one with a different thread.
-	dmMsg := &store.Message{
-		ID:          tid("g3-f-off-dm-msg"),
-		ProjectID:   nilProject.ID,
-		Sender:      "agent:" + agentID,
-		SenderID:    agentID,
-		Recipient:   "user:" + DevUserID,
-		RecipientID: DevUserID,
-		AgentID:     agentID,
-		Msg:         "DM message",
-		Type:        "output",
-		Channel:     "web",
-	}
-	threadMsg := &store.Message{
-		ID:          tid("g3-f-off-thread-msg"),
-		ProjectID:   nilProject.ID,
-		Sender:      "agent:" + agentID,
-		SenderID:    agentID,
-		Recipient:   "user:" + DevUserID,
-		RecipientID: DevUserID,
-		AgentID:     agentID,
-		Msg:         "thread message",
-		Type:        "output",
-		Channel:     "web",
-		ThreadID:    "some-thread",
-	}
-	for _, msg := range []*store.Message{dmMsg, threadMsg} {
-		if err := s.CreateMessage(context.Background(), msg); err != nil {
-			t.Fatalf("CreateMessage: %v", err)
-		}
-	}
-
-	// Thread query with switch off — returns everything (legacy filter).
-	url := fmt.Sprintf("/api/v1/agents/%s/messages?thread_id=some-thread", agentID)
-	rec := doRequest(t, srv, http.MethodGet, url, nil)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("switch OFF: expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var result store.ListResult[store.Message]
-	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	// With switch off, both messages should be visible (legacy filter by
-	// AgentID, no ConversationID scoping). The result is NOT DM-scoped.
-	if len(result.Items) < 2 {
-		t.Errorf("switch OFF: expected at least 2 messages (legacy filter), got %d", len(result.Items))
 	}
 }

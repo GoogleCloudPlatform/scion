@@ -269,34 +269,6 @@ func TestOffload_ClientSuppliedReservedMetadataAlwaysStripped(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// I2: envelope switch OFF.
-// ---------------------------------------------------------------------------
-
-func TestOffload_I2_EnvelopeSwitchOff_MsgStillReplaced(t *testing.T) {
-	srv, _, _, sender, target, _, dispatcher, _ := paritySetup(t)
-	enableOffload(t, srv, 4000, false) // envelope switch OFF
-
-	body := strings.Repeat("q", 12000)
-	rr := sendViaStructured(t, srv, sender, target, body)
-	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
-
-	calls := dispatchesTo(dispatcher, target.ID)
-	require.Len(t, calls, 1)
-	assert.NotEqual(t, body, calls[0].StructuredMessage.Msg, "Msg must be the stub regardless of the envelope switch")
-	assert.Equal(t, "true", calls[0].StructuredMessage.Metadata[messaging.MetaBodyOffloaded])
-	// With the switch OFF, the hub never renders DeliveryText — the broker's
-	// legacy FormatForDelivery renders from Msg/Metadata at dispatch time
-	// instead. Since P2 added the 3 keys to deliveryMetadataAllowlist
-	// (pkg/messages/format.go), that legacy render must show them (nit 8/I2).
-	require.Empty(t, calls[0].StructuredMessage.DeliveryText, "the hub does not render when the envelope switch is off")
-	legacyText := messages.FormatForDelivery(calls[0].StructuredMessage)
-	assert.Contains(t, legacyText, messaging.MetaBodyOffloaded)
-	assert.Contains(t, legacyText, messaging.MetaBodyChars)
-	assert.Contains(t, legacyText, messaging.MetaBodySHA256)
-	assert.NotContains(t, legacyText, body, "the legacy envelope must also be the stub, not the full body")
-}
-
-// ---------------------------------------------------------------------------
 // I7: user-token sender, and the mention invariant.
 // ---------------------------------------------------------------------------
 
@@ -729,7 +701,7 @@ func enableOffloadAndCPM(t *testing.T, srv *Server, threshold int) {
 	fileK := koanf.New(".")
 	envK := koanf.New(".")
 	ops := NewOperationalSettings(fakeStore, fileK, envK)
-	doc := []byte(`{"conversation_envelope_switch":true,"cross_project_messaging_enabled":true,"offload_threshold_runes":` +
+	doc := []byte(`{"cross_project_messaging_enabled":true,"offload_threshold_runes":` +
 		strconv.Itoa(threshold) + `}`)
 	rev, err := ops.Update(context.Background(), "messaging", doc, "test", 0, "managed")
 	require.NoError(t, err)

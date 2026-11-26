@@ -154,7 +154,7 @@ func TestMaintenanceHasNoOwnedKeys(t *testing.T) {
 
 func TestMessagingHasNoOwnedKeys(t *testing.T) {
 	keys := []string{
-		"messaging.conversation_envelope_switch",
+		"messaging.cross_project_messaging_enabled",
 	}
 	for _, key := range keys {
 		if sec := OwningSection(key); sec != "" {

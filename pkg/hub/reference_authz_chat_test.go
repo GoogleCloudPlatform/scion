@@ -81,10 +81,12 @@ func TestChatHistory_ReplyPreviewsOnlyFromSameConversation(t *testing.T) {
 	f := newRefFixture(t)
 	ctx := context.Background()
 
-	foreign := f.seedMessage(t, f.projB.ID, f.topicB, "", "text of project B")
-	local := f.seedMessage(t, f.projA.ID, f.topicA, "", "text of topic A")
-	replyForeign := f.seedMessage(t, f.projA.ID, f.topicA, "", "reply 1")
-	replyLocal := f.seedMessage(t, f.projA.ID, f.topicA, "", "reply 2")
+	convA := topicConversationID(t, f.wcs, f.topicA)
+	convB := topicConversationID(t, f.wcs, f.topicB)
+	foreign := f.seedMessage(t, f.projB.ID, f.topicB, convB, "text of project B")
+	local := f.seedMessage(t, f.projA.ID, f.topicA, convA, "text of topic A")
+	replyForeign := f.seedMessage(t, f.projA.ID, f.topicA, convA, "reply 1")
+	replyLocal := f.seedMessage(t, f.projA.ID, f.topicA, convA, "reply 2")
 	// Written directly, as a row stored before the send-time check.
 	require.NoError(t, f.wcs.SetMessageReplyTo(ctx, replyForeign, foreign))
 	require.NoError(t, f.wcs.SetMessageReplyTo(ctx, replyLocal, local))
@@ -136,7 +138,8 @@ func TestChatDMHistory_StaysReadableAfterProjectAccessEnds(t *testing.T) {
 
 	// alice's DM with agent aa of project A.
 	dm := dmKeyFor(t, "agent", f.aa.ID, "user", f.ua.ID)
-	f.seedMessage(t, f.projA.ID, dm, "", "earlier DM message")
+	dmConvID := seedConversation(t, f.st, "native", dm, "direct")
+	f.seedMessage(t, f.projA.ID, dm, dmConvID, "earlier DM message")
 	require.NotEmpty(t, f.history(t, f.ua, dm).Messages)
 
 	f.revokeProjectAccess(t, f.ua, f.projA)

@@ -2032,33 +2032,24 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
 			}
 		} else if user.ID() != "" && primaryAgent.ID != "" {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", primaryAgent.ID)
 			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
 			}
 		}
 		if convResult != nil {
 			storeMsg.ConversationID = convResult.ConversationID
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
-					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil))
-				}
-				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+				messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
+				return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil))
 			}
 		}
 		chatV2ConvResult = convResult
@@ -2322,28 +2313,26 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	// Phase 9b(ii): render the delivery envelope from the persisted message
-	// row and conversation result when the envelope switch is ON.
+	// Render the delivery envelope from the persisted message row and
+	// conversation result.
 	// Additive model: the primary always gets IsMention=false (type:"message").
 	// When multiple agents are engaged, CoAddressees lists all of them so
 	// the primary's envelope includes a "to" field naming the full group.
 	// The attachments delivered with this message are planned for the
 	// primary once, before any render (ptone/scion#4596).
 	s.applyAttachmentPlan(ctx, primaryAgent, msg)
-	if s.writeDenyEnabled() {
-		renderInput := messaging.RenderDeliveryInput{
-			MessageID:  storeMsg.ID,
-			ConvResult: chatV2ConvResult,
-			Msg:        msg,
-			CreatedAt:  storeMsg.CreatedAt,
-			ReplyToID:  replyToID,
-			Plan:       msg.AttachmentPlan,
-		}
-		if len(agents) > 1 {
-			renderInput.CoAddressees = groupCoAddressees(agents)
-		}
-		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
+	renderInput := messaging.RenderDeliveryInput{
+		MessageID:  storeMsg.ID,
+		ConvResult: chatV2ConvResult,
+		Msg:        msg,
+		CreatedAt:  storeMsg.CreatedAt,
+		ReplyToID:  replyToID,
+		Plan:       msg.AttachmentPlan,
 	}
+	if len(agents) > 1 {
+		renderInput.CoAddressees = groupCoAddressees(agents)
+	}
+	msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 
 	// The hub's message record for the primary, written before the phase
 	// gate and the dispatch outcome (see logMessageRecord).
@@ -2544,23 +2533,17 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, projectID, threadOpts...)
 					if convErr != nil {
-						if s.writeDenyEnabled() {
-							messaging.WriteDenialMetrics.Inc("chat_v2.mention.thread")
-							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
-							continue
-						}
-						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
+						messaging.WriteDenialMetrics.Inc("chat_v2.mention.thread")
+						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+						continue
 					}
 				} else if user.ID() != "" && mentionAgent.ID != "" {
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "agent", mentionAgent.ID)
 					if convErr != nil {
-						if s.writeDenyEnabled() {
-							messaging.WriteDenialMetrics.Inc("chat_v2.mention.dm")
-							s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
-							continue
-						}
-						s.messageLog.Warn("conversation resolution failed for mention (write-deny OFF, continuing)", "slug", mentionAgent.Slug, "error", convErr)
+						messaging.WriteDenialMetrics.Inc("chat_v2.mention.dm")
+						s.messageLog.Error("conversation resolution failed for mention", "slug", mentionAgent.Slug, "error", convErr)
+						continue
 					}
 				}
 				if convResult != nil {
@@ -2601,7 +2584,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// and the same CoAddressees as the primary, so every agent sees the
 			// identical "to" list naming the full group.
 			s.applyAttachmentPlan(ctx, mentionAgent, mentionMsg)
-			if s.writeDenyEnabled() && mentionPersisted {
+			if mentionPersisted {
 				mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:    mentionStoreMsg.ID,
 					ConvResult:   mentionConvResult,
@@ -2917,23 +2900,17 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, key, msgProjectID, threadOpts...)
 			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc(threadMetric)
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc(threadMetric)
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			}
 		} else if user.ID() != "" && recipientID != "" {
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, "user", user.ID(), "user", recipientID)
 			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("chat_v2.human.dm")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("chat_v2.human.dm")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			}
 		}
 		if convResult != nil {
@@ -3379,11 +3356,6 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		if wcs == nil {
-			// G3-e: switch ON + non-DM key + no webChatStore → bypass.
-			// Track before returning so the VM run can see uncovered traffic.
-			if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-				messaging.SwitchBypassMetrics.IncWcsNil()
-			}
 			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 			return
 		}
@@ -3428,8 +3400,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	}
 
 	// The history selector: the web chat's channel (every channel for a
-	// project visitor's own DM) plus the conversation-ID or legacy
-	// thread-ID match chosen by the read switch (resolveChatReadTarget).
+	// project visitor's own DM) plus the conversation-ID match from
+	// resolveChatReadTarget.
 	target, rerr := s.resolveChatReadTarget(ctx, wcs, key, topic, GetIdentityFromContext(ctx))
 	if rerr != nil {
 		// A never-used DM (chatReadAbsent) is an empty page.
@@ -3437,8 +3409,8 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	filter := target.Filter
-	// historyConvID is the conversation the page is listed by, when the
-	// envelope switch resolved one; reply previews are matched against it.
+	// historyConvID is the conversation the page is listed by; reply
+	// previews are matched against it.
 	historyConvID := target.ConversationID
 	// No history caller reads totalCount, and counting costs a scan of
 	// the whole conversation on every page, so the page skips it
@@ -4091,9 +4063,8 @@ func (s *Server) handleConversationRead(w http.ResponseWriter, r *http.Request, 
 	// The watermark must be a persisted message of this conversation:
 	// clients must never set a client-local placeholder, and a message of
 	// another conversation gets the same answer as a missing one. History
-	// lists by ConversationID when the envelope switch is on, and a visible
-	// row's ThreadID may then differ from key, so a match on either counts
-	// (sameConversation).
+	// lists by ConversationID, and a visible row's ThreadID may differ
+	// from key, so a match on either counts (sameConversation).
 	const watermarkNotInConversation = "messageId does not refer to a message in this conversation"
 	targetMsg, err := s.store.GetMessage(ctx, body.MessageID)
 	if err != nil {
@@ -4187,17 +4158,12 @@ func (s *Server) writeConversationReadState(
 // recent messages, newest first — the (created_at, id) DESC order
 // ListMessages uses by default, the same order handleConversationRead's
 // monotonic guard reasons in. It resolves the same filter
-// handleConversationHistory and the DM list (nativeDMLastMessages) use,
-// honouring the
-// ConversationEnvelopeSwitch when it is on so mark-unread sees the same
-// message set the history view and the DM list's "last message" do.
+// handleConversationHistory and the DM list (nativeDMLastMessages) use so
+// mark-unread sees the same message set the history view and the DM list's
+// "last message" do.
 //
-// That equivalence is exact for DMs: an unresolved conversation under the
-// switch returns (nil, nil) here, the same empty result history's DM branch
-// returns. For topics it is not quite exact — an unresolved topic falls back
-// to a ThreadID filter here, where history instead returns a 409 — but that
-// is harmless: an unresolved topic has nothing a ThreadID filter would match
-// either, so both paths agree there is nothing to show or act on.
+// That equivalence is exact for DMs: an unresolved conversation returns
+// (nil, nil) here, the same empty result history's DM branch returns.
 func (s *Server) conversationRecentMessages(
 	ctx context.Context, key string, isDM bool, wcs WebChatStore, limit int,
 ) ([]store.Message, error) {
@@ -4206,30 +4172,26 @@ func (s *Server) conversationRecentMessages(
 		// Mention fan-out copies are excluded, matching nativeDMLastMessages —
 		// chat-thread does not display them, so they must not count as the
 		// "latest message" mark-unread reasons about.
-		filter = store.MessageFilter{Channel: nativeDMMessageScope.Channel, ThreadID: key,
-			ExcludeType: nativeDMMessageScope.ExcludeType}
-		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-			parts := strings.Split(key, ":")
-			if len(parts) != 5 {
-				return nil, fmt.Errorf("invalid DM key: %q", key)
-			}
-			conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
-			if err != nil {
-				return nil, err
-			}
-			if conv == nil {
-				// Never-used DM: matches nativeDMLastMessages' prior
-				// behaviour exactly (nil, nil) rather than falling back to
-				// a ThreadID filter, which would show unrelated legacy rows
-				// once envelope mode is the source of truth.
-				return nil, nil
-			}
-			filter.ThreadID = ""
-			filter.ConversationID = conv.ConversationID
+		parts := strings.Split(key, ":")
+		if len(parts) != 5 {
+			return nil, fmt.Errorf("invalid DM key: %q", key)
+		}
+		conv, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
+		if err != nil {
+			return nil, err
+		}
+		if conv == nil {
+			// Never-used DM: matches nativeDMLastMessages' behaviour exactly.
+			return nil, nil
+		}
+		filter = store.MessageFilter{
+			Channel:        nativeDMMessageScope.Channel,
+			ConversationID: conv.ConversationID,
+			ExcludeType:    nativeDMMessageScope.ExcludeType,
 		}
 	} else {
 		filter = store.MessageFilter{Channel: "web", ThreadID: key}
-		if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() && wcs != nil {
+		if wcs != nil {
 			if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
 				if convResult := messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
 					messaging.WithReadTopicLookup(wcs)); convResult != nil {
@@ -4901,9 +4863,9 @@ var nativeDMMessageScope = store.LatestMessageOptions{Channel: "web", ExcludeTyp
 // nativeDMLastMessages returns the last visible message of each DM for the
 // DM list — for every key, the message conversationRecentMessages(key,
 // isDM, limit 1) would return — with a constant number of store queries:
-// one latest-message lookup, plus one conversation lookup when the
-// conversation envelope switch is on. The result maps a conversation key to
-// its last visible message; keys with no visible message are absent.
+// one conversation lookup plus one latest-message lookup. The result maps
+// a conversation key to its last visible message; keys with no visible
+// message are absent.
 //
 // A failed batched read is logged and degrades rather than failing the
 // list: every DM it covered is listed without last-message enrichment.
@@ -4927,23 +4889,8 @@ func (s *Server) nativeDMLastMessagesStrict(ctx context.Context, keys []string) 
 		return result, nil
 	}
 
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.ConversationEnvelopeSwitch() {
-		latest, err := s.store.LatestMessagesByThreadIDs(ctx, keys, nativeDMMessageScope)
-		if err != nil {
-			return nil, fmt.Errorf("latest DM messages: %w", err)
-		}
-		for _, key := range keys {
-			if msg := latest[key]; msg != nil {
-				result[key] = msg
-			}
-		}
-		return result, nil
-	}
-
-	// Envelope mode: resolve each key to its DM conversation exactly as
-	// conversationRecentMessages does, then read by conversation ID. A key
-	// that does not resolve (malformed, or a never-used DM) has no last
+	// Resolve each key to its DM conversation, then read by conversation ID.
+	// A key that does not resolve (malformed, or a never-used DM) has no last
 	// message.
 	refByKey := make(map[string]string, len(keys))
 	refs := make([]string, 0, len(keys))

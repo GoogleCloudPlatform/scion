@@ -67,16 +67,28 @@ func doMessageRequestAsUser(t *testing.T, srv *Server, user *store.User, method,
 // ---------------------------------------------------------------------------
 
 func TestAgentMessages_ManagerSeesAll(t *testing.T) {
-	srv, _, alice, _, agentID := setupMessagePrivacyTest(t)
+	srv, s, alice, _, agentID := setupMessagePrivacyTest(t)
+	ctx := context.Background()
+	agent, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	now := time.Now()
+	// Non-web channel queries apply agentFullHistoryDecision rather than DM scoping.
+	for _, m := range []*store.Message{
+		{ID: tid("disc-m1"), ProjectID: agent.ProjectID, Sender: "user:alice", SenderID: alice.ID, Recipient: "agent:privacy-agent", RecipientID: agentID, Msg: "discord alice", Type: "instruction", Channel: "discord", AgentID: agentID, CreatedAt: now},
+		{ID: tid("disc-m2"), ProjectID: agent.ProjectID, Sender: "agent:privacy-agent", SenderID: agentID, Recipient: "user:alice", RecipientID: alice.ID, Msg: "discord reply", Type: "state-change", Channel: "discord", AgentID: agentID, CreatedAt: now},
+		{ID: tid("disc-m3"), ProjectID: agent.ProjectID, Sender: "user:carol", SenderID: tid("msg-carol"), Recipient: "agent:privacy-agent", RecipientID: agentID, Msg: "discord carol", Type: "instruction", Channel: "discord", AgentID: agentID, CreatedAt: now},
+	} {
+		require.NoError(t, s.CreateMessage(ctx, m))
+	}
 
 	rec := doMessageRequestAsUser(t, srv, alice, http.MethodGet,
-		"/api/v1/agents/"+agentID+"/messages", nil)
+		"/api/v1/agents/"+agentID+"/messages?channel=discord", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	var result store.ListResult[store.Message]
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&result))
 
-	// Alice is the agent owner → manage bypass → sees all 3 messages.
+	// Alice is the agent owner → manage bypass → sees all 3 non-web messages.
 	assert.Equal(t, 3, result.TotalCount,
 		"manager should see all messages including ones they are not a participant in")
 }

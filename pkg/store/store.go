@@ -4065,15 +4065,10 @@ type MessageStore interface {
 	// Results are ordered by created_at DESC.
 	ListMessages(ctx context.Context, filter MessageFilter, opts ListOptions) (*ListResult[Message], error)
 
-	// LatestMessagesByThreadIDs returns, for each thread ID, the newest
-	// message with that thread_id matching opts, using the ListMessages
-	// order (created DESC, then id DESC). It answers the same question as
-	// ListMessages with a ThreadID filter and Limit 1, for many threads in
-	// one lookup. Threads with no matching message are absent from the map.
-	LatestMessagesByThreadIDs(ctx context.Context, threadIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
-
-	// LatestMessagesByConversationIDs is LatestMessagesByThreadIDs keyed
-	// by conversation_id instead of thread_id. Malformed conversation IDs
+	// LatestMessagesByConversationIDs returns, for each conversation ID, the
+	// newest message with that conversation_id matching opts, using the
+	// ListMessages order (created DESC, then id DESC). Conversations with no
+	// matching message are absent from the map. Malformed conversation IDs
 	// are rejected with an error, as ListMessages rejects them.
 	LatestMessagesByConversationIDs(ctx context.Context, conversationIDs []string, opts LatestMessageOptions) (map[string]*Message, error)
 

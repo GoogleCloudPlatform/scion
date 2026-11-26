@@ -36,16 +36,15 @@ import (
 // Phase 2 of starred messages: agent and human DMs, labels, deletion,
 // promotion and lifecycle cleanup through the real handlers.
 
-// dmConversation creates the direct conversation of a DM key (the read
-// switch lists DM history by it) and returns its ID.
+// dmConversation ensures the direct conversation of a DM key exists and returns its ID.
 func (f *starFixture) dmConversation(t *testing.T, key string) string {
 	t.Helper()
-	id := uuid.NewString()
 	at := time.Now().UTC().Add(-2 * time.Hour)
-	require.NoError(t, f.s.CreateConversation(context.Background(), &store.Conversation{
-		ID: id, Kind: "direct", Surface: "native", ExternalRef: key, DriftState: "active", LastActivityAt: at, CreatedAt: at,
-	}))
-	return id
+	conv, err := f.s.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: key, DriftState: "active", LastActivityAt: at, CreatedAt: at,
+	})
+	require.NoError(t, err)
+	return conv.ID
 }
 
 // dmMsg stores a native DM message (projectID must be a UUID: production

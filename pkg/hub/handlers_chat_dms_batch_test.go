@@ -109,11 +109,6 @@ func (s *dmCountingStore) GetConversationsByExternalRefs(ctx context.Context, su
 	return s.Store.GetConversationsByExternalRefs(ctx, surface, refs)
 }
 
-func (s *dmCountingStore) LatestMessagesByThreadIDs(ctx context.Context, ids []string, o store.LatestMessageOptions) (map[string]*store.Message, error) {
-	s.c.inc("LatestMessagesByThreadIDs")
-	return s.Store.LatestMessagesByThreadIDs(ctx, ids, o)
-}
-
 func (s *dmCountingStore) LatestMessagesByConversationIDs(ctx context.Context, ids []string, o store.LatestMessageOptions) (map[string]*store.Message, error) {
 	s.c.inc("LatestMessagesByConversationIDs")
 	return s.Store.LatestMessagesByConversationIDs(ctx, ids, o)
@@ -360,14 +355,6 @@ func (f *dmMixFixture) seedFiller(n int) {
 func newDMMixServer(t *testing.T, envelope bool) (*Server, *dmMixFixture, *dmCallCounter) {
 	t.Helper()
 	srv, s, wcs, project, _ := setupSendTest(t)
-	ctx := context.Background()
-	settings := newFakeHubSettingStore()
-	ops := NewOperationalSettings(settings, emptyKoanf(), emptyKoanf())
-	settings.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":`+strconv.FormatBool(envelope)+`}`))
-	if _, err := ops.Refresh(ctx); err != nil {
-		t.Fatal(err)
-	}
-	srv.SetOperationalSettings(ops)
 
 	counter := &dmCallCounter{calls: map[string]int{}}
 	srv.store = &dmCountingStore{Store: s, c: counter}
@@ -408,101 +395,93 @@ func normalizeDMEntries(t *testing.T, entries []chatDMEntry) []chatDMEntry {
 }
 
 // TestChatDMs_BatchedMatchesPerDMLookups pins the batched DM list to the
-// response the per-DM lookups produced, for a mix of DMs, in both legacy
-// and conversation-envelope mode.
+// response the per-DM lookups produced, for a mix of DMs.
 func TestChatDMs_BatchedMatchesPerDMLookups(t *testing.T) {
-	for _, envelope := range []bool{false, true} {
-		t.Run("envelope="+strconv.FormatBool(envelope), func(t *testing.T) {
-			srv, f, _ := newDMMixServer(t, envelope)
-			f.seedCases()
+	const envelope = true
+	srv, f, _ := newDMMixServer(t, envelope)
+	f.seedCases()
 
-			got := listDMs(t, srv)
-			want := normalizeDMEntries(t, perDMReferenceEntries(t, srv, f.wcs, DevUserID))
-			if !reflect.DeepEqual(got, want) {
-				for i := range want {
-					if i < len(got) && !reflect.DeepEqual(got[i], want[i]) {
-						t.Errorf("entry %d:\n got %+v\nwant %+v", i, got[i], want[i])
-					}
-				}
-				t.Fatalf("batched list differs from per-DM lookups (got %d entries, want %d)", len(got), len(want))
+	got := listDMs(t, srv)
+	want := normalizeDMEntries(t, perDMReferenceEntries(t, srv, f.wcs, DevUserID))
+	if !reflect.DeepEqual(got, want) {
+		for i := range want {
+			if i < len(got) && !reflect.DeepEqual(got[i], want[i]) {
+				t.Errorf("entry %d:\n got %+v\nwant %+v", i, got[i], want[i])
 			}
+		}
+		t.Fatalf("batched list differs from per-DM lookups (got %d entries, want %d)", len(got), len(want))
+	}
 
-			// Spot-check the cases themselves so the reference cannot
-			// silently drift with the handler.
-			byPeer := map[string]chatDMEntry{}
-			for _, e := range got {
-				byPeer[e.PeerName] = e
-			}
-			check := func(peer string, wantLast string, unread, muted bool) {
-				t.Helper()
-				e, ok := byPeer[peer]
-				if !ok {
-					t.Fatalf("no DM with peer %q in %+v", peer, got)
-				}
-				if e.LastMessageID != wantLast || e.HasUnread != unread || e.Muted != muted {
-					t.Errorf("%s: last=%q unread=%v muted=%v; want last=%q unread=%v muted=%v",
-						peer, e.LastMessageID, e.HasUnread, e.Muted, wantLast, unread, muted)
-				}
-			}
-			check("dmmix-read", tid("dmmix-read-1"), false, false)
-			check("dmmix-muted", tid("dmmix-muted-1"), true, true)
-			check("dmmix-mention", tid("dmmix-mention-visible"), false, false)
-			check("dmmix-empty", "", false, false)
-			check("dmmix-deleted", tid("dmmix-deleted-older"), true, false)
-			check("dmmix-external", "", false, false)
-			if envelope {
-				check("dmmix-convonly", tid("dmmix-convonly-conv"), true, false)
-			} else {
-				check("dmmix-convonly", tid("dmmix-convonly-thread"), true, false)
-			}
-			tieWant := tid("dmmix-tie-a")
-			if tid("dmmix-tie-b") > tieWant {
-				tieWant = tid("dmmix-tie-b")
-			}
-			check("dmmix-tie", tieWant, true, false)
-			check("dmmix-gone-agent", tid("dmmix-gone-agent-1"), true, false)
-			check("DM Mix Human", tid("dmmix-human-1"), true, false)
-			if e := byPeer["DM Mix Human"]; e.PeerEmail != "dmmix-human@example.com" {
-				t.Errorf("human peer entry: %+v", e)
-			}
-			// The missing agent has no name; it is the only unnamed DM.
-			if e, ok := byPeer[""]; !ok || e.LastMessageID != tid("dmmix-missing-agent-1") {
-				t.Errorf("missing-agent entry: %+v (present=%v)", e, ok)
-			}
+	// Spot-check the cases themselves so the reference cannot
+	// silently drift with the handler.
+	byPeer := map[string]chatDMEntry{}
+	for _, e := range got {
+		byPeer[e.PeerName] = e
+	}
+	check := func(peer string, wantLast string, unread, muted bool) {
+		t.Helper()
+		e, ok := byPeer[peer]
+		if !ok {
+			t.Fatalf("no DM with peer %q in %+v", peer, got)
+		}
+		if e.LastMessageID != wantLast || e.HasUnread != unread || e.Muted != muted {
+			t.Errorf("%s: last=%q unread=%v muted=%v; want last=%q unread=%v muted=%v",
+				peer, e.LastMessageID, e.HasUnread, e.Muted, wantLast, unread, muted)
+		}
+	}
+	check("dmmix-read", tid("dmmix-read-1"), false, false)
+	check("dmmix-muted", tid("dmmix-muted-1"), true, true)
+	check("dmmix-mention", tid("dmmix-mention-visible"), false, false)
+	check("dmmix-empty", "", false, false)
+	check("dmmix-deleted", tid("dmmix-deleted-older"), true, false)
+	check("dmmix-external", "", false, false)
+	check("dmmix-convonly", tid("dmmix-convonly-conv"), true, false)
+	tieWant := tid("dmmix-tie-a")
+	if tid("dmmix-tie-b") > tieWant {
+		tieWant = tid("dmmix-tie-b")
+	}
+	check("dmmix-tie", tieWant, true, false)
+	check("dmmix-gone-agent", tid("dmmix-gone-agent-1"), true, false)
+	check("DM Mix Human", tid("dmmix-human-1"), true, false)
+	if e := byPeer["DM Mix Human"]; e.PeerEmail != "dmmix-human@example.com" {
+		t.Errorf("human peer entry: %+v", e)
+	}
+	// The missing agent has no name; it is the only unnamed DM.
+	if e, ok := byPeer[""]; !ok || e.LastMessageID != tid("dmmix-missing-agent-1") {
+		t.Errorf("missing-agent entry: %+v (present=%v)", e, ok)
+	}
 
-			// Unused wire fields must not be serialized even when messages,
-			// avatars, and read watermarks exist on the underlying rows.
-			rawRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
-			if rawRec.Code != http.StatusOK {
-				t.Fatalf("raw list: %d %s", rawRec.Code, rawRec.Body.String())
+	// Unused wire fields must not be serialized even when messages,
+	// avatars, and read watermarks exist on the underlying rows.
+	rawRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/dms", nil)
+	if rawRec.Code != http.StatusOK {
+		t.Fatalf("raw list: %d %s", rawRec.Code, rawRec.Body.String())
+	}
+	var rawDoc struct {
+		DMs []map[string]any `json:"dms"`
+	}
+	if err := json.Unmarshal(rawRec.Body.Bytes(), &rawDoc); err != nil {
+		t.Fatal(err)
+	}
+	for i, item := range rawDoc.DMs {
+		for _, dropped := range []string{
+			"peerAvatar",
+			"lastMessagePreview",
+			"lastMessageSender",
+			"lastReadMessageId",
+		} {
+			if v, present := item[dropped]; present {
+				t.Errorf("entry %d still serializes dropped field %q = %v", i, dropped, v)
 			}
-			var rawDoc struct {
-				DMs []map[string]any `json:"dms"`
-			}
-			if err := json.Unmarshal(rawRec.Body.Bytes(), &rawDoc); err != nil {
-				t.Fatal(err)
-			}
-			for i, item := range rawDoc.DMs {
-				for _, dropped := range []string{
-					"peerAvatar",
-					"lastMessagePreview",
-					"lastMessageSender",
-					"lastReadMessageId",
-				} {
-					if v, present := item[dropped]; present {
-						t.Errorf("entry %d still serializes dropped field %q = %v", i, dropped, v)
-					}
-				}
-			}
+		}
+	}
 
-			// Ordering is the ListDMs order: newest activity first.
-			for i := 1; i < len(got); i++ {
-				if got[i].LastActivityAt.After(got[i-1].LastActivityAt) {
-					t.Fatalf("entries out of activity order at %d: %v after %v",
-						i, got[i].LastActivityAt, got[i-1].LastActivityAt)
-				}
-			}
-		})
+	// Ordering is the ListDMs order: newest activity first.
+	for i := 1; i < len(got); i++ {
+		if got[i].LastActivityAt.After(got[i-1].LastActivityAt) {
+			t.Fatalf("entries out of activity order at %d: %v after %v",
+				i, got[i].LastActivityAt, got[i-1].LastActivityAt)
+		}
 	}
 }
 
@@ -510,56 +489,48 @@ func TestChatDMs_BatchedMatchesPerDMLookups(t *testing.T) {
 // list request makes, against the per-DM lookups it replaced, for a small
 // and an 80-DM list.
 func TestChatDMs_StoreCallsDoNotScaleWithDMs(t *testing.T) {
-	for _, envelope := range []bool{false, true} {
-		t.Run("envelope="+strconv.FormatBool(envelope), func(t *testing.T) {
-			srv, f, counter := newDMMixServer(t, envelope)
-			f.seedCases()
+	srv, f, counter := newDMMixServer(t, true)
+	f.seedCases()
 
-			measure := func() (batched map[string]int, batchedTotal, perDMTotal, dms int) {
-				t.Helper()
-				counter.reset()
-				dms = len(listDMs(t, srv))
-				batched, batchedTotal = counter.snapshot()
-				counter.reset()
-				perDMReferenceEntries(t, srv, srv.webChatStore, DevUserID)
-				_, perDMTotal = counter.snapshot()
-				return batched, batchedTotal, perDMTotal, dms
-			}
-
-			smallCalls, smallTotal, smallPerDM, smallN := measure()
-			f.seedFiller(80 - smallN)
-			largeCalls, largeTotal, largePerDM, largeN := measure()
-			if largeN != 80 {
-				t.Fatalf("large list has %d DMs, want 80", largeN)
-			}
-
-			want := map[string]int{
-				"ListDMs":                        1,
-				"LatestMessagesByThreadIDs":      1,
-				"GetUsersByIDs":                  1,
-				"GetAgentsByIDsIncludingDeleted": 1,
-				"GetReadStates":                  1,
-			}
-			if envelope {
-				delete(want, "LatestMessagesByThreadIDs")
-				want["GetConversationsByExternalRefs"] = 1
-				want["LatestMessagesByConversationIDs"] = 1
-			}
-			for _, calls := range []map[string]int{smallCalls, largeCalls} {
-				if !reflect.DeepEqual(calls, want) {
-					t.Fatalf("batched store calls = %v; want %v", calls, want)
-				}
-			}
-			if smallTotal != largeTotal {
-				t.Fatalf("batched calls grew with DMs: %d for %d DMs, %d for %d", smallTotal, smallN, largeTotal, largeN)
-			}
-			if largePerDM <= largeTotal {
-				t.Fatalf("per-DM reference made %d calls, batched %d", largePerDM, largeTotal)
-			}
-			t.Logf("store calls: %d DMs per-DM=%d batched=%d; %d DMs per-DM=%d batched=%d",
-				smallN, smallPerDM, smallTotal, largeN, largePerDM, largeTotal)
-		})
+	measure := func() (batched map[string]int, batchedTotal, perDMTotal, dms int) {
+		t.Helper()
+		counter.reset()
+		dms = len(listDMs(t, srv))
+		batched, batchedTotal = counter.snapshot()
+		counter.reset()
+		perDMReferenceEntries(t, srv, srv.webChatStore, DevUserID)
+		_, perDMTotal = counter.snapshot()
+		return batched, batchedTotal, perDMTotal, dms
 	}
+
+	smallCalls, smallTotal, smallPerDM, smallN := measure()
+	f.seedFiller(80 - smallN)
+	largeCalls, largeTotal, largePerDM, largeN := measure()
+	if largeN != 80 {
+		t.Fatalf("large list has %d DMs, want 80", largeN)
+	}
+
+	want := map[string]int{
+		"ListDMs":                         1,
+		"GetConversationsByExternalRefs":  1,
+		"LatestMessagesByConversationIDs": 1,
+		"GetUsersByIDs":                   1,
+		"GetAgentsByIDsIncludingDeleted":  1,
+		"GetReadStates":                   1,
+	}
+	for _, calls := range []map[string]int{smallCalls, largeCalls} {
+		if !reflect.DeepEqual(calls, want) {
+			t.Fatalf("batched store calls = %v; want %v", calls, want)
+		}
+	}
+	if smallTotal != largeTotal {
+		t.Fatalf("batched calls grew with DMs: %d for %d DMs, %d for %d", smallTotal, smallN, largeTotal, largeN)
+	}
+	if largePerDM <= largeTotal {
+		t.Fatalf("per-DM reference made %d calls, batched %d", largePerDM, largeTotal)
+	}
+	t.Logf("store calls: %d DMs per-DM=%d batched=%d; %d DMs per-DM=%d batched=%d",
+		smallN, smallPerDM, smallTotal, largeN, largePerDM, largeTotal)
 }
 
 // dmNilConversationStore returns a nil entry alongside the real ones from

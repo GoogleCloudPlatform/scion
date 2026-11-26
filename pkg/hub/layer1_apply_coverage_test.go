@@ -370,8 +370,8 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 		// Sections with no koanf paths, read through getters.
 		"maintenance": {section: "maintenance", doc: `{"admin_mode":true,"maintenance_message":"probe"}`,
 			observe: func(s *Server, _ *OperationalSettings) any { on, msg := s.maintenance.State(); return []any{on, msg} }},
-		"messaging": {section: "messaging", doc: `{"conversation_envelope_switch":false}`,
-			observe: func(_ *Server, o *OperationalSettings) any { return o.ConversationEnvelopeSwitch() }},
+		"messaging": {section: "messaging", doc: `{"offload_threshold_runes":4000}`,
+			observe: func(_ *Server, o *OperationalSettings) any { return o.OffloadThresholdRunes() }},
 		"experiments": {section: "experiments", doc: `{"overrides":{"web.gcs_links":true}}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ExperimentsSnapshot().Overrides }},
 		"artifacts": {section: "artifacts", doc: `{"enabled":false}`,

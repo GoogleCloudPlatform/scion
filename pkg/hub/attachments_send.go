@@ -297,8 +297,8 @@ func (s *Server) validateAgentSendAttachments(ctx context.Context, caller Identi
 //  1. a message naming the reserved in-process channel is refused before
 //     anything is stored (the answer ErrReservedChannel produces);
 //  2. the conversation is resolved as deliverToUser would
-//     (resolveUserMessageConversation); a failure while write-deny is on
-//     is answered before anything is stored;
+//     (resolveUserMessageConversation); a resolution failure is answered
+//     before anything is stored;
 //  3. storeRow stores the row, binds the attachments, stamps the
 //     watermarks (the caller arms afterUserMessagePersisted for it) and
 //     publishes the SSE event;

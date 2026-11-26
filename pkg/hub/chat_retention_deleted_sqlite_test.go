@@ -275,7 +275,6 @@ func (f *chatRetentionHubFixture) dms() map[string]chatDMEntry {
 func TestChatRetention_ListsAndUnreadAfterPurgeSQLite(t *testing.T) {
 	f := newChatRetentionHubFixture(t)
 	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30,"sweep":{"pause_ms":0}}`)
-	require.True(t, f.srv.GetOperationalSettings().ConversationEnvelopeSwitch(), "the DM list reads by conversation")
 	now := time.Now().UTC()
 	old := now.Add(-40 * 24 * time.Hour)
 

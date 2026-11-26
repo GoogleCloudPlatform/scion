@@ -596,7 +596,7 @@ func (o *OperationalSettings) refresh(ctx context.Context) (changed []string, re
 			)
 		} else if sec := opsettings.SectionByName(row.Section); sec != nil && sec.New != nil {
 			// Syntactically valid JSON can still be semantically wrong (e.g.
-			// {"conversation_envelope_switch":"yes"} — valid JSON, but "yes"
+			// {"cross_project_messaging_enabled":"yes"} — valid JSON, but "yes"
 			// does not unmarshal into *bool). Detect at ingest so the failure
 			// is logged once per refresh, not silently swallowed per getter.
 			target := sec.New()
@@ -2377,39 +2377,6 @@ func (o *OperationalSettings) ProjectDefaultScratchpad() bool {
 		return *pd.DefaultScratchpad
 	}
 	return true // field omitted in doc → compiled default
-}
-
-// ConversationEnvelopeSwitch returns whether the consolidated conversation
-// envelope switch is enabled. This replaces ConversationReadSwitch and
-// ConversationWriteDenySwitch with a single switch that:
-//   - defaults ON when the section is absent from the DB (compiled default)
-//   - defaults ON when the section is present but the key is omitted
-//   - returns OFF when the document is malformed (fail-closed, DEF-92)
-//   - returns the explicit value when the key is present
-//
-// Hot-reloadable: reads from the DB-backed cache.
-func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-
-	state, ok := o.cache["messaging"]
-	if !ok {
-		return true // section absent → compiled default → ON
-	}
-
-	if state.Malformed {
-		return false // unreadable → pre-refactor behaviour → OFF
-	}
-
-	var ms opsettings.MessagingSettings
-	if err := json.Unmarshal(state.Value, &ms); err != nil {
-		return false // parse error → fail closed → OFF
-	}
-
-	if ms.ConversationEnvelopeSwitch != nil {
-		return *ms.ConversationEnvelopeSwitch
-	}
-	return true // field omitted in doc → compiled default → ON
 }
 
 // OffloadThresholdRunes returns the rune-count threshold above which an

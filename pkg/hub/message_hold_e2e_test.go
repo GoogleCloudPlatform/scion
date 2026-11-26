@@ -434,12 +434,10 @@ func setHoldTestSettings(t *testing.T, srv *Server, exps map[string]bool) {
 	require.NoError(t, err)
 	fakeStore := newFakeHubSettingStore()
 	fakeStore.seed("experiments", raw)
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
 	_, err = ops.Refresh(context.Background())
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
-	require.True(t, srv.GetOperationalSettings().ConversationEnvelopeSwitch())
 }
 
 func newHoldE2EFixture(t *testing.T) *holdE2EFixture {

@@ -312,12 +312,6 @@ func TestU5a_DeliverToAgent_StripsReservedMetadata(t *testing.T) {
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(fanout, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
-	// r3 finding 1: this proxy is built by hand and never receives the
-	// writeDenyEnabled hook server.go:3084 wires up in production, so
-	// DeliveryText would never render here even with enableOffload. Set it
-	// directly, matching delivery_text_system_test.go's pattern for the
-	// notification dispatcher.
-	proxy.writeDenyEnabled = func() bool { return true }
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)
@@ -361,7 +355,6 @@ func TestS4_6_DeliverToAgent_ClearsForgedEvent(t *testing.T) {
 	events := NewChannelEventPublisher()
 	t.Cleanup(events.Close)
 	proxy := NewMessageBrokerProxy(fanout, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
-	proxy.writeDenyEnabled = func() bool { return true }
 	proxy.Start()
 	t.Cleanup(proxy.Stop)
 	srv.SetMessageBrokerProxy(proxy)

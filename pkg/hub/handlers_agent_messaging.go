@@ -152,8 +152,7 @@ type routingResult struct {
 	// and it was authorized (DEF-138 Rule 1). False for derived conversations (Rules 2/3).
 	Asserted bool
 	// ConvResult holds the full conversation metadata when S4 resolved or
-	// created a conversation. Nil if conversation resolution failed (write-deny
-	// disabled) or was skipped.
+	// created a conversation. Nil if conversation resolution was skipped.
 	ConvResult *messaging.ConversationResult
 
 	// Transport (S2 + S6 output).
@@ -671,14 +670,10 @@ func (s *Server) resolveOutboundRouting(
 			RecipientID:   recipientID,
 		})
 		if deriveErr != nil {
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("outbound.derive")
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-					"conversation key derivation failed: "+deriveErr.Error(), nil)
-				return nil, deriveErr
-			}
-			s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
-				"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
+			messaging.WriteDenialMetrics.Inc("outbound.derive")
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+				"conversation key derivation failed: "+deriveErr.Error(), nil)
+			return nil, deriveErr
 		} else {
 			// The sender's message mode is checked before the thread
 			// conversation is resolved, so a refused post writes no row
@@ -741,13 +736,10 @@ func (s *Server) resolveOutboundRouting(
 			var convErr error
 			convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 			if convErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("outbound.resolve")
-					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-					return nil, convErr
-				}
-				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+				messaging.WriteDenialMetrics.Inc("outbound.resolve")
+				s.messageLog.Error("conversation resolution failed", "error", convErr)
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return nil, convErr
 			} else {
 				// A thread conversation is a group conversation: the
 				// sender's message mode applies (group_message_mode.go).
@@ -758,12 +750,9 @@ func (s *Server) resolveOutboundRouting(
 					}
 				}
 				if err := messaging.ValidateAttributed(convResult.ConversationID); err != nil {
-					if s.writeDenyEnabled() {
-						messaging.WriteDenialMetrics.Inc("outbound.validate")
-						writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
-						return nil, err
-					}
-					s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+					messaging.WriteDenialMetrics.Inc("outbound.validate")
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+					return nil, err
 				}
 			}
 		}
@@ -861,9 +850,9 @@ func (s *Server) resolveOutboundRouting(
 
 	if convRefResolved {
 		if convResult == nil {
-			// ConversationRef was resolved (S3), but conversation resolution
-			// failed (S4). This can happen when write-deny is disabled.
-			// Log and continue — downstream persistence will also skip.
+			// ConversationRef was resolved (S3), but no conversation result
+			// was produced (S4). Log and continue — downstream persistence
+			// will also skip.
 			s.messageLog.Warn("DEF-160: conv-ref resolved but conversation not resolved; skipping S6 fixups")
 		} else {
 			switch convResult.Kind {
@@ -2614,13 +2603,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 				return
 			}
-			if s.writeDenyEnabled() {
-				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
-				s.messageLog.Error("conversation resolution failed", "error", convErr)
-				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-				return
-			}
-			s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
+			s.messageLog.Error("conversation resolution failed", "error", convErr)
+			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+			return
 		} else {
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
@@ -3049,14 +3035,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				RecipientID:   agent.ID,
 			})
 			if deriveErr != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("agent_msg.derive")
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-						"conversation key derivation failed: "+deriveErr.Error(), nil)
-					return
-				}
-				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
-					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
+				messaging.WriteDenialMetrics.Inc("agent_msg.derive")
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
+					"conversation key derivation failed: "+deriveErr.Error(), nil)
+				return
 			} else {
 				// An agent sender's message mode is checked before the
 				// thread conversation is resolved, so a refused post writes
@@ -3094,14 +3076,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateConversationByKey(ctx, s.store, s.messageLog, extRef, kind, projID, keyOpts...)
 				if convErr != nil {
-					if s.writeDenyEnabled() {
-						messaging.WriteDenialMetrics.Inc("agent_msg.resolve")
-						s.messageLog.Error("conversation resolution failed", "error", convErr)
-						writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
-						return
-					}
-					s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-					convResult = nil
+					messaging.WriteDenialMetrics.Inc("agent_msg.resolve")
+					s.messageLog.Error("conversation resolution failed", "error", convErr)
+					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return
 				}
 			}
 		}
@@ -3111,12 +3089,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		messaging.RecordStep(ctx, "conversation_resolved")
 		if convResult != nil {
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
-				if s.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("agent_msg.validate")
-					writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
-					return
-				}
-				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+				messaging.WriteDenialMetrics.Inc("agent_msg.validate")
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+				return
 			}
 		}
 		// A thread conversation is a group conversation: an agent
@@ -3358,12 +3333,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
-		// Phase 9b(ii): render the delivery envelope from the persisted row
-		// and conversation result when the envelope switch is ON.
+		// Render the delivery envelope from the persisted row and
+		// conversation result.
 		// The attachments delivered with this message are planned for the
 		// agent once, before any render (ptone/scion#4596).
 		s.applyAttachmentPlan(ctx, agent, structuredMsg)
-		if s.writeDenyEnabled() && persistedMsgID != "" {
+		if persistedMsgID != "" {
 			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 				MessageID:  storeMsg.ID,
 				ConvResult: convResult,
@@ -3396,15 +3371,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				FetchByID:            false, // P1/P2: literal false (design §8.1, §10 P1/P2).
 			}, pol)
 			if off.Offloaded {
-				if s.writeDenyEnabled() {
-					deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-						MessageID:  storeMsg.ID,
-						ConvResult: convResult,
-						Msg:        deliverMsg,
-						CreatedAt:  storeMsg.CreatedAt,
-						Plan:       deliverMsg.AttachmentPlan,
-					})
-				}
+				deliverMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+					MessageID:  storeMsg.ID,
+					ConvResult: convResult,
+					Msg:        deliverMsg,
+					CreatedAt:  storeMsg.CreatedAt,
+					Plan:       deliverMsg.AttachmentPlan,
+				})
 				dispatchMsg = deliverMsg
 			}
 		}
@@ -3914,13 +3887,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "agent", agent.ID)
 					if convErr != nil {
-						if s.writeDenyEnabled() {
-							messaging.WriteDenialMetrics.Inc("group.agent_recipient")
-							s.messageLog.Error("conversation resolution failed", "error", convErr)
-							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
-							continue
-						}
-						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+						messaging.WriteDenialMetrics.Inc("group.agent_recipient")
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+						continue
 					} else {
 						storeMsg.ConversationID = convResult.ConversationID
 					}
@@ -3981,7 +3951,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			// less than the content they already hold. Across a group[]
 			// fan-out to N agent recipients, observers receive N envelopes,
 			// each naming a different DM conversation.
-			if s.writeDenyEnabled() && persisted {
+			if persisted {
 				agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 					MessageID:  storeMsg.ID,
 					ConvResult: convResult,
@@ -4149,13 +4119,10 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 					var convErr error
 					convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, s.store, s.store, s.messageLog, authKind, authID, "user", userID)
 					if convErr != nil {
-						if s.writeDenyEnabled() {
-							messaging.WriteDenialMetrics.Inc("group.user_recipient")
-							s.messageLog.Error("conversation resolution failed", "error", convErr)
-							results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
-							continue
-						}
-						s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+						messaging.WriteDenialMetrics.Inc("group.user_recipient")
+						s.messageLog.Error("conversation resolution failed", "error", convErr)
+						results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "conversation resolution failed"}
+						continue
 					} else {
 						storeMsg.ConversationID = convResult.ConversationID
 					}
@@ -4590,18 +4557,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// The envelope's message_id names the stored row, so it is passed
 		// only when the row was written (ptone/scion#3881); an empty ID
 		// omits the key.
-		if s.writeDenyEnabled() {
-			renderID := ""
-			if persisted {
-				renderID = storeMsg.ID
-			}
-			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  renderID,
-				ConvResult: nil,
-				Msg:        &agentMsg,
-				CreatedAt:  storeMsg.CreatedAt,
-			})
+		renderID := ""
+		if persisted {
+			renderID = storeMsg.ID
 		}
+		agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  renderID,
+			ConvResult: nil,
+			Msg:        &agentMsg,
+			CreatedAt:  storeMsg.CreatedAt,
+		})
 
 		// ptone/scion#1839: carry the per-agent persisted message ID
 		// (RecipientID = agent.ID) so a post-acceptance broker failure is
@@ -4944,7 +4909,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// The group case (where the target IS a participant) is an open
 		// question — it requires a participant check and is out of scope
 		// for Phase 9b.
-		if s.writeDenyEnabled() && persisted {
+		if persisted {
 			mentionMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
 				MessageID:  storeMsg.ID,
 				ConvResult: nil,
@@ -5087,8 +5052,7 @@ func (s *Server) decideKeyedPostSender(w http.ResponseWriter, r *http.Request, m
 		// for every sender kind, without evaluating the empty project. Any
 		// other failure is a direct key (a dm: thread_id, or the sender and
 		// recipient pair), which is not a post into a project's
-		// conversation: the resolution step refuses it with write-deny on,
-		// and otherwise goes on without a conversation.
+		// conversation and is refused during conversation resolution.
 		if msg.ThreadID != "" && !strings.HasPrefix(msg.ThreadID, "dm:") {
 			s.refuseKeyedPostAsNotFound(w, r, agent.ProjectID, "thread post: conversation key not derived")
 			return false

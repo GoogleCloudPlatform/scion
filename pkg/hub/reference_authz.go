@@ -57,9 +57,9 @@ const reasonExternalRefOfOtherProject = "external reference names a conversation
 
 // externalRefOfOtherProject reports whether a conversation resolution error
 // is the store keeping an existing conversation in the project it was created
-// with. Such a reference is never reused: the request is refused whatever the
-// write-deny setting, because continuing would deliver the message without
-// the conversation the reference names.
+// with. Such a reference is never reused: the request is refused because
+// continuing would deliver the message without the conversation the
+// reference names.
 func externalRefOfOtherProject(err error) bool {
 	return errors.Is(err, store.ErrConversationProjectMismatch)
 }
@@ -68,9 +68,8 @@ func externalRefOfOtherProject(err error) bool {
 // A match on either field is enough:
 //
 //   - convID != "" && msg.ConversationID == convID (history lists by
-//     conversation when the conversation envelope switch is on, and a
-//     visible row's ThreadID may then differ from the key)
-//   - msg.ThreadID == threadKey (rows listed by thread key)
+//     conversation, and a visible row's ThreadID may differ from the key)
+//   - msg.ThreadID == threadKey (rows matched by thread key)
 //
 // A message of another conversation matches neither. Pure; no store access.
 func sameConversation(msg *store.Message, threadKey, convID string) bool {

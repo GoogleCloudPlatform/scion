@@ -262,7 +262,6 @@ func (failingConvStore) UpsertConversationByExternalRef(context.Context, *store.
 func TestAgentSend_WriteDenyConversationFailureStoresNothing(t *testing.T) {
 	f := newSendFixture(t)
 	proxy := NewMessageBrokerProxy(nil, failingConvStore{f.st}, NewChannelEventPublisher(), func() AgentDispatcher { return f.disp }, slog.Default())
-	proxy.writeDenyEnabled = func() bool { return true }
 	storeMsg := &store.Message{ID: uuid.NewString(), ProjectID: f.projA.ID, Sender: "agent:" + f.sender.Slug, SenderID: f.sender.ID,
 		Recipient: "user:" + f.ua.Email, RecipientID: f.ua.ID, Msg: "no conversation"}
 	structured := &messages.StructuredMessage{Sender: storeMsg.Sender, SenderID: storeMsg.SenderID,

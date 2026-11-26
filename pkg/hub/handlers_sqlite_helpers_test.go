@@ -2371,21 +2371,16 @@ func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender
 	}
 }
 
-// enableWriteDenySwitch configures OperationalSettings on the server with the
-// consolidated ConversationEnvelopeSwitch ON. After this call, handlers that
-// check s.writeDenyEnabled() will deny writes when conversation resolution fails.
+// enableWriteDenySwitch attaches an empty OperationalSettings to srv.
+// The conversation envelope switch has been removed (always active).
 func enableWriteDenySwitch(t *testing.T, srv *Server) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("ops.Refresh failed: %v", err)
 	}
 	srv.SetOperationalSettings(ops)
-	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
-		t.Fatalf("enableWriteDenySwitch: ConversationEnvelopeSwitch() is still false after setup")
-	}
 }
 
 // readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
@@ -4284,26 +4279,16 @@ func seedHubMemberNoProjects(t *testing.T, s store.Store, name string) *store.Us
 	return user
 }
 
-// enableReadSwitch configures OperationalSettings on the server with the
-// ConversationReadSwitch flag ON. After this call, handlers that check
-// s.GetOperationalSettings().ConversationReadSwitch() will enter the
-// Phase 8 conversation-resolution branch.
+// enableReadSwitch attaches an empty OperationalSettings to srv.
+// The conversation envelope switch has been removed (always active).
 func enableReadSwitch(t *testing.T, srv *Server) {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatalf("ops.Refresh failed: %v", err)
 	}
 	srv.SetOperationalSettings(ops)
-	// Canary: verify the switch is actually on. Without this, a silent
-	// failure in enableReadSwitch makes every delta==0 assertion pass
-	// trivially — the handler never enters the read-switch block at all.
-	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
-		t.Fatalf("enableReadSwitch: ConversationEnvelopeSwitch() is still false after setup — " +
-			"every FlagOn test in this file is vacuous without this guard")
-	}
 }
 
 // seedConversation creates a conversation in the store with the given

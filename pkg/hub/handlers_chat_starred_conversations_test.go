@@ -488,35 +488,30 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 }
 
 // TestChatStarredConversations_DriftedRowAgreesWithStarList pins that the
-// rail selects a conversation's messages exactly as the star list does,
-// under both read-switch settings: a row whose thread ID is the key but
-// whose conversation ID is another conversation's counts only with the
-// switch off, in the rail and in GET /api/v1/chat/stars alike.
+// rail selects a conversation's messages by conversation ID exactly as the
+// star list does: a row whose thread ID is the key but whose conversation ID
+// is another conversation's does not count in either endpoint.
 func TestChatStarredConversations_DriftedRowAgreesWithStarList(t *testing.T) {
-	for _, readSwitch := range []bool{true, false} {
-		t.Run(fmt.Sprintf("readSwitch=%t", readSwitch), func(t *testing.T) {
-			f := newStarredRailFixture(t, readSwitch)
-			ctx := context.Background()
-			drifted := f.topic(t, f.projA)
-			m := uuid.NewString()
-			require.NoError(t, f.s.CreateMessage(ctx, &store.Message{
-				ID: m, ProjectID: f.projA, Sender: "user:" + f.member + "@test.com", SenderID: f.member, Recipient: "chat",
-				Msg: "drifted", Type: "chat", Channel: "web", ThreadID: drifted, ConversationID: uuid.NewString(),
-				CreatedAt: time.Now().UTC().Add(-time.Minute),
-			}))
-			_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
-				f.member, m, drifted, f.projA, sqliteStarTime(time.Now()))
-			require.NoError(t, err)
+	f := newStarredRailFixture(t, true)
+	ctx := context.Background()
+	drifted := f.topic(t, f.projA)
+	m := uuid.NewString()
+	require.NoError(t, f.s.CreateMessage(ctx, &store.Message{
+		ID: m, ProjectID: f.projA, Sender: "user:" + f.member + "@test.com", SenderID: f.member, Recipient: "chat",
+		Msg: "drifted", Type: "chat", Channel: "web", ThreadID: drifted, ConversationID: uuid.NewString(),
+		CreatedAt: time.Now().UTC().Add(-time.Minute),
+	}))
+	_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+		f.member, m, drifted, f.projA, sqliteStarTime(time.Now()))
+	require.NoError(t, err)
 
-			listed := len(decodeStarPage(t, f.session(t, f.member, http.MethodGet, starListPath(drifted), nil)).Items) > 0
-			assert.Equal(t, !readSwitch, listed, "the star list counts the row only with the switch off")
-			assert.Equal(t, listed, contains(starredConversationRowKeys(f.rail(t, f.member).Items), drifted),
-				"the rail agrees with the star list")
-			// The fixture's ordinary rows count under both settings.
-			assert.Subset(t, starredConversationRowKeys(f.rail(t, f.member).Items),
-				[]string{f.topicA, f.topicA2, f.dms.agentKey, f.dms.humanKey})
-		})
-	}
+	listed := len(decodeStarPage(t, f.session(t, f.member, http.MethodGet, starListPath(drifted), nil)).Items) > 0
+	assert.False(t, listed, "the star list does not count a drifted conversation_id row")
+	assert.Equal(t, listed, contains(starredConversationRowKeys(f.rail(t, f.member).Items), drifted),
+		"the rail agrees with the star list")
+	// The fixture's ordinary rows count.
+	assert.Subset(t, starredConversationRowKeys(f.rail(t, f.member).Items),
+		[]string{f.topicA, f.topicA2, f.dms.agentKey, f.dms.humanKey})
 }
 
 // TestChatStarredConversations_ScanBudget pins the bounded scan: hidden
@@ -694,18 +689,22 @@ func TestChatStarredConversations_BatchedLookups(t *testing.T) {
 			key := f.topic(t, f.projA)
 			m := f.threadMsg(t, key, f.projA, "m", time.Now().Add(-time.Minute))
 			_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
-				Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+				Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: topicConversationID(t, f.wcs, key)}})
 			require.NoError(t, err)
 			dmKey := f.dm(t, f.member, "user", f.plainUser(t))
-			dm := f.dmMsg(t, dmKey, "", uuid.Nil.String(), "user:"+f.member, f.member, "d", "web", time.Now().Add(-time.Minute))
+			dmConv, err := f.s.GetConversationByExternalRef(ctx, "native", dmKey)
+			require.NoError(t, err)
+			dm := f.dmMsg(t, dmKey, dmConv.ID, uuid.Nil.String(), "user:"+f.member, f.member, "d", "web", time.Now().Add(-time.Minute))
 			_, _, err = f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: dm,
-				Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ThreadID: dmKey}})
+				Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: dmConv.ID}})
 			require.NoError(t, err)
 		}
 		key := f.dm(t, f.member, "agent", f.agentA.ID)
-		m := f.dmMsg(t, key, "", f.projA, "user:"+f.member, f.member, "a", "web", time.Now().Add(-time.Minute))
-		_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
-			Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}})
+		agentDMConv, err := f.s.GetConversationByExternalRef(ctx, "native", key)
+		require.NoError(t, err)
+		m := f.dmMsg(t, key, agentDMConv.ID, f.projA, "user:"+f.member, f.member, "a", "web", time.Now().Add(-time.Minute))
+		_, _, err = f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: m, ProjectID: f.projA,
+			Selector: StarSelector{ConversationKey: key, Channel: "web", ConversationID: agentDMConv.ID}})
 		require.NoError(t, err)
 	}
 	addConversations(2)

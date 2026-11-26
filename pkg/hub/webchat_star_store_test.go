@@ -296,7 +296,7 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 			}))
 		},
 		moveMsg: func(t *testing.T, id, threadID string) {
-			_, err := db.Exec(`UPDATE messages SET thread_id = ? WHERE id = ?`, threadID, id)
+			_, err := db.Exec(`UPDATE messages SET thread_id = ?, conversation_id = COALESCE((SELECT conversation_id FROM webchat_topic WHERE id = ?), conversation_id) WHERE id = ?`, threadID, threadID, id)
 			require.NoError(t, err)
 		},
 		addTopic: func(t *testing.T, id string) {
@@ -443,7 +443,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 			require.NoError(t, err)
 		},
 		moveMsg: func(t *testing.T, id, threadID string) {
-			_, err := db.Exec(`UPDATE messages SET thread_id = $1 WHERE id = $2`, threadID, id)
+			_, err := db.Exec(`UPDATE messages SET thread_id = $1, conversation_id = COALESCE((SELECT NULLIF(conversation_id, '')::uuid FROM webchat_topic WHERE id = $2), conversation_id) WHERE id = $3`, threadID, threadID, id)
 			require.NoError(t, err)
 		},
 		addTopic: func(t *testing.T, id string) {

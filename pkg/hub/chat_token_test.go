@@ -64,10 +64,13 @@ func newChatFixture(t *testing.T) *chatFixture {
 
 func (f *chatFixture) topic(t *testing.T, projectID string) string {
 	t.Helper()
+	ctx := context.Background()
 	id := uuid.NewString()
 	at := time.Now().UTC().Add(-time.Hour)
-	require.NoError(t, f.wcs.CreateTopic(context.Background(), WebChatTopic{
-		ID: id, ProjectID: projectID, Name: "chat-" + id[:8], CreatedBy: f.admin, CreatedAt: at, LastActivityAt: at,
+	convID := seedConversation(t, f.s, "native", "thread:"+projectID+":"+id, "group")
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID: id, ProjectID: projectID, Name: "chat-" + id[:8], CreatedBy: f.admin,
+		ConversationID: convID, CreatedAt: at, LastActivityAt: at,
 	}))
 	return id
 }
@@ -77,10 +80,19 @@ func (f *chatFixture) topic(t *testing.T, projectID string) string {
 func (f *chatFixture) chatMessage(t *testing.T, sender, senderID, threadID, projectID, text string) string {
 	t.Helper()
 	ctx := context.Background()
+	var convID string
+	if strings.HasPrefix(threadID, "dm:") {
+		if conv, err := f.s.GetConversationByExternalRef(ctx, "native", threadID); err == nil && conv != nil {
+			convID = conv.ID
+		}
+	} else if topic, err := f.wcs.GetTopic(ctx, threadID); err == nil && topic != nil {
+		convID = topic.ConversationID
+	}
 	id := uuid.NewString()
 	require.NoError(t, f.s.CreateMessage(ctx, &store.Message{
 		ID: id, ProjectID: projectID, Sender: sender, SenderID: senderID, Recipient: "chat",
-		Msg: text, Type: "chat", Channel: "web", ThreadID: threadID, CreatedAt: time.Now().UTC().Add(-time.Minute),
+		Msg: text, Type: "chat", Channel: "web", ThreadID: threadID, ConversationID: convID,
+		CreatedAt: time.Now().UTC().Add(-time.Minute),
 	}))
 	f.srv.touchConversationActivity(ctx, threadID, id)
 	return id
@@ -92,6 +104,7 @@ func (f *chatFixture) dm(t *testing.T, userID, peerKind, peerID string) string {
 	t.Helper()
 	key, err := messages.DMConversationKey("user", userID, peerKind, peerID)
 	require.NoError(t, err)
+	seedConversation(t, f.s, "native", key, "direct")
 	registerDMParticipants(context.Background(), f.wcs, key)
 	return key
 }

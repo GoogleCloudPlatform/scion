@@ -143,10 +143,6 @@ func (m *mockMessageStore) ListMessages(_ context.Context, filter store.MessageF
 	return result, nil
 }
 
-func (m *mockMessageStore) LatestMessagesByThreadIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
-	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ThreadID }), nil
-}
-
 func (m *mockMessageStore) LatestMessagesByConversationIDs(_ context.Context, ids []string, opts store.LatestMessageOptions) (map[string]*store.Message, error) {
 	return m.latestBy(ids, opts, func(msg *store.Message) string { return msg.ConversationID }), nil
 }

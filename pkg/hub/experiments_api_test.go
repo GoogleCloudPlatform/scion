@@ -1259,7 +1259,7 @@ func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
 
 	// A different section still resets through the same route: the rejection
 	// is specific to "experiments", not a blanket change to the route.
-	msgStore := json.RawMessage(`{"conversation_envelope_switch":true}`)
+	msgStore := json.RawMessage(`{"offload_threshold_runes":0}`)
 	if _, err := s.UpsertHubSetting(context.Background(), "messaging", msgStore, "seed", 0, "managed"); err != nil {
 		t.Fatalf("UpsertHubSetting: %v", err)
 	}

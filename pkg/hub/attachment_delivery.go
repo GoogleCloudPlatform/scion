@@ -426,10 +426,10 @@ func (d *attachmentDelivery) Issue(ctx context.Context, recipient *store.Agent, 
 // applyAttachmentPlan plans the deliveries of msg, the per-recipient message
 // dispatched to recipient, and stores the plan on it for the render site and
 // the dispatcher. It never changes msg otherwise: when the hub renders no
-// delivery text (the envelope switch is off), the dispatcher applies the
-// plan to the copy it sends (legacyAttachmentCopy), so copies made from msg
-// for other recipients never carry this recipient's paths. It is called
-// once per dispatched message, before any render.
+// delivery text (e.g. the message row was not persisted), the dispatcher
+// applies the plan to the copy it sends (legacyAttachmentCopy), so copies
+// made from msg for other recipients never carry this recipient's paths. It
+// is called once per dispatched message, before any render.
 func (s *Server) applyAttachmentPlan(ctx context.Context, recipient *store.Agent, msg *messages.StructuredMessage) {
 	if msg == nil || len(msg.AttachmentDeliveries) == 0 || msg.AttachmentPlan != nil {
 		return

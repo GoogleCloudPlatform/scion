@@ -193,30 +193,7 @@ func TestDEF171_AgentDM_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: Agent-to-agent DM does NOT stamp DeliveryText when envelope switch
-// is OFF (legacy format preserved).
-// ---------------------------------------------------------------------------
-
-func TestDEF171_AgentDM_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
-	srv, _, project, agentA, agentB, convID, dispatcher := def171Setup(t)
-	// Do NOT enable the switch — writeDenyEnabled() returns false.
-
-	rr := sendAgentDM(t, srv, agentA, convID, project.ID, "DEF-171 legacy test")
-	require.Equal(t, http.StatusOK, rr.Code,
-		"agent-to-agent DM must succeed; body: %s", rr.Body.String())
-
-	calls := dispatcher.getCalls()
-	require.Equal(t, 1, len(calls), "expected 1 dispatch call")
-
-	call := calls[0]
-	require.Equal(t, agentB.ID, call.Agent.ID, "dispatch must target agent B")
-	require.NotNil(t, call.StructuredMessage, "StructuredMessage must not be nil")
-	assert.Empty(t, call.StructuredMessage.DeliveryText,
-		"DeliveryText must be empty when envelope switch is OFF")
-}
-
-// ---------------------------------------------------------------------------
-// Test 3: Mutation test — removing RenderDeliveryText makes DeliveryText empty,
+// Test 2: Mutation test — removing RenderDeliveryText makes DeliveryText empty,
 // proving the new code is load-bearing.
 // ---------------------------------------------------------------------------
 
