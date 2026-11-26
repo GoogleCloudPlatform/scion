@@ -57,7 +57,7 @@ func TestReconnectorDecideSeesEnds(t *testing.T) {
 	if c.end.DialErr == nil || c.end.Code() != CloseUnauthenticated || c.delay != time.Second {
 		t.Fatalf("dial end = %+v (code %d), delay %v", c.end, c.end.Code(), c.delay)
 	}
-	settle(t, h.clk, 1)
+	h.waitTimer(time.Second)
 	h.clk.Advance(time.Second)
 
 	_, relay := h.connect()
@@ -88,7 +88,7 @@ func TestReconnectorDecideOverridesDelay(t *testing.T) {
 	case <-time.After(waitTimeout):
 		t.Fatal("Decide not called")
 	}
-	settle(t, h.clk, 1)
+	h.waitTimer(override)
 	h.clk.Advance(override - time.Millisecond)
 	if n := h.clk.Pending(); n != 1 {
 		t.Fatalf("redial timer fired before the overridden delay (pending %d)", n)

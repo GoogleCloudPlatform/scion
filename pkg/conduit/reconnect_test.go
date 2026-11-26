@@ -188,10 +188,25 @@ func (h *reconnectHarness) noCeiling() {
 	}
 }
 
+// waitTimer waits until a timer with deadline now+d is armed on h.clk.
+// Unlike settle(t, h.clk, 1), it cannot return early while an ended
+// session's keepalive timers are still being stopped (4->3->2->1->0)
+// before the Reconnector arms its backoff or reconnect-window timer.
+func (h *reconnectHarness) waitTimer(d time.Duration) {
+	h.t.Helper()
+	if !h.clk.WaitForTimer(waitTimeout, h.clk.Now().Add(d)) {
+		h.t.Fatalf("redial timer for %v was not armed (pending %d)", d, h.clk.Pending())
+	}
+}
+
 // connect lets the next dial succeed and returns both ends.
 func (h *reconnectHarness) connect() (Session, *session) {
 	h.t.Helper()
-	h.plan <- nil
+	select {
+	case h.plan <- nil:
+	case <-time.After(waitTimeout):
+		h.t.Fatal("reconnector never dialled")
+	}
 	var relay *session
 	select {
 	case relay = <-h.relays:
@@ -214,7 +229,7 @@ func TestReconnectorBackoffAndReset(t *testing.T) {
 	for _, ceil := range []time.Duration{time.Second, 2 * time.Second} {
 		h.plan <- errors.New("refused")
 		h.expectCeiling(ceil)
-		settle(t, h.clk, 1)
+		h.waitTimer(ceil)
 		h.clk.Advance(ceil)
 	}
 	// Long session: 60s, then the relay drops it.
@@ -223,7 +238,7 @@ func TestReconnectorBackoffAndReset(t *testing.T) {
 	h.clk.Advance(BackoffResetLive)
 	_ = relay.Close()
 	h.expectCeiling(time.Second) // reset
-	settle(t, h.clk, 1)
+	h.waitTimer(time.Second)
 	h.clk.Advance(time.Second)
 
 	// Short session: no reset, the backoff keeps growing.
@@ -278,12 +293,13 @@ func TestReconnectorHonoursReconnectAfter(t *testing.T) {
 			if err := relay.GoAway(GoAwayOptions{ReconnectAfter: window}); err != nil {
 				t.Fatal(err)
 			}
-			// The GoAway with no streams closes both sessions; only the
-			// window timer remains. Whether the Reconnector saw Done or
-			// GoAwayReceived first, it classifies the end from the session
-			// state.
+			// The GoAway with no streams closes both sessions; wait for the
+			// window timer itself rather than a pending count, since the ended
+			// sessions' keepalive timers may still be stopping. Whether the
+			// Reconnector saw Done or GoAwayReceived first, it classifies the
+			// end from the session state.
 			h.expectCeiling(window) // the window draw, not a backoff
-			settle(t, h.clk, 1)
+			h.waitTimer(window)
 			h.clk.Advance(window - time.Millisecond)
 			select {
 			case h.plan <- nil:
@@ -309,7 +325,7 @@ func TestReconnectorGoAwayDrawsWithinWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.expectCeiling(10 * time.Second)
-	settle(t, h.clk, 1)
+	h.waitTimer(3 * time.Second)
 	h.clk.Advance(3*time.Second - time.Millisecond)
 	select {
 	case h.plan <- nil:
@@ -333,7 +349,7 @@ func TestReconnectorBacksOffOnFailureGoAway(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.expectCeiling(time.Second)
-			settle(t, h.clk, 1)
+			h.waitTimer(time.Second)
 			h.clk.Advance(time.Second)
 			// The next failure keeps growing the backoff.
 			_, relay = h.connect()
@@ -432,6 +448,65 @@ func TestRedialDelayOrderings(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestReconnectHarnessWaitTimerIgnoresLingeringTimers guards against the
+// race where an ended session's keepalive timers are still being stopped
+// (4->3->2->1->0) while Reconnector.Run has not yet armed its backoff
+// timer: waiting on a pending timer count of 1 would return early on a
+// lingering timer, causing Advance to miss the redial timer and connect
+// to deadlock.
+func TestReconnectHarnessWaitTimerIgnoresLingeringTimers(t *testing.T) {
+	inDecide := make(chan struct{})
+	releaseDecide := make(chan struct{})
+	h := newReconnectHarnessWith(t, func(r *Reconnector) {
+		r.Decide = func(ctx context.Context, _ End, d time.Duration) (time.Duration, error) {
+			close(inDecide)
+			select {
+			case <-releaseDecide:
+				return d, nil
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+	})
+	// Arm a lingering timer (like an ended session's keepalive) so
+	// h.clk.Pending() == 1 before Reconnector.Run reaches wait(d).
+	stale := h.clk.AfterFunc(time.Hour, func() {})
+	defer stale.Stop()
+
+	h.plan <- errors.New("refused")
+	h.expectCeiling(time.Second)
+	select {
+	case <-inDecide:
+	case <-time.After(waitTimeout):
+		t.Fatal("Decide not called")
+	}
+
+	waited := make(chan struct{})
+	go func() {
+		defer close(waited)
+		h.waitTimer(time.Second)
+	}()
+
+	// With only the lingering 1h timer armed (Pending() == 1), waitTimer
+	// must not return before Decide releases and Reconnector arms its 1s
+	// backoff timer.
+	select {
+	case <-waited:
+		t.Fatal("waitTimer returned before redial timer was armed (fooled by lingering timer)")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseDecide)
+	select {
+	case <-waited:
+	case <-time.After(waitTimeout):
+		t.Fatal("waitTimer did not return after redial timer was armed")
+	}
+	stale.Stop()
+	h.clk.Advance(time.Second)
+	h.connect()
 }
 
 // TestRemoveSessionClearsBackingArray: removing an ended session clears
