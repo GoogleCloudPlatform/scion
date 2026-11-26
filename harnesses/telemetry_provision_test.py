@@ -249,6 +249,15 @@ class TelemetryProvisionTest(unittest.TestCase):
                 self.assertNotIn('OTEL_EXPORTER_OTLP_HEADERS', env)
                 self.assertNotIn('OTEL_EXPORTER_OTLP_CERTIFICATE', env)
 
+    def test_grok_build_sets_usage_source_native_only_when_enabled(self):
+        # ptone/scion#2235, ptone/scion#9247: the native grok_code.api_request /
+        # grok_code.api_error rule is fixture-vetted against grok 1.0.92, so
+        # grok-build declares the D4/D10 opt-in when telemetry is enabled.
+        enabled_env, _ = self._invoke('grok-build', True, 4317)
+        self.assertEqual(enabled_env['SCION_USAGE_SOURCE'], 'native')
+        disabled_env, _ = self._invoke('grok-build', False, 4317)
+        self.assertNotIn('SCION_USAGE_SOURCE', disabled_env)
+
     def test_grok_build_never_reaches_cloud_endpoint(self):
         # #2053: grok-build had the same cloud-endpoint/header/CA bypass as
         # copilot. Seed all of those inputs (see test_copilot_never_reaches_

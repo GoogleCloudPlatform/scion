@@ -12,6 +12,7 @@ package telemetry
 
 import (
 	"errors"
+	"math"
 	"os"
 	"regexp"
 	"strconv"
@@ -811,9 +812,57 @@ func geminiObservation(eventName string, attrs []*commonpb.KeyValue) UsageObserv
 	return obs
 }
 
+// grokBuildObservation: input_tokens is inclusive of cache_read_tokens (and
+// assumed inclusive of cache_creation_tokens; unverified live since only 0 was
+// observed on Vertex AI xai/grok-4.6), so input is derived only when all three
+// are present and consistent. output_tokens is exclusive of reasoning_tokens,
+// so canonical output is output_tokens + reasoning_tokens when both are present
+// (canonical output includes reasoning).
+func grokBuildObservation(eventName string, attrs []*commonpb.KeyValue) UsageObservation {
+	if eventName == grokBuildAPIErrorEvent {
+		obs := errorObservation("grok-build.api_error")
+		obs.SessionID = logAttrString(attrs, "session.id")
+		return obs
+	}
+	keys := []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens", "reasoning_tokens"}
+	fields := make([]tokenField, len(keys))
+	for i, k := range keys {
+		fields[i] = readTokenField(attrs, k)
+	}
+	input, output, cached, cacheWrite, reasoning := fields[0], fields[1], fields[2], fields[3], fields[4]
+	if input.ok() && cached.ok() && cacheWrite.ok() && (cached.n > input.n || cacheWrite.n > input.n-cached.n) {
+		input.malformed, cached.malformed, cacheWrite.malformed = true, true, true
+		fields[0], fields[2], fields[3] = input, cached, cacheWrite
+	}
+	if output.ok() && reasoning.ok() && reasoning.n > math.MaxInt64-output.n {
+		output.malformed, reasoning.malformed = true, true
+		fields[1], fields[4] = output, reasoning
+	}
+	obs := UsageObservation{
+		SourceKind:              "grok-build.api_request",
+		SessionID:               logAttrString(attrs, "session.id"),
+		Status:                  telemetrycontract.StatusSuccess,
+		Calls:                   1,
+		CacheRead:               cached.ptr(),
+		CacheWrite:              cacheWrite.ptr(),
+		Reasoning:               reasoning.ptr(),
+		ReasoningOverlapsOutput: true,
+		TokenStatus:             tokenStatusOf(fields...),
+		MalformedFields:         malformedNames(keys, fields),
+	}
+	if input.ok() && cached.ok() && cacheWrite.ok() {
+		obs.Input = int64Ptr(input.n - cached.n - cacheWrite.n)
+		obs.InputDerivation = telemetrycontract.InputDerivationDerived
+	}
+	if output.ok() && reasoning.ok() {
+		obs.Output = int64Ptr(output.n + reasoning.n)
+	}
+	return obs
+}
+
 // harnessVersionFromAttrs reads the harness version a native source
 // reports: codex's app.version attribute, else the resource's
-// service.version (Claude Code).
+// service.version (Claude Code, Grok Build).
 func harnessVersionFromAttrs(recordAttrs, resourceAttrs []*commonpb.KeyValue) string {
 	if v := logAttrString(recordAttrs, "app.version"); v != "" {
 		return v
@@ -841,6 +890,8 @@ func logObservation(harness, scopeName, eventName string, record *logspb.LogReco
 		obs.SessionID = logAttrString(attrs, "conversation.id")
 	case "gemini-cli":
 		obs = geminiObservation(eventName, attrs)
+	case "grok-build":
+		obs = grokBuildObservation(eventName, attrs)
 	default:
 		obs = UsageObservation{SourceKind: harness + "." + eventName, Status: inc.Status, Calls: inc.Calls, TokenStatus: telemetrycontract.TokenStatusNotReported}
 	}

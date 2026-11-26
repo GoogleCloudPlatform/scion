@@ -545,14 +545,10 @@ def _harden_config(ctx: scion_harness.ProvisionContext) -> None:
 # telemetry config alias) and copied cloud headers/CA into the harness env,
 # which sent native telemetry straight to the cloud endpoint, bypassing
 # sciontool's redaction and identity stamping entirely (fork issue #2053,
-# phase 0). Grok's own OTel env vars (GROK_TELEMETRY_ENABLED,
-# GROK_EXTERNAL_OTEL) and its exact protocol support are unverified against
-# primary docs (findings-q4-harness-matrix.md); this phase keeps the
-# pre-existing gRPC-on-4317 assumption, which already matches sciontool's
-# local gRPC receiver default (the same one claude/codex use), and fixes only
-# the endpoint/header/CA bypass. Verifying Grok's actual OTel wire support is
-# left to a follow-up, alongside grok-build usage derivation (out of scope,
-# D6/D8).
+# phase 0). Live capture against grok 1.0.92 confirms GROK_EXTERNAL_OTEL=true
+# exports OTLP/gRPC logs and metrics to sciontool's local receiver on 4317
+# with per-request grok_code.api_request / grok_code.api_error events
+# (ptone/scion#2235, ptone/scion#9247).
 
 _OTEL_PROTOCOL = "grpc"
 _DEFAULT_OTEL_GRPC_PORT = "4317"
@@ -736,6 +732,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if telemetry_enabled:
         otel_env = _build_telemetry_env(env_overlay)
         env.update(otel_env)
+        env["SCION_USAGE_SOURCE"] = "native"
         ctx.info(f"telemetry: injected {len(otel_env)} OTel env var(s)")
     # SCION_NATIVE_TELEMETRY_POLICY lets the env guard (hooks/envoverlay.go)
     # protect the OTEL_* vars above from being overridden at runtime.
