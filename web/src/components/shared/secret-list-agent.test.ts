@@ -552,4 +552,74 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
     expect(putCall!.body!.target).toBeUndefined();
     expect(putCall!.body!.injectionMode).toBeUndefined();
   });
+
+  it('preserves a custom environment target on Update (PUT) and resets target to key on File -> Environment', async () => {
+    const customEnvSecret: Secret = {
+      id: 'sec-env-custom',
+      key: 'OPENAI_PROD',
+      type: 'environment',
+      target: 'OPENAI_API_KEY',
+      scope: 'project',
+      scopeId: 'proj-1',
+      injectionMode: 'as_needed',
+      version: 1,
+      created: '2026-11-20T00:00:00Z',
+      updated: '2026-11-21T00:00:00Z',
+    };
+    const fileSecret: Secret = {
+      id: 'sec-file-1',
+      key: 'SSH_DEPLOY',
+      type: 'file',
+      target: '~/.ssh/id_ed25519',
+      scope: 'project',
+      scopeId: 'proj-1',
+      injectionMode: 'always',
+      version: 1,
+      created: '2026-11-20T00:00:00Z',
+      updated: '2026-11-21T00:00:00Z',
+    };
+
+    const calls = installFetch([customEnvSecret, fileSecret]);
+    const el = await mountList({
+      scope: 'project',
+      scopeId: 'proj-1',
+      apiBasePath: '/api/v1/projects/proj-1',
+      compact: true,
+    });
+
+    const priv = el as unknown as {
+      openUpdateDialog: (s: Secret) => void;
+      openEditSettingsDialog: (s: Secret) => void;
+      dialogValue: string;
+      handleSave: (e: Event) => Promise<void>;
+    };
+
+    // R1: rotating an environment secret preserves its custom target in PUT body.
+    priv.openUpdateDialog(customEnvSecret);
+    priv.dialogValue = 'sk-rotated-value';
+    await el.updateComplete;
+    await priv.handleSave(new Event('submit'));
+
+    const putEnv = calls.find((c) => c.method === 'PUT' && c.url.includes('OPENAI_PROD'));
+    expect(putEnv).toBeDefined();
+    expect(putEnv!.body!.type).toBe('environment');
+    expect(putEnv!.body!.target).toBe('OPENAI_API_KEY');
+
+    // O1: Edit settings changing File -> Environment sends target = key (never the old file path).
+    priv.openEditSettingsDialog(fileSecret);
+    await el.updateComplete;
+    const typeSelect = el.shadowRoot!.querySelector<HTMLElement & { value: string }>(
+      'sl-select[data-field="type"]'
+    )!;
+    typeSelect.value = 'environment';
+    typeSelect.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    await priv.handleSave(new Event('submit'));
+
+    const patchFileToEnv = calls.find((c) => c.method === 'PATCH' && c.url.includes('SSH_DEPLOY'));
+    expect(patchFileToEnv).toBeDefined();
+    expect(patchFileToEnv!.body!.type).toBe('environment');
+    expect(patchFileToEnv!.body!.target).toBe('SSH_DEPLOY');
+    expect(patchFileToEnv!.body!.target).not.toContain('id_ed25519');
+  });
 });

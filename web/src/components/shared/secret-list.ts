@@ -87,6 +87,7 @@ export class ScionSecretList extends LitElement {
   @state() private dialogValue = '';
   @state() private dialogDescription = '';
   @state() private dialogType: SecretType = 'environment';
+  private dialogInitialType: SecretType = 'environment';
   @state() private dialogTarget = '';
   @state() private dialogInjectionMode: InjectionMode = 'as_needed';
   @state() private dialogAllowProgeny = false;
@@ -284,6 +285,7 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = '';
     this.dialogType = 'environment';
+    this.dialogInitialType = 'environment';
     this.dialogTarget = '';
     this.dialogInjectionMode = this.scope === 'agent' ? 'always' : 'as_needed';
     this.dialogAllowProgeny = false;
@@ -298,6 +300,7 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = secret.description || '';
     this.dialogType = secret.type;
+    this.dialogInitialType = secret.type;
     this.dialogTarget = secret.target || '';
     this.dialogInjectionMode =
       secret.injectionMode || (this.scope === 'agent' ? 'always' : 'as_needed');
@@ -313,6 +316,7 @@ export class ScionSecretList extends LitElement {
     this.dialogValue = '';
     this.dialogDescription = secret.description || '';
     this.dialogType = secret.type;
+    this.dialogInitialType = secret.type;
     this.dialogTarget = secret.target || '';
     this.dialogInjectionMode =
       secret.injectionMode || (this.scope === 'agent' ? 'always' : 'as_needed');
@@ -350,7 +354,11 @@ export class ScionSecretList extends LitElement {
       let method: string;
 
       const effectiveTarget =
-        this.dialogType === 'file' ? this.dialogTarget || undefined : undefined;
+        this.dialogType === 'on_demand'
+          ? undefined
+          : this.dialogType === 'environment' && this.dialogInitialType === 'file'
+            ? key
+            : this.dialogTarget || undefined;
       const effectiveInjectionMode =
         this.dialogType === 'environment'
           ? this.scope === 'agent'
@@ -1073,8 +1081,9 @@ export class ScionSecretList extends LitElement {
             value=${this.dialogType}
             @sl-change=${(e: Event) => {
               const nextType = (e.target as HTMLSelectElement).value as SecretType;
+              const prevType = this.dialogType;
               this.dialogType = nextType;
-              if (nextType !== 'file') {
+              if (nextType !== prevType) {
                 this.dialogTarget = '';
               }
             }}
