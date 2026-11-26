@@ -34,6 +34,7 @@ import { devices, expect, test } from '@playwright/test';
 import type { Locator, Page } from '@playwright/test';
 
 import {
+  admin,
   createProject,
   editorText,
   openArtifact,
@@ -669,4 +670,137 @@ test.describe('desktop width', () => {
     await page.keyboard.press('Escape');
     await expect(dialog.locator('div.dialog[part="base"]')).toBeHidden();
   });
+});
+
+const REVIEW_DRAFTS_FLAG = 'hub.artifacts_review_drafts';
+
+async function setReviewDrafts(value: boolean | null): Promise<void> {
+  const read = await admin('GET', '/api/v1/admin/experiments');
+  expect(read.status).toBe(200);
+  const revision = (read.body as { revision: number }).revision;
+  const res = await admin('PUT', '/api/v1/admin/experiments', {
+    overrides: { [REVIEW_DRAFTS_FLAG]: value },
+    expected_revision: revision,
+  });
+  expect(res.status).toBe(200);
+}
+
+/**
+ * Verifies real browser geometry of the sticky review toolbar on phone widths
+ * (ptone/scion#9488): single-row (`flex-wrap: nowrap`), no horizontal overflow
+ * (`scrollWidth <= clientWidth`), and every sticky review action button sits
+ * completely inside the toolbar and viewport.
+ */
+async function assertStickyToolbarFitsSingleRow(page: Page, contextLabel: string): Promise<void> {
+  const bar = toolbar(page);
+  await expect(bar).toBeVisible();
+  const metrics = await bar.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const barRect = el.getBoundingClientRect();
+    const actions = Array.from(el.querySelectorAll('.g-review-actions sl-button')).map((btn) => {
+      const r = btn.getBoundingClientRect();
+      return {
+        cls: btn.className,
+        left: r.left,
+        right: r.right,
+        top: r.top,
+        bottom: r.bottom,
+        width: r.width,
+        height: r.height,
+      };
+    });
+    const visibleControls = Array.from(el.querySelectorAll('sl-button, sl-radio-button'))
+      .map((c) => c.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0);
+    const midYs = visibleControls.map((r) => (r.top + r.bottom) / 2);
+    const rowSpread = midYs.length > 0 ? Math.max(...midYs) - Math.min(...midYs) : 0;
+    return {
+      flexWrap: cs.flexWrap,
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
+      barLeft: barRect.left,
+      barRight: barRect.right,
+      barTop: barRect.top,
+      barBottom: barRect.bottom,
+      viewportWidth: window.innerWidth,
+      actions,
+      rowSpread,
+    };
+  });
+
+  expect(metrics.flexWrap, `${contextLabel}: flex-wrap`).toBe('nowrap');
+  expect(metrics.scrollWidth, `${contextLabel}: scrollWidth <= clientWidth`).toBeLessThanOrEqual(
+    metrics.clientWidth
+  );
+  expect(metrics.rowSpread, `${contextLabel}: single-row vertical alignment`).toBeLessThanOrEqual(
+    6
+  );
+  expect(metrics.actions.length, `${contextLabel}: sticky review actions count`).toBe(3);
+
+  for (const btn of metrics.actions) {
+    expect(btn.width, `${contextLabel} (${btn.cls}): visible width`).toBeGreaterThan(0);
+    expect(btn.height, `${contextLabel} (${btn.cls}): visible height`).toBeGreaterThan(0);
+    expect(btn.left, `${contextLabel} (${btn.cls}): inside toolbar left`).toBeGreaterThanOrEqual(
+      metrics.barLeft - 0.5
+    );
+    expect(btn.right, `${contextLabel} (${btn.cls}): inside toolbar right`).toBeLessThanOrEqual(
+      metrics.barRight + 0.5
+    );
+    expect(btn.top, `${contextLabel} (${btn.cls}): inside toolbar top`).toBeGreaterThanOrEqual(
+      metrics.barTop - 0.5
+    );
+    expect(btn.bottom, `${contextLabel} (${btn.cls}): inside toolbar bottom`).toBeLessThanOrEqual(
+      metrics.barBottom + 0.5
+    );
+    expect(btn.left, `${contextLabel} (${btn.cls}): inside viewport left`).toBeGreaterThanOrEqual(
+      0
+    );
+    expect(btn.right, `${contextLabel} (${btn.cls}): inside viewport right`).toBeLessThanOrEqual(
+      metrics.viewportWidth + 0.5
+    );
+  }
+}
+
+test.describe('sticky review toolbar single-row geometry on phone widths', () => {
+  test.beforeAll(async () => {
+    await setReviewDrafts(true);
+  });
+
+  test.afterAll(async () => {
+    await setReviewDrafts(null);
+  });
+
+  for (const width of [320, 375, 414]) {
+    test(`fits single row without overflow at ${width}px in graphical and source views`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 740 });
+      const a = await publish({
+        project,
+        title: `Sticky Toolbar ${width}px`,
+        entry: 'index.md',
+        files: { 'index.md': Buffer.from(DOC) },
+      });
+      await openArtifact(page, project, a.id);
+      await startGraphicalReview(page);
+
+      // Graphical view with drafts enabled.
+      await assertStickyToolbarFitsSingleRow(page, `${width}px graphical`);
+
+      // Switch to Source view and re-verify geometry.
+      await page
+        .locator('scion-page-artifact-detail .view-toggle sl-radio-button[value="source"]')
+        .click();
+      await expect(
+        page.locator('scion-page-artifact-detail scion-code-editor.review-editor')
+      ).toBeVisible();
+      await assertStickyToolbarFitsSingleRow(page, `${width}px source`);
+
+      // Trigger a source-view reviewHint (Delete with no selection) and verify
+      // it renders in .hint-strip without overflowing .g-toolbar.
+      await toolbar(page).locator('sl-button', { hasText: 'Delete' }).click();
+      await expect(hint(page)).toBeVisible();
+      await assertStickyToolbarFitsSingleRow(page, `${width}px source + reviewHint`);
+    });
+  }
 });
