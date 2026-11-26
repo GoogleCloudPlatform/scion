@@ -104,9 +104,10 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// (/api/v1/artifacts?mine=1) is classified artifact.read and checks
 	// each listed artifact against its home project. update/delete/manage/
 	// steward always target an existing artifact.
-	"artifact.create": {TargetClassKindProjectScoped},
-	"artifact.read":   {TargetClassKindProjectScoped},
-	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {}, "artifact.steward": {},
+	"artifact.create":         {TargetClassKindProjectScoped},
+	"artifact.read":           {TargetClassKindProjectScoped},
+	"artifact.request_review": {TargetClassKindProjectScoped},
+	"artifact.update":         {}, "artifact.delete": {}, "artifact.manage": {}, "artifact.steward": {},
 
 	// skill.* — create/create_global/list/register are CapabilityScope;
 	// read/update/delete and update_global/delete_global always target an

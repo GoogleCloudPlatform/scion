@@ -1325,7 +1325,7 @@ export function splitPrincipal(ref: string): ['user' | 'agent' | '', string] {
   return [kind, ref.slice(i + 1)];
 }
 
-async function searchUsers(q: string): Promise<ShareSubject[]> {
+export async function searchUsers(q: string): Promise<ShareSubject[]> {
   try {
     const res = await apiFetch(`/api/v1/users?search=${encodeURIComponent(q)}&limit=5`, {
       suppressAccessDeniedToast: true,

@@ -42,19 +42,21 @@ const userNoticeWriteTimeout = 5 * time.Second
 // writer accepts. A new hub-authored notice adds its pkg/store constants
 // here; no request field ever reaches these columns.
 var userNoticeKinds = map[string]string{
-	store.NotificationKindArtifactGrant:    store.NotificationResourceArtifact,
-	store.NotificationKindDecisionsWaiting: store.NotificationResourceDecisions,
+	store.NotificationKindArtifactGrant:         store.NotificationResourceArtifact,
+	store.NotificationKindArtifactReviewRequest: store.NotificationResourceArtifact,
+	store.NotificationKindDecisionsWaiting:      store.NotificationResourceDecisions,
 }
 
 // userNotice is a hub-authored notification to one user. Kind, ResourceType
 // and Status must be pkg/store constants. Message comes from the kind's
 // fixed template (for artifact grants, grantNoticeMessage) filled with ids,
 // enums and an already sanitised label only, so no request text reaches
-// the row (K14/K19).
+// the row (K14/K19). Excerpt, when set, holds a cleaned note excerpt.
 type userNotice struct {
 	Kind, ResourceType, ResourceID, Status string
 	ProjectID, SubscriberUserID, AgentID   string // ProjectID or AgentID "" -> nil UUID
 	Message                                string // from the per-kind template only
+	Excerpt                                string // optional cleaned excerpt
 }
 
 // errUserNoticeInvalid refuses a notice outside the writer's closed set.
@@ -88,6 +90,7 @@ func (s *Server) writeUserNotification(ctx context.Context, n userNotice) error 
 		Kind:           n.Kind,
 		ResourceType:   n.ResourceType,
 		ResourceID:     n.ResourceID,
+		Excerpt:        n.Excerpt,
 	}
 	if err := s.store.CreateNotification(ctx, notif); err != nil {
 		return err

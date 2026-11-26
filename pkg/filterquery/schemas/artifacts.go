@@ -26,7 +26,7 @@ var Artifacts = filterquery.Schema{
 			Help:        "Artifact state or access",
 			Kind:        filterquery.KindFlagSet,
 			Exec:        filterquery.ExecServer,
-			Enum:        []string{"review", "mine", "shared"},
+			Enum:        []string{"review", "requested", "mine", "shared"},
 			Exclusive:   [][]string{{"mine", "shared"}},
 			MultiValued: true,
 		},
@@ -47,11 +47,11 @@ var ProjectArtifacts = filterquery.Schema{
 	Keys: []filterquery.Key{
 		{
 			Name:        "is",
-			Help:        "Artifacts shared with this project",
+			Help:        "Artifact state or shared with this project",
 			Kind:        filterquery.KindFlagSet,
 			Exec:        filterquery.ExecServer,
-			Enum:        []string{"shared"},
-			MultiValued: false,
+			Enum:        []string{"shared", "requested"},
+			MultiValued: true,
 		},
 	},
 }

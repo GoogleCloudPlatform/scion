@@ -58,6 +58,9 @@ const (
 	// super-admins): it makes them stewards of the artifacts agents own in
 	// that project (design D25). It is never agent-callable.
 	PermissionSteward = "artifact.steward"
+	// PermissionRequestReview allows requesting reviews on artifacts
+	// (ptone/scion#9296).
+	PermissionRequestReview = "artifact.request_review"
 )
 
 // Host is the service's only view of the system it runs in. It answers
@@ -288,4 +291,49 @@ type InboxNotifier interface {
 	// InboxChanged tells the host that userID's artifact-reviews inbox may
 	// have changed. Best effort, called after commit.
 	InboxChanged(ctx context.Context, userID string)
+}
+
+// ReviewRequestNotifier is an optional extension of Host for durable artifact
+// review requests (ptone/scion#9296). A host without it sends no notifications
+// and reports notifySkipped "unavailable" (fail closed).
+type ReviewRequestNotifier interface {
+	// MayNotifyReviewer checks whether the calling user may see and notify
+	// reviewerUserID (anti-spam user visibility). ok=false, err=nil means the
+	// reviewer is unavailable/not visible; err != nil means a lookup fault.
+	MayNotifyReviewer(ctx context.Context, reviewerUserID string) (ok bool, err error)
+
+	// NotifyReviewRequest writes an in-app ARTIFACT_REVIEW_REQUESTED notice to
+	// the reviewer after a request is created or reminded. Best effort.
+	NotifyReviewRequest(ctx context.Context, n ReviewRequestNotice) error
+
+	// NotifyRequestDismissed writes an in-app ARTIFACT_REVIEW_DISMISSED notice
+	// to the requester (and artifact owner if different) after a request is
+	// dismissed. Best effort.
+	NotifyRequestDismissed(ctx context.Context, n ReviewRequestDismissNotice) error
+}
+
+// ReviewRequestNotice describes a committed review request or reminder.
+type ReviewRequestNotice struct {
+	ArtifactID     string
+	ArtifactTitle  string
+	HomeScope      string
+	RequestedSeq   int
+	ReviewerUserID string
+	RequesterKind  string
+	RequesterRef   string
+	Note           string
+}
+
+// ReviewRequestDismissNotice describes a committed review request dismissal.
+type ReviewRequestDismissNotice struct {
+	ArtifactID    string
+	ArtifactTitle string
+	HomeScope     string
+	OwnerKind     string
+	OwnerRef      string
+	RequesterKind string
+	RequesterRef  string
+	ReviewerKind  string
+	ReviewerRef   string
+	ResponseNote  string
 }

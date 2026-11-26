@@ -80,8 +80,9 @@ const (
 	ActionDelete         = "delete"
 	ActionList           = "list"
 	ActionManage         = "manage"
-	ActionAdmin          = "admin"   // access_constraint.admin: administer access constraints
-	ActionSteward        = "steward" // artifact.steward: share and retire an agent's artifact within bounds (design D25)
+	ActionAdmin          = "admin"          // access_constraint.admin: administer access constraints
+	ActionSteward        = "steward"        // artifact.steward: share and retire an agent's artifact within bounds (design D25)
+	ActionRequestReview  = "request_review" // artifact.request_review: ask users to review an artifact (ptone/scion#9296)
 	ActionAttach         = "attach"
 	ActionPortAccess     = "port_access"
 	ActionRegister       = "register"
@@ -281,6 +282,7 @@ var Registry = []Permission{
 	{ID: "artifact.delete", Resource: ResourceArtifact, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "artifact:delete", Description: "Delete artifacts", Reserved: "no artifact route checks artifact.delete; DELETE on an artifact is gated by artifact.manage (ptone/scion#4529)"},
 	{ID: "artifact.manage", Resource: ResourceArtifact, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "artifact:manage", Description: "Manage artifact grants and share links", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/links.go:func (s *Service) canAdministerWith", "pkg/artifacts/links.go:func (s *Service) stewardAuthority", "pkg/artifacts/retire.go:func (s *Service) retireAuthority"}},
 	{ID: "artifact.steward", Resource: ResourceArtifact, Action: ActionSteward, CapabilityKind: CapabilityResource, UATScope: "artifact:steward", Description: "Share and delete artifacts owned by agents in the project (no admin grants, no moves)", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) StewardClause", "pkg/artifacts/links.go:func (s *Service) stewardAuthority"}},
+	{ID: "artifact.request_review", Resource: ResourceArtifact, Action: ActionRequestReview, CapabilityKind: CapabilityScope, UATScope: "artifact:request_review", Description: "Request reviews on artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Permits", "pkg/artifacts/review_requests.go:PermissionRequestReview"}},
 
 	{ID: "skill.create", Resource: ResourceSkill, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "skill:create", AgentScopes: []string{"project:skill:write"}, Description: "Create skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, UATScope: "skill:create_global", ExcludeFromManageAlias: true, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},

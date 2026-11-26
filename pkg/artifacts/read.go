@@ -329,6 +329,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
+	s.populateReviewState(r.Context(), b, a, &resp)
 	if a.CurrentSeq > 0 {
 		v, ok := readyVersion(w, r, b, a, 0)
 		if !ok {

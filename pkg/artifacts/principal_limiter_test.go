@@ -41,21 +41,21 @@ func exhaust(t *testing.T, l *principalLimiter, f LimitFamily, kind, ref string)
 }
 
 func TestPrincipalLimiterFamiliesAreDefined(t *testing.T) {
-	for _, f := range []LimitFamily{LimitReviewBeat, LimitReviewList, LimitDraftWrite} {
+	for _, f := range []LimitFamily{LimitReviewBeat, LimitReviewList, LimitDraftWrite, LimitReviewRequest, LimitReviewRequestDismiss} {
 		lim, ok := principalFamilyLimits[f]
-		if !ok || lim.perMinute < 1 || lim.burst < 1 || lim.globalPerMinute < lim.perMinute {
-			t.Errorf("family %s limits %+v, want defined with global >= per principal", f, lim)
+		if !ok || lim.perPeriod < 1 || lim.burst < 1 || lim.globalPerPeriod < lim.perPeriod || lim.period <= 0 {
+			t.Errorf("family %s limits %+v, want defined with global >= per principal and positive period", f, lim)
 		}
 	}
-	if got := principalFamilyLimits[LimitReviewBeat]; got != (familyLimit{perMinute: 24, burst: 24, globalPerMinute: 2400}) {
+	if got := principalFamilyLimits[LimitReviewBeat]; got != (familyLimit{perPeriod: 24, burst: 24, globalPerPeriod: 2400, period: time.Minute}) {
 		t.Errorf("review_beat limits %+v", got)
 	}
 	// The beat family must admit MaxReviewSessionsPerPrincipal live tabs
 	// of a principal on one artifact beating once a minute, plus the extra
 	// beats.
-	if principalFamilyLimits[LimitReviewBeat].perMinute < 2*MaxReviewSessionsPerPrincipal {
+	if principalFamilyLimits[LimitReviewBeat].perPeriod < 2*MaxReviewSessionsPerPrincipal {
 		t.Errorf("review_beat %d/min is below two beats a minute for %d tabs",
-			principalFamilyLimits[LimitReviewBeat].perMinute, MaxReviewSessionsPerPrincipal)
+			principalFamilyLimits[LimitReviewBeat].perPeriod, MaxReviewSessionsPerPrincipal)
 	}
 }
 
@@ -93,7 +93,7 @@ func TestPrincipalLimiterRefills(t *testing.T) {
 	clk := &fixedClock{t: time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)}
 	l := newPrincipalLimiter(clk.now)
 	exhaust(t, l, LimitReviewBeat, PrincipalKindUser, "u1")
-	clk.t = clk.t.Add(time.Minute / time.Duration(principalFamilyLimits[LimitReviewBeat].perMinute))
+	clk.t = clk.t.Add(time.Minute / time.Duration(principalFamilyLimits[LimitReviewBeat].perPeriod))
 	if _, ok := l.allow(LimitReviewBeat, PrincipalKindUser, "u1"); !ok {
 		t.Error("no token after one refill interval")
 	}

@@ -357,6 +357,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'artifact:request_review',
+    label: 'artifact:request_review',
+    description: 'Request reviews on artifacts',
+    resource: 'artifact',
+    isAlias: false,
+  },
+  {
     value: 'artifact:steward',
     label: 'artifact:steward',
     description:

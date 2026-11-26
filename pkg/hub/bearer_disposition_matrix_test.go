@@ -566,6 +566,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "same as the PUT /api/v1/artifacts/{id}/review-draft entry above: the generic refusal probes get 404 for a caller that cannot read the artifact where the matrix expects 403, and the admitting super-admin lacks artifact:read and holds no grant on the fixture artifact; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded and TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation drive DELETE with user access tokens",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and requires an interactive user session in MayNotifyReviewer (refusing every reviewer for scoped UATs); TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> every reviewer refused reviewer_unavailable with no notifications) and agent callers",
+		Pin:    "TestArtifactsReviewRequestsOnRoutes",
+	},
+	{OperationID: "artifact.review.request.dismiss", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-request/dismiss"}: {
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and answers uniform 404 when the caller's credential lacks artifact:read in the artifact's home scope or when no open review request exists; TestArtifactsReviewRequestsOnRoutes exercises session and scoped UAT (boundary excluding project -> 404 row unchanged, ceiling lacking artifact:read -> 404 row unchanged, admitting UAT -> 200) dismiss with the experiment on and off",
+		Pin:    "TestArtifactsReviewRequestsOnRoutes",
+	},
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",

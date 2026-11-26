@@ -39,15 +39,16 @@ import {
 } from '../../client/principal-names.js';
 import type { ArtifactListItem, ArtifactResponse } from '../../client/artifacts.js';
 import {
-  getActiveSingleKeyValue,
   getViewSchema,
+  hasIsFlagInQuery,
   knownKeysFor,
   parse as parseFilterQuery,
   serverSubset,
-  setSingleKeyInQueryWithNotice,
+  toggleIsFlagInQueryWithNotice,
   validate as validateFilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
+import { ARTIFACTS_REVIEW_REQUESTS_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
 import type { FilterCommitDetail, FilterInputDetail } from './filter-box/filter-box.js';
 import './filter-box/filter-box.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.js';
@@ -238,9 +239,22 @@ export class ScionArtifactList extends LitElement {
     }
   `;
 
+  private get reviewRequestsEnabled(): boolean {
+    return isFeatureEnabled(ARTIFACTS_REVIEW_REQUESTS_FLAG);
+  }
+
   override connectedCallback(): void {
     super.connectedCallback();
-    const urlQ = new URLSearchParams(window.location.search).get(this.urlParam) ?? '';
+    const params = new URLSearchParams(window.location.search);
+    const requestedParam = params.get('requested');
+    const hasLegacyRequested =
+      this.reviewRequestsEnabled && (requestedParam === '1' || requestedParam === 'true');
+    let urlQ = params.get(this.urlParam) ?? '';
+    let migratedLegacy = false;
+    if (!urlQ && hasLegacyRequested) {
+      urlQ = 'is:requested';
+      migratedLegacy = true;
+    }
     if (urlQ) {
       this.filterQueryText = urlQ;
       const parsed = parseFilterQuery(urlQ, knownKeysFor(PROJECT_ARTIFACTS_SCHEMA));
@@ -249,6 +263,9 @@ export class ScionArtifactList extends LitElement {
         if (!v.error) {
           this.committedServerQ = serverSubset(parsed.query, PROJECT_ARTIFACTS_SCHEMA);
         }
+      }
+      if (migratedLegacy) {
+        this.syncQueryToUrl(urlQ);
       }
     }
     void this.load();
@@ -322,6 +339,7 @@ export class ScionArtifactList extends LitElement {
     } else {
       params.delete(this.urlParam);
     }
+    params.delete('requested');
     replaceSearch(params);
   }
 
@@ -342,13 +360,11 @@ export class ScionArtifactList extends LitElement {
     void this.load();
   };
 
-  private onSharedChipClick = (): void => {
-    const active =
-      getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
-    const edit = setSingleKeyInQueryWithNotice(
+  private onFlagChipClick(flag: 'shared' | 'requested'): void {
+    const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
-      'is',
-      active ? '' : 'shared',
+      flag,
+      [],
       PROJECT_ARTIFACTS_SCHEMA
     );
     const next = edit.value;
@@ -370,7 +386,7 @@ export class ScionArtifactList extends LitElement {
         }
       }
     }
-  };
+  }
 
   private resolveNames(items: ArtifactListItem[]): void {
     for (const item of items) {
@@ -503,6 +519,9 @@ export class ScionArtifactList extends LitElement {
                   ${item.reviewPending
                     ? html`<sl-badge pill variant="warning">Review pending</sl-badge>`
                     : nothing}
+                  ${item.reviewRequested
+                    ? html`<sl-badge pill variant="primary">Review requested</sl-badge>`
+                    : nothing}
                 </td>
               </tr>
             `
@@ -536,15 +555,21 @@ export class ScionArtifactList extends LitElement {
     } else {
       body = this.renderTable();
     }
-    const sharedActive =
-      getActiveSingleKeyValue(this.filterQueryText, 'is', PROJECT_ARTIFACTS_SCHEMA) === 'shared';
+    const sharedActive = hasIsFlagInQuery(this.filterQueryText, 'shared', PROJECT_ARTIFACTS_SCHEMA);
+    const requestedActive = hasIsFlagInQuery(
+      this.filterQueryText,
+      'requested',
+      PROJECT_ARTIFACTS_SCHEMA
+    );
     return html`
       <div class="toolbar">
         <scion-filter-box
           view="artifacts-project"
           .value=${this.filterQueryText}
           .notice=${this.filterNotice}
-          placeholder="Filter artifacts… (try is:shared)"
+          placeholder=${this.reviewRequestsEnabled
+            ? 'Filter artifacts… (try is:requested)'
+            : 'Filter artifacts… (try is:shared)'}
           @filter-input=${this.onFilterInput}
           @filter-commit=${this.onFilterCommit}
         ></scion-filter-box>
@@ -552,10 +577,20 @@ export class ScionArtifactList extends LitElement {
           type="button"
           class="filter-chip ${sharedActive ? 'active' : ''}"
           aria-pressed=${sharedActive ? 'true' : 'false'}
-          @click=${this.onSharedChipClick}
+          @click=${(): void => this.onFlagChipClick('shared')}
         >
           Shared with this project
         </button>
+        ${this.reviewRequestsEnabled
+          ? html`<button
+              type="button"
+              class="filter-chip ${requestedActive ? 'active' : ''}"
+              aria-pressed=${requestedActive ? 'true' : 'false'}
+              @click=${(): void => this.onFlagChipClick('requested')}
+            >
+              Requested of me
+            </button>`
+          : nothing}
         <span class="spacer"></span>
         ${this.newButton()}
       </div>

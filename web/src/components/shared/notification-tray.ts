@@ -70,6 +70,15 @@ export const ARTIFACT_REVIEW_SUMMARY_KIND = 'artifact_review_summary';
 export const ARTIFACT_REVIEW_SUBMITTED_STATUS = 'ARTIFACT_REVIEW_SUBMITTED';
 
 /**
+ * Artifact review-request lifecycle notifications (ptone/scion#9296, #9306):
+ * a reviewer is asked to review an artifact, or a reviewer dismisses a request
+ * with an optional note shown as the excerpt.
+ */
+export const ARTIFACT_REVIEW_REQUEST_KIND = 'artifact_review_request';
+export const ARTIFACT_REVIEW_REQUESTED_STATUS = 'ARTIFACT_REVIEW_REQUESTED';
+export const ARTIFACT_REVIEW_DISMISSED_STATUS = 'ARTIFACT_REVIEW_DISMISSED';
+
+/**
  * An agent saved a user secret for the user; it waits for the user's
  * approval in Profile > Secrets. The row carries text only, never a value.
  */
@@ -142,15 +151,19 @@ const EXCERPT_BREAKS = /[\t\n\v\f\r\u0085\u2028\u2029]+/g;
 /** Control and format characters, removed from the excerpt. */
 const EXCERPT_UNSAFE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
+function isArtifactExcerptKind(kind: string | undefined): boolean {
+  return kind === ARTIFACT_REVIEW_SUMMARY_KIND || kind === ARTIFACT_REVIEW_REQUEST_KIND;
+}
+
 /**
- * The excerpt of a review summary row, or '' for any other row: no other
- * kind shows one. The hub already cleans it; line breaks become spaces,
- * control and format characters are removed and runs of spaces collapse
+ * The excerpt of a review summary or review-request row, or '' for any other
+ * row: no other kind shows one. The hub already cleans it; line breaks become
+ * spaces, control and format characters are removed and runs of spaces collapse
  * here again, so a row from anywhere else still shows as one line of plain
  * text.
  */
 export function reviewSummaryExcerpt(n: Notification): string {
-  if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || typeof n.excerpt !== 'string') return '';
+  if (!isArtifactExcerptKind(n.kind) || typeof n.excerpt !== 'string') return '';
   return n.excerpt
     .replace(EXCERPT_BREAKS, ' ')
     .replace(EXCERPT_UNSAFE, '')
@@ -159,16 +172,16 @@ export function reviewSummaryExcerpt(n: Notification): string {
 }
 
 /**
- * The artifact page path of a review summary row, built from its project and
- * resource fields alone (both canonical UUIDs, the project not the nil
- * UUID), or null. The message and excerpt are never read. It is the path
+ * The artifact page path of a review summary or review-request row, built from
+ * its project and resource fields alone (both canonical UUIDs, the project not
+ * the nil UUID), or null. The message and excerpt are never read. It is the path
  * artifactPagePath (client/artifacts.ts) builds, written out here so the
  * tray does not load the artifacts client. An artifact not homed in a
  * project (the hub writes the nil UUID) deliberately gets no link; the CLI
  * still prints its scion://artifact/ reference.
  */
 export function reviewSummaryLink(n: Notification): string | null {
-  if (n.kind !== ARTIFACT_REVIEW_SUMMARY_KIND || n.resourceType !== 'artifact') return null;
+  if (!isArtifactExcerptKind(n.kind) || n.resourceType !== 'artifact') return null;
   const artifactId = n.resourceId ?? '';
   const projectId = n.projectId ?? '';
   if (
@@ -805,6 +818,10 @@ export class ScionNotificationTray extends LitElement {
         return 'Schedule Blocked';
       case ARTIFACT_REVIEW_SUBMITTED_STATUS:
         return 'Review Submitted';
+      case ARTIFACT_REVIEW_REQUESTED_STATUS:
+        return 'Review requested';
+      case ARTIFACT_REVIEW_DISMISSED_STATUS:
+        return 'Review request dismissed';
       case SECRET_PENDING_STATUS:
         return 'Secret Awaiting Approval';
       case DECISIONS_WAITING_STATUS:
@@ -887,6 +904,10 @@ export class ScionNotificationTray extends LitElement {
         return 'shield-lock';
       case DECISIONS_WAITING_STATUS:
         return 'signpost-split';
+      case ARTIFACT_REVIEW_REQUESTED_STATUS:
+        return 'person-check';
+      case ARTIFACT_REVIEW_DISMISSED_STATUS:
+        return 'x-circle';
       default:
         return 'info-circle-fill';
     }
@@ -1461,7 +1482,11 @@ export class ScionNotificationTray extends LitElement {
           <sl-icon name=${this.statusIcon(iconStatus)}></sl-icon>
         </div>
         <div class="notif-body">
-          ${isDecisions ? html`<div class="notif-title">Decisions waiting</div>` : nothing}
+          ${isDecisions
+            ? html`<div class="notif-title">Decisions waiting</div>`
+            : n.status === ARTIFACT_REVIEW_DISMISSED_STATUS
+              ? html`<div class="notif-title">Review request dismissed</div>`
+              : nothing}
           <div class="notif-message">${n.message}</div>
           <sl-tooltip content=${n.message} hoist>
             <span class="truncation-badge" style="display:none">...</span>

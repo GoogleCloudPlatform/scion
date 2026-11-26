@@ -59,6 +59,9 @@ var maxListScan = 500
 type ArtifactListItem struct {
 	ArtifactInfo
 	ReviewPending bool `json:"reviewPending"`
+	// ReviewRequested is true when hub.artifacts_review_requests is enabled
+	// and the caller has an open review request on this artifact.
+	ReviewRequested bool `json:"reviewRequested,omitempty"`
 	// Access is why the caller sees the artifact: AccessOwned,
 	// AccessProject (it may read artifacts homed in the artifact's
 	// project) or AccessShared (a grant to it or to one of its projects).
@@ -102,6 +105,7 @@ type listParams struct {
 	rawQuery      string
 	canonicalQ    string
 	reviewPending bool
+	requested     bool
 	ownedOnly     bool
 	scope         string
 	sharedOnly    bool
@@ -127,6 +131,9 @@ func (p listParams) binding() string {
 	v := url.Values{}
 	v.Set("q", p.canonicalQ)
 	v.Set("review_pending", strconv.FormatBool(p.reviewPending))
+	if p.requested {
+		v.Set("requested", "true")
+	}
 	v.Set("owned", strconv.FormatBool(p.ownedOnly))
 	if p.scope != "" {
 		v.Set("scope", p.scope)
@@ -155,6 +162,13 @@ func parseListParams(q url.Values) (listParams, string) {
 		p.reviewPending = true
 	default:
 		return p, "review_pending must be 1 or 0"
+	}
+	switch q.Get("requested") {
+	case "", "0", "false":
+	case "1", "true":
+		p.requested = true
+	default:
+		return p, "requested must be 1 or 0"
 	}
 	switch q.Get("owner") {
 	case "":
@@ -285,9 +299,11 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, ArtifactListResponse{Artifacts: []ArtifactListItem{}, CanCreate: canCreateIn(ctx, host, p.scope)})
 		return
 	}
+	reviewRequestsEnabled := s.featureEnabled(ctx, FeatureReviewRequests)
 	items, next, err := s.collect(ctx, host, b, CandidateQuery{
 		PrincipalKind: kind, PrincipalRef: ref, ScopeRefs: scopes, OwnedOnly: ownedOnly,
-		ReviewPending: p.reviewPending, HomeScope: p.scope, ScopeShares: scopeShares,
+		ReviewPending: p.reviewPending, RequestedOnly: p.requested,
+		ReviewRequestsEnabled: reviewRequestsEnabled, HomeScope: p.scope, ScopeShares: scopeShares,
 		SharedOnly: p.sharedOnly, Query: queryTerms, After: after,
 	}, p.limit)
 	if err != nil {
@@ -357,12 +373,14 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 			continue
 		}
 		reviewPending := c.CurrentKind == VersionKindReview
-		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, access) {
+		reviewRequested := q.ReviewRequestsEnabled && c.RequestedByMe
+		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, reviewRequested, access) {
 			continue
 		}
 		items = append(items, ArtifactListItem{
 			ArtifactInfo:    artifactInfo(&c.Artifact),
 			ReviewPending:   reviewPending,
+			ReviewRequested: reviewRequested,
 			Access:          access,
 			SharedWithScope: q.HomeScope != "" && c.ScopeRef != q.HomeScope,
 			src:             &c.Artifact,
@@ -488,7 +506,7 @@ func queryRequiresProjectShared(qt *QueryTerms) bool {
 // resolved ReviewPending and Access classification (required for `is:shared`
 // and `-is:shared`, since AccessShared depends on host.Authorize per home
 // project).
-func matchesQueryIsTerms(qt *QueryTerms, reviewPending bool, access string) bool {
+func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested bool, access string) bool {
 	for _, t := range qt.Terms {
 		if t.Field != "is" {
 			continue
@@ -498,6 +516,10 @@ func matchesQueryIsTerms(qt *QueryTerms, reviewPending bool, access string) bool
 			switch v {
 			case "review":
 				if reviewPending {
+					matched = true
+				}
+			case "requested":
+				if reviewRequested {
 					matched = true
 				}
 			case "mine":

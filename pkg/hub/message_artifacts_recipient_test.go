@@ -241,14 +241,16 @@ type moduleFuncKey struct{ path, function string }
 
 // recipientCheckSymbols are the non-access-granting named-principal check
 // entry points (the send-time recipient warning, the open-review access
-// filter, and the lost-access review-draft reaper), each with the only
-// functions in the module that may call it.
+// filter, the lost-access review-draft reaper, and the review-request
+// existing-access eligibility check), each with the only functions in the
+// module that may call it.
 var recipientCheckSymbols = map[string]map[moduleFuncKey]bool{
 	"RecipientMayNotRead": {{"pkg/hub/message_artifacts.go", "artifactRecipientWarning"}: true},
 	"ResolveRecipient": {
-		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:            true,
-		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:      true,
-		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}: true,
+		{"pkg/artifacts/recipient.go", "RecipientMayNotRead"}:              true,
+		{"pkg/artifacts/review_sessions.go", "readableOpenReviews"}:        true,
+		{"pkg/artifacts/review_drafts.go", "ReapLostAccessReviewDrafts"}:   true,
+		{"pkg/artifacts/review_requests.go", "handleCreateReviewRequests"}: true,
 	},
 	"readableOpenReviews": {{"pkg/artifacts/review_sessions.go", "checkOpenReviews"}: true},
 	"recipientIdentity":   {{"pkg/hub/artifacts_recipient.go", "ResolveRecipient"}: true},
@@ -309,13 +311,15 @@ func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
 
 // TestArtifactRecipientCheckIsWarningOnly pins, across the whole module,
 // that the named-principal recipient check never grants access or serves
-// content — it may only feed the sender's warning, filter open reviews, or
-// withhold/remove the principal's own data on a definitive deny:
+// content — it may only feed the sender's warning, filter open reviews,
+// withhold/remove the principal's own data on a definitive deny, or refuse a
+// caller-initiated request on the principal's behalf:
 // RecipientMayNotRead is called only by artifactRecipientWarning, whose
 // result admitMessageArtifacts only appends to the warning;
-// ResolveRecipient only by RecipientMayNotRead, readableOpenReviews, and
-// ReapLostAccessReviewDrafts; and the hub's recipient identity and chain
-// walk only from the resolved recipient's own methods.
+// ResolveRecipient only by RecipientMayNotRead, readableOpenReviews,
+// ReapLostAccessReviewDrafts, and the review-request existing-access check
+// (handleCreateReviewRequests, ptone/scion#9296); and the hub's recipient
+// identity and chain walk only from the resolved recipient's own methods.
 func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 	seen := map[string]int{}
 	forEachModuleGoFile(t, func(path string, f *ast.File) {
@@ -336,7 +340,7 @@ func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 				}
 				seen[sym]++
 				if !allowed[moduleFuncKey{path, fd.Name.Name}] {
-					t.Errorf("%s:%s calls %s; it is warning-only and may be called only from %v", path, fd.Name.Name, sym, allowed)
+					t.Errorf("%s:%s calls %s; it is non-access-granting and may be called only from %v", path, fd.Name.Name, sym, allowed)
 				}
 				return true
 			})

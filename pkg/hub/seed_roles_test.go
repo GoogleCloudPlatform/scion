@@ -1095,7 +1095,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-owner",
 			perms: projectOwnerPermissionIDs(),
 			want: []string{
-				"artifact.create", "artifact.read", "artifact.steward",
+				"artifact.create", "artifact.read", "artifact.request_review", "artifact.steward",
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
@@ -1124,7 +1124,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-admin",
 			perms: projectAdminPermissionIDs(),
 			want: []string{
-				"artifact.create", "artifact.read",
+				"artifact.create", "artifact.read", "artifact.request_review",
 				"agent.create", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.stop_all", "agent.update",
@@ -1151,7 +1151,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 			name:  "project-member",
 			perms: projectMemberCuratedPermissionIDs(),
 			want: []string{
-				"artifact.create", "artifact.read",
+				"artifact.create", "artifact.read", "artifact.request_review",
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
 				"github_trigger.comment",
@@ -1189,9 +1189,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   17,
-		store.ProjectRoleAdmin:   15,
-		store.ProjectRoleMember:  10,
+		store.ProjectRoleOwner:   18,
+		store.ProjectRoleAdmin:   16,
+		store.ProjectRoleMember:  11,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  2,
 	}
@@ -1216,9 +1216,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 17, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 15, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 10, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 18, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 16, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 11, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 2, projectViewerPermissionIDs},
 	}

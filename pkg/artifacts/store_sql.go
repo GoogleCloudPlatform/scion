@@ -83,6 +83,7 @@ var migrations = []migration{
 	{name: migrationReviewSessions, sqlite: sqliteReviewSessions, postgres: postgresReviewSessions},
 	{name: migrationReviewLadder, apply: applyReviewLadder},
 	{name: migrationReviewDrafts, sqlite: sqliteReviewDrafts, postgres: postgresReviewDrafts},
+	{name: migrationReviewRequests, sqlite: sqliteReviewRequests, postgres: postgresReviewRequests},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -1005,9 +1006,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 			seq                            sql.NullInt64
 			expires, created, updated      dbTime
 			orphaned, transferred          dbTime
+			requestedByMe                  bool
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &orphaned, &sponsor, &formerKind, &formerRef, &transferred, &prevKey, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &sponsor, &formerKind, &formerRef, &transferred, &prevKey, &kind, &requestedByMe); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -1022,6 +1024,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.TransferredAt = transferred.ptr()
 		c.FormerKey = prevKey.String
 		c.CurrentKind = kind.String
+		c.RequestedByMe = requestedByMe
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1047,6 +1050,14 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any, error) {
 		nArms   int
 		filtErr error
 	)
+	selectCols := candidateColumns
+	var selectArgs []any
+	if q.ReviewRequestsEnabled {
+		selectCols += `, EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?) AS requested_by_me`
+		selectArgs = []any{q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen}
+	} else {
+		selectCols += `, FALSE AS requested_by_me`
+	}
 	arm := func(from, where string, whereArgs ...any) {
 		if filtErr != nil {
 			return
@@ -1055,8 +1066,9 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any, error) {
 		if nArms > 1 {
 			b.WriteString("\nUNION\n")
 		}
-		b.WriteString("SELECT * FROM (SELECT DISTINCT " + candidateColumns + " FROM " + from +
+		b.WriteString("SELECT * FROM (SELECT DISTINCT " + selectCols + " FROM " + from +
 			"\n\t\tLEFT JOIN artifact_version v ON v.artifact_id = a.id AND v.seq = a.current_seq\n\t\tWHERE " + where)
+		args = append(args, selectArgs...)
 		args = append(args, whereArgs...)
 		if err := s.writeCandidateFilters(&b, &args, q); err != nil {
 			filtErr = err
@@ -1130,6 +1142,14 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 	if q.ReviewPending {
 		b.WriteString(" AND v.kind = ?")
 		*args = append(*args, VersionKindReview)
+	}
+	if q.RequestedOnly {
+		if q.ReviewRequestsEnabled {
+			b.WriteString(" AND EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
+			*args = append(*args, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
+		} else {
+			b.WriteString(" AND 1 = 0")
+		}
 	}
 	if q.HomeScope != "" {
 		// Shared with the project: an unexpired scope grant to it, found
@@ -1233,6 +1253,11 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 			case "review":
 				b.WriteString(" AND (v.kind IS NULL OR v.kind <> ?)")
 				*args = append(*args, VersionKindReview)
+			case "requested":
+				if q.ReviewRequestsEnabled {
+					b.WriteString(" AND NOT EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
+					*args = append(*args, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
+				}
 			case "mine":
 				b.WriteString(" AND NOT (a.owner_kind = ? AND a.owner_ref = ?)")
 				*args = append(*args, q.PrincipalKind, q.PrincipalRef)
@@ -1258,6 +1283,13 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 		case "review":
 			clauses = append(clauses, "v.kind = ?")
 			clauseArgs = append(clauseArgs, VersionKindReview)
+		case "requested":
+			if q.ReviewRequestsEnabled {
+				clauses = append(clauses, "EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
+				clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
+			} else {
+				clauses = append(clauses, "1 = 0")
+			}
 		case "mine":
 			clauses = append(clauses, "(a.owner_kind = ? AND a.owner_ref = ?)")
 			clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef)
