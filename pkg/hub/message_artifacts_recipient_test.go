@@ -311,13 +311,15 @@ func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
 
 // TestArtifactRecipientCheckIsWarningOnly pins, across the whole module,
 // that the named-principal recipient check never grants access or serves
-// content — it may only feed the sender's warning, filter open reviews, or
-// withhold/remove the principal's own data on a definitive deny:
+// content — it may only feed the sender's warning, filter open reviews,
+// withhold/remove the principal's own data on a definitive deny, or refuse a
+// caller-initiated request on the principal's behalf:
 // RecipientMayNotRead is called only by artifactRecipientWarning, whose
 // result admitMessageArtifacts only appends to the warning;
-// ResolveRecipient only by RecipientMayNotRead, readableOpenReviews, and
-// ReapLostAccessReviewDrafts; and the hub's recipient identity and chain
-// walk only from the resolved recipient's own methods.
+// ResolveRecipient only by RecipientMayNotRead, readableOpenReviews,
+// ReapLostAccessReviewDrafts, and the review-request existing-access check
+// (handleCreateReviewRequests, ptone/scion#9296); and the hub's recipient
+// identity and chain walk only from the resolved recipient's own methods.
 func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 	seen := map[string]int{}
 	forEachModuleGoFile(t, func(path string, f *ast.File) {
@@ -338,7 +340,7 @@ func TestArtifactRecipientCheckIsWarningOnly(t *testing.T) {
 				}
 				seen[sym]++
 				if !allowed[moduleFuncKey{path, fd.Name.Name}] {
-					t.Errorf("%s:%s calls %s; it is warning-only and may be called only from %v", path, fd.Name.Name, sym, allowed)
+					t.Errorf("%s:%s calls %s; it is non-access-granting and may be called only from %v", path, fd.Name.Name, sym, allowed)
 				}
 				return true
 			})

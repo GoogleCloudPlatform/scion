@@ -33,10 +33,14 @@ import (
 // read and review-access checks about a named principal (kind, ref) rather
 // than the caller of ctx: the send-time recipient warning (RecipientMayNotRead,
 // ptone/scion#4575), the open-review access filter (readableOpenReviews,
-// ptone/scion#7650), and the lost-access review-draft reaper
-// (ReapLostAccessReviewDrafts, ptone/scion#8475), where none of those
-// principals has a credential in a caller's request. Nothing built from it
-// ever grants access or serves content.
+// ptone/scion#7650), the lost-access review-draft reaper
+// (ReapLostAccessReviewDrafts, ptone/scion#8475), and the review-request
+// existing-access check (handleCreateReviewRequests, ptone/scion#9296), where
+// none of those principals has a credential in a caller's request. It may only
+// feed advisory warnings, filter open reviews, withhold or remove the
+// principal's own data on a definitive deny, or refuse a caller-initiated
+// request on the principal's behalf; nothing built from it ever grants access
+// or serves content.
 type RecipientAuthority interface {
 	// ResolveRecipient looks the principal up once, for every question
 	// one check asks about it. It returns a nil subject and no error for

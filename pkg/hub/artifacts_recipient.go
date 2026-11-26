@@ -35,8 +35,9 @@ import (
 // saved review draft, or a candidate reviewer named in a review request), not
 // for the caller of ctx. They are NON-ACCESS-GRANTING:
 // nothing here ever grants access, serves content, or is consulted by any read
-// route; besides advisory warnings and filtering, a recipient check may also
-// withhold or remove the principal's own data on a definitive deny. The
+// route; besides advisory warnings and filtering, a recipient check may only
+// withhold or remove the principal's own data on a definitive deny, or refuse
+// a caller-initiated request on the principal's behalf. The
 // identity ResolveRecipient builds (recipientIdentity) is used only as the
 // subject of policy reads (CheckAccess, the delegation chain walk and the
 // agent scope check, all run under maskAllAuthzMemo) and never enters a
