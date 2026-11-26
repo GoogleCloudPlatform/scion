@@ -170,6 +170,27 @@ export interface DecisionRetentionInfo {
   days: number;
 }
 
+/** Reports which filter facets were truncated at the hub's 500-item cap (design-8985 §3.3). */
+export interface ProjectDecisionFacetsTruncated {
+  agents?: boolean;
+  answerers?: boolean;
+  conversations?: boolean;
+}
+
+/** One suggestion option returned by `/decisions/suggestions`. */
+export interface DecisionSuggestionValue {
+  value: string;
+  help?: string;
+}
+
+/** Response of `GET /api/v1/projects/{id}/decisions/suggestions`. */
+export interface DecisionSuggestionsResponse {
+  key: string;
+  values: DecisionSuggestionValue[];
+  total: number;
+  nextCursor?: string;
+}
+
 /** Response of `GET /api/v1/projects/{id}/decisions?tab=pending`. */
 export interface ProjectPendingDecisionsResponse {
   counts: ProjectDecisionCounts;
@@ -179,6 +200,7 @@ export interface ProjectPendingDecisionsResponse {
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
   retention?: DecisionRetentionInfo | undefined;
+  facetsTruncated?: ProjectDecisionFacetsTruncated;
   nextCursor?: string;
 }
 
@@ -190,6 +212,7 @@ export interface ProjectMadeDecisionsResponse {
   answerers: ProjectDecisionActorView[];
   conversations?: ProjectDecisionConversationView[];
   retention?: DecisionRetentionInfo | undefined;
+  facetsTruncated?: ProjectDecisionFacetsTruncated;
   nextCursor?: string;
 }
 
@@ -570,6 +593,7 @@ export async function fetchProjectPendingDecisions(
     ...(parseDecisionRetentionInfo(data?.retention)
       ? { retention: parseDecisionRetentionInfo(data?.retention) }
       : {}),
+    ...(data?.facetsTruncated ? { facetsTruncated: data.facetsTruncated } : {}),
     ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
   };
 }
@@ -609,6 +633,43 @@ export async function fetchProjectMadeDecisions(
     ...(parseDecisionRetentionInfo(data?.retention)
       ? { retention: parseDecisionRetentionInfo(data?.retention) }
       : {}),
+    ...(data?.facetsTruncated ? { facetsTruncated: data.facetsTruncated } : {}),
+    ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
+  };
+}
+
+/** Fetches `GET /api/v1/projects/{id}/decisions/suggestions`. */
+export async function fetchProjectDecisionSuggestions(
+  projectId: string,
+  options: {
+    key: string;
+    prefix?: string | undefined;
+    limit?: number | undefined;
+    cursor?: string | undefined;
+    signal?: AbortSignal | undefined;
+  }
+): Promise<DecisionSuggestionsResponse> {
+  const params = new URLSearchParams();
+  params.set('key', options.key);
+  if (options.prefix !== undefined && options.prefix !== '') {
+    params.set('prefix', options.prefix);
+  }
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  if (options.cursor) {
+    params.set('cursor', options.cursor);
+  }
+  const url = `/api/v1/projects/${encodeURIComponent(projectId)}/decisions/suggestions?${params.toString()}`;
+  const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
+  if (!res.ok) {
+    return throwDecisionsApiError(res);
+  }
+  const data = (await res.json()) as Partial<DecisionSuggestionsResponse> | null;
+  return {
+    key: data?.key ?? options.key,
+    values: Array.isArray(data?.values) ? data.values : [],
+    total: typeof data?.total === 'number' ? data.total : 0,
     ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
   };
 }

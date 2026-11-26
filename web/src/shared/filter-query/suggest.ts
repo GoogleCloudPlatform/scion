@@ -38,6 +38,24 @@ export type ValueSuggestion = string | { value: string; help?: string; pinned?: 
 
 export type ValueSuggestionProvider = (key: string, prefix: string) => ValueSuggestion[];
 
+export interface RemoteValueSuggestionsResult {
+  values: ValueSuggestion[];
+  total?: number;
+}
+
+export type RemoteValueSuggestionProvider = (
+  key: string,
+  prefix: string,
+  signal: AbortSignal
+) => Promise<ValueSuggestion[] | RemoteValueSuggestionsResult> | null;
+
+export interface ValueSuggestionContext {
+  key: string;
+  prefix: string;
+  replaceStart: number;
+  replaceEnd: number;
+}
+
 interface NormalizedValueSuggestion {
   value: string;
   help?: string;
@@ -53,6 +71,74 @@ function normalizeValueSuggestion(raw: ValueSuggestion): NormalizedValueSuggesti
     ...(raw.help ? { help: raw.help } : {}),
     ...(raw.pinned ? { pinned: true } : {}),
   };
+}
+
+/**
+ * If `cursor` is positioned inside the value part of a known `key:value` token,
+ * returns the key name, current value prefix (after the last comma), and the
+ * replacement range; otherwise returns `null`.
+ */
+export function getValueSuggestionContext(
+  input: string,
+  cursor: number,
+  schema: ViewSchema
+): ValueSuggestionContext | null {
+  const before = input.slice(0, cursor);
+  let tokenStart = before.length;
+  while (tokenStart > 0 && !/\s/.test(before[tokenStart - 1])) {
+    tokenStart--;
+  }
+  const token = before.slice(tokenStart);
+  const negatePrefix = token.startsWith('-') ? '-' : '';
+  const body = negatePrefix ? token.slice(1) : token;
+  const colonIdx = body.indexOf(':');
+  if (colonIdx <= 0) return null;
+
+  const keyName = body.slice(0, colonIdx).toLowerCase();
+  const keyDef = schema.keys.find((k) => k.name.toLowerCase() === keyName);
+  if (!keyDef) return null;
+
+  const afterColon = body.slice(colonIdx + 1);
+  const lastComma = afterColon.lastIndexOf(',');
+  const prefix = lastComma >= 0 ? afterColon.slice(lastComma + 1) : afterColon;
+  const replaceStart =
+    tokenStart + negatePrefix.length + colonIdx + 1 + (lastComma >= 0 ? lastComma + 1 : 0);
+
+  return {
+    key: keyDef.name,
+    prefix,
+    replaceStart,
+    replaceEnd: cursor,
+  };
+}
+
+/**
+ * Converts pre-ranked value suggestions (e.g. from a remote endpoint) into
+ * filter-box `Suggestion` items without re-ranking them.
+ */
+export function buildSuggestionsFromValues(
+  values: ValueSuggestion[],
+  replaceStart: number,
+  replaceEnd: number,
+  limit = 12
+): Suggestion[] {
+  const out: Suggestion[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    if (out.length >= limit) break;
+    const item = normalizeValueSuggestion(raw);
+    const dedupKey = `${item.value}\0${item.help ?? ''}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    out.push({
+      insertText: formatValue(item.value),
+      label: item.value,
+      ...(item.help ? { help: item.help } : {}),
+      replaceStart,
+      replaceEnd,
+    });
+  }
+  return out;
 }
 
 /**

@@ -28,9 +28,14 @@ export {
 } from './canonical.js';
 export { match } from './match.js';
 export {
+  buildSuggestionsFromValues,
   getSuggestions,
+  getValueSuggestionContext,
+  type RemoteValueSuggestionProvider,
+  type RemoteValueSuggestionsResult,
   type Suggestion,
   type ValueSuggestion,
+  type ValueSuggestionContext,
   type ValueSuggestionProvider,
 } from './suggest.js';
 export {

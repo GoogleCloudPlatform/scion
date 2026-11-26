@@ -296,4 +296,179 @@ describe('<scion-filter-box>', () => {
     expect(feedback?.classList.contains('warning')).toBe(true);
     expect(feedback?.textContent).toContain('by: applies to the Made tab only');
   });
+
+  it('debounces remoteValueSuggestions by 250ms, dims local results with Searching… and aria-busy, then replaces with remote results and footer', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = () => [{ value: 'deploy-local' }];
+
+    let resolveRemote:
+      | ((val: { values: Array<{ value: string; help?: string }>; total: number }) => void)
+      | null = null;
+    const provider = vi.fn(
+      () =>
+        new Promise<{ values: Array<{ value: string; help?: string }>; total: number }>(
+          (resolve) => {
+            resolveRemote = resolve;
+          }
+        )
+    );
+    el.remoteValueSuggestions = provider;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Local results appear immediately; remote not called before 250ms.
+    expect(provider).not.toHaveBeenCalled();
+    expect(el.shadowRoot?.querySelectorAll('[role="option"]')).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('[data-remote-status="loading"]')).toBeNull();
+
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider).toHaveBeenCalledWith('agent', 'dep', expect.any(AbortSignal));
+    const listbox = el.shadowRoot?.querySelector('[role="listbox"]');
+    expect(listbox?.getAttribute('aria-busy')).toBe('true');
+    expect(el.shadowRoot?.querySelector('[data-remote-status="loading"]')?.textContent).toContain(
+      'Searching…'
+    );
+    expect(el.shadowRoot?.querySelector('[role="option"]')?.classList.contains('dim')).toBe(true);
+
+    // Resolve with remote results + total > shown.
+    resolveRemote!({
+      values: [{ value: 'deploy-frontend' }, { value: 'deploy-frontend', help: 'deleted · 3f9c' }],
+      total: 143,
+    });
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(listbox?.getAttribute('aria-busy')).toBeNull();
+    const opts = Array.from(el.shadowRoot?.querySelectorAll('[role="option"]') ?? []);
+    expect(opts).toHaveLength(2);
+    expect(opts[0].classList.contains('dim')).toBe(false);
+    expect(opts[0].querySelector('.option-label')?.textContent).toBe('deploy-frontend');
+    expect(opts[1].querySelector('.option-help')?.textContent).toBe('deleted · 3f9c');
+    expect(el.shadowRoot?.querySelector('[data-remote-footer]')?.textContent).toContain(
+      'Showing 2 of 143 · keep typing'
+    );
+    expect(el.shadowRoot?.querySelector('[role="status"]')?.textContent?.trim()).toBe(
+      '143 suggestions'
+    );
+  });
+
+  it('aborts in-flight remoteValueSuggestions request when user types again', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+
+    const signals: AbortSignal[] = [];
+    const resolvers: Array<(v: Array<{ value: string }>) => void> = [];
+    el.remoteValueSuggestions = (_key, _prefix, signal) => {
+      signals.push(signal);
+      return new Promise((resolve) => {
+        resolvers.push(resolve);
+      });
+    };
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:de';
+    input.setSelectionRange(8, 8);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(signals).toHaveLength(1);
+    expect(signals[0].aborted).toBe(false);
+
+    // Typing again aborts the first request.
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    expect(signals[0].aborted).toBe(true);
+
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+    expect(signals).toHaveLength(2);
+    expect(signals[1].aborted).toBe(false);
+
+    // Late resolution of first request is ignored; second request wins.
+    resolvers[0]([{ value: 'stale-agent' }]);
+    resolvers[1]([{ value: 'fresh-agent' }]);
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const labels = Array.from(el.shadowRoot?.querySelectorAll('.option-label') ?? []).map(
+      (n) => n.textContent
+    );
+    expect(labels).toEqual(['fresh-agent']);
+  });
+
+  it('skips remote loading when remoteValueSuggestions returns null', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    el.valueSuggestions = () => [{ value: 'deploy-local' }];
+    const provider = vi.fn(() => null);
+    el.remoteValueSuggestions = provider;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:dep';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await el.updateComplete;
+
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(el.shadowRoot?.querySelector('[data-remote-status]')).toBeNull();
+    expect(el.shadowRoot?.querySelectorAll('[role="option"]')).toHaveLength(1);
+  });
+
+  it('shows no-match state and error fallback without blocking typed commit', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    el.view = 'decisions';
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    // Empty match state.
+    el.remoteValueSuggestions = () => Promise.resolve({ values: [], total: 0 });
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'agent:zzq';
+    input.setSelectionRange(9, 9);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('[data-remote-status="empty"]')?.textContent).toContain(
+      'No agents match ‘zzq’'
+    );
+
+    // Error fallback state.
+    el.remoteValueSuggestions = () => Promise.reject(new Error('network down'));
+    input.value = 'agent:offline-bot';
+    input.setSelectionRange(17, 17);
+    input.dispatchEvent(new Event('input'));
+    vi.advanceTimersByTime(250);
+    await Promise.resolve();
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('[data-remote-status="error"]')?.textContent).toContain(
+      "Couldn't load suggestions. You can still type a value."
+    );
+
+    // Pressing Enter still commits the typed query.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await el.updateComplete;
+    expect(commits.some((c) => c.serverQ === 'agent:offline-bot')).toBe(true);
+  });
 });

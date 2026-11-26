@@ -46,6 +46,7 @@ import {
   getViewSchema,
   knownKeysFor,
   parse,
+  type RemoteValueSuggestionProvider,
   type ValueSuggestion,
 } from '../../shared/filter-query/index.js';
 import { formatValue } from '../../shared/filter-query/canonical.js';
@@ -188,6 +189,9 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
   /** Project facet options from the Hub response (`scope="profile"`). */
   @property({ attribute: false }) projects: ProjectDecisionProjectRef[] = [];
+
+  /** Optional remote value suggestion provider forwarded to `<scion-filter-box>` for truncated facets. */
+  @property({ attribute: false }) remoteValueSuggestions?: RemoteValueSuggestionProvider;
 
   @state() private open = false;
   @state() private datesOpen = false;
@@ -697,6 +701,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
             placeholder="Filter decisions… (try agent:deploy by:me)"
             .value=${this.dialectDraft}
             .valueSuggestions=${this.provideDialectValueSuggestions}
+            .remoteValueSuggestions=${this.remoteValueSuggestions}
             .externalWarning=${this.madeOnlyPendingWarning(this.dialectDraft)}
             @filter-input=${(e: CustomEvent<{ value: string }>): void =>
               this.handleDialectFilterInput(e)}
