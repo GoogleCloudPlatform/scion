@@ -1,3 +1,5 @@
+//go:build !no_sqlite
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,11 +17,7 @@
 package hub
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"testing"
 	"time"
@@ -27,7 +25,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +47,7 @@ func TestDurationBackstopExperiment_DispatchAndEffectiveConfigEcho(t *testing.T)
 		RunDeadline:  deadline,
 		BrokerBuild:  "dev",
 		TemplateHash: "abc123",
-	}, "broker-1", store.EffectiveConfigSourceSync, nil)
+	}, "broker-1", nil)
 	require.True(t, ok)
 	assert.Equal(t, "30m", eff.MaxDuration)
 	assert.Equal(t, deadline, eff.RunDeadline)
@@ -61,85 +58,40 @@ func TestDurationBackstopExperiment_DispatchAndEffectiveConfigEcho(t *testing.T)
 }
 
 func TestDurationBackstopHeartbeat_RecordsLimitsExceededWithoutDuplicateEvent(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
+	srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
-	project := &store.Project{
-		ID:   "proj-backstop",
-		Name: "Backstop Project",
-		Slug: "backstop-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:     "broker-backstop",
-		Name:   "backstop-broker",
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	agent := &store.Agent{
-		ID:              "00000000-0000-0000-0000-000000009372",
-		Slug:            "backstop-agent",
-		Name:            "backstop-agent",
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		RunID:           "run-backstop-1",
-		Phase:           string(state.PhaseRunning),
-		Activity:        string(state.ActivityThinking),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	postBackstopHB := func() {
-		body, err := json.Marshal(brokerHeartbeatRequest{
-			Status: "online",
-			Projects: []brokerProjectHeartbeat{
-				{
-					ProjectID:  project.ID,
-					AgentCount: 1,
-					Agents: []brokerAgentHeartbeat{
-						{
-							Slug:       agent.Slug,
-							AgentID:    agent.ID,
-							RunID:      agent.RunID,
-							Status:     string(state.ActivityLimitsExceeded),
-							Phase:      string(state.PhaseStopped),
-							Activity:   string(state.ActivityLimitsExceeded),
-							ExitReason: string(state.ExitReasonLimitsExceeded),
-							Message:    api.ReasonMaxDurationBackstop,
-						},
-					},
-				},
-			},
-		})
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", bytes.NewReader(body))
-		req = req.WithContext(contextWithBrokerIdentity(req.Context(), broker.ID))
-		w := httptest.NewRecorder()
-		srv.handleBrokerHeartbeat(w, req, broker.ID)
-		require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	agent := getAgentState(t, s, agentSlug, projectID)
+	hb := brokerAgentHeartbeat{
+		Slug:       agentSlug,
+		AgentID:    agent.ID,
+		RunID:      agent.RunID,
+		Status:     string(state.ActivityLimitsExceeded),
+		Phase:      string(state.PhaseStopped),
+		Activity:   string(state.ActivityLimitsExceeded),
+		ExitReason: string(state.ExitReasonLimitsExceeded),
+		Message:    api.ReasonMaxDurationBackstop,
 	}
 
-	postBackstopHB()
+	code := sendHeartbeat(t, srv, brokerID, projectID, hb)
+	require.Equal(t, http.StatusOK, code)
 
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
+	got := getAgentState(t, s, agentSlug, projectID)
 	assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	assert.Equal(t, string(state.ActivityLimitsExceeded), got.Activity)
 	assert.Equal(t, string(state.ExitReasonLimitsExceeded), got.ExitReason)
 	assert.Equal(t, api.ReasonMaxDurationBackstop, got.Message)
-	firstUpdated := got.Updated
 
 	// Re-posting the same backstop heartbeat (or racing after sciontool already
-	// reported limits_exceeded) must not regress or duplicate the state change.
+	// reported limits_exceeded) must not regress or visibly change state (so no
+	// duplicate status event is published).
 	time.Sleep(10 * time.Millisecond)
-	postBackstopHB()
+	code = sendHeartbeat(t, srv, brokerID, projectID, hb)
+	require.Equal(t, http.StatusOK, code)
 
-	got2, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
+	got2 := getAgentState(t, s, agentSlug, projectID)
 	assert.Equal(t, string(state.PhaseStopped), got2.Phase)
 	assert.Equal(t, string(state.ActivityLimitsExceeded), got2.Activity)
 	assert.Equal(t, string(state.ExitReasonLimitsExceeded), got2.ExitReason)
 	assert.Equal(t, api.ReasonMaxDurationBackstop, got2.Message)
-	assert.Equal(t, firstUpdated, got2.Updated, "duplicate backstop heartbeat should not rewrite unchanged terminal state")
+	assert.False(t, agentStatusVisiblyChanged(got, got2), "duplicate backstop heartbeat must not produce a visible status change")
 }

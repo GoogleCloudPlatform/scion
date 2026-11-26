@@ -172,7 +172,7 @@ func TestKubernetesRuntime_List_DeadlineExceededMapsToLimitsExceeded(t *testing.
 		},
 	}
 
-	cs := fake.NewSimpleClientset(pod)
+	cs := fake.NewClientset(pod)
 	rt := NewKubernetesRuntime(&k8s.Client{Clientset: cs})
 	rt.DefaultNamespace = "default"
 
