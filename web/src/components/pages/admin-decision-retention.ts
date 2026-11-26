@@ -263,9 +263,15 @@ export function buildDecisionRetentionPutBody(
 
 /**
  * The messages of a failed save: the per-field `errors` of a
- * validation_failed body, else the body's error message.
+ * validation_failed body, else the body's error message. When `formatProject`
+ * is provided, `project_overrides.<uuid>` paths are rendered with the project's
+ * display label.
  */
-export function decisionRetentionSaveErrors(body: unknown, fallback: string): string[] {
+export function decisionRetentionSaveErrors(
+  body: unknown,
+  fallback: string,
+  formatProject?: (projectId: string) => string
+): string[] {
   if (body && typeof body === 'object') {
     const list = (body as { errors?: unknown }).errors;
     if (Array.isArray(list)) {
@@ -275,7 +281,13 @@ export function decisionRetentionSaveErrors(body: unknown, fallback: string): st
           const { Path, Message, path, message } = e as Record<string, unknown>;
           const msg =
             typeof Message === 'string' ? Message : typeof message === 'string' ? message : '';
-          const at = typeof Path === 'string' ? Path : typeof path === 'string' ? path : '';
+          let at = typeof Path === 'string' ? Path : typeof path === 'string' ? path : '';
+          if (at && formatProject) {
+            at = at.replace(
+              /^project_overrides([./])([^./]+)/,
+              (_m, sep: string, pid: string) => `project_overrides${sep}${formatProject(pid)}`
+            );
+          }
           return msg ? (at ? `${at}: ${msg}` : msg) : '';
         })
         .filter((m) => m);
@@ -825,7 +837,8 @@ export class ScionAdminDecisionRetention extends LitElement {
       if (!res.ok) {
         this.saveErrors = decisionRetentionSaveErrors(
           await res.json().catch(() => null),
-          'Failed to save decision retention settings'
+          'Failed to save decision retention settings',
+          (pid) => this.projectLabel(pid)
         );
         return;
       }

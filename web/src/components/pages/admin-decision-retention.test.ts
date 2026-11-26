@@ -370,7 +370,7 @@ describe('needsDecisionPurgeConfirmation', () => {
 });
 
 describe('decisionRetentionSaveErrors', () => {
-  it('lists the per-field errors of a validation_failed body', () => {
+  it('lists the per-field errors of a validation_failed body and maps project_overrides UUIDs', () => {
     expect(
       decisionRetentionSaveErrors(
         {
@@ -383,6 +383,17 @@ describe('decisionRetentionSaveErrors', () => {
         'fallback'
       )
     ).toEqual([`project_overrides.${PROJ_WEB}: project not found`, 'bad']);
+
+    expect(
+      decisionRetentionSaveErrors(
+        {
+          error: 'validation_failed',
+          errors: [{ Path: `project_overrides.${PROJ_WEB}`, Message: 'project not found' }],
+        },
+        'fallback',
+        (pid) => (pid === PROJ_WEB ? 'web-console' : pid)
+      )
+    ).toEqual(['project_overrides.web-console: project not found']);
   });
 });
 
