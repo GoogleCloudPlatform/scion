@@ -186,11 +186,19 @@ func Write(ctx context.Context, root *os.Root, scratchDir string, ex Excluder, l
 // EstimateOptions configures optional checks performed during EstimateWithOptions.
 type EstimateOptions struct {
 	// CheckReadable, when true, verifies via stat-based POSIX mode/owner checks
-	// (no per-file open/close RTTs) that every non-excluded directory and
-	// regular file encountered within limits is readable/traversable by the
-	// current process, failing closed with fs.ErrPermission on unreadable
-	// entries without exceeding Limits or walking excluded subtrees.
+	// (or for euid 0, a single squash-detection probe) that every non-excluded
+	// directory and regular file encountered within limits is
+	// readable/traversable by the current process, failing closed with
+	// fs.ErrPermission on unreadable entries without exceeding Limits or
+	// walking excluded subtrees.
 	CheckReadable bool
+	// ExpectedOwnerUID, when > 0, identifies the expected non-root owner UID
+	// (e.g. Kubernetes K8sContainerUID) for root squash-detection probing. When
+	// set, a root process (euid == 0) only latches "root not squashed" after a
+	// successful probe of a non-world-readable entry owned by ExpectedOwnerUID
+	// (never on an NFS anonymous/nobody UID or an arbitrary third UID). When 0,
+	// any non-anon owner qualifies to latch.
+	ExpectedOwnerUID int
 }
 
 // Estimate performs a stat-only walk of root using the same excluder, symlink
@@ -220,7 +228,7 @@ func EstimateWithOptions(ctx context.Context, root *os.Root, ex Excluder, lim Li
 
 	var access statAccessChecker
 	if opts.CheckReadable {
-		access = newStatAccessChecker()
+		access = newStatAccessChecker(opts.ExpectedOwnerUID)
 	}
 
 	var (

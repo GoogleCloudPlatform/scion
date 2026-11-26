@@ -23,7 +23,7 @@ import (
 
 type statAccessChecker struct{}
 
-func newStatAccessChecker() statAccessChecker { return statAccessChecker{} }
+func newStatAccessChecker(_ int) statAccessChecker { return statAccessChecker{} }
 
 func (*statAccessChecker) checkReadable(_ *os.Root, _ string, _ fs.FileInfo, _ bool) error {
 	return nil

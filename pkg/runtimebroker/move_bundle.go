@@ -507,7 +507,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.WorkspaceDir, wsEx, req.Limits.WorkspaceLimits(), false)
+	wsEst, wsErr := estimateMoveBundleRoot(r.Context(), dirs.WorkspaceDir, wsEx, req.Limits.WorkspaceLimits(), false, 0)
 	if wsErr != nil {
 		if errors.Is(wsErr, fs.ErrNotExist) {
 			NotFound(w, "Agent workspace")
@@ -541,7 +541,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	// Kubernetes NFS home, R2), so excluded caches are skipped and entry/byte
 	// limits bound the walk.
 	checkHomeReadable := dirs.HomeOwner.UID > 0
-	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.HomeDir, homeEx, req.Limits.HomeLimits(), checkHomeReadable)
+	homeEst, homeErr := estimateMoveBundleRoot(r.Context(), dirs.HomeDir, homeEx, req.Limits.HomeLimits(), checkHomeReadable, dirs.HomeOwner.UID)
 	if homeErr != nil {
 		if errors.Is(homeErr, fs.ErrNotExist) {
 			NotFound(w, "Agent home")
@@ -567,7 +567,7 @@ func (s *Server) handleMoveBundlePrecheck(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func estimateMoveBundleRoot(ctx context.Context, dir string, ex bundle.Excluder, lim bundle.Limits, checkReadable bool) (api.MoveBundleRootEstimate, error) {
+func estimateMoveBundleRoot(ctx context.Context, dir string, ex bundle.Excluder, lim bundle.Limits, checkReadable bool, expectedOwnerUID int) (api.MoveBundleRootEstimate, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return api.MoveBundleRootEstimate{}, err
@@ -575,7 +575,8 @@ func estimateMoveBundleRoot(ctx context.Context, dir string, ex bundle.Excluder,
 	defer func() { _ = root.Close() }()
 
 	res, err := bundle.EstimateWithOptions(ctx, root, ex, lim, bundle.EstimateOptions{
-		CheckReadable: checkReadable,
+		CheckReadable:    checkReadable,
+		ExpectedOwnerUID: expectedOwnerUID,
 	})
 	est := api.MoveBundleRootEstimate{
 		Bytes:   res.Bytes,
