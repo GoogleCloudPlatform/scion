@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 func setProjectNeverSuspendCeiling(t *testing.T, s store.Store, ceiling int64) {
@@ -747,7 +748,20 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		// Reservation was stranded by the failed release.
 		require.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
 
-		// One reconcile pass releases the orphaned reservation and frees the slot.
+		// While younger than reconcileMinReservationAge, a missing-row reservation
+		// is treated as an in-flight create and survives reconcile.
+		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+		assert.True(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID),
+			"young missing-row reservation must survive reconcile to protect in-flight creates")
+
+		// Backdate the stranded reservation past reconcileMinReservationAge:
+		// one reconcile pass releases it and frees the slot.
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err = db.ExecContext(ctx,
+			"UPDATE usage_reservations SET created_at = ? WHERE resource_id = ? AND limit_definition_id = ?",
+			time.Now().Add(-2*reconcileMinReservationAge), resp1.Agent.ID, def.ID)
+		require.NoError(t, err)
+
 		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
 		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, resp1.Agent.ID))
 
@@ -867,5 +881,165 @@ func TestNeverSuspend_QuotaReconcile_SoftDeleteRace_AndUsageParity(t *testing.T)
 		require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &errResp))
 		assert.Equal(t, float64(1), errResp.Error.Details["count"])
 		assert.Equal(t, float64(1), errResp.Error.Details["limit"])
+	})
+
+	t.Run("soft-deleted row with young reservation does not count and is released by reconcile", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxNeverSuspendAgentsPerProject)
+		require.NoError(t, err)
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-sd-young-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS SD Young Project", Slug: "ns-sd-young-project",
+			GitRemote: "https://github.com/example/ns-sd-young.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		brokerID := tid("ns-sd-young-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "NS SD Young Broker", Slug: "ns-sd-young-broker", Status: store.BrokerStatusOnline,
+			CreatedBy: DevUserID,
+		}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS SD Young Broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		srv.SetDispatcher(&createAgentDispatcher{})
+
+		// Seed a soft-deleted flagged agent with a brand-new (young) reservation.
+		deletedAgent := &store.Agent{
+			ID: tid("ns-sd-young-agent"), Slug: "ns-sd-young-agent", Name: "ns-sd-young-agent",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		require.NoError(t, s.CreateAgent(ctx, deletedAgent))
+		_, err = s.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: def.ID,
+			SubjectID:         DevUserID,
+			ScopeType:         store.QuotaScopeProject,
+			ScopeID:           projectID,
+			ResourceID:        deletedAgent.ID,
+			Reserved:          1,
+		})
+		require.NoError(t, err)
+		softDeleteAgentRow(t, s, deletedAgent.ID)
+
+		// Unified usage must not count the soft-deleted agent's young reservation.
+		usage, err := neverSuspendQuotaUsage(ctx, s, def.ID, projectID, time.Now())
+		require.NoError(t, err)
+		assert.Empty(t, usage, "young reservation for soft-deleted row must not count")
+
+		// Enforcement allows creating a new flagged agent at cap=1 even before reconcile.
+		createRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-sd-young-new",
+			"projectId":     projectID,
+			"provisionOnly": true,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+
+		// Reconcile releases the young soft-deleted reservation immediately.
+		srv.ReconcileStaleNeverSuspendQuotaReservations(ctx)
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, deletedAgent.ID))
+	})
+
+	t.Run("restore over cap succeeds when lifecycle.never_suspend experiment is off", func(t *testing.T) {
+		srv, s := testServer(t)
+		srv.mu.Lock()
+		srv.config.SoftDeleteRetention = 24 * time.Hour
+		srv.mu.Unlock()
+		setProjectNeverSuspendCeiling(t, s, 1)
+
+		projectID := tid("ns-rest-off-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS Rest Off Project", Slug: "ns-rest-off-project",
+			GitRemote: "https://github.com/example/ns-rest-off.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+
+		// Fill the cap with a live flagged agent.
+		live := &store.Agent{
+			ID: tid("ns-rest-off-live"), Slug: "ns-rest-off-live", Name: "ns-rest-off-live",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		require.NoError(t, s.CreateAgent(ctx, live))
+
+		// Soft-deleted flagged agent.
+		deleted := &store.Agent{
+			ID: tid("ns-rest-off-del"), Slug: "ns-rest-off-del", Name: "ns-rest-off-del",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseStopped), SuspendPolicy: store.SuspendPolicyNever,
+		}
+		require.NoError(t, s.CreateAgent(ctx, deleted))
+		softDeleteAgentRow(t, s, deleted.ID)
+
+		// Experiment off: restore must not enforce never-suspend quota (design §4.2 point 7).
+		setNeverSuspendExperiment(t, srv, false)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+deleted.ID+"/restore", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		assert.False(t, hasReservation(t, s, store.LimitMaxNeverSuspendAgentsPerProject, deleted.ID))
+	})
+
+	t.Run("existing agent with active create launch or unpinned broker returns 409 without silent 200 or pin write", func(t *testing.T) {
+		srv, s := testServer(t)
+		setNeverSuspendExperiment(t, srv, true)
+
+		projectID := tid("ns-r1-project")
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: projectID, Name: "NS R1 Project", Slug: "ns-r1-project",
+			GitRemote: "https://github.com/example/ns-r1.git",
+			OwnerID:   DevUserID, CreatedBy: DevUserID,
+		}))
+		brokerID := tid("ns-r1-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID: brokerID, Name: "NS R1 Broker", Slug: "ns-r1-broker", Status: store.BrokerStatusOnline,
+			CreatedBy: DevUserID,
+		}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: projectID, BrokerID: brokerID, BrokerName: "NS R1 Broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		srv.SetDispatcher(&createAgentDispatcher{})
+
+		// Case 1: auto agent with an active create launch -> POST with suspendPolicy=never returns 409 (not 200).
+		launching := &store.Agent{
+			ID: tid("ns-r1-launching"), Slug: "ns-r1-launching", Name: "ns-r1-launching",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			RuntimeBrokerID: brokerID, Phase: string(state.PhaseCreated), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, launching))
+		_, err := s.BeginLaunch(ctx, launching.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+
+		recLaunch := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-r1-launching",
+			"projectId":     projectID,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusConflict, recLaunch.Code, "body: %s", recLaunch.Body.String())
+		var errLaunch ErrorResponse
+		require.NoError(t, json.Unmarshal(recLaunch.Body.Bytes(), &errLaunch))
+		assert.Equal(t, ErrCodeSuspendPolicyCreateOnly, errLaunch.Error.Code)
+
+		// Case 2: unpinned auto agent without a broker -> 409 and no broker pin is persisted.
+		unpinned := &store.Agent{
+			ID: tid("ns-r1-unpinned"), Slug: "ns-r1-unpinned", Name: "ns-r1-unpinned",
+			ProjectID: projectID, OwnerID: DevUserID, CreatedBy: DevUserID,
+			Phase: string(state.PhaseCreated), SuspendPolicy: store.SuspendPolicyAuto,
+		}
+		require.NoError(t, s.CreateAgent(ctx, unpinned))
+
+		recUnpinned := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]any{
+			"name":          "ns-r1-unpinned",
+			"projectId":     projectID,
+			"suspendPolicy": store.SuspendPolicyNever,
+		})
+		require.Equal(t, http.StatusConflict, recUnpinned.Code, "body: %s", recUnpinned.Body.String())
+		storedUnpinned, err := s.GetAgent(ctx, unpinned.ID)
+		require.NoError(t, err)
+		assert.Empty(t, storedUnpinned.RuntimeBrokerID, "refused mismatch must not assign or pin a broker")
+		assert.Empty(t, storedUnpinned.PinnedRuntimeBrokerID, "refused mismatch must not persist a pin")
 	})
 }

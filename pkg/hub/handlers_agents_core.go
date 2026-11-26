@@ -5452,15 +5452,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		timezoneSource = &tz.Source
 	}
 
-	// SuspendPolicy update: reserve quota on auto->never, warn if the harness
-	// cannot resume (design §4.6), persist via SetAgentSuspendPolicy with
-	// agent.suspend_policy.set audit, and report suspensionInFlight if an idle
-	// claim or auto-suspend intent swap was already taken (design §4.2 point 3).
-	currentPolicy := agent.SuspendPolicy
-	if currentPolicy == "" {
-		currentPolicy = store.SuspendPolicyAuto
-	}
-	suspendPolicyChanged := updates.SuspendPolicy != nil && *updates.SuspendPolicy != currentPolicy
+	// SuspendPolicy update: reserve quota when targeting "never" (idempotent),
+	// warn if the harness cannot resume (design §4.6), persist via
+	// SetAgentSuspendPolicy with in-transaction before/after audit, and report
+	// suspensionInFlight if a stop or suspend is already in flight (design §4.2
+	// point 3). Always run writeSuspendPolicyTx when updates.SuspendPolicy != nil
+	// rather than trusting the handler-entry snapshot, so a concurrent clear
+	// cannot turn a "never" PATCH into a stale echo.
 	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever {
 		if ok, harnessType, _ := s.harnessSupportsResume(ctx, agent); !ok {
 			if harnessType != "" {
@@ -5472,7 +5470,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	}
 
 	var neverSuspendReserved bool
-	if suspendPolicyChanged && *updates.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
+	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
 		ok, created := s.reserveQuotaHTTP(ctx, w, store.LimitMaxNeverSuspendAgentsPerProject,
 			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
 		if !ok {
@@ -5535,7 +5533,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return nil
 	}
 
-	if suspendPolicyChanged {
+	if updates.SuspendPolicy != nil {
 		err := s.store.WithTx(ctx, func(tx store.Store) error {
 			if needsRowUpdate {
 				if err := tx.UpdateAgent(ctx, agent); err != nil {
@@ -5565,11 +5563,6 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			relCtx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
 			s.quotaService.Release(relCtx, store.LimitMaxNeverSuspendAgentsPerProject, agent.ID)
 			cancel()
-		}
-	} else if updates.SuspendPolicy != nil && !needsRowUpdate {
-		// No-op echo of suspendPolicy with no other fields: avoid bumping state_version.
-		if *updates.SuspendPolicy == store.SuspendPolicyNever {
-			suspensionInFlight = isAutoSuspendInFlight(agent)
 		}
 	} else if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
@@ -5646,7 +5639,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 }
 
 // isAutoSuspendInFlight reports whether a stop or suspend is already in flight
-// on a (either an active idle-suspend claim, or a running agent whose
+// on agent a (either an active idle-suspend claim, or a running agent whose
 // run_intent has already been swapped to stopped).
 func isAutoSuspendInFlight(a *store.Agent) bool {
 	if a == nil {

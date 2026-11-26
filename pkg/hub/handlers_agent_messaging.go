@@ -2115,10 +2115,11 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// (ptone/scion#2769; errAgentOwnerUserMissing, see
 	// lockAgentGuardUserTx).
 	// Re-reserve the per-project never-suspend quota when restoring a flagged
-	// agent (design §4.1, §4.5, §9 item 8). Over-cap returns 409 Conflict so
-	// callers can distinguish a restore quota conflict from a rate limit.
+	// agent while the experiment is enabled (design §4.1, §4.2 point 7, §4.5,
+	// §9 item 8). Over-cap returns 409 Conflict so callers can distinguish a
+	// restore quota conflict from a rate limit.
 	var neverSuspendReserved bool
-	if agent.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
+	if s.experimentEnabled(experiments.NeverSuspend) && agent.SuspendPolicy == store.SuspendPolicyNever && s.quotaService != nil && agent.ProjectID != "" {
 		created, qErr := s.quotaService.Reserve(ctx, store.LimitMaxNeverSuspendAgentsPerProject,
 			projectQuotaSubject(agent), store.QuotaScopeProject, agent.ProjectID, agent.ID)
 		if qErr != nil {

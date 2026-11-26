@@ -421,15 +421,6 @@ func countsAcrossSubjects(limitName string) bool {
 	return limitName == store.LimitMaxAgentsPerProject || limitName == store.LimitMaxNeverSuspendAgentsPerProject
 }
 
-// countActive is Reserve's count of active reservations: the scope-wide
-// total for a limit counted across subjects, through the grouped per-scope
-// count, else the subject's own count in the scope.
-//
-// For max_never_suspend_agents_per_project, usage is computed as the union of
-// active reservation resource IDs and non-deleted agents with
-// suspend_policy="never" in the project so agents flagged while Phase 1 was
-// deployed (without reservations) are included without double-counting agents
-// that hold both a row and a reservation (ptone/scion#9183).
 // neverSuspendQuotaUsage is the single source of truth for
 // max_never_suspend_agents_per_project usage, used by both quota enforcement
 // (Reserve / 429 details) and the admin usage endpoints (getUsageSummary /
@@ -531,6 +522,13 @@ func neverSuspendQuotaUsage(ctx context.Context, st store.Store, limitDefID, pro
 	return out, nil
 }
 
+// countActive is Reserve's count of active reservations: the scope-wide
+// total for a limit counted across subjects, through the grouped per-scope
+// count, else the subject's own count in the scope.
+//
+// For max_never_suspend_agents_per_project, usage is delegated to
+// neverSuspendQuotaUsage so enforcement and admin usage views agree
+// (ptone/scion#9183).
 func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
 	if limitName == store.LimitMaxNeverSuspendAgentsPerProject && scopeType == store.QuotaScopeProject {
 		usage, err := neverSuspendQuotaUsage(ctx, qs.store, limitDefID, scopeID, time.Now())

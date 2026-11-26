@@ -314,8 +314,10 @@ func (s *Server) reconcileQuotaReservations(ctx context.Context) {
 
 // ReconcileStaleNeverSuspendQuotaReservations releases stale
 // max_never_suspend_agents_per_project reservations:
-//   - any active reservation whose agent row no longer exists or is
-//     soft-deleted (at any age, matching ReconcileStaleProjectQuotaReservations),
+//   - any active reservation whose agent row is soft-deleted (at any age),
+//   - any active reservation whose agent row is missing and is at least
+//     reconcileMinReservationAge old (preserving in-flight creates younger than
+//     the grace window so concurrent creates cannot overshoot the cap),
 //   - any active reservation whose live agent has suspend_policy != "never"
 //     and is at least reconcileMinReservationAge old.
 func (s *Server) ReconcileStaleNeverSuspendQuotaReservations(ctx context.Context) {
@@ -350,8 +352,20 @@ func (s *Server) ReconcileStaleNeverSuspendQuotaReservations(ctx context.Context
 	for _, res := range reservations {
 		agent, ok := agentsByID[res.ResourceID]
 		if !ok {
-			if s.releaseObservedReservation(ctx, res) {
-				released++
+			if time.Since(res.CreatedAt) >= reconcileMinReservationAge {
+				if s.releaseObservedReservation(ctx, res) {
+					released++
+				}
+				continue
+			}
+			// Younger than reconcileMinReservationAge: release immediately only
+			// if the row is soft-deleted; a missing row may be an in-flight
+			// create that has not committed yet.
+			row, getErr := s.store.GetAgent(ctx, res.ResourceID)
+			if getErr == nil && !row.DeletedAt.IsZero() {
+				if s.releaseObservedReservation(ctx, res) {
+					released++
+				}
 			}
 			continue
 		}
