@@ -8,10 +8,11 @@ const BASE_PATH_PORT = 4533;
 
 export default defineConfig({
   testDir: '.',
-  // Two projects share the settings below. 'default' runs the suite against
-  // the dev server at the root path. 'base-path' runs base.pw.ts against a
-  // second dev server started with PROXY_BASE_PATH=/tw/, so the app is served
-  // under a deployment base path (ptone/scion#4202).
+  // Three projects share the settings below. 'default' runs the suite against
+  // the dev server at the root path. 'mobile' runs mobile.pw.ts at a phone
+  // viewport (390x844). 'base-path' runs base.pw.ts against a second dev
+  // server started with PROXY_BASE_PATH=/tw/, so the app is served under a
+  // deployment base path (ptone/scion#4202).
   projects: [
     {
       name: 'default',

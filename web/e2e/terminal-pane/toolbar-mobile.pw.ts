@@ -21,9 +21,14 @@ const agentId = '11111111-1111-4111-8111-111111111111';
 
 async function setupNarrowPane(
   page: Page,
-  options: { keyBar: boolean; compactHeader?: boolean; activity?: string }
+  options: { keyBar: boolean; compactHeader?: boolean; phoneChrome?: boolean; activity?: string }
 ): Promise<void> {
-  const { keyBar, compactHeader = true, activity = 'waiting_for_input' } = options;
+  const {
+    keyBar,
+    compactHeader = true,
+    phoneChrome = false,
+    activity = 'waiting_for_input',
+  } = options;
   await page.addInitScript((enabled: boolean) => {
     window.__SCION_FEATURES__ = {
       'web.terminal_key_bar': enabled,
@@ -64,12 +69,16 @@ async function setupNarrowPane(
     .poll(() => page.evaluate(() => window.paneFixture.session.state.connection))
     .toBe('connected');
 
-  await page.evaluate((compact: boolean) => {
-    const pane = window.paneFixture.pane;
-    pane.compactHeader = compact;
-    pane.userId = 'fixture-user';
-    pane.requestUpdate();
-  }, compactHeader);
+  await page.evaluate(
+    ({ compact, phone }: { compact: boolean; phone: boolean }) => {
+      const pane = window.paneFixture.pane;
+      pane.compactHeader = compact;
+      pane.phoneChrome = phone;
+      pane.userId = 'fixture-user';
+      pane.requestUpdate();
+    },
+    { compact: compactHeader, phone: phoneChrome }
+  );
   await page.waitForTimeout(50);
 }
 
@@ -145,6 +154,74 @@ for (const width of [390, 375, 320]) {
     });
   }
 }
+
+test('phoneChrome does not overflow in connected, disconnected, or reconnecting states at 320px/375px/390px', async ({
+  page,
+}) => {
+  await setupNarrowPane(page, { keyBar: true, phoneChrome: true });
+
+  for (const width of [390, 375, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.waitForTimeout(30);
+    // Connected state
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+    await expect(page.locator('.menu-btn')).toBeVisible();
+
+    // Disconnected state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        idle: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = false;
+      pane.idle = false;
+      pane.attempting = false;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+
+    // Reconnecting... state
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        idle: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = false;
+      pane.idle = false;
+      pane.attempting = true;
+      pane.requestUpdate();
+    });
+    await page.waitForTimeout(30);
+    await assertNoToolbarOverflow(page, width);
+    await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
+
+    // Verify Reconnecting... lives inside .toolbar-overflow
+    await page.locator('.toolbar-overflow-btn').click();
+    await expect(page.locator('.toolbar-overflow sl-menu-item[value="reconnect"]')).toContainText(
+      'Reconnecting...'
+    );
+    await page.keyboard.press('Escape');
+
+    // Restore connected state for next width
+    await page.evaluate(() => {
+      const pane = window.paneFixture.pane as unknown as {
+        connected: boolean;
+        attempting: boolean;
+        requestUpdate: () => void;
+      };
+      pane.connected = true;
+      pane.attempting = false;
+      pane.requestUpdate();
+    });
+  }
+});
 
 test('desktop viewport keeps inline controls visible and hides overflow menu', async ({ page }) => {
   await setupNarrowPane(page, { keyBar: false, compactHeader: false });

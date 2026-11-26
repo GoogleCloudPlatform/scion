@@ -41,6 +41,7 @@ import {
 import '../components/shared/header.js';
 import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import { deepActiveElement } from '../components/shared/deep-active-element.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
 import { render as litRender } from 'lit';
@@ -713,12 +714,13 @@ export class TerminalWorkspaceRoot {
    */
   private renderTestHubBanner(): void {
     if (this.testHubBannerHost.parentNode !== this.element) {
-      this.element.insertBefore(
-        this.testHubBannerHost,
+      const anchor =
         this.viewAsMemberBannerHost.parentNode === this.element
           ? this.viewAsMemberBannerHost
-          : this.header
-      );
+          : this.header.parentNode === this.element
+            ? this.header
+            : this.shell;
+      this.element.insertBefore(this.testHubBannerHost, anchor);
     }
     litRender(
       keyed(this.currentPath, renderTestHubBanner(getTestInfraStatus())),
@@ -728,7 +730,8 @@ export class TerminalWorkspaceRoot {
 
   private renderViewAsMemberBanner(): void {
     if (this.viewAsMemberBannerHost.parentNode !== this.element) {
-      this.element.insertBefore(this.viewAsMemberBannerHost, this.header);
+      const anchor = this.header.parentNode === this.element ? this.header : this.shell;
+      this.element.insertBefore(this.viewAsMemberBannerHost, anchor);
     }
     litRender(renderViewAsMemberBanner(this.user), this.viewAsMemberBannerHost);
   }
@@ -1661,7 +1664,16 @@ export class TerminalWorkspaceRoot {
    */
   private applyPhoneChrome(isNarrow: boolean, paneShown: boolean): void {
     for (const pane of this.panes.values()) pane.phoneChrome = isNarrow;
-    const drawerMode = isNarrow && paneShown && !this.element.hidden;
+    // While the workspace is hidden (e.g. switched to chat), close the drawer
+    // without moving <scion-header> out of the rail and back on return, which
+    // would disconnect/reconnect its notification tray twice per round-trip.
+    if (this.element.hidden) {
+      this.drawerOpen = false;
+      this.syncDrawer();
+      this.element.dataset.narrow = String(isNarrow);
+      return;
+    }
+    const drawerMode = isNarrow && paneShown;
     if (drawerMode !== this.drawerMode) {
       this.drawerMode = drawerMode;
       // The slide animates only a toggle, never the switch into drawer mode
@@ -1688,15 +1700,18 @@ export class TerminalWorkspaceRoot {
 
   /**
    * Applies the drawer state: an open drawer is a modal dialog over the
-   * terminal (the pane area is inert behind it); a closed one is off screen,
-   * so nothing in it is focusable or read. Out of drawer mode the rail is an
-   * ordinary landmark again.
+   * terminal (the pane area and workspace banners are inert behind it); a
+   * closed one is off screen, so nothing in it is focusable or read. Out of
+   * drawer mode the rail is an ordinary landmark again.
    */
   private syncDrawer(): void {
     const open = this.drawerMode && this.drawerOpen;
     this.element.dataset.phoneDrawer = this.drawerMode ? (open ? 'open' : 'closed') : 'off';
     this.rail.inert = this.drawerMode && !open;
     if (this.paneArea) this.paneArea.inert = open;
+    this.testHubBannerHost.inert = open;
+    this.viewAsMemberBannerHost.inert = open;
+    if (!this.placeMenu.hidden) this.closePlaceMenu();
     if (open) {
       this.rail.setAttribute('role', 'dialog');
       this.rail.setAttribute('aria-modal', 'true');
@@ -1719,8 +1734,12 @@ export class TerminalWorkspaceRoot {
     this.drawerOpen = open;
     if (open) {
       // Off the terminal first: on a phone that also lowers the keyboard.
-      const active = document.activeElement;
-      if (active instanceof HTMLElement && this.paneArea?.contains(active)) active.blur();
+      // xterm's helper textarea lives inside <scion-terminal-pane>'s shadow
+      // root, so blur the deep active element rather than the shadow host.
+      if (this.paneArea?.contains(document.activeElement)) {
+        const active = deepActiveElement();
+        if (active instanceof HTMLElement) active.blur();
+      }
     }
     this.syncDrawer();
     if (open) {
@@ -2263,6 +2282,7 @@ export class TerminalWorkspaceRoot {
 
     if (event.key === 'Escape') {
       event.preventDefault();
+      event.stopPropagation();
       this.closePlaceMenu();
       return;
     }
@@ -2289,6 +2309,7 @@ export class TerminalWorkspaceRoot {
   private readonly handleDropdownSelect = (event: Event): void => {
     const agentId = (event as CustomEvent<TerminalDropdownSelectDetail>).detail?.agentId;
     if (!agentId) return;
+    this.setDrawerOpen(false, false);
     const key = this.findSessionKeyByAgentId(agentId);
     if (key) {
       this.placeInNextFreeSlot(key);
@@ -2440,9 +2461,13 @@ export class TerminalWorkspaceRoot {
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
       }
-      /* The header in the phone drawer (applyPhoneChrome). */
+      /* The header in the phone drawer (applyPhoneChrome). The rail owns the
+         top and left safe-area insets, so zero the header's own insets here to
+         avoid doubling them under viewport-fit=cover. */
       #terminal-workspace .terminal-rail > scion-header {
+        padding-top: 0;
         padding-inline: 1rem;
+        --scion-header-inset-left: 0px;
         flex-shrink: 0;
       }
       .terminal-test-hub-banner,
@@ -3001,6 +3026,7 @@ export class TerminalWorkspaceRoot {
         height: var(--scion-app-height, 100dvh);
         padding-top: env(safe-area-inset-top, 0px);
         padding-bottom: env(safe-area-inset-bottom, 0px);
+        padding-left: env(safe-area-inset-left, 0px);
         box-sizing: border-box;
         background: var(--scion-surface, var(--scion-bg, #ffffff));
         border-right: 1px solid var(--scion-border, #e2e8f0);

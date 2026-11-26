@@ -450,8 +450,8 @@ export class ScionTerminalPane extends LitElement {
       }
 
       .toolbar .separator,
-      .toolbar .agent-name,
-      .toolbar .pane-action-btn:not(.toolbar-overflow-btn),
+      .toolbar:not(.phone) .agent-name,
+      .toolbar .pane-action-btn:not(.toolbar-overflow-btn):not(.menu-btn),
       .toolbar .spacer,
       .toolbar .port-btn,
       .toolbar .port-dropdown,
@@ -552,18 +552,46 @@ export class ScionTerminalPane extends LitElement {
       flex: 1;
     }
 
-    /* Phone header (phoneChrome): one tight row. */
+    /* Phone header (phoneChrome): one tight row that clears safe-area insets
+       (since <scion-header> lives inside the phone drawer) and moves secondary
+       actions into .toolbar-overflow across all narrow widths (<= 760px). */
     .toolbar.phone {
-      gap: 0.5rem;
-      padding: 0.25rem 0.5rem;
-      min-height: 40px;
+      gap: 0.375rem;
+      padding: calc(0.375rem + env(safe-area-inset-top, 0px))
+        max(0.5rem, env(safe-area-inset-right, 0px)) 0.375rem
+        max(0.5rem, env(safe-area-inset-left, 0px));
+      min-height: calc(40px + env(safe-area-inset-top, 0px));
+    }
+
+    .toolbar.phone .separator,
+    .toolbar.phone .pane-action-btn:not(.toolbar-overflow-btn):not(.menu-btn),
+    .toolbar.phone .spacer,
+    .toolbar.phone .port-btn,
+    .toolbar.phone .port-dropdown,
+    .toolbar.phone .capture-auth-btn,
+    .toolbar.phone .reconnect-btn,
+    .toolbar.phone .status-label {
+      display: none;
+    }
+
+    .toolbar.phone .agent-name {
+      min-width: 0;
+    }
+
+    .toolbar.phone .toggle-group button {
+      width: 36px;
+    }
+
+    .toolbar.phone .toolbar-tail {
+      margin-left: auto;
+      gap: 0.375rem;
+    }
+
+    .toolbar.phone .toolbar-overflow {
+      display: inline-flex;
     }
 
     .toolbar.phone .status-indicator {
-      flex-shrink: 0;
-    }
-
-    .more-menu {
       flex-shrink: 0;
     }
 
@@ -1405,13 +1433,6 @@ export class ScionTerminalPane extends LitElement {
    * pane itself, so the terminal takes focus once it connects (see
    * `shouldAutoFocusTerminal`).
    */
-  /** Focuses the phone header's menu button (where a closed drawer returns focus). */
-  focusMenuButton(): void {
-    const button = this.renderRoot.querySelector<HTMLElement>('.menu-btn');
-    if (button) button.focus();
-    else this.focusTerminal();
-  }
-
   focusTerminal(): void {
     if (this.terminal) {
       this.terminal.focus();
@@ -1419,6 +1440,13 @@ export class ScionTerminalPane extends LitElement {
     }
     if (!this.hasAttribute('tabindex')) this.tabIndex = -1;
     this.focus();
+  }
+
+  /** Focuses the phone header's menu button (where a closed drawer returns focus). */
+  focusMenuButton(): void {
+    const button = this.renderRoot.querySelector<HTMLElement>('.menu-btn');
+    if (button) button.focus();
+    else this.focusTerminal();
   }
 
   /** Presentation only. Output continues to be parsed by the same xterm. */
@@ -3000,6 +3028,7 @@ export class ScionTerminalPane extends LitElement {
   private renderMenuButton() {
     if (!this.phoneChrome) return nothing;
     return html`<button
+      type="button"
       class="pane-action-btn menu-btn"
       aria-expanded=${this.drawerOpen ? 'true' : 'false'}
       title="Terminals"
@@ -3014,129 +3043,6 @@ export class ScionTerminalPane extends LitElement {
   }
 
   /**
-   * The phone header's "More" menu: the back links, the graph and chat
-   * links, the exposed ports and Capture Auth, which the wide header shows
-   * inline.
-   */
-  private renderMoreMenu() {
-    const name = this.agentName || this.agentId;
-    const projectName = projectDisplayName({
-      name: this.agent?.project,
-      slug: this.agent?.projectSlug,
-    });
-    const onSelect = (e: CustomEvent<{ item: { value: string } }>): void => {
-      const value = e.detail.item.value;
-      if (value === 'project') navigateTo(`/projects/${this.projectId}`);
-      else if (value === 'agent') navigateTo(`/agents/${this.agentId}`);
-      else if (value === 'graph') this.openInGraph();
-      else if (value === 'chat') this.openInChat();
-      else if (value === 'capture-auth') void this.openCaptureAuthScopeDialog();
-      else if (value.startsWith('port:')) {
-        window.open(
-          `/api/v1/agents/${this.agentId}/ports/${value.slice(5)}/proxy/`,
-          '_blank',
-          'noopener'
-        );
-      }
-    };
-    return html`<sl-dropdown class="more-menu" placement="bottom-end" hoist>
-      <button
-        slot="trigger"
-        class="pane-action-btn"
-        title="More"
-        aria-label="More actions for ${name}"
-      >
-        <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
-      </button>
-      <sl-menu @sl-select=${onSelect}>
-        ${this.projectId
-          ? html`<sl-menu-item value="project">
-              <sl-icon slot="prefix" name="folder"></sl-icon>
-              ${projectName ? `Back to ${projectName}` : 'Back to Project'}
-            </sl-menu-item>`
-          : nothing}
-        <sl-menu-item value="agent">
-          <span slot="prefix" aria-hidden="true">${ROBOT_EMOJI}</span>
-          Back to Agent
-        </sl-menu-item>
-        ${this.projectId
-          ? html`<sl-menu-item value="graph">
-              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              Open in graph
-            </sl-menu-item>`
-          : nothing}
-        ${this.userId && isFeatureEnabled('web.native_chat')
-          ? html`<sl-menu-item value="chat">
-              <sl-icon slot="prefix" name="chat-dots"></sl-icon>
-              Open in chat
-            </sl-menu-item>`
-          : nothing}
-        ${this.exposedPorts.map(
-          (p) =>
-            html`<sl-menu-item value=${`port:${p.port}`}>
-              <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
-              ${p.label ? `${p.label} (:${p.port})` : `Open :${p.port}`}
-            </sl-menu-item>`
-        )}
-        ${this.showCaptureAuth
-          ? html`<sl-menu-item value="capture-auth" ?disabled=${this.captureAuthLoading}>
-              <sl-icon slot="prefix" name="key"></sl-icon>
-              ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
-            </sl-menu-item>`
-          : nothing}
-      </sl-menu>
-    </sl-dropdown>`;
-  }
-
-  /** The phone header row (phoneChrome). */
-  private renderPhoneToolbar() {
-    return html`
-      <div class="toolbar phone">
-        ${this.renderMenuButton()} ${this.renderAgentName(this.agentName || this.agentId)}
-        <div class="toggle-group" title="Switch between agent and shell tmux windows">
-          <button
-            class=${this.activeWindow === 'agent' ? 'active' : ''}
-            title="Agent window"
-            aria-label="Agent window"
-            @click=${() => this.switchToAgent()}
-            ?disabled=${!this.connected}
-          >
-            ${this.renderRobotIcon()}
-          </button>
-          <button
-            class=${this.activeWindow === 'shell' ? 'active' : ''}
-            title="Shell window"
-            aria-label="Shell window"
-            @click=${() => this.switchToShell()}
-            ?disabled=${!this.connected}
-          >
-            ${this.renderTerminalIcon()}
-          </button>
-        </div>
-        <div class="spacer"></div>
-        <div
-          class="status-indicator"
-          role="img"
-          title=${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
-          aria-label=${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
-        >
-          <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-        </div>
-        ${!this.connected && !this.idle
-          ? html`<button
-              class="reconnect-btn"
-              ?disabled=${this.reconnectDisabled}
-              @click=${() => this.handleReconnect()}
-            >
-              ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
-            </button>`
-          : nothing}
-        ${this.renderMoreMenu()}
-      </div>
-    `;
-  }
-
-  /**
    * Breadcrumb navigation to the agent's project (when present) and agent
    * detail page. Full mode renders `<scion-breadcrumb>` with linked crumbs
    * (no current-page crumb, since the terminal pane is the active context).
@@ -3144,7 +3050,7 @@ export class ScionTerminalPane extends LitElement {
    * accessible names, and tooltips.
    */
   private renderBackLinks() {
-    if (!this.agentId) {
+    if (!this.agentId || this.phoneChrome) {
       return nothing;
     }
     const projectHref = `/projects/${encodeURIComponent(this.projectId)}`;
@@ -3189,7 +3095,11 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private handleOverflowSelect(value: string): void {
-    if (value === 'graph') {
+    if (value === 'project') {
+      if (this.projectId) navigateTo(`/projects/${encodeURIComponent(this.projectId)}`);
+    } else if (value === 'agent') {
+      if (this.agentId) navigateTo(`/agents/${encodeURIComponent(this.agentId)}`);
+    } else if (value === 'graph') {
       this.openInGraph();
     } else if (value === 'chat') {
       this.openInChat();
@@ -3209,6 +3119,10 @@ export class ScionTerminalPane extends LitElement {
 
   private renderToolbarOverflow() {
     const displayName = this.agentName || this.agentId;
+    const projectName = projectDisplayName({
+      name: this.agent?.project,
+      slug: this.agent?.projectSlug,
+    });
     const showGraph = Boolean(this.projectId);
     const showChat = Boolean(this.userId && isFeatureEnabled('web.native_chat'));
     const showReconnect = !this.connected && !this.idle;
@@ -3233,6 +3147,18 @@ export class ScionTerminalPane extends LitElement {
                   ? ` · ${this.agentDisplayStatus.replace(/_/g, ' ')}`
                   : ''}</sl-menu-label
               >`
+            : nothing}
+          ${this.phoneChrome && this.projectId
+            ? html`<sl-menu-item value="project">
+                <sl-icon slot="prefix" name="folder" aria-hidden="true"></sl-icon>
+                ${projectName ? `Back to ${projectName}` : 'Back to Project'}
+              </sl-menu-item>`
+            : nothing}
+          ${this.phoneChrome && this.agentId
+            ? html`<sl-menu-item value="agent">
+                <sl-icon slot="prefix" name="cpu" aria-hidden="true"></sl-icon>
+                Back to Agent
+              </sl-menu-item>`
             : nothing}
           ${showGraph
             ? html`<sl-menu-item value="graph">
@@ -3280,7 +3206,9 @@ export class ScionTerminalPane extends LitElement {
   override render() {
     if (this.loading) {
       return html`
-        <div class="toolbar">${this.renderMenuButton()} ${this.renderBackLinks()}</div>
+        <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
+          ${this.renderMenuButton()} ${this.renderBackLinks()}
+        </div>
         <div class="loading-state">
           <div class="spinner"></div>
           <p>Connecting to agent...</p>
@@ -3293,7 +3221,7 @@ export class ScionTerminalPane extends LitElement {
       const suspendHint =
         this.isSuspended && this.agent ? suspendReasonHint(this.agent) : undefined;
       return html`
-        <div class="toolbar">
+        <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
           ${this.renderMenuButton()} ${this.renderBackLinks()}
           ${this.agentName
             ? html`
@@ -3385,23 +3313,27 @@ export class ScionTerminalPane extends LitElement {
     // prettier-ignore
     return html`
       <div class="toolbar-container">
-      <div class="toolbar">
+      <div class="toolbar ${this.phoneChrome ? 'phone' : ''}">
         ${this.renderMenuButton()}
         ${this.renderBackLinks()}
         <div class="separator"></div>
         ${this.renderAgentName(this.agentName || this.agentId)}
         <div class="toggle-group" title="Switch between agent and shell tmux windows">
           <button
+            type="button"
             class=${this.activeWindow === 'agent' ? 'active' : ''}
             title="Agent window"
+            aria-label="Agent window"
             @click=${() => this.switchToAgent()}
             ?disabled=${!this.connected}
           >
             ${this.renderRobotIcon()}
           </button>
           <button
+            type="button"
             class=${this.activeWindow === 'shell' ? 'active' : ''}
             title="Shell window"
+            aria-label="Shell window"
             @click=${() => this.switchToShell()}
             ?disabled=${!this.connected}
           >

@@ -463,16 +463,117 @@ describe('the phone drawer', () => {
     expect(rail().hasAttribute('role')).toBe(false);
   });
 
-  it('hiding the workspace leaves drawer mode', async () => {
+  it('hiding the workspace closes the drawer without reparenting the header', async () => {
     mockNarrowViewport();
     const pane = await mount();
     toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
     root.show(false);
-    expect(root.element.dataset.phoneDrawer).toBe('off');
-    expect(header().parentElement).toBe(root.element);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(header().parentElement).toBe(rail());
+    expect(root.element.querySelector<HTMLElement>('.terminal-pane-area')!.inert).toBe(false);
     root.show(true);
     await flush();
     expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(header().parentElement).toBe(rail());
+  });
+
+  it('opening the drawer makes workspace banners inert and blurs the deep active element', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    const testBanner = root.element.querySelector<HTMLElement>('.terminal-test-hub-banner')!;
+    const viewAsBanner = root.element.querySelector<HTMLElement>(
+      '.terminal-view-as-member-banner'
+    )!;
+
+    // Simulate xterm's helper textarea inside the pane's shadow root holding focus.
+    const helper = document.createElement('textarea');
+    helper.className = 'xterm-helper-textarea';
+    pane.shadowRoot!.append(helper);
+    helper.focus();
+    const blurSpy = vi.spyOn(helper, 'blur');
+
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    expect(testBanner.inert).toBe(true);
+    expect(viewAsBanner.inert).toBe(true);
+    expect(blurSpy).toHaveBeenCalledTimes(1);
+
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(testBanner.inert).toBe(false);
+    expect(viewAsBanner.inert).toBe(false);
+  });
+
+  it('selecting a terminal via TERMINAL_DROPDOWN_SELECT_EVENT closes the open drawer and un-inerts the pane area', async () => {
+    const AGENT_B = '22222222-2222-4222-8222-222222222222';
+    mockNarrowViewport();
+    const paneA = await mount();
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_B, { deferConnect: true }));
+    await flush();
+
+    const area = root.element.querySelector<HTMLElement>('.terminal-pane-area')!;
+    toggle(paneA);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    expect(area.inert).toBe(true);
+
+    window.dispatchEvent(
+      new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
+        detail: { agentId: AGENT_B },
+      })
+    );
+    await flush();
+
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(area.inert).toBe(false);
+
+    // Selecting the already-shown terminal also closes the drawer cleanly.
+    const paneB = paneFor(root, AGENT_B);
+    toggle(paneB);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    window.dispatchEvent(
+      new CustomEvent<TerminalDropdownSelectDetail>(TERMINAL_DROPDOWN_SELECT_EVENT, {
+        detail: { agentId: AGENT_B },
+      })
+    );
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(area.inert).toBe(false);
+  });
+
+  it('Escape inside an open sl-dropdown inside the drawer keeps the drawer open', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const dropdown = document.createElement('sl-dropdown');
+    dropdown.setAttribute('open', '');
+    rail().append(dropdown);
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    dropdown.dispatchEvent(esc);
+
+    expect(esc.defaultPrevented).toBe(false);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    dropdown.remove();
+  });
+
+  it('re-inserting detached banners while the header is inside the drawer does not throw', async () => {
+    mockNarrowViewport();
+    await mount();
+    expect(header().parentElement).toBe(rail());
+
+    const testBanner = root.element.querySelector<HTMLElement>('.terminal-test-hub-banner')!;
+    const viewAsBanner = root.element.querySelector<HTMLElement>(
+      '.terminal-view-as-member-banner'
+    )!;
+    testBanner.remove();
+    viewAsBanner.remove();
+
+    expect(() => root.setCurrentPath('/terminals/next')).not.toThrow();
+    expect(() => root.setUser(null)).not.toThrow();
+    expect(testBanner.parentElement).toBe(root.element);
+    expect(viewAsBanner.parentElement).toBe(root.element);
   });
 });
 

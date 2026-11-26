@@ -68,10 +68,10 @@ async function mockHub(page: Page): Promise<void> {
       },
     })
   );
-  await page.routeWebSocket('**/pty?*', () => {});
+  await page.routeWebSocket('**/pty?*', (socket) => {
+    socket.send(JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') }));
+  });
 }
-
-const SHOTS = process.env.TW_MOBILE_SHOTS;
 
 type KeyboardWindow = Window & { __setTestKeyboard: (frameHeight: number | null) => void };
 
@@ -122,12 +122,6 @@ async function box(
   return b;
 }
 
-async function shot(page: Page, name: string): Promise<void> {
-  if (!SHOTS) return;
-  await page.waitForTimeout(400); // past the drawer's slide
-  await page.screenshot({ path: `${SHOTS}/${name}.png` });
-}
-
 // A fresh dev server optimizes the terminal workspace's lazily imported
 // dependencies on the first load, which fails that load ("Outdated
 // Optimize Dep"); load it once before the tests.
@@ -162,7 +156,6 @@ test('the terminal takes the screen; the list, header and layout bar are off it'
   // The pane header is one row.
   const toolbar = await box(page, page.locator('scion-terminal-pane:not([hidden]) .toolbar'));
   expect(toolbar.height).toBeLessThanOrEqual(52);
-  await shot(page, 'phone-terminal');
 });
 
 test('the menu button opens the drawer with the list, Jump to agent and the header', async ({
@@ -174,7 +167,6 @@ test('the menu button opens the drawer with the list, Jump to agent and the head
   await expect(rail(page).locator('scion-header')).toBeVisible();
   await expect(rail(page).getByRole('button', { name: /Jump to agent/ })).toBeVisible();
   await expect(rail(page).getByText('second-agent')).toBeVisible();
-  await shot(page, 'phone-drawer');
   // Choosing a terminal closes the drawer and shows it.
   await rail(page).getByText('second-agent').click();
   await expect(rail(page)).toBeHidden();
@@ -224,18 +216,67 @@ test('the pane actions are in the More menu', async ({ page }) => {
   await open(page);
   const pane = page.locator('scion-terminal-pane:not([hidden])');
   await expect(pane.locator('.back-link')).toHaveCount(0);
-  await pane.getByRole('button', { name: /More actions/ }).click();
-  await expect(pane.getByRole('menuitem', { name: /Back to Agent/ })).toBeVisible();
-  await expect(pane.getByRole('menuitem', { name: /Back to demo/ })).toBeVisible();
-  await expect(pane.getByRole('menuitem', { name: /Open in graph/ })).toBeVisible();
-  await shot(page, 'phone-more');
-  await pane.getByRole('menuitem', { name: /Back to Agent/ }).click();
+  await expect(pane.locator('button.toolbar-overflow-btn')).toBeVisible();
+  await pane.locator('button.toolbar-overflow-btn').click();
+  const menu = pane.locator('.toolbar-overflow sl-menu');
+  await expect(menu.getByRole('menuitem', { name: /Back to Agent/ })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /Back to demo/ })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: /Open in graph/ })).toBeVisible();
+  await menu.getByRole('menuitem', { name: /Back to Agent/ }).click();
   await expect(page).toHaveURL(`/agents/${agent}`);
 });
 
-test('with the keyboard up, the terminal fills what the keyboard leaves', async ({ page }) => {
+test('picking a terminal from the header Terminals dropdown closes the drawer and focuses the pane', async ({
+  page,
+}) => {
+  await open(page);
+  await menuButton(page).click();
+  await expect(rail(page)).toBeVisible();
+
+  const header = rail(page).locator('scion-header');
+  const modeTrigger = header.locator('.mode-trigger');
+  await modeTrigger.click();
+  await header.locator('sl-menu-item', { hasText: 'second-agent' }).first().click();
+
+  await expect(page.locator('#terminal-workspace')).toHaveAttribute('data-phone-drawer', 'closed');
+  await expect(page.locator('.terminal-pane-area')).toHaveJSProperty('inert', false);
+  await expect(page).toHaveURL(`/terminals/${agentB}`);
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName === 'SCION-TERMINAL-PANE'))
+    .toBe(true);
+
+  // Picking the already-shown terminal from the header dropdown also closes the drawer.
+  await menuButton(page).click();
+  await expect(page.locator('#terminal-workspace')).toHaveAttribute('data-phone-drawer', 'open');
+  await modeTrigger.click();
+  await header.locator('sl-menu-item', { hasText: 'second-agent' }).first().click();
+
+  await expect(page.locator('#terminal-workspace')).toHaveAttribute('data-phone-drawer', 'closed');
+  await expect(page.locator('.terminal-pane-area')).toHaveJSProperty('inert', false);
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.tagName === 'SCION-TERMINAL-PANE'))
+    .toBe(true);
+});
+
+test('with the keyboard up, the terminal fills what the keyboard leaves and opening the drawer blurs xterm', async ({
+  page,
+}) => {
   await installFakeKeyboard(page);
   await open(page);
+  // Focus xterm's helper textarea inside the pane's shadow root.
+  const helper = page.locator('scion-terminal-pane:not([hidden]) .xterm-helper-textarea');
+  await expect(helper).toBeAttached();
+  await helper.focus();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        return el?.className ?? '';
+      })
+    )
+    .toContain('xterm-helper-textarea');
+
   const frame = 844 - 336; // a 336px iPhone keyboard
   await page.evaluate((h) => (window as unknown as KeyboardWindow).__setTestKeyboard(h), frame);
   await expect
@@ -246,10 +287,22 @@ test('with the keyboard up, the terminal fills what the keyboard leaves', async 
     .toBeLessThanOrEqual(frame + 1);
   const area = await box(page, terminalArea(page));
   expect(area.height).toBeGreaterThan(frame * 0.8);
-  await shot(page, 'phone-keyboard');
-  // The menu still opens the drawer with the keyboard up (it lowers it).
+  // The menu still opens the drawer with the keyboard up and blurs xterm's textarea.
   await menuButton(page).click();
   await expect(rail(page)).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        let el: Element | null = document.activeElement;
+        while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+        const railEl = document.querySelector('.terminal-rail');
+        return {
+          inRail: Boolean(el && railEl?.contains(el)),
+          isXtermTextarea: Boolean(el?.classList.contains('xterm-helper-textarea')),
+        };
+      })
+    )
+    .toEqual({ inRail: true, isXtermTextarea: false });
   await page.keyboard.press('Escape');
   await expect(rail(page)).toBeHidden();
   // Keyboard down: the full screen again.
