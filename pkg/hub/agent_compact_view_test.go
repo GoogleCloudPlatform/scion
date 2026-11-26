@@ -300,7 +300,7 @@ func TestAgentCompactView_KeySetIsAllowlist(t *testing.T) {
 	full := &store.Agent{
 		ID: tid("cv-allkeys"), Slug: "cv-allkeys", Name: "All Keys", Template: "claude",
 		ProjectID: f.project.ID, Labels: map[string]string{"k": "v"},
-		Phase: "suspended", Activity: "completed", SuspendReason: "idle", ContainerStatus: "Up 5 minutes",
+		Phase: "suspended", Activity: "completed", SuspendReason: "idle", SuspendPolicy: store.SuspendPolicyNever, ContainerStatus: "Up 5 minutes",
 		Message: "Waiting for review", MessageMode: "project", Ancestry: []string{f.agentIDAt(0)},
 		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
 		HarnessConfig: "claude",

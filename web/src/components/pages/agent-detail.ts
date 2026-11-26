@@ -87,6 +87,14 @@ import {
   stateLabel,
   suspendReasonHint,
 } from '../../shared/agent-state-display.js';
+import {
+  canForceSuspend,
+  FORCE_SUSPEND_CONFIRM_OPTIONS,
+  forceKeepSuspendedConfirmMessage,
+  forceSuspendConfirmMessage,
+  isNeverSuspendActive,
+  neverSuspendBadge,
+} from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { agentPlacementView } from './agent-placement.js';
@@ -132,6 +140,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   idleSuspendEnabled,
   isFeatureEnabled,
+  neverSuspendEnabled,
   usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
 import '../shared/secret-list.js';
@@ -444,7 +453,8 @@ export class ScionPageAgentDetail extends LitElement {
     .broker-link sl-icon {
       flex-shrink: 0;
     }
-    .exec-container-badge sl-icon {
+    .exec-container-badge sl-icon,
+    .never-suspend-badge sl-icon {
       margin-right: 0.25rem;
     }
     .project-link:hover,
@@ -1538,6 +1548,29 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  /**
+   * The Suspend policy row when `lifecycle.never_suspend` is enabled.
+   */
+  private renderSuspendPolicy(agent: Agent) {
+    if (!neverSuspendEnabled()) return nothing;
+    const isNever = agent.suspendPolicy === 'never';
+    const policy = isNever ? 'never' : 'auto';
+    const hint = isNever
+      ? 'Skipped by automatic idle/stalled and bulk suspends; manual suspend requires force.'
+      : 'Eligible for automatic idle and stalled suspension.';
+    return html`
+      <div class="info-item" data-testid="agent-suspend-policy">
+        <span class="info-label">Suspend policy</span>
+        <span class="info-value"
+          >${policy}
+          <span style="color: var(--scion-text-muted, #64748b); font-size: 0.85em;"
+            >${hint}</span
+          ></span
+        >
+      </div>
+    `;
+  }
+
   private isZeroDate(dateString: string): boolean {
     if (!dateString) return true;
     const date = new Date(dateString);
@@ -1551,6 +1584,18 @@ export class ScionPageAgentDetail extends LitElement {
 
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
     if (!this.agent) return;
+
+    if (action === 'suspend' && isNeverSuspendActive(this.agent)) {
+      if (
+        !(await showConfirm(
+          forceSuspendConfirmMessage(this.agent.name),
+          FORCE_SUSPEND_CONFIRM_OPTIONS
+        ))
+      ) {
+        return;
+      }
+      action = 'force-suspend';
+    }
 
     if (action === 'force-resume') {
       if (
@@ -1573,6 +1618,7 @@ export class ScionPageAgentDetail extends LitElement {
       start: 'starting',
       stop: 'stopping',
       suspend: 'stopping',
+      'force-suspend': 'stopping',
       resume: 'starting',
       'force-resume': 'starting',
     };
@@ -1585,6 +1631,7 @@ export class ScionPageAgentDetail extends LitElement {
       start: `/api/v1/agents/${this.agentId}/start`,
       stop: `/api/v1/agents/${this.agentId}/stop`,
       suspend: `/api/v1/agents/${this.agentId}/suspend`,
+      'force-suspend': `/api/v1/agents/${this.agentId}/suspend`,
       resume: `/api/v1/agents/${this.agentId}/start`,
       'force-resume': `/api/v1/agents/${this.agentId}/start`,
     };
@@ -1620,6 +1667,9 @@ export class ScionPageAgentDetail extends LitElement {
   private renderKeepSuspended(agent: Agent) {
     const hubSuspended = agent.suspendReason === 'idle' || agent.suspendReason === 'stalled';
     if (!hubSuspended || !idleSuspendEnabled()) return nothing;
+    if (isNeverSuspendActive(agent) && !canForceSuspend(agent._capabilities, this.pageData?.user)) {
+      return nothing;
+    }
     return html`
       <sl-tooltip content="New work will no longer wake this agent; only a resume brings it back.">
         <sl-button
@@ -1641,11 +1691,23 @@ export class ScionPageAgentDetail extends LitElement {
   /** Converts a hub suspension to a user suspension (POST suspend on a suspended agent). */
   private async keepSuspended(): Promise<void> {
     if (!this.agent) return;
+    let action: AgentLifecycleAction = 'suspend';
+    if (isNeverSuspendActive(this.agent)) {
+      if (
+        !(await showConfirm(
+          forceKeepSuspendedConfirmMessage(this.agent.name),
+          FORCE_SUSPEND_CONFIRM_OPTIONS
+        ))
+      ) {
+        return;
+      }
+      action = 'force-suspend';
+    }
     this.actionLoading = { ...this.actionLoading, 'keep-suspended': true };
     try {
       const response = await apiFetch(
         `/api/v1/agents/${this.agentId}/suspend`,
-        lifecycleActionRequestInit('suspend')
+        lifecycleActionRequestInit(action)
       );
       if (!response.ok) {
         throw new Error(
@@ -2341,7 +2403,7 @@ export class ScionPageAgentDetail extends LitElement {
           .crumbs=${[...agentParentTrail(this.projectNamed), current(agent.name)]}
         ></scion-breadcrumb>
         <sl-icon slot="icon" name="cpu"></sl-icon>
-        ${agentStatusBadge(agent)}
+        ${agentStatusBadge(agent)} ${neverSuspendBadge(agent)}
         ${isShell && execContainersEnabled()
           ? html`
               <sl-badge
@@ -2449,12 +2511,15 @@ export class ScionPageAgentDetail extends LitElement {
             ? html`
                 ${lifecycleOk
                   ? html`
-                      ${agent.harnessCapabilities?.resume?.support !== 'no'
+                      ${agent.harnessCapabilities?.resume?.support !== 'no' &&
+                      (!isNeverSuspendActive(agent) ||
+                        canForceSuspend(agent._capabilities, this.pageData?.user))
                         ? html`
                             <sl-button
                               variant="warning"
                               size="small"
                               outline
+                              data-testid="header-suspend"
                               ?loading=${this.actionLoading['suspend']}
                               ?disabled=${this.actionLoading['suspend']}
                               @click=${() => this.handleAction('suspend')}
@@ -2650,7 +2715,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
-          ${this.renderSuspendReason(agent)}
+          ${this.renderSuspendReason(agent)} ${this.renderSuspendPolicy(agent)}
           ${agent.detail?.toolName
             ? html`
                 <div class="info-item">

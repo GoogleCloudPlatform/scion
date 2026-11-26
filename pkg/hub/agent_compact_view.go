@@ -90,6 +90,7 @@ type AgentCompactItem struct {
 	Phase           string            `json:"phase,omitempty"`
 	Activity        string            `json:"activity,omitempty"`
 	SuspendReason   string            `json:"suspendReason,omitempty"`
+	SuspendPolicy   string            `json:"suspendPolicy,omitempty"`
 	ContainerStatus string            `json:"containerStatus,omitempty"`
 	Message         string            `json:"message,omitempty"`
 	MessageMode     string            `json:"messageMode"`
@@ -151,6 +152,7 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		Phase:             a.Phase,
 		Activity:          a.Activity,
 		SuspendReason:     a.SuspendReason,
+		SuspendPolicy:     a.SuspendPolicy,
 		ContainerStatus:   a.ContainerStatus,
 		Message:           a.Message,
 		MessageMode:       a.MessageMode,

@@ -49,6 +49,7 @@ import {
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import { neverSuspendBadge } from '../../shared/never-suspend.js';
 import {
   heldReincarnateKeys,
   REINCARNATE_CONFIRM_MESSAGE,
@@ -89,6 +90,8 @@ import './not-found.js';
 interface AgentPatchResponse {
   disposition?: AgentUpdateDisposition;
   warnings?: string[];
+  /** True when suspendPolicy was set to "never" while an auto-suspend was already in flight. */
+  suspensionInFlight?: boolean;
   /** The agent's pending config edits after the save (held edits on). */
   pendingConfig?: { config?: Record<string, unknown> } | null;
 }
@@ -185,6 +188,7 @@ export function agentEditTopValues(agent: Agent, hubAutoExpose = false): AgentCo
     labels: agent.labels ?? {},
     explicitTimezone: applied?.explicitTimezone,
     explicitTimezoneLegacy: applied?.explicitTimezoneLegacy,
+    suspendPolicy: agent.suspendPolicy,
     messageMode: agent.messageMode,
     agentRole: applied?.agentRole,
     env: applied?.env,
@@ -251,6 +255,7 @@ export class ScionPageAgentEdit extends LitElement {
   @state() private conflict = false;
   @state() private touched: string[] = [];
   @state() private warnings: string[] = [];
+  @state() private suspensionInFlight = false;
   @state() private grouping: AgentConfigGrouping = loadEditGrouping();
 
   /** The by-tier view and the summary strip are behind web.agent_edit. */
@@ -415,6 +420,10 @@ export class ScionPageAgentEdit extends LitElement {
       this.error = await extractApiError(res, 'This agent changed since the page loaded.');
       return false;
     }
+    if (res.status === 403) {
+      this.error = await extractApiError(res, 'You do not have permission to update this agent.');
+      return false;
+    }
     if (!res.ok) {
       this.error = await extractApiError(res, `HTTP ${res.status}`);
       return false;
@@ -426,6 +435,7 @@ export class ScionPageAgentEdit extends LitElement {
       // An unreadable body still means the save succeeded.
     }
     this.warnings = body.warnings ?? [];
+    this.suspensionInFlight = Boolean(body.suspensionInFlight);
     showToast(
       dispositionSummary(body.disposition, Object.keys(body.pendingConfig?.config ?? {})),
       'success'
@@ -626,7 +636,7 @@ export class ScionPageAgentEdit extends LitElement {
           slot="back"
           .crumbs=${[...this.ancestorCrumbs(false), current('Edit', false)]}
         ></scion-breadcrumb>
-        ${agentStatusBadge(agent)}
+        ${agentStatusBadge(agent)} ${neverSuspendBadge(agent)}
       </scion-detail-header>
       ${this.conflict
         ? html`<sl-alert variant="warning" open data-testid="conflict">
@@ -640,6 +650,23 @@ export class ScionPageAgentEdit extends LitElement {
         : this.error
           ? html`<sl-alert variant="danger" open data-testid="error">${this.error}</sl-alert>`
           : nothing}
+      ${this.suspensionInFlight
+        ? html`<sl-alert
+            variant="warning"
+            open
+            closable
+            data-testid="suspension-in-flight"
+            @sl-after-hide=${(e: Event) => {
+              if (e.target !== e.currentTarget) return;
+              this.suspensionInFlight = false;
+            }}
+          >
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            A suspension was already in progress when Never suspend was enabled. This change does
+            not cancel the in-flight suspension, but the policy is saved and will apply once the
+            agent is running again.
+          </sl-alert>`
+        : nothing}
       ${this.warnings.length > 0
         ? html`<sl-alert variant="primary" open closable data-testid="warnings">
             <sl-icon slot="icon" name="info-circle"></sl-icon>
@@ -708,6 +735,9 @@ export class ScionPageAgentEdit extends LitElement {
     }
     sl-alert {
       margin-bottom: 1rem;
+    }
+    .never-suspend-badge sl-icon {
+      margin-right: 0.25rem;
     }
     .grouping {
       margin-bottom: 1rem;

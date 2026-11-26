@@ -1070,6 +1070,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       phase: 'running',
       activity: 'working',
       suspendReason: 'idle',
+      suspendPolicy: 'never',
       containerStatus: 'Up 1 minute',
       message: 'Waiting for review',
       messageMode: 'owner',
