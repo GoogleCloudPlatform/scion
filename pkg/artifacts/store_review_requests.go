@@ -218,7 +218,7 @@ func (s *sqlStore) CreateOrRemindReviewRequest(ctx context.Context, req ReviewRe
 			return existing, ReviewRequestOutcomeUnchanged, nil
 		}
 		nextNote := existing.Note
-		if req.Note != "" {
+		if req.Note != "" && req.RequesterKind == existing.RequesterKind && req.RequesterRef == existing.RequesterRef {
 			nextNote = req.Note
 		}
 		res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request

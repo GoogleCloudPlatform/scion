@@ -39,17 +39,16 @@ var (
 )
 
 // MayNotifyReviewer implements artifacts.ReviewRequestNotifier: checks that the
-// calling user can read reviewerUserID (anti-spam user visibility, §4.3 step 4).
+// caller is an interactive, unscoped user session (interactiveUserSession, the
+// same gate MayNotifyGrant uses) and can read reviewerUserID (anti-spam user
+// visibility, §4.3 step 4).
 func (h *artifactHost) MayNotifyReviewer(ctx context.Context, reviewerUserID string) (bool, error) {
+	caller, ok := interactiveUserSession(ctx)
+	if !ok {
+		return false, nil
+	}
 	if h.server == nil || h.server.store == nil || h.server.authzService == nil {
 		return false, errReviewRequestNoticeUnavailable
-	}
-	caller := GetUserIdentityFromContext(ctx)
-	if caller == nil || caller.ID() == "" {
-		return false, nil
-	}
-	if _, federated := caller.(FederatedIdentity); federated {
-		return false, nil
 	}
 	subject, _, err := h.server.namedUserSubject(ctx, reviewerUserID)
 	if err != nil {
@@ -121,7 +120,12 @@ func (h *artifactHost) NotifyRequestDismissed(ctx context.Context, n artifacts.R
 	var firstErr error
 	for _, recipientID := range recipients {
 		label := h.server.grantNoticeLabel(ctx, recipientID, n.ReviewerRef)
-		msg := fmt.Sprintf("%s dismissed your review request on %q", label, title)
+		var msg string
+		if n.RequesterKind == artifacts.PrincipalKindUser && recipientID == n.RequesterRef {
+			msg = fmt.Sprintf("%s dismissed your review request on %q", label, title)
+		} else {
+			msg = fmt.Sprintf("%s dismissed a review request on %q", label, title)
+		}
 		if err := h.server.writeUserNotification(ctx, userNotice{
 			Kind:             store.NotificationKindArtifactReviewRequest,
 			ResourceType:     store.NotificationResourceArtifact,

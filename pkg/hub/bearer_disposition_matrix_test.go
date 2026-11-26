@@ -559,7 +559,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
 	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and the artifact service answers 404 for callers that cannot read the artifact; TestArtifactsReviewRequestsOnRoutes exercises session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 200) and agent callers with the experiment on and off",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and requires an interactive user session in MayNotifyReviewer (refusing every reviewer for scoped UATs); TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> every reviewer refused reviewer_unavailable with no notifications) and agent callers",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.dismiss", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-request/dismiss"}: {

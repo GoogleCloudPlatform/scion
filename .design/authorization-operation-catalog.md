@@ -109,7 +109,7 @@
 - [artifact.review.session.write](#artifactreviewsessionwrite) — Record or end the caller's own review session of an artifact (the heartbeat of a review tab, ptone/scion#6849); 404 while the hub.artifacts_open_review_check experiment is off; any caller who may start a review version passes (the write check of artifact.version.create); rate limited per principal after authorization; the row is always the caller's own; a DELETE that deletes the caller's session row writes a review_session_ended decision-log entry; the Hub keeps the row until the reaper deletes it, at least an hour after its last beat, so this includes a session that no longer counts as open; a DELETE when no such row exists writes none (both answer 204)
 - [artifact.review.draft.read](#artifactreviewdraftread) — Read the caller's own saved draft review of an artifact (200 with draft null when none exists, plus currentSeq; ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); the row is always keyed by the caller's own principal with no administrator, steward, owner or publisher override
 - [artifact.review.draft.write](#artifactreviewdraftwrite) — Create, replace or delete the caller's own saved draft review of an artifact with optimistic rev concurrency (ptone/scion#7116, ptone/scion#8470); 404 while the hub.artifacts_review_drafts experiment is off; requires review access (the readableArtifact and canWriteErr checks of artifact.version.create); rate limited per principal (LimitDraftWrite) after authorization and before reading the request body; the row is always keyed by the caller's own principal with no override; a DELETE that deletes the caller's draft row writes a review_draft_deleted decision-log entry without content, while a DELETE when no draft exists writes none (both answer 204); draft saves never trigger review notifications
-- [artifact.review.request.create](#artifactreviewrequestcreate) — Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), and credential permission artifact.request_review in the artifact's home scope; in phase 1 only user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)
+- [artifact.review.request.create](#artifactreviewrequestcreate) — Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session for reviewer visibility (MayNotifyReviewer); in phase 1 only interactive user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)
 - [artifact.review.request.dismiss](#artifactreviewrequestdismiss) — Dismiss the caller's own open review request on an artifact with an optional note (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off, when the caller's credential does not permit artifact.read in the artifact's home scope, or when no open request exists for the caller; session callers who lost read access via role or grant removal can still dismiss and receive only the request row; rate limited per user (LimitReviewRequestDismiss)
 - [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
 - [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
@@ -4675,7 +4675,7 @@
 
 **Domain:** artifact
 
-**Description:** Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), and credential permission artifact.request_review in the artifact's home scope; in phase 1 only user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)
+**Description:** Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session for reviewer visibility (MayNotifyReviewer); in phase 1 only interactive user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)
 
 ### Entry Points
 
@@ -4685,9 +4685,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsReviewRequestsOnRoutes`)
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
 
 **Base Permission:** `artifact.request_review`
 

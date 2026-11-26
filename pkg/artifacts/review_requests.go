@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // FeatureReviewRequests is the server-side experiment that gates the
@@ -229,6 +231,9 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusBadRequest, "bad_request", `each reviewer must be a user principal ("user:<id>")`)
 			return
 		}
+		if u, err := uuid.Parse(rid); err == nil {
+			rid = u.String()
+		}
 		norm := PrincipalRef(PrincipalKindUser, rid)
 		if seen[norm] {
 			continue
@@ -368,6 +373,10 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			if _, allowed := s.notifyLimiterFor().allow(PrincipalRef(kind, ref)); !allowed {
 				notifySkipped = NotifySkippedRateLimited
 			} else {
+				noticeNote := row.Note
+				if outcome == ReviewRequestOutcomeReminded && (row.RequesterKind != kind || row.RequesterRef != ref) {
+					noticeNote = req.Note
+				}
 				nerr := notifier.NotifyReviewRequest(ctx, ReviewRequestNotice{
 					ArtifactID:     a.ID,
 					ArtifactTitle:  a.Title,
@@ -376,13 +385,25 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 					ReviewerUserID: t.userID,
 					RequesterKind:  kind,
 					RequesterRef:   ref,
-					Note:           row.Note,
+					Note:           noticeNote,
 				})
 				if nerr != nil {
 					slog.WarnContext(ctx, "artifacts: review request notification failed", "artifact", a.ID, "error", nerr)
 					notifySkipped = NotifySkippedUnavailable
 				} else {
 					notified = true
+				}
+			}
+		}
+
+		if row.RequesterRef != "" {
+			reqPrincipal := PrincipalRef(row.RequesterKind, row.RequesterRef)
+			if _, known := names[reqPrincipal]; !known {
+				for k, v := range s.principalDisplayNames(ctx, []string{reqPrincipal}) {
+					if names == nil {
+						names = make(map[string]string, 1)
+					}
+					names[k] = v
 				}
 			}
 		}

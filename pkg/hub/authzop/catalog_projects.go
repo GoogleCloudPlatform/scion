@@ -1993,12 +1993,12 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.review.request.create",
 		Domain:      "artifact",
-		Description: "Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), and credential permission artifact.request_review in the artifact's home scope; in phase 1 only user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)",
+		Description: "Request or remind a review of an artifact from one or more users (ptone/scion#9296, ptone/scion#9306); 404 while the hub.artifacts_review_requests experiment is off; requires readableArtifact, publish access (canPublish), credential permission artifact.request_review in the artifact's home scope, and an interactive user session for reviewer visibility (MayNotifyReviewer); in phase 1 only interactive user requesters and reviewers who already can review (access=existing) are admitted; rate limited per requester (LimitReviewRequest)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/review-requests", Method: "POST"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
 		ResourceResolver: "artifact-home-project",
 		BasePermission:   "artifact.request_review",
 		Effects:          []SecurityEffect{EffectCreateResource, EffectUpdateResource},
@@ -2009,9 +2009,7 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestArtifactsReviewRequestsOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestReviewRequestsAuthorization"},
 		},
-		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetArtifactRecord,
-			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
-			Pin:        "TestArtifactsReviewRequestsOnRoutes"},
+		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
 		ID:          "artifact.review.request.dismiss",

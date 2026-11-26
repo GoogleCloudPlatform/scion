@@ -580,3 +580,148 @@ func TestReviewRequestRemindUpdatesNoteAndCooldownUnchanged(t *testing.T) {
 		t.Errorf("sentRequests count = %d, want 2 (no notice during cooldown)", len(h.sentRequests))
 	}
 }
+
+func TestReviewRequestRemindByOtherPublisherPreservesNoteAndPopulatesRequesterName(t *testing.T) {
+	svc, h, _, artID := newReviewRequestFixture(t)
+
+	// Grant Carol write access so she can publish and remind.
+	grantRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", "alice",
+		GrantRequest{SubjectKind: "principal", SubjectRef: "user:carol", Permission: GrantWrite})
+	if grantRec.Code != http.StatusCreated {
+		t.Fatalf("grant carol write = %d %s", grantRec.Code, grantRec.Body.String())
+	}
+
+	// Alice requests review from Bob with note A.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "alice",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "note A"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice create = %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Carol (a different publisher) reminds Bob with note C.
+	rec = doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", "carol",
+		CreateReviewRequestsBody{Reviewers: []string{"user:bob"}, Note: "note C"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("carol remind = %d %s", rec.Code, rec.Body.String())
+	}
+	var remResp CreateReviewRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &remResp); err != nil {
+		t.Fatalf("decode carol remind: %v", err)
+	}
+	if len(remResp.Requests) != 1 || remResp.Requests[0].Outcome != ReviewRequestOutcomeReminded || !remResp.Requests[0].Notified {
+		t.Fatalf("carol remind = %+v, want reminded + notified", remResp.Requests)
+	}
+	rr := remResp.Requests[0].Request
+	if rr.Requester.Ref != "alice" || rr.Requester.DisplayName != "Alice" {
+		t.Errorf("reminded requester = %+v, want ref=alice displayName=Alice", rr.Requester)
+	}
+	if rr.Note != "note A" {
+		t.Errorf("reminded stored note = %q, want %q (must not overwrite original requester's note)", rr.Note, "note A")
+	}
+
+	// Bob's GET artifact still shows requester Alice and note A.
+	getRec := doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID, "user", "bob", nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET artifact = %d %s", getRec.Code, getRec.Body.String())
+	}
+	var ar ArtifactResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &ar); err != nil {
+		t.Fatalf("decode GET: %v", err)
+	}
+	if ar.ReviewState == nil || ar.ReviewState.RequestedOfMe == nil {
+		t.Fatalf("missing requestedOfMe: %s", getRec.Body.String())
+	}
+	if ar.ReviewState.RequestedOfMe.Requester.Ref != "alice" || ar.ReviewState.RequestedOfMe.Requester.DisplayName != "Alice" || ar.ReviewState.RequestedOfMe.Note != "note A" {
+		t.Errorf("requestedOfMe = %+v, want requester Alice with note A", ar.ReviewState.RequestedOfMe)
+	}
+
+	// The reminder notice Bob received attributes note C to Carol.
+	if len(h.sentRequests) != 2 {
+		t.Fatalf("sentRequests count = %d, want 2", len(h.sentRequests))
+	}
+	if h.sentRequests[1].RequesterRef != "carol" || h.sentRequests[1].Note != "note C" {
+		t.Errorf("reminder notice = %+v, want RequesterRef=carol Note=%q", h.sentRequests[1], "note C")
+	}
+}
+
+func TestReviewRequestCanonicalisesReviewerUUIDs(t *testing.T) {
+	f := newFixture(t, false)
+	fh := newFakeHost()
+	aliceUUID := "11111111-1111-4111-8111-111111111111"
+	bobUUID := "22222222-2222-4222-8222-222222222222"
+	h := &reviewRequestTestHost{
+		fakeHost:     fh,
+		gateOn:       true,
+		inboxHintsOn: true,
+		resolveMap: map[string]RecipientSubject{
+			aliceUUID: &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}},
+			bobUUID:   &staticRecipientSubject{scopes: map[string]bool{"proj-1": true}},
+		},
+		names: map[string]string{
+			"user:" + aliceUUID: "Alice",
+			"user:" + bobUUID:   "Bob",
+		},
+	}
+	svc := NewService(h)
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-test")
+
+	pAlice := principal{PrincipalKindUser, aliceUUID, ""}
+	pBob := principal{PrincipalKindUser, bobUUID, ""}
+	fh.allow(pAlice, "proj-1", PermissionRead, PermissionCreate, PermissionManage, PermissionRequestReview)
+	fh.allow(pBob, "proj-1", PermissionRead)
+
+	pubReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=doc.md&title=UUID+Doc&scope=proj-1", strings.NewReader("# UUID\n"))
+	pubReq = withPrincipal(pubReq, pAlice)
+	pubRec := httptest.NewRecorder()
+	svc.ServeHTTP(pubRec, pubReq)
+	if pubRec.Code != http.StatusCreated {
+		t.Fatalf("publish = %d %s", pubRec.Code, pubRec.Body.String())
+	}
+	var pubResp ArtifactResponse
+	_ = json.Unmarshal(pubRec.Body.Bytes(), &pubResp)
+	artID := pubResp.Artifact.ID
+
+	grantRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/grants", "user", aliceUUID,
+		GrantRequest{SubjectKind: "principal", SubjectRef: "user:" + bobUUID, Permission: GrantReview})
+	if grantRec.Code != http.StatusCreated {
+		t.Fatalf("grant bob = %d %s", grantRec.Code, grantRec.Body.String())
+	}
+
+	// Pass uppercase Bob UUID, duplicate lowercase Bob UUID, and uppercase self UUID.
+	rec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", "user", aliceUUID,
+		CreateReviewRequestsBody{
+			Reviewers: []string{
+				"user:" + strings.ToUpper(bobUUID),
+				"user:" + bobUUID,
+				"user:" + strings.ToUpper(aliceUUID),
+			},
+			Note: "Check UUID",
+		})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST review-requests = %d %s", rec.Code, rec.Body.String())
+	}
+	var resp CreateReviewRequestsResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Requests) != 2 {
+		t.Fatalf("got %d deduplicated results, want 2: %+v", len(resp.Requests), resp.Requests)
+	}
+	if resp.Requests[0].Reviewer != "user:"+bobUUID || resp.Requests[0].Outcome != ReviewRequestOutcomeCreated || resp.Requests[0].Request.Reviewer.Ref != bobUUID {
+		t.Errorf("result[0] = %+v, want canonical lowercase bobUUID created", resp.Requests[0])
+	}
+	if resp.Requests[1].Reviewer != "user:"+aliceUUID || resp.Requests[1].Outcome != ReviewRequestOutcomeRefused || resp.Requests[1].Code != CodeReviewerUnavailable {
+		t.Errorf("result[1] = %+v, want canonical self refused reviewer_unavailable", resp.Requests[1])
+	}
+
+	// Bob sees requestedOfMe and can dismiss with his canonical lowercase UUID.
+	getRec := doJSON(svc, http.MethodGet, "/api/v1/artifacts/"+artID, "user", bobUUID, nil)
+	var ar ArtifactResponse
+	_ = json.Unmarshal(getRec.Body.Bytes(), &ar)
+	if ar.ReviewState == nil || ar.ReviewState.RequestedOfMe == nil {
+		t.Fatalf("bob cannot see requestedOfMe after uppercase UUID request: %s", getRec.Body.String())
+	}
+	disRec := doJSON(svc, http.MethodPost, "/api/v1/artifacts/"+artID+"/review-request/dismiss", "user", bobUUID, nil)
+	if disRec.Code != http.StatusOK {
+		t.Fatalf("bob dismiss = %d %s, want 200", disRec.Code, disRec.Body.String())
+	}
+}
