@@ -50,7 +50,11 @@ import {
   decisionsEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
-import { INBOX_NOTHING_WAITING, formatInboxProse } from '../../utils/inbox-prose.js';
+import {
+  INBOX_NOTHING_WAITING,
+  formatInboxProseSegments,
+  type InboxLinkKey,
+} from '../../utils/inbox-prose.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
 
@@ -100,6 +104,23 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
     defaultHref: '/chat',
   },
 ];
+
+/**
+ * Web-owned hrefs for non-primary inline prose link keys (design §14.3).
+ * Populated when target routes hydrate in Phases 3 and 4 (AC-16).
+ */
+export const INBOX_LINK_HREFS: Partial<Record<Exclude<InboxLinkKey, 'primary'>, string>> = {};
+
+function resolveInboxLinkHref(
+  link: InboxLinkKey,
+  cat: InboxCategory,
+  card: InboxCardConfig
+): string | undefined {
+  if (link === 'primary') {
+    return cat.href || card.defaultHref;
+  }
+  return INBOX_LINK_HREFS[link];
+}
 
 @customElement('scion-page-profile-inbox')
 export class ScionPageProfileInbox extends LitElement {
@@ -268,6 +289,23 @@ export class ScionPageProfileInbox extends LitElement {
         color: var(--scion-text, #1e293b);
       }
 
+      .card-prose-link {
+        color: var(--scion-primary, #3b82f6);
+        font-weight: 500;
+        text-decoration: underline;
+        text-underline-offset: 0.15em;
+      }
+
+      .card-prose-link:hover {
+        color: var(--scion-primary-hover, #2563eb);
+      }
+
+      .card-prose-link:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: 2px;
+        border-radius: var(--scion-radius-sm, 0.25rem);
+      }
+
       .card-empty,
       .card-unavailable {
         margin: 0;
@@ -282,30 +320,6 @@ export class ScionPageProfileInbox extends LitElement {
         gap: 0.75rem;
         font-size: 0.875rem;
         color: var(--sl-color-danger-600, #dc2626);
-      }
-
-      .card-actions {
-        margin-top: auto;
-        padding-top: 0.5rem;
-        display: flex;
-        align-items: center;
-        justify-content: flex-end;
-        gap: 0.75rem;
-      }
-
-      .card-action-link {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.25rem;
-        font-size: 0.875rem;
-        font-weight: 500;
-        color: var(--scion-primary, #3b82f6);
-        text-decoration: none;
-        white-space: nowrap;
-      }
-
-      .card-action-link:hover {
-        text-decoration: underline;
       }
 
       .loading-state {
@@ -408,10 +422,10 @@ export class ScionPageProfileInbox extends LitElement {
     if (cat.state === 'disabled') return nothing;
 
     const countText = cat.capped ? `${cat.count}+` : String(cat.count);
-    const prose =
-      cat.state === 'ok' ? formatInboxProse(card.key, cat.count, cat.capped, cat.breakdown) : '';
-    const hasWaiting = cat.state === 'ok' && prose !== INBOX_NOTHING_WAITING;
-    const href = cat.href || card.defaultHref;
+    const segments =
+      cat.state === 'ok'
+        ? formatInboxProseSegments(card.key, cat.count, cat.capped, cat.breakdown)
+        : 'nothing';
 
     return html`
       <section class="inbox-card" data-inbox-card=${card.key}>
@@ -443,17 +457,23 @@ export class ScionPageProfileInbox extends LitElement {
                     </sl-button>
                   </div>
                 `
-              : !hasWaiting
+              : segments === 'nothing'
                 ? html`<p class="card-empty" data-card-empty>${INBOX_NOTHING_WAITING}</p>`
-                : html`
-                    <p class="card-prose" data-card-prose>${prose}</p>
-                    <div class="card-actions">
-                      <a href=${href} class="card-action-link" data-card-action>
-                        Details
-                        <sl-icon name="arrow-right"></sl-icon>
-                      </a>
-                    </div>
-                  `}
+                : html`<p class="card-prose" data-card-prose>
+                    ${segments.map((seg) => {
+                      const segHref = seg.link
+                        ? resolveInboxLinkHref(seg.link, cat, card)
+                        : undefined;
+                      return segHref
+                        ? html`<a
+                            class="card-prose-link"
+                            href=${segHref}
+                            data-card-prose-link=${seg.link!}
+                            >${seg.text}</a
+                          >`
+                        : seg.text;
+                    })}
+                  </p>`}
         </div>
       </section>
     `;

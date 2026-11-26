@@ -15,12 +15,26 @@
  */
 
 /**
- * Pure summary-of-state prose formatter for Inbox cards (design §6.2, §6.3).
+ * Pure summary-of-state prose formatter for Inbox cards (design §6.2, §6.3, §14.3).
  * Mirrored in Go by `cmd/inbox_prose.go` and verified against the shared
- * fixture `testdata/inbox_prose.json`.
+ * fixture `pkg/hubclient/testdata/inbox_prose.json`.
  */
 
 export const INBOX_NOTHING_WAITING = 'Nothing Waiting';
+
+export type InboxLinkKey =
+  | 'primary'
+  | 'chat-unread'
+  | 'chat-mentions'
+  | 'chat-starred'
+  | 'reviews-to-address'
+  | 'reviews-requested'
+  | 'reviews-drafts';
+
+export interface ProseSegment {
+  text: string;
+  link?: InboxLinkKey;
+}
 
 function pluralize(n: number, singular: string, plural: string): string {
   return n === 1 ? `1 ${singular}` : `${n} ${plural}`;
@@ -33,8 +47,18 @@ function formatCountNoun(count: number, capped: boolean, singular: string, plura
   return pluralize(count, singular, plural);
 }
 
-function appendAgentsProjects(base: string, agents: number, projects: number): string {
-  let out = base;
+function appendUnlinked(segments: ProseSegment[], text: string): void {
+  if (!text) return;
+  const last = segments[segments.length - 1];
+  if (last && !last.link) {
+    last.text += text;
+    return;
+  }
+  segments.push({ text });
+}
+
+function buildAgentsProjectsSuffix(agents: number, projects: number): string {
+  let out = '';
   if (agents > 0) {
     out += ` from ${pluralize(agents, 'agent', 'agents')}`;
   }
@@ -44,49 +68,72 @@ function appendAgentsProjects(base: string, agents: number, projects: number): s
   return out;
 }
 
-export function formatInboxProse(
+function primaryWithAgentsProjects(
+  primaryText: string,
+  agents: number,
+  projects: number
+): ProseSegment[] {
+  const segments: ProseSegment[] = [{ text: primaryText, link: 'primary' }];
+  appendUnlinked(segments, buildAgentsProjectsSuffix(agents, projects));
+  return segments;
+}
+
+export function formatInboxProseSegments(
   category: string,
   count: number,
   capped: boolean,
   breakdown?: Record<string, number>
-): string {
+): ProseSegment[] | 'nothing' {
   const agents = breakdown?.agents ?? 0;
   const projects = breakdown?.projects ?? 0;
 
   switch (category) {
     case 'decisions':
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      return appendAgentsProjects(
+      if (count <= 0) return 'nothing';
+      return primaryWithAgentsProjects(
         formatCountNoun(count, capped, 'decision', 'decisions'),
         agents,
         projects
       );
 
     case 'agent_secrets':
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      return appendAgentsProjects(
+      if (count <= 0) return 'nothing';
+      return primaryWithAgentsProjects(
         formatCountNoun(count, capped, 'secret request', 'secret requests'),
         agents,
         projects
       );
 
     case 'waiting': {
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      const base = formatCountNoun(count, capped, 'agent waiting', 'agents waiting');
-      return projects > 0 ? `${base} in ${pluralize(projects, 'project', 'projects')}` : base;
+      if (count <= 0) return 'nothing';
+      const segments: ProseSegment[] = [
+        {
+          text: formatCountNoun(count, capped, 'agent waiting', 'agents waiting'),
+          link: 'primary',
+        },
+      ];
+      if (projects > 0) {
+        appendUnlinked(segments, ` in ${pluralize(projects, 'project', 'projects')}`);
+      }
+      return segments;
     }
 
     case 'pending_secrets':
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      return appendAgentsProjects(
+      if (count <= 0) return 'nothing';
+      return primaryWithAgentsProjects(
         formatCountNoun(count, capped, 'pending secret', 'pending secrets'),
         agents,
         projects
       );
 
     case 'reviews':
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      return formatCountNoun(count, capped, 'pending review', 'pending reviews');
+      if (count <= 0) return 'nothing';
+      return [
+        {
+          text: formatCountNoun(count, capped, 'pending review', 'pending reviews'),
+          link: 'primary',
+        },
+      ];
 
     case 'chat': {
       const unread =
@@ -96,27 +143,53 @@ export function formatInboxProse(
       const mentions = breakdown?.mentions ?? 0;
       const starred = breakdown?.starredMessages ?? 0;
 
-      const clauses: string[] = [];
+      const segments: ProseSegment[] = [];
+      let hasClause = false;
+
       if (unread > 0) {
-        clauses.push(
-          formatCountNoun(unread, capped, 'unread conversation', 'unread conversations')
-        );
+        segments.push({
+          text: formatCountNoun(unread, capped, 'unread conversation', 'unread conversations'),
+          link: 'primary',
+        });
+        hasClause = true;
       }
       if (mentions > 0) {
-        clauses.push(`${mentions} with mentions`);
+        appendUnlinked(segments, `${hasClause ? ', ' : ''}${mentions} with mentions`);
+        hasClause = true;
       }
       if (starred > 0) {
-        clauses.push(pluralize(starred, 'starred message', 'starred messages'));
+        appendUnlinked(
+          segments,
+          `${hasClause ? ', ' : ''}${pluralize(starred, 'starred message', 'starred messages')}`
+        );
+        hasClause = true;
       }
-      if (clauses.length === 0) {
-        return INBOX_NOTHING_WAITING;
+      if (!hasClause) {
+        return 'nothing';
       }
-      const line = clauses.join(', ');
-      return projects > 0 ? `${line} across ${pluralize(projects, 'project', 'projects')}` : line;
+      if (projects > 0) {
+        appendUnlinked(segments, ` across ${pluralize(projects, 'project', 'projects')}`);
+      }
+      return segments;
     }
 
     default:
-      if (count <= 0) return INBOX_NOTHING_WAITING;
-      return formatCountNoun(count, capped, 'item waiting', 'items waiting');
+      if (count <= 0) return 'nothing';
+      return [
+        { text: formatCountNoun(count, capped, 'item waiting', 'items waiting'), link: 'primary' },
+      ];
   }
+}
+
+export function formatInboxProse(
+  category: string,
+  count: number,
+  capped: boolean,
+  breakdown?: Record<string, number>
+): string {
+  const segments = formatInboxProseSegments(category, count, capped, breakdown);
+  if (segments === 'nothing') {
+    return INBOX_NOTHING_WAITING;
+  }
+  return segments.map((s) => s.text).join('');
 }

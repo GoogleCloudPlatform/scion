@@ -18,7 +18,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { formatInboxProse } from './inbox-prose.js';
+import {
+  INBOX_NOTHING_WAITING,
+  formatInboxProse,
+  formatInboxProseSegments,
+  type ProseSegment,
+} from './inbox-prose.js';
 
 interface ProseCase {
   name: string;
@@ -27,6 +32,7 @@ interface ProseCase {
   capped: boolean;
   breakdown?: Record<string, number>;
   expected: string;
+  segments: ProseSegment[] | null;
 }
 
 const THIS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -35,13 +41,23 @@ const FIXTURE_PATH = resolve(REPO_ROOT, 'pkg/hubclient/testdata/inbox_prose.json
 
 const fixture = JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as { cases: ProseCase[] };
 
-describe('formatInboxProse (shared fixture)', () => {
+describe('formatInboxProse & formatInboxProseSegments (shared fixture)', () => {
   it('loads non-empty shared fixture', () => {
     expect(fixture.cases.length).toBeGreaterThan(0);
   });
 
   for (const tc of fixture.cases) {
     it(tc.name, () => {
+      expect(tc).toHaveProperty('segments');
+      const segments = formatInboxProseSegments(tc.category, tc.count, tc.capped, tc.breakdown);
+      if (tc.segments === null) {
+        expect(segments).toBe('nothing');
+        expect(tc.expected).toBe(INBOX_NOTHING_WAITING);
+      } else {
+        expect(segments).toEqual(tc.segments);
+        const joined = (segments as ProseSegment[]).map((s) => s.text).join('');
+        expect(joined).toBe(tc.expected);
+      }
       expect(formatInboxProse(tc.category, tc.count, tc.capped, tc.breakdown)).toBe(tc.expected);
     });
   }

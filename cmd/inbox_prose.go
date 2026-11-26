@@ -23,51 +23,69 @@ import (
 
 const inboxNothingWaitingProse = "Nothing Waiting"
 
-// formatInboxProse renders the summary-of-state prose line for an inbox
-// category, mirroring web/src/utils/inbox-prose.ts (design §6.2, §9).
-func formatInboxProse(category string, count int, capped bool, breakdown map[string]int) string {
+type inboxLinkKey string
+
+const (
+	// inboxLinkPrimary resolves to the category's hub href; Phases 3 and 4 add
+	// chat-* and reviews-* link keys mirroring web/src/utils/inbox-prose.ts.
+	inboxLinkPrimary inboxLinkKey = "primary"
+)
+
+type inboxProseSegment struct {
+	Text string       `json:"text"`
+	Link inboxLinkKey `json:"link,omitempty"`
+}
+
+// formatInboxProseSegments returns the structured prose segments for an inbox
+// category, or nil when nothing is waiting, mirroring web/src/utils/inbox-prose.ts
+// (design §6.2, §9, §14.3).
+func formatInboxProseSegments(category string, count int, capped bool, breakdown map[string]int) []inboxProseSegment {
 	switch category {
 	case hubclient.InboxCategoryDecisions:
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		return appendAgentsProjects(
+		return primaryWithAgentsProjects(
 			formatCountNoun(count, capped, "decision", "decisions"),
 			breakdown[hubclient.InboxBreakdownAgents],
 			breakdown[hubclient.InboxBreakdownProjects],
 		)
 	case "agent_secrets":
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		return appendAgentsProjects(
+		return primaryWithAgentsProjects(
 			formatCountNoun(count, capped, "secret request", "secret requests"),
 			breakdown[hubclient.InboxBreakdownAgents],
 			breakdown[hubclient.InboxBreakdownProjects],
 		)
 	case hubclient.InboxCategoryWaiting:
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		base := formatCountNoun(count, capped, "agent waiting", "agents waiting")
+		segments := []inboxProseSegment{
+			{Text: formatCountNoun(count, capped, "agent waiting", "agents waiting"), Link: inboxLinkPrimary},
+		}
 		if projects := breakdown[hubclient.InboxBreakdownProjects]; projects > 0 {
-			return fmt.Sprintf("%s in %s", base, pluralizeInbox(projects, "project", "projects"))
+			segments = appendUnlinkedSegment(segments, " in "+pluralizeInbox(projects, "project", "projects"))
 		}
-		return base
+		return segments
 	case hubclient.InboxCategoryPendingSecrets:
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		return appendAgentsProjects(
+		return primaryWithAgentsProjects(
 			formatCountNoun(count, capped, "pending secret", "pending secrets"),
 			breakdown[hubclient.InboxBreakdownAgents],
 			breakdown[hubclient.InboxBreakdownProjects],
 		)
 	case hubclient.InboxCategoryReviews:
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		return formatCountNoun(count, capped, "pending review", "pending reviews")
+		return []inboxProseSegment{
+			{Text: formatCountNoun(count, capped, "pending review", "pending reviews"), Link: inboxLinkPrimary},
+		}
 	case hubclient.InboxCategoryChat:
 		unread := count
 		if breakdown != nil {
@@ -79,30 +97,60 @@ func formatInboxProse(category string, count int, capped bool, breakdown map[str
 		starred := breakdown["starredMessages"]
 		projects := breakdown[hubclient.InboxBreakdownProjects]
 
-		var clauses []string
+		var segments []inboxProseSegment
+		hasClause := false
 		if unread > 0 {
-			clauses = append(clauses, formatCountNoun(unread, capped, "unread conversation", "unread conversations"))
+			segments = append(segments, inboxProseSegment{
+				Text: formatCountNoun(unread, capped, "unread conversation", "unread conversations"),
+				Link: inboxLinkPrimary,
+			})
+			hasClause = true
 		}
 		if mentions > 0 {
-			clauses = append(clauses, fmt.Sprintf("%d with mentions", mentions))
+			prefix := ""
+			if hasClause {
+				prefix = ", "
+			}
+			segments = appendUnlinkedSegment(segments, fmt.Sprintf("%s%d with mentions", prefix, mentions))
+			hasClause = true
 		}
 		if starred > 0 {
-			clauses = append(clauses, pluralizeInbox(starred, "starred message", "starred messages"))
+			prefix := ""
+			if hasClause {
+				prefix = ", "
+			}
+			segments = appendUnlinkedSegment(segments, prefix+pluralizeInbox(starred, "starred message", "starred messages"))
+			hasClause = true
 		}
-		if len(clauses) == 0 {
-			return inboxNothingWaitingProse
+		if !hasClause {
+			return nil
 		}
-		line := strings.Join(clauses, ", ")
 		if projects > 0 {
-			line += " across " + pluralizeInbox(projects, "project", "projects")
+			segments = appendUnlinkedSegment(segments, " across "+pluralizeInbox(projects, "project", "projects"))
 		}
-		return line
+		return segments
 	default:
 		if count <= 0 {
-			return inboxNothingWaitingProse
+			return nil
 		}
-		return formatCountNoun(count, capped, "item waiting", "items waiting")
+		return []inboxProseSegment{
+			{Text: formatCountNoun(count, capped, "item waiting", "items waiting"), Link: inboxLinkPrimary},
+		}
 	}
+}
+
+// formatInboxProse renders the summary-of-state prose line for an inbox
+// category, mirroring web/src/utils/inbox-prose.ts (design §6.2, §9, §14.3).
+func formatInboxProse(category string, count int, capped bool, breakdown map[string]int) string {
+	segments := formatInboxProseSegments(category, count, capped, breakdown)
+	if len(segments) == 0 {
+		return inboxNothingWaitingProse
+	}
+	var b strings.Builder
+	for _, seg := range segments {
+		b.WriteString(seg.Text)
+	}
+	return b.String()
 }
 
 func formatCountNoun(count int, capped bool, singular, plural string) string {
@@ -112,13 +160,25 @@ func formatCountNoun(count int, capped bool, singular, plural string) string {
 	return pluralizeInbox(count, singular, plural)
 }
 
-func appendAgentsProjects(base string, agents, projects int) string {
-	out := base
+func appendUnlinkedSegment(segments []inboxProseSegment, text string) []inboxProseSegment {
+	if text == "" {
+		return segments
+	}
+	if n := len(segments); n > 0 && segments[n-1].Link == "" {
+		segments[n-1].Text += text
+		return segments
+	}
+	return append(segments, inboxProseSegment{Text: text})
+}
+
+func primaryWithAgentsProjects(primaryText string, agents, projects int) []inboxProseSegment {
+	segments := []inboxProseSegment{{Text: primaryText, Link: inboxLinkPrimary}}
+	var suffix string
 	if agents > 0 {
-		out += " from " + pluralizeInbox(agents, "agent", "agents")
+		suffix += " from " + pluralizeInbox(agents, "agent", "agents")
 	}
 	if projects > 0 {
-		out += " in " + pluralizeInbox(projects, "project", "projects")
+		suffix += " in " + pluralizeInbox(projects, "project", "projects")
 	}
-	return out
+	return appendUnlinkedSegment(segments, suffix)
 }

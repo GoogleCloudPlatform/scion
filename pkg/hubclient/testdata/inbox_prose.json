@@ -6,7 +6,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "agents": 0, "projects": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "decisions singular",
@@ -14,7 +15,11 @@
       "count": 1,
       "capped": false,
       "breakdown": { "agents": 1, "projects": 1 },
-      "expected": "1 decision from 1 agent in 1 project"
+      "expected": "1 decision from 1 agent in 1 project",
+      "segments": [
+        { "text": "1 decision", "link": "primary" },
+        { "text": " from 1 agent in 1 project" }
+      ]
     },
     {
       "name": "decisions plural",
@@ -22,7 +27,11 @@
       "count": 8,
       "capped": false,
       "breakdown": { "agents": 3, "projects": 2 },
-      "expected": "8 decisions from 3 agents in 2 projects"
+      "expected": "8 decisions from 3 agents in 2 projects",
+      "segments": [
+        { "text": "8 decisions", "link": "primary" },
+        { "text": " from 3 agents in 2 projects" }
+      ]
     },
     {
       "name": "decisions capped",
@@ -30,7 +39,11 @@
       "count": 50,
       "capped": true,
       "breakdown": { "agents": 4, "projects": 2 },
-      "expected": "50+ decisions from 4 agents in 2 projects"
+      "expected": "50+ decisions from 4 agents in 2 projects",
+      "segments": [
+        { "text": "50+ decisions", "link": "primary" },
+        { "text": " from 4 agents in 2 projects" }
+      ]
     },
     {
       "name": "decisions capped singular uses plural noun",
@@ -38,7 +51,11 @@
       "count": 1,
       "capped": true,
       "breakdown": { "agents": 1, "projects": 1 },
-      "expected": "1+ decisions from 1 agent in 1 project"
+      "expected": "1+ decisions from 1 agent in 1 project",
+      "segments": [
+        { "text": "1+ decisions", "link": "primary" },
+        { "text": " from 1 agent in 1 project" }
+      ]
     },
     {
       "name": "decisions drops zero agents and projects",
@@ -46,14 +63,20 @@
       "count": 3,
       "capped": false,
       "breakdown": { "agents": 0, "projects": 0 },
-      "expected": "3 decisions"
+      "expected": "3 decisions",
+      "segments": [
+        { "text": "3 decisions", "link": "primary" }
+      ]
     },
     {
       "name": "decisions missing breakdown drops clauses",
       "category": "decisions",
       "count": 2,
       "capped": false,
-      "expected": "2 decisions"
+      "expected": "2 decisions",
+      "segments": [
+        { "text": "2 decisions", "link": "primary" }
+      ]
     },
     {
       "name": "decisions drops only missing project clause",
@@ -61,7 +84,11 @@
       "count": 2,
       "capped": false,
       "breakdown": { "agents": 2 },
-      "expected": "2 decisions from 2 agents"
+      "expected": "2 decisions from 2 agents",
+      "segments": [
+        { "text": "2 decisions", "link": "primary" },
+        { "text": " from 2 agents" }
+      ]
     },
     {
       "name": "agent_secrets empty",
@@ -69,7 +96,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "agents": 0, "projects": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "agent_secrets singular",
@@ -77,7 +105,11 @@
       "count": 1,
       "capped": false,
       "breakdown": { "agents": 1, "projects": 1 },
-      "expected": "1 secret request from 1 agent in 1 project"
+      "expected": "1 secret request from 1 agent in 1 project",
+      "segments": [
+        { "text": "1 secret request", "link": "primary" },
+        { "text": " from 1 agent in 1 project" }
+      ]
     },
     {
       "name": "agent_secrets plural capped",
@@ -85,7 +117,11 @@
       "count": 50,
       "capped": true,
       "breakdown": { "agents": 5, "projects": 3 },
-      "expected": "50+ secret requests from 5 agents in 3 projects"
+      "expected": "50+ secret requests from 5 agents in 3 projects",
+      "segments": [
+        { "text": "50+ secret requests", "link": "primary" },
+        { "text": " from 5 agents in 3 projects" }
+      ]
     },
     {
       "name": "waiting empty",
@@ -93,7 +129,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "projects": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "waiting singular with project",
@@ -101,7 +138,11 @@
       "count": 1,
       "capped": false,
       "breakdown": { "projects": 1 },
-      "expected": "1 agent waiting in 1 project"
+      "expected": "1 agent waiting in 1 project",
+      "segments": [
+        { "text": "1 agent waiting", "link": "primary" },
+        { "text": " in 1 project" }
+      ]
     },
     {
       "name": "waiting plural with projects",
@@ -109,7 +150,11 @@
       "count": 4,
       "capped": false,
       "breakdown": { "projects": 2 },
-      "expected": "4 agents waiting in 2 projects"
+      "expected": "4 agents waiting in 2 projects",
+      "segments": [
+        { "text": "4 agents waiting", "link": "primary" },
+        { "text": " in 2 projects" }
+      ]
     },
     {
       "name": "waiting drops zero project clause",
@@ -117,7 +162,10 @@
       "count": 2,
       "capped": false,
       "breakdown": { "projects": 0 },
-      "expected": "2 agents waiting"
+      "expected": "2 agents waiting",
+      "segments": [
+        { "text": "2 agents waiting", "link": "primary" }
+      ]
     },
     {
       "name": "waiting capped",
@@ -125,7 +173,11 @@
       "count": 200,
       "capped": true,
       "breakdown": { "projects": 12 },
-      "expected": "200+ agents waiting in 12 projects"
+      "expected": "200+ agents waiting in 12 projects",
+      "segments": [
+        { "text": "200+ agents waiting", "link": "primary" },
+        { "text": " in 12 projects" }
+      ]
     },
     {
       "name": "pending_secrets empty",
@@ -133,7 +185,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "agents": 0, "projects": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "pending_secrets singular",
@@ -141,7 +194,11 @@
       "count": 1,
       "capped": false,
       "breakdown": { "agents": 1, "projects": 1 },
-      "expected": "1 pending secret from 1 agent in 1 project"
+      "expected": "1 pending secret from 1 agent in 1 project",
+      "segments": [
+        { "text": "1 pending secret", "link": "primary" },
+        { "text": " from 1 agent in 1 project" }
+      ]
     },
     {
       "name": "pending_secrets plural capped",
@@ -149,7 +206,11 @@
       "count": 50,
       "capped": true,
       "breakdown": { "agents": 3, "projects": 2 },
-      "expected": "50+ pending secrets from 3 agents in 2 projects"
+      "expected": "50+ pending secrets from 3 agents in 2 projects",
+      "segments": [
+        { "text": "50+ pending secrets", "link": "primary" },
+        { "text": " from 3 agents in 2 projects" }
+      ]
     },
     {
       "name": "pending_secrets drops zero agents",
@@ -157,7 +218,11 @@
       "count": 2,
       "capped": false,
       "breakdown": { "agents": 0, "projects": 1 },
-      "expected": "2 pending secrets in 1 project"
+      "expected": "2 pending secrets in 1 project",
+      "segments": [
+        { "text": "2 pending secrets", "link": "primary" },
+        { "text": " in 1 project" }
+      ]
     },
     {
       "name": "reviews empty",
@@ -165,7 +230,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "toAddress": 0, "requested": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "reviews singular",
@@ -173,7 +239,10 @@
       "count": 1,
       "capped": false,
       "breakdown": { "toAddress": 1, "requested": 0 },
-      "expected": "1 pending review"
+      "expected": "1 pending review",
+      "segments": [
+        { "text": "1 pending review", "link": "primary" }
+      ]
     },
     {
       "name": "reviews plural",
@@ -181,7 +250,10 @@
       "count": 5,
       "capped": false,
       "breakdown": { "toAddress": 2, "requested": 3 },
-      "expected": "5 pending reviews"
+      "expected": "5 pending reviews",
+      "segments": [
+        { "text": "5 pending reviews", "link": "primary" }
+      ]
     },
     {
       "name": "reviews capped",
@@ -189,7 +261,10 @@
       "count": 500,
       "capped": true,
       "breakdown": { "toAddress": 500, "requested": 0 },
-      "expected": "500+ pending reviews"
+      "expected": "500+ pending reviews",
+      "segments": [
+        { "text": "500+ pending reviews", "link": "primary" }
+      ]
     },
     {
       "name": "chat empty",
@@ -197,7 +272,8 @@
       "count": 0,
       "capped": false,
       "breakdown": { "unreadConversations": 0, "dms": 0, "mentions": 0 },
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "chat unread singular without mentions",
@@ -205,7 +281,10 @@
       "count": 1,
       "capped": false,
       "breakdown": { "unreadConversations": 1, "dms": 1, "mentions": 0 },
-      "expected": "1 unread conversation"
+      "expected": "1 unread conversation",
+      "segments": [
+        { "text": "1 unread conversation", "link": "primary" }
+      ]
     },
     {
       "name": "chat unread plural with mentions",
@@ -213,7 +292,11 @@
       "count": 5,
       "capped": false,
       "breakdown": { "unreadConversations": 5, "dms": 1, "mentions": 2 },
-      "expected": "5 unread conversations, 2 with mentions"
+      "expected": "5 unread conversations, 2 with mentions",
+      "segments": [
+        { "text": "5 unread conversations", "link": "primary" },
+        { "text": ", 2 with mentions" }
+      ]
     },
     {
       "name": "chat unread with mentions and starred across projects",
@@ -221,7 +304,11 @@
       "count": 5,
       "capped": false,
       "breakdown": { "unreadConversations": 5, "mentions": 3, "starredMessages": 4, "projects": 2 },
-      "expected": "5 unread conversations, 3 with mentions, 4 starred messages across 2 projects"
+      "expected": "5 unread conversations, 3 with mentions, 4 starred messages across 2 projects",
+      "segments": [
+        { "text": "5 unread conversations", "link": "primary" },
+        { "text": ", 3 with mentions, 4 starred messages across 2 projects" }
+      ]
     },
     {
       "name": "chat zero unread with starred messages only",
@@ -229,7 +316,10 @@
       "count": 0,
       "capped": false,
       "breakdown": { "unreadConversations": 0, "mentions": 0, "starredMessages": 1, "projects": 1 },
-      "expected": "1 starred message across 1 project"
+      "expected": "1 starred message across 1 project",
+      "segments": [
+        { "text": "1 starred message across 1 project" }
+      ]
     },
     {
       "name": "chat zero projects drops across clause",
@@ -237,28 +327,38 @@
       "count": 2,
       "capped": false,
       "breakdown": { "unreadConversations": 2, "mentions": 0, "projects": 0 },
-      "expected": "2 unread conversations"
+      "expected": "2 unread conversations",
+      "segments": [
+        { "text": "2 unread conversations", "link": "primary" }
+      ]
     },
     {
       "name": "chat falls back to count when breakdown omitted",
       "category": "chat",
       "count": 3,
       "capped": true,
-      "expected": "3+ unread conversations"
+      "expected": "3+ unread conversations",
+      "segments": [
+        { "text": "3+ unread conversations", "link": "primary" }
+      ]
     },
     {
       "name": "unknown category empty",
       "category": "other",
       "count": 0,
       "capped": false,
-      "expected": "Nothing Waiting"
+      "expected": "Nothing Waiting",
+      "segments": null
     },
     {
       "name": "unknown category plural",
       "category": "other",
       "count": 2,
       "capped": false,
-      "expected": "2 items waiting"
+      "expected": "2 items waiting",
+      "segments": [
+        { "text": "2 items waiting", "link": "primary" }
+      ]
     }
   ]
 }
