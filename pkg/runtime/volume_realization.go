@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // VolumeRealization says how a runtime realizes an api.VolumeMount.
@@ -107,6 +108,33 @@ func unsupportedVolumeTypeError(index int, v api.VolumeMount, runtimeKind string
 		Target:  v.Target,
 		Runtime: strings.TrimSpace(runtimeKind),
 	}
+}
+
+// CloudRunEnvOverride reports whether the current process environment
+// overrides runtimeKind ("docker", "local", or "auto") to a Cloud Run runtime.
+// Both runtime selection (factory.go) and request-time volume checks
+// (EffectiveVolumeRuntimeKind) consult this rule so they cannot drift.
+func CloudRunEnvOverride(runtimeKind string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(runtimeKind)) {
+	case "docker", "local", "auto":
+		if cloudrunenv.IsInstance() {
+			return "cloudrun-instances", true
+		}
+		if cloudrunenv.IsService() {
+			return "cloudrun", true
+		}
+	}
+	return runtimeKind, false
+}
+
+// EffectiveVolumeRuntimeKind returns the runtime kind that will execute
+// runtimeKind under the current process environment, applying
+// CloudRunEnvOverride when running on Cloud Run.
+func EffectiveVolumeRuntimeKind(runtimeKind string) string {
+	if overridden, ok := CloudRunEnvOverride(runtimeKind); ok {
+		return overridden
+	}
+	return runtimeKind
 }
 
 // isKubernetesRuntimeKind reports whether rt (lowercased, trimmed) is a

@@ -233,13 +233,13 @@ profiles:
 		endAsyncLaunchesAtCleanup(t, srv)
 
 		// Verify resolveRuntimeNameForOpts returns raw "docker" from settings,
-		// while volumeCheckRuntimeName classifies it as "cloudrun" from K_SERVICE.
+		// while EffectiveVolumeRuntimeKind classifies it as "cloudrun" from K_SERVICE.
 		rawRT, err := srv.resolveRuntimeNameForOpts(api.StartOptions{Name: "a1", Profile: "docker-prof"})
 		if err != nil || rawRT != "docker" {
 			t.Fatalf("resolveRuntimeNameForOpts = (%q, %v), want (\"docker\", nil)", rawRT, err)
 		}
-		if got := volumeCheckRuntimeName(rawRT); got != "cloudrun" {
-			t.Fatalf("volumeCheckRuntimeName(%q) = %q, want \"cloudrun\"", rawRT, got)
+		if got := runtime.EffectiveVolumeRuntimeKind(rawRT); got != "cloudrun" {
+			t.Fatalf("EffectiveVolumeRuntimeKind(%q) = %q, want \"cloudrun\"", rawRT, got)
 		}
 
 		// Handler-level: POST /api/v1/agents with cloudrun-volume must not be

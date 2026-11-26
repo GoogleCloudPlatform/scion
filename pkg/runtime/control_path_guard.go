@@ -203,10 +203,10 @@ func CheckWorkspaceVolumeSources(vols []api.VolumeMount) error {
 
 // CheckWorkspaceVolumeSourcesForRuntime applies the workspace volume checks
 // for runtimeKind using RealizeVolume. It is for a request that is about to
-// be persisted (the Hub's create and start): which workspace shapes are
-// allowed is decided later, where the workspace is resolved, but an
-// unsupported volume type on a bind runtime or a workspace that reaches a
-// control path is refused before anything is written.
+// be persisted (the Runtime Broker's create and start handlers): which
+// workspace shapes are allowed is decided later, where the workspace is
+// resolved, but an unsupported volume type on a bind runtime or a workspace
+// that reaches a control path is refused before anything is written.
 func CheckWorkspaceVolumeSourcesForRuntime(vols []api.VolumeMount, runtimeKind string) error {
 	for i, v := range vols {
 		if v.Target != "/workspace" {

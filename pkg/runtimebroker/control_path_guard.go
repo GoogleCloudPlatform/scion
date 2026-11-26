@@ -26,25 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
-
-// volumeCheckRuntimeName returns the runtime kind to classify request volumes
-// against. It mirrors pkg/runtime/factory.go's Cloud Run environment override:
-// when running on Cloud Run (cloudrunenv.IsInstance() or cloudrunenv.IsService())
-// and settings resolved to "docker", "local", or "auto", the dispatch executes
-// on Cloud Run rather than a local bind runtime. Off Cloud Run, a docker
-// profile builds a real DockerRuntime even if the broker's default runtime is
-// Cloud Run, so resolvedName is returned unchanged.
-func volumeCheckRuntimeName(resolvedName string) string {
-	switch strings.ToLower(strings.TrimSpace(resolvedName)) {
-	case "docker", "local", "auto":
-		if cloudrunenv.IsInstance() || cloudrunenv.IsService() {
-			return "cloudrun"
-		}
-	}
-	return resolvedName
-}
 
 // checkRequestVolumes refuses volumes sent by the Hub (a create's config and
 // inline config, a start's inline config) that use an unsupported volume type
