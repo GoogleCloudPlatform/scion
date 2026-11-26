@@ -867,21 +867,26 @@ func TestUsageIngest_PerRowDBRejectionDoesNotFailBatch(t *testing.T) {
 	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
 
 	good1 := makeStoreUsageEvent("hub-test", "evt-good-1", runID, projectID, agentID, &userID, 1, ts, 100, 40, 10, 5)
-	// Violates the run_id foreign key constraint at the DB layer (simulating a
-	// per-row DB/data rejection that bypassed earlier validation).
-	badFK := makeStoreUsageEvent("hub-test", "evt-bad-fk", "run-does-not-exist", projectID, agentID, &userID, 2, ts.Add(time.Second), 999, 999, 0, 0)
+	good1.ID = uuid.NewString()
+	// Shares good1's primary key UUID (with a distinct event_id) so it triggers
+	// a real DB constraint violation (SQLITE_CONSTRAINT_PRIMARYKEY) while
+	// belonging to the same (run_id, producer_epoch) as MeterHealth. This
+	// exercises both per-row SAVEPOINT rollback and the store filter that
+	// removes DB-rejected seqs from ReceivedSeqs.
+	badRow := makeStoreUsageEvent("hub-test", "evt-poison-2", runID, projectID, agentID, &userID, 2, ts.Add(time.Second), 999, 999, 0, 0)
+	badRow.ID = good1.ID
 	good3 := makeStoreUsageEvent("hub-test", "evt-good-3", runID, projectID, agentID, &userID, 3, ts.Add(2*time.Second), 200, 60, 20, 10)
 
 	batch := &store.UsageIngestBatchInput{
 		AgentID: agentID,
-		Events:  []*store.UsageEvent{good1, badFK, good3},
+		Events:  []*store.UsageEvent{good1, badRow, good3},
 		MeterHealth: &store.UsageMeterHealthUpdate{
 			AgentID:       agentID,
 			RunID:         runID,
 			ProducerEpoch: "ep-1",
 			LastReceiptAt: ts.Add(3 * time.Second),
 			ProducerSeq:   3,
-			ReceivedSeqs:  []int64{1, 3},
+			ReceivedSeqs:  []int64{1, 2, 3},
 		},
 	}
 
@@ -890,7 +895,7 @@ func TestUsageIngest_PerRowDBRejectionDoesNotFailBatch(t *testing.T) {
 	assert.Equal(t, 2, res1.Accepted)
 	assert.Equal(t, 0, res1.Duplicates)
 	require.Len(t, res1.Rejected, 1)
-	assert.Equal(t, "evt-bad-fk", res1.Rejected[0].EventID)
+	assert.Equal(t, "evt-poison-2", res1.Rejected[0].EventID)
 	assert.NotEmpty(t, res1.Rejected[0].Reason)
 
 	// Replay the exact same batch: good events are duplicates, bad row is still
@@ -900,7 +905,7 @@ func TestUsageIngest_PerRowDBRejectionDoesNotFailBatch(t *testing.T) {
 	assert.Equal(t, 0, res2.Accepted)
 	assert.Equal(t, 2, res2.Duplicates)
 	require.Len(t, res2.Rejected, 1)
-	assert.Equal(t, "evt-bad-fk", res2.Rejected[0].EventID)
+	assert.Equal(t, "evt-poison-2", res2.Rejected[0].EventID)
 
 	// Verify rollups reflect ONLY the 2 good events (never the bad row).
 	rollup, err := client.UsageRollupDaily.Query().
