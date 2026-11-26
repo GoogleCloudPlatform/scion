@@ -759,7 +759,7 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 
 	seedWebThread := func(proj *store.Project, name string, at time.Time, msgCount int, markRead bool) (string, string, []string) {
 		topicID := api.NewUUID()
-		convID := seedConversation(t, f.s, "native", topicID, "group")
+		convID := api.NewUUID()
 		require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
 			ID:             topicID,
 			ProjectID:      proj.ID,
