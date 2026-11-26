@@ -2637,6 +2637,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return
 	}
+	if req.ParentRef != "" && req.ExternalRef == "" {
+		ValidationError(w, "parent_ref requires external_ref to be set", nil)
+		return
+	}
 
 	// A held target (ptone/scion#3433) is refused for a user send, with or
 	// without wake, with the refusal an agent send gets (ptone/scion#6859).

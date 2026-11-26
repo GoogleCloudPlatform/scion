@@ -375,7 +375,7 @@ func (s *Server) resolveBrokerInboundConversation(
 		return nil, lookupErr
 	}
 	if errors.Is(lookupErr, store.ErrNotFound) || existingNew == nil {
-		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID); err != nil {
+		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, newKey, legacyChannel, legacyThreadID); err != nil {
 			return nil, err
 		} else if legacyConv != nil {
 			return &messaging.ConversationResult{
@@ -412,12 +412,12 @@ func (s *Server) resolveBrokerInboundConversation(
 }
 
 // lookupLegacyPhase5Conversation performs a strictly read-only lookup for a
-// pre-P4 Phase-5 conversation row matching legacyThreadID (or Teams stripped
-// parentRef). It never creates a row.
+// pre-P4 Phase-5 conversation row matching legacyThreadID. It never creates a
+// row.
 func (s *Server) lookupLegacyPhase5Conversation(
 	ctx context.Context,
 	log *slog.Logger,
-	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID string,
+	projectID, surface, newKey, legacyChannel, legacyThreadID string,
 ) (*store.Conversation, error) {
 	type candidate struct {
 		surface string
@@ -450,15 +450,6 @@ func (s *Server) lookupLegacyPhase5Conversation(
 		addCandidate(legacySurface, legacyThreadID)
 		if legacySurface != surface {
 			addCandidate(surface, legacyThreadID)
-		}
-	}
-	// Teams pre-P4 channel posts stored thread:<project>:<stripped conv id>
-	// (without ";messageid=...") while P4 sends the full conv id with parentRef
-	// equal to the stripped id.
-	if surface == "teams" && parentRef != "" && strings.Contains(externalRef, ";messageid=") {
-		addCandidate(legacySurface, parentRef)
-		if legacySurface != surface {
-			addCandidate(surface, parentRef)
 		}
 	}
 

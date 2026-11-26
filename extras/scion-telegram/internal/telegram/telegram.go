@@ -493,8 +493,32 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	var chatIDs []int64
 
 	// Priority 0: Conversation external_ref (Phase 11).
+	// When chatRoutes or topicChats are configured, only post to the
+	// conversation's chat if it is registered in the broker's routes;
+	// otherwise fall back to the pre-P4 routing path.
 	if convChatID, ok, _ := parseTelegramConversationTarget(msg); ok {
-		chatIDs = append(chatIDs, convChatID)
+		allowConvChat := true
+		if len(chatRoutes) > 0 || len(topicChats) > 0 {
+			allowConvChat = false
+			if _, exists := chatRoutes[convChatID]; exists {
+				allowConvChat = true
+			} else {
+				for _, chats := range topicChats {
+					for _, cid := range chats {
+						if cid == convChatID {
+							allowConvChat = true
+							break
+						}
+					}
+					if allowConvChat {
+						break
+					}
+				}
+			}
+		}
+		if allowConvChat {
+			chatIDs = append(chatIDs, convChatID)
+		}
 	}
 
 	// Priority 1: Direct routing via metadata

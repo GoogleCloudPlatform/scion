@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -416,4 +417,81 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	assert.Equal(t, int64(42), tgSrv.sentMessages[2].MessageThreadID)
 	assert.Equal(t, int64(998877), tgSrv.sentMessages[3].ChatID)
 	assert.Equal(t, int64(0), tgSrv.sentMessages[3].MessageThreadID)
+}
+
+// TestTelegramBrokerV2_Publish_Priority0RequiresActiveGroupLink verifies that
+// Priority 0 only posts to the conversation's ParentRef chat when that chat is
+// an active GroupLink for the message's project; an unlinked, inactive, or
+// other-project chat receives no post.
+func TestTelegramBrokerV2_Publish_Priority0RequiresActiveGroupLink(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	defer tgSrv.srv.Close()
+
+	st, err := NewSQLiteStore(filepath.Join(t.TempDir(), "tg-link-guard.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	b := NewV2(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	b.api = NewAPIClient("test-token", tgSrv.srv.URL)
+	b.store = st
+
+	ctx := context.Background()
+	topic := "scion.project.p1.user.u1.messages"
+	convReply := func(text string) *messages.StructuredMessage {
+		return &messages.StructuredMessage{
+			Version:        messages.Version,
+			Sender:         "agent:coder",
+			Recipient:      "user:alice",
+			Msg:            text,
+			Type:           messages.TypeInstruction,
+			Channel:        "telegram",
+			ConversationID: "conv-forum-42",
+			Conversation: &messages.Conversation{
+				Surface:     "telegram",
+				ExternalRef: "42",
+				ParentRef:   "-100123456",
+			},
+		}
+	}
+
+	// 1. Unlinked chat: no post.
+	require.NoError(t, b.Publish(ctx, topic, convReply("to unlinked chat")))
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.sentMessages, "unlinked chat must not receive Priority 0 post")
+	tgSrv.mu.Unlock()
+
+	// 2. Inactive GroupLink for project p1: no post.
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100123456,
+		ProjectID: "p1",
+		Active:    false,
+	}))
+	require.NoError(t, b.Publish(ctx, topic, convReply("to inactive chat")))
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.sentMessages, "inactive GroupLink must not receive Priority 0 post")
+	tgSrv.mu.Unlock()
+
+	// 3. Active GroupLink for a different project: no post.
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100123456,
+		ProjectID: "other-project",
+		Active:    true,
+	}))
+	require.NoError(t, b.Publish(ctx, topic, convReply("to other project chat")))
+	tgSrv.mu.Lock()
+	assert.Empty(t, tgSrv.sentMessages, "GroupLink for another project must not receive Priority 0 post")
+	tgSrv.mu.Unlock()
+
+	// 4. Active GroupLink for project p1: delivered to chat -100123456 topic 42.
+	require.NoError(t, st.SaveGroupLink(ctx, &GroupLink{
+		ChatID:    -100123456,
+		ProjectID: "p1",
+		Active:    true,
+	}))
+	require.NoError(t, b.Publish(ctx, topic, convReply("to active linked chat")))
+	tgSrv.mu.Lock()
+	require.Len(t, tgSrv.sentMessages, 1)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[0].ChatID)
+	assert.Equal(t, int64(42), tgSrv.sentMessages[0].MessageThreadID)
+	tgSrv.mu.Unlock()
 }

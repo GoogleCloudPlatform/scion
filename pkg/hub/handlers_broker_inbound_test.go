@@ -1731,7 +1731,7 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 			p4ExternalRef:  "19:chan-2@thread.tacv2;messageid=1700000000200",
 			p4ParentRef:    "19:chan-2@thread.tacv2",
 			msgChannel:     "teams",
-			msgThreadID:    "",
+			msgThreadID:    "19:chan-2@thread.tacv2",
 		},
 		{
 			name:           "telegram_pre_p4_forum_topic_reused",
@@ -1863,6 +1863,71 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 		require.NoError(t, err)
 		_, legacyErr := s.GetConversationByExternalRef(ctx, "slack", legacyKey)
 		assert.ErrorIs(t, legacyErr, store.ErrNotFound, "legacy row must never be created")
+	})
+
+	t.Run("teams_post_upgrade_threads_do_not_merge_into_pre_upgrade_channel_row", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "teams-no-merge")
+		ctx := context.Background()
+
+		// Seed a pre-upgrade channel-level row (from a pre-P4 root post).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("teams"),
+		)
+		require.NoError(t, err)
+
+		// Scenario 1: Reply in post-upgrade thread A (ThreadID=root-a) must get
+		// a new canonical conversation, NOT reuse the channel-level row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-a",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-a",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply in thread A",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		// Scenario 2: Reply in a second post-upgrade thread B (ThreadID=root-b)
+		// must get its own distinct conversation, separate from thread A and the channel row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-b",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-b",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply in thread B",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		keyA, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2;messageid=root-a")
+		require.NoError(t, err)
+		convA, err := s.GetConversationByExternalRef(ctx, "teams", keyA)
+		require.NoError(t, err)
+		assert.NotEqual(t, chanConv.ConversationID, convA.ID, "thread A must not merge into pre-upgrade channel row")
+
+		keyB, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2;messageid=root-b")
+		require.NoError(t, err)
+		convB, err := s.GetConversationByExternalRef(ctx, "teams", keyB)
+		require.NoError(t, err)
+		assert.NotEqual(t, chanConv.ConversationID, convB.ID, "thread B must not merge into pre-upgrade channel row")
+		assert.NotEqual(t, convA.ID, convB.ID, "thread A and thread B must get two distinct conversations")
 	})
 }
 
@@ -2191,4 +2256,31 @@ func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
 	newConv, err := s.GetConversationByExternalRef(ctx, "slack", wantNewKey)
 	require.NoError(t, err)
 	assert.Equal(t, "C0123ABC", newConv.ParentRef)
+
+	// 3. parent_ref without external_ref is rejected with 400 (matching contract §4).
+	reqBody3 := MessageRequest{
+		Surface:   "slack",
+		ParentRef: "C0123ABC",
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "parent_ref without external_ref",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	b3, err := json.Marshal(reqBody3)
+	require.NoError(t, err)
+	r3 := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(b3))
+	r3.Header.Set("Content-Type", "application/json")
+	r3 = r3.WithContext(contextWithBrokerIdentity(
+		contextWithIdentity(r3.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")),
+		NewBrokerIdentity("test-broker"),
+	))
+	rec3 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec3, r3)
+	require.Equal(t, http.StatusBadRequest, rec3.Code, "body: %s", rec3.Body.String())
+	assert.Contains(t, rec3.Body.String(), "parent_ref requires external_ref")
 }

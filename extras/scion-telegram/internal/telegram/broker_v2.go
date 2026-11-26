@@ -1075,9 +1075,25 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	var chatIDs []int64
 
 	// Priority 0: Conversation external_ref (Phase 11).
+	// When a store and projectID are present, only post to the conversation's
+	// chat if it is still an active GroupLink for this project; otherwise fall
+	// back to the pre-P4 routing path so unlinking a group stops replies into
+	// existing forum-topic conversations.
 	convChatID, hasConvChatID, convThreadID := parseTelegramConversationTarget(msg)
 	if hasConvChatID {
-		chatIDs = append(chatIDs, convChatID)
+		allowConvChat := true
+		if store != nil && projectID != "" {
+			link, err := store.GetGroupLink(ctx, convChatID)
+			if err != nil {
+				b.log.Warn("Failed to verify group link for conversation chat", "chat_id", convChatID, "error", err)
+				allowConvChat = false
+			} else if link == nil || !link.Active || link.ProjectID != projectID {
+				allowConvChat = false
+			}
+		}
+		if allowConvChat {
+			chatIDs = append(chatIDs, convChatID)
+		}
 	}
 
 	// Priority 1: Direct chat ID from metadata.
