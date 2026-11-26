@@ -49,6 +49,7 @@ var (
 	triggerPresetApplyComment       string
 	triggerPresetApplyReplyInThread bool
 	triggerPresetApplyDryRun        bool
+	triggerPresetApplyStrict        bool
 )
 
 var triggerPresetCmd = &cobra.Command{
@@ -362,7 +363,7 @@ func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclien
 		return hubclient.TriggerActionSpec{}, nil, err
 	}
 	if dryRun {
-		return hubclient.TriggerActionSpec{}, nil, nil
+		return hubclient.TriggerActionSpec{Type: actionKind}, nil, nil
 	}
 
 	if strings.TrimSpace(triggerPresetApplyName) == "" {
@@ -556,6 +557,14 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return wrapHubError(fmt.Errorf("failed to compile trigger preset: %w", formatTriggerPresetCompileError(err)))
 	}
 
+	if reasons := triggerPresetWideningReasons(compiled, action); len(reasons) > 0 {
+		warning := formatTriggerPresetWideningWarning(reasons)
+		_, _ = fmt.Fprintln(os.Stderr, warning)
+		if triggerPresetApplyStrict {
+			return fmt.Errorf("trigger preset widens eligibility (refused by --strict): %s", strings.Join(reasons, "; "))
+		}
+	}
+
 	if triggerPresetApplyDryRun {
 		if isTriggerJSONOutput() {
 			return outputTriggerJSON(compiled)
@@ -688,6 +697,74 @@ func formatTriggerMatchFormLabel(raw json.RawMessage) string {
 	return form.Preset
 }
 
+// triggerPresetWideningReasons checks whether a compiled preset's effective
+// form fields combined with the given action widen trigger eligibility beyond
+// trusted defaults:
+//   - allowed_associations includes any value beyond OWNER, MEMBER, COLLABORATOR
+//   - include_forks is true with a dispatching action (dispatch_agent)
+//   - allow_bots is true with a dispatching action (dispatch_agent)
+func triggerPresetWideningReasons(compiled *hubclient.CompiledTriggerPreset, action hubclient.TriggerActionSpec) []string {
+	if compiled == nil || len(compiled.Form.Fields) == 0 {
+		return nil
+	}
+	var reasons []string
+	if extra := wideningAuthorAssociations(compiled.Form.Fields["allowed_associations"]); len(extra) > 0 {
+		sanitized := make([]string, len(extra))
+		for i, v := range extra {
+			sanitized[i] = triggerTerminalText(v, false)
+		}
+		reasons = append(reasons, fmt.Sprintf("allowed_associations includes %s beyond OWNER, MEMBER, COLLABORATOR", strings.Join(sanitized, ", ")))
+	}
+	if action.Type == "dispatch_agent" {
+		if b, ok := compiled.Form.Fields["include_forks"].(bool); ok && b {
+			reasons = append(reasons, "include_forks is enabled with a dispatch_agent action")
+		}
+		if b, ok := compiled.Form.Fields["allow_bots"].(bool); ok && b {
+			reasons = append(reasons, "allow_bots is enabled with a dispatch_agent action")
+		}
+	}
+	return reasons
+}
+
+func wideningAuthorAssociations(raw any) []string {
+	var vals []string
+	switch typed := raw.(type) {
+	case []string:
+		vals = typed
+	case []any:
+		vals = make([]string, 0, len(typed))
+		for _, elem := range typed {
+			if s, ok := elem.(string); ok {
+				vals = append(vals, s)
+			}
+		}
+	default:
+		return nil
+	}
+	var extra []string
+	seen := make(map[string]struct{}, len(vals))
+	for _, v := range vals {
+		norm := strings.ToUpper(strings.TrimSpace(v))
+		if norm == "" {
+			continue
+		}
+		switch norm {
+		case "OWNER", "MEMBER", "COLLABORATOR":
+			continue
+		}
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
+		extra = append(extra, norm)
+	}
+	return extra
+}
+
+func formatTriggerPresetWideningWarning(reasons []string) string {
+	return "Warning: trigger preset widens eligibility: " + strings.Join(reasons, "; ")
+}
+
 func init() {
 	triggerPresetCmd.AddCommand(triggerPresetListCmd)
 	triggerPresetCmd.AddCommand(triggerPresetShowCmd)
@@ -709,4 +786,5 @@ func init() {
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyComment, "comment", "", "Post a GitHub comment with this body template (shorthand for --action github.comment; requires a github preset)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyReplyInThread, "reply-in-thread", false, "Reply under the review comment thread instead of the PR/issue conversation (requires --comment)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDryRun, "dry-run", false, "Compile and print the rule without creating a trigger")
+	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyStrict, "strict", false, "Fail if the preset widens eligibility (untrusted author associations, or forks/bots with dispatch-agent)")
 }

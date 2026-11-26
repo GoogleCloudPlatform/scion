@@ -556,6 +556,7 @@ var (
 	triggerUpdateWhereFile         string
 	triggerUpdateSubjectExpr       string
 	triggerUpdateOnSubject         string
+	triggerUpdateCoalesceWindow    string
 	triggerUpdateMaxFiresPerMinute int
 	triggerUpdateMaxConcurrent     int
 	triggerUpdateRevision          int
@@ -672,7 +673,7 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		req.Match = patch
 		anyChange = true
 	}
-	if flags.Changed("subject") || flags.Changed("on-subject") {
+	if flags.Changed("subject") || flags.Changed("on-subject") || flags.Changed("coalesce") {
 		subj := &hubclient.TriggerSubjectPatchSpec{}
 		if flags.Changed("subject") {
 			expr := triggerUpdateSubjectExpr
@@ -681,6 +682,10 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		if flags.Changed("on-subject") {
 			mode := strings.TrimSpace(triggerUpdateOnSubject)
 			subj.Mode = &mode
+		}
+		if flags.Changed("coalesce") {
+			coalesce := strings.TrimSpace(triggerUpdateCoalesceWindow)
+			subj.CoalesceWindow = &coalesce
 		}
 		req.Subject = subj
 		anyChange = true
@@ -973,7 +978,8 @@ func init() {
 	f.StringArrayVar(&triggerUpdateWhereRules, "where", nil, "Updated ordered match rules [<dialect>:]<expr> (repeatable)")
 	f.StringVar(&triggerUpdateWhereFile, "where-file", "", "Path to JSON file containing updated ordered {dialect, expr} match rules")
 	f.StringVar(&triggerUpdateSubjectExpr, "subject", "", "Updated CEL subject expression")
-	f.StringVar(&triggerUpdateOnSubject, "on-subject", "", "Updated subject concurrency policy (new or skip)")
+	f.StringVar(&triggerUpdateOnSubject, "on-subject", "", "Updated subject concurrency policy (new, skip, or reuse)")
+	f.StringVar(&triggerUpdateCoalesceWindow, "coalesce", "", "Updated coalescing window duration (0 or 0s clears, max 10m, e.g. 30s)")
 	f.IntVar(&triggerUpdateMaxFiresPerMinute, "max-per-minute", 0, "Updated maximum fires per minute (0 = unlimited; max 600)")
 	f.IntVar(&triggerUpdateMaxConcurrent, "max-concurrent", 0, "Updated maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
 	f.IntVar(&triggerUpdateRevision, "revision", 0, "Expected authorization revision for optimistic concurrency")

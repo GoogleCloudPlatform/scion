@@ -750,3 +750,101 @@ func TestTriggerCLI_RefusesCrossActionFlags(t *testing.T) {
 		assert.Contains(t, err.Error(), "--task cannot be used with action type \"message\"")
 	})
 }
+
+func TestTriggerUpdate_CoalesceFlagAndOnSubjectHelpText(t *testing.T) {
+	onSubjectFlag := triggerUpdateCmd.Flags().Lookup("on-subject")
+	require.NotNil(t, onSubjectFlag)
+	assert.Contains(t, onSubjectFlag.Usage, "new, skip, or reuse")
+	assert.NotContains(t, onSubjectFlag.Usage, "new or skip")
+
+	coalesceFlag := triggerUpdateCmd.Flags().Lookup("coalesce")
+	require.NotNil(t, coalesceFlag)
+
+	const trigID = "66666666-6666-6666-6666-666666666666"
+
+	runCoalesceCase := func(t *testing.T, flagVal string) (hubclient.UpdateTriggerRequest, map[string]any) {
+		t.Helper()
+		resetTriggerDispatchTestFlags(t)
+
+		var (
+			gotPatch hubclient.UpdateTriggerRequest
+			rawPatch map[string]any
+		)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method != http.MethodPatch {
+				t.Errorf("unexpected %s request for subject-only update", r.Method)
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			var raw json.RawMessage
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&raw))
+			require.NoError(t, json.Unmarshal(raw, &gotPatch))
+			require.NoError(t, json.Unmarshal(raw, &rawPatch))
+			respCoalesce := ""
+			if gotPatch.Subject != nil && gotPatch.Subject.CoalesceWindow != nil &&
+				*gotPatch.Subject.CoalesceWindow != "0" && *gotPatch.Subject.CoalesceWindow != "0s" {
+				respCoalesce = *gotPatch.Subject.CoalesceWindow
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:                    trigID,
+				ProjectID:             "proj-1",
+				Name:                  "pr-sync",
+				AuthorizationRevision: 2,
+				Subject: hubclient.TriggerSubjectSpec{
+					CoalesceWindow: respCoalesce,
+				},
+				Action: hubclient.TriggerActionSpec{
+					Type:      "message",
+					AgentName: "lead",
+					Message:   "hi",
+				},
+				Status: "active",
+			})
+		}))
+		t.Cleanup(srv.Close)
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+
+		origFn := triggerHubContextFn
+		t.Cleanup(func() { triggerHubContextFn = origFn })
+		triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+		}
+
+		origCoalesce := triggerUpdateCoalesceWindow
+		require.NoError(t, triggerUpdateCmd.Flags().Set("coalesce", flagVal))
+		t.Cleanup(func() {
+			triggerUpdateCoalesceWindow = origCoalesce
+			_ = triggerUpdateCmd.Flags().Set("coalesce", "")
+			triggerUpdateCmd.Flags().Lookup("coalesce").Changed = false
+		})
+
+		_ = captureStdout(t, func() {
+			require.NoError(t, runTriggerUpdate(triggerUpdateCmd, []string{trigID}))
+		})
+		return gotPatch, rawPatch
+	}
+
+	t.Run("sets_coalesce_window", func(t *testing.T) {
+		patch, raw := runCoalesceCase(t, "30s")
+		require.NotNil(t, patch.Subject)
+		require.NotNil(t, patch.Subject.CoalesceWindow)
+		assert.Equal(t, "30s", *patch.Subject.CoalesceWindow)
+		subjRaw, ok := raw["subject"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "30s", subjRaw["coalesce_window"])
+	})
+
+	t.Run("zero_clears_coalesce_window", func(t *testing.T) {
+		patch, raw := runCoalesceCase(t, "0")
+		require.NotNil(t, patch.Subject)
+		require.NotNil(t, patch.Subject.CoalesceWindow)
+		assert.Equal(t, "0", *patch.Subject.CoalesceWindow)
+		subjRaw, ok := raw["subject"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "0", subjRaw["coalesce_window"])
+	})
+}

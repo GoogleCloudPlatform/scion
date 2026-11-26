@@ -77,6 +77,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	origComment := triggerPresetApplyComment
 	origReplyInThread := triggerPresetApplyReplyInThread
 	origDryRun := triggerPresetApplyDryRun
+	origStrict := triggerPresetApplyStrict
 	t.Cleanup(func() {
 		outputFormat = origFormat
 		triggerOutputJSON = origJSON
@@ -95,6 +96,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 		triggerPresetApplyComment = origComment
 		triggerPresetApplyReplyInThread = origReplyInThread
 		triggerPresetApplyDryRun = origDryRun
+		triggerPresetApplyStrict = origStrict
 	})
 	outputFormat = ""
 	triggerOutputJSON = false
@@ -113,6 +115,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	triggerPresetApplyComment = ""
 	triggerPresetApplyReplyInThread = false
 	triggerPresetApplyDryRun = false
+	triggerPresetApplyStrict = false
 }
 
 func TestTriggerPresetCLI_ListShowAndSanitization(t *testing.T) {
@@ -376,4 +379,239 @@ func TestTriggerPresetCLI_ApplyCarriesReuseAndCoalesceWindow(t *testing.T) {
 	assert.Equal(t, "30s", seenCreate.Subject.CoalesceWindow)
 	assert.Contains(t, applyOut, "Trigger created: tr-1")
 	assert.Contains(t, applyOut, "Coalesce: 30s")
+}
+
+func TestTriggerPresetCLI_ApplyWideningWarningAndStrict(t *testing.T) {
+	schema := hubclient.TriggerPreset{
+		ID:      "github.command",
+		Source:  "github",
+		Version: 1,
+		Title:   "Slash command",
+		Fields: []hubclient.TriggerPresetField{
+			{Name: "command", Type: "string", Required: true},
+			{Name: "allowed_associations", Type: "list"},
+			{Name: "include_forks", Type: "bool"},
+			{Name: "allow_bots", Type: "bool"},
+		},
+	}
+
+	type testCase struct {
+		name        string
+		formFields  map[string]any
+		dispatch    bool
+		dryRun      bool
+		strict      bool
+		wantWarn    bool
+		wantWarnSub string
+		wantErr     bool
+		wantCreate  bool
+	}
+
+	cases := []testCase{
+		{
+			name: "default_trusted_dispatch_no_warning",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER", "COLLABORATOR"},
+				"include_forks":        false,
+				"allow_bots":           false,
+			},
+			dispatch:   true,
+			strict:     true,
+			wantWarn:   false,
+			wantErr:    false,
+			wantCreate: true,
+		},
+		{
+			name: "forks_and_bots_with_message_action_no_warning",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER"},
+				"include_forks":        true,
+				"allow_bots":           true,
+			},
+			dispatch:   false,
+			strict:     true,
+			wantWarn:   false,
+			wantErr:    false,
+			wantCreate: true,
+		},
+		{
+			name: "untrusted_association_warns_without_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"},
+				"include_forks":        false,
+				"allow_bots":           false,
+			},
+			dispatch:    false,
+			strict:      false,
+			wantWarn:    true,
+			wantWarnSub: "CONTRIBUTOR",
+			wantErr:     false,
+			wantCreate:  true,
+		},
+		{
+			name: "untrusted_association_fails_with_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "NONE"},
+				"include_forks":        false,
+				"allow_bots":           false,
+			},
+			dispatch:    false,
+			strict:      true,
+			wantWarn:    true,
+			wantWarnSub: "NONE",
+			wantErr:     true,
+			wantCreate:  false,
+		},
+		{
+			name: "include_forks_with_dispatch_warns_without_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER", "COLLABORATOR"},
+				"include_forks":        true,
+				"allow_bots":           false,
+			},
+			dispatch:    true,
+			strict:      false,
+			wantWarn:    true,
+			wantWarnSub: "include_forks",
+			wantErr:     false,
+			wantCreate:  true,
+		},
+		{
+			name: "include_forks_with_dispatch_fails_with_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER", "COLLABORATOR"},
+				"include_forks":        true,
+				"allow_bots":           false,
+			},
+			dispatch:    true,
+			strict:      true,
+			wantWarn:    true,
+			wantWarnSub: "include_forks",
+			wantErr:     true,
+			wantCreate:  false,
+		},
+		{
+			name: "allow_bots_with_dispatch_warns_and_fails_with_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER", "MEMBER", "COLLABORATOR"},
+				"include_forks":        false,
+				"allow_bots":           true,
+			},
+			dispatch:    true,
+			strict:      true,
+			wantWarn:    true,
+			wantWarnSub: "allow_bots",
+			wantErr:     true,
+			wantCreate:  false,
+		},
+		{
+			name: "dry_run_with_dispatch_forks_warns_and_fails_with_strict",
+			formFields: map[string]any{
+				"command":              "review",
+				"allowed_associations": []string{"OWNER"},
+				"include_forks":        true,
+				"allow_bots":           false,
+			},
+			dispatch:    true,
+			dryRun:      true,
+			strict:      true,
+			wantWarn:    true,
+			wantWarnSub: "include_forks",
+			wantErr:     true,
+			wantCreate:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetTriggerPresetFlags(t)
+
+			var createCalled bool
+			compiledResp := hubclient.CompiledTriggerPreset{
+				Match: hubclient.CompiledTriggerMatch{
+					Types: []string{"github.issue_comment.created"},
+					Rules: []hubclient.CompiledTriggerRule{
+						{Dialect: "cel", Expr: "event.attributes.command == 'review'"},
+					},
+				},
+				Subject: hubclient.CompiledTriggerSubject{Mode: "new"},
+				Form: hubclient.CompiledTriggerForm{
+					Preset:  "github.command",
+					Version: 1,
+					Fields:  tc.formFields,
+				},
+			}
+
+			withMockTriggerPresetHub(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/trigger-presets":
+					_ = json.NewEncoder(w).Encode([]hubclient.TriggerPreset{schema})
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/trigger-presets/compile":
+					_ = json.NewEncoder(w).Encode(compiledResp)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+					createCalled = true
+					var req hubclient.CreateTriggerRequest
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+					w.WriteHeader(http.StatusCreated)
+					_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+						ID:     "tr-widen",
+						Name:   req.Name,
+						Source: req.Source,
+						Match:  *req.Match,
+						Action: req.Action,
+						Status: "active",
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}, hubsync.CredentialKindOAuth)
+
+			triggerPresetApplyName = "gh-review"
+			triggerPresetApplyDryRun = tc.dryRun
+			triggerPresetApplyStrict = tc.strict
+			if tc.dispatch {
+				triggerPresetApplyDispatch = true
+				triggerPresetApplyDispatchFlags = dispatchAgentFlagValues{
+					template:    "default",
+					task:        "Review PR",
+					githubToken: "installation",
+				}
+			} else {
+				triggerPresetApplyAction = "message"
+				triggerPresetApplyAgent = "lead"
+				triggerPresetApplyMessage = "Handle /review"
+			}
+
+			var runErr error
+			stderr := captureStderr(t, func() {
+				_ = captureStdout(t, func() {
+					runErr = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
+				})
+			})
+
+			if tc.wantWarn {
+				assert.Contains(t, stderr, "Warning: trigger preset widens eligibility:")
+				if tc.wantWarnSub != "" {
+					assert.Contains(t, stderr, tc.wantWarnSub)
+				}
+			} else {
+				assert.Empty(t, stderr, "expected no widening warning on stderr")
+			}
+			if tc.wantErr {
+				require.Error(t, runErr)
+				assert.Contains(t, runErr.Error(), "--strict")
+			} else {
+				require.NoError(t, runErr)
+			}
+			assert.Equal(t, tc.wantCreate, createCalled)
+		})
+	}
 }
