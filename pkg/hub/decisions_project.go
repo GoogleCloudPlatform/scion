@@ -823,7 +823,6 @@ func (s *Server) decisionsCore(
 	resolved := resolveProjectDecisionsFilterQuery(set, user.ID(), pq, facetAgents, facetAnswerers, listKeys)
 	if pq.parsedQuery != nil {
 		listKeys = resolved.listKeys
-		targetProjectIDs = resolved.projectIDs
 	}
 
 	// Live counts and classified prompt cards across all open prompts.

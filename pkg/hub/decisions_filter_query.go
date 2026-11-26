@@ -71,13 +71,13 @@ func parseDecisionsFilterQ(
 }
 
 // resolvedDecisionsQuery is the scope-resolved translation of a structured
-// filterquery.Query for GET /api/v1/projects/{id}/decisions (design-8985 §3.2).
+// filterquery.Query for GET /api/v1/projects/{id}/decisions and
+// GET /api/v1/users/me/decisions (design-8985 §3.2).
 // Every value is resolved strictly within the caller's decisionScopeSet and
 // readable facet entries; an unresolvable positive term sets impossible=true so
 // the handler returns an empty 200 without acting as an existence oracle.
 type resolvedDecisionsQuery struct {
 	listKeys           []string
-	projectIDs         []string
 	agentIDs           []string
 	excludeAgentIDs    []string
 	userIDs            []string
@@ -139,16 +139,6 @@ func resolveProjectDecisionsFilterQuery(
 	keySet := make(map[string]bool, len(initialKeys))
 	for _, k := range initialKeys {
 		keySet[k] = true
-	}
-	projSet := make(map[string]bool, len(set.projectIDs))
-	if pq.projectID != "" {
-		if set.projects[pq.projectID] != nil {
-			projSet[pq.projectID] = true
-		}
-	} else {
-		for _, pid := range set.projectIDs {
-			projSet[pid] = true
-		}
 	}
 
 	resolveProjects := func(values []string) map[string]bool {
@@ -293,9 +283,6 @@ func resolveProjectDecisionsFilterQuery(
 		case "project":
 			matched := resolveProjects(term.Values)
 			if term.Negate {
-				for pid := range matched {
-					delete(projSet, pid)
-				}
 				for k := range keySet {
 					if matched[set.keyProject[k]] {
 						delete(keySet, k)
@@ -306,13 +293,6 @@ func resolveProjectDecisionsFilterQuery(
 					res.impossible = true
 					return res
 				}
-				nextProjs := make(map[string]bool)
-				for pid := range projSet {
-					if matched[pid] {
-						nextProjs[pid] = true
-					}
-				}
-				projSet = nextProjs
 				nextKeys := make(map[string]bool)
 				for k := range keySet {
 					if matched[set.keyProject[k]] {
@@ -320,7 +300,7 @@ func resolveProjectDecisionsFilterQuery(
 					}
 				}
 				keySet = nextKeys
-				if len(projSet) == 0 || len(keySet) == 0 {
+				if len(keySet) == 0 {
 					res.impossible = true
 					return res
 				}
@@ -379,7 +359,7 @@ func resolveProjectDecisionsFilterQuery(
 		}
 	}
 
-	// Materialize surviving keys and projects in original order.
+	// Materialize surviving keys in original order.
 	if len(keySet) == 0 {
 		res.listKeys = nil
 	} else {
@@ -390,17 +370,6 @@ func resolveProjectDecisionsFilterQuery(
 			}
 		}
 		res.listKeys = filteredKeys
-	}
-	if len(projSet) == 0 {
-		res.projectIDs = nil
-	} else {
-		filteredProjs := make([]string, 0, len(projSet))
-		for _, pid := range set.projectIDs {
-			if projSet[pid] {
-				filteredProjs = append(filteredProjs, pid)
-			}
-		}
-		res.projectIDs = filteredProjs
 	}
 
 	if hasPosAgents {
