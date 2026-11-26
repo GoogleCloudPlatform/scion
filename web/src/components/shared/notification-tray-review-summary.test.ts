@@ -203,6 +203,14 @@ describe('notification tray: review summary', () => {
     expect(popups[0].title).toBe('Review submitted on v7');
     expect(popups[0].options.body).toBe('Review (v7) of your artifact submitted by Alice.');
     popups = [];
+    tray.dispatchBrowserNotification(
+      summary({
+        message: 'Review summary from Eve (v1) (v5 of your artifact):',
+        excerpt: 'Looks good.',
+      })
+    );
+    expect(popups[0].title).toBe('Review submitted on v5');
+    popups = [];
     tray.dispatchBrowserNotification(summary({ kind: 'artifact_grant' }));
     expect(popups[0].options.body).toBe(n.message);
   });

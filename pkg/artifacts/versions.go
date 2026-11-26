@@ -1133,8 +1133,11 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 	if v.Seq == a.CurrentSeq {
 		currentIsReview = v.Kind == VersionKindReview
 	} else if a.CurrentSeq > 0 {
-		if cv, err := b.store.GetVersion(r.Context(), a.ID, a.CurrentSeq); err == nil && cv != nil {
+		cv, err := b.store.GetVersion(r.Context(), a.ID, a.CurrentSeq)
+		if err == nil && cv != nil {
 			currentIsReview = cv.Kind == VersionKindReview
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
+			slog.WarnContext(r.Context(), "artifacts: get current version for reviewState failed", "artifact", a.ID, "seq", a.CurrentSeq, "error", err)
 		}
 	}
 	s.populateReviewState(r.Context(), b, a, currentIsReview, &resp)

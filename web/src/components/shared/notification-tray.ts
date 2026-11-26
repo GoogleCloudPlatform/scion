@@ -817,7 +817,9 @@ export class ScionNotificationTray extends LitElement {
       case SCHEDULE_BLOCKED_STATUS:
         return 'Schedule Blocked';
       case ARTIFACT_REVIEW_SUBMITTED_STATUS: {
-        const match = /\(v(\d+)\b/.exec(n.message);
+        const match =
+          /^Review \(v(\d+)\) of your artifact /.exec(n.message) ??
+          /\(v(\d+) of your artifact\):$/.exec(n.message);
         return match ? `Review submitted on v${match[1]}` : 'Review submitted';
       }
       case ARTIFACT_REVIEW_REQUESTED_STATUS:

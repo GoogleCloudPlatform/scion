@@ -1954,7 +1954,7 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /** The current version is a review the owner has not answered yet. */
-  private get reviewPendingNow(): boolean {
+  private get reviewOnLatestNow(): boolean {
     return this.isReview && this.showsCurrent && this.data!.version!.seq === this.latestSeq;
   }
 
@@ -4221,7 +4221,7 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Says who reviewed and what, while the current version is a review. */
   private renderReviewBanner(): TemplateResult | typeof nothing {
     const v = this.data?.version;
-    if (!v || !this.reviewPendingNow) return nothing;
+    if (!v || !this.reviewOnLatestNow) return nothing;
     const a = this.data!.artifact;
     const counts = this.text !== null ? countCritic(this.text) : null;
     const base = this.versions.find((x) => x.seq < v.seq);
