@@ -40,4 +40,9 @@ export const GITHUB_ADMIN_SECTIONS: readonly GitHubAdminSection[] = [
     tag: 'scion-admin-github-associations',
     load: () => import('../admin/admin-github-associations.js'),
   },
+  {
+    id: 'routing',
+    tag: 'scion-admin-github-routing',
+    load: () => import('../admin/admin-github-routing.js'),
+  },
 ];

@@ -477,6 +477,20 @@ export function triggersEnabled(): boolean {
 }
 
 /**
+ * GitHub App events as triggers (hub.github_triggers, ptone/scion#836):
+ * gates GitHub trigger authoring, readiness reporting, and admin repository
+ * routing UI surfaces. Requires `hub.triggers` to be enabled as well: the hub
+ * checks both flags server-side, while the web flag affects presentation only.
+ * Default OFF.
+ */
+export const GITHUB_TRIGGERS_FLAG = 'hub.github_triggers';
+
+/** Whether GitHub App trigger UI surfaces are enabled in this session. */
+export function githubTriggersEnabled(): boolean {
+  return triggersEnabled() && isFeatureEnabled(GITHUB_TRIGGERS_FLAG);
+}
+
+/**
  * Access constraints management UI (hub.access_constraints, ptone/scion#9080):
  * gates the Access Constraints admin nav item, /admin/access-boundaries* pages,
  * and cross-links/notices. Presentation only: the hub enforces the experiment

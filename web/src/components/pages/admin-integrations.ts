@@ -20,7 +20,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { pushUrl, replaceUrl } from '../../client/navigation.js';
-import { hasAnyPermission } from '../../lib/admin-permissions.js';
+import { hasAnyPermission, type AdminStatus } from '../../lib/admin-permissions.js';
 import type { PageData } from '../../shared/types.js';
 import {
   INTEGRATION_TABS,
@@ -50,6 +50,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private loadedTabs = new Set<string>();
   @state() private loadErrors = new Map<string, string>();
 
+  private adminStatus: AdminStatus | null = null;
   private tabElements = new Map<string, HTMLElement>();
   private popstateHandler = () => {
     this.syncFromLocation();
@@ -159,6 +160,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     const userId = this.pageData?.user?.id;
     if (userId) {
       const adminStatus = await loadAdminStatus(userId);
+      this.adminStatus = adminStatus;
       if (adminStatus) {
         this.canReadIntegrations = hasAnyPermission(adminStatus, ['hub.integrations.read']);
       }
@@ -258,6 +260,13 @@ export class ScionPageAdminIntegrations extends LitElement {
   private syncElementSubPath(tab: IntegrationTab, el: HTMLElement): void {
     if (tab.id === 'chat') {
       (el as HTMLElement & { integrationName?: string | null }).integrationName = this.subPath;
+    } else if (tab.id === 'github') {
+      const target = el as HTMLElement & {
+        adminStatus?: AdminStatus | null;
+        pageData?: PageData | undefined;
+      };
+      target.adminStatus = this.adminStatus;
+      target.pageData = this.pageData;
     }
   }
 
