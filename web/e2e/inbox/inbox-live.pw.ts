@@ -257,4 +257,181 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await context.close();
     }
   });
+
+  test('chat card shows starred/projects summary, live-updates on star/unstar without changing total, and hydrates ?filter=mentions|starred with 200px rail fit (Phase 3 AC-8, AC-10)', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      baseURL: hub.baseURL,
+      storageState: user.storageStatePath,
+    });
+    const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    try {
+      const createTopic = async (name: string): Promise<string> => {
+        const res = await hubApi<{ id: string }>(
+          hub,
+          hub.devToken,
+          'POST',
+          `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`,
+          { name }
+        );
+        expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
+        return res.body.id;
+      };
+
+      const postAsDev = async (topicId: string, content: string): Promise<string> => {
+        const res = await hubApi<{ id: string }>(
+          hub,
+          hub.devToken,
+          'POST',
+          `/api/v1/chat/conversations/${encodeURIComponent(topicId)}/messages`,
+          { content }
+        );
+        expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
+        return res.body.id;
+      };
+
+      const plainTopic = await createTopic(`plain-${Date.now()}`);
+      const mentionTopic = await createTopic(`mentions-${Date.now()}`);
+      await postAsDev(plainTopic, 'Routine update without mention');
+      const mentionMsgId = await postAsDev(
+        mentionTopic,
+        `Attention @${user.user.email} please review`
+      );
+
+      await page.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+      const chatCard = page.locator('[data-inbox-card="chat"]');
+      await expect(chatCard).toBeVisible({ timeout: 15_000 });
+      await expect(chatCard.locator('[data-card-count]')).toHaveText('2', { timeout: 10_000 });
+      await expect(chatCard.locator('[data-card-prose]')).toHaveText(
+        '2 unread conversations, 1 with mentions across 1 project',
+        { timeout: 10_000 }
+      );
+      await expect(chatCard.locator('a[data-card-prose-link="chat-unread"]')).toHaveAttribute(
+        'href',
+        '/chat?filter=unread'
+      );
+      await expect(chatCard.locator('a[data-card-prose-link="chat-mentions"]')).toHaveAttribute(
+        'href',
+        '/chat?filter=mentions'
+      );
+      await expect(chatCard.locator('a[data-card-prose-link="chat-starred"]')).toHaveCount(0);
+
+      // Plant sentinel to prove star/unstar updates happen without page reload.
+      await page.evaluate(() => {
+        (window as unknown as { __chatStarSentinel?: string }).__chatStarSentinel = 'alive';
+      });
+
+      // Star a message via the session's browser fetch (cookie auth).
+      const starStatus = await page.evaluate(
+        async ({ msgId, convKey }) => {
+          const res = await fetch(`/api/v1/chat/stars/${encodeURIComponent(msgId)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversationKey: convKey }),
+          });
+          return res.status;
+        },
+        { msgId: mentionMsgId, convKey: mentionTopic }
+      );
+      expect(starStatus).toBeLessThan(300);
+
+      // Live update adds starred clause & link; badge total stays 2 (AC-10).
+      await expect(chatCard.locator('[data-card-prose]')).toHaveText(
+        '2 unread conversations, 1 with mentions, 1 starred message across 1 project',
+        { timeout: 7_000 }
+      );
+      await expect(chatCard.locator('a[data-card-prose-link="chat-starred"]')).toHaveAttribute(
+        'href',
+        '/chat?filter=starred'
+      );
+      await expect(chatCard.locator('[data-card-count]')).toHaveText('2');
+
+      // Unstar the message; starred clause & link disappear without reload.
+      const unstarStatus = await page.evaluate(async (msgId) => {
+        const res = await fetch(`/api/v1/chat/stars/${encodeURIComponent(msgId)}`, {
+          method: 'DELETE',
+        });
+        return res.status;
+      }, mentionMsgId);
+      expect(unstarStatus).toBe(204);
+
+      await expect(chatCard.locator('[data-card-prose]')).toHaveText(
+        '2 unread conversations, 1 with mentions across 1 project',
+        { timeout: 7_000 }
+      );
+      await expect(chatCard.locator('a[data-card-prose-link="chat-starred"]')).toHaveCount(0);
+
+      const sentinel = await page.evaluate(
+        () => (window as unknown as { __chatStarSentinel?: string }).__chatStarSentinel
+      );
+      expect(sentinel).toBe('alive');
+
+      // Click the "1 with mentions" link -> /chat?filter=mentions hydrates, strips param, persists.
+      await chatCard.locator('a[data-card-prose-link="chat-mentions"]').click();
+      const rail = page.locator('scion-chat-space-rail');
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => new URL(page.url()).searchParams.has('filter'), { timeout: 5_000 })
+        .toBe(false);
+      const storedFilter = await page.evaluate(() =>
+        localStorage.getItem('scion-chat-space-filter')
+      );
+      expect(storedFilter).toBe('mentions');
+
+      const unreadBtn = rail.locator('.filter-toggle button', { hasText: 'Unread' });
+      const mentionsChip = rail.locator('[data-mentions-chip]');
+      await expect(unreadBtn).toHaveAttribute('aria-pressed', 'true');
+      await expect(mentionsChip).toBeVisible();
+      await expect(mentionsChip).toHaveAttribute('aria-pressed', 'true');
+
+      // Only the mentioned thread is shown; plain unread thread and Unread DMs are hidden.
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'mentions-' })).toBeVisible(
+        { timeout: 10_000 }
+      );
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
+      await expect(rail.locator('.dm-section')).toHaveCount(0);
+
+      // AC-8 extended: toolbar does not overflow at a 200px rail width.
+      const overflow200 = await page.evaluate(() => {
+        const chatPage = document.querySelector('scion-page-chat');
+        const railWrap = chatPage?.shadowRoot?.querySelector<HTMLElement>('.v2-rail');
+        if (railWrap) {
+          railWrap.style.width = '200px';
+          railWrap.style.minWidth = '200px';
+          railWrap.style.maxWidth = '200px';
+        }
+        const railEl = chatPage?.shadowRoot?.querySelector('scion-chat-space-rail');
+        const toolbar = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-toolbar');
+        const subfilter = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-subfilter');
+        return {
+          railWidth: railEl?.getBoundingClientRect().width ?? 0,
+          toolbarOverflow: toolbar ? toolbar.scrollWidth > toolbar.clientWidth + 1 : true,
+          subfilterOverflow: subfilter ? subfilter.scrollWidth > subfilter.clientWidth + 1 : true,
+        };
+      });
+      expect(overflow200.railWidth).toBeLessThanOrEqual(201);
+      expect(overflow200.toolbarOverflow).toBe(false);
+      expect(overflow200.subfilterOverflow).toBe(false);
+
+      // Hydrate ?filter=starred directly -> Starred active, chip hidden, param stripped.
+      await page.goto('/chat?filter=starred', { waitUntil: 'domcontentloaded' });
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => new URL(page.url()).searchParams.has('filter'), { timeout: 5_000 })
+        .toBe(false);
+      await expect(rail.locator('.filter-toggle button', { hasText: 'Starred' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+      await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
 });

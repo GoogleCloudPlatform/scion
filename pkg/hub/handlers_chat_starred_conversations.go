@@ -120,7 +120,7 @@ func (s *Server) handleChatStarredConversations(w http.ResponseWriter, r *http.R
 		limit = n
 	}
 
-	auth := s.newStarredConversationAuthorizer(r, call)
+	auth := s.newStarredConversationAuthorizer(ctx, call)
 	if projectID != "" {
 		// The project scope is authorized before anything is queried; a
 		// project the caller may not read is answered as a missing one.
@@ -286,10 +286,18 @@ type starredConversationAuthorizer struct {
 	agentRead map[string]bool
 }
 
-func (s *Server) newStarredConversationAuthorizer(r *http.Request, call starCall) *starredConversationAuthorizer {
+func (s *Server) newStarredConversationAuthorizer(ctx context.Context, call starCall) *starredConversationAuthorizer {
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		if call.token != nil {
+			identity = call.token
+		} else {
+			identity = call.user
+		}
+	}
 	a := &starredConversationAuthorizer{
 		s: s, call: call,
-		identity:    GetIdentityFromContext(r.Context()),
+		identity:    identity,
 		projects:    map[string]*store.Project{},
 		projectRead: map[string]bool{},
 		agents:      map[string]*store.Agent{},
@@ -297,7 +305,7 @@ func (s *Server) newStarredConversationAuthorizer(r *http.Request, call starCall
 		agentRead:   map[string]bool{},
 	}
 	if call.token != nil {
-		a.check = s.newSelfScopeCheck(r.Context(), call.token, permInboxRead)
+		a.check = s.newSelfScopeCheck(ctx, call.token, permInboxRead)
 	}
 	return a
 }

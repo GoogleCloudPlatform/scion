@@ -56,6 +56,7 @@ const (
 	InboxBreakdownUnreadConversations = "unreadConversations"
 	InboxBreakdownDMs                 = "dms"
 	InboxBreakdownMentions            = "mentions"
+	InboxBreakdownStarredMessages     = "starredMessages"
 
 	// InboxCategoryNotifications is the SSE hint category emitted when a user
 	// acknowledges one or all bell notifications (design §5.2).

@@ -45,14 +45,18 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 import type { PageData, Agent, Project, DeletionInfo } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
-import { browserPath, stripBasePath } from '../../client/navigation.js';
+import { browserPath, replaceSearch, stripBasePath } from '../../client/navigation.js';
 import { agentIndexOf, agentStore } from '../../client/agent-store.js';
 import {
+  CHAT_RAIL_FILTER_PARAM,
+  RAIL_FILTER_STORAGE_KEY,
   dmPeerFromKey,
   isChatConversationPath,
   messageFilterFromSearch,
+  railFilterFromSearch,
   searchWithMessageFilter,
   type ChatMessageFilter,
+  type ChatUrlRailFilter,
 } from '../../client/chat-routes.js';
 import type { AgentListSnapshot } from '../../client/agent-store.js';
 import type { SeedEpochToken } from '../../client/state.js';
@@ -2184,6 +2188,16 @@ export class ScionPageChat extends LitElement {
     if (changedProperties.has('pageData') && this.pageData) {
       this.parseV2Route();
     }
+    if (this._pendingUrlRailFilter && this.v2SpaceRailLoaded) {
+      const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+        | (HTMLElement & { applyUrlFilter?: (f: ChatUrlRailFilter) => void })
+        | null;
+      if (rail?.applyUrlFilter) {
+        const pending = this._pendingUrlRailFilter;
+        this._pendingUrlRailFilter = null;
+        rail.applyUrlFilter(pending);
+      }
+    }
     // A message arriving in the conversation already on screen should not
     // also pop a desktop notification about it. Reported from updated()
     // rather than from each of the many places v2Conversation is assigned.
@@ -2546,12 +2560,44 @@ export class ScionPageChat extends LitElement {
     return this.isConnected && !!match && decodeURIComponent(match[1]) === peerId;
   }
 
+  private _pendingUrlRailFilter: ChatUrlRailFilter | null = null;
+
+  /**
+   * Hydrate the rail filter from `?filter=unread|mentions|starred` on any chat
+   * route, persist it to localStorage, and strip `filter` from the URL via
+   * `replaceSearch` (design §7.1, §14.4). Invalid values are ignored and stripped.
+   */
+  private hydrateRailFilterFromUrl(): void {
+    const params = new URLSearchParams(window.location.search);
+    if (!params.has(CHAT_RAIL_FILTER_PARAM)) return;
+    const requested = railFilterFromSearch(window.location.search);
+    params.delete(CHAT_RAIL_FILTER_PARAM);
+    replaceSearch(params);
+    if (!requested) return;
+    if (requested === 'starred' && !starredMessagesEnabled()) return;
+    try {
+      localStorage.setItem(RAIL_FILTER_STORAGE_KEY, requested);
+    } catch {
+      // Ignore storage errors.
+    }
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | (HTMLElement & { applyUrlFilter?: (f: ChatUrlRailFilter) => void })
+      | null;
+    if (rail?.applyUrlFilter) {
+      rail.applyUrlFilter(requested);
+      this._pendingUrlRailFilter = null;
+    } else {
+      this._pendingUrlRailFilter = requested;
+    }
+  }
+
   private parseV2Route(): void {
     // Always use the browser URL as the source of truth. pushState
     // navigations (handleThreadSelect, handleMemberClick) update the
     // browser URL without updating pageData, so pageData.path can be
     // stale when this is called from handleRailLoaded after a reload.
     const path = window.location.pathname;
+    this.hydrateRailFilterFromUrl();
     this.syncMessageFilterFromUrl();
 
     // Match legacy /chat/space/{projectId}/thread/{topicId} (backward compat)

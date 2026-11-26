@@ -26,9 +26,12 @@ const inboxNothingWaitingProse = "Nothing Waiting"
 type inboxLinkKey string
 
 const (
-	// inboxLinkPrimary resolves to the category's hub href; Phases 3 and 4 add
-	// chat-* and reviews-* link keys mirroring web/src/utils/inbox-prose.ts.
-	inboxLinkPrimary inboxLinkKey = "primary"
+	// inboxLinkPrimary resolves to the category's hub href; chat-* link keys
+	// resolve to chat rail filter routes mirroring web/src/utils/inbox-prose.ts.
+	inboxLinkPrimary      inboxLinkKey = "primary"
+	inboxLinkChatUnread   inboxLinkKey = "chat-unread"
+	inboxLinkChatMentions inboxLinkKey = "chat-mentions"
+	inboxLinkChatStarred  inboxLinkKey = "chat-starred"
 )
 
 type inboxProseSegment struct {
@@ -94,7 +97,7 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 			}
 		}
 		mentions := breakdown[hubclient.InboxBreakdownMentions]
-		starred := breakdown["starredMessages"]
+		starred := breakdown[hubclient.InboxBreakdownStarredMessages]
 		projects := breakdown[hubclient.InboxBreakdownProjects]
 
 		var segments []inboxProseSegment
@@ -102,24 +105,28 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 		if unread > 0 {
 			segments = append(segments, inboxProseSegment{
 				Text: formatCountNoun(unread, capped, "unread conversation", "unread conversations"),
-				Link: inboxLinkPrimary,
+				Link: inboxLinkChatUnread,
 			})
 			hasClause = true
 		}
 		if mentions > 0 {
-			prefix := ""
 			if hasClause {
-				prefix = ", "
+				segments = appendUnlinkedSegment(segments, ", ")
 			}
-			segments = appendUnlinkedSegment(segments, fmt.Sprintf("%s%d with mentions", prefix, mentions))
+			segments = append(segments, inboxProseSegment{
+				Text: fmt.Sprintf("%d with mentions", mentions),
+				Link: inboxLinkChatMentions,
+			})
 			hasClause = true
 		}
 		if starred > 0 {
-			prefix := ""
 			if hasClause {
-				prefix = ", "
+				segments = appendUnlinkedSegment(segments, ", ")
 			}
-			segments = appendUnlinkedSegment(segments, prefix+pluralizeInbox(starred, "starred message", "starred messages"))
+			segments = append(segments, inboxProseSegment{
+				Text: pluralizeInbox(starred, "starred message", "starred messages"),
+				Link: inboxLinkChatStarred,
+			})
 			hasClause = true
 		}
 		if !hasClause {

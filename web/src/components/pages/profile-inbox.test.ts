@@ -158,7 +158,13 @@ describe('<scion-page-profile-inbox>', () => {
       chat: makeCat({
         count: 5,
         href: '/chat',
-        breakdown: { unreadConversations: 5, dms: 1, mentions: 2 },
+        breakdown: {
+          unreadConversations: 5,
+          dms: 1,
+          mentions: 2,
+          starredMessages: 4,
+          projects: 2,
+        },
       }),
     });
 
@@ -250,19 +256,33 @@ describe('<scion-page-profile-inbox>', () => {
     checkCard('reviews', 'Reviews', '3', '3 pending reviews', [
       { text: '3 pending reviews', href: '/artifacts?review_on_latest=1&owner=me' },
     ]);
-    checkCard('chat', 'Chat', '5', '5 unread conversations, 2 with mentions', [
-      { text: '5 unread conversations', href: '/chat' },
-    ]);
+    checkCard(
+      'chat',
+      'Chat',
+      '5',
+      '5 unread conversations, 2 with mentions, 4 starred messages across 2 projects',
+      [
+        { text: '5 unread conversations', href: '/chat?filter=unread' },
+        { text: '2 with mentions', href: '/chat?filter=mentions' },
+        { text: '4 starred messages', href: '/chat?filter=starred' },
+      ]
+    );
 
-    // AC-16: no rendered link targets unhydrated filter routes.
+    // AC-16: Phase 3 chat filter links are active; no rendered link targets Phase 4 unhydrated reviews filter routes.
     const allLinks = Array.from(page.shadowRoot?.querySelectorAll('a[href]') ?? []);
     for (const a of allLinks) {
       const href = a.getAttribute('href') ?? '';
-      expect(href).not.toContain('/chat?filter=');
       expect(href).not.toContain('requested=1');
       expect(href).not.toContain('drafts=1');
     }
-    expect(Object.values(INBOX_LINK_HREFS)).toEqual([]);
+    expect(Object.keys(INBOX_LINK_HREFS).sort()).toEqual([
+      'chat-mentions',
+      'chat-starred',
+      'chat-unread',
+    ]);
+    expect(INBOX_LINK_HREFS['reviews-to-address']).toBeUndefined();
+    expect(INBOX_LINK_HREFS['reviews-requested']).toBeUndefined();
+    expect(INBOX_LINK_HREFS['reviews-drafts']).toBeUndefined();
   });
 
   it('hides disabled cards, renders unavailable sign-in note, error Retry, and Nothing Waiting with no links when 0', async () => {
@@ -363,5 +383,74 @@ describe('<scion-page-profile-inbox>', () => {
     expect(page.shadowRoot?.querySelector('[data-inbox-caught-up]')).not.toBeNull();
     expect(page.shadowRoot?.querySelectorAll('.card-prose-link').length).toBe(0);
     expect(page.shadowRoot?.querySelectorAll('.card-actions').length).toBe(0);
+  });
+
+  it('renders starred-only chat prose and link without badge when unread is 0 (AC-10) and omits starred link when gated off (AC-13)', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const starredOnly = makeSummary({
+      chat: makeCat({
+        count: 0,
+        href: '/chat',
+        breakdown: {
+          unreadConversations: 0,
+          dms: 0,
+          mentions: 0,
+          starredMessages: 4,
+          projects: 2,
+        },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(starredOnly), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const chatCard = page.shadowRoot?.querySelector('[data-inbox-card="chat"]');
+    expect(chatCard?.querySelector('[data-card-count]')).toBeNull();
+    expect(chatCard?.querySelector('[data-card-empty]')).toBeNull();
+    expect(chatCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '4 starred messages across 2 projects'
+    );
+    const links = Array.from(
+      chatCard?.querySelectorAll('a.card-prose-link') ?? []
+    ) as HTMLAnchorElement[];
+    expect(
+      links.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
+    ).toEqual([{ text: '4 starred messages', href: '/chat?filter=starred' }]);
+
+    // AC-13: when web.chat_starred_messages is off, hub omits starredMessages -> no starred link.
+    const gateOff = makeSummary({
+      chat: makeCat({
+        count: 2,
+        href: '/chat',
+        breakdown: { unreadConversations: 2, dms: 0, mentions: 0, projects: 1 },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(gateOff), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+
+    expect(chatCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '2 unread conversations across 1 project'
+    );
+    const gateOffLinks = Array.from(
+      chatCard?.querySelectorAll('a.card-prose-link') ?? []
+    ) as HTMLAnchorElement[];
+    expect(
+      gateOffLinks.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
+    ).toEqual([{ text: '2 unread conversations', href: '/chat?filter=unread' }]);
   });
 });

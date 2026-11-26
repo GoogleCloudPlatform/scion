@@ -94,14 +94,17 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
                         AND c.external_ref <> '' AND c.deleted_at IS NULL)`
 	limit := a.add(f.Limit + 1)
 	rows, err := s.db.QueryContext(ctx, `
-SELECT c.ckey, c.is_dm, c.project_id, c.topic_name, c.activity, c.sort_value FROM (
+SELECT c.ckey, c.is_dm, c.project_id, c.topic_name, c.activity, c.star_count, c.sort_value FROM (
 SELECT el.ckey AS ckey,
        `+isDM+` AS is_dm,
        (CASE WHEN `+isDM+` THEN el.star_project ELSE t.project_id END) AS project_id,
        COALESCE(t.name, '') AS topic_name,
        `+activity+` AS activity,
+       el.star_count AS star_count,
        `+sortValue+` AS sort_value
-  FROM (SELECT st.conversation_key AS ckey, MAX(COALESCE(st.project_id, '')) AS star_project
+  FROM (SELECT st.conversation_key AS ckey,
+               MAX(COALESCE(st.project_id, '')) AS star_project,
+               COUNT(*) AS star_count
           FROM webchat_message_star st
           JOIN `+messagesTable+` m ON m.id = `+pgUUIDText("st.message_id")+`
          WHERE st.user_id = `+user+`::text
@@ -123,7 +126,7 @@ SELECT el.ckey AS ckey,
 	for rows.Next() {
 		var c StarredConversationCandidate
 		var activity sql.NullTime
-		if err := rows.Scan(&c.ConversationKey, &c.IsDM, &c.ProjectID, &c.TopicName, &activity, &c.Position.Value); err != nil {
+		if err := rows.Scan(&c.ConversationKey, &c.IsDM, &c.ProjectID, &c.TopicName, &activity, &c.StarCount, &c.Position.Value); err != nil {
 			return StarredConversationPage{}, fmt.Errorf("webchat store: list starred conversations: %w", err)
 		}
 		if activity.Valid {

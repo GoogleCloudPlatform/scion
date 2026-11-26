@@ -2342,6 +2342,9 @@ type Server struct {
 	// inboxWaitingLimitForTest, when positive (tests only), overrides the
 	// default waiting-agent window limit (inboxWaitingLimit).
 	inboxWaitingLimitForTest int
+	// inboxChatStarredScanBudgetForTest, when positive (tests only), overrides
+	// the default starred-conversation scan budget (inboxChatStarredScanBudget).
+	inboxChatStarredScanBudgetForTest int
 	// maxProfileDecisionProjectsForTest, when positive (tests only), overrides
 	// maxProfileDecisionProjects so truncation paths can be pinned without
 	// seeding >200 projects.

@@ -144,3 +144,24 @@ export function searchWithMessageFilter(search: string, filter: ChatMessageFilte
   const q = params.toString();
   return q ? `?${q}` : '';
 }
+
+/** localStorage key of the selected chat rail filter. */
+export const RAIL_FILTER_STORAGE_KEY = 'scion-chat-space-filter';
+
+/** The query parameter carrying a one-shot rail filter hydration target. */
+export const CHAT_RAIL_FILTER_PARAM = 'filter';
+
+/** Valid URL-hydratable rail filter values (design §7.1, §14.4). */
+export type ChatUrlRailFilter = 'unread' | 'mentions' | 'starred';
+
+/**
+ * The rail filter a URL query names (`?filter=unread|mentions|starred`), or
+ * null when absent or invalid.
+ */
+export function railFilterFromSearch(search: string): ChatUrlRailFilter | null {
+  const raw = new URLSearchParams(search).get(CHAT_RAIL_FILTER_PARAM);
+  if (raw === 'unread' || raw === 'mentions' || raw === 'starred') {
+    return raw;
+  }
+  return null;
+}

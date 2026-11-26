@@ -65,6 +65,7 @@ import {
 } from './context-menu.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import { stateManager } from '../../../client/state.js';
+import { RAIL_FILTER_STORAGE_KEY } from '../../../client/chat-routes.js';
 import { chatStarsLocalChanges } from '../../../client/chat-stars.js';
 import {
   STARRED_RAIL_RECONCILE_MS,
@@ -472,7 +473,7 @@ export interface ThreadSelectDetail {
 }
 
 /** The rail's conversation filter. */
-export type RailFilter = 'all' | 'unread' | 'starred';
+export type RailFilter = 'all' | 'unread' | 'mentions' | 'starred';
 
 /** Detail of the rail's `rail-filter-change` event, sent when the user picks a filter. */
 export interface RailFilterChangeDetail {
@@ -480,7 +481,7 @@ export interface RailFilterChangeDetail {
 }
 
 /** localStorage key of the selected rail filter (the only thing persisted). */
-export const RAIL_FILTER_STORAGE_KEY = 'scion-chat-space-filter';
+export { RAIL_FILTER_STORAGE_KEY };
 
 /**
  * The peer of a DM key for `userId` (the slot that is not the caller's user
@@ -748,6 +749,7 @@ export class ScionChatSpaceRail extends LitElement {
       height: 100%;
       overflow: hidden;
       background: var(--scion-surface, #ffffff);
+      container-type: inline-size;
     }
 
     /*
@@ -1214,6 +1216,7 @@ export class ScionChatSpaceRail extends LitElement {
       border-radius: calc(var(--scion-radius) * 0.75);
       overflow: hidden;
       flex: 1;
+      min-width: 0;
     }
 
     .filter-toggle button {
@@ -1232,7 +1235,64 @@ export class ScionChatSpaceRail extends LitElement {
       transition: all 150ms ease;
       white-space: nowrap;
       flex: 1;
+      min-width: 0;
       justify-content: center;
+    }
+
+    @container (max-width: 230px) {
+      .rail-toolbar {
+        padding: 0.375rem 0.5rem;
+        gap: 0.25rem;
+      }
+
+      .filter-toggle button {
+        padding: 0 0.25rem;
+        font-size: var(--chat-fs-xs);
+      }
+
+      .filter-toggle button sl-icon {
+        display: none;
+      }
+    }
+
+    .rail-subfilter {
+      display: flex;
+      align-items: center;
+      padding: 0.25rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .mentions-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      height: 1.5rem;
+      padding: 0 0.5rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius);
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      font-size: var(--chat-fs-xs);
+      font-family: inherit;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 150ms ease;
+    }
+
+    .mentions-chip:hover:not(.active) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+    }
+
+    .mentions-chip.active {
+      background: var(--scion-primary, #3b82f6);
+      border-color: var(--scion-primary, #3b82f6);
+      color: var(--scion-primary-text, #ffffff);
+    }
+
+    .mentions-chip:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 1px;
     }
 
     .filter-toggle button:not(:last-child) {
@@ -1403,6 +1463,12 @@ export class ScionChatSpaceRail extends LitElement {
         min-height: 44px;
       }
 
+      .mentions-chip {
+        font-size: 14px;
+        min-height: 36px;
+        padding: 0 0.75rem;
+      }
+
       .sort-btn::part(base) {
         width: 44px;
         height: 44px;
@@ -1423,7 +1489,7 @@ export class ScionChatSpaceRail extends LitElement {
     super.connectedCallback();
     // Restore persisted filter/sort from localStorage.
     const savedFilter = localStorage.getItem(RAIL_FILTER_STORAGE_KEY);
-    if (savedFilter === 'unread') this.spaceFilter = 'unread';
+    if (savedFilter === 'unread' || savedFilter === 'mentions') this.spaceFilter = savedFilter;
     if (savedFilter === 'starred') this.spaceFilter = 'starred';
     this.starred.addEventListener('change', this.handleStarredChange);
     stateManager.addEventListener('chat-stars-updated', this.handleStarredInvalidate);
@@ -1966,7 +2032,8 @@ export class ScionChatSpaceRail extends LitElement {
    */
   private visibleThreadSpaceIds(): Set<string> {
     const ids = new Set<string>();
-    for (const space of this.spaces) {
+    const spaces = this.spaceFilter === 'starred' ? [] : this.getFilteredSpaces();
+    for (const space of spaces) {
       if (!this.collapsedSpaces.has(space.projectId)) ids.add(space.projectId);
     }
     if (this.selectedProjectId) ids.add(this.selectedProjectId);
@@ -4398,11 +4465,16 @@ export class ScionChatSpaceRail extends LitElement {
     </div>`;
   }
 
+  private isUnreadMode(): boolean {
+    return this.spaceFilter === 'unread' || this.spaceFilter === 'mentions';
+  }
+
   /**
    * Render the filter + sort toolbar below the rail header. The sort menu
    * also holds Refresh spaces, the same refresh as a pull.
    */
   private renderToolbar() {
+    const unreadActive = this.isUnreadMode();
     return html`
       <div class="rail-toolbar">
         <div class="filter-toggle" role="group" aria-label="Show conversations">
@@ -4414,9 +4486,11 @@ export class ScionChatSpaceRail extends LitElement {
             All
           </button>
           <button
-            class=${this.spaceFilter === 'unread' ? 'active' : ''}
-            aria-pressed=${this.spaceFilter === 'unread' ? 'true' : 'false'}
-            @click=${() => this.setSpaceFilter('unread', true)}
+            class=${unreadActive ? 'active' : ''}
+            aria-pressed=${unreadActive ? 'true' : 'false'}
+            @click=${() => {
+              if (!unreadActive) this.setSpaceFilter('unread', true);
+            }}
           >
             <sl-icon name="envelope" aria-hidden="true"></sl-icon>
             Unread
@@ -4468,6 +4542,25 @@ export class ScionChatSpaceRail extends LitElement {
           </sl-menu>
         </sl-dropdown>
       </div>
+      ${unreadActive
+        ? html`
+            <div class="rail-subfilter" data-rail-subfilter>
+              <button
+                type="button"
+                class="mentions-chip ${this.spaceFilter === 'mentions' ? 'active' : ''}"
+                aria-pressed=${this.spaceFilter === 'mentions' ? 'true' : 'false'}
+                data-mentions-chip
+                @click=${() =>
+                  this.setSpaceFilter(
+                    this.spaceFilter === 'mentions' ? 'unread' : 'mentions',
+                    true
+                  )}
+              >
+                @ Mentions only
+              </button>
+            </div>
+          `
+        : nothing}
     `;
   }
 
@@ -4505,6 +4598,23 @@ export class ScionChatSpaceRail extends LitElement {
   /** The current filter (the page reads it to keep the center consistent). */
   get filter(): RailFilter {
     return this.spaceFilter;
+  }
+
+  /**
+   * Apply a rail filter hydrated from `?filter=unread|mentions|starred`,
+   * persisting it to localStorage just like clicking the control (design §7.1, §14.4).
+   */
+  applyUrlFilter(filter: RailFilter): void {
+    if (filter === 'starred' && !starredMessagesEnabled()) return;
+    if (this.spaceFilter === filter) {
+      if (filter === 'all') {
+        localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);
+      } else {
+        localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+      }
+      return;
+    }
+    this.setSpaceFilter(filter, true);
   }
 
   /**
@@ -4636,6 +4746,10 @@ export class ScionChatSpaceRail extends LitElement {
         (s) => s.unreadCount > 0 || s.hasUnreadMention || s.projectId === openProjectId
       );
     }
+    if (this.spaceFilter === 'mentions') {
+      const openProjectId = this.findProjectIdForSelectedThread();
+      return sorted.filter((s) => s.hasUnreadMention || s.projectId === openProjectId);
+    }
     return sorted;
   }
 
@@ -4662,9 +4776,12 @@ export class ScionChatSpaceRail extends LitElement {
    * Threads to show within a shown space under the current filter. The
    * open conversation is always kept, even once read, so the user reading
    * it (or auto-advance marking it read) does not pull it out from under
-   * them; every other thread is held to the unread definition above.
+   * them; every other thread is held to the unread/mentions definition above.
    */
   private getVisibleThreads(threads: ChatSpaceThread[]): ChatSpaceThread[] {
+    if (this.spaceFilter === 'mentions') {
+      return threads.filter((t) => t.id === this.selectedKey || (!t.muted && t.hasUnreadMention));
+    }
     if (this.spaceFilter !== 'unread') return threads;
     return threads.filter((t) => t.id === this.selectedKey || this.isThreadUnreadForFilter(t));
   }
@@ -4672,6 +4789,14 @@ export class ScionChatSpaceRail extends LitElement {
   private renderSpaces() {
     if (this.spaceFilter === 'starred') return this.renderStarred();
     const filtered = this.getFilteredSpaces();
+    if (this.spaceFilter === 'mentions') {
+      if (filtered.length === 0) {
+        return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
+          No unread mentions
+        </div>`;
+      }
+      return filtered.map((space) => this.renderSpace(space));
+    }
     if (this.spaceFilter === 'unread') {
       const dmRows = railUnreadDMs(this.dms, this.selectedKey);
       if (filtered.length === 0 && dmRows.length === 0) {
@@ -5124,7 +5249,7 @@ export class ScionChatSpaceRail extends LitElement {
         // Under the unread filter, a group left with no visible threads
         // (empty, or every member read) is noise — hide it entirely rather
         // than showing a bare "(0)" header.
-        if (this.spaceFilter === 'unread' && groupThreads.length === 0) {
+        if (this.isUnreadMode() && groupThreads.length === 0) {
           return nothing;
         }
         const collapsed =

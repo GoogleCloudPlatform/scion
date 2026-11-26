@@ -100,16 +100,20 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
     key: 'chat',
     icon: 'chat-dots',
     title: 'Chat',
-    descriptor: 'Unread conversations and mentions',
+    descriptor: 'Unread conversations and starred messages',
     defaultHref: '/chat',
   },
 ];
 
 /**
  * Web-owned hrefs for non-primary inline prose link keys (design §14.3).
- * Populated when target routes hydrate in Phases 3 and 4 (AC-16).
+ * Reviews keys stay absent until Phase 4 hydrates those filters (AC-16).
  */
-export const INBOX_LINK_HREFS: Partial<Record<Exclude<InboxLinkKey, 'primary'>, string>> = {};
+export const INBOX_LINK_HREFS: Partial<Record<Exclude<InboxLinkKey, 'primary'>, string>> = {
+  'chat-unread': '/chat?filter=unread',
+  'chat-mentions': '/chat?filter=mentions',
+  'chat-starred': '/chat?filter=starred',
+};
 
 function resolveInboxLinkHref(
   link: InboxLinkKey,

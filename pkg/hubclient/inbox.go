@@ -52,6 +52,7 @@ const (
 	InboxBreakdownUnreadConversations = "unreadConversations"
 	InboxBreakdownDMs                 = "dms"
 	InboxBreakdownMentions            = "mentions"
+	InboxBreakdownStarredMessages     = "starredMessages"
 
 	// InboxState* are the valid values for InboxCategory.State.
 	InboxStateOK          = "ok"
