@@ -364,10 +364,9 @@ func TestPutServerConfigDB_GitHubAppMaskedEchoLeavesRowUnchanged(t *testing.T) {
 }
 
 // OQ8 (DB mode): PUT /api/v1/admin/server-config without server.github_app
-// leaves every stored github_app key, private key and webhook secret unchanged.
+// leaves every stored github_app key and settings.yaml unchanged.
 func TestPutServerConfigDB_OmittingGitHubAppLeavesStoredConfigAndSecretsUnchanged(t *testing.T) {
 	settingsPath := setTempScionHome(t)
-	const storedPrivateKey = "-----BEGIN RSA PRIVATE KEY-----\ntest-key-material\n-----END RSA PRIVATE KEY-----"
 	fileSettings := "schema_version: \"1\"\nserver:\n  github_app:\n    app_id: 42\n    private_key: |\n      -----BEGIN RSA PRIVATE KEY-----\n      test-key-material\n      -----END RSA PRIVATE KEY-----\n    webhook_secret: " + rtWebhookSec + "\n"
 	require.NoError(t, os.WriteFile(settingsPath, []byte(fileSettings), 0600))
 
@@ -396,14 +395,12 @@ func TestPutServerConfigDB_OmittingGitHubAppLeavesStoredConfigAndSecretsUnchange
 	assert.Equal(t, "https://github.com/apps/x", snap.GitHubInstallationURL)
 	assert.Equal(t, "/etc/ghapp/key.pem", snap.GitHubPrivateKeyPath)
 
-	// File-backed secrets in settings.yaml remain untouched.
+	// DB mode keeps GitHub App secrets (private key, webhook secret) in the hub
+	// secrets backend, which PUT /api/v1/admin/server-config never touches; verify
+	// settings.yaml itself is byte-identical after the DB-mode PUT.
 	data, err := os.ReadFile(settingsPath)
 	require.NoError(t, err)
-	var raw map[string]interface{}
-	require.NoError(t, yamlv3.Unmarshal(data, &raw))
-	ga := raw["server"].(map[string]interface{})["github_app"].(map[string]interface{})
-	assert.Equal(t, storedPrivateKey+"\n", ga["private_key"])
-	assert.Equal(t, rtWebhookSec, ga["webhook_secret"])
+	assert.Equal(t, fileSettings, string(data), "settings.yaml must remain byte-identical after DB-mode server-config PUT")
 }
 
 // OQ8 (file mode): PUT /api/v1/admin/server-config without server.github_app
@@ -438,6 +435,12 @@ server:
 	require.NoError(t, yamlv3.Unmarshal(data, &raw))
 	serverMap, ok := raw["server"].(map[string]interface{})
 	require.True(t, ok)
+
+	// Confirm the PUT actually persisted the requested change.
+	hubMap, ok := serverMap["hub"].(map[string]interface{})
+	require.True(t, ok, "server.hub must be present in settings.yaml")
+	assert.Equal(t, []interface{}{"updated@example.com"}, hubMap["admin_emails"])
+
 	ga, ok := serverMap["github_app"].(map[string]interface{})
 	require.True(t, ok, "server.github_app must remain present in settings.yaml")
 

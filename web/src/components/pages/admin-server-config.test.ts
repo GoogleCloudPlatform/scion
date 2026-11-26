@@ -7237,6 +7237,11 @@ describe('scion-page-admin-server-config — section-level saves with revisions'
 describe('GitHub App moved out of Server Config (M2.1)', () => {
   let element: ScionPageAdminServerConfig;
 
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
   afterEach(() => {
     element?.remove();
     vi.restoreAllMocks();

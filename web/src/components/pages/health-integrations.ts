@@ -329,7 +329,7 @@ export class ScionHealthIntegrations extends LitElement {
     return html`
       <tr data-integration=${it.name}>
         <td class="name">
-          <a href="${INTEGRATIONS_PAGE}/${encodeURIComponent(it.name)}">${it.name}</a>
+          <a href="${INTEGRATIONS_PAGE}/chat/${encodeURIComponent(it.name)}">${it.name}</a>
         </td>
         <td class="platform">${it.platform || html`<span class="muted">—</span>`}</td>
         <td class="health">
