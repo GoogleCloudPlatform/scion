@@ -735,13 +735,15 @@ func TestProjectGitHub_CreatorProofColdAndUnverified(t *testing.T) {
 	assert.False(t, noTokResp.Association.Verified)
 	assert.Equal(t, githubAppErrAssociationUnverified, noTokResp.Association.ErrorCode)
 
-	// Warm the association report cache via githubAssociationReport(ctx, false) and
+	// Warm the association report cache via githubAssociationReport(ctx, true) and
 	// verify GET /github still returns verified=false, association_unverified.
 	fakeAPI.mu.Lock()
 	fakeAPI.repoStatus = 0
 	fakeAPI.mu.Unlock()
-	_, _, err = srv.githubAssociationReport(ctx, false)
+	_, _, err = srv.githubAssociationReport(ctx, true)
 	require.NoError(t, err)
+	_, freshNoTok := srv.githubAssociationReportCache.lookupFreshProject(noTokProj.ID, instID, now)
+	require.True(t, freshNoTok, "expected fresh report cache entry for noTokProj")
 
 	recNoTokWarm := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+noTokProj.ID+"/github", nil)
 	require.Equal(t, http.StatusOK, recNoTokWarm.Code, recNoTokWarm.Body.String())
@@ -775,9 +777,13 @@ func TestProjectGitHub_CreatorProofColdAndUnverified(t *testing.T) {
 	assert.Equal(t, githubAppErrAssociationUnauthorized, deniedColdResp.Association.ErrorCode)
 	assert.Contains(t, deniedColdResp.Association.Reason, "acme/denied-repo")
 
-	// Force-rebuild the report cache so deniedProj has a fresh non-authorized entry.
+	// Advance fake clock past the report rebuild cooldown and force-rebuild the
+	// report cache so deniedProj has a fresh non-authorized entry.
+	now = now.Add(time.Minute)
 	_, _, err = srv.githubAssociationReport(ctx, true)
 	require.NoError(t, err)
+	_, freshDenied := srv.githubAssociationReportCache.lookupFreshProject(deniedProj.ID, instID, now)
+	require.True(t, freshDenied, "expected fresh report cache entry for deniedProj")
 
 	recDeniedWarm := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+deniedProj.ID+"/github", nil)
 	require.Equal(t, http.StatusOK, recDeniedWarm.Code, recDeniedWarm.Body.String())
