@@ -359,8 +359,9 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 // record, and the user the user delete row removes.
 func (m *bearerMatrixFixture) callerPatternOverrides() map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"user.self.update", "/api/v1/users/{id}"}:  {"id": m.adminID},
-		{"user.admin.delete", "/api/v1/users/{id}"}: {"id": m.userDelete},
+		{"user.self.update", "/api/v1/users/{id}"}:           {"id": m.adminID},
+		{"user.usage.self.read", "/api/v1/users/{id}/usage"}: {"id": m.adminID},
+		{"user.admin.delete", "/api/v1/users/{id}"}:          {"id": m.userDelete},
 	}
 }
 

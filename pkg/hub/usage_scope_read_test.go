@@ -33,6 +33,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
+func bindSystemRoleForUsageReadTest(t *testing.T, s store.Store, userID, roleName string) {
+	t.Helper()
+	ctx := context.Background()
+	role, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: role.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
 func doAgentUsageGET(t *testing.T, srv *Server, path, agentTok string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -59,6 +76,7 @@ func TestScopedUsageRead_ExperimentOffReturns404(t *testing.T) {
 
 	admin := &store.User{ID: uuid.NewString(), Email: "scope-admin-off@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
 	proj := &store.Project{ID: tid("scope-off-proj"), Name: "scope-off", Slug: "scope-off"}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
@@ -81,6 +99,7 @@ func TestUsageRoutes_NamespaceDistinctFromQuotaUsageMe(t *testing.T) {
 
 	admin := &store.User{ID: uuid.NewString(), Email: "ns-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
 
 	// GET /api/v1/usage -> global token usage (UsageSummaryResponse with scope.kind="global").
 	recGlobal := doUserUsageReadRequest(t, srv, "/api/v1/usage", admin)
@@ -118,6 +137,7 @@ func TestScopedUsageRead_AuthzMatrix(t *testing.T) {
 	member := &store.User{ID: uuid.NewString(), Email: "u-member@example.com", DisplayName: "Member", Role: "member", Status: "active"}
 	outsider := &store.User{ID: uuid.NewString(), Email: "u-outsider@example.com", DisplayName: "Outsider", Role: "member", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
 	require.NoError(t, s.CreateUser(ctx, member))
 	require.NoError(t, s.CreateUser(ctx, outsider))
 
@@ -138,10 +158,8 @@ func TestScopedUsageRead_AuthzMatrix(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, agA))
 	require.NoError(t, s.CreateAgent(ctx, agB))
 
-	tokA, err := srv.agentTokenService.GenerateAgentToken(agA.ID, projA.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-	tokB, err := srv.agentTokenService.GenerateAgentToken(agB.ID, projB.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
+	tokA := srv.generateRecordedAgentToken(t, agA.ID, projA.ID, []AgentTokenScope{ScopeProjectRead}, nil)
+	tokB := srv.generateRecordedAgentToken(t, agB.ID, projB.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	// 1. GET /api/v1/projects/{id}/usage
 	assert.Equal(t, http.StatusUnauthorized, doUserUsageReadRequest(t, srv, "/api/v1/projects/"+projA.ID+"/usage", nil).Code)
@@ -178,9 +196,9 @@ func TestMeUsageRead_SelfTokenReadsOwn(t *testing.T) {
 
 	member := &store.User{ID: uuid.NewString(), Email: "me-uat@example.com", DisplayName: "Member", Role: "member", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, member))
+	bindSystemRoleForUsageReadTest(t, s, member.ID, store.SystemRoleHubMember)
 
-	rawUAT, _, err := srv.uatService.CreateToken(ctx, member.ID, "me-usage-tok", "", []string{string(UATScopeAgentRead)}, nil)
-	require.NoError(t, err)
+	rawUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
 
 	rec := doUATUsageGET(t, srv, "/api/v1/me/usage", rawUAT)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -198,10 +216,10 @@ func TestUserUsageRead_SelfTokenReadsOwn(t *testing.T) {
 	member := &store.User{ID: uuid.NewString(), Email: "user-uat@example.com", DisplayName: "Member", Role: "member", Status: "active"}
 	other := &store.User{ID: uuid.NewString(), Email: "other-uat@example.com", DisplayName: "Other", Role: "member", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, member))
+	bindSystemRoleForUsageReadTest(t, s, member.ID, store.SystemRoleHubMember)
 	require.NoError(t, s.CreateUser(ctx, other))
 
-	rawUAT, _, err := srv.uatService.CreateToken(ctx, member.ID, "user-usage-tok", "", []string{string(UATScopeAgentRead)}, nil)
-	require.NoError(t, err)
+	rawUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
 
 	recSelf := doUATUsageGET(t, srv, "/api/v1/users/"+member.ID+"/usage", rawUAT)
 	require.Equal(t, http.StatusOK, recSelf.Code, recSelf.Body.String())
@@ -218,6 +236,7 @@ func TestScopedUsageRead_GranularityHourlyCoverageGroupByAndNullability(t *testi
 
 	admin := &store.User{ID: uuid.NewString(), Email: "gran-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
 	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
 	proj := &store.Project{ID: tid("gran-proj"), Name: "gran-proj", Slug: "gran-proj"}
 	require.NoError(t, s.CreateProject(ctx, proj))
 	ag1 := &store.Agent{
