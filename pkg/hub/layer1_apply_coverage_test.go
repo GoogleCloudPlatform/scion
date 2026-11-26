@@ -372,7 +372,7 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any { on, msg := s.maintenance.State(); return []any{on, msg} }},
 		"messaging": {section: "messaging", doc: `{"offload_threshold_runes":4000}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.OffloadThresholdRunes() }},
-		"experiments": {section: "experiments", doc: `{"overrides":{"web.gcs_links":true}}`,
+		"experiments": {section: "experiments", doc: `{"overrides":{"web.fixture_flag":true}}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ExperimentsSnapshot().Overrides }},
 		"artifacts": {section: "artifacts", doc: `{"enabled":false}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.Artifacts() }},

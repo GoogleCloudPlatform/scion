@@ -593,9 +593,8 @@ const GCS_ENTITY_BLOCKER: EntityPattern = {
 };
 
 /**
- * Turn `gs://` object references in one text node into links. Only run for a
- * message that is eligible per the gate (the `web.gcs_links` experiment and
- * agent-sent) — never for a user-sent message. Runs before `@mentions` and
+ * Turn `gs://` object references in one text node into links. Only run for an
+ * agent-sent message — never for a user-sent message. Runs before `@mentions` and
  * other entity links so `@` inside an object name (e.g. `gs://bkt/a:@b`)
  * stays part of the link instead of being split off as a mention. Accepted
  * matches are wrapped in `<a>` (and added to `built` so `@mentions` step over
@@ -3510,13 +3509,12 @@ export class ScionChatMessage extends LitElement {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
       const fragment = renderer.renderFragment(body);
-      // gs:// links are gated on the server-reported feature flag AND the
-      // message being agent-sent — a user-sent message never links, however
-      // the body happens to be spelled.
+      // gs:// links are gated on the message being agent-sent — a user-sent
+      // message never links, however the body happens to be spelled.
       const codeSpans = codeSpanMentionsEnabled();
       linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
-        gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
+        gcs: this.senderIsAgent,
         knownUsersByEmail: this.effectiveKnownUsersByEmail(),
         codeSpanMentions: codeSpans,
         knownMentionSlugs: codeSpans

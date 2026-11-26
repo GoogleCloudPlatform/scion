@@ -71,11 +71,6 @@ import {
 } from './data.js';
 
 async function gotoGcsThread(page: Page): Promise<TrackedRequest[]> {
-  await page.addInitScript(() => {
-    (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-      'web.gcs_links': true,
-    };
-  });
   const requests = await setupGcsApiMocks(page);
   await page.goto('/e2e/chat-file-preview/fixture.html', { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!document.querySelector('scion-chat-thread'));
@@ -92,54 +87,6 @@ function messageLocator(page: Page, id: string) {
 function previewDialog(page: Page) {
   return page.locator('scion-chat-file-preview sl-dialog.file-preview-dialog');
 }
-
-test('renders as plain text when web.gcs_links is pinned off, even for an agent message', async ({
-  page,
-}) => {
-  await page.addInitScript(() => {
-    (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-      'web.gcs_links': false,
-    };
-  });
-  await setupGcsApiMocks(page);
-  await page.goto('/e2e/chat-file-preview/fixture.html', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-chat-thread'));
-  await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(
-    GCS_MESSAGES.length
-  );
-
-  const msg = messageLocator(page, GCS_START_MSG.id);
-  await expect(msg).toContainText(`gs://${GCS_BUCKET}/start.txt`);
-  // Wait for this message's markdown render to replace its plain-text
-  // fallback (.md-content exists only after chat-message.ts's asynchronous
-  // renderContent has finished) before asserting the absence of a
-  // sub-element: the plain-text fallback already contains the same text, so
-  // a text check alone cannot tell the two states apart.
-  await expect(msg.locator('.md-content')).toHaveCount(1);
-  await expect(msg.locator('.gcs-link')).toHaveCount(0);
-});
-
-test('renders as plain text when the web.gcs_links experiment is off, with no local pin (ptone/scion#2545)', async ({
-  page,
-}) => {
-  // No __SCION_FEATURES__ init script here: this drives the real
-  // /api/v1/experiments fetch path end to end, rather than bypassing it via
-  // a pinned value, complementing the pinned-off case above.
-  await setupGcsApiMocks(page, { gcsLinksExperimentEnabled: false });
-  await page.goto('/e2e/chat-file-preview/fixture.html', { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!document.querySelector('scion-chat-thread'));
-  await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(
-    GCS_MESSAGES.length
-  );
-
-  const msg = messageLocator(page, GCS_START_MSG.id);
-  await expect(msg).toContainText(`gs://${GCS_BUCKET}/start.txt`);
-  // Same render-wait-before-absence-check pattern as the pinned-off case
-  // above (lesson 3): a not-yet-rendered message would otherwise satisfy the
-  // absence check for the wrong reason.
-  await expect(msg.locator('.md-content')).toHaveCount(1);
-  await expect(msg.locator('.gcs-link')).toHaveCount(0);
-});
 
 test('links a gs:// URI in plain text and inside inline code', async ({ page }) => {
   await gotoGcsThread(page);

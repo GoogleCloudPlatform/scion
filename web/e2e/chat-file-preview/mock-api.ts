@@ -179,18 +179,8 @@ export async function setupApiMocks(page: Page): Promise<TrackedRequest[]> {
  * and /api/v1/experiments. Deliberately independent of {@link setupApiMocks}
  * (a different message count/shape) so this suite's fixtures never perturb
  * the extraction suite's `toHaveCount(5)` assertions.
- *
- * @param opts.gcsLinksExperimentEnabled - the `web.gcs_links` value served
- * from `/api/v1/experiments` (ptone/scion#2545). Defaults to `true`, since
- * most specs in this file exercise the linkifier; pass `false` for a case
- * that drives the real experiments-fetch path instead of an
- * `__SCION_FEATURES__` init-script pin.
  */
-export async function setupGcsApiMocks(
-  page: Page,
-  opts: { gcsLinksExperimentEnabled?: boolean } = {}
-): Promise<TrackedRequest[]> {
-  const { gcsLinksExperimentEnabled = true } = opts;
+export async function setupGcsApiMocks(page: Page): Promise<TrackedRequest[]> {
   const requests: TrackedRequest[] = [];
   await stubMainClientModule(page);
 
@@ -347,7 +337,7 @@ export async function setupGcsApiMocks(
 
     if (path === '/api/v1/experiments') {
       return route.fulfill({
-        json: { experiments: { 'web.gcs_links': gcsLinksExperimentEnabled } },
+        json: { experiments: {} },
       });
     }
 

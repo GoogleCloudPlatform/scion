@@ -62,7 +62,7 @@ function mentionSlugs(root: Element): string[] {
 
 beforeEach(() => {
   document.body.innerHTML = '';
-  window.__SCION_FEATURES__ = { 'web.gcs_links': true, [ARTIFACTS_FLAG]: true };
+  window.__SCION_FEATURES__ = { [ARTIFACTS_FLAG]: true };
 });
 
 afterEach(() => {

@@ -147,13 +147,6 @@ function isExperimentMap(value: unknown): value is Record<string, boolean> {
  *   (ptone/scion#2217), signed-in callers only. A failure, 401, 404 or a
  *   non-JSON 200 (e.g. a dev server with no hub) leaves the compiled
  *   defaults and any localStorage override in place for this page load.
- *   gs:// link rendering is gated by the registered `web.gcs_links`
- *   experiment (ptone/scion#2545), read through this map the same way as
- *   any other registered experiment. If this fetch fails, `web.gcs_links`
- *   resolves from a localStorage override if one is set, else from the
- *   compiled default, which is off (it is deliberately absent from
- *   `DEFAULT_ON_FLAGS`); either way the hub's own experiment check still
- *   refuses the fetch.
  *
  * The experiment map usually needs no request at all (ptone/scion#2489):
  * the hub embeds the endpoint's map in the `__SCION_DATA__` boot payload of

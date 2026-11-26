@@ -1669,12 +1669,10 @@ declare global {
 describe('scion-chat-message gs:// linkification', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
-    window.__SCION_FEATURES__ = { 'web.gcs_links': true };
   });
 
   afterEach(() => {
     document.body.innerHTML = '';
-    delete window.__SCION_FEATURES__;
   });
 
   /**
@@ -1758,12 +1756,6 @@ describe('scion-chat-message gs:// linkification', () => {
   it('links an agent message rendered the same way (fromAgent=true, senderIsAgent=true) as the positive control', async () => {
     const el = await mountGcs('gs://bkt/dir/file.md', true, true);
     expect(gcsLinks(el)).toHaveLength(1);
-  });
-
-  it('does not link when the web.gcs_links experiment is off, even for an agent message', async () => {
-    window.__SCION_FEATURES__ = { 'web.gcs_links': false };
-    const el = await mountGcs('gs://bkt/dir/file.md', true);
-    expect(gcsLinks(el)).toHaveLength(0);
   });
 
   it('links a gs:// URI at the very start of the body', async () => {

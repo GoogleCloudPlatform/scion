@@ -411,9 +411,7 @@ func TestGCSLink_ParityVector_RequiredExchangeURIEndToEnd(t *testing.T) {
 
 func TestGCSLink_FeatureOff(t *testing.T) {
 	srv, s := attachmentTestServer(t)
-	// No SetGCPTokenGenerator call: s.gcpTokenGenerator stays nil. The
-	// web.gcs_links experiment defaults off too (production registry
-	// default), so this denies on either/both grounds.
+	// No SetGCPTokenGenerator call: s.gcpTokenGenerator stays nil.
 	viewer := gcsTestUser(t, s, "off-viewer")
 
 	rec := doRequestAsUser(t, srv, viewer, http.MethodGet, gcsRequestPath(tid("off-msg"), "bkt", "o.txt"), nil)
@@ -433,33 +431,6 @@ func TestGCSLink_Deny_FeatureOffDespiteValidFixture(t *testing.T) {
 	f.source.putObject("bkt", "o.txt", &storage.ObjectAttrs{Size: 2, Generation: 1}, []byte("hi"))
 
 	f.srv.SetGCPTokenGenerator(nil)
-
-	rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
-	require.Equal(t, http.StatusNotFound, rec.Code)
-	require.JSONEq(t, gcsExpected404Body, rec.Body.String())
-	require.Zero(t, f.gen.mintCount())
-	attrsCalls, openCalls := f.source.counts()
-	require.Zero(t, attrsCalls)
-	require.Zero(t, openCalls)
-
-	events := f.audit.all()
-	require.Len(t, events, 1)
-	require.Equal(t, GCSLinkReasonFeatureOff, events[0].Reason)
-}
-
-// TestGCSLink_Deny_ExperimentOffDespiteValidFixture is
-// TestGCSLink_Deny_FeatureOffDespiteValidFixture's counterpart for the other
-// half of step 1's condition: every other step would succeed, and the token
-// generator is present, so only the web.gcs_links experiment being off
-// denies the fetch. newGCSFixture turns the experiment on by default (the
-// production registry default is off); this flips it back off via the same
-// admin-override mechanism to isolate the check (ptone/scion#2545).
-func TestGCSLink_Deny_ExperimentOffDespiteValidFixture(t *testing.T) {
-	f := newGCSFixture(t)
-	viewer, msg := gcsHappyPathFixture(t, f, "experimentoffvalid", "gs://bkt/o.txt")
-	f.source.putObject("bkt", "o.txt", &storage.ObjectAttrs{Size: 2, Generation: 1}, []byte("hi"))
-
-	setGCSLinksExperiment(t, f.srv, false)
 
 	rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, gcsRequestPath(msg.ID, "bkt", "o.txt"), nil)
 	require.Equal(t, http.StatusNotFound, rec.Code)

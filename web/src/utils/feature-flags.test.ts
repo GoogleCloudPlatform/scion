@@ -228,6 +228,18 @@ describe('feature-flags: authorization decision audit v2 flag removed', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Removed gs:// links flag (graduated, ptone/scion#9482)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: gs:// links flag removed', () => {
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // isFeatureEnabled: resolution order
 // ---------------------------------------------------------------------------
 

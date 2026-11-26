@@ -67,14 +67,6 @@ const (
 	gcsErrCodeTooLarge    = "too_large"
 	gcsErrCodeUpstream    = "upstream_error"
 	gcsObjectNotFoundBody = "Object not found"
-
-	// gcsLinksExperiment is the registered experiment (pkg/experiments) that
-	// gates both the web linkifier (LayerWeb) and this endpoint (LayerServer;
-	// ptone/scion#2545). The hub decides hub behaviour
-	// (docs-site/src/content/docs/reference/experiments.md): this constant
-	// is what handleGCSObject's step 1 actually checks, and the web gate
-	// only mirrors it.
-	gcsLinksExperiment = "web.gcs_links"
 )
 
 // gcsBucketPattern and gcsObjectPattern mirror the web client's
@@ -597,11 +589,9 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 1: feature availability. Both the registered experiment and a
-	// configured token generator are required; either missing denies with
-	// the same uniform not-available response, so a caller cannot tell which
-	// one is off.
-	if !s.experimentEnabled(gcsLinksExperiment) || s.gcpTokenGenerator == nil {
+	// Step 1: feature availability. A configured token generator is required;
+	// if missing, deny with the uniform not-available response.
+	if s.gcpTokenGenerator == nil {
 		deny(GCSLinkReasonFeatureOff, http.StatusNotFound)
 		return
 	}

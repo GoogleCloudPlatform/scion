@@ -2891,8 +2891,7 @@ type Server struct {
 	// production, meaning "use the constant". gcsLinkEndpointOverride points
 	// gcsObjectSourceFor's *storage.Client at a fake GCS server in tests;
 	// empty in production, meaning "use the real GCS endpoint". The feature
-	// itself is gated on both the web.gcs_links experiment and
-	// gcpTokenGenerator != nil (step 1).
+	// itself is gated on gcpTokenGenerator != nil (step 1).
 	gcsLinkBaseTransport           *http.Transport
 	gcsLinkRateLimiter             *GCPTokenRateLimiter
 	gcsLinkSem                     chan struct{}
@@ -3607,12 +3606,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize gs:// link fetch endpoint support (shared base transport,
 	// per-viewer rate limiter, global concurrency semaphore). The feature's
-	// own availability gate (step 1 of handleGCSObject) checks the
-	// web.gcs_links experiment and gcpTokenGenerator directly at request
-	// time, so these are safe to build unconditionally even when no
-	// generator is configured yet — exactly like the pre-existing GCP token
-	// rate limiter below, which is likewise built regardless and simply goes
-	// unused until SetGCPTokenGenerator is called.
+	// own availability gate (step 1 of handleGCSObject) checks
+	// gcpTokenGenerator directly at request time, so these are safe to build
+	// unconditionally even when no generator is configured yet — exactly like
+	// the pre-existing GCP token rate limiter below, which is likewise built
+	// regardless and simply goes unused until SetGCPTokenGenerator is called.
 	srv.gcsLinkBaseTransport = newGCSLinkBaseTransport()
 	srv.gcsLinkRateLimiter = NewGCPTokenRateLimiter(float64(gcsLinkRateLimitPerMinute)/60.0, gcsLinkRateLimitPerMinute)
 	srv.gcsLinkSem = make(chan struct{}, gcsLinkGlobalConcurrency)
