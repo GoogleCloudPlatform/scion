@@ -81,6 +81,25 @@ func (UsageRollupDaily) Fields() []ent.Field {
 			Default(0),
 		field.Int64("null_token_events").
 			Default(0),
+		// Per-bucket presence (non-null) counters allow reads to distinguish
+		// measured 0 from all-NULL (unknown) and flag partially-known buckets
+		// without scanning usage_events (§3.1). presence_tracked_events marks
+		// events ingested with presence tracking; pre-existing legacy rows have
+		// presence_tracked_events = 0 so sum == 0 safely reads as null.
+		field.Int64("input_known_events").
+			Default(0),
+		field.Int64("output_known_events").
+			Default(0),
+		field.Int64("cache_read_known_events").
+			Default(0),
+		field.Int64("cache_write_known_events").
+			Default(0),
+		field.Int64("cache_write_1h_known_events").
+			Default(0),
+		field.Int64("reasoning_known_events").
+			Default(0),
+		field.Int64("presence_tracked_events").
+			Default(0),
 		field.Time("first_event_ts"),
 		field.Time("last_event_ts"),
 	}

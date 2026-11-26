@@ -179,6 +179,9 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 			s.getUserDeletion(w, r, id)
 		})(w, r)
 		return
+	case "usage":
+		s.handleUserUsage(w, r, id)
+		return
 	default:
 		NotFound(w, "User resource")
 		return

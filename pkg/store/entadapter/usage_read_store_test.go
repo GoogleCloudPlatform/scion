@@ -49,7 +49,12 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	day1 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	// Hourly coverage marker is absent before any hourly rollup writes.
+	_, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	assert.False(t, hasCov)
+
+	day1 := time.Date(2026, 11, 20, 12, 15, 0, 0, time.UTC)
 	day2 := time.Date(2026, 11, 21, 15, 30, 0, 0, time.UTC)
 
 	int64p := func(v int64) *int64 { return &v }
@@ -122,7 +127,13 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.Accepted)
 
-	// Duplicate replay should not change rollups or presence counts.
+	// Hourly coverage marker was recorded at earliest UTC hour bucket (day1 12:00Z).
+	covStart, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	require.True(t, hasCov)
+	assert.Equal(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC), covStart)
+
+	// Duplicate replay should not change daily/hourly rollups or presence counts.
 	resDup, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID: agentID,
 		Events:  []*store.UsageEvent{ev1},
@@ -131,7 +142,7 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	assert.Equal(t, 0, resDup.Accepted)
 	assert.Equal(t, 1, resDup.Duplicates)
 
-	// ListUsageRollupsDailyByAgent full window
+	// ListUsageRollupsDailyByAgent full window + presence counters
 	rollups, err := cs.ListUsageRollupsDailyByAgent(ctx, agentID, day1, day2)
 	require.NoError(t, err)
 	require.Len(t, rollups, 2)
@@ -141,28 +152,33 @@ func TestUsageRead_RollupsPresenceMeterHealthAndDBNow(t *testing.T) {
 	assert.Equal(t, int64(3), rollups[0].CacheRead)
 	assert.Equal(t, int64(2), rollups[0].CacheWrite)
 	assert.Equal(t, int64(2), rollups[0].Reasoning)
+	assert.Equal(t, int64(1), rollups[0].InputKnownEvents)
+	assert.Equal(t, int64(1), rollups[0].ReasoningKnownEvents)
+	assert.Equal(t, int64(0), rollups[0].CacheWrite1hKnownEvents)
+	assert.Equal(t, int64(1), rollups[0].PresenceTrackedEvents)
+
 	assert.Equal(t, "claude-haiku-4-5", rollups[1].Model)
+	assert.Equal(t, int64(1), rollups[1].CacheReadKnownEvents)  // measured 0
+	assert.Equal(t, int64(0), rollups[1].CacheWriteKnownEvents) // NULL
+	assert.Equal(t, int64(0), rollups[1].ReasoningKnownEvents)  // NULL
+	assert.Equal(t, int64(1), rollups[1].PresenceTrackedEvents)
+
+	// ListUsageRollupsHourlyByAgent mirrors daily with UTC hour buckets.
+	hourly, err := cs.ListUsageRollupsHourlyByAgent(ctx, agentID, day1, day2)
+	require.NoError(t, err)
+	require.Len(t, hourly, 2)
+	assert.Equal(t, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC), hourly[0].BucketStart)
+	assert.Equal(t, int64(8), hourly[0].Input)
+	assert.Equal(t, int64(1), hourly[0].PresenceTrackedEvents)
+	assert.Equal(t, time.Date(2026, 11, 21, 15, 0, 0, 0, time.UTC), hourly[1].BucketStart)
+	assert.Equal(t, int64(1), hourly[1].CacheReadKnownEvents)
+	assert.Equal(t, int64(0), hourly[1].CacheWriteKnownEvents)
 
 	// Narrow window (day1 only)
 	rollupsDay1, err := cs.ListUsageRollupsDailyByAgent(ctx, agentID, day1, day1)
 	require.NoError(t, err)
 	require.Len(t, rollupsDay1, 1)
 	assert.Equal(t, "claude-sonnet-4-6", rollupsDay1[0].Model)
-
-	// GetUsageTokenPresenceByAgent distinguishes measured 0 vs NULL
-	presence, err := cs.GetUsageTokenPresenceByAgent(ctx, agentID, day1.Add(-time.Hour), day2.Add(time.Hour))
-	require.NoError(t, err)
-	require.Len(t, presence, 2)
-	// Sorted by model ASC: claude-haiku-4-5 then claude-sonnet-4-6
-	assert.Equal(t, "claude-haiku-4-5", presence[0].Model)
-	assert.Equal(t, int64(1), presence[0].CacheReadCount)  // measured 0
-	assert.Equal(t, int64(0), presence[0].CacheWriteCount) // NULL
-	assert.Equal(t, int64(0), presence[0].ReasoningCount)  // NULL
-
-	assert.Equal(t, "claude-sonnet-4-6", presence[1].Model)
-	assert.Equal(t, int64(1), presence[1].InputCount)
-	assert.Equal(t, int64(1), presence[1].ReasoningCount)
-	assert.Equal(t, int64(0), presence[1].CacheWrite1hCount) // NULL
 
 	// ListMeterHealthByAgent
 	mhs, err := cs.ListMeterHealthByAgent(ctx, agentID)
@@ -361,4 +377,186 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 	assert.Equal(t, int64(2), counts[projB])
 	assert.Equal(t, int64(0), counts[projExcluded], "superseded, soft-deleted, and stopped runs must not count as stale")
 	assert.Len(t, counts, 2)
+}
+
+func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projA := createTestProject(t, cs, "usage-query-a")
+	projB := createTestProject(t, cs, "usage-query-b")
+	user1 := createTestUser(t, cs, "usage-u1@example.com")
+	user2 := createTestUser(t, cs, "usage-u2@example.com")
+
+	agMeasured := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "ag-measured",
+		Name:      "ag-measured",
+		ProjectID: projA,
+		OwnerID:   user1,
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agMeasured))
+	_, err := cs.SetAgentRunID(ctx, agMeasured.ID, "run-m-1", nil)
+	require.NoError(t, err)
+	agMeasured.RunID = "run-m-1"
+
+	agStale := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "ag-stale",
+		Name:      "ag-stale",
+		ProjectID: projA,
+		OwnerID:   user1,
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agStale))
+	_, err = cs.SetAgentRunID(ctx, agStale.ID, "run-s-1", nil)
+	require.NoError(t, err)
+	agStale.RunID = "run-s-1"
+
+	agUnmeasured := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "ag-unmeasured",
+		Name:      "ag-unmeasured",
+		ProjectID: projB,
+		OwnerID:   user2,
+	}
+	require.NoError(t, cs.CreateAgent(ctx, agUnmeasured))
+	_, err = cs.SetAgentRunID(ctx, agUnmeasured.ID, "run-u-1", nil)
+	require.NoError(t, err)
+	agUnmeasured.RunID = "run-u-1"
+
+	seedRunForIngestTest(t, cs, projA, agMeasured.ID, agMeasured.RunID, &user1)
+	seedRunForIngestTest(t, cs, projA, agStale.ID, agStale.RunID, &user1)
+	seedRunForIngestTest(t, cs, projB, agUnmeasured.ID, agUnmeasured.RunID, &user2)
+
+	base := time.Date(2026, 11, 26, 10, 0, 0, 0, time.UTC)
+	ev1 := makeStoreUsageEvent("hub-q", "q-1", agMeasured.RunID, projA, agMeasured.ID, &user1, 1, base.Add(5*time.Minute), 100, 50, 10, 0)
+	ev1.Model = "claude-sonnet-4-6"
+	ev1.Reasoning = i64p(20)
+
+	ev2 := makeStoreUsageEvent("hub-q", "q-2", agMeasured.RunID, projA, agMeasured.ID, &user1, 2, base.Add(65*time.Minute), 200, 80, 0, 5)
+	ev2.Model = "claude-haiku-4-5"
+	ev2.Reasoning = nil // mixed known+unknown reasoning
+
+	ev3 := makeStoreUsageEvent("hub-q", "q-3", agStale.RunID, projA, agStale.ID, &user1, 1, base.Add(10*time.Minute), 40, 10, 0, 0)
+	ev3.Model = "claude-opus-4-6"
+	ev3.CacheRead = nil
+	ev3.CacheWrite = nil
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agMeasured.ID,
+		Events:  []*store.UsageEvent{ev1, ev2},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agMeasured.ID,
+			RunID:         agMeasured.RunID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: base.Add(2 * time.Hour),
+			ProducerSeq:   2,
+			ReceivedSeqs:  []int64{1, 2},
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agStale.ID,
+		Events:  []*store.UsageEvent{ev3},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agStale.ID,
+			RunID:         agStale.RunID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: base.Add(10 * time.Minute), // stale relative to base+2h
+			ProducerSeq:   1,
+			ReceivedSeqs:  []int64{1},
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// Hourly query grouped by model with limit=2 -> truncated=true, exact totals preserved.
+	res, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       base,
+		Until:       base.Add(2 * time.Hour),
+		ProjectID:   projA,
+		GroupBy:     []string{store.UsageGroupByModel},
+		Limit:       2,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.Truncated)
+	assert.Len(t, res.Groups, 2)
+	assert.Equal(t, int64(340), res.Totals.Input)
+	assert.Equal(t, int64(140), res.Totals.Output)
+	assert.Equal(t, int64(3), res.Totals.Events)
+	assert.Equal(t, int64(3), res.Totals.PresenceTrackedEvents)
+	assert.Equal(t, int64(1), res.Totals.ReasoningKnownEvents)
+	assert.Equal(t, int64(2), res.Totals.CacheReadKnownEvents)
+
+	// Hourly query grouped by hour -> ordered ASC by bucket_start.
+	hourRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       base,
+		Until:       base.Add(2 * time.Hour),
+		ProjectID:   projA,
+		GroupBy:     []string{store.UsageGroupByHour},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	require.Len(t, hourRes.Groups, 2)
+	require.NotNil(t, hourRes.Groups[0].BucketStart)
+	require.NotNil(t, hourRes.Groups[1].BucketStart)
+	assert.Equal(t, base, *hourRes.Groups[0].BucketStart)
+	assert.Equal(t, base.Add(time.Hour), *hourRes.Groups[1].BucketStart)
+
+	// Hourly table grouped by day collapses both hours into 1 UTC day bucket.
+	dayFromHourly, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       base,
+		Until:       base.Add(2 * time.Hour),
+		ProjectID:   projA,
+		GroupBy:     []string{store.UsageGroupByDay},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	require.Len(t, dayFromHourly.Groups, 1)
+	require.NotNil(t, dayFromHourly.Groups[0].BucketStart)
+	assert.Equal(t, time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC), *dayFromHourly.Groups[0].BucketStart)
+	assert.Equal(t, int64(340), dayFromHourly.Groups[0].Input)
+
+	// Scope coverage: projA has 1 measured + 1 stale; projB has 1 unmeasured; global has 3 total.
+	dbNow := base.Add(2*time.Hour + 1*time.Minute)
+	covA, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projA,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      dbNow,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, covA.TotalAgents)
+	assert.Equal(t, 1, covA.MeasuredAgents)
+	assert.Equal(t, 1, covA.StaleAgents)
+	assert.Equal(t, 0, covA.UnmeasuredAgents)
+	require.NotNil(t, covA.LastReceiptAt)
+	assert.Equal(t, base.Add(2*time.Hour), *covA.LastReceiptAt)
+
+	covGlobal, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		StaleAfter: 3 * time.Minute,
+		DBNow:      dbNow,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, covGlobal.TotalAgents)
+	assert.Equal(t, 1, covGlobal.MeasuredAgents)
+	assert.Equal(t, 1, covGlobal.StaleAgents)
+	assert.Equal(t, 1, covGlobal.UnmeasuredAgents)
+
+	covUser2, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		BillingUserID: user2,
+		StaleAfter:    3 * time.Minute,
+		DBNow:         dbNow,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, covUser2.TotalAgents)
+	assert.Equal(t, 0, covUser2.MeasuredAgents)
+	assert.Equal(t, 0, covUser2.StaleAgents)
+	assert.Equal(t, 1, covUser2.UnmeasuredAgents)
 }

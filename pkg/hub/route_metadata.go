@@ -1180,6 +1180,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.metrics.read", Resource: "hub", Action: "read",
 	},
+	"/api/v1/usage": {
+		Pattern: "/api/v1/usage", RouteID: "hub.usage.read",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.metrics.read", Resource: "hub", Action: "read",
+	},
 
 	// -------------------------------------------------------------------------
 	// Hub admin: Quota management (PR-B3)
@@ -1342,6 +1347,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	"/api/v1/usage/me": {
 		Pattern: "/api/v1/usage/me", RouteID: "usage.me",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/me/usage": {
+		Pattern: "/api/v1/me/usage", RouteID: "me.usage",
 		Classification: RouteAuthenticated,
 	},
 

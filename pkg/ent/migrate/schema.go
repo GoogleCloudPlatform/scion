@@ -4731,6 +4731,13 @@ var (
 		{Name: "reported_cost_micros", Type: field.TypeInt64, Default: 0},
 		{Name: "events", Type: field.TypeInt64, Default: 0},
 		{Name: "null_token_events", Type: field.TypeInt64, Default: 0},
+		{Name: "input_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "output_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_1h_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "reasoning_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "presence_tracked_events", Type: field.TypeInt64, Default: 0},
 		{Name: "first_event_ts", Type: field.TypeTime},
 		{Name: "last_event_ts", Type: field.TypeTime},
 	}
@@ -4759,6 +4766,65 @@ var (
 				Name:    "usagerollupdaily_agent_id_bucket_start",
 				Unique:  false,
 				Columns: []*schema.Column{UsageRollupsDailyColumns[4], UsageRollupsDailyColumns[1]},
+			},
+		},
+	}
+	// UsageRollupsHourlyColumns holds the columns for the "usage_rollups_hourly" table.
+	UsageRollupsHourlyColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "bucket_start", Type: field.TypeTime},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "billing_user_id", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString, Default: ""},
+		{Name: "model", Type: field.TypeString, Default: ""},
+		{Name: "usage_source", Type: field.TypeString},
+		{Name: "calls", Type: field.TypeInt64, Default: 0},
+		{Name: "error_calls", Type: field.TypeInt64, Default: 0},
+		{Name: "input", Type: field.TypeInt64, Default: 0},
+		{Name: "output", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_1h", Type: field.TypeInt64, Default: 0},
+		{Name: "reasoning", Type: field.TypeInt64, Default: 0},
+		{Name: "reported_cost_micros", Type: field.TypeInt64, Default: 0},
+		{Name: "events", Type: field.TypeInt64, Default: 0},
+		{Name: "null_token_events", Type: field.TypeInt64, Default: 0},
+		{Name: "input_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "output_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_read_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "cache_write_1h_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "reasoning_known_events", Type: field.TypeInt64, Default: 0},
+		{Name: "presence_tracked_events", Type: field.TypeInt64, Default: 0},
+		{Name: "first_event_ts", Type: field.TypeTime},
+		{Name: "last_event_ts", Type: field.TypeTime},
+	}
+	// UsageRollupsHourlyTable holds the schema information for the "usage_rollups_hourly" table.
+	UsageRollupsHourlyTable = &schema.Table{
+		Name:       "usage_rollups_hourly",
+		Columns:    UsageRollupsHourlyColumns,
+		PrimaryKey: []*schema.Column{UsageRollupsHourlyColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "usage_rollups_hourly_key",
+				Unique:  true,
+				Columns: []*schema.Column{UsageRollupsHourlyColumns[1], UsageRollupsHourlyColumns[2], UsageRollupsHourlyColumns[3], UsageRollupsHourlyColumns[4], UsageRollupsHourlyColumns[5], UsageRollupsHourlyColumns[6], UsageRollupsHourlyColumns[7]},
+			},
+			{
+				Name:    "usagerolluphourly_project_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsHourlyColumns[2], UsageRollupsHourlyColumns[1]},
+			},
+			{
+				Name:    "usagerolluphourly_billing_user_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsHourlyColumns[3], UsageRollupsHourlyColumns[1]},
+			},
+			{
+				Name:    "usagerolluphourly_agent_id_bucket_start",
+				Unique:  false,
+				Columns: []*schema.Column{UsageRollupsHourlyColumns[4], UsageRollupsHourlyColumns[1]},
 			},
 		},
 	}
@@ -5203,6 +5269,7 @@ var (
 		UsageEventsTable,
 		UsageReservationsTable,
 		UsageRollupsDailyTable,
+		UsageRollupsHourlyTable,
 		UsageScopeCountersDailyTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -5519,6 +5586,9 @@ func init() {
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsageRollupsDailyTable.Annotation = &entsql.Annotation{
 		Table: "usage_rollups_daily",
+	}
+	UsageRollupsHourlyTable.Annotation = &entsql.Annotation{
+		Table: "usage_rollups_hourly",
 	}
 	UsageScopeCountersDailyTable.Annotation = &entsql.Annotation{
 		Table: "usage_scope_counters_daily",

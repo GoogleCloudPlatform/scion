@@ -120,6 +120,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -4504,10 +4505,140 @@ func init() {
 	usagerollupdailyDescNullTokenEvents := usagerollupdailyFields[18].Descriptor()
 	// usagerollupdaily.DefaultNullTokenEvents holds the default value on creation for the null_token_events field.
 	usagerollupdaily.DefaultNullTokenEvents = usagerollupdailyDescNullTokenEvents.Default.(int64)
+	// usagerollupdailyDescInputKnownEvents is the schema descriptor for input_known_events field.
+	usagerollupdailyDescInputKnownEvents := usagerollupdailyFields[19].Descriptor()
+	// usagerollupdaily.DefaultInputKnownEvents holds the default value on creation for the input_known_events field.
+	usagerollupdaily.DefaultInputKnownEvents = usagerollupdailyDescInputKnownEvents.Default.(int64)
+	// usagerollupdailyDescOutputKnownEvents is the schema descriptor for output_known_events field.
+	usagerollupdailyDescOutputKnownEvents := usagerollupdailyFields[20].Descriptor()
+	// usagerollupdaily.DefaultOutputKnownEvents holds the default value on creation for the output_known_events field.
+	usagerollupdaily.DefaultOutputKnownEvents = usagerollupdailyDescOutputKnownEvents.Default.(int64)
+	// usagerollupdailyDescCacheReadKnownEvents is the schema descriptor for cache_read_known_events field.
+	usagerollupdailyDescCacheReadKnownEvents := usagerollupdailyFields[21].Descriptor()
+	// usagerollupdaily.DefaultCacheReadKnownEvents holds the default value on creation for the cache_read_known_events field.
+	usagerollupdaily.DefaultCacheReadKnownEvents = usagerollupdailyDescCacheReadKnownEvents.Default.(int64)
+	// usagerollupdailyDescCacheWriteKnownEvents is the schema descriptor for cache_write_known_events field.
+	usagerollupdailyDescCacheWriteKnownEvents := usagerollupdailyFields[22].Descriptor()
+	// usagerollupdaily.DefaultCacheWriteKnownEvents holds the default value on creation for the cache_write_known_events field.
+	usagerollupdaily.DefaultCacheWriteKnownEvents = usagerollupdailyDescCacheWriteKnownEvents.Default.(int64)
+	// usagerollupdailyDescCacheWrite1hKnownEvents is the schema descriptor for cache_write_1h_known_events field.
+	usagerollupdailyDescCacheWrite1hKnownEvents := usagerollupdailyFields[23].Descriptor()
+	// usagerollupdaily.DefaultCacheWrite1hKnownEvents holds the default value on creation for the cache_write_1h_known_events field.
+	usagerollupdaily.DefaultCacheWrite1hKnownEvents = usagerollupdailyDescCacheWrite1hKnownEvents.Default.(int64)
+	// usagerollupdailyDescReasoningKnownEvents is the schema descriptor for reasoning_known_events field.
+	usagerollupdailyDescReasoningKnownEvents := usagerollupdailyFields[24].Descriptor()
+	// usagerollupdaily.DefaultReasoningKnownEvents holds the default value on creation for the reasoning_known_events field.
+	usagerollupdaily.DefaultReasoningKnownEvents = usagerollupdailyDescReasoningKnownEvents.Default.(int64)
+	// usagerollupdailyDescPresenceTrackedEvents is the schema descriptor for presence_tracked_events field.
+	usagerollupdailyDescPresenceTrackedEvents := usagerollupdailyFields[25].Descriptor()
+	// usagerollupdaily.DefaultPresenceTrackedEvents holds the default value on creation for the presence_tracked_events field.
+	usagerollupdaily.DefaultPresenceTrackedEvents = usagerollupdailyDescPresenceTrackedEvents.Default.(int64)
 	// usagerollupdailyDescID is the schema descriptor for id field.
 	usagerollupdailyDescID := usagerollupdailyFields[0].Descriptor()
 	// usagerollupdaily.DefaultID holds the default value on creation for the id field.
 	usagerollupdaily.DefaultID = usagerollupdailyDescID.Default.(func() uuid.UUID)
+	usagerolluphourlyFields := schema.UsageRollupHourly{}.Fields()
+	_ = usagerolluphourlyFields
+	// usagerolluphourlyDescProjectID is the schema descriptor for project_id field.
+	usagerolluphourlyDescProjectID := usagerolluphourlyFields[2].Descriptor()
+	// usagerolluphourly.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	usagerolluphourly.ProjectIDValidator = usagerolluphourlyDescProjectID.Validators[0].(func(string) error)
+	// usagerolluphourlyDescBillingUserID is the schema descriptor for billing_user_id field.
+	usagerolluphourlyDescBillingUserID := usagerolluphourlyFields[3].Descriptor()
+	// usagerolluphourly.DefaultBillingUserID holds the default value on creation for the billing_user_id field.
+	usagerolluphourly.DefaultBillingUserID = usagerolluphourlyDescBillingUserID.Default.(string)
+	// usagerolluphourlyDescAgentID is the schema descriptor for agent_id field.
+	usagerolluphourlyDescAgentID := usagerolluphourlyFields[4].Descriptor()
+	// usagerolluphourly.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	usagerolluphourly.AgentIDValidator = usagerolluphourlyDescAgentID.Validators[0].(func(string) error)
+	// usagerolluphourlyDescHarness is the schema descriptor for harness field.
+	usagerolluphourlyDescHarness := usagerolluphourlyFields[5].Descriptor()
+	// usagerolluphourly.DefaultHarness holds the default value on creation for the harness field.
+	usagerolluphourly.DefaultHarness = usagerolluphourlyDescHarness.Default.(string)
+	// usagerolluphourlyDescModel is the schema descriptor for model field.
+	usagerolluphourlyDescModel := usagerolluphourlyFields[6].Descriptor()
+	// usagerolluphourly.DefaultModel holds the default value on creation for the model field.
+	usagerolluphourly.DefaultModel = usagerolluphourlyDescModel.Default.(string)
+	// usagerolluphourlyDescUsageSource is the schema descriptor for usage_source field.
+	usagerolluphourlyDescUsageSource := usagerolluphourlyFields[7].Descriptor()
+	// usagerolluphourly.UsageSourceValidator is a validator for the "usage_source" field. It is called by the builders before save.
+	usagerolluphourly.UsageSourceValidator = usagerolluphourlyDescUsageSource.Validators[0].(func(string) error)
+	// usagerolluphourlyDescCalls is the schema descriptor for calls field.
+	usagerolluphourlyDescCalls := usagerolluphourlyFields[8].Descriptor()
+	// usagerolluphourly.DefaultCalls holds the default value on creation for the calls field.
+	usagerolluphourly.DefaultCalls = usagerolluphourlyDescCalls.Default.(int64)
+	// usagerolluphourlyDescErrorCalls is the schema descriptor for error_calls field.
+	usagerolluphourlyDescErrorCalls := usagerolluphourlyFields[9].Descriptor()
+	// usagerolluphourly.DefaultErrorCalls holds the default value on creation for the error_calls field.
+	usagerolluphourly.DefaultErrorCalls = usagerolluphourlyDescErrorCalls.Default.(int64)
+	// usagerolluphourlyDescInput is the schema descriptor for input field.
+	usagerolluphourlyDescInput := usagerolluphourlyFields[10].Descriptor()
+	// usagerolluphourly.DefaultInput holds the default value on creation for the input field.
+	usagerolluphourly.DefaultInput = usagerolluphourlyDescInput.Default.(int64)
+	// usagerolluphourlyDescOutput is the schema descriptor for output field.
+	usagerolluphourlyDescOutput := usagerolluphourlyFields[11].Descriptor()
+	// usagerolluphourly.DefaultOutput holds the default value on creation for the output field.
+	usagerolluphourly.DefaultOutput = usagerolluphourlyDescOutput.Default.(int64)
+	// usagerolluphourlyDescCacheRead is the schema descriptor for cache_read field.
+	usagerolluphourlyDescCacheRead := usagerolluphourlyFields[12].Descriptor()
+	// usagerolluphourly.DefaultCacheRead holds the default value on creation for the cache_read field.
+	usagerolluphourly.DefaultCacheRead = usagerolluphourlyDescCacheRead.Default.(int64)
+	// usagerolluphourlyDescCacheWrite is the schema descriptor for cache_write field.
+	usagerolluphourlyDescCacheWrite := usagerolluphourlyFields[13].Descriptor()
+	// usagerolluphourly.DefaultCacheWrite holds the default value on creation for the cache_write field.
+	usagerolluphourly.DefaultCacheWrite = usagerolluphourlyDescCacheWrite.Default.(int64)
+	// usagerolluphourlyDescCacheWrite1h is the schema descriptor for cache_write_1h field.
+	usagerolluphourlyDescCacheWrite1h := usagerolluphourlyFields[14].Descriptor()
+	// usagerolluphourly.DefaultCacheWrite1h holds the default value on creation for the cache_write_1h field.
+	usagerolluphourly.DefaultCacheWrite1h = usagerolluphourlyDescCacheWrite1h.Default.(int64)
+	// usagerolluphourlyDescReasoning is the schema descriptor for reasoning field.
+	usagerolluphourlyDescReasoning := usagerolluphourlyFields[15].Descriptor()
+	// usagerolluphourly.DefaultReasoning holds the default value on creation for the reasoning field.
+	usagerolluphourly.DefaultReasoning = usagerolluphourlyDescReasoning.Default.(int64)
+	// usagerolluphourlyDescReportedCostMicros is the schema descriptor for reported_cost_micros field.
+	usagerolluphourlyDescReportedCostMicros := usagerolluphourlyFields[16].Descriptor()
+	// usagerolluphourly.DefaultReportedCostMicros holds the default value on creation for the reported_cost_micros field.
+	usagerolluphourly.DefaultReportedCostMicros = usagerolluphourlyDescReportedCostMicros.Default.(int64)
+	// usagerolluphourlyDescEvents is the schema descriptor for events field.
+	usagerolluphourlyDescEvents := usagerolluphourlyFields[17].Descriptor()
+	// usagerolluphourly.DefaultEvents holds the default value on creation for the events field.
+	usagerolluphourly.DefaultEvents = usagerolluphourlyDescEvents.Default.(int64)
+	// usagerolluphourlyDescNullTokenEvents is the schema descriptor for null_token_events field.
+	usagerolluphourlyDescNullTokenEvents := usagerolluphourlyFields[18].Descriptor()
+	// usagerolluphourly.DefaultNullTokenEvents holds the default value on creation for the null_token_events field.
+	usagerolluphourly.DefaultNullTokenEvents = usagerolluphourlyDescNullTokenEvents.Default.(int64)
+	// usagerolluphourlyDescInputKnownEvents is the schema descriptor for input_known_events field.
+	usagerolluphourlyDescInputKnownEvents := usagerolluphourlyFields[19].Descriptor()
+	// usagerolluphourly.DefaultInputKnownEvents holds the default value on creation for the input_known_events field.
+	usagerolluphourly.DefaultInputKnownEvents = usagerolluphourlyDescInputKnownEvents.Default.(int64)
+	// usagerolluphourlyDescOutputKnownEvents is the schema descriptor for output_known_events field.
+	usagerolluphourlyDescOutputKnownEvents := usagerolluphourlyFields[20].Descriptor()
+	// usagerolluphourly.DefaultOutputKnownEvents holds the default value on creation for the output_known_events field.
+	usagerolluphourly.DefaultOutputKnownEvents = usagerolluphourlyDescOutputKnownEvents.Default.(int64)
+	// usagerolluphourlyDescCacheReadKnownEvents is the schema descriptor for cache_read_known_events field.
+	usagerolluphourlyDescCacheReadKnownEvents := usagerolluphourlyFields[21].Descriptor()
+	// usagerolluphourly.DefaultCacheReadKnownEvents holds the default value on creation for the cache_read_known_events field.
+	usagerolluphourly.DefaultCacheReadKnownEvents = usagerolluphourlyDescCacheReadKnownEvents.Default.(int64)
+	// usagerolluphourlyDescCacheWriteKnownEvents is the schema descriptor for cache_write_known_events field.
+	usagerolluphourlyDescCacheWriteKnownEvents := usagerolluphourlyFields[22].Descriptor()
+	// usagerolluphourly.DefaultCacheWriteKnownEvents holds the default value on creation for the cache_write_known_events field.
+	usagerolluphourly.DefaultCacheWriteKnownEvents = usagerolluphourlyDescCacheWriteKnownEvents.Default.(int64)
+	// usagerolluphourlyDescCacheWrite1hKnownEvents is the schema descriptor for cache_write_1h_known_events field.
+	usagerolluphourlyDescCacheWrite1hKnownEvents := usagerolluphourlyFields[23].Descriptor()
+	// usagerolluphourly.DefaultCacheWrite1hKnownEvents holds the default value on creation for the cache_write_1h_known_events field.
+	usagerolluphourly.DefaultCacheWrite1hKnownEvents = usagerolluphourlyDescCacheWrite1hKnownEvents.Default.(int64)
+	// usagerolluphourlyDescReasoningKnownEvents is the schema descriptor for reasoning_known_events field.
+	usagerolluphourlyDescReasoningKnownEvents := usagerolluphourlyFields[24].Descriptor()
+	// usagerolluphourly.DefaultReasoningKnownEvents holds the default value on creation for the reasoning_known_events field.
+	usagerolluphourly.DefaultReasoningKnownEvents = usagerolluphourlyDescReasoningKnownEvents.Default.(int64)
+	// usagerolluphourlyDescPresenceTrackedEvents is the schema descriptor for presence_tracked_events field.
+	usagerolluphourlyDescPresenceTrackedEvents := usagerolluphourlyFields[25].Descriptor()
+	// usagerolluphourly.DefaultPresenceTrackedEvents holds the default value on creation for the presence_tracked_events field.
+	usagerolluphourly.DefaultPresenceTrackedEvents = usagerolluphourlyDescPresenceTrackedEvents.Default.(int64)
+	// usagerolluphourlyDescID is the schema descriptor for id field.
+	usagerolluphourlyDescID := usagerolluphourlyFields[0].Descriptor()
+	// usagerolluphourly.DefaultID holds the default value on creation for the id field.
+	usagerolluphourly.DefaultID = usagerolluphourlyDescID.Default.(func() uuid.UUID)
 	usagescopecounterdailyFields := schema.UsageScopeCounterDaily{}.Fields()
 	_ = usagescopecounterdailyFields
 	// usagescopecounterdailyDescScopeKind is the schema descriptor for scope_kind field.

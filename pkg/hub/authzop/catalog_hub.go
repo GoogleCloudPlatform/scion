@@ -759,6 +759,24 @@ var hubOperations = []OperationSpec{
 		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestMetricsDashboard_RequiresMetricsSelector"}},
 		Bearer:           AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
 	},
+	{
+		ID:          "hub.usage.read",
+		Domain:      "hub",
+		Description: "Read hub-wide Track 1 token usage summary and aggregate meter health across all projects (behind tokenomics.usage_ledger). Distinct from /api/v1/usage/me (quota usage)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/usage", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.metrics.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"}},
+		Bearer:           AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
 
 	// =====================================================================
 	// Domain: hub — GitHub App integration (D4 route guard conversion)
@@ -948,7 +966,7 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "quota.usage.self.read",
 		Domain:      "quota",
-		Description: "Read the caller's own quota usage: each limit's effective value and active count for the caller only",
+		Description: "Read the caller's own quota usage: each limit's effective value and active count for the caller only (distinct from GET /api/v1/me/usage, which returns Track 1 token usage)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/usage/me", Method: "GET"},
 		},
@@ -969,6 +987,31 @@ var hubOperations = []OperationSpec{
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestUsageMe_ReturnsOnlyTheHolder"},
+	},
+	{
+		ID:          "hub.usage.self.read",
+		Domain:      "hub",
+		Description: "Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/me/usage", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestMeUsageRead_SelfTokenReadsOwn"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Returns only the caller's own Track 1 token usage; carries no other user's records",
+			Scope:  "caller's own Track 1 token usage only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestMeUsageRead_SelfTokenReadsOwn"},
 	},
 	{
 		ID:          "hub.experiments.read",

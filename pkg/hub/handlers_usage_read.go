@@ -161,12 +161,6 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	presence, err := s.store.GetUsageTokenPresenceByAgent(ctx, agent.ID, since, until)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
 	runs, err := s.store.ListRunAttributionsByAgent(ctx, agent.ID, defaultUsageRunSummaryCap)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -189,7 +183,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, targetRunID, meterRows, currentRunHasEvents)
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunHasEvents)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -327,7 +321,7 @@ func parseUsageTimeParam(raw string, ref time.Time, endOfDay bool) (time.Time, e
 }
 
 type usageBucketPresence struct {
-	eventCount        int64
+	trackedEvents     int64
 	inputCount        int64
 	outputCount       int64
 	cacheReadCount    int64
@@ -336,14 +330,26 @@ type usageBucketPresence struct {
 	reasoningCount    int64
 }
 
-func (p *usageBucketPresence) add(src *store.UsageTokenPresence) {
-	p.eventCount += src.EventCount
-	p.inputCount += src.InputCount
-	p.outputCount += src.OutputCount
-	p.cacheReadCount += src.CacheReadCount
-	p.cacheWriteCount += src.CacheWriteCount
-	p.cacheWrite1hCount += src.CacheWrite1hCount
-	p.reasoningCount += src.ReasoningCount
+func (p *usageBucketPresence) addRollup(r *store.UsageRollupDaily) {
+	p.trackedEvents += r.PresenceTrackedEvents
+	p.inputCount += r.InputKnownEvents
+	p.outputCount += r.OutputKnownEvents
+	p.cacheReadCount += r.CacheReadKnownEvents
+	p.cacheWriteCount += r.CacheWriteKnownEvents
+	p.cacheWrite1hCount += r.CacheWrite1hKnownEvents
+	p.reasoningCount += r.ReasoningKnownEvents
+}
+
+func presenceFromTotals(t store.UsageRollupTotals) usageBucketPresence {
+	return usageBucketPresence{
+		trackedEvents:     t.PresenceTrackedEvents,
+		inputCount:        t.InputKnownEvents,
+		outputCount:       t.OutputKnownEvents,
+		cacheReadCount:    t.CacheReadKnownEvents,
+		cacheWriteCount:   t.CacheWriteKnownEvents,
+		cacheWrite1hCount: t.CacheWrite1hKnownEvents,
+		reasoningCount:    t.ReasoningKnownEvents,
+	}
 }
 
 type modelRollupAgg struct {
@@ -367,7 +373,6 @@ func buildAgentUsageResponse(
 	agent *store.Agent,
 	since, until, dbNow time.Time,
 	rollups []*store.UsageRollupDaily,
-	presence []*store.UsageTokenPresence,
 	runs []*store.RunAttribution,
 	targetRunID string,
 	meterRows []*store.MeterHealth,
@@ -379,22 +384,7 @@ func buildAgentUsageResponse(
 		usageSource string
 	}
 
-	presenceByKey := make(map[modelKey]*usageBucketPresence, len(presence))
 	var totalPresence usageBucketPresence
-	for _, p := range presence {
-		if p == nil {
-			continue
-		}
-		k := modelKey{model: p.Model, harness: p.Harness, usageSource: p.UsageSource}
-		dst, ok := presenceByKey[k]
-		if !ok {
-			dst = &usageBucketPresence{}
-			presenceByKey[k] = dst
-		}
-		dst.add(p)
-		totalPresence.add(p)
-	}
-
 	byModelMap := make(map[modelKey]*modelRollupAgg)
 	var (
 		totalCalls           int64
@@ -423,6 +413,7 @@ func buildAgentUsageResponse(
 		totalCacheWrite += r.CacheWrite
 		totalCacheWrite1h += r.CacheWrite1h
 		totalReasoning += r.Reasoning
+		totalPresence.addRollup(r)
 
 		k := modelKey{model: r.Model, harness: r.Harness, usageSource: r.UsageSource}
 		agg, ok := byModelMap[k]
@@ -431,9 +422,6 @@ func buildAgentUsageResponse(
 				model:       r.Model,
 				harness:     r.Harness,
 				usageSource: r.UsageSource,
-			}
-			if p, hasP := presenceByKey[k]; hasP {
-				agg.presence = *p
 			}
 			byModelMap[k] = agg
 		}
@@ -447,6 +435,7 @@ func buildAgentUsageResponse(
 		agg.reasoning += r.Reasoning
 		agg.events += r.Events
 		agg.nullTokenEvents += r.NullTokenEvents
+		agg.presence.addRollup(r)
 	}
 
 	byModel := make([]AgentUsageModelBreakdown, 0, len(byModelMap))
@@ -560,10 +549,11 @@ func buildAgentUsageResponse(
 	}
 }
 
-// resolveNullableTokens converts non-nullable daily rollup sums into canonical
-// three-state nullable token buckets (§3.1). A bucket with zero non-null
-// contributions — or whose presence cannot be verified (for example, events
-// past ledger retention) — surfaces as nil (JSON null), never 0.
+// resolveNullableTokens converts non-nullable rollup sums into canonical
+// three-state nullable token buckets (§3.1) using the rollup's per-bucket
+// presence counters (no usage_events scan required). A bucket with zero
+// non-null contributions — including pre-migration legacy daily rows where
+// presence_tracked_events == 0 — surfaces as nil (JSON null), never 0.
 func resolveNullableTokens(
 	events, nullTokenEvents int64,
 	input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning int64,
@@ -575,17 +565,17 @@ func resolveNullableTokens(
 
 	resolveBucket := func(sum int64, nonNullCount int64) (*int64, int64) {
 		var unknownCount int64
-		if presence.eventCount > 0 && nonNullCount > 0 && nonNullCount < presence.eventCount {
-			unknownCount = presence.eventCount - nonNullCount
+		if presence.trackedEvents > 0 && nonNullCount > 0 && nonNullCount < presence.trackedEvents {
+			unknownCount = presence.trackedEvents - nonNullCount
 		}
 		if sum > 0 {
 			v := sum
 			return &v, unknownCount
 		}
-		// Sum is 0. Only emit measured 0 when usage_events presence confirms at
-		// least one non-null event for this bucket; otherwise surface nil
+		// Sum is 0. Only emit measured 0 when rollup presence counters confirm
+		// at least one non-null event for this bucket; otherwise surface nil
 		// (unknown) — never fabricate 0 (§3.1).
-		if presence.eventCount > 0 && nonNullCount > 0 {
+		if nonNullCount > 0 {
 			var zero int64
 			return &zero, unknownCount
 		}

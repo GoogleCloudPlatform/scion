@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -144,6 +145,30 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	assert.Equal(t, int64(totalEvents*5), rollup.Output)
 	assert.Equal(t, int64(totalEvents*2), rollup.CacheRead)
 	assert.Equal(t, int64(totalEvents*3), rollup.CacheWrite)
+	assert.Equal(t, int64(totalEvents), rollup.InputKnownEvents)
+	assert.Equal(t, int64(totalEvents), rollup.PresenceTrackedEvents)
+
+	// Hourly rollups and hourly coverage marker must be exact under concurrent Postgres ingest.
+	hourUTC := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	hRollup, err := client.UsageRollupHourly.Query().
+		Where(
+			usagerolluphourly.BucketStartEQ(hourUTC),
+			usagerolluphourly.AgentIDEQ(agentID),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(totalEvents), hRollup.Events)
+	assert.Equal(t, int64(totalEvents*10), hRollup.Input)
+	assert.Equal(t, int64(totalEvents*5), hRollup.Output)
+	assert.Equal(t, int64(totalEvents*2), hRollup.CacheRead)
+	assert.Equal(t, int64(totalEvents*3), hRollup.CacheWrite)
+	assert.Equal(t, int64(totalEvents), hRollup.InputKnownEvents)
+	assert.Equal(t, int64(totalEvents), hRollup.PresenceTrackedEvents)
+
+	covStart, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	require.True(t, hasCov)
+	assert.Equal(t, hourUTC, covStart)
 
 	for _, tc := range []struct {
 		kind string
@@ -185,6 +210,31 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	require.NoError(t, rows.Scan(&malformedType, &chargedType))
 	assert.Equal(t, "array", malformedType)
 	assert.Equal(t, "array", chargedType)
+
+	// Exercise QueryUsageRollups (hourly, day-from-hourly date_trunc, limit/truncated) and GetUsageScopeCoverage on Postgres.
+	qRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       hourUTC,
+		Until:       hourUTC,
+		ProjectID:   projectID,
+		GroupBy:     []string{store.UsageGroupByDay, store.UsageGroupByModel},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	assert.False(t, qRes.Truncated)
+	require.Len(t, qRes.Groups, 1)
+	require.NotNil(t, qRes.Groups[0].BucketStart)
+	assert.Equal(t, dayUTC, *qRes.Groups[0].BucketStart)
+	assert.Equal(t, int64(totalEvents*10), qRes.Totals.Input)
+	assert.Equal(t, int64(totalEvents), qRes.Totals.PresenceTrackedEvents)
+
+	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projectID,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      ts.Add(2 * time.Minute),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, cov.StaleAgents)
 }
 
 func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {

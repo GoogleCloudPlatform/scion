@@ -131,9 +131,10 @@ func (s *UsageLedgerStore) IngestUsageBatch(ctx context.Context, in *store.Usage
 	}
 
 	var result *store.UsageIngestBatchResult
+	var wroteHourly bool
 	run := func(client *ent.Client) error {
 		var err error
-		result, err = s.ingestUsageBatchTx(ctx, client, in)
+		result, wroteHourly, err = s.ingestUsageBatchTx(ctx, client, in)
 		return err
 	}
 
@@ -155,10 +156,13 @@ func (s *UsageLedgerStore) IngestUsageBatch(ctx context.Context, in *store.Usage
 	if err := tx.Commit(); err != nil {
 		return nil, mapError(err)
 	}
+	if wroteHourly && s.hourlyCoverageRecorded != nil {
+		s.hourlyCoverageRecorded.Store(true)
+	}
 	return result, nil
 }
 
-func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.Client, in *store.UsageIngestBatchInput) (*store.UsageIngestBatchResult, error) {
+func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.Client, in *store.UsageIngestBatchInput) (*store.UsageIngestBatchResult, bool, error) {
 	drv := client.Driver()
 	dialectName := drv.Dialect()
 
@@ -167,7 +171,7 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 	if dialectName == dialect.Postgres && in.AgentID != "" {
 		var res sql.Result
 		if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtext('usage_rollup:' || $1))", []any{in.AgentID}, &res); err != nil {
-			return nil, mapError(err)
+			return nil, false, mapError(err)
 		}
 	}
 
@@ -241,16 +245,16 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 			// instead of aborting the whole batch transaction.
 			var spRes sql.Result
 			if err := drv.Exec(ctx, "SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
-				return nil, mapError(err)
+				return nil, false, mapError(err)
 			}
 			inserted, err := insertUsageEventReturning(ctx, drv, insertSQL, ev)
 			if err != nil {
 				if isUsageEventRowDataError(err) {
 					if rbErr := drv.Exec(ctx, "ROLLBACK TO SAVEPOINT sp_usage_event", []any{}, &spRes); rbErr != nil {
-						return nil, mapError(rbErr)
+						return nil, false, mapError(rbErr)
 					}
 					if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); relErr != nil {
-						return nil, mapError(relErr)
+						return nil, false, mapError(relErr)
 					}
 					rejectedRows = append(rejectedRows, store.UsageIngestRowRejection{
 						EventID: ev.EventID,
@@ -259,10 +263,10 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 					rejectedEvents = append(rejectedEvents, ev)
 					continue
 				}
-				return nil, mapError(err)
+				return nil, false, mapError(err)
 			}
 			if err := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
-				return nil, mapError(err)
+				return nil, false, mapError(err)
 			}
 			if inserted {
 				insertedEvents = append(insertedEvents, ev)
@@ -272,13 +276,30 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 		}
 	}
 
-	// Aggregate ONLY newly inserted rows into daily rollups and scope counters.
+	// Aggregate ONLY newly inserted rows into daily rollups, hourly rollups,
+	// and scope counters in the same transaction (§4.3).
+	wroteHourly := false
 	if len(insertedEvents) > 0 {
-		if err := upsertDailyRollupsTx(ctx, drv, dialectName, insertedEvents); err != nil {
-			return nil, err
+		if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_daily", utcDayStart, insertedEvents); err != nil {
+			return nil, false, err
+		}
+		if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_hourly", utcHourStart, insertedEvents); err != nil {
+			return nil, false, err
 		}
 		if err := upsertScopeCountersDailyTx(ctx, drv, dialectName, insertedEvents); err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		if s.hourlyCoverageRecorded == nil || !s.hourlyCoverageRecorded.Load() {
+			minHour := utcHourStart(insertedEvents[0].EventTS)
+			for _, ev := range insertedEvents[1:] {
+				if h := utcHourStart(ev.EventTS); h.Before(minHour) {
+					minHour = h
+				}
+			}
+			if err := ensureHourlyCoverageMarkerTx(ctx, drv, dialectName, minHour); err != nil {
+				return nil, false, err
+			}
+			wroteHourly = true
 		}
 	}
 
@@ -323,7 +344,7 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 			FinalState:           mhUpd.FinalState,
 		}
 		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, receivedSeqs); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
@@ -332,7 +353,7 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 		Duplicates:     intraDuplicates + dbDuplicates,
 		Rejected:       rejectedRows,
 		InsertedEvents: insertedEvents,
-	}, nil
+	}, wroteHourly, nil
 }
 
 // isUsageEventRowDataError reports whether err is a per-row data or integrity
@@ -440,7 +461,7 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 	return inserted, nil
 }
 
-type dailyRollupKey struct {
+type usageRollupKey struct {
 	bucketStart   time.Time
 	projectID     string
 	billingUserID string
@@ -450,33 +471,40 @@ type dailyRollupKey struct {
 	usageSource   string
 }
 
-type dailyRollupAgg struct {
-	key                dailyRollupKey
-	calls              int64
-	errorCalls         int64
-	input              int64
-	output             int64
-	cacheRead          int64
-	cacheWrite         int64
-	cacheWrite1h       int64
-	reasoning          int64
-	reportedCostMicros int64
-	events             int64
-	nullTokenEvents    int64
-	firstEventTS       time.Time
-	lastEventTS        time.Time
+type usageRollupAgg struct {
+	key                     usageRollupKey
+	calls                   int64
+	errorCalls              int64
+	input                   int64
+	output                  int64
+	cacheRead               int64
+	cacheWrite              int64
+	cacheWrite1h            int64
+	reasoning               int64
+	reportedCostMicros      int64
+	events                  int64
+	nullTokenEvents         int64
+	inputKnownEvents        int64
+	outputKnownEvents       int64
+	cacheReadKnownEvents    int64
+	cacheWriteKnownEvents   int64
+	cacheWrite1hKnownEvents int64
+	reasoningKnownEvents    int64
+	presenceTrackedEvents   int64
+	firstEventTS            time.Time
+	lastEventTS             time.Time
 }
 
-func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName string, events []*store.UsageEvent) error {
-	aggs := make(map[dailyRollupKey]*dailyRollupAgg, len(events))
+func upsertRollupsTx(ctx context.Context, drv dialect.Driver, dialectName, tableName string, bucketFn func(time.Time) time.Time, events []*store.UsageEvent) error {
+	aggs := make(map[usageRollupKey]*usageRollupAgg, len(events))
 	for _, ev := range events {
 		eventTS := ev.EventTS.UTC().Truncate(time.Microsecond)
-		bucketStart := utcDayStart(eventTS)
+		bucketStart := bucketFn(eventTS)
 		billingUserID := ""
 		if ev.BillingUserID != nil {
 			billingUserID = *ev.BillingUserID
 		}
-		k := dailyRollupKey{
+		k := usageRollupKey{
 			bucketStart:   bucketStart,
 			projectID:     ev.ProjectID,
 			billingUserID: billingUserID,
@@ -487,7 +515,7 @@ func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName s
 		}
 		agg, ok := aggs[k]
 		if !ok {
-			agg = &dailyRollupAgg{
+			agg = &usageRollupAgg{
 				key:          k,
 				firstEventTS: eventTS,
 				lastEventTS:  eventTS,
@@ -500,26 +528,33 @@ func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName s
 		}
 		if ev.Input != nil {
 			agg.input = saturatingAddInt64(agg.input, *ev.Input)
+			agg.inputKnownEvents = saturatingAddInt64(agg.inputKnownEvents, 1)
 		}
 		if ev.Output != nil {
 			agg.output = saturatingAddInt64(agg.output, *ev.Output)
+			agg.outputKnownEvents = saturatingAddInt64(agg.outputKnownEvents, 1)
 		}
 		if ev.CacheRead != nil {
 			agg.cacheRead = saturatingAddInt64(agg.cacheRead, *ev.CacheRead)
+			agg.cacheReadKnownEvents = saturatingAddInt64(agg.cacheReadKnownEvents, 1)
 		}
 		if ev.CacheWrite != nil {
 			agg.cacheWrite = saturatingAddInt64(agg.cacheWrite, *ev.CacheWrite)
+			agg.cacheWriteKnownEvents = saturatingAddInt64(agg.cacheWriteKnownEvents, 1)
 		}
 		if ev.CacheWrite1h != nil {
 			agg.cacheWrite1h = saturatingAddInt64(agg.cacheWrite1h, *ev.CacheWrite1h)
+			agg.cacheWrite1hKnownEvents = saturatingAddInt64(agg.cacheWrite1hKnownEvents, 1)
 		}
 		if ev.Reasoning != nil {
 			agg.reasoning = saturatingAddInt64(agg.reasoning, *ev.Reasoning)
+			agg.reasoningKnownEvents = saturatingAddInt64(agg.reasoningKnownEvents, 1)
 		}
 		if ev.ReportedCostMicros != nil {
 			agg.reportedCostMicros = saturatingAddInt64(agg.reportedCostMicros, *ev.ReportedCostMicros)
 		}
 		agg.events = saturatingAddInt64(agg.events, 1)
+		agg.presenceTrackedEvents = saturatingAddInt64(agg.presenceTrackedEvents, 1)
 		if ev.Input == nil && ev.Output == nil && ev.CacheRead == nil && ev.CacheWrite == nil && ev.CacheWrite1h == nil && ev.Reasoning == nil {
 			agg.nullTokenEvents = saturatingAddInt64(agg.nullTokenEvents, 1)
 		}
@@ -532,7 +567,7 @@ func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName s
 	}
 
 	// Canonical key-sorted order prevents deadlocks across concurrent replicas (§4.3).
-	ordered := make([]*dailyRollupAgg, 0, len(aggs))
+	ordered := make([]*usageRollupAgg, 0, len(aggs))
 	for _, agg := range aggs {
 		ordered = append(ordered, agg)
 	}
@@ -559,31 +594,73 @@ func upsertDailyRollupsTx(ctx context.Context, drv dialect.Driver, dialectName s
 		return a.usageSource < b.usageSource
 	})
 
-	upsertSQL := usageRebindSQL(dialectName, `
-INSERT INTO usage_rollups_daily (
+	satAdd := func(col string) string {
+		return fmt.Sprintf(
+			"%s = CASE WHEN EXCLUDED.%s > 9223372036854775807 - %s.%s THEN 9223372036854775807 ELSE %s.%s + EXCLUDED.%s END",
+			col, col, tableName, col, tableName, col, col,
+		)
+	}
+
+	upsertSQL := usageRebindSQL(dialectName, fmt.Sprintf(`
+INSERT INTO %s (
 	id, bucket_start, project_id, billing_user_id, agent_id, harness, model, usage_source,
 	calls, error_calls, input, output, cache_read, cache_write, cache_write_1h, reasoning,
-	reported_cost_micros, events, null_token_events, first_event_ts, last_event_ts
+	reported_cost_micros, events, null_token_events,
+	input_known_events, output_known_events, cache_read_known_events, cache_write_known_events,
+	cache_write_1h_known_events, reasoning_known_events, presence_tracked_events,
+	first_event_ts, last_event_ts
 ) VALUES (
 	?, ?, ?, ?, ?, ?, ?, ?,
 	?, ?, ?, ?, ?, ?, ?, ?,
-	?, ?, ?, ?, ?
+	?, ?, ?,
+	?, ?, ?, ?,
+	?, ?, ?,
+	?, ?
 )
 ON CONFLICT (bucket_start, project_id, billing_user_id, agent_id, harness, model, usage_source)
 DO UPDATE SET
-	calls = CASE WHEN EXCLUDED.calls > 9223372036854775807 - usage_rollups_daily.calls THEN 9223372036854775807 ELSE usage_rollups_daily.calls + EXCLUDED.calls END,
-	error_calls = CASE WHEN EXCLUDED.error_calls > 9223372036854775807 - usage_rollups_daily.error_calls THEN 9223372036854775807 ELSE usage_rollups_daily.error_calls + EXCLUDED.error_calls END,
-	input = CASE WHEN EXCLUDED.input > 9223372036854775807 - usage_rollups_daily.input THEN 9223372036854775807 ELSE usage_rollups_daily.input + EXCLUDED.input END,
-	output = CASE WHEN EXCLUDED.output > 9223372036854775807 - usage_rollups_daily.output THEN 9223372036854775807 ELSE usage_rollups_daily.output + EXCLUDED.output END,
-	cache_read = CASE WHEN EXCLUDED.cache_read > 9223372036854775807 - usage_rollups_daily.cache_read THEN 9223372036854775807 ELSE usage_rollups_daily.cache_read + EXCLUDED.cache_read END,
-	cache_write = CASE WHEN EXCLUDED.cache_write > 9223372036854775807 - usage_rollups_daily.cache_write THEN 9223372036854775807 ELSE usage_rollups_daily.cache_write + EXCLUDED.cache_write END,
-	cache_write_1h = CASE WHEN EXCLUDED.cache_write_1h > 9223372036854775807 - usage_rollups_daily.cache_write_1h THEN 9223372036854775807 ELSE usage_rollups_daily.cache_write_1h + EXCLUDED.cache_write_1h END,
-	reasoning = CASE WHEN EXCLUDED.reasoning > 9223372036854775807 - usage_rollups_daily.reasoning THEN 9223372036854775807 ELSE usage_rollups_daily.reasoning + EXCLUDED.reasoning END,
-	reported_cost_micros = CASE WHEN EXCLUDED.reported_cost_micros > 9223372036854775807 - usage_rollups_daily.reported_cost_micros THEN 9223372036854775807 ELSE usage_rollups_daily.reported_cost_micros + EXCLUDED.reported_cost_micros END,
-	events = CASE WHEN EXCLUDED.events > 9223372036854775807 - usage_rollups_daily.events THEN 9223372036854775807 ELSE usage_rollups_daily.events + EXCLUDED.events END,
-	null_token_events = CASE WHEN EXCLUDED.null_token_events > 9223372036854775807 - usage_rollups_daily.null_token_events THEN 9223372036854775807 ELSE usage_rollups_daily.null_token_events + EXCLUDED.null_token_events END,
-	first_event_ts = CASE WHEN EXCLUDED.first_event_ts < usage_rollups_daily.first_event_ts THEN EXCLUDED.first_event_ts ELSE usage_rollups_daily.first_event_ts END,
-	last_event_ts = CASE WHEN EXCLUDED.last_event_ts > usage_rollups_daily.last_event_ts THEN EXCLUDED.last_event_ts ELSE usage_rollups_daily.last_event_ts END`)
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	%s,
+	first_event_ts = CASE WHEN EXCLUDED.first_event_ts < %s.first_event_ts THEN EXCLUDED.first_event_ts ELSE %s.first_event_ts END,
+	last_event_ts = CASE WHEN EXCLUDED.last_event_ts > %s.last_event_ts THEN EXCLUDED.last_event_ts ELSE %s.last_event_ts END`,
+		tableName,
+		satAdd("calls"),
+		satAdd("error_calls"),
+		satAdd("input"),
+		satAdd("output"),
+		satAdd("cache_read"),
+		satAdd("cache_write"),
+		satAdd("cache_write_1h"),
+		satAdd("reasoning"),
+		satAdd("reported_cost_micros"),
+		satAdd("events"),
+		satAdd("null_token_events"),
+		satAdd("input_known_events"),
+		satAdd("output_known_events"),
+		satAdd("cache_read_known_events"),
+		satAdd("cache_write_known_events"),
+		satAdd("cache_write_1h_known_events"),
+		satAdd("reasoning_known_events"),
+		satAdd("presence_tracked_events"),
+		tableName, tableName,
+		tableName, tableName,
+	))
 
 	for _, agg := range ordered {
 		var res sql.Result
@@ -607,12 +684,46 @@ DO UPDATE SET
 			agg.reportedCostMicros,
 			agg.events,
 			agg.nullTokenEvents,
+			agg.inputKnownEvents,
+			agg.outputKnownEvents,
+			agg.cacheReadKnownEvents,
+			agg.cacheWriteKnownEvents,
+			agg.cacheWrite1hKnownEvents,
+			agg.reasoningKnownEvents,
+			agg.presenceTrackedEvents,
 			agg.firstEventTS,
 			agg.lastEventTS,
 		}
 		if err := drv.Exec(ctx, upsertSQL, args, &res); err != nil {
 			return mapError(err)
 		}
+	}
+	return nil
+}
+
+type hourlyCoverageMarker struct {
+	StartedAt string `json:"started_at"`
+}
+
+func ensureHourlyCoverageMarkerTx(ctx context.Context, drv dialect.Driver, dialectName string, startedAt time.Time) error {
+	payload, err := json.Marshal(hourlyCoverageMarker{
+		StartedAt: utcHourStart(startedAt).UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	valParam := "?"
+	if dialectName == dialect.Postgres {
+		valParam = "CAST(? AS jsonb)"
+	}
+	q := usageRebindSQL(dialectName, fmt.Sprintf(`
+INSERT INTO hub_settings (id, section, value, revision, updated_by, origin, create_time, update_time)
+VALUES (?, ?, %s, 1, 'system', 'seeded', ?, ?)
+ON CONFLICT (section) DO NOTHING`, valParam))
+	var res sql.Result
+	if err := drv.Exec(ctx, q, []any{uuid.New(), store.UsageRollupHourlyCoverageSection, string(payload), now, now}, &res); err != nil {
+		return mapError(err)
 	}
 	return nil
 }
@@ -948,6 +1059,11 @@ func saturatingAddInt64(a, b int64) int64 {
 func utcDayStart(t time.Time) time.Time {
 	u := t.UTC()
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func utcHourStart(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), u.Hour(), 0, 0, 0, time.UTC)
 }
 
 func nullableStringArg(s *string) any {

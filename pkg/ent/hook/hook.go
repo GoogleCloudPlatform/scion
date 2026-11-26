@@ -1377,6 +1377,18 @@ func (f UsageRollupDailyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRollupDailyMutation", m)
 }
 
+// The UsageRollupHourlyFunc type is an adapter to allow the use of ordinary
+// function as UsageRollupHourly mutator.
+type UsageRollupHourlyFunc func(context.Context, *ent.UsageRollupHourlyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageRollupHourlyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageRollupHourlyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageRollupHourlyMutation", m)
+}
+
 // The UsageScopeCounterDailyFunc type is an adapter to allow the use of ordinary
 // function as UsageScopeCounterDaily mutator.
 type UsageScopeCounterDailyFunc func(context.Context, *ent.UsageScopeCounterDailyMutation) (ent.Value, error)

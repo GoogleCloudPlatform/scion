@@ -145,6 +145,41 @@ func NullTokenEvents(v int64) predicate.UsageRollupDaily {
 	return predicate.UsageRollupDaily(sql.FieldEQ(FieldNullTokenEvents, v))
 }
 
+// InputKnownEvents applies equality check predicate on the "input_known_events" field. It's identical to InputKnownEventsEQ.
+func InputKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldInputKnownEvents, v))
+}
+
+// OutputKnownEvents applies equality check predicate on the "output_known_events" field. It's identical to OutputKnownEventsEQ.
+func OutputKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldOutputKnownEvents, v))
+}
+
+// CacheReadKnownEvents applies equality check predicate on the "cache_read_known_events" field. It's identical to CacheReadKnownEventsEQ.
+func CacheReadKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheReadKnownEvents, v))
+}
+
+// CacheWriteKnownEvents applies equality check predicate on the "cache_write_known_events" field. It's identical to CacheWriteKnownEventsEQ.
+func CacheWriteKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWrite1hKnownEvents applies equality check predicate on the "cache_write_1h_known_events" field. It's identical to CacheWrite1hKnownEventsEQ.
+func CacheWrite1hKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheWrite1hKnownEvents, v))
+}
+
+// ReasoningKnownEvents applies equality check predicate on the "reasoning_known_events" field. It's identical to ReasoningKnownEventsEQ.
+func ReasoningKnownEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldReasoningKnownEvents, v))
+}
+
+// PresenceTrackedEvents applies equality check predicate on the "presence_tracked_events" field. It's identical to PresenceTrackedEventsEQ.
+func PresenceTrackedEvents(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldPresenceTrackedEvents, v))
+}
+
 // FirstEventTs applies equality check predicate on the "first_event_ts" field. It's identical to FirstEventTsEQ.
 func FirstEventTs(v time.Time) predicate.UsageRollupDaily {
 	return predicate.UsageRollupDaily(sql.FieldEQ(FieldFirstEventTs, v))
@@ -1023,6 +1058,286 @@ func NullTokenEventsLT(v int64) predicate.UsageRollupDaily {
 // NullTokenEventsLTE applies the LTE predicate on the "null_token_events" field.
 func NullTokenEventsLTE(v int64) predicate.UsageRollupDaily {
 	return predicate.UsageRollupDaily(sql.FieldLTE(FieldNullTokenEvents, v))
+}
+
+// InputKnownEventsEQ applies the EQ predicate on the "input_known_events" field.
+func InputKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldInputKnownEvents, v))
+}
+
+// InputKnownEventsNEQ applies the NEQ predicate on the "input_known_events" field.
+func InputKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldInputKnownEvents, v))
+}
+
+// InputKnownEventsIn applies the In predicate on the "input_known_events" field.
+func InputKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldInputKnownEvents, vs...))
+}
+
+// InputKnownEventsNotIn applies the NotIn predicate on the "input_known_events" field.
+func InputKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldInputKnownEvents, vs...))
+}
+
+// InputKnownEventsGT applies the GT predicate on the "input_known_events" field.
+func InputKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldInputKnownEvents, v))
+}
+
+// InputKnownEventsGTE applies the GTE predicate on the "input_known_events" field.
+func InputKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldInputKnownEvents, v))
+}
+
+// InputKnownEventsLT applies the LT predicate on the "input_known_events" field.
+func InputKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldInputKnownEvents, v))
+}
+
+// InputKnownEventsLTE applies the LTE predicate on the "input_known_events" field.
+func InputKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldInputKnownEvents, v))
+}
+
+// OutputKnownEventsEQ applies the EQ predicate on the "output_known_events" field.
+func OutputKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldOutputKnownEvents, v))
+}
+
+// OutputKnownEventsNEQ applies the NEQ predicate on the "output_known_events" field.
+func OutputKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldOutputKnownEvents, v))
+}
+
+// OutputKnownEventsIn applies the In predicate on the "output_known_events" field.
+func OutputKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldOutputKnownEvents, vs...))
+}
+
+// OutputKnownEventsNotIn applies the NotIn predicate on the "output_known_events" field.
+func OutputKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldOutputKnownEvents, vs...))
+}
+
+// OutputKnownEventsGT applies the GT predicate on the "output_known_events" field.
+func OutputKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldOutputKnownEvents, v))
+}
+
+// OutputKnownEventsGTE applies the GTE predicate on the "output_known_events" field.
+func OutputKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldOutputKnownEvents, v))
+}
+
+// OutputKnownEventsLT applies the LT predicate on the "output_known_events" field.
+func OutputKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldOutputKnownEvents, v))
+}
+
+// OutputKnownEventsLTE applies the LTE predicate on the "output_known_events" field.
+func OutputKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldOutputKnownEvents, v))
+}
+
+// CacheReadKnownEventsEQ applies the EQ predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheReadKnownEvents, v))
+}
+
+// CacheReadKnownEventsNEQ applies the NEQ predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldCacheReadKnownEvents, v))
+}
+
+// CacheReadKnownEventsIn applies the In predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldCacheReadKnownEvents, vs...))
+}
+
+// CacheReadKnownEventsNotIn applies the NotIn predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldCacheReadKnownEvents, vs...))
+}
+
+// CacheReadKnownEventsGT applies the GT predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldCacheReadKnownEvents, v))
+}
+
+// CacheReadKnownEventsGTE applies the GTE predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldCacheReadKnownEvents, v))
+}
+
+// CacheReadKnownEventsLT applies the LT predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldCacheReadKnownEvents, v))
+}
+
+// CacheReadKnownEventsLTE applies the LTE predicate on the "cache_read_known_events" field.
+func CacheReadKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldCacheReadKnownEvents, v))
+}
+
+// CacheWriteKnownEventsEQ applies the EQ predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWriteKnownEventsNEQ applies the NEQ predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWriteKnownEventsIn applies the In predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldCacheWriteKnownEvents, vs...))
+}
+
+// CacheWriteKnownEventsNotIn applies the NotIn predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldCacheWriteKnownEvents, vs...))
+}
+
+// CacheWriteKnownEventsGT applies the GT predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWriteKnownEventsGTE applies the GTE predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWriteKnownEventsLT applies the LT predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWriteKnownEventsLTE applies the LTE predicate on the "cache_write_known_events" field.
+func CacheWriteKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldCacheWriteKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsEQ applies the EQ predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldCacheWrite1hKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsNEQ applies the NEQ predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldCacheWrite1hKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsIn applies the In predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldCacheWrite1hKnownEvents, vs...))
+}
+
+// CacheWrite1hKnownEventsNotIn applies the NotIn predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldCacheWrite1hKnownEvents, vs...))
+}
+
+// CacheWrite1hKnownEventsGT applies the GT predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldCacheWrite1hKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsGTE applies the GTE predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldCacheWrite1hKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsLT applies the LT predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldCacheWrite1hKnownEvents, v))
+}
+
+// CacheWrite1hKnownEventsLTE applies the LTE predicate on the "cache_write_1h_known_events" field.
+func CacheWrite1hKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldCacheWrite1hKnownEvents, v))
+}
+
+// ReasoningKnownEventsEQ applies the EQ predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldReasoningKnownEvents, v))
+}
+
+// ReasoningKnownEventsNEQ applies the NEQ predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldReasoningKnownEvents, v))
+}
+
+// ReasoningKnownEventsIn applies the In predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldReasoningKnownEvents, vs...))
+}
+
+// ReasoningKnownEventsNotIn applies the NotIn predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldReasoningKnownEvents, vs...))
+}
+
+// ReasoningKnownEventsGT applies the GT predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldReasoningKnownEvents, v))
+}
+
+// ReasoningKnownEventsGTE applies the GTE predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldReasoningKnownEvents, v))
+}
+
+// ReasoningKnownEventsLT applies the LT predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldReasoningKnownEvents, v))
+}
+
+// ReasoningKnownEventsLTE applies the LTE predicate on the "reasoning_known_events" field.
+func ReasoningKnownEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldReasoningKnownEvents, v))
+}
+
+// PresenceTrackedEventsEQ applies the EQ predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldEQ(FieldPresenceTrackedEvents, v))
+}
+
+// PresenceTrackedEventsNEQ applies the NEQ predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsNEQ(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNEQ(FieldPresenceTrackedEvents, v))
+}
+
+// PresenceTrackedEventsIn applies the In predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldIn(FieldPresenceTrackedEvents, vs...))
+}
+
+// PresenceTrackedEventsNotIn applies the NotIn predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsNotIn(vs ...int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldNotIn(FieldPresenceTrackedEvents, vs...))
+}
+
+// PresenceTrackedEventsGT applies the GT predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsGT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGT(FieldPresenceTrackedEvents, v))
+}
+
+// PresenceTrackedEventsGTE applies the GTE predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsGTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldGTE(FieldPresenceTrackedEvents, v))
+}
+
+// PresenceTrackedEventsLT applies the LT predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsLT(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLT(FieldPresenceTrackedEvents, v))
+}
+
+// PresenceTrackedEventsLTE applies the LTE predicate on the "presence_tracked_events" field.
+func PresenceTrackedEventsLTE(v int64) predicate.UsageRollupDaily {
+	return predicate.UsageRollupDaily(sql.FieldLTE(FieldPresenceTrackedEvents, v))
 }
 
 // FirstEventTsEQ applies the EQ predicate on the "first_event_ts" field.

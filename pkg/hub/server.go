@@ -8706,6 +8706,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/usage/", s.guarded("/api/v1/admin/usage/", s.handleAdminUsageByLimit))
 	s.mux.HandleFunc("/api/v1/usage/me", s.guarded("/api/v1/usage/me", s.handleUsageMe))
 
+	// Tokenomics Track 1 usage read APIs (distinct from /api/v1/usage/me quota usage).
+	// /api/v1/usage is an exact-match pattern (no trailing slash) so it never shadows /api/v1/usage/me.
+	s.mux.HandleFunc("/api/v1/usage", s.guarded("/api/v1/usage", s.handleGlobalUsage))
+	s.mux.HandleFunc("/api/v1/me/usage", s.guarded("/api/v1/me/usage", s.handleMeUsage))
+
 	// Role management (PR-C1)
 	s.mux.HandleFunc("/api/v1/admin/roles", s.guarded("/api/v1/admin/roles", s.handleAdminRoles))
 	s.mux.HandleFunc("/api/v1/admin/roles/export", s.guarded("/api/v1/admin/roles/export", s.handleAdminRolesExport))

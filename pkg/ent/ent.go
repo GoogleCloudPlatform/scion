@@ -126,6 +126,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -308,6 +309,7 @@ func checkColumn(t, c string) error {
 			usageevent.Table:                    usageevent.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			usagerollupdaily.Table:              usagerollupdaily.ValidColumn,
+			usagerolluphourly.Table:             usagerolluphourly.ValidColumn,
 			usagescopecounterdaily.Table:        usagescopecounterdaily.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
