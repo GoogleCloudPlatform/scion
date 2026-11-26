@@ -487,12 +487,9 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Step 5: single transaction — CAS pending -> approved + INSERT command_runs(queued).
-	// Default share_output to the agent's share_output_requested unless the
-	// approver explicitly set share_output in the request body (D3).
-	shareOutput := row.ShareOutputRequested
-	if body.ShareOutput != nil {
-		shareOutput = *body.ShareOutput
-	}
+	// Share output is explicit opt-in only: omitting share_output defaults to
+	// false so older clients never share output without an explicit approver choice (M1).
+	shareOutput := body.ShareOutput != nil && *body.ShareOutput
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	appRes, err := s.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
 		RequestID:      row.ID,

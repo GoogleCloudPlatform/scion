@@ -881,13 +881,13 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 		return resp
 	}
 
-	// 1. share_output=false (agent requested true, approver explicitly sets false):
-	//    agent receives outcome only, no output_tail in command-response or agent list.
+	// 1. share_output omitted (nil) on a request where agent asked for share_output_requested=true:
+	//    explicit opt-in only (M1) -> records share_output=false, agent receives outcome only,
+	//    no output_tail in command-response or agent list.
 	privateCanary := "PRIVATE_OUTPUT_CANARY_" + api.NewUUID()
 	reqNoShare := createPendingReq("no-share", "echo "+privateCanary, true)
-	shareFalse := false
-	appNoShare := approveViaHandler(reqNoShare, &shareFalse)
-	assert.False(t, appNoShare.Run.ShareOutput, "explicit share_output=false must override share_output_requested=true")
+	appNoShare := approveViaHandler(reqNoShare, nil)
+	assert.False(t, appNoShare.Run.ShareOutput, "omitted share_output must default to false even when share_output_requested=true")
 	finNoShare := f.waitRunFinished(t, appNoShare.Run.RunID)
 	assert.Equal(t, store.CommandRunStatusSucceeded, finNoShare.Status)
 	assert.False(t, finNoShare.ShareOutput)
@@ -908,7 +908,7 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 	require.NotNil(t, agentListNoShare.Items[0].Run)
 	assert.Empty(t, agentListNoShare.Items[0].Run.OutputTail, "share_output=false must not include outputTail in agent list")
 
-	// 2. share_output=true (defaulted from agent's share_output_requested=true):
+	// 2. share_output=true (explicit opt-in):
 	//    fixture with ghp_..., PEM private key block, and > 4 KiB UTF-8 comes back redacted & bounded (AC F8).
 	//    Construct the visible canary dynamically in bash so the literal string
 	//    never appears in request.script (tightening card/SSE/slog leak checks).
@@ -926,8 +926,9 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 		"printf 'SHARED_%s_%s\\n' 'VISIBLE_TAIL' '" + sharedUUID + "'",
 	}, "\n")
 	reqShare := createPendingReq("with-share", scriptWithSecrets, true)
-	appShare := approveViaHandler(reqShare, nil) // nil -> defaults to ShareOutputRequested=true
-	assert.True(t, appShare.Run.ShareOutput, "omitted share_output must default to share_output_requested=true")
+	shareTrue := true
+	appShare := approveViaHandler(reqShare, &shareTrue)
+	assert.True(t, appShare.Run.ShareOutput, "explicit share_output=true must be recorded on the run")
 	finShare := f.waitRunFinished(t, appShare.Run.RunID)
 	assert.Equal(t, store.CommandRunStatusSucceeded, finShare.Status)
 	assert.True(t, finShare.ShareOutput)

@@ -29,6 +29,10 @@ const (
 	commandOutputRedactedMarker = "[REDACTED]"
 )
 
+// ansiEscapeRE matches ANSI CSI, OSC, and 2-byte ESC sequences so coloured
+// terminal output cannot split or disguise secret tokens before matching.
+var ansiEscapeRE = regexp.MustCompile("\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|[@-Z\\\\-_])")
+
 type commandOutputRedactRule struct {
 	re *regexp.Regexp
 	// replace transforms a match (with submatch indices from FindAllStringSubmatchIndex)
@@ -66,44 +70,71 @@ var commandOutputRedactRules = []commandOutputRedactRule{
 			return "Bearer " + commandOutputRedactedMarker, true
 		},
 	},
-	// 5. GitHub tokens (ghp_, gho_, ghs_, github_pat_).
+	// 5. GitHub tokens (ghp_, gho_, ghs_, ghu_, github_pat_).
 	{
-		re: regexp.MustCompile(`\b(?:gh[pos]_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,})\b`),
+		re: regexp.MustCompile(`\b(?:gh[posu]_[A-Za-z0-9_]{6,}|github_pat_[A-Za-z0-9_]{6,})\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 6. AWS access key IDs (AKIA..., ASIA...).
+	// 6. GitLab personal access tokens (glpat-...).
+	{
+		re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{8,}\b`),
+		replace: func(_ string, _ []int) (string, bool) {
+			return commandOutputRedactedMarker, true
+		},
+	},
+	// 7. Provider secret keys (OpenAI/Stripe sk-..., Google API AIza...).
+	{
+		re: regexp.MustCompile(`\b(?:sk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,})\b`),
+		replace: func(_ string, _ []int) (string, bool) {
+			return commandOutputRedactedMarker, true
+		},
+	},
+	// 8. AWS access key IDs (AKIA..., ASIA...).
 	{
 		re: regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{12,}\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 7. Google OAuth2 access tokens (ya29....).
+	// 9. Google OAuth2 access tokens (ya29....).
 	{
 		re: regexp.MustCompile(`\bya29\.[A-Za-z0-9._-]{10,}`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 8. Slack tokens (xoxa-, xoxb-, xoxp-, xoxr-).
+	// 10. Slack tokens (xoxa-, xoxb-, xoxp-, xoxr-).
 	{
 		re: regexp.MustCompile(`\bxox[abpr]-[A-Za-z0-9-]{8,}`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 9. JWT-shaped tokens (eyJ... . ... . ...).
+	// 11. JWT-shaped tokens (eyJ... . ... . ...).
 	{
 		re: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b`),
 		replace: func(_ string, _ []int) (string, bool) {
 			return commandOutputRedactedMarker, true
 		},
 	},
-	// 10. Space-separated CLI secret flags (--password <val>, --token <val>, --secret <val>).
+	// 12. URL userinfo credentials (scheme://user:pass@host).
 	{
-		re: regexp.MustCompile(`(?i)(--(?:[a-z0-9_-]*-)?(?:password|passwd|secret|token)[ \t]+)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;]+)`),
+		re: regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@]+:)([^/\s@]+)(@)`),
+		replace: func(src string, loc []int) (string, bool) {
+			prefix := src[loc[2]:loc[3]]
+			pass := src[loc[4]:loc[5]]
+			suffix := src[loc[6]:loc[7]]
+			if pass == commandOutputRedactedMarker {
+				return src[loc[0]:loc[1]], false
+			}
+			return prefix + commandOutputRedactedMarker + suffix, true
+		},
+	},
+	// 13. Space-separated CLI secret flags (--password <val>, --token <val>, --secret <val>, --api-key <val>).
+	{
+		re: regexp.MustCompile(`(?i)(--(?:[a-z0-9_-]*-)?(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key)[ \t]+)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;]+)`),
 		replace: func(src string, loc []int) (string, bool) {
 			prefix := src[loc[2]:loc[3]]
 			val := src[loc[4]:loc[5]]
@@ -114,9 +145,9 @@ var commandOutputRedactRules = []commandOutputRedactRule{
 			return prefix + commandOutputRedactedMarker, true
 		},
 	},
-	// 11. password|passwd|secret|token key-value assignments (env, shell, YAML, JSON).
+	// 14. password|passwd|secret|token|api_key|access_key|private_key key-value assignments (env, shell, YAML, JSON).
 	{
-		re: regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*(?:password|passwd|secret|token)[A-Za-z0-9_.-]*"?[ \t]*[:=][ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;\}]+)`),
+		re: regexp.MustCompile(`(?i)(\b[A-Za-z0-9_.-]*(?:password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key)[A-Za-z0-9_.-]*"?[ \t]*[:=][ \t]*)("[^"\r\n]+"|'[^'\r\n]+'|[^\s"'` + "`" + `,;\}]+)`),
 		replace: func(src string, loc []int) (string, bool) {
 			prefix := src[loc[2]:loc[3]]
 			val := src[loc[4]:loc[5]]
@@ -134,10 +165,11 @@ var commandOutputRedactRules = []commandOutputRedactRule{
 }
 
 // redactCommandOutput applies best-effort secret redaction per design §4.9.
-// Redaction is defense in depth; the approver's explicit share_output opt-in
-// is the primary access control (D3).
+// ANSI escape sequences are stripped before matching so terminal colouring
+// cannot disguise secret tokens. Redaction is defense in depth; the approver's
+// explicit share_output opt-in is the primary access control (D3).
 func redactCommandOutput(input string) (redacted string, count int) {
-	s := strings.ToValidUTF8(input, "\uFFFD")
+	s := ansiEscapeRE.ReplaceAllString(strings.ToValidUTF8(input, "\uFFFD"), "")
 	for _, rule := range commandOutputRedactRules {
 		locs := rule.re.FindAllStringSubmatchIndex(s, -1)
 		if len(locs) == 0 {

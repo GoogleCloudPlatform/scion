@@ -140,3 +140,39 @@ func TestRedactAndBoundCommandOutput_LeadingKeyFragmentPGPAndCLIFlags(t *testing
 	assert.NotContains(t, tail, "mysec123")
 	assert.NotContains(t, tail, "super-secret-bearer-token-9999")
 }
+
+func TestRedactAndBoundCommandOutput_ANSIProviderKeysAndURLCreds(t *testing.T) {
+	// ANSI colour codes wrapped around and inside a token must be stripped before matching.
+	ansiTok := "\x1b[31mghp_\x1b[1m1234567890abcdef123456\x1b[0m"
+	ghu := "ghu_1234567890abcdef1234567890abcdef1234"
+	glpat := "glpat-abcdef1234567890XYZ"
+	skKey := "sk-proj-abcdefghijklmnopqrstuvwxyz123456"
+	aizaKey := "AIzaSyDaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"
+	urlCred := "https://alice:superpass123@git.example.com/org/repo.git"
+
+	input := strings.Join([]string{
+		"colored: " + ansiTok,
+		"ghu: " + ghu,
+		"glpat: " + glpat,
+		"openai: " + skKey,
+		"google: " + aizaKey,
+		"remote: " + urlCred,
+		"STRIPE_API_KEY=raw_api_key_val_999",
+		"CLOUD_ACCESS_KEY=raw_access_key_val_888",
+	}, "\n")
+
+	tail, count := redactAndBoundCommandOutput([]byte(input))
+	assert.Equal(t, 8, count)
+	assert.Contains(t, tail, "remote: https://alice:[REDACTED]@git.example.com/org/repo.git")
+	assert.Contains(t, tail, "STRIPE_API_KEY=[REDACTED]")
+	assert.Contains(t, tail, "CLOUD_ACCESS_KEY=[REDACTED]")
+	for _, secret := range []string{
+		"1234567890abcdef123456",
+		ghu, glpat, skKey, aizaKey,
+		"superpass123",
+		"raw_api_key_val_999",
+		"raw_access_key_val_888",
+	} {
+		assert.NotContains(t, tail, secret, "secret %q must be redacted", secret)
+	}
+}
