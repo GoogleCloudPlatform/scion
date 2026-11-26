@@ -101,6 +101,13 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		return nil
 	}
 
+	// Surface filtering: ignore messages targeted at another surface
+	// (including "native" / "web"). Untargeted messages (empty surface)
+	// continue to flow.
+	if !plugin.MatchesSurface(msg, b.surfaceName()) {
+		return nil
+	}
+
 	// Dedup check: compute SHA256 fingerprint and skip if seen within TTL.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -168,6 +175,40 @@ func (b *BrokerServer) ChannelName() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.channelName
+}
+
+// surfaceName returns the canonical conversation surface name for this broker
+// ("gchat" by default, or the configured plugin_name).
+func (b *BrokerServer) surfaceName() string {
+	if name := b.ChannelName(); name != "" {
+		return name
+	}
+	return "gchat"
+}
+
+// chatAppInboundConversation builds the Conversation addressing for an inbound
+// message sent from the chat app to the Hub.
+func chatAppInboundConversation(surface, spaceID, threadID string) *messages.Conversation {
+	if surface == "" {
+		surface = "gchat"
+	}
+	if threadID != "" {
+		conv := &messages.Conversation{
+			Surface:     surface,
+			ExternalRef: threadID,
+		}
+		if spaceID != "" && spaceID != threadID {
+			conv.ParentRef = spaceID
+		}
+		return conv
+	}
+	if spaceID != "" {
+		return &messages.Conversation{
+			Surface:     surface,
+			ExternalRef: spaceID,
+		}
+	}
+	return nil
 }
 
 // Subscribe registers a topic pattern for receiving messages.

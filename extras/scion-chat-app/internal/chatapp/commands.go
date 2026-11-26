@@ -451,6 +451,7 @@ func (r *CommandRouter) handleDialogSubmit(ctx context.Context, event *ChatEvent
 		if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
+		msg.Conversation = chatAppInboundConversation(msg.Channel, event.SpaceID, msg.ThreadID)
 		agents := client.ProjectAgents(link.ProjectID)
 		// Read the agent once: an agent that is still launching refuses
 		// messages, so the response then waits for the launch. A failed
@@ -1391,6 +1392,7 @@ func (r *CommandRouter) cmdMessage(ctx context.Context, event *ChatEvent, args [
 	} else if event.ThreadID != "" {
 		msg.ThreadID = event.ThreadID
 	}
+	msg.Conversation = chatAppInboundConversation(msg.Channel, event.SpaceID, msg.ThreadID)
 
 	// Download and attach any files uploaded with the message.
 	if len(event.Attachments) > 0 && r.downloader != nil {
@@ -1813,6 +1815,7 @@ func (r *CommandRouter) cmdThread(ctx context.Context, event *ChatEvent, args []
 		} else if event.ThreadID != "" {
 			msg.ThreadID = event.ThreadID
 		}
+		msg.Conversation = chatAppInboundConversation(msg.Channel, event.SpaceID, msg.ThreadID)
 		if _, err := client.ProjectAgents(link.ProjectID).SendStructuredMessage(ctx, createResp.Agent.Slug, msg, false, false, false); err != nil {
 			return textResponse(event, fmt.Sprintf("Agent `%s` created and started, but failed to send instruction: %v", createResp.Agent.Slug, err)), nil
 		}
@@ -1946,6 +1949,7 @@ func (r *CommandRouter) threadAsync(ctx context.Context, event *ChatEvent, link 
 			msg.Channel = r.broker.ChannelName()
 		}
 		msg.ThreadID = agentThread
+		msg.Conversation = chatAppInboundConversation(msg.Channel, spaceID, agentThread)
 	}
 
 	// Post the card ourselves so it can be updated when the launch ends.

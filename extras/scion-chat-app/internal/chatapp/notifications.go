@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
@@ -63,6 +64,14 @@ func (n *NotificationRelay) SetSendQueue(sq *SendQueue) {
 //	scion.project.<projectID>.user.<userID>.messages  — user-targeted message
 //	scion.project.<projectID>.agent.<agentID>.messages — agent-targeted message
 func (n *NotificationRelay) HandleBrokerMessage(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	if msg != nil && !plugin.MatchesSurface(msg, "gchat") {
+		n.log.Debug("ignoring message for non-gchat surface",
+			"topic", topic,
+			"surface", plugin.ResolveConversationTarget(msg).Surface,
+		)
+		return nil
+	}
+
 	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		n.log.Debug("ignoring unrecognized topic", "topic", topic, "error", err)
@@ -330,9 +339,10 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
+		convTarget := plugin.ResolveConversationTarget(msg)
 		sendReq := SendMessageRequest{
 			SpaceID:     link.SpaceID,
-			ThreadID:    msg.ThreadID,
+			ThreadID:    convTarget.ExternalRef,
 			Text:        mentions,
 			Card:        &card,
 			Attachments: attachments,
