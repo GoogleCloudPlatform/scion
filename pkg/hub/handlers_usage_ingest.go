@@ -247,7 +247,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 			// lazily attribute soft-deleted agents (SoftFinishRunID).
 			if agent.DeletedAt.IsZero() && agent.RunID != "" && runID == agent.RunID {
 				attr, err = s.store.EnsureRunAttributionForAgent(ctx, agentID, runID, effectiveHubID)
-				if err != nil {
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
 					return nil, "", "", err
 				}
 			}

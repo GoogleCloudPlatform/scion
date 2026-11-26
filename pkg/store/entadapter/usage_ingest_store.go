@@ -30,6 +30,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
@@ -38,7 +40,9 @@ import (
 // Used as the lazy attribution fallback at ingest time (P1.1 review O2) when
 // an event names the agent's current run_id and no run_attribution row exists
 // yet (narrow OFF->ON race). Always builds attribution from the Hub's agents
-// row, never from event payload.
+// row inside the transaction, re-checking that the agent is not soft-deleted
+// and its current run_id still equals runID (N1); returns store.ErrNotFound
+// if the agent moved to a different run or was deleted concurrently.
 func (s *UsageLedgerStore) EnsureRunAttributionForAgent(ctx context.Context, agentID, runID, hubID string) (*store.RunAttribution, error) {
 	if agentID == "" || runID == "" {
 		return nil, fmt.Errorf("%w: agent_id and run_id are required", store.ErrInvalidInput)
@@ -48,7 +52,38 @@ func (s *UsageLedgerStore) EnsureRunAttributionForAgent(ctx context.Context, age
 		return nil, store.ErrNotFound
 	}
 	run := func(client *ent.Client) error {
-		return ensureRunAttributionForAgentTx(ctx, client, uid, runID, "", hubID, "", nil)
+		// If another concurrent writer already created run_attribution for
+		// runID, return it without touching the agent row.
+		exists, err := client.RunAttribution.Query().
+			Where(runattribution.IDEQ(runID)).
+			Exist(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if exists {
+			return nil
+		}
+		// Re-check inside the transaction that the agent is live and its
+		// current run_id still matches runID before building attribution.
+		q := client.Agent.Query().
+			Where(
+				agent.IDEQ(uid),
+				agent.DeletedAtIsNil(),
+				agent.RunIDEQ(runID),
+			)
+		if s.usesRowLocks() {
+			q = q.ForUpdate()
+		}
+		row, err := q.Select(runAttributionAgentColumns...).Only(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, "", hubID, "")
+		if err != nil {
+			return err
+		}
+		_, err = insertRunAttributionOnConflictDoNothing(ctx, client, attr)
+		return err
 	}
 	if s.inTx {
 		if err := run(s.client); err != nil {
@@ -690,20 +725,32 @@ DO UPDATE SET
 	return nil
 }
 
+// maxMeterHealthMissingRanges bounds the number of disjoint missing_ranges
+// entries persisted in meter_health per (agent_id, run_id, producer_epoch).
+// When exceeded (e.g., an adversarial every-other-seq producer), adjacent
+// ranges separated by the smallest gaps are conservatively coalesced into
+// larger ranges. Coalescing may conservatively include already-received seqs
+// between adjacent gaps, but NEVER drops an unreceived seq or advances
+// last_contiguous_seq past an unreceived seq.
+const maxMeterHealthMissingRanges = 1024
+
 // advanceIngestSeqState computes (last_contiguous_seq, max_seq_seen,
-// missing_ranges) for IngestUsageBatch where the Hub is the sole authority on
-// sequence gaps and contiguity (RV1):
+// missing_ranges, coalesced) for IngestUsageBatch where the Hub is the sole
+// authority on sequence gaps and contiguity (RV1, R1):
 //   - Always adds (existingMax, nextMax] minus receivedSeqs to missing_ranges,
 //     regardless of any producer-supplied missing_ranges.
 //   - Producer-supplied missing_ranges and last_contiguous_seq are ignored so
 //     they can never shrink or close Hub-recorded gaps for unreceived seqs.
 //   - last_contiguous_seq advances strictly through received sequences.
+//   - Range subtraction is a single linear merge over sorted ranges.
+//   - Stored missing_ranges are capped at maxMeterHealthMissingRanges via
+//     conservative coalescing of the closest adjacent ranges.
 func advanceIngestSeqState(
 	existingContig, existingMax int64,
 	existingMissing []store.SeqRange,
 	producerSeq int64,
 	receivedSeqs []int64,
-) (nextContig, nextMax int64, nextMissing []store.SeqRange) {
+) (nextContig, nextMax int64, nextMissing []store.SeqRange, coalesced bool) {
 	nextContig = existingContig
 	nextMax = existingMax
 	if producerSeq > nextMax {
@@ -717,7 +764,14 @@ func advanceIngestSeqState(
 
 	cur := normalizeSeqRanges(existingMissing)
 	if nextMax > existingMax {
-		cur = normalizeSeqRanges(append(cur, store.SeqRange{Start: existingMax + 1, End: nextMax}))
+		newRange := store.SeqRange{Start: existingMax + 1, End: nextMax}
+		if len(cur) > 0 && newRange.Start <= cur[len(cur)-1].End+1 {
+			if newRange.End > cur[len(cur)-1].End {
+				cur[len(cur)-1].End = newRange.End
+			}
+		} else {
+			cur = append(cur, newRange)
+		}
 	}
 	if len(receivedSeqs) > 0 {
 		cur = subtractSeqsFromRanges(cur, receivedSeqs)
@@ -733,10 +787,11 @@ func advanceIngestSeqState(
 		cur = pruneRangesAtOrBelow(cur, nextContig)
 	}
 
+	cur, coalesced = capSeqRanges(cur, maxMeterHealthMissingRanges)
 	if len(cur) == 0 {
-		return nextContig, nextMax, nil
+		return nextContig, nextMax, nil, coalesced
 	}
-	return nextContig, nextMax, cur
+	return nextContig, nextMax, cur, coalesced
 }
 
 func normalizeSeqRanges(in []store.SeqRange) []store.SeqRange {
@@ -776,37 +831,90 @@ func normalizeSeqRanges(in []store.SeqRange) []store.SeqRange {
 	return out
 }
 
+// subtractSeqsFromRanges removes all positive seqs from sorted, disjoint
+// ranges in a single linear merge pass after sorting seqs (O(R + S log S)).
 func subtractSeqsFromRanges(ranges []store.SeqRange, seqs []int64) []store.SeqRange {
 	if len(ranges) == 0 || len(seqs) == 0 {
 		return ranges
 	}
-	sorted := append([]int64(nil), seqs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-
-	cur := ranges
-	for _, seq := range sorted {
-		if seq <= 0 {
-			continue
-		}
-		var next []store.SeqRange
-		for _, r := range cur {
-			if seq < r.Start || seq > r.End {
-				next = append(next, r)
-				continue
-			}
-			if r.Start < seq {
-				next = append(next, store.SeqRange{Start: r.Start, End: seq - 1})
-			}
-			if seq < r.End {
-				next = append(next, store.SeqRange{Start: seq + 1, End: r.End})
-			}
-		}
-		cur = next
-		if len(cur) == 0 {
-			break
+	sorted := make([]int64, 0, len(seqs))
+	for _, s := range seqs {
+		if s > 0 {
+			sorted = append(sorted, s)
 		}
 	}
-	return cur
+	if len(sorted) == 0 {
+		return ranges
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	out := make([]store.SeqRange, 0, len(ranges))
+	si := 0
+	for _, r := range ranges {
+		for si < len(sorted) && sorted[si] < r.Start {
+			si++
+		}
+		curStart := r.Start
+		for si < len(sorted) && sorted[si] <= r.End {
+			s := sorted[si]
+			if s > curStart {
+				out = append(out, store.SeqRange{Start: curStart, End: s - 1})
+			}
+			curStart = s + 1
+			for si < len(sorted) && sorted[si] == s {
+				si++
+			}
+		}
+		if curStart <= r.End {
+			out = append(out, store.SeqRange{Start: curStart, End: r.End})
+		}
+	}
+	return out
+}
+
+// capSeqRanges enforces len(out) <= maxRanges by conservatively coalescing the
+// (len(ranges) - maxRanges) adjacent pairs separated by the smallest gaps
+// (breaking ties toward older/lower ranges so recent gaps remain granular).
+// Coalescing only expands ranges across intermediate received seqs and never
+// drops an unreceived seq or increases ranges[0].Start.
+func capSeqRanges(ranges []store.SeqRange, maxRanges int) ([]store.SeqRange, bool) {
+	if maxRanges <= 0 || len(ranges) <= maxRanges {
+		return ranges, false
+	}
+	type gapPair struct {
+		idx int
+		gap int64
+	}
+	pairs := make([]gapPair, len(ranges)-1)
+	for i := 0; i < len(ranges)-1; i++ {
+		pairs[i] = gapPair{
+			idx: i,
+			gap: ranges[i+1].Start - ranges[i].End - 1,
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].gap != pairs[j].gap {
+			return pairs[i].gap < pairs[j].gap
+		}
+		return pairs[i].idx < pairs[j].idx
+	})
+	excess := len(ranges) - maxRanges
+	mergeAfter := make([]bool, len(ranges)-1)
+	for i := 0; i < excess; i++ {
+		mergeAfter[pairs[i].idx] = true
+	}
+	out := make([]store.SeqRange, 0, maxRanges)
+	cur := ranges[0]
+	for i := 0; i < len(ranges)-1; i++ {
+		if mergeAfter[i] {
+			cur.End = ranges[i+1].End
+		} else {
+			out = append(out, cur)
+			cur = ranges[i+1]
+		}
+	}
+	out = append(out, cur)
+	return out, true
 }
 
 func pruneRangesAtOrBelow(ranges []store.SeqRange, cutoff int64) []store.SeqRange {

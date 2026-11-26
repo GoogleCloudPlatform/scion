@@ -662,7 +662,12 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	}
 
 	if existing == nil {
-		initContig, initMax, initMissing := advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
+		initContig, initMax, initMissing, coalesced := advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
+		if coalesced {
+			slog.Warn("meter_health: missing_ranges exceeded cap; conservatively coalesced adjacent gaps",
+				"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
+				"cap", maxMeterHealthMissingRanges, "max_seq_seen", initMax)
+		}
 		newID := uuid.New()
 		b := client.MeterHealth.Create().
 			SetID(newID).
@@ -708,10 +713,15 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	if lastReceipt.After(nextReceipt) {
 		nextReceipt = lastReceipt
 	}
-	nextContig, nextMax, nextMissing := advanceIngestSeqState(
+	nextContig, nextMax, nextMissing, coalesced := advanceIngestSeqState(
 		existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
 		mh.MaxSeqSeen, receivedSeqs,
 	)
+	if coalesced {
+		slog.Warn("meter_health: missing_ranges exceeded cap; conservatively coalesced adjacent gaps",
+			"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
+			"cap", maxMeterHealthMissingRanges, "max_seq_seen", nextMax)
+	}
 
 	nextAnomalous := existing.AnomalousCount + anomalousDelta
 	nextDrift := existing.SchemaDriftDetected || mh.SchemaDriftDetected

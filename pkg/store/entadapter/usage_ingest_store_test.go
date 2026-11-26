@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -939,4 +940,140 @@ func TestIsUsageEventRowDataError(t *testing.T) {
 	assert.False(t, isUsageEventRowDataError(&pgconn.PgError{Code: "40P01"})) // deadlock_detected
 	assert.False(t, isUsageEventRowDataError(&pgconn.PgError{Code: "08006"})) // connection_failure
 	assert.False(t, isUsageEventRowDataError(nil))
+}
+
+func TestMeterHealth_MissingRangesBoundedAndLinearUnderAdversarialProducer(t *testing.T) {
+	// Scenario (R1): 250 requests of 500 alternating (even) seqs each = 125,000
+	// received seqs and 125,000 unreceived odd seqs, followed by a large
+	// producer_seq jump. Range count must stay <= maxMeterHealthMissingRanges,
+	// per-request cost must stay bounded, and no unreceived seq may ever be
+	// marked received or skipped by last_contiguous_seq.
+	const (
+		batches  = 250
+		perBatch = 500
+	)
+	var (
+		contig       int64
+		maxSeq       int64
+		missing      []store.SeqRange
+		anyCoalesced bool
+	)
+
+	start := time.Now()
+	for b := 0; b < batches; b++ {
+		seqs := make([]int64, perBatch)
+		for i := 0; i < perBatch; i++ {
+			seqs[i] = int64((b*perBatch + i + 1) * 2) // 2, 4, 6, ... (all odd seqs unreceived)
+		}
+		var coalesced bool
+		contig, maxSeq, missing, coalesced = advanceIngestSeqState(contig, maxSeq, missing, seqs[len(seqs)-1], seqs)
+		if coalesced {
+			anyCoalesced = true
+		}
+		require.LessOrEqual(t, len(missing), maxMeterHealthMissingRanges, "batch %d exceeded missing_ranges cap", b)
+		require.Equal(t, int64(0), contig, "last_contiguous_seq must never advance past unreceived seq 1")
+	}
+	// Large producer_seq jump beyond maxSeq.
+	jumpTarget := maxSeq + 1_000_000
+	contig, maxSeq, missing, _ = advanceIngestSeqState(contig, maxSeq, missing, jumpTarget, nil)
+	elapsed := time.Since(start)
+
+	assert.True(t, anyCoalesced, "adversarial every-other-seq producer must trigger conservative coalescing")
+	assert.LessOrEqual(t, len(missing), maxMeterHealthMissingRanges)
+	assert.Equal(t, int64(0), contig)
+	assert.Equal(t, jumpTarget, maxSeq)
+	assert.Less(t, elapsed, 2*time.Second, "250 adversarial batches must complete quickly with linear merge + cap (took %v)", elapsed)
+
+	// Verify EVERY unreceived odd seq in [1, batches*perBatch*2] and the jumped
+	// tail (batches*perBatch*2, jumpTarget] is covered by missing_ranges.
+	contains := func(seq int64) bool {
+		idx := sort.Search(len(missing), func(i int) bool { return missing[i].End >= seq })
+		return idx < len(missing) && missing[idx].Start <= seq && seq <= missing[idx].End
+	}
+	totalEvenMax := int64(batches * perBatch * 2)
+	for seq := int64(1); seq <= totalEvenMax; seq += 2 {
+		if !contains(seq) {
+			t.Fatalf("unreceived seq %d was not covered by missing_ranges", seq)
+		}
+	}
+	assert.True(t, contains(totalEvenMax+1), "first jumped seq must be covered")
+	assert.True(t, contains(jumpTarget), "last jumped seq must be covered")
+
+	// End-to-end store persistence check through IngestUsageBatch.
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	agentID := uuid.NewString()
+	runID := "run-adv-" + uuid.NewString()
+	t0 := time.Date(2026, 11, 26, 3, 0, 0, 0, time.UTC)
+
+	for b := 0; b < 6; b++ {
+		seqs := make([]int64, 250)
+		for i := 0; i < 250; i++ {
+			seqs[i] = int64((b*250 + i + 1) * 2)
+		}
+		_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: agentID,
+			MeterHealth: &store.UsageMeterHealthUpdate{
+				AgentID:       agentID,
+				RunID:         runID,
+				ProducerEpoch: "ep-adv",
+				LastReceiptAt: t0.Add(time.Duration(b) * time.Second),
+				ProducerSeq:   seqs[len(seqs)-1],
+				ReceivedSeqs:  seqs,
+			},
+		})
+		require.NoError(t, err)
+	}
+
+	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	require.Len(t, mhs, 1)
+	assert.LessOrEqual(t, len(mhs[0].MissingRanges), maxMeterHealthMissingRanges)
+	assert.Equal(t, int64(0), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3000), mhs[0].MaxSeqSeen)
+}
+
+func TestEnsureRunAttributionForAgent_RechecksCurrentRunIDInTx(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "lazy-recheck")
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "lazy-recheck-agent",
+		Name:      "lazy-recheck-agent",
+		ProjectID: projectID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+	_, err := cs.SetAgentRunID(ctx, ag.ID, "run-current", nil)
+	require.NoError(t, err)
+
+	// Stale run_id that no longer matches agents.run_id must be rejected with
+	// store.ErrNotFound and must NOT create a run_attribution row.
+	_, err = cs.EnsureRunAttributionForAgent(ctx, ag.ID, "run-stale", "hub-test")
+	require.ErrorIs(t, err, store.ErrNotFound)
+	_, err = cs.GetRunAttribution(ctx, "run-stale")
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	// Matching current run_id succeeds and creates attribution.
+	attr, err := cs.EnsureRunAttributionForAgent(ctx, ag.ID, "run-current", "hub-test")
+	require.NoError(t, err)
+	assert.Equal(t, "run-current", attr.RunID)
+	assert.Equal(t, projectID, attr.ProjectID)
+
+	// Once the agent moves to a new run, a second call for the already-attributed
+	// run still returns the existing row, while an unattributed old run is rejected.
+	_, err = cs.SetAgentRunID(ctx, ag.ID, "run-next", nil)
+	require.NoError(t, err)
+	existing, err := cs.EnsureRunAttributionForAgent(ctx, ag.ID, "run-current", "hub-test")
+	require.NoError(t, err)
+	assert.Equal(t, "run-current", existing.RunID)
+	_, err = cs.EnsureRunAttributionForAgent(ctx, ag.ID, "run-never-attributed", "hub-test")
+	require.ErrorIs(t, err, store.ErrNotFound)
 }
