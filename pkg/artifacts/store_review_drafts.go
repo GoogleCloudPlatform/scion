@@ -451,3 +451,30 @@ func (s *sqlStore) ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKe
 	}
 	return out, nil
 }
+
+// ListReviewDraftArtifactIDs implements Store.
+func (s *sqlStore) ListReviewDraftArtifactIDs(ctx context.Context, kind, ref string) ([]string, error) {
+	if kind == "" || ref == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT artifact_id
+		FROM artifact_review_draft
+		WHERE principal_kind = ? AND principal_ref = ?
+		ORDER BY artifact_id`), kind, ref)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft artifact ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("artifacts: scan review draft artifact id: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: list review draft artifact ids: %w", err)
+	}
+	return out, nil
+}

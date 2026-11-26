@@ -446,6 +446,12 @@ type Store interface {
 	// when non-nil. It reads only the key columns, never bodies or notes.
 	ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKey, limit int) ([]ReviewDraftKey, error)
 
+	// ListReviewDraftArtifactIDs returns the artifact IDs for which the
+	// principal (kind, ref) holds a saved, unsubmitted review draft. It reads
+	// only artifact_id, never bodies or notes, and is scoped strictly to the
+	// given principal.
+	ListReviewDraftArtifactIDs(ctx context.Context, kind, ref string) ([]string, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)
@@ -851,6 +857,9 @@ type QueryTerms struct {
 	Terms       []QueryTerm
 	Text        string
 	ExcludeText []string
+	// DraftIDs holds the calling principal's saved review draft artifact IDs,
+	// resolved once per request when Terms references `is:draft`.
+	DraftIDs []string
 }
 
 // Position is a place in ListCandidates' order.

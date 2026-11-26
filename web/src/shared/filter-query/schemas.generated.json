@@ -253,7 +253,8 @@
           "review",
           "requested",
           "mine",
-          "shared"
+          "shared",
+          "draft"
         ],
         "exclusive": [
           [

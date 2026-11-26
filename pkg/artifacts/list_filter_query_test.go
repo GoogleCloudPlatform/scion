@@ -19,11 +19,13 @@ package artifacts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -259,11 +261,11 @@ func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
 		title: "mine-review-p1", ownerKind: PrincipalKindUser, ownerRef: "u1",
 		scope: "p1", updated: t0.Add(4 * time.Minute), kind: VersionKindReview,
 	})
-	seedList(t, f.db, f.store, listSeed{
+	minePubID := seedList(t, f.db, f.store, listSeed{
 		title: "mine-pub-p1", ownerKind: PrincipalKindUser, ownerRef: "u1",
 		scope: "p1", updated: t0.Add(3 * time.Minute), kind: VersionKindPublish,
 	})
-	seedList(t, f.db, f.store, listSeed{
+	otherRevID := seedList(t, f.db, f.store, listSeed{
 		title: "other-review-p2", ownerKind: PrincipalKindUser, ownerRef: "u2",
 		scope: "p2", updated: t0.Add(2 * time.Minute), kind: VersionKindReview,
 		grants: []Grant{{SubjectKind: SubjectScope, SubjectRef: "p1", Permission: GrantRead}},
@@ -352,6 +354,31 @@ func TestListCandidates_FilterQuerySQLPushdown(t *testing.T) {
 			name:  "text and excludeText",
 			query: &QueryTerms{Text: "mine", ExcludeText: []string{"null"}},
 			want:  []string{"mine-pub-p1", "mine-review-p1"},
+		},
+		{
+			name:  "is:draft",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"draft"}}}, DraftIDs: []string{minePubID, otherRevID}},
+			want:  []string{"mine-pub-p1", "other-review-p2"},
+		},
+		{
+			name:  "is:draft empty DraftIDs",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"draft"}}}},
+			want:  nil,
+		},
+		{
+			name:  "-is:draft",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"draft"}, Negate: true}}, DraftIDs: []string{minePubID, otherRevID}},
+			want:  []string{"mine-null-ver-p1", "mine-review-p1", "other-pub-p2"},
+		},
+		{
+			name:  "is:draft,review comma OR with empty DraftIDs",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"draft", "review"}}}},
+			want:  []string{"mine-review-p1", "other-review-p2"},
+		},
+		{
+			name:  "is:draft,review comma OR with DraftIDs",
+			query: &QueryTerms{Terms: []QueryTerm{{Field: "is", Values: []string{"draft", "review"}}}, DraftIDs: []string{minePubID}},
+			want:  []string{"mine-pub-p1", "mine-review-p1", "other-review-p2"},
 		},
 	}
 
@@ -455,4 +482,221 @@ func TestFilterQueryToArtifactStoreTerms_MemoisesProjectLookups(t *testing.T) {
 			}
 		}
 	})
+}
+
+type draftCountingStore struct {
+	Store
+	mu          sync.Mutex
+	draftLookup int
+	failDrafts  error
+}
+
+func (c *draftCountingStore) ListReviewDraftArtifactIDs(ctx context.Context, kind, ref string) ([]string, error) {
+	c.mu.Lock()
+	c.draftLookup++
+	fail := c.failDrafts
+	c.mu.Unlock()
+	if fail != nil {
+		return nil, fail
+	}
+	return c.Store.ListReviewDraftArtifactIDs(ctx, kind, ref)
+}
+
+func (c *draftCountingStore) resetDraftCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.draftLookup
+	c.draftLookup = 0
+	return n
+}
+
+func TestListFilterQueryDialect_IsDraft(t *testing.T) {
+	f := newFixture(t, false)
+	cs := &draftCountingStore{Store: f.store}
+	f.svc.SetStore(cs)
+	f.host.slugs = map[string]string{
+		"proj-one": "project-1",
+		"proj-two": "project-2",
+	}
+
+	userV := principal{kind: PrincipalKindUser, ref: "user-2"}
+	adminUser := principal{kind: PrincipalKindUser, ref: "admin-1"}
+	f.host.allow(userV, "project-1", PermissionRead, PermissionCreate)
+	f.host.allow(userV, "project-2", PermissionRead, PermissionCreate)
+	f.host.allow(adminUser, "project-1", PermissionRead, PermissionCreate, PermissionManage)
+	f.host.allow(adminUser, "project-2", PermissionRead, PermissionCreate, PermissionManage)
+
+	// Publish 4 artifacts readable by userU:
+	// aMineRev: owned by userU in project-1, review pending, title "Alpha Report"
+	aMineRev := f.publish(userU, "alpha.md", []byte("1"), "scope=project-1&title="+url.QueryEscape("Alpha Report")).Artifact.ID
+	if _, err := f.db.Exec(`UPDATE artifact_version SET kind = ? WHERE artifact_id = ?`, VersionKindReview, aMineRev); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	// aProj: owned by agentA in project-1, title "Beta Report"
+	aProj := f.publish(agentA, "beta.md", []byte("2"), "title="+url.QueryEscape("Beta Report")).Artifact.ID
+	time.Sleep(2 * time.Millisecond)
+	// aShared: owned by agentX in project-2, granted to userU (AccessShared), title "Gamma Notes"
+	aShared := f.publish(agentX, "gamma.md", []byte("3"), "title="+url.QueryEscape("Gamma Notes")).Artifact.ID
+	f.grantPrincipal(aShared, userU)
+	time.Sleep(2 * time.Millisecond)
+	// aUnreadable: owned by agentX in project-2, NOT readable by userU.
+	aUnreadable := f.publish(agentX, "secret.md", []byte("4"), "title="+url.QueryEscape("Secret Notes")).Artifact.ID
+
+	now := time.Now().UTC()
+	putDraft := func(artifactID string, w principal) {
+		t.Helper()
+		if _, err := f.store.PutReviewDraft(context.Background(), ReviewDraft{
+			ArtifactID:    artifactID,
+			PrincipalKind: w.kind,
+			PrincipalRef:  w.ref,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "private draft by " + w.ref,
+		}, 0, now, MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("PutReviewDraft(%s, %s): %v", artifactID, w.ref, err)
+		}
+	}
+
+	qList := func(w principal, q string) []string {
+		t.Helper()
+		got := listIDs(f.list(&w, listPath+"&q="+url.QueryEscape(q)))
+		slices.Sort(got)
+		return got
+	}
+	want := func(ids ...string) []string {
+		slices.Sort(ids)
+		return ids
+	}
+
+	// 1. Empty drafts: is:draft returns empty, -is:draft returns all readable rows.
+	cs.resetDraftCount()
+	if got := qList(userU, "is:draft"); len(got) != 0 {
+		t.Errorf("empty drafts is:draft = %v, want empty", got)
+	}
+	if n := cs.resetDraftCount(); n != 1 {
+		t.Errorf("empty drafts is:draft lookup count = %d, want 1", n)
+	}
+	if got := qList(userU, "-is:draft"); !slices.Equal(got, want(aMineRev, aProj, aShared)) {
+		t.Errorf("empty drafts -is:draft = %v, want %v", got, want(aMineRev, aProj, aShared))
+	}
+	if n := cs.resetDraftCount(); n != 1 {
+		t.Errorf("empty drafts -is:draft lookup count = %d, want 1", n)
+	}
+
+	// Seed drafts:
+	// - userU has drafts on aProj, aShared, and aUnreadable (stale draft on unreadable artifact)
+	// - userV has a draft on aMineRev (userU must never see/match it)
+	// - adminUser has a draft on aMineRev (userU must never see/match it; admin must not see userU's drafts)
+	putDraft(aProj, userU)
+	putDraft(aShared, userU)
+	putDraft(aUnreadable, userU)
+	putDraft(aMineRev, userV)
+	putDraft(aMineRev, adminUser)
+
+	// 2. Basic matching & negation for userU (aUnreadable is NOT leaked).
+	cs.resetDraftCount()
+	if got := qList(userU, "is:draft"); !slices.Equal(got, want(aProj, aShared)) {
+		t.Errorf("userU is:draft = %v, want %v", got, want(aProj, aShared))
+	}
+	if n := cs.resetDraftCount(); n != 1 {
+		t.Errorf("is:draft lookup count across 4 artifacts = %d, want 1", n)
+	}
+	if got := qList(userU, "-is:draft"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("userU -is:draft = %v, want %v", got, want(aMineRev))
+	}
+	if n := cs.resetDraftCount(); n != 1 {
+		t.Errorf("-is:draft lookup count = %d, want 1", n)
+	}
+
+	// 3. Repeated is:draft in one query still does exactly 1 lookup; queries
+	// without is:draft (including plain text "draft") do 0 lookups.
+	if got := qList(userU, "is:draft is:draft"); !slices.Equal(got, want(aProj, aShared)) {
+		t.Errorf("repeated is:draft = %v, want %v", got, want(aProj, aShared))
+	}
+	if n := cs.resetDraftCount(); n != 1 {
+		t.Errorf("repeated is:draft lookup count = %d, want 1", n)
+	}
+	_ = qList(userU, "is:review")
+	_ = qList(userU, "is:mine")
+	_ = qList(userU, "draft")
+	if n := cs.resetDraftCount(); n != 0 {
+		t.Errorf("non-draft queries lookup count = %d, want 0", n)
+	}
+
+	// 4. Caller scoping: userV and adminUser each see ONLY their own drafts.
+	if got := qList(userV, "is:draft"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("userV is:draft = %v, want %v (must not match userU's drafts)", got, want(aMineRev))
+	}
+	if got := qList(userV, "-is:draft"); !slices.Equal(got, want(aProj, aShared, aUnreadable)) {
+		t.Errorf("userV -is:draft = %v, want %v", got, want(aProj, aShared, aUnreadable))
+	}
+	if got := qList(adminUser, "is:draft"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("admin is:draft = %v, want %v (admin must not match other principals' drafts)", got, want(aMineRev))
+	}
+	if got := qList(adminUser, "-is:draft"); !slices.Equal(got, want(aProj, aShared, aUnreadable)) {
+		t.Errorf("admin -is:draft = %v, want %v", got, want(aProj, aShared, aUnreadable))
+	}
+
+	// 5. Combined terms: other is: flags, project:, text, comma-OR, negation.
+	if got := qList(userU, "is:draft is:shared"); !slices.Equal(got, want(aShared)) {
+		t.Errorf("is:draft is:shared = %v, want %v", got, want(aShared))
+	}
+	if got := qList(userU, "is:draft is:mine"); len(got) != 0 {
+		t.Errorf("is:draft is:mine = %v, want empty", got)
+	}
+	if got := qList(userU, "is:draft,review"); !slices.Equal(got, want(aMineRev, aProj, aShared)) {
+		t.Errorf("is:draft,review = %v, want %v", got, want(aMineRev, aProj, aShared))
+	}
+	if got := qList(userU, "is:draft,shared"); !slices.Equal(got, want(aProj, aShared)) {
+		t.Errorf("is:draft,shared = %v, want %v", got, want(aProj, aShared))
+	}
+	if got := qList(userU, "-is:draft,shared"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("-is:draft,shared = %v, want %v", got, want(aMineRev))
+	}
+	if got := qList(userU, "is:draft project:proj-one"); !slices.Equal(got, want(aProj)) {
+		t.Errorf("is:draft project:proj-one = %v, want %v", got, want(aProj))
+	}
+	if got := qList(userU, "is:draft report"); !slices.Equal(got, want(aProj)) {
+		t.Errorf("is:draft report = %v, want %v", got, want(aProj))
+	}
+	if got := qList(userU, "-is:draft report"); !slices.Equal(got, want(aMineRev)) {
+		t.Errorf("-is:draft report = %v, want %v", got, want(aMineRev))
+	}
+
+	// 6. Pagination & cursor binding with is:draft.
+	page1 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("is:draft"))
+	if len(page1.Artifacts) != 1 || page1.NextCursor == "" {
+		t.Fatalf("is:draft page1 = %+v, want 1 item and nextCursor", page1)
+	}
+	page2 := f.list(&userU, listPath+"&limit=1&q="+url.QueryEscape("IS:DRAFT")+"&cursor="+url.QueryEscape(page1.NextCursor))
+	if len(page2.Artifacts) != 1 || page2.NextCursor != "" {
+		t.Fatalf("is:draft page2 = %+v, want 1 item and empty nextCursor", page2)
+	}
+	paged := want(page1.Artifacts[0].ID, page2.Artifacts[0].ID)
+	if !slices.Equal(paged, want(aProj, aShared)) {
+		t.Errorf("paginated is:draft = %v, want %v", paged, want(aProj, aShared))
+	}
+	// Cursor bound to is:draft must be rejected for -is:draft.
+	badCur := f.do(&userU, http.MethodGet, listPath+"&limit=1&q="+url.QueryEscape("-is:draft")+"&cursor="+url.QueryEscape(page1.NextCursor), nil, nil)
+	if badCur.Code != http.StatusBadRequest {
+		t.Errorf("cursor reuse with -is:draft status = %d, want 400", badCur.Code)
+	}
+
+	// 7. Project-scoped list rejects is:draft with 400 invalid_filter_query.
+	projRec := f.do(&userU, http.MethodGet, listPath+"&scope=project-1&q="+url.QueryEscape("is:draft"), nil, nil)
+	if projRec.Code != http.StatusBadRequest {
+		t.Errorf("project-scoped is:draft status = %d, want 400", projRec.Code)
+	}
+
+	// 8. Store error on draft lookup surfaces as 500 internal (fail closed / surface error).
+	cs.mu.Lock()
+	cs.failDrafts = errors.New("draft lookup unavailable")
+	cs.mu.Unlock()
+	for _, q := range []string{"is:draft", "-is:draft"} {
+		rec := f.do(&userU, http.MethodGet, listPath+"&q="+url.QueryEscape(q), nil, nil)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("draft lookup error for %q: status = %d, want 500", q, rec.Code)
+		}
+	}
 }

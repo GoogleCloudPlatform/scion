@@ -265,6 +265,32 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(valSugs.map((s) => s.label)).toContain('running');
   });
 
+  it('suggests and validates is:draft on artifacts schema and rejects it on artifacts-project', () => {
+    const artifactsSchema = getViewSchema('artifacts') as ViewSchema;
+    const projectArtifactsSchema = getViewSchema('artifacts-project') as ViewSchema;
+
+    const allIs = getSuggestions('is:', 3, artifactsSchema).map((s) => s.label);
+    expect(allIs).toContain('draft');
+    expect(allIs).toContain('review');
+    expect(allIs).toContain('mine');
+    expect(allIs).toContain('shared');
+
+    const draftSugs = getSuggestions('is:dr', 5, artifactsSchema).map((s) => s.label);
+    expect(draftSugs).toEqual(['draft']);
+
+    for (const raw of ['is:draft', '-is:draft', 'is:draft is:mine', 'is:draft,shared']) {
+      const parsed = parse(raw, knownKeysFor(artifactsSchema));
+      expect(parsed.error, raw).toBeUndefined();
+      expect(validate(parsed.query as Query, artifactsSchema, raw).error, raw).toBeUndefined();
+    }
+
+    const projParsed = parse('is:draft', knownKeysFor(projectArtifactsSchema));
+    expect(projParsed.error).toBeUndefined();
+    expect(
+      validate(projParsed.query as Query, projectArtifactsSchema, 'is:draft').error?.code
+    ).toBe('value');
+  });
+
   it('quotes dynamic value suggestions containing commas, quotes, or spaces', () => {
     const sugs = getSuggestions('label:', 6, agentsSchema, () => [
       'team=a,b',

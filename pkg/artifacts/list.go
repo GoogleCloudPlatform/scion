@@ -275,6 +275,15 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
 			return
 		}
+		if queryMentionsDraft(queryTerms) {
+			draftIDs, err := b.store.ListReviewDraftArtifactIDs(ctx, kind, ref)
+			if err != nil {
+				slog.ErrorContext(ctx, "artifacts: list review draft ids failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
+				return
+			}
+			queryTerms.DraftIDs = draftIDs
+		}
 	}
 
 	ownedOnly := p.ownedOnly || queryRequiresOwnedOnly(queryTerms)
@@ -356,6 +365,13 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		return nil, nil, err
 	}
 	grants := newGrantsWindow(ctx, b.store, rows, max(2*(limit+1), grantWindowMin))
+	var draftSet map[string]bool
+	if q.Query != nil && len(q.Query.DraftIDs) > 0 {
+		draftSet = make(map[string]bool, len(q.Query.DraftIDs))
+		for _, id := range q.Query.DraftIDs {
+			draftSet[id] = true
+		}
+	}
 	items := []ArtifactListItem{}
 	var last *Position
 	for i := range rows {
@@ -374,7 +390,7 @@ func (s *Service) collect(ctx context.Context, host Host, b backend, q Candidate
 		}
 		reviewPending := c.CurrentKind == VersionKindReview
 		reviewRequested := q.ReviewRequestsEnabled && c.RequestedByMe
-		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, reviewRequested, access) {
+		if q.Query != nil && q.HomeScope == "" && !matchesQueryIsTerms(q.Query, reviewPending, reviewRequested, access, draftSet[c.ID]) {
 			continue
 		}
 		items = append(items, ArtifactListItem{
@@ -502,11 +518,25 @@ func queryRequiresProjectShared(qt *QueryTerms) bool {
 	return false
 }
 
+func queryMentionsDraft(qt *QueryTerms) bool {
+	if qt == nil {
+		return false
+	}
+	for _, t := range qt.Terms {
+		if t.Field == "is" && slices.Contains(t.Values, "draft") {
+			return true
+		}
+	}
+	return false
+}
+
 // matchesQueryIsTerms evaluates global-list `is:` terms against a row's
-// resolved ReviewPending and Access classification (required for `is:shared`
+// resolved ReviewPending, ReviewRequested, Access classification, and whether
+// the caller has a saved review draft on the row (required for `is:shared`
 // and `-is:shared`, since AccessShared depends on host.Authorize per home
-// project).
-func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested bool, access string) bool {
+// project, and for multi-value terms combining `shared` with `draft`,
+// `requested`, or `review`).
+func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested bool, access string, hasDraft bool) bool {
 	for _, t := range qt.Terms {
 		if t.Field != "is" {
 			continue
@@ -528,6 +558,10 @@ func matchesQueryIsTerms(qt *QueryTerms, reviewPending, reviewRequested bool, ac
 				}
 			case "shared":
 				if access == AccessShared {
+					matched = true
+				}
+			case "draft":
+				if hasDraft {
 					matched = true
 				}
 			}

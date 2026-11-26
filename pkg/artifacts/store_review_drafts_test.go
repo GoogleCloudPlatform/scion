@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -548,6 +549,83 @@ func TestReviewDraftStoreListKeys(t *testing.T) {
 		rem, err := st.ListReviewDraftKeys(ctx, nil, 10)
 		if err != nil || len(rem) != 0 {
 			t.Fatalf("remaining keys after walk-delete = %v, %v", rem, err)
+		}
+	})
+}
+
+func TestReviewDraftStoreListArtifactIDs(t *testing.T) {
+	forEachDraftBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+		a1, _, _, _ := seedArtifact(t, st, "")
+		a2, _, _, _ := seedArtifact(t, st, "")
+		a3, _, _, _ := seedArtifact(t, st, "")
+
+		// Empty before any drafts.
+		got, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindUser, "u1")
+		if err != nil || len(got) != 0 {
+			t.Fatalf("empty ListReviewDraftArtifactIDs = %v, %v", got, err)
+		}
+		// Empty kind/ref returns empty without error.
+		if got, err := st.ListReviewDraftArtifactIDs(ctx, "", "u1"); err != nil || len(got) != 0 {
+			t.Fatalf("empty kind ListReviewDraftArtifactIDs = %v, %v", got, err)
+		}
+
+		// Save drafts for u1 on a1 and a3, u2 on a2 and a3, agent ag1 on a1.
+		for _, tc := range []struct {
+			art       *Artifact
+			kind, ref string
+		}{
+			{a1, PrincipalKindUser, "u1"},
+			{a3, PrincipalKindUser, "u1"},
+			{a2, PrincipalKindUser, "u2"},
+			{a3, PrincipalKindUser, "u2"},
+			{a1, PrincipalKindAgent, "ag1"},
+		} {
+			if _, err := st.PutReviewDraft(ctx, testDraft(tc.art, tc.kind, tc.ref, 1, "doc.md", "draft", ""), 0, now, MaxDraftsPerPrincipal); err != nil {
+				t.Fatalf("PutReviewDraft(%+v): %v", tc, err)
+			}
+		}
+
+		gotU1, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindUser, "u1")
+		if err != nil {
+			t.Fatalf("ListReviewDraftArtifactIDs(u1): %v", err)
+		}
+		wantU1 := []string{a1.ID, a3.ID}
+		slices.Sort(wantU1)
+		if !slices.Equal(gotU1, wantU1) {
+			t.Errorf("u1 draft IDs = %v, want %v", gotU1, wantU1)
+		}
+
+		gotU2, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindUser, "u2")
+		if err != nil {
+			t.Fatalf("ListReviewDraftArtifactIDs(u2): %v", err)
+		}
+		wantU2 := []string{a2.ID, a3.ID}
+		slices.Sort(wantU2)
+		if !slices.Equal(gotU2, wantU2) {
+			t.Errorf("u2 draft IDs = %v, want %v", gotU2, wantU2)
+		}
+
+		gotAg1, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindAgent, "ag1")
+		if err != nil {
+			t.Fatalf("ListReviewDraftArtifactIDs(ag1): %v", err)
+		}
+		if !slices.Equal(gotAg1, []string{a1.ID}) {
+			t.Errorf("ag1 draft IDs = %v, want [%s]", gotAg1, a1.ID)
+		}
+
+		// Deleting u1's draft on a1 removes only a1 for u1.
+		if _, err := st.DeleteReviewDraft(ctx, a1.ID, PrincipalKindUser, "u1", 0); err != nil {
+			t.Fatalf("DeleteReviewDraft: %v", err)
+		}
+		gotU1After, err := st.ListReviewDraftArtifactIDs(ctx, PrincipalKindUser, "u1")
+		if err != nil {
+			t.Fatalf("ListReviewDraftArtifactIDs(u1 after delete): %v", err)
+		}
+		if !slices.Equal(gotU1After, []string{a3.ID}) {
+			t.Errorf("u1 draft IDs after delete = %v, want [%s]", gotU1After, a3.ID)
 		}
 	})
 }

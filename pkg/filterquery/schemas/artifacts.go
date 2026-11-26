@@ -26,7 +26,7 @@ var Artifacts = filterquery.Schema{
 			Help:        "Artifact state or access",
 			Kind:        filterquery.KindFlagSet,
 			Exec:        filterquery.ExecServer,
-			Enum:        []string{"review", "requested", "mine", "shared"},
+			Enum:        []string{"review", "requested", "mine", "shared", "draft"},
 			Exclusive:   [][]string{{"mine", "shared"}},
 			MultiValued: true,
 		},

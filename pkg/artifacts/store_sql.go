@@ -1269,6 +1269,14 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 				}
 				// On global views, AccessShared depends on host.Authorize per home
 				// project; collect() applies the exact -is:shared check after canReadWith.
+			case "draft":
+				if len(q.Query.DraftIDs) > 0 {
+					marks := strings.TrimSuffix(strings.Repeat("?, ", len(q.Query.DraftIDs)), ", ")
+					b.WriteString(" AND a.id NOT IN (" + marks + ")")
+					for _, id := range q.Query.DraftIDs {
+						*args = append(*args, id)
+					}
+				}
 			default:
 				return fmt.Errorf("artifacts: unsupported is filter value %q", v)
 			}
@@ -1308,6 +1316,16 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 				// collect() applies the exact listAccess check after canReadWith.
 				clauses = append(clauses, "NOT (a.owner_kind = ? AND a.owner_ref = ?)")
 				clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef)
+			}
+		case "draft":
+			if len(q.Query.DraftIDs) == 0 {
+				clauses = append(clauses, "1 = 0")
+			} else {
+				marks := strings.TrimSuffix(strings.Repeat("?, ", len(q.Query.DraftIDs)), ", ")
+				clauses = append(clauses, "a.id IN ("+marks+")")
+				for _, id := range q.Query.DraftIDs {
+					clauseArgs = append(clauseArgs, id)
+				}
 			}
 		default:
 			return fmt.Errorf("artifacts: unsupported is filter value %q", v)
