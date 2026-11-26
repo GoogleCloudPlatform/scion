@@ -66,8 +66,11 @@ func TestStart_DurationBackstopGateAndDeadline(t *testing.T) {
 		}
 	})
 
-	t.Run("enabled experiment with unlimited or unset max_duration leaves RunDeadline zero", func(t *testing.T) {
-		for _, maxDur := range []string{"", "0"} {
+	t.Run("enabled experiment with unlimited, unset, or whitespace-padded max_duration leaves RunDeadline zero", func(t *testing.T) {
+		// Whitespace-padded values like " 5m" are parsed strictly by raw
+		// api.ParseDuration (no TrimSpace) to match sciontool and avoid a
+		// deadline mismatch.
+		for _, maxDur := range []string{"", "0", " 5m"} {
 			project, _ := envFixture(t, envSettingsV1)
 			ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
 				Experiments: []string{experiments.AgentPolicyDurationBackstop},
