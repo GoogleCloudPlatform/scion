@@ -19,7 +19,7 @@
  * (`POST /api/v1/admin/users/invite/bulk`, ptone/scion#4952).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import {
@@ -56,6 +56,12 @@ export class ScionInviteBatchResults extends LitElement {
 
   @state()
   private filterMode: 'all' | 'issues' = 'all';
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('response')) {
+      this.filterMode = 'all';
+    }
+  }
 
   static override styles = css`
     :host {
@@ -265,7 +271,9 @@ export class ScionInviteBatchResults extends LitElement {
     const chips = this.buildCountChips(resp);
     const results = resp.results ?? [];
     const issueCount = results.filter(isIssueResult).length;
-    const visibleResults = this.filterMode === 'issues' ? results.filter(isIssueResult) : results;
+    const effectiveFilterMode = issueCount > 0 ? this.filterMode : 'all';
+    const visibleResults =
+      effectiveFilterMode === 'issues' ? results.filter(isIssueResult) : results;
 
     return html`
       <div class="results-container">

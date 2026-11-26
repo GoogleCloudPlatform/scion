@@ -36,6 +36,12 @@ import './project-picker.js';
 import type { ProjectChangeDetail, ProjectOption } from './project-picker.js';
 import './invite-batch-results.js';
 import {
+  BUILT_IN_PROJECT_MEMBERSHIP_ROLES,
+  PROJECT_VIEWER_ROLE_NAME,
+  getRoleTier,
+  type RoleTier,
+} from './role-binding-utils.js';
+import {
   INVITE_BULK_MAX_EMAILS,
   INVITE_BULK_MAX_MEMBERSHIPS,
   INVITE_BULK_MAX_PROJECTS,
@@ -69,11 +75,45 @@ interface ProvisionUserResponse {
   warnings?: string[];
 }
 
+/** Radio value for "no built-in project role" (custom roles only). */
+const NO_BUILT_IN_ROLE = '__none__';
+
+function isBuiltInRole(role: AssignableProjectRole): boolean {
+  return role.roleKind
+    ? role.roleKind === 'builtin'
+    : BUILT_IN_PROJECT_MEMBERSHIP_ROLES.includes(role.name);
+}
+
+function sortBuiltInRoles(roles: readonly AssignableProjectRole[]): AssignableProjectRole[] {
+  const rank: Record<RoleTier, number> = { owner: 0, admin: 1, member: 2 };
+  const order = (name: string): number =>
+    rank[getRoleTier(name)] + (name === PROJECT_VIEWER_ROLE_NAME ? 1 : 0);
+  return [...roles].sort((a, b) => order(a.name) - order(b.name));
+}
+
+function sortCustomRoles(roles: readonly AssignableProjectRole[]): AssignableProjectRole[] {
+  return [...roles].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function rowSelectedRoleIds(row: ProjectMembershipRow): string[] {
+  const ids: string[] = [];
+  if (row.selectedBuiltInId && row.selectedBuiltInId !== NO_BUILT_IN_ROLE) {
+    ids.push(row.selectedBuiltInId);
+  }
+  for (const id of row.selectedCustomIds) {
+    if (id && !ids.includes(id)) {
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
 interface ProjectMembershipRow {
   rowId: number;
   projectId: string;
   projectLabel: string;
-  selectedRoleIds: string[];
+  selectedBuiltInId: string;
+  selectedCustomIds: string[];
   assignableRoles: AssignableProjectRole[];
   loadingRoles: boolean;
   rolesError: string | null;
@@ -228,6 +268,12 @@ export class ScionInviteUsersDialog extends LitElement {
     .roles-list {
       display: flex;
       flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .roles-group {
+      display: flex;
+      flex-direction: column;
       gap: 0.375rem;
     }
 
@@ -237,6 +283,17 @@ export class ScionInviteUsersDialog extends LitElement {
       color: var(--scion-text-secondary);
     }
 
+    .builtin-role-group::part(form-control-label) {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--scion-text-secondary);
+      margin-bottom: 0.25rem;
+    }
+
+    .builtin-role-group sl-radio {
+      margin-bottom: 0.25rem;
+    }
+
     .role-option {
       display: flex;
       flex-direction: column;
@@ -244,9 +301,25 @@ export class ScionInviteUsersDialog extends LitElement {
     }
 
     .role-option-reason {
+      display: block;
       font-size: 0.75rem;
       color: var(--scion-text-muted);
+    }
+
+    .role-option > .role-option-reason {
       padding-left: 1.5rem;
+    }
+
+    .display-name-omitted-hint {
+      margin: -0.5rem 0 0;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
+    }
+
+    .results-view {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
     }
 
     .invite-role-hint {
@@ -324,14 +397,16 @@ export class ScionInviteUsersDialog extends LitElement {
   }
 
   private get projectRowsValid(): boolean {
-    return this.projectRows.every(
-      (row) =>
+    return this.projectRows.every((row) => {
+      const selected = rowSelectedRoleIds(row);
+      return (
         row.projectId.length > 0 &&
         !row.loadingRoles &&
         !row.rolesError &&
-        row.selectedRoleIds.length > 0 &&
-        row.selectedRoleIds.length <= INVITE_BULK_MAX_ROLES_PER_PROJECT
-    );
+        selected.length > 0 &&
+        selected.length <= INVITE_BULK_MAX_ROLES_PER_PROJECT
+      );
+    });
   }
 
   private get canSubmit(): boolean {
@@ -401,7 +476,8 @@ export class ScionInviteUsersDialog extends LitElement {
         rowId,
         projectId: '',
         projectLabel: '',
-        selectedRoleIds: [],
+        selectedBuiltInId: NO_BUILT_IN_ROLE,
+        selectedCustomIds: [],
         assignableRoles: [],
         loadingRoles: false,
         rolesError: null,
@@ -428,7 +504,8 @@ export class ScionInviteUsersDialog extends LitElement {
         ...r,
         projectId: '',
         projectLabel: '',
-        selectedRoleIds: [],
+        selectedBuiltInId: NO_BUILT_IN_ROLE,
+        selectedCustomIds: [],
         assignableRoles: [],
         loadingRoles: false,
         rolesError: null,
@@ -440,7 +517,8 @@ export class ScionInviteUsersDialog extends LitElement {
       ...r,
       projectId,
       projectLabel: displayLabel || projectId,
-      selectedRoleIds: [],
+      selectedBuiltInId: NO_BUILT_IN_ROLE,
+      selectedCustomIds: [],
       assignableRoles: [],
       loadingRoles: true,
       rolesError: null,
@@ -480,14 +558,31 @@ export class ScionInviteUsersDialog extends LitElement {
     }
   }
 
-  private toggleRoleSelection(rowId: number, roleId: string, checked: boolean): void {
+  private setBuiltInRole(rowId: number, roleId: string): void {
+    this.updateProjectRow(rowId, (r) => {
+      if (!roleId || roleId === NO_BUILT_IN_ROLE) {
+        return { ...r, selectedBuiltInId: NO_BUILT_IN_ROLE };
+      }
+      const role = r.assignableRoles.find((item) => item.id === roleId && isBuiltInRole(item));
+      if (!role || !role.grantable) return r;
+      if (
+        r.selectedBuiltInId === NO_BUILT_IN_ROLE &&
+        r.selectedCustomIds.length >= INVITE_BULK_MAX_ROLES_PER_PROJECT
+      ) {
+        return r;
+      }
+      return { ...r, selectedBuiltInId: roleId };
+    });
+  }
+
+  private toggleCustomRoleSelection(rowId: number, roleId: string, checked: boolean): void {
     this.updateProjectRow(rowId, (r) => {
       if (checked) {
-        if (r.selectedRoleIds.includes(roleId)) return r;
-        if (r.selectedRoleIds.length >= INVITE_BULK_MAX_ROLES_PER_PROJECT) return r;
-        return { ...r, selectedRoleIds: [...r.selectedRoleIds, roleId] };
+        if (r.selectedCustomIds.includes(roleId)) return r;
+        if (rowSelectedRoleIds(r).length >= INVITE_BULK_MAX_ROLES_PER_PROJECT) return r;
+        return { ...r, selectedCustomIds: [...r.selectedCustomIds, roleId] };
       }
-      return { ...r, selectedRoleIds: r.selectedRoleIds.filter((id) => id !== roleId) };
+      return { ...r, selectedCustomIds: r.selectedCustomIds.filter((id) => id !== roleId) };
     });
   }
 
@@ -567,7 +662,7 @@ export class ScionInviteUsersDialog extends LitElement {
     if (this.projectRows.length > 0) {
       request.projects = this.projectRows.map((row) => ({
         projectId: row.projectId,
-        roleDefinitionIds: [...row.selectedRoleIds],
+        roleDefinitionIds: rowSelectedRoleIds(row),
       }));
     }
 
@@ -698,8 +793,11 @@ export class ScionInviteUsersDialog extends LitElement {
   }
 
   private renderProjectRow(row: ProjectMembershipRow) {
+    const builtInRoles = sortBuiltInRoles(row.assignableRoles.filter(isBuiltInRole));
+    const customRoles = sortCustomRoles(row.assignableRoles.filter((r) => !isBuiltInRole(r)));
     const grantableRoles = row.assignableRoles.filter((r) => r.grantable);
-    const maxRolesReached = row.selectedRoleIds.length >= INVITE_BULK_MAX_ROLES_PER_PROJECT;
+    const totalSelected = rowSelectedRoleIds(row).length;
+    const maxRolesReached = totalSelected >= INVITE_BULK_MAX_ROLES_PER_PROJECT;
 
     return html`
       <div class="project-row" data-project-row=${row.rowId}>
@@ -742,38 +840,107 @@ export class ScionInviteUsersDialog extends LitElement {
                   </div>`
                 : html`
                     <div class="roles-list">
-                      <span class="roles-label">
-                        Project roles (select 1–${INVITE_BULK_MAX_ROLES_PER_PROJECT}):
-                        ${grantableRoles.length === 0 ? ' None grantable.' : ''}
-                      </span>
-                      ${row.assignableRoles.map((role) => {
-                        const checked = row.selectedRoleIds.includes(role.id);
-                        const disabled =
-                          this.submitting || !role.grantable || (!checked && maxRolesReached);
-                        return html`
-                          <div class="role-option">
-                            <sl-checkbox
-                              size="small"
-                              ?checked=${checked}
-                              ?disabled=${disabled}
-                              data-role-id=${role.id}
+                      ${grantableRoles.length === 0
+                        ? html`<span class="roles-label">No grantable roles available.</span>`
+                        : nothing}
+                      ${builtInRoles.length > 0
+                        ? html`
+                            <sl-radio-group
+                              class="builtin-role-group"
+                              label="Project role"
+                              name="project-role-${row.rowId}"
+                              data-testid="builtin-role-group-${row.rowId}"
+                              .value=${row.selectedBuiltInId}
                               @sl-change=${(e: Event) => {
-                                const target = e.target as HTMLInputElement;
-                                this.toggleRoleSelection(row.rowId, role.id, target.checked);
+                                const target = e.currentTarget as HTMLInputElement;
+                                this.setBuiltInRole(row.rowId, target.value);
                               }}
                             >
-                              ${role.name}
-                            </sl-checkbox>
-                            ${!role.grantable
-                              ? html`
-                                  <span class="role-option-reason">
-                                    ${role.reason || 'Not grantable by your account'}
-                                  </span>
-                                `
-                              : nothing}
-                          </div>
-                        `;
-                      })}
+                              ${builtInRoles.map((role) => {
+                                const disabled =
+                                  this.submitting ||
+                                  !role.grantable ||
+                                  (row.selectedBuiltInId === NO_BUILT_IN_ROLE && maxRolesReached);
+                                return html`
+                                  <sl-radio
+                                    size="small"
+                                    value=${role.id}
+                                    data-role-id=${role.id}
+                                    ?disabled=${disabled}
+                                  >
+                                    ${role.name}
+                                    ${!role.grantable
+                                      ? html`
+                                          <span class="role-option-reason">
+                                            ${role.reason || 'Not grantable by your account'}
+                                          </span>
+                                        `
+                                      : nothing}
+                                  </sl-radio>
+                                `;
+                              })}
+                              ${customRoles.length > 0
+                                ? html`
+                                    <sl-radio
+                                      size="small"
+                                      value=${NO_BUILT_IN_ROLE}
+                                      data-role-id=${NO_BUILT_IN_ROLE}
+                                      ?disabled=${this.submitting}
+                                    >
+                                      None
+                                      <span class="role-option-reason">
+                                        No built-in role; custom roles only
+                                      </span>
+                                    </sl-radio>
+                                  `
+                                : nothing}
+                            </sl-radio-group>
+                          `
+                        : nothing}
+                      ${customRoles.length > 0
+                        ? html`
+                            <div class="roles-group">
+                              <span class="roles-label">
+                                Custom roles (up to ${INVITE_BULK_MAX_ROLES_PER_PROJECT} total
+                                roles):
+                              </span>
+                              ${customRoles.map((role) => {
+                                const checked = row.selectedCustomIds.includes(role.id);
+                                const disabled =
+                                  this.submitting ||
+                                  !role.grantable ||
+                                  (!checked && maxRolesReached);
+                                return html`
+                                  <div class="role-option">
+                                    <sl-checkbox
+                                      size="small"
+                                      ?checked=${checked}
+                                      ?disabled=${disabled}
+                                      data-role-id=${role.id}
+                                      @sl-change=${(e: Event) => {
+                                        const target = e.target as HTMLInputElement;
+                                        this.toggleCustomRoleSelection(
+                                          row.rowId,
+                                          role.id,
+                                          target.checked
+                                        );
+                                      }}
+                                    >
+                                      ${role.name}
+                                    </sl-checkbox>
+                                    ${!role.grantable
+                                      ? html`
+                                          <span class="role-option-reason">
+                                            ${role.reason || 'Not grantable by your account'}
+                                          </span>
+                                        `
+                                      : nothing}
+                                  </div>
+                                `;
+                              })}
+                            </div>
+                          `
+                        : nothing}
                     </div>
                   `
           : nothing}
@@ -865,7 +1032,14 @@ export class ScionInviteUsersDialog extends LitElement {
                       }}
                     ></sl-input>
                   `
-                : nothing}
+                : this.displayName.trim().length > 0
+                  ? html`
+                      <p class="display-name-omitted-hint" data-testid="display-name-omitted-hint">
+                        Display name is only used for a single invite without project memberships
+                        and will not be sent with this batch.
+                      </p>
+                    `
+                  : nothing}
               <sl-input
                 label="Note (optional)"
                 placeholder="e.g., New hire, Q3 contractor"
@@ -919,32 +1093,38 @@ export class ScionInviteUsersDialog extends LitElement {
               </sl-alert>
             `
           : nothing}
-        ${this.submitError
+        ${this.renderSubmitErrorAlert()}
+      </div>
+    `;
+  }
+
+  private renderSubmitErrorAlert() {
+    if (!this.submitError) return nothing;
+    return html`
+      <sl-alert class="submit-error-alert" variant="danger" open>
+        <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
+        <div>${this.submitError}</div>
+        ${this.refusalLines.length > 0
           ? html`
-              <sl-alert class="submit-error-alert" variant="danger" open>
-                <sl-icon slot="icon" name="exclamation-octagon"></sl-icon>
-                <div>${this.submitError}</div>
-                ${this.refusalLines.length > 0
-                  ? html`
-                      <ul class="refusal-list">
-                        ${this.refusalLines.map((line) => html`<li>${line}</li>`)}
-                      </ul>
-                    `
-                  : nothing}
-              </sl-alert>
+              <ul class="refusal-list">
+                ${this.refusalLines.map((line) => html`<li>${line}</li>`)}
+              </ul>
             `
           : nothing}
-      </div>
+      </sl-alert>
     `;
   }
 
   private renderResultsView(resp: InviteBatchResponse) {
     return html`
-      <scion-invite-batch-results
-        .response=${resp}
-        .projectLabels=${this.buildProjectLabels()}
-        .roleLabels=${this.buildRoleLabels()}
-      ></scion-invite-batch-results>
+      <div class="results-view">
+        ${this.renderSubmitErrorAlert()}
+        <scion-invite-batch-results
+          .response=${resp}
+          .projectLabels=${this.buildProjectLabels()}
+          .roleLabels=${this.buildRoleLabels()}
+        ></scion-invite-batch-results>
+      </div>
     `;
   }
 

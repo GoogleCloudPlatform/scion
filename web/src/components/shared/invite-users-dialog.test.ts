@@ -263,6 +263,67 @@ describe('scion-invite-batch-results', () => {
     expect(alert!.textContent).toContain('Batch did not finish completely');
     expect(el.shadowRoot!.textContent).toContain('safe to retry');
   });
+
+  it('resets filterMode to all when response changes after filtering to Issues', async () => {
+    el = await mountResults({
+      batchId: 'batch-1',
+      invited: 1,
+      skipped: 0,
+      total: 2,
+      complete: false,
+      counts: {
+        created: 1,
+        already_invited: 0,
+        already_active: 0,
+        suspended: 0,
+        invalid: 0,
+        duplicate: 0,
+        failed: 1,
+        membership_failed: 0,
+      },
+      results: [
+        { index: 0, email: 'a@example.com', status: 'created' },
+        { index: 1, email: 'b@example.com', status: 'failed', reason: 'not_processed' },
+      ],
+    });
+
+    const root = el.shadowRoot!;
+    const issuesBtn = Array.from(root.querySelectorAll('.filter-buttons sl-button')).find((b) =>
+      b.textContent?.includes('Issues')
+    ) as HTMLElement;
+    expect(issuesBtn).toBeTruthy();
+    issuesBtn.click();
+    await el.updateComplete;
+    expect(root.querySelectorAll('.result-row').length).toBe(1);
+
+    // Swap in a retry response where all issues are cleared
+    el.response = {
+      batchId: 'batch-2',
+      invited: 1,
+      skipped: 1,
+      total: 2,
+      complete: true,
+      counts: {
+        created: 1,
+        already_invited: 1,
+        already_active: 0,
+        suspended: 0,
+        invalid: 0,
+        duplicate: 0,
+        failed: 0,
+        membership_failed: 0,
+      },
+      results: [
+        { index: 0, email: 'a@example.com', status: 'already_invited' },
+        { index: 1, email: 'b@example.com', status: 'created' },
+      ],
+    };
+    await el.updateComplete;
+
+    expect(root.querySelectorAll('.result-row').length).toBe(2);
+    expect(root.textContent).toContain('Showing 2 of 2');
+    expect(root.querySelector('.empty-filter')).toBeNull();
+  });
 });
 
 describe('scion-invite-users-dialog', () => {
@@ -326,16 +387,37 @@ describe('scion-invite-users-dialog', () => {
       dialogEl.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]')
     ).toBeNull();
 
-    // Back to 1 address, then add a project: Display name hidden
+    // Back to 1 address, type a Display name, then add a project: Display name hidden with hint
     setTextarea(dialogEl, 'alice@example.com');
     await dialogEl.updateComplete;
-    expect(
-      dialogEl.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]')
-    ).not.toBeNull();
+    const displayNameInput = dialogEl.shadowRoot!.querySelector(
+      'sl-input[label="Display name (optional)"]'
+    ) as HTMLInputElement;
+    expect(displayNameInput).not.toBeNull();
+    displayNameInput.value = 'Alice Smith';
+    displayNameInput.dispatchEvent(new Event('sl-input'));
+    await dialogEl.updateComplete;
+
     clickButton(dialogEl, 'Add project');
     await dialogEl.updateComplete;
     expect(
       dialogEl.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]')
+    ).toBeNull();
+    const hint = dialogEl.shadowRoot!.querySelector('[data-testid="display-name-omitted-hint"]');
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('will not be sent');
+
+    // Removing the project brings Display name back and hides the hint
+    const removeBtn = dialogEl.shadowRoot!.querySelector(
+      'sl-icon-button[label="Remove project"]'
+    ) as HTMLElement;
+    removeBtn.click();
+    await dialogEl.updateComplete;
+    expect(
+      dialogEl.shadowRoot!.querySelector('sl-input[label="Display name (optional)"]')
+    ).not.toBeNull();
+    expect(
+      dialogEl.shadowRoot!.querySelector('[data-testid="display-name-omitted-hint"]')
     ).toBeNull();
   });
 
@@ -453,19 +535,16 @@ describe('scion-invite-users-dialog', () => {
     await new Promise((r) => setTimeout(r, 20));
     await dialogEl.updateComplete;
 
-    // Non-grantable role is disabled with reason
-    const ownerCheckbox = dialogEl.shadowRoot!.querySelector(
-      'sl-checkbox[data-role-id="role-owner"]'
-    )!;
-    expect(ownerCheckbox.hasAttribute('disabled')).toBe(true);
+    // Non-grantable built-in role is a disabled radio with reason
+    const ownerRadio = dialogEl.shadowRoot!.querySelector('sl-radio[data-role-id="role-owner"]')!;
+    expect(ownerRadio.hasAttribute('disabled')).toBe(true);
     expect(dialogEl.shadowRoot!.textContent).toContain('Only owners may grant Owner');
 
-    // Select grantable role
-    const memberCheckbox = dialogEl.shadowRoot!.querySelector(
-      'sl-checkbox[data-role-id="role-member"]'
-    ) as HTMLInputElement;
-    memberCheckbox.checked = true;
-    memberCheckbox.dispatchEvent(new Event('sl-change'));
+    // Select grantable built-in role via radio group
+    const radioGroup = dialogEl.shadowRoot!.querySelector('sl-radio-group') as HTMLInputElement;
+    expect(radioGroup).not.toBeNull();
+    radioGroup.value = 'role-member';
+    radioGroup.dispatchEvent(new Event('sl-change'));
     await dialogEl.updateComplete;
 
     clickButton(dialogEl, 'Invite 2 Users');
@@ -562,11 +641,9 @@ describe('scion-invite-users-dialog', () => {
     await new Promise((r) => setTimeout(r, 20));
     await dialogEl.updateComplete;
 
-    const cb = dialogEl.shadowRoot!.querySelector(
-      'sl-checkbox[data-role-id="role-admin"]'
-    ) as HTMLInputElement;
-    cb.checked = true;
-    cb.dispatchEvent(new Event('sl-change'));
+    const radioGroup = dialogEl.shadowRoot!.querySelector('sl-radio-group') as HTMLInputElement;
+    radioGroup.value = 'role-admin';
+    radioGroup.dispatchEvent(new Event('sl-change'));
     await dialogEl.updateComplete;
 
     clickButton(dialogEl, 'Invite User');
@@ -753,11 +830,9 @@ describe('scion-invite-users-dialog', () => {
     await new Promise((r) => setTimeout(r, 20));
     await dialogEl.updateComplete;
 
-    const cb = dialogEl.shadowRoot!.querySelector(
-      'sl-checkbox[data-role-id="role-viewer"]'
-    ) as HTMLInputElement;
-    cb.checked = true;
-    cb.dispatchEvent(new Event('sl-change'));
+    const radioGroup = dialogEl.shadowRoot!.querySelector('sl-radio-group') as HTMLInputElement;
+    radioGroup.value = 'role-viewer';
+    radioGroup.dispatchEvent(new Event('sl-change'));
     await dialogEl.updateComplete;
 
     clickButton(dialogEl, 'Import 2');
@@ -796,5 +871,276 @@ describe('scion-invite-users-dialog', () => {
     const dialog = dialogEl.shadowRoot!.querySelector('sl-dialog')!;
     dialog.dispatchEvent(new CustomEvent('sl-request-close', { bubbles: true, composed: true }));
     expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('enforces single-select for built-in roles while allowing multiple custom roles', async () => {
+    const fetchMock = vi.fn((url: string | URL | Request, init?: RequestInit) => {
+      const path = requestUrl(url);
+      if (path.endsWith('/api/v1/projects/proj-1')) {
+        return Promise.resolve(jsonResponse({ id: 'proj-1', name: 'Alpha', slug: 'alpha' }));
+      }
+      if (path.includes('/assignable-roles')) {
+        return Promise.resolve(
+          jsonResponse({
+            items: [
+              {
+                id: 'role-admin',
+                name: 'project-admin',
+                description: '',
+                roleKind: 'builtin',
+                grantable: true,
+                reason: '',
+              },
+              {
+                id: 'role-member',
+                name: 'project-member',
+                description: '',
+                roleKind: 'builtin',
+                grantable: true,
+                reason: '',
+              },
+              {
+                id: 'role-custom-a',
+                name: 'Deployer',
+                description: '',
+                roleKind: 'custom',
+                grantable: true,
+                reason: '',
+              },
+              {
+                id: 'role-custom-b',
+                name: 'Auditor',
+                description: '',
+                roleKind: 'custom',
+                grantable: true,
+                reason: '',
+              },
+            ],
+          })
+        );
+      }
+      if (init?.method === 'POST' && path.includes('/api/v1/admin/users/invite/bulk')) {
+        return Promise.resolve(
+          jsonResponse({
+            batchId: 'b-roles',
+            invited: 1,
+            skipped: 0,
+            total: 1,
+            complete: true,
+            counts: {
+              created: 1,
+              already_invited: 0,
+              already_active: 0,
+              suspended: 0,
+              invalid: 0,
+              duplicate: 0,
+              failed: 0,
+              membership_failed: 0,
+            },
+            results: [{ index: 0, email: 'a@example.com', status: 'created' }],
+          } satisfies InviteBatchResponse)
+        );
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    dialogEl = await mountDialog({ canReadUsers: true });
+    setTextarea(dialogEl, 'a@example.com');
+    clickButton(dialogEl, 'Add project');
+    await dialogEl.updateComplete;
+
+    dialogEl.shadowRoot!.querySelector('scion-project-picker')!.dispatchEvent(
+      new CustomEvent('project-change', {
+        detail: { projectId: 'proj-1', displayLabel: 'Alpha' },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    // Built-in roles are radios inside a single radio group (plus None because custom roles exist)
+    const radioGroup = dialogEl.shadowRoot!.querySelector('sl-radio-group') as HTMLInputElement;
+    expect(radioGroup).not.toBeNull();
+    expect(
+      dialogEl.shadowRoot!.querySelector('sl-radio[data-role-id="role-admin"]')
+    ).not.toBeNull();
+    expect(
+      dialogEl.shadowRoot!.querySelector('sl-radio[data-role-id="role-member"]')
+    ).not.toBeNull();
+    expect(dialogEl.shadowRoot!.querySelector('sl-radio[data-role-id="__none__"]')).not.toBeNull();
+    expect(dialogEl.shadowRoot!.querySelector('sl-checkbox[data-role-id="role-admin"]')).toBeNull();
+    expect(
+      dialogEl.shadowRoot!.querySelector('sl-checkbox[data-role-id="role-member"]')
+    ).toBeNull();
+
+    // Selecting first built-in role then second replaces the first
+    radioGroup.value = 'role-admin';
+    radioGroup.dispatchEvent(new Event('sl-change'));
+    await dialogEl.updateComplete;
+
+    radioGroup.value = 'role-member';
+    radioGroup.dispatchEvent(new Event('sl-change'));
+    await dialogEl.updateComplete;
+
+    // Multiple custom roles can still be checked simultaneously
+    const customA = dialogEl.shadowRoot!.querySelector(
+      'sl-checkbox[data-role-id="role-custom-a"]'
+    ) as HTMLInputElement;
+    const customB = dialogEl.shadowRoot!.querySelector(
+      'sl-checkbox[data-role-id="role-custom-b"]'
+    ) as HTMLInputElement;
+    customA.checked = true;
+    customA.dispatchEvent(new Event('sl-change'));
+    customB.checked = true;
+    customB.dispatchEvent(new Event('sl-change'));
+    await dialogEl.updateComplete;
+
+    clickButton(dialogEl, 'Invite User');
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    const postCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        requestUrl(url).includes('/api/v1/admin/users/invite/bulk') && init?.method === 'POST'
+    );
+    expect(postCall).toBeTruthy();
+    const sentBody = JSON.parse(postCall![1]?.body as string) as {
+      projects: Array<{ projectId: string; roleDefinitionIds: string[] }>;
+    };
+    expect(sentBody.projects).toEqual([
+      {
+        projectId: 'proj-1',
+        roleDefinitionIds: ['role-member', 'role-custom-a', 'role-custom-b'],
+      },
+    ]);
+  });
+
+  it('shows submitError and refusalLines in results view when Retry batch fails and clears on next retry', async () => {
+    let callCount = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        callCount++;
+        if (callCount === 1) {
+          return Promise.resolve(
+            jsonResponse({
+              batchId: 'b-1',
+              invited: 1,
+              skipped: 0,
+              total: 2,
+              complete: false,
+              counts: {
+                created: 1,
+                already_invited: 0,
+                already_active: 0,
+                suspended: 0,
+                invalid: 0,
+                duplicate: 0,
+                failed: 1,
+                membership_failed: 0,
+              },
+              results: [
+                { index: 0, email: 'a@example.com', status: 'created' },
+                { index: 1, email: 'b@example.com', status: 'failed', reason: 'not_processed' },
+              ],
+            } satisfies InviteBatchResponse)
+          );
+        }
+        if (callCount === 2) {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: 'internal',
+                  message: 'boom retry failed',
+                },
+              },
+              500
+            )
+          );
+        }
+        if (callCount === 3) {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: 'forbidden',
+                  message: 'project permissions changed; nothing was created',
+                  details: {
+                    reason: 'batch_projects_not_grantable',
+                    projects: [
+                      {
+                        index: 0,
+                        projectId: 'proj-1',
+                        reason: 'role_not_grantable',
+                        roleDefinitionId: 'role-admin',
+                      },
+                    ],
+                  },
+                },
+              },
+              403
+            )
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            batchId: 'b-4',
+            invited: 1,
+            skipped: 1,
+            total: 2,
+            complete: true,
+            counts: {
+              created: 1,
+              already_invited: 1,
+              already_active: 0,
+              suspended: 0,
+              invalid: 0,
+              duplicate: 0,
+              failed: 0,
+              membership_failed: 0,
+            },
+            results: [
+              { index: 0, email: 'a@example.com', status: 'already_invited' },
+              { index: 1, email: 'b@example.com', status: 'created' },
+            ],
+          } satisfies InviteBatchResponse)
+        );
+      })
+    );
+
+    dialogEl = await mountDialog();
+    setTextarea(dialogEl, 'a@example.com\nb@example.com');
+    await dialogEl.updateComplete;
+    clickButton(dialogEl, 'Invite 2 Users');
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    // First retry fails with 500 -> error banner is visible in results view
+    clickButton(dialogEl, 'Retry batch');
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    const alert500 = dialogEl.shadowRoot!.querySelector('.submit-error-alert');
+    expect(alert500).not.toBeNull();
+    expect(alert500!.textContent).toContain('boom retry failed');
+    expect(dialogEl.shadowRoot!.querySelector('scion-invite-batch-results')).not.toBeNull();
+
+    // Second retry fails with 403 refusal -> error banner updates with refusal lines
+    clickButton(dialogEl, 'Retry batch');
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    const alert403 = dialogEl.shadowRoot!.querySelector('.submit-error-alert');
+    expect(alert403).not.toBeNull();
+    expect(alert403!.textContent).toContain('project permissions changed');
+    expect(alert403!.textContent).toContain('proj-1');
+
+    // Third retry succeeds -> error banner is cleared
+    clickButton(dialogEl, 'Retry batch');
+    await new Promise((r) => setTimeout(r, 20));
+    await dialogEl.updateComplete;
+
+    expect(dialogEl.shadowRoot!.querySelector('.submit-error-alert')).toBeNull();
   });
 });
