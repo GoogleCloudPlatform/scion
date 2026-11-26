@@ -67,7 +67,11 @@ import {
 } from '../../shared/filter-query/index.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import '../shared/filter-box/filter-box.js';
-import { ARTIFACTS_REVIEW_REQUESTS_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
+  ARTIFACTS_REVIEW_REQUESTS_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { formatRelative, formatInstant } from '../../utils/time.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
@@ -241,6 +245,10 @@ export class ScionPageArtifacts extends LitElement {
       if (this.reviewRequestsEnabled && (requestedParam === '1' || requestedParam === 'true')) {
         migrated.push('is:requested');
       }
+      const draftsParam = params.get('drafts');
+      if (this.reviewDraftsEnabled && (draftsParam === '1' || draftsParam === 'true')) {
+        migrated.push('is:draft');
+      }
       if (params.get('owner') === 'me') migrated.push('is:mine');
       if (migrated.length > 0) {
         urlQ = migrated.join(' ');
@@ -267,6 +275,11 @@ export class ScionPageArtifacts extends LitElement {
   /** Artifact review requests gate (experiment hub.artifacts_review_requests). */
   private get reviewRequestsEnabled(): boolean {
     return isFeatureEnabled(ARTIFACTS_REVIEW_REQUESTS_FLAG);
+  }
+
+  /** Artifact review drafts gate (experiment hub.artifacts_review_drafts). */
+  private get reviewDraftsEnabled(): boolean {
+    return isFeatureEnabled(ARTIFACTS_REVIEW_DRAFTS_FLAG);
   }
   /** Stops the running publish check, if any; its result is dropped. */
   private cancelPublishCheck(): void {
@@ -447,6 +460,7 @@ export class ScionPageArtifacts extends LitElement {
     }
     params.delete('review_pending');
     params.delete('requested');
+    params.delete('drafts');
     if (params.get('owner') === 'me') {
       params.delete('owner');
     }
@@ -467,7 +481,7 @@ export class ScionPageArtifacts extends LitElement {
     void this.load();
   };
 
-  private onFlagChipClick(flag: 'review' | 'requested' | 'mine' | 'shared'): void {
+  private onFlagChipClick(flag: 'review' | 'requested' | 'draft' | 'mine' | 'shared'): void {
     const exclusive = flag === 'mine' ? ['shared'] : flag === 'shared' ? ['mine'] : [];
     const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
@@ -576,6 +590,7 @@ export class ScionPageArtifacts extends LitElement {
       'requested',
       ARTIFACTS_FILTER_SCHEMA
     );
+    const draftActive = hasIsFlagInQuery(this.filterQueryText, 'draft', ARTIFACTS_FILTER_SCHEMA);
     const mineActive = hasIsFlagInQuery(this.filterQueryText, 'mine', ARTIFACTS_FILTER_SCHEMA);
     const sharedActive = hasIsFlagInQuery(this.filterQueryText, 'shared', ARTIFACTS_FILTER_SCHEMA);
     return html`
@@ -608,6 +623,16 @@ export class ScionPageArtifacts extends LitElement {
                 @click=${(): void => this.onFlagChipClick('requested')}
               >
                 Requested of me
+              </button>`
+            : nothing}
+          ${this.reviewDraftsEnabled
+            ? html`<button
+                type="button"
+                class="filter-chip ${draftActive ? 'active' : ''}"
+                aria-pressed=${draftActive ? 'true' : 'false'}
+                @click=${(): void => this.onFlagChipClick('draft')}
+              >
+                My drafts
               </button>`
             : nothing}
           <button
@@ -785,7 +810,10 @@ export class ScionPageArtifacts extends LitElement {
           ${a.reviewRequested
             ? html`<sl-badge variant="primary" pill>Review requested</sl-badge>`
             : nothing}
-          ${!a.ownerDeleted && !a.reviewPending && !a.reviewRequested
+          ${a.reviewInDraft
+            ? html`<sl-badge variant="neutral" pill>Review in draft</sl-badge>`
+            : nothing}
+          ${!a.ownerDeleted && !a.reviewPending && !a.reviewRequested && !a.reviewInDraft
             ? html`<span class="muted">—</span>`
             : nothing}
         </td>
