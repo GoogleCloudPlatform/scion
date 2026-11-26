@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 442
+**Operations:** 443
 
 ## Table of Contents
 
@@ -76,8 +76,9 @@
 - [webhookendpoint.list](#webhookendpointlist) — List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
 - [webhookendpoint.read](#webhookendpointread) — Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
 - [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row. When defaultTrigger is supplied, also creates a default message trigger in the same transaction under trigger.create, webhook_endpoint.read, and message-target authoring checks
-- [webhookendpoint.update](#webhookendpointupdate) — Update a webhook endpoint's description, status (active/disabled), or agent binding. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404
+- [webhookendpoint.update](#webhookendpointupdate) — Update a webhook endpoint's description, status (active/disabled), agent binding, auth mode, signature mode, allowProjectAgents, rate limits, body limit, or replay window. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404. Refuses with 409 if the change would drop replay protection while active replay-protected triggers depend on the endpoint
 - [webhookendpoint.rotatesecret](#webhookendpointrotatesecret) — Rotate a webhook endpoint's HMAC signing secret, writing version n+1 before bumping secret_version and keeping version n valid for a 24h grace window. Returns the new secret once. Agent callers may rotate only endpoints they own
+- [webhookendpoint.send](#webhookendpointsend) — Send an authenticated webhook event to a hub_token-mode endpoint on POST /api/v1/hooks/{id}. Handler-internal entry point: the route itself stays exempt for the anonymous HMAC posture via isWebhookIngressRequest, while requests carrying a credential are validated by UnifiedAuthMiddleware and authorized here via webhookEndpointAccessDecision(send)
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
 - [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
@@ -3364,7 +3365,7 @@
 
 **Domain:** webhookendpoint
 
-**Description:** Update a webhook endpoint's description, status (active/disabled), or agent binding. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404
+**Description:** Update a webhook endpoint's description, status (active/disabled), agent binding, auth mode, signature mode, allowProjectAgents, rate limits, body limit, or replay window. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404. Refuses with 409 if the change would drop replay protection while active replay-protected triggers depend on the endpoint
 
 ### Entry Points
 
@@ -3397,6 +3398,7 @@
 
 - `pkg/hub:TestWebhookEndpointUpdateAndDisable`
 - `pkg/hub:TestWebhookEndpointBoundAgentAccess`
+- `pkg/hub:TestWebhookEndpointPatch_ReplayProtectionAndLimits`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
@@ -3439,6 +3441,38 @@
 - `pkg/hub:TestWebhookEndpointSecretRotation_GraceWindowAndMaintenance`
 - `pkg/hub:TestWebhookEndpointBoundAgentAccess`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.send
+
+**Domain:** webhookendpoint
+
+**Description:** Send an authenticated webhook event to a hub_token-mode endpoint on POST /api/v1/hooks/{id}. Handler-internal entry point: the route itself stays exempt for the anonymous HMAC posture via isWebhookIngressRequest, while requests carrying a credential are validated by UnifiedAuthMiddleware and authorized here via webhookEndpointAccessDecision(send)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| internal_dispatch | — | `authorizeWebhookIngressHubToken:hub_token` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.send`
+
+**Resource Resolver:** project-from-endpoint
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestWebhookIngress_HubTokenAuthMatrix`
 
 ---
 

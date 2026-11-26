@@ -115,9 +115,10 @@ func TestWebhookIngress_ExperimentOffReturns404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/hooks/"+ep.ID, nil)
+	getReq.Header.Set("Authorization", "Bearer "+testDevToken)
 	getRec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(getRec, getReq)
-	assert.Equal(t, http.StatusNotFound, getRec.Code, "GET must also 404 (not 405) when hub.triggers is off")
+	assert.Equal(t, http.StatusNotFound, getRec.Code, "authenticated GET must also 404 (not 405) when hub.triggers is off")
 
 	evs, err := f.store.ListTriggerEvents(context.Background(), store.TriggerEventFilter{ProjectID: f.projectID}, store.ListOptions{})
 	require.NoError(t, err)
@@ -130,13 +131,21 @@ func TestWebhookIngress_MethodPathAndMiddlewarePlumbing(t *testing.T) {
 	now := time.Now().Unix()
 	payload := []byte(`{"hello":"world"}`)
 
-	// 1. Non-POST methods return 405 with Allow: POST.
+	// 1. Dual-posture route (§7.1): isWebhookIngressRequest admits POST only.
+	//    - Credential-less non-POST methods are rejected 401 by UnifiedAuthMiddleware.
+	//    - Authenticated non-POST methods reach the handler and return 405 with Allow: POST.
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodPatch} {
-		req := httptest.NewRequest(method, "/api/v1/hooks/"+ep.ID, nil)
-		rec := httptest.NewRecorder()
-		f.srv.Handler().ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "method %s", method)
-		assert.Equal(t, http.MethodPost, rec.Header().Get("Allow"), "method %s", method)
+		anonReq := httptest.NewRequest(method, "/api/v1/hooks/"+ep.ID, nil)
+		anonRec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(anonRec, anonReq)
+		assert.Equal(t, http.StatusUnauthorized, anonRec.Code, "credential-less %s must be 401", method)
+
+		authReq := httptest.NewRequest(method, "/api/v1/hooks/"+ep.ID, nil)
+		authReq.Header.Set("Authorization", "Bearer "+testDevToken)
+		authRec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(authRec, authReq)
+		assert.Equal(t, http.StatusMethodNotAllowed, authRec.Code, "authenticated %s", method)
+		assert.Equal(t, http.MethodPost, authRec.Header().Get("Allow"), "authenticated %s", method)
 	}
 
 	// 2. 36-char lowercase hex non-UUID matches unauth route pattern and is rejected 404 by handler.
@@ -158,18 +167,22 @@ func TestWebhookIngress_MethodPathAndMiddlewarePlumbing(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "subpath %s must require auth", path)
 	}
 
-	// 4. Bearer token sent to /api/v1/hooks/{id} is ignored:
-	//    - Valid dev Bearer token WITHOUT X-Scion-Signature still returns 401 invalid_signature.
-	//    - Garbage Bearer token WITH valid X-Scion-Signature succeeds 202.
+	// 4. Dual-posture credential handling (§7.1) on an hmac endpoint:
+	//    - Valid dev Bearer token WITHOUT X-Scion-Signature still returns 401 invalid_signature (hmac ignores identity).
+	//    - Invalid Bearer token WITH valid X-Scion-Signature returns 401 BEFORE the handler runs (middleware rejects bad credentials).
+	//    - Credential-less POST WITH valid X-Scion-Signature succeeds 202 (Stage 1 unchanged).
 	recBearerNoSig := sendSignedHookHTTP(f.srv, ep.ID, "", now, "", "", "", "application/json", "", map[string]string{
 		"Authorization": "Bearer " + testDevToken,
 	}, payload)
 	assert.Equal(t, http.StatusUnauthorized, recBearerNoSig.Code)
 
-	recGarbageBearerValidSig := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-bearer-ignored", "", "", "application/json", "", map[string]string{
+	recGarbageBearerValidSig := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-bad-bearer", "", "", "application/json", "", map[string]string{
 		"Authorization": "Bearer invalid-garbage-token",
 	}, payload)
-	require.Equal(t, http.StatusAccepted, recGarbageBearerValidSig.Code, recGarbageBearerValidSig.Body.String())
+	assert.Equal(t, http.StatusUnauthorized, recGarbageBearerValidSig.Code, "invalid bearer must be rejected 401 before handler")
+
+	recCredlessValidSig := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-credless-ok", "", "", "application/json", "", nil, payload)
+	require.Equal(t, http.StatusAccepted, recCredlessValidSig.Code, recCredlessValidSig.Body.String())
 
 	// 5. proxyModeWriteGuard passes server-to-server webhook POSTs (no Origin, no Sec-Fetch-Site).
 	f.srv.config.AuthMode = "proxy"

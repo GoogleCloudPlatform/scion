@@ -63,10 +63,12 @@ type FireTracker interface {
 
 // FireTriggerRef identifies the trigger rule that initiated a FireEvent.
 type FireTriggerRef struct {
-	ID          string
-	Name        string
-	SubjectMode string // "new" | "skip" (Stage 2 §5.3, §5.6)
-	FireSubject string // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
+	ID                      string
+	Name                    string
+	SubjectMode             string // "new" | "skip" (Stage 2 §5.3, §5.6)
+	FireSubject             string // dispatcher-derived fire subject (subject_rule output or bounded event subject, Stage 1 §6.3 / Stage 2 §5.6)
+	MaxFiresPerMinute       int    // per-trigger fire rate cap (0 = unlimited, Stage 2 §7.4)
+	MaxConcurrentDispatches int    // per-trigger dispatch_agent concurrency cap (0 = default 5, Stage 2 §7.4)
 }
 
 // FireScheduleRef identifies the schedule and firing event for a schedule.fired
@@ -107,6 +109,11 @@ type FireRequest struct {
 	FireAt     time.Time // nominal fire/receipt time for staleness checks
 	Attempts   int       // 1-based delivery attempt count (>1 enables marker-based retry deduplication)
 	Tracked    FireTracker
+	// BeforeFire, when set by an adapter, runs after action.Authorize succeeds
+	// and before action.Fire executes (for example, per-trigger rate, concurrency,
+	// and project live-agent caps in Stage 2 §7.4). Returning a non-empty
+	// skipReason with err == nil skips the fire without counting an error.
+	BeforeFire func(ctx context.Context) (skipReason string, err error)
 }
 
 // FireStatus is the terminal outcome classification of a fire.

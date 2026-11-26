@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -22,6 +24,61 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
+
+const webhookEndpointChangedSubject = "trigger.webhook_endpoint.changed"
+
+type webhookEndpointChangedEvent struct {
+	EndpointID string `json:"endpointId"`
+}
+
+// invalidateWebhookEndpointCache evicts endpointID from this replica's ingress
+// cache immediately and publishes a content-free invalidation event via s.events
+// so peer replicas (via PostgresEventPublisher LISTEN/NOTIFY) evict their caches
+// without waiting for EndpointCacheTTL (Stage 2 P4a O4).
+func (s *Server) invalidateWebhookEndpointCache(endpointID string) {
+	if s == nil || endpointID == "" {
+		return
+	}
+	if s.webhookIngress != nil {
+		s.webhookIngress.InvalidateEndpoint(endpointID)
+	}
+	if s.events != nil {
+		s.events.PublishRaw(webhookEndpointChangedSubject, webhookEndpointChangedEvent{
+			EndpointID: endpointID,
+		})
+	}
+}
+
+// startWebhookEndpointInvalidationSubscriber listens for cross-replica webhook
+// endpoint config changes on s.events and evicts the local ingress cache.
+// Exits cleanly when ctx is cancelled.
+func (s *Server) startWebhookEndpointInvalidationSubscriber(ctx context.Context) {
+	if s == nil || s.webhookIngress == nil || s.events == nil {
+		return
+	}
+	ch, unsub := s.events.Subscribe(webhookEndpointChangedSubject)
+	if ch == nil {
+		unsub()
+		return
+	}
+	go func() {
+		defer unsub()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
+				var payload webhookEndpointChangedEvent
+				if err := json.Unmarshal(ev.Data, &payload); err == nil && payload.EndpointID != "" {
+					s.webhookIngress.InvalidateEndpoint(payload.EndpointID)
+				}
+			}
+		}
+	}()
+}
 
 // newWebhookIngress constructs the POST /api/v1/hooks/{id} handler over srv's
 // store, durable queue, trusted-proxy configuration, and secret cipher (§8.1).
@@ -36,10 +93,11 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 	}
 	trustedNets := parseTrustedProxies(trustedProxies)
 	return trigger.NewIngress(trigger.IngressConfig{
-		Store:      srv.store,
-		QueueStore: dqs,
-		Queue:      srv.durableQueue,
-		LoadSecret: srv.loadWebhookEndpointSecret,
+		Store:             srv.store,
+		QueueStore:        dqs,
+		Queue:             srv.durableQueue,
+		LoadSecret:        srv.loadWebhookEndpointSecret,
+		AuthorizeHubToken: srv.authorizeWebhookIngressHubToken,
 		ClientIP: func(r *http.Request) string {
 			return trustedClientIP(r, trustedNets)
 		},
@@ -52,6 +110,29 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 		Metrics: serverTriggerMetrics{srv: srv},
 		Logger:  logging.Subsystem("hub.triggers"),
 	})
+}
+
+// authorizeWebhookIngressHubToken authorizes a hub_token webhook delivery on
+// POST /api/v1/hooks/{id} (catalog operation webhookendpoint.send, §7.1).
+func (s *Server) authorizeWebhookIngressHubToken(r *http.Request, ep *store.WebhookEndpoint) trigger.HubTokenAuthResult {
+	if s == nil || r == nil || ep == nil {
+		return trigger.HubTokenAuthResult{}
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return trigger.HubTokenAuthResult{Authenticated: false}
+	}
+	d := s.webhookEndpointAccessDecision(ctx, ep.ProjectID, ActionSend, ep)
+	if !d.allowed {
+		logAuthzDenial(r, identity, webhookEndpointResource(ep.ProjectID), ActionSend, d.reason)
+		return trigger.HubTokenAuthResult{Authenticated: true, Allowed: false}
+	}
+	return trigger.HubTokenAuthResult{
+		Authenticated: true,
+		Allowed:       true,
+		Sender:        principalKindForIdentity(identity) + ":" + identity.ID(),
+	}
 }
 
 // handleWebhookIngress handles unauthenticated POST /api/v1/hooks/{id}

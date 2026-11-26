@@ -40,12 +40,12 @@ type WebhookEndpointService interface {
 	// List returns webhook endpoints matching the filter criteria.
 	List(ctx context.Context, opts *ListWebhookEndpointsOptions) (*ListWebhookEndpointsResponse, error)
 
-	// Update updates a webhook endpoint's description, status, or agent binding.
+	// Update updates a webhook endpoint's mutable settings (description, status,
+	// agent binding, auth/replay/rate/body limits).
 	Update(ctx context.Context, id string, req *UpdateWebhookEndpointRequest) (*WebhookEndpoint, error)
 
 	// RotateSecret rotates a webhook endpoint's signing secret, returning the new secret once.
 	RotateSecret(ctx context.Context, id string) (*WebhookEndpointRotated, error)
-
 	// Delete deletes a webhook endpoint and pauses its active dependent triggers.
 	Delete(ctx context.Context, id string) error
 }
@@ -127,23 +127,40 @@ type WebhookEndpointDefaultTriggerSpec struct {
 	Wake      bool   `json:"wake,omitempty"`
 }
 
+// WebhookEndpointRateLimitSpec configures per-endpoint ingress token-bucket limits.
+type WebhookEndpointRateLimitSpec struct {
+	PerSecond int `json:"perSecond,omitempty"`
+	Burst     int `json:"burst,omitempty"`
+}
+
 // CreateWebhookEndpointRequest is the client-side request for creating a webhook endpoint.
 type CreateWebhookEndpointRequest struct {
-	Name           string                             `json:"name"`
-	Description    string                             `json:"description,omitempty"`
-	SignatureMode  string                             `json:"signatureMode,omitempty"`
-	BoundAgentID   string                             `json:"boundAgentId,omitempty"`
-	BoundLifetime  string                             `json:"boundLifetime,omitempty"`
-	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
-	Trigger        *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
+	Name                string                             `json:"name"`
+	Description         string                             `json:"description,omitempty"`
+	AuthMode            string                             `json:"auth,omitempty"`
+	AllowProjectAgents  bool                               `json:"allowProjectAgents,omitempty"`
+	SignatureMode       string                             `json:"signatureMode,omitempty"`
+	MaxBodyBytes        int                                `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec      `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds int                                `json:"replayWindowSeconds,omitempty"`
+	BoundAgentID        string                             `json:"boundAgentId,omitempty"`
+	BoundLifetime       string                             `json:"boundLifetime,omitempty"`
+	DefaultTrigger      *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
+	Trigger             *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
 }
 
 // UpdateWebhookEndpointRequest is the client-side request for PATCH /webhook-endpoints/{id}.
 type UpdateWebhookEndpointRequest struct {
-	Description   *string `json:"description,omitempty"`
-	Status        *string `json:"status,omitempty"`
-	BoundAgentID  *string `json:"boundAgentId,omitempty"`
-	BoundLifetime *string `json:"boundLifetime,omitempty"`
+	Description         *string                       `json:"description,omitempty"`
+	Status              *string                       `json:"status,omitempty"`
+	BoundAgentID        *string                       `json:"boundAgentId,omitempty"`
+	BoundLifetime       *string                       `json:"boundLifetime,omitempty"`
+	AuthMode            *string                       `json:"auth,omitempty"`
+	AllowProjectAgents  *bool                         `json:"allowProjectAgents,omitempty"`
+	SignatureMode       *string                       `json:"signatureMode,omitempty"`
+	MaxBodyBytes        *int                          `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds *int                          `json:"replayWindowSeconds,omitempty"`
 }
 
 // WebhookEndpointBoundAgent identifies the agent a webhook endpoint is bound to.
@@ -154,24 +171,29 @@ type WebhookEndpointBoundAgent struct {
 
 // WebhookEndpoint represents a webhook endpoint returned by GET and LIST routes.
 type WebhookEndpoint struct {
-	ID              string                     `json:"id"`
-	ProjectID       string                     `json:"projectId"`
-	Name            string                     `json:"name"`
-	Description     string                     `json:"description,omitempty"`
-	URL             string                     `json:"url"`
-	SignatureMode   string                     `json:"signatureMode"`
-	SecretVersion   int                        `json:"secretVersion"`
-	SecretRotatedAt *time.Time                 `json:"secretRotatedAt,omitempty"`
-	ConfigVersion   int                        `json:"configVersion,omitempty"`
-	Status          string                     `json:"status"`
-	BoundAgent      *WebhookEndpointBoundAgent `json:"boundAgent,omitempty"`
-	BoundLifetime   string                     `json:"boundLifetime,omitempty"`
-	LastReceivedAt  *time.Time                 `json:"lastReceivedAt,omitempty"`
-	ReceiveCount    int                        `json:"receiveCount"`
-	RejectCount     int                        `json:"rejectCount"`
-	CreatedBy       string                     `json:"createdBy,omitempty"`
-	CreatedAt       time.Time                  `json:"createdAt"`
-	UpdatedAt       time.Time                  `json:"updatedAt"`
+	ID                  string                        `json:"id"`
+	ProjectID           string                        `json:"projectId"`
+	Name                string                        `json:"name"`
+	Description         string                        `json:"description,omitempty"`
+	URL                 string                        `json:"url"`
+	AuthMode            string                        `json:"auth"`
+	AllowProjectAgents  bool                          `json:"allowProjectAgents,omitempty"`
+	SignatureMode       string                        `json:"signatureMode"`
+	MaxBodyBytes        int                           `json:"maxBodyBytes"`
+	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds int                           `json:"replayWindowSeconds"`
+	SecretVersion       int                           `json:"secretVersion"`
+	SecretRotatedAt     *time.Time                    `json:"secretRotatedAt,omitempty"`
+	ConfigVersion       int                           `json:"configVersion"`
+	Status              string                        `json:"status"`
+	BoundAgent          *WebhookEndpointBoundAgent    `json:"boundAgent,omitempty"`
+	BoundLifetime       string                        `json:"boundLifetime,omitempty"`
+	LastReceivedAt      *time.Time                    `json:"lastReceivedAt,omitempty"`
+	ReceiveCount        int                           `json:"receiveCount"`
+	RejectCount         int                           `json:"rejectCount"`
+	CreatedBy           string                        `json:"createdBy,omitempty"`
+	CreatedAt           time.Time                     `json:"createdAt"`
+	UpdatedAt           time.Time                     `json:"updatedAt"`
 }
 
 // WebhookEndpointCreated is returned once when creating a webhook endpoint.
@@ -186,7 +208,7 @@ type WebhookEndpointCreated struct {
 type WebhookEndpointRotated struct {
 	WebhookEndpoint
 	Secret             string    `json:"secret"`
-	GraceWindowExpires time.Time `json:"graceWindowExpires"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires,omitzero"`
 }
 
 // ListWebhookEndpointsOptions configures webhook endpoint listing.
@@ -325,47 +347,53 @@ type TriggerSubjectPatchSpec struct {
 
 // Trigger represents a trigger definition returned by the Hub API.
 type Trigger struct {
-	ID                    string             `json:"id"`
-	ProjectID             string             `json:"projectId"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	Source                TriggerSourceSpec  `json:"source"`
-	Match                 TriggerMatchSpec   `json:"match"`
-	Action                TriggerActionSpec  `json:"action"`
-	Subject               TriggerSubjectSpec `json:"subject"`
-	Status                string             `json:"status"`
-	StatusReason          string             `json:"statusReason,omitempty"`
-	AuthorizationRevision int                `json:"authorizationRevision"`
-	LastFireAt            *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus        string             `json:"lastFireStatus,omitempty"`
-	LastFireError         string             `json:"lastFireError,omitempty"`
-	FireCount             int                `json:"fireCount"`
-	ErrorCount            int                `json:"errorCount"`
-	CreatedBy             string             `json:"createdBy,omitempty"`
-	CreatedAt             time.Time          `json:"createdAt"`
-	UpdatedAt             time.Time          `json:"updatedAt"`
+	ID                      string             `json:"id"`
+	ProjectID               string             `json:"projectId"`
+	Name                    string             `json:"name"`
+	Description             string             `json:"description,omitempty"`
+	Source                  TriggerSourceSpec  `json:"source"`
+	Match                   TriggerMatchSpec   `json:"match"`
+	Action                  TriggerActionSpec  `json:"action"`
+	Subject                 TriggerSubjectSpec `json:"subject"`
+	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
+	Status                  string             `json:"status"`
+	StatusReason            string             `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                `json:"authorizationRevision"`
+	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
+	LastFireError           string             `json:"lastFireError,omitempty"`
+	FireCount               int                `json:"fireCount"`
+	ErrorCount              int                `json:"errorCount"`
+	CreatedBy               string             `json:"createdBy,omitempty"`
+	CreatedAt               time.Time          `json:"createdAt"`
+	UpdatedAt               time.Time          `json:"updatedAt"`
 }
 
 // CreateTriggerRequest is the client-side request for creating a trigger.
 type CreateTriggerRequest struct {
-	Name        string              `json:"name"`
-	Description string              `json:"description,omitempty"`
-	Source      TriggerSourceSpec   `json:"source"`
-	Match       *TriggerMatchSpec   `json:"match,omitempty"`
-	Action      TriggerActionSpec   `json:"action"`
-	Subject     *TriggerSubjectSpec `json:"subject,omitempty"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   *TriggerMatchSpec   `json:"match,omitempty"`
+	Action                  TriggerActionSpec   `json:"action"`
+	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
 }
 
 // UpdateTriggerRequest is the client-side request for updating a trigger.
 type UpdateTriggerRequest struct {
-	Name             *string                  `json:"name,omitempty"`
-	Description      *string                  `json:"description,omitempty"`
-	Source           *TriggerSourceSpec       `json:"source,omitempty"`
-	Match            *TriggerMatchPatchSpec   `json:"match,omitempty"`
-	Action           *TriggerActionSpec       `json:"action,omitempty"`
-	Subject          *TriggerSubjectPatchSpec `json:"subject,omitempty"`
-	ExpectedRevision *int                     `json:"expectedRevision,omitempty"`
-	IfMatch          string                   `json:"-"`
+	Name                    *string                  `json:"name,omitempty"`
+	Description             *string                  `json:"description,omitempty"`
+	Source                  *TriggerSourceSpec       `json:"source,omitempty"`
+	Match                   *TriggerMatchPatchSpec   `json:"match,omitempty"`
+	Action                  *TriggerActionSpec       `json:"action,omitempty"`
+	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
+	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
+	ExpectedRevision        *int                     `json:"expectedRevision,omitempty"`
+	IfMatch                 string                   `json:"-"`
 }
 
 // ListTriggersOptions configures trigger listing.

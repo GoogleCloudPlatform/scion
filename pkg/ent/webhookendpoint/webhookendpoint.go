@@ -30,6 +30,18 @@ const (
 	FieldOwnerPrincipalID = "owner_principal_id"
 	// FieldOwnerCredentialKind holds the string denoting the owner_credential_kind field in the database.
 	FieldOwnerCredentialKind = "owner_credential_kind"
+	// FieldAuthMode holds the string denoting the auth_mode field in the database.
+	FieldAuthMode = "auth_mode"
+	// FieldAllowProjectAgents holds the string denoting the allow_project_agents field in the database.
+	FieldAllowProjectAgents = "allow_project_agents"
+	// FieldMaxBodyBytes holds the string denoting the max_body_bytes field in the database.
+	FieldMaxBodyBytes = "max_body_bytes"
+	// FieldRatePerSecond holds the string denoting the rate_per_second field in the database.
+	FieldRatePerSecond = "rate_per_second"
+	// FieldRateBurst holds the string denoting the rate_burst field in the database.
+	FieldRateBurst = "rate_burst"
+	// FieldReplayWindowSeconds holds the string denoting the replay_window_seconds field in the database.
+	FieldReplayWindowSeconds = "replay_window_seconds"
 	// FieldSecretVersion holds the string denoting the secret_version field in the database.
 	FieldSecretVersion = "secret_version"
 	// FieldSecretRotatedAt holds the string denoting the secret_rotated_at field in the database.
@@ -71,6 +83,12 @@ var Columns = []string{
 	FieldOwnerPrincipalKind,
 	FieldOwnerPrincipalID,
 	FieldOwnerCredentialKind,
+	FieldAuthMode,
+	FieldAllowProjectAgents,
+	FieldMaxBodyBytes,
+	FieldRatePerSecond,
+	FieldRateBurst,
+	FieldReplayWindowSeconds,
 	FieldSecretVersion,
 	FieldSecretRotatedAt,
 	FieldConfigVersion,
@@ -105,6 +123,18 @@ var (
 	OwnerPrincipalIDValidator func(string) error
 	// OwnerCredentialKindValidator is a validator for the "owner_credential_kind" field. It is called by the builders before save.
 	OwnerCredentialKindValidator func(string) error
+	// DefaultAuthMode holds the default value on creation for the "auth_mode" field.
+	DefaultAuthMode string
+	// DefaultAllowProjectAgents holds the default value on creation for the "allow_project_agents" field.
+	DefaultAllowProjectAgents bool
+	// DefaultMaxBodyBytes holds the default value on creation for the "max_body_bytes" field.
+	DefaultMaxBodyBytes int
+	// DefaultRatePerSecond holds the default value on creation for the "rate_per_second" field.
+	DefaultRatePerSecond int
+	// DefaultRateBurst holds the default value on creation for the "rate_burst" field.
+	DefaultRateBurst int
+	// DefaultReplayWindowSeconds holds the default value on creation for the "replay_window_seconds" field.
+	DefaultReplayWindowSeconds int
 	// DefaultSecretVersion holds the default value on creation for the "secret_version" field.
 	DefaultSecretVersion int
 	// DefaultConfigVersion holds the default value on creation for the "config_version" field.
@@ -175,6 +205,36 @@ func ByOwnerPrincipalID(opts ...sql.OrderTermOption) OrderOption {
 // ByOwnerCredentialKind orders the results by the owner_credential_kind field.
 func ByOwnerCredentialKind(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOwnerCredentialKind, opts...).ToFunc()
+}
+
+// ByAuthMode orders the results by the auth_mode field.
+func ByAuthMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthMode, opts...).ToFunc()
+}
+
+// ByAllowProjectAgents orders the results by the allow_project_agents field.
+func ByAllowProjectAgents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAllowProjectAgents, opts...).ToFunc()
+}
+
+// ByMaxBodyBytes orders the results by the max_body_bytes field.
+func ByMaxBodyBytes(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMaxBodyBytes, opts...).ToFunc()
+}
+
+// ByRatePerSecond orders the results by the rate_per_second field.
+func ByRatePerSecond(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRatePerSecond, opts...).ToFunc()
+}
+
+// ByRateBurst orders the results by the rate_burst field.
+func ByRateBurst(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRateBurst, opts...).ToFunc()
+}
+
+// ByReplayWindowSeconds orders the results by the replay_window_seconds field.
+func ByReplayWindowSeconds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReplayWindowSeconds, opts...).ToFunc()
 }
 
 // BySecretVersion orders the results by the secret_version field.

@@ -34,6 +34,18 @@ type WebhookEndpoint struct {
 	OwnerPrincipalID string `json:"owner_principal_id,omitempty"`
 	// OwnerCredentialKind holds the value of the "owner_credential_kind" field.
 	OwnerCredentialKind string `json:"owner_credential_kind,omitempty"`
+	// AuthMode holds the value of the "auth_mode" field.
+	AuthMode string `json:"auth_mode,omitempty"`
+	// AllowProjectAgents holds the value of the "allow_project_agents" field.
+	AllowProjectAgents bool `json:"allow_project_agents,omitempty"`
+	// MaxBodyBytes holds the value of the "max_body_bytes" field.
+	MaxBodyBytes int `json:"max_body_bytes,omitempty"`
+	// RatePerSecond holds the value of the "rate_per_second" field.
+	RatePerSecond int `json:"rate_per_second,omitempty"`
+	// RateBurst holds the value of the "rate_burst" field.
+	RateBurst int `json:"rate_burst,omitempty"`
+	// ReplayWindowSeconds holds the value of the "replay_window_seconds" field.
+	ReplayWindowSeconds int `json:"replay_window_seconds,omitempty"`
 	// SecretVersion holds the value of the "secret_version" field.
 	SecretVersion int `json:"secret_version,omitempty"`
 	// SecretRotatedAt holds the value of the "secret_rotated_at" field.
@@ -70,9 +82,11 @@ func (*WebhookEndpoint) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case webhookendpoint.FieldFixtureRootID, webhookendpoint.FieldFixtureIssuerID, webhookendpoint.FieldBoundAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case webhookendpoint.FieldSecretVersion, webhookendpoint.FieldConfigVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
+		case webhookendpoint.FieldAllowProjectAgents:
+			values[i] = new(sql.NullBool)
+		case webhookendpoint.FieldMaxBodyBytes, webhookendpoint.FieldRatePerSecond, webhookendpoint.FieldRateBurst, webhookendpoint.FieldReplayWindowSeconds, webhookendpoint.FieldSecretVersion, webhookendpoint.FieldConfigVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
 			values[i] = new(sql.NullInt64)
-		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldBoundLifetime, webhookendpoint.FieldCreatedBy:
+		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldAuthMode, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldBoundLifetime, webhookendpoint.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case webhookendpoint.FieldSecretRotatedAt, webhookendpoint.FieldLastReceivedAt, webhookendpoint.FieldCreated, webhookendpoint.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -148,6 +162,42 @@ func (_m *WebhookEndpoint) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field owner_credential_kind", values[i])
 			} else if value.Valid {
 				_m.OwnerCredentialKind = value.String
+			}
+		case webhookendpoint.FieldAuthMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field auth_mode", values[i])
+			} else if value.Valid {
+				_m.AuthMode = value.String
+			}
+		case webhookendpoint.FieldAllowProjectAgents:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field allow_project_agents", values[i])
+			} else if value.Valid {
+				_m.AllowProjectAgents = value.Bool
+			}
+		case webhookendpoint.FieldMaxBodyBytes:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field max_body_bytes", values[i])
+			} else if value.Valid {
+				_m.MaxBodyBytes = int(value.Int64)
+			}
+		case webhookendpoint.FieldRatePerSecond:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field rate_per_second", values[i])
+			} else if value.Valid {
+				_m.RatePerSecond = int(value.Int64)
+			}
+		case webhookendpoint.FieldRateBurst:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field rate_burst", values[i])
+			} else if value.Valid {
+				_m.RateBurst = int(value.Int64)
+			}
+		case webhookendpoint.FieldReplayWindowSeconds:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field replay_window_seconds", values[i])
+			} else if value.Valid {
+				_m.ReplayWindowSeconds = int(value.Int64)
 			}
 		case webhookendpoint.FieldSecretVersion:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -293,6 +343,24 @@ func (_m *WebhookEndpoint) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("owner_credential_kind=")
 	builder.WriteString(_m.OwnerCredentialKind)
+	builder.WriteString(", ")
+	builder.WriteString("auth_mode=")
+	builder.WriteString(_m.AuthMode)
+	builder.WriteString(", ")
+	builder.WriteString("allow_project_agents=")
+	builder.WriteString(fmt.Sprintf("%v", _m.AllowProjectAgents))
+	builder.WriteString(", ")
+	builder.WriteString("max_body_bytes=")
+	builder.WriteString(fmt.Sprintf("%v", _m.MaxBodyBytes))
+	builder.WriteString(", ")
+	builder.WriteString("rate_per_second=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RatePerSecond))
+	builder.WriteString(", ")
+	builder.WriteString("rate_burst=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RateBurst))
+	builder.WriteString(", ")
+	builder.WriteString("replay_window_seconds=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ReplayWindowSeconds))
 	builder.WriteString(", ")
 	builder.WriteString("secret_version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SecretVersion))

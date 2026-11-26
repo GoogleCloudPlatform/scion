@@ -574,6 +574,18 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					return
 				}
 
+				// Step 3f.5: Generic webhook ingress (Stage 2 §7.1, dual-posture).
+				// A credential-less POST to ^/api/v1/hooks/[0-9a-f-]{36}$ is passed
+				// through WITHOUT an identity so HMAC endpoints behave identically
+				// to Stage 1; requests carrying any credential were already
+				// validated above (invalid -> 401 before the handler) so hub_token
+				// endpoints can authorize via webhookEndpointAccessDecision(send).
+				if isWebhookIngressRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
+				}
+
 				// Step 3g: no credential of any kind reached a port proxy
 				// route on a request that is not a page navigation
 				// (a navigation without a web session is sent to login by
@@ -1097,12 +1109,17 @@ func isUnauthenticatedEndpoint(path string) bool {
 	case "/api/v1/csp-reports": // Browser policy reports for the web pages (no sign-in; browsers send reports on their own)
 		return true
 	}
-	// Generic signed webhook ingress: exact ^/api/v1/hooks/[0-9a-f-]{36}$ match
-	// only (never prefix), so subpaths like /api/v1/hooks/x/y still require auth.
-	if trigger.IsHooksRequestPath(path) {
-		return true
-	}
 	return false
+}
+
+// isWebhookIngressRequest reports whether r is a POST to /api/v1/hooks/{id}
+// matching the exact canonical lowercase UUID shape (§7.1, §8.1 step 1).
+// Checking both Path and EscapedPath rejects percent-encoded traversal or
+// subpath attempts; non-POST methods and subpaths never match and require auth.
+func isWebhookIngressRequest(r *http.Request) bool {
+	return r.Method == http.MethodPost &&
+		trigger.IsHooksRequestPath(r.URL.Path) &&
+		trigger.IsHooksRequestPath(r.URL.EscapedPath())
 }
 
 // isReservedPlatformIdentity reports whether email is the hub's configured

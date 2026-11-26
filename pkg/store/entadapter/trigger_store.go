@@ -120,6 +120,10 @@ func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 	if e.BoundAgentID != nil {
 		boundAgentID = e.BoundAgentID.String()
 	}
+	authMode := e.AuthMode
+	if authMode == "" {
+		authMode = store.WebhookAuthModeHMAC
+	}
 	return &store.WebhookEndpoint{
 		ID:                  e.ID.String(),
 		ProjectID:           e.ProjectID.String(),
@@ -128,6 +132,12 @@ func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 		OwnerPrincipalKind:  e.OwnerPrincipalKind,
 		OwnerPrincipalID:    e.OwnerPrincipalID,
 		OwnerCredentialKind: e.OwnerCredentialKind,
+		AuthMode:            authMode,
+		AllowProjectAgents:  e.AllowProjectAgents,
+		MaxBodyBytes:        e.MaxBodyBytes,
+		RatePerSecond:       e.RatePerSecond,
+		RateBurst:           e.RateBurst,
+		ReplayWindowSeconds: e.ReplayWindowSeconds,
 		SecretVersion:       e.SecretVersion,
 		SecretRotatedAt:     e.SecretRotatedAt,
 		ConfigVersion:       e.ConfigVersion,
@@ -162,8 +172,20 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 	if err != nil {
 		return err
 	}
+	authMode := ep.AuthMode
+	if authMode == "" {
+		authMode = store.WebhookAuthModeHMAC
+	}
+	maxBodyBytes := ep.MaxBodyBytes
+	if maxBodyBytes <= 0 {
+		maxBodyBytes = store.DefaultWebhookMaxBodyBytes
+	}
+	replayWindow := ep.ReplayWindowSeconds
+	if replayWindow <= 0 {
+		replayWindow = store.DefaultWebhookReplayWindowSeconds
+	}
 	secretVersion := ep.SecretVersion
-	if secretVersion <= 0 {
+	if secretVersion <= 0 && authMode != store.WebhookAuthModeHubToken {
 		secretVersion = 1
 	}
 	configVersion := ep.ConfigVersion
@@ -205,6 +227,12 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		SetOwnerPrincipalKind(ep.OwnerPrincipalKind).
 		SetOwnerPrincipalID(ep.OwnerPrincipalID).
 		SetOwnerCredentialKind(ep.OwnerCredentialKind).
+		SetAuthMode(authMode).
+		SetAllowProjectAgents(ep.AllowProjectAgents).
+		SetMaxBodyBytes(maxBodyBytes).
+		SetRatePerSecond(ep.RatePerSecond).
+		SetRateBurst(ep.RateBurst).
+		SetReplayWindowSeconds(replayWindow).
 		SetSecretVersion(secretVersion).
 		SetConfigVersion(configVersion).
 		SetSignatureMode(sigMode).
@@ -418,6 +446,27 @@ func (s *TriggerStore) UpdateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		}
 		u.SetBoundLifetime(ep.BoundLifetime)
 	}
+	if fields.AuthMode {
+		u.SetAuthMode(ep.AuthMode)
+	}
+	if fields.AllowProjectAgents {
+		u.SetAllowProjectAgents(ep.AllowProjectAgents)
+	}
+	if fields.SignatureMode {
+		u.SetSignatureMode(ep.SignatureMode)
+	}
+	if fields.MaxBodyBytes {
+		u.SetMaxBodyBytes(ep.MaxBodyBytes)
+	}
+	if fields.RatePerSecond {
+		u.SetRatePerSecond(ep.RatePerSecond)
+	}
+	if fields.RateBurst {
+		u.SetRateBurst(ep.RateBurst)
+	}
+	if fields.ReplayWindowSeconds {
+		u.SetReplayWindowSeconds(ep.ReplayWindowSeconds)
+	}
 	updated, err := u.Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -435,21 +484,23 @@ func (s *TriggerStore) RotateWebhookEndpointSecret(ctx context.Context, projectI
 	if err != nil {
 		return nil, err
 	}
-	if nextVersion < 2 {
+	if nextVersion < 1 {
 		return nil, store.ErrInvalidInput
 	}
 	ts := rotatedAt.UTC().Truncate(time.Microsecond)
-	n, err := s.client.WebhookEndpoint.Update().
+	u := s.client.WebhookEndpoint.Update().
 		Where(
 			webhookendpoint.IDEQ(uid),
 			webhookendpoint.ProjectIDEQ(pid),
 			webhookendpoint.SecretVersionEQ(nextVersion-1),
 		).
 		SetSecretVersion(nextVersion).
-		SetSecretRotatedAt(ts).
 		AddConfigVersion(1).
-		SetUpdated(ts).
-		Save(ctx)
+		SetUpdated(ts)
+	if nextVersion >= 2 {
+		u = u.SetSecretRotatedAt(ts)
+	}
+	n, err := u.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -462,7 +513,6 @@ func (s *TriggerStore) RotateWebhookEndpointSecret(ctx context.Context, projectI
 	}
 	return entWebhookEndpointToStore(updated), nil
 }
-
 func (s *TriggerStore) FlushWebhookEndpointCounters(ctx context.Context, id string, receiveDelta, rejectDelta int, lastReceivedAt *time.Time) error {
 	uid, err := parseUUID(id)
 	if err != nil {
@@ -956,35 +1006,37 @@ func unmarshalMatchRules(raw string) ([]store.TriggerMatchRule, bool) {
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 	matchRules, matchRulesCorrupt := unmarshalMatchRules(e.MatchRules)
 	tr := &store.Trigger{
-		ID:                    e.ID.String(),
-		ProjectID:             e.ProjectID.String(),
-		Name:                  e.Name,
-		Description:           e.Description,
-		SourceKind:            e.SourceKind,
-		SourceID:              e.SourceID,
-		MatchTypes:            unmarshalMatchTypes(e.MatchTypes),
-		MatchDialect:          e.MatchDialect,
-		MatchRule:             e.MatchRule,
-		MatchRules:            matchRules,
-		MatchForm:             e.MatchForm,
-		MatchRulesCorrupt:     matchRulesCorrupt,
-		ActionType:            e.ActionType,
-		ActionPayload:         e.ActionPayload,
-		SubjectDialect:        e.SubjectDialect,
-		SubjectRule:           e.SubjectRule,
-		SubjectMode:           e.SubjectMode,
-		CoalesceWindowSeconds: e.CoalesceWindowSeconds,
-		Status:                e.Status,
-		StatusReason:          e.StatusReason,
-		LastFireAt:            e.LastFireAt,
-		LastFireStatus:        e.LastFireStatus,
-		LastFireError:         e.LastFireError,
-		FireCount:             e.FireCount,
-		ErrorCount:            e.ErrorCount,
-		CreatedBy:             e.CreatedBy,
-		CreatedAt:             e.Created,
-		UpdatedAt:             e.Updated,
-		Fixture:               fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
+		ID:                      e.ID.String(),
+		ProjectID:               e.ProjectID.String(),
+		Name:                    e.Name,
+		Description:             e.Description,
+		SourceKind:              e.SourceKind,
+		SourceID:                e.SourceID,
+		MatchTypes:              unmarshalMatchTypes(e.MatchTypes),
+		MatchDialect:            e.MatchDialect,
+		MatchRule:               e.MatchRule,
+		MatchRules:              matchRules,
+		MatchForm:               e.MatchForm,
+		MatchRulesCorrupt:       matchRulesCorrupt,
+		ActionType:              e.ActionType,
+		ActionPayload:           e.ActionPayload,
+		SubjectDialect:          e.SubjectDialect,
+		SubjectRule:             e.SubjectRule,
+		SubjectMode:             e.SubjectMode,
+		CoalesceWindowSeconds:   e.CoalesceWindowSeconds,
+		MaxFiresPerMinute:       e.MaxFiresPerMinute,
+		MaxConcurrentDispatches: e.MaxConcurrentDispatches,
+		Status:                  e.Status,
+		StatusReason:            e.StatusReason,
+		LastFireAt:              e.LastFireAt,
+		LastFireStatus:          e.LastFireStatus,
+		LastFireError:           e.LastFireError,
+		FireCount:               e.FireCount,
+		ErrorCount:              e.ErrorCount,
+		CreatedBy:               e.CreatedBy,
+		CreatedAt:               e.Created,
+		UpdatedAt:               e.Updated,
+		Fixture:                 fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
 	}
 	tr.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
@@ -1216,6 +1268,8 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		SetSubjectRule(tr.SubjectRule).
 		SetSubjectMode(subjectMode).
 		SetCoalesceWindowSeconds(tr.CoalesceWindowSeconds).
+		SetMaxFiresPerMinute(tr.MaxFiresPerMinute).
+		SetMaxConcurrentDispatches(tr.MaxConcurrentDispatches).
 		SetStatus(status).
 		SetFireCount(tr.FireCount).
 		SetErrorCount(tr.ErrorCount).
@@ -1496,6 +1550,12 @@ func (s *TriggerStore) UpdateTrigger(
 	}
 	if fields.CoalesceWindowSeconds {
 		update = update.SetCoalesceWindowSeconds(tr.CoalesceWindowSeconds)
+	}
+	if fields.MaxFiresPerMinute {
+		update = update.SetMaxFiresPerMinute(tr.MaxFiresPerMinute)
+	}
+	if fields.MaxConcurrentDispatches {
+		update = update.SetMaxConcurrentDispatches(tr.MaxConcurrentDispatches)
 	}
 	if fields.Status {
 		update = update.SetStatus(tr.Status)
@@ -3189,6 +3249,47 @@ func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID str
 		return 0, mapError(err)
 	}
 	return n, nil
+}
+
+// CountRecentTriggerFires counts non-skipped fires for triggerID created after
+// since. When excludeFireID names the caller's in-flight fire row, it excludes
+// that row AND any other in-flight ("firing") row ordered strictly after the
+// caller's (created, id) pair so concurrent claimants never mutually skip each
+// other (Stage 2 §7.4, P4a O1). Non-firing (completed/refused/failed) rows in
+// the window always count.
+func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error) {
+	tid, err := parseUUID(triggerID)
+	if err != nil {
+		return 0, err
+	}
+	q := s.client.TriggerFire.Query().
+		Where(
+			triggerfire.TriggerIDEQ(tid),
+			triggerfire.CreatedGT(since.UTC()),
+			triggerfire.StatusNEQ(store.TriggerFireStatusSkipped),
+		)
+	if excludeFireID != "" {
+		exID, parseErr := parseUUID(excludeFireID)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		q = q.Where(triggerfire.IDNEQ(exID))
+		callerRow, getErr := s.client.TriggerFire.Get(ctx, exID)
+		if getErr == nil {
+			callerCreated := callerRow.Created.UTC()
+			q = q.Where(triggerfire.Or(
+				triggerfire.StatusNEQ(store.TriggerFireStatusFiring),
+				triggerfire.CreatedLT(callerCreated),
+				triggerfire.And(
+					triggerfire.CreatedEQ(callerCreated),
+					triggerfire.IDLT(exID),
+				),
+			))
+		} else if !ent.IsNotFound(getErr) {
+			return 0, getErr
+		}
+	}
+	return q.Count(ctx)
 }
 
 func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error) {

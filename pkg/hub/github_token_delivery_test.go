@@ -866,9 +866,10 @@ func TestGitHubTokenInstallation_RuntimeSecretPullRefusedAndChildInherits(t *tes
 	})
 }
 
-// TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver covers O1:
-// the no-installation trailer note uses resolveGitHubMintProject (including
-// token-source-project label authorization and minter presence).
+// TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver covers O1
+// and P1c-5b L1: authoring with githubTokenSourceProjectLabel is refused as a
+// reserved label key, and the no-installation trailer note reflects the
+// project's GitHub installation and minter availability.
 func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testing.T) {
 	ctx := t.Context()
 	f := newTriggerDispatchAgentFixture(t, "o1-note-resolver")
@@ -890,6 +891,27 @@ func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testin
 		GitHubInstallationID: &installID,
 	}
 	require.NoError(t, f.sched.store.CreateProject(ctx, sourceProj))
+
+	// Authoring a trigger with the reserved github-token-source-project label
+	// is refused 400 reserved_label_key (P1c-5b L1).
+	refusedRec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "reserved-gh-label",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.reserved"}},
+			Action: TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				AgentName:   "reserved-gh-ag",
+				Task:        "Run ${event.id}",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+				Labels: map[string]string{
+					githubTokenSourceProjectLabel: sourceProj.ID,
+				},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, refusedRec.Code, refusedRec.Body.String())
+	assert.Contains(t, refusedRec.Body.String(), "reserved_label_key")
 
 	disp, ok := f.sched.srv.GetDispatcher().(*HTTPAgentDispatcher)
 	require.True(t, ok)

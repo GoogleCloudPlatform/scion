@@ -34,9 +34,29 @@ const (
 	HeaderSubject   = "X-Scion-Subject"
 )
 
-// ReplayWindow is the maximum clock skew / replay tolerance (±300 s) accepted
-// for the scion_v1 timestamp parameter (§8.1a).
-const ReplayWindow = 300 * time.Second
+// ReplayWindow is the default clock skew / replay tolerance (±300 s) accepted
+// for the scion_v1 timestamp parameter (§8.1a, Stage 2 §7.3).
+const (
+	ReplayWindow    = time.Duration(store.DefaultWebhookReplayWindowSeconds) * time.Second
+	MinReplayWindow = time.Duration(store.MinWebhookReplayWindowSeconds) * time.Second
+	MaxReplayWindow = time.Duration(store.MaxWebhookReplayWindowSeconds) * time.Second
+)
+
+// EffectiveReplayWindow returns the bounded replay tolerance for an endpoint's
+// configured replay_window_seconds (0 -> 300s default, clamped to 30s..900s).
+func EffectiveReplayWindow(seconds int) time.Duration {
+	if seconds <= 0 {
+		return ReplayWindow
+	}
+	w := time.Duration(seconds) * time.Second
+	if w < MinReplayWindow {
+		return MinReplayWindow
+	}
+	if w > MaxReplayWindow {
+		return MaxReplayWindow
+	}
+	return w
+}
 
 // maxSignatureV1Candidates bounds the number of v1= tags examined in a single
 // X-Scion-Signature header during secret rotation (§8.1a).
@@ -81,15 +101,29 @@ func SignScionV1(secret string, ts int64, delivery, event, subject string, body 
 }
 
 // VerifyScionV1Signature verifies an X-Scion-Signature header against secret,
-// now (±300 s window), the optional routing headers, and raw body (§8.1 step 6,
-// §8.1a). Multiple v1= tags are accepted so future secret rotation works
-// seamlessly; any constant-time match passes.
+// now (±300 s default window), the optional routing headers, and raw body
+// (§8.1 step 6, §8.1a). Multiple v1= tags are accepted so future secret
+// rotation works seamlessly; any constant-time match passes.
 func VerifyScionV1Signature(secret string, now time.Time, sigHeader, delivery, event, subject string, body []byte) bool {
+	return VerifyScionV1SignatureWithWindow(secret, now, ReplayWindow, sigHeader, delivery, event, subject, body)
+}
+
+// VerifyScionV1SignatureWithWindow verifies an X-Scion-Signature header using
+// the given replay tolerance window (clamped to MinReplayWindow..MaxReplayWindow;
+// zero uses ReplayWindow = 300s, Stage 2 §7.3).
+func VerifyScionV1SignatureWithWindow(secret string, now time.Time, window time.Duration, sigHeader, delivery, event, subject string, body []byte) bool {
 	if secret == "" || sigHeader == "" {
 		return false
 	}
 	if len(delivery)+len(event)+len(subject) > maxSignedHeaderBytes {
 		return false
+	}
+	if window <= 0 {
+		window = ReplayWindow
+	} else if window < MinReplayWindow {
+		window = MinReplayWindow
+	} else if window > MaxReplayWindow {
+		window = MaxReplayWindow
 	}
 
 	var (
@@ -134,7 +168,7 @@ func VerifyScionV1Signature(secret string, now time.Time, sigHeader, delivery, e
 	if err != nil || strconv.FormatInt(ts, 10) != tsRaw {
 		return false
 	}
-	windowSec := int64(ReplayWindow / time.Second)
+	windowSec := int64(window / time.Second)
 	diff := now.Unix() - ts
 	if diff < -windowSec || diff > windowSec {
 		return false
@@ -162,12 +196,14 @@ func VerifyScionV1Signature(secret string, now time.Time, sigHeader, delivery, e
 // (Stage 2 design §7.3).
 //
 // Replay-protected sources:
+//   - webhook endpoints with auth_mode = hub_token (authenticated live hub
+//     credential over TLS; no captured HMAC signature to replay);
 //   - webhook endpoints in scion_v1 or stripe_v1 signature mode;
 //   - github App sources (Stage 3 §4.4: per-project X-GitHub-Delivery dedup +
 //     signed-body freshness window).
 //
-// Body-only / github_v1 webhook modes do not authenticate timestamps or
-// delivery headers and therefore return false.
+// Body-only / github_v1 webhook modes with hmac auth do not authenticate
+// timestamps or delivery headers and therefore return false.
 func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 	switch sourceKind {
 	case store.TriggerSourceKindGitHub:
@@ -175,6 +211,9 @@ func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 	case store.TriggerSourceKindWebhook:
 		if ep == nil {
 			return false
+		}
+		if ep.AuthMode == store.WebhookAuthModeHubToken {
+			return true
 		}
 		switch ep.SignatureMode {
 		case store.WebhookSignatureModeScionV1, "stripe_v1":
@@ -185,4 +224,58 @@ func SourceReplayProtected(sourceKind string, ep *store.WebhookEndpoint) bool {
 	default:
 		return false
 	}
+}
+
+// Closed-set refusal reasons returned by FireReplaySafe.
+const (
+	FireReplayReasonSourceNotProtected = "source not replay protected"
+	FireReplayReasonMissingDeliveryID  = "missing delivery id"
+)
+
+// WebhookEventVerificationMode derives the ingress verification mode for a
+// webhook event (Stage 2 §7.1, §7.3, §5.8). It prefers a recognized hub-written
+// event.attributes["signature_mode"] recorded at ingress ("scion_v1",
+// "hub_token", "body_only", "github_v1", "stripe_v1") so a subsequent endpoint
+// auth_mode flip cannot rewrite how an already-ingested event was verified,
+// while unrecognized/spoofed attribute values fall back to ep.
+func WebhookEventVerificationMode(attrs map[string]string, ep *store.WebhookEndpoint) string {
+	if attrs != nil {
+		switch recorded := strings.TrimSpace(attrs["signature_mode"]); recorded {
+		case store.WebhookAuthModeHubToken,
+			store.WebhookSignatureModeScionV1,
+			store.WebhookSignatureModeBodyOnly,
+			"github_v1",
+			"stripe_v1":
+			return recorded
+		}
+	}
+	if ep == nil {
+		return ""
+	}
+	if ep.AuthMode == store.WebhookAuthModeHubToken {
+		return store.WebhookAuthModeHubToken
+	}
+	return strings.TrimSpace(ep.SignatureMode)
+}
+
+// FireReplaySafe checks whether a trigger fire event satisfies both source-level
+// replay protection (SourceReplayProtected) and per-delivery deduplication
+// required by agent-creating or command-executing actions (Stage 2 §7.3,
+// P1c-1 security M1).
+//
+// Returns "" when safe to fire, or a closed-set fire refusal reason:
+//   - FireReplayReasonSourceNotProtected when SourceReplayProtected is false
+//   - FireReplayReasonMissingDeliveryID when a webhook delivery not verified
+//     as hub_token at ingress omitted X-Scion-Delivery (leaving it replayable
+//     within replay_window_seconds)
+func FireReplaySafe(sourceKind string, ep *store.WebhookEndpoint, attrs map[string]string) string {
+	if !SourceReplayProtected(sourceKind, ep) {
+		return FireReplayReasonSourceNotProtected
+	}
+	if sourceKind == store.TriggerSourceKindWebhook &&
+		WebhookEventVerificationMode(attrs, ep) != store.WebhookAuthModeHubToken &&
+		strings.TrimSpace(attrs["delivery"]) == "" {
+		return FireReplayReasonMissingDeliveryID
+	}
+	return ""
 }

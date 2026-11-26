@@ -45,3 +45,24 @@ func TestComputeRefillPeriod_ClampsOverflowForTinyRates(t *testing.T) {
 	// After 1 second, k1 is NOT refilled and NOT expired, so k2 cannot evict it.
 	assert.False(t, ks.allow("k2", now.Add(time.Second)))
 }
+
+func TestAllowEndpointWithLimit_LowerAndClamp(t *testing.T) {
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	lim := NewIngressLimiter(LimiterConfig{Now: func() time.Time { return now }})
+
+	// Endpoint with lower burst=2 allows 2, rejects 3rd.
+	assert.True(t, lim.AllowEndpointWithLimit("ep-low", 1, 2))
+	assert.True(t, lim.AllowEndpointWithLimit("ep-low", 1, 2))
+	assert.False(t, lim.AllowEndpointWithLimit("ep-low", 1, 2))
+
+	// Advancing 1s refills 1 token at rate=1/s.
+	now = now.Add(time.Second)
+	assert.True(t, lim.AllowEndpointWithLimit("ep-low", 1, 2))
+	assert.False(t, lim.AllowEndpointWithLimit("ep-low", 1, 2))
+
+	// Attempting to exceed hub constants (rate=999, burst=999) clamps to hub burst (60).
+	for i := 0; i < PerEndpointBurst; i++ {
+		assert.True(t, lim.AllowEndpointWithLimit("ep-clamped", 999, 999), "request %d should pass", i)
+	}
+	assert.False(t, lim.AllowEndpointWithLimit("ep-clamped", 999, 999), "burst above hub constant must be clamped")
+}

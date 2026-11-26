@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -40,6 +41,8 @@ var (
 	errWebhookEndpointBoundLimitExceeded = errors.New("agent bound webhook endpoint limit exceeded")
 	errWebhookEndpointNameExists         = errors.New("webhook endpoint name already exists")
 	errDefaultTriggerNameExists          = errors.New("default trigger name already exists")
+	errReplayProtectedTriggersExist      = errors.New("replay-protected triggers exist on webhook endpoint")
+	errWebhookEndpointMissingSecret      = errors.New("webhook endpoint has no signing secret")
 )
 
 // WebhookEndpointDefaultTriggerSpec configures an optional default message
@@ -56,22 +59,34 @@ type WebhookEndpointDefaultTriggerSpec struct {
 
 // CreateWebhookEndpointRequest is the request body for POST /webhook-endpoints.
 type CreateWebhookEndpointRequest struct {
-	Name           string                             `json:"name"`
-	Description    string                             `json:"description,omitempty"`
-	SignatureMode  string                             `json:"signatureMode,omitempty"`
-	BoundAgentID   string                             `json:"boundAgentId,omitempty"`
-	BoundLifetime  string                             `json:"boundLifetime,omitempty"`
-	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
+	Name                string                             `json:"name"`
+	Description         string                             `json:"description,omitempty"`
+	AuthMode            string                             `json:"auth,omitempty"`
+	AllowProjectAgents  bool                               `json:"allowProjectAgents,omitempty"`
+	SignatureMode       string                             `json:"signatureMode,omitempty"`
+	MaxBodyBytes        int                                `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec      `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds int                                `json:"replayWindowSeconds,omitempty"`
+	BoundAgentID        string                             `json:"boundAgentId,omitempty"`
+	BoundLifetime       string                             `json:"boundLifetime,omitempty"`
+	DefaultTrigger      *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
 	// Trigger is the Stage 2 §4.3 alias for DefaultTrigger.
 	Trigger *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
 }
 
-// UpdateWebhookEndpointRequest is the request body for PATCH /webhook-endpoints/{id}.
+// UpdateWebhookEndpointRequest is the request body for PATCH /webhook-endpoints/{id}
+// (Stage 2 §4.4, §7.1, §7.3, §7.4).
 type UpdateWebhookEndpointRequest struct {
-	Description   *string `json:"description,omitempty"`
-	Status        *string `json:"status,omitempty"`
-	BoundAgentID  *string `json:"boundAgentId,omitempty"`
-	BoundLifetime *string `json:"boundLifetime,omitempty"`
+	Description         *string                       `json:"description,omitempty"`
+	Status              *string                       `json:"status,omitempty"`
+	BoundAgentID        *string                       `json:"boundAgentId,omitempty"`
+	BoundLifetime       *string                       `json:"boundLifetime,omitempty"`
+	AuthMode            *string                       `json:"auth,omitempty"`
+	AllowProjectAgents  *bool                         `json:"allowProjectAgents,omitempty"`
+	SignatureMode       *string                       `json:"signatureMode,omitempty"`
+	MaxBodyBytes        *int                          `json:"maxBodyBytes,omitempty"`
+	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds *int                          `json:"replayWindowSeconds,omitempty"`
 }
 
 // handleWebhookEndpoints routes requests under
@@ -282,6 +297,79 @@ func (s *Server) lookupProjectAgentByRef(ctx context.Context, projectID, ref str
 	return s.store.GetAgentBySlug(ctx, projectID, ref)
 }
 
+func validateWebhookEndpointAuthMode(raw string) (string, error) {
+	mode := strings.TrimSpace(raw)
+	if mode == "" {
+		return store.WebhookAuthModeHMAC, nil
+	}
+	switch mode {
+	case store.WebhookAuthModeHMAC, store.WebhookAuthModeHubToken:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported auth %q (supported: %s, %s)", mode, store.WebhookAuthModeHMAC, store.WebhookAuthModeHubToken)
+	}
+}
+
+func validateWebhookEndpointSignatureMode(raw string) (string, error) {
+	sigMode := strings.TrimSpace(raw)
+	if sigMode == "" {
+		return store.WebhookSignatureModeScionV1, nil
+	}
+	// P4b extends this switch with github_v1 and stripe_v1.
+	switch sigMode {
+	case store.WebhookSignatureModeScionV1:
+		return sigMode, nil
+	default:
+		return "", fmt.Errorf("unsupported signatureMode %q (supported: %s)", sigMode, store.WebhookSignatureModeScionV1)
+	}
+}
+
+func validateWebhookEndpointMaxBodyBytes(v int) (int, error) {
+	if v == 0 {
+		return store.DefaultWebhookMaxBodyBytes, nil
+	}
+	if v < 0 || v > trigger.MaxEndpointBodyBytes {
+		return 0, fmt.Errorf("maxBodyBytes must be between 1 and %d", trigger.MaxEndpointBodyBytes)
+	}
+	return v, nil
+}
+
+func validateWebhookEndpointRateLimit(rl *WebhookEndpointRateLimitSpec) (int, int, error) {
+	if rl == nil {
+		return 0, 0, nil
+	}
+	maxRate := int(trigger.PerEndpointRatePerSecond)
+	if rl.PerSecond < 0 || rl.PerSecond > maxRate {
+		return 0, 0, fmt.Errorf("rateLimit.perSecond must be between 0 and %d", maxRate)
+	}
+	if rl.Burst < 0 || rl.Burst > trigger.PerEndpointBurst {
+		return 0, 0, fmt.Errorf("rateLimit.burst must be between 0 and %d", trigger.PerEndpointBurst)
+	}
+	return rl.PerSecond, rl.Burst, nil
+}
+
+func validateWebhookEndpointReplayWindow(seconds int) (int, error) {
+	if seconds == 0 {
+		return store.DefaultWebhookReplayWindowSeconds, nil
+	}
+	if seconds < store.MinWebhookReplayWindowSeconds || seconds > store.MaxWebhookReplayWindowSeconds {
+		return 0, fmt.Errorf("replayWindowSeconds must be between %d and %d",
+			store.MinWebhookReplayWindowSeconds, store.MaxWebhookReplayWindowSeconds)
+	}
+	return seconds, nil
+}
+
+func validateWebhookEndpointStatus(raw string) (string, error) {
+	st := strings.TrimSpace(raw)
+	switch st {
+	case store.WebhookEndpointStatusActive, store.WebhookEndpointStatusDisabled:
+		return st, nil
+	default:
+		return "", fmt.Errorf("unsupported status %q (supported: %s, %s)",
+			st, store.WebhookEndpointStatusActive, store.WebhookEndpointStatusDisabled)
+	}
+}
+
 func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -325,11 +413,29 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ValidationError(w, err.Error(), nil)
 		return
 	}
-	sigMode := strings.TrimSpace(req.SignatureMode)
-	if sigMode == "" {
-		sigMode = store.WebhookSignatureModeScionV1
-	} else if sigMode != store.WebhookSignatureModeScionV1 {
-		ValidationError(w, fmt.Sprintf("unsupported signatureMode %q (supported: %s)", sigMode, store.WebhookSignatureModeScionV1), nil)
+	authMode, err := validateWebhookEndpointAuthMode(req.AuthMode)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	sigMode, err := validateWebhookEndpointSignatureMode(req.SignatureMode)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	maxBodyBytes, err := validateWebhookEndpointMaxBodyBytes(req.MaxBodyBytes)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	ratePerSec, rateBurst, err := validateWebhookEndpointRateLimit(req.RateLimit)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	replayWindow, err := validateWebhookEndpointReplayWindow(req.ReplayWindowSeconds)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
 		return
 	}
 
@@ -353,6 +459,11 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ownerKind = store.DelegationPrincipalAgent
 	}
 
+	secretVersion := 1
+	if authMode == store.WebhookAuthModeHubToken {
+		secretVersion = 0
+	}
+
 	ep := store.WebhookEndpoint{
 		ID:                  api.NewUUID(),
 		ProjectID:           projectID,
@@ -361,9 +472,15 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		OwnerPrincipalKind:  ownerKind,
 		OwnerPrincipalID:    identity.ID(),
 		OwnerCredentialKind: attr.InitiatorCredentialKind,
-		SignatureMode:       sigMode,
-		SecretVersion:       1,
+		AuthMode:            authMode,
+		AllowProjectAgents:  req.AllowProjectAgents,
+		MaxBodyBytes:        maxBodyBytes,
+		RatePerSecond:       ratePerSec,
+		RateBurst:           rateBurst,
+		ReplayWindowSeconds: replayWindow,
 		ConfigVersion:       1,
+		SignatureMode:       sigMode,
+		SecretVersion:       secretVersion,
 		Status:              store.WebhookEndpointStatusActive,
 		BoundAgentID:        boundAgentID,
 		BoundLifetime:       boundLifetime,
@@ -438,25 +555,37 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 	}
 
-	rawSecret, err := generateWebhookEndpointSecret()
-	if err != nil {
-		InternalError(w)
-		return
-	}
-
-	secretRow, err := s.newWebhookEndpointSecretRow(projectID, ep.ID, 1, rawSecret, identity.ID())
-	if err != nil {
-		InternalError(w)
-		return
+	var (
+		rawSecret string
+		secretRow *store.Secret
+	)
+	if authMode != store.WebhookAuthModeHubToken {
+		var err error
+		rawSecret, err = generateWebhookEndpointSecret()
+		if err != nil {
+			InternalError(w)
+			return
+		}
+		secretRow, err = s.newWebhookEndpointSecretRow(projectID, ep.ID, 1, rawSecret, identity.ID())
+		if err != nil {
+			InternalError(w)
+			return
+		}
 	}
 
 	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointCreate, ep.ID)
 	afterSummary := map[string]any{
-		"project_id":     projectID,
-		"endpoint_id":    ep.ID,
-		"name":           ep.Name,
-		"signature_mode": ep.SignatureMode,
-		"secret_version": ep.SecretVersion,
+		"project_id":            projectID,
+		"endpoint_id":           ep.ID,
+		"name":                  ep.Name,
+		"auth_mode":             ep.AuthMode,
+		"allow_project_agents":  ep.AllowProjectAgents,
+		"signature_mode":        ep.SignatureMode,
+		"max_body_bytes":        ep.MaxBodyBytes,
+		"rate_per_second":       ep.RatePerSecond,
+		"rate_burst":            ep.RateBurst,
+		"replay_window_seconds": ep.ReplayWindowSeconds,
+		"secret_version":        ep.SecretVersion,
 	}
 	if ep.BoundAgentID != "" {
 		afterSummary["bound_agent_id"] = ep.BoundAgentID
@@ -510,8 +639,10 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			}
 			return cErr
 		}
-		if sErr := tx.CreateSecret(ctx, secretRow); sErr != nil {
-			return sErr
+		if secretRow != nil {
+			if sErr := tx.CreateSecret(ctx, secretRow); sErr != nil {
+				return sErr
+			}
 		}
 		if defaultTr != nil {
 			srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
@@ -688,13 +819,64 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		mask.Description = true
 	}
 	if req.Status != nil {
-		status := strings.TrimSpace(*req.Status)
-		if status != store.WebhookEndpointStatusActive && status != store.WebhookEndpointStatusDisabled {
-			ValidationError(w, fmt.Sprintf("invalid status %q (supported: active, disabled)", status), nil)
+		status, err := validateWebhookEndpointStatus(*req.Status)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
 			return
 		}
 		updated.Status = status
 		mask.Status = true
+	}
+	if req.AuthMode != nil {
+		mode, err := validateWebhookEndpointAuthMode(*req.AuthMode)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.AuthMode = mode
+		mask.AuthMode = true
+	}
+	if req.AllowProjectAgents != nil {
+		updated.AllowProjectAgents = *req.AllowProjectAgents
+		mask.AllowProjectAgents = true
+	}
+	if req.SignatureMode != nil {
+		sigMode, err := validateWebhookEndpointSignatureMode(*req.SignatureMode)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.SignatureMode = sigMode
+		mask.SignatureMode = true
+	}
+	if req.MaxBodyBytes != nil {
+		maxBody, err := validateWebhookEndpointMaxBodyBytes(*req.MaxBodyBytes)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.MaxBodyBytes = maxBody
+		mask.MaxBodyBytes = true
+	}
+	if req.RateLimit != nil {
+		ratePerSec, rateBurst, err := validateWebhookEndpointRateLimit(req.RateLimit)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.RatePerSecond = ratePerSec
+		updated.RateBurst = rateBurst
+		mask.RatePerSecond = true
+		mask.RateBurst = true
+	}
+	if req.ReplayWindowSeconds != nil {
+		win, err := validateWebhookEndpointReplayWindow(*req.ReplayWindowSeconds)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.ReplayWindowSeconds = win
+		mask.ReplayWindowSeconds = true
 	}
 	if req.BoundAgentID != nil || req.BoundLifetime != nil {
 		targetAgent := ep.BoundAgentID
@@ -717,7 +899,10 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		mask.Binding = true
 	}
 
-	if !mask.Description && !mask.Status && !mask.Binding {
+	if !mask.Description && !mask.Status && !mask.Binding &&
+		!mask.AuthMode && !mask.AllowProjectAgents && !mask.SignatureMode &&
+		!mask.MaxBodyBytes && !mask.RatePerSecond && !mask.RateBurst &&
+		!mask.ReplayWindowSeconds {
 		writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, *ep))
 		return
 	}
@@ -742,8 +927,8 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			return lErr
 		}
 		// Re-read under LockTriggerQuota so bindingChanged, the R1 delete check,
-		// the per-agent cap, and the audit snapshot see the authoritative state
-		// rather than a stale pre-transaction snapshot (O-A).
+		// the per-agent cap, replay-protection checks, and the audit snapshot see
+		// the authoritative state rather than a stale pre-transaction snapshot (O-A).
 		current, gErr := tx.GetWebhookEndpoint(ctx, ep.ID)
 		if gErr != nil {
 			return gErr
@@ -758,6 +943,30 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 		if mask.Status {
 			next.Status = updated.Status
+		}
+		if mask.AuthMode {
+			if updated.AuthMode == store.WebhookAuthModeHMAC && current.SecretVersion <= 0 {
+				return errWebhookEndpointMissingSecret
+			}
+			next.AuthMode = updated.AuthMode
+		}
+		if mask.AllowProjectAgents {
+			next.AllowProjectAgents = updated.AllowProjectAgents
+		}
+		if mask.SignatureMode {
+			next.SignatureMode = updated.SignatureMode
+		}
+		if mask.MaxBodyBytes {
+			next.MaxBodyBytes = updated.MaxBodyBytes
+		}
+		if mask.RatePerSecond {
+			next.RatePerSecond = updated.RatePerSecond
+		}
+		if mask.RateBurst {
+			next.RateBurst = updated.RateBurst
+		}
+		if mask.ReplayWindowSeconds {
+			next.ReplayWindowSeconds = updated.ReplayWindowSeconds
 		}
 		if mask.Binding {
 			effectiveAgent := current.BoundAgentID
@@ -795,12 +1004,38 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			next.BoundLifetime = effectiveLifetime
 		}
 
+		// Stage 2 §7.3: refuse any PATCH that would leave the endpoint without
+		// replay protection while active agent-creating / command-executing
+		// triggers depend on it.
+		if !trigger.SourceReplayProtected(store.TriggerSourceKindWebhook, &next) {
+			activeProtected, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
+				ProjectID:   projectID,
+				SourceKind:  store.TriggerSourceKindWebhook,
+				SourceID:    ep.ID,
+				Status:      store.TriggerStatusActive,
+				ActionTypes: []string{store.TriggerActionDispatchAgent, store.TriggerActionExec},
+			})
+			if cErr != nil {
+				return cErr
+			}
+			if activeProtected > 0 {
+				return errReplayProtectedTriggersExist
+			}
+		}
+
 		beforeBytes, _ := json.Marshal(map[string]any{
-			"endpoint_id":    current.ID,
-			"project_id":     projectID,
-			"status":         current.Status,
-			"bound_agent_id": current.BoundAgentID,
-			"bound_lifetime": current.BoundLifetime,
+			"endpoint_id":           current.ID,
+			"project_id":            projectID,
+			"status":                current.Status,
+			"bound_agent_id":        current.BoundAgentID,
+			"bound_lifetime":        current.BoundLifetime,
+			"auth_mode":             current.AuthMode,
+			"signature_mode":        current.SignatureMode,
+			"allow_project_agents":  current.AllowProjectAgents,
+			"max_body_bytes":        current.MaxBodyBytes,
+			"rate_per_second":       current.RatePerSecond,
+			"rate_burst":            current.RateBurst,
+			"replay_window_seconds": current.ReplayWindowSeconds,
 		})
 		audit.BeforeSummary = string(beforeBytes)
 
@@ -809,12 +1044,19 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 		updated = next
 		afterBytes, _ := json.Marshal(map[string]any{
-			"endpoint_id":    updated.ID,
-			"project_id":     projectID,
-			"status":         updated.Status,
-			"bound_agent_id": updated.BoundAgentID,
-			"bound_lifetime": updated.BoundLifetime,
-			"config_version": updated.ConfigVersion,
+			"endpoint_id":           updated.ID,
+			"project_id":            projectID,
+			"status":                updated.Status,
+			"bound_agent_id":        updated.BoundAgentID,
+			"bound_lifetime":        updated.BoundLifetime,
+			"auth_mode":             updated.AuthMode,
+			"signature_mode":        updated.SignatureMode,
+			"allow_project_agents":  updated.AllowProjectAgents,
+			"max_body_bytes":        updated.MaxBodyBytes,
+			"rate_per_second":       updated.RatePerSecond,
+			"rate_burst":            updated.RateBurst,
+			"replay_window_seconds": updated.ReplayWindowSeconds,
+			"config_version":        updated.ConfigVersion,
 		})
 		audit.AfterSummary = string(afterBytes)
 		return tx.CreateMutationAudit(ctx, audit)
@@ -836,15 +1078,18 @@ func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)
+		case errors.Is(err, errWebhookEndpointMissingSecret):
+			ValidationError(w, "cannot switch hub_token endpoint to hmac auth without a signing secret", nil)
+		case errors.Is(err, errReplayProtectedTriggersExist):
+			writeError(w, http.StatusConflict, "replay_protected_triggers_exist",
+				"cannot remove replay protection while active dispatch_agent or exec triggers depend on this webhook endpoint", nil)
 		default:
 			writeErrorFromErr(w, err, "")
 		}
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, updated))
 }
 
@@ -920,15 +1165,16 @@ func (s *Server) rotateWebhookEndpointSecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 
-	writeJSON(w, http.StatusOK, WebhookEndpointRotatedResponse{
+	resp := WebhookEndpointRotatedResponse{
 		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ctx, *rotated),
 		Secret:                  rawSecret,
-		GraceWindowExpires:      rotatedAt.Add(store.WebhookSecretRotationGraceWindow),
-	})
+	}
+	if rotated.SecretVersion >= 2 {
+		resp.GraceWindowExpires = rotatedAt.Add(store.WebhookSecretRotationGraceWindow)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {
@@ -972,8 +1218,6 @@ func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
-	if s.webhookIngress != nil {
-		s.webhookIngress.InvalidateEndpoint(ep.ID)
-	}
+	s.invalidateWebhookEndpointCache(ep.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

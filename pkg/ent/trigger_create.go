@@ -418,6 +418,34 @@ func (_c *TriggerCreate) SetNillableCoalesceWindowSeconds(v *int) *TriggerCreate
 	return _c
 }
 
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (_c *TriggerCreate) SetMaxFiresPerMinute(v int) *TriggerCreate {
+	_c.mutation.SetMaxFiresPerMinute(v)
+	return _c
+}
+
+// SetNillableMaxFiresPerMinute sets the "max_fires_per_minute" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableMaxFiresPerMinute(v *int) *TriggerCreate {
+	if v != nil {
+		_c.SetMaxFiresPerMinute(*v)
+	}
+	return _c
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (_c *TriggerCreate) SetMaxConcurrentDispatches(v int) *TriggerCreate {
+	_c.mutation.SetMaxConcurrentDispatches(v)
+	return _c
+}
+
+// SetNillableMaxConcurrentDispatches sets the "max_concurrent_dispatches" field if the given value is not nil.
+func (_c *TriggerCreate) SetNillableMaxConcurrentDispatches(v *int) *TriggerCreate {
+	if v != nil {
+		_c.SetMaxConcurrentDispatches(*v)
+	}
+	return _c
+}
+
 // SetStatus sets the "status" field.
 func (_c *TriggerCreate) SetStatus(v string) *TriggerCreate {
 	_c.mutation.SetStatus(v)
@@ -659,6 +687,14 @@ func (_c *TriggerCreate) defaults() {
 		v := trigger.DefaultCoalesceWindowSeconds
 		_c.mutation.SetCoalesceWindowSeconds(v)
 	}
+	if _, ok := _c.mutation.MaxFiresPerMinute(); !ok {
+		v := trigger.DefaultMaxFiresPerMinute
+		_c.mutation.SetMaxFiresPerMinute(v)
+	}
+	if _, ok := _c.mutation.MaxConcurrentDispatches(); !ok {
+		v := trigger.DefaultMaxConcurrentDispatches
+		_c.mutation.SetMaxConcurrentDispatches(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := trigger.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -760,6 +796,12 @@ func (_c *TriggerCreate) check() error {
 	}
 	if _, ok := _c.mutation.CoalesceWindowSeconds(); !ok {
 		return &ValidationError{Name: "coalesce_window_seconds", err: errors.New(`ent: missing required field "Trigger.coalesce_window_seconds"`)}
+	}
+	if _, ok := _c.mutation.MaxFiresPerMinute(); !ok {
+		return &ValidationError{Name: "max_fires_per_minute", err: errors.New(`ent: missing required field "Trigger.max_fires_per_minute"`)}
+	}
+	if _, ok := _c.mutation.MaxConcurrentDispatches(); !ok {
+		return &ValidationError{Name: "max_concurrent_dispatches", err: errors.New(`ent: missing required field "Trigger.max_concurrent_dispatches"`)}
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "Trigger.status"`)}
@@ -935,6 +977,14 @@ func (_c *TriggerCreate) createSpec() (*Trigger, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.CoalesceWindowSeconds(); ok {
 		_spec.SetField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
 		_node.CoalesceWindowSeconds = value
+	}
+	if value, ok := _c.mutation.MaxFiresPerMinute(); ok {
+		_spec.SetField(trigger.FieldMaxFiresPerMinute, field.TypeInt, value)
+		_node.MaxFiresPerMinute = value
+	}
+	if value, ok := _c.mutation.MaxConcurrentDispatches(); ok {
+		_spec.SetField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+		_node.MaxConcurrentDispatches = value
 	}
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1463,6 +1513,42 @@ func (u *TriggerUpsert) UpdateCoalesceWindowSeconds() *TriggerUpsert {
 // AddCoalesceWindowSeconds adds v to the "coalesce_window_seconds" field.
 func (u *TriggerUpsert) AddCoalesceWindowSeconds(v int) *TriggerUpsert {
 	u.Add(trigger.FieldCoalesceWindowSeconds, v)
+	return u
+}
+
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (u *TriggerUpsert) SetMaxFiresPerMinute(v int) *TriggerUpsert {
+	u.Set(trigger.FieldMaxFiresPerMinute, v)
+	return u
+}
+
+// UpdateMaxFiresPerMinute sets the "max_fires_per_minute" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateMaxFiresPerMinute() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldMaxFiresPerMinute)
+	return u
+}
+
+// AddMaxFiresPerMinute adds v to the "max_fires_per_minute" field.
+func (u *TriggerUpsert) AddMaxFiresPerMinute(v int) *TriggerUpsert {
+	u.Add(trigger.FieldMaxFiresPerMinute, v)
+	return u
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (u *TriggerUpsert) SetMaxConcurrentDispatches(v int) *TriggerUpsert {
+	u.Set(trigger.FieldMaxConcurrentDispatches, v)
+	return u
+}
+
+// UpdateMaxConcurrentDispatches sets the "max_concurrent_dispatches" field to the value that was provided on create.
+func (u *TriggerUpsert) UpdateMaxConcurrentDispatches() *TriggerUpsert {
+	u.SetExcluded(trigger.FieldMaxConcurrentDispatches)
+	return u
+}
+
+// AddMaxConcurrentDispatches adds v to the "max_concurrent_dispatches" field.
+func (u *TriggerUpsert) AddMaxConcurrentDispatches(v int) *TriggerUpsert {
+	u.Add(trigger.FieldMaxConcurrentDispatches, v)
 	return u
 }
 
@@ -2181,6 +2267,48 @@ func (u *TriggerUpsertOne) AddCoalesceWindowSeconds(v int) *TriggerUpsertOne {
 func (u *TriggerUpsertOne) UpdateCoalesceWindowSeconds() *TriggerUpsertOne {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateCoalesceWindowSeconds()
+	})
+}
+
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (u *TriggerUpsertOne) SetMaxFiresPerMinute(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMaxFiresPerMinute(v)
+	})
+}
+
+// AddMaxFiresPerMinute adds v to the "max_fires_per_minute" field.
+func (u *TriggerUpsertOne) AddMaxFiresPerMinute(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddMaxFiresPerMinute(v)
+	})
+}
+
+// UpdateMaxFiresPerMinute sets the "max_fires_per_minute" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateMaxFiresPerMinute() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMaxFiresPerMinute()
+	})
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (u *TriggerUpsertOne) SetMaxConcurrentDispatches(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMaxConcurrentDispatches(v)
+	})
+}
+
+// AddMaxConcurrentDispatches adds v to the "max_concurrent_dispatches" field.
+func (u *TriggerUpsertOne) AddMaxConcurrentDispatches(v int) *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddMaxConcurrentDispatches(v)
+	})
+}
+
+// UpdateMaxConcurrentDispatches sets the "max_concurrent_dispatches" field to the value that was provided on create.
+func (u *TriggerUpsertOne) UpdateMaxConcurrentDispatches() *TriggerUpsertOne {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMaxConcurrentDispatches()
 	})
 }
 
@@ -3091,6 +3219,48 @@ func (u *TriggerUpsertBulk) AddCoalesceWindowSeconds(v int) *TriggerUpsertBulk {
 func (u *TriggerUpsertBulk) UpdateCoalesceWindowSeconds() *TriggerUpsertBulk {
 	return u.Update(func(s *TriggerUpsert) {
 		s.UpdateCoalesceWindowSeconds()
+	})
+}
+
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (u *TriggerUpsertBulk) SetMaxFiresPerMinute(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMaxFiresPerMinute(v)
+	})
+}
+
+// AddMaxFiresPerMinute adds v to the "max_fires_per_minute" field.
+func (u *TriggerUpsertBulk) AddMaxFiresPerMinute(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddMaxFiresPerMinute(v)
+	})
+}
+
+// UpdateMaxFiresPerMinute sets the "max_fires_per_minute" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateMaxFiresPerMinute() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMaxFiresPerMinute()
+	})
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (u *TriggerUpsertBulk) SetMaxConcurrentDispatches(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.SetMaxConcurrentDispatches(v)
+	})
+}
+
+// AddMaxConcurrentDispatches adds v to the "max_concurrent_dispatches" field.
+func (u *TriggerUpsertBulk) AddMaxConcurrentDispatches(v int) *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.AddMaxConcurrentDispatches(v)
+	})
+}
+
+// UpdateMaxConcurrentDispatches sets the "max_concurrent_dispatches" field to the value that was provided on create.
+func (u *TriggerUpsertBulk) UpdateMaxConcurrentDispatches() *TriggerUpsertBulk {
+	return u.Update(func(s *TriggerUpsert) {
+		s.UpdateMaxConcurrentDispatches()
 	})
 }
 

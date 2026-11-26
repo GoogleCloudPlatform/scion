@@ -24,7 +24,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Cache and counter-flush defaults (§4.1 F8, §8.1 step 3 F4/F14).
+// Cache and counter-flush defaults (§4.1 F8, §8.1 step 3 F4/F14, Stage 2 P4a O4).
+// Cross-replica invalidations are delivered immediately via the hub EventPublisher
+// ("trigger.webhook_endpoint.changed"); EndpointCacheTTL bounds staleness if a
+// replica misses a pubsub notification during a brief reconnect.
 const (
 	EndpointCacheTTL        = 5 * time.Minute
 	NegativeCacheTTL        = 60 * time.Second

@@ -179,7 +179,7 @@ var fixtureCreateSites = []fixtureCreateSite{
 		"exec schedule API create; stampSchedule from the request principal"},
 	{"pkg/store/entadapter/scheduled_exec_run_store.go", "return tx.CreateSchedule(ctx, sc)", false,
 		"CreateScheduleChecked: store quota-checked wrapper delegating to tx.CreateSchedule; every non-test caller is classified in fixtureCreateSites and stamps sc"},
-	{"pkg/hub/handlers_triggers.go", "tx.CreateTrigger(ctx, &trigger)", true,
+	{"pkg/hub/handlers_triggers.go", "tx.CreateTrigger(ctx, &tr)", true,
 		"trigger API create; stampTrigger from the request principal, in the create transaction"},
 	{"pkg/hub/handlers_webhook_endpoints.go", "tx.CreateWebhookEndpoint(ctx, &ep)", true,
 		"webhook endpoint API create; stampWebhookEndpoint from the request principal, in the create transaction"},

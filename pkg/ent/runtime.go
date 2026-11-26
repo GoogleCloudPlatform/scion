@@ -3794,24 +3794,32 @@ func init() {
 	triggerDescCoalesceWindowSeconds := triggerFields[16].Descriptor()
 	// trigger.DefaultCoalesceWindowSeconds holds the default value on creation for the coalesce_window_seconds field.
 	trigger.DefaultCoalesceWindowSeconds = triggerDescCoalesceWindowSeconds.Default.(int)
+	// triggerDescMaxFiresPerMinute is the schema descriptor for max_fires_per_minute field.
+	triggerDescMaxFiresPerMinute := triggerFields[17].Descriptor()
+	// trigger.DefaultMaxFiresPerMinute holds the default value on creation for the max_fires_per_minute field.
+	trigger.DefaultMaxFiresPerMinute = triggerDescMaxFiresPerMinute.Default.(int)
+	// triggerDescMaxConcurrentDispatches is the schema descriptor for max_concurrent_dispatches field.
+	triggerDescMaxConcurrentDispatches := triggerFields[18].Descriptor()
+	// trigger.DefaultMaxConcurrentDispatches holds the default value on creation for the max_concurrent_dispatches field.
+	trigger.DefaultMaxConcurrentDispatches = triggerDescMaxConcurrentDispatches.Default.(int)
 	// triggerDescStatus is the schema descriptor for status field.
-	triggerDescStatus := triggerFields[17].Descriptor()
+	triggerDescStatus := triggerFields[19].Descriptor()
 	// trigger.DefaultStatus holds the default value on creation for the status field.
 	trigger.DefaultStatus = triggerDescStatus.Default.(string)
 	// triggerDescFireCount is the schema descriptor for fire_count field.
-	triggerDescFireCount := triggerFields[22].Descriptor()
+	triggerDescFireCount := triggerFields[24].Descriptor()
 	// trigger.DefaultFireCount holds the default value on creation for the fire_count field.
 	trigger.DefaultFireCount = triggerDescFireCount.Default.(int)
 	// triggerDescErrorCount is the schema descriptor for error_count field.
-	triggerDescErrorCount := triggerFields[23].Descriptor()
+	triggerDescErrorCount := triggerFields[25].Descriptor()
 	// trigger.DefaultErrorCount holds the default value on creation for the error_count field.
 	trigger.DefaultErrorCount = triggerDescErrorCount.Default.(int)
 	// triggerDescCreated is the schema descriptor for created field.
-	triggerDescCreated := triggerFields[25].Descriptor()
+	triggerDescCreated := triggerFields[27].Descriptor()
 	// trigger.DefaultCreated holds the default value on creation for the created field.
 	trigger.DefaultCreated = triggerDescCreated.Default.(func() time.Time)
 	// triggerDescUpdated is the schema descriptor for updated field.
-	triggerDescUpdated := triggerFields[26].Descriptor()
+	triggerDescUpdated := triggerFields[28].Descriptor()
 	// trigger.DefaultUpdated holds the default value on creation for the updated field.
 	trigger.DefaultUpdated = triggerDescUpdated.Default.(func() time.Time)
 	// trigger.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -4154,40 +4162,64 @@ func init() {
 	webhookendpointDescOwnerCredentialKind := webhookendpointFields[6].Descriptor()
 	// webhookendpoint.OwnerCredentialKindValidator is a validator for the "owner_credential_kind" field. It is called by the builders before save.
 	webhookendpoint.OwnerCredentialKindValidator = webhookendpointDescOwnerCredentialKind.Validators[0].(func(string) error)
+	// webhookendpointDescAuthMode is the schema descriptor for auth_mode field.
+	webhookendpointDescAuthMode := webhookendpointFields[7].Descriptor()
+	// webhookendpoint.DefaultAuthMode holds the default value on creation for the auth_mode field.
+	webhookendpoint.DefaultAuthMode = webhookendpointDescAuthMode.Default.(string)
+	// webhookendpointDescAllowProjectAgents is the schema descriptor for allow_project_agents field.
+	webhookendpointDescAllowProjectAgents := webhookendpointFields[8].Descriptor()
+	// webhookendpoint.DefaultAllowProjectAgents holds the default value on creation for the allow_project_agents field.
+	webhookendpoint.DefaultAllowProjectAgents = webhookendpointDescAllowProjectAgents.Default.(bool)
+	// webhookendpointDescMaxBodyBytes is the schema descriptor for max_body_bytes field.
+	webhookendpointDescMaxBodyBytes := webhookendpointFields[9].Descriptor()
+	// webhookendpoint.DefaultMaxBodyBytes holds the default value on creation for the max_body_bytes field.
+	webhookendpoint.DefaultMaxBodyBytes = webhookendpointDescMaxBodyBytes.Default.(int)
+	// webhookendpointDescRatePerSecond is the schema descriptor for rate_per_second field.
+	webhookendpointDescRatePerSecond := webhookendpointFields[10].Descriptor()
+	// webhookendpoint.DefaultRatePerSecond holds the default value on creation for the rate_per_second field.
+	webhookendpoint.DefaultRatePerSecond = webhookendpointDescRatePerSecond.Default.(int)
+	// webhookendpointDescRateBurst is the schema descriptor for rate_burst field.
+	webhookendpointDescRateBurst := webhookendpointFields[11].Descriptor()
+	// webhookendpoint.DefaultRateBurst holds the default value on creation for the rate_burst field.
+	webhookendpoint.DefaultRateBurst = webhookendpointDescRateBurst.Default.(int)
+	// webhookendpointDescReplayWindowSeconds is the schema descriptor for replay_window_seconds field.
+	webhookendpointDescReplayWindowSeconds := webhookendpointFields[12].Descriptor()
+	// webhookendpoint.DefaultReplayWindowSeconds holds the default value on creation for the replay_window_seconds field.
+	webhookendpoint.DefaultReplayWindowSeconds = webhookendpointDescReplayWindowSeconds.Default.(int)
 	// webhookendpointDescSecretVersion is the schema descriptor for secret_version field.
-	webhookendpointDescSecretVersion := webhookendpointFields[7].Descriptor()
+	webhookendpointDescSecretVersion := webhookendpointFields[13].Descriptor()
 	// webhookendpoint.DefaultSecretVersion holds the default value on creation for the secret_version field.
 	webhookendpoint.DefaultSecretVersion = webhookendpointDescSecretVersion.Default.(int)
 	// webhookendpointDescConfigVersion is the schema descriptor for config_version field.
-	webhookendpointDescConfigVersion := webhookendpointFields[9].Descriptor()
+	webhookendpointDescConfigVersion := webhookendpointFields[15].Descriptor()
 	// webhookendpoint.DefaultConfigVersion holds the default value on creation for the config_version field.
 	webhookendpoint.DefaultConfigVersion = webhookendpointDescConfigVersion.Default.(int)
 	// webhookendpointDescSignatureMode is the schema descriptor for signature_mode field.
-	webhookendpointDescSignatureMode := webhookendpointFields[10].Descriptor()
+	webhookendpointDescSignatureMode := webhookendpointFields[16].Descriptor()
 	// webhookendpoint.DefaultSignatureMode holds the default value on creation for the signature_mode field.
 	webhookendpoint.DefaultSignatureMode = webhookendpointDescSignatureMode.Default.(string)
 	// webhookendpointDescStatus is the schema descriptor for status field.
-	webhookendpointDescStatus := webhookendpointFields[11].Descriptor()
+	webhookendpointDescStatus := webhookendpointFields[17].Descriptor()
 	// webhookendpoint.DefaultStatus holds the default value on creation for the status field.
 	webhookendpoint.DefaultStatus = webhookendpointDescStatus.Default.(string)
 	// webhookendpointDescBoundLifetime is the schema descriptor for bound_lifetime field.
-	webhookendpointDescBoundLifetime := webhookendpointFields[13].Descriptor()
+	webhookendpointDescBoundLifetime := webhookendpointFields[19].Descriptor()
 	// webhookendpoint.DefaultBoundLifetime holds the default value on creation for the bound_lifetime field.
 	webhookendpoint.DefaultBoundLifetime = webhookendpointDescBoundLifetime.Default.(string)
 	// webhookendpointDescReceiveCount is the schema descriptor for receive_count field.
-	webhookendpointDescReceiveCount := webhookendpointFields[16].Descriptor()
+	webhookendpointDescReceiveCount := webhookendpointFields[22].Descriptor()
 	// webhookendpoint.DefaultReceiveCount holds the default value on creation for the receive_count field.
 	webhookendpoint.DefaultReceiveCount = webhookendpointDescReceiveCount.Default.(int)
 	// webhookendpointDescRejectCount is the schema descriptor for reject_count field.
-	webhookendpointDescRejectCount := webhookendpointFields[17].Descriptor()
+	webhookendpointDescRejectCount := webhookendpointFields[23].Descriptor()
 	// webhookendpoint.DefaultRejectCount holds the default value on creation for the reject_count field.
 	webhookendpoint.DefaultRejectCount = webhookendpointDescRejectCount.Default.(int)
 	// webhookendpointDescCreated is the schema descriptor for created field.
-	webhookendpointDescCreated := webhookendpointFields[18].Descriptor()
+	webhookendpointDescCreated := webhookendpointFields[24].Descriptor()
 	// webhookendpoint.DefaultCreated holds the default value on creation for the created field.
 	webhookendpoint.DefaultCreated = webhookendpointDescCreated.Default.(func() time.Time)
 	// webhookendpointDescUpdated is the schema descriptor for updated field.
-	webhookendpointDescUpdated := webhookendpointFields[19].Descriptor()
+	webhookendpointDescUpdated := webhookendpointFields[25].Descriptor()
 	// webhookendpoint.DefaultUpdated holds the default value on creation for the updated field.
 	webhookendpoint.DefaultUpdated = webhookendpointDescUpdated.Default.(func() time.Time)
 	// webhookendpoint.UpdateDefaultUpdated holds the default value on update for the updated field.

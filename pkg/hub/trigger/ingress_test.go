@@ -209,10 +209,10 @@ func TestIngressLimiter_SplitBucketsRefillAndCleanup(t *testing.T) {
 	assert.True(t, lim.AllowRejection())
 	assert.False(t, lim.AllowRejection())
 
-	assert.True(t, lim.AllowEndpoint("ep-a"))
-	assert.True(t, lim.AllowEndpoint("ep-a"))
-	assert.False(t, lim.AllowEndpoint("ep-a"))
-	assert.True(t, lim.AllowEndpoint("ep-b"), "exhausting ep-a must not affect ep-b")
+	assert.True(t, lim.AllowEndpointWithLimit("ep-a", 0, 0))
+	assert.True(t, lim.AllowEndpointWithLimit("ep-a", 0, 0))
+	assert.False(t, lim.AllowEndpointWithLimit("ep-a", 0, 0))
+	assert.True(t, lim.AllowEndpointWithLimit("ep-b", 0, 0), "exhausting ep-a must not affect ep-b")
 
 	assert.True(t, lim.AllowProjectVerified("proj-a"))
 	assert.True(t, lim.AllowProjectVerified("proj-a"))
@@ -226,8 +226,8 @@ func TestIngressLimiter_SplitBucketsRefillAndCleanup(t *testing.T) {
 
 	// Advance clock by 500ms (2 req/s -> +1 token) and verify refill.
 	now = now.Add(500 * time.Millisecond)
-	assert.True(t, lim.AllowEndpoint("ep-a"))
-	assert.False(t, lim.AllowEndpoint("ep-a"))
+	assert.True(t, lim.AllowEndpointWithLimit("ep-a", 0, 0))
+	assert.False(t, lim.AllowEndpointWithLimit("ep-a", 0, 0))
 
 	// Advance past MaxAge; on-demand refill restores full burst without any background Cleanup sweep.
 	now = now.Add(15 * time.Minute)
@@ -307,7 +307,7 @@ func TestIngressLimiter_IPv6Slash48SprayDoesNotLockOutNewSenders(t *testing.T) {
 			epKey := fmt.Sprintf("ep-%d", i)
 			projKey := fmt.Sprintf("proj-%d", i)
 			for j := 0; j < 60; j++ {
-				require.True(t, smallLim.AllowEndpoint(epKey))
+				require.True(t, smallLim.AllowEndpointWithLimit(epKey, 0, 0))
 			}
 			for j := 0; j < 300; j++ {
 				require.True(t, smallLim.AllowProjectVerified(projKey))
@@ -315,12 +315,12 @@ func TestIngressLimiter_IPv6Slash48SprayDoesNotLockOutNewSenders(t *testing.T) {
 		}
 		// Still unrefilled at t+5s (< 6s): 9th endpoint and 9th project fail closed.
 		smallNow = now.Add(5 * time.Second)
-		assert.False(t, smallLim.AllowEndpoint("ep-overflow"))
+		assert.False(t, smallLim.AllowEndpointWithLimit("ep-overflow", 0, 0))
 		assert.False(t, smallLim.AllowProjectVerified("proj-overflow"))
 
 		// At t+6s (== burst/rate, well below 30m MaxAge): refilled buckets are evicted and new keys succeed.
 		smallNow = now.Add(6 * time.Second)
-		assert.True(t, smallLim.AllowEndpoint("ep-overflow"))
+		assert.True(t, smallLim.AllowEndpointWithLimit("ep-overflow", 0, 0))
 		assert.True(t, smallLim.AllowProjectVerified("proj-overflow"))
 	})
 }
@@ -656,11 +656,11 @@ func TestBoundedTables_ConstantWorkUnderFullTableFlood(t *testing.T) {
 		for i := range 20 {
 			epID := fmt.Sprintf("ep-exhausted-%d", i)
 			for range trigger.PerEndpointBurst {
-				require.True(t, lim.AllowEndpoint(epID))
+				require.True(t, lim.AllowEndpointWithLimit(epID, 0, 0))
 			}
 		}
 		for i := 20; i < trigger.LimiterMaxEntries; i++ {
-			require.True(t, lim.AllowEndpoint(fmt.Sprintf("ep-light-%d", i)))
+			require.True(t, lim.AllowEndpointWithLimit(fmt.Sprintf("ep-light-%d", i), 0, 0))
 		}
 
 		// At +200ms, the first 20 are still unrefilled while the 9,980 behind them ARE refilled.
@@ -668,7 +668,7 @@ func TestBoundedTables_ConstantWorkUnderFullTableFlood(t *testing.T) {
 		now = now.Add(200 * time.Millisecond)
 		admitted := 0
 		for i := range totalKeys - trigger.LimiterMaxEntries {
-			if lim.AllowEndpoint(fmt.Sprintf("ep-new-%d", i)) {
+			if lim.AllowEndpointWithLimit(fmt.Sprintf("ep-new-%d", i), 0, 0) {
 				admitted++
 			}
 			now = now.Add(10 * time.Millisecond)
@@ -998,7 +998,7 @@ func TestIngress_NoBackgroundCleanupGoroutinesOrTickersOnBoundedTables(t *testin
 			Status:        store.WebhookEndpointStatusActive,
 		}
 		require.True(t, lim.AllowClientIP(fmt.Sprintf("198.51.100.%d", i)))
-		require.True(t, lim.AllowEndpoint(epID))
+		require.True(t, lim.AllowEndpointWithLimit(epID, 0, 0))
 		require.True(t, lim.AllowProjectVerified(fmt.Sprintf("proj-%d", i)))
 		_, err := cache.LookupEndpoint(populateCtx, cacheBacking, epID)
 		require.NoError(t, err)

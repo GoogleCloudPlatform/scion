@@ -42,27 +42,39 @@ type WebhookEndpointBoundAgent struct {
 	Name string `json:"name,omitempty"`
 }
 
+// WebhookEndpointRateLimitSpec configures per-endpoint ingress token-bucket
+// limits bounded by hub constants (Stage 2 §7.4). Zero values mean hub defaults.
+type WebhookEndpointRateLimitSpec struct {
+	PerSecond int `json:"perSecond,omitempty"`
+	Burst     int `json:"burst,omitempty"`
+}
+
 // WebhookEndpointResponse is the API representation of a webhook endpoint on
 // GET and LIST routes. It never includes the signing secret.
 type WebhookEndpointResponse struct {
-	ID              string                     `json:"id"`
-	ProjectID       string                     `json:"projectId"`
-	Name            string                     `json:"name"`
-	Description     string                     `json:"description,omitempty"`
-	URL             string                     `json:"url"`
-	SignatureMode   string                     `json:"signatureMode"`
-	SecretVersion   int                        `json:"secretVersion"`
-	SecretRotatedAt *time.Time                 `json:"secretRotatedAt,omitempty"`
-	ConfigVersion   int                        `json:"configVersion,omitempty"`
-	Status          string                     `json:"status"`
-	BoundAgent      *WebhookEndpointBoundAgent `json:"boundAgent,omitempty"`
-	BoundLifetime   string                     `json:"boundLifetime,omitempty"`
-	LastReceivedAt  *time.Time                 `json:"lastReceivedAt,omitempty"`
-	ReceiveCount    int                        `json:"receiveCount"`
-	RejectCount     int                        `json:"rejectCount"`
-	CreatedBy       string                     `json:"createdBy,omitempty"`
-	CreatedAt       time.Time                  `json:"createdAt"`
-	UpdatedAt       time.Time                  `json:"updatedAt"`
+	ID                  string                        `json:"id"`
+	ProjectID           string                        `json:"projectId"`
+	Name                string                        `json:"name"`
+	Description         string                        `json:"description,omitempty"`
+	URL                 string                        `json:"url"`
+	AuthMode            string                        `json:"auth"`
+	AllowProjectAgents  bool                          `json:"allowProjectAgents,omitempty"`
+	SignatureMode       string                        `json:"signatureMode"`
+	MaxBodyBytes        int                           `json:"maxBodyBytes"`
+	RateLimit           *WebhookEndpointRateLimitSpec `json:"rateLimit,omitempty"`
+	ReplayWindowSeconds int                           `json:"replayWindowSeconds"`
+	SecretVersion       int                           `json:"secretVersion"`
+	SecretRotatedAt     *time.Time                    `json:"secretRotatedAt,omitempty"`
+	ConfigVersion       int                           `json:"configVersion"`
+	Status              string                        `json:"status"`
+	BoundAgent          *WebhookEndpointBoundAgent    `json:"boundAgent,omitempty"`
+	BoundLifetime       string                        `json:"boundLifetime,omitempty"`
+	LastReceivedAt      *time.Time                    `json:"lastReceivedAt,omitempty"`
+	ReceiveCount        int                           `json:"receiveCount"`
+	RejectCount         int                           `json:"rejectCount"`
+	CreatedBy           string                        `json:"createdBy,omitempty"`
+	CreatedAt           time.Time                     `json:"createdAt"`
+	UpdatedAt           time.Time                     `json:"updatedAt"`
 }
 
 // WebhookEndpointCreatedResponse is returned once on POST /webhook-endpoints.
@@ -70,7 +82,7 @@ type WebhookEndpointResponse struct {
 // message trigger created in the same transaction.
 type WebhookEndpointCreatedResponse struct {
 	WebhookEndpointResponse
-	Secret    string           `json:"secret"`
+	Secret    string           `json:"secret,omitempty"`
 	TriggerID string           `json:"triggerId,omitempty"`
 	Trigger   *TriggerResponse `json:"trigger,omitempty"`
 }
@@ -79,7 +91,7 @@ type WebhookEndpointCreatedResponse struct {
 type WebhookEndpointRotatedResponse struct {
 	WebhookEndpointResponse
 	Secret             string    `json:"secret"`
-	GraceWindowExpires time.Time `json:"graceWindowExpires"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires,omitzero"`
 }
 
 // ListWebhookEndpointsResponse is the paginated response of GET /webhook-endpoints.
@@ -167,25 +179,27 @@ type TriggerSubjectSpec struct {
 
 // TriggerResponse is the API representation of a trigger definition.
 type TriggerResponse struct {
-	ID                    string             `json:"id"`
-	ProjectID             string             `json:"projectId"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	Source                TriggerSourceSpec  `json:"source"`
-	Match                 TriggerMatchSpec   `json:"match"`
-	Action                TriggerActionSpec  `json:"action"`
-	Subject               TriggerSubjectSpec `json:"subject"`
-	Status                string             `json:"status"`
-	StatusReason          string             `json:"statusReason,omitempty"`
-	AuthorizationRevision int                `json:"authorizationRevision"`
-	LastFireAt            *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus        string             `json:"lastFireStatus,omitempty"`
-	LastFireError         string             `json:"lastFireError,omitempty"`
-	FireCount             int                `json:"fireCount"`
-	ErrorCount            int                `json:"errorCount"`
-	CreatedBy             string             `json:"createdBy,omitempty"`
-	CreatedAt             time.Time          `json:"createdAt"`
-	UpdatedAt             time.Time          `json:"updatedAt"`
+	ID                      string             `json:"id"`
+	ProjectID               string             `json:"projectId"`
+	Name                    string             `json:"name"`
+	Description             string             `json:"description,omitempty"`
+	Source                  TriggerSourceSpec  `json:"source"`
+	Match                   TriggerMatchSpec   `json:"match"`
+	Action                  TriggerActionSpec  `json:"action"`
+	Subject                 TriggerSubjectSpec `json:"subject"`
+	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
+	Status                  string             `json:"status"`
+	StatusReason            string             `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                `json:"authorizationRevision"`
+	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
+	LastFireError           string             `json:"lastFireError,omitempty"`
+	FireCount               int                `json:"fireCount"`
+	ErrorCount              int                `json:"errorCount"`
+	CreatedBy               string             `json:"createdBy,omitempty"`
+	CreatedAt               time.Time          `json:"createdAt"`
+	UpdatedAt               time.Time          `json:"updatedAt"`
 }
 
 // ListTriggersResponse is the paginated response of GET /triggers.
@@ -319,25 +333,53 @@ func (s *Server) buildWebhookEndpointResponseWithCache(ctx context.Context, ep s
 			Name: s.resolveBoundAgentName(ctx, ep.BoundAgentID, agentNames),
 		}
 	}
+	authMode := ep.AuthMode
+	if authMode == "" {
+		authMode = store.WebhookAuthModeHMAC
+	}
+	maxBody := ep.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = store.DefaultWebhookMaxBodyBytes
+	}
+	replayWin := ep.ReplayWindowSeconds
+	if replayWin <= 0 {
+		replayWin = store.DefaultWebhookReplayWindowSeconds
+	}
+	cfgVer := ep.ConfigVersion
+	if cfgVer <= 0 {
+		cfgVer = 1
+	}
+	var rateLimit *WebhookEndpointRateLimitSpec
+	if ep.RatePerSecond > 0 || ep.RateBurst > 0 {
+		rateLimit = &WebhookEndpointRateLimitSpec{
+			PerSecond: ep.RatePerSecond,
+			Burst:     ep.RateBurst,
+		}
+	}
 	return WebhookEndpointResponse{
-		ID:              ep.ID,
-		ProjectID:       ep.ProjectID,
-		Name:            ep.Name,
-		Description:     ep.Description,
-		URL:             s.webhookEndpointIngressURL(ep.ID),
-		SignatureMode:   ep.SignatureMode,
-		SecretVersion:   ep.SecretVersion,
-		SecretRotatedAt: ep.SecretRotatedAt,
-		ConfigVersion:   ep.ConfigVersion,
-		Status:          ep.Status,
-		BoundAgent:      boundAgent,
-		BoundLifetime:   ep.BoundLifetime,
-		LastReceivedAt:  ep.LastReceivedAt,
-		ReceiveCount:    ep.ReceiveCount,
-		RejectCount:     ep.RejectCount,
-		CreatedBy:       ep.CreatedBy,
-		CreatedAt:       ep.CreatedAt,
-		UpdatedAt:       ep.UpdatedAt,
+		ID:                  ep.ID,
+		ProjectID:           ep.ProjectID,
+		Name:                ep.Name,
+		Description:         ep.Description,
+		URL:                 s.webhookEndpointIngressURL(ep.ID),
+		AuthMode:            authMode,
+		AllowProjectAgents:  ep.AllowProjectAgents,
+		SignatureMode:       ep.SignatureMode,
+		MaxBodyBytes:        maxBody,
+		RateLimit:           rateLimit,
+		ReplayWindowSeconds: replayWin,
+		SecretVersion:       ep.SecretVersion,
+		SecretRotatedAt:     ep.SecretRotatedAt,
+		ConfigVersion:       cfgVer,
+		Status:              ep.Status,
+		BoundAgent:          boundAgent,
+		BoundLifetime:       ep.BoundLifetime,
+		LastReceivedAt:      ep.LastReceivedAt,
+		ReceiveCount:        ep.ReceiveCount,
+		RejectCount:         ep.RejectCount,
+		CreatedBy:           ep.CreatedBy,
+		CreatedAt:           ep.CreatedAt,
+		UpdatedAt:           ep.UpdatedAt,
 	}
 }
 
@@ -508,17 +550,19 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 			Mode:           tr.SubjectMode,
 			CoalesceWindow: coalesceWindow,
 		},
-		Status:                tr.Status,
-		StatusReason:          tr.StatusReason,
-		AuthorizationRevision: tr.AuthorizationRevision,
-		LastFireAt:            tr.LastFireAt,
-		LastFireStatus:        tr.LastFireStatus,
-		LastFireError:         tr.LastFireError,
-		FireCount:             tr.FireCount,
-		ErrorCount:            tr.ErrorCount,
-		CreatedBy:             tr.CreatedBy,
-		CreatedAt:             tr.CreatedAt,
-		UpdatedAt:             tr.UpdatedAt,
+		MaxFiresPerMinute:       tr.MaxFiresPerMinute,
+		MaxConcurrentDispatches: tr.MaxConcurrentDispatches,
+		Status:                  tr.Status,
+		StatusReason:            tr.StatusReason,
+		AuthorizationRevision:   tr.AuthorizationRevision,
+		LastFireAt:              tr.LastFireAt,
+		LastFireStatus:          tr.LastFireStatus,
+		LastFireError:           tr.LastFireError,
+		FireCount:               tr.FireCount,
+		ErrorCount:              tr.ErrorCount,
+		CreatedBy:               tr.CreatedBy,
+		CreatedAt:               tr.CreatedAt,
+		UpdatedAt:               tr.UpdatedAt,
 	}
 }
 

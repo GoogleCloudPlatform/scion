@@ -29,9 +29,12 @@ const (
 	MaxTriggerEventListsBytes        = 8 * 1024
 )
 
-// WebhookEndpoint signature modes, statuses, bound lifetimes, and rotation grace
-// window (Stage 1 §4.1, §8.1a; Stage 2 §4.1, §4.4).
+// WebhookEndpoint auth modes, signature modes, statuses, bound lifetimes,
+// rotation grace window, and bounds (Stage 1 §4.1, §8.1a; Stage 2 §4.1, §4.4, §7.1, §7.3, §7.4).
 const (
+	WebhookAuthModeHMAC     = "hmac"
+	WebhookAuthModeHubToken = "hub_token"
+
 	WebhookSignatureModeScionV1  = "scion_v1"
 	WebhookSignatureModeBodyOnly = "body_only"
 
@@ -43,6 +46,20 @@ const (
 	WebhookBoundLifetimePersistent = "persistent"
 
 	WebhookSecretRotationGraceWindow = 24 * time.Hour
+
+	// DefaultWebhookMaxBodyBytes is the default per-endpoint body limit (64 KiB).
+	DefaultWebhookMaxBodyBytes = 64 * 1024
+	// DefaultWebhookReplayWindowSeconds is the default timestamp tolerance (300 s).
+	DefaultWebhookReplayWindowSeconds = 300
+	// MinWebhookReplayWindowSeconds and MaxWebhookReplayWindowSeconds bound replay_window_seconds (§7.3).
+	MinWebhookReplayWindowSeconds = 30
+	MaxWebhookReplayWindowSeconds = 900
+
+	// Trigger fire and dispatch limits (§7.4).
+	MaxTriggerFiresPerMinute              = 600
+	DefaultTriggerMaxConcurrentDispatches = 5
+	MaxTriggerConcurrentDispatches        = 50
+	MaxLiveTriggerAgentsPerProject        = 25
 )
 
 // Trigger source kinds, rule dialects, action types, subject modes, statuses,
@@ -150,6 +167,12 @@ type WebhookEndpoint struct {
 	OwnerPrincipalKind  string            `json:"ownerPrincipalKind"`
 	OwnerPrincipalID    string            `json:"ownerPrincipalId"`
 	OwnerCredentialKind string            `json:"ownerCredentialKind"`
+	AuthMode            string            `json:"authMode"`
+	AllowProjectAgents  bool              `json:"allowProjectAgents"`
+	MaxBodyBytes        int               `json:"maxBodyBytes"`
+	RatePerSecond       int               `json:"ratePerSecond"`
+	RateBurst           int               `json:"rateBurst"`
+	ReplayWindowSeconds int               `json:"replayWindowSeconds"`
 	SecretVersion       int               `json:"secretVersion"`
 	SecretRotatedAt     *time.Time        `json:"secretRotatedAt,omitempty"`
 	ConfigVersion       int               `json:"configVersion"`
@@ -180,12 +203,19 @@ type WebhookEndpointFilter struct {
 }
 
 // WebhookEndpointFieldMask names the mutable columns an UpdateWebhookEndpoint
-// call intends to write (Stage 2 §4.4).
+// call intends to write (Stage 2 §4.4, §7.1, §7.3, §7.4).
 type WebhookEndpointFieldMask struct {
 	Description bool
 	Status      bool
 	// Binding writes both bound_agent_id and bound_lifetime together.
-	Binding bool
+	Binding             bool
+	AuthMode            bool
+	AllowProjectAgents  bool
+	SignatureMode       bool
+	MaxBodyBytes        bool
+	RatePerSecond       bool
+	RateBurst           bool
+	ReplayWindowSeconds bool
 }
 
 // TriggerMatchRule is one ordered element of a trigger's match_rules list (§4.2, mixed-rule-arrays §2.1).
@@ -196,33 +226,35 @@ type TriggerMatchRule struct {
 
 // Trigger represents a project-scoped event trigger definition (§4.2).
 type Trigger struct {
-	ID                    string             `json:"id"`
-	ProjectID             string             `json:"projectId"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	SourceKind            string             `json:"sourceKind"`
-	SourceID              string             `json:"sourceId"`
-	MatchTypes            []string           `json:"matchTypes"`
-	MatchDialect          string             `json:"matchDialect,omitempty"`
-	MatchRule             string             `json:"matchRule,omitempty"`
-	MatchRules            []TriggerMatchRule `json:"matchRules"`
-	MatchForm             string             `json:"matchForm,omitempty"`
-	ActionType            string             `json:"actionType"`
-	ActionPayload         string             `json:"actionPayload"`
-	SubjectDialect        string             `json:"subjectDialect"`
-	SubjectRule           string             `json:"subjectRule,omitempty"`
-	SubjectMode           string             `json:"subjectMode"`
-	CoalesceWindowSeconds int                `json:"coalesceWindowSeconds,omitempty"`
-	Status                string             `json:"status"`
-	StatusReason          string             `json:"statusReason,omitempty"`
-	LastFireAt            *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus        string             `json:"lastFireStatus,omitempty"`
-	LastFireError         string             `json:"lastFireError,omitempty"`
-	FireCount             int                `json:"fireCount"`
-	ErrorCount            int                `json:"errorCount"`
-	CreatedBy             string             `json:"createdBy,omitempty"`
-	CreatedAt             time.Time          `json:"createdAt"`
-	UpdatedAt             time.Time          `json:"updatedAt"`
+	ID                      string             `json:"id"`
+	ProjectID               string             `json:"projectId"`
+	Name                    string             `json:"name"`
+	Description             string             `json:"description,omitempty"`
+	SourceKind              string             `json:"sourceKind"`
+	SourceID                string             `json:"sourceId"`
+	MatchTypes              []string           `json:"matchTypes"`
+	MatchDialect            string             `json:"matchDialect,omitempty"`
+	MatchRule               string             `json:"matchRule,omitempty"`
+	MatchRules              []TriggerMatchRule `json:"matchRules"`
+	MatchForm               string             `json:"matchForm,omitempty"`
+	ActionType              string             `json:"actionType"`
+	ActionPayload           string             `json:"actionPayload"`
+	SubjectDialect          string             `json:"subjectDialect"`
+	SubjectRule             string             `json:"subjectRule,omitempty"`
+	SubjectMode             string             `json:"subjectMode"`
+	CoalesceWindowSeconds   int                `json:"coalesceWindowSeconds,omitempty"`
+	MaxFiresPerMinute       int                `json:"maxFiresPerMinute"`
+	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches"`
+	Status                  string             `json:"status"`
+	StatusReason            string             `json:"statusReason,omitempty"`
+	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
+	LastFireError           string             `json:"lastFireError,omitempty"`
+	FireCount               int                `json:"fireCount"`
+	ErrorCount              int                `json:"errorCount"`
+	CreatedBy               string             `json:"createdBy,omitempty"`
+	CreatedAt               time.Time          `json:"createdAt"`
+	UpdatedAt               time.Time          `json:"updatedAt"`
 
 	InitiatorAttribution `json:"-"`
 	AuthorityCeiling     EffectCeiling     `json:"-"`
@@ -252,22 +284,24 @@ type TriggerFilter struct {
 // write. Status writes both status and status_reason together, matching
 // ScheduleFieldMask.
 type TriggerFieldMask struct {
-	Name                  bool
-	Description           bool
-	SourceKind            bool
-	SourceID              bool
-	MatchTypes            bool
-	MatchDialect          bool
-	MatchRule             bool
-	MatchRules            bool
-	MatchForm             bool
-	ActionType            bool
-	ActionPayload         bool
-	SubjectDialect        bool
-	SubjectRule           bool
-	SubjectMode           bool
-	CoalesceWindowSeconds bool
-	Status                bool
+	Name                    bool
+	Description             bool
+	SourceKind              bool
+	SourceID                bool
+	MatchTypes              bool
+	MatchDialect            bool
+	MatchRule               bool
+	MatchRules              bool
+	MatchForm               bool
+	ActionType              bool
+	ActionPayload           bool
+	SubjectDialect          bool
+	SubjectRule             bool
+	SubjectMode             bool
+	CoalesceWindowSeconds   bool
+	MaxFiresPerMinute       bool
+	MaxConcurrentDispatches bool
+	Status                  bool
 }
 
 // TriggerEvent represents a durable inbox event record (§4.3).
@@ -452,6 +486,11 @@ type TriggerStore interface {
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error)
+	// CountRecentTriggerFires counts trigger_fires rows for triggerID with
+	// created > since and status <> 'skipped', excluding excludeFireID when
+	// non-empty (so an in-flight firing row does not count against its own
+	// max_fires_per_minute budget, Stage 2 §7.4).
+	CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error)
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
 	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
 	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)

@@ -98,6 +98,7 @@ const (
 	ActionClone          = "clone"
 	ActionExecute        = "execute"
 	ActionMessage        = "message"
+	ActionSend           = "send"
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
@@ -438,6 +439,7 @@ var Registry = []Permission{
 	{ID: "webhook_endpoint.list", Resource: ResourceWebhookEndpoint, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:list", Description: "List webhook endpoints", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 	{ID: "webhook_endpoint.create", Resource: ResourceWebhookEndpoint, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:create", Description: "Create a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 	{ID: "webhook_endpoint.update", Resource: ResourceWebhookEndpoint, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:update", Description: "Update, disable, enable or rotate the secret of a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
+	{ID: "webhook_endpoint.send", Resource: ResourceWebhookEndpoint, Action: ActionSend, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:send", Description: "Send an authenticated webhook event to a hub_token endpoint", Enforcement: []string{"pkg/hub/handlers_hooks_ingress.go", "pkg/hub/trigger_authz.go"}},
 	{ID: "webhook_endpoint.delete", Resource: ResourceWebhookEndpoint, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:delete", Description: "Delete a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)

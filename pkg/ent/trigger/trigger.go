@@ -76,6 +76,10 @@ const (
 	FieldSubjectMode = "subject_mode"
 	// FieldCoalesceWindowSeconds holds the string denoting the coalesce_window_seconds field in the database.
 	FieldCoalesceWindowSeconds = "coalesce_window_seconds"
+	// FieldMaxFiresPerMinute holds the string denoting the max_fires_per_minute field in the database.
+	FieldMaxFiresPerMinute = "max_fires_per_minute"
+	// FieldMaxConcurrentDispatches holds the string denoting the max_concurrent_dispatches field in the database.
+	FieldMaxConcurrentDispatches = "max_concurrent_dispatches"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldStatusReason holds the string denoting the status_reason field in the database.
@@ -134,6 +138,8 @@ var Columns = []string{
 	FieldSubjectRule,
 	FieldSubjectMode,
 	FieldCoalesceWindowSeconds,
+	FieldMaxFiresPerMinute,
+	FieldMaxConcurrentDispatches,
 	FieldStatus,
 	FieldStatusReason,
 	FieldLastFireAt,
@@ -191,6 +197,10 @@ var (
 	DefaultSubjectMode string
 	// DefaultCoalesceWindowSeconds holds the default value on creation for the "coalesce_window_seconds" field.
 	DefaultCoalesceWindowSeconds int
+	// DefaultMaxFiresPerMinute holds the default value on creation for the "max_fires_per_minute" field.
+	DefaultMaxFiresPerMinute int
+	// DefaultMaxConcurrentDispatches holds the default value on creation for the "max_concurrent_dispatches" field.
+	DefaultMaxConcurrentDispatches int
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// DefaultFireCount holds the default value on creation for the "fire_count" field.
@@ -368,6 +378,16 @@ func BySubjectMode(opts ...sql.OrderTermOption) OrderOption {
 // ByCoalesceWindowSeconds orders the results by the coalesce_window_seconds field.
 func ByCoalesceWindowSeconds(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCoalesceWindowSeconds, opts...).ToFunc()
+}
+
+// ByMaxFiresPerMinute orders the results by the max_fires_per_minute field.
+func ByMaxFiresPerMinute(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMaxFiresPerMinute, opts...).ToFunc()
+}
+
+// ByMaxConcurrentDispatches orders the results by the max_concurrent_dispatches field.
+func ByMaxConcurrentDispatches(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMaxConcurrentDispatches, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

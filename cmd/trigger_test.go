@@ -2911,3 +2911,196 @@ func TestTriggerCLI_GitHubCreateGetAndList(t *testing.T) {
 	assert.Contains(t, listOut, "gh-ping")
 	assert.NotContains(t, listOut, "github:")
 }
+
+func TestTriggerP4aCLIFlags(t *testing.T) {
+	origName := triggerWebhookName
+	origAuth := triggerWebhookAuth
+	origAllowProj := triggerWebhookAllowProjectAgents
+	origReplay := triggerWebhookReplayWindow
+	origRate := triggerWebhookRate
+	origBurst := triggerWebhookBurst
+	origMaxBody := triggerWebhookMaxBody
+	origAgent := triggerWebhookAgent
+	origToSelf := triggerWebhookToSelf
+	origMsg := triggerWebhookMessage
+	origInt := triggerWebhookInterrupt
+	origWake := triggerWebhookWake
+	t.Cleanup(func() {
+		triggerWebhookName = origName
+		triggerWebhookAuth = origAuth
+		triggerWebhookAllowProjectAgents = origAllowProj
+		triggerWebhookReplayWindow = origReplay
+		triggerWebhookRate = origRate
+		triggerWebhookBurst = origBurst
+		triggerWebhookMaxBody = origMaxBody
+		triggerWebhookAgent = origAgent
+		triggerWebhookToSelf = origToSelf
+		triggerWebhookMessage = origMsg
+		triggerWebhookInterrupt = origInt
+		triggerWebhookWake = origWake
+	})
+
+	triggerWebhookName = "p4a-ep"
+	triggerWebhookAuth = "hub_token"
+	triggerWebhookAllowProjectAgents = true
+	triggerWebhookReplayWindow = 120
+	triggerWebhookRate = 5
+	triggerWebhookBurst = 20
+	triggerWebhookMaxBody = "16KiB"
+	triggerWebhookAgent = ""
+	triggerWebhookToSelf = false
+	triggerWebhookMessage = ""
+	triggerWebhookInterrupt = false
+	triggerWebhookWake = false
+
+	req, err := buildCreateWebhookEndpointRequest()
+	require.NoError(t, err)
+	assert.Equal(t, "hub_token", req.AuthMode)
+	assert.True(t, req.AllowProjectAgents)
+	assert.Equal(t, 120, req.ReplayWindowSeconds)
+	assert.Equal(t, 16*1024, req.MaxBodyBytes)
+	require.NotNil(t, req.RateLimit)
+	assert.Equal(t, 5, req.RateLimit.PerSecond)
+	assert.Equal(t, 20, req.RateLimit.Burst)
+
+	// Invalid --auth is rejected locally.
+	triggerWebhookAuth = "bogus"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+
+	// Invalid --max-body is rejected locally (including integer overflow, N1).
+	triggerWebhookAuth = "hmac"
+	triggerWebhookMaxBody = "not-a-size"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+
+	triggerWebhookMaxBody = "9999999999999MiB"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflow")
+
+	// Verify trigger create flags --max-per-minute and --max-concurrent.
+	assert.NotNil(t, triggerCreateCmd.Flags().Lookup("max-per-minute"))
+	assert.NotNil(t, triggerCreateCmd.Flags().Lookup("max-concurrent"))
+	assert.NotNil(t, triggerUpdateCmd.Flags().Lookup("max-per-minute"))
+	assert.NotNil(t, triggerUpdateCmd.Flags().Lookup("max-concurrent"))
+}
+
+func TestTriggerWebhookUpdateP4aFlags(t *testing.T) {
+	origDesc := triggerWebhookUpdateDescription
+	origStatus := triggerWebhookUpdateStatus
+	origBind := triggerWebhookUpdateBind
+	origUnbind := triggerWebhookUpdateUnbind
+	origPersist := triggerWebhookUpdatePersistent
+	origAgentLife := triggerWebhookUpdateAgentLife
+	origAuth := triggerWebhookUpdateAuth
+	origAllowProj := triggerWebhookUpdateAllowProjectAgents
+	origSigMode := triggerWebhookUpdateSignatureMode
+	origRate := triggerWebhookUpdateRate
+	origBurst := triggerWebhookUpdateBurst
+	origMaxBody := triggerWebhookUpdateMaxBody
+	origReplay := triggerWebhookUpdateReplayWindow
+	t.Cleanup(func() {
+		triggerWebhookUpdateDescription = origDesc
+		triggerWebhookUpdateStatus = origStatus
+		triggerWebhookUpdateBind = origBind
+		triggerWebhookUpdateUnbind = origUnbind
+		triggerWebhookUpdatePersistent = origPersist
+		triggerWebhookUpdateAgentLife = origAgentLife
+		triggerWebhookUpdateAuth = origAuth
+		triggerWebhookUpdateAllowProjectAgents = origAllowProj
+		triggerWebhookUpdateSignatureMode = origSigMode
+		triggerWebhookUpdateRate = origRate
+		triggerWebhookUpdateBurst = origBurst
+		triggerWebhookUpdateMaxBody = origMaxBody
+		triggerWebhookUpdateReplayWindow = origReplay
+	})
+
+	parseUpdate := func(args ...string) (*hubclient.UpdateWebhookEndpointRequest, error) {
+		triggerWebhookUpdateDescription = ""
+		triggerWebhookUpdateStatus = ""
+		triggerWebhookUpdateBind = ""
+		triggerWebhookUpdateUnbind = false
+		triggerWebhookUpdatePersistent = false
+		triggerWebhookUpdateAgentLife = false
+		triggerWebhookUpdateAuth = ""
+		triggerWebhookUpdateAllowProjectAgents = false
+		triggerWebhookUpdateSignatureMode = ""
+		triggerWebhookUpdateRate = 0
+		triggerWebhookUpdateBurst = 0
+		triggerWebhookUpdateMaxBody = ""
+		triggerWebhookUpdateReplayWindow = 0
+
+		c := &cobra.Command{Use: "update"}
+		bindTriggerWebhookUpdateFlags(c)
+		if err := c.Flags().Parse(args); err != nil {
+			return nil, err
+		}
+		return buildUpdateWebhookEndpointRequest(c)
+	}
+
+	// No flags -> usage error.
+	_, err := parseUpdate()
+	require.Error(t, err)
+
+	// Each flag sent ONLY when Changed.
+	req, err := parseUpdate("--auth", "hub_token")
+	require.NoError(t, err)
+	require.NotNil(t, req.AuthMode)
+	assert.Equal(t, "hub_token", *req.AuthMode)
+	assert.Nil(t, req.AllowProjectAgents)
+	assert.Nil(t, req.SignatureMode)
+	assert.Nil(t, req.MaxBodyBytes)
+	assert.Nil(t, req.RateLimit)
+	assert.Nil(t, req.ReplayWindowSeconds)
+
+	// --allow-project-agents=true
+	req, err = parseUpdate("--allow-project-agents")
+	require.NoError(t, err)
+	require.NotNil(t, req.AllowProjectAgents)
+	assert.True(t, *req.AllowProjectAgents)
+	assert.Nil(t, req.AuthMode)
+
+	// --allow-project-agents=false (explicitly false must still be sent).
+	req, err = parseUpdate("--allow-project-agents=false")
+	require.NoError(t, err)
+	require.NotNil(t, req.AllowProjectAgents)
+	assert.False(t, *req.AllowProjectAgents)
+
+	// --signature-mode
+	req, err = parseUpdate("--signature-mode", "scion_v1")
+	require.NoError(t, err)
+	require.NotNil(t, req.SignatureMode)
+	assert.Equal(t, "scion_v1", *req.SignatureMode)
+
+	// --rate and --burst
+	req, err = parseUpdate("--rate", "4", "--burst", "15")
+	require.NoError(t, err)
+	require.NotNil(t, req.RateLimit)
+	assert.Equal(t, 4, req.RateLimit.PerSecond)
+	assert.Equal(t, 15, req.RateLimit.Burst)
+	assert.Nil(t, req.MaxBodyBytes)
+
+	// --max-body
+	req, err = parseUpdate("--max-body", "32KiB")
+	require.NoError(t, err)
+	require.NotNil(t, req.MaxBodyBytes)
+	assert.Equal(t, 32*1024, *req.MaxBodyBytes)
+
+	// --replay-window
+	req, err = parseUpdate("--replay-window", "90")
+	require.NoError(t, err)
+	require.NotNil(t, req.ReplayWindowSeconds)
+	assert.Equal(t, 90, *req.ReplayWindowSeconds)
+
+	// Invalid values rejected locally.
+	_, err = parseUpdate("--auth", "bogus")
+	require.Error(t, err)
+	_, err = parseUpdate("--rate", "-1")
+	require.Error(t, err)
+	_, err = parseUpdate("--replay-window", "-5")
+	require.Error(t, err)
+	_, err = parseUpdate("--max-body", "9999999999999MiB")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "overflow")
+}

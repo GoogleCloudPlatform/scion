@@ -380,7 +380,7 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Webhooks ───────────────────────────────────────────────────────
 	"/api/v1/webhooks/github": "webhook", // GitHub webhook — signature verification
-	"/api/v1/hooks/{id}":      "webhook", // Generic webhook ingress — scion_v1 HMAC verification
+	"/api/v1/hooks/{id}":      "webhook", // Generic webhook ingress — dual-posture HMAC or hub_token (webhook_endpoint.send)
 	"/github-app/setup":       "public",  // GitHub App post-install callback — browser redirect
 
 	// ── Workstation-only system endpoints ──────────────────────────────

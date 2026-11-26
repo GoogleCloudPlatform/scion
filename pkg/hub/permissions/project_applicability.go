@@ -201,7 +201,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"trigger.read": true, "trigger.list": true, "trigger.create": true,
 	"trigger.delete": true, "trigger.update": true,
 	"webhook_endpoint.read": true, "webhook_endpoint.list": true,
-	"webhook_endpoint.create": true, "webhook_endpoint.update": true, "webhook_endpoint.delete": true,
+	"webhook_endpoint.create": true, "webhook_endpoint.update": true,
+	"webhook_endpoint.send": true, "webhook_endpoint.delete": true,
 
 	"project.secret_read": true,
 
@@ -339,7 +340,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"trigger.create":        {BoundaryKindProject, BoundaryKindHub},
 	"webhook_endpoint.read": {BoundaryKindProject, BoundaryKindHub}, "webhook_endpoint.list": {BoundaryKindProject, BoundaryKindHub},
 	"webhook_endpoint.create": {BoundaryKindProject, BoundaryKindHub}, "webhook_endpoint.update": {BoundaryKindProject, BoundaryKindHub},
-	"webhook_endpoint.delete": {BoundaryKindProject, BoundaryKindHub},
+	"webhook_endpoint.send": {BoundaryKindProject, BoundaryKindHub}, "webhook_endpoint.delete": {BoundaryKindProject, BoundaryKindHub},
 
 	// hub.* integration and observability permissions act on the hub
 	// itself, so their selectors are hub-only.
@@ -573,7 +574,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"trigger.create":        {TargetClassKindProjectScoped},
 	"webhook_endpoint.read": {TargetClassKindProjectScoped}, "webhook_endpoint.list": {TargetClassKindProjectScoped},
 	"webhook_endpoint.create": {TargetClassKindProjectScoped}, "webhook_endpoint.update": {TargetClassKindProjectScoped},
-	"webhook_endpoint.delete": {TargetClassKindProjectScoped},
+	"webhook_endpoint.send": {TargetClassKindProjectScoped}, "webhook_endpoint.delete": {TargetClassKindProjectScoped},
 
 	// hub.* integration and observability permissions target the hub
 	// instance.

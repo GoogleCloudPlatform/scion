@@ -61,6 +61,18 @@ func (WebhookEndpoint) Fields() []ent.Field {
 		field.String("owner_credential_kind").
 			NotEmpty().
 			Immutable(),
+		field.String("auth_mode").
+			Default("hmac"),
+		field.Bool("allow_project_agents").
+			Default(false),
+		field.Int("max_body_bytes").
+			Default(65536),
+		field.Int("rate_per_second").
+			Default(0),
+		field.Int("rate_burst").
+			Default(0),
+		field.Int("replay_window_seconds").
+			Default(300),
 		field.Int("secret_version").
 			Default(1),
 		field.Time("secret_rotated_at").

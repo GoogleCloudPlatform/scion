@@ -56,6 +56,8 @@ func ClientRateKey(ip string) string {
 type tokenBucket struct {
 	tokens    float64
 	lastCheck time.Time
+	rate      float64
+	burst     int
 }
 
 // singleTokenBucket is a concurrency-safe global token bucket (used for the
@@ -145,10 +147,20 @@ func newKeyedBucketSet(rate float64, burst, maxEntries int, maxAge time.Duration
 }
 
 func (s *keyedBucketSet) allow(key string, now time.Time) bool {
+	return s.allowWithLimit(key, now, s.rate, s.burst)
+}
+
+func (s *keyedBucketSet) allowWithLimit(key string, now time.Time, rate float64, burst int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.burst < 1 {
+	if rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) || rate > s.rate {
+		rate = s.rate
+	}
+	if burst <= 0 || burst > s.burst {
+		burst = s.burst
+	}
+	if burst < 1 {
 		return false
 	}
 
@@ -156,8 +168,10 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 	if !ok {
 		cutoff := now.Add(-s.maxAge)
 		nb := &tokenBucket{
-			tokens:    float64(s.burst) - 1,
+			tokens:    float64(burst) - 1,
 			lastCheck: now,
+			rate:      rate,
+			burst:     burst,
 		}
 		// Evict a refilled/expired bucket in O(1) bounded probes; dropping a
 		// fully refilled bucket changes no admission decision for timestamps >= now.
@@ -174,14 +188,28 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 	}
 
 	s.buckets.recordScan(0)
+	bRate := b.rate
+	if bRate <= 0 {
+		bRate = s.rate
+	}
+	bBurst := b.burst
+	if bBurst <= 0 {
+		bBurst = s.burst
+	}
 	elapsed := now.Sub(b.lastCheck).Seconds()
 	if elapsed > 0 {
-		b.tokens += elapsed * s.rate
-		if b.tokens > float64(s.burst) {
-			b.tokens = float64(s.burst)
+		b.tokens += elapsed * bRate
+		if b.tokens > float64(bBurst) {
+			b.tokens = float64(bBurst)
 		}
 		b.lastCheck = now
 		s.buckets.touch(key)
+	}
+	// Apply updated per-key limits (e.g. after PATCH on a webhook endpoint).
+	b.rate = rate
+	b.burst = burst
+	if b.tokens > float64(burst) {
+		b.tokens = float64(burst)
 	}
 	if b.tokens >= 1 {
 		b.tokens--
@@ -191,14 +219,26 @@ func (s *keyedBucketSet) allow(key string, now time.Time) bool {
 }
 
 func (s *keyedBucketSet) isRefilled(b *tokenBucket, now time.Time) bool {
+	bRate := b.rate
+	if bRate <= 0 {
+		bRate = s.rate
+	}
+	bBurst := b.burst
+	if bBurst <= 0 {
+		bBurst = s.burst
+	}
 	idle := now.Sub(b.lastCheck)
 	if idle <= 0 {
-		return b.tokens >= float64(s.burst)
+		return b.tokens >= float64(bBurst)
 	}
-	if s.refillPeriod > 0 && idle >= s.refillPeriod {
+	refillPeriod := s.refillPeriod
+	if bRate != s.rate || bBurst != s.burst {
+		refillPeriod = computeRefillPeriod(bRate, bBurst)
+	}
+	if refillPeriod > 0 && idle >= refillPeriod {
 		return true
 	}
-	return b.tokens+idle.Seconds()*s.rate >= float64(s.burst)
+	return b.tokens+idle.Seconds()*bRate >= float64(bBurst)
 }
 
 func (s *keyedBucketSet) len() int {
@@ -302,9 +342,11 @@ func (l *IngressLimiter) AllowRejection() bool {
 	return l.rejection.allow(l.now())
 }
 
-// AllowEndpoint charges the per-endpoint bucket for a known active endpoint.
-func (l *IngressLimiter) AllowEndpoint(endpointID string) bool {
-	return l.perEndpoint.allow(endpointID, l.now())
+// AllowEndpointWithLimit charges the per-endpoint bucket for a known active
+// endpoint using the endpoint's configured ratePerSecond and burst, clamped to
+// the hub constants (Stage 2 §7.4: an endpoint can lower, never raise).
+func (l *IngressLimiter) AllowEndpointWithLimit(endpointID string, ratePerSecond, burst int) bool {
+	return l.perEndpoint.allowWithLimit(endpointID, l.now(), float64(ratePerSecond), burst)
 }
 
 // AllowProjectVerified charges the per-project verified bucket after signature verification.

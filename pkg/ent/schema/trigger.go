@@ -78,6 +78,10 @@ func (Trigger) Fields() []ent.Field {
 			Default("new"),
 		field.Int("coalesce_window_seconds").
 			Default(0),
+		field.Int("max_fires_per_minute").
+			Default(0),
+		field.Int("max_concurrent_dispatches").
+			Default(0),
 		field.String("status").
 			Default("active"),
 		field.String("status_reason").

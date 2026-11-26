@@ -95,6 +95,36 @@ func OwnerCredentialKind(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldOwnerCredentialKind, v))
 }
 
+// AuthMode applies equality check predicate on the "auth_mode" field. It's identical to AuthModeEQ.
+func AuthMode(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldAuthMode, v))
+}
+
+// AllowProjectAgents applies equality check predicate on the "allow_project_agents" field. It's identical to AllowProjectAgentsEQ.
+func AllowProjectAgents(v bool) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldAllowProjectAgents, v))
+}
+
+// MaxBodyBytes applies equality check predicate on the "max_body_bytes" field. It's identical to MaxBodyBytesEQ.
+func MaxBodyBytes(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldMaxBodyBytes, v))
+}
+
+// RatePerSecond applies equality check predicate on the "rate_per_second" field. It's identical to RatePerSecondEQ.
+func RatePerSecond(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRatePerSecond, v))
+}
+
+// RateBurst applies equality check predicate on the "rate_burst" field. It's identical to RateBurstEQ.
+func RateBurst(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRateBurst, v))
+}
+
+// ReplayWindowSeconds applies equality check predicate on the "replay_window_seconds" field. It's identical to ReplayWindowSecondsEQ.
+func ReplayWindowSeconds(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldReplayWindowSeconds, v))
+}
+
 // SecretVersion applies equality check predicate on the "secret_version" field. It's identical to SecretVersionEQ.
 func SecretVersion(v int) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSecretVersion, v))
@@ -633,6 +663,241 @@ func OwnerCredentialKindEqualFold(v string) predicate.WebhookEndpoint {
 // OwnerCredentialKindContainsFold applies the ContainsFold predicate on the "owner_credential_kind" field.
 func OwnerCredentialKindContainsFold(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldOwnerCredentialKind, v))
+}
+
+// AuthModeEQ applies the EQ predicate on the "auth_mode" field.
+func AuthModeEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldAuthMode, v))
+}
+
+// AuthModeNEQ applies the NEQ predicate on the "auth_mode" field.
+func AuthModeNEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldAuthMode, v))
+}
+
+// AuthModeIn applies the In predicate on the "auth_mode" field.
+func AuthModeIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldAuthMode, vs...))
+}
+
+// AuthModeNotIn applies the NotIn predicate on the "auth_mode" field.
+func AuthModeNotIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldAuthMode, vs...))
+}
+
+// AuthModeGT applies the GT predicate on the "auth_mode" field.
+func AuthModeGT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldAuthMode, v))
+}
+
+// AuthModeGTE applies the GTE predicate on the "auth_mode" field.
+func AuthModeGTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldAuthMode, v))
+}
+
+// AuthModeLT applies the LT predicate on the "auth_mode" field.
+func AuthModeLT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldAuthMode, v))
+}
+
+// AuthModeLTE applies the LTE predicate on the "auth_mode" field.
+func AuthModeLTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldAuthMode, v))
+}
+
+// AuthModeContains applies the Contains predicate on the "auth_mode" field.
+func AuthModeContains(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContains(FieldAuthMode, v))
+}
+
+// AuthModeHasPrefix applies the HasPrefix predicate on the "auth_mode" field.
+func AuthModeHasPrefix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasPrefix(FieldAuthMode, v))
+}
+
+// AuthModeHasSuffix applies the HasSuffix predicate on the "auth_mode" field.
+func AuthModeHasSuffix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasSuffix(FieldAuthMode, v))
+}
+
+// AuthModeEqualFold applies the EqualFold predicate on the "auth_mode" field.
+func AuthModeEqualFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEqualFold(FieldAuthMode, v))
+}
+
+// AuthModeContainsFold applies the ContainsFold predicate on the "auth_mode" field.
+func AuthModeContainsFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldAuthMode, v))
+}
+
+// AllowProjectAgentsEQ applies the EQ predicate on the "allow_project_agents" field.
+func AllowProjectAgentsEQ(v bool) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldAllowProjectAgents, v))
+}
+
+// AllowProjectAgentsNEQ applies the NEQ predicate on the "allow_project_agents" field.
+func AllowProjectAgentsNEQ(v bool) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldAllowProjectAgents, v))
+}
+
+// MaxBodyBytesEQ applies the EQ predicate on the "max_body_bytes" field.
+func MaxBodyBytesEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldMaxBodyBytes, v))
+}
+
+// MaxBodyBytesNEQ applies the NEQ predicate on the "max_body_bytes" field.
+func MaxBodyBytesNEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldMaxBodyBytes, v))
+}
+
+// MaxBodyBytesIn applies the In predicate on the "max_body_bytes" field.
+func MaxBodyBytesIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldMaxBodyBytes, vs...))
+}
+
+// MaxBodyBytesNotIn applies the NotIn predicate on the "max_body_bytes" field.
+func MaxBodyBytesNotIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldMaxBodyBytes, vs...))
+}
+
+// MaxBodyBytesGT applies the GT predicate on the "max_body_bytes" field.
+func MaxBodyBytesGT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldMaxBodyBytes, v))
+}
+
+// MaxBodyBytesGTE applies the GTE predicate on the "max_body_bytes" field.
+func MaxBodyBytesGTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldMaxBodyBytes, v))
+}
+
+// MaxBodyBytesLT applies the LT predicate on the "max_body_bytes" field.
+func MaxBodyBytesLT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldMaxBodyBytes, v))
+}
+
+// MaxBodyBytesLTE applies the LTE predicate on the "max_body_bytes" field.
+func MaxBodyBytesLTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldMaxBodyBytes, v))
+}
+
+// RatePerSecondEQ applies the EQ predicate on the "rate_per_second" field.
+func RatePerSecondEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRatePerSecond, v))
+}
+
+// RatePerSecondNEQ applies the NEQ predicate on the "rate_per_second" field.
+func RatePerSecondNEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldRatePerSecond, v))
+}
+
+// RatePerSecondIn applies the In predicate on the "rate_per_second" field.
+func RatePerSecondIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldRatePerSecond, vs...))
+}
+
+// RatePerSecondNotIn applies the NotIn predicate on the "rate_per_second" field.
+func RatePerSecondNotIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldRatePerSecond, vs...))
+}
+
+// RatePerSecondGT applies the GT predicate on the "rate_per_second" field.
+func RatePerSecondGT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldRatePerSecond, v))
+}
+
+// RatePerSecondGTE applies the GTE predicate on the "rate_per_second" field.
+func RatePerSecondGTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldRatePerSecond, v))
+}
+
+// RatePerSecondLT applies the LT predicate on the "rate_per_second" field.
+func RatePerSecondLT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldRatePerSecond, v))
+}
+
+// RatePerSecondLTE applies the LTE predicate on the "rate_per_second" field.
+func RatePerSecondLTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldRatePerSecond, v))
+}
+
+// RateBurstEQ applies the EQ predicate on the "rate_burst" field.
+func RateBurstEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldRateBurst, v))
+}
+
+// RateBurstNEQ applies the NEQ predicate on the "rate_burst" field.
+func RateBurstNEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldRateBurst, v))
+}
+
+// RateBurstIn applies the In predicate on the "rate_burst" field.
+func RateBurstIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldRateBurst, vs...))
+}
+
+// RateBurstNotIn applies the NotIn predicate on the "rate_burst" field.
+func RateBurstNotIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldRateBurst, vs...))
+}
+
+// RateBurstGT applies the GT predicate on the "rate_burst" field.
+func RateBurstGT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldRateBurst, v))
+}
+
+// RateBurstGTE applies the GTE predicate on the "rate_burst" field.
+func RateBurstGTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldRateBurst, v))
+}
+
+// RateBurstLT applies the LT predicate on the "rate_burst" field.
+func RateBurstLT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldRateBurst, v))
+}
+
+// RateBurstLTE applies the LTE predicate on the "rate_burst" field.
+func RateBurstLTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldRateBurst, v))
+}
+
+// ReplayWindowSecondsEQ applies the EQ predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldReplayWindowSeconds, v))
+}
+
+// ReplayWindowSecondsNEQ applies the NEQ predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsNEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldReplayWindowSeconds, v))
+}
+
+// ReplayWindowSecondsIn applies the In predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldReplayWindowSeconds, vs...))
+}
+
+// ReplayWindowSecondsNotIn applies the NotIn predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsNotIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldReplayWindowSeconds, vs...))
+}
+
+// ReplayWindowSecondsGT applies the GT predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsGT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldReplayWindowSeconds, v))
+}
+
+// ReplayWindowSecondsGTE applies the GTE predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsGTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldReplayWindowSeconds, v))
+}
+
+// ReplayWindowSecondsLT applies the LT predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsLT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldReplayWindowSeconds, v))
+}
+
+// ReplayWindowSecondsLTE applies the LTE predicate on the "replay_window_seconds" field.
+func ReplayWindowSecondsLTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldReplayWindowSeconds, v))
 }
 
 // SecretVersionEQ applies the EQ predicate on the "secret_version" field.
