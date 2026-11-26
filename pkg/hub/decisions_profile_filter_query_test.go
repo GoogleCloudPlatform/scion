@@ -332,6 +332,29 @@ func TestProfileDecisions_FilterQueryDialect(t *testing.T) {
 			"cursor": {page1.NextCursor},
 		}.Encode(), nil)
 		assert.Equal(t, http.StatusBadRequest, rrCross.Code)
+
+		// Replaying a structured cursor with a pure-text query prefixed with "fq:"
+		// (N3: unambiguous text vs structured cursor-bind prefix) must return 400.
+		rrCrossMode := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, userMeDecisionsPath+"?"+url.Values{
+			"tab":    {"made"},
+			"sort":   {"recent"},
+			"q":      {"fq:project:" + projAlpha.Slug},
+			"limit":  {"1"},
+			"cursor": {page1.NextCursor},
+		}.Encode(), nil)
+		assert.Equal(t, http.StatusBadRequest, rrCrossMode.Code)
+	})
+
+	t.Run("limit=0 resolves structured agent and project filters accurately", func(t *testing.T) {
+		pProj := getPending(f.alice, url.Values{"limit": {"0"}, "q": {"project:proj-beta"}})
+		assert.Empty(t, pProj.Prompts)
+		require.NotNil(t, pProj.FilteredCounts)
+		assert.Equal(t, 1, pProj.FilteredCounts.WaitingOnYou)
+
+		pAgent := getPending(f.alice, url.Values{"limit": {"0"}, "q": {"agent:beta-bot"}})
+		assert.Empty(t, pAgent.Prompts)
+		require.NotNil(t, pAgent.FilteredCounts)
+		assert.Equal(t, 1, pAgent.FilteredCounts.WaitingOnYou)
 	})
 
 	t.Run("experiment off keeps q as plain text", func(t *testing.T) {

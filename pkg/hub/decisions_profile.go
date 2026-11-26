@@ -27,7 +27,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
@@ -114,7 +113,7 @@ func (q projectDecisionsQuery) profileCursorBind() string {
 	if q.madeFilter.To != nil {
 		toStr = q.madeFilter.To.UTC().Format(time.RFC3339Nano)
 	}
-	queryBind := q.q
+	queryBind := "t:" + q.q
 	if q.parsedQuery != nil {
 		queryBind = "fq:" + filterquery.Canonical(*q.parsedQuery)
 	}
@@ -290,40 +289,12 @@ func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID
 		}
 	}
 
-	if rawQ := q.Get("q"); strings.TrimSpace(rawQ) != "" {
-		if dialectEnabled {
-			parsed, fqErr := filterquery.Parse(rawQ, schemas.ProfileDecisions.HasKey)
-			if fqErr != nil {
-				writeInvalidFilterQuery(w, fqErr)
-				return projectDecisionsQuery{}, false
-			}
-			if vErr := schemas.ProfileDecisions.Validate(parsed); vErr != nil {
-				writeInvalidFilterQuery(w, vErr)
-				return projectDecisionsQuery{}, false
-			}
-			if parsed.Mode == filterquery.ModeText {
-				if parsed.Text != "" {
-					if n := utf8.RuneCountInString(parsed.Text); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-						ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-							map[string]interface{}{"field": "q"})
-						return projectDecisionsQuery{}, false
-					}
-					out.q = parsed.Text
-				}
-			} else {
-				out.parsedQuery = &parsed
-				out.q = parsed.Text
-			}
-		} else {
-			search := strings.TrimSpace(rawQ)
-			if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-				ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-					map[string]interface{}{"field": "q"})
-				return projectDecisionsQuery{}, false
-			}
-			out.q = search
-		}
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.ProfileDecisions, dialectEnabled)
+	if !ok {
+		return projectDecisionsQuery{}, false
 	}
+	out.q = textQ
+	out.parsedQuery = parsedQ
 	out.conversation = strings.TrimSpace(q.Get("conversation"))
 	if len(out.conversation) > maxProjectDecisionsConversationBytes {
 		ValidationError(w, fmt.Sprintf("conversation must be at most %d bytes", maxProjectDecisionsConversationBytes),

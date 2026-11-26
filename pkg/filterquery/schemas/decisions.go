@@ -69,7 +69,7 @@ var ProfileDecisions = filterquery.Schema{
 		append([]filterquery.Key(nil), Decisions.Keys...),
 		filterquery.Key{
 			Name:        "project",
-			Help:        "Project slug or ID",
+			Help:        "Project slug or ID (your projects)",
 			Kind:        filterquery.KindRef,
 			Exec:        filterquery.ExecServer,
 			MultiValued: false,

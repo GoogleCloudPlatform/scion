@@ -347,7 +347,7 @@
       },
       {
         "name": "project",
-        "help": "Project slug or ID",
+        "help": "Project slug or ID (your projects)",
         "kind": "ref",
         "exec": "server",
         "multiValued": false

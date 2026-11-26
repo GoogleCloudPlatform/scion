@@ -15,12 +15,60 @@
 package hub
 
 import (
+	"fmt"
+	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// parseDecisionsFilterQ parses and validates the `q` query parameter for both
+// project and profile decisions handlers (design-8985 §3.2). When dialectEnabled
+// is true, it parses and validates against schema; pure-text queries enforce the
+// 2..256 rune bounds, while structured queries return parsed != nil and text = parsed.Text.
+func parseDecisionsFilterQ(
+	w http.ResponseWriter,
+	rawQ string,
+	schema filterquery.Schema,
+	dialectEnabled bool,
+) (text string, parsed *filterquery.Query, ok bool) {
+	if strings.TrimSpace(rawQ) == "" {
+		return "", nil, true
+	}
+	if dialectEnabled {
+		q, fqErr := filterquery.Parse(rawQ, schema.HasKey)
+		if fqErr != nil {
+			writeInvalidFilterQuery(w, fqErr)
+			return "", nil, false
+		}
+		if vErr := schema.Validate(q); vErr != nil {
+			writeInvalidFilterQuery(w, vErr)
+			return "", nil, false
+		}
+		if q.Mode == filterquery.ModeText {
+			if q.Text != "" {
+				if n := utf8.RuneCountInString(q.Text); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+					ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+						map[string]interface{}{"field": "q"})
+					return "", nil, false
+				}
+				return q.Text, nil, true
+			}
+			return "", nil, true
+		}
+		return q.Text, &q, true
+	}
+	search := strings.TrimSpace(rawQ)
+	if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+		ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+			map[string]interface{}{"field": "q"})
+		return "", nil, false
+	}
+	return search, nil, true
+}
 
 // resolvedDecisionsQuery is the scope-resolved translation of a structured
 // filterquery.Query for GET /api/v1/projects/{id}/decisions (design-8985 §3.2).
