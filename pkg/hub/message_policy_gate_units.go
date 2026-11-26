@@ -33,16 +33,17 @@ import (
 // originPolicyEvalInput is the unified input for origin-mode message policy
 // evaluation across E1/E2 (H2), E3a, E3b, and E3c.
 type originPolicyEvalInput struct {
-	sendID              string
-	sender              *store.Agent
-	senderIdent         Identity
-	originSnap          h2FactSnapshot
-	copyTargets         []resolvedCopyTarget
-	copyBody            string
-	copyAttachmentCount int
-	copyUrgent          bool
-	preloadedHumans     []chatMemberEntry
-	humansLoaded        bool
+	sendID                 string
+	sender                 *store.Agent
+	senderIdent            Identity
+	requireActorCrossCheck bool
+	originSnap             h2FactSnapshot
+	copyTargets            []resolvedCopyTarget
+	copyBody               string
+	copyAttachmentCount    int
+	copyUrgent             bool
+	preloadedHumans        []chatMemberEntry
+	humansLoaded           bool
 }
 
 // originPolicyRejection carries the structured HTTP 422 (or 499/5xx) refusal
@@ -111,14 +112,20 @@ type unitPolicyEvalRow struct {
 
 // verifySenderAuthorityCrossCheck enforces D5: the eval/credential project is
 // always the sender's store project, cross-checked that the store agent record
-// matches the authenticated or delegated actor ID. A conflicting token project
-// claim never overrides the stored agent's ProjectID (O1).
+// matches the authenticated or delegated actor ID (never the delegated issuer).
+// A conflicting token project claim never overrides the stored agent's
+// ProjectID (O1). Missing/unresolvable sender or invalid actor fails closed.
 func verifySenderAuthorityCrossCheck(sender *store.Agent, senderIdent Identity) (string, error) {
-	if sender == nil || sender.ProjectID == "" {
+	if sender == nil || sender.ID == "" || sender.ProjectID == "" {
 		return "", errors.New("message policy gate: missing sender agent or sender project")
 	}
 	if senderIdent == nil {
 		return "", errors.New("message policy gate: missing sender identity")
+	}
+	switch senderIdent.(type) {
+	case AgentIdentity, *DelegatedAgentIdentity:
+	default:
+		return "", errors.New("message policy gate: invalid non-agent actor identity")
 	}
 	if sender.ID != senderIdent.ID() {
 		return "", errors.New("message policy gate: sender agent ID does not match authenticated actor")
@@ -137,9 +144,6 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 	if !s.experimentEnabled(experiments.MessagePolicies) {
 		return h2PolicyOutcome{}, nil
 	}
-	if in.sender == nil || in.sender.ProjectID == "" {
-		return h2PolicyOutcome{}, nil
-	}
 	if ctx.Err() != nil {
 		return h2PolicyOutcome{}, &originPolicyRejection{
 			httpStatus: 499,
@@ -156,14 +160,12 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 		return h2PolicyOutcome{}, nil
 	}
 
-	evalProjectID := in.sender.ProjectID
-	if in.senderIdent != nil {
+	var evalProjectID string
+	if in.requireActorCrossCheck || in.senderIdent != nil {
 		var authErr error
 		evalProjectID, authErr = verifySenderAuthorityCrossCheck(in.sender, in.senderIdent)
 		if authErr != nil {
 			s.messageLog.Error("message policy gate: sender authority cross-check failed (fail-closed)",
-				"sender_id", in.sender.ID,
-				"sender_project_id", in.sender.ProjectID,
 				"error", authErr,
 			)
 			return h2PolicyOutcome{}, &originPolicyRejection{
@@ -172,6 +174,11 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 				message:    "Message delivery denied",
 			}
 		}
+	} else {
+		if in.sender == nil || in.sender.ProjectID == "" {
+			return h2PolicyOutcome{}, nil
+		}
+		evalProjectID = in.sender.ProjectID
 	}
 	in.originSnap.projectID = evalProjectID
 

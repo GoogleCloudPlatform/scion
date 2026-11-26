@@ -2806,9 +2806,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			var rej *originPolicyRejection
 			delegatedPolicyRes, rej = s.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
-				sender:      actorAgent,
-				senderIdent: delegated,
-				originSnap:  originSnap,
+				sender:                 actorAgent,
+				senderIdent:            delegated,
+				requireActorCrossCheck: true,
+				originSnap:             originSnap,
 			})
 			if rej != nil {
 				rej.writeHTTP(w)

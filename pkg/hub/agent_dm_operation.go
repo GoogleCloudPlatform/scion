@@ -511,15 +511,16 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (dmRes
 			}
 			var rej *originPolicyRejection
 			dmPolicyRes, rej = s.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
-				sender:              input.SenderAgent,
-				senderIdent:         input.SenderIdentity,
-				originSnap:          originSnap,
-				copyTargets:         copyTargets,
-				copyBody:            input.Msg,
-				copyAttachmentCount: len(input.AttachRefs),
-				copyUrgent:          false,
-				preloadedHumans:     input.mentionHumanMembers,
-				humansLoaded:        input.mentionHumanMembers != nil,
+				sender:                 input.SenderAgent,
+				senderIdent:            input.SenderIdentity,
+				requireActorCrossCheck: true,
+				originSnap:             originSnap,
+				copyTargets:            copyTargets,
+				copyBody:               input.Msg,
+				copyAttachmentCount:    len(input.AttachRefs),
+				copyUrgent:             false,
+				preloadedHumans:        input.mentionHumanMembers,
+				humansLoaded:           input.mentionHumanMembers != nil,
 			})
 			if rej != nil {
 				return nil, rej.toAgentDMError()

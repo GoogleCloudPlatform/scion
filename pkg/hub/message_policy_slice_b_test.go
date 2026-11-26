@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -32,11 +33,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
 func sliceBResetDispatcher(d *recordingDispatcher) {
@@ -1231,4 +1237,330 @@ func TestShadow_OwnGroups_NoEnforceReuse(t *testing.T) {
 	calls := providerCalls
 	mu.Unlock()
 	assert.Equal(t, 2, calls, "shadow policy must execute in its own group and never reuse enforce result")
+}
+
+// TestD5_StoreProjectPrecedence_Boundaries verifies the accepted D5
+// store-project precedence boundaries across ordinary agent (E3b), delegated
+// agent (E3c), positive controls, actor-ID mismatch / missing sender fail-closed
+// (zero policy loads, zero secret lookups, zero provider calls), and copy
+// admission + shadow decision project propagation.
+func TestD5_StoreProjectPrecedence_Boundaries(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+	copyTarget := sliceBMakeAgent(t, f, "d5-copy-target")
+
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions, experiments.SystemOne:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+
+	localBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: localBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		return nil, egress.ErrAuth
+	})
+
+	admin, err := f.s.GetUser(ctx, hubConfigTokenUser(t, f.s, "d5-bound-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	// Project A = f.project; Project B = projB.
+	projB := &store.Project{
+		ID:   tid("d5-proj-b"),
+		Name: "D5 Project B",
+		Slug: "d5-proj-b",
+	}
+	require.NoError(t, f.s.CreateProject(ctx, projB))
+
+	const (
+		projAKey = "AIza-d5-project-A-secret-1111"
+		projBKey = "AIza-d5-project-B-secret-2222"
+	)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      projAKey,
+		SecretType: store.SecretTypeEnvironment,
+		Scope:      store.ScopeProject,
+		ScopeID:    f.project.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      projBKey,
+		SecretType: store.SecretTypeEnvironment,
+		Scope:      store.ScopeProject,
+		ScopeID:    projB.ID,
+	})
+	require.NoError(t, err)
+
+	var (
+		providerCalls atomic.Int32
+		keyMu         sync.Mutex
+		seenKeyHeader string
+		s1AnswerTrue  atomic.Bool
+	)
+	s1AnswerTrue.Store(true)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		keyMu.Lock()
+		seenKeyHeader = r.Header.Get("x-goog-api-key")
+		keyMu.Unlock()
+		score := 0.05
+		if s1AnswerTrue.Load() {
+			score = 0.96
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"answers": {"asks_choice": {"type": "noul", "noul": %.2f, "confidence": 0.96}},
+			"usage": {"total_input_tokens": 16, "total_output_tokens": 0, "total_tokens": 16}
+		}`, score)
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	createRec := doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-d5-inst",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind": "api_key",
+			"secretRef": map[string]any{
+				"name":  systemoneprovider.DefaultGeminiAPIKeySecretName,
+				"scope": systemoneprovider.SecretScopeProject,
+			},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-d5-inst")
+	require.NoError(t, err)
+	_, _, err = f.s.AddProjectSystemOneInstance(ctx, projB.ID, "gemini-d5-inst")
+	require.NoError(t, err)
+
+	s1Rule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"gemini-d5-inst"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+
+	// Distinct policies in A vs B:
+	// - Project A rejects when body contains "TRIGGER_A" && judgment_flags.asks_choice
+	// - Project B rejects EVERYTHING on agent_dm (violation_rule: "true", uses B's secret if evaluated)
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "policy-a-dm",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentDM}},
+		ViolationRule: `message.body.contains("TRIGGER_A") && judgment_flags.asks_choice`,
+		SystemOneRule: s1Rule,
+		SystemOneRefs: []string{"gemini-d5-inst"},
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		RejectReason:  "rejected-by-project-A",
+	}))
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     projB.ID,
+		Name:          "policy-b-dm",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentDM}},
+		ViolationRule: `judgment_flags.asks_choice || true`,
+		SystemOneRule: s1Rule,
+		SystemOneRefs: []string{"gemini-d5-inst"},
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		RejectReason:  "rejected-by-project-B",
+	}))
+	// Shadow policy in A on mention_delivery to verify shadow + copy admission propagate store project A.
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "policy-a-copy-shadow",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceMentionDelivery}},
+		ViolationRule: `false`,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}))
+
+	sendE3bWithClaim := func(claimProjectID, msg string) *httptest.ResponseRecorder {
+		raw, mErr := json.Marshal(map[string]any{"message": msg})
+		require.NoError(t, mErr)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.peerAgent.ID+"/message", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.sender.ID},
+			ProjectID: claimProjectID,
+			Ancestry:  f.sender.Ancestry,
+		}}))
+		rr := httptest.NewRecorder()
+		f.srv.handleAgentMessage(rr, req, f.peerAgent.ID)
+		return rr
+	}
+
+	sendE3cWithClaim := func(claimProjectID, msg string) *httptest.ResponseRecorder {
+		raw, mErr := json.Marshal(map[string]any{"message": msg})
+		require.NoError(t, mErr)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.peerAgent.ID+"/message", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		delegated := &DelegatedAgentIdentity{
+			agentID:           f.sender.ID,
+			agentProjectID:    claimProjectID,
+			authorizingUserID: f.alice.ID,
+			grantID:           tid("d5-del-grant-" + claimProjectID),
+		}
+		req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+		rr := httptest.NewRecorder()
+		f.srv.handleAgentMessage(rr, req, f.peerAgent.ID)
+		return rr
+	}
+
+	// 1. Ordinary agent sender: token claims B, stored sender is in A.
+	//    A's policy rejects TRIGGER_A using A's secret; clean message is admitted (proving B's reject-all never ran).
+	t.Run("ordinary_agent_conflicting_claim_uses_store_project_A", func(t *testing.T) {
+		keyMu.Lock()
+		seenKeyHeader = ""
+		keyMu.Unlock()
+
+		rr := sendE3bWithClaim(projB.ID, "TRIGGER_A ordinary conflict")
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "rejected-by-project-A")
+		assert.NotContains(t, rr.Body.String(), "rejected-by-project-B")
+		keyMu.Lock()
+		gotKey := seenKeyHeader
+		keyMu.Unlock()
+		assert.Equal(t, projAKey, gotKey, "must use project A secret, never project B")
+		assert.NotEqual(t, projBKey, gotKey)
+
+		// Clean message with token claiming B is ADMITTED by A (B's reject-all never applies).
+		// Also mentions copyTarget to verify item 6: copy admission + shadow decision propagate store project A.
+		sliceBResetDispatcher(f.dispatcher)
+		rrOK := sendE3bWithClaim(projB.ID, "clean message @"+copyTarget.Slug)
+		require.Equal(t, http.StatusOK, rrOK.Code, rrOK.Body.String())
+		assert.Len(t, f.dispatcher.getCalls(), 2, "origin + copy must both deliver using store-project A admission")
+
+		// Wait for shadow decision row on mention_delivery and assert ProjectID == A (never B).
+		var shadowFound bool
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			resA, lErr := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: f.project.ID}, store.ListOptions{Limit: 50})
+			require.NoError(t, lErr)
+			for _, d := range resA.Items {
+				if d.PolicyName == "policy-a-copy-shadow" && d.Mode == store.MessagePolicyModeShadow && d.ProjectID == f.project.ID {
+					shadowFound = true
+					break
+				}
+			}
+			if shadowFound {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		assert.True(t, shadowFound, "shadow decision row must be persisted under store project A")
+
+		resB, lErr := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{ProjectID: projB.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, lErr)
+		assert.Empty(t, resB.Items, "project B must have zero decision rows")
+	})
+
+	// 2. Delegated sender: delegated actor claims B, stored actor is in A.
+	t.Run("delegated_sender_conflicting_claim_uses_store_project_A", func(t *testing.T) {
+		keyMu.Lock()
+		seenKeyHeader = ""
+		keyMu.Unlock()
+
+		rr := sendE3cWithClaim(projB.ID, "TRIGGER_A delegated conflict")
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "rejected-by-project-A")
+		assert.NotContains(t, rr.Body.String(), "rejected-by-project-B")
+		keyMu.Lock()
+		gotKey := seenKeyHeader
+		keyMu.Unlock()
+		assert.Equal(t, projAKey, gotKey, "delegated send must use project A secret, never project B")
+
+		rrOK := sendE3cWithClaim(projB.ID, "clean delegated message")
+		require.Equal(t, http.StatusOK, rrOK.Code, rrOK.Body.String())
+	})
+
+	// 3. Positive controls: matching claims behave normally.
+	t.Run("positive_controls_matching_claims", func(t *testing.T) {
+		rrOrd := sendE3bWithClaim(f.project.ID, "TRIGGER_A ordinary matching")
+		require.Equal(t, http.StatusUnprocessableEntity, rrOrd.Code, rrOrd.Body.String())
+		assert.Contains(t, rrOrd.Body.String(), "rejected-by-project-A")
+
+		rrDel := sendE3cWithClaim(f.project.ID, "TRIGGER_A delegated matching")
+		require.Equal(t, http.StatusUnprocessableEntity, rrDel.Code, rrDel.Body.String())
+		assert.Contains(t, rrDel.Body.String(), "rejected-by-project-A")
+	})
+
+	// 4. Actor-ID mismatch (ordinary and delegated) + missing sender: fail closed
+	//    with ZERO policy loads, ZERO secret lookups, and ZERO provider calls.
+	t.Run("actor_id_mismatch_and_missing_sender_fail_closed_zero_io", func(t *testing.T) {
+		listBefore := f.faultWrapper.listCalls.Load()
+		secretsBefore := countingSecrets.getCalls.Load()
+		providerBefore := providerCalls.Load()
+
+		// 4a. Ordinary agent actor-ID mismatch (token subject is peerAgent, sender record is sender).
+		_, rejOrd := f.srv.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+			sender:                 f.sender,
+			senderIdent:            sliceBSendAgentIdent(f.peerAgent),
+			requireActorCrossCheck: true,
+			originSnap: h2FactSnapshot{
+				surface:       store.MessagePolicySurfaceAgentDM,
+				projectID:     f.project.ID,
+				senderID:      f.sender.ID,
+				recipientKind: "agent",
+				recipientID:   f.peerAgent.ID,
+			},
+		})
+		require.NotNil(t, rejOrd)
+		assert.Equal(t, http.StatusForbidden, rejOrd.httpStatus)
+
+		// 4b. Delegated actor-ID mismatch (delegated actor is peerAgent, NOT sender — also never matches issuer).
+		_, rejDel := f.srv.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+			sender: f.sender,
+			senderIdent: &DelegatedAgentIdentity{
+				agentID:           f.peerAgent.ID,
+				agentProjectID:    f.project.ID,
+				authorizingUserID: f.sender.ID, // issuer ID must NOT satisfy actor check
+				grantID:           tid("d5-mismatch-grant"),
+			},
+			requireActorCrossCheck: true,
+			originSnap: h2FactSnapshot{
+				surface:       store.MessagePolicySurfaceAgentDM,
+				projectID:     f.project.ID,
+				senderID:      f.sender.ID,
+				recipientKind: "agent",
+				recipientID:   f.peerAgent.ID,
+			},
+		})
+		require.NotNil(t, rejDel)
+		assert.Equal(t, http.StatusForbidden, rejDel.httpStatus)
+
+		// 4c. Missing sender agent fails closed.
+		_, rejNil := f.srv.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+			sender:                 nil,
+			senderIdent:            sliceBSendAgentIdent(f.sender),
+			requireActorCrossCheck: true,
+			originSnap: h2FactSnapshot{
+				surface:       store.MessagePolicySurfaceAgentDM,
+				recipientKind: "agent",
+				recipientID:   f.peerAgent.ID,
+			},
+		})
+		require.NotNil(t, rejNil)
+		assert.Equal(t, http.StatusForbidden, rejNil.httpStatus)
+
+		assert.Equal(t, listBefore, f.faultWrapper.listCalls.Load(), "actor mismatch / missing sender must perform ZERO policy loads")
+		assert.Equal(t, secretsBefore, countingSecrets.getCalls.Load(), "actor mismatch / missing sender must perform ZERO secret lookups")
+		assert.Equal(t, providerBefore, providerCalls.Load(), "actor mismatch / missing sender must perform ZERO provider calls")
+	})
 }
