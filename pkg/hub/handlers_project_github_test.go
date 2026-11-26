@@ -714,7 +714,8 @@ func TestProjectGitHub_CreatorProofColdAndUnverified(t *testing.T) {
 	assert.NotContains(t, sanResp.Association.Reason, "sensitive detail")
 	assert.Equal(t, githubAppStatusMessage(githubAppErrAssociationCheckFailed), sanResp.Association.Reason)
 
-	// Missing creator token yields explicit unverified state (not plain unauthorized).
+	// Missing creator token yields explicit unverified state (not plain unauthorized),
+	// both when the association report cache is cold AND after the report cache is warmed.
 	noTokProj := &store.Project{
 		ID:                   tid("pg-no-creator-tok"),
 		Name:                 "pg-no-creator-tok",
@@ -733,6 +734,59 @@ func TestProjectGitHub_CreatorProofColdAndUnverified(t *testing.T) {
 	assert.False(t, noTokResp.Association.Authorized)
 	assert.False(t, noTokResp.Association.Verified)
 	assert.Equal(t, githubAppErrAssociationUnverified, noTokResp.Association.ErrorCode)
+
+	// Warm the association report cache via githubAssociationReport(ctx, false) and
+	// verify GET /github still returns verified=false, association_unverified.
+	fakeAPI.mu.Lock()
+	fakeAPI.repoStatus = 0
+	fakeAPI.mu.Unlock()
+	_, _, err = srv.githubAssociationReport(ctx, false)
+	require.NoError(t, err)
+
+	recNoTokWarm := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+noTokProj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recNoTokWarm.Code, recNoTokWarm.Body.String())
+	var noTokWarmResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recNoTokWarm.Body.Bytes(), &noTokWarmResp))
+	assert.False(t, noTokWarmResp.Association.Authorized)
+	assert.False(t, noTokWarmResp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnverified, noTokWarmResp.Association.ErrorCode)
+	assert.Equal(t, noTokResp.Association.Reason, noTokWarmResp.Association.Reason)
+
+	// Definitively denied creator: cold-cache GET and report-warm GET must match
+	// and preserve the specific denial reason.
+	deniedProj := &store.Project{
+		ID:                   tid("pg-denied-creator-proj"),
+		Name:                 "pg-denied-creator-proj",
+		Slug:                 tid("pg-denied-creator-proj"),
+		GitRemote:            fakeAPI.srv.URL + "/acme/denied-repo",
+		CreatedBy:            creator.ID, // has ghp_cold_push, which is NOT granted on acme/denied-repo
+		GitHubInstallationID: &instID,
+		Created:              time.Now(),
+		Updated:              time.Now(),
+	}
+	require.NoError(t, st.CreateProject(ctx, deniedProj))
+
+	recDeniedCold := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+deniedProj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recDeniedCold.Code, recDeniedCold.Body.String())
+	var deniedColdResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recDeniedCold.Body.Bytes(), &deniedColdResp))
+	assert.False(t, deniedColdResp.Association.Authorized)
+	assert.True(t, deniedColdResp.Association.Verified)
+	assert.Equal(t, githubAppErrAssociationUnauthorized, deniedColdResp.Association.ErrorCode)
+	assert.Contains(t, deniedColdResp.Association.Reason, "acme/denied-repo")
+
+	// Force-rebuild the report cache so deniedProj has a fresh non-authorized entry.
+	_, _, err = srv.githubAssociationReport(ctx, true)
+	require.NoError(t, err)
+
+	recDeniedWarm := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+deniedProj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recDeniedWarm.Code, recDeniedWarm.Body.String())
+	var deniedWarmResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recDeniedWarm.Body.Bytes(), &deniedWarmResp))
+	assert.Equal(t, deniedColdResp.Association.Authorized, deniedWarmResp.Association.Authorized)
+	assert.Equal(t, deniedColdResp.Association.Verified, deniedWarmResp.Association.Verified)
+	assert.Equal(t, deniedColdResp.Association.ErrorCode, deniedWarmResp.Association.ErrorCode)
+	assert.Equal(t, deniedColdResp.Association.Reason, deniedWarmResp.Association.Reason)
 }
 
 func TestProjectGitHub_EffectivePermissionsMatchMint(t *testing.T) {

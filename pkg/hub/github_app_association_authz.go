@@ -993,7 +993,11 @@ type githubAssociationCachedEval struct {
 //
 //  1. Unassociated projects return Authorized=false, Verified=true.
 //  2. When githubAssociationReportCache holds a fresh, non-dirty entry for
-//     project.ID on its current installation, that entry answers directly.
+//     project.ID on its current installation, authorized entries and
+//     check_failed entries answer directly; non-authorized entries also answer
+//     directly when allowCreatorCheck=false, while allowCreatorCheck=true falls
+//     through to the bounded local evaluation so unverified no-token states and
+//     specific denial reasons do not depend on report-cache warmth.
 //  3. Otherwise local checks run (host, active installation matching owner,
 //     and admin binding).
 //  4. When no admin binding applies, creator proof is evaluated:
@@ -1024,11 +1028,11 @@ func (s *Server) evaluateGitHubAssociationCached(
 	}
 
 	if entry, ok := s.githubAssociationReportCache.lookupFreshProject(project.ID, instID, timeNow()); ok {
-		eval.Authorized = entry.Authorized
-		eval.Basis = entry.Basis
-		eval.WriteAllowed = entry.WriteAllowed
 		if entry.Authorized {
+			eval.Authorized = true
 			eval.Verified = true
+			eval.Basis = entry.Basis
+			eval.WriteAllowed = entry.WriteAllowed
 			return eval, nil
 		}
 		if entry.ErrorCode == githubAppErrAssociationCheckFailed {
@@ -1037,13 +1041,15 @@ func (s *Server) evaluateGitHubAssociationCached(
 			eval.Reason = githubAppStatusMessage(githubAppErrAssociationCheckFailed)
 			return eval, nil
 		}
-		eval.Verified = true
-		eval.ErrorCode = entry.ErrorCode
-		if eval.ErrorCode == "" {
-			eval.ErrorCode = githubAppErrAssociationUnauthorized
+		if !allowCreatorCheck {
+			eval.Verified = true
+			eval.ErrorCode = entry.ErrorCode
+			if eval.ErrorCode == "" {
+				eval.ErrorCode = githubAppErrAssociationUnauthorized
+			}
+			eval.Reason = githubAppStatusMessage(githubAppErrAssociationUnauthorized)
+			return eval, nil
 		}
-		eval.Reason = githubAppStatusMessage(githubAppErrAssociationUnauthorized)
-		return eval, nil
 	}
 
 	if !allowCreatorCheck &&
