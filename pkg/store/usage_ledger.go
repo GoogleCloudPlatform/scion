@@ -310,6 +310,22 @@ type UsageIngestBatchResult struct {
 	Rejected   []UsageIngestRowRejection
 }
 
+// UsageTokenPresence reports per-(model, harness, usage_source) non-null event
+// counts from usage_events over a query window so read APIs can distinguish
+// measured 0 from all-NULL (unknown) buckets in usage_rollups_daily (§3.1).
+type UsageTokenPresence struct {
+	Model             string
+	Harness           string
+	UsageSource       string
+	EventCount        int64
+	InputCount        int64
+	OutputCount       int64
+	CacheReadCount    int64
+	CacheWriteCount   int64
+	CacheWrite1hCount int64
+	ReasoningCount    int64
+}
+
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
 // operational usage ledger tables introduced in P1.1.
 type UsageLedgerStore interface {
@@ -350,6 +366,10 @@ type UsageLedgerStore interface {
 	// GetMeterHealth returns all meter_health rows for (agentID, runID).
 	GetMeterHealth(ctx context.Context, agentID, runID string) ([]*MeterHealth, error)
 
+	// ListMeterHealthByAgent returns all meter_health rows for agentID ordered
+	// by last_receipt_at descending.
+	ListMeterHealthByAgent(ctx context.Context, agentID string) ([]*MeterHealth, error)
+
 	// EnsureRunAttributionForAgent ensures a run_attribution row exists for
 	// the agent's current run_id (lazy attribution fallback for the narrow
 	// OFF->ON race), built from the Hub's agents row, never from event payload.
@@ -361,4 +381,21 @@ type UsageLedgerStore interface {
 	// inserted rows (in canonical key-sorted order to prevent deadlocks),
 	// and updates meter_health (events and/or heartbeats).
 	IngestUsageBatch(ctx context.Context, in *UsageIngestBatchInput) (*UsageIngestBatchResult, error)
+
+	// ListUsageRollupsDailyByAgent returns usage_rollups_daily rows for agentID
+	// with bucket_start in [sinceDay, untilDay] (inclusive, UTC day boundaries).
+	ListUsageRollupsDailyByAgent(ctx context.Context, agentID string, sinceDay, untilDay time.Time) ([]*UsageRollupDaily, error)
+
+	// GetUsageTokenPresenceByAgent returns per-(model, harness, usage_source)
+	// non-null counts for each canonical token column in usage_events for
+	// agentID with event_ts in [since, until] (inclusive).
+	GetUsageTokenPresenceByAgent(ctx context.Context, agentID string, since, until time.Time) ([]*UsageTokenPresence, error)
+
+	// HasUsageEventsForRun reports whether at least one usage_events row exists
+	// for (agentID, runID).
+	HasUsageEventsForRun(ctx context.Context, agentID, runID string) (bool, error)
+
+	// DBNow returns the current UTC timestamp from the database clock
+	// (Tokenomics design §4.2 item 7).
+	DBNow(ctx context.Context) (time.Time, error)
 }

@@ -440,3 +440,16 @@ export function execContainersEnabled(): boolean {
  * with a collapse toggle inside the bar. Presentation only. Default OFF.
  */
 export const TERMINAL_KEY_BAR_FLAG = 'web.terminal_key_bar';
+
+/**
+ * Tokenomics Track 1 usage ledger (tokenomics.usage_ledger, ptone/scion#9235):
+ * shows the Usage panel on the agent detail page. Presentation only: the hub
+ * enforces the experiment on GET /api/v1/agents/{id}/usage (404 while off) and
+ * on ingest/attribution routes. Default OFF.
+ */
+export const TOKENOMICS_USAGE_LEDGER_FLAG = 'tokenomics.usage_ledger';
+
+/** Whether the Tokenomics usage ledger UI surfaces are enabled in this session. */
+export function usageLedgerEnabled(): boolean {
+  return isFeatureEnabled(TOKENOMICS_USAGE_LEDGER_FLAG);
+}

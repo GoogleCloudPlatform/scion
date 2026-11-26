@@ -49,6 +49,7 @@ const (
 	AgentRouteMessagesStream     AgentSubRouteID = "agents.messages.stream"
 	AgentRouteSecrets            AgentSubRouteID = "agents.secrets"
 	AgentRouteMetricsSummary     AgentSubRouteID = "agents.metrics.summary"
+	AgentRouteUsage              AgentSubRouteID = "agents.usage"
 	AgentRouteUsageEvents        AgentSubRouteID = "agents.usage.events"
 	AgentRouteUsageCapabilities  AgentSubRouteID = "agents.usage.capabilities"
 	AgentRouteActionStatus       AgentSubRouteID = "agents.action.status"
@@ -201,6 +202,7 @@ const (
 	opAgentTokenRefresh      authzop.OperationID = "agent.token.refresh"
 	opAgentOutboundMessage   authzop.OperationID = "agent.outbound.message"
 	opAgentMetricsReport     authzop.OperationID = "agent.metrics.report"
+	opAgentUsageRead         authzop.OperationID = "agent.usage.read"
 	opAgentUsageIngest       authzop.OperationID = "agent.usage.ingest"
 	opAgentUsageCapabilities authzop.OperationID = "agent.usage.capabilities"
 	opAgentStatusUpdate      authzop.OperationID = "agent.status.update"
@@ -267,6 +269,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteMessagesStream, form: agentFormByID, segs: []string{"messages", "stream"}, ops: getOp(opAgentMessagesRead), kind: authzop.EntryPointSSE},
 	{id: AgentRouteSecrets, form: agentFormByID, segs: []string{"secrets"}, opaque: true},
 	{id: AgentRouteMetricsSummary, form: agentFormByID, segs: []string{"metrics", "summary"}, ops: getOp(opAgentMetricsRead)},
+	{id: AgentRouteUsage, form: agentFormByID, segs: []string{"usage"}, ops: getOp(opAgentUsageRead)},
 	{id: AgentRouteUsageEvents, form: agentFormByID, segs: []string{"usage", "events"}, ops: postOp(opAgentUsageIngest)},
 	{id: AgentRouteUsageCapabilities, form: agentFormByID, segs: []string{"usage", "capabilities"}, ops: getOp(opAgentUsageCapabilities)},
 	{id: AgentRouteActionStatus, form: agentFormByID, segs: []string{"status"}, ops: postOp(opAgentStatusUpdate)},

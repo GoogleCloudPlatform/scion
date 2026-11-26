@@ -1154,6 +1154,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/message-logs":                                     {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/message-logs":                {"projectId": f.project, "id": f.agent},
 		"/api/v1/agents/{id}/metrics/summary":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/usage":                                            {"id": f.agent},
 		"/api/v1/agents/{id}/keys":                                             {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/keys":                        {"projectId": f.project, "id": f.agent},
 		"/api/v1/agents/{id}/message":                                          {"id": f.agent},

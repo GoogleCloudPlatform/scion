@@ -2649,3 +2649,96 @@ export interface AgentSuspendScreen {
   truncated: boolean;
   phase: string;
 }
+
+/**
+ * Measurement status for Track 1 usage read responses (Tokenomics design §3.3).
+ */
+export type UsageMeasurementStatus =
+  | 'measured'
+  | 'partial'
+  | 'calls_only'
+  | 'unmeasured'
+  | 'legacy_client'
+  | 'stale';
+
+/**
+ * Per-bucket counts of events in the window where that bucket was NULL while
+ * other events reported known values (mixed known+unknown).
+ */
+export interface AgentUsageBucketUnknownEvents {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+  cache_write_1h?: number;
+  reasoning?: number;
+}
+
+/**
+ * Nullable canonical Track 1 token buckets (§3.1).
+ * null means unknown (never fabricated as 0).
+ */
+export interface AgentUsageTokens {
+  input: number | null;
+  output: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  cache_write_1h: number | null;
+  reasoning: number | null;
+  summable_tokens: number | null;
+  unknown_events?: AgentUsageBucketUnknownEvents;
+}
+
+/**
+ * Per-model usage breakdown returned by GET /api/v1/agents/{id}/usage.
+ */
+export interface AgentUsageModelBreakdown {
+  model: string;
+  harness?: string;
+  usage_source?: string;
+  calls: number;
+  error_calls: number;
+  events: number;
+  null_token_events: number;
+  tokens: AgentUsageTokens;
+}
+
+/**
+ * Compact per-run attribution summary returned by GET /api/v1/agents/{id}/usage.
+ */
+export interface AgentUsageRunSummary {
+  run_id: string;
+  generation: number;
+  harness?: string;
+  harness_config?: string;
+  template?: string;
+  created_at: string;
+}
+
+/**
+ * Effective UTC query window for a usage read response.
+ */
+export interface AgentUsageWindow {
+  since: string;
+  until: string;
+}
+
+/**
+ * Track 1 operational token usage summary for a single agent.
+ * Response from GET /api/v1/agents/{id}/usage (behind tokenomics.usage_ledger).
+ */
+export interface AgentUsageResponse {
+  agent_id: string;
+  project_id: string;
+  window: AgentUsageWindow;
+  calls: number;
+  error_calls: number;
+  events: number;
+  null_token_events: number;
+  tokens: AgentUsageTokens;
+  by_model: AgentUsageModelBreakdown[];
+  runs?: AgentUsageRunSummary[];
+  measurement_status: UsageMeasurementStatus;
+  as_of: string;
+  last_receipt_at: string | null;
+}
