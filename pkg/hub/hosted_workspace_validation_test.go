@@ -311,6 +311,6 @@ func TestDispatch_HostedWorkspacePrecheck(t *testing.T) {
 
 	t.Run("workstation mode allows stored absolute workspace", func(t *testing.T) {
 		d, _, a, _, _ := newSetup(t, false, "/var/tmp/workstation-dir", nil)
-		require.NoError(t, d.hostedWorkspacePrecheck(ctx, a))
+		require.NoError(t, d.hostedConfigPrecheck(ctx, a))
 	})
 }

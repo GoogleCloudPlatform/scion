@@ -85,6 +85,9 @@ func (d *HTTPAgentDispatcher) hostedConfigPrecheck(ctx context.Context, agent *s
 // authority. Pre-existing rows whose stored absolute workspace does not match
 // are refused before dispatch with a typed workspace_not_permitted error.
 func (d *HTTPAgentDispatcher) hostedWorkspacePrecheck(ctx context.Context, agent *store.Agent) error {
+	if !d.hostedMode || agent == nil || agent.AppliedConfig == nil {
+		return nil
+	}
 	raw := agent.AppliedConfig.Workspace
 	if raw == "" || !isAbsWorkspace(raw) {
 		return nil
