@@ -124,7 +124,9 @@ export function makeGraphValueSuggestions(
     if (k !== 'project' && k !== 'label' && k !== 'template' && k !== 'harness') {
       return [];
     }
-    return base(k, prefix).sort((a, b) => a.localeCompare(b));
+    return base(k, prefix)
+      .map((v) => (typeof v === 'string' ? v : v.value))
+      .sort((a, b) => a.localeCompare(b));
   };
 }
 
