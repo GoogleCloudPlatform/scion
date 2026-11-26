@@ -56,11 +56,11 @@ func decodeHostedRefusal(t *testing.T, rec *httptest.ResponseRecorder) (code, me
 // and dispatches nothing.
 func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 	for name, vol := range map[string]api.VolumeMount{
-		"socket bind":       hostedSocketVolume,
-		"etc bind":          {Source: "/etc", Target: "/host-etc", ReadOnly: true},
-		"nfs":               {Type: "nfs", Server: "10.1.2.3", Source: "/export", Target: "/n"},
-		"gke shared volume": {Type: "gke-shared-volume", VolumeName: "other-project", Target: "/g"},
-		"gcs not canonical": {Type: "GCS", Bucket: "b", Target: "/b"},
+		"socket bind":         hostedSocketVolume,
+		"etc bind":            {Source: "/etc", Target: "/host-etc", ReadOnly: true},
+		"nfs":                 {Type: "nfs", Server: "10.1.2.3", Source: "/export", Target: "/n"},
+		"gke shared volume":   {Type: "gke-shared-volume", VolumeName: "other-project", Target: "/g"},
+		"unknown volume type": {Type: "tmpfs", Target: "/t"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
@@ -86,15 +86,20 @@ func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 }
 
 // TestCreateAgent_HostedLetsGCSThrough: the hub does not know the runtime
-// the agent will run in, so a gcs volume is left to the broker.
+// the agent will run in, so a gcs volume (matched case-insensitively) is left
+// to the broker.
 func TestCreateAgent_HostedLetsGCSThrough(t *testing.T) {
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, _, project := setupCreateAgentServer(t, disp)
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "hosted-gcs-agent", ProjectID: project.ID,
-		Config: &api.ScionConfig{Volumes: []api.VolumeMount{{Type: "gcs", Bucket: "b", Target: "/b"}}},
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	for _, volType := range []string{"gcs", "GCS"} {
+		t.Run(volType, func(t *testing.T) {
+			disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+			srv, _, project := setupCreateAgentServer(t, disp)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+				Name: "hosted-gcs-agent", ProjectID: project.ID,
+				Config: &api.ScionConfig{Volumes: []api.VolumeMount{{Type: volType, Bucket: "b", Target: "/b"}}},
+			})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		})
+	}
 }
 
 // TestCreateAgent_WorkstationKeepsMemberVolumes: a workstation hub stores

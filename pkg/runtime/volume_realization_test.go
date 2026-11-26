@@ -22,6 +22,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 func TestRealizeVolume_Matrix(t *testing.T) {
@@ -300,4 +301,55 @@ func TestVolumeRealization_KubernetesAndCloudRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCloudRunEnvOverride pins CloudRunEnvOverride to base factory.go's exact
+// set ("docker", "local", "auto" only; empty "" is not overridden so unknown
+// runtime kinds stay fail-closed and match base selectRuntime/build).
+func TestCloudRunEnvOverride(t *testing.T) {
+	t.Run("service env", func(t *testing.T) {
+		t.Setenv(cloudrunenv.InstanceEnv, "")
+		t.Setenv(cloudrunenv.ServiceEnv, "svc")
+		for _, tc := range []struct {
+			in      string
+			want    string
+			wantHit bool
+		}{
+			{"docker", "cloudrun", true},
+			{"local", "cloudrun", true},
+			{"auto", "cloudrun", true},
+			{"", "", false},
+			{"podman", "podman", false},
+			{"kubernetes", "kubernetes", false},
+		} {
+			got, hit := CloudRunEnvOverride(tc.in)
+			if got != tc.want || hit != tc.wantHit {
+				t.Errorf("CloudRunEnvOverride(%q) = (%q, %v), want (%q, %v)", tc.in, got, hit, tc.want, tc.wantHit)
+			}
+		}
+	})
+
+	t.Run("instance env", func(t *testing.T) {
+		t.Setenv(cloudrunenv.ServiceEnv, "")
+		t.Setenv(cloudrunenv.InstanceEnv, "inst")
+		for _, in := range []string{"docker", "local", "auto"} {
+			got, hit := CloudRunEnvOverride(in)
+			if got != "cloudrun-instances" || !hit {
+				t.Errorf("CloudRunEnvOverride(%q) = (%q, %v), want (\"cloudrun-instances\", true)", in, got, hit)
+			}
+		}
+		if got, hit := CloudRunEnvOverride(""); got != "" || hit {
+			t.Errorf("CloudRunEnvOverride(\"\") = (%q, %v), want (\"\", false)", got, hit)
+		}
+	})
+
+	t.Run("no cloudrun env", func(t *testing.T) {
+		t.Setenv(cloudrunenv.ServiceEnv, "")
+		t.Setenv(cloudrunenv.InstanceEnv, "")
+		for _, in := range []string{"", "docker", "local", "auto"} {
+			if got, hit := CloudRunEnvOverride(in); got != in || hit {
+				t.Errorf("CloudRunEnvOverride(%q) = (%q, %v), want (%q, false)", in, got, hit, in)
+			}
+		}
+	})
 }
