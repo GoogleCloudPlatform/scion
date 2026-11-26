@@ -338,7 +338,7 @@ func TestMessagePolicy_EndToEnd_EnforceRejectThenShadowDeliver(t *testing.T) {
 	for _, blocked := range []string{"create", "delete", "test", "decisions"} {
 		_, blockedErr := executeMessagePolicyE2ECLI(t, ModeAgent, blocked)
 		require.Error(t, blockedErr, "agent mode must block message-policy %s", blocked)
-		assert.Contains(t, blockedErr.Error(), fmt.Sprintf(`unknown command %q for "scion message-policy"`, blocked))
+		assert.Contains(t, blockedErr.Error(), fmt.Sprintf(`command "scion message-policy %s" is not available in agent mode`, blocked))
 	}
 
 	// 3. Agent sends a violating outbound message to user:alice-e2e@example.com via `scion message`.

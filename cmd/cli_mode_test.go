@@ -798,18 +798,20 @@ func cloneCommandForModeExec(src *cobra.Command) *cobra.Command {
 	return c
 }
 
-// TestAgentModeGatedSubcommandsFail covers ptone/scion#8365 over the real
-// command tree: every subcommand removed by the agent-mode gate (whether its
-// surviving parent is Runnable or a pure group like "project service-accounts")
-// must fail with an unknown-command error instead of printing parent help and
-// exiting 0. Bare group invocations and "<group> help" still print help.
+// TestAgentModeGatedSubcommandsFail covers ptone/scion#8365 and ptone/scion#9449
+// over the real command tree: every command removed by the agent-mode gate
+// (whether top-level, under a Runnable parent, or under a pure group like
+// "project service-accounts") must fail with a "not available in agent mode"
+// error instead of reporting "unknown command" or printing parent help and
+// exiting 0. Truly unknown commands still report "unknown command", and bare
+// group invocations and "<group> help" still print help.
 func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 	type gatedCase struct {
-		path       string
-		parentPath string
-		leaf       string
-		args       []string
-		wantParent string
+		path        string
+		parentPath  string
+		leaf        string
+		args        []string
+		wantCommand string
 	}
 
 	var cases []gatedCase
@@ -831,16 +833,13 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 				// is a positional argument rather than a subcommand.
 				if parentPath == "" || !acceptsPositionalArgs(parent) {
 					args := strings.Split(path, ".")
-					wantParent := "scion"
-					if parentPath != "" {
-						wantParent = "scion " + strings.ReplaceAll(parentPath, ".", " ")
-					}
+					wantCommand := "scion " + strings.ReplaceAll(path, ".", " ")
 					cases = append(cases, gatedCase{
-						path:       path,
-						parentPath: parentPath,
-						leaf:       name,
-						args:       args,
-						wantParent: wantParent,
+						path:        path,
+						parentPath:  parentPath,
+						leaf:        name,
+						args:        args,
+						wantCommand: wantCommand,
 					})
 				}
 				// Do not descend into a removed parent; the parent itself fails.
@@ -852,12 +851,14 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 	walk(rootCmd, "")
 	require.NotEmpty(t, cases, "real command tree must contain agent-gated commands")
 
-	// Sanity-check that representative nested non-Runnable groups are in the table.
+	// Sanity-check that representative top-level and nested groups are in the table.
 	var paths []string
 	for _, tc := range cases {
 		paths = append(paths, tc.path)
 	}
 	for _, mustInclude := range []string{
+		"server",
+		"config",
 		"project.service-accounts.list",
 		"project.service-accounts.add",
 		"project.service-accounts.mint",
@@ -888,19 +889,63 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 			root.SetArgs(tc.args)
 			err := root.Execute()
 			require.Error(t, err, "gated command %q must fail, not fall through to help", tc.path)
-			assert.Contains(t, err.Error(), `unknown command "`+tc.leaf+`" for "`+tc.wantParent+`"`)
-			assert.NotContains(t, err.Error(), "mode")
+			assert.Contains(t, err.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
+			assert.NotContains(t, err.Error(), "unknown command")
 			assert.NotContains(t, out.String(), "Usage:", "gated command %q must not print parent help", tc.path)
 
-			// For nested gated subcommands, "<parent> <gated> --help" must also fail.
-			if tc.parentPath != "" {
-				helpArgs := append(append([]string(nil), tc.args...), "--help")
-				helpErr := unknownSubcommandHelpError(root, helpArgs)
-				require.Error(t, helpErr, "gated command help %q must fail", helpArgs)
-				assert.Contains(t, helpErr.Error(), `unknown command "`+tc.leaf+`" for "`+tc.wantParent+`"`)
-			}
+			// "<cmd> --help" for any gated command must also report not available in agent mode.
+			helpArgs := append(append([]string(nil), tc.args...), "--help")
+			helpErr := unknownSubcommandHelpError(root, helpArgs)
+			require.Error(t, helpErr, "gated command help %q must fail", helpArgs)
+			assert.Contains(t, helpErr.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
 		})
 	}
+
+	// Removed command aliases must also report not available in agent mode.
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		wantCommand string
+	}{
+		{"broker_alias", []string{"broker"}, "scion runtime-broker"},
+		{"broker_alias_subcmd", []string{"broker", "start"}, "scion runtime-broker"},
+		{"project_sa_ls_alias", []string{"project", "service-accounts", "ls"}, "scion project service-accounts list"},
+		{"project_ls_alias", []string{"project", "ls"}, "scion project list"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := cloneCommandForModeExec(rootCmd)
+			root.SilenceErrors = true
+			root.SilenceUsage = true
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetErr(&out)
+
+			applyModeRestrictions(root, ModeAgent)
+
+			root.SetArgs(tc.args)
+			err := root.Execute()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `command "`+tc.wantCommand+`" is not available in agent mode`)
+			assert.NotContains(t, err.Error(), "unknown command")
+		})
+	}
+
+	// Truly unknown top-level command still reports "unknown command".
+	t.Run("root_unknown", func(t *testing.T) {
+		root := cloneCommandForModeExec(rootCmd)
+		root.SilenceErrors = true
+		root.SilenceUsage = true
+		var out bytes.Buffer
+		root.SetOut(&out)
+		root.SetErr(&out)
+		applyModeRestrictions(root, ModeAgent)
+
+		root.SetArgs([]string{"nosuch"})
+		err := root.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unknown command "nosuch" for "scion"`)
+		assert.NotContains(t, err.Error(), "not available in agent mode")
+	})
 
 	// Surviving groups must still print help and exit 0 on bare invocation
 	// or "<group> help", and reject arbitrary unknown subcommands.
@@ -953,6 +998,7 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 			err := root.Execute()
 			require.Error(t, err, "unknown subcommand under %q must fail", groupPath)
 			assert.Contains(t, err.Error(), `unknown command "nosuch" for "`+wantParent+`"`)
+			assert.NotContains(t, err.Error(), "not available in agent mode")
 			assert.NotContains(t, out.String(), "Usage:")
 		})
 	}
@@ -960,8 +1006,9 @@ func TestAgentModeGatedSubcommandsFail(t *testing.T) {
 
 // TestAgentModeGatedSubcommandCLI runs the real CLI entrypoint (Execute) in a
 // child process configured for agent mode via settings.yaml, confirming that
-// gated subcommands under non-Runnable parents exit non-zero with an error on
-// stderr instead of printing parent help and exiting 0.
+// gated commands exit non-zero with a "not available in agent mode" error on
+// stderr (and no usage block), while truly unknown commands still say
+// "unknown command".
 func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 	dir, home := t.TempDir(), t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0755))
@@ -972,29 +1019,62 @@ func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 	))
 
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		wantErr string
+		name         string
+		args         []string
+		wantErr      string
+		forbidStderr string
 	}{
 		{
-			name:    "project_service_accounts_list",
-			args:    []string{"project", "service-accounts", "list"},
-			wantErr: `unknown command "list" for "scion project service-accounts"`,
+			name:         "server",
+			args:         []string{"server"},
+			wantErr:      `command "scion server" is not available in agent mode`,
+			forbidStderr: "Usage:",
 		},
 		{
-			name:    "project_service_accounts_list_help",
-			args:    []string{"project", "service-accounts", "list", "--help"},
-			wantErr: `unknown command "list" for "scion project service-accounts"`,
+			name:         "server_start",
+			args:         []string{"server", "start"},
+			wantErr:      `command "scion server" is not available in agent mode`,
+			forbidStderr: "Usage:",
 		},
 		{
-			name:    "project_list",
-			args:    []string{"project", "list"},
-			wantErr: `unknown command "list" for "scion project"`,
+			name:         "server_help",
+			args:         []string{"server", "--help"},
+			wantErr:      `command "scion server" is not available in agent mode`,
+			forbidStderr: "Usage:",
 		},
 		{
-			name:    "completion",
-			args:    []string{"completion"},
-			wantErr: `unknown command "completion" for "scion"`,
+			name:         "project_service_accounts_list",
+			args:         []string{"project", "service-accounts", "list"},
+			wantErr:      `command "scion project service-accounts list" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "project_service_accounts_list_help",
+			args:         []string{"project", "service-accounts", "list", "--help"},
+			wantErr:      `command "scion project service-accounts list" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "project_list",
+			args:         []string{"project", "list"},
+			wantErr:      `command "scion project list" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:         "completion",
+			args:         []string{"completion"},
+			wantErr:      `command "scion completion" is not available in agent mode`,
+			forbidStderr: "Usage:",
+		},
+		{
+			name:    "unknown_top_level",
+			args:    []string{"nosuchcmd"},
+			wantErr: `unknown command "nosuchcmd" for "scion"`,
+		},
+		{
+			name:    "unknown_nested",
+			args:    []string{"project", "service-accounts", "nosuch"},
+			wantErr: `unknown command "nosuch" for "scion project service-accounts"`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1002,8 +1082,17 @@ func TestAgentModeGatedSubcommandCLI(t *testing.T) {
 			assert.NotEqual(t, 0, res.code, "%q exited 0; stdout=%q stderr=%q", tc.args, res.stdout, res.stderr)
 			assert.Contains(t, res.stderr, tc.wantErr, "%q", tc.args)
 			assert.NotContains(t, res.stdout, "Usage:", "%q must not print parent help on stdout", tc.args)
+			if tc.forbidStderr != "" {
+				assert.NotContains(t, res.stderr, tc.forbidStderr, "%q must not print %q on stderr", tc.args, tc.forbidStderr)
+			}
 		})
 	}
+
+	// Bare root still prints help and exits 0, listing only allowed commands.
+	rootRes := runSSHCLI(t, dir, home, nil)
+	assert.Equal(t, 0, rootRes.code, "bare root failed: stderr=%q", rootRes.stderr)
+	assert.Contains(t, rootRes.stdout, "Usage:")
+	assert.NotContains(t, rootRes.stdout, "  server ")
 
 	// Bare parent still prints help and exits 0, listing only allowed subcommands.
 	res := runSSHCLI(t, dir, home, nil, "project", "service-accounts")

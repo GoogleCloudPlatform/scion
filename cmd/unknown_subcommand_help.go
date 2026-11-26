@@ -64,8 +64,12 @@ func unknownSubcommandHelpError(root *cobra.Command, args []string) error {
 			return nil
 		}
 	}
-	if verr := target.ValidateArgs(positional); verr == nil || errors.Is(verr, pflag.ErrHelp) {
+	verr := target.ValidateArgs(positional)
+	if verr == nil || errors.Is(verr, pflag.ErrHelp) {
 		return nil
+	}
+	if errors.Is(verr, errNotAvailableInAgentMode) {
+		return verr
 	}
 	return fmt.Errorf("unknown command %q for %q", positional[0], target.CommandPath())
 }

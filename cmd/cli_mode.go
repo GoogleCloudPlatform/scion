@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -404,22 +405,53 @@ func checkFlagsForMode(cmd *cobra.Command, mode CLIMode) error {
 	return err
 }
 
+// errNotAvailableInAgentMode is matched with errors.Is for commands removed by
+// the agent-mode gate. The concrete error names the command.
+var errNotAvailableInAgentMode = errors.New("command is not available in agent mode")
+
+type agentModeUnavailableError struct {
+	command string // full command path, e.g. "scion server"
+}
+
+func (e *agentModeUnavailableError) Error() string {
+	return fmt.Sprintf("command %q is not available in agent mode", e.command)
+}
+
+func (e *agentModeUnavailableError) Is(target error) bool {
+	return target == errNotAvailableInAgentMode
+}
+
 func applyAgentMode(root *cobra.Command) {
 	// Prevent Cobra's ExecuteC from lazily re-adding the built-in "completion"
 	// command after removeCommands strips it in agent mode.
 	root.CompletionOptions.DisableDefaultCmd = true
-	removeCommands(root, "", func(path string) bool {
+	removed := removeCommands(root, "", func(path string) bool {
 		return !agentAllowed[path]
 	})
+	// Record Cobra's built-in "completion" command even when it has not been
+	// lazily added to root yet, so "scion completion" reports unavailable
+	// rather than unknown.
+	if removed == nil {
+		removed = map[string]string{}
+	}
+	removed["completion"] = "completion"
+	if !root.Runnable() {
+		rejectUnknownSubcommandsWithRemoved(root, removed)
+	} else {
+		wrapArgsWithRemoved(root, removed)
+	}
 }
 
 // removeCommands walks the command tree and removes commands where shouldRemove
-// returns true. It processes children recursively before deciding whether to
-// remove a parent. Surviving non-Runnable command groups get
-// rejectUnknownSubcommands so that invoking a removed or unknown subcommand
-// fails with an unknown-command error instead of printing parent help and
-// exiting 0.
-func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(string) bool) {
+// returns true, returning a map from each removed direct child's name (and
+// aliases) to its canonical name. It processes children recursively before
+// deciding whether to remove a parent. Surviving non-Runnable command groups
+// get rejectUnknownSubcommandsWithRemoved, and surviving Runnable groups with
+// removed children wrap their Args validator, so invoking a removed command
+// reports "not available in agent mode" while truly unknown subcommands still
+// fail with "unknown command".
+func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(string) bool) map[string]string {
+	var removed map[string]string
 	for _, child := range parent.Commands() {
 		name := child.Name()
 		path := name
@@ -432,33 +464,74 @@ func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(stri
 		}
 
 		hadSubcommands := child.HasSubCommands()
+		var childRemoved map[string]string
 		if hadSubcommands {
-			removeCommands(child, path, shouldRemove)
+			childRemoved = removeCommands(child, path, shouldRemove)
 		}
 
 		if shouldRemove(path) {
+			if removed == nil {
+				removed = map[string]string{}
+			}
+			removed[name] = name
+			for _, alias := range child.Aliases {
+				removed[alias] = name
+			}
 			parent.RemoveCommand(child)
 			parent.Long = dropCommandLines(parent.Long, parent.CommandPath()+" "+name)
-		} else if hadSubcommands && !child.Runnable() {
-			rejectUnknownSubcommands(child)
+		} else if hadSubcommands {
+			if !child.Runnable() {
+				rejectUnknownSubcommandsWithRemoved(child, childRemoved)
+			} else if len(childRemoved) > 0 {
+				wrapArgsWithRemoved(child, childRemoved)
+			}
 		}
 	}
+	return removed
 }
 
 // rejectUnknownSubcommands makes a non-Runnable command group Runnable with an
 // Args validator (matching hubCmd, configCmd, artifactCmd, and messagePolicyCmd)
-// so Cobra rejects removed or unknown subcommands with "unknown command" and a
-// non-zero exit instead of falling through to parent help with exit 0. Bare
-// "<group>" and "<group> help ..." still print help via pflag.ErrHelp before
+// so Cobra rejects unknown subcommands with "unknown command" and a non-zero
+// exit instead of falling through to parent help with exit 0. Bare "<group>"
+// and "<group> help ..." still print help via pflag.ErrHelp before
 // PersistentPreRunE runs.
 func rejectUnknownSubcommands(cmd *cobra.Command) {
+	rejectUnknownSubcommandsWithRemoved(cmd, nil)
+}
+
+func rejectUnknownSubcommandsWithRemoved(cmd *cobra.Command, removed map[string]string) {
 	cmd.Args = func(c *cobra.Command, args []string) error {
 		if len(args) == 0 || args[0] == "help" {
 			return pflag.ErrHelp
 		}
+		if canonical, ok := removed[args[0]]; ok {
+			return &agentModeUnavailableError{command: c.CommandPath() + " " + canonical}
+		}
 		return cobra.NoArgs(c, args)
 	}
 	cmd.Run = func(*cobra.Command, []string) {}
+}
+
+// wrapArgsWithRemoved wraps an already-Runnable command's Args validator so
+// that when the original validator rejects positional arguments (i.e. the
+// command does not accept positional args of its own) and args[0] names a
+// subcommand removed in agent mode, it reports errNotAvailableInAgentMode
+// instead of "unknown command".
+func wrapArgsWithRemoved(cmd *cobra.Command, removed map[string]string) {
+	origArgs := cmd.Args
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		var origErr error
+		if origArgs != nil {
+			origErr = origArgs(c, args)
+		}
+		if origErr != nil && !errors.Is(origErr, pflag.ErrHelp) && len(args) > 0 {
+			if canonical, ok := removed[args[0]]; ok {
+				return &agentModeUnavailableError{command: c.CommandPath() + " " + canonical}
+			}
+		}
+		return origErr
+	}
 }
 
 // dropCommandLines removes the lines of a command's long help that show

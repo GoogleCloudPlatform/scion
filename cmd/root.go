@@ -330,7 +330,7 @@ func Execute() {
 
 	// "<group> <unknown> --help" is an unknown command, not the group's
 	// help (ptone/scion#4579). Checked after the mode restrictions, so a
-	// subcommand the mode removed is unknown too.
+	// subcommand the mode removed reports unavailable in agent mode too.
 	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
 		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
 		os.Exit(1)
@@ -450,6 +450,9 @@ func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
 	}
 	if isUsageError(err) {
 		return true
+	}
+	if errors.Is(err, errNotAvailableInAgentMode) {
+		return false
 	}
 	if isHubFailure(err) {
 		return false

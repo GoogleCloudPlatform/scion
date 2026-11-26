@@ -88,10 +88,10 @@ func TestArtifactShareModes(t *testing.T) {
 }
 
 // TestArtifactShareRefusedInAgentMode: in agent mode "scion artifact share"
-// fails with the generic unknown-command error, the same as for a command
-// that does not exist (.design/cli-modes.md section 4.3), instead of
-// printing the artifact help and succeeding, and the artifact help no
-// longer lists share. In human mode share runs and is listed.
+// fails with a "not available in agent mode" error instead of printing the
+// artifact help and succeeding, while a truly nonexistent subcommand still
+// fails with "unknown command", and the artifact help no longer lists share.
+// In human mode share runs and is listed.
 func TestArtifactShareRefusedInAgentMode(t *testing.T) {
 	build := func() (*cobra.Command, *cobra.Command, *bool, *bytes.Buffer) {
 		ran := false
@@ -114,18 +114,18 @@ func TestArtifactShareRefusedInAgentMode(t *testing.T) {
 		root.SetArgs([]string{"artifact", "share", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
 		err := root.Execute()
 		require.Error(t, err, "share must fail, not fall through to help")
-		assert.Contains(t, err.Error(), `unknown command "share" for "scion artifact"`)
-		assert.NotContains(t, err.Error(), "mode")
+		assert.Contains(t, err.Error(), `command "scion artifact share" is not available in agent mode`)
+		assert.NotContains(t, err.Error(), "unknown command")
 		assert.False(t, *ran)
 		shareOut := out.String()
 
-		// The refusal is exactly what a nonexistent subcommand gets, with
-		// only the name changed, and prints the same (nothing).
+		// A nonexistent subcommand still gets "unknown command", not the agent-mode message.
 		out.Reset()
 		root.SetArgs([]string{"artifact", "nosuch", "scion://artifact/5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d"})
 		nosuch := root.Execute()
 		require.Error(t, nosuch)
-		assert.Equal(t, strings.ReplaceAll(nosuch.Error(), `"nosuch"`, `"share"`), err.Error())
+		assert.Contains(t, nosuch.Error(), `unknown command "nosuch" for "scion artifact"`)
+		assert.NotContains(t, nosuch.Error(), "not available in agent mode")
 		assert.Equal(t, out.String(), shareOut)
 		assert.Empty(t, shareOut)
 		assert.NotContains(t, art.Long, "scion artifact share")
