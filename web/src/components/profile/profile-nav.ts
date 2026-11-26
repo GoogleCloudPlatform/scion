@@ -58,6 +58,7 @@ import {
   renderAttribution,
   renderSidebarBrand,
 } from '../shared/brand-mark.js';
+import { INBOX_CHILD_ROUTES } from '../shared/inbox-tabs.js';
 
 interface NavItem {
   path: string;
@@ -720,14 +721,6 @@ export class ScionProfileNav extends LitElement {
       overflow: hidden;
     }
 
-    .nav-item-sub .nav-link {
-      padding-left: 1.75rem;
-    }
-
-    :host([collapsed]) .nav-item-sub .nav-link {
-      padding-left: 0.75rem;
-    }
-
     :host([collapsed]) .sidebar-attribution {
       display: none;
     }
@@ -952,7 +945,7 @@ export class ScionProfileNav extends LitElement {
                     <a
                       href="/profile/inbox"
                       data-inbox-nav-link
-                      class="nav-link ${this.isActive('/profile/inbox') ? 'active' : ''}"
+                      class="nav-link ${this.isInboxActive() ? 'active' : ''}"
                     >
                       <sl-icon name="inbox"></sl-icon>
                       <span class="nav-link-text">Inbox</span>
@@ -969,21 +962,6 @@ export class ScionProfileNav extends LitElement {
                         : nothing}
                     </a>
                   </li>
-                  ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
-                    ? html`
-                        <li class="nav-item nav-item-sub">
-                          <a
-                            href="/profile/decisions"
-                            data-decisions-nav-link
-                            class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
-                          >
-                            <sl-icon name="signpost-split"></sl-icon>
-                            <span class="nav-link-text">Decisions</span>
-                            ${this.renderDecisionsBadge()}
-                          </a>
-                        </li>
-                      `
-                    : nothing}
                 </ul>
               </div>
             `
@@ -1154,6 +1132,10 @@ export class ScionProfileNav extends LitElement {
         composed: true,
       })
     );
+  }
+
+  private isInboxActive(): boolean {
+    return INBOX_CHILD_ROUTES.some((route) => this.isActive(route));
   }
 
   private isActive(path: string): boolean {

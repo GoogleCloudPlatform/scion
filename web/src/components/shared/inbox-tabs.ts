@@ -15,16 +15,17 @@
  */
 
 /**
- * Shared Inbox sub-navigation tab strip (`Overview | Decisions`) rendered at
- * the top of `/profile/inbox` and `/profile/decisions` when `web.inbox_dashboard`
- * is enabled (design §6.1).
+ * Data-driven Inbox sub-navigation tab strip (`Overview | Decisions | ...`)
+ * rendered at the top of Inbox views when `web.inbox_dashboard` is enabled and
+ * at least two tabs are visible (design §6.4).
+ *
+ * `INBOX_CHILD_ROUTES` is derived from `INBOX_TABS` so `<scion-profile-nav>`
+ * active-state highlighting and the tab strip can never disagree.
  */
 
 import { css, html, nothing, type TemplateResult } from 'lit';
 import { getLastKnownProfileDecisionAvailability } from '../../client/profile-decisions.js';
 import { decisionsEnabled, isInboxDashboardEnabled } from '../../utils/feature-flags.js';
-
-export type InboxTabId = 'overview' | 'decisions';
 
 export interface InboxTabStripOptions {
   /**
@@ -34,6 +35,45 @@ export interface InboxTabStripOptions {
    */
   decisionsVisible?: boolean;
 }
+
+export interface InboxTabConfig {
+  id: string;
+  label: string;
+  icon: string;
+  href: string;
+  isVisible: (options?: InboxTabStripOptions) => boolean;
+}
+
+/**
+ * Canonical Inbox tab registry (design §6.4). Order determines tab strip order.
+ * Phase 5b appends Agent Secrets here; future message-action kinds follow the
+ * same pattern without changing `<scion-profile-nav>` or `renderInboxTabStrip`.
+ */
+export const INBOX_TABS: readonly InboxTabConfig[] = [
+  {
+    id: 'overview',
+    label: 'Overview',
+    icon: 'inbox',
+    href: '/profile/inbox',
+    isVisible: (): boolean => true,
+  },
+  {
+    id: 'decisions',
+    label: 'Decisions',
+    icon: 'signpost-split',
+    href: '/profile/decisions',
+    isVisible: (options?: InboxTabStripOptions): boolean =>
+      options?.decisionsVisible !== undefined
+        ? decisionsEnabled() && options.decisionsVisible
+        : decisionsEnabled() && getLastKnownProfileDecisionAvailability() === true,
+  },
+];
+
+/**
+ * Route prefixes belonging to the Inbox view family, derived from `INBOX_TABS`
+ * so the sidebar `Inbox` item stays active on every Inbox tab route.
+ */
+export const INBOX_CHILD_ROUTES: readonly string[] = INBOX_TABS.map((tab) => tab.href);
 
 export const inboxTabStripStyles = css`
   .inbox-tab-strip {
@@ -76,38 +116,27 @@ export const inboxTabStripStyles = css`
 `;
 
 export function renderInboxTabStrip(
-  active: InboxTabId,
+  active: string,
   options?: InboxTabStripOptions
 ): TemplateResult | typeof nothing {
   if (!isInboxDashboardEnabled()) return nothing;
-  const showDecisions =
-    options?.decisionsVisible !== undefined
-      ? decisionsEnabled() && options.decisionsVisible
-      : decisionsEnabled() && getLastKnownProfileDecisionAvailability() === true;
+  const visibleTabs = INBOX_TABS.filter((tab) => tab.isVisible(options));
+  if (visibleTabs.length < 2) return nothing;
   return html`
     <nav class="inbox-tab-strip" aria-label="Inbox views" data-inbox-tab-strip>
-      <a
-        href="/profile/inbox"
-        class="inbox-tab-link ${active === 'overview' ? 'active' : ''}"
-        aria-current=${active === 'overview' ? 'page' : 'false'}
-        data-inbox-tab="overview"
-      >
-        <sl-icon name="inbox"></sl-icon>
-        <span>Overview</span>
-      </a>
-      ${showDecisions
-        ? html`
-            <a
-              href="/profile/decisions"
-              class="inbox-tab-link ${active === 'decisions' ? 'active' : ''}"
-              aria-current=${active === 'decisions' ? 'page' : 'false'}
-              data-inbox-tab="decisions"
-            >
-              <sl-icon name="signpost-split"></sl-icon>
-              <span>Decisions</span>
-            </a>
-          `
-        : nothing}
+      ${visibleTabs.map(
+        (tab) => html`
+          <a
+            href=${tab.href}
+            class="inbox-tab-link ${active === tab.id ? 'active' : ''}"
+            aria-current=${active === tab.id ? 'page' : 'false'}
+            data-inbox-tab=${tab.id}
+          >
+            <sl-icon name=${tab.icon}></sl-icon>
+            <span>${tab.label}</span>
+          </a>
+        `
+      )}
     </nav>
   `;
 }
