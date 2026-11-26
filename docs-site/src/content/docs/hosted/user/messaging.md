@@ -449,7 +449,7 @@ Every agent is protected by a **Message Mode** that controls which users and oth
 
 - **Web Dashboard**: Use the mode controls on the agent detail page.
 - **CLI**: Use `scion set-message-mode <agent-name> <mode>`, or set the initial mode at creation time with `scion start --message-mode <mode>`.
-- **Agent self-service**: Full-role agents can call `set_message_mode` programmatically to adjust their own or their children's message modes.
+- **Agent self-service**: Full-role agents can call `set_message_mode` programmatically to adjust the message modes of their descendants (agents they started, directly or through their children). An agent cannot change its own mode or the mode of a peer agent in the project; that answers `403`.
 
 The available modes are:
 

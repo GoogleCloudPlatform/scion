@@ -140,7 +140,7 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestProjectRegisterToken_EnforcesProjectCreate",
 	},
 	{OperationID: "project.clone", Method: "POST", Pattern: "/api/v1/projects/{id}/clone"}: {
-		Reason: "a clone needs project:read, project:clone and project:create together, the creator is bound to the seeded project-owner role (some of its permissions have no selector), and only a super-admin who is a member of the source project can mint project:clone; the dedicated test sets this up and drives the route with real tokens and with the holder's session",
+		Reason: "a clone needs project:update, project:clone and project:create together, the creator is bound to the seeded project-owner role (some of its permissions have no selector), and only a super-admin can mint project:clone; the dedicated test sets this up and drives the route with real tokens and with the holder's session",
 		Pin:    "TestProjectCloneToken_RequiresSourceReadCloneAndCreate",
 	},
 	{OperationID: "project.lifecycle.delete", Method: "DELETE", Pattern: "/api/v1/projects/{id}"}: {

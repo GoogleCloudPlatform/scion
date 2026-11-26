@@ -1183,3 +1183,19 @@ func TestProjectClone_GCPServiceAccountVerifiedAndDefaultRemapped(t *testing.T) 
 	assert.Equal(t, clonedVerified.ID, remappedID,
 		"default SA annotation should point to the cloned SA with the same email")
 }
+
+func TestProjectClone_ReadOnlyMemberDenied(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	addProjectMemberWithRole(t, s, project, bob.ID, store.GroupMemberRoleMember)
+
+	bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, "member", "api")
+	require.True(t, srv.authzService.CheckAccess(ctx, bobIdent, projectResource(project), ActionRead).Allowed,
+		"bob must read the source project for this test to mean anything")
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone", CloneProjectRequest{Name: "bob-clone"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a project member with read access may not clone: %s", rec.Body.String())
+
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone", CloneProjectRequest{Name: "alice-clone"})
+	assert.Equal(t, http.StatusCreated, rec.Code, "the source owner clones: %s", rec.Body.String())
+}

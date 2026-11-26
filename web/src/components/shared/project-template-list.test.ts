@@ -26,7 +26,13 @@ import type { Capabilities } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 
 const TEMPLATES = [
-  { id: 't-1', name: 'Alpha Template', slug: 'alpha-template', created: '2026-01-01T00:00:00Z' },
+  {
+    id: 't-1',
+    name: 'Alpha Template',
+    slug: 'alpha-template',
+    created: '2026-01-01T00:00:00Z',
+    _capabilities: { actions: ['read', 'update'] },
+  },
 ];
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -40,9 +46,13 @@ function createFetchHandler(opts: {
   hubCaps?: Capabilities;
   hubStatus?: number;
   templates?: unknown[];
+  projects?: unknown[];
 }) {
   return (url: string | URL | Request): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+    if (path.includes('/api/v1/projects?limit=100')) {
+      return Promise.resolve(jsonResponse({ projects: opts.projects ?? [] }));
+    }
     if (path.includes('/api/v1/projects?limit=1')) {
       if (opts.hubStatus && opts.hubStatus !== 200) {
         return Promise.resolve(jsonResponse({ error: { code: 'x' } }, opts.hubStatus));
@@ -62,6 +72,7 @@ async function createComponent(opts: {
   hubCaps?: Capabilities;
   hubStatus?: number;
   templates?: unknown[];
+  projects?: unknown[];
 }): Promise<HTMLElement> {
   vi.stubGlobal('fetch', vi.fn(createFetchHandler(opts)));
   const el = document.createElement('scion-project-template-list') as HTMLElement & {
@@ -139,5 +150,57 @@ describe('scion-project-template-list — hub project.create gate', () => {
     expect(text(element, '.empty')).toContain(
       'No project templates yet. Create one from an existing project.'
     );
+  });
+
+  it('hides Create From for a template without project update capability', async () => {
+    element = await createComponent({
+      hubCaps: { actions: ['list', 'create'] },
+      templates: [
+        {
+          id: 't-ro',
+          name: 'Read-Only Template',
+          slug: 'read-only-template',
+          created: '2026-01-01T00:00:00Z',
+          _capabilities: { actions: ['read'] },
+        },
+      ],
+    });
+
+    expect(menuItems(element)).toEqual(['Rename', 'Delete']);
+  });
+
+  it('filters Create Template source picker to projects with update capability', async () => {
+    element = await createComponent({
+      hubCaps: { actions: ['list', 'create'] },
+      projects: [
+        {
+          id: 'p-admin',
+          name: 'Admin Project',
+          slug: 'admin-project',
+          _capabilities: { actions: ['read', 'update'] },
+        },
+        {
+          id: 'p-member',
+          name: 'Member Project',
+          slug: 'member-project',
+          _capabilities: { actions: ['read'] },
+        },
+        {
+          id: 'p-nocaps',
+          name: 'No Caps Project',
+          slug: 'no-caps-project',
+        },
+      ],
+    });
+
+    const createBtn = element.shadowRoot?.querySelector('.create-btn sl-button') as HTMLElement;
+    expect(createBtn).not.toBeNull();
+    createBtn.click();
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+
+    const options = Array.from(element.shadowRoot?.querySelectorAll('sl-dialog sl-option') ?? []);
+    expect(options.map((o) => o.getAttribute('value'))).toEqual(['p-admin']);
   });
 });

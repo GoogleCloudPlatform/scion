@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -84,11 +85,14 @@ type CascadeResult struct {
 // are denied:
 //   - Agents without project:agent:set_message_mode scope (requires full role)
 //   - Agents targeting agents in a different project
+//   - Agents targeting an agent they are not an ancestor of (a project
+//     peer, or the agent itself)
 //   - Project admins who are not also project owners or lineage owners
 //   - Federated agents
 //
 // Allowed callers: super-admin, project owner, lineage owner (user in the
-// agent's ancestry chain), full-role agent (same project). A user access
+// agent's ancestry chain), full-role agent (same project) that is an
+// ancestor of the target. A user access
 // token of an allowed user needs the agent:set_message_mode selector and a
 // boundary that contains the agent's project; the project-admin denial and
 // the lineage-owner rule apply to it as to the user's session.
@@ -164,6 +168,18 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		// Answer with 404 instead of 403 to prevent cross-project existence oracle.
 		if agentIdent.ProjectID() != agent.ProjectID {
 			NotFound(w, "Agent")
+			return
+		}
+
+		// Lineage constraint: an agent changes the message mode only of
+		// its own descendants. Message mode controls who may reach an
+		// agent and whether it is quarantined, and the agents in a project
+		// belong to different users, so a project peer (or the agent
+		// itself) is refused, the same rule as the ancestor relationship
+		// that grants agent.set_message_mode to agent principals.
+		if !slices.Contains(agent.Ancestry, agentIdent.ID()) || agent.ID == agentIdent.ID() {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"an agent may change the message mode only of agents it started (directly or through its descendants)", nil)
 			return
 		}
 

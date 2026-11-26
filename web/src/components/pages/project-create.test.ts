@@ -238,6 +238,7 @@ const GIT_TEMPLATE = {
     'scion.dev/default-branch': 'develop',
   },
   annotations: { 'scion.io/default-harness-config': 'claude-default' },
+  _capabilities: { actions: ['read', 'update'] },
 };
 
 const SHARED_TEMPLATE = {
@@ -245,6 +246,7 @@ const SHARED_TEMPLATE = {
   name: 'Research notebook',
   slug: 'research-notebook',
   labels: { 'scion.io/template': 'true' },
+  _capabilities: { actions: ['read', 'update'] },
 };
 
 const EMPTY_PER_AGENT_TEMPLATE = {
@@ -252,6 +254,7 @@ const EMPTY_PER_AGENT_TEMPLATE = {
   name: 'Batch evaluator',
   slug: 'batch-evaluator',
   labels: { 'scion.io/template': 'true', 'scion.dev/workspace-mode': 'per-agent' },
+  _capabilities: { actions: ['read', 'update'] },
 };
 
 /** The hub's 400 for a slug outside the slug format. */
@@ -519,6 +522,28 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     expect(optionValues(el, '#startFrom')).toEqual(['blank']);
     expect(text(q(el, '.start-from-hint'))).toContain('No project templates yet');
+  });
+
+  it('excludes templates without project update capability from Start from', async () => {
+    const readOnlyTemplate = {
+      id: 'tpl-readonly',
+      name: 'Read-only template',
+      slug: 'read-only-template',
+      labels: { 'scion.io/template': 'true' },
+      _capabilities: { actions: ['read'] },
+    };
+    const noCapsTemplate = {
+      id: 'tpl-nocaps',
+      name: 'No caps template',
+      slug: 'no-caps-template',
+      labels: { 'scion.io/template': 'true' },
+    };
+    const { el } = await createForm({
+      templates: [GIT_TEMPLATE, readOnlyTemplate, noCapsTemplate],
+    });
+    element = el;
+
+    expect(optionValues(el, '#startFrom')).toEqual(['blank', 'tpl-git']);
   });
 
   it('Blank + Shared workspace directory posts {name, slug} to /projects', async () => {

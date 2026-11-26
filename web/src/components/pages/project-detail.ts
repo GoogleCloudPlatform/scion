@@ -3185,7 +3185,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${can(this.project?._capabilities, 'read') && can(this.hubProjectCapabilities, 'create')
+          ${can(this.project?._capabilities, 'update') && can(this.hubProjectCapabilities, 'create')
             ? this.adminStatus?.isAdmin === true
               ? html`
                   <sl-dropdown>

@@ -38,12 +38,14 @@ interface ProjectTemplate {
   name: string;
   slug: string;
   created: string;
+  _capabilities?: Capabilities;
 }
 
 interface ProjectItem {
   id: string;
   name: string;
   slug: string;
+  _capabilities?: Capabilities;
 }
 
 @customElement('scion-project-template-list')
@@ -234,7 +236,7 @@ export class ScionProjectTemplateList extends LitElement {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = (await response.json()) as { projects?: ProjectItem[] };
       this.sourceProjects = (data.projects ?? [])
-        .slice()
+        .filter((p) => can(p._capabilities, 'update'))
         .sort((a, b) => a.name.localeCompare(b.name));
     } catch (err) {
       this.createError = err instanceof Error ? err.message : 'Failed to load projects';
@@ -464,7 +466,7 @@ export class ScionProjectTemplateList extends LitElement {
               <sl-icon name="three-dots-vertical"></sl-icon>
             </sl-button>
             <sl-menu>
-              ${this.canCreateProjects
+              ${this.canCreateProjects && can(template._capabilities, 'update')
                 ? html`
                     <sl-menu-item @click=${() => this.openCreateFromDialog(template)}>
                       <sl-icon slot="prefix" name="folder-plus"></sl-icon>

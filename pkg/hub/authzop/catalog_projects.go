@@ -805,7 +805,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:     "project.clone",
 		Domain: "project",
-		Description: "Clone a project into a new project owned by the caller. The caller needs project.read on the source and " +
+		Description: "Clone a project into a new project owned by the caller. The caller needs project.update on the source and " +
 			"project.create as a collection-level create at the hub scope; a token also needs the project:clone selector",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/clone", Method: "POST"},

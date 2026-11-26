@@ -40,7 +40,7 @@ import {
 } from '../../client/git-remote.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import { current, projectsRoot } from '../../client/crumbs.js';
-import type { PageData } from '../../shared/types.js';
+import type { Capabilities, PageData } from '../../shared/types.js';
 import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/breadcrumb.js';
 import '../shared/status-badge.js';
@@ -73,6 +73,7 @@ interface ProjectTemplate {
   gitRemote?: string;
   labels?: Record<string, string>;
   annotations?: Record<string, string>;
+  _capabilities?: Capabilities;
 }
 
 interface WorkspaceTypeOption {
@@ -1029,7 +1030,10 @@ export class ScionPageProjectCreate extends LitElement {
           break;
         }
         const data = (await res.json()) as { projects?: ProjectTemplate[]; nextCursor?: string };
-        templates.push(...(data.projects ?? []));
+        // Cloning a template requires project.update on the source project;
+        // omit templates the caller can only read so "Start from" does not
+        // offer choices that will 403 on submit.
+        templates.push(...(data.projects ?? []).filter((t) => can(t._capabilities, 'update')));
         cursor = data.nextCursor ?? '';
         page++;
       } while (cursor);

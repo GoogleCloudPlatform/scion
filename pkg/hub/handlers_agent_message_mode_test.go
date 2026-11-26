@@ -826,14 +826,16 @@ func TestSetMessageMode_APIRouting(t *testing.T) {
 func TestSetMessageMode_FullRoleAgentAllowed(t *testing.T) {
 	srv, s, owner, _, _, projectID := smmSetup(t)
 
-	// Target agent whose mode will be changed.
-	target := smmAgent(t, s, "smm-full-agent-target", projectID, store.MessageModeProject,
-		[]string{owner.ID})
-
 	// Caller agent with full-role scopes (same project).
 	caller := smmAgent(t, s, "smm-full-agent-caller", projectID, store.MessageModeProject,
 		[]string{owner.ID})
 	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	// Target agent whose mode will be changed: a child of the caller (an
+	// agent changes the mode only of its descendants; a project peer is
+	// refused, see TestSetMessageMode_FullRoleAgentPeerDenied).
+	target := smmAgent(t, s, "smm-full-agent-target", projectID, store.MessageModeProject,
+		[]string{owner.ID, caller.ID})
 
 	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "direct"}, callerIdent)
 
@@ -881,5 +883,45 @@ func TestSetMessageMode_BaselineRoleAgentDenied(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for baseline-role agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSetMessageMode_FullRoleAgentPeerDenied(t *testing.T) {
+	srv, s, owner, member, _, projectID := smmSetup(t)
+
+	// The target belongs to another user; the caller is a full-role agent
+	// in the same project but not its ancestor.
+	target := smmAgent(t, s, "smm-peer-target", projectID, store.MessageModeNone, []string{member.ID})
+	caller := smmAgent(t, s, "smm-peer-caller", projectID, store.MessageModeProject, []string{owner.ID})
+	callerIdent := msgAuthzAgentIdentity(caller.ID, projectID, caller.Ancestry, ScopesForRole(AgentRoleFull)...)
+
+	rr := smmDoRequest(t, srv, target.ID, SetMessageModeRequest{Mode: "project"}, callerIdent)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for peer agent caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+	got, err := s.GetAgent(context.Background(), target.ID)
+	require_NoError(t, err)
+	if got.MessageMode != store.MessageModeNone {
+		t.Fatalf("quarantined peer agent should stay in mode %q, got %q", store.MessageModeNone, got.MessageMode)
+	}
+
+	// Nor may an agent change its own mode.
+	self := smmDoRequest(t, srv, caller.ID, SetMessageModeRequest{Mode: "hub"}, callerIdent)
+	if self.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for agent changing its own mode, got %d: %s", self.Code, self.Body.String())
+	}
+
+	// A direct descendant of the caller is still allowed.
+	child := smmAgent(t, s, "smm-peer-child", projectID, store.MessageModeProject, []string{owner.ID, caller.ID})
+	ok := smmDoRequest(t, srv, child.ID, SetMessageModeRequest{Mode: "tree"}, callerIdent)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("expected 200 for ancestor agent changing child mode, got %d: %s", ok.Code, ok.Body.String())
+	}
+
+	// A transitive descendant (grandchild) of the caller is also allowed.
+	grandchild := smmAgent(t, s, "smm-peer-grandchild", projectID, store.MessageModeProject, []string{owner.ID, caller.ID, child.ID})
+	okGrandchild := smmDoRequest(t, srv, grandchild.ID, SetMessageModeRequest{Mode: "direct"}, callerIdent)
+	if okGrandchild.Code != http.StatusOK {
+		t.Fatalf("expected 200 for ancestor agent changing grandchild mode, got %d: %s", okGrandchild.Code, okGrandchild.Body.String())
 	}
 }
