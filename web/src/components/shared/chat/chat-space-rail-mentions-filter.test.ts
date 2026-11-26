@@ -312,4 +312,36 @@ describe('space rail — mentions sub-filter (design §14.4, AC-8)', () => {
     expect(el.filter).toBe('all');
     expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBeNull();
   });
+
+  it('derives space mention visibility from loaded threads even when space.hasUnreadMention is false', async () => {
+    const spaceWithoutRollup: ChatSpace = {
+      projectId: 'proj-no-rollup',
+      projectName: 'Loaded Mentions Space',
+      projectSlug: 'loaded-mentions-space',
+      unreadCount: 2,
+      hasUnreadMention: false,
+    };
+    const tMention = thread({
+      id: 't-m1',
+      name: 'thread-with-mention',
+      hasUnread: true,
+      hasUnreadMention: true,
+    });
+    const tPlain = thread({
+      id: 't-p1',
+      name: 'thread-plain-unread',
+      hasUnread: true,
+      hasUnreadMention: false,
+    });
+    const el = await mountRail(
+      [spaceWithoutRollup],
+      new Map([[spaceWithoutRollup.projectId, [tMention, tPlain]]])
+    );
+
+    el.applyUrlFilter('mentions');
+    await el.updateComplete;
+
+    expect(spaceNames(el)).toEqual(['Loaded Mentions Space']);
+    expect(threadNames(el)).toEqual(['thread-with-mention']);
+  });
 });

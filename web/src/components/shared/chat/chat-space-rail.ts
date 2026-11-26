@@ -2032,9 +2032,20 @@ export class ScionChatSpaceRail extends LitElement {
    */
   private visibleThreadSpaceIds(): Set<string> {
     const ids = new Set<string>();
-    const spaces = this.spaceFilter === 'starred' ? [] : this.getFilteredSpaces();
-    for (const space of spaces) {
-      if (!this.collapsedSpaces.has(space.projectId)) ids.add(space.projectId);
+    if (this.spaceFilter === 'mentions') {
+      // `/api/v1/chat/spaces` reports unreadCount per space, not a per-space
+      // hasUnreadMention rollup. Load threads for every space with unread
+      // activity (or a server-supplied mention flag) so client-side mentions
+      // filtering can identify spaces containing an unread mention.
+      for (const space of this.spaces) {
+        if (space.unreadCount > 0 || space.hasUnreadMention) {
+          ids.add(space.projectId);
+        }
+      }
+    } else if (this.spaceFilter !== 'starred') {
+      for (const space of this.getFilteredSpaces()) {
+        if (!this.collapsedSpaces.has(space.projectId)) ids.add(space.projectId);
+      }
     }
     if (this.selectedProjectId) ids.add(this.selectedProjectId);
     return ids;
@@ -4733,6 +4744,19 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
+  /**
+   * Whether a space currently has at least one unmuted thread with an unread
+   * mention. Uses loaded threads when available (since `/api/v1/chat/spaces`
+   * omits a per-space mention rollup) and falls back to `space.hasUnreadMention`.
+   */
+  private spaceHasUnreadMention(space: ChatSpace): boolean {
+    const threads = this.threadsBySpace.get(space.projectId);
+    if (threads) {
+      return threads.some((t) => !t.muted && t.hasUnreadMention);
+    }
+    return Boolean(space.hasUnreadMention);
+  }
+
   /** Get filtered spaces based on current filter. */
   private getFilteredSpaces(): ChatSpace[] {
     const sorted = this.getSortedSpaces();
@@ -4748,7 +4772,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
     if (this.spaceFilter === 'mentions') {
       const openProjectId = this.findProjectIdForSelectedThread();
-      return sorted.filter((s) => s.hasUnreadMention || s.projectId === openProjectId);
+      return sorted.filter((s) => this.spaceHasUnreadMention(s) || s.projectId === openProjectId);
     }
     return sorted;
   }
@@ -4791,6 +4815,17 @@ export class ScionChatSpaceRail extends LitElement {
     const filtered = this.getFilteredSpaces();
     if (this.spaceFilter === 'mentions') {
       if (filtered.length === 0) {
+        const pendingMentionCheck = this.spaces.some(
+          (s) =>
+            (s.unreadCount > 0 || s.hasUnreadMention) &&
+            !this.threadsBySpace.has(s.projectId) &&
+            this.loadingThreads.has(s.projectId)
+        );
+        if (pendingMentionCheck) {
+          return html`<div class="loading-state" role="status">
+            <sl-spinner></sl-spinner>
+          </div>`;
+        }
         return html`<div class="loading-state" style="font-size: var(--chat-fs-md)">
           No unread mentions
         </div>`;

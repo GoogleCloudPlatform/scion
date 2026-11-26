@@ -388,7 +388,10 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(mentionsChip).toBeVisible();
       await expect(mentionsChip).toHaveAttribute('aria-pressed', 'true');
 
-      // Only the mentioned thread is shown; plain unread thread and Unread DMs are hidden.
+      // Expand the shown space and confirm only the mentioned thread appears (plain unread thread and Unread DMs hidden).
+      const spaceHeader = rail.locator('.space-header').first();
+      await expect(spaceHeader).toBeVisible({ timeout: 10_000 });
+      await spaceHeader.click();
       await expect(rail.locator('.thread-item .thread-name', { hasText: 'mentions-' })).toBeVisible(
         { timeout: 10_000 }
       );
