@@ -378,7 +378,7 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (project
 		out.pendingCursor = &cur
 	}
 
-	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.Decisions, true)
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.Decisions)
 	if !ok {
 		return projectDecisionsQuery{}, false
 	}

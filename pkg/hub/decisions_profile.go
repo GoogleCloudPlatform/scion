@@ -242,7 +242,7 @@ func profileDecisionsCaller(w http.ResponseWriter, r *http.Request) (UserIdentit
 	return user, token, true
 }
 
-func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID string, dialectEnabled bool) (projectDecisionsQuery, bool) {
+func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID string) (projectDecisionsQuery, bool) {
 	q := r.URL.Query()
 	out := projectDecisionsQuery{
 		profile:  true,
@@ -289,7 +289,7 @@ func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID
 		}
 	}
 
-	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.ProfileDecisions, dialectEnabled)
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.ProfileDecisions)
 	if !ok {
 		return projectDecisionsQuery{}, false
 	}
@@ -385,7 +385,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pq, ok := parseProfileDecisionsQuery(w, r, user.ID(), s.experimentEnabled(experiments.FiltersQueryDialect))
+	pq, ok := parseProfileDecisionsQuery(w, r, user.ID())
 	if !ok {
 		return
 	}

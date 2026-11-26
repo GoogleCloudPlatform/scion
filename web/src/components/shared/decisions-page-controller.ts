@@ -542,7 +542,7 @@ export class DecisionsPageController implements ReactiveController {
       }
       this.filterProject = parsed.project;
       this.filterQ = parsed.q;
-      // Under filters.query_dialect, keep a malformed raw q= (parse/validate
+      // Keep a malformed raw q= (parse/validate
       // error) in searchDraft so <scion-filter-box> shows its inline error
       // while filterQ stays empty and loads the unfiltered list without a 400.
       // Sub-minimum text like `?q=a` has no inline error, so clear searchDraft

@@ -34,7 +34,7 @@ import (
 
 func TestProfileDecisions_FilterQueryDialect(t *testing.T) {
 	f := newDecisionsFixture(t)
-	setDecisionsAndDialectExperiments(t, f.srv, true, true)
+	setDecisionsExperiments(t, f.srv, true)
 	ctx := context.Background()
 
 	f.srv.mu.RLock()
@@ -357,20 +357,9 @@ func TestProfileDecisions_FilterQueryDialect(t *testing.T) {
 		assert.Equal(t, 1, pAgent.FilteredCounts.WaitingOnYou)
 	})
 
-	t.Run("experiment off keeps q as plain text", func(t *testing.T) {
-		setDecisionsAndDialectExperiments(t, f.srv, true, false)
-		defer setDecisionsAndDialectExperiments(t, f.srv, true, true)
-
-		// Reserved OR syntax is NOT a 400 when dialect is off (treated as plain text).
+	t.Run("malformed filter query returns 400 invalid_filter_query", func(t *testing.T) {
 		rr := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, userMeDecisionsPath+"?"+url.Values{"q": {"project:a OR project:b"}}.Encode(), nil)
-		require.Equal(t, http.StatusOK, rr.Code)
-		resp := decodeProfilePendingDecisions(t, rr)
-		assert.Empty(t, promptKeys(resp))
-
-		// project:<slug> is NOT interpreted as a project filter when dialect is off.
-		rr2 := doRequestAsUser(t, f.srv, f.alice, http.MethodGet, userMeDecisionsPath+"?"+url.Values{"q": {"project:proj-beta"}}.Encode(), nil)
-		require.Equal(t, http.StatusOK, rr2.Code)
-		resp2 := decodeProfilePendingDecisions(t, rr2)
-		assert.Empty(t, promptKeys(resp2))
+		require.Equal(t, http.StatusBadRequest, rr.Code)
+		assert.Contains(t, rr.Body.String(), "invalid_filter_query")
 	})
 }

@@ -79,7 +79,7 @@ async function flushRender(el: ScionPageProfileDecisions): Promise<void> {
   }
 }
 
-describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', () => {
+describe('Profile Decisions page — filter query dialect (ptone/scion#9348)', () => {
   let requestedUrls: string[];
 
   beforeEach(() => {
@@ -162,21 +162,8 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
     return el;
   }
 
-  it('keeps legacy filter controls and Project combobox when filters.query_dialect is off', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': false });
-    const el = await mountPage();
-
-    const panel = el.shadowRoot?.querySelector(
-      'scion-decisions-filter-panel'
-    ) as ScionDecisionsFilterPanel | null;
-    expect(panel).not.toBeNull();
-    expect(panel?.shadowRoot?.querySelector('scion-filter-box')).toBeNull();
-    expect(panel?.shadowRoot?.querySelector('[data-filter-panel-toggle]')).not.toBeNull();
-    expect(panel?.querySelector('[data-filter="project"]')).not.toBeNull();
-  });
-
-  it('renders <scion-filter-box view="profile-decisions"> with project: suggestions and From/To disclosure when on', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+  it('renders <scion-filter-box view="profile-decisions"> with project: suggestions and From/To disclosure', async () => {
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?tab=made');
 
     const panel = el.shadowRoot?.querySelector(
@@ -217,7 +204,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('round-trips q= with project: in URL and warns on Made-only keys on Pending tab', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?q=project%3Aalpha-app+by%3Ame');
 
     const panel = el.shadowRoot?.querySelector(
@@ -245,7 +232,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('shows old URL params (including project=) as filter terms on load and replaces them with q= on commit', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage(
       `?tab=made&project=${PROJ_ALPHA_ID}&agent=${AGENT_1_ID}&conversation=topic-ops&user=${VIEWER_ID}&provenance=direct`
     );
@@ -276,7 +263,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('drilling down a project on Made sort=project writes project:<slug> into q=', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?tab=made&sort=project');
 
     const drillLink = el.shadowRoot?.querySelector(
@@ -293,7 +280,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('drill-down replaces positive project: terms, keeps negations and other terms, and matches href (O2)', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
 
     // Case 1: existing positive OR project:alpha-app,beta-svc -> replaced by single project:alpha-app
     const el1 = await mountPage('?tab=made&sort=project&q=project%3Aalpha-app%2Cbeta-svc');
@@ -336,7 +323,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('shows invalid profile q= URL inline without sending a 400 API request', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?tab=made&q=project%3Aa+OR+project%3Ab');
 
     // No API request should include the invalid q= param.
@@ -351,7 +338,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('clears the filter box for sub-minimum plain text q=a on profile load without sending a 400 request', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?tab=made&q=a');
 
     expect(requestedUrls.some((u) => u.includes('q='))).toBe(false);
@@ -364,7 +351,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('keeps exact project ID for colliding or absent legacy project= param', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const unknownProjId = '99999999-9999-9999-9999-999999999999';
     const el = await mountPage(`?tab=made&project=${unknownProjId}`);
 
@@ -376,7 +363,7 @@ describe('Profile Decisions page — filters.query_dialect (ptone/scion#9348)', 
   });
 
   it('rewords the 200-project truncation banner in dialect mode and hides it for positive project: queries (O3)', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     vi.stubGlobal(
       'fetch',
       vi.fn(() =>
