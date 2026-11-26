@@ -179,7 +179,6 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetTransferNotifier(s.notifyArtifactTransfer)
 	svc.SetLogger(s.artifactLog)
 	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
-	svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.FiltersQueryDialect) })
 	// Share-link reads are rate limited per client, read through the
 	// hub's trusted proxies the same way as its other pre-auth limits.
 	svc.SetClientKey(func(r *http.Request) string { return shareLinkClientKey(r, s.clientIPTrustedNets) })

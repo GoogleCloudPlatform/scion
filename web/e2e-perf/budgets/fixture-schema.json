@@ -36,7 +36,6 @@
       "status": 200,
       "fields": [
         "experiments.federation.project_visitors:boolean",
-        "experiments.filters.query_dialect:boolean",
         "experiments.hub.admin_managed_brokers:boolean",
         "experiments.hub.agent_edit_held:boolean",
         "experiments.hub.agent_secrets:boolean",

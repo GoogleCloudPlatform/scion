@@ -40,7 +40,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { navigateTo, replaceSearch, stripBasePath } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import {
   ARTIFACTS_FLAG,
   artifactListUrl,
@@ -56,11 +56,12 @@ import {
   type ArtifactListResponse,
 } from '../../client/artifacts.js';
 import {
-  filtersQueryDialectEnabled,
   getViewSchema,
+  hasIsFlagInQuery,
   knownKeysFor,
   parse as parseFilterQuery,
   serverSubset,
+  toggleIsFlagInQueryWithNotice,
   validate as validateFilterQuery,
   type ViewSchema,
 } from '../../shared/filter-query/index.js';
@@ -96,82 +97,11 @@ export const NOWHERE_TO_PUBLISH =
  */
 type PublishAccess = 'checking' | 'yes' | 'no' | 'unknown';
 
-/** Delay before a search box change reloads the list. */
-const SEARCH_DEBOUNCE_MS = 300;
-
 const ARTIFACTS_FILTER_SCHEMA: ViewSchema = getViewSchema('artifacts') ?? {
   view: 'artifacts',
   keys: [],
   textHelp: 'Matches artifact title or key',
 };
-
-/**
- * Reports whether `input` currently has a positive single-value `is:<flag>` term
- * (and no negated `-is:<flag>` term) for the given schema.
- */
-export function hasIsFlagInQuery(input: string, flag: string, schema: ViewSchema): boolean {
-  const res = parseFilterQuery(input, knownKeysFor(schema));
-  if (!res.query || res.query.mode !== 'structured') return false;
-  const target = flag.toLowerCase();
-  let foundPositive = false;
-  for (const t of res.query.terms) {
-    if (t.key.toLowerCase() !== 'is') continue;
-    const hasTarget = t.values.some((v) => v.toLowerCase() === target);
-    if (!hasTarget) continue;
-    if (t.negate) return false;
-    if (t.values.length === 1) foundPositive = true;
-  }
-  return foundPositive;
-}
-
-/**
- * Toggles an `is:<flag>` term in `input` while preserving all other terms and
- * free text verbatim. When turning `flag` on, removes any mutually exclusive
- * `is:<ex>` terms and any `-is:<flag>` negation first.
- */
-export function toggleIsFlagInQuery(
-  input: string,
-  flag: string,
-  exclusiveFlags: readonly string[],
-  schema: ViewSchema
-): string {
-  const target = flag.toLowerCase();
-  const active = hasIsFlagInQuery(input, target, schema);
-  const trimmed = input.trim();
-
-  if (!trimmed) {
-    return active ? '' : `is:${target}`;
-  }
-
-  const res = parseFilterQuery(input, knownKeysFor(schema));
-  if (!res.query || res.query.mode !== 'structured') {
-    return active ? trimmed : `is:${target} ${trimmed}`;
-  }
-
-  const dropSet = new Set<string>(
-    active ? [target] : [target, ...exclusiveFlags.map((f) => f.toLowerCase())]
-  );
-  const toRemove = res.query.terms.filter((t) => {
-    if (t.key.toLowerCase() !== 'is') return false;
-    if (t.values.length !== 1) return false;
-    const val = t.values[0].toLowerCase();
-    if (active) {
-      return !t.negate && val === target;
-    }
-    return dropSet.has(val);
-  });
-
-  let out = input;
-  const sortedDesc = [...toRemove].sort((a, b) => b.offset - a.offset);
-  for (const t of sortedDesc) {
-    const before = out.slice(0, t.offset).replace(/[ \t\n\r]+$/, '');
-    const after = out.slice(t.offset + t.length).replace(/^[ \t\n\r]+/, '');
-    out = before && after ? `${before} ${after}` : before + after;
-  }
-  out = out.trim();
-  if (active) return out;
-  return out ? `is:${target} ${out}` : `is:${target}`;
-}
 
 @customElement('scion-page-artifacts')
 export class ScionPageArtifacts extends LitElement {
@@ -184,11 +114,8 @@ export class ScionPageArtifacts extends LitElement {
   @state() private error: string | null = null;
   @state() private items: ArtifactListItem[] = [];
   @state() private nextCursor = '';
-  @state() private search = '';
-  @state() private reviewPending = false;
-  @state() private ownedOnly = false;
-  @state() private sharedOnly = false;
   @state() private filterQueryText = '';
+  @state() private filterNotice = '';
   /** The row whose Move dialog is open. */
   @state() private moving: ArtifactListItem | null = null;
   /** Display names by "kind:id" (owners) or "project:id"; '' while unknown. */
@@ -205,7 +132,6 @@ export class ScionPageArtifacts extends LitElement {
   private publishGen = 0;
   /** Cancels the running publish check. */
   private publishAbort: AbortController | null = null;
-  private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private requested = new Set<string>();
 
   static override styles = [
@@ -304,82 +230,34 @@ export class ScionPageArtifacts extends LitElement {
       this.loading = false;
       return;
     }
-    if (filtersQueryDialectEnabled()) {
-      const params = new URLSearchParams(window.location.search);
-      let urlQ = params.get('q') ?? '';
-      let migratedLegacy = false;
-      if (!urlQ) {
-        const migrated: string[] = [];
-        const reviewParam = params.get('review_pending');
-        if (reviewParam === '1' || reviewParam === 'true') migrated.push('is:review');
-        if (params.get('owner') === 'me') migrated.push('is:mine');
-        if (migrated.length > 0) {
-          urlQ = migrated.join(' ');
-          migratedLegacy = true;
+    const params = new URLSearchParams(window.location.search);
+    let urlQ = params.get('q') ?? '';
+    let migratedLegacy = false;
+    if (!urlQ) {
+      const migrated: string[] = [];
+      const reviewParam = params.get('review_pending');
+      if (reviewParam === '1' || reviewParam === 'true') migrated.push('is:review');
+      if (params.get('owner') === 'me') migrated.push('is:mine');
+      if (migrated.length > 0) {
+        urlQ = migrated.join(' ');
+        migratedLegacy = true;
+      }
+    }
+    if (urlQ) {
+      this.filterQueryText = urlQ;
+      const parsed = parseFilterQuery(urlQ, knownKeysFor(ARTIFACTS_FILTER_SCHEMA));
+      if (!parsed.error && parsed.query) {
+        const v = validateFilterQuery(parsed.query, ARTIFACTS_FILTER_SCHEMA, urlQ);
+        if (!v.error) {
+          this.committedServerQ = serverSubset(parsed.query, ARTIFACTS_FILTER_SCHEMA);
         }
       }
-      if (urlQ) {
-        this.filterQueryText = urlQ;
-        const parsed = parseFilterQuery(urlQ, knownKeysFor(ARTIFACTS_FILTER_SCHEMA));
-        if (!parsed.error && parsed.query) {
-          const v = validateFilterQuery(parsed.query, ARTIFACTS_FILTER_SCHEMA, urlQ);
-          if (!v.error) {
-            this.committedServerQ = serverSubset(parsed.query, ARTIFACTS_FILTER_SCHEMA);
-          }
-        }
-        if (migratedLegacy) {
-          this.syncQueryToUrl(urlQ);
-        }
+      if (migratedLegacy) {
+        this.syncQueryToUrl(urlQ);
       }
-    } else {
-      this.hydrateFiltersFromUrl();
     }
     void this.load();
     void this.checkPublishAccess();
-  }
-
-  /**
-   * Hydrates filter toggles from URL query parameters on mount so drill-in
-   * links such as `/artifacts?review_pending=1&owner=me` land pre-filtered
-   * (design §6.5, AC12).
-   */
-  private hydrateFiltersFromUrl(): void {
-    if (typeof window === 'undefined') return;
-    const params = new URLSearchParams(window.location.search);
-    const reviewParam = params.get('review_pending');
-    this.reviewPending = reviewParam === '1' || reviewParam === 'true';
-    this.ownedOnly = params.get('owner') === 'me';
-    if (this.ownedOnly) {
-      this.sharedOnly = false;
-    }
-  }
-
-  /**
-   * Keeps `review_pending` and `owner=me` query parameters in sync with the
-   * filter toggles via `replaceSearch()` without creating history entries.
-   */
-  private syncUrlFromFilters(): void {
-    if (typeof window === 'undefined') return;
-    const appPath = stripBasePath(window.location.pathname);
-    if (appPath !== '/artifacts' && appPath !== '/artifacts/') {
-      return;
-    }
-    const params = new URLSearchParams(window.location.search);
-    if (this.reviewPending) {
-      params.set('review_pending', '1');
-    } else {
-      params.delete('review_pending');
-    }
-    if (this.ownedOnly) {
-      params.set('owner', 'me');
-    } else if (params.get('owner') === 'me') {
-      params.delete('owner');
-    }
-    const nextSearch = params.toString();
-    const currentSearch = window.location.search.replace(/^\?/, '');
-    if (nextSearch !== currentSearch) {
-      replaceSearch(params);
-    }
   }
 
   /** Stops the running publish check, if any; its result is dropped. */
@@ -438,15 +316,11 @@ export class ScionPageArtifacts extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    if (this.searchTimer) clearTimeout(this.searchTimer);
     this.cancelPublishCheck();
   }
 
   private get filtered(): boolean {
-    if (filtersQueryDialectEnabled()) {
-      return this.committedServerQ.trim() !== '';
-    }
-    return this.search.trim() !== '' || this.reviewPending || this.ownedOnly || this.sharedOnly;
+    return this.committedServerQ.trim() !== '';
   }
 
   /**
@@ -499,17 +373,7 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private async fetchPage(cursor?: string): Promise<ArtifactListResponse> {
-    const url = filtersQueryDialectEnabled()
-      ? artifactListUrl({ q: this.committedServerQ }, cursor)
-      : artifactListUrl(
-          {
-            q: this.search,
-            reviewPending: this.reviewPending,
-            ownedOnly: this.ownedOnly,
-            sharedOnly: this.sharedOnly,
-          },
-          cursor
-        );
+    const url = artifactListUrl({ q: this.committedServerQ }, cursor);
     const res = await apiFetch(url);
     if (!res.ok) {
       throw new Error(await extractApiError(res, `HTTP ${res.status}`));
@@ -565,36 +429,6 @@ export class ScionPageArtifacts extends LitElement {
     })();
   }
 
-  private onSearchInput(e: Event): void {
-    const value = (e.target as HTMLElement & { value: string }).value;
-    if (this.searchTimer) clearTimeout(this.searchTimer);
-    this.searchTimer = setTimeout(() => {
-      this.search = value;
-      void this.load();
-    }, SEARCH_DEBOUNCE_MS);
-  }
-
-  private onStatusChange(e: Event): void {
-    this.reviewPending = (e.target as HTMLElement & { value: string }).value === 'review';
-    this.syncUrlFromFilters();
-    void this.load();
-  }
-
-  private onOwnedChange(e: Event): void {
-    this.ownedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
-    // An owned artifact is never shared with its owner: the filters exclude each other.
-    if (this.ownedOnly) this.sharedOnly = false;
-    this.syncUrlFromFilters();
-    void this.load();
-  }
-
-  private onSharedChange(e: Event): void {
-    this.sharedOnly = (e.target as HTMLElement & { checked: boolean }).checked;
-    if (this.sharedOnly) this.ownedOnly = false;
-    this.syncUrlFromFilters();
-    void this.load();
-  }
-
   private syncQueryToUrl(raw: string): void {
     const params = new URLSearchParams(window.location.search);
     const trimmed = raw.trim();
@@ -611,10 +445,12 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private onFilterInput = (e: CustomEvent<FilterInputDetail>): void => {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
   };
 
   private onFilterCommit = (e: CustomEvent<FilterCommitDetail>): void => {
+    this.filterNotice = '';
     this.filterQueryText = e.detail.value;
     this.syncQueryToUrl(e.detail.value);
     if (e.detail.serverQ === this.committedServerQ) return;
@@ -624,12 +460,14 @@ export class ScionPageArtifacts extends LitElement {
 
   private onFlagChipClick(flag: 'review' | 'mine' | 'shared'): void {
     const exclusive = flag === 'mine' ? ['shared'] : flag === 'shared' ? ['mine'] : [];
-    const next = toggleIsFlagInQuery(
+    const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
       flag,
       exclusive,
       ARTIFACTS_FILTER_SCHEMA
     );
+    const next = edit.value;
+    this.filterNotice = edit.notice ?? '';
     if (next === this.filterQueryText) return;
     this.filterQueryText = next;
     this.syncQueryToUrl(next);
@@ -723,96 +561,46 @@ export class ScionPageArtifacts extends LitElement {
   }
 
   private renderFilterBar(): TemplateResult {
-    if (filtersQueryDialectEnabled()) {
-      const reviewActive = hasIsFlagInQuery(
-        this.filterQueryText,
-        'review',
-        ARTIFACTS_FILTER_SCHEMA
-      );
-      const mineActive = hasIsFlagInQuery(this.filterQueryText, 'mine', ARTIFACTS_FILTER_SCHEMA);
-      const sharedActive = hasIsFlagInQuery(
-        this.filterQueryText,
-        'shared',
-        ARTIFACTS_FILTER_SCHEMA
-      );
-      return html`
-        <div class="filter-bar">
-          <scion-filter-box
-            view="artifacts"
-            .value=${this.filterQueryText}
-            .valueSuggestions=${this.suggestValues}
-            placeholder="Filter artifacts… (try is:review project:my-project)"
-            @filter-input=${this.onFilterInput}
-            @filter-commit=${this.onFilterCommit}
-          ></scion-filter-box>
-          <div class="filter-chips" role="group" aria-label="Quick filters">
-            <button
-              type="button"
-              class="filter-chip ${reviewActive ? 'active' : ''}"
-              aria-pressed=${reviewActive ? 'true' : 'false'}
-              @click=${(): void => this.onFlagChipClick('review')}
-            >
-              Review pending
-            </button>
-            <button
-              type="button"
-              class="filter-chip ${mineActive ? 'active' : ''}"
-              aria-pressed=${mineActive ? 'true' : 'false'}
-              @click=${(): void => this.onFlagChipClick('mine')}
-            >
-              Owned by me
-            </button>
-            <button
-              type="button"
-              class="filter-chip ${sharedActive ? 'active' : ''}"
-              aria-pressed=${sharedActive ? 'true' : 'false'}
-              @click=${(): void => this.onFlagChipClick('shared')}
-            >
-              Shared with me
-            </button>
-          </div>
-          ${this.loading && this.items.length > 0
-            ? html`<sl-spinner class="inline-loading" aria-label="Loading artifacts"></sl-spinner>`
-            : nothing}
-          ${this.items.length > 0
-            ? html`<span class="count">Showing ${this.items.length}</span>`
-            : nothing}
-        </div>
-      `;
-    }
+    const reviewActive = hasIsFlagInQuery(this.filterQueryText, 'review', ARTIFACTS_FILTER_SCHEMA);
+    const mineActive = hasIsFlagInQuery(this.filterQueryText, 'mine', ARTIFACTS_FILTER_SCHEMA);
+    const sharedActive = hasIsFlagInQuery(this.filterQueryText, 'shared', ARTIFACTS_FILTER_SCHEMA);
     return html`
       <div class="filter-bar">
-        <sl-input
-          class="search-input"
-          size="small"
-          placeholder="Search title or key..."
-          aria-label="Search artifacts"
-          clearable
-          @sl-input=${(e: Event): void => this.onSearchInput(e)}
-        >
-          <sl-icon slot="prefix" name="search"></sl-icon>
-        </sl-input>
-        <sl-select
-          size="small"
-          value=${this.reviewPending ? 'review' : 'all'}
-          @sl-change=${(e: Event): void => this.onStatusChange(e)}
-          style="min-width: 170px;"
-        >
-          <sl-option value="all">All artifacts</sl-option>
-          <sl-option value="review">Review pending</sl-option>
-        </sl-select>
-        <sl-checkbox
-          size="small"
-          ?checked=${this.ownedOnly}
-          @sl-change=${(e: Event): void => this.onOwnedChange(e)}
-          >Owned by me</sl-checkbox
-        >
-        <sl-checkbox
-          size="small"
-          ?checked=${this.sharedOnly}
-          @sl-change=${(e: Event): void => this.onSharedChange(e)}
-          >Shared with me</sl-checkbox
-        >
+        <scion-filter-box
+          view="artifacts"
+          .value=${this.filterQueryText}
+          .notice=${this.filterNotice}
+          .valueSuggestions=${this.suggestValues}
+          placeholder="Filter artifacts… (try is:review project:my-project)"
+          @filter-input=${this.onFilterInput}
+          @filter-commit=${this.onFilterCommit}
+        ></scion-filter-box>
+        <div class="filter-chips" role="group" aria-label="Quick filters">
+          <button
+            type="button"
+            class="filter-chip ${reviewActive ? 'active' : ''}"
+            aria-pressed=${reviewActive ? 'true' : 'false'}
+            @click=${(): void => this.onFlagChipClick('review')}
+          >
+            Review pending
+          </button>
+          <button
+            type="button"
+            class="filter-chip ${mineActive ? 'active' : ''}"
+            aria-pressed=${mineActive ? 'true' : 'false'}
+            @click=${(): void => this.onFlagChipClick('mine')}
+          >
+            Owned by me
+          </button>
+          <button
+            type="button"
+            class="filter-chip ${sharedActive ? 'active' : ''}"
+            aria-pressed=${sharedActive ? 'true' : 'false'}
+            @click=${(): void => this.onFlagChipClick('shared')}
+          >
+            Shared with me
+          </button>
+        </div>
         ${this.loading && this.items.length > 0
           ? html`<sl-spinner class="inline-loading" aria-label="Loading artifacts"></sl-spinner>`
           : nothing}

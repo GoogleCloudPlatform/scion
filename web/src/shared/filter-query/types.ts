@@ -18,6 +18,7 @@ export const MAX_INPUT_BYTES = 512;
 export const MAX_TERMS = 32;
 export const MAX_VALUES_PER_KEY = 20;
 export const MAX_TEXT_RUNES = 200;
+export const MAX_DISTINCT_REFERENTS = 20;
 
 export type FilterErrorCode = 'syntax' | 'value' | 'limit' | 'unsupported_key';
 

@@ -128,6 +128,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     localStorage.clear();
+    window.history.replaceState(null, '', '/agents');
   });
 
   it('merges a status delta in place, preserving identity for every untouched agent, and adds an SSE-created agent under scope all with no extra request', async () => {
@@ -355,7 +356,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       'fetch',
       vi.fn((input: string | URL | Request) => {
         const url = requestUrl(input);
-        if (url.includes('scope=mine')) {
+        if (url.includes('q=is%3Amine')) {
           return Promise.resolve(jsonResponse({ agents: initial, _capabilities: { actions: [] } }));
         }
         return Promise.resolve(jsonResponse({ agents: [], _capabilities: { actions: [] } }));
@@ -620,7 +621,6 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
 
     type Internals = {
       handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
-      setPhaseFilter(p: string): void;
     };
     const actionable = (id: string, o: Partial<Agent> = {}): Agent =>
       agent(id, { _capabilities: { actions: ['read', 'lifecycle', 'delete'] }, ...o });
@@ -887,7 +887,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       expect(button).toBeDefined();
       button!.click();
       await el.updateComplete;
-      expect(localStorage.getItem('scion-filter-agents-phase')).toBe('stopping');
+      expect(new URLSearchParams(window.location.search).get('q')).toBe('phase:stopping');
       expect(shown()).toEqual(['a1']);
 
       handleUpdate('agent.a2.status', { phase: 'stopping' }); // enters
@@ -933,7 +933,7 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       const agentsRequests = urls.filter((u) => u.startsWith('/api/v1/agents'));
       expect(agentsRequests.length).toBeGreaterThan(0);
       for (const u of agentsRequests) {
-        expect(new URL(u, 'http://x').searchParams.get('phase')).toBe('stopping');
+        expect(new URL(u, 'http://x').searchParams.get('q')).toBe('phase:stopping');
       }
       await vi.waitFor(() =>
         expect(el.shadowRoot?.querySelector('.filter-bar button.active')?.textContent?.trim()).toBe(

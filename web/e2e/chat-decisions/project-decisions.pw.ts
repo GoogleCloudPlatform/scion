@@ -506,17 +506,14 @@ test.describe('Project Decisions page on real hub (web.decisions)', () => {
         .allTextContents();
       expect(userFilterOptionsB.join(' ')).not.toContain('Alice');
 
-      // 6b. Real-hub P2 filter panel + search capability + zero DM leakage via q=9482:
+      // 6b. Real-hub P2 filter box + search capability + zero DM leakage via q=9482:
       const panelB = decisionsB.locator('scion-decisions-filter-panel');
       await expect(panelB).toBeVisible();
-      await panelB.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
-      const convInputB = panelB
-        .locator('scion-facet-combobox[data-filter="conversation"]')
-        .getByRole('combobox', { name: 'Conversation' });
-      await convInputB.click();
+      const filterInputB = panelB.locator('scion-filter-box input');
+      await filterInputB.click();
+      await filterInputB.fill('conversation:');
       const convOptionLabelsB = await panelB
-        .locator('scion-facet-combobox[data-filter="conversation"]')
-        .getByRole('option')
+        .locator('scion-filter-box [role="option"]')
         .allTextContents();
       expect(convOptionLabelsB.join(' ')).toContain('#release');
       expect(convOptionLabelsB.join(' ').toLowerCase()).not.toContain('dm');
@@ -536,7 +533,7 @@ test.describe('Project Decisions page on real hub (web.decisions)', () => {
         waitUntil: 'domcontentloaded',
       });
       const panelA = decisionsTab1.locator('scion-decisions-filter-panel');
-      await expect(panelA.locator('[data-filter-tag="q"]')).toContainText('"9482"');
+      await expect(panelA.locator('scion-filter-box input')).toHaveValue('9482');
       await expect(madeTableA).toContainText('D-DM-SECRET');
 
       // 7. Navigating User A back to /projects/:id shows the Decisions header badge decremented to 1.

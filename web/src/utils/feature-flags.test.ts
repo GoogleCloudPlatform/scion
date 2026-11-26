@@ -24,6 +24,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as featureFlags from './feature-flags.js';
+import * as filterQuery from '../shared/filter-query/index.js';
 import {
   DECISIONS_FLAG,
   decisionsEnabled,
@@ -187,6 +188,30 @@ describe('feature-flags: web.decisions consolidation', () => {
     expect(decisionsEnabled()).toBe(false);
     setFeatureFlag(DECISIONS_FLAG, true);
     expect(decisionsEnabled()).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Removed unified filter query dialect flag (graduated, ptone/scion#9034)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: unified filter query dialect flag removed', () => {
+  it('does not export FILTERS_QUERY_DIALECT_FLAG or filtersQueryDialectEnabled from filter-query', () => {
+    // Type-level check: neither symbol is exported from shared/filter-query/index.ts.
+    type HasFlag = 'FILTERS_QUERY_DIALECT_FLAG' extends keyof typeof filterQuery ? true : false;
+    type HasHelper = 'filtersQueryDialectEnabled' extends keyof typeof filterQuery ? true : false;
+    const hasFlag: HasFlag = false;
+    const hasHelper: HasHelper = false;
+    expect(hasFlag).toBe(false);
+    expect(hasHelper).toBe(false);
+    expect((filterQuery as Record<string, unknown>).FILTERS_QUERY_DIALECT_FLAG).toBeUndefined();
+    expect((filterQuery as Record<string, unknown>).filtersQueryDialectEnabled).toBeUndefined();
+  });
+
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('filters.query_dialect')).toBe(false);
   });
 });
 

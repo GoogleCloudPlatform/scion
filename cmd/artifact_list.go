@@ -84,7 +84,7 @@ func init() {
 	artifactListCmd.Flags().StringVar(&artifactListProject, "project-id", "", "Only artifacts homed in, or shared with, this project (a project id)")
 	artifactListCmd.Flags().BoolVar(&artifactListShared, "shared", false, "Only artifacts shared with you (with --project-id, shared with that project) from elsewhere")
 	artifactListCmd.Flags().BoolVar(&artifactListReviewPending, "review-pending", false, "Only artifacts whose current version is a review")
-	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Only artifacts whose title or key contains this text")
+	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Filter query (e.g. is:review project:my-proj) or plain title/key text")
 	artifactListCmd.Flags().IntVar(&artifactListLimit, "limit", 0, "Page size (default: the hub's)")
 	artifactListCmd.Flags().BoolVar(&artifactListAll, "all", false, "Follow every page instead of printing one")
 	artifactListCmd.Flags().StringVar(&artifactListCursor, "cursor", "", "Start at this page (the nextCursor of a previous --format json list)")

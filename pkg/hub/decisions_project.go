@@ -339,7 +339,7 @@ func (q projectDecisionsQuery) filtered() bool {
 	return q.q != "" || q.conversation != "" || q.agentID != "" || q.projectID != "" || q.hasPendingStructuredFilter()
 }
 
-func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request, dialectEnabled bool) (projectDecisionsQuery, bool) {
+func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (projectDecisionsQuery, bool) {
 	q := r.URL.Query()
 	out := projectDecisionsQuery{
 		tab:   strings.TrimSpace(q.Get("tab")),
@@ -378,7 +378,7 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request, dialectE
 		out.pendingCursor = &cur
 	}
 
-	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.Decisions, dialectEnabled)
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.Decisions)
 	if !ok {
 		return projectDecisionsQuery{}, false
 	}
@@ -593,7 +593,7 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	pq, ok := parseProjectDecisionsQuery(w, r, s.experimentEnabled(experiments.FiltersQueryDialect))
+	pq, ok := parseProjectDecisionsQuery(w, r)
 	if !ok {
 		return
 	}

@@ -15,9 +15,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/feature-flags.js';
+import { resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 import {
-  FILTERS_QUERY_DIALECT_FLAG,
   getViewSchema,
   knownKeysFor,
   parse,
@@ -197,19 +196,7 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
     );
   }
 
-  it('renders legacy <sl-input> and keeps behavior unchanged when filters.query_dialect is off', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
-    const source = makeSource(['src/a.ts', 'src/b.go', '.env']);
-    const el = await mountBrowser(source);
-
-    expect(el.shadowRoot?.querySelector('scion-filter-box')).toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-input.filter-input')).not.toBeNull();
-    expect(el.shadowRoot?.querySelector('sl-checkbox.dot-files-toggle')).not.toBeNull();
-    expect(renderedPaths(el)).toEqual(['src/a.ts', 'src/b.go']);
-  });
-
-  it('renders <scion-filter-box view="files"> and keeps the dotfiles toggle when experiment is on', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+  it('renders <scion-filter-box view="files"> and keeps the dotfiles toggle', async () => {
     const source = makeSource(['src/a.ts', 'src/b.go', '.env']);
     const el = await mountBrowser(source);
 
@@ -223,7 +210,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('sends only the text part to ?q= and post-filters merged backend results with ext:', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const searchFiles = vi.fn((_q: string) =>
       Promise.resolve({
         files: [
@@ -258,7 +244,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('does not call backend search when query has only ext: terms (no text)', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const searchFiles = vi.fn(() => Promise.resolve({ files: [], totalSize: 0, totalCount: 0 }));
     const source = makeSource(['src/a.ts', 'src/b.go'], searchFiles);
     const el = await mountBrowser(source);
@@ -278,7 +263,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('keeps last valid filter applied when the query has a syntax error', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const source = makeSource(['src/a.ts', 'src/b.go']);
     const el = await mountBrowser(source);
 
@@ -299,7 +283,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('works client-only for template/harness-config data sources without searchFiles', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const source = makeSource(['config.yaml', 'prompt.md', 'scripts/run.sh']);
     const el = await mountBrowser(source);
 
@@ -315,7 +298,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('supplies loaded file extensions as dynamic value suggestions for ext:', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const source = makeSource(['src/a.ts', 'pkg/b.go', 'README.md']);
     const el = await mountBrowser(source);
 
@@ -325,7 +307,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('keeps truncation visible in the count label for key-only queries when initial listing hasMore', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const searchFiles = vi.fn(() => Promise.resolve({ files: [], totalSize: 0, totalCount: 0 }));
     const files = [
       makeEntry('pkg/server.go'),
@@ -387,7 +368,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('keeps stale backend rows hidden while a second search is held pending', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     let resolveSecond: ((r: FileListResult) => void) | null = null;
     const searchFiles = vi.fn((q: string) => {
       if (q === 'foo') {
@@ -435,7 +415,6 @@ describe('<scion-file-browser> unified filter dialect (P5)', () => {
   });
 
   it('preserves a server-only fuzzy hit through the post-filter branch while enforcing ext:', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     // Simulate a server-only hit ("deep/srv_hit.ts") whose path does not match the client
     // regex for "button" — it must survive postFilterFilesByQuery once settled, while
     // "deep/srv_hit.go" is excluded by ext:ts.

@@ -421,8 +421,20 @@ async function setupProfileDecisionsMocks(
     const limitParam = url.searchParams.get('limit');
     const tab = url.searchParams.get('tab') || 'pending';
     const sort = url.searchParams.get('sort') || (tab === 'made' ? 'recent' : 'project');
-    const projectFilter = url.searchParams.get('project') || '';
-    const q = (url.searchParams.get('q') || '').toLowerCase();
+    const rawQ = url.searchParams.get('q') || '';
+    const projectTokenMatch = rawQ.match(/(?:^|\s)project:([^\s]+)/i);
+    const projectFromQ = projectTokenMatch
+      ? projectTokenMatch[1].toLowerCase() === 'scion'
+        ? PROJ_SCION.id
+        : projectTokenMatch[1].toLowerCase() === 'web-site'
+          ? PROJ_WEB.id
+          : projectTokenMatch[1]
+      : '';
+    const projectFilter = url.searchParams.get('project') || projectFromQ;
+    const q = rawQ
+      .replace(/(?:^|\s)project:[^\s]+/gi, '')
+      .trim()
+      .toLowerCase();
     const convFilter = url.searchParams.get('conversation') || '';
     const agentFilter = url.searchParams.get('agent') || '';
     const cursor = url.searchParams.get('cursor') || '';
@@ -651,31 +663,28 @@ for (const theme of ['light', 'dark'] as const) {
       const phone = isPhone(page);
 
       if (phone) {
-        // R-4: Mobile (320 / 375 / 390) filtered by Project: scion with removable tag and zero horizontal overflow
+        // R-4: Mobile (320 / 375 / 390) filtered by project:scion with filter box and zero horizontal overflow
         await page.goto('/profile/decisions?tab=pending&sort=project&project=proj-1', {
           waitUntil: 'domcontentloaded',
         });
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
         const pageEl = page.locator('scion-page-profile-decisions');
         const panel = pageEl.locator('scion-decisions-filter-panel');
+        const filterInput = panel.locator('scion-filter-box input');
         await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('3 of 4', {
           timeout: 15_000,
         });
-        await expect(panel.locator('[data-filter-tag="project"]')).toContainText('Project: scion');
-        await expect(panel.locator('[data-active-filter-count]')).toHaveText('1 active');
+        await expect(filterInput).toHaveValue('project:scion');
         await assertZeroHorizontalOverflow(page);
         await shot(page, testInfo, theme, 'r4-mobile-waiting-filtered');
 
-        // Expand filter panel on mobile -> stacked controls (Project, Conversation with project hint, Agent with project hint)
-        await panel.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
-        await expect(
-          panel.getByRole('button', { name: /Search and filters/i, expanded: true })
-        ).toBeVisible();
+        // Conversation autocomplete suggestions carry project hints on mobile
+        await filterInput.click();
+        await filterInput.fill('conversation:');
+        await expect(panel.locator('scion-filter-box [role="option"]').first()).toContainText(
+          'scion'
+        );
         await assertZeroHorizontalOverflow(page);
-
-        const convCombo = panel.locator('scion-facet-combobox[data-filter="conversation"]');
-        await convCombo.getByRole('combobox', { name: 'Conversation' }).click();
-        await expect(convCombo.getByRole('option').first()).toContainText('scion');
         await shot(page, testInfo, theme, 'r4b-mobile-filters-expanded');
         return;
       }
@@ -695,13 +704,13 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(pageEl.locator('[data-load-more="made"]')).toHaveCount(0);
       await shot(page, testInfo, theme, 'r3a-made-by-project');
 
-      // Desktop R-3b: Click "See all in scion" -> switches to Most recent filtered to proj-1; then Clear -> full Most recent table with Project column
+      // Desktop R-3b: Click "See all in scion" -> switches to Most recent filtered to project:scion; then Clear -> full Most recent table with Project column
       await pageEl.locator('[data-see-all-project="proj-1"]').click();
-      await expect(page).toHaveURL(/\/profile\/decisions\?tab=made&sort=recent&project=proj-1$/);
+      await expect(page).toHaveURL(/\/profile\/decisions\?tab=made&sort=recent&q=project%3Ascion$/);
       const panel = pageEl.locator('scion-decisions-filter-panel');
-      await expect(panel.locator('[data-filter-tag="project"]')).toContainText('Project: scion');
+      await expect(panel.locator('scion-filter-box input')).toHaveValue('project:scion');
 
-      await panel.locator('[data-clear-filters]').click();
+      await panel.locator('scion-filter-box button[aria-label="Clear filter"]').click();
       await expect(page).toHaveURL(/\/profile\/decisions\?tab=made&sort=recent$/);
       const table = pageEl.locator('table.log[data-made-table]');
       await expect(table).toBeVisible();
@@ -717,7 +726,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       const pageEl = page.locator('scion-page-profile-decisions');
       await expect(pageEl.locator('[data-truncated-projects]')).toContainText(
-        'Showing your 200 most recently active projects; pick a project to see others'
+        'Showing your 200 most recently active projects; only those 200 projects are searched.'
       );
 
       // Older hub returning 404 on /api/v1/users/me/decisions hides the Profile > Decisions nav entry

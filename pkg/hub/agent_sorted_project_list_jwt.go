@@ -57,8 +57,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 		cur = &decoded
 	}
 
-	memberFilter := filter
-	memberFilter.Phase = ""
+	memberFilter := unphasedAgentFilter(filter)
 	members, complete, ok := s.sortedProjectCandidates(w, ctx, memberFilter, p)
 	if !ok {
 		return
@@ -79,7 +78,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 		page = members
 		totalCount = len(members)
 	} else {
-		r := filterMembersByPhase(members, filter.Phase)
+		r := filterMembersByPhase(members, filter.Phase, filter.Query)
 		totalCount = len(r)
 		start := 0
 		if cur != nil {

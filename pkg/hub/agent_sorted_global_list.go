@@ -44,11 +44,10 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		}
 	}
 
-	// statsFilter is the request filter with Phase cleared: the fit probe
-	// and the stats population are both decided on the unphased candidate
-	// set.
-	statsFilter := filter
-	statsFilter.Phase = ""
+	// statsFilter is the request filter with Phase and any `phase:` terms in
+	// Query cleared: the fit probe and the stats population are both decided
+	// on the phase-independent candidate set.
+	statsFilter := unphasedAgentFilter(filter)
 
 	var (
 		items       []store.Agent

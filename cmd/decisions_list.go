@@ -93,7 +93,7 @@ Examples:
 	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "all-projects", "sort", "conversation", "agent",
 		"answered-by", "provenance", "since", "until", "limit")
 	// Shared across human and agent mode.
-	cmd.Flags().StringP("search", "q", "", "Search Decisions (2 to 256 characters; question, key and answer, plus agent and conversation names in human mode)")
+	cmd.Flags().StringP("search", "q", "", "Search Decisions (human mode: filter query up to 512 bytes and 2-200 characters of search text; agent mode: 2-256 character text search)")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
 }

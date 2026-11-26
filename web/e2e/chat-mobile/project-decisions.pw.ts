@@ -754,7 +754,9 @@ async function setupProjectDecisionsMocks(
         });
         return;
       }
-      const provenance = url.searchParams.get('provenance');
+      const provenance =
+        url.searchParams.get('provenance') ||
+        (q.includes('provenance:confirmed') ? 'confirmed' : null);
       const cursor = url.searchParams.get('cursor');
       if (provenance === 'confirmed') {
         void route.fulfill({
@@ -964,17 +966,14 @@ for (const theme of ['light', 'dark'] as const) {
       const desktopTable = pageEl.locator('table.log[data-made-table]');
       const mobileList = pageEl.locator('[data-made-mobile-list]');
       const filterPanel = pageEl.locator('scion-decisions-filter-panel');
-      const filterToggle = filterPanel.getByRole('button', {
-        name: /Search and filters/i,
-        expanded: false,
-      });
-      const filterBody = filterPanel.locator('#decisions-filter-body');
+      const filterBox = filterPanel.locator('scion-filter-box');
+      const dateRangeToggle = filterPanel.locator('[data-date-range-toggle]');
 
       if (isPhone(page)) {
         await expect(mobileList).toBeVisible({ timeout: 15_000 });
         await expect(desktopTable).toBeHidden();
-        await expect(filterToggle).toBeVisible();
-        await expect(filterBody).toBeHidden();
+        await expect(filterBox).toBeVisible();
+        await expect(dateRangeToggle).toHaveAttribute('aria-expanded', 'false');
 
         await expect(mobileList.locator('[data-mobile-answer]')).toHaveCount(3);
         await expect(mobileList).toContainText('Decisions page');
@@ -983,8 +982,8 @@ for (const theme of ['light', 'dark'] as const) {
       } else {
         await expect(desktopTable).toBeVisible({ timeout: 15_000 });
         await expect(mobileList).toBeHidden();
-        await expect(filterToggle).toBeVisible();
-        await expect(filterBody).toBeHidden();
+        await expect(filterBox).toBeVisible();
+        await expect(dateRangeToggle).toHaveAttribute('aria-expanded', 'false');
 
         const overrideRow = desktopTable.locator('tr[data-answer-row="ans-override"]');
         await expect(overrideRow).toHaveClass(/follow/);
@@ -1024,24 +1023,18 @@ for (const theme of ['light', 'dark'] as const) {
         await expect(desktopTable.locator('tbody tr')).toHaveCount(4);
       }
 
-      // Expand the collapsible filter panel and filter by Provenance = Confirmed.
-      await filterToggle.click();
-      await expect(
-        filterPanel.getByRole('button', { name: /Search and filters/i, expanded: true })
-      ).toBeVisible();
-      await expect(filterBody).toBeVisible();
-
-      const provSelect = pageEl.locator('sl-select[data-filter="provenance"]');
-      await provSelect.scrollIntoViewIfNeeded();
-      await provSelect.evaluate((el) => {
-        (el as HTMLElement & { value: string }).value = 'confirmed';
-        el.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
-      });
+      // Filter by provenance:confirmed via the unified filter box.
+      const filterInput = filterBox.locator('input');
+      await filterInput.click();
+      await filterInput.fill('provenance:confirmed');
+      await filterInput.press('Enter');
 
       await expect
         .poll(() =>
           ctrl.decisionsRequests.some(
-            (u) => u.includes('tab=made') && u.includes('provenance=confirmed')
+            (u) =>
+              u.includes('tab=made') &&
+              (u.includes('provenance=confirmed') || u.includes('q=provenance%3Aconfirmed'))
           )
         )
         .toBe(true);
@@ -1082,7 +1075,7 @@ for (const theme of ['light', 'dark'] as const) {
       const phone = isPhone(page);
 
       if (phone) {
-        // F-3: Mobile (390px) collapsed with wrapping removable tags ("backfill", Conversation: #release, Answered by: you)
+        // F-3: Mobile (390px) with legacy URL params hydrated into filter box
         await page.goto(
           `/projects/${PROJECT_ID}/decisions?tab=made&q=backfill&conversation=topic-release&user=${SELF_ID}`,
           { waitUntil: 'domcontentloaded' }
@@ -1091,40 +1084,23 @@ for (const theme of ['light', 'dark'] as const) {
 
         const pageEl = page.locator('scion-page-project-decisions');
         const panel = pageEl.locator('scion-decisions-filter-panel');
-        await expect(
-          panel.getByRole('button', { name: /Search and filters/i, expanded: false })
-        ).toBeVisible({ timeout: 15_000 });
-        await expect(panel.locator('[data-filter-tag="q"]')).toContainText('"backfill"');
-        await expect(panel.locator('[data-filter-tag="conversation"]')).toContainText(
-          'Conversation: #release'
-        );
-        await expect(panel.locator('[data-filter-tag="user"]')).toContainText('Answered by: you');
-        await expect(panel.locator('[data-active-filter-count]')).toHaveText('3 active');
+        const filterInput = panel.locator('scion-filter-box input');
+        await expect(filterInput).toBeVisible({ timeout: 15_000 });
+        await expect(filterInput).toHaveValue('conversation:#release by:me backfill');
         await expect(pageEl.locator('[data-made-mobile-list] [data-mobile-answer]')).toHaveCount(1);
         await shot(page, testInfo, theme, 'f3-mobile-collapsed');
 
-        // F-4: Mobile expanded (stacked controls, no drawer) + Conversation combobox fuzzy matching "rel"
-        await panel.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
-        await expect(
-          panel.getByRole('button', { name: /Search and filters/i, expanded: true })
-        ).toBeVisible();
+        // F-4: Mobile autocomplete suggestions for conversation:
         await expect(page.locator('sl-drawer[open]')).toHaveCount(0);
-
-        const convCombo = panel.locator('scion-facet-combobox[data-filter="conversation"]');
-        await convCombo.locator('[data-combobox-clear]').click();
-        await expect(panel.locator('[data-active-filter-count]')).toHaveText('2 active');
-
-        const convInput = convCombo.getByRole('combobox', { name: 'Conversation' });
-        await convInput.click();
-        await convInput.fill('rel');
-        const convOptions = convCombo.getByRole('option');
+        await filterInput.click();
+        await filterInput.fill('conversation:rel');
+        const convOptions = panel.locator('scion-filter-box [role="option"]');
         await expect(convOptions).toHaveCount(2);
         await expect(convOptions.nth(0)).toContainText('#release');
         await expect(convOptions.nth(1)).toContainText('DM with release-bot');
-        await expect(convOptions.nth(0).locator('mark')).toHaveText('rel');
         await shot(page, testInfo, theme, 'f4-mobile-expanded-combobox');
       } else {
-        // F-1: Desktop collapsed by default with removable tags ("backfill", Conversation: #release), 2 active, Clear
+        // F-1: Desktop with legacy URL params hydrated into filter box
         await page.goto(
           `/projects/${PROJECT_ID}/decisions?tab=made&q=backfill&conversation=topic-release`,
           { waitUntil: 'domcontentloaded' }
@@ -1133,49 +1109,38 @@ for (const theme of ['light', 'dark'] as const) {
 
         const pageEl = page.locator('scion-page-project-decisions');
         const panel = pageEl.locator('scion-decisions-filter-panel');
-        await expect(
-          panel.getByRole('button', { name: /Search and filters/i, expanded: false })
-        ).toBeVisible({ timeout: 15_000 });
-        await expect(panel.locator('[data-filter-tag="q"]')).toContainText('"backfill"');
-        await expect(panel.locator('[data-filter-tag="conversation"]')).toContainText(
-          'Conversation: #release'
-        );
-        await expect(panel.locator('[data-active-filter-count]')).toHaveText('2 active');
+        const filterInput = panel.locator('scion-filter-box input');
+        await expect(filterInput).toBeVisible({ timeout: 15_000 });
+        await expect(filterInput).toHaveValue('conversation:#release backfill');
         await expect(pageEl.locator('table.log[data-made-table] tbody tr')).toHaveCount(2);
         await expect(pageEl).toContainText('End of matching decisions');
         await shot(page, testInfo, theme, 'f1-made-collapsed');
 
-        // F-2 / F-2-dark: Press "/" on page -> expands panel & focuses search; Agent combobox fuzzy matches "rlsb"
+        // F-2 / F-2-dark: Press "/" on page -> focuses filter box; agent: autocomplete suggests release-bot
         await page.keyboard.press('/');
-        await expect(
-          panel.getByRole('button', { name: /Search and filters/i, expanded: true })
-        ).toBeVisible();
-
-        const agentCombo = panel.locator('scion-facet-combobox[data-filter="agent"]');
-        const agentInput = agentCombo.getByRole('combobox', { name: 'Agent' });
-        await agentInput.click();
-        await agentInput.fill('rlsb');
-        const agentOptions = agentCombo.getByRole('option');
+        await expect(filterInput).toBeFocused();
+        await filterInput.fill('agent:release');
+        const agentOptions = panel.locator('scion-filter-box [role="option"]');
         await expect(agentOptions).toHaveCount(2);
         await expect(agentOptions.nth(0)).toContainText('release-bot');
         await expect(agentOptions.nth(1)).toContainText('release-bot');
-        await expect(agentOptions.nth(1)).toContainText('deleted · 3f9c');
-        await expect(agentOptions.nth(0).locator('mark')).toHaveCount(4);
         await shot(page, testInfo, theme, 'f2-made-expanded-combobox');
       }
 
       // F-2b: Waiting on you filtered by agent -> "1 of 3" tab badge and "Waiting on others (0 of 2)"
-      await page.evaluate(() => localStorage.removeItem('scion:decisions:filters-open'));
       await page.goto(`/projects/${PROJECT_ID}/decisions?agent=${REL_AGENT_UUID}`, {
         waitUntil: 'domcontentloaded',
       });
       const pageEl = page.locator('scion-page-project-decisions');
       const panel = pageEl.locator('scion-decisions-filter-panel');
+      const filterInput = panel.locator('scion-filter-box input');
+      const clearBtn = panel.locator('scion-filter-box button[aria-label="Clear filter"]');
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('1 of 3', {
         timeout: 15_000,
       });
-      await expect(panel.locator('[data-filter-tag="agent"]')).toContainText('Agent: release-bot');
-      await expect(panel.locator('[data-active-filter-count]')).toHaveText('1 active');
+      // Two agents share the name "release-bot", so the legacy ?agent=<uuid>
+      // keeps the unambiguous UUID in the filter box.
+      await expect(filterInput).toHaveValue(`agent:${REL_AGENT_UUID}`);
       await expect(pageEl.locator('sl-details[data-waiting-others]')).toHaveAttribute(
         'summary',
         'Waiting on others (0 of 2)'
@@ -1183,9 +1148,9 @@ for (const theme of ['light', 'dark'] as const) {
       await shot(page, testInfo, theme, 'f2b-waiting-filtered');
 
       // F-5a: Distinct no-match state with "Clear filters" action
-      await panel.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
-      const searchInput = panel.locator('sl-input[data-filter="q"] input');
-      await searchInput.fill('nomatch');
+      await filterInput.click();
+      await filterInput.fill('nomatch');
+      await filterInput.press('Enter');
       const noMatch = pageEl.locator('[data-no-match="pending"]');
       await expect(noMatch).toBeVisible({ timeout: 10_000 });
       await expect(noMatch).toContainText('No decisions match these filters');
@@ -1193,29 +1158,27 @@ for (const theme of ['light', 'dark'] as const) {
       await shot(page, testInfo, theme, 'f5a-no-match');
 
       // F-5b: Search timeout warning alert ("Search took too long; narrow it...") on 503 SEARCH_TIMEOUT
-      await searchInput.fill('timeout-slow');
+      await filterInput.fill('timeout-slow');
+      await filterInput.press('Enter');
       const timeoutAlert = pageEl.locator('[data-search-timeout]');
       await expect(timeoutAlert).toBeVisible({ timeout: 10_000 });
       await expect(timeoutAlert).toContainText('Search took too long; narrow it');
       await shot(page, testInfo, theme, 'f5b-search-timeout');
 
       // Clear filters recovers back to unfiltered Waiting on you ("3" badge) and cleans URL
-      await panel.locator('[data-clear-filters]').click();
+      await clearBtn.click();
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('3');
       await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/decisions$`));
 
       // First-load SEARCH_TIMEOUT via direct ?q=timeout-slow&conversation=topic-release link mounts
-      // filter panel, hydrates facets (`Conversation: #release` resolved from key), and recovers on Clear
+      // filter panel, hydrates facets (`conversation:#release` resolved from key), and recovers on Clear
       await page.goto(
         `/projects/${PROJECT_ID}/decisions?q=timeout-slow&conversation=topic-release`,
         { waitUntil: 'domcontentloaded' }
       );
       await expect(timeoutAlert).toBeVisible({ timeout: 10_000 });
-      await expect(panel.locator('[data-filter-tag="q"]')).toContainText('"timeout-slow"');
-      await expect(panel.locator('[data-filter-tag="conversation"]')).toContainText(
-        'Conversation: #release'
-      );
-      await panel.locator('[data-clear-filters]').click();
+      await expect(filterInput).toHaveValue('conversation:#release timeout-slow');
+      await clearBtn.click();
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('3');
       await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/decisions$`));
     });

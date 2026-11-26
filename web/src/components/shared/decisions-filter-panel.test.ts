@@ -42,42 +42,28 @@ describe('<scion-decisions-filter-panel> (D13)', () => {
     window.localStorage.removeItem(DECISIONS_FILTERS_OPEN_STORAGE_KEY);
   });
 
-  it('starts collapsed by default and persists open/closed preference in localStorage', async () => {
+  it('renders <scion-filter-box> by default with no queryDialect binding and supports Date range disclosure on Made', async () => {
     const el = await mountPanel({ tab: 'pending' });
     const root = el.shadowRoot!;
-    const toggle = root.querySelector<HTMLButtonElement>('[data-filter-panel-toggle]')!;
-    const body = root.querySelector<HTMLElement>('#decisions-filter-body')!;
+    const box = root.querySelector('scion-filter-box') as (HTMLElement & { view?: string }) | null;
+    expect(box).not.toBeNull();
+    expect(box?.view).toBe('decisions');
+    expect(root.querySelector('[data-filter-panel-toggle]')).toBeNull();
+    expect(root.querySelector('[data-date-range-toggle]')).toBeNull();
 
-    expect(el.isOpen).toBe(false);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    expect(body.hidden).toBe(true);
-    expect(root.querySelector('.kbd')?.textContent).toBe('/');
-
-    // Click toggle -> expands and writes localStorage
-    toggle.click();
+    el.tab = 'made';
     await el.updateComplete;
-
-    expect(el.isOpen).toBe(true);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(body.hidden).toBe(false);
-    expect(window.localStorage.getItem(DECISIONS_FILTERS_OPEN_STORAGE_KEY)).toBe('true');
-
-    // Remount a new instance -> remembers open state from localStorage
-    el.remove();
-    const el2 = await mountPanel({ tab: 'made' });
-    expect(el2.isOpen).toBe(true);
-    expect(el2.shadowRoot!.querySelector<HTMLElement>('#decisions-filter-body')!.hidden).toBe(
-      false
-    );
-
-    // Collapse -> writes false
-    el2.shadowRoot!.querySelector<HTMLButtonElement>('[data-filter-panel-toggle]')!.click();
-    await el2.updateComplete;
-    expect(el2.isOpen).toBe(false);
-    expect(window.localStorage.getItem(DECISIONS_FILTERS_OPEN_STORAGE_KEY)).toBe('false');
+    const dateToggle = root.querySelector<HTMLButtonElement>('[data-date-range-toggle]');
+    expect(dateToggle).not.toBeNull();
+    expect(dateToggle?.getAttribute('aria-expanded')).toBe('false');
+    dateToggle?.click();
+    await el.updateComplete;
+    expect(dateToggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(root.querySelector('[data-filter="from"]')).not.toBeNull();
+    expect(root.querySelector('[data-filter="to"]')).not.toBeNull();
   });
 
-  it('renders removable tags (including quoted search text), active count, and Clear without toggling open state', async () => {
+  it('synthesizes legacy filter props into <scion-filter-box> value and shows Made-only warning on Pending', async () => {
     const el = await mountPanel({
       tab: 'made',
       q: 'backfill',
@@ -93,65 +79,49 @@ describe('<scion-decisions-filter-panel> (D13)', () => {
       answerers: [{ id: 'u-me', name: 'Alice' }],
     });
     const root = el.shadowRoot!;
-    const patches: DecisionsFilterPatch[] = [];
-    let cleared = 0;
-    el.addEventListener('decisions-filter-change', (e) => {
-      patches.push((e as CustomEvent<DecisionsFilterPatch>).detail);
-    });
-    el.addEventListener('decisions-filters-clear', () => {
-      cleared++;
-    });
+    const box = root.querySelector('scion-filter-box') as HTMLElement & {
+      value: string;
+      externalWarning: string;
+    };
+    expect(box).not.toBeNull();
+    expect(box.value).toBe(
+      'conversation:#release agent:release-bot by:me provenance:overridden backfill'
+    );
+    expect(box.externalWarning).toBe('');
 
-    const tags = Array.from(root.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
-    expect(tags.map((t) => t.textContent?.trim())).toEqual([
-      '"backfill"',
-      'Conversation: #release',
-      'Agent: release-bot',
-      'Answered by: you',
-      'Provenance: changed',
-      'From: 2026-11-01',
-      'To: 2026-11-14',
-    ]);
-    expect(root.querySelector('[data-active-filter-count]')?.textContent).toBe('7 active');
-
-    // Removing a tag emits patch and keeps panel collapsed
-    tags[0].dispatchEvent(new CustomEvent('sl-remove', { bubbles: true }));
-    expect(patches).toEqual([{ q: '' }]);
-    expect(el.isOpen).toBe(false);
-
-    // Clicking Clear emits clear and keeps panel collapsed
-    root.querySelector<HTMLElement>('[data-clear-filters]')!.click();
-    expect(cleared).toBe(1);
-    expect(el.isOpen).toBe(false);
-
-    // Switching tab to pending shows only shared tags & controls (no Made-only controls)
+    // Switching to pending warns about Made-only keys in the query.
     el.tab = 'pending';
     await el.updateComplete;
-    const pendingTags = Array.from(root.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
-    expect(pendingTags.map((t) => t.textContent?.trim())).toEqual([
-      '"backfill"',
-      'Conversation: #release',
-      'Agent: release-bot',
-    ]);
-    expect(root.querySelector('[data-filter="user"]')).toBeNull();
-    expect(root.querySelector('[data-filter="provenance"]')).toBeNull();
-    expect(root.querySelector('[data-filter="from"]')).toBeNull();
+    expect(box.externalWarning).toContain('Made tab only');
   });
 
-  it('expandAndFocusSearch() opens the panel and focuses the search input', async () => {
+  it('expandAndFocusSearch() focuses the <scion-filter-box> input', async () => {
     const el = await mountPanel({ tab: 'pending' });
-    const slInput = el.shadowRoot!.querySelector<HTMLElement & { focus: () => void }>(
-      'sl-input[data-filter="q"]'
-    )!;
-    const focusSpy = vi.fn();
-    slInput.focus = focusSpy;
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & {
+      focusInput: () => void;
+    };
+    expect(box).not.toBeNull();
+    const focusSpy = vi.spyOn(box, 'focusInput');
+
+    await el.expandAndFocusSearch();
+    expect(focusSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists open/closed preference in localStorage when supportsSearch is false', async () => {
+    const el = await mountPanel({ supportsSearch: false, tab: 'made' });
+    const root = el.shadowRoot!;
+    const toggle = root.querySelector<HTMLButtonElement>('[data-filter-panel-toggle]')!;
+    const body = root.querySelector<HTMLElement>('#decisions-filter-body')!;
 
     expect(el.isOpen).toBe(false);
-    await el.expandAndFocusSearch();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(body.hidden).toBe(true);
+
+    toggle.click();
+    await el.updateComplete;
     expect(el.isOpen).toBe(true);
-    expect(focusSpy).toHaveBeenCalledTimes(1);
+    expect(body.hidden).toBe(false);
     expect(window.localStorage.getItem(DECISIONS_FILTERS_OPEN_STORAGE_KEY)).toBe('true');
-    expect(slInput.getAttribute('maxlength')).toBe('256');
   });
 
   it('hides search, Conversation, and pending Agent when supportsSearch is false while preserving Made filters', async () => {
@@ -203,8 +173,9 @@ describe('<scion-decisions-filter-panel> (D13)', () => {
     expect(root.querySelector('[data-clear-filters]')).not.toBeNull();
   });
 
-  it('includes Dismissed in the Made Provenance select and renders Provenance: dismissed tag (ptone/scion#8217)', async () => {
+  it('includes Dismissed in the Made Provenance select and renders Provenance: dismissed tag when supportsSearch is false (ptone/scion#8217)', async () => {
     const el = await mountPanel({
+      supportsSearch: false,
       tab: 'made',
       provenance: 'dismissed',
     });

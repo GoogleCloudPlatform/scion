@@ -672,28 +672,20 @@ describe('<scion-page-project-decisions>', () => {
     expect(rP2.querySelector('[data-surface]')?.textContent?.trim()).toBe('Teams');
     expect(root.querySelector('[data-load-more="made"]')).toBeNull();
 
-    // Filter changes combine & reset cursor
+    // Filter changes combine & reset cursor via <scion-filter-box>
     const pRoot = panelRootOf(el);
-    const agentCombobox = pRoot.querySelector<HTMLElement>('[data-filter="agent"]')!;
-    agentCombobox.dispatchEvent(
-      new CustomEvent('facet-change', {
-        detail: { value: 'a-rel', label: 'release-bot' },
-        bubbles: true,
-        composed: true,
-      })
+    const box = pRoot.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
+    const boxInput = box.shadowRoot!.querySelector<HTMLInputElement>('input')!;
+    boxInput.value = 'agent:release-bot provenance:confirmed';
+    boxInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    boxInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
     );
-    await settle(el, 25);
-
-    const provSelect = pRoot.querySelector<HTMLElement & { value?: string }>(
-      '[data-filter="provenance"]'
-    )!;
-    provSelect.value = 'confirmed';
-    provSelect.dispatchEvent(new CustomEvent('sl-change'));
     await settle(el, 25);
 
     const lastMadeUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
     expect(lastMadeUrl).toBe(
-      '/api/v1/projects/p-1/decisions?tab=made&agent=a-rel&provenance=confirmed'
+      '/api/v1/projects/p-1/decisions?tab=made&q=agent%3Arelease-bot+provenance%3Aconfirmed'
     );
     expect(root.querySelector('[data-no-match="made"]')?.textContent).toContain(
       'No decisions match these filters'
@@ -1033,6 +1025,8 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
     const root = el.shadowRoot!;
     const pRoot = panelRootOf(el);
+    pRoot.querySelector<HTMLButtonElement>('[data-date-range-toggle]')!.click();
+    await settle(el, 15);
 
     const fromInput = pRoot.querySelector<HTMLElement & { value?: string }>(
       '[data-filter="from"]'
@@ -1064,7 +1058,9 @@ describe('<scion-page-project-decisions>', () => {
     expect(rangeErr?.textContent).toContain('Start date must be on or before end date.');
 
     // Clear filters recovers cleanly
-    pRoot.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(el, 25);
 
     expect(root.querySelector('[data-date-range-error]')).toBeNull();
@@ -1078,50 +1074,45 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
     const pRoot = panelRootOf(el);
+    pRoot.querySelector<HTMLButtonElement>('[data-date-range-toggle]')!.click();
+    await settle(el, 15);
 
-    const setSelectOrDate = async (selector: string, val: string): Promise<void> => {
+    const box = pRoot.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
+    const boxInput = box.shadowRoot!.querySelector<HTMLInputElement>('input')!;
+    boxInput.value = 'conversation:#release agent:release-bot by:Bob provenance:interpreted';
+    boxInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    boxInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
+    );
+    await settle(el, 15);
+
+    const setDate = async (selector: string, val: string): Promise<void> => {
       const ctrl = pRoot.querySelector<HTMLElement & { value?: string }>(selector)!;
       ctrl.value = val;
       ctrl.dispatchEvent(new CustomEvent('sl-change'));
       await settle(el, 15);
     };
 
-    const setCombobox = async (selector: string, val: string, label: string): Promise<void> => {
-      const ctrl = pRoot.querySelector<HTMLElement>(selector)!;
-      ctrl.dispatchEvent(
-        new CustomEvent('facet-change', {
-          detail: { value: val, label },
-          bubbles: true,
-          composed: true,
-        })
-      );
-      await settle(el, 15);
-    };
-
-    await setCombobox('[data-filter="conversation"]', 'topic-release', '#release');
-    await setCombobox('[data-filter="agent"]', 'a-rel', 'release-bot');
-    await setSelectOrDate('[data-filter="user"]', 'u-bob');
-    await setSelectOrDate('[data-filter="provenance"]', 'interpreted');
-    await setSelectOrDate('[data-filter="from"]', '2026-11-01');
-    await setSelectOrDate('[data-filter="to"]', '2026-11-13');
+    await setDate('[data-filter="from"]', '2026-11-01');
+    await setDate('[data-filter="to"]', '2026-11-13');
 
     const combinedUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
     const parsed = new URL(combinedUrl, 'http://localhost');
     expect(parsed.searchParams.get('tab')).toBe('made');
-    expect(parsed.searchParams.get('conversation')).toBe('topic-release');
-    expect(parsed.searchParams.get('agent')).toBe('a-rel');
-    expect(parsed.searchParams.get('user')).toBe('u-bob');
-    expect(parsed.searchParams.get('provenance')).toBe('interpreted');
+    expect(parsed.searchParams.get('q')).toBe(
+      'agent:release-bot by:bob conversation:#release provenance:interpreted'
+    );
     expect(parsed.searchParams.get('from')).toBe('2026-11-01T00:00:00.000Z');
     expect(parsed.searchParams.get('to')).toBe('2026-11-13T23:59:59.999Z');
 
-    // Click Clear in panel summary and verify all params are cleared
-    pRoot.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    // Clear all filters and verify all params are cleared
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(el, 25);
 
     const resetUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
     expect(resetUrl).toBe('/api/v1/projects/p-1/decisions?tab=made');
-    expect(pRoot.querySelector('[data-clear-filters]')).toBeNull();
   });
 
   it('preserves the exact <scion-chat-decisions> DOM element for surviving cards via keyed repeat()', async () => {
@@ -1371,14 +1362,10 @@ describe('<scion-page-project-decisions>', () => {
     expect(customRowText).toContain('not answerable by you');
     expect(customRowText).not.toContain('unexpected_backend_code');
 
-    // Collapsible filter panel toggle button exposes aria-expanded and aria-controls="decisions-filter-body"
-    const filtersToggle = panel.querySelector<HTMLElement>('[data-filter-panel-toggle]')!;
-    expect(filtersToggle.getAttribute('aria-controls')).toBe('decisions-filter-body');
-    expect(filtersToggle.getAttribute('aria-expanded')).toBe('false');
-    expect(panel.querySelector('#decisions-filter-body')).not.toBeNull();
-    filtersToggle.click();
-    await settle(el, 10);
-    expect(filtersToggle.getAttribute('aria-expanded')).toBe('true');
+    // Dialect filter panel renders <scion-filter-box view="decisions">
+    const filterBox = panel.querySelector<HTMLElement>('scion-filter-box');
+    expect(filterBox).not.toBeNull();
+    expect(filterBox?.getAttribute('view')).toBe('decisions');
 
     el.remove();
 
@@ -1401,7 +1388,7 @@ describe('<scion-page-project-decisions>', () => {
 
     madeHandler = (url, init) => {
       madeCall++;
-      const agent = url.searchParams.get('agent');
+      const q = url.searchParams.get('q');
       const limit = url.searchParams.get('limit');
       if (madeCall === 1) {
         return jsonResponse({
@@ -1415,7 +1402,7 @@ describe('<scion-page-project-decisions>', () => {
           conversations: [],
         });
       }
-      if (agent === 'a-x' && !limit) {
+      if (q === 'agent:agent-x' && !limit) {
         init?.signal?.addEventListener('abort', () => {
           filterResetAborted = true;
         });
@@ -1423,7 +1410,7 @@ describe('<scion-page-project-decisions>', () => {
           resolveFilterReset = resolve;
         });
       }
-      // Deferred live refresh after filter reset settles (agent=a-x&limit=50)
+      // Deferred live refresh after filter reset settles (q=agent:agent-x&limit=50)
       return jsonResponse({
         counts: { waitingOnYou: 1, waitingOnOthers: 0 },
         entries: [rowLiveNew, rowFiltered],
@@ -1445,14 +1432,13 @@ describe('<scion-page-project-decisions>', () => {
       root.querySelector('[data-answer-row="ans-old"] [data-surface]')?.textContent?.trim()
     ).toBe('Other');
 
-    // Change Agent filter to a-x -> holds reset fetch open while madeEntries still holds ans-old
-    const agentCombobox = panel.querySelector<HTMLElement>('[data-filter="agent"]')!;
-    agentCombobox.dispatchEvent(
-      new CustomEvent('facet-change', {
-        detail: { value: 'a-x' },
-        bubbles: true,
-        composed: true,
-      })
+    // Change Agent filter to agent:agent-x -> holds reset fetch open while madeEntries still holds ans-old
+    const box = panel.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
+    const boxInput = box.shadowRoot!.querySelector<HTMLInputElement>('input')!;
+    boxInput.value = 'agent:agent-x';
+    boxInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    boxInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
     );
     await settle(el, 10);
 
@@ -1643,13 +1629,11 @@ describe('<scion-page-project-decisions>', () => {
       expect(madeUrl.searchParams.get('to')).toBe('2026-11-14T23:59:59.999Z');
 
       const panel = panelRootOf(validEl);
-      expect(panel.querySelector('[data-active-filter-count]')?.textContent?.trim()).toBe(
-        '7 active'
+      const box = panel.querySelector<HTMLElement & { value: string }>('scion-filter-box');
+      expect(box?.value).toBe(
+        'conversation:#release agent:release-bot by:me provenance:direct backfill'
       );
-      expect(panel.querySelector('[data-filter-tag="q"]')?.textContent?.trim()).toBe('"backfill"');
-      expect(panel.querySelector('[data-filter-tag="from"]')?.textContent?.trim()).toContain(
-        '2026-11-01'
-      );
+      expect(panel.querySelector('[data-date-range-toggle]')?.textContent).toContain('2026-11-01');
       validEl.remove();
 
       // Invalid URL state: 1-char q, non-UUID agent, bogus provenance, inverted from > to, Made-only user on pending
@@ -1714,26 +1698,27 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount();
     const root = el.shadowRoot!;
     const panel = panelRootOf(el);
-    const searchInput = panel.querySelector<HTMLElement & { value: string }>('[data-filter="q"]')!;
+    const box = panel.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
+    const searchInput = box.shadowRoot!.querySelector<HTMLInputElement>('input')!;
 
-    // 1-char input does not trigger an invalid q=b request even after 300ms
+    // 1-char input does not trigger an invalid q=b request even after debounce
     searchInput.value = 'b';
-    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     await settle(el, 330);
     expect(callNum).toBe(1);
 
-    // Type "ba" -> wait 320ms -> starts first search request (held in flight)
+    // Type "ba" -> wait 330ms -> starts first search request (held in flight)
     searchInput.value = 'ba';
-    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     await settle(el, 100);
-    expect(callNum).toBe(1); // Not yet fired before 300ms
+    expect(callNum).toBe(1); // Not yet fired before debounce
     await settle(el, 230);
     expect(callNum).toBe(2);
     expect(firstSearchAborted).toBe(false);
 
-    // Type "backfill" while "ba" is in flight -> after 300ms, aborts "ba" and fires "backfill"
+    // Type "backfill" while "ba" is in flight -> after debounce, aborts "ba" and fires "backfill"
     searchInput.value = 'backfill';
-    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    searchInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
     await settle(el, 330);
     expect(firstSearchAborted).toBe(true);
     expect(callNum).toBe(3);
@@ -1830,13 +1815,14 @@ describe('<scion-page-project-decisions>', () => {
     expect(madeReq.searchParams.get('conversation')).toBe('topic-release');
     expect(madeReq.searchParams.get('agent')).toBe(agentUuid);
 
-    // Apply a Made-only filter (provenance=direct)
-    const madePanel = panelRootOf(el);
-    const provSelect = madePanel.querySelector<HTMLElement & { value: string }>(
-      '[data-filter="provenance"]'
-    )!;
-    provSelect.value = 'direct';
-    provSelect.dispatchEvent(new CustomEvent('sl-change'));
+    // Apply a Made-only filter (provenance=direct) via filters-change event
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { provenance: 'direct' },
+        bubbles: true,
+        composed: true,
+      })
+    );
     await settle(el, 25);
     expect(window.location.search).toContain('provenance=direct');
 
@@ -1847,8 +1833,10 @@ describe('<scion-page-project-decisions>', () => {
       `?q=backfill&conversation=topic-release&agent=${agentUuid}`
     );
 
-    // Click summary Clear -> clears all active shared filters and restores unfiltered badge "3"
-    panelRootOf(el).querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    // Clear all active shared filters and restore unfiltered badge "3"
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(el, 25);
     expect(window.location.search).toBe('');
     expect(root.querySelector('sl-tab[panel="pending"] sl-badge')?.textContent?.trim()).toBe('3');
@@ -1942,31 +1930,30 @@ describe('<scion-page-project-decisions>', () => {
     );
     expect(root.querySelector('[data-empty="pending"]')).toBeNull();
 
-    // Pressing "/" on the page expands the collapsed filter panel (and is ignored when focus is in an input)
-    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
-      'false'
-    );
+    // Pressing "/" on the page focuses the filter-box input (and is ignored when focus is in another input)
+    const filterBox = panel.querySelector<HTMLElement>('scion-filter-box')!;
+    const filterInput = filterBox.shadowRoot!.querySelector<HTMLInputElement>('input')!;
+    const focusSpy = vi.spyOn(filterInput, 'focus');
+
     const dummyInput = document.createElement('input');
     document.body.appendChild(dummyInput);
     dummyInput.focus();
     dummyInput.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
     await settle(el, 10);
-    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
-      'false'
-    );
+    expect(focusSpy).not.toHaveBeenCalled();
     dummyInput.remove();
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
     await settle(el, 15);
-    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
-      'true'
-    );
+    expect(focusSpy).toHaveBeenCalled();
 
     // 3. D9: HTTP 503 SEARCH_TIMEOUT renders warning alert while keeping filter panel mounted
-    const searchInput = panel.querySelector<HTMLElement & { value: string }>('[data-filter="q"]')!;
-    searchInput.value = 'timeout-query';
-    searchInput.dispatchEvent(new CustomEvent('sl-input'));
-    await settle(el, 330);
+    filterInput.value = 'timeout-query';
+    filterInput.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    filterInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true })
+    );
+    await settle(el, 30);
 
     const timeoutAlert = root.querySelector('[data-search-timeout]');
     expect(timeoutAlert).not.toBeNull();
@@ -1974,8 +1961,10 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('scion-decisions-filter-panel')).not.toBeNull();
     expect(root.querySelector('.error-state')).toBeNull();
 
-    // Recover by clicking Clear on the filter panel -> unfiltered prompts return and "Waiting on others (2)" renders
-    panel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    // Recover by clearing filters -> unfiltered prompts return and "Waiting on others (2)" renders
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(el, 25);
     expect(root.querySelector('[data-search-timeout]')).toBeNull();
     expect(root.querySelector('[data-prompt-card="m-1"]')).not.toBeNull();
@@ -2124,33 +2113,28 @@ describe('<scion-page-project-decisions>', () => {
     ).toBe(true);
 
     const pendingPanel = panelRootOf(pendingEl);
-    expect(pendingPanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
-      '"slowsearch"'
-    );
-    expect(
-      pendingPanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
-    ).toBe('Conversation: #release');
-    expect(
-      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>(
-        '[data-filter="conversation"]'
-      )?.options
-    ).toEqual([{ value: 'topic-release', label: '#release' }]);
-    expect(
-      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
-        ?.options
-    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
-    expect(pendingPanel.querySelector('[data-clear-filters]')).not.toBeNull();
+    const pendingBox = pendingPanel.querySelector<HTMLElement & { value: string }>(
+      'scion-filter-box'
+    )!;
+    expect(pendingBox.value).toBe('conversation:#release slowsearch');
+    expect(pendingPanelEl?.conversations).toEqual([
+      { key: 'topic-release', label: '#release', projectId: 'p-1' },
+    ]);
+    expect(pendingPanelEl?.agents).toEqual([{ id: 'a-rel', name: 'release-bot' }]);
 
-    // "/" shortcut expands panel and exposes search input even on first-load timeout
+    // "/" shortcut focuses the filter-box input even on first-load timeout
+    const pendingFocusSpy = vi.spyOn(
+      pendingBox.shadowRoot!.querySelector<HTMLInputElement>('input')!,
+      'focus'
+    );
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
     await settle(pendingEl, 15);
-    expect(
-      pendingPanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
-    ).toBe('true');
-    expect(pendingPanel.querySelector('[data-filter="q"]')).not.toBeNull();
+    expect(pendingFocusSpy).toHaveBeenCalled();
 
     // Clear recovers from first-load timeout on Pending
-    pendingPanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    pendingPanelEl!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(pendingEl, 25);
     expect(window.location.search).toBe('');
     expect(pendingRoot.querySelector('[data-search-timeout]')).toBeNull();
@@ -2180,31 +2164,26 @@ describe('<scion-page-project-decisions>', () => {
     ).toBe(true);
 
     const madePanel = panelRootOf(madeEl);
-    expect(madePanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
-      '"slowsearch"'
-    );
-    expect(
-      madePanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
-    ).toBe('Conversation: #release');
-    expect(
-      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="conversation"]')
-        ?.options
-    ).toEqual([{ value: 'topic-release', label: '#release' }]);
-    expect(
-      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
-        ?.options
-    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
-    expect(madePanel.querySelector('[data-clear-filters]')).not.toBeNull();
+    const madeBox = madePanel.querySelector<HTMLElement & { value: string }>('scion-filter-box')!;
+    expect(madeBox.value).toBe('conversation:#release slowsearch');
+    expect(madePanelEl?.conversations).toEqual([
+      { key: 'topic-release', label: '#release', projectId: 'p-1' },
+    ]);
+    expect(madePanelEl?.agents).toEqual([{ id: 'a-rel', name: 'release-bot' }]);
 
     // "/" shortcut works on Made first-load timeout too
+    const madeFocusSpy = vi.spyOn(
+      madeBox.shadowRoot!.querySelector<HTMLInputElement>('input')!,
+      'focus'
+    );
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
     await settle(madeEl, 15);
-    expect(
-      madePanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
-    ).toBe('true');
+    expect(madeFocusSpy).toHaveBeenCalled();
 
     // Clear recovers from first-load timeout on Made (and clears stale timeout on inactive Pending tab)
-    madePanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    madePanelEl!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(madeEl, 25);
     expect(window.location.search).toBe('?tab=made');
     expect(madeRoot.querySelector('[data-search-timeout]')).toBeNull();

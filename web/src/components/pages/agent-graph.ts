@@ -40,7 +40,6 @@ import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
 import {
   canonical,
-  filtersQueryDialectEnabled,
   getViewSchema,
   knownKeysFor,
   parse,
@@ -186,17 +185,15 @@ export class AgentGraphPage extends LitElement {
   ]);
 
   /**
-   * "Jump to agent" over the graph. With `filters.query_dialect` on, keeps
-   * searching all loaded agents even when a filter hides some of them; picking
-   * a hidden agent clears the filter so it can be revealed.
+   * "Jump to agent" over the graph. Keeps searching all loaded agents even when
+   * a filter hides some of them; picking a hidden agent clears the filter so it
+   * can be revealed.
    */
   readonly graphPalette = new GraphPaletteController(this, {
     treeView: (): ScionAgentTreeView | null =>
       this.renderRoot.querySelector('scion-agent-tree-view'),
-    candidates: (): readonly Agent[] | undefined =>
-      filtersQueryDialectEnabled() ? this.agents : undefined,
+    candidates: (): readonly Agent[] => this.agents,
     onSelectHidden: (agentId: string): boolean => {
-      if (!filtersQueryDialectEnabled()) return false;
       const target = this.agents.find((a) => a.id === agentId);
       if (target && this.memberScope && this.memberScope === target.projectId) {
         // Keep the active project scope so we don't trigger a full re-drain
@@ -252,27 +249,19 @@ export class AgentGraphPage extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     const params = new URLSearchParams(window.location.search);
-    const useDialect = filtersQueryDialectEnabled();
-    let initialFallbackProject = '';
-    if (useDialect) {
-      const { queryText, migrated, initialProject } = migrateProjectParamToQuery(
-        params,
-        stateManager.getAgents(),
-        stateManager.getProjects()
-      );
-      this.initiallyProjectScoped = migrated;
-      this.filterQueryText = queryText;
-      this.activeFilterQuery = this.parseValidQuery(queryText);
-      initialFallbackProject = initialProject;
-      if (migrated) {
-        if (queryText) params.set('q', queryText);
-        else params.delete('q');
-        params.delete('project');
-        replaceSearch(params);
-      }
-    } else {
-      this.projectFilter = params.get('project') || '';
-      this.initiallyProjectScoped = !!params.get('project');
+    const { queryText, migrated, initialProject } = migrateProjectParamToQuery(
+      params,
+      stateManager.getAgents(),
+      stateManager.getProjects()
+    );
+    this.initiallyProjectScoped = migrated;
+    this.filterQueryText = queryText;
+    this.activeFilterQuery = this.parseValidQuery(queryText);
+    if (migrated) {
+      if (queryText) params.set('q', queryText);
+      else params.delete('q');
+      params.delete('project');
+      replaceSearch(params);
     }
     this.syncProjectLabel();
     this.focusId = params.get('focus') || '';
@@ -283,16 +272,10 @@ export class AgentGraphPage extends LitElement {
     stateManager.addEventListener('agents-resync', this.onAgentsResync);
 
     this.watchFirstConnect();
-    if (useDialect) {
-      this.syncLoadScopeForQuery(this.activeFilterQuery, {
-        initial: true,
-        fallbackProjectId: initialFallbackProject,
-      });
-    } else if (stateManager.isAgentSetComplete('compact')) {
-      this.adoptHeldSet();
-    } else {
-      void this.load(this.projectFilter, false);
-    }
+    this.syncLoadScopeForQuery(this.activeFilterQuery, {
+      initial: true,
+      fallbackProjectId: initialProject,
+    });
   }
 
   override disconnectedCallback(): void {
@@ -658,45 +641,6 @@ export class AgentGraphPage extends LitElement {
     void this.load(this.memberScope, true);
   }
 
-  /** Agents after the project filter is applied */
-  private get visibleAgents(): Agent[] {
-    if (!this.projectFilter) return this.agents;
-    return this.agents.filter((a) => a.projectId === this.projectFilter);
-  }
-
-  private get projects(): Array<{ id: string; name: string }> {
-    // The store holds every agent loaded in this page lifetime (the
-    // unscoped set too), so a project-scoped membership still offers every
-    // known project.
-    const seen = new Map<string, string>();
-    for (const agent of [...this.agents, ...stateManager.getAgents()]) {
-      if (agent.projectId && !seen.has(agent.projectId)) {
-        seen.set(agent.projectId, agent.project || agent.projectId);
-      }
-    }
-    return Array.from(seen, ([id, name]) => ({ id, name })).sort((a, b) =>
-      a.name.localeCompare(b.name)
-    );
-  }
-
-  private onProjectFilterChange(e: Event): void {
-    this.setProjectFilter((e.target as HTMLSelectElement & { value: string }).value);
-  }
-
-  /** Change the project filter (`''` every project), keeping the URL in sync. */
-  private setProjectFilter(value: string): void {
-    if (value === this.projectFilter) return;
-    this.projectFilter = value;
-    this.applyProjectFilter(value);
-    const params = new URLSearchParams(window.location.search);
-    if (value) {
-      params.set('project', value);
-    } else {
-      params.delete('project');
-    }
-    replaceSearch(params);
-  }
-
   private parseValidQuery(raw: string): Query | null {
     const trimmed = raw.trim();
     if (!trimmed) return null;
@@ -892,22 +836,13 @@ export class AgentGraphPage extends LitElement {
   }
 
   override render() {
-    const useDialect = filtersQueryDialectEnabled();
-    const filtered = useDialect ? this.getFilteredGraph() : null;
-    const shownAgents = filtered ? filtered.agents : this.visibleAgents;
-    const contextIds = filtered ? filtered.contextIds : undefined;
+    const filtered = this.getFilteredGraph();
+    const shownAgents = filtered.agents;
+    const contextIds = filtered.contextIds;
     const filteredEmpty = Boolean(
-      filtered &&
-      filtered.hasActiveFilter &&
-      shownAgents.length === 0 &&
-      !this.loading &&
-      !this.error
+      filtered.hasActiveFilter && shownAgents.length === 0 && !this.loading && !this.error
     );
-    const treeFilterKey = useDialect
-      ? this.activeFilterQuery
-        ? canonical(this.activeFilterQuery)
-        : ''
-      : this.projectFilter;
+    const treeFilterKey = this.activeFilterQuery ? canonical(this.activeFilterQuery) : '';
 
     return html`
       <div style="padding: var(--sl-spacing-large, 1.25rem);">
@@ -919,33 +854,14 @@ export class AgentGraphPage extends LitElement {
           <div
             style="display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; flex: 1 1 auto; justify-content: flex-end;"
           >
-            ${useDialect
-              ? html`
-                  <scion-filter-box
-                    view="graph"
-                    .value=${this.filterQueryText}
-                    .valueSuggestions=${this.valueSuggestions}
-                    placeholder="Filter graph… (try phase:running harness:antigravity)"
-                    @filter-input=${this.onFilterInput}
-                    @filter-commit=${this.onFilterCommit}
-                  ></scion-filter-box>
-                `
-              : this.initiallyProjectScoped
-                ? nothing
-                : html`
-                    <sl-select
-                      size="small"
-                      placeholder="All projects"
-                      clearable
-                      value=${this.projectFilter}
-                      @sl-change=${this.onProjectFilterChange}
-                      style="min-width: 180px"
-                    >
-                      ${this.projects.map(
-                        (p) => html`<sl-option value=${p.id}>${p.name}</sl-option>`
-                      )}
-                    </sl-select>
-                  `}
+            <scion-filter-box
+              view="graph"
+              .value=${this.filterQueryText}
+              .valueSuggestions=${this.valueSuggestions}
+              placeholder="Filter graph… (try phase:running harness:antigravity)"
+              @filter-input=${this.onFilterInput}
+              @filter-commit=${this.onFilterCommit}
+            ></scion-filter-box>
             <scion-view-toggle view="graph" @view-change=${this.onViewChange}></scion-view-toggle>
           </div>
         </div>

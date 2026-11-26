@@ -1000,3 +1000,40 @@ func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(
 	require.NotNil(t, profParsed.Entries[0].InterpretedAnswer)
 	assert.True(t, profParsed.Entries[1].AwaitingConfirmation)
 }
+
+func TestDecisionsListHuman_FilterQueryValidation(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	h := newHumanDecisionsHub(t)
+	h.pending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[],"conversations":[]}`
+	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[],"conversations":[],"projects":[]}`
+
+	// 1-rune pure text rejected.
+	_, err := runDecisionsTestCmd(t, "decisions", "list", "-q", "a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 2 characters")
+
+	// 201-rune pure text rejected (dialect MaxTextRunes = 200).
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", strings.Repeat("é", 201))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "200")
+
+	// >512 bytes rejected (dialect MaxQueryBytes = 512).
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", strings.Repeat("😀", 129))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "512")
+
+	// Malformed structured query rejected.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", "agent:a OR agent:b")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--search:")
+
+	// 200-rune pure text accepted.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", strings.Repeat("é", 200))
+	require.NoError(t, err)
+
+	// Structured filter query accepted both with and without --all-projects.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", "agent:foo")
+	require.NoError(t, err)
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "-q", "project:alpha agent:foo")
+	require.NoError(t, err)
+}

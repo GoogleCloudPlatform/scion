@@ -35,8 +35,8 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import {
-  MAX_DECISIONS_SEARCH_RUNES,
-  normalizeDecisionsSearchQuery,
+  MIN_DECISIONS_SEARCH_RUNES,
+  normalizeDecisionsFilterQuery,
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionActorView,
   type ProjectDecisionConversationView,
@@ -188,9 +188,6 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
   /** Project facet options from the Hub response (`scope="profile"`). */
   @property({ attribute: false }) projects: ProjectDecisionProjectRef[] = [];
-
-  /** When true, renders `<scion-filter-box>` with the decisions or profile-decisions schema (ptone/scion#8985). */
-  @property({ type: Boolean }) queryDialect = false;
 
   @state() private open = false;
   @state() private datesOpen = false;
@@ -464,30 +461,16 @@ export class ScionDecisionsFilterPanel extends LitElement {
     return this.open;
   }
 
-  /** Expands the panel (persisting the preference) and focuses the search input (`/` shortcut, D13). */
+  /** Focuses the filter box input (`/` shortcut, D13). */
   async expandAndFocusSearch(): Promise<void> {
     if (!this.supportsSearch) return;
-    if (this.useFilterBox) {
-      await this.updateComplete;
-      const box = this.shadowRoot?.querySelector<ScionFilterBox>('scion-filter-box');
-      box?.focusInput();
-      return;
-    }
-    if (!this.open) {
-      this.setOpen(true);
-    }
     await this.updateComplete;
-    const slInput = this.shadowRoot?.querySelector<
-      HTMLElement & { focus?: () => void; shadowRoot?: ShadowRoot | null }
-    >('sl-input[data-filter="q"]');
-    if (!slInput) return;
-    slInput.focus?.();
-    const inner = slInput.shadowRoot?.querySelector<HTMLInputElement>('input');
-    inner?.focus();
+    const box = this.shadowRoot?.querySelector<ScionFilterBox>('scion-filter-box');
+    box?.focusInput();
   }
 
   private get useFilterBox(): boolean {
-    return this.queryDialect && this.supportsSearch;
+    return this.supportsSearch;
   }
 
   private get dialectView(): 'decisions' | 'profile-decisions' {
@@ -503,8 +486,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
       changed.has('conversation') ||
       changed.has('agent') ||
       changed.has('user') ||
-      changed.has('provenance') ||
-      changed.has('queryDialect')
+      changed.has('provenance')
     ) {
       if (
         changed.has('q') ||
@@ -676,8 +658,13 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
   private handleDialectFilterCommit(e: CustomEvent<FilterCommitDetail>): void {
     const { query, serverQ, value } = e.detail;
+    const normalizedText = normalizeDecisionsFilterQuery(value);
     const committedQ =
-      query.mode === 'text' ? normalizeDecisionsSearchQuery(value) : serverQ.trim();
+      query.mode === 'text'
+        ? [...normalizedText].length >= MIN_DECISIONS_SEARCH_RUNES
+          ? normalizedText
+          : ''
+        : serverQ.trim();
     this.dialectUserEdited = false;
     this.dialectDraft = value;
     this.dispatchEvent(
@@ -786,14 +773,6 @@ export class ScionDecisionsFilterPanel extends LitElement {
     writeStoredOpenPreference(next);
   }
 
-  private get conversationOptions(): FacetComboboxOption[] {
-    return this.conversations.map((c) => ({
-      value: c.key,
-      label: c.label || c.key,
-      ...(c.hint ? { hint: c.hint } : {}),
-    }));
-  }
-
   private get agentOptions(): FacetComboboxOption[] {
     return this.agents.map((a) => ({
       value: a.id,
@@ -805,20 +784,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
   private get activeTags(): DecisionsFilterTag[] {
     const tags: DecisionsFilterTag[] = [...this.extraTags];
 
-    if (this.supportsSearch) {
-      const normalizedQ = normalizeDecisionsSearchQuery(this.q);
-      if (normalizedQ) {
-        tags.push({ key: 'q', label: `"${normalizedQ}"` });
-      }
-
-      if (this.conversation) {
-        const convLabel =
-          this.conversations.find((c) => c.key === this.conversation)?.label ?? this.conversation;
-        tags.push({ key: 'conversation', label: `Conversation: ${convLabel}` });
-      }
-    }
-
-    if ((this.supportsSearch || this.tab === 'made') && this.agent) {
+    if (this.tab === 'made' && this.agent) {
       const actor = this.agents.find((a) => a.id === this.agent);
       const duplicateName =
         actor !== undefined && this.agents.filter((a) => a.name === actor.name).length > 1;
@@ -872,27 +838,6 @@ export class ScionDecisionsFilterPanel extends LitElement {
       }
     }
     this.setOpen(!this.open);
-  }
-
-  private handleSearchInput(e: Event): void {
-    const val = (e.currentTarget as { value?: string } | null)?.value ?? '';
-    this.dispatchEvent(
-      new CustomEvent<DecisionsSearchInputDetail>('decisions-search-input', {
-        detail: { value: val, immediate: val.trim() === '' },
-        bubbles: true,
-        composed: true,
-      })
-    );
-  }
-
-  private handleSearchClear(): void {
-    this.dispatchEvent(
-      new CustomEvent<DecisionsSearchInputDetail>('decisions-search-input', {
-        detail: { value: '', immediate: true },
-        bubbles: true,
-        composed: true,
-      })
-    );
   }
 
   private removeTag(key: DecisionsFilterKey): void {
@@ -950,7 +895,6 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
     const tags = this.activeTags;
     const activeCount = tags.length;
-    const displayedSearch = this.searchText ?? this.q;
 
     return html`
       <div class="fpanel" data-decisions-filter-panel data-scope=${this.scope}>
@@ -1014,26 +958,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
         </div>
 
         <div id="decisions-filter-body" class="body" ?hidden=${!this.open}>
-          ${this.supportsSearch
-            ? html`
-                <sl-input
-                  class="search"
-                  size="small"
-                  type="search"
-                  clearable
-                  maxlength=${MAX_DECISIONS_SEARCH_RUNES}
-                  data-filter="q"
-                  aria-label="Search decisions"
-                  placeholder="Search questions, answers, keys, agents, conversations"
-                  .value=${displayedSearch}
-                  @sl-input=${(e: Event): void => this.handleSearchInput(e)}
-                  @sl-clear=${(): void => this.handleSearchClear()}
-                >
-                  <sl-icon slot="prefix" name="search"></sl-icon>
-                </sl-input>
-              `
-            : nothing}
-          ${this.scope === 'project' && !this.supportsSearch && this.tab === 'pending'
+          ${this.scope === 'project' && this.tab === 'pending'
             ? html`
                 <p class="empty-filters-note" data-no-pending-filters>
                   No filters are available on this tab for this Hub version.
@@ -1043,22 +968,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
                 <div class="row2">
                   <slot name="leading-controls"></slot>
 
-                  ${this.supportsSearch
-                    ? html`
-                        <scion-facet-combobox
-                          data-filter="conversation"
-                          label="Conversation"
-                          placeholder="Any"
-                          footer-text="↑↓ Enter Esc"
-                          .options=${this.conversationOptions}
-                          .value=${this.conversation}
-                          @facet-change=${(e: CustomEvent<FacetChangeDetail>): void => {
-                            this.emitPatch({ conversation: e.detail.value });
-                          }}
-                        ></scion-facet-combobox>
-                      `
-                    : nothing}
-                  ${this.supportsSearch || this.tab === 'made'
+                  ${this.tab === 'made'
                     ? html`
                         <scion-facet-combobox
                           data-filter="agent"

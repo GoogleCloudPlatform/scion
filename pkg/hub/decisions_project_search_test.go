@@ -140,8 +140,6 @@ func TestProjectDecisions_SearchAndFilterValidation(t *testing.T) {
 	for name, params := range map[string]url.Values{
 		"one rune":                {"q": {"a"}},
 		"one rune after trim":     {"q": {"  a  "}},
-		"257 runes":               {"q": {strings.Repeat("é", 257)}},
-		"257 runes on made":       {"tab": {"made"}, "q": {strings.Repeat("x", 257)}},
 		"agent not a uuid":        {"agent": {"release-bot"}},
 		"conversation too long":   {"conversation": {strings.Repeat("k", 257)}},
 		"made conversation width": {"tab": {"made"}, "conversation": {strings.Repeat("k", 257)}},
@@ -150,10 +148,20 @@ func TestProjectDecisions_SearchAndFilterValidation(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, code, "%s: %s", name, body)
 	}
 	for name, params := range map[string]url.Values{
-		"two runes":        {"q": {"ro"}},
-		"256 multibyte":    {"q": {strings.Repeat("é", 256)}},
-		"blank is no q":    {"q": {"   "}},
-		"conversation 256": {"conversation": {strings.Repeat("k", 256)}},
+		"201 multibyte runes":     {"q": {strings.Repeat("é", 201)}},
+		"201 ascii runes on made": {"tab": {"made"}, "q": {strings.Repeat("x", 201)}},
+		"over 512 bytes":          {"q": {strings.Repeat("😀", 129)}},
+	} {
+		code, body := f.get(t, f.bob, params)
+		assert.Equal(t, http.StatusBadRequest, code, "%s: %s", name, body)
+		assert.Contains(t, string(body), ErrCodeInvalidFilterQuery, "%s: %s", name, body)
+	}
+	for name, params := range map[string]url.Values{
+		"two runes":           {"q": {"ro"}},
+		"200 multibyte runes": {"q": {strings.Repeat("é", 200)}},
+		"512 bytes":           {"q": {strings.Repeat("😀", 128)}},
+		"blank is no q":       {"q": {"   "}},
+		"conversation 256":    {"conversation": {strings.Repeat("k", 256)}},
 	} {
 		code, body := f.get(t, f.bob, params)
 		assert.Equal(t, http.StatusOK, code, "%s: %s", name, body)

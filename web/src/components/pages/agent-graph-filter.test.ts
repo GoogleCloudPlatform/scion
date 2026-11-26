@@ -17,7 +17,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Agent } from '../../shared/types.js';
 import {
-  FILTERS_QUERY_DIALECT_FLAG,
   getViewSchema,
   knownKeysFor,
   parse,
@@ -33,7 +32,7 @@ import {
   resolveProjectLoadTarget,
 } from './agent-graph-filter.js';
 import type { SeededDrainResult } from '../../client/agent-drain.js';
-import { setFeatureFlag, resetServerFlagStateForTests } from '../../utils/feature-flags.js';
+import { resetServerFlagStateForTests } from '../../utils/feature-flags.js';
 import { stateManager } from '../../client/state.js';
 import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
 import type { AgentGraphPage } from './agent-graph.js';
@@ -350,44 +349,7 @@ describe('scion-page-agent-graph filter dialect integration', () => {
     harnessConfig: 'codex',
   });
 
-  it('keeps legacy select, URL, and palette selection unchanged when filters.query_dialect is off', async () => {
-    vi.spyOn(stateManager, 'getAgents').mockReturnValue([parent, child, other]);
-    window.history.replaceState({}, '', '/agents/graph');
-    page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
-    document.body.appendChild(page);
-    await page.updateComplete;
-
-    expect(page.shadowRoot!.querySelector('scion-filter-box')).toBeNull();
-    expect(page.shadowRoot!.querySelector('sl-select')).not.toBeNull();
-
-    // With experiment off, selecting a real candidate whose revealAgent returns
-    // false must not fall through to onSelectHidden or call focusAgentNode.
-    const tree = page.shadowRoot!.querySelector('scion-agent-tree-view') as ScionAgentTreeView;
-    const revealSpy = vi.spyOn(tree, 'revealAgent').mockReturnValue(false);
-    const focusSpy = vi.spyOn(tree, 'focusAgentNode');
-    page.graphPalette.open();
-    const palette = await vi.waitFor(() => {
-      const p = document.querySelector('scion-quick-palette') as
-        | (HTMLElement & { open?: boolean; groups?: { agents?: { status?: string } } })
-        | null;
-      if (!p?.open || p.groups?.agents?.status !== 'ready') throw new Error('palette not ready');
-      return p;
-    });
-    palette.dispatchEvent(
-      new CustomEvent('palette-select', {
-        detail: { target: { kind: 'agent', agentId: 'a-other', displayName: 'Other' } },
-      })
-    );
-    expect(revealSpy).toHaveBeenCalledWith('a-other');
-    palette
-      .shadowRoot!.querySelector('sl-dialog')!
-      .dispatchEvent(new Event('sl-after-hide', { bubbles: true, composed: true }));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(focusSpy).not.toHaveBeenCalled();
-  });
-
-  it('migrates ?project= to ?q=project:... and filters with dimmed context when dialect is on', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+  it('migrates ?project= to ?q=project:... and filters with dimmed context', async () => {
     vi.spyOn(stateManager, 'getAgents').mockReturnValue([parent, child, other]);
     window.history.replaceState({}, '', '/agents/graph?project=p-1');
     page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
@@ -463,7 +425,6 @@ describe('scion-page-agent-graph filter dialect integration', () => {
   });
 
   it('re-flows layout deliberately on narrowing filter-input while keeping stable positions on live delete', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     const r = mkAgent({ id: 'r', name: 'Root', phase: 'running', labels: { keep: '1' } });
     const c1 = mkAgent({
       id: 'c1',
@@ -563,7 +524,6 @@ describe('scion-page-agent-graph filter dialect integration', () => {
   });
 
   it('clears the filter and reveals/focuses the picked agent when selecting a hidden agent in unscoped mode', async () => {
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     vi.spyOn(stateManager, 'getAgents').mockReturnValue([parent, child, other]);
     window.history.replaceState({}, '', '/agents/graph?q=harness:antigravity');
     page = document.createElement('scion-page-agent-graph') as AgentGraphPage;
@@ -623,7 +583,6 @@ describe('scion-page-agent-graph R1 load scope with non-held drains', () => {
   beforeEach(() => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
-    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     vi.spyOn(stateManager, 'setScope').mockImplementation(() => {});
     vi.spyOn(stateManager, 'sseConnected').mockResolvedValue(undefined);
     vi.spyOn(stateManager, 'isAgentSetComplete').mockReturnValue(false);

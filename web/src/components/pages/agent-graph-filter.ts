@@ -17,6 +17,8 @@
 import type { Agent, Project } from '../../shared/types.js';
 import { parentIdOf } from '../../shared/lineage.js';
 import {
+  agentToFilterRow,
+  buildAgentValueSuggestions,
   match,
   type FilterRow,
   type Query,
@@ -45,60 +47,11 @@ export function isEmptyGraphQuery(q: Query | null): boolean {
 
 /**
  * Maps an Agent (compact or full) to a FilterRow for the graph schema.
- * Note: small duplication with agents-list field accessors (to be unified after
- * parallel P2/P3 landing).
+ * Delegates to the shared `agentToFilterRow` accessor with project display-name
+ * matching enabled.
  */
 export function agentToGraphFilterRow(agent: Agent): FilterRow {
-  return {
-    values(key: string): string[] {
-      switch (key.toLowerCase()) {
-        case 'phase':
-          return agent.phase ? [agent.phase] : [];
-        case 'activity':
-          return agent.activity ? [agent.activity] : [];
-        case 'label': {
-          const out: string[] = [];
-          if (agent.labels) {
-            for (const [k, v] of Object.entries(agent.labels)) {
-              out.push(k, `${k}=${v}`);
-            }
-          }
-          return out;
-        }
-        case 'project': {
-          const out: string[] = [];
-          if (agent.projectSlug) out.push(agent.projectSlug);
-          if (agent.projectId) out.push(agent.projectId);
-          if (agent.project) out.push(agent.project);
-          return out;
-        }
-        case 'template':
-          return agent.template ? [agent.template] : [];
-        case 'harness': {
-          // harnessVendor is a vendor, not a harness config.
-          const hc = agent.harnessConfig || agent.appliedConfig?.harnessConfig;
-          return hc ? [hc] : [];
-        }
-        case 'mode': {
-          const out: string[] = [agent.messageMode || 'project'];
-          if (agent._messageability?.canMessage === true) {
-            out.push('can_message');
-          } else if (agent._messageability?.canMessage === false) {
-            out.push('cannot_message');
-          }
-          return out;
-        }
-        default:
-          return [];
-      }
-    },
-    text(): string[] {
-      const out: string[] = [];
-      if (agent.name) out.push(agent.name);
-      if (agent.slug) out.push(agent.slug);
-      return out;
-    },
-  };
+  return agentToFilterRow(agent, { includeProjectName: true });
 }
 
 /**
@@ -165,40 +118,15 @@ export function filterGraphAgents(
 export function makeGraphValueSuggestions(
   getAgents: () => readonly Agent[]
 ): ValueSuggestionProvider {
-  return (key: string): string[] => {
-    const agents = getAgents();
-    const set = new Set<string>();
-    switch (key.toLowerCase()) {
-      case 'project':
-        for (const a of agents) {
-          const val = a.projectSlug || a.projectId;
-          if (val) set.add(val);
-        }
-        break;
-      case 'label':
-        for (const a of agents) {
-          if (!a.labels) continue;
-          for (const [k, v] of Object.entries(a.labels)) {
-            set.add(k);
-            set.add(`${k}=${v}`);
-          }
-        }
-        break;
-      case 'template':
-        for (const a of agents) {
-          if (a.template) set.add(a.template);
-        }
-        break;
-      case 'harness':
-        for (const a of agents) {
-          const hc = a.harnessConfig || a.appliedConfig?.harnessConfig;
-          if (hc) set.add(hc);
-        }
-        break;
-      default:
-        return [];
+  const base = buildAgentValueSuggestions(getAgents);
+  return (key: string, prefix: string): string[] => {
+    const k = key.toLowerCase();
+    if (k !== 'project' && k !== 'label' && k !== 'template' && k !== 'harness') {
+      return [];
     }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+    return base(k, prefix)
+      .map((v) => (typeof v === 'string' ? v : v.value))
+      .sort((a, b) => a.localeCompare(b));
   };
 }
 

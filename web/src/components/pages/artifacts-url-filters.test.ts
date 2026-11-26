@@ -86,53 +86,51 @@ describe('artifacts list page URL filter hydration', () => {
       .map((u) => new URL(u, 'http://x').searchParams);
   }
 
-  it('hydrates reviewPending and ownedOnly from ?review_pending=1&owner=me on mount', async () => {
+  it('migrates ?review_pending=1&owner=me to ?q=is:mine is:review on mount', async () => {
     window.history.replaceState(null, '', '/artifacts?review_pending=1&owner=me');
     const el = await mount();
 
     const params = listParams()[0];
-    expect(params.get('review_pending')).toBe('1');
-    expect(params.get('owner')).toBe('me');
+    expect(params.get('q')).toBe('is:mine is:review');
 
-    const statusSelect = el.shadowRoot!.querySelector('sl-select')!;
-    expect(statusSelect.getAttribute('value')).toBe('review');
-
-    const checkboxes = el.shadowRoot!.querySelectorAll('sl-checkbox');
-    expect(checkboxes[0].hasAttribute('checked')).toBe(true);
-    expect(checkboxes[1].hasAttribute('checked')).toBe(false);
+    const box = el.shadowRoot!.querySelector('scion-filter-box') as HTMLElement & { value: string };
+    expect(box.value).toBe('is:review is:mine');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review is:mine');
+    expect(new URLSearchParams(window.location.search).has('review_pending')).toBe(false);
+    expect(new URLSearchParams(window.location.search).has('owner')).toBe(false);
   });
 
-  it('keeps ?review_pending=1 and ?owner=me in sync via history.replaceState when toggles change', async () => {
+  it('keeps ?q= in sync via history.replaceState when quick-filter chips change', async () => {
     const replaceSpy = vi.spyOn(window.history, 'replaceState');
     const el = await mount();
     expect(window.location.search).toBe('');
 
-    const statusSelect = el.shadowRoot!.querySelector('sl-select') as HTMLElement & {
-      value: string;
+    const chipByText = (label: string): HTMLButtonElement => {
+      const btn = Array.from(
+        el.shadowRoot!.querySelectorAll<HTMLButtonElement>('.filter-chip')
+      ).find((b) => b.textContent?.trim() === label);
+      if (!btn) throw new Error(`Missing chip: ${label}`);
+      return btn;
     };
-    statusSelect.value = 'review';
-    statusSelect.dispatchEvent(new Event('sl-change', { bubbles: true }));
+
+    chipByText('Review pending').click();
     await settle(el);
-    expect(window.location.search).toBe('?review_pending=1');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:review');
     expect(replaceSpy).toHaveBeenCalled();
 
-    const [ownedCb, sharedCb] = Array.from(
-      el.shadowRoot!.querySelectorAll('sl-checkbox')
-    ) as (HTMLElement & { checked: boolean })[];
-    ownedCb.checked = true;
-    ownedCb.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    chipByText('Owned by me').click();
     await settle(el);
-    expect(window.location.search).toBe('?review_pending=1&owner=me');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:mine is:review');
 
-    // Enabling "Shared with me" clears ownedOnly and removes owner=me from URL.
-    sharedCb.checked = true;
-    sharedCb.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    // Enabling "Shared with me" replaces is:mine with is:shared.
+    chipByText('Shared with me').click();
     await settle(el);
-    expect(window.location.search).toBe('?review_pending=1');
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('is:shared is:review');
 
-    // Resetting review filter removes review_pending=1 from URL.
-    statusSelect.value = 'all';
-    statusSelect.dispatchEvent(new Event('sl-change', { bubbles: true }));
+    // Clicking active chips toggles them off and clears ?q=.
+    chipByText('Shared with me').click();
+    await settle(el);
+    chipByText('Review pending').click();
     await settle(el);
     expect(window.location.search).toBe('');
   });

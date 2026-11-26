@@ -16,6 +16,7 @@
 
 import { scanKeyPrefix } from './parse.js';
 import {
+  MAX_DISTINCT_REFERENTS,
   MAX_TERMS,
   MAX_TEXT_RUNES,
   MAX_VALUES_PER_KEY,
@@ -155,6 +156,7 @@ export function validate(query: Query, schema: ViewSchema, rawInput = ''): Valid
 
   const posFlags = new Map<string, Map<string, Term>>();
   const seenPositiveSingle = new Map<string, Term>();
+  const seenRefs = new Set<string>();
 
   for (const term of query.terms) {
     const keyDef = lookupKey(schema, term.key);
@@ -231,6 +233,21 @@ export function validate(query: Query, schema: ViewSchema, rawInput = ''): Valid
             error: {
               code: 'value',
               message: `invalid label filter "${v}": label key must not be empty`,
+              offset: term.offset,
+              length: term.length,
+            },
+            warnings,
+          };
+        }
+      }
+    } else if (keyDef.kind === 'ref') {
+      for (const v of term.values) {
+        seenRefs.add(`${keyDef.name}\0${v.toLowerCase()}`);
+        if (seenRefs.size > MAX_DISTINCT_REFERENTS) {
+          return {
+            error: {
+              code: 'limit',
+              message: `filter query exceeds maximum of ${MAX_DISTINCT_REFERENTS} distinct reference values`,
               offset: term.offset,
               length: term.length,
             },

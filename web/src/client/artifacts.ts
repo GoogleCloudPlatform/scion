@@ -390,13 +390,10 @@ export async function listProjectArtifacts(
     cursor?: string;
     limit?: number;
     signal?: AbortSignal;
-    /** Only artifacts homed elsewhere and shared with the project. */
-    sharedOnly?: boolean;
   } = {}
 ): Promise<ArtifactListResponse> {
   const params = new URLSearchParams({ mine: '1', scope: projectId });
   if (opts.q) params.set('q', opts.q);
-  if (opts.sharedOnly) params.set('shared', '1');
   if (opts.cursor) params.set('cursor', opts.cursor);
   if (opts.limit) params.set('limit', String(opts.limit));
   return okJSON(
@@ -1287,14 +1284,10 @@ export interface ArtifactListResponse {
 
 /** Filters of the artifact list. */
 export interface ArtifactListFilters {
-  /** Title or key contains this text. */
+  /** Unified filter query (`?q=`). */
   q?: string;
-  /** Only artifacts whose current version is a review. */
-  reviewPending?: boolean;
-  /** Only artifacts the caller owns. */
+  /** Only artifacts the caller owns (used by chat artifact picker). */
   ownedOnly?: boolean;
-  /** Only artifacts a grant shares with the caller. */
-  sharedOnly?: boolean;
   /**
    * Only artifacts homed in this project, plus those shared with it when
    * the caller may read there (the list endpoint's scope filter).
@@ -1310,9 +1303,7 @@ export function artifactListUrl(filters: ArtifactListFilters, cursor?: string): 
   const params = new URLSearchParams({ mine: '1' });
   const q = filters.q?.trim();
   if (q) params.set('q', q);
-  if (filters.reviewPending) params.set('review_pending', '1');
   if (filters.ownedOnly) params.set('owner', 'me');
-  if (filters.sharedOnly) params.set('shared', '1');
   if (filters.scope) params.set('scope', filters.scope);
   if (cursor) params.set('cursor', cursor);
   return `/api/v1/artifacts?${params.toString()}`;

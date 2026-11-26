@@ -37,7 +37,7 @@ import './workspace-migration-notice.js';
 import type { WorkspaceMigrationNotice } from './workspace-migration-notice.js';
 import './filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from './filter-box/filter-box.js';
-import { filtersQueryDialectEnabled, type Query } from '../../shared/filter-query/index.js';
+import type { Query } from '../../shared/filter-query/index.js';
 import {
   collectFileExtensions,
   extractFileQueryText,
@@ -596,7 +596,6 @@ export class ScionFileBrowser extends LitElement {
 
   private readonly initialLimit = 500;
   private _searchAbortController: AbortController | null = null;
-  private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   /** The text query most recently committed / in flight for commit deduplication. */
   private _committedBackendQuery = '';
   /** The text query that `backendResults` actually answered (set only on successful response). */
@@ -659,10 +658,6 @@ export class ScionFileBrowser extends LitElement {
       font-size: 0.75rem;
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
-    }
-
-    .filter-input {
-      width: 14rem;
     }
 
     .filter-box {
@@ -999,41 +994,10 @@ export class ScionFileBrowser extends LitElement {
       this._searchAbortController.abort();
       this._searchAbortController = null;
     }
-    if (this._searchDebounceTimer !== null) {
-      clearTimeout(this._searchDebounceTimer);
-      this._searchDebounceTimer = null;
-    }
-  }
-
-  private handleFilterInput(value: string): void {
-    this.filterText = value;
-    this.backendError = false;
-
-    if (!value) {
-      this.backendResults = [];
-      this.backendHasMore = false;
-      this.backendSearching = false;
-      this._cancelSearch();
-      return;
-    }
-
-    if (!this.dataSource?.searchFiles) return;
-
-    if (this._searchDebounceTimer !== null) {
-      clearTimeout(this._searchDebounceTimer);
-    }
-    this._searchDebounceTimer = setTimeout(() => {
-      this._searchDebounceTimer = null;
-      void this._runBackendSearch(value);
-    }, 250);
-  }
-
-  private get isDialectEnabled(): boolean {
-    return filtersQueryDialectEnabled();
   }
 
   private isFilterActive(): boolean {
-    return this.isDialectEnabled ? !isFileQueryEmpty(this.activeQuery) : Boolean(this.filterText);
+    return !isFileQueryEmpty(this.activeQuery);
   }
 
   private fileValueSuggestions = (key: string): string[] => {
@@ -1120,9 +1084,7 @@ export class ScionFileBrowser extends LitElement {
     if (!this.isFilterActive()) return this.getBaseFiles();
 
     const base = this.getBaseFiles();
-    const localMatches = this.isDialectEnabled
-      ? filterFilesByQuery(base, this.activeQuery)
-      : this.applyFilter(base);
+    const localMatches = filterFilesByQuery(base, this.activeQuery);
 
     if (this.backendResults.length === 0) return localMatches;
 
@@ -1130,13 +1092,11 @@ export class ScionFileBrowser extends LitElement {
       ? this.backendResults
       : this.backendResults.filter((f) => !isDotFile(f.path));
 
-    if (this.isDialectEnabled) {
-      const textPart = extractFileQueryText(this.activeQuery);
-      filteredBackend =
-        textPart === this._backendResultsQuery
-          ? postFilterFilesByQuery(filteredBackend, this.activeQuery)
-          : filterFilesByQuery(filteredBackend, this.activeQuery);
-    }
+    const textPart = extractFileQueryText(this.activeQuery);
+    filteredBackend =
+      textPart === this._backendResultsQuery
+        ? postFilterFilesByQuery(filteredBackend, this.activeQuery)
+        : filterFilesByQuery(filteredBackend, this.activeQuery);
 
     const seen = new Set(localMatches.map((f) => f.path));
     const merged = [...localMatches];
@@ -1188,31 +1148,6 @@ export class ScionFileBrowser extends LitElement {
         }
       }
       return this.sortDir === 'asc' ? cmp : -cmp;
-    });
-  }
-
-  private applyFilter(files: FileEntry[]): FileEntry[] {
-    const pattern = this.filterText;
-
-    // Try to use the input as a regex first (allows e.g. \.tsx?$ or ^src/)
-    try {
-      const re = new RegExp(pattern, 'i');
-      return files.filter((f) => re.test(f.path));
-    } catch {
-      // Not valid regex — fall back to fuzzy match
-    }
-
-    // Fuzzy match: every character in the pattern must appear in order (case-insensitive)
-    const lower = pattern.toLowerCase();
-    return files.filter((f) => {
-      const name = f.path.toLowerCase();
-      let ni = 0;
-      for (let pi = 0; pi < lower.length; pi++) {
-        ni = name.indexOf(lower[pi], ni);
-        if (ni === -1) return false;
-        ni++;
-      }
-      return true;
     });
   }
 
@@ -1322,14 +1257,11 @@ export class ScionFileBrowser extends LitElement {
     const base = this.getBaseFiles();
     const hasDotFiles = this.files.some((f) => isDotFile(f.path));
 
-    const useDialect = this.isDialectEnabled;
     const filterActive = this.isFilterActive();
 
     let countLabel;
     if (filterActive) {
-      const localMatches = useDialect
-        ? filterFilesByQuery(base, this.activeQuery)
-        : this.applyFilter(base);
+      const localMatches = filterFilesByQuery(base, this.activeQuery);
       const localCount = localMatches.length;
       if (this.backendSearching) {
         countLabel = html`${localCount} local match${localCount !== 1 ? 'es' : ''} ·
@@ -1342,7 +1274,6 @@ export class ScionFileBrowser extends LitElement {
       } else {
         const mergedCount = this.getMergedFiles().length;
         const localOnlyTruncated =
-          useDialect &&
           !extractFileQueryText(this.activeQuery) &&
           this.initialHasMore &&
           Boolean(this.dataSource?.searchFiles);
@@ -1369,35 +1300,17 @@ export class ScionFileBrowser extends LitElement {
         <div class="toolbar-left">
           <span class="toolbar-meta">${countLabel}</span>
           ${this.files.length > 0
-            ? useDialect
-              ? html`
-                  <scion-filter-box
-                    class="filter-box"
-                    view="files"
-                    .value=${this.filterText}
-                    placeholder="Filter files… (try ext:ts)"
-                    .valueSuggestions=${this.fileValueSuggestions}
-                    @filter-input=${this.handleDialectFilterInput}
-                    @filter-commit=${this.handleDialectFilterCommit}
-                  ></scion-filter-box>
-                `
-              : html`
-                  <sl-input
-                    class="filter-input"
-                    size="small"
-                    placeholder="Filter files…"
-                    clearable
-                    .value=${this.filterText}
-                    @sl-input=${(e: Event) => {
-                      this.handleFilterInput((e.target as HTMLInputElement).value);
-                    }}
-                    @sl-clear=${() => {
-                      this.handleFilterInput('');
-                    }}
-                  >
-                    <sl-icon name="funnel" slot="prefix"></sl-icon>
-                  </sl-input>
-                `
+            ? html`
+                <scion-filter-box
+                  class="filter-box"
+                  view="files"
+                  .value=${this.filterText}
+                  placeholder="Filter files… (try ext:ts)"
+                  .valueSuggestions=${this.fileValueSuggestions}
+                  @filter-input=${this.handleDialectFilterInput}
+                  @filter-commit=${this.handleDialectFilterCommit}
+                ></scion-filter-box>
+              `
             : nothing}
           ${hasDotFiles
             ? html`

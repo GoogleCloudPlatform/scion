@@ -49,7 +49,6 @@ import { stateManager } from '../../client/state.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import type {
   DecisionsFilterPatch,
-  DecisionsFilterTag,
   DecisionsSearchInputDetail,
 } from '../shared/decisions-filter-panel.js';
 import '../shared/decisions-filter-panel.js';
@@ -76,7 +75,6 @@ import {
   renderWaitingOnOthersSection,
   renderWaitingTabBadge,
 } from '../shared/decisions-views.js';
-import type { FacetChangeDetail, FacetComboboxOption } from '../shared/facet-combobox.js';
 import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
 
@@ -125,7 +123,6 @@ export class ScionPageProfileDecisions extends LitElement {
         limit,
         filter,
         signal,
-        dialect: this.ctrl.queryDialect,
         validateQuery: this.ctrl.validateDialectQuery,
       }),
     fetchMade: ({ sort, cursor, limit, filter, signal }): Promise<ProfileMadeDecisionsResponse> =>
@@ -134,7 +131,6 @@ export class ScionPageProfileDecisions extends LitElement {
         cursor,
         limit,
         signal,
-        dialect: this.ctrl.queryDialect,
         validateQuery: this.ctrl.validateDialectQuery,
       }),
   });
@@ -181,11 +177,6 @@ export class ScionPageProfileDecisions extends LitElement {
         border-color: var(--scion-primary, #3b82f6);
       }
 
-      scion-decisions-filter-panel > scion-facet-combobox[slot='leading-controls'] {
-        flex: 1 1 11rem;
-        min-width: 10rem;
-      }
-
       sl-alert[data-truncated-projects] {
         display: block;
         margin: 0.75rem 0;
@@ -216,32 +207,11 @@ export class ScionPageProfileDecisions extends LitElement {
         margin-left: auto;
         font-size: 0.8125rem;
       }
-
-      @media (max-width: 760px) {
-        scion-decisions-filter-panel > scion-facet-combobox[slot='leading-controls'] {
-          flex: 1 1 auto;
-          width: 100%;
-          min-width: 0;
-        }
-      }
     `,
   ];
 
   private readonly resolveProjectName = (ref: ProjectDecisionProjectRef | undefined): string =>
     this.ctrl.projectDisplayName(ref);
-
-  private get projectFacetOptions(): FacetComboboxOption[] {
-    return this.ctrl.facetsProjects.map((p) => ({
-      value: p.id,
-      label: p.name || p.slug || p.id,
-    }));
-  }
-
-  private get projectExtraTags(): DecisionsFilterTag[] {
-    if (!this.ctrl.filterProject) return [];
-    const name = this.ctrl.projectDisplayName(undefined, this.ctrl.filterProject);
-    return [{ key: 'project', label: `Project: ${name}` }];
-  }
 
   /** D5: Conversation facet options show their project as the muted combobox suffix. */
   private get profileConversationFacets(): ProjectDecisionConversationView[] {
@@ -338,7 +308,6 @@ export class ScionPageProfileDecisions extends LitElement {
       <scion-decisions-filter-panel
         scope="profile"
         .supportsSearch=${this.ctrl.supportsSearch}
-        .queryDialect=${this.ctrl.queryDialect}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}
@@ -349,7 +318,6 @@ export class ScionPageProfileDecisions extends LitElement {
         .provenance=${this.ctrl.filterProvenance}
         .from=${this.ctrl.filterFrom}
         .to=${this.ctrl.filterTo}
-        .extraTags=${this.projectExtraTags}
         .currentUserId=${this.ctrl.currentUserId}
         .projects=${this.ctrl.facetsProjects}
         .conversations=${this.profileConversationFacets}
@@ -363,20 +331,7 @@ export class ScionPageProfileDecisions extends LitElement {
           this.ctrl.applyFilterPatch(e.detail)}
         @decisions-filters-clear=${this.ctrl.clearFilters}
       >
-        ${this.ctrl.queryDialect
-          ? this.renderSortBar('dialect-leading')
-          : html`
-              <scion-facet-combobox
-                slot="leading-controls"
-                data-filter="project"
-                label="Project"
-                placeholder="Any"
-                .options=${this.projectFacetOptions}
-                .value=${this.ctrl.filterProject}
-                @facet-change=${(e: CustomEvent<FacetChangeDetail>): void =>
-                  this.ctrl.applyFilterPatch({ project: e.detail.value })}
-              ></scion-facet-combobox>
-            `}
+        ${this.renderSortBar('dialect-leading')}
       </scion-decisions-filter-panel>
     `;
   }
@@ -392,9 +347,7 @@ export class ScionPageProfileDecisions extends LitElement {
     return html`
       <sl-alert variant="primary" open data-truncated-projects>
         <sl-icon slot="icon" name="info-circle"></sl-icon>
-        ${this.ctrl.queryDialect
-          ? 'Showing your 200 most recently active projects; only those 200 projects are searched.'
-          : 'Showing your 200 most recently active projects; pick a project to see others'}
+        Showing your 200 most recently active projects; only those 200 projects are searched.
       </sl-alert>
     `;
   }
@@ -454,19 +407,11 @@ export class ScionPageProfileDecisions extends LitElement {
         </sl-tab>
 
         <sl-tab-panel name="pending" ?active=${this.ctrl.activeTab === 'pending'}>
-          ${this.ctrl.activeTab === 'pending'
-            ? html`${this.ctrl.queryDialect
-                ? nothing
-                : this.renderSortBar()}${this.renderFilterPanel()}`
-            : nothing}
+          ${this.ctrl.activeTab === 'pending' ? this.renderFilterPanel() : nothing}
           ${this.renderPendingPanel()}
         </sl-tab-panel>
         <sl-tab-panel name="made" ?active=${this.ctrl.activeTab === 'made'}>
-          ${this.ctrl.activeTab === 'made'
-            ? html`${this.ctrl.queryDialect
-                ? nothing
-                : this.renderSortBar()}${this.renderFilterPanel()}`
-            : nothing}
+          ${this.ctrl.activeTab === 'made' ? this.renderFilterPanel() : nothing}
           ${this.renderMadePanel()}
         </sl-tab-panel>
       </sl-tab-group>

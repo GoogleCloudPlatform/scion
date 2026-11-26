@@ -403,20 +403,23 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
       await expect(decisionsPage).not.toContainText(gammaPendingQuestion);
       await expect(decisionsPage).not.toContainText('D-GAMMA-PENDING');
 
-      // Expand filter panel -> verify Project combobox has ONLY projAlpha + projBeta (never projGamma)
+      // Filter box suggestions -> verify project: has ONLY projAlpha + projBeta (never projGamma)
       const panel = decisionsPage.locator('scion-decisions-filter-panel');
-      await panel.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
-      const projCombo = decisionsPage.locator('scion-facet-combobox[data-filter="project"]');
-      await projCombo.getByRole('combobox', { name: 'Project' }).click();
-      const projOptionTexts = await projCombo.getByRole('option').allTextContents();
+      const filterInput = panel.locator('scion-filter-box input');
+      await filterInput.click();
+      await filterInput.fill('project:');
+      const projOptionTexts = await panel
+        .locator('scion-filter-box [role="option"]')
+        .allTextContents();
       expect(projOptionTexts.join(' ')).toContain(projAlphaName);
       expect(projOptionTexts.join(' ')).toContain(projBetaName);
       expect(projOptionTexts.join(' ')).not.toContain(projGammaName);
 
-      // Agent combobox carries muted project hints from P4's agents[].projectId and excludes gamma-bot
-      const agentCombo = panel.locator('scion-facet-combobox[data-filter="agent"]');
-      await agentCombo.getByRole('combobox', { name: 'Agent' }).click();
-      const agentOptionTexts = await agentCombo.getByRole('option').allTextContents();
+      // agent: suggestions carry muted project hints from P4's agents[].projectId and exclude gamma-bot
+      await filterInput.fill('agent:');
+      const agentOptionTexts = await panel
+        .locator('scion-filter-box [role="option"]')
+        .allTextContents();
       const joinedAgentOptions = agentOptionTexts.join(' | ');
       expect(joinedAgentOptions).toContain('alpha-bot');
       expect(joinedAgentOptions).toContain(projAlphaName);
@@ -424,6 +427,8 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
       expect(joinedAgentOptions).toContain(projBetaName);
       expect(joinedAgentOptions).not.toContain('gamma-bot');
       expect(joinedAgentOptions).not.toContain(projGammaName);
+      await filterInput.fill('');
+      await filterInput.press('Escape');
 
       // Switch sort to Most recent -> single chronological list with project badges on cards
       await decisionsPage.locator('[data-sort-option="recent"]').click();
@@ -478,12 +483,8 @@ test.describe('Profile Decisions roll-up across projects on real hub (ptone/scio
       await expect(decisionsPage.locator(`[data-made-group="${projGammaId}"]`)).toHaveCount(0);
 
       await decisionsPage.locator(`[data-see-all-project="${projBetaId}"]`).click();
-      await expect(pageA).toHaveURL(
-        new RegExp(`/profile/decisions\\?tab=made&sort=recent&project=${projBetaId}$`)
-      );
-      await expect(panel.locator('[data-filter-tag="project"]')).toContainText(
-        `Project: ${projBetaName}`
-      );
+      await expect(pageA).toHaveURL(/\/profile\/decisions\?tab=made&sort=recent&q=project%3A/);
+      await expect(panel.locator('scion-filter-box input')).toHaveValue(/^project:/);
     } finally {
       await ctxA.close();
     }

@@ -511,7 +511,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(requestedUrls).toContain('/api/v1/users/me/decisions?tab=made&sort=recent');
   });
 
-  it('wires Project combobox, removable Project tag, filtered "n of m" badge, and D5 project labels/hints on Conversation and Agent options', async () => {
+  it('wires filter box value suggestions with D5 project labels/hints and filtered "n of m" badge', async () => {
     setFeatureFlag(DECISIONS_FLAG, true);
 
     const el = await mount('/profile/decisions?tab=pending&sort=project');
@@ -519,41 +519,37 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
       'scion-decisions-filter-panel'
     );
     expect(panel?.scope).toBe('profile');
-
-    const projectCbx = el.shadowRoot?.querySelector<ScionFacetCombobox>(
-      'scion-facet-combobox[data-filter="project"]'
-    );
-    expect(projectCbx).not.toBeNull();
-    expect(projectCbx?.options).toEqual([
-      { value: 'proj-1', label: 'scion' },
-      { value: 'proj-2', label: 'web-site' },
-    ]);
-
-    // D5: Conversation options carry project hint; Agent options use agents[].projectId when present and fall back gracefully when absent (without inferring from loaded rows)
     expect(panel).not.toBeNull();
-    panel?.setOpen(true);
-    await settle(el, 15);
-    const convCbx = panel?.shadowRoot?.querySelector<ScionFacetCombobox>(
-      'scion-facet-combobox[data-filter="conversation"]'
-    );
-    expect(convCbx?.options).toEqual([
-      { value: 'topic:landing', label: '#landing', hint: 'web-site' },
-      { value: 'topic:release', label: '#release', hint: 'scion' },
+
+    const box = panel?.shadowRoot?.querySelector<
+      HTMLElement & {
+        valueSuggestions?: (
+          key: string,
+          prefix: string
+        ) => Array<string | { value: string; help?: string; pinned?: boolean }>;
+      }
+    >('scion-filter-box');
+    expect(box).not.toBeNull();
+
+    // Project, Conversation, and Agent suggestions carry D5 project hints.
+    expect(box?.valueSuggestions?.('project', '')).toEqual([
+      { value: 'scion' },
+      { value: 'web-site' },
+    ]);
+    expect(box?.valueSuggestions?.('conversation', '')).toEqual([
+      { value: '#landing', help: 'web-site' },
+      { value: '#release', help: 'scion' },
+    ]);
+    expect(box?.valueSuggestions?.('agent', '')).toEqual([
+      { value: 'design-bot', help: 'web-site' },
+      { value: 'nc-x', help: 'scion' },
+      { value: 'release-bot' },
     ]);
 
-    const agentCbx = panel?.shadowRoot?.querySelector<ScionFacetCombobox>(
-      'scion-facet-combobox[data-filter="agent"]'
-    );
-    expect(agentCbx?.options).toEqual([
-      { value: AGENT_DES, label: 'design-bot', hint: 'web-site' },
-      { value: AGENT_NCX, label: 'nc-x', hint: 'scion' },
-      { value: AGENT_REL, label: 'release-bot' },
-    ]);
-
-    // Commit Project filter via combobox
-    projectCbx?.dispatchEvent(
-      new CustomEvent('facet-change', {
-        detail: { value: 'proj-1', label: 'scion' },
+    // Commit Project filter via legacy filter-change event (also still supported)
+    panel?.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { project: 'proj-1' },
         bubbles: true,
         composed: true,
       })
@@ -565,16 +561,10 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
       '3 of 4'
     );
 
-    // Collapsed filter panel shows removable "Project: scion" tag
-    const tagTexts = Array.from(
-      panel?.shadowRoot?.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]') ?? []
-    ).map((t) => t.textContent?.trim());
-    expect(tagTexts).toContain('Project: scion');
-
-    // Removing the Project tag clears the project filter
-    panel?.shadowRoot
-      ?.querySelector<HTMLElement>('sl-tag[data-filter-tag="project"]')
-      ?.dispatchEvent(new CustomEvent('sl-remove', { bubbles: true }));
+    // Clearing filters clears the project filter
+    panel?.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
     await settle(el, 20);
     expect(window.location.search).toBe('?tab=pending&sort=project');
   });
@@ -611,7 +601,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(madeGroups.map((g) => g.getAttribute('data-made-group'))).toEqual(['proj-1', 'proj-2']);
     expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).toBeNull();
 
-    // Click "See all in scion" -> sets project=proj-1 and switches sort to recent
+    // Click "See all in scion" -> sets q=project:scion and switches sort to recent
     const seeAll = el.shadowRoot?.querySelector<HTMLAnchorElement>(
       '[data-see-all-project="proj-1"]'
     );
@@ -619,9 +609,9 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     seeAll?.click();
     await settle(el, 25);
 
-    expect(window.location.search).toBe('?tab=made&sort=recent&project=proj-1');
+    expect(window.location.search).toBe('?tab=made&sort=recent&q=project%3Ascion');
     expect(requestedUrls).toContain(
-      '/api/v1/users/me/decisions?tab=made&sort=recent&project=proj-1'
+      '/api/v1/users/me/decisions?tab=made&sort=recent&q=project%3Ascion'
     );
 
     // Recent table renders Project column and Load more button
@@ -649,7 +639,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     const banner = el.shadowRoot?.querySelector<HTMLElement>('[data-truncated-projects]');
     expect(banner).not.toBeNull();
     expect(banner?.textContent).toContain(
-      'Showing your 200 most recently active projects; pick a project to see others'
+      'Showing your 200 most recently active projects; only those 200 projects are searched.'
     );
 
     // Selecting a project hides the truncated banner
@@ -851,17 +841,15 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(el.shadowRoot?.querySelector('[data-search-timeout]')).toBeNull();
     expect(el.shadowRoot?.querySelectorAll('[data-prompt-card]')).toHaveLength(1);
 
-    // "/" shortcut opens the filter panel
-    panel.setOpen(false);
-    await settle(el, 10);
-    expect(panel.shadowRoot?.querySelector('#decisions-filter-body')?.hasAttribute('hidden')).toBe(
-      true
-    );
+    // "/" shortcut focuses the filter box input
+    const box = panel.shadowRoot?.querySelector('scion-filter-box');
+    expect(box).not.toBeNull();
+    const boxInput = box?.shadowRoot?.querySelector<HTMLInputElement>('input');
+    expect(boxInput).not.toBeNull();
+    const focusSpy = vi.spyOn(boxInput!, 'focus');
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', cancelable: true }));
     await settle(el, 15);
-    expect(panel.shadowRoot?.querySelector('#decisions-filter-body')?.hasAttribute('hidden')).toBe(
-      false
-    );
+    expect(focusSpy).toHaveBeenCalled();
 
     // Search with no matches -> shows no-match empty state and "Clear filters" button
     panel.dispatchEvent(
@@ -1158,14 +1146,14 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     el.shadowRoot?.querySelector<HTMLElement>('[data-see-all-project="proj-1"]')?.click();
     await settle(el, 25);
     expect(requestedUrls[requestedUrls.length - 1]).toBe(
-      '/api/v1/users/me/decisions?tab=made&sort=recent&q=baz&project=proj-1'
+      '/api/v1/users/me/decisions?tab=made&sort=recent&q=project%3Ascion+baz'
     );
 
     const beforePendingReturnIdx = requestedUrls.length;
     el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
     await settle(el, 25);
     expect(requestedUrls.slice(beforePendingReturnIdx)).toEqual([
-      '/api/v1/users/me/decisions?tab=pending&sort=recent&q=baz&project=proj-1',
+      '/api/v1/users/me/decisions?tab=pending&sort=recent&q=project%3Ascion+baz',
     ]);
   });
 

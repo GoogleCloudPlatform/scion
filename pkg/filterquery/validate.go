@@ -56,6 +56,9 @@ func (s Schema) Validate(q Query) *Error {
 
 	// Track positive flag-set values per key for mutual-exclusion checks.
 	posFlags := make(map[string]map[string]Term)
+	// Track distinct (key, lower(value)) pairs across KindRef terms to bound
+	// per-request referent lookups on the hub.
+	seenRefs := make(map[string]struct{})
 
 	for _, term := range q.Terms {
 		keyDef, ok := s.LookupKey(term.Key)
@@ -123,6 +126,19 @@ func (s Schema) Validate(q Query) *Error {
 					return &Error{
 						Code:    ErrCodeValue,
 						Message: fmt.Sprintf("invalid label filter %q: label key must not be empty", v),
+						Offset:  term.Offset,
+						Length:  term.Length,
+					}
+				}
+			}
+		case KindRef:
+			for _, v := range term.Values {
+				refKey := keyDef.Name + "\x00" + strings.ToLower(v)
+				seenRefs[refKey] = struct{}{}
+				if len(seenRefs) > MaxDistinctReferents {
+					return &Error{
+						Code:    ErrCodeLimit,
+						Message: fmt.Sprintf("filter query exceeds maximum of %d distinct reference values", MaxDistinctReferents),
 						Offset:  term.Offset,
 						Length:  term.Length,
 					}

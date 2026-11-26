@@ -71,13 +71,7 @@ func TestArtifactsList_FilterQueryDialect(t *testing.T) {
 		return listedIDs(decodeArtifactList(t, userArtifactRequest(t, srv, user, http.MethodGet, target, nil)))
 	}
 
-	// Experiment OFF: q=is:review is plain text and matches the literal title.
-	assert.Equal(t, sortedIDs(projID), list(artifactListPath+"&q="+url.QueryEscape("is:review")), "experiment off")
-
-	// Turn filters.query_dialect ON.
-	enableFiltersQueryDialect(t, srv)
-
-	// Experiment ON: structured queries work end-to-end.
+	// Structured queries work end-to-end.
 	assert.Equal(t, sortedIDs(ownID), list(artifactListPath+"&q="+url.QueryEscape("is:review")), "is:review")
 	assert.Equal(t, sortedIDs(ownID), list(artifactListPath+"&q="+url.QueryEscape("is:mine")), "is:mine")
 	assert.Equal(t, sortedIDs(sharedID), list(artifactListPath+"&q="+url.QueryEscape("is:shared")), "is:shared")

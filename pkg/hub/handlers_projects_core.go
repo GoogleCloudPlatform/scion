@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
@@ -3316,11 +3315,10 @@ func projectAgentListFilter(w http.ResponseWriter, query url.Values, projectID s
 }
 
 // applyProjectAgentFilterQuery parses and translates ?q= for project-scoped
-// agent lists (using schemas.ProjectAgents, which excludes project: and is:)
-// when the filters.query_dialect experiment is enabled.
+// agent lists (using schemas.ProjectAgents, which excludes project: and is:).
 func (s *Server) applyProjectAgentFilterQuery(ctx context.Context, w http.ResponseWriter, query url.Values, identity Identity, filter *store.AgentFilter) bool {
 	rawQ := query.Get("q")
-	if rawQ == "" || !s.experimentEnabled(experiments.FiltersQueryDialect) {
+	if rawQ == "" {
 		return true
 	}
 	parsed, fqErr := filterquery.Parse(rawQ, schemas.ProjectAgents.HasKey)

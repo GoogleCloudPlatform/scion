@@ -119,7 +119,6 @@ export class ScionPageProjectDecisions extends LitElement {
         limit,
         filter,
         signal,
-        dialect: this.ctrl.queryDialect,
         validateQuery: isValidDecisionsDialectQuery,
       }),
     fetchMade: ({ cursor, limit, filter, signal }): Promise<ProjectMadeDecisionsResponse> =>
@@ -127,7 +126,6 @@ export class ScionPageProjectDecisions extends LitElement {
         cursor,
         limit,
         signal,
-        dialect: this.ctrl.queryDialect,
         validateQuery: isValidDecisionsDialectQuery,
       }),
   });
@@ -155,7 +153,6 @@ export class ScionPageProjectDecisions extends LitElement {
       <scion-decisions-filter-panel
         scope="project"
         .supportsSearch=${this.ctrl.supportsSearch}
-        .queryDialect=${this.ctrl.queryDialect}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}

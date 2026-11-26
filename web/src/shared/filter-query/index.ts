@@ -14,15 +14,8 @@
  * limitations under the License.
  */
 
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import rawSchemas from './schemas.generated.json' with { type: 'json' };
 import type { ViewSchema } from './types.js';
-
-export const FILTERS_QUERY_DIALECT_FLAG = 'filters.query_dialect';
-
-export function filtersQueryDialectEnabled(): boolean {
-  return isFeatureEnabled(FILTERS_QUERY_DIALECT_FLAG);
-}
 
 export * from './types.js';
 export { parse } from './parse.js';
@@ -40,16 +33,30 @@ export {
   type ValueSuggestion,
   type ValueSuggestionProvider,
 } from './suggest.js';
-export { getActiveSingleKeyValue, setSingleKeyInQuery } from './query-edit.js';
+export {
+  getActiveSingleKeyValue,
+  hasIsFlagInQuery,
+  setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
+  toggleIsFlagInQuery,
+  toggleIsFlagInQueryWithNotice,
+  UNREPRESENTABLE_CLEAR_NOTICE,
+  type QueryEditResult,
+} from './query-edit.js';
 export {
   agentToFilterRow,
   buildAgentValueSuggestions,
   canLiveAddAgent,
   clientEvaluableAgentQuery,
+  drainServerQuery,
+  hasNonPhaseServerPredicate,
   hasScopeTermInQuery,
   hasServerOnlyAgentTerms,
   matchAgentQuery,
+  nonPhasePredicateForQuery,
+  nonPhaseServerPredicateForQuery,
   phasePredicateForQuery,
+  refusalKeyForQuery,
   type AgentFilterContext,
 } from './agent-accessors.js';
 

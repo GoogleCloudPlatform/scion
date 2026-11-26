@@ -676,15 +676,6 @@ const SuspendScreen = "hub.suspend_screen"
 // stored value is true while the experiment is off.
 const AdminManagedBrokers = "hub.admin_managed_brokers"
 
-// FiltersQueryDialect gates the unified key:value filter query dialect across
-// hub list endpoints and the web UI's <scion-filter-box> (ptone/scion#9018).
-// Server layer: while off, GET /api/v1/agents ignores the q parameter; while
-// on, q is parsed, validated, and pushed down to store predicates (400
-// invalid_filter_query on invalid queries). Web layer: while off, views render
-// their existing filter controls; while on, adopted views render the unified
-// filter box. Default off.
-const FiltersQueryDialect = "filters.query_dialect"
-
 // AgentMoveBundle gates portable workspace + $HOME bundle transfer for
 // cross-broker `scion reincarnate --broker` moves (ptone/scion#8960). Checked
 // in the Hub during move eligibility evaluation (`bundle_experiment`). While
@@ -759,17 +750,6 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9141",
 		Owner:       "tokenomics",
 		ReviewBy:    "2027-05-25",
-	},
-	{
-		Name:        FiltersQueryDialect,
-		Title:       "Unified filter query dialect",
-		Description: "Enables the unified Gmail/GitHub-style key:value filter query dialect (q=) on supported list endpoints and replaces view-specific filter inputs with <scion-filter-box> in the web UI. Server layer: while off, GET /api/v1/agents ignores q; while on, q is parsed, validated, and translated into store predicates. Web layer: selects <scion-filter-box> on adopted list views.",
-		Default:     false,
-		Layers:      []Layer{LayerServer, LayerWeb},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#9018",
-		Owner:       "ui",
-		ReviewBy:    "2027-05-23",
 	},
 	{
 		Name:        TemplateDriftWarning,
@@ -1520,6 +1500,8 @@ var compiledRetired = []string{
 	// Replaced by web.decisions (ptone/scion#8223).
 	"web.chat_choices",
 	"web.project_decisions",
+	// Graduated: unified filter query dialect is always on (ptone/scion#9034).
+	"filters.query_dialect",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

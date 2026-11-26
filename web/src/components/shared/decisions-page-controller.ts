@@ -44,7 +44,6 @@ import {
   hasDecisionsSearchCapability,
   isDecisionsSearchTimeoutError,
   normalizeDecisionsFilterQuery,
-  normalizeDecisionsSearchQuery,
   parseDecisionsUrlState,
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionConversationView,
@@ -57,7 +56,6 @@ import {
 } from '../../client/project-decisions.js';
 import {
   canonical,
-  filtersQueryDialectEnabled,
   getViewSchema,
   knownKeysFor,
   parse as parseFilterQuery,
@@ -80,7 +78,10 @@ export function isValidDecisionsDialectQuery(
   view: DecisionsFilterView = 'decisions'
 ): boolean {
   const schema = getViewSchema(view);
-  if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
+  if (!schema) {
+    const trimmed = normalizeDecisionsFilterQuery(raw);
+    return [...trimmed].length >= MIN_DECISIONS_SEARCH_RUNES;
+  }
   const parsed = parseFilterQuery(raw, knownKeysFor(schema));
   if (parsed.error || !parsed.query) return false;
   const validation = validateFilterQuery(parsed.query, schema, raw);
@@ -247,7 +248,6 @@ export class DecisionsPageController implements ReactiveController {
   private readonly adapter: DecisionsPageAdapter;
 
   enabled = false;
-  queryDialect = false;
   hubNotFound = false;
   currentUserId = '';
   activeTab: 'pending' | 'made' = 'pending';
@@ -369,13 +369,7 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnFlagsChanged = (): void => {
     const next = decisionsEnabled();
-    const nextDialect = filtersQueryDialectEnabled();
-    const dialectChanged = nextDialect !== this.queryDialect;
-    this.queryDialect = nextDialect;
     if (next === this.enabled) {
-      if (dialectChanged) {
-        this.notify();
-      }
       return;
     }
     this.enabled = next;
@@ -454,7 +448,6 @@ export class DecisionsPageController implements ReactiveController {
   };
 
   hostConnected(): void {
-    this.queryDialect = filtersQueryDialectEnabled();
     this.extractRouteState();
     this.enabled = decisionsEnabled();
     this.notify();
@@ -533,7 +526,6 @@ export class DecisionsPageController implements ReactiveController {
     const search = query ? `?${query}` : window.location.search;
     if (this.adapter.scope === 'profile') {
       const parsed = parseProfileDecisionsUrlState(search, {
-        dialect: this.queryDialect,
         validateQuery: this.validateDialectQuery,
       });
       this.activeTab = parsed.tab;
@@ -549,12 +541,12 @@ export class DecisionsPageController implements ReactiveController {
       }
       this.filterProject = parsed.project;
       this.filterQ = parsed.q;
-      // Under filters.query_dialect, keep a malformed raw q= (parse/validate
+      // Keep a malformed raw q= (parse/validate
       // error) in searchDraft so <scion-filter-box> shows its inline error
       // while filterQ stays empty and loads the unfiltered list without a 400.
       // Sub-minimum text like `?q=a` has no inline error, so clear searchDraft
       // so the box never displays text that isn't filtering.
-      const rawQ = this.queryDialect ? extractRawDecisionsQueryParam(search) : '';
+      const rawQ = extractRawDecisionsQueryParam(search);
       this.searchDraft =
         parsed.q || (rawQ && hasDecisionsDialectInlineError(rawQ, 'profile-decisions') ? rawQ : '');
       this.filterConversation = parsed.conversation;
@@ -565,19 +557,18 @@ export class DecisionsPageController implements ReactiveController {
       this.filterTo = parsed.to;
     } else {
       const parsed = parseDecisionsUrlState(search, {
-        dialect: this.queryDialect,
         validateQuery: isValidDecisionsDialectQuery,
       });
       this.activeTab = parsed.tab;
       this.sort = 'recent';
       this.filterProject = '';
       this.filterQ = parsed.q;
-      // Under filters.query_dialect, keep a malformed raw q= (parse/validate
-      // error) in searchDraft so <scion-filter-box> shows its inline error
-      // while filterQ stays empty and loads the unfiltered list without a 400.
-      // Sub-minimum text like `?q=a` has no inline error, so clear searchDraft
-      // so the box never displays text that isn't filtering (Opt3).
-      const rawQ = this.queryDialect ? extractRawDecisionsQueryParam(search) : '';
+      // Keep a malformed raw q= (parse/validate error) in searchDraft so
+      // <scion-filter-box> shows its inline error while filterQ stays empty
+      // and loads the unfiltered list without a 400. Sub-minimum text like
+      // `?q=a` has no inline error, so clear searchDraft so the box never
+      // displays text that isn't filtering (Opt3).
+      const rawQ = extractRawDecisionsQueryParam(search);
       this.searchDraft = parsed.q || (rawQ && hasDecisionsDialectInlineError(rawQ) ? rawQ : '');
       this.filterConversation = parsed.conversation;
       this.filterAgent = parsed.agent;
@@ -605,7 +596,7 @@ export class DecisionsPageController implements ReactiveController {
               from: this.filterFrom,
               to: this.filterTo,
             },
-            { dialect: this.queryDialect, validateQuery: this.validateDialectQuery }
+            { validateQuery: this.validateDialectQuery }
           )
         : buildDecisionsUrlSearch(
             {
@@ -618,7 +609,7 @@ export class DecisionsPageController implements ReactiveController {
               from: this.filterFrom,
               to: this.filterTo,
             },
-            { dialect: this.queryDialect, validateQuery: isValidDecisionsDialectQuery }
+            { validateQuery: isValidDecisionsDialectQuery }
           );
     const curQs = window.location.search.replace(/^\?/, '');
     if (nextQs !== curQs) {
@@ -805,7 +796,7 @@ export class DecisionsPageController implements ReactiveController {
     isValidDecisionsDialectQuery(raw, this.dialectView);
 
   get hasPositiveProjectDialectFilter(): boolean {
-    if (!this.queryDialect || this.adapter.scope !== 'profile') return false;
+    if (this.adapter.scope !== 'profile') return false;
     const raw = normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery);
     if (!raw) return false;
     const schema = getViewSchema('profile-decisions');
@@ -816,15 +807,14 @@ export class DecisionsPageController implements ReactiveController {
   }
 
   private hasPendingDialectFilter(): boolean {
-    if (!this.queryDialect) return false;
     const raw = normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery);
     if (!raw) return false;
     const schema = getViewSchema(this.dialectView);
-    if (!schema) return Boolean(normalizeDecisionsSearchQuery(raw));
+    if (!schema) return [...raw].length >= MIN_DECISIONS_SEARCH_RUNES;
     const parsed = parseFilterQuery(raw, knownKeysFor(schema));
     if (parsed.error || !parsed.query) return false;
     if (parsed.query.mode === 'text') {
-      return Boolean(normalizeDecisionsSearchQuery(parsed.query.text));
+      return [...parsed.query.text].length >= MIN_DECISIONS_SEARCH_RUNES;
     }
     if (parsed.query.text || (parsed.query.excludeText?.length ?? 0) > 0) return true;
     return parsed.query.terms.some((t) => {
@@ -836,9 +826,7 @@ export class DecisionsPageController implements ReactiveController {
 
   get isPendingFiltered(): boolean {
     if (this.adapter.scope === 'project' && !this.supportsSearch) return false;
-    const qActive = this.queryDialect
-      ? this.hasPendingDialectFilter()
-      : Boolean(normalizeDecisionsSearchQuery(this.filterQ));
+    const qActive = this.hasPendingDialectFilter();
     return Boolean(
       (this.supportsSearch && (qActive || this.filterConversation)) ||
       this.filterAgent ||
@@ -847,9 +835,7 @@ export class DecisionsPageController implements ReactiveController {
   }
 
   get isMadeFiltered(): boolean {
-    const qActive = this.queryDialect
-      ? Boolean(normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery))
-      : Boolean(normalizeDecisionsSearchQuery(this.filterQ));
+    const qActive = Boolean(normalizeDecisionsFilterQuery(this.filterQ, this.validateDialectQuery));
     return Boolean(
       (this.supportsSearch && (qActive || this.filterConversation)) ||
       this.filterAgent ||
@@ -1348,7 +1334,7 @@ export class DecisionsPageController implements ReactiveController {
     if (this.searchDebounceTimer === null) return false;
     clearTimeout(this.searchDebounceTimer);
     this.searchDebounceTimer = null;
-    const nextQ = normalizeDecisionsSearchQuery(this.searchDraft);
+    const nextQ = normalizeDecisionsFilterQuery(this.searchDraft, this.validateDialectQuery);
     if (nextQ !== this.filterQ) {
       this.filterQ = nextQ;
       return true;
@@ -1523,21 +1509,15 @@ export class DecisionsPageController implements ReactiveController {
   private buildDrillDownMadeProjectState(projectId: string): { project: string; q: string } {
     const cleaned = cleanProfileProjectValue(projectId);
     if (!cleaned) return { project: this.filterProject, q: this.filterQ };
-    if (this.queryDialect) {
-      const proj = this.knownProjectsById.get(cleaned);
-      const uniqueSlug =
-        proj !== undefined &&
-        Boolean(proj.slug) &&
-        Array.from(this.knownProjectsById.values()).filter(
-          (p) => p.slug.toLowerCase() === proj.slug.toLowerCase()
-        ).length === 1;
-      const nextQ = buildProfileProjectDrillDownQuery(
-        this.filterQ,
-        uniqueSlug ? proj.slug : cleaned
-      );
-      return { project: '', q: nextQ };
-    }
-    return { project: cleaned, q: this.filterQ };
+    const proj = this.knownProjectsById.get(cleaned);
+    const uniqueSlug =
+      proj !== undefined &&
+      Boolean(proj.slug) &&
+      Array.from(this.knownProjectsById.values()).filter(
+        (p) => p.slug.toLowerCase() === proj.slug.toLowerCase()
+      ).length === 1;
+    const nextQ = buildProfileProjectDrillDownQuery(this.filterQ, uniqueSlug ? proj.slug : cleaned);
+    return { project: '', q: nextQ };
   }
 
   buildDrillDownMadeProjectSearch(projectId: string): string {
@@ -1555,7 +1535,7 @@ export class DecisionsPageController implements ReactiveController {
         from: this.filterFrom,
         to: this.filterTo,
       },
-      { dialect: this.queryDialect, validateQuery: this.validateDialectQuery }
+      { validateQuery: this.validateDialectQuery }
     );
   }
 
@@ -1637,7 +1617,7 @@ export class DecisionsPageController implements ReactiveController {
     }
 
     const commitSearch = (): void => {
-      const nextQ = normalizeDecisionsSearchQuery(this.searchDraft);
+      const nextQ = normalizeDecisionsFilterQuery(this.searchDraft, this.validateDialectQuery);
       if (nextQ === this.filterQ && !this.pendingSearchTimeout && !this.madeSearchTimeout) {
         return;
       }
@@ -1691,7 +1671,7 @@ export class DecisionsPageController implements ReactiveController {
         clearTimeout(this.searchDebounceTimer);
         this.searchDebounceTimer = null;
       }
-      const nextQ = normalizeDecisionsSearchQuery(patch.q);
+      const nextQ = normalizeDecisionsFilterQuery(patch.q, this.validateDialectQuery);
       this.searchDraft = nextQ;
       if (nextQ !== this.filterQ) {
         this.filterQ = nextQ;

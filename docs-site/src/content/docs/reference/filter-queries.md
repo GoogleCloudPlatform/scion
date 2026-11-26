@@ -3,7 +3,7 @@ title: Filter Queries
 description: Unified key:value filter query dialect for Scion web list views.
 ---
 
-Scion list views share a Gmail/GitHub-style `key:value` filter query dialect (gated behind the `filters.query_dialect` experiment).
+Scion list views share a Gmail/GitHub-style `key:value` filter query dialect.
 
 ## Syntax
 
@@ -21,14 +21,14 @@ Scion list views share a Gmail/GitHub-style `key:value` filter query dialect (ga
 ### Reserved syntax and limits
 
 - Bare `OR`, `AND`, parentheses `( )`, and comparison prefixes (`>`, `<`, `>=`, `<=`) are reserved and return a syntax error in structured mode.
-- Queries are bounded to 512 bytes, 32 terms, 20 values per key, and 200 characters of search text.
+- Queries are bounded to 512 bytes, 32 terms, 20 values per key, 200 characters of search text, and 20 distinct reference values across all reference keys (`project`, `broker`, `owner`, `agent`, `conversation`, `by`).
 - On syntax or value errors, the web UI keeps the last valid filter applied while displaying the error inline; the Hub API returns `400 invalid_filter_query` with `details.offset` and `details.length` measured in **UTF-8 bytes** into the raw `q` query string.
 
 ## Views
 
 ### `agents` (Agents list)
 
-Text search matches agent **name** or **slug** (case-insensitive substring).
+Text search matches agent **name** or **slug** (case-insensitive substring). On `GET /api/v1/agents` in sorted mode (`sort=created|updated`), `stats`, the `fit` probe, and `complete: true` rows ignore `phase:` terms in `q`, so a `q=phase:running&fit=N` caller can receive non-running rows when `complete` is `true` and must filter `phase` locally.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -45,7 +45,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring).
 
 ### `project_agents` (Project agents list)
 
-Text search matches agent **name** or **slug** (case-insensitive substring). Scoped to the current project (`project:` and `is:` are not exposed).
+Text search matches agent **name** or **slug** (case-insensitive substring). Scoped to the current project (`project:` and `is:` are not exposed). On `GET /api/v1/projects/:id/agents` in sorted mode, `stats`, the `fit` probe, and `complete: true` rows likewise ignore `phase:` terms in `q`.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -77,7 +77,7 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 
 ### `decisions` (Project Decisions page)
 
-Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Covers both the **Waiting on you** (Pending) and **Made** tabs; Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning. Date range bounds (`From` / `To`) remain date inputs alongside the filter box on the Made tab.
+Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Pure-text `q` requires at least 2 characters, and all `q` values follow the dialect limits above (max 512 bytes, 200 characters of search text; over-limit queries return `400 invalid_filter_query`). Covers both the **Waiting on you** (Pending) and **Made** tabs; Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning. Date range bounds (`From` / `To`) remain date inputs alongside the filter box on the Made tab.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -88,7 +88,7 @@ Text search matches decision **question**, **answer**, **conversation label**, o
 
 ### `profile-decisions` (Profile Decisions page)
 
-Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Exposes the same keys as `decisions` plus `project:`, which resolves strictly within the caller's readable member projects (up to the 200-project scope). Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning, and `From` / `To` remain date inputs alongside the filter box on the Made tab.
+Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring), with the same `q` limits as `decisions` (min 2 characters for pure text, max 512 bytes, max 200 characters of search text; `400 invalid_filter_query` when exceeded). Exposes the same keys as `decisions` plus `project:`, which resolves strictly within the caller's readable member projects (up to the 200-project scope). Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning, and `From` / `To` remain date inputs alongside the filter box on the Made tab.
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |

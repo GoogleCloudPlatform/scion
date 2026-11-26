@@ -72,7 +72,7 @@ async function flushRender(el: ScionPageProjectDecisions): Promise<void> {
   }
 }
 
-describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', () => {
+describe('Project Decisions page — filter query dialect (ptone/scion#9346)', () => {
   let requestedUrls: string[];
 
   beforeEach(() => {
@@ -141,20 +141,8 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
     return el;
   }
 
-  it('keeps legacy filter controls when filters.query_dialect is off', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': false });
-    const el = await mountPage();
-
-    const panel = el.shadowRoot?.querySelector(
-      'scion-decisions-filter-panel'
-    ) as ScionDecisionsFilterPanel | null;
-    expect(panel).not.toBeNull();
-    expect(panel?.shadowRoot?.querySelector('scion-filter-box')).toBeNull();
-    expect(panel?.shadowRoot?.querySelector('[data-filter-panel-toggle]')).not.toBeNull();
-  });
-
-  it('renders <scion-filter-box view="decisions"> with local suggestions, hints, and collision email fallback when on', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+  it('renders <scion-filter-box view="decisions"> with local suggestions, hints, and collision email fallback', async () => {
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?tab=made');
 
     const panel = el.shadowRoot?.querySelector(
@@ -196,7 +184,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
   });
 
   it('round-trips q= in URL and warns on Made-only keys on Pending tab without dropping them', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage('?q=agent%3Adeploy-frontend+by%3Ame');
 
     const panel = el.shadowRoot?.querySelector(
@@ -220,7 +208,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
   });
 
   it('shows old URL params as filter terms on load (preserving colliding agent ID on unrelated edit) and replaces them with q= on commit', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const el = await mountPage(
       `?tab=made&agent=${AGENT_1_ID}&conversation=topic-ops&user=${VIEWER_ID}&provenance=direct`
     );
@@ -253,7 +241,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
   });
 
   it('synthesizes unique agent names as agent:<name> and colliding conversation labels as conversation:<key> (Opt2)', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     vi.stubGlobal(
       'fetch',
       vi.fn((input: RequestInfo | URL) => {
@@ -291,7 +279,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
   });
 
   it('loads the unfiltered list with no 400 request for invalid q= URLs, clearing sub-minimum text and keeping inline-error drafts (O1, Opt3)', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const longText = 'x'.repeat(220);
 
     // Sub-minimum plain text (?q=a) has no inline filter-box error, so Opt3 clears the box.
@@ -331,7 +319,7 @@ describe('Project Decisions page — filters.query_dialect (ptone/scion#9346)', 
   });
 
   it('pins `me` first in by: suggestions even with >12 answerers sorting before "me" (O3)', async () => {
-    setServerFlags({ 'web.decisions': true, 'filters.query_dialect': true });
+    setServerFlags({ 'web.decisions': true });
     const manyAnswerers = [
       { id: VIEWER_ID, name: 'Alice', hint: 'alice@example.com' },
       ...Array.from({ length: 15 }, (_, i) => ({

@@ -28,6 +28,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -106,8 +108,20 @@ func humanDecisionsListOptions(cmd *cobra.Command) (hubclient.ListProjectDecisio
 
 	search, _ := flags.GetString("search")
 	if search = strings.TrimSpace(search); search != "" {
-		if n := utf8.RuneCountInString(search); n < minDecisionsSearchRunes || n > maxDecisionsSearchRunes {
-			return opts, newUsageError("--search must be %d to %d characters", minDecisionsSearchRunes, maxDecisionsSearchRunes)
+		allProjects, _ := flags.GetBool("all-projects")
+		schema := schemas.Decisions
+		if allProjects {
+			schema = schemas.ProfileDecisions
+		}
+		parsed, fqErr := filterquery.Parse(search, schema.HasKey)
+		if fqErr != nil {
+			return opts, newUsageError("--search: %s", fqErr.Message)
+		}
+		if vErr := schema.Validate(parsed); vErr != nil {
+			return opts, newUsageError("--search: %s", vErr.Message)
+		}
+		if parsed.Mode == filterquery.ModeText && utf8.RuneCountInString(parsed.Text) < minDecisionsSearchRunes {
+			return opts, newUsageError("--search must be at least %d characters", minDecisionsSearchRunes)
 		}
 		opts.Query = search
 	}

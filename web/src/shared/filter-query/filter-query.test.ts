@@ -21,17 +21,26 @@ import { describe, expect, it } from 'vitest';
 import {
   VIEW_SCHEMAS,
   buildAgentValueSuggestions,
+  canLiveAddAgent,
   canonical,
+  drainServerQuery,
   getActiveSingleKeyValue,
   getSuggestions,
   getViewSchema,
+  hasNonPhaseServerPredicate,
   hasServerOnlyAgentTerms,
   knownKeysFor,
   match,
   matchAgentQuery,
+  nonPhaseServerPredicateForQuery,
   parse,
+  refusalKeyForQuery,
   serverSubset,
   setSingleKeyInQuery,
+  setSingleKeyInQueryWithNotice,
+  toggleIsFlagInQuery,
+  toggleIsFlagInQueryWithNotice,
+  UNREPRESENTABLE_CLEAR_NOTICE,
   validate,
   type FilterRow,
   type Query,
@@ -311,10 +320,52 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     );
     expect(setSingleKeyInQuery('foo', 'phase', 'running', agentsSchema)).toBe('phase:running foo');
 
-    // Clearing the last chip preserves meaning instead of demoting structured text to literal text.
-    expect(setSingleKeyInQuery('phase:running -test', 'phase', '', agentsSchema)).toBe('');
-    expect(setSingleKeyInQuery('is:mine "a b"', 'is', '', agentsSchema)).toBe('a b');
-    expect(setSingleKeyInQuery('phase:running foo', 'phase', '', agentsSchema)).toBe('foo');
+    // Clearing the last chip unquotes clean pure text, and never reinterprets
+    // exclusions or key-like quoted text as literal substrings: when the
+    // remainder cannot be represented in pure-text mode with the same meaning,
+    // it clears to '' and returns a short feedback notice.
+    expect(setSingleKeyInQueryWithNotice('phase:running -test', 'phase', '', agentsSchema)).toEqual(
+      { value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE }
+    );
+    expect(
+      setSingleKeyInQueryWithNotice('is:mine "phase:running"', 'is', '', agentsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(setSingleKeyInQueryWithNotice('is:mine "a b"', 'is', '', agentsSchema)).toEqual({
+      value: 'a b',
+    });
+    expect(setSingleKeyInQueryWithNotice('phase:running foo', 'phase', '', agentsSchema)).toEqual({
+      value: 'foo',
+    });
+
+    // Artifacts toggleIsFlagInQuery promotes pure text with quoting and preserves meaning on clear.
+    const artifactsSchema = getViewSchema('artifacts')!;
+    expect(toggleIsFlagInQuery('-draft', 'review', [], artifactsSchema)).toBe('is:review "-draft"');
+    expect(toggleIsFlagInQuery('a OR b', 'review', [], artifactsSchema)).toBe('is:review "a OR b"');
+    expect(toggleIsFlagInQuery('"hello"', 'review', [], artifactsSchema)).toBe(
+      'is:review "\\"hello\\""'
+    );
+    expect(
+      toggleIsFlagInQueryWithNotice('is:review -draft', 'review', [], artifactsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(
+      toggleIsFlagInQueryWithNotice('is:mine "is:review"', 'mine', ['shared'], artifactsSchema)
+    ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
+    expect(
+      toggleIsFlagInQueryWithNotice('is:mine "a b"', 'mine', ['shared'], artifactsSchema)
+    ).toEqual({ value: 'a b' });
+
+    // Distinct referent cap: 20 distinct refs pass (duplicates fold), 21 fail with code 'limit'.
+    const atCap =
+      'project:p1,p2,p3,p4,p5,p6,p7,p8,p9,p10 broker:b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 project:P1';
+    const parsedAtCap = parse(atCap, knownKeysFor(agentsSchema));
+    expect(parsedAtCap.error).toBeUndefined();
+    expect(validate(parsedAtCap.query!, agentsSchema, atCap).error).toBeUndefined();
+
+    const overCap = `${atCap} owner:o1`;
+    const parsedOverCap = parse(overCap, knownKeysFor(agentsSchema));
+    expect(parsedOverCap.error).toBeUndefined();
+    const overErr = validate(parsedOverCap.query!, agentsSchema, overCap).error;
+    expect(overErr?.code).toBe('limit');
   });
 
   it('matches all P2 agent keys and builds dynamic value suggestions from loaded rows', () => {
@@ -393,16 +444,90 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(provider('template', '')).toEqual(expect.arrayContaining(['developer', 'reviewer']));
     expect(provider('owner', '')).toEqual(expect.arrayContaining(['me', 'u-me', 'u-other']));
     expect(provider('label', '')).toEqual(expect.arrayContaining(['team', 'team=ui', 'env=prod']));
+
+    // canLiveAddAgent ignores phase terms so mixed queries keep phase-independent populations.
+    const mixed = parse('phase:running label:env=prod', known).query!;
+    const stoppedProd: Agent = {
+      id: '3',
+      name: 'gamma',
+      slug: 'gamma',
+      projectId: 'p1',
+      phase: 'stopped',
+      labels: { env: 'prod' },
+    };
+    const stoppedDev: Agent = {
+      id: '4',
+      name: 'delta',
+      slug: 'delta',
+      projectId: 'p1',
+      phase: 'stopped',
+      labels: { env: 'dev' },
+    };
+    expect(canLiveAddAgent(mixed, stoppedProd, ctx)).toBe(true);
+    expect(canLiveAddAgent(mixed, stoppedDev, ctx)).toBe(false);
+
+    // drainServerQuery strips phase: terms while preserving quoted text containing "phase:".
+    const quotedText = parse('"foo phase:x"', known).query!;
+    const quotedStructured = parse('label:env=prod "foo phase:x" phase:running', known).query!;
+    expect(drainServerQuery(quotedText, agentsSchema)).toBe('"foo phase:x"');
+    expect(drainServerQuery(quotedStructured, agentsSchema)).toBe('label:env=prod "foo phase:x"');
+
+    // R2: hasNonPhaseServerPredicate, nonPhaseServerPredicateForQuery, and refusalKeyForQuery
+    // distinguish unrepresentable text/exclusion-only remainders from unfiltered queries.
+    const exclOnly = parse('phase:running -test', known).query!;
+    const keyLikeQuoted = parse('phase:running "label:x"', known).query!;
+    const textAndExcl = parse('phase:running api server -test', known).query!;
+    const phaseAndClient = parse('phase:running mode:owner', known).query!;
+    expect(drainServerQuery(exclOnly, agentsSchema)).toBe('');
+    expect(drainServerQuery(keyLikeQuoted, agentsSchema)).toBe('');
+    expect(drainServerQuery(textAndExcl, agentsSchema)).toBe('');
+
+    expect(hasNonPhaseServerPredicate(exclOnly, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(keyLikeQuoted, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(textAndExcl, agentsSchema)).toBe(true);
+    expect(hasNonPhaseServerPredicate(phaseAndClient, agentsSchema)).toBe(false);
+    expect(hasNonPhaseServerPredicate(null, agentsSchema)).toBe(false);
+
+    expect(refusalKeyForQuery(null, agentsSchema)).toBe('');
+    expect(refusalKeyForQuery(phaseAndClient, agentsSchema)).toBe('');
+    expect(refusalKeyForQuery(exclOnly, agentsSchema)).toBe('-test');
+    expect(refusalKeyForQuery(parse('phase:stopped -test', known).query!, agentsSchema)).toBe(
+      '-test'
+    );
+    expect(refusalKeyForQuery(keyLikeQuoted, agentsSchema)).toBe('"label:x"');
+    expect(refusalKeyForQuery(textAndExcl, agentsSchema)).toBe('"api server" -test');
+
+    const exclPred = nonPhaseServerPredicateForQuery(exclOnly, agentsSchema, ctx);
+    expect(exclPred).not.toBeNull();
+    expect(exclPred!({ id: 'a', name: 'prod-bot', slug: 'prod-bot', phase: 'stopped' })).toBe(true);
+    expect(exclPred!({ id: 'b', name: 'test-bot', slug: 'test-bot', phase: 'running' })).toBe(
+      false
+    );
+    expect(nonPhaseServerPredicateForQuery(phaseAndClient, agentsSchema, ctx)).toBeNull();
   });
 });
 
 describe('schema-to-docs completeness', () => {
-  it('documents every key from schemas.generated.json in reference/filter-queries.md', () => {
+  it('documents every key from schemas.generated.json in its view section of reference/filter-queries.md without experimental wording', () => {
     const doc = readFileSync(DOCS_PATH, 'utf8');
+    expect(doc.toLowerCase()).not.toContain('experimental');
+
+    const sections = doc.split(/^### /m).slice(1);
+    const byView = new Map<string, string>();
+    for (const section of sections) {
+      const match = /^`([^`]+)`/.exec(section);
+      if (match) {
+        byView.set(match[1], section);
+      }
+    }
+
     for (const schema of VIEW_SCHEMAS) {
-      expect(doc).toContain(`\`${schema.view}\``);
+      const section = byView.get(schema.view);
+      expect(section, `missing ### \`${schema.view}\` section`).toBeDefined();
       for (const key of schema.keys) {
-        expect(doc).toContain(`| \`${key.name}\` |`);
+        expect(section, `missing key \`${key.name}\` in section \`${schema.view}\``).toContain(
+          `| \`${key.name}\` |`
+        );
       }
     }
   });

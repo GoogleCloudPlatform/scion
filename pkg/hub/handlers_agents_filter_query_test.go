@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
@@ -29,48 +30,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func enableFiltersQueryDialect(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"`+experiments.FiltersQueryDialect+`":true}}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-}
-
-func TestListAgents_FilterQuery_ExperimentOffIgnoresQ(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{ID: uuid.NewString(), Name: "fq-off", Slug: "fq-off"}
-	require.NoError(t, s.CreateProject(ctx, proj))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: uuid.NewString(), Name: "a1", Slug: "a1", ProjectID: proj.ID, Phase: "running",
-	}))
-	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID: uuid.NewString(), Name: "a2", Slug: "a2", ProjectID: proj.ID, Phase: "stopped",
-	}))
-
-	// Experiment is off by default: even invalid q is ignored and all agents are returned.
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("phase:stopped"), nil)
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	var resp ListAgentsResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Len(t, resp.Agents, 2)
-
-	recBad := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape("phase:"), nil)
-	require.Equal(t, http.StatusOK, recBad.Code)
-}
-
 func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	srv, s := testServer(t)
-	enableFiltersQueryDialect(t, srv)
 	ctx := context.Background()
 
 	proj := &store.Project{ID: uuid.NewString(), Name: "fq-on", Slug: "fq-on"}
@@ -152,11 +116,19 @@ func TestListAgents_FilterQuery_StructuredAndErrorsAndPagination(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recMode.Body.Bytes(), &modeResp))
 	assert.Equal(t, ErrCodeInvalidFilterQuery, modeResp.Error.Code)
 	assert.Contains(t, modeResp.Error.Message, "mode")
+
+	// Exceeding the distinct-referent cap -> 400 invalid_filter_query.
+	tooManyRefs := "project:p1,p2,p3,p4,p5,p6,p7,p8,p9,p10 broker:b1,b2,b3,b4,b5,b6,b7,b8,b9,b10 owner:o1"
+	recLimit := doRequest(t, srv, http.MethodGet, "/api/v1/agents?q="+url.QueryEscape(tooManyRefs), nil)
+	require.Equal(t, http.StatusBadRequest, recLimit.Code)
+	var limitResp ErrorResponse
+	require.NoError(t, json.Unmarshal(recLimit.Body.Bytes(), &limitResp))
+	assert.Equal(t, ErrCodeInvalidFilterQuery, limitResp.Error.Code)
+	assert.Contains(t, limitResp.Error.Message, "distinct reference")
 }
 
 func TestListAgents_FilterQuery_AllServerKeysAndReferents(t *testing.T) {
 	srv, s := testServer(t)
-	enableFiltersQueryDialect(t, srv)
 	ctx := context.Background()
 
 	aliceID := uuid.NewString()
@@ -344,16 +316,6 @@ func TestListProjectAgents_FilterQuery(t *testing.T) {
 		Phase: "running", Activity: "working", Template: "developer",
 	}))
 
-	// Experiment off: ignores q.
-	recOff := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running"), nil)
-	require.Equal(t, http.StatusOK, recOff.Code)
-	var respOff ListAgentsResponse
-	require.NoError(t, json.Unmarshal(recOff.Body.Bytes(), &respOff))
-	assert.Len(t, respOff.Agents, 2)
-
-	// Enable experiment.
-	enableFiltersQueryDialect(t, srv)
-
 	// Filters within project A only.
 	recOn := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projA.ID+"/agents?q="+url.QueryEscape("phase:running harness:claude"), nil)
 	require.Equal(t, http.StatusOK, recOn.Code)
@@ -373,4 +335,107 @@ func TestListProjectAgents_FilterQuery(t *testing.T) {
 	var respProj ListAgentsResponse
 	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &respProj))
 	assert.Empty(t, respProj.Agents)
+}
+
+func TestListAgentsSorted_FilterQuery_PhaseIndependentStatsAndFit(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "PhaseStatsProj", Slug: "phase-stats"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	seed := []*store.Agent{
+		{
+			ID: uuid.NewString(), Name: "run-x-1", Slug: "run-x-1", ProjectID: proj.ID,
+			Phase: "running", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "stop-x-1", Slug: "stop-x-1", ProjectID: proj.ID,
+			Phase: "stopped", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "err-x-1", Slug: "err-x-1", ProjectID: proj.ID,
+			Phase: "error", Labels: map[string]string{"env": "x"},
+		},
+		{
+			ID: uuid.NewString(), Name: "run-y-1", Slug: "run-y-1", ProjectID: proj.ID,
+			Phase: "running", Labels: map[string]string{"env": "y"},
+		},
+	}
+	for _, a := range seed {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	endpoints := []struct {
+		name string
+		base string
+	}{
+		{name: "global", base: "/api/v1/agents"},
+		{name: "project", base: "/api/v1/projects/" + proj.ID + "/agents"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.name, func(t *testing.T) {
+			fetch := func(q string, fit, limit int) ListAgentsResponse {
+				t.Helper()
+				path := fmt.Sprintf("%s?sort=updated&dir=desc&stats=1&fit=%d&limit=%d&q=%s",
+					ep.base, fit, limit, url.QueryEscape(q))
+				rec := doRequest(t, srv, http.MethodGet, path, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "body=%s", rec.Body.String())
+				var resp ListAgentsResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				return resp
+			}
+
+			// Paged (fit=2 < 3 agents with label:env=x):
+			// stats and fit outcome for `phase:running label:env=x` equal `label:env=x`,
+			// while rows and totalCount contain only running agents.
+			unphasedPaged := fetch("label:env=x", 2, 2)
+			phasedPaged := fetch("phase:running label:env=x", 2, 2)
+
+			require.NotNil(t, unphasedPaged.Complete)
+			require.NotNil(t, phasedPaged.Complete)
+			assert.False(t, *unphasedPaged.Complete)
+			assert.False(t, *phasedPaged.Complete)
+
+			require.NotNil(t, unphasedPaged.Stats)
+			require.NotNil(t, phasedPaged.Stats)
+			assert.Equal(t, 3, unphasedPaged.Stats.Total)
+			assert.Equal(t, 1, unphasedPaged.Stats.Running)
+			assert.Equal(t, unphasedPaged.Stats.Total, phasedPaged.Stats.Total)
+			assert.Equal(t, unphasedPaged.Stats.Running, phasedPaged.Stats.Running)
+			require.NotNil(t, unphasedPaged.Stats.Agents)
+			require.NotNil(t, phasedPaged.Stats.Agents)
+			assert.Equal(t, *unphasedPaged.Stats.Agents, *phasedPaged.Stats.Agents)
+
+			assert.Equal(t, 1, phasedPaged.TotalCount)
+			require.Len(t, phasedPaged.Agents, 1)
+			assert.Equal(t, "run-x-1", phasedPaged.Agents[0].Name)
+
+			// Negated phase term: `-phase:stopped label:env=x` keeps stats identical,
+			// while rows return running + error (2 rows).
+			negPaged := fetch("-phase:stopped label:env=x", 2, 2)
+			require.NotNil(t, negPaged.Complete)
+			assert.False(t, *negPaged.Complete)
+			require.NotNil(t, negPaged.Stats)
+			assert.Equal(t, *unphasedPaged.Stats.Agents, *negPaged.Stats.Agents)
+			assert.Equal(t, 2, negPaged.TotalCount)
+			require.Len(t, negPaged.Agents, 2)
+			for _, a := range negPaged.Agents {
+				assert.NotEqual(t, "stopped", a.Phase)
+			}
+
+			// Complete (fit=10 >= 3 agents with label:env=x):
+			// both return complete=true with the full unphased readable set and identical stats.
+			unphasedSmall := fetch("label:env=x", 10, 10)
+			phasedSmall := fetch("phase:running label:env=x", 10, 10)
+			require.NotNil(t, unphasedSmall.Complete)
+			require.NotNil(t, phasedSmall.Complete)
+			assert.True(t, *unphasedSmall.Complete)
+			assert.True(t, *phasedSmall.Complete)
+			assert.Equal(t, 3, len(phasedSmall.Agents))
+			assert.Equal(t, unphasedSmall.Stats.Total, phasedSmall.Stats.Total)
+			assert.Equal(t, unphasedSmall.Stats.Running, phasedSmall.Stats.Running)
+		})
+	}
 }

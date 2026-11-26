@@ -41,7 +41,7 @@
  * local state, and on any move out of `paged` (a different data set).
  */
 
-import type { Agent, AgentPhase } from '../shared/types.js';
+import type { Agent } from '../shared/types.js';
 import { isAgentRunning } from '../shared/types.js';
 import type { AgentSortField, SortDir } from '../shared/agent-sort.js';
 import { sortAgents, serverOrderCompare, serverSortKey } from '../shared/agent-sort.js';
@@ -125,52 +125,65 @@ export function projectAgentsFitFor(pageSize: number): number {
 
 /** The client view state a window renders. A change resets local pagination to page 0. */
 export interface AgentListViewState {
-  phaseFilter: AgentPhase | '';
-  /** The live-typed label filter preview (small-state local filtering only — never the request label; see `AgentListWindow`'s own `committedLabel`). */
-  label: string;
   sortField: AgentSortField;
   sortDir: SortDir;
   pageSize: number;
   view: AgentListView;
   /**
-   * The global page's client-side mode filter: a message mode, or
-   * `can_message` / `cannot_message`. Empty or omitted means none. A mode
-   * filter is never sent to the server, so a non-empty one makes the view
-   * state complete-needing.
+   * Canonical server `?q=` query string for the committed filter query
+   * (empty string when unfiltered). Tracked by `serverParamsKey` and used
+   * to key sorted-mode 422 refusal memory.
    */
-  modeFilter?: string;
+  serverQuery: string;
   /**
-   * Optional client-side filter predicate from the unified filter query dialect
-   * (ptone/scion#9018). When set, replaces legacy `phaseFilter` and `label`
-   * local filtering while still applying `modeFilter`.
+   * Client-side filter predicate from the unified filter query dialect
+   * (ptone/scion#9018), updated on every keystroke for live preview and on
+   * commit.
    */
   filterPredicate?: ((agent: Agent) => boolean) | null;
   /**
+   * True when the user has typed an uncommitted filter query that differs
+   * from the committed query. In the `paged` state, `items` applies
+   * `filterPredicate` as a local preview only while this flag is true;
+   * otherwise the server's page rows are returned as-is.
+   */
+  previewDiffersFromCommitted?: boolean;
+  /**
    * Snapshot predicate for the committed server query (updated only when
    * `serverQuery` commits, never on per-keystroke typing). Used in the paged
-   * state to gate off-page SSE adds and detect when existing members leave
-   * the server's filtered population.
+   * state to decide whether a row matches the current page's full committed
+   * filter (including `phase:` terms).
    */
   committedFilterPredicate?: ((agent: Agent) => boolean) | null;
   /**
+   * Non-phase projection of `committedFilterPredicate` (all terms except
+   * `phase`), mirroring the hub's phase-independent stats population. Required:
+   * pass `null` when no non-phase terms are active. Used to gate membership in
+   * `memberIndex`: a phase transition alone never evicts a member from
+   * `memberIndex`, while a failing non-phase predicate does.
+   */
+  committedNonPhasePredicate: ((agent: Agent) => boolean) | null;
+  /**
    * Phase-only projection of `committedFilterPredicate`, used for off-page
-   * `unknown` deltas that carry only `phase` (without labels or name).
-   * Returns false only when the new phase violates the committed query's
-   * phase terms, so label/text terms never cause false eviction.
+   * `unknown` deltas that carry only `phase` (without labels or name), for
+   * detecting `newlyPasses` transitions, and for frozen-walk filtering over
+   * the phase-independent stats population.
    */
   committedPhasePredicate?: ((phase: string) => boolean) | null;
-  /**
-   * Canonical server `?q=` query string when the unified filter dialect is active.
-   * When defined (even empty string), `isSortedEligible` does not require `=` in
-   * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
-   */
-  serverQuery?: string;
   /**
    * True when the committed filter query contains a client-only key (e.g.
    * `mode:`), which cannot be pushed down to the server and therefore forces a
    * complete-set drain (making `isSortedEligible` return false).
    */
   hasClientOnlyFilter?: boolean;
+  /**
+   * Non-phase, non-client-only server predicate used to filter `H` when
+   * computing local `stats` (and Stop-all). Ensures local counts match the
+   * hub's phase-independent stats population even when a drain could not push
+   * down an unrepresentable text- or exclusion-only remainder (e.g.
+   * `phase:running -test`).
+   */
+  localStatsPredicate?: ((agent: Agent) => boolean) | null;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -203,7 +216,7 @@ export interface PagedPageParams {
 export interface SortedRequestTicket {
   readonly trigger: AgentListTrigger;
   readonly key: string;
-  readonly label: string;
+  readonly serverQuery: string;
   readonly eligible: boolean;
 }
 
@@ -346,17 +359,14 @@ export class AgentListWindow extends EventTarget {
   private _stale = false;
   private incomplete: 'capped' | 'failed' | null = null;
   private generation = 0;
-  /** The committed label for which the server refused sorted mode (422), or `null`. */
-  private refusedLabel: string | null = null;
-  /** The server parameters (sort, dir, phase, page size) the adopted paged response was requested with. */
+  /** The committed server query for which the server refused sorted mode (422), or `null`. */
+  private refusedQuery: string | null = null;
+  /** The server parameters (sort, dir, q, page size) the adopted paged response was requested with. */
   private pagedParams = '';
   /** The sorted first request in flight, if any (see `beginSortedRequest`). */
   private inFlight: SortedRequestTicket | null = null;
   /** Aborts the window's own page fetch in flight, if any. */
   private pageController: AbortController | null = null;
-
-  /** The label the current paged response was fetched under (the paged add rule). Empty or `k=v` only: a bare-key label is never paged. */
-  private committedLabel = '';
 
   private viewState: AgentListViewState;
   private readonly getProjectId: () => string;
@@ -387,38 +397,39 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * Whether a view state may use sorted (server-paged) requests: grid or
-   * list, `updated` or `created` sort, no mode filter, and a committed
-   * label that is empty or contains `=`. Everything else needs the
-   * complete set.
+   * list, `updated` or `created` sort, and no client-only filter keys.
+   * Everything else needs the complete set.
    */
-  isSortedEligible(committedLabel: string): boolean {
-    const { view, sortField, modeFilter, serverQuery, hasClientOnlyFilter } = this.viewState;
+  isSortedEligible(): boolean {
+    const { view, sortField, hasClientOnlyFilter } = this.viewState;
     if (view !== 'grid' && view !== 'list') return false;
-    if (modeFilter || hasClientOnlyFilter) return false;
-    if (sortField !== 'updated' && sortField !== 'created') return false;
-    if (serverQuery !== undefined) return true;
-    const label = committedLabel.trim();
-    return label === '' || label.includes('=');
-  }
-
-  /** Whether the server refused sorted mode (422) for this committed label. */
-  isSortedRefused(committedLabel: string): boolean {
-    return this.refusedLabel !== null && this.refusedLabel === committedLabel.trim();
+    if (hasClientOnlyFilter) return false;
+    return sortField === 'updated' || sortField === 'created';
   }
 
   /**
-   * Remember a 422 refusal of sorted mode for this committed label. No
-   * sorted request is planned again until a different label is committed;
-   * that label gets one sorted attempt of its own.
+   * Whether the server refused sorted mode (422) for this refusal key.
+   * Callers pass the phase-independent server query derived from the parsed
+   * query (e.g. `drainServerQuery`), because the hub's project candidate
+   * ceiling ignores `phase:` terms.
    */
-  recordRefusal(committedLabel: string): void {
-    this.refusedLabel = committedLabel.trim();
+  isSortedRefused(refusalKey: string): boolean {
+    return this.refusedQuery !== null && this.refusedQuery === refusalKey.trim();
+  }
+
+  /**
+   * Remember a 422 refusal of sorted mode for this phase-independent refusal
+   * key. No sorted request is planned again until a query with a different
+   * refusal key is committed; that query gets one sorted attempt of its own.
+   */
+  recordRefusal(refusalKey: string): void {
+    this.refusedQuery = refusalKey.trim();
   }
 
   /**
    * The request a trigger needs, given the current state, view state and
-   * committed label. Table (eligible = sorted-eligible and not refused for
-   * this label):
+   * committed server query. Table (eligible = sorted-eligible and not
+   * refused for this query):
    *
    * | trigger              | small  | paged            | held   | capped           |
    * |----------------------|--------|------------------|--------|------------------|
@@ -428,17 +439,20 @@ export class AgentListWindow extends EventTarget {
    * | chip                 | eligible ? fit : drain   | page   | drain  | drain            |
    *
    * (*) While paged, an eligible view change sends a fit request only when
-   * a server parameter (sort, dir, phase or page size) differs from the
+   * a server parameter (sort, dir, q or page size) differs from the
    * adopted page's; a grid and list switch alone sends nothing, since both
    * render the same server page.
    *
    * A lifecycle refresh in held or capped sends nothing: the phase changes
    * arrive live and merge into H. A view change in capped back to a
    * sorted-eligible state returns to paged, unless sorted mode was refused
-   * for this label, in which case H stays capped and is sorted locally.
+   * for this query, in which case H stays capped and is sorted locally.
    */
-  planRequest(trigger: AgentListTrigger, committedLabel: string): AgentListRequestPlan {
-    const eligible = this.isSortedEligible(committedLabel) && !this.isSortedRefused(committedLabel);
+  planRequest(
+    trigger: AgentListTrigger,
+    serverQuery = this.viewState.serverQuery
+  ): AgentListRequestPlan {
+    const eligible = this.isSortedEligible() && !this.isSortedRefused(serverQuery);
     const first: AgentListRequestPlan = eligible ? 'fit' : 'drain';
     const state = this._state;
     switch (trigger) {
@@ -463,26 +477,26 @@ export class AgentListWindow extends EventTarget {
 
   /** The view-state fields a sorted request depends on. The view (grid or list) is not one of them. */
   private serverParamsKey(): string {
-    const { sortField, sortDir, phaseFilter, pageSize, serverQuery } = this.viewState;
-    if (serverQuery !== undefined) {
-      return `${sortField}|${sortDir}|q:${serverQuery}|${pageSize}`;
-    }
-    return `${sortField}|${sortDir}|${phaseFilter}|${pageSize}`;
+    const { sortField, sortDir, pageSize, serverQuery } = this.viewState;
+    return `${sortField}|${sortDir}|q:${serverQuery}|${pageSize}`;
   }
 
   /**
    * Record that the host is sending a sorted first request (`fit`) for the
-   * current view state and committed label. Cancels the window's own page
+   * current view state and server query. Cancels the window's own page
    * fetch, whose result the new response replaces. Returns the ticket to
    * pass to `setPaged` (its `key`) and `endSortedRequest`.
    */
-  beginSortedRequest(trigger: AgentListTrigger, committedLabel: string): SortedRequestTicket {
+  beginSortedRequest(
+    trigger: AgentListTrigger,
+    serverQuery = this.viewState.serverQuery
+  ): SortedRequestTicket {
     this.cancelPageFetch();
     const ticket: SortedRequestTicket = {
       trigger,
       key: this.serverParamsKey(),
-      label: committedLabel.trim(),
-      eligible: this.isSortedEligible(committedLabel),
+      serverQuery: serverQuery.trim(),
+      eligible: this.isSortedEligible(),
     };
     this.inFlight = ticket;
     return ticket;
@@ -496,20 +510,20 @@ export class AgentListWindow extends EventTarget {
   /**
    * After a view-state change: the trigger of the sorted request in flight
    * when its response no longer fits the current view state (a different
-   * sort, dir, phase or page size, a different committed label, or a view
-   * state that now needs the complete set), else `null`. The host then
-   * supersedes that request: it aborts it, calls `endSortedRequest()`, and
-   * plans again (re-sending a page-load or label-commit request, or
-   * planning the view change). A grid and list switch alone never
-   * supersedes, since both render the same response.
+   * sort, dir, server query or page size, or a view state that now needs
+   * the complete set), else `null`. The host then supersedes that request:
+   * it aborts it, calls `endSortedRequest()`, and plans again (re-sending a
+   * page-load or label-commit request, or planning the view change). A grid
+   * and list switch alone never supersedes, since both render the same
+   * response.
    */
-  supersededRequest(committedLabel: string): AgentListTrigger | null {
+  supersededRequest(serverQuery = this.viewState.serverQuery): AgentListTrigger | null {
     const t = this.inFlight;
     if (!t) return null;
     const same =
       t.key === this.serverParamsKey() &&
-      t.label === committedLabel.trim() &&
-      t.eligible === this.isSortedEligible(committedLabel);
+      t.serverQuery === serverQuery.trim() &&
+      t.eligible === this.isSortedEligible();
     return same ? null : t.trigger;
   }
 
@@ -659,15 +673,14 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Adopt the first paged response (a fit response with `complete: false`)
-   * fetched under `committedLabel`. Resets to page 0 with no cursor.
-   * `fetchedKey` is the ticket key of the request (see
-   * `beginSortedRequest`); the page is recorded under it, not under the
-   * current view state, so a view state that changed while the request was
-   * in flight still plans a request (`planRequest('view-change')`).
+   * Adopt the first paged response (a fit response with `complete: false`).
+   * Resets to page 0 with no cursor. `fetchedKey` is the ticket key of the
+   * request (see `beginSortedRequest`); the page is recorded under it, not
+   * under the current view state, so a view state that changed while the
+   * request was in flight still plans a request (`planRequest('view-change')`).
    * Defaults to the current view state.
    */
-  setPaged(result: PagedPageResult, committedLabel: string, fetchedKey?: string): void {
+  setPaged(result: PagedPageResult, fetchedKey?: string): void {
     this.cancelPageFetch();
     this.generation++;
     this._state = 'paged';
@@ -684,7 +697,6 @@ export class AgentListWindow extends EventTarget {
     this._updatesAvailable = false;
     this._error = null;
     this._loading = false;
-    this.committedLabel = committedLabel;
     this.pagedParams = fetchedKey ?? this.serverParamsKey();
     this.freezeOrder(result);
     this.seedStats(result.stats);
@@ -727,8 +739,8 @@ export class AgentListWindow extends EventTarget {
     this.frozenOrder = null;
     const population = result.stats?.agents;
     if (!population) return;
-    const phase = this.viewState.phaseFilter;
-    const order = population.filter(([, p]) => !phase || p === phase).map(([id]) => id);
+    const phasePred = this.viewState.committedPhasePredicate;
+    const order = population.filter(([, p]) => !phasePred || phasePred(p)).map(([id]) => id);
     if (order.length !== result.totalCount) return;
     for (let i = 0; i < result.agents.length; i++) {
       if (order[i] !== result.agents[i]?.id) return;
@@ -780,48 +792,26 @@ export class AgentListWindow extends EventTarget {
     return result;
   }
 
-  /** The live-typed label preview filter, shared by the small state's full filter chain and the paged state's items-only preview. */
-  private filterByLabel(list: Agent[]): Agent[] {
-    const label = this.viewState.label.trim();
-    if (!label) return list;
-    const parts = label.split('=');
-    const key = parts[0];
-    const value = parts.slice(1).join('=');
-    return list.filter((a) => {
-      if (!a.labels) return false;
-      return value ? a.labels[key] === value : key in a.labels;
-    });
-  }
-
   private filteredAndSorted(list: Agent[]): Agent[] {
-    let out = list;
-    if (this.viewState.filterPredicate) {
-      out = out.filter(this.viewState.filterPredicate);
-    } else {
-      if (this.viewState.phaseFilter) {
-        out = out.filter((a) => a.phase === this.viewState.phaseFilter);
-      }
-      out = this.filterByLabel(out);
-    }
-    out = filterByMode(out, this.viewState.modeFilter ?? '');
+    const out = this.viewState.filterPredicate ? list.filter(this.viewState.filterPredicate) : list;
     return sortAgents(out, this.viewState.sortField, this.viewState.sortDir);
   }
 
   /**
    * The page slice to render: a local slice of `display` (local states), or the
-   * current server page (paged). While paged, the live-typed label is still
-   * applied as a local preview with no request and no `pageIndex` change:
-   * while typing, the display applies the client label filter to what is
-   * loaded. `total`/`rangeStart` deliberately keep reporting the server's
-   * unfiltered count during this preview, so the "of N" figure may not
-   * match the filtered row count until the label is committed.
+   * current server page (paged). While paged, an uncommitted filter-query edit
+   * (`previewDiffersFromCommitted: true`) is applied as a local preview over
+   * the loaded page with no request and no `pageIndex` change; `total` and
+   * `rangeStart` keep reporting the server's committed count until the edit is
+   * committed. Once committed (or when no uncommitted edit is active), the
+   * server page rows are returned directly.
    */
   get items(): Agent[] {
     if (this._state === 'paged') {
-      if (this.viewState.filterPredicate) {
+      if (this.viewState.previewDiffersFromCommitted && this.viewState.filterPredicate) {
         return this.pageItems.filter(this.viewState.filterPredicate);
       }
-      return this.filterByLabel(this.pageItems);
+      return this.pageItems;
     }
     const display = this.display;
     const start = this._pageIndex * this.viewState.pageSize;
@@ -869,9 +859,11 @@ export class AgentListWindow extends EventTarget {
   get stats(): { total: number; running: number; incomplete: boolean } {
     if (this.isLocal) {
       const held = this.getHeldAgents();
+      const statsPred = this.viewState.localStatsPredicate;
+      const counted = statsPred ? held.filter(statsPred) : held;
       return {
-        total: held.length,
-        running: held.filter((a) => isAgentRunning(a)).length,
+        total: counted.length,
+        running: counted.filter((a) => isAgentRunning(a)).length,
         incomplete: this._state === 'capped',
       };
     }
@@ -1102,22 +1094,24 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v` or committed query predicate, if any. */
-  private passesCommittedLabel(agent: Agent): boolean {
+  /**
+   * Whether an agent belongs in the phase-independent stats population
+   * (mirroring the hub's `statsFilter` with `phase:` terms removed).
+   */
+  private passesCommittedNonPhase(agent: Agent): boolean {
+    return (
+      !this.viewState.committedNonPhasePredicate || this.viewState.committedNonPhasePredicate(agent)
+    );
+  }
+
+  /** The committed query's add rule (mirroring the server's phase-independent stats population): the project match (or `isAddable`) plus `passesCommittedNonPhase`. */
+  private passesCommittedQuery(agent: Agent): boolean {
     if (this.isAddable) {
       if (!this.isAddable(agent)) return false;
     } else if (agent.projectId !== this.getProjectId()) {
       return false;
     }
-    if (this.viewState.committedFilterPredicate) {
-      return this.viewState.committedFilterPredicate(agent);
-    }
-    const label = this.committedLabel.trim();
-    if (!label || !label.includes('=')) return true;
-    const eq = label.indexOf('=');
-    const key = label.slice(0, eq);
-    const value = label.slice(eq + 1);
-    return agent.labels?.[key] === value;
+    return this.passesCommittedNonPhase(agent);
   }
 
   /** The server sort the paged state was fetched with: `created`, or `updated` for everything else. */
@@ -1176,11 +1170,8 @@ export class AgentListWindow extends EventTarget {
     return false;
   }
 
-  private passesPhase(a: Agent): boolean {
-    if (this.viewState.committedFilterPredicate) {
-      return this.viewState.committedFilterPredicate(a);
-    }
-    return !this.viewState.phaseFilter || a.phase === this.viewState.phaseFilter;
+  private passesCommittedFilter(a: Agent): boolean {
+    return !this.viewState.committedFilterPredicate || this.viewState.committedFilterPredicate(a);
   }
 
   /**
@@ -1210,7 +1201,7 @@ export class AgentListWindow extends EventTarget {
       const agent = this.getAgent(id);
       if (!agent) continue;
       if (onPage.has(id)) {
-        if (this.passesPhase(agent)) {
+        if (this.passesCommittedFilter(agent)) {
           // Replace this object, then re-sort the page locally (today's live reorder).
           // Chip iff the new key would move it off this page.
           const newK = this.kOf(agent);
@@ -1219,13 +1210,15 @@ export class AgentListWindow extends EventTarget {
           resort = true;
           this.memberIndex.set(id, agent.phase);
         } else {
-          // On-page agent now fails the phase / committed query filter: remove the row (backfill chip).
+          // On-page agent now fails the committed query filter: remove the row (backfill chip).
+          // Keep it in `memberIndex` with its updated phase if it still passes
+          // the non-phase stats population (e.g. a phase transition under `phase:running`).
           onPage.delete(id);
           chip = true;
-          if (this.viewState.committedFilterPredicate) {
-            this.memberIndex.delete(id);
-          } else {
+          if (this.passesCommittedNonPhase(agent)) {
             this.memberIndex.set(id, agent.phase);
+          } else {
+            this.memberIndex.delete(id);
           }
         }
       } else {
@@ -1303,46 +1296,37 @@ export class AgentListWindow extends EventTarget {
     const wasMember = this.memberIndex.has(id);
 
     if (wasMember) {
-      if (this.viewState.committedFilterPredicate) {
-        if (!this.viewState.committedFilterPredicate(agent)) {
-          // Existing member stopped matching the committed server query: remove from population.
-          this.memberIndex.delete(id);
-          return false;
-        }
-        this.memberIndex.set(id, agent.phase);
-        return this.withinPageKRange(this.kOf(agent), rangeBefore);
+      if (!this.passesCommittedNonPhase(agent)) {
+        // Existing member stopped matching the non-phase stats population: remove.
+        this.memberIndex.delete(id);
+        return false;
       }
-      // An existing off-page member's phase changes unconditionally: only
-      // *adding* a new member is gated by the add rule.
+      const phasePred = this.viewState.committedPhasePredicate;
       const prevPhase = this.memberIndex.getPhase(id);
-      const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
-      const nowPasses = this.passesPhase(agent);
+      const prevPassed = !phasePred || (prevPhase !== undefined && phasePred(prevPhase));
       this.memberIndex.set(id, agent.phase);
-      const newlyPasses = nowPasses && !prevPassed;
-      const enteredRange = this.withinPageKRange(this.kOf(agent), rangeBefore);
-      // An off-page member change affecting counts only shows no chip.
-      return newlyPasses || enteredRange;
+      const nowPasses = !phasePred || phasePred(agent.phase);
+      const newlyPasses = Boolean(phasePred) && !prevPassed && nowPasses;
+      return newlyPasses || (nowPasses && this.withinPageKRange(this.kOf(agent), rangeBefore));
     }
 
-    if (!this.passesCommittedLabel(agent)) {
-      // Neither on-page nor a member, and outside the committed label: the
+    if (!this.passesCommittedQuery(agent)) {
+      // Neither on-page nor a member, and outside the committed query: the
       // same as a delta for an ID the window has never heard of — ignored,
-      // with no chip. The project page
-      // has no "created outside today's add rule" row; that row is for the
-      // global mine/shared pages only.
+      // with no chip.
       return false;
     }
 
-    // A genuinely new member under today's add rule — e.g.
-    // a `created` event, which `AgentsChangedDetail`
-    // cannot distinguish from any other upsert, so the add rule itself is
-    // what keeps an out-of-label agent out of the stats.
+    // A genuinely new member under the add rule — e.g. a `created` event,
+    // which `AgentsChangedDetail` cannot distinguish from any other upsert,
+    // so the add rule itself is what keeps an out-of-query agent out of the
+    // stats.
     this.memberIndex.set(id, agent.phase);
     // A newly created agent shows only if it could land on this page: for
     // a desc sort only page 0 can receive a brand-new row (inserts sort
     // before the cursor); an asc sort can receive one on any page.
     const couldLandOnThisPage = this.viewState.sortDir === 'asc' || this._pageIndex === 0;
-    return this.passesPhase(agent) && couldLandOnThisPage;
+    return this.passesCommittedFilter(agent) && couldLandOnThisPage;
   }
 
   /** An off-page `unknown` delta: only phase (and sometimes `lastActivityEvent`) is known. */
@@ -1352,35 +1336,23 @@ export class AgentListWindow extends EventTarget {
     rangeBefore: { first: string; last: string } | null
   ): boolean {
     if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
-    if (this.viewState.committedFilterPredicate || this.viewState.committedPhasePredicate) {
-      if (delta.phase) {
-        if (
-          this.viewState.committedPhasePredicate &&
-          !this.viewState.committedPhasePredicate(delta.phase)
-        ) {
-          // Existing member's phase now violates the committed query: remove from population.
-          this.memberIndex.delete(id);
-          return false;
-        }
-        this.memberIndex.set(id, delta.phase);
-      }
-      return delta.lastActivityEvent && this.serverSort === 'updated'
-        ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
-        : false;
-    }
+    const phasePred = this.viewState.committedPhasePredicate;
     const prevPhase = this.memberIndex.getPhase(id);
-    const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
-    if (delta.phase) this.memberIndex.set(id, delta.phase);
-    const nowPasses =
-      !this.viewState.phaseFilter || (delta.phase ?? prevPhase) === this.viewState.phaseFilter;
-    const newlyPasses = nowPasses && !prevPassed;
-    // K is not carried by UnknownAgentDelta's phase-only shape unless a
-    // lastActivityEvent accompanies it; when absent, assume it does not
-    // enter the page (conservative: this class of off-page drift is
-    // accepted, and carrying K end-to-end would be additive).
-    // An activity time moves only the `updated` key.
+    const prevPassed = !phasePred || (prevPhase !== undefined && phasePred(prevPhase));
+    let nowPasses = prevPassed;
+    let newlyPasses = false;
+    if (delta.phase) {
+      // Phase transitions never evict a member from the phase-independent stats
+      // population; update its phase in place and raise the chip if it newly
+      // passes the committed phase filter.
+      this.memberIndex.set(id, delta.phase);
+      nowPasses = !phasePred || phasePred(delta.phase);
+      if (phasePred && !prevPassed && nowPasses) {
+        newlyPasses = true;
+      }
+    }
     const enteredRange =
-      delta.lastActivityEvent && this.serverSort === 'updated'
+      nowPasses && delta.lastActivityEvent && this.serverSort === 'updated'
         ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
         : false;
     return newlyPasses || enteredRange;
@@ -1389,20 +1361,4 @@ export class AgentListWindow extends EventTarget {
   private notifyChange(): void {
     this.dispatchEvent(new Event('change'));
   }
-}
-
-/**
- * The global page's mode filter over a list: `can_message` and
- * `cannot_message` by messageability, any other value by message mode
- * (`project` when unset). An empty filter returns the list itself.
- */
-function filterByMode(list: Agent[], modeFilter: string): Agent[] {
-  if (!modeFilter) return list;
-  if (modeFilter === 'can_message') {
-    return list.filter((a) => a._messageability?.canMessage === true);
-  }
-  if (modeFilter === 'cannot_message') {
-    return list.filter((a) => a._messageability?.canMessage === false);
-  }
-  return list.filter((a) => (a.messageMode || 'project') === modeFilter);
 }

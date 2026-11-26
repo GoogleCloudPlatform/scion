@@ -40,12 +40,12 @@ function agent(id: string, updated: number, phase = 'running'): Agent {
 
 function viewState(partial: Partial<AgentListViewState> = {}): AgentListViewState {
   return {
-    phaseFilter: '',
-    label: '',
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 3,
     view: 'list',
+    serverQuery: '',
+    committedNonPhasePredicate: null,
     ...partial,
   };
 }
@@ -105,11 +105,23 @@ class FakeServer {
   }
 }
 
-function setup(server: FakeServer, vs: Partial<AgentListViewState> = {}): AgentListWindow {
-  const state = viewState(vs);
+function setup(
+  server: FakeServer,
+  vs: Partial<AgentListViewState> = {},
+  phase = ''
+): AgentListWindow {
+  const state = viewState({
+    ...(phase
+      ? {
+          serverQuery: `phase:${phase}`,
+          committedPhasePredicate: (p: string): boolean => p === phase,
+        }
+      : {}),
+    ...vs,
+  });
   const win = new AgentListWindow({
     viewState: state,
-    fetchPage: (params) => Promise.resolve(server.page(params, state.phaseFilter)),
+    fetchPage: (params) => Promise.resolve(server.page(params, phase)),
     getAgent: () => undefined,
     getProjectId: () => 'p-1',
     getHeldAgents: () => [],
@@ -119,10 +131,7 @@ function setup(server: FakeServer, vs: Partial<AgentListViewState> = {}): AgentL
 
 /** Walks every page from page 0, running `between` after each page. */
 async function walk(win: AgentListWindow, server: FakeServer, between?: (page: number) => void) {
-  win.setPaged(
-    server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }),
-    ''
-  );
+  win.setPaged(server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }));
   const seen: string[] = win.items.map((a) => a.id);
   between?.(0);
   let page = 0;
@@ -196,10 +205,9 @@ describe('AgentListWindow — frozen walk order', () => {
       phase: (i % 2 === 0 ? 'running' : 'stopped') as AgentPhase,
     }));
     const server = new FakeServer(agents);
-    const win = setup(server, { phaseFilter: 'running' });
+    const win = setup(server, {}, 'running');
     win.setPaged(
-      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running'),
-      ''
+      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running')
     );
     const seen = win.items.map((a) => a.id);
     server.bump('a8', 1);
@@ -216,7 +224,7 @@ describe('AgentListWindow — frozen walk order', () => {
     const win = setup(server);
     const first = server.page({ limit: 3, wantStats: true, signal: new AbortController().signal });
     // A page row dropped (for example deleted live) so the head disagrees.
-    win.setPaged({ ...first, agents: first.agents.slice(1) }, '');
+    win.setPaged({ ...first, agents: first.agents.slice(1) });
     await win.next();
     expect(server.requests.at(-1)?.cursor).toBeDefined();
     expect(server.requests.at(-1)?.ids).toBeUndefined();
@@ -225,10 +233,7 @@ describe('AgentListWindow — frozen walk order', () => {
   it('the refresh chip on a later page starts a fresh walk from page 0', async () => {
     const server = new FakeServer(ten());
     const win = setup(server);
-    win.setPaged(
-      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }),
-      ''
-    );
+    win.setPaged(server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }));
     await win.next();
     expect(win.pageIndex).toBe(1);
     server.bump('a9', 5);
@@ -267,7 +272,7 @@ describe('AgentListWindow — frozen walk order', () => {
 
   it('agents leaving the phase filter mid-walk drop out without stalling the walk', async () => {
     const server = new FakeServer(ten());
-    const win = setup(server, { phaseFilter: 'running' });
+    const win = setup(server, {}, 'running');
     const seen = await walk(win, server, (page) => {
       if (page === 0) {
         server.agents = server.agents.map((a) =>
@@ -282,10 +287,7 @@ describe('AgentListWindow — frozen walk order', () => {
   it('invalidateCursors drops the frozen order; refresh then starts a fresh frozen walk', async () => {
     const server = new FakeServer(ten());
     const win = setup(server);
-    win.setPaged(
-      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }),
-      ''
-    );
+    win.setPaged(server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }));
     await win.next();
     win.invalidateCursors();
     expect(win.hasNext).toBe(false);
@@ -301,10 +303,9 @@ describe('AgentListWindow — frozen walk order', () => {
 
   it('an agent that leaves the phase filter and re-enters counts in the total again', async () => {
     const server = new FakeServer(ten());
-    const win = setup(server, { phaseFilter: 'running' });
+    const win = setup(server, {}, 'running');
     win.setPaged(
-      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running'),
-      ''
+      server.page({ limit: 3, wantStats: true, signal: new AbortController().signal }, 'running')
     );
     const setPhase = (id: string, phase: AgentPhase) => {
       server.agents = server.agents.map((a) => (a.id === id ? { ...a, phase } : a));

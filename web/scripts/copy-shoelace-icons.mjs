@@ -211,7 +211,6 @@ const USED_ICONS = [
   'star-fill',
   'stop-circle',
   'sun',
-  'tag',
   'telegram',
   'terminal',
   'three-dots',
