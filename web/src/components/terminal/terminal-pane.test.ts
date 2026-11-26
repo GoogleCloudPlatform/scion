@@ -980,7 +980,7 @@ describe('theme', () => {
     pane.terminal = realTerminal;
     delete (page as unknown as { session?: unknown }).session;
 
-    // The 8 chrome buttons across the three branches (the inactive window
+    // The 9 chrome buttons across the three branches (the inactive window
     // toggle has no class, so it is labelled by its parent).
     expect([...seen].sort()).toEqual([
       'active',
@@ -988,6 +988,7 @@ describe('theme', () => {
       'error-state > button',
       'metadata-retry',
       'pane-action-btn',
+      'pane-action-btn toolbar-overflow-btn',
       'port-dropdown-trigger',
       'reconnect-btn',
       'toggle-group > button',
@@ -1868,6 +1869,79 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(bar.querySelector('.toggle-group')).not.toBeNull();
     expect(bar.querySelectorAll('a.back-link.compact')).toHaveLength(2);
     expect(bar.querySelector('.pane-action-btn')).not.toBeNull();
+  });
+
+  it('defines narrow-container toolbar rules and renders overflow menu items (ptone/scion#9406)', async () => {
+    await withProject(true);
+    const styles = (
+      customElements.get('scion-terminal-pane') as unknown as {
+        styles: { cssText: string };
+      }
+    ).styles.cssText.replace(/\s+/g, ' ');
+    expect(styles).toContain('container-type: inline-size;');
+    expect(styles).toContain('container-name: terminal-toolbar;');
+    expect(styles).toContain('@container terminal-toolbar (max-width: 520px)');
+    expect(styles).toContain('@container terminal-toolbar (max-width: 360px)');
+
+    // Populate secondary actions so all overflow entries render.
+    const internal = page as unknown as {
+      userId: string;
+      exposedPorts: Array<{ port: number; label?: string }>;
+      agent: Record<string, unknown>;
+      agentPhase: string;
+      connected: boolean;
+      idle: boolean;
+    };
+    internal.userId = 'user-1';
+    internal.exposedPorts = [{ port: 3000, label: 'Preview' }];
+    internal.agent = {
+      id: agentId,
+      name: 'test',
+      phase: 'running',
+      harnessAuth: 'none',
+      resolvedHarness: 'claude',
+    };
+    internal.agentPhase = 'running';
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const bar = toolbar();
+    const overflow = bar.querySelector('sl-dropdown.toolbar-overflow')!;
+    expect(overflow).not.toBeNull();
+    expect(overflow.hasAttribute('hoist')).toBe(true);
+    const trigger = overflow.querySelector<HTMLButtonElement>('button.toolbar-overflow-btn')!;
+    expect(trigger.getAttribute('aria-label')).toBe('More actions');
+
+    const label = overflow.querySelector('sl-menu-label.toolbar-overflow-agent-label')!;
+    expect(label.textContent?.trim()).toContain('test');
+
+    const values = [...overflow.querySelectorAll('sl-menu-item')].map((el) =>
+      el.getAttribute('value')
+    );
+    expect(values).toContain('graph');
+    expect(values).toContain('port:3000');
+    expect(values).toContain('capture-auth');
+
+    // Status indicator keeps accessible label when text is hidden in narrow containers.
+    const indicator = bar.querySelector<HTMLElement>('.status-indicator')!;
+    expect(indicator.getAttribute('aria-label')).toBe('Connected');
+    expect(indicator.querySelector('.status-label')?.textContent).toBe('Connected');
+
+    // Opening a port from the overflow menu uses window.open with the proxy URL.
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    try {
+      const menu = overflow.querySelector('sl-menu')!;
+      menu.dispatchEvent(
+        new CustomEvent('sl-select', { detail: { item: { value: 'port:3000' } } })
+      );
+      expect(openSpy).toHaveBeenCalledWith(
+        `/api/v1/agents/${agentId}/ports/3000/proxy/`,
+        '_blank',
+        'noopener'
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });
 
