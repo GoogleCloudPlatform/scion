@@ -343,7 +343,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.update",
 		Domain:      "agent",
-		Description: "Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach",
+		Description: "Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach (writes agent.suspend_policy.set audit record only when suspendPolicy changes)",
 		EntryPoints: []EntryPoint{
 			// handleAgentByID (handlers_agents_core.go) dispatches the
 			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
@@ -363,7 +363,15 @@ var agentOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		// Written atomically in the PATCH transaction only when suspendPolicy changes.
+		AuditObligation: &AuditObligation{
+			EventType:     "agent.suspend_policy.set",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"suspend_policy"},
+			AfterFields:   []string{"suspend_policy"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_PassthroughGateStillApplies"},

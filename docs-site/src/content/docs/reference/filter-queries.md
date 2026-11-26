@@ -41,6 +41,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring). On 
 | `template` | string | template name (case-insensitive) | server | `template:developer` | Agent template name |
 | `owner` | ref | user ID, email, or `me` | server | `owner:me` | Owner ID, email, or 'me' |
 | `is` | flag_set | `mine`, `shared` (mutually exclusive) | server | `is:mine`, `is:shared` | Scope filter (mine or shared) |
+| `suspendPolicy` | enum | `auto`, `never` | server | `suspendPolicy:never` | Automatic suspension policy |
 | `mode` | enum | `hub`, `project`, `tree`, `direct`, `owner`, `none`, `can_message`, `cannot_message` | client | `mode:owner`, `mode:can_message` | Messaging mode or reachability (client-side) |
 
 ### `project_agents` (Project agents list)
@@ -56,6 +57,7 @@ Text search matches agent **name** or **slug** (case-insensitive substring). Sco
 | `broker` | ref | runtime broker name or ID | server | `broker:local-docker` | Runtime broker name or ID |
 | `template` | string | template name (case-insensitive) | server | `template:developer` | Agent template name |
 | `owner` | ref | user ID, email, or `me` | server | `owner:me` | Owner ID, email, or 'me' |
+| `suspendPolicy` | enum | `auto`, `never` | server | `suspendPolicy:never` | Automatic suspension policy |
 | `mode` | enum | `hub`, `project`, `tree`, `direct`, `owner`, `none` | client | `mode:owner` | Messaging mode (client-side) |
 
 ### `artifacts` (Artifacts list)

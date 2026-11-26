@@ -293,3 +293,123 @@ func TestAgentStore_ClaimIdleSuspend_AndSwapAutoSuspend_SuspendPolicy(t *testing
 		assert.Equal(t, store.RunIntentStopped, gotB.RunIntent)
 	})
 }
+
+func TestAgentStore_SetAgentSuspendPolicy_RunningCountsAndFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	t.Run("SetAgentSuspendPolicy toggles without bumping state_version and validates input", func(t *testing.T) {
+		a := makeAgent(projectID, "sp-set-toggle")
+		require.NoError(t, s.CreateAgent(ctx, a))
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, before.SuspendPolicy)
+
+		changed, err := s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		require.NoError(t, err)
+		assert.False(t, changed, "same-value auto->auto must report changed=false")
+
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		require.NoError(t, err)
+		assert.True(t, changed, "auto->never must report changed=true")
+		afterNever, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyNever, afterNever.SuspendPolicy)
+		assert.Equal(t, before.StateVersion, afterNever.StateVersion, "SetAgentSuspendPolicy must not bump state_version")
+
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		require.NoError(t, err)
+		assert.False(t, changed, "same-value never->never must report changed=false")
+
+		changed, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		require.NoError(t, err)
+		assert.True(t, changed, "never->auto must report changed=true")
+		afterAuto, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, afterAuto.SuspendPolicy)
+		assert.Equal(t, before.StateVersion, afterAuto.StateVersion)
+
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, "bogus")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, "")
+		assert.ErrorIs(t, err, store.ErrInvalidInput)
+		_, err = s.SetAgentSuspendPolicy(ctx, uuid.New().String(), store.SuspendPolicyNever)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// Soft-deleted row must not be written by SetAgentSuspendPolicy (even for same value).
+		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetDeletedAt(time.Now().UTC()).
+			Save(ctx)
+		require.NoError(t, err)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyNever)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.SetAgentSuspendPolicy(ctx, a.ID, store.SuspendPolicyAuto)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		afterDeleted, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.SuspendPolicyAuto, afterDeleted.SuspendPolicy, "soft-deleted row policy must remain unchanged")
+	})
+
+	t.Run("CountRunningNeverSuspendAgents and QueryTerms filter", func(t *testing.T) {
+		running := makeAgent(projectID, "sp-cnt-running")
+		running.Phase = string(state.PhaseRunning)
+		running.SuspendPolicy = store.SuspendPolicyNever
+		running.RuntimeBrokerID = "broker-a"
+		require.NoError(t, s.CreateAgent(ctx, running))
+
+		stopped := makeAgent(projectID, "sp-cnt-stopped")
+		stopped.Phase = string(state.PhaseStopped)
+		stopped.SuspendPolicy = store.SuspendPolicyNever
+		stopped.RuntimeBrokerID = "broker-a"
+		require.NoError(t, s.CreateAgent(ctx, stopped))
+
+		autoRunning := makeAgent(projectID, "sp-cnt-auto")
+		autoRunning.Phase = string(state.PhaseRunning)
+		autoRunning.SuspendPolicy = store.SuspendPolicyAuto
+		autoRunning.RuntimeBrokerID = "broker-a"
+		require.NoError(t, s.CreateAgent(ctx, autoRunning))
+
+		deletedNever := makeAgent(projectID, "sp-cnt-deleted")
+		deletedNever.Phase = string(state.PhaseRunning)
+		deletedNever.SuspendPolicy = store.SuspendPolicyNever
+		deletedNever.RuntimeBrokerID = "broker-a"
+		require.NoError(t, s.CreateAgent(ctx, deletedNever))
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(deletedNever.ID)).
+			SetDeletedAt(time.Now().UTC()).
+			Save(ctx)
+		require.NoError(t, err)
+
+		// CountRunningNeverSuspendAgents counts only non-deleted running flagged agents.
+		runningCounts, err := s.CountRunningNeverSuspendAgents(ctx)
+		require.NoError(t, err)
+		require.Len(t, runningCounts, 1)
+		assert.Equal(t, projectID, runningCounts[0].ProjectID)
+		assert.Equal(t, "broker-a", runningCounts[0].RuntimeBrokerID)
+		assert.Equal(t, int64(1), runningCounts[0].Count)
+
+		// QueryTerms filter on suspendPolicy.
+		resNever, err := s.ListAgents(ctx, store.AgentFilter{
+			ProjectID: projectID,
+			Query: &store.QueryTerms{
+				Terms: []store.QueryTerm{{Field: "suspendpolicy", Values: []string{store.SuspendPolicyNever}}},
+			},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		gotNeverIDs := make([]string, len(resNever.Items))
+		for i, item := range resNever.Items {
+			gotNeverIDs[i] = item.ID
+		}
+		assert.ElementsMatch(t, []string{running.ID, stopped.ID}, gotNeverIDs)
+
+		resNotNever, err := s.ListAgents(ctx, store.AgentFilter{
+			ProjectID: projectID,
+			Query: &store.QueryTerms{
+				Terms: []store.QueryTerm{{Field: "suspendpolicy", Values: []string{store.SuspendPolicyNever}, Negate: true}},
+			},
+		}, store.ListOptions{})
+		require.NoError(t, err)
+		for _, item := range resNotNever.Items {
+			assert.Equal(t, store.SuspendPolicyAuto, item.SuspendPolicy)
+		}
+	})
+}

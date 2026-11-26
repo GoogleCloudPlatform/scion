@@ -1557,18 +1557,21 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// SuspendPolicy is create-only in Phase 1 (ptone/scion#9181): changing it
-	// on an existing agent requires PATCH with quota and audit (Phase 3).
-	// Refuse a mismatched non-empty suspendPolicy with 409 before any
-	// existing-agent branch acts; empty or matching values pass through.
-	if req.SuspendPolicy != "" {
+	// Changing suspendPolicy on an existing agent requires PATCH with audit.
+	// Refuse a mismatched non-empty suspendPolicy with 409 before startGate or
+	// existingAgentFlatChecks can answer 200 (in-flight create) or persist a
+	// broker pin; empty or matching values pass through.
+	// Exception: the env-gather recreate branch (existingBranchRecreate)
+	// hard-deletes the existing row and creates a fresh agent from req, so it
+	// honors req.SuspendPolicy like any other create-time field.
+	if req.SuspendPolicy != "" && classifyExistingAgent(existingAgent, req) != existingBranchRecreate {
 		existingPolicy := existingAgent.SuspendPolicy
 		if existingPolicy == "" {
 			existingPolicy = store.SuspendPolicyAuto
 		}
 		if req.SuspendPolicy != existingPolicy {
 			writeError(w, http.StatusConflict, ErrCodeSuspendPolicyCreateOnly,
-				"suspendPolicy applies only when the agent is created; it cannot be changed on an existing agent in this release",
+				"suspendPolicy cannot be changed through create/start on an existing agent; use PATCH /api/v1/agents/{id} to update it",
 				map[string]interface{}{
 					"current":   existingPolicy,
 					"requested": req.SuspendPolicy,

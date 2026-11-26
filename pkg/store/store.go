@@ -702,6 +702,21 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error
 
+	// SetAgentSuspendPolicy sets the agent's suspend_policy ("auto" or "never")
+	// if it differs from the stored value, reporting whether the row actually
+	// transitioned. It is the single-purpose post-create writer for the column;
+	// generic UpdateAgent must not write it. Like SetAgentSoftDeleteOpID, it
+	// neither checks nor bumps state_version. Refuses soft-deleted rows
+	// (deleted_at IS NULL predicate). Returns ErrInvalidInput if policy is not
+	// a valid suspend policy, or ErrNotFound if the agent does not exist or is
+	// soft-deleted.
+	SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) (changed bool, err error)
+
+	// CountRunningNeverSuspendAgents returns the number of non-deleted agents
+	// in the running phase with suspend_policy = "never", grouped by project
+	// and runtime broker.
+	CountRunningNeverSuspendAgents(ctx context.Context) ([]RunningNeverSuspendCount, error)
+
 	// DeleteAgent removes an agent by ID.
 	// It does not deactivate the agent's delegation edges or service-account
 	// assignments, which have no foreign key to the agent. A caller must

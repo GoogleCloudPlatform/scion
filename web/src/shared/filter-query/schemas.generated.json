@@ -86,6 +86,17 @@
         "multiValued": false
       },
       {
+        "name": "suspendPolicy",
+        "help": "Automatic suspension policy",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "auto",
+          "never"
+        ],
+        "multiValued": false
+      },
+      {
         "name": "is",
         "help": "Scope filter (mine or shared)",
         "kind": "flag_set",
@@ -199,6 +210,17 @@
         "help": "Owner ID, email, or 'me'",
         "kind": "ref",
         "exec": "server",
+        "multiValued": false
+      },
+      {
+        "name": "suspendPolicy",
+        "help": "Automatic suspension policy",
+        "kind": "enum",
+        "exec": "server",
+        "enum": [
+          "auto",
+          "never"
+        ],
         "multiValued": false
       },
       {

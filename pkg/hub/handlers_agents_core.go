@@ -4987,6 +4987,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// through reincarnate; held role edits are not stored yet).
 		// Without them it is ignored, as before.
 		AgentRole *string `json:"agentRole,omitempty"`
+		// SuspendPolicy sets the agent's automatic suspension policy
+		// ("auto" or "never"). Tier-T0 immediate metadata, gated by the
+		// lifecycle.never_suspend experiment.
+		SuspendPolicy *string `json:"suspendPolicy,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -5101,6 +5105,19 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	if updates.SuspendPolicy != nil {
+		if !s.experimentEnabled(experiments.NeverSuspend) {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"experiment_disabled: "+experiments.NeverSuspend+" is off; suspendPolicy cannot be set on this hub",
+				map[string]interface{}{"experiment": experiments.NeverSuspend})
+			return
+		}
+		if !store.IsValidSuspendPolicy(*updates.SuspendPolicy) {
+			ValidationError(w, "invalid suspend policy: "+*updates.SuspendPolicy, map[string]interface{}{"field": "suspendPolicy"})
+			return
+		}
+	}
+
 	// Refuse, before anything is written, a request that names a key the
 	// mutability table locks for this agent (agent_config_mutability.go):
 	// the same rule GET editability reports.
@@ -5109,7 +5126,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		resolvedHarness, _ := s.resolveAgentHarnessCapabilities(ctx, agent)
 		appliedFixed = appliedFixedValues(agent, resolvedHarness)
 	}
-	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
+	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil, updates.SuspendPolicy != nil), rawFields, updates.Config, appliedFixed); ref != nil {
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
@@ -5423,7 +5440,114 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		timezoneSource = &tz.Source
 	}
 
-	if updates.Name != "" {
+	// SuspendPolicy update: warn if the harness cannot resume (design §4.6),
+	// persist via conditional SetAgentSuspendPolicy with in-transaction
+	// before/after audit when the value actually transitions, and report
+	// suspensionInFlight if a stop or suspend is already in flight (design §4.2
+	// point 3). Always run writeSuspendPolicyTx when updates.SuspendPolicy != nil
+	// rather than trusting the handler-entry snapshot, so concurrent PATCHes
+	// serialize on the row lock and derive audit + disposition from the atomic
+	// transition result.
+	if updates.SuspendPolicy != nil && *updates.SuspendPolicy == store.SuspendPolicyNever {
+		if ok, harnessType, reason := s.harnessSupportsResume(ctx, agent); !ok {
+			switch {
+			case harnessType != "":
+				warnings = append(warnings, fmt.Sprintf("harness %q does not support resume; this agent is never auto-suspended so suspendPolicy=%q has no effect", harnessType, store.SuspendPolicyNever))
+			case reason != "":
+				warnings = append(warnings, fmt.Sprintf("%s; suspendPolicy=%q may have no effect", reason, store.SuspendPolicyNever))
+			default:
+				warnings = append(warnings, fmt.Sprintf("unable to verify whether this agent's harness supports resume; suspendPolicy=%q may have no effect", store.SuspendPolicyNever))
+			}
+		}
+	}
+
+	needsRowUpdate := updates.Name != "" ||
+		updates.Labels != nil ||
+		updates.Annotations != nil ||
+		updates.TaskSummary != "" ||
+		updates.Config != nil ||
+		updates.GCPIdentity != nil ||
+		updates.ExplicitTimezone != nil ||
+		len(pendingExperimentOff) > 0
+
+	var suspensionInFlight bool
+	var suspendPolicyChanged bool
+	writeSuspendPolicyTx := func(tx store.Store) error {
+		target := *updates.SuspendPolicy
+		changed, err := tx.SetAgentSuspendPolicy(ctx, agent.ID, target)
+		if err != nil {
+			return err
+		}
+		suspendPolicyChanged = changed
+		if changed {
+			// suspend_policy is a binary enum ("auto" / "never"), so a
+			// conditional transition to target came atomically from the other
+			// value.
+			beforePolicy := store.SuspendPolicyAuto
+			if target == store.SuspendPolicyAuto {
+				beforePolicy = store.SuspendPolicyNever
+			}
+			policyAudit := &store.MutationAuditRecord{
+				MutationType:  mutationTypeAgentSuspendPolicySet,
+				TargetType:    "agent",
+				TargetID:      agent.ID,
+				BeforeSummary: beforePolicy,
+				AfterSummary:  target,
+				Timestamp:     time.Now(),
+			}
+			auditActorFromContext(ctx).ApplyActor(policyAudit)
+			applyHubActorFallback(policyAudit)
+			if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
+				return fmt.Errorf("agent update suspend policy audit: %w", err)
+			}
+		}
+		if target == store.SuspendPolicyNever {
+			fresh, err := tx.GetAgent(ctx, agent.ID)
+			if err != nil {
+				return err
+			}
+			suspensionInFlight = isAutoSuspendInFlight(fresh)
+		}
+		return nil
+	}
+
+	if updates.SuspendPolicy != nil {
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if needsRowUpdate {
+				if err := tx.UpdateAgent(ctx, agent); err != nil {
+					return err
+				}
+				if updates.Name != "" {
+					keys := api.IdentityKeysFor(agent.Slug, agent.Name)
+					if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys); err != nil {
+						return err
+					}
+				}
+				if saWrite != nil {
+					if err := saWrite.apply(r, tx, agent.ID); err != nil {
+						return err
+					}
+				}
+			}
+			return writeSuspendPolicyTx(tx)
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		agent.SuspendPolicy = *updates.SuspendPolicy
+		// Derive disposition.applied from the store's atomic transition result
+		// rather than the handler-entry snapshot.
+		if suspendPolicyChanged {
+			if *updates.SuspendPolicy == store.SuspendPolicyNever {
+				before.suspendPolicy = store.SuspendPolicyAuto
+			} else {
+				before.suspendPolicy = store.SuspendPolicyNever
+			}
+		} else {
+			before.suspendPolicy = *updates.SuspendPolicy
+		}
+	} else if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a
 		// database invariant, so it must never be able to drift from the
@@ -5488,17 +5612,31 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		disposition.Held = configHeld
 	}
 	writeJSON(w, http.StatusOK, agentUpdateResponse{
-		Agent:            redactedAgentCopy(ctx, s, agent),
-		ResolvedTimezone: resolvedTimezone,
-		TimezoneSource:   timezoneSource,
-		Warnings:         warnings,
-		Disposition:      disposition,
+		Agent:              redactedAgentCopy(ctx, s, agent),
+		ResolvedTimezone:   resolvedTimezone,
+		TimezoneSource:     timezoneSource,
+		Warnings:           warnings,
+		Disposition:        disposition,
+		SuspensionInFlight: suspensionInFlight,
 	})
+}
+
+// isAutoSuspendInFlight reports whether a stop or suspend is already in flight
+// on agent a (either an active idle-suspend claim, or a running agent whose
+// run_intent has already been swapped to stopped).
+func isAutoSuspendInFlight(a *store.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if a.IdleSuspendClaimActive {
+		return true
+	}
+	return a.Phase == string(state.PhaseRunning) && a.RunIntent == store.RunIntentStopped
 }
 
 // presentAgentPatchKeys lists the top-level wire keys an agent PATCH names,
 // by the same presence rules applyAgentUpdate writes them with.
-func presentAgentPatchKeys(name string, lbls, annotations map[string]string, taskSummary string, hasGCPIdentity, hasTimezone bool) []string {
+func presentAgentPatchKeys(name string, lbls, annotations map[string]string, taskSummary string, hasGCPIdentity, hasTimezone, hasSuspendPolicy bool) []string {
 	var keys []string
 	if name != "" {
 		keys = append(keys, "name")
@@ -5517,6 +5655,9 @@ func presentAgentPatchKeys(name string, lbls, annotations map[string]string, tas
 	}
 	if hasTimezone {
 		keys = append(keys, "explicitTimezone")
+	}
+	if hasSuspendPolicy {
+		keys = append(keys, "suspendPolicy")
 	}
 	return keys
 }
@@ -5635,19 +5776,25 @@ func configPatchPhase(phase string) bool {
 // outside config, as it stood before the PATCH, so the disposition can
 // leave out keys the request echoed unchanged.
 type agentPatchSnapshot struct {
-	name        string
-	labels      map[string]string
-	annotations map[string]string
-	taskSummary string
-	gcpIdentity *store.GCPIdentityConfig
+	name          string
+	labels        map[string]string
+	annotations   map[string]string
+	taskSummary   string
+	gcpIdentity   *store.GCPIdentityConfig
+	suspendPolicy string
 }
 
 func agentPatchSnapshotOf(agent *store.Agent) agentPatchSnapshot {
+	sp := agent.SuspendPolicy
+	if sp == "" {
+		sp = store.SuspendPolicyAuto
+	}
 	snap := agentPatchSnapshot{
-		name:        agent.Name,
-		labels:      maps.Clone(agent.Labels),
-		annotations: maps.Clone(agent.Annotations),
-		taskSummary: agent.TaskSummary,
+		name:          agent.Name,
+		labels:        maps.Clone(agent.Labels),
+		annotations:   maps.Clone(agent.Annotations),
+		taskSummary:   agent.TaskSummary,
+		suspendPolicy: sp,
 	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil {
 		id := *agent.AppliedConfig.GCPIdentity
@@ -5695,6 +5842,13 @@ func agentUpdateDisposition(before agentPatchSnapshot, after *store.Agent, confi
 	if timezoneChanged {
 		applied = append(applied, "explicitTimezone")
 	}
+	afterPolicy := after.SuspendPolicy
+	if afterPolicy == "" {
+		afterPolicy = store.SuspendPolicyAuto
+	}
+	if afterPolicy != before.suspendPolicy {
+		applied = append(applied, "suspendPolicy")
+	}
 	sort.Strings(applied)
 	return AgentUpdateDisposition{
 		Applied:            applied,
@@ -5717,6 +5871,11 @@ type agentUpdateResponse struct {
 	// Disposition names the keys the request changed, by when each takes
 	// effect.
 	Disposition AgentUpdateDisposition `json:"disposition"`
+	// SuspensionInFlight is true when a PATCH setting suspendPolicy="never"
+	// committed while a stop or suspend was already in flight (an active
+	// idle-suspend claim, or a running agent whose run_intent is already
+	// stopped); the in-flight operation is not canceled.
+	SuspensionInFlight bool `json:"suspensionInFlight,omitempty"`
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

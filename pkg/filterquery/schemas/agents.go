@@ -98,6 +98,17 @@ var agentCommonKeys = []filterquery.Key{
 		MultiValued: false,
 	},
 	{
+		Name: "suspendPolicy",
+		Help: "Automatic suspension policy",
+		Kind: filterquery.KindEnum,
+		Exec: filterquery.ExecServer,
+		Enum: []string{
+			"auto",
+			"never",
+		},
+		MultiValued: false,
+	},
+	{
 		Name: "mode",
 		Help: "Messaging mode or reachability (client-side)",
 		Kind: filterquery.KindEnum,
@@ -135,6 +146,7 @@ var Agents = filterquery.Schema{
 		agentCommonKeys[4], // broker
 		agentCommonKeys[5], // template
 		agentCommonKeys[6], // owner
+		agentCommonKeys[7], // suspendPolicy
 		{
 			Name:        "is",
 			Help:        "Scope filter (mine or shared)",
@@ -144,7 +156,7 @@ var Agents = filterquery.Schema{
 			Exclusive:   [][]string{{"mine", "shared"}},
 			MultiValued: false,
 		},
-		agentCommonKeys[7], // mode
+		agentCommonKeys[8], // mode
 	},
 }
 
@@ -163,6 +175,7 @@ var ProjectAgents = filterquery.Schema{
 		agentCommonKeys[4], // broker
 		agentCommonKeys[5], // template
 		agentCommonKeys[6], // owner
+		agentCommonKeys[7], // suspendPolicy
 		{
 			Name: "mode",
 			Help: "Messaging mode (client-side)",

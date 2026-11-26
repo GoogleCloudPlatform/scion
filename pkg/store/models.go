@@ -2552,6 +2552,15 @@ func IsValidSuspendPolicy(policy string) bool {
 	}
 }
 
+// RunningNeverSuspendCount is the per-(project, runtime broker) count of
+// non-deleted running agents with suspend_policy = "never", reported by the
+// scion.hub.never_suspend_agents gauge.
+type RunningNeverSuspendCount struct {
+	ProjectID       string
+	RuntimeBrokerID string
+	Count           int64
+}
+
 // CrossProjectInbound policy values define which external agents may deliver
 // messages to agents in this project. Default is "none".
 const (
