@@ -667,6 +667,210 @@ func TestHubUsageSink_ShutdownDrain(t *testing.T) {
 	}
 }
 
+// O1: a failed final drain (Hub 5xx at shutdown) or remaining pending bytes at
+// shutdown must send final_state="incomplete" rather than "final".
+func TestHubUsageSink_ShutdownDrainIncomplete(t *testing.T) {
+	t.Run("failed final drain (Hub 5xx) sends final_state=incomplete", func(t *testing.T) {
+		var mu sync.Mutex
+		var finalStates []string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			// Fail event batches with 503 during shutdown drain, but accept the
+			// final heartbeat so we can observe its final_state.
+			if len(req.Events) > 0 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("hub overloaded"))
+				return
+			}
+			mu.Lock()
+			if req.FinalState != "" {
+				finalStates = append(finalStates, req.FinalState)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{})
+		}))
+		defer srv.Close()
+
+		o := testOutbox(t)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:shut-inc-5xx", 1), AppendWritten)
+
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:          httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID:         "run-shut-5xx",
+			DrainInterval: time.Hour,
+		})
+		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d.Stop(ctx)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(finalStates) != 1 || finalStates[0] != telemetrycontract.MeterFinalStateIncomplete {
+			t.Fatalf("finalStates = %v, want [%q]", finalStates, telemetrycontract.MeterFinalStateIncomplete)
+		}
+		if o.Stats().PendingBytes == 0 {
+			t.Error("expected PendingBytes > 0 when final drain failed")
+		}
+	})
+
+	t.Run("pending bytes remaining at shutdown sends final_state=incomplete", func(t *testing.T) {
+		var mu sync.Mutex
+		var finalStates []string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			if req.FinalState != "" {
+				finalStates = append(finalStates, req.FinalState)
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		}))
+		defer srv.Close()
+
+		// With a nil hub resolver, provisional staging lines cannot be
+		// finalized, so DrainBatch succeeds with 0 sent while PendingBytes > 0.
+		o := testOutbox(t)
+		mustAppend(t, o, draftUsage(telemetrycontract.SourceIdentityComposite, "cmp1:shut-inc-pending", 1), AppendWritten)
+
+		sink := NewHubUsageSink(o, HubUsageSinkConfig{
+			Post:          httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+			RunID:         "run-shut-pending",
+			DrainInterval: time.Hour,
+		})
+		d := NewHubAnalyticsDrainer(o, sink, nil)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		d.Stop(ctx)
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(finalStates) != 1 || finalStates[0] != telemetrycontract.MeterFinalStateIncomplete {
+			t.Fatalf("finalStates = %v, want [%q]", finalStates, telemetrycontract.MeterFinalStateIncomplete)
+		}
+		if o.Stats().PendingBytes == 0 {
+			t.Error("expected PendingBytes > 0 for unfinalized staging line")
+		}
+	})
+}
+
+// O3: in Hub-only mode, a 404 capability revocation detaches the native
+// producer so subsequent native records are no-ops and do not grow
+// analytics-outbox-hub or trip overflow counters.
+func TestPipeline_HubOnlyRevocation404DetachesNativeProducer(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+	t.Setenv("SCION_LAUNCH_ID", "run-hubonly-revoke")
+
+	var hubCalls atomic.Int32
+	revoked := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubCalls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("revoked"))
+		select {
+		case revoked <- struct{}{}:
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &Config{
+		Enabled:      true,
+		CloudEnabled: false, // Hub-only mode (no GCP exporter)
+		GRPCPort:     0,
+		HTTPPort:     0,
+	}
+	p := NewWithConfig(cfg)
+	agentHome := t.TempDir()
+	p.SetAnalyticsOutbox(agentHome, 0, 0)
+	p.SetHubUsageSink(HubUsageSinkConfig{
+		Post:              httptestPostFunc(srv.URL, "agent-1", "tok-1"),
+		RunID:             "run-hubonly-revoke",
+		HubID:             "hub-1",
+		DrainInterval:     20 * time.Millisecond,
+		HeartbeatInterval: time.Hour,
+	})
+
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Pipeline.Start: %v", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.Stop(stopCtx)
+	}()
+
+	makeObs := func(id string) UsageObservation {
+		return UsageObservation{
+			SourceKind:      "claude.api_request",
+			Identity:        telemetrycontract.SourceIdentityComposite,
+			SourceEventID:   id,
+			Status:          telemetrycontract.StatusSuccess,
+			Calls:           1,
+			Input:           int64Ptr(10),
+			InputDerivation: telemetrycontract.InputDerivationReported,
+			TokenStatus:     telemetrycontract.TokenStatusPartial,
+		}
+	}
+
+	// Record event 1 to trigger a drain POST, which receives HTTP 404.
+	if out, err := p.analytics.native.Record(makeObs("cmp1:ho-rev-1")); err != nil || out != AppendWritten {
+		t.Fatalf("Record 1 = (%v, %v), want (AppendWritten, nil)", out, err)
+	}
+
+	// Wait until the drainer processes the 404 and marks Hub revoked.
+	deadline := time.Now().Add(3 * time.Second)
+	for !p.analytics.drainer.HubRevoked() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for HubRevoked() == true after 404")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if IsHubOutboxActive(agentHome) {
+		t.Error("expected Hub outbox active marker to be removed after 404 revocation")
+	}
+
+	ledgerBefore, _, ok, err := p.HubAnalyticsLedger()
+	if !ok || err != nil {
+		t.Fatalf("HubAnalyticsLedger before = ok:%v err:%v", ok, err)
+	}
+
+	// Subsequent native records must be no-ops: no new seqs, no overflow, no errors.
+	for i := 2; i <= 50; i++ {
+		if out, err := p.analytics.native.Record(makeObs(fmt.Sprintf("cmp1:ho-rev-%d", i))); err != nil || out != 0 {
+			t.Fatalf("Record %d after revocation = (%v, %v), want (0, nil)", i, out, err)
+		}
+	}
+
+	ledgerAfter, memAfter, ok, err := p.HubAnalyticsLedger()
+	if !ok || err != nil {
+		t.Fatalf("HubAnalyticsLedger after = ok:%v err:%v", ok, err)
+	}
+	if ledgerAfter.LastSeq != ledgerBefore.LastSeq {
+		t.Errorf("Hub outbox LastSeq advanced after 404 revocation: %d -> %d (native producer was not detached)", ledgerBefore.LastSeq, ledgerAfter.LastSeq)
+	}
+	if memAfter.Overflow != 0 || ledgerAfter.OverflowTotal != 0 {
+		t.Errorf("overflow = %d (persisted %d), want 0 after revocation", memAfter.Overflow, ledgerAfter.OverflowTotal)
+	}
+}
+
 func TestPipeline_HubSinkEnablesOutboxWithoutGCPExporter(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "agent-1")
 	t.Setenv("SCION_HARNESS", "claude")
@@ -1382,19 +1586,15 @@ func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *te
 		}
 	})
 
-	t.Run("proactive re-encoded JSON expansion bisects before POST", func(t *testing.T) {
-		const maxBytes = 1500
+	t.Run("proactive re-encoded JSON expansion bisects before POST without triggering 413", func(t *testing.T) {
+		const maxBytes = 2000
 		var mu sync.Mutex
 		var maxSeenBody int
 		var delivered int
+		var status413Count int
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			var req telemetrycontract.UsageIngestRequest
-			if err := json.Unmarshal(raw, &req); err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -1402,6 +1602,20 @@ func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *te
 			if len(raw) > maxSeenBody {
 				maxSeenBody = len(raw)
 			}
+			if len(raw) > maxBytes {
+				status413Count++
+				mu.Unlock()
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				_, _ = w.Write([]byte("payload too large"))
+				return
+			}
+			mu.Unlock()
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.Unmarshal(raw, &req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
 			delivered += len(req.Events)
 			mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
@@ -1410,28 +1624,55 @@ func TestHubUsageSink_413BisectsBatchAndOnlyDeadLettersSingleOversizeEvent(t *te
 		defer srv.Close()
 
 		o := testOutbox(t)
-		for i := 1; i <= 2; i++ {
-			ev := draftUsage(telemetrycontract.SourceIdentityComposite, fmt.Sprintf("cmp1:esc-%d", i), int64(i))
-			// '<' expands from 1 byte to 6 bytes (\u003c) under encoding/json HTML escaping.
-			ev.SessionID = strings.Repeat("<", 80)
-			mustAppend(t, o, ev, AppendWritten)
-		}
-
 		sink := NewHubUsageSink(o, HubUsageSinkConfig{
 			Post:           httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID:          "run-esc",
 			MaxBatchEvents: 500,
 			MaxBatchBytes:  maxBytes,
 		})
-		d := NewHubAnalyticsDrainer(o, sink, trustedHub("hub-1"))
 
-		if sent := d.RunOnce(context.Background()); sent != 2 {
-			t.Fatalf("sent = %d, want 2", sent)
+		// Build two valid UsageEvent JSON lines whose raw unescaped bytes fit
+		// comfortably within EffectiveMaxBatchBytes (so a single 2-event batch
+		// enters SendBatch), but whose '<' characters expand 1->6 bytes
+		// (\u003c) when encoding/json re-marshals UsageIngestRequest, pushing
+		// the combined request body over maxBytes.
+		unescapedLine := func(id string, seq int64) []byte {
+			ev := draftUsage(telemetrycontract.SourceIdentityComposite, id, seq)
+			ev.EventID = id
+			ev.HubID = "hub-1"
+			ev.RunID = "run-esc"
+			ev.ProducerEpoch = "ep-1"
+			ev.ProducerSeq = seq
+			ev.SourceOccurrence = 1
+			ev.SessionID = strings.Repeat("<", 100)
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(ev); err != nil {
+				t.Fatalf("encode unescaped line: %v", err)
+			}
+			return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+		}
+		line1 := unescapedLine("u1-proactive-1", 1)
+		line2 := unescapedLine("u1-proactive-2", 2)
+		if eff := sink.EffectiveMaxBatchBytes(); len(line1)+1+len(line2) > eff {
+			t.Fatalf("test setup: combined raw lines (%d bytes) exceed EffectiveMaxBatchBytes (%d); want them packed into one batch", len(line1)+1+len(line2), eff)
+		}
+
+		outcome, err := sink.SendBatch(context.Background(), [][]byte{line1, line2})
+		if err != nil {
+			t.Fatalf("SendBatch: %v", err)
+		}
+		if len(outcome.RejectedIndices) != 0 {
+			t.Errorf("RejectedIndices = %v, want empty", outcome.RejectedIndices)
 		}
 		mu.Lock()
 		defer mu.Unlock()
 		if delivered != 2 {
 			t.Fatalf("delivered = %d, want 2", delivered)
+		}
+		if status413Count != 0 {
+			t.Errorf("server received %d HTTP 413 oversize POST(s), want 0 (proactive re-encode split must prevent oversize POST)", status413Count)
 		}
 		if maxSeenBody > maxBytes {
 			t.Errorf("max HTTP body size = %d > maxBytes %d (proactive re-encoded bisect failed)", maxSeenBody, maxBytes)

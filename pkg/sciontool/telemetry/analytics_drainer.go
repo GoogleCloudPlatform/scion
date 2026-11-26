@@ -927,6 +927,10 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
 		a.send = newCountingBatchSend(sink.SendBatch)
 		a.drainer = newHubAnalyticsDrainerWithSend(hubOutbox, sink, a.send.SendBatch, resolver)
+		native := a.native
+		a.drainer.onHubRevoked = func() {
+			native.detach()
+		}
 	default:
 		// GCP-only mode (probe negative): never create analytics-outbox-hub;
 		// clear any stale active marker from an earlier run.

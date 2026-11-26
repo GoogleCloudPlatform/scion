@@ -89,6 +89,7 @@ type UsageAnalytics struct {
 	runID     string
 	onRecord  func(time.Time)
 
+	disabled                   atomic.Bool
 	droppedNoIdentity, invalid atomic.Int64
 }
 
@@ -274,6 +275,20 @@ func (a *UsageAnalytics) clearHubOutbox() {
 	a.metaMu.Unlock()
 }
 
+// detach disables further Record appends on this producer (used in Hub-only
+// mode after a 404 capability revocation) while keeping the underlying outbox
+// handle readable for diagnostics and ledger snapshots.
+func (a *UsageAnalytics) detach() {
+	if a == nil {
+		return
+	}
+	a.disabled.Store(true)
+	a.metaMu.Lock()
+	a.hubOutbox = nil
+	a.onRecord = nil
+	a.metaMu.Unlock()
+}
+
 // HubOutbox returns the tee Hub outbox when attached, or nil.
 func (a *UsageAnalytics) HubOutbox() *AnalyticsOutbox {
 	if a == nil {
@@ -333,7 +348,7 @@ func (a *UsageAnalytics) resolveHubOutbox() (*AnalyticsOutbox, bool, error) {
 // outbox independently so a Hub outbox overflow or I/O error never affects
 // the primary GCP outbox outcome or counters.
 func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
-	if a == nil {
+	if a == nil || a.disabled.Load() {
 		return 0, nil
 	}
 	a.metaMu.RLock()
