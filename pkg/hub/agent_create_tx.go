@@ -166,73 +166,84 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 		CreatorType: w.Edge.DelegatorType, CreatorID: w.Edge.DelegatorID,
 	})
 
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
-			return err
-		}
-		agent := w.Agent
-		// The creation-time provenance stamp is resolved here, in the
-		// create transaction, from the edge's delegator: the principal the
-		// create runs as (the request's user or agent, or the scheduled
-		// fire's revision principal). It overwrites anything the model
-		// carried. A delegator whose provenance cannot be resolved fails
-		// the create before any row is written.
-		creator := fixturePrincipal{Kind: w.Edge.DelegatorType, ID: w.Edge.DelegatorID}
-		if err := stampAgent(ctx, tx, agent, creator); err != nil {
-			return err
-		}
-		if err := tx.CreateAgent(ctx, agent); err != nil {
-			return err
-		}
-		// The caller sets Name to the slug, so IdentityKeysFor collapses to
-		// the single {slug} row, the same function rename and restore use.
-		if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(w.Slug, agent.Name)); err != nil {
-			return err
-		}
-		w.Edge.DelegateID = agent.ID
-		if err := tx.CreateDelegationEdge(ctx, w.Edge); err != nil {
-			return err
-		}
-		if assignment != nil {
-			assignment.AgentID = agent.ID
-			assignment.ProjectID = agent.ProjectID
-			if err := tx.ReplaceAgentServiceAccountAssignment(ctx, assignment); err != nil {
-				return fmt.Errorf("agent create service-account assignment: %w", err)
-			}
-		}
-		w.Audit.TargetType = "agent"
-		w.Audit.TargetID = agent.ID
-		if err := tx.CreateMutationAudit(ctx, w.Audit); err != nil {
-			return fmt.Errorf("agent create audit: %w", err)
-		}
-		if agent.SuspendPolicy == store.SuspendPolicyNever {
-			policyAudit := &store.MutationAuditRecord{
-				MutationType:  mutationTypeAgentSuspendPolicySet,
-				TargetType:    "agent",
-				TargetID:      agent.ID,
-				BeforeSummary: store.SuspendPolicyAuto,
-				AfterSummary:  store.SuspendPolicyNever,
-				Timestamp:     w.Audit.Timestamp,
-			}
-			auditActorFromContext(ctx).ApplyActor(policyAudit)
-			applyHubActorFallback(policyAudit)
-			if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
-				return fmt.Errorf("agent create suspend policy audit: %w", err)
-			}
-		}
-		if w.Subscription != nil {
-			w.Subscription.AgentID = agent.ID
-			if err := tx.CreateNotificationSubscription(ctx, w.Subscription); err != nil {
-				return fmt.Errorf("agent create notification subscription: %w", err)
-			}
-		}
-		if w.OnCommitTx != nil {
-			if err := w.OnCommitTx(ctx, tx); err != nil {
+	runTx := func(effectiveLimit int64) error {
+		return s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := lockAgentGuardUserTx(ctx, tx, w.Agent); err != nil {
 				return err
 			}
-		}
-		return nil
-	})
+			if effectiveLimit > 0 {
+				if err := checkNeverSuspendQuotaInTx(ctx, tx, w.Agent.ProjectID, effectiveLimit); err != nil {
+					return err
+				}
+			}
+			agent := w.Agent
+			// The creation-time provenance stamp is resolved here, in the
+			// create transaction, from the edge's delegator: the principal the
+			// create runs as (the request's user or agent, or the scheduled
+			// fire's revision principal). It overwrites anything the model
+			// carried. A delegator whose provenance cannot be resolved fails
+			// the create before any row is written.
+			creator := fixturePrincipal{Kind: w.Edge.DelegatorType, ID: w.Edge.DelegatorID}
+			if err := stampAgent(ctx, tx, agent, creator); err != nil {
+				return err
+			}
+			if err := tx.CreateAgent(ctx, agent); err != nil {
+				return err
+			}
+			// The caller sets Name to the slug, so IdentityKeysFor collapses to
+			// the single {slug} row, the same function rename and restore use.
+			if err := tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, api.IdentityKeysFor(w.Slug, agent.Name)); err != nil {
+				return err
+			}
+			w.Edge.DelegateID = agent.ID
+			if err := tx.CreateDelegationEdge(ctx, w.Edge); err != nil {
+				return err
+			}
+			if assignment != nil {
+				assignment.AgentID = agent.ID
+				assignment.ProjectID = agent.ProjectID
+				if err := tx.ReplaceAgentServiceAccountAssignment(ctx, assignment); err != nil {
+					return fmt.Errorf("agent create service-account assignment: %w", err)
+				}
+			}
+			w.Audit.TargetType = "agent"
+			w.Audit.TargetID = agent.ID
+			if err := tx.CreateMutationAudit(ctx, w.Audit); err != nil {
+				return fmt.Errorf("agent create audit: %w", err)
+			}
+			if agent.SuspendPolicy == store.SuspendPolicyNever {
+				policyAudit := &store.MutationAuditRecord{
+					MutationType:  mutationTypeAgentSuspendPolicySet,
+					TargetType:    "agent",
+					TargetID:      agent.ID,
+					BeforeSummary: store.SuspendPolicyAuto,
+					AfterSummary:  store.SuspendPolicyNever,
+					Timestamp:     w.Audit.Timestamp,
+				}
+				auditActorFromContext(ctx).ApplyActor(policyAudit)
+				applyHubActorFallback(policyAudit)
+				if err := tx.CreateMutationAudit(ctx, policyAudit); err != nil {
+					return fmt.Errorf("agent create suspend policy audit: %w", err)
+				}
+			}
+			if w.Subscription != nil {
+				w.Subscription.AgentID = agent.ID
+				if err := tx.CreateNotificationSubscription(ctx, w.Subscription); err != nil {
+					return fmt.Errorf("agent create notification subscription: %w", err)
+				}
+			}
+			if w.OnCommitTx != nil {
+				if err := w.OnCommitTx(ctx, tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	if w.Agent.SuspendPolicy == store.SuspendPolicyNever {
+		return s.withNeverSuspendQuotaLock(ctx, projectQuotaSubject(w.Agent), w.Agent.ProjectID, runTx)
+	}
+	return runTx(0)
 }
 
 // Stages of a committed create at which a failure rolls it back. Each

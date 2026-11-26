@@ -2562,6 +2562,15 @@ type RunningNeverSuspendCount struct {
 	Count           int64
 }
 
+// NeverSuspendAgentSummary is the narrow row projection returned by
+// ListNeverSuspendAgents for admin quota usage views.
+type NeverSuspendAgentSummary struct {
+	ID        string
+	ProjectID string
+	CreatedBy string
+	Created   time.Time
+}
+
 // CrossProjectInbound policy values define which external agents may deliver
 // messages to agents in this project. Default is "none".
 const (
@@ -5951,8 +5960,13 @@ const (
 // System limit definition names
 const (
 	LimitMaxAgentsPerProject = "max_agents_per_project"
-	LimitMaxProjectsPerUser  = "max_projects_per_user"
-	LimitMaxMembersPerGroup  = "max_members_per_group"
+	// LimitMaxNeverSuspendAgentsPerProject caps non-deleted agents with
+	// suspend_policy = "never" (in any phase) per project. Seeded unlimited
+	// (0) like the other fairness quotas; enforced directly from agent rows
+	// rather than usage reservations.
+	LimitMaxNeverSuspendAgentsPerProject = "max_never_suspend_agents_per_project"
+	LimitMaxProjectsPerUser              = "max_projects_per_user"
+	LimitMaxMembersPerGroup              = "max_members_per_group"
 	// LimitMaxAgentsPerBroker is the per-runtime-broker ceiling on
 	// concurrently live agents (ptone/scion#1303). Unlike the other system
 	// limits, which are opt-in fairness quotas seeded unlimited and scoped to

@@ -693,6 +693,77 @@ func (s *AgentStore) CountRunningNeverSuspendAgents(ctx context.Context) ([]stor
 	return out, nil
 }
 
+// CountNeverSuspendAgentsInProject returns the number of non-deleted agents
+// (in any phase) in projectID with suspend_policy = "never".
+func (s *AgentStore) CountNeverSuspendAgentsInProject(ctx context.Context, projectID string) (int64, error) {
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.Agent.Query().
+		Where(
+			agent.ProjectIDEQ(pid),
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return int64(n), nil
+}
+
+// CountNeverSuspendAgents returns the total number of non-deleted agents (in
+// any phase) across all projects with suspend_policy = "never".
+func (s *AgentStore) CountNeverSuspendAgents(ctx context.Context) (int64, error) {
+	n, err := s.client.Agent.Query().
+		Where(
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
+		).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return int64(n), nil
+}
+
+// ListNeverSuspendAgents returns a narrow summary (id, project_id, created_by,
+// created) of every non-deleted agent (in any phase) with suspend_policy = "never".
+func (s *AgentStore) ListNeverSuspendAgents(ctx context.Context) ([]store.NeverSuspendAgentSummary, error) {
+	var rows []struct {
+		ID        uuid.UUID  `json:"id"`
+		ProjectID uuid.UUID  `json:"project_id"`
+		CreatedBy *uuid.UUID `json:"created_by"`
+		Created   time.Time  `json:"created"`
+	}
+	err := s.client.Agent.Query().
+		Where(
+			agent.DeletedAtIsNil(),
+			agent.SuspendPolicyEQ(agent.SuspendPolicyNever),
+		).
+		Order(ent.Asc(agent.FieldCreated), ent.Asc(agent.FieldID)).
+		Select(agent.FieldID, agent.FieldProjectID, agent.FieldCreatedBy, agent.FieldCreated).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.NeverSuspendAgentSummary, 0, len(rows))
+	for _, r := range rows {
+		createdBy := ""
+		if r.CreatedBy != nil {
+			createdBy = r.CreatedBy.String()
+		}
+		out = append(out, store.NeverSuspendAgentSummary{
+			ID:        r.ID.String(),
+			ProjectID: r.ProjectID.String(),
+			CreatedBy: createdBy,
+			Created:   r.Created,
+		})
+	}
+	return out, nil
+}
+
 // UpdateAgent updates an existing agent using optimistic locking on
 // state_version. The mutable field set mirrors the legacy SQLite store:
 // identity-adjacent operational fields are updated, while immutable lineage

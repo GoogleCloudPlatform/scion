@@ -736,6 +736,12 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 			// every project's with one aggregate query, never one per
 			// project (ptone/scion#6033).
 			count, listErr = s.countScopedActiveReservations(ctx, def.ID, store.QuotaScopeProject)
+		case store.LimitMaxNeverSuspendAgentsPerProject:
+			// Never-suspend quota is row-only (no reservations): count
+			// non-deleted agents with suspend_policy = "never" directly.
+			var n int64
+			n, listErr = s.store.CountNeverSuspendAgents(ctx)
+			count = int(n)
 		case store.LimitMaxMembersPerGroup:
 			// Group member reservations are stored at store.QuotaScopeGroup,
 			// one scope per group (handlers_groups.go), never at
@@ -798,6 +804,30 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 		// Every project's reservations, as getUsageSummary counts them
 		// (ptone/scion#6033).
 		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
+	case store.LimitMaxNeverSuspendAgentsPerProject:
+		// Row-only accounting: project live never-suspend agent rows into the
+		// existing usage reservation response shape so the admin UI renders
+		// them identically to other per-project quotas.
+		var rows []store.NeverSuspendAgentSummary
+		rows, err = s.store.ListNeverSuspendAgents(ctx)
+		if err == nil {
+			reservations = make([]*store.UsageReservation, 0, len(rows))
+			for _, row := range rows {
+				subj := row.CreatedBy
+				if subj == "" {
+					subj = row.ProjectID
+				}
+				reservations = append(reservations, &store.UsageReservation{
+					LimitDefinitionID: def.ID,
+					SubjectID:         subj,
+					ScopeType:         store.QuotaScopeProject,
+					ScopeID:           row.ProjectID,
+					ResourceID:        row.ID,
+					Reserved:          1,
+					CreatedAt:         row.Created,
+				})
+			}
+		}
 	case store.LimitMaxMembersPerGroup:
 		// Every group's reservations, as getUsageSummary counts them
 		// (ptone/scion#6036).
