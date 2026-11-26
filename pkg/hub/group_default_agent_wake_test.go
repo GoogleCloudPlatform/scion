@@ -265,17 +265,138 @@ func TestGroupDefaultAgentWake_ExcludedTypeDoesNotWake(t *testing.T) {
 	require.Nil(t, resp.NoAgentWoken, "a type that never reaches an agent must not report no_agent_woken")
 }
 
-func TestGroupDefaultAgentWake_HumanOnlyMentionWakesDefault(t *testing.T) {
+func TestGroupDefaultAgentWake_HumanOnlyMentionLeavesDefaultAlone(t *testing.T) {
 	f := newGroupWakeFixture(t)
 	f.setDefault(t, f.target.ID)
 
-	// The project owner is a human member; mentioning only a human is not
-	// an agent mention.
-	resp := f.post(t, "cc @parity-owner@test.example on this", "")
+	ctx := context.Background()
+	human := &store.User{
+		ID:          tid("gdw-alice-human"),
+		Email:       "alice-human@test.example",
+		DisplayName: "Alice Smith",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, f.s.CreateUser(ctx, human))
+	rd, err := f.s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      human.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name string
+		msg  string
+	}{
+		{name: "raw project member email", msg: "cc @parity-owner@test.example on this"},
+		{name: "raw external email", msg: "cc @external-human@test.example on this"},
+		{name: "display name slug", msg: "@alice-smith please review"},
+		{name: "wrapped display name slug", msg: "**@alice-smith** please review"},
+		{name: "email local part", msg: "hey @alice-human quick question"},
+		{name: "user prefix mention", msg: "@user:parity-owner@test.example fyi"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(dispatchesTo(f.dispatcher, f.target.ID))
+			resp := f.post(t, tc.msg, "")
+
+			require.Len(t, dispatchesTo(f.dispatcher, f.target.ID), before,
+				"a group post mentioning a human must not wake the default agent")
+			require.Nil(t, resp.DefaultAgentResult)
+			requireNoAgentWoken(t, resp)
+		})
+	}
+	requireNoMentionRowFor(t, f.s, f.convID, f.target.ID)
+}
+
+func TestGroupDefaultAgentWake_HumanRecipientLeavesDefaultAlone(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	f.setDefault(t, f.target.ID)
+
+	ctx := context.Background()
+	wcs := f.srv.webChatStore
+	require.NotNil(t, wcs)
+
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: f.projectID, Name: "gdw-human-recipient-thread",
+		DefaultAgent: f.target.Slug,
+		CreatedBy:    tid("parity-owner"), CreatedAt: time.Now(),
+	}))
+	topicConvID, err := wcs.GetTopicConversationID(ctx, topicID)
+	require.NoError(t, err)
+	require.NotEmpty(t, topicConvID)
+
+	cases := []struct {
+		name string
+		req  OutboundMessageRequest
+	}{
+		{
+			name: "conv ref with user recipient",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.convID,
+				Recipient:       "user:parity-owner@test.example",
+				Msg:             "status update for the human",
+			},
+		},
+		{
+			name: "conversation id with user recipient",
+			req: OutboundMessageRequest{
+				ConversationID: f.convID,
+				Recipient:      "user:parity-owner@test.example",
+				Msg:            "status update for the human",
+			},
+		},
+		{
+			name: "thread id with user recipient",
+			req: OutboundMessageRequest{
+				Recipient: "user:parity-owner@test.example",
+				Msg:       "status update for the human in thread",
+				ThreadID:  topicID,
+				Channel:   "web",
+			},
+		},
+		{
+			name: "conv ref with human recipient id",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.convID,
+				RecipientID:     tid("parity-owner"),
+				Msg:             "status update by recipient id",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(dispatchesTo(f.dispatcher, f.target.ID))
+			resp := f.postRequest(t, tc.req)
+
+			require.Len(t, dispatchesTo(f.dispatcher, f.target.ID), before,
+				"a group post addressed to a human must not wake the default agent")
+			require.Nil(t, resp.DefaultAgentResult)
+			requireNoAgentWoken(t, resp)
+		})
+	}
+	requireNoMentionRowFor(t, f.s, f.convID, f.target.ID)
+	requireNoMentionRowFor(t, f.s, topicConvID, f.target.ID)
+}
+
+func TestGroupDefaultAgentWake_CodeBlockHumanMentionStillWakesDefault(t *testing.T) {
+	f := newGroupWakeFixture(t)
+	f.setDefault(t, f.target.ID)
+
+	resp := f.post(t, "status update:\n```\n@parity-owner@test.example\n```", "")
 
 	got := dispatchesTo(f.dispatcher, f.target.ID)
-	require.Len(t, got, 1, "a post that mentions only a human must reach the default agent")
-	require.Empty(t, resp.MentionResults)
+	require.Len(t, got, 1, "a human mention inside a fenced code block must not suppress default-agent wake")
 	require.NotNil(t, resp.DefaultAgentResult)
 	require.Equal(t, "delivered", resp.DefaultAgentResult.Status)
 	require.Equal(t, []string{f.target.Slug}, resp.WokenAgents)
@@ -296,10 +417,10 @@ func TestGroupDefaultAgentWake_DeletedDefaultReportedUnreachable(t *testing.T) {
 	requireNoAgentWoken(t, resp)
 }
 
-// A post by thread ID into a native thread whose topic names the default
-// agent: the copy lands in the thread's conversation and carries the
-// thread's key.
-func TestGroupDefaultAgentWake_ThreadKeyPostWakesTopicDefault(t *testing.T) {
+// A post into a native thread whose topic names the default agent (with no
+// human recipient or mention): the copy lands in the thread's conversation
+// and carries the thread's key.
+func TestGroupDefaultAgentWake_TopicDefaultWokenByConvRef(t *testing.T) {
 	f := newGroupWakeFixture(t)
 	ctx := context.Background()
 	wcs := f.srv.webChatStore
@@ -320,10 +441,8 @@ func TestGroupDefaultAgentWake_ThreadKeyPostWakesTopicDefault(t *testing.T) {
 	require.NotEmpty(t, conv.ExternalRef, "precondition: the topic conversation has a thread key")
 
 	resp := f.postRequest(t, OutboundMessageRequest{
-		Recipient: "user:parity-owner@test.example",
-		Msg:       "status update for the thread",
-		ThreadID:  topicID,
-		Channel:   "web",
+		ConversationRef: "conv:" + topicConvID,
+		Msg:             "status update for the thread",
 	})
 
 	got := dispatchesTo(f.dispatcher, f.target.ID)

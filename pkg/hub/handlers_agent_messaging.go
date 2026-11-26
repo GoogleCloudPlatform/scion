@@ -186,6 +186,9 @@ type routingResult struct {
 	Def152DerivedRecipient bool
 	// UserResolved tracks whether RecipientID came from user resolution (GetUser/GetUserByEmail).
 	UserResolved bool
+	// ExplicitUserRecipient records that S1 resolved a caller-supplied user
+	// recipient, even if S6 later overwrote Recipient/UserResolved for group routing.
+	ExplicitUserRecipient bool
 }
 
 // outboundThreadState is the result of outboundThreadConversationState.
@@ -318,6 +321,7 @@ func (s *Server) resolveOutboundRouting(
 	recipientID := req.RecipientID
 	recipient := req.Recipient
 	userResolved := false
+	explicitUserRecipient := false
 
 	if recipientID == "" && recipient != "" {
 		// Explicit recipient string provided without an ID — resolve the user.
@@ -338,6 +342,7 @@ func (s *Server) resolveOutboundRouting(
 				recipientID = u.ID
 				recipient = "user:" + userAddressName(u)
 				userResolved = true
+				explicitUserRecipient = true
 			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
@@ -359,6 +364,7 @@ func (s *Server) resolveOutboundRouting(
 				}
 				recipient = "user:" + name
 				userResolved = true
+				explicitUserRecipient = true
 			} else if errors.Is(err, store.ErrNotSingular) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
 					fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
@@ -414,6 +420,7 @@ func (s *Server) resolveOutboundRouting(
 				recipient = "user:" + userAddressName(u)
 			}
 			userResolved = true
+			explicitUserRecipient = true
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 				fmt.Sprintf("recipient_id %s is not a valid addressee. No user exists with that ID.", recipientID), nil)
@@ -1071,6 +1078,7 @@ func (s *Server) resolveOutboundRouting(
 	result.ConvRefResolved = convRefResolved
 	result.Def152DerivedRecipient = def152DerivedRecipient
 	result.UserResolved = userResolved
+	result.ExplicitUserRecipient = explicitUserRecipient
 
 	return result, nil
 }
@@ -1864,10 +1872,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		})
 	}
 
-	// A group post that @mentions no agent goes to the conversation's
-	// default agent. The sender's agentGroupPostDecision already allowed
-	// the post in resolveOutboundRouting; wakeGroupDefaultAgent adds the
-	// pairwise check, the loop guard, and groupAgentJoinAllowed
+	// A group post that @mentions no agent and neither addresses nor
+	// @mentions a human goes to the conversation's default agent. The
+	// sender's agentGroupPostDecision already allowed the post in
+	// resolveOutboundRouting; wakeGroupDefaultAgent adds the pairwise
+	// check, the loop guard, and groupAgentJoinAllowed
 	// (group_message_mode.go).
 	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
 	var defaultAgentResult *messages.MentionResult
@@ -1879,6 +1888,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Msg:               originalMsgForMentions,
 			Type:              req.Type,
 			MentionResults:    mentionResults,
+			AddressedToHuman:  s.isGroupPostAddressedToHuman(ctx, &req, result, humanMembers),
+			HumanMembers:      humanMembers,
 			ParentMessageID:   storeMsg.ID,
 			ParentAttachments: boundAttachments,
 			Channel:           result.Channel,
