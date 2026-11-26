@@ -49,6 +49,7 @@ import (
 var sponsorRefSites = []struct{ file, line, role string }{
 	{"pkg/artifacts/links.go", "switch st.StewardClause(ctx, a.OwnerRef, a.ScopeRef, a.SponsorRef, a.OrphanedAt != nil) {", "pass"},
 	{"pkg/artifacts/publish.go", "a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)", "write"},
+	{"pkg/artifacts/publish.go", "a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)", "write"},
 	{"pkg/artifacts/schema.go", "ALTER TABLE artifact ADD COLUMN IF NOT EXISTS sponsor_ref TEXT;", "ddl"},
 	{"pkg/artifacts/schema.go", "ALTER TABLE artifact ADD COLUMN sponsor_ref TEXT;", "ddl"},
 	{"pkg/artifacts/sponsor_backfill.go", "WHERE owner_kind = ? AND owner_ref = ? AND scope_kind = ? AND sponsor_ref IS NULL AND deleted_at IS NULL`),", "write"},

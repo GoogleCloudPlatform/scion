@@ -258,7 +258,13 @@ func (s *sqlStore) CreatePublished(ctx context.Context, a *Artifact, v *Version,
 	if v != nil && v.State != VersionStateReady {
 		return errors.New("artifacts: CreatePublished needs a ready version")
 	}
-	return s.createArtifact(ctx, a, v, files, grants)
+	err := s.createArtifact(ctx, a, v, files, grants)
+	if err != nil && a != nil && a.Key != "" {
+		if _, lookErr := s.GetArtifactByKey(ctx, a.ScopeKind, a.ScopeRef, a.OwnerKind, a.OwnerRef, a.Key); lookErr == nil {
+			return ErrConflict
+		}
+	}
+	return err
 }
 
 // CreatePending implements Store.
@@ -345,10 +351,11 @@ func (s *sqlStore) createArtifact(ctx context.Context, a *Artifact, v *Version, 
 // insertVersion writes a version row and its manifest inside tx.
 func (s *sqlStore) insertVersion(ctx context.Context, tx *sql.Tx, v *Version, files []File) error {
 	if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_version
-		(id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		(id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state, source_attachment_id, source_message_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		v.ID, v.ArtifactID, v.Seq, v.Kind, v.EntryPath, nullString(v.Note), v.TotalBytes, v.FileCount,
-		nullString(v.CreatedByKind), nullString(v.CreatedByRef), s.timeArg(v.CreatedAt), v.State); err != nil {
+		nullString(v.CreatedByKind), nullString(v.CreatedByRef), s.timeArg(v.CreatedAt), v.State,
+		nullString(v.SourceAttachmentID), nullString(v.SourceMessageID)); err != nil {
 		return fmt.Errorf("artifacts: insert version: %w", err)
 	}
 	return s.insertFiles(ctx, tx, v.ID, files)
@@ -411,6 +418,47 @@ func (s *sqlStore) CreateVersion(ctx context.Context, v *Version, files []File, 
 		return fmt.Errorf("artifacts: commit version: %w", err)
 	}
 	return nil
+}
+
+// AppendPublishedVersion implements Store.
+func (s *sqlStore) AppendPublishedVersion(ctx context.Context, v *Version, files []File) (*Artifact, error) {
+	if v == nil || v.State != VersionStateReady {
+		return nil, errors.New("artifacts: AppendPublishedVersion needs a ready version")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: begin append published version: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ? AND deleted_at IS NULL`),
+		s.timeArg(v.CreatedAt), v.ArtifactID)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return nil, ErrNotFound
+	}
+	if err := s.refuseAttachmentTx(ctx, tx, v.ArtifactID); err != nil {
+		return nil, err
+	}
+	var maxSeq int
+	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COALESCE(MAX(seq), 0)
+		FROM artifact_version WHERE artifact_id = ?`), v.ArtifactID).Scan(&maxSeq); err != nil {
+		return nil, fmt.Errorf("artifacts: next seq: %w", err)
+	}
+	v.Seq = maxSeq + 1
+	if err := s.insertVersion(ctx, tx, v, files); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET current_seq = ?
+		WHERE id = ? AND (current_seq IS NULL OR current_seq < ?)`), v.Seq, v.ArtifactID, v.Seq); err != nil {
+		return nil, fmt.Errorf("artifacts: advance current version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("artifacts: commit append published version: %w", err)
+	}
+	return s.GetArtifact(ctx, v.ArtifactID)
 }
 
 // GetArtifactByKey implements Store.
@@ -825,21 +873,23 @@ func (s *sqlStore) GetArtifacts(ctx context.Context, ids []string) (map[string]*
 }
 
 // versionColumns is the artifact_version column list scanVersion reads.
-const versionColumns = "id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state, fail_reason"
+const versionColumns = "id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state, fail_reason, source_attachment_id, source_message_id"
 
 func scanVersion(r rowScanner) (Version, error) {
 	var (
-		v                           Version
-		note, byKind, byRef, reason sql.NullString
-		created                     dbTime
+		v                                           Version
+		note, byKind, byRef, reason, srcAtt, srcMsg sql.NullString
+		created                                     dbTime
 	)
 	err := r.Scan(&v.ID, &v.ArtifactID, &v.Seq, &v.Kind, &v.EntryPath, &note, &v.TotalBytes, &v.FileCount,
-		&byKind, &byRef, &created, &v.State, &reason)
+		&byKind, &byRef, &created, &v.State, &reason, &srcAtt, &srcMsg)
 	v.FailReason = reason.String
 	v.Note = note.String
 	v.CreatedByKind = byKind.String
 	v.CreatedByRef = byRef.String
 	v.CreatedAt = created.Time
+	v.SourceAttachmentID = srcAtt.String
+	v.SourceMessageID = srcMsg.String
 	return v, err
 }
 

@@ -490,7 +490,7 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 // ServeHTTP routes a request:
 //
 //	POST /api/v1/artifacts?name=<file>[&title=][&scope=]    single-file publish
-//	POST /api/v1/artifacts                                  create a pending version (JSON manifest)
+//	POST /api/v1/artifacts                                  create a pending version (JSON manifest) or publish fromAttachment by reference
 //	GET  /api/v1/artifacts?mine=1[&q=][&review_on_latest=1][&owner=me][&limit=][&cursor=]
 //	                                                        artifacts the caller owns, is granted, or shares a project with
 //	GET  /api/v1/artifacts/{id}                             metadata of the current version

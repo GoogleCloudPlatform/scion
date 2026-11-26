@@ -37,6 +37,10 @@ type ArtifactService interface {
 	// first version.
 	Publish(ctx context.Context, req *PublishArtifactRequest) (*ArtifactResponse, error)
 
+	// PublishFromAttachment publishes an existing message attachment as an
+	// artifact version by reference with no bytes uploaded (ptone/scion#4599).
+	PublishFromAttachment(ctx context.Context, req *PublishFromAttachmentRequest) (*ArtifactResponse, error)
+
 	// Get returns an artifact and its current version.
 	Get(ctx context.Context, id string) (*ArtifactResponse, error)
 
@@ -197,6 +201,17 @@ type PublishArtifactRequest struct {
 	// ExpiresIn optionally sets the artifact's retention at publish time
 	// (e.g. "720h", "30d", or "never").
 	ExpiresIn string
+}
+
+// PublishFromAttachmentRequest is the JSON body of POST /api/v1/artifacts when
+// publishing an existing attachment as an artifact by reference.
+type PublishFromAttachmentRequest struct {
+	FromAttachment string `json:"fromAttachment"`
+	Title          string `json:"title,omitempty"`
+	ScopeRef       string `json:"scopeRef,omitempty"`
+	Key            string `json:"key,omitempty"`
+	Note           string `json:"note,omitempty"`
+	ExpiresIn      string `json:"expiresIn,omitempty"`
 }
 
 // ListArtifactsOptions filters and pages List.
@@ -438,18 +453,20 @@ type Artifact struct {
 
 // ArtifactVersion describes one version of an artifact.
 type ArtifactVersion struct {
-	Seq           int            `json:"seq"`
-	Ref           string         `json:"ref"`
-	Kind          string         `json:"kind"`
-	EntryPath     string         `json:"entryPath"`
-	Note          string         `json:"note,omitempty"`
-	TotalBytes    int64          `json:"totalBytes"`
-	FileCount     int            `json:"fileCount"`
-	CreatedByKind string         `json:"createdByKind,omitempty"`
-	CreatedByRef  string         `json:"createdByRef,omitempty"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	State         string         `json:"state"`
-	Files         []ArtifactFile `json:"files"`
+	Seq                int            `json:"seq"`
+	Ref                string         `json:"ref"`
+	Kind               string         `json:"kind"`
+	EntryPath          string         `json:"entryPath"`
+	Note               string         `json:"note,omitempty"`
+	TotalBytes         int64          `json:"totalBytes"`
+	FileCount          int            `json:"fileCount"`
+	CreatedByKind      string         `json:"createdByKind,omitempty"`
+	CreatedByRef       string         `json:"createdByRef,omitempty"`
+	CreatedAt          time.Time      `json:"createdAt"`
+	State              string         `json:"state"`
+	Files              []ArtifactFile `json:"files"`
+	SourceAttachmentID string         `json:"sourceAttachmentId,omitempty"`
+	SourceMessageID    string         `json:"sourceMessageId,omitempty"`
 }
 
 // ArtifactDiscardedVersion is a discarded version as the versions list
@@ -514,6 +531,16 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 		httpReq.Header.Set("X-Content-SHA256", req.SHA256)
 	}
 	resp, err := s.longTransport().DoNoRetry(ctx, httpReq)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// PublishFromAttachment implements ArtifactService. It is sent once, never
+// retried, because a replay would create a second artifact.
+func (s *artifactService) PublishFromAttachment(ctx context.Context, req *PublishFromAttachmentRequest) (*ArtifactResponse, error) {
+	resp, err := s.longTransport().PostNoRetry(ctx, "/api/v1/artifacts", req, nil)
 	if err != nil {
 		return nil, err
 	}

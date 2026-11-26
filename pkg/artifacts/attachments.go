@@ -547,3 +547,29 @@ func writeAttachmentNotShareable(w http.ResponseWriter) {
 	writeError(w, http.StatusConflict, CodeAttachmentNotShareable,
 		"attachments cannot be shared, versioned or changed")
 }
+
+// versionInfoForViewer builds VersionInfo for v and populates SourceMessageID
+// only when the caller of ctx may read the source message (ptone/scion#4599).
+func (s *Service) versionInfoForViewer(ctx context.Context, b backend, v *Version, files []File) *VersionInfo {
+	vi := versionInfo(v, files)
+	if v.SourceMessageID != "" && s.canReadSourceMessage(ctx, b, v) {
+		vi.SourceMessageID = v.SourceMessageID
+	}
+	return vi
+}
+
+// canReadSourceMessage reports whether the caller of ctx may read the message
+// v was published from. It uses the same MessageScopeHost check as attachment
+// reads so provenance links never leak to viewers who cannot read the message.
+func (s *Service) canReadSourceMessage(ctx context.Context, b backend, v *Version) bool {
+	if v.SourceMessageID == "" {
+		return false
+	}
+	var msgProjectID *string
+	if v.SourceAttachmentID != "" {
+		if att, err := b.store.GetAttachment(ctx, v.SourceAttachmentID); err == nil && att != nil {
+			msgProjectID = att.MessageProjectID
+		}
+	}
+	return s.MayReadAttachments(ctx, v.SourceMessageID, msgProjectID)
+}

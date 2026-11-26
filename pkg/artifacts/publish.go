@@ -356,6 +356,368 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Warnings: warnings})
 }
 
+// handlePublishFromAttachment implements POST /api/v1/artifacts with a JSON
+// body containing fromAttachment (ptone/scion#4599). It creates a new artifact
+// (or appends a ready version when key matches an existing artifact owned by
+// the caller in scope) pointing directly at the attachment's existing blob,
+// copying no bytes and leaving the attachment unchanged.
+func (s *Service) handlePublishFromAttachment(w http.ResponseWriter, r *http.Request, req *CreateVersionRequest) {
+	ctx := r.Context()
+	if len(req.Files) > 0 || req.Entry != "" || req.Kind != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "fromAttachment cannot be combined with files, entry or kind")
+		return
+	}
+	key := req.Key
+	if err := validKey(key); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if !utf8.ValidString(req.Note) || utf8.RuneCountInString(req.Note) > maxNoteRunes {
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("note must be valid UTF-8 of at most %d characters", maxNoteRunes))
+		return
+	}
+	title := strings.TrimSpace(req.Title)
+	if title != "" && (!utf8.ValidString(title) || utf8.RuneCountInString(title) > maxTitleRunes) {
+		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("title must be valid UTF-8 of at most %d characters", maxTitleRunes))
+		return
+	}
+	scope := strings.TrimSpace(req.ScopeRef)
+	if s2 := strings.TrimSpace(req.Scope); s2 != "" {
+		if scope != "" && scope != s2 {
+			writeError(w, http.StatusBadRequest, "bad_request", "scope and scopeRef must match when both are set")
+			return
+		}
+		scope = s2
+	}
+
+	kind, ref, home, ok := s.host.Principal(ctx)
+	if !ok {
+		if s.writeMissingScope(w, r) {
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
+		return
+	}
+	if scope == "" {
+		scope = home
+	}
+	if scope == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
+		return
+	}
+	b, ok := s.backend()
+	if !ok {
+		writeBackendUnavailable(w, b, "artifact storage is not configured")
+		return
+	}
+	now := time.Now().UTC()
+	limits := b.currentLimits(ctx)
+	expiresAt, explicitExpiry, expErr := resolvePublishExpiry(kind, req.ExpiresIn, limits, now)
+	if expErr != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", expErr)
+		return
+	}
+
+	// Gate 1: caller must be able to read the attachment (phase 1 message rule).
+	// Absent, malformed, or unreadable attachments all return the exact same 404.
+	attID := strings.TrimPrefix(strings.TrimSpace(req.FromAttachment), AttachmentRefScheme)
+	if !canonicalID(attID) {
+		writeNotFound(w)
+		return
+	}
+	att, err := b.store.GetAttachment(ctx, attID)
+	if errors.Is(err, ErrNotFound) {
+		writeNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: get attachment failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the attachment")
+		return
+	}
+	readable, err := s.canReadErr(ctx, b, att)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: attachment read check failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the attachment")
+		return
+	}
+	if !readable {
+		writeNotFound(w)
+		return
+	}
+	attFile, err := attachmentFile(ctx, b, att)
+	if errors.Is(err, ErrNotFound) {
+		writeNotFound(w)
+		return
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read attachment file failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not read the attachment")
+		return
+	}
+
+	// Gate 2: caller must pass the publish gate in the target scope
+	// (artifact.create, or write on the existing keyed artifact).
+	var existing *Artifact
+	if key != "" {
+		existing, err = b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			slog.ErrorContext(ctx, "artifacts: key lookup failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact")
+			return
+		}
+	}
+	if existing == nil && !canCreateIn(ctx, s.host, scope) {
+		s.logCreateRefusal(r, scope)
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
+		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
+		return
+	}
+	if attFile.Size > limits.MaxFileBytes {
+		writeTooLarge(w, limits.MaxFileBytes)
+		return
+	}
+
+	srcMsgID := ""
+	if att.ScopeKind == ScopeKindMessage {
+		srcMsgID = att.ScopeRef
+	}
+	versionID := uuid.NewString()
+	baseFile := File{
+		VersionID: versionID,
+		Path:      attFile.Path,
+		Size:      attFile.Size,
+		SHA256:    attFile.SHA256,
+		MediaType: attFile.MediaType,
+	}
+	files := []File{baseFile}
+	totalBytes := attFile.Size
+	var warnings []string
+
+	// Helper to append to an existing keyed artifact, checking write access,
+	// expiry, and open reviews before committing.
+	appendToExisting := func(target *Artifact) {
+		access, werr := s.canWriteErr(ctx, b, target)
+		if werr != nil {
+			writeGrantsReadFailed(w, r, werr)
+			return
+		}
+		if access == accessNone {
+			s.logWriteRefusal(r, target)
+			if !s.host.Permits(ctx, target.ScopeRef, PermissionCreate) && s.writeMissingScope(w, r) {
+				return
+			}
+			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+			return
+		}
+		if refuseKind(w, access, VersionKindPublish) {
+			s.logRefusal(r, logActionWrite, logReasonReviewOnly, target)
+			return
+		}
+		if explicitExpiry {
+			if target.OwnerKind != kind || target.OwnerRef != ref {
+				writeError(w, http.StatusForbidden, "forbidden", "only the artifact owner may set expiry at publish time")
+				return
+			}
+			if kind == PrincipalKindAgent && limits.DefaultRetention > 0 && expiryLengthens(target.ExpiresAt, expiresAt) {
+				writeError(w, http.StatusBadRequest, "bad_request", "cannot lengthen an artifact's expiry when the hub has a default retention")
+				return
+			}
+		}
+		openWarn, ok := s.checkOpenReviews(w, r, b, target, req.Force)
+		if !ok {
+			return
+		}
+		allWarnings := append(append([]string(nil), openWarn...), warnings...)
+		priorWasReview := false
+		if target.OwnerKind == PrincipalKindUser && target.CurrentSeq > 0 && s.inboxHintsActive(ctx) {
+			if prior, perr := b.store.GetVersion(ctx, target.ID, target.CurrentSeq); perr == nil && prior.Kind == VersionKindReview {
+				priorWasReview = true
+			}
+		}
+		v := &Version{
+			ID:                 versionID,
+			ArtifactID:         target.ID,
+			Kind:               VersionKindPublish,
+			EntryPath:          attFile.Path,
+			Note:               strings.TrimSpace(req.Note),
+			TotalBytes:         totalBytes,
+			FileCount:          len(files),
+			CreatedByKind:      kind,
+			CreatedByRef:       ref,
+			CreatedAt:          now,
+			State:              VersionStateReady,
+			SourceAttachmentID: att.ID,
+			SourceMessageID:    srcMsgID,
+		}
+		updated, aerr := b.store.AppendPublishedVersion(ctx, v, files)
+		switch {
+		case errors.Is(aerr, ErrAttachmentNotShareable):
+			writeAttachmentNotShareable(w)
+			return
+		case errors.Is(aerr, ErrNotFound):
+			writeNotFound(w)
+			return
+		case aerr != nil:
+			slog.ErrorContext(ctx, "artifacts: append published version failed", "error", aerr)
+			s.logVersionError(r, target, v.Seq, logReasonStoreError)
+			writeError(w, http.StatusInternalServerError, "internal", "could not record the version")
+			return
+		}
+		if explicitExpiry {
+			expUpdated, eerr := s.applyPublishExpiry(ctx, r, b, updated, expiresAt, kind, ref)
+			if eerr != nil {
+				slog.ErrorContext(ctx, "artifacts: set publish expiry failed", "error", eerr)
+				writeError(w, http.StatusInternalServerError, "internal", "could not set the artifact expiry")
+				return
+			}
+			updated = expUpdated
+		}
+		s.logVersion(r, logActionVersionFinalized, updated, v.Seq, access)
+		if priorWasReview && updated.CurrentSeq == v.Seq && updated.OwnerKind == PrincipalKindUser {
+			s.notifyInboxChanged(ctx, updated.OwnerRef)
+		}
+		vi := versionInfo(v, files)
+		vi.SourceMessageID = v.SourceMessageID
+		writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(updated), Version: vi, Warnings: allWarnings})
+	}
+
+	// Run Markdown remote-image fetching / HTML remote-image warning before
+	// committing (for an existing artifact, check write access first so a
+	// refused caller triggers no remote fetches).
+	if existing != nil {
+		access, werr := s.canWriteErr(ctx, b, existing)
+		if werr != nil {
+			writeGrantsReadFailed(w, r, werr)
+			return
+		}
+		if access == accessNone {
+			s.logWriteRefusal(r, existing)
+			if !s.host.Permits(ctx, existing.ScopeRef, PermissionCreate) && s.writeMissingScope(w, r) {
+				return
+			}
+			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+			return
+		}
+	}
+	extra, warn := s.attachmentPublishExtras(w, r, b, versionID, &baseFile)
+	warnings = warn
+	for _, rf := range extra {
+		files = append(files, rf)
+		totalBytes += rf.Size
+	}
+
+	if existing != nil {
+		appendToExisting(existing)
+		return
+	}
+
+	if title == "" {
+		title = attFile.Path
+	}
+	a := &Artifact{
+		ID:         uuid.NewString(),
+		ScopeKind:  ScopeKindProject,
+		ScopeRef:   scope,
+		OwnerKind:  kind,
+		OwnerRef:   ref,
+		Key:        key,
+		Title:      title,
+		CurrentSeq: 1,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+		ExpiresAt:  retentionExpiry(limits, now),
+	}
+	a.SponsorRef = s.sponsorFor(ctx, kind, ref, a.ScopeKind)
+	v := &Version{
+		ID:                 versionID,
+		ArtifactID:         a.ID,
+		Seq:                1,
+		Kind:               VersionKindPublish,
+		EntryPath:          attFile.Path,
+		Note:               strings.TrimSpace(req.Note),
+		TotalBytes:         totalBytes,
+		FileCount:          len(files),
+		CreatedByKind:      kind,
+		CreatedByRef:       ref,
+		CreatedAt:          now,
+		State:              VersionStateReady,
+		SourceAttachmentID: att.ID,
+		SourceMessageID:    srcMsgID,
+	}
+	g := Grant{
+		ID:           uuid.NewString(),
+		ArtifactID:   a.ID,
+		SubjectKind:  SubjectScope,
+		SubjectRef:   scope,
+		Permission:   GrantRead,
+		CreatedByRef: PrincipalRef(kind, ref),
+		CreatedAt:    now,
+	}
+	grants := []Grant{g}
+	if sg, ok := s.sponsorReviewGrant(r, a, now); ok {
+		grants = append(grants, sg)
+	}
+	err = b.store.CreatePublished(ctx, a, v, files, grants)
+	if errors.Is(err, ErrConflict) {
+		// Another publish took the key first: append to its artifact.
+		if raced, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key); lookErr == nil {
+			appendToExisting(raced)
+			return
+		}
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: publish from attachment failed", "error", err)
+		s.logVersionError(r, a, 1, logReasonStoreError)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
+		return
+	}
+	if explicitExpiry {
+		updated, eerr := s.applyPublishExpiry(ctx, r, b, a, expiresAt, kind, ref)
+		if eerr != nil {
+			slog.ErrorContext(ctx, "artifacts: set publish expiry failed", "error", eerr)
+			writeError(w, http.StatusInternalServerError, "internal", "could not set the artifact expiry")
+			return
+		}
+		a = updated
+	}
+	s.logAllowed(r, logEntry{action: logActionPublished, artifact: a, seq: 1, authority: logAuthorityOwner})
+	s.logSponsorReviewGrants(r, a, grants)
+	vi := versionInfo(v, files)
+	vi.SourceMessageID = v.SourceMessageID
+	writeJSON(w, http.StatusCreated, ArtifactResponse{Artifact: artifactInfo(a), Version: vi, Warnings: warnings})
+}
+
+// attachmentPublishExtras runs remote-image fetching for Markdown entries and
+// remote-image warnings for HTML entries when publishing from an existing
+// attachment blob.
+func (s *Service) attachmentPublishExtras(w http.ResponseWriter, r *http.Request, b backend, versionID string, entry *File) ([]File, []string) {
+	ctx := r.Context()
+	if entry.MediaType == mediaTypeHTML {
+		if window, _, err := s.entryWindow(r, b, entry); err == nil && htmlHasRemoteImages(window) {
+			return nil, []string{WarnHTMLRemoteImages}
+		}
+		return nil, nil
+	}
+	if entry.MediaType != mediaTypeMarkdown {
+		return nil, nil
+	}
+	rc, _, err := b.blobs.Download(ctx, BlobPath(b.hubID, entry.SHA256))
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown attachment failed", "error", err)
+		return nil, nil
+	}
+	window, err := readWindow(rc, entry.Size)
+	_ = rc.Close()
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: read markdown attachment failed", "error", err)
+		return nil, nil
+	}
+	return s.remoteImages(ctx, w, b, versionID, window, entry.Size > imageScanWindow, versionUsage{files: 1, bytes: entry.Size})
+}
+
 // CodeMissingScope is the error code of a 403 answered to a publish whose
 // credential lacks a scope publishing needs. The error's details carry
 // every missing scope under "scopes" and the first of them under "scope"

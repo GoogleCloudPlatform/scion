@@ -217,6 +217,12 @@ type Version struct {
 	// FailReason constants), or "" for a version that is not failed or was
 	// failed before reasons were recorded.
 	FailReason string
+	// SourceAttachmentID is the attachment artifact id this version was
+	// published from by reference, or "" for an ordinary publish.
+	SourceAttachmentID string
+	// SourceMessageID is the message id the source attachment was bound to
+	// when published by reference, or "" when none.
+	SourceMessageID string
 }
 
 // Reasons a version stopped being pending without becoming ready
@@ -299,8 +305,17 @@ type Store interface {
 
 	// CreatePublished writes a new artifact together with its first,
 	// ready version, that version's files and the given grants, in one
-	// transaction. The artifact's CurrentSeq is set to v.Seq.
+	// transaction. The artifact's CurrentSeq is set to v.Seq. When another
+	// live artifact already holds a's key for the same owner and scope, it
+	// returns ErrConflict.
 	CreatePublished(ctx context.Context, a *Artifact, v *Version, files []File, grants []Grant) error
+
+	// AppendPublishedVersion appends the ready version v and its files to an
+	// existing live non-attachment artifact, assigning v.Seq (one above the
+	// artifact's highest seq) and advancing CurrentSeq to v.Seq, in one
+	// transaction. It returns ErrNotFound when the artifact is absent or
+	// deleted and ErrAttachmentNotShareable when it is an attachment.
+	AppendPublishedVersion(ctx context.Context, v *Version, files []File) (*Artifact, error)
 
 	// CreatePending writes a new artifact together with its first version,
 	// which must be pending, that version's manifest and the given grants,

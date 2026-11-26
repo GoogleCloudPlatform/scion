@@ -86,11 +86,24 @@ func TestStoreMigratesAttachments(t *testing.T) {
 				}
 			}
 			ctx := context.Background()
-			existing := seedOwned(t, st, PrincipalKindUser, "user-old")
+			// Seed a pre-0009 row directly using the 0008 schema (before
+			// source_attachment_id and source_message_id existed on artifact_version).
+			existingID := uuid.NewString()
+			nowArg := st.timeArg(time.Now().UTC())
+			if _, err := db.Exec(st.rebind(`INSERT INTO artifact (id, scope_kind, scope_ref, owner_kind, owner_ref, title, current_seq, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`),
+				existingID, ScopeKindProject, "project-1", PrincipalKindUser, "user-old", "old.md", nowArg, nowArg); err != nil {
+				t.Fatalf("seed pre-0009 artifact: %v", err)
+			}
+			if _, err := db.Exec(st.rebind(`INSERT INTO artifact_version (id, artifact_id, seq, kind, entry_path, total_bytes, file_count, created_at, state)
+				VALUES (?, ?, 1, ?, ?, 1, 1, ?, ?)`),
+				uuid.NewString(), existingID, VersionKindPublish, "old.md", nowArg, VersionStateReady); err != nil {
+				t.Fatalf("seed pre-0009 version: %v", err)
+			}
 			if err := st.Init(ctx); err != nil {
 				t.Fatalf("Init over 0008: %v", err)
 			}
-			got, err := st.GetArtifact(ctx, existing.ID)
+			got, err := st.GetArtifact(ctx, existingID)
 			if err != nil || got.ScopeKind != ScopeKindProject || got.OwnerRef != "user-old" {
 				t.Fatalf("existing row after migration = %+v, %v", got, err)
 			}

@@ -342,7 +342,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		currentIsReview = v.Kind == VersionKindReview
-		resp.Version = versionInfo(v, files)
+		resp.Version = s.versionInfoForViewer(r.Context(), b, v, files)
 		resp.Archive = s.archiveInfo(r.Context(), b, files)
 	}
 	s.populateReviewState(r.Context(), b, a, currentIsReview, &resp)
