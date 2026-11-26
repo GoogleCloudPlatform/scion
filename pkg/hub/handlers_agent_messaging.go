@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1459,12 +1460,29 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// persistence, DM participant registration, attachment ingestion, thread
 	// membership write, mention fan-out, default-agent wake, or channel
 	// dispatch. No-op when hub.message_policies is off.
+	var (
+		policyDecisions      []messages.Decision
+		policySecretRequests []messages.SecretRequest
+		policyCommandRequest *messages.CommandRequest
+	)
+	if decisionSend != nil {
+		policyDecisions = decisionSend.decisions
+	}
+	if secretRequestSend != nil {
+		policySecretRequests = secretRequestSend.requests
+	}
+	if commandRequestSend != nil {
+		policyCommandRequest = commandRequestSend.request
+	}
+	promptText := messagepolicy.PolicyPromptText(policyDecisions, policySecretRequests, policyCommandRequest)
+
 	outboundMessageID := api.NewUUID()
 	h2PolicyRes, h2Allowed := s.evaluateH2MessagePolicies(ctx, w, &h2PolicyInput{
 		agent:               agent,
 		req:                 &req,
 		routing:             result,
 		hasChoices:          decisionSend != nil,
+		promptText:          promptText,
 		artifactAttachments: len(artifactAttachments),
 	})
 	if !h2Allowed {
