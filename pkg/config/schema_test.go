@@ -2002,3 +2002,39 @@ func TestV1RuntimeIndicatorKeys_MatchV1OnlyRuntimeFields(t *testing.T) {
 	sort.Strings(got)
 	assert.Equal(t, want, got, "v1RuntimeIndicatorKeys must equal the V1RuntimeConfig yaml keys minus the RuntimeConfig ones")
 }
+
+func TestValidateSchemas_RequiredSecretTypes(t *testing.T) {
+	t.Run("settings-v1.schema.json", func(t *testing.T) {
+		for _, secretType := range []string{"environment", "file", "on_demand"} {
+			t.Run("accepts_"+secretType, func(t *testing.T) {
+				doc := []byte("schema_version: \"1\"\nharness_configs:\n  test:\n    harness: claude\n    image: test:latest\n    secrets:\n      - key: API_KEY\n        type: " + secretType + "\n")
+				errs, err := ValidateSettings(doc, "1")
+				require.NoError(t, err)
+				assert.Empty(t, errs, "expected secret type %q to be valid in settings-v1.schema.json", secretType)
+			})
+		}
+		t.Run("rejects_variable", func(t *testing.T) {
+			doc := []byte("schema_version: \"1\"\nharness_configs:\n  test:\n    harness: claude\n    image: test:latest\n    secrets:\n      - key: API_KEY\n        type: variable\n")
+			errs, err := ValidateSettings(doc, "1")
+			require.NoError(t, err)
+			assert.NotEmpty(t, errs, "expected retired secret type 'variable' to be rejected by settings-v1.schema.json")
+		})
+	})
+
+	t.Run("agent-v1.schema.json", func(t *testing.T) {
+		for _, secretType := range []string{"environment", "file", "on_demand"} {
+			t.Run("accepts_"+secretType, func(t *testing.T) {
+				doc := []byte("schema_version: \"1\"\nsecrets:\n  - key: API_KEY\n    type: " + secretType + "\n")
+				errs, err := ValidateAgentConfig(doc, "1")
+				require.NoError(t, err)
+				assert.Empty(t, errs, "expected secret type %q to be valid in agent-v1.schema.json", secretType)
+			})
+		}
+		t.Run("rejects_variable", func(t *testing.T) {
+			doc := []byte("schema_version: \"1\"\nsecrets:\n  - key: API_KEY\n    type: variable\n")
+			errs, err := ValidateAgentConfig(doc, "1")
+			require.NoError(t, err)
+			assert.NotEmpty(t, errs, "expected retired secret type 'variable' to be rejected by agent-v1.schema.json")
+		})
+	})
+}
