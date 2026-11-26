@@ -262,7 +262,8 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 
 	// Validate all fields (including UUID syntax and override bounds) before
 	// pruning overrides for deleted projects.
-	if _, err := next.Settings().Resolve(); err != nil {
+	settings := next.Settings()
+	if _, err := settings.Resolve(); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
 	}
@@ -274,13 +275,9 @@ func (s *Server) handlePutDecisionRetention(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		next.ProjectOverrides = pruned
+		settings = next.Settings()
 	}
 
-	settings := next.Settings()
-	if _, err := settings.Resolve(); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
-		return
-	}
 	doc, err := json.Marshal(settings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to marshal decision retention settings", nil)
