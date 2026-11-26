@@ -802,27 +802,36 @@ func (s *UsageLedgerStore) HasUsageEventsForRun(ctx context.Context, agentID, ru
 }
 
 // GetRunUsageSourceSummary implements store.UsageLedgerStore.GetRunUsageSourceSummary.
+// Uses two indexed EXISTS probes (legacy vs non-legacy) instead of scanning
+// every event of the run with GROUP BY (O3).
 func (s *UsageLedgerStore) GetRunUsageSourceSummary(ctx context.Context, agentID, runID string) (store.RunUsageSourceSummary, error) {
 	if agentID == "" || runID == "" {
 		return store.RunUsageSourceSummary{}, nil
 	}
-	var sources []string
-	err := s.client.UsageEvent.Query().
-		Where(usageevent.AgentIDEQ(agentID), usageevent.RunIDEQ(runID)).
-		GroupBy(usageevent.FieldUsageSource).
-		Scan(ctx, &sources)
+	hasLegacy, err := s.client.UsageEvent.Query().
+		Where(
+			usageevent.AgentIDEQ(agentID),
+			usageevent.RunIDEQ(runID),
+			usageevent.UsageSourceEQ(store.UsageSourceLegacySessionMetrics),
+		).
+		Exist(ctx)
 	if err != nil {
 		return store.RunUsageSourceSummary{}, mapError(err)
 	}
-	var out store.RunUsageSourceSummary
-	for _, src := range sources {
-		if src == store.UsageSourceLegacySessionMetrics {
-			out.HasLegacyEvents = true
-		} else {
-			out.HasTrack1Events = true
-		}
+	hasTrack1, err := s.client.UsageEvent.Query().
+		Where(
+			usageevent.AgentIDEQ(agentID),
+			usageevent.RunIDEQ(runID),
+			usageevent.UsageSourceNEQ(store.UsageSourceLegacySessionMetrics),
+		).
+		Exist(ctx)
+	if err != nil {
+		return store.RunUsageSourceSummary{}, mapError(err)
 	}
-	return out, nil
+	return store.RunUsageSourceSummary{
+		HasTrack1Events: hasTrack1,
+		HasLegacyEvents: hasLegacy,
+	}, nil
 }
 
 // DBNow implements store.UsageLedgerStore.DBNow, reading the current UTC

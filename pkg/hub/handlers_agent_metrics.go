@@ -186,21 +186,6 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Legacy converter (D9/D9a): for unmarked posts while tokenomics.usage_ledger
-	// is enabled, convert into a legacy_session_metrics ledger row and stamp
-	// converted_at atomically through IngestUsageBatch. Never fail the metrics
-	// POST if conversion fails: log and leave converted_at NULL so catch-up retries.
-	if !req.UsageEventsEnabled && s.experimentEnabled(experiments.TokenomicsUsageLedger) {
-		preferredRunID := strings.TrimSpace(presentedAgentTokenRunID(ctx))
-		if preferredRunID == "" {
-			preferredRunID = strings.TrimSpace(agent.RunID)
-		}
-		if _, convErr := s.store.ConvertLegacySessionMetricsRow(ctx, s.usageLedgerHubID(), metrics, preferredRunID); convErr != nil {
-			s.agentMetricsLog.Warn("Failed to convert legacy session metrics to usage ledger; catch-up will retry",
-				"agent_id", id, "session_id", req.Session.ID, "metrics_id", metrics.ID, "error", convErr)
-		}
-	}
-
 	s.agentMetricsLog.Info("Session metrics recorded",
 		"agent_id", id,
 		"session_id", req.Session.ID,
@@ -211,4 +196,17 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": metrics.ID})
+
+	// Legacy converter (D9/D9a, R3): write 201 Created first, then enqueue
+	// asynchronous conversion off the request path using context.WithoutCancel
+	// + bounded timeout so live conversion never slows or fails POST /metrics.
+	// If the queue is full or conversion fails, converted_at stays NULL and
+	// periodic catch-up retries automatically.
+	if !req.UsageEventsEnabled && s.experimentEnabled(experiments.TokenomicsUsageLedger) {
+		preferredRunID := strings.TrimSpace(presentedAgentTokenRunID(ctx))
+		if preferredRunID == "" {
+			preferredRunID = strings.TrimSpace(agent.RunID)
+		}
+		s.enqueueLiveLegacySessionMetrics(ctx, metrics, preferredRunID)
+	}
 }

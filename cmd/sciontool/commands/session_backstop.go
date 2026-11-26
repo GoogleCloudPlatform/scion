@@ -229,10 +229,8 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 	return runHeldReportSenderWithHome(handlers.NewFileSessionState(agentHome), agentHome, newReporter, ticks, stopTicks)
 }
 
-// runHeldReportSender runs sendDueHeldReports on every tick until the
-// returned func is called. That func stops the ticks, cancels a send in
-// progress, waits for the check in progress to finish, and may be called
-// more than once.
+// runHeldReportSender is a test-only convenience wrapper around
+// runHeldReportSenderWithHome with agentHome="".
 func runHeldReportSender(store heldReportStore, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
 	return runHeldReportSenderWithHome(store, "", newReporter, ticks, stopTicks)
 }
@@ -282,6 +280,8 @@ type metricsReporter interface {
 // already due (RetryReportsNoFollow), so the next check, a hook process or
 // the shutdown backstop sends it again. That includes a send cancelled
 // through parent (the check is being stopped). Failures are logged.
+// sendDueHeldReports is a test-only convenience wrapper around
+// sendDueHeldReportsWithHome with agentHome="".
 func sendDueHeldReports(parent context.Context, store heldReportStore, newReporter func() metricsReporter) {
 	sendDueHeldReportsWithHome(parent, store, "", newReporter)
 }

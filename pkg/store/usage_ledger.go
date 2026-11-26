@@ -330,6 +330,15 @@ func LegacySessionMetricsEventID(agentID, sessionID string, startedAt time.Time)
 	return "legacy-sm:" + hex.EncodeToString(sum[:])
 }
 
+// SessionMetricsConversionMark identifies one agent_session_metrics row to
+// stamp with converted_at inside IngestUsageBatch's transaction. When EventID
+// is non-empty, the row is stamped only if that EventID was not rejected at
+// persistence time (preventing backfill livelock on partial-batch rejections).
+type SessionMetricsConversionMark struct {
+	ID      string
+	EventID string
+}
+
 // UsageIngestBatchInput holds validated, attribution-stamped usage events and
 // an optional meter_health update to persist atomically in one transaction.
 type UsageIngestBatchInput struct {
@@ -349,9 +358,9 @@ type UsageIngestBatchInput struct {
 	//    or after the existing hourly coverage start (if one exists);
 	//  - always writes usage_rollups_daily and usage_scope_counters_daily.
 	IsBackfill bool
-	// MarkSessionMetricsConvertedIDs lists agent_session_metrics UUIDs to stamp
+	// MarkSessionMetricsConverted lists agent_session_metrics rows to stamp
 	// with converted_at in the same transaction as the ledger/rollup writes.
-	MarkSessionMetricsConvertedIDs []string
+	MarkSessionMetricsConverted []SessionMetricsConversionMark
 }
 
 // RunUsageSourceSummary reports which classes of usage_events exist for a run.

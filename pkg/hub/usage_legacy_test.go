@@ -39,6 +39,7 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
 	srv.SetHubID("hub-legacy-http")
+	t.Cleanup(srv.stopUsageLedger)
 
 	user := &store.User{
 		ID:          uuid.NewString(),
@@ -151,7 +152,7 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, rollupsAfterMarked, "marked post must not be converted into ledger/rollups")
 
-	// 4. Unmarked legacy post: converts to ledger + rollups with NULLs and legacy_client status.
+	// 4. Unmarked legacy post: converts asynchronously to ledger + rollups with NULLs and legacy_client status.
 	seg1Payload := metricsPayloadRequest{
 		Type:    "agent_metrics",
 		AgentID: agent.ID,
@@ -167,6 +168,8 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	}
 	code, leg1ID := postMetrics(t, seg1Payload)
 	require.Equal(t, http.StatusCreated, code)
+	srv.usageLedger.liveInFlight.Wait()
+
 	leg1Row, err := s.GetAgentSessionMetrics(ctx, leg1ID)
 	require.NoError(t, err)
 	assert.NotNil(t, leg1Row.ConvertedAt)
@@ -190,6 +193,7 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 		Tokens: metricsTokens{Input: 500, Output: 100, Cached: 0, Reasoning: 0},
 	})
 	require.Equal(t, http.StatusCreated, code)
+	srv.usageLedger.liveInFlight.Wait()
 
 	usageResp := getAgentUsage(t)
 	assert.Equal(t, MeasurementStatusLegacyClient, usageResp.MeasurementStatus)
@@ -206,8 +210,12 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	assert.Equal(t, int64(2100), *usageResp.Tokens.SummableTokens)
 	assert.Equal(t, int64(0), usageResp.Calls)
 
-	// 5. Once a Track 1 event is ingested for the same run, measurement_status
-	//    becomes "measured", and a subsequent unmarked legacy post does not double count.
+	// 5. Track 1 event at now-2m:
+	//    (a) An unmarked legacy segment whose window [now-3m, now-1m] overlaps
+	//        the Track 1 event must NOT double count;
+	//    (b) A later unmarked legacy segment with a new session_id and a window
+	//        [now-30s, now] AFTER the Track 1 event (e.g. after sink revocation)
+	//        MUST be converted and included in totals (R1).
 	in200 := int64(200)
 	out50 := int64(50)
 	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
@@ -238,32 +246,213 @@ func TestHandleAgentMetrics_LegacyConverter(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	// (a) Overlapping window [now-3m, now-1m] -> skipped.
 	code, _ = postMetrics(t, metricsPayloadRequest{
 		Type:    "agent_metrics",
 		AgentID: agent.ID,
 		Session: metricsSession{
-			ID:        "sess-after-t1",
-			StartedAt: now.Add(-1 * time.Minute).Format(time.RFC3339),
-			EndedAt:   now.Format(time.RFC3339),
+			ID:        "sess-overlapping-t1",
+			StartedAt: now.Add(-3 * time.Minute).Format(time.RFC3339),
+			EndedAt:   now.Add(-1 * time.Minute).Format(time.RFC3339),
 			Status:    "completed",
 			Model:     "claude-sonnet-4-6",
 		},
 		Tokens: metricsTokens{Input: 7777, Output: 6666},
 	})
 	require.Equal(t, http.StatusCreated, code)
+	srv.usageLedger.liveInFlight.Wait()
 
-	usageAfterT1 := getAgentUsage(t)
-	assert.Equal(t, MeasurementStatusMeasured, usageAfterT1.MeasurementStatus)
-	require.NotNil(t, usageAfterT1.Tokens.Input)
-	assert.Equal(t, int64(1700), *usageAfterT1.Tokens.Input, "unmarked post on a Track 1 run must not double count")
-	require.NotNil(t, usageAfterT1.Tokens.Output)
-	assert.Equal(t, int64(350), *usageAfterT1.Tokens.Output)
+	usageAfterOverlap := getAgentUsage(t)
+	assert.Equal(t, MeasurementStatusMeasured, usageAfterOverlap.MeasurementStatus)
+	require.NotNil(t, usageAfterOverlap.Tokens.Input)
+	assert.Equal(t, int64(1700), *usageAfterOverlap.Tokens.Input, "overlapping window must not double count")
+	require.NotNil(t, usageAfterOverlap.Tokens.Output)
+	assert.Equal(t, int64(350), *usageAfterOverlap.Tokens.Output)
+
+	// (b) Later non-overlapping window [now-30s, now] with new session_id -> converted (R1).
+	code, _ = postMetrics(t, metricsPayloadRequest{
+		Type:    "agent_metrics",
+		AgentID: agent.ID,
+		Session: metricsSession{
+			ID:        "sess-after-revoke",
+			StartedAt: now.Add(-30 * time.Second).Format(time.RFC3339),
+			EndedAt:   now.Format(time.RFC3339),
+			Status:    "completed",
+			Model:     "claude-sonnet-4-6",
+		},
+		Tokens: metricsTokens{Input: 400, Output: 80},
+	})
+	require.Equal(t, http.StatusCreated, code)
+	srv.usageLedger.liveInFlight.Wait()
+
+	usageAfterRevoke := getAgentUsage(t)
+	assert.Equal(t, MeasurementStatusMeasured, usageAfterRevoke.MeasurementStatus)
+	require.NotNil(t, usageAfterRevoke.Tokens.Input)
+	assert.Equal(t, int64(2100), *usageAfterRevoke.Tokens.Input, "later non-overlapping unmarked segment must be converted")
+	require.NotNil(t, usageAfterRevoke.Tokens.Output)
+	assert.Equal(t, int64(430), *usageAfterRevoke.Tokens.Output)
+}
+
+func TestHandleAgentMetrics_LiveConversionAsyncDoesNotBlockPost(t *testing.T) {
+	// R3: With the store's convert call blocked, POST /metrics still returns
+	// 201 Created promptly, and the row is converted once released.
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-legacy-async-post")
+	t.Cleanup(srv.stopUsageLedger)
+
+	proj := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "Async Post Proj",
+		Slug: "async-post-" + uuid.NewString()[:8],
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "async-post-agent",
+		Name:      "Async Post Agent",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	agentToken := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	srv.usageLedger.liveConvertFn = func(c context.Context, hubID string, row *store.AgentSessionMetrics, preferredRunID string) (bool, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return s.ConvertLegacySessionMetricsRow(c, hubID, row, preferredRunID)
+	}
+	setUsageLedgerExperimentForTest(t, srv, true)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	body, err := json.Marshal(metricsPayloadRequest{
+		Type:    "agent_metrics",
+		AgentID: ag.ID,
+		Session: metricsSession{
+			ID:        "sess-async-block",
+			StartedAt: now.Add(-5 * time.Minute).Format(time.RFC3339),
+			EndedAt:   now.Format(time.RFC3339),
+			Status:    "completed",
+			Model:     "claude-sonnet-4-6",
+		},
+		Tokens: metricsTokens{Input: 333, Output: 66},
+	})
+	require.NoError(t, err)
+
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ag.ID+"/metrics", bytes.NewReader(body)).WithContext(reqCtx)
+	req.Header.Set("X-Scion-Agent-Token", agentToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	postDone := make(chan struct{})
+	go func() {
+		defer close(postDone)
+		srv.Handler().ServeHTTP(rec, req)
+	}()
+
+	select {
+	case <-postDone:
+	case <-time.After(1 * time.Second):
+		close(release)
+		t.Fatal("POST /metrics blocked on live conversion")
+	}
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Cancel the HTTP request context immediately after response; conversion
+	// must still succeed once released because it uses context.WithoutCancel.
+	cancelReq()
+
+	var resp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	metricsID := resp["id"]
+	require.NotEmpty(t, metricsID)
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("timed out waiting for async live converter to start")
+	}
+
+	// Row is not yet stamped while blocked.
+	beforeRow, err := s.GetAgentSessionMetrics(ctx, metricsID)
+	require.NoError(t, err)
+	assert.Nil(t, beforeRow.ConvertedAt)
+
+	close(release)
+	srv.usageLedger.liveInFlight.Wait()
+
+	afterRow, err := s.GetAgentSessionMetrics(ctx, metricsID)
+	require.NoError(t, err)
+	assert.NotNil(t, afterRow.ConvertedAt, "row must be converted after release even though request ctx was cancelled")
+}
+
+func TestUsageLedger_SyncReconcileDoesNotBlockOnLegacyBackfill(t *testing.T) {
+	// R2: Sync startup reconcileUsageLedger must return promptly while a
+	// stubbed legacyBackfillFn is blocked, and the legacy backfill must still
+	// complete once unblocked.
+	ctx := context.Background()
+	srv, _ := testServer(t)
+	srv.SetHubID("hub-legacy-sync-nonblock")
+	t.Cleanup(srv.stopUsageLedger)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	srv.usageLedger.backfillFn = func(context.Context, string) (int, error) {
+		return 0, nil
+	}
+	srv.usageLedger.legacyBackfillFn = func(context.Context, string) (store.LegacySessionMetricsBackfillResult, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		close(finished)
+		return store.LegacySessionMetricsBackfillResult{Processed: 2, Converted: 2}, nil
+	}
+
+	setUsageLedgerExperimentForTest(t, srv, true)
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		srv.reconcileUsageLedger(ctx)
+	}()
+
+	select {
+	case <-reconcileDone:
+	case <-time.After(1 * time.Second):
+		close(release)
+		t.Fatal("sync reconcileUsageLedger blocked on legacy backfill")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("legacy backfill goroutine did not start")
+	}
+
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy backfill did not complete after release")
+	}
 }
 
 func TestUsageLedger_LegacyBackfillOnToggleAndOffOnGap(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
 	srv.SetHubID("hub-legacy-toggle")
+	t.Cleanup(srv.stopUsageLedger)
 
 	proj := &store.Project{
 		ID:   uuid.NewString(),
@@ -296,13 +485,14 @@ func TestUsageLedger_LegacyBackfillOnToggleAndOffOnGap(t *testing.T) {
 	}
 	require.NoError(t, s.CreateAgentSessionMetrics(ctx, row1))
 
-	// 1. Toggle ON -> reconcile backfills row1 automatically.
+	// 1. Toggle ON -> async legacy catch-up backfills row1 automatically.
 	setUsageLedgerExperimentForTest(t, srv, true)
 	srv.reconcileUsageLedger(ctx)
 
-	got1, err := s.GetAgentSessionMetrics(ctx, row1.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got1.ConvertedAt)
+	require.Eventually(t, func() bool {
+		got1, err := s.GetAgentSessionMetrics(ctx, row1.ID)
+		return err == nil && got1.ConvertedAt != nil
+	}, 2*time.Second, 20*time.Millisecond, "row1 should be backfilled asynchronously")
 
 	// 2. Toggle OFF, insert row2 while OFF, toggle ON -> row2 is caught up
 	//    without double counting row1.
@@ -328,9 +518,10 @@ func TestUsageLedger_LegacyBackfillOnToggleAndOffOnGap(t *testing.T) {
 	setUsageLedgerExperimentForTest(t, srv, true)
 	srv.reconcileUsageLedger(ctx)
 
-	got2, err := s.GetAgentSessionMetrics(ctx, row2.ID)
-	require.NoError(t, err)
-	require.NotNil(t, got2.ConvertedAt)
+	require.Eventually(t, func() bool {
+		got2, err := s.GetAgentSessionMetrics(ctx, row2.ID)
+		return err == nil && got2.ConvertedAt != nil
+	}, 2*time.Second, 20*time.Millisecond, "row2 posted while OFF should be caught up on next ON")
 
 	day := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
 	rollups, err := s.ListUsageRollupsDailyByAgent(ctx, ag.ID, day, day)
@@ -369,21 +560,25 @@ func TestDeriveMeasurementStatus_LegacyClient(t *testing.T) {
 	}))
 }
 
-func TestUsageLedger_LegacyBackfillRetryOnFailure(t *testing.T) {
+func TestUsageLedger_LegacyBackfillRetryAndPeriodicCatchup(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := testServer(t)
 	srv.SetHubID("hub-legacy-retry")
 	srv.usageLedger.retryInterval = 15 * time.Millisecond
 	srv.usageLedger.retryMax = 30 * time.Millisecond
+	srv.usageLedger.legacyPeriodicInterval = 25 * time.Millisecond
 
-	attempts := make(chan int, 4)
+	attempts := make(chan int, 8)
 	call := 0
 	srv.usageLedger.backfillFn = func(context.Context, string) (int, error) {
 		return 0, nil
 	}
 	srv.usageLedger.legacyBackfillFn = func(context.Context, string) (store.LegacySessionMetricsBackfillResult, error) {
 		call++
-		attempts <- call
+		select {
+		case attempts <- call:
+		default:
+		}
 		if call == 1 {
 			return store.LegacySessionMetricsBackfillResult{}, errors.New("transient legacy backfill error")
 		}
@@ -394,16 +589,13 @@ func TestUsageLedger_LegacyBackfillRetryOnFailure(t *testing.T) {
 	srv.reconcileUsageLedgerAsync(ctx)
 	t.Cleanup(srv.stopUsageLedger)
 
-	select {
-	case n := <-attempts:
-		assert.Equal(t, 1, n)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for first legacy backfill attempt")
-	}
-	select {
-	case n := <-attempts:
-		assert.Equal(t, 2, n)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for retry legacy backfill attempt")
+	// Attempt 1 fails -> Attempt 2 retries and succeeds -> Attempt 3 fires via periodic timer (R3).
+	for want := 1; want <= 3; want++ {
+		select {
+		case got := <-attempts:
+			assert.Equal(t, want, got)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for legacy backfill attempt %d", want)
+		}
 	}
 }

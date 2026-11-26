@@ -38,6 +38,7 @@ import (
 
 const (
 	defaultLegacySessionMetricsBackfillPageSize = 100
+	defaultLegacyBackfillBatchYield             = 25 * time.Millisecond
 	legacySessionMetricsSourceKind              = "agent_session_metrics"
 	legacySessionMetricsProducerEpoch           = "legacy-session-metrics"
 )
@@ -68,13 +69,15 @@ func (s *UsageLedgerStore) ConvertLegacySessionMetricsRow(
 		if err != nil {
 			return err
 		}
+		mark := store.SessionMetricsConversionMark{ID: row.ID}
 		in := &store.UsageIngestBatchInput{
-			AgentID:                        row.AgentID,
-			MarkSessionMetricsConvertedIDs: []string{row.ID},
+			AgentID: row.AgentID,
 		}
 		if ev != nil {
+			mark.EventID = ev.EventID
 			in.Events = []*store.UsageEvent{ev}
 		}
+		in.MarkSessionMetricsConverted = []store.SessionMetricsConversionMark{mark}
 		res, wh, err := s.ingestUsageBatchTx(ctx, client, in)
 		if err != nil {
 			return err
@@ -110,21 +113,26 @@ func (s *UsageLedgerStore) ConvertLegacySessionMetricsRow(
 
 // BackfillLegacySessionMetrics implements store.UsageLedgerStore.BackfillLegacySessionMetrics.
 func (s *UsageLedgerStore) BackfillLegacySessionMetrics(ctx context.Context, hubID string) (store.LegacySessionMetricsBackfillResult, error) {
-	return s.backfillLegacySessionMetricsPaged(ctx, hubID, defaultLegacySessionMetricsBackfillPageSize, nil)
+	return s.backfillLegacySessionMetricsPaged(ctx, hubID, defaultLegacySessionMetricsBackfillPageSize, defaultLegacyBackfillBatchYield, nil, nil)
 }
 
 // backfillLegacySessionMetricsPaged processes unconverted agent_session_metrics
-// rows (WHERE converted_at IS NULL) in bounded batches. Each batch acquires a
-// Postgres transaction-scoped advisory lock (and an in-process mutex for
-// SQLite), converts non-overlapping rows through ingestUsageBatchTx with
-// IsBackfill=true, and stamps converted_at on every row in the batch inside the
-// same transaction. afterBatchHook (used in crash-mid-run tests) is called
-// after each committed batch; returning a non-nil error stops the loop cleanly.
+// rows (WHERE converted_at IS NULL) in bounded batches with a short inter-batch
+// yield. Each batch acquires a Postgres transaction-scoped advisory lock (and
+// an in-process mutex for SQLite), converts non-overlapping rows through
+// ingestUsageBatchTx with IsBackfill=true, and stamps converted_at on every
+// non-rejected row in the batch inside the same transaction.
+//
+// If a full batch makes zero stamping progress (e.g. every row was rejected at
+// persistence time), the loop breaks and returns an error rather than spinning
+// forever (O1).
 func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 	ctx context.Context,
 	hubID string,
 	pageSize int,
+	batchYield time.Duration,
 	afterBatchHook func(batch int, res store.LegacySessionMetricsBackfillResult) error,
+	mutateBatchInput func(in *store.UsageIngestBatchInput),
 ) (store.LegacySessionMetricsBackfillResult, error) {
 	if pageSize <= 0 {
 		pageSize = defaultLegacySessionMetricsBackfillPageSize
@@ -145,7 +153,7 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		batchRes, fetched, err := s.backfillLegacySessionMetricsOneBatch(ctx, hubID, pageSize)
+		batchRes, fetched, stamped, rejectedCount, err := s.backfillLegacySessionMetricsOneBatch(ctx, hubID, pageSize, mutateBatchInput)
 		if err != nil {
 			return total, err
 		}
@@ -159,8 +167,20 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 				return total, err
 			}
 		}
+		if fetched > 0 && stamped == 0 {
+			return total, fmt.Errorf("legacy session_metrics backfill made no progress: %d rows fetched, %d rejected", fetched, rejectedCount)
+		}
 		if fetched < pageSize {
 			break
+		}
+		if batchYield > 0 {
+			timer := time.NewTimer(batchYield)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return total, ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return total, nil
@@ -170,9 +190,10 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 	ctx context.Context,
 	hubID string,
 	pageSize int,
-) (store.LegacySessionMetricsBackfillResult, int, error) {
+	mutateBatchInput func(in *store.UsageIngestBatchInput),
+) (store.LegacySessionMetricsBackfillResult, int, int, int, error) {
 	var batchRes store.LegacySessionMetricsBackfillResult
-	var fetched int
+	var fetched, stamped, rejectedCount int
 
 	run := func(client *ent.Client) error {
 		drv := client.Driver()
@@ -199,32 +220,42 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 		receivedAt := time.Now().UTC().Truncate(time.Microsecond)
 		attrCache := make(map[string]*store.RunAttribution, len(entities))
 		events := make([]*store.UsageEvent, 0, len(entities))
-		markIDs := make([]string, 0, len(entities))
+		marks := make([]store.SessionMetricsConversionMark, 0, len(entities))
 
 		for _, e := range entities {
 			row := entAgentSessionMetricsToStore(e)
-			markIDs = append(markIDs, row.ID)
 			ev, err := s.prepareLegacyUsageEventTx(ctx, client, hubID, row, "", receivedAt, false, attrCache)
 			if err != nil {
 				return err
 			}
+			mark := store.SessionMetricsConversionMark{ID: row.ID}
 			if ev != nil {
+				mark.EventID = ev.EventID
 				events = append(events, ev)
 			} else {
 				batchRes.Skipped++
 			}
+			marks = append(marks, mark)
 		}
 
 		in := &store.UsageIngestBatchInput{
-			Events:                         events,
-			IsBackfill:                     true,
-			MarkSessionMetricsConvertedIDs: markIDs,
+			Events:                      events,
+			IsBackfill:                  true,
+			MarkSessionMetricsConverted: marks,
+		}
+		if mutateBatchInput != nil {
+			mutateBatchInput(in)
 		}
 		ingestRes, _, err := s.ingestUsageBatchTx(ctx, client, in)
 		if err != nil {
 			return err
 		}
-		batchRes.Processed = fetched
+		rejectedCount = len(ingestRes.Rejected)
+		stamped = len(marks) - rejectedCount
+		if stamped < 0 {
+			stamped = 0
+		}
+		batchRes.Processed = stamped
 		batchRes.Converted = ingestRes.Accepted
 		batchRes.Skipped += ingestRes.Duplicates
 		return nil
@@ -232,23 +263,23 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 
 	if s.inTx {
 		if err := run(s.client); err != nil {
-			return batchRes, 0, err
+			return batchRes, 0, 0, 0, err
 		}
-		return batchRes, fetched, nil
+		return batchRes, fetched, stamped, rejectedCount, nil
 	}
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return batchRes, 0, mapError(err)
+		return batchRes, 0, 0, 0, mapError(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := run(tx.Client()); err != nil {
-		return batchRes, 0, err
+		return batchRes, 0, 0, 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return batchRes, 0, mapError(err)
+		return batchRes, 0, 0, 0, mapError(err)
 	}
-	return batchRes, fetched, nil
+	return batchRes, fetched, stamped, rejectedCount, nil
 }
 
 // prepareLegacyUsageEventTx checks for Track 1 overlap, resolves or ensures a
@@ -265,7 +296,7 @@ func (s *UsageLedgerStore) prepareLegacyUsageEventTx(
 	clampFuture bool,
 	attrCache map[string]*store.RunAttribution,
 ) (*store.UsageEvent, error) {
-	overlap, err := hasTrack1OverlapTx(ctx, client, row, preferredRunID)
+	overlap, err := hasTrack1OverlapTx(ctx, client, row)
 	if err != nil {
 		return nil, err
 	}
@@ -282,28 +313,15 @@ func (s *UsageLedgerStore) prepareLegacyUsageEventTx(
 }
 
 // hasTrack1OverlapTx reports whether non-legacy Track 1 usage_events already
-// exist for this agent's run (when preferredRunID is set), session_id_hash, or
-// session time window [started_at, effectiveEnd].
-func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.AgentSessionMetrics, preferredRunID string) (bool, error) {
-	// 1. Live path: if preferredRunID already has non-legacy Track 1 events for
-	// this agent, never double count.
-	if preferredRunID != "" {
-		exists, err := client.UsageEvent.Query().
-			Where(
-				usageevent.AgentIDEQ(row.AgentID),
-				usageevent.RunIDEQ(preferredRunID),
-				usageevent.UsageSourceNEQ(store.UsageSourceLegacySessionMetrics),
-			).
-			Exist(ctx)
-		if err != nil {
-			return false, mapError(err)
-		}
-		if exists {
-			return true, nil
-		}
-	}
-
-	// 2. Exact session_id_hash match against any non-legacy Track 1 event for
+// exist for this agent matching either:
+//  1. the segment's session_id_hash, or
+//  2. an event_ts falling inside the segment's [started_at, effectiveEnd] window.
+//
+// A run-level check is intentionally NOT used: if a sink is revoked mid-run
+// (e.g. experiment toggled OFF then ON), subsequent unmarked sessions in the
+// same run carry a new session_id and later window and must be converted (R1).
+func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.AgentSessionMetrics) (bool, error) {
+	// 1. Exact session_id_hash match against any non-legacy Track 1 event for
 	// this agent.
 	if row.SessionID != "" {
 		sum := sha256.Sum256([]byte(row.SessionID))
@@ -323,9 +341,9 @@ func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.Agen
 		}
 	}
 
-	// 3. Time-window overlap for historical/catch-up rows: if non-legacy Track 1
-	// events for this agent fall within [started_at, effectiveEnd], skip to
-	// avoid double counting harnesses whose Track 1 events omit session_id.
+	// 2. Time-window overlap: if non-legacy Track 1 events for this agent fall
+	// within [started_at, effectiveEnd], skip to avoid double counting
+	// harnesses whose Track 1 events omit session_id.
 	startTS := row.StartedAt.UTC().Truncate(time.Microsecond)
 	endTS := startTS
 	if row.EndedAt != nil && !row.EndedAt.IsZero() {
@@ -358,10 +376,13 @@ func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.Agen
 // agents row if agent.RunID == preferredRunID; falls back to synthetic
 // "legacy-agent:<agent_id>" if no run_id exists.
 //
-// Catch-up/backfill path (preferredRunID == ""): uses synthetic
-// "legacy-backfill:<agent_id>" built from the agents row as it exists at
-// conversion time (or minimal project_id/agent_id when the agent was
-// hard-deleted), keeping historical rows separate from active Track 1 runs.
+// Catch-up/backfill path (preferredRunID == ""): when the agent has a live
+// current run whose run_attribution belongs to row.AgentID and
+// row.StartedAt >= run_attribution.created_at, attributes to that real run so
+// rows posted while the experiment was OFF or failed live conversions appear
+// on the current run (O4). Otherwise uses synthetic "legacy-backfill:<agent_id>"
+// built from the agents row as it exists at conversion time (or minimal
+// project_id/agent_id when the agent was hard-deleted).
 func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 	ctx context.Context,
 	client *ent.Client,
@@ -403,7 +424,6 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 				if _, ierr := insertRunAttributionOnConflictDoNothing(ctx, client, attr); ierr != nil {
 					return nil, ierr
 				}
-				// Re-read in case a concurrent tx inserted first.
 				stored, rerr := client.RunAttribution.Query().
 					Where(runattribution.IDEQ(preferredRunID)).
 					Only(ctx)
@@ -417,6 +437,40 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 			if !ent.IsNotFound(qerr) {
 				return nil, mapError(qerr)
 			}
+		}
+	} else if uid, parseErr := uuid.Parse(row.AgentID); parseErr == nil {
+		// Catch-up path (O4): attribute to the agent's real current run when
+		// row.StartedAt >= that run's run_attribution.created_at and the run
+		// belongs to the agent.
+		agRow, qerr := client.Agent.Query().
+			Where(
+				agent.IDEQ(uid),
+				agent.DeletedAtIsNil(),
+				agent.RunIDNEQ(""),
+			).
+			Select(agent.FieldID, agent.FieldRunID).
+			Only(ctx)
+		if qerr == nil && agRow.RunID != "" {
+			var currentAttr *store.RunAttribution
+			if cached, ok := attrCache[agRow.RunID]; ok {
+				currentAttr = cached
+			} else {
+				ra, rerr := client.RunAttribution.Query().
+					Where(runattribution.IDEQ(agRow.RunID)).
+					Only(ctx)
+				if rerr == nil {
+					currentAttr = entRunAttributionToStore(ra)
+					attrCache[agRow.RunID] = currentAttr
+				} else if !ent.IsNotFound(rerr) {
+					return nil, mapError(rerr)
+				}
+			}
+			if currentAttr != nil && currentAttr.AgentID == row.AgentID &&
+				!row.StartedAt.UTC().Truncate(time.Microsecond).Before(currentAttr.CreatedAt.UTC().Truncate(time.Microsecond)) {
+				return currentAttr, nil
+			}
+		} else if qerr != nil && !ent.IsNotFound(qerr) {
+			return nil, mapError(qerr)
 		}
 	}
 

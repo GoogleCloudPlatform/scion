@@ -127,7 +127,7 @@ func (s *UsageLedgerStore) IngestUsageBatch(ctx context.Context, in *store.Usage
 	if in == nil {
 		return nil, fmt.Errorf("%w: ingest input is required", store.ErrInvalidInput)
 	}
-	if len(in.Events) == 0 && in.MeterHealth == nil && len(in.MarkSessionMetricsConvertedIDs) == 0 {
+	if len(in.Events) == 0 && in.MeterHealth == nil && len(in.MarkSessionMetricsConverted) == 0 {
 		return &store.UsageIngestBatchResult{}, nil
 	}
 
@@ -356,13 +356,24 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 
 	// Atomically stamp converted_at on converted/skipped agent_session_metrics
 	// rows in the same transaction as the ledger and rollup writes (D9a).
-	if len(in.MarkSessionMetricsConvertedIDs) > 0 && len(rejectedRows) == 0 {
-		seenIDs := make(map[uuid.UUID]struct{}, len(in.MarkSessionMetricsConvertedIDs))
-		uuids := make([]uuid.UUID, 0, len(in.MarkSessionMetricsConvertedIDs))
-		for _, rawID := range in.MarkSessionMetricsConvertedIDs {
-			uid, err := uuid.Parse(rawID)
+	// Rows whose event was rejected at persistence time are NOT stamped so
+	// non-rejected rows still make forward progress without livelock (O1).
+	if len(in.MarkSessionMetricsConverted) > 0 {
+		rejectedIDs := make(map[string]struct{}, len(rejectedRows))
+		for _, r := range rejectedRows {
+			rejectedIDs[r.EventID] = struct{}{}
+		}
+		seenIDs := make(map[uuid.UUID]struct{}, len(in.MarkSessionMetricsConverted))
+		uuids := make([]uuid.UUID, 0, len(in.MarkSessionMetricsConverted))
+		for _, m := range in.MarkSessionMetricsConverted {
+			if m.EventID != "" {
+				if _, rejected := rejectedIDs[m.EventID]; rejected {
+					continue
+				}
+			}
+			uid, err := uuid.Parse(m.ID)
 			if err != nil {
-				return nil, false, fmt.Errorf("%w: invalid session_metrics id %q", store.ErrInvalidInput, rawID)
+				return nil, false, fmt.Errorf("%w: invalid session_metrics id %q", store.ErrInvalidInput, m.ID)
 			}
 			if _, dup := seenIDs[uid]; dup {
 				continue
