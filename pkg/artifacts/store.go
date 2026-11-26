@@ -89,6 +89,15 @@ var ErrAttachmentNotOwned = errors.New("artifacts: the attachment was uploaded b
 // no longer an unsent upload: it was already sent in a message.
 var ErrAttachmentBound = errors.New("artifacts: the attachment was already sent")
 
+// ErrOwnerChanged is returned by TransferOwner when the artifact's current
+// owner does not match TransferOptions.ExpectOwner (under the row lock).
+var ErrOwnerChanged = errors.New("artifacts: the artifact's owner changed")
+
+// ErrKeyConflict is returned by TransferOwner when the target owner already
+// holds a live artifact with the same key in the same scope and ClearKey is
+// false.
+var ErrKeyConflict = errors.New("artifacts: the target owner already has an artifact with this key")
+
 // Version kinds.
 const (
 	VersionKindPublish = "publish"
@@ -158,17 +167,23 @@ type Artifact struct {
 	// gone, or nil while the owner is live (or was never checked).
 	OrphanedAt *time.Time
 	// SponsorRef is, for an artifact owned by an agent in a project scope,
-	// the id of the user at the root of the agent's recorded delegation
-	// chain when the artifact was created (ptone/scion#6028): the agent's
-	// delegating user, as SponsorRecorder answered at creation or the
-	// sponsor backfill recorded later for an older artifact. It is ""
-	// when nothing was recorded: a user-owned artifact, an attachment, an
-	// artifact created before sponsors were recorded and not backfilled,
-	// or one whose delegating user could not be resolved. The creation-time
-	// value stands: nothing updates a recorded value. It never gives
-	// access by itself; the steward and review clauses check the user
-	// again on every request.
+	// the id of the user at the root of the current owning agent's recorded
+	// delegation chain, recorded when that agent became the owner (creation,
+	// sponsor backfill, or ownership transfer). It is "" when nothing was
+	// recorded: a user-owned artifact, an attachment, an artifact created
+	// before sponsors were recorded and not backfilled, or one whose
+	// delegating user could not be resolved. It never gives access by itself;
+	// the steward and review clauses check the user again on every request.
 	SponsorRef string
+	// FormerOwnerKind, FormerOwnerRef and TransferredAt record the most
+	// recent ownership transfer of the artifact, or are zero when it has
+	// never been transferred. Full transfer history is in artifact_event.
+	FormerOwnerKind string
+	FormerOwnerRef  string
+	TransferredAt   *time.Time
+	// FormerKey holds the artifact's previous key when an ownership transfer
+	// cleared Key to resolve a collision on the target owner.
+	FormerKey string
 	// MessageProjectID is, for an attachment bound to a message, the project
 	// of that message as the hub derived it at bind time (ptone/scion#4596):
 	// nil while unknown (an unbound upload, or a row bound before migration
@@ -683,6 +698,48 @@ type Store interface {
 	// artifacts of scope kind, in ascending order, strictly after after
 	// ("" = from the start).
 	ListLiveScopeRefs(ctx context.Context, kind, after string, limit int) ([]string, error)
+
+	// TransferOwner atomically transfers ownership of artifactID to opts.To
+	// under the artifact's row lock, checking opts.ExpectOwner and actor.Expect,
+	// resolving key collisions per opts.ClearKey, clearing orphaned_at,
+	// recording former_owner_*/transferred_at/sponsor_ref, cleaning up any
+	// redundant principal grant on opts.To, optionally creating the new
+	// sponsor's automatic review grant, and appending the owner_transferred
+	// event.
+	TransferOwner(ctx context.Context, artifactID string, opts TransferOptions, actor *Actor, now time.Time) (*Artifact, TransferResult, error)
+}
+
+// TransferOptions qualifies Store.TransferOwner.
+type TransferOptions struct {
+	// ExpectOwner is the owner the caller observed; required. A mismatch
+	// under the row lock returns ErrOwnerChanged.
+	ExpectOwner Owner
+	// To is the new owner (agent in this phase).
+	To Owner
+	// Sponsor is the new owner's delegating user resolved by the host;
+	// required non-empty for agent targets.
+	Sponsor string
+	// ClearKey, when true, resolves a key collision with a live artifact
+	// owned by To in the same scope by moving Key into FormerKey and
+	// setting Key to NULL. When false, a collision returns ErrKeyConflict.
+	ClearKey bool
+	// SponsorReviewGrant, when true and Sponsor differs from the previous
+	// sponsor and holds no principal grant on the artifact, inserts an
+	// automatic system:sponsor_review review grant for the new sponsor.
+	SponsorReviewGrant bool
+	// FormerOwnerLive records whether the former owner was live at request
+	// time, included in the owner_transferred event detail.
+	FormerOwnerLive bool
+}
+
+// TransferResult reports what TransferOwner changed alongside the owner.
+type TransferResult struct {
+	FromOwner            Owner
+	FormerSponsor        string
+	KeyCleared           bool
+	RemovedGrantID       string
+	RemovedGrantPerm     string
+	SponsorReviewGrantID string
 }
 
 // AttachmentRow is one attachment ListMessageAttachments returns: the

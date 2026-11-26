@@ -87,6 +87,12 @@ type ArtifactResponse struct {
 	// a steward, or an owner or admin of its home project (the custodian
 	// clause), each a user whose credential permits artifact.manage there.
 	CanRetire bool `json:"canRetire,omitempty"`
+	// CanTransfer, on a GET of the artifact or of one of its versions, is
+	// true when hub.artifacts_transfer is on, the owner is an agent, the
+	// caller holds a steward authority with a session or dev credential, and
+	// the live-owner rule passes. Advisory only; POST /{id}/transfer decides
+	// again.
+	CanTransfer bool `json:"canTransfer,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
 	// true when the caller may publish new versions of it of any kind
 	// (edit, upload or review; see canWriteErr): the decision POST
@@ -258,6 +264,12 @@ type ArtifactInfo struct {
 	// (a deleted agent or user; see the owner liveness reconciler). The
 	// artifact is otherwise unchanged.
 	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
+	// FormerOwnerKind, FormerOwnerRef and TransferredAt record the most
+	// recent ownership transfer of the artifact, omitted when never
+	// transferred. Read-gated alongside the rest of ArtifactInfo.
+	FormerOwnerKind string     `json:"formerOwnerKind,omitempty"`
+	FormerOwnerRef  string     `json:"formerOwnerRef,omitempty"`
+	TransferredAt   *time.Time `json:"transferredAt,omitempty"`
 }
 
 // VersionInfo describes one version and its files.
@@ -295,7 +307,10 @@ func artifactInfo(a *Artifact) ArtifactInfo {
 		ID: a.ID, Ref: FormatRef(a.ID, 0), ScopeKind: a.ScopeKind, ScopeRef: a.ScopeRef,
 		OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef, Key: a.Key, Title: a.Title,
 		CurrentSeq: a.CurrentSeq, ExpiresAt: a.ExpiresAt, CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
-		OwnerDeleted: a.OrphanedAt != nil,
+		OwnerDeleted:    a.OrphanedAt != nil,
+		FormerOwnerKind: a.FormerOwnerKind,
+		FormerOwnerRef:  a.FormerOwnerRef,
+		TransferredAt:   a.TransferredAt,
 	}
 }
 

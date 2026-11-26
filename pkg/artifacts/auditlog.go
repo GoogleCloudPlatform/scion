@@ -61,7 +61,9 @@ const (
 	logKeyUnorphanedCount = "unorphaned_count"
 	// logKeyNotified is set on a grant entry whose request asked for
 	// notify (Ask for review): whether the subject was told.
-	logKeyNotified = "notified"
+	logKeyNotified       = "notified"
+	logKeyFormerOwnerRef = "former_owner_ref"
+	logKeyKeyCleared     = "key_cleared"
 )
 
 // Log outcomes.
@@ -94,13 +96,15 @@ const (
 	logActionOwnerPass        = "owner_pass"     // per-run summary of the owner liveness pass
 	logActionRetentionPass    = "retention_pass" // per-run summary of the expiry sweep
 
-	logActionRead       = "read"
-	logActionAdminister = "administer"
-	logActionWrite      = "write"
-	logActionCreate     = "create"
-	logActionDelete     = "delete"
-	logActionMove       = "move"
-	logActionShare      = "share"
+	logActionRead            = "read"
+	logActionAdminister      = "administer"
+	logActionWrite           = "write"
+	logActionCreate          = "create"
+	logActionDelete          = "delete"
+	logActionMove            = "move"
+	logActionShare           = "share"
+	logActionTransfer        = "transfer"
+	logActionTransferTargets = "transfer_targets"
 )
 
 // logActionReviewEnded is the entry of a caller deleting its own review
@@ -157,6 +161,17 @@ const (
 	logReasonNotifyNotPermitted = "notify_not_permitted"
 	logReasonNotifyUnavailable  = "notify_unavailable"
 	logReasonNotifyFailed       = "notify_failed"
+
+	// Ownership transfer refusal and error reasons (ptone/scion#9337).
+	logReasonTransferNotAllowed = "transfer_not_allowed"
+	logReasonSessionRequired    = "session_required"
+	logReasonOwnerLive          = "owner_live"
+	logReasonOwnerChanged       = "owner_changed"
+	logReasonKeyConflict        = "key_conflict"
+	logReasonInvalidTarget      = "invalid_target"
+	logReasonTargetIneligible   = "target_ineligible"
+	logReasonRateLimited        = "rate_limited"
+	logReasonUnavailable        = "unavailable"
 )
 
 // Log authorities: why the actor was allowed. They are the artifact_event
@@ -215,6 +230,12 @@ type logEntry struct {
 	count       int
 	// notified, when set, is logged as logKeyNotified.
 	notified *bool
+	// formerOwnerRef and keyCleared are set on ownership transfer entries.
+	formerOwnerRef string
+	keyCleared     *bool
+	// orphanedOverride, when set, overrides artifact.OrphanedAt != nil in
+	// logKeyOrphaned (e.g. from a live owner check on transfer).
+	orphanedOverride *bool
 }
 
 // logDecision writes e for the request r, as its caller.
@@ -264,7 +285,11 @@ func writeDecision(ctx context.Context, l *slog.Logger, level slog.Level, route,
 		str(logKeyProjectID, a.ScopeRef)
 		str(logKeyOwnerKind, a.OwnerKind)
 		if a.OwnerKind != "" {
-			attrs = append(attrs, slog.Bool(logKeyOrphaned, a.OrphanedAt != nil))
+			orphaned := a.OrphanedAt != nil
+			if e.orphanedOverride != nil {
+				orphaned = *e.orphanedOverride
+			}
+			attrs = append(attrs, slog.Bool(logKeyOrphaned, orphaned))
 		}
 	}
 	if e.seq > 0 {
@@ -281,6 +306,10 @@ func writeDecision(ctx context.Context, l *slog.Logger, level slog.Level, route,
 	}
 	if e.notified != nil {
 		attrs = append(attrs, slog.Bool(logKeyNotified, *e.notified))
+	}
+	str(logKeyFormerOwnerRef, e.formerOwnerRef)
+	if e.keyCleared != nil {
+		attrs = append(attrs, slog.Bool(logKeyKeyCleared, *e.keyCleared))
 	}
 	l.LogAttrs(ctx, level, "artifacts: "+e.action, attrs...)
 }
@@ -336,6 +365,10 @@ func routeTemplate(r *http.Request) string {
 		return base + "/" + reviewSessionsSegment + "/{sid}"
 	case sub[0] == reviewDraftSegment && len(sub) == 1:
 		return base + "/" + reviewDraftSegment
+	case sub[0] == transferSegment && len(sub) == 1:
+		return base + "/" + transferSegment
+	case sub[0] == transferTargetsSegment && len(sub) == 1:
+		return base + "/" + transferTargetsSegment
 	case sub[0] == "versions" && len(sub) == 1:
 		return base + "/versions"
 	case sub[0] == "versions" && len(sub) == 2:

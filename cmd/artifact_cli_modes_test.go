@@ -87,3 +87,22 @@ func TestArtifactCommentsMode(t *testing.T) {
 		assert.True(t, containsLine(art.Long, "scion artifact comments <ref>"), "comments help line in %s mode", mode)
 	}
 }
+
+// TestArtifactTransferMode: artifact transfer is human-only, removed in agent
+// mode and dropped from the artifact help there (ptone/scion#9337).
+func TestArtifactTransferMode(t *testing.T) {
+	assert.False(t, agentAllowed["artifact.transfer"])
+	_, _, err := rootCmd.Find([]string{"artifact", "transfer"})
+	assert.NoError(t, err, "artifact transfer is registered")
+
+	for mode, want := range map[CLIMode]bool{ModeHuman: true, ModeAgent: false} {
+		root := &cobra.Command{Use: "scion"}
+		art := &cobra.Command{Use: "artifact", Long: artifactCmd.Long}
+		art.AddCommand(&cobra.Command{Use: "transfer"})
+		art.AddCommand(&cobra.Command{Use: "get"})
+		root.AddCommand(art)
+		applyModeRestrictions(root, mode)
+		assert.Equal(t, want, slices.Contains(collectCommandNames(root), "artifact.transfer"), "artifact.transfer in %s mode", mode)
+		assert.Equal(t, want, containsLine(art.Long, "scion artifact transfer <ref> --to <agent>"), "transfer help line in %s mode", mode)
+	}
+}

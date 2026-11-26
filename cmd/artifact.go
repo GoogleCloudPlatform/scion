@@ -78,6 +78,7 @@ Commands:
   scion artifact view <ref> [--check] [--show-link]
   scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
   scion artifact grants <ref> [--add|--remove] List or change grants (users only)
+  scion artifact transfer <ref> --to <agent>   Transfer ownership to an agent (users only)
   scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names, as for "scion hub": an unrecognized subcommand, including one

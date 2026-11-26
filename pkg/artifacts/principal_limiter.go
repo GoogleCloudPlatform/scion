@@ -39,12 +39,17 @@ const (
 	// LimitDraftWrite covers writing and deleting a saved draft review. It
 	// is defined for durable draft reviews, which have no route yet.
 	LimitDraftWrite LimitFamily = "draft_write"
+	// LimitTransfer covers POST /api/v1/artifacts/{id}/transfer (ptone/scion#9337):
+	// 30 transfers per hour per user, 300 per hour globally per hub instance.
+	LimitTransfer LimitFamily = "transfer"
 )
 
 // familyLimit is one family's rates: a principal's sustained rate and
 // burst, and the rate of all principals together on one hub instance.
+// period defaults to time.Minute when zero.
 type familyLimit struct {
 	perMinute, burst, globalPerMinute int
+	period                            time.Duration
 }
 
 // principalFamilyLimits are the rates of every family.
@@ -55,11 +60,13 @@ type familyLimit struct {
 // with tabs on several artifacts. review_list and draft_write have no route
 // yet; their rates are set for the planned uses: review_list read on page
 // load, on return to a tab (at most every 30 s) and on entering edit mode,
-// and draft_write an autosave every few seconds while typing.
+// and draft_write an autosave every few seconds while typing. transfer:
+// 30/h per user, 300/h global.
 var principalFamilyLimits = map[LimitFamily]familyLimit{
 	LimitReviewBeat: {perMinute: 24, burst: 24, globalPerMinute: 2400},
 	LimitReviewList: {perMinute: 10, burst: 10, globalPerMinute: 1000},
 	LimitDraftWrite: {perMinute: 12, burst: 12, globalPerMinute: 1200},
+	LimitTransfer:   {perMinute: 30, burst: 30, globalPerMinute: 300, period: time.Hour},
 }
 
 // principalMaxClients caps the principals one family tracks at once. As
@@ -85,7 +92,11 @@ type principalLimiter struct {
 func newPrincipalLimiter(now func() time.Time) *principalLimiter {
 	l := &principalLimiter{families: make(map[LimitFamily]*rateLimiter, len(principalFamilyLimits))}
 	for f, lim := range principalFamilyLimits {
-		l.families[f] = newRateLimiter(now, lim.perMinute, lim.burst, lim.globalPerMinute, lim.globalPerMinute, principalMaxClients)
+		period := lim.period
+		if period <= 0 {
+			period = time.Minute
+		}
+		l.families[f] = newPeriodLimiter(now, lim.perMinute, period, lim.burst, lim.globalPerMinute, period, lim.globalPerMinute, principalMaxClients)
 	}
 	return l
 }

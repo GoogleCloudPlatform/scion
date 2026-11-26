@@ -135,6 +135,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "artifacts_review.go", function: "deliverArtifactReview", symbol: "dispatchWithBrokerRetry",
 		class: "exempt", reason: "derivative: review notice to the artifact's owning agent after an authorized finalize"},
 
+	// artifacts_transfer.go: dispatchTransferNotice — derivative notice
+	// (ptone/scion#9337). Sent after an authorized steward committed an
+	// ownership transfer; goes to the new owner (and live former owner) as
+	// "system" with sanitized steward display name and artifact reference.
+	{file: "artifacts_transfer.go", function: "dispatchTransferNotice", symbol: "dispatchWithBrokerRetry",
+		class: "exempt", reason: "derivative: ownership transfer notice to new/former owning agent after an authorized transfer"},
+
 	// notifications.go: dispatchToAgent — UNGUARDED notification fan-out.
 	// Subscription-only authorization; revocation not re-evaluated.
 	{file: "notifications.go", function: "dispatchToAgent", symbol: "dispatchWithBrokerRetry",

@@ -176,6 +176,7 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc.SetReviewNotifier(s.notifyArtifactReview)
 	svc.SetReviewWakeOfferer(s.offerArtifactReviewWake)
 	svc.SetReviewDeliveryNotifier(s.notifyArtifactReviewWithDelivery)
+	svc.SetTransferNotifier(s.notifyArtifactTransfer)
 	svc.SetLogger(s.artifactLog)
 	svc.SetArchiveEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.ArtifactArchive) })
 	svc.SetFilterQueryDialectEnabled(func(context.Context) bool { return s.experimentEnabled(experiments.FiltersQueryDialect) })
