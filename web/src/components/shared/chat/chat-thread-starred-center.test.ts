@@ -15,11 +15,11 @@
  */
 
 /**
- * The starred-only center of <scion-chat-thread> (messageFilter 'starred',
- * web.chat_starred_messages): the filtered history request, standalone
- * rendering, the banner in place of the composer, read-state invariance,
- * no live appends, refetch on star invalidations and deletions, and the
- * ways back to the full conversation (jump, Show all, Reply, reply preview).
+ * The starred-only center of <scion-chat-thread> (messageFilter 'starred'):
+ * the filtered history request, standalone rendering, the banner in place of
+ * the composer, read-state invariance, no live appends, refetch on star
+ * invalidations and deletions, and the ways back to the full conversation
+ * (jump, Show all, Reply, reply preview).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -160,12 +160,6 @@ function action(el: ScionChatThread, msg: Message, id: string): MenuActionLike |
   return (el as unknown as Internals).messageMenuActions(msg).find((a) => a.id === id);
 }
 
-function setFlag(on: boolean): void {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': on,
-  };
-}
-
 function filterEvents(el: ScionChatThread): MessageFilterChangeDetail[] {
   const seen: MessageFilterChangeDetail[] = [];
   el.addEventListener('chat-message-filter-change', (e) =>
@@ -178,7 +172,6 @@ describe('scion-chat-thread starred-only center', () => {
   beforeEach(() => {
     apiFetch.mockReset();
     showToastMock.mockReset();
-    setFlag(true);
   });
 
   afterEach(() => {
@@ -697,7 +690,6 @@ describe('scion-chat-thread starred-only center: reconcile and semantics', () =>
   beforeEach(() => {
     apiFetch.mockReset();
     showToastMock.mockReset();
-    setFlag(true);
     vi.spyOn(Date, 'now').mockImplementation(() => now);
   });
 
@@ -779,7 +771,6 @@ describe('scion-chat-thread starred-only center: focus repair', () => {
   beforeEach(() => {
     apiFetch.mockReset();
     showToastMock.mockReset();
-    setFlag(true);
   });
 
   afterEach(() => {

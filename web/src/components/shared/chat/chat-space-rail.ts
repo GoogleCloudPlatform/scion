@@ -65,8 +65,7 @@ import {
 } from './context-menu.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import { stateManager } from '../../../client/state.js';
-import { chatStarsLocalChanges, starredMessagesEnabled } from '../../../client/chat-stars.js';
-import { FEATURE_FLAGS_CHANGED_EVENT } from '../../../utils/feature-flags.js';
+import { chatStarsLocalChanges } from '../../../client/chat-stars.js';
 import {
   STARRED_RAIL_RECONCILE_MS,
   StarredRailController,
@@ -1422,11 +1421,10 @@ export class ScionChatSpaceRail extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    // Restore persisted filter/sort from localStorage. A stored Starred
-    // filter is ignored while the experiment is off.
+    // Restore persisted filter/sort from localStorage.
     const savedFilter = localStorage.getItem(RAIL_FILTER_STORAGE_KEY);
     if (savedFilter === 'unread') this.spaceFilter = 'unread';
-    if (savedFilter === 'starred' && starredMessagesEnabled()) this.spaceFilter = 'starred';
+    if (savedFilter === 'starred') this.spaceFilter = 'starred';
     this.starred.addEventListener('change', this.handleStarredChange);
     stateManager.addEventListener('chat-stars-updated', this.handleStarredInvalidate);
     stateManager.addEventListener('connected', this.handleStarredInvalidate);
@@ -1434,8 +1432,6 @@ export class ScionChatSpaceRail extends LitElement {
     // Returning to the tab refetches once (visibilitychange covers it; a
     // window focus listener as well would refetch twice).
     document.addEventListener('visibilitychange', this.handleStarredVisibility);
-    // A flag change re-runs syncStarredFilter (leaving Starred if it is off).
-    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
     if (this.spaceFilter === 'starred') this.startStarred();
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
@@ -1635,7 +1631,6 @@ export class ScionChatSpaceRail extends LitElement {
     stateManager.removeEventListener('connected', this.handleStarredInvalidate);
     chatStarsLocalChanges.removeEventListener('changed', this.handleStarredInvalidate);
     document.removeEventListener('visibilitychange', this.handleStarredVisibility);
-    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
     this.stopStarred();
     if (this._pullAnnounceTimer) {
       clearTimeout(this._pullAnnounceTimer);
@@ -4426,16 +4421,14 @@ export class ScionChatSpaceRail extends LitElement {
             <sl-icon name="envelope" aria-hidden="true"></sl-icon>
             Unread
           </button>
-          ${starredMessagesEnabled()
-            ? html`<button
-                class=${this.spaceFilter === 'starred' ? 'active' : ''}
-                aria-pressed=${this.spaceFilter === 'starred' ? 'true' : 'false'}
-                @click=${() => this.setSpaceFilter('starred', true)}
-              >
-                <sl-icon name="star" aria-hidden="true"></sl-icon>
-                Starred
-              </button>`
-            : nothing}
+          <button
+            class=${this.spaceFilter === 'starred' ? 'active' : ''}
+            aria-pressed=${this.spaceFilter === 'starred' ? 'true' : 'false'}
+            @click=${() => this.setSpaceFilter('starred', true)}
+          >
+            <sl-icon name="star" aria-hidden="true"></sl-icon>
+            Starred
+          </button>
         </div>
         <sl-dropdown>
           <sl-icon-button
@@ -4482,12 +4475,11 @@ export class ScionChatSpaceRail extends LitElement {
    * Set the space filter. `fromUser` is a pick in the filter control: only
    * that is persisted to localStorage (the only thing the rail persists),
    * and the page is told (`rail-filter-change`) so it can apply or clear
-   * the starred-only center of an open conversation. A change the page or
-   * the experiment drives (a full-context permalink, a jump, the
-   * experiment turning off) leaves the stored preference alone.
+   * the starred-only center of an open conversation. A change the page
+   * drives (a full-context permalink, a jump) leaves the stored preference
+   * alone.
    */
   private setSpaceFilter(filter: RailFilter, fromUser = false): void {
-    if (filter === 'starred' && !starredMessagesEnabled()) filter = 'all';
     if (this.spaceFilter === filter) return;
     this.spaceFilter = filter;
     if (fromUser) {
@@ -4549,11 +4541,6 @@ export class ScionChatSpaceRail extends LitElement {
    * changed after it started applies to it.
    */
   private syncStarredFilter(changed: Map<string, unknown>): void {
-    // The experiment turned off in this browser: Starred is no longer offered.
-    if (this.spaceFilter === 'starred' && !starredMessagesEnabled()) {
-      this.setSpaceFilter('all');
-      return;
-    }
     if (changed.has('centerFilter') || changed.has('selectedKey')) {
       if (this.selectedKey && this.centerFilter === 'starred' && this.spaceFilter !== 'starred') {
         this.setSpaceFilter('starred');
@@ -4593,10 +4580,6 @@ export class ScionChatSpaceRail extends LitElement {
   /** A stars invalidation, a local star change, reconnect or focus: refetch. */
   private handleStarredInvalidate = (): void => {
     if (this.spaceFilter === 'starred') void this.starred.refresh();
-  };
-
-  private handleFlagsChanged = (): void => {
-    this.requestUpdate();
   };
 
   private handleStarredVisibility = (): void => {

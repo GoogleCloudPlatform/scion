@@ -15,11 +15,10 @@
  */
 
 /**
- * The starred-only center's URL (web.chat_starred_messages): the page takes
- * `?messages=starred` from a conversation route, drops it from any other
- * route or while the experiment is off, pushes a separate history entry
- * when the thread leaves the filter, and opens a header entry in full
- * context from the filtered center.
+ * The starred-only center's URL: the page takes `?messages=starred` from a
+ * conversation route, drops it from any other route, pushes a separate
+ * history entry when the thread leaves the filter, and opens a header entry
+ * in full context from the filtered center.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -85,12 +84,6 @@ function at(url: string): void {
   window.history.replaceState({}, '', url);
 }
 
-function setFlag(on: boolean): void {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': on,
-  };
-}
-
 async function settle(): Promise<void> {
   for (let i = 0; i < 5; i++) await Promise.resolve();
   await new Promise((r) => setTimeout(r, 0));
@@ -105,12 +98,10 @@ beforeEach(() => {
   replaceRoute.mockClear();
   navigateTo.mockClear();
   showToastMock.mockClear();
-  setFlag(true);
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
-  delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
   at('/');
 });
 
@@ -147,21 +138,6 @@ describe('the starred-only center URL', () => {
     }
     // A stray filter on a non-conversation route is dropped silently.
     expect(showToastMock).not.toHaveBeenCalled();
-  });
-
-  it('shows ordinary history and drops the filter while the experiment is off', () => {
-    setFlag(false);
-    at('/chat/my-project/topic-a?messages=starred#msg-' + M1);
-    const p = page();
-    p.syncMessageFilterFromUrl();
-    expect(p.centerMessageFilter).toBe('');
-    expect(window.location.search).toBe('');
-    expect(window.location.hash).toBe('#msg-' + M1);
-    // The change is made visible: the full history is not the starred one.
-    expect(showToastMock).toHaveBeenCalledWith(
-      'Starred messages are not available. Showing all messages.',
-      'warning'
-    );
   });
 
   it('a jump out of the filter is a new entry naming the message; Show all names none', () => {

@@ -15,11 +15,10 @@
  */
 
 /**
- * The Starred rail filter (web.chat_starred_messages): the third option of
- * the rail's filter control, fed by GET /api/v1/chat/starred-conversations
- * (never by the loaded All/Unread rail), grouped into a DMs section and
- * project headings, with Load more, its distinct states and selection into
- * the starred-only center.
+ * The Starred rail filter: the third option of the rail's filter control,
+ * fed by GET /api/v1/chat/starred-conversations (never by the loaded
+ * All/Unread rail), grouped into a DMs section and project headings, with
+ * Load more, its distinct states and selection into the starred-only center.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -101,12 +100,6 @@ function respond(input: RequestInfo | URL): Promise<Response> {
   return Promise.resolve(new Response('{}', { status: 200 }));
 }
 
-function setFlag(on: boolean): void {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': on,
-  };
-}
-
 async function settle(el: any): Promise<void> {
   for (let i = 0; i < 4; i++) {
     await new Promise((r) => setTimeout(r, 0));
@@ -158,7 +151,6 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  setFlag(true);
   localStorage.clear();
   starredPages = [];
   starredCalls.length = 0;
@@ -169,7 +161,6 @@ afterEach(() => {
   vi.clearAllMocks();
   document.body.innerHTML = '';
   localStorage.clear();
-  setFlag(false);
 });
 
 describe('space rail — Starred filter control', () => {
@@ -189,15 +180,6 @@ describe('space rail — Starred filter control', () => {
     await settle(el);
     expect(button(el, 'Starred').getAttribute('aria-pressed')).toBe('true');
     expect(button(el, 'All').getAttribute('aria-pressed')).toBe('false');
-  });
-
-  it('has no Starred option while the experiment is off, and ignores a stored Starred filter', async () => {
-    setFlag(false);
-    localStorage.setItem('scion-chat-space-filter', 'starred');
-    const el = await mount();
-    expect(filterButtons(el).map((b) => b.textContent?.trim())).toEqual(['All', 'Unread']);
-    expect(el.spaceFilter).toBe('all');
-    expect(starredCalls).toHaveLength(0);
   });
 
   it('restores a stored Starred filter and persists only the filter', async () => {
@@ -494,30 +476,6 @@ describe('space rail — Starred and the experiment', () => {
     expect(el.spaceFilter).toBe('all');
     expect(el._starredPoll).toBeNull();
     expect(localStorage.getItem('scion-chat-space-filter')).toBe('starred');
-  });
-
-  it('leaves Starred when the experiment is turned off in the browser', async () => {
-    starredPages = [{ items: ROWS }];
-    const el = await mount();
-    button(el, 'Starred').click();
-    await settle(el);
-    setFlag(false);
-    el.requestUpdate();
-    await settle(el);
-    expect(el.spaceFilter).toBe('all');
-    expect(el._starredPoll).toBeNull();
-  });
-
-  it('a flag change with the experiment off leaves Starred at once', async () => {
-    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
-    starredPages = [{ items: ROWS }];
-    const el = await mount();
-    button(el, 'Starred').click();
-    await settle(el);
-    setFeatureFlag('web.chat_starred_messages', false);
-    await settle(el);
-    expect(el.spaceFilter).toBe('all');
-    expect(filterButtons(el).map((b) => b.textContent?.trim())).toEqual(['All', 'Unread']);
   });
 
   it('a page-driven change to All keeps the stored Starred preference', async () => {

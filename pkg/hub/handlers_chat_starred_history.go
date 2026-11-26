@@ -24,13 +24,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// The starred-only variant of conversation history (the filtered center of
-// web.chat_starred_messages):
+// The starred-only variant of conversation history (the filtered center):
 //
 //	GET /api/v1/chat/conversations/{key}/messages?starred=true[&limit][&cursor][&around]
 //
@@ -41,9 +39,7 @@ import (
 // conversation is resolved as the other star reads resolve it (the shared
 // read target, inbox:read for a token), and the continuation is a sealed
 // cursor bound to the conversation, the caller and the filter, so it is
-// not interchangeable with an ordinary history cursor. While the
-// experiment is off the variant is a 404; it never falls back to
-// unfiltered history.
+// not interchangeable with an ordinary history cursor.
 
 const (
 	// chatStarredHistoryBinding is the cursor binding endpoint of the
@@ -75,12 +71,6 @@ func rawQueryHasKey(rawQuery, key string) bool {
 // handleStarredHistory implements the starred=true variant of
 // handleConversationHistory.
 func (s *Server) handleStarredHistory(w http.ResponseWriter, r *http.Request, key string) {
-	// The experiment is checked before anything else: off, the filter is a
-	// 404, never ignored.
-	if !s.experimentEnabled(experiments.ChatStarredMessages) {
-		http.NotFound(w, r)
-		return
-	}
 	q, ok := starQuery(w, r, []string{"starred", "limit", "cursor", "around"}, "")
 	if !ok {
 		return

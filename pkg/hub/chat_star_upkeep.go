@@ -22,14 +22,13 @@ import (
 	"time"
 )
 
-// Lifecycle of starred messages (web.chat_starred_messages): cleanup when
-// a conversation, user or project is deleted, and a bounded periodic
-// upkeep pass that repairs stored conversation metadata and purges stars
-// whose target is permanently gone. None of it is needed for privacy:
-// every read joins the live message and re-checks access, so a cleanup
-// that fails never makes deleted content readable; it only leaves an
-// unreachable row for the next upkeep pass. All of it runs whether or not
-// the experiment is on.
+// Lifecycle of starred messages: cleanup when a conversation, user or
+// project is deleted, and a bounded periodic upkeep pass that repairs
+// stored conversation metadata and purges stars whose target is
+// permanently gone. None of it is needed for privacy: every read joins the
+// live message and re-checks access, so a cleanup that fails never makes
+// deleted content readable; it only leaves an unreachable row for the next
+// upkeep pass.
 
 const (
 	// messageStarUpkeepTick is how often each replica runs an upkeep pass.
@@ -103,7 +102,7 @@ func (s *Server) deleteMessageStarsOf(ctx context.Context, what, id string,
 
 // startMessageStarUpkeep starts the replica's upkeep loop: one pass every
 // messageStarUpkeepTick until ctx is cancelled or stopMessageStarUpkeep
-// runs. It runs whenever native chat is enabled, experiment on or off.
+// runs. It runs whenever native chat is enabled.
 func (s *Server) startMessageStarUpkeep(ctx context.Context) {
 	if !s.nativeChatEnabled() {
 		return

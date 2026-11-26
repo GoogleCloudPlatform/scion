@@ -24,16 +24,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// GET /api/v1/chat/starred-conversations: the Starred rail
-// (web.chat_starred_messages). Each item is one conversation the caller
-// can read now in which the caller has at least one live star, with its
-// current name, activity and project. No excerpt, count or other user's
-// state is returned.
+// GET /api/v1/chat/starred-conversations: the Starred rail. Each item is
+// one conversation the caller can read now in which the caller has at least
+// one live star, with its current name, activity and project. No excerpt,
+// count or other user's state is returned.
 //
 // Query: projectId (optional, a project the caller can read), sort
 // (activity, the default, or alpha), limit (1-100, default 30) and cursor.
@@ -82,10 +80,6 @@ type starredConversationsCursor struct {
 
 // handleChatStarredConversations serves /api/v1/chat/starred-conversations.
 func (s *Server) handleChatStarredConversations(w http.ResponseWriter, r *http.Request) {
-	if !s.experimentEnabled(experiments.ChatStarredMessages) {
-		http.NotFound(w, r)
-		return
-	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return

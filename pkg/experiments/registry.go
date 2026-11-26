@@ -264,14 +264,6 @@ const Decisions = "web.decisions"
 // and bell discovery link in the web UI (LayerWeb).
 const InboxDashboard = "web.inbox_dashboard"
 
-// ChatStarredMessages gates starred messages in native web chat: the
-// message Star/Unstar action, the private starred indicator, the
-// conversation header's starred-message list, the starred-only center and
-// the rail's Starred filter in the web UI, and the hub's /api/v1/chat/stars
-// and /api/v1/chat/starred-conversations routes and the starred=true
-// history variant (404 while off). Stored stars are kept while it is off.
-const ChatStarredMessages = "web.chat_starred_messages"
-
 // ChatRetention gates hub-wide chat message retention: the
 // chat_retention operational-settings section and its admin API (404 while
 // off), the chat-retention sweeper, which purges nothing while it is off,
@@ -1124,17 +1116,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-02-21",
 	},
 	{
-		Name:        ChatStarredMessages,
-		Title:       "Starred messages in chat",
-		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
-		Default:     true,
-		Layers:      []Layer{LayerWeb, LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#5797",
-		Owner:       "native-chat",
-		ReviewBy:    "2027-01-31",
-	},
-	{
 		Name:        ChatRetention,
 		Title:       "Chat message retention",
 		Description: "Lets a hub admin bound how long chat history is kept, with one hub-wide age window: a background sweep hard-deletes messages older than the window, with their mentions, stars, reply metadata and attachment links, in small paced batches. Gates the Chat retention settings section and its admin API (404 while off), the sweep and the history marker (LayerServer) and the settings panel and history divider (LayerWeb). Turning it on deletes nothing until an admin also enables the sweep and sets a window; turning it off stops the sweep. Take a database backup before enabling.",
@@ -1556,6 +1537,8 @@ var compiledRetired = []string{
 	"hub.authorization_decision_audit_v2",
 	// Graduated: gs:// link previews are always on (ptone/scion#9482).
 	"web.gcs_links",
+	// Graduated: starred messages in native chat are always on (ptone/scion#9485).
+	"web.chat_starred_messages",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

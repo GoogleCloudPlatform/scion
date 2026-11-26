@@ -1342,7 +1342,7 @@ export class ScionChatMessage extends LitElement {
   fromAgent = false;
 
   /**
-   * Whether the viewer starred this message (web.chat_starred_messages).
+   * Whether the viewer starred this message.
    * Shows a small, noninteractive filled star in the message meta; the
    * Star/Unstar toggle lives in the message menu.
    */
@@ -1350,7 +1350,7 @@ export class ScionChatMessage extends LitElement {
   starred = false;
 
   /**
-   * Show the message's More actions button (web.chat_starred_messages):
+   * Show the message's More actions button:
    * the keyboard entry to the message menu. The thread makes one message's
    * button the list's single tab stop (`actionsTabIndex` 0, the others
    * -1) and moves it with the arrow keys. It is always visible: bare dots

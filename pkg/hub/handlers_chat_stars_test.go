@@ -34,12 +34,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// starFixture is a chatFixture with the starred-messages experiment set
-// and an event publisher.
+// starFixture is a chatFixture with an event publisher and MessageStarStore.
 type starFixture struct {
 	*chatFixture
 	ep    *ChannelEventPublisher
@@ -47,19 +45,7 @@ type starFixture struct {
 	db    *sql.DB
 }
 
-// setStarsExperiment sets web.chat_starred_messages through operational settings.
-func setStarsExperiment(t *testing.T, srv *Server, enabled, _ bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, experiments.ChatStarredMessages, enabled)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	_, err := ops.Refresh(context.Background())
-	require.NoError(t, err)
-	srv.SetOperationalSettings(ops)
-	require.Equal(t, enabled, srv.experimentEnabled(experiments.ChatStarredMessages))
-}
-
-func newStarFixture(t *testing.T, readSwitch bool) *starFixture {
+func newStarFixture(t *testing.T, _ bool) *starFixture {
 	t.Helper()
 	f := &starFixture{chatFixture: newChatFixture(t)}
 	f.ep = NewChannelEventPublisher()
@@ -70,7 +56,6 @@ func newStarFixture(t *testing.T, readSwitch bool) *starFixture {
 	db, ok := f.s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
 	f.db = db.DB()
-	setStarsExperiment(t, f.srv, true, readSwitch)
 	return f
 }
 
@@ -195,29 +180,6 @@ func starEvents(t *testing.T, ch <-chan Event) []string {
 		subjects = append(subjects, e.Subject)
 	}
 	return subjects
-}
-
-func TestChatStars_ExperimentOffIs404(t *testing.T) {
-	f := newStarFixture(t, true)
-	msg := f.threadMsg(t, f.topicA, f.projA, "hello", time.Now())
-	setStarsExperiment(t, f.srv, false, true)
-	for _, c := range []struct{ method, path string }{
-		{http.MethodPut, starPath(msg)},
-		{http.MethodDelete, starPath(msg)},
-		{http.MethodGet, starPath(msg)},
-		{http.MethodGet, starStatePath(msg)},
-		{http.MethodGet, starListPath(f.topicA)},
-		{http.MethodPost, "/api/v1/chat/stars"},
-	} {
-		rec := f.session(t, f.admin, c.method, c.path, map[string]string{"conversationKey": f.topicA})
-		assert.Equal(t, http.StatusNotFound, rec.Code, "%s %s: %s", c.method, c.path, rec.Body.String())
-	}
-	// Stored stars are kept while it is off.
-	_, _, err := f.stars.AddMessageStar(context.Background(), f.admin, StarTarget{MessageID: msg, ProjectID: f.projA,
-		Selector: StarSelector{ConversationKey: f.topicA, Channel: "web", ThreadID: f.topicA}})
-	require.NoError(t, err)
-	setStarsExperiment(t, f.srv, true, true)
-	assert.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.admin, http.MethodGet, starStatePath(msg), nil)))
 }
 
 func TestChatStars_NoCapableStoreIs503(t *testing.T) {

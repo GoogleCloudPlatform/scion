@@ -34,13 +34,11 @@ import (
 )
 
 // starRingReplica builds a keyring-mode replica (newCapReplica) of the star
-// fixture's deployment: the same database, chat store and attachment store,
-// and the starred-messages experiment on.
+// fixture's deployment: the same database, chat store and attachment store.
 func starRingReplica(t *testing.T, f *starFixture, k *keyring.Keyring, clk *krClock) *Server {
 	t.Helper()
 	r := newCapReplica(t, f.s, k, clk)
 	mirrorHubResources(r, f.srv)
-	setStarsExperiment(t, r, true, true)
 	return r
 }
 

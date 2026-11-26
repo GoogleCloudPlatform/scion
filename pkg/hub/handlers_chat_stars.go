@@ -28,13 +28,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
-// Starred messages in native chat (web.chat_starred_messages):
+// Starred messages in native chat:
 //
 //	PUT    /api/v1/chat/stars/{messageId}   star a message (body: conversationKey)
 //	DELETE /api/v1/chat/stars/{messageId}   remove the caller's star (always 204)
@@ -48,8 +47,7 @@ import (
 // out-of-scope, unstarred or unreadable target is one shared 404. A user
 // access token needs inbox:write to add or remove and inbox:read to read,
 // for the conversation's project (a DM between users needs a hub
-// boundary). While the experiment is off every route answers 404. Project
-// threads, agent DMs and DMs between users are all served.
+// boundary). Project threads, agent DMs and DMs between users are all served.
 
 const (
 	chatStarsDefaultLimit = 30
@@ -120,10 +118,6 @@ func writeStarNotFound(w http.ResponseWriter) {
 
 // handleChatStars serves /api/v1/chat/stars (the list).
 func (s *Server) handleChatStars(w http.ResponseWriter, r *http.Request) {
-	if !s.experimentEnabled(experiments.ChatStarredMessages) {
-		http.NotFound(w, r)
-		return
-	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
@@ -139,10 +133,6 @@ func (s *Server) handleChatStars(w http.ResponseWriter, r *http.Request) {
 // /api/v1/chat/stars/{messageId}. The literal state route is matched
 // before the message ID.
 func (s *Server) handleChatStarRoutes(w http.ResponseWriter, r *http.Request) {
-	if !s.experimentEnabled(experiments.ChatStarredMessages) {
-		http.NotFound(w, r)
-		return
-	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/stars/")
 	if rest == "state" {
 		if r.Method != http.MethodGet {
@@ -1003,11 +993,10 @@ func starDMPermalink(key, messageID string) string {
 	return chatDMWebPath(key) + "#msg-" + url.PathEscape(messageID)
 }
 
-// messageStarStoreProblem returns why starred messages cannot be served
-// while the experiment is on, or "" when they can (or the experiment is
-// off, or native chat is disabled).
+// messageStarStoreProblem returns why starred messages cannot be served,
+// or "" when they can (or native chat is disabled).
 func (s *Server) messageStarStoreProblem() string {
-	if !s.nativeChatEnabled() || !s.experimentEnabled(experiments.ChatStarredMessages) {
+	if !s.nativeChatEnabled() {
 		return ""
 	}
 	s.mu.RLock()
@@ -1022,11 +1011,11 @@ func (s *Server) messageStarStoreProblem() string {
 	return ""
 }
 
-// validateMessageStarStore logs, at startup, an experiment that is on
-// without a capable chat store; its routes answer 503 until fixed.
+// validateMessageStarStore logs, at startup, when native chat is enabled
+// without a star-capable chat store; its routes answer 503 until fixed.
 func (s *Server) validateMessageStarStore() {
 	if problem := s.messageStarStoreProblem(); problem != "" {
-		slog.Error("chat stars: "+experiments.ChatStarredMessages+" is on but starred messages are unavailable", "reason", problem)
+		slog.Error("chat stars: starred messages are unavailable", "reason", problem)
 	}
 }
 
@@ -1041,10 +1030,9 @@ func markChatMessageDeleted(ctx context.Context, wcs WebChatStore, messageID str
 }
 
 // publishStarsChangedTo sends the content-free stars invalidation to each
-// user's own subject while the experiment is on. No owner list is
-// published anywhere else.
+// user's own subject. No owner list is published anywhere else.
 func (s *Server) publishStarsChangedTo(ctx context.Context, userIDs []string) {
-	if len(userIDs) == 0 || !s.experimentEnabled(experiments.ChatStarredMessages) {
+	if len(userIDs) == 0 {
 		return
 	}
 	for _, id := range userIDs {

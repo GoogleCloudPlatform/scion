@@ -13,9 +13,9 @@
 // limitations under the License.
 
 /**
- * The Starred rail (web.chat_starred_messages), with mock data and a mocked
- * hub that serves GET /api/v1/chat/starred-conversations from its own star
- * state (sorted and paged as the hub does) and the starred-only history:
+ * The Starred rail, with mock data and a mocked hub that serves
+ * GET /api/v1/chat/starred-conversations from its own star state (sorted
+ * and paged as the hub does) and the starred-only history:
  *
  * - All / Unread / Starred; the DMs section and project headings; Recent
  *   and Alphabetical; Load more conversations; No starred conversations yet;

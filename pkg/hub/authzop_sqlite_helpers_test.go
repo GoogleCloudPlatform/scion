@@ -821,17 +821,16 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
 	// hub.conduit, hub.agent_delegation, federation.project_visitors,
-	// web.chat_starred_messages, hub.agent_edit_held,
-	// hub.user_delete_force_cascade, hub.artifact_archive,
-	// hub.artifacts_open_review_check, hub.project_self_leave and
-	// hub.runtime_orphan_reconcile on too, so
+	// hub.agent_edit_held, hub.user_delete_force_cascade,
+	// hub.artifact_archive, hub.artifacts_open_review_check,
+	// hub.project_self_leave and hub.runtime_orphan_reconcile on too, so
 	// their experiment-gated
 	// routes are live: the registry above with them also defaulting on (no
 	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
-			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
+			e.Name == experiments.AgentEditHeld ||
 			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
 			e.Name == experiments.ArtifactsOpenReviewCheck || e.Name == experiments.ArtifactsReviewDrafts ||
 			e.Name == experiments.ArtifactsTransfer || e.Name == experiments.ArtifactsReviewRequests ||
@@ -849,7 +848,6 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
-	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
 	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))

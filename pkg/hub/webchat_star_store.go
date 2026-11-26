@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Starred messages in native web chat (web.chat_starred_messages).
+// Starred messages in native web chat.
 //
 // A star is a private (user, message) association in webchat_message_star.
 // The message ID is its identity; conversation_key and project_id are
@@ -339,8 +339,7 @@ CREATE INDEX IF NOT EXISTS idx_webchat_message_star_message
 `
 
 // initMessageStars creates webchat_message_star and its indexes
-// (idempotent) and records the migration after all DDL succeeded. It runs
-// whether or not the experiment is on.
+// (idempotent) and records the migration after all DDL succeeded.
 func (s *sqliteWebChatStore) initMessageStars() error {
 	if _, err := s.db.Exec(sqliteMessageStarDDL); err != nil {
 		return fmt.Errorf("webchat store: create message star table: %w", err)

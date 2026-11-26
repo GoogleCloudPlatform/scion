@@ -723,7 +723,6 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ConduitDeliver:                  testAdminPolicyDeny,
 	experiments.ExecSchedules:                   testAdminPolicyDeny,
 	experiments.ChatScheduledSend:               testAdminPolicyDeny,
-	experiments.ChatStarredMessages:             testAdminPolicyDeny,
 	experiments.Decisions:                       testAdminPolicyDeny,
 	experiments.InboxDashboard:                  testAdminPolicyDeny,
 	experiments.ChatRetention:                   testAdminPolicyDeny,

@@ -15,10 +15,10 @@
  */
 
 /**
- * The page side of the Starred rail (web.chat_starred_messages): a Starred
- * row opens the conversation's starred-only center (`?messages=starred`),
- * and a filter picked in the rail applies to, or clears, the open
- * conversation's center in a new history entry.
+ * The page side of the Starred rail: a Starred row opens the conversation's
+ * starred-only center (`?messages=starred`), and a filter picked in the rail
+ * applies to, or clears, the open conversation's center in a new history
+ * entry.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
@@ -64,12 +64,6 @@ function at(url: string): void {
   window.history.replaceState({}, '', url);
 }
 
-function setFlag(on: boolean): void {
-  (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
-    'web.chat_starred_messages': on,
-  };
-}
-
 function pushed(): string[] {
   return pushRoute.mock.calls.map((c) => String(c[0]));
 }
@@ -94,13 +88,11 @@ beforeAll(async () => {
 beforeEach(() => {
   pushRoute.mockClear();
   replaceRoute.mockClear();
-  setFlag(true);
   at('/chat');
 });
 
 afterEach(() => {
   document.body.innerHTML = '';
-  delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
   at('/');
 });
 
@@ -115,14 +107,6 @@ describe('a Starred rail row', () => {
     at('/chat');
     pushRoute.mockClear();
     p.handleThreadSelect(threadSelect());
-    expect(pushed()).toEqual(['/chat/proj/topic-a']);
-    expect(p.centerMessageFilter).toBe('');
-  });
-
-  it('opens full context while the experiment is off', () => {
-    setFlag(false);
-    const p = page();
-    p.handleThreadSelect(threadSelect('starred'));
     expect(pushed()).toEqual(['/chat/proj/topic-a']);
     expect(p.centerMessageFilter).toBe('');
   });

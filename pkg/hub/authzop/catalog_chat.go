@@ -872,7 +872,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.add",
 		Domain:      "chat",
-		Description: "Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off",
+		Description: "Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/stars/{messageId}", Method: "PUT"},
 		},
@@ -894,7 +894,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.read",
 		Domain:      "chat",
-		Description: "Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off",
+		Description: "Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/stars/{messageId}", Method: "GET"},
 		},
@@ -916,7 +916,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.state",
 		Domain:      "chat",
-		Description: "Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off",
+		Description: "Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/stars/state", Method: "GET"},
 		},
@@ -938,7 +938,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.list",
 		Domain:      "chat",
-		Description: "List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off",
+		Description: "List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/stars", Method: "GET"},
 		},
@@ -960,7 +960,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.conversations",
 		Domain:      "chat",
-		Description: "List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off",
+		Description: "List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/starred-conversations", Method: "GET"},
 		},
@@ -981,7 +981,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.history.starred",
 		Domain:      "chat",
-		Description: "Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history",
+		Description: "Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "starred"},
 		},
@@ -1002,7 +1002,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.star.remove",
 		Domain:      "chat",
-		Description: "Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off",
+		Description: "Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/stars/{messageId}", Method: "DELETE"},
 		},

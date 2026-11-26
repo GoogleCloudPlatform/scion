@@ -13,11 +13,10 @@
 // limitations under the License.
 
 /**
- * Starred messages across a DM promotion (web.chat_starred_messages), with
- * mock data. The hub's promotion path (both dialects, modern and legacy
- * rows, rollback, access re-check) is covered by the Go store and handler
- * tests; this case covers the browser side: a DM's star list is open when
- * the DM is promoted, and
+ * Starred messages across a DM promotion, with mock data. The hub's
+ * promotion path (both dialects, modern and legacy rows, rollback, access
+ * re-check) is covered by the Go store and handler tests; this case covers
+ * the browser side: a DM's star list is open when the DM is promoted, and
  *
  * - with the promotion event (the same subject and payload the hub
  *   publishes, user.<id>.chat.dm.promoted, plus the stars invalidation),
@@ -94,12 +93,6 @@ interface HubState {
 async function setupMocks(page: Page): Promise<HubState> {
   const hub: HubState = { promoted: false, detailCalls: 0, listKeys: [] };
   await setupChatMobileMocks(page);
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = {
-      ...(window.__SCION_FEATURES__ ?? {}),
-      'web.chat_starred_messages': true,
-    };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: USER_ID, email: 'fixture@example.test' } })
   );
