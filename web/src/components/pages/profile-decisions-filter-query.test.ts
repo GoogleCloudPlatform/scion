@@ -437,4 +437,89 @@ describe('Profile Decisions page — filter query dialect (ptone/scion#9348)', (
       'only those 200 projects are searched'
     );
   });
+
+  it('calls /users/me/decisions/suggestions only for truncated keys (never project: or non-truncated)', async () => {
+    setServerFlags({ 'web.decisions': true });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        requestedUrls.push(url);
+        if (url.includes('/api/v1/users/me/decisions/suggestions')) {
+          const parsed = new URL(url, 'http://localhost');
+          const key = parsed.searchParams.get('key') ?? '';
+          return Promise.resolve(
+            makeResponse({
+              key,
+              values: [{ value: `remote-${key}-val` }],
+              total: 1,
+            })
+          );
+        }
+        return Promise.resolve(
+          makeResponse({
+            counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+            prompts: [],
+            ...defaultProfileFacets(),
+            facetsTruncated: { agents: true, answerers: true },
+          })
+        );
+      })
+    );
+
+    const el = await mountPage('');
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const provider = box.remoteValueSuggestions;
+    expect(provider).toBeTypeOf('function');
+
+    const ac = new AbortController();
+    // Truncated keys (`agent` and `by`) call /users/me/decisions/suggestions with plural emptyLabel.
+    const agentRes = await provider!('agent', 'rem', ac.signal);
+    expect(agentRes).toEqual({
+      values: [{ value: 'remote-agent-val' }],
+      total: 1,
+      emptyLabel: 'agents',
+    });
+    const byRes = await provider!('by', 'rem', ac.signal);
+    expect(byRes).toEqual({
+      values: [{ value: 'remote-by-val' }],
+      total: 1,
+      emptyLabel: 'answerers',
+    });
+
+    // Non-truncated key (`conversation`) and `project` return null and issue no request.
+    expect(provider!('conversation', 'ops', ac.signal)).toBeNull();
+    expect(provider!('project', 'alp', ac.signal)).toBeNull();
+
+    const suggUrls = requestedUrls.filter((u) =>
+      u.includes('/api/v1/users/me/decisions/suggestions')
+    );
+    expect(suggUrls).toHaveLength(2);
+    expect(suggUrls[0]).toContain('key=agent&prefix=rem');
+    expect(suggUrls[1]).toContain('key=by&prefix=rem');
+  });
+
+  it('issues zero /users/me/decisions/suggestions calls when no facets are truncated', async () => {
+    setServerFlags({ 'web.decisions': true });
+    const el = await mountPage('');
+    const panel = el.shadowRoot?.querySelector(
+      'scion-decisions-filter-panel'
+    ) as ScionDecisionsFilterPanel;
+    const box = panel.shadowRoot?.querySelector('scion-filter-box') as ScionFilterBox;
+    const provider = box.remoteValueSuggestions;
+    expect(provider).toBeTypeOf('function');
+
+    const ac = new AbortController();
+    expect(provider!('agent', 'dep', ac.signal)).toBeNull();
+    expect(provider!('conversation', 'ops', ac.signal)).toBeNull();
+    expect(provider!('by', 'ali', ac.signal)).toBeNull();
+    expect(provider!('project', 'alp', ac.signal)).toBeNull();
+    expect(
+      requestedUrls.filter((u) => u.includes('/api/v1/users/me/decisions/suggestions'))
+    ).toEqual([]);
+  });
 });

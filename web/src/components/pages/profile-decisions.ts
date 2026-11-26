@@ -39,12 +39,14 @@ import type {
 import {
   dispatchProfileDecisionsCountChanged,
   dispatchProfileDecisionsNotFound,
+  fetchProfileDecisionSuggestions,
   fetchProfileMadeDecisions,
   fetchProfilePendingDecisions,
   type ProfileDecisionMadeGroupView,
   type ProfileMadeDecisionsResponse,
   type ProfilePendingDecisionsResponse,
 } from '../../client/profile-decisions.js';
+import type { RemoteValueSuggestionProvider } from '../../shared/filter-query/suggest.js';
 import { stateManager } from '../../client/state.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import type {
@@ -305,11 +307,34 @@ export class ScionPageProfileDecisions extends LitElement {
     `;
   }
 
+  private readonly provideRemoteValueSuggestions: RemoteValueSuggestionProvider = (
+    key,
+    prefix,
+    signal
+  ) => {
+    const trunc = this.ctrl.facetsTruncated;
+    const isTruncated =
+      (key === 'agent' && Boolean(trunc.agents)) ||
+      (key === 'conversation' && Boolean(trunc.conversations)) ||
+      (key === 'by' && Boolean(trunc.answerers));
+    if (!isTruncated) return null;
+    return fetchProfileDecisionSuggestions({
+      key,
+      prefix,
+      signal,
+    }).then((res) => ({
+      values: res.values,
+      total: res.total,
+      emptyLabel: key === 'agent' ? 'agents' : key === 'by' ? 'answerers' : 'conversations',
+    }));
+  };
+
   private renderFilterPanel(): TemplateResult {
     return html`
       <scion-decisions-filter-panel
         scope="profile"
         .supportsSearch=${this.ctrl.supportsSearch}
+        .remoteValueSuggestions=${this.provideRemoteValueSuggestions}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}
