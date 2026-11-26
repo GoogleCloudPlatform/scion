@@ -426,13 +426,13 @@ func TestMessagePolicySystemOne_EnforceOutcomesAndFailClosedMatrix(t *testing.T)
 	assert.Equal(t, "violation", errResp.Error.Details["class"])
 	assert.Equal(t, "Resend with --choices-file.", errResp.Error.Details["remediation"])
 
-	// Structured choices satisfies !message.has_choices == false -> admitted!
-	var structuredChoices []messages.DecisionInput
-	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &structuredChoices))
+	// Structured decisions satisfies !message.has_choices == false -> admitted!
+	var structuredDecisions []messages.DecisionInput
+	require.NoError(t, json.Unmarshal([]byte(mpgOneDecision), &structuredDecisions))
 	rrOK := f.sendOutbound(t, OutboundMessageRequest{
 		Recipient: "user:" + f.alice.Email,
 		Msg:       "Please decide.",
-		Choices:   structuredChoices,
+		Decisions: structuredDecisions,
 	})
 	require.Equal(t, http.StatusOK, rrOK.Code, rrOK.Body.String())
 	assert.Equal(t, 1, f.recordChannel.count())
@@ -650,7 +650,7 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 	_, _, err = f.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      projAPIKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project.ID,
 	})
@@ -666,7 +666,7 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 	_, _, err = f.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      projBAPIKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    projB.ID,
 	})
@@ -845,7 +845,7 @@ func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *test
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      "AIza-hub-scoped-matrix-key",
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeHub,
 		ScopeID:    "test-hub-id",
 	})
@@ -853,7 +853,7 @@ func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *test
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      "AIza-project-scoped-matrix-key",
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project,
 	})
@@ -1198,7 +1198,7 @@ func TestMessagePolicySystemOne_FullBodyLimitsRunBeforeCredentialIO(t *testing.T
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      "AIza-oversize-project-key",
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project.ID,
 	})
@@ -1364,7 +1364,7 @@ func TestMessagePolicySystemOne_P2bAllowlistAndCapacityEnforcement(t *testing.T)
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      "AIza-p2b-project-key",
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project.ID,
 	})
@@ -1958,7 +1958,7 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      projAKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.project,
 	})
@@ -1967,7 +1967,7 @@ func TestMessagePolicySystemOne_O2UnboundRuleBeyond200InstancesL1Precheck(t *tes
 	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
 		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
 		Value:      projBKey,
-		SecretType: store.SecretTypeVariable,
+		SecretType: store.SecretTypeEnvironment,
 		Scope:      store.ScopeProject,
 		ScopeID:    f.otherProject,
 	})
