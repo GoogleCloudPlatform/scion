@@ -59,7 +59,7 @@ func (s *Server) prepareCommandRequestSend(w http.ResponseWriter, req *OutboundM
 			map[string]interface{}{"experiment": experiments.CommandRequests})
 		return nil, false
 	}
-	if req.Decisions != nil || req.DecisionsUpdate || req.Choices != nil || req.ChoicesUpdate {
+	if req.Decisions != nil || req.DecisionsUpdate {
 		ValidationError(w, "cannot combine command_request with decisions in the same message",
 			map[string]interface{}{"field": "command_request"})
 		return nil, false
