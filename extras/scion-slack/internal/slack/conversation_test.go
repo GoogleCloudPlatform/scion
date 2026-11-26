@@ -208,10 +208,36 @@ func TestSlackBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 		},
 	}
 
+	// 1. Without hub_inbound_conversation capability flag (older hub):
+	// inbound payloads must omit surface, external_ref, parent_ref, display_name.
 	he := b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
 	require.Nil(t, he)
-
 	res, he := b.deliverRoutedInbound("p1", "coder", msg)
+	require.Nil(t, he)
+	require.NotNil(t, res)
+	assert.True(t, res.Delivered)
+
+	mu.Lock()
+	for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name"} {
+		_, hasIn := gotInbound[field]
+		assert.False(t, hasIn, "older hub (no flag) must omit %q on /broker/inbound", field)
+		_, hasRt := gotRouted[field]
+		assert.False(t, hasRt, "older hub (no flag) must omit %q on /broker/inbound/routed", field)
+	}
+	gotInbound = nil
+	gotRouted = nil
+	mu.Unlock()
+
+	// 2. With hub_inbound_conversation="1" (P4+ hub):
+	// inbound payloads include surface, external_ref, and parent_ref.
+	require.NoError(t, b.Configure(map[string]string{
+		"hub_inbound_conversation": "1",
+	}))
+
+	he = b.deliverInbound("scion.project.p1.agent.coder.messages", msg)
+	require.Nil(t, he)
+
+	res, he = b.deliverRoutedInbound("p1", "coder", msg)
 	require.Nil(t, he)
 	require.NotNil(t, res)
 	assert.True(t, res.Delivered)
@@ -294,4 +320,67 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	assert.Equal(t, "1700000000.000100", posted[0].ThreadTS)
 	assert.Equal(t, "D_ALICE_DM", posted[1].Channel)
 	assert.Equal(t, "", posted[1].ThreadTS)
+}
+
+// TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS (R-FV1)
+// verifies that a conv:<id> reply into a pre-upgrade Slack row (thread:p:<ts>,
+// translated to ExternalRef="<ts>" with empty ThreadID) never posts to "<ts>"
+// as a channel ID: when ParentRef is empty it falls through to the linked
+// channel with thread_ts=<ts>, and when ParentRef is set it composes
+// (ParentRef, ExternalRef).
+func TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS(t *testing.T) {
+	srv, getPosted := newTestSlackServer(t)
+
+	b := NewBroker(nil)
+	b.client = slackapi.New("xoxb-test", slackapi.OptionAPIURL(srv.URL+"/"))
+	b.store = newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID: "CLINK",
+		ProjectID: "p1",
+		Active:    true,
+	}))
+
+	topic := "scion.project.p1.user.u1.messages"
+
+	// 1. Pre-upgrade row with no ParentRef: bare ts must fall through to CLINK, never post to channel "1700000000.000100".
+	err := b.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "conv:<id> reply into pre-upgrade slack thread",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-legacy-slack",
+		Conversation: &messages.Conversation{
+			Surface:     "slack",
+			ExternalRef: "1700000000.000100",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2. Same row once ParentRef is populated: composes (ParentRef, ExternalRef).
+	err = b.Publish(ctx, topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "conv:<id> reply with parent_ref",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-legacy-slack",
+		Conversation: &messages.Conversation{
+			Surface:     "slack",
+			ExternalRef: "1700000000.000100",
+			ParentRef:   "C0123ABC",
+		},
+	})
+	require.NoError(t, err)
+
+	posted := getPosted()
+	require.Len(t, posted, 2)
+	assert.Equal(t, "CLINK", posted[0].Channel)
+	assert.Equal(t, "1700000000.000100", posted[0].ThreadTS)
+	assert.Equal(t, "C0123ABC", posted[1].Channel)
+	assert.Equal(t, "1700000000.000100", posted[1].ThreadTS)
 }

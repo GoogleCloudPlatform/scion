@@ -60,11 +60,12 @@ type TelegramBrokerV2 struct {
 	api     *TelegramAPIClient
 	botInfo *BotUser
 
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	pluginName string
-	httpClient *http.Client
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	pluginName             string
+	hubInboundConversation bool
+	httpClient             *http.Client
 
 	store Store
 
@@ -519,6 +520,9 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	}
 	if v, ok := config["plugin_name"]; ok {
 		b.pluginName = v
+	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.hubInboundConversation = plugin.HubSupportsInboundConversation(config)
 	}
 
 	// Commit. The previous store, send queue and generation are retired;
@@ -3295,6 +3299,7 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -3308,9 +3313,11 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 	}
 
 	payload := inboundPayload{
-		Topic:               topic,
-		Message:             msg,
-		InboundConversation: telegramInboundConversation(msg),
+		Topic:   topic,
+		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = telegramInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -3405,6 +3412,7 @@ func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic stri
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -3418,10 +3426,12 @@ func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic stri
 	}
 
 	payload := inboundPayload{
-		Topic:               topic,
-		Message:             msg,
-		AttachmentIDs:       attachmentIDs,
-		InboundConversation: telegramInboundConversation(msg),
+		Topic:         topic,
+		Message:       msg,
+		AttachmentIDs: attachmentIDs,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = telegramInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

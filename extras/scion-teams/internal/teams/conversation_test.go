@@ -191,7 +191,8 @@ func TestTeamsHubClient_DeliverInbound_ConversationPayload(t *testing.T) {
 
 	client := NewHubClient(hubSrv.URL, "", "", slog.Default())
 
-	// Threaded channel conversation includes surface, external_ref, and parent_ref.
+	// Threaded channel conversation: without hub_inbound_conversation flag
+	// (older hub), top-level conversation fields must be omitted.
 	threadedMsg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "user:alice@example.com",
@@ -204,6 +205,21 @@ func TestTeamsHubClient_DeliverInbound_ConversationPayload(t *testing.T) {
 			"teams_conversation_id": "19:chan-1@thread.tacv2;messageid=1700000000100",
 		},
 	}
+	require.NoError(t, client.DeliverInbound(context.Background(), "scion.project.p1.agent.coder.messages", threadedMsg))
+
+	mu.Lock()
+	require.Len(t, gotBodies, 1)
+	for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name"} {
+		_, hasField := gotBodies[0][field]
+		assert.False(t, hasField, "older hub (no flag) must omit %q", field)
+	}
+	gotBodies = nil
+	mu.Unlock()
+
+	// Enable hub_inbound_conversation (P4+ hub).
+	client.SetHubInboundConversation(true)
+
+	// Threaded channel conversation includes surface, external_ref, and parent_ref.
 	require.NoError(t, client.DeliverInbound(context.Background(), "scion.project.p1.agent.coder.messages", threadedMsg))
 
 	// Non-threaded conversation includes surface and external_ref without parent_ref.
@@ -312,4 +328,61 @@ func TestTeamsBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	require.Len(t, delivered, 2)
 	assert.Contains(t, delivered, "/v3/conversations/19:chan-1@thread.tacv2;messageid=100/activities")
 	assert.Contains(t, delivered, "/v3/conversations/a:dm-alice/activities")
+}
+
+// TestTeamsBroker_Publish_PreUpgradeReplyToIDNeverPostsToGuessedTarget (R-FV1)
+// verifies that a conv:<id> reply into a pre-upgrade Teams thread:p:<replyToId>
+// row (translated to ExternalRef="<replyToId>" with empty ThreadID) never posts
+// to "<replyToId>", instead falling through to the project's linked channel.
+func TestTeamsBroker_Publish_PreUpgradeReplyToIDNeverPostsToGuessedTarget(t *testing.T) {
+	var mu sync.Mutex
+	var delivered []string
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		delivered = append(delivered, r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ActivityResponse{ID: "resp-1"})
+	}))
+	defer apiServer.Close()
+
+	broker := NewBroker(slog.Default())
+	configureBrokerWithAPI(t, broker, apiServer.URL)
+	ctx := context.Background()
+
+	require.NoError(t, broker.store.UpsertConversationReference(ctx, &ConversationReference{
+		ConversationID: "19:linked-chan@thread.tacv2",
+		ServiceURL:     apiServer.URL,
+		UpdatedAt:      time.Now(),
+	}))
+	require.NoError(t, broker.store.CreateChannelLink(ctx, &ChannelLink{
+		ConversationID: "19:linked-chan@thread.tacv2",
+		ProjectID:      "p1",
+		Active:         true,
+	}))
+
+	require.NoError(t, broker.Publish(ctx, "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "conv:<id> reply into pre-upgrade teams replyToId row",
+		Type:           messages.TypeInstruction,
+		Channel:        "teams",
+		ConversationID: "conv-legacy-teams",
+		Conversation: &messages.Conversation{
+			Surface:     "teams",
+			ExternalRef: "1700000000100",
+		},
+	}))
+
+	broker.mu.Lock()
+	sq := broker.sendQueue
+	broker.mu.Unlock()
+	sq.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, delivered, 1)
+	assert.Equal(t, "/v3/conversations/19:linked-chan@thread.tacv2/activities", delivered[0])
 }

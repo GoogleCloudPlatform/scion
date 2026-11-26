@@ -189,11 +189,12 @@ type DiscordBroker struct {
 	session *discordgo.Session // Discord gateway session
 	botUser *discordgo.User    // Bot's own user info
 
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	pluginName string
-	httpClient *http.Client
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	pluginName             string
+	hubInboundConversation bool
+	httpClient             *http.Client
 
 	store Store
 
@@ -292,6 +293,9 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	}
 	if v, ok := config["plugin_name"]; ok {
 		b.pluginName = v
+	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.hubInboundConversation = plugin.HubSupportsInboundConversation(config)
 	}
 
 	// Phase 1: Bot token configuration.
@@ -2072,6 +2076,7 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -2085,9 +2090,11 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	}
 
 	payload := inboundPayload{
-		Topic:               topic,
-		Message:             msg,
-		InboundConversation: b.discordInboundConversation(msg),
+		Topic:   topic,
+		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = b.discordInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2139,6 +2146,7 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if hubURL == "" {
@@ -2148,10 +2156,12 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 	}
 
 	payload := routedInboundPayload{
-		ProjectID:           projectID,
-		DefaultAgent:        defaultAgent,
-		Message:             msg,
-		InboundConversation: b.discordInboundConversation(msg),
+		ProjectID:    projectID,
+		DefaultAgent: defaultAgent,
+		Message:      msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = b.discordInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

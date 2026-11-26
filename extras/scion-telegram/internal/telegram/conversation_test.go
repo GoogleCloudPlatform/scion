@@ -234,7 +234,8 @@ func TestTelegramBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	}))
 	defer hubSrv.Close()
 
-	// V2 threaded inbound (deliverInbound and deliverInboundOutcome).
+	// 1. Without hub_inbound_conversation flag (older hub): even threaded
+	// deliveries must omit surface, external_ref, parent_ref, display_name.
 	b2 := NewV2(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b2.hubURL = hubSrv.URL
 
@@ -255,9 +256,31 @@ func TestTelegramBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	assert.Empty(t, errMsg)
 	assert.True(t, answered)
 
-	// V1 non-threaded inbound (deliverInbound).
+	mu.Lock()
+	require.Len(t, gotInbound, 2)
+	for i := 0; i < 2; i++ {
+		for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name"} {
+			_, hasField := gotInbound[i][field]
+			assert.False(t, hasField, "older hub (no flag) must omit %q", field)
+		}
+	}
+	gotInbound = nil
+	mu.Unlock()
+
+	// 2. With hub_inbound_conversation enabled (P4+ hub):
+	// V2 threaded inbound (deliverInbound and deliverInboundOutcome).
+	b2.hubInboundConversation = true
+	b2.deliverInbound("scion.project.p1.agent.coder.messages", threadedMsg)
+	status, errMsg, answered = b2.deliverInboundOutcome(context.Background(), "scion.project.p1.agent.coder.messages", threadedMsg, nil)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Empty(t, errMsg)
+	assert.True(t, answered)
+
+	// V1 non-threaded inbound (deliverInbound) even with flag enabled omits
+	// surface/external_ref so 1:1 private chats resolve via Phase 5 DM.
 	b1 := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	b1.hubURL = hubSrv.URL
+	b1.hubInboundConversation = true
 
 	flatMsg := &messages.StructuredMessage{
 		Version:   messages.Version,
@@ -275,10 +298,12 @@ func TestTelegramBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 	defer mu.Unlock()
 	require.Len(t, gotInbound, 3)
 
-	// Both V2 threaded deliveries include surface, external_ref "<chat>:<thread>", and parent_ref "<chat>".
+	// Both V2 threaded deliveries include surface, external_ref "<thread>"
+	// (matching msg.ThreadID so pre-P4 rows and outbound --thread-id share one
+	// conversation), and parent_ref "<chat>".
 	for i := 0; i < 2; i++ {
 		assert.Equal(t, "telegram", gotInbound[i]["surface"])
-		assert.Equal(t, "-100123456:42", gotInbound[i]["external_ref"])
+		assert.Equal(t, "42", gotInbound[i]["external_ref"])
 		assert.Equal(t, "-100123456", gotInbound[i]["parent_ref"])
 	}
 
@@ -324,15 +349,17 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 2. Outbound `--channel telegram --thread-id 42` (bare topic ID) after Option A translation.
+	// 2. Outbound `--channel telegram --thread-id 42` (bare topic ID) and
+	// conv:<id> reply into a pre-upgrade thread:p:42 row (empty ThreadID, empty
+	// ParentRef): never posts to chat ID 42; resolves chat via metadata/links
+	// with MessageThreadID=42.
 	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
 		Version:        messages.Version,
 		Sender:         "agent:coder",
 		Recipient:      "user:alice",
-		Msg:            "reply on bare topic id",
+		Msg:            "conv:<id> reply into pre-upgrade bare topic id",
 		Type:           messages.TypeInstruction,
 		Channel:        "telegram",
-		ThreadID:       "42",
 		ConversationID: "conv-tg-bare-topic",
 		Conversation: &messages.Conversation{
 			Surface:     "telegram",
@@ -340,6 +367,23 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 		},
 		Metadata: map[string]string{
 			"telegram_chat_id": "-100123456",
+		},
+	})
+	require.NoError(t, err)
+
+	// 2b. Composed (ParentRef, ExternalRef) form from new inbound forum topics.
+	err = b.Publish(context.Background(), topic, &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice",
+		Msg:            "reply composed from parent_ref + external_ref",
+		Type:           messages.TypeInstruction,
+		Channel:        "telegram",
+		ConversationID: "conv-tg-parent-topic",
+		Conversation: &messages.Conversation{
+			Surface:     "telegram",
+			ExternalRef: "42",
+			ParentRef:   "-100123456",
 		},
 	})
 	require.NoError(t, err)
@@ -363,11 +407,13 @@ func TestTelegramBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 
 	tgSrv.mu.Lock()
 	defer tgSrv.mu.Unlock()
-	require.Len(t, tgSrv.sentMessages, 3)
+	require.Len(t, tgSrv.sentMessages, 4)
 	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[0].ChatID)
 	assert.Equal(t, int64(42), tgSrv.sentMessages[0].MessageThreadID)
 	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[1].ChatID)
 	assert.Equal(t, int64(42), tgSrv.sentMessages[1].MessageThreadID)
-	assert.Equal(t, int64(998877), tgSrv.sentMessages[2].ChatID)
-	assert.Equal(t, int64(0), tgSrv.sentMessages[2].MessageThreadID)
+	assert.Equal(t, int64(-100123456), tgSrv.sentMessages[2].ChatID)
+	assert.Equal(t, int64(42), tgSrv.sentMessages[2].MessageThreadID)
+	assert.Equal(t, int64(998877), tgSrv.sentMessages[3].ChatID)
+	assert.Equal(t, int64(0), tgSrv.sentMessages[3].MessageThreadID)
 }

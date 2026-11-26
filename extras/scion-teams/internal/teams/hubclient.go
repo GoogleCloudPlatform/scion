@@ -25,6 +25,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -34,11 +35,21 @@ import (
 
 // HubClient delivers inbound messages to the Scion Hub.
 type HubClient struct {
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	httpClient *http.Client
-	log        *slog.Logger
+	mu                     sync.RWMutex
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	hubInboundConversation bool
+	httpClient             *http.Client
+	log                    *slog.Logger
+}
+
+// SetHubInboundConversation toggles whether DeliverInbound emits top-level
+// Phase 11 conversation addressing (surface, external_ref, parent_ref).
+func (c *HubClient) SetHubInboundConversation(enabled bool) {
+	c.mu.Lock()
+	c.hubInboundConversation = enabled
+	c.mu.Unlock()
 }
 
 // NewHubClient creates a new HubClient for delivering messages to the hub.
@@ -94,10 +105,16 @@ func teamsInboundConversation(msg *messages.StructuredMessage) plugin.InboundCon
 
 // DeliverInbound sends a structured message to the hub's inbound endpoint.
 func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	c.mu.RLock()
+	hubInboundConv := c.hubInboundConversation
+	c.mu.RUnlock()
+
 	payload := inboundPayload{
-		Topic:               topic,
-		Message:             msg,
-		InboundConversation: teamsInboundConversation(msg),
+		Topic:   topic,
+		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = teamsInboundConversation(msg)
 	}
 
 	body, err := json.Marshal(payload)

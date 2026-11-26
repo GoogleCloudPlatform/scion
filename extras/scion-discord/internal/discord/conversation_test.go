@@ -150,7 +150,8 @@ func TestDiscordBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 		"777777777777777777": "200000000000000001",
 	}
 
-	// Threaded channel: includes surface, external_ref, and parent_ref.
+	// Threaded channel: without hub_inbound_conversation flag (older hub),
+	// inbound payloads must omit surface/external_ref/parent_ref/display_name.
 	threadMsg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Sender:    "user:alice@example.com",
@@ -162,6 +163,31 @@ func TestDiscordBroker_Inbound_SendsSurfaceExternalRefParentRef(t *testing.T) {
 		},
 	}
 
+	require.Nil(t, b.deliverInbound("scion.project.p1.agent.coder.messages", threadMsg))
+	resNoFlag, heNoFlag := b.deliverRoutedInbound("p1", "coder", threadMsg)
+	require.Nil(t, heNoFlag)
+	require.NotNil(t, resNoFlag)
+	assert.True(t, resNoFlag.Delivered)
+
+	mu.Lock()
+	require.Len(t, gotInbound, 1)
+	require.Len(t, gotRouted, 1)
+	for _, field := range []string{"surface", "external_ref", "parent_ref", "display_name"} {
+		_, hasIn := gotInbound[0][field]
+		assert.False(t, hasIn, "older hub (no flag) must omit %q on /broker/inbound", field)
+		_, hasRt := gotRouted[0][field]
+		assert.False(t, hasRt, "older hub (no flag) must omit %q on /broker/inbound/routed", field)
+	}
+	gotInbound = nil
+	gotRouted = nil
+	mu.Unlock()
+
+	// Enable hub_inbound_conversation="1" (P4+ hub).
+	require.NoError(t, b.Configure(map[string]string{
+		"hub_inbound_conversation": "1",
+	}))
+
+	// Threaded channel: includes surface, external_ref, and parent_ref.
 	require.Nil(t, b.deliverInbound("scion.project.p1.agent.coder.messages", threadMsg))
 	res, he := b.deliverRoutedInbound("p1", "coder", threadMsg)
 	require.Nil(t, he)

@@ -52,11 +52,12 @@ type Config struct {
 	MentionRouting bool
 
 	// Phase 2: Hub connection.
-	HubURL        string
-	HMACKey       string
-	BrokerID      string
-	SendQueueSize int
-	SendMinDelay  time.Duration
+	HubURL                 string
+	HMACKey                string
+	BrokerID               string
+	HubInboundConversation bool
+	SendQueueSize          int
+	SendMinDelay           time.Duration
 }
 
 // TeamsBroker implements plugin.MessageBrokerPluginInterface for Microsoft Teams.
@@ -205,6 +206,12 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	if v, ok := config["broker_id"]; ok {
 		b.config.BrokerID = v
 	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.config.HubInboundConversation = plugin.HubSupportsInboundConversation(config)
+		if b.hubClient != nil {
+			b.hubClient.SetHubInboundConversation(b.config.HubInboundConversation)
+		}
+	}
 	if v, ok := config["send_queue_size"]; ok {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			b.config.SendQueueSize = n
@@ -220,6 +227,7 @@ func (b *TeamsBroker) Configure(config map[string]string) error {
 	if b.config.HubURL != "" && b.config.HMACKey != "" && b.config.BrokerID != "" {
 		if b.phase == 1 {
 			b.hubClient = NewHubClient(b.config.HubURL, b.config.HMACKey, b.config.BrokerID, b.log)
+			b.hubClient.SetHubInboundConversation(b.config.HubInboundConversation)
 
 			// Initialize outbound messaging components.
 			b.sender = NewSender(b.tokenProvider, b.log)
