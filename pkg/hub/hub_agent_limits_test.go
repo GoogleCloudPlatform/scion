@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -344,4 +345,40 @@ func TestAgentLimits_StoredOverCeilingClampedOnStart(t *testing.T) {
 	require.NotNil(t, stored.EffectiveConfig)
 	assert.Equal(t, 50, stored.EffectiveConfig.MaxTurns)
 	assert.Equal(t, []string{"max_turns"}, stored.EffectiveConfig.LimitsClampedBy)
+}
+
+// TestPutServerConfigDB_AgentDefaultsExceedsAgentLimitsCeiling_422 pins the
+// PUT /api/v1/admin/server-config validation check against stored agent_limits
+// ceilings: over-ceiling default_max_turns returns HTTP 422 validation_error
+// naming both keys without writing agent_defaults.
+func TestPutServerConfigDB_AgentDefaultsExceedsAgentLimitsCeiling_422(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ctx := context.Background()
+
+	_, err := ops.Update(ctx, opsettings.AgentLimitsSectionName, json.RawMessage(`{"max_turns":50}`), "admin", -1, "managed")
+	require.NoError(t, err)
+
+	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"default_max_turns":80}`)
+	rr := httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "validation_error")
+	assert.Contains(t, rr.Body.String(), "agent_defaults.default_max_turns")
+	assert.Contains(t, rr.Body.String(), "agent_limits.max_turns")
+	_, lookupErr := fakeStore.GetHubSetting(ctx, "agent_defaults")
+	assert.Error(t, lookupErr, "refused PUT must not write agent_defaults")
+
+	// Within ceiling succeeds.
+	req = adminRequest(http.MethodPut, "/api/v1/admin/server-config", `{"default_max_turns":50}`)
+	rr = httptest.NewRecorder()
+	srv.handlePutServerConfigDB(rr, req, ops)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Reverse order: tightening agent_limits below the saved default_max_turns is refused.
+	_, err = ops.Update(ctx, opsettings.AgentLimitsSectionName, json.RawMessage(`{"max_turns":30}`), "admin", -1, "managed")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrSectionValidation), "want ErrSectionValidation, got %v", err)
+	assert.Contains(t, err.Error(), "agent_defaults.default_max_turns")
+	assert.Contains(t, err.Error(), "agent_limits.max_turns")
 }
