@@ -82,13 +82,14 @@ type UsageAnalytics struct {
 	// 404 revocation). In hook subprocesses, hubDir is set and checked via
 	// isHubOutboxActiveDir so hooks discover Hub activation and revocation
 	// from disk without creating the Hub outbox when inactive.
-	metaMu    sync.RWMutex
-	hubOutbox *AnalyticsOutbox
-	hubDir    string
-	hubOwner  *OutboxOwner
-	hubOnly   bool
-	runID     string
-	onRecord  func(time.Time)
+	metaMu       sync.RWMutex
+	hubOutbox    *AnalyticsOutbox
+	hubDir       string
+	hubOwner     *OutboxOwner
+	hubOnly      bool
+	runID        string
+	onRecord     func(time.Time)
+	isSuppressed func() bool
 
 	disabled                   atomic.Bool
 	droppedNoIdentity, invalid atomic.Int64
@@ -425,6 +426,32 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 }
 
 // DroppedNoIdentity and Invalid are per-process counters for diagnostics.
+func (a *UsageAnalytics) setDirectOTelSuppressedFn(fn func() bool) {
+	if a == nil {
+		return
+	}
+	a.metaMu.Lock()
+	a.isSuppressed = fn
+	a.metaMu.Unlock()
+}
+
+func (a *UsageAnalytics) directOTelSuppressed() bool {
+	if a == nil {
+		return false
+	}
+	a.metaMu.RLock()
+	fn := a.isSuppressed
+	hubDir := a.hubDir
+	a.metaMu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	if hubDir != "" {
+		return isHubOutboxSuppressDir(hubDir)
+	}
+	return false
+}
+
 func (a *UsageAnalytics) DroppedNoIdentity() int64 {
 	if a == nil {
 		return 0
@@ -518,6 +545,10 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 		TokenStatus:         obs.TokenStatus,
 		MalformedFields:     append([]string{}, obs.MalformedFields...), // always written
 		ReportedCostMicros:  obs.ReportedCostMicros,
+	}
+	if a.directOTelSuppressed() {
+		sup := true
+		ev.DirectOTelSuppressed = &sup
 	}
 	if ev.Harness == "" {
 		ev.Harness = "unknown"

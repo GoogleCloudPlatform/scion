@@ -194,6 +194,12 @@ type UsageIngestResponse struct {
 	Duplicates  int                    `json:"duplicates"`
 	Rejected    []UsageIngestRejection `json:"rejected"`
 	Enforcement *UsageEnforcement      `json:"enforcement,omitempty"`
+	// SuppressDirectOTel reports whether the Hub replica handling this ingest
+	// or heartbeat request currently has a constructed and active OTel metrics
+	// sink and is re-emitting canonical usage counters. Omitted (false) on
+	// older Hubs or replicas without an active sink, instructing sciontool to
+	// un-suppress direct container export.
+	SuppressDirectOTel bool `json:"suppress_direct_otel,omitempty"`
 }
 
 // UsageCapabilitiesResponse is returned by

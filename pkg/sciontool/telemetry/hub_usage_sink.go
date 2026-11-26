@@ -61,10 +61,14 @@ type HubUsageSinkConfig struct {
 	// SupportedSignals returns the usage signal categories this producer can
 	// report for the current run (e.g. ["calls", "input", "output", ...]).
 	SupportedSignals func() []string
-	// SuppressDirectOTel records whether the Hub capability probe instructed
-	// this container to suppress direct OTel export of gen_ai.api.calls and
-	// scion.usage.tokens (Tokenomics P2.2 D3).
+	// SuppressDirectOTel records the initial suppression directive from the
+	// Hub capability probe (Tokenomics P2.2 D3). Subsequent ingest and
+	// heartbeat responses revalidate this state via OnSuppressChanged.
 	SuppressDirectOTel bool
+	// OnSuppressChanged is invoked on every successful ingest or heartbeat
+	// response with resp.SuppressDirectOTel (an omitted field decodes as false
+	// and un-suppresses direct container export).
+	OnSuppressChanged func(bool)
 }
 
 func (c HubUsageSinkConfig) maxBatchEvents() int {
@@ -235,15 +239,20 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 
 	ledgerEpoch, ledgerSeq := s.ledgerMeta()
 
-	// Partition into contiguous groups sharing (run_id, producer_epoch) so each
-	// Hub ingest request has a single consistent meter_health (run, epoch) key
-	// and preserves per-event run_id across restarts.
+	// Partition into contiguous groups sharing (run_id, producer_epoch,
+	// direct_otel_suppressed) so each Hub ingest request has a single
+	// consistent meter_health (run, epoch) key and carries the exact
+	// per-event suppression state recorded at outbox write time (R2).
 	start := 0
 	for start < len(events) {
 		groupRunID := events[start].RunID
 		groupEpoch := events[start].ProducerEpoch
+		groupSuppressed := eventDirectOTelSuppressed(&events[start])
 		end := start + 1
-		for end < len(events) && events[end].RunID == groupRunID && events[end].ProducerEpoch == groupEpoch {
+		for end < len(events) &&
+			events[end].RunID == groupRunID &&
+			events[end].ProducerEpoch == groupEpoch &&
+			eventDirectOTelSuppressed(&events[end]) == groupSuppressed {
 			end++
 		}
 		if err := s.sendGroup(ctx, events[start:end], origIndex[start:end], ledgerEpoch, ledgerSeq, &rejected); err != nil {
@@ -286,13 +295,11 @@ func (s *HubUsageSink) sendGroup(
 		seq = ledgerSeq
 	}
 
-	// Only mark DirectOTelSuppressed=true when suppression is active AND the
-	// batch belongs to the current run (or no RunID was pinned). Residual WAL
-	// events replayed from an earlier run (runID != s.cfg.RunID) may have been
-	// exported directly by the container before suppression took effect, so
-	// leaving DirectOTelSuppressed=false prevents Hub re-emission from double
-	// counting them while still persisting them to the ledger and rollups.
-	directSuppressed := s.cfg.SuppressDirectOTel && (s.cfg.RunID == "" || runID == s.cfg.RunID)
+	// Derive DirectOTelSuppressed strictly from the per-event stamp recorded at
+	// outbox write time (Tokenomics P2.2 R2). Pre-P2.2 outbox lines omit the
+	// field and decode as false (preventing double counting), while residual
+	// WAL lines from a suppressed prior run keep true across restarts.
+	directSuppressed := eventDirectOTelSuppressed(&events[0])
 
 	req := telemetrycontract.UsageIngestRequest{
 		Events:               events,
@@ -337,6 +344,9 @@ func (s *HubUsageSink) sendGroup(
 	}
 
 	if resp != nil {
+		if s.cfg.OnSuppressChanged != nil {
+			s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+		}
 		for _, rej := range resp.Rejected {
 			if rej.Index >= 0 && rej.Index < len(origIndices) {
 				*rejected = append(*rejected, origIndices[rej.Index])
@@ -370,6 +380,16 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		SupportedSignals:     s.supportedSignals(),
 		FinalState:           finalState,
 	}
-	_, err := s.cfg.Post(ctx, req)
-	return err
+	resp, err := s.cfg.Post(ctx, req)
+	if err != nil {
+		return err
+	}
+	if resp != nil && s.cfg.OnSuppressChanged != nil {
+		s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+	}
+	return nil
+}
+
+func eventDirectOTelSuppressed(ev *telemetrycontract.UsageEvent) bool {
+	return ev != nil && ev.DirectOTelSuppressed != nil && *ev.DirectOTelSuppressed
 }

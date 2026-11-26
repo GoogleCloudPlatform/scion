@@ -105,6 +105,20 @@ func TestLoadOTLPConfigFromEnv(t *testing.T) {
 			t.Fatalf("error echoed raw header value: %v", err)
 		}
 	})
+
+	t.Run("non-grpc protocol rejected", func(t *testing.T) {
+		env := map[string]string{
+			EnvOTelEndpoint: "collector.internal:4318",
+			EnvOTelProtocol: "http",
+		}
+		_, err := loadOTLPConfig(func(k string) string { return env[k] })
+		if err == nil {
+			t.Fatal("expected error for unsupported SCION_OTEL_PROTOCOL=http")
+		}
+		if !strings.Contains(err.Error(), "grpc") {
+			t.Fatalf("expected error to mention grpc, got: %v", err)
+		}
+	})
 }
 
 func TestNewMeterProvider_OTLPHeadersAndDistinctInstanceID(t *testing.T) {
@@ -195,6 +209,18 @@ func TestNewMeterProvider_ConflictingOTLPTransportFails(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error when plaintext OTLP conflicts with TLS options")
+	}
+
+	_, err = NewMeterProvider(context.Background(), "",
+		WithInstanceID("hub-http-otlp"),
+		WithOTLPConfig(OTLPConfig{
+			Endpoint: "127.0.0.1:4318",
+			Protocol: "http",
+			Insecure: true,
+		}),
+	)
+	if err == nil {
+		t.Fatal("expected error when OTLP protocol is not grpc")
 	}
 }
 

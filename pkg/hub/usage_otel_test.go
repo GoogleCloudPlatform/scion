@@ -89,10 +89,11 @@ func setupUsageOTelAgent(t *testing.T, srv *Server, s store.Store, suffix string
 		Name:      "uotel-agent-" + suffix,
 		ProjectID: proj.ID,
 		Phase:     string(state.PhaseRunning),
-		RunID:     runID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, ag))
-	_, err := s.EnsureRunAttribution(ctx, &store.RunAttribution{
+	_, err := s.SetAgentRunID(ctx, ag.ID, runID, nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
 		RunID:      runID,
 		Generation: 1,
 		HubID:      srv.usageLedgerHubID(),
@@ -154,6 +155,21 @@ func TestUsageOTel_ReemitsOnlyCommittedInsertedRowsAndEnforcesContract(t *testin
 		DirectOTelSuppressed: true,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var batchResp telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &batchResp))
+	assert.True(t, batchResp.SuppressDirectOTel, "ingest response must echo suppress_direct_otel=true when Hub sink is active")
+
+	// Empty 60s heartbeat must also carry suppress_direct_otel=true (R1).
+	recHB := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{},
+		RunID:         runID,
+		ProducerEpoch: "ep-1",
+		ProducerSeq:   2,
+	})
+	require.Equal(t, http.StatusOK, recHB.Code, recHB.Body.String())
+	var hbResp telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(recHB.Body.Bytes(), &hbResp))
+	assert.True(t, hbResp.SuppressDirectOTel, "heartbeat response must echo suppress_direct_otel=true when Hub sink is active")
 
 	// Replay the exact same batch (cross-batch duplicates): MUST NOT increment counters again.
 	recDup := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{

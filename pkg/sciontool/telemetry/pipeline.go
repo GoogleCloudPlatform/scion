@@ -433,6 +433,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 	p.analytics.supportedSignals = p.supportedUsageSignals
 	p.analytics.onSuppressChanged = p.setSuppressDirectOTel
+	p.analytics.isSuppressed = p.SuppressDirectOTel
 	p.analytics.start(ctx, gcpExporter)
 
 	// Create receiver with span and metric handlers

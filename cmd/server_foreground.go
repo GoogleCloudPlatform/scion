@@ -648,11 +648,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		log.Print(obs.Tracing.LogLine())
 
 		// Wire hub OTel metrics export to Cloud Monitoring and/or operator OTLP.
-		otlpMetricsCfg, otlpMetricsCfgErr := hubmetrics.LoadOTLPConfigFromEnv()
-		if otlpMetricsCfgErr != nil {
-			log.Printf("WARNING: hub OTLP metrics config invalid: %v", otlpMetricsCfgErr)
-		}
-		if obs.Metrics.Enabled || otlpMetricsCfg.Enabled() {
+		if obs.Metrics.Enabled || hubmetrics.HasOTLPEndpointEnv() {
 			gcpMetricsProjectID := ""
 			if obs.Metrics.Enabled {
 				gcpMetricsProjectID = obs.Metrics.Project.ID

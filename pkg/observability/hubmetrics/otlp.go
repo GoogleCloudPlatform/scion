@@ -35,6 +35,7 @@ import (
 // of SCION_OTEL_* variables across Scion binaries.
 const (
 	EnvOTelEndpoint      = "SCION_OTEL_ENDPOINT"
+	EnvOTelProtocol      = "SCION_OTEL_PROTOCOL"
 	EnvOTelInsecure      = "SCION_OTEL_INSECURE"
 	EnvOTelSkipTLSVerify = "SCION_OTEL_SKIP_TLS_VERIFY"
 	EnvOTelCAFile        = "SCION_OTEL_CA_FILE"
@@ -47,6 +48,7 @@ const (
 // MeterProvider (used alongside or instead of GCP Cloud Monitoring).
 type OTLPConfig struct {
 	Endpoint      string
+	Protocol      string
 	Insecure      bool
 	SkipTLSVerify bool
 	CAFile        string
@@ -60,22 +62,42 @@ func (c OTLPConfig) Enabled() bool {
 	return strings.TrimSpace(c.Endpoint) != ""
 }
 
+// HasOTLPEndpointEnv reports whether SCION_OTEL_ENDPOINT is non-empty without
+// parsing headers or protocol, allowing callers to avoid duplicate config
+// parsing and duplicate warning logs before invoking NewMeterProvider.
+func HasOTLPEndpointEnv() bool {
+	return strings.TrimSpace(os.Getenv(EnvOTelEndpoint)) != ""
+}
+
 // LoadOTLPConfigFromEnv reads Hub OTLP metrics sink configuration from the
-// SCION_OTEL_* environment variables. Returns an error only when
-// SCION_OTEL_ENDPOINT is set and SCION_OTEL_HEADERS is malformed.
+// SCION_OTEL_* environment variables. Returns an error when
+// SCION_OTEL_ENDPOINT is set and SCION_OTEL_PROTOCOL is unsupported or
+// SCION_OTEL_HEADERS is malformed.
 func LoadOTLPConfigFromEnv() (OTLPConfig, error) {
 	return loadOTLPConfig(os.Getenv)
+}
+
+func validateOTLPProtocol(proto string) error {
+	p := strings.ToLower(strings.TrimSpace(proto))
+	if p == "" || p == "grpc" {
+		return nil
+	}
+	return fmt.Errorf("unsupported %s %q for Hub OTLP metrics: only \"grpc\" is supported", EnvOTelProtocol, proto)
 }
 
 func loadOTLPConfig(getenv func(string) string) (OTLPConfig, error) {
 	cfg := OTLPConfig{
 		Endpoint: strings.TrimSpace(getenv(EnvOTelEndpoint)),
+		Protocol: strings.TrimSpace(getenv(EnvOTelProtocol)),
 		CAFile:   strings.TrimSpace(getenv(EnvOTelCAFile)),
 		CertFile: strings.TrimSpace(getenv(EnvOTelCertFile)),
 		KeyFile:  strings.TrimSpace(getenv(EnvOTelKeyFile)),
 	}
 	if cfg.Endpoint == "" {
 		return cfg, nil
+	}
+	if err := validateOTLPProtocol(cfg.Protocol); err != nil {
+		return OTLPConfig{}, err
 	}
 	if v, ok := parseBoolValue(getenv(EnvOTelInsecure)); ok {
 		cfg.Insecure = v
@@ -117,6 +139,9 @@ func newOTLPExporter(ctx context.Context, cfg OTLPConfig) (metric.Exporter, erro
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
 		return nil, fmt.Errorf("OTLP endpoint is required")
+	}
+	if err := validateOTLPProtocol(cfg.Protocol); err != nil {
+		return nil, err
 	}
 
 	opts := []otlpmetricgrpc.Option{

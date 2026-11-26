@@ -491,6 +491,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		Enforcement: &telemetrycontract.UsageEnforcement{
 			Action: telemetrycontract.UsageEnforcementActionNone,
 		},
+		SuppressDirectOTel: s.UsageOTelMetrics().HasConfiguredSink(),
 	})
 }
 

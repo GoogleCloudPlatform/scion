@@ -194,12 +194,36 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 	staleReceipt := staleCutoff.Add(-30 * time.Second)
 	freshReceipt := staleCutoff.Add(30 * time.Second)
 
-	projA := "proj-stale-a-" + uuid.NewString()
-	projB := "proj-stale-b-" + uuid.NewString()
+	projA := uuid.NewString()
+	projB := uuid.NewString()
+	projExcluded := uuid.NewString()
 
-	addRun := func(projectID, agentID, runID string, updates ...*store.UsageMeterHealthUpdate) {
+	for _, pid := range []string{projA, projB, projExcluded} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID:   pid,
+			Name: pid,
+			Slug: pid,
+		}))
+	}
+
+	addRun := func(projectID, agentID, currentRunID, phase string, deleted bool, mhRunID string, updates ...*store.UsageMeterHealthUpdate) {
+		ag := &store.Agent{
+			ID:        agentID,
+			Slug:      "slug-" + agentID,
+			Name:      "name-" + agentID,
+			ProjectID: projectID,
+			Phase:     phase,
+			RunID:     currentRunID,
+		}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		updAg := client.Agent.UpdateOneID(uuid.MustParse(agentID)).SetRunID(currentRunID)
+		if deleted {
+			delAt := now.Add(-1 * time.Minute)
+			updAg = updAg.SetDeletedAt(delAt)
+		}
+		require.NoError(t, updAg.Exec(ctx))
 		_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
-			RunID:      runID,
+			RunID:      mhRunID,
 			Generation: 1,
 			HubID:      "hub-stale-test",
 			ProjectID:  projectID,
@@ -217,42 +241,48 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 		}
 	}
 
+	newID := func() string { return uuid.NewString() }
+
 	// Project A:
-	// 1. Stale open run -> counted
-	addRun(projA, "ag-a1", "run-a1", &store.UsageMeterHealthUpdate{
-		AgentID:       "ag-a1",
+	// 1. Stale open run on active running agent -> counted
+	agA1 := newID()
+	addRun(projA, agA1, "run-a1", "running", false, "run-a1", &store.UsageMeterHealthUpdate{
+		AgentID:       agA1,
 		RunID:         "run-a1",
 		ProducerEpoch: "ep-1",
 		LastReceiptAt: staleReceipt,
 		FinalState:    store.MeterHealthFinalStateOpen,
 	})
 	// 2. Fresh open run -> NOT counted
-	addRun(projA, "ag-a2", "run-a2", &store.UsageMeterHealthUpdate{
-		AgentID:       "ag-a2",
+	agA2 := newID()
+	addRun(projA, agA2, "run-a2", "running", false, "run-a2", &store.UsageMeterHealthUpdate{
+		AgentID:       agA2,
 		RunID:         "run-a2",
 		ProducerEpoch: "ep-1",
 		LastReceiptAt: freshReceipt,
 		FinalState:    store.MeterHealthFinalStateOpen,
 	})
 	// 3. Closed (final) run with old receipt -> NOT counted
-	addRun(projA, "ag-a3", "run-a3", &store.UsageMeterHealthUpdate{
-		AgentID:       "ag-a3",
+	agA3 := newID()
+	addRun(projA, agA3, "run-a3", "running", false, "run-a3", &store.UsageMeterHealthUpdate{
+		AgentID:       agA3,
 		RunID:         "run-a3",
 		ProducerEpoch: "ep-1",
 		LastReceiptAt: staleReceipt,
 		FinalState:    store.MeterHealthFinalStateFinal,
 	})
 	// 4. Multi-epoch run where ep-1 is stale open, ep-2 is fresh open -> NOT counted
-	addRun(projA, "ag-a4", "run-a4",
+	agA4 := newID()
+	addRun(projA, agA4, "run-a4", "running", false, "run-a4",
 		&store.UsageMeterHealthUpdate{
-			AgentID:       "ag-a4",
+			AgentID:       agA4,
 			RunID:         "run-a4",
 			ProducerEpoch: "ep-1",
 			LastReceiptAt: staleReceipt,
 			FinalState:    store.MeterHealthFinalStateOpen,
 		},
 		&store.UsageMeterHealthUpdate{
-			AgentID:       "ag-a4",
+			AgentID:       agA4,
 			RunID:         "run-a4",
 			ProducerEpoch: "ep-2",
 			LastReceiptAt: freshReceipt,
@@ -260,16 +290,17 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 		},
 	)
 	// 5. Multi-epoch run where ep-1 is stale open, ep-2 is newer final -> NOT counted
-	addRun(projA, "ag-a5", "run-a5",
+	agA5 := newID()
+	addRun(projA, agA5, "run-a5", "running", false, "run-a5",
 		&store.UsageMeterHealthUpdate{
-			AgentID:       "ag-a5",
+			AgentID:       agA5,
 			RunID:         "run-a5",
 			ProducerEpoch: "ep-1",
 			LastReceiptAt: staleReceipt,
 			FinalState:    store.MeterHealthFinalStateOpen,
 		},
 		&store.UsageMeterHealthUpdate{
-			AgentID:       "ag-a5",
+			AgentID:       agA5,
 			RunID:         "run-a5",
 			ProducerEpoch: "ep-2",
 			LastReceiptAt: staleReceipt.Add(10 * time.Second),
@@ -277,19 +308,50 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 		},
 	)
 
-	// Project B: 2 stale open runs
-	addRun(projB, "ag-b1", "run-b1", &store.UsageMeterHealthUpdate{
-		AgentID:       "ag-b1",
+	// Project B: 2 stale open runs on active running agents
+	agB1 := newID()
+	addRun(projB, agB1, "run-b1", "running", false, "run-b1", &store.UsageMeterHealthUpdate{
+		AgentID:       agB1,
 		RunID:         "run-b1",
 		ProducerEpoch: "ep-1",
 		LastReceiptAt: staleReceipt,
 		FinalState:    store.MeterHealthFinalStateOpen,
 	})
-	addRun(projB, "ag-b2", "run-b2", &store.UsageMeterHealthUpdate{
-		AgentID:       "ag-b2",
+	agB2 := newID()
+	addRun(projB, agB2, "run-b2", "running", false, "run-b2", &store.UsageMeterHealthUpdate{
+		AgentID:       agB2,
 		RunID:         "run-b2",
 		ProducerEpoch: "ep-1",
 		LastReceiptAt: staleReceipt.Add(-5 * time.Minute),
+		FinalState:    store.MeterHealthFinalStateOpen,
+	})
+
+	// Excluded project (R3): all 3 must report 0 (absent from counts).
+	// (a) Superseded run: agent now has run-excl-new, old open stale row is on run-excl-old
+	agEx1 := newID()
+	addRun(projExcluded, agEx1, "run-excl-new", "running", false, "run-excl-old", &store.UsageMeterHealthUpdate{
+		AgentID:       agEx1,
+		RunID:         "run-excl-old",
+		ProducerEpoch: "ep-1",
+		LastReceiptAt: staleReceipt,
+		FinalState:    store.MeterHealthFinalStateOpen,
+	})
+	// (b) Soft-deleted agent with stale open row on its run
+	agEx2 := newID()
+	addRun(projExcluded, agEx2, "run-excl-del", "running", true, "run-excl-del", &store.UsageMeterHealthUpdate{
+		AgentID:       agEx2,
+		RunID:         "run-excl-del",
+		ProducerEpoch: "ep-1",
+		LastReceiptAt: staleReceipt,
+		FinalState:    store.MeterHealthFinalStateOpen,
+	})
+	// (c) Stopped agent with stale open row on its run
+	agEx3 := newID()
+	addRun(projExcluded, agEx3, "run-excl-stop", "stopped", false, "run-excl-stop", &store.UsageMeterHealthUpdate{
+		AgentID:       agEx3,
+		RunID:         "run-excl-stop",
+		ProducerEpoch: "ep-1",
+		LastReceiptAt: staleReceipt,
 		FinalState:    store.MeterHealthFinalStateOpen,
 	})
 
@@ -297,5 +359,6 @@ func TestUsageRead_CountStaleMetersByProject(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), counts[projA])
 	assert.Equal(t, int64(2), counts[projB])
+	assert.Equal(t, int64(0), counts[projExcluded], "superseded, soft-deleted, and stopped runs must not count as stale")
 	assert.Len(t, counts, 2)
 }

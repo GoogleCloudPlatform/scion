@@ -205,9 +205,10 @@ func (s *UsageLedgerStore) DBNow(ctx context.Context) (time.Time, error) {
 }
 
 // CountStaleMetersByProject implements store.UsageLedgerStore.CountStaleMetersByProject.
-// Matches the read-time staleness rule in pkg/hub/handlers_usage_read.go: a run
-// is stale when its latest meter_health row is still "open" and has
-// last_receipt_at strictly before staleBefore.
+// Matches the read-time staleness rule in pkg/hub/handlers_usage_read.go: scoped
+// to each live (non-deleted, running) agent's current run_id, a run is stale
+// when its latest meter_health row is still "open" and has last_receipt_at
+// strictly before staleBefore.
 func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
 	drv := s.client.Driver()
 	dialectName := drv.Dialect()
@@ -217,6 +218,7 @@ SELECT project_id, COUNT(*) AS stale_count
 FROM (
 	SELECT ra.project_id, mh.agent_id, mh.run_id
 	FROM meter_health mh
+	INNER JOIN agents a ON CAST(a.id AS TEXT) = mh.agent_id AND a.run_id = mh.run_id AND a.deleted_at IS NULL AND a.phase = 'running'
 	INNER JOIN run_attribution ra ON ra.run_id = mh.run_id
 	WHERE mh.final_state = 'open'
 	  AND NOT EXISTS (
