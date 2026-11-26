@@ -43,7 +43,7 @@ func (s *Server) handleCommandRequestOutput(w http.ResponseWriter, r *http.Reque
 	}
 	ctx := r.Context()
 
-	row, _, _, err := s.loadCommandRequestWithMessage(ctx, reqID)
+	row, _, _, err := s.loadCommandRequestWithMessage(ctx, reqID, false)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound) {
 			NotFound(w, "Command request")

@@ -683,6 +683,12 @@ func TestCommandRequestStore_GetAndPurgeActionRunOutputs(t *testing.T) {
 	if err != nil || string(gotOld) != "old-action-output" {
 		t.Fatalf("GetActionRunOutput(old) = (%q, %v), want old-action-output", string(gotOld), err)
 	}
+	if has, err := cs.HasActionRunOutput(ctx, oldRun.ID); err != nil || !has {
+		t.Fatalf("HasActionRunOutput(old) = (%v, %v), want (true, nil)", has, err)
+	}
+	if has, err := cs.HasActionRunOutput(ctx, schedRunID.String()); err != nil || has {
+		t.Fatalf("HasActionRunOutput(scheduled_exec) = (%v, %v), want (false, nil)", has, err)
+	}
 	if _, err := cs.GetActionRunOutput(ctx, schedRunID.String()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("GetActionRunOutput(scheduled_exec) err = %v, want ErrNotFound", err)
 	}
@@ -697,6 +703,9 @@ func TestCommandRequestStore_GetAndPurgeActionRunOutputs(t *testing.T) {
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if has, err := cs.HasActionRunOutput(ctx, oldRun.ID); err != nil || has {
+		t.Fatalf("HasActionRunOutput(old after purge) = (%v, %v), want (false, nil)", has, err)
 	}
 	if _, err := cs.GetActionRunOutput(ctx, oldRun.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("old action_run output should be purged, got err=%v", err)

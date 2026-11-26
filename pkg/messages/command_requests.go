@@ -426,7 +426,8 @@ type CommandRequestDetailResponse struct {
 	CanApprove             bool                             `json:"canApprove"`
 	// CanDismiss is a P5 feature-detect hook; false until the dismiss API lands in P5.
 	CanDismiss bool `json:"canDismiss,omitempty"`
-	// OutputAvailable is a P4 feature-detect hook; false until the output API lands in P4.
+	// OutputAvailable is true for the approver when the run has finished and
+	// an action_run output row exists in exec_run_outputs.
 	OutputAvailable bool   `json:"outputAvailable,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 }

@@ -977,7 +977,8 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 	}
 	assert.True(t, foundOutputReturned, "expected output_returned audit event")
 
-	// Card GET /api/v1/command-requests/{id} never returns outputTail.
+	// Card GET /api/v1/command-requests/{id} never returns outputTail, and sets
+	// outputAvailable=true for the approver when finished and an output row exists.
 	cardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+reqShare.ID, nil)
 	cardReq = cardReq.WithContext(contextWithCredentialContext(
 		contextWithIdentity(cardReq.Context(), f.owner),
@@ -990,7 +991,38 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 	require.NoError(t, json.Unmarshal(cardRec.Body.Bytes(), &cardResp))
 	require.NotNil(t, cardResp.Run)
 	assert.Empty(t, cardResp.Run.OutputTail, "card GET must never populate run.outputTail")
+	assert.True(t, cardResp.OutputAvailable, "card GET must set outputAvailable=true for approver when output row exists")
 	assert.NotContains(t, cardRec.Body.String(), sharedCanary, "card GET must never include output")
+
+	// Pending request (no run yet) must have outputAvailable=false for approver.
+	pendingReq := createPendingReq("pending-no-output", "echo pending", false)
+	pendCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+pendingReq.ID, nil)
+	pendCardReq = pendCardReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(pendCardReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	pendCardRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(pendCardRec, pendCardReq)
+	require.Equal(t, http.StatusOK, pendCardRec.Code)
+	var pendCardResp messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(pendCardRec.Body.Bytes(), &pendCardResp))
+	assert.False(t, pendCardResp.OutputAvailable, "pending request must report outputAvailable=false")
+
+	// Non-approver conversation participant must see outputAvailable=false on a finished run.
+	require.NoError(t, f.store.AddConversationParticipant(ctx, reqShare.ConversationID, "user", bob.ID, "member"))
+	grantProjectAccessOnly(t, f.store, bob.ID, f.launched.ProjectID)
+	bobCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+reqShare.ID, nil)
+	bobCardReq = bobCardReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(bobCardReq.Context(), NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web")),
+		CredentialContext{Kind: CredentialKindInteractive, ID: bob.ID},
+	))
+	bobCardRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(bobCardRec, bobCardReq)
+	if bobCardRec.Code == http.StatusOK {
+		var bobCardResp messages.CommandRequestDetailResponse
+		require.NoError(t, json.Unmarshal(bobCardRec.Body.Bytes(), &bobCardResp))
+		assert.False(t, bobCardResp.OutputAvailable, "non-approver must see outputAvailable=false")
+	}
 
 	// 3. Approver output view: GET /api/v1/command-requests/{id}/output (AC-S10).
 	outURL := "/api/v1/command-requests/" + reqNoShare.ID + "/output"

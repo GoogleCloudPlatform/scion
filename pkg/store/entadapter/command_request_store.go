@@ -1037,6 +1037,24 @@ func (c *CompositeStore) GetActionRunOutput(ctx context.Context, runID string) (
 	return row.Content, nil
 }
 
+// HasActionRunOutput implements store.CommandRequestStore.
+func (c *CompositeStore) HasActionRunOutput(ctx context.Context, runID string) (bool, error) {
+	uid, err := parseUUID(runID)
+	if err != nil {
+		return false, err
+	}
+	exists, err := c.client.ExecRunOutput.Query().
+		Where(
+			execrunoutput.IDEQ(uid),
+			execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindActionRun),
+		).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return exists, nil
+}
+
 // PurgeOldActionRunOutputs implements store.CommandRequestStore.
 func (c *CompositeStore) PurgeOldActionRunOutputs(ctx context.Context, olderThan time.Time) (int, error) {
 	cutoff := olderThan.UTC().Truncate(time.Microsecond)

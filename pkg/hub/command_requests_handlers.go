@@ -302,6 +302,13 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	outputAvailable := false
+	if isApprover && runRow != nil && runRow.FinishedAt != nil && user.ID() == runRow.ApproverUserID {
+		if has, herr := s.store.HasActionRunOutput(ctx, runRow.ID); herr == nil && has {
+			outputAvailable = true
+		}
+	}
+
 	runView := commandRunView(runRow)
 	writeJSON(w, http.StatusOK, messages.CommandRequestDetailResponse{
 		Request:                commandRequestView(row, replacedBy, runRow),
@@ -314,6 +321,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		ApproverEmail:          approverEmail,
 		PreviousVersionUnknown: prevUnknown,
 		CanApprove:             canApprove,
+		OutputAvailable:        outputAvailable,
 		Reason:                 reason,
 	})
 }
