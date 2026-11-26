@@ -126339,6 +126339,7 @@ type TriggerEventMutation struct {
 	lists            *string
 	headers          *string
 	payload          *string
+	payload_ref      *string
 	payload_bytes    *int
 	addpayload_bytes *int
 	status           *string
@@ -126927,6 +126928,42 @@ func (m *TriggerEventMutation) ResetPayload() {
 	m.payload = nil
 }
 
+// SetPayloadRef sets the "payload_ref" field.
+func (m *TriggerEventMutation) SetPayloadRef(s string) {
+	m.payload_ref = &s
+}
+
+// PayloadRef returns the value of the "payload_ref" field in the mutation.
+func (m *TriggerEventMutation) PayloadRef() (r string, exists bool) {
+	v := m.payload_ref
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPayloadRef returns the old "payload_ref" field's value of the TriggerEvent entity.
+// If the TriggerEvent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerEventMutation) OldPayloadRef(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPayloadRef is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPayloadRef requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPayloadRef: %w", err)
+	}
+	return oldValue.PayloadRef, nil
+}
+
+// ResetPayloadRef resets all changes to the "payload_ref" field.
+func (m *TriggerEventMutation) ResetPayloadRef() {
+	m.payload_ref = nil
+}
+
 // SetPayloadBytes sets the "payload_bytes" field.
 func (m *TriggerEventMutation) SetPayloadBytes(i int) {
 	m.payload_bytes = &i
@@ -127299,7 +127336,7 @@ func (m *TriggerEventMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerEventMutation) Fields() []string {
-	fields := make([]string, 0, 20)
+	fields := make([]string, 0, 21)
 	if m.project_id != nil {
 		fields = append(fields, triggerevent.FieldProjectID)
 	}
@@ -127338,6 +127375,9 @@ func (m *TriggerEventMutation) Fields() []string {
 	}
 	if m.payload != nil {
 		fields = append(fields, triggerevent.FieldPayload)
+	}
+	if m.payload_ref != nil {
+		fields = append(fields, triggerevent.FieldPayloadRef)
 	}
 	if m.payload_bytes != nil {
 		fields = append(fields, triggerevent.FieldPayloadBytes)
@@ -127394,6 +127434,8 @@ func (m *TriggerEventMutation) Field(name string) (ent.Value, bool) {
 		return m.Headers()
 	case triggerevent.FieldPayload:
 		return m.Payload()
+	case triggerevent.FieldPayloadRef:
+		return m.PayloadRef()
 	case triggerevent.FieldPayloadBytes:
 		return m.PayloadBytes()
 	case triggerevent.FieldStatus:
@@ -127443,6 +127485,8 @@ func (m *TriggerEventMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldHeaders(ctx)
 	case triggerevent.FieldPayload:
 		return m.OldPayload(ctx)
+	case triggerevent.FieldPayloadRef:
+		return m.OldPayloadRef(ctx)
 	case triggerevent.FieldPayloadBytes:
 		return m.OldPayloadBytes(ctx)
 	case triggerevent.FieldStatus:
@@ -127556,6 +127600,13 @@ func (m *TriggerEventMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetPayload(v)
+		return nil
+	case triggerevent.FieldPayloadRef:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPayloadRef(v)
 		return nil
 	case triggerevent.FieldPayloadBytes:
 		v, ok := value.(int)
@@ -127747,6 +127798,9 @@ func (m *TriggerEventMutation) ResetField(name string) error {
 		return nil
 	case triggerevent.FieldPayload:
 		m.ResetPayload()
+		return nil
+	case triggerevent.FieldPayloadRef:
+		m.ResetPayloadRef()
 		return nil
 	case triggerevent.FieldPayloadBytes:
 		m.ResetPayloadBytes()

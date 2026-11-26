@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -84,6 +85,10 @@ type TriggerService interface {
 type TriggerEventService interface {
 	// Get retrieves a trigger event by ID, including headers and JSON payload.
 	Get(ctx context.Context, id string) (*TriggerEventDetail, error)
+
+	// GetPayload streams the raw JSON payload for a trigger event (GET .../trigger-events/{id}?payload=1).
+	// Callers must close the returned io.ReadCloser.
+	GetPayload(ctx context.Context, id string) (io.ReadCloser, error)
 
 	// List returns trigger events matching the filter criteria.
 	List(ctx context.Context, opts *ListTriggerEventsOptions) (*ListTriggerEventsResponse, error)
@@ -492,6 +497,7 @@ type TriggerEventSummary struct {
 	ReceivedAt   time.Time           `json:"receivedAt"`
 	Attributes   map[string]string   `json:"attributes,omitempty"`
 	Lists        map[string][]string `json:"lists,omitempty"`
+	PayloadRef   string              `json:"payloadRef,omitempty"`
 	PayloadBytes int                 `json:"payloadBytes"`
 	Status       string              `json:"status"`
 	MatchCount   int                 `json:"matchCount"`
@@ -698,6 +704,19 @@ func (s *triggerEventService) Get(ctx context.Context, id string) (*TriggerEvent
 		return nil, err
 	}
 	return apiclient.DecodeRequired[TriggerEventDetail](resp)
+}
+
+func (s *triggerEventService) GetPayload(ctx context.Context, id string) (io.ReadCloser, error) {
+	query := url.Values{}
+	query.Set("payload", "1")
+	resp, err := s.c.getWithQuery(ctx, s.basePath()+"/"+url.PathEscape(id), query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, apiclient.CheckResponse(resp)
+	}
+	return resp.Body, nil
 }
 
 func (s *triggerEventService) List(ctx context.Context, opts *ListTriggerEventsOptions) (*ListTriggerEventsResponse, error) {

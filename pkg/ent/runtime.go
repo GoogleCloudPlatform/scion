@@ -3997,24 +3997,28 @@ func init() {
 	triggereventDescPayload := triggereventFields[13].Descriptor()
 	// triggerevent.DefaultPayload holds the default value on creation for the payload field.
 	triggerevent.DefaultPayload = triggereventDescPayload.Default.(string)
+	// triggereventDescPayloadRef is the schema descriptor for payload_ref field.
+	triggereventDescPayloadRef := triggereventFields[14].Descriptor()
+	// triggerevent.DefaultPayloadRef holds the default value on creation for the payload_ref field.
+	triggerevent.DefaultPayloadRef = triggereventDescPayloadRef.Default.(string)
 	// triggereventDescPayloadBytes is the schema descriptor for payload_bytes field.
-	triggereventDescPayloadBytes := triggereventFields[14].Descriptor()
+	triggereventDescPayloadBytes := triggereventFields[15].Descriptor()
 	// triggerevent.DefaultPayloadBytes holds the default value on creation for the payload_bytes field.
 	triggerevent.DefaultPayloadBytes = triggereventDescPayloadBytes.Default.(int)
 	// triggereventDescStatus is the schema descriptor for status field.
-	triggereventDescStatus := triggereventFields[15].Descriptor()
+	triggereventDescStatus := triggereventFields[16].Descriptor()
 	// triggerevent.DefaultStatus holds the default value on creation for the status field.
 	triggerevent.DefaultStatus = triggereventDescStatus.Default.(string)
 	// triggereventDescMatchCount is the schema descriptor for match_count field.
-	triggereventDescMatchCount := triggereventFields[16].Descriptor()
+	triggereventDescMatchCount := triggereventFields[17].Descriptor()
 	// triggerevent.DefaultMatchCount holds the default value on creation for the match_count field.
 	triggerevent.DefaultMatchCount = triggereventDescMatchCount.Default.(int)
 	// triggereventDescFireCount is the schema descriptor for fire_count field.
-	triggereventDescFireCount := triggereventFields[17].Descriptor()
+	triggereventDescFireCount := triggereventFields[18].Descriptor()
 	// triggerevent.DefaultFireCount holds the default value on creation for the fire_count field.
 	triggerevent.DefaultFireCount = triggereventDescFireCount.Default.(int)
 	// triggereventDescCreated is the schema descriptor for created field.
-	triggereventDescCreated := triggereventFields[20].Descriptor()
+	triggereventDescCreated := triggereventFields[21].Descriptor()
 	// triggerevent.DefaultCreated holds the default value on creation for the created field.
 	triggerevent.DefaultCreated = triggereventDescCreated.Default.(func() time.Time)
 	// triggereventDescID is the schema descriptor for id field.

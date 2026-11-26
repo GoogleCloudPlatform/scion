@@ -91,8 +91,10 @@ One-call endpoint + default trigger:
 
 Data visibility & payload limits:
   - Note: anyone with read access to this project's triggers can read bodies sent here.
-  - Requests must be application/json with a body of at most 64 KiB (HTTP 413 above
-    64 KiB; ensure any reverse proxy in front of the Hub also permits 64 KiB bodies).
+  - Requests must be application/json with a body of at most 64 KiB by default,
+    configurable up to 1 MiB via --max-body (HTTP 413 above the endpoint limit;
+    ensure any reverse proxy in front of the Hub permits bodies up to your
+    configured --max-body).
   - Running this command in agent mode prints the one-time secret into the agent's
     transcript; agent-owned endpoints are isolated so the secret only reaches
     triggers on that agent's own endpoint.
@@ -837,7 +839,7 @@ func bindTriggerWebhookUpdateFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&triggerWebhookUpdateSignatureMode, "signature-mode", "", "Updated signature mode (e.g. scion_v1)")
 	cmd.Flags().IntVar(&triggerWebhookUpdateRate, "rate", 0, "Updated per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
 	cmd.Flags().IntVar(&triggerWebhookUpdateBurst, "burst", 0, "Updated per-endpoint ingress burst limit (0 = hub default 60)")
-	cmd.Flags().StringVar(&triggerWebhookUpdateMaxBody, "max-body", "", "Updated per-endpoint max body size in bytes or KiB (e.g. 16384 or 16KiB; max 64KiB)")
+	cmd.Flags().StringVar(&triggerWebhookUpdateMaxBody, "max-body", "", "Updated per-endpoint max body size in bytes, KiB, or MiB (e.g. 16384, 64KiB, or 1MiB; max 1MiB)")
 	cmd.Flags().IntVar(&triggerWebhookUpdateReplayWindow, "replay-window", 0, "Updated timestamp replay tolerance in seconds (30-900; 0 = default 300)")
 	cmd.Flags().StringVar(&triggerWebhookUpdateBind, "bind", "", "Bind the endpoint to an agent name or ID (users only)")
 	cmd.Flags().BoolVar(&triggerWebhookUpdateUnbind, "unbind", false, "Clear the endpoint's agent binding (users only)")
@@ -862,7 +864,7 @@ func init() {
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookReplayWindow, "replay-window", 0, "Timestamp replay tolerance in seconds (30-900; default 300)")
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookRate, "rate", 0, "Per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
 	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookBurst, "burst", 0, "Per-endpoint ingress burst limit (0 = hub default 60)")
-	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMaxBody, "max-body", "", "Per-endpoint max body size in bytes or KiB (e.g. 16384 or 16KiB; max 64KiB)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMaxBody, "max-body", "", "Per-endpoint max body size in bytes, KiB, or MiB (e.g. 16384, 64KiB, or 1MiB; max 1MiB)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAgent, "agent", "", "Create a default message trigger targeting this agent name or ID (requires --message)")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Bind the endpoint to the calling agent via its Hub identity and create a default message trigger to self (deleted with the agent unless --persistent)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookBind, "bind", "", "Bind the endpoint to an agent name or ID (user callers)")

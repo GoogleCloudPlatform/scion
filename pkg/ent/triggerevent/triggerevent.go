@@ -40,6 +40,8 @@ const (
 	FieldHeaders = "headers"
 	// FieldPayload holds the string denoting the payload field in the database.
 	FieldPayload = "payload"
+	// FieldPayloadRef holds the string denoting the payload_ref field in the database.
+	FieldPayloadRef = "payload_ref"
 	// FieldPayloadBytes holds the string denoting the payload_bytes field in the database.
 	FieldPayloadBytes = "payload_bytes"
 	// FieldStatus holds the string denoting the status field in the database.
@@ -74,6 +76,7 @@ var Columns = []string{
 	FieldLists,
 	FieldHeaders,
 	FieldPayload,
+	FieldPayloadRef,
 	FieldPayloadBytes,
 	FieldStatus,
 	FieldMatchCount,
@@ -114,6 +117,8 @@ var (
 	DefaultHeaders string
 	// DefaultPayload holds the default value on creation for the "payload" field.
 	DefaultPayload string
+	// DefaultPayloadRef holds the default value on creation for the "payload_ref" field.
+	DefaultPayloadRef string
 	// DefaultPayloadBytes holds the default value on creation for the "payload_bytes" field.
 	DefaultPayloadBytes int
 	// DefaultStatus holds the default value on creation for the "status" field.
@@ -199,6 +204,11 @@ func ByHeaders(opts ...sql.OrderTermOption) OrderOption {
 // ByPayload orders the results by the payload field.
 func ByPayload(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldPayload, opts...).ToFunc()
+}
+
+// ByPayloadRef orders the results by the payload_ref field.
+func ByPayloadRef(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPayloadRef, opts...).ToFunc()
 }
 
 // ByPayloadBytes orders the results by the payload_bytes field.

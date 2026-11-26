@@ -17,6 +17,7 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -401,6 +402,10 @@ func TestTriggerEventService(t *testing.T) {
 	mux.HandleFunc("/api/v1/projects/proj-1/trigger-events/evt-789", func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("payload") == "1" {
+			_, _ = w.Write([]byte(`{"action":"created","overflow":true}`))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(TriggerEventDetail{
 			TriggerEventSummary: summary,
 			Headers:             map[string]string{"x-github-event": "issue_comment"},
@@ -436,6 +441,13 @@ func TestTriggerEventService(t *testing.T) {
 	assert.Equal(t, "issue_comment", detail.Headers["x-github-event"])
 	assert.Equal(t, []string{"bug", "triggers"}, detail.Lists["labels"])
 	assert.JSONEq(t, `{"action":"created","comment":{"body":"@scion /ping"}}`, string(detail.Payload))
+
+	rc, err := svc.GetPayload(ctx, "evt-789")
+	require.NoError(t, err)
+	streamed, err := io.ReadAll(rc)
+	require.NoError(t, rc.Close())
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"action":"created","overflow":true}`, string(streamed))
 }
 
 func TestWebhookEndpointService_UpdateAndRotateSecret(t *testing.T) {

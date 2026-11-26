@@ -336,9 +336,10 @@ func MatchUntrustedPattern(pattern, path string) bool {
 }
 
 type resolvedVar struct {
-	inserted string
-	found    bool
-	err      *RenderError
+	inserted      string
+	found         bool
+	missingReason string
+	err           *RenderError
 }
 
 // Render expands t against vars, enforcing allowed on untrusted placeholders,
@@ -397,18 +398,25 @@ func (t *Template) Render(vars Vars, allowed []string, opts ...RenderOption) (st
 				val, found, lerr = vars.Lookup(ph.Path)
 			}
 			if lerr != nil {
-				reason := "lookup rejected"
-				var perr *PayloadValueError
-				if errors.As(lerr, &perr) && perr != nil && perr.Reason != "" {
-					reason = perr.Reason
-				}
-				res = resolvedVar{
-					err: &RenderError{
-						Kind:   KindValueRejected,
-						Slot:   t.slot.Name,
-						Path:   ph.Path,
-						Reason: reason,
-					},
+				if errors.Is(lerr, ErrPayloadOutOfLine) {
+					res = resolvedVar{
+						found:         false,
+						missingReason: ErrPayloadOutOfLine.Error(),
+					}
+				} else {
+					reason := "lookup rejected"
+					var perr *PayloadValueError
+					if errors.As(lerr, &perr) && perr != nil && perr.Reason != "" {
+						reason = perr.Reason
+					}
+					res = resolvedVar{
+						err: &RenderError{
+							Kind:   KindValueRejected,
+							Slot:   t.slot.Name,
+							Path:   ph.Path,
+							Reason: reason,
+						},
+					}
 				}
 			} else if found {
 				inserted := val
@@ -442,9 +450,10 @@ func (t *Template) Render(vars Vars, allowed []string, opts ...RenderOption) (st
 				continue
 			}
 			return "", Report{}, &RenderError{
-				Kind: KindValueMissing,
-				Slot: t.slot.Name,
-				Path: ph.Path,
+				Kind:   KindValueMissing,
+				Slot:   t.slot.Name,
+				Path:   ph.Path,
+				Reason: res.missingReason,
 			}
 		}
 

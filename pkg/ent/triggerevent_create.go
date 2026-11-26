@@ -142,6 +142,20 @@ func (_c *TriggerEventCreate) SetNillablePayload(v *string) *TriggerEventCreate 
 	return _c
 }
 
+// SetPayloadRef sets the "payload_ref" field.
+func (_c *TriggerEventCreate) SetPayloadRef(v string) *TriggerEventCreate {
+	_c.mutation.SetPayloadRef(v)
+	return _c
+}
+
+// SetNillablePayloadRef sets the "payload_ref" field if the given value is not nil.
+func (_c *TriggerEventCreate) SetNillablePayloadRef(v *string) *TriggerEventCreate {
+	if v != nil {
+		_c.SetPayloadRef(*v)
+	}
+	return _c
+}
+
 // SetPayloadBytes sets the "payload_bytes" field.
 func (_c *TriggerEventCreate) SetPayloadBytes(v int) *TriggerEventCreate {
 	_c.mutation.SetPayloadBytes(v)
@@ -309,6 +323,10 @@ func (_c *TriggerEventCreate) defaults() {
 		v := triggerevent.DefaultPayload
 		_c.mutation.SetPayload(v)
 	}
+	if _, ok := _c.mutation.PayloadRef(); !ok {
+		v := triggerevent.DefaultPayloadRef
+		_c.mutation.SetPayloadRef(v)
+	}
 	if _, ok := _c.mutation.PayloadBytes(); !ok {
 		v := triggerevent.DefaultPayloadBytes
 		_c.mutation.SetPayloadBytes(v)
@@ -400,6 +418,9 @@ func (_c *TriggerEventCreate) check() error {
 	}
 	if _, ok := _c.mutation.Payload(); !ok {
 		return &ValidationError{Name: "payload", err: errors.New(`ent: missing required field "TriggerEvent.payload"`)}
+	}
+	if _, ok := _c.mutation.PayloadRef(); !ok {
+		return &ValidationError{Name: "payload_ref", err: errors.New(`ent: missing required field "TriggerEvent.payload_ref"`)}
 	}
 	if _, ok := _c.mutation.PayloadBytes(); !ok {
 		return &ValidationError{Name: "payload_bytes", err: errors.New(`ent: missing required field "TriggerEvent.payload_bytes"`)}
@@ -503,6 +524,10 @@ func (_c *TriggerEventCreate) createSpec() (*TriggerEvent, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.Payload(); ok {
 		_spec.SetField(triggerevent.FieldPayload, field.TypeString, value)
 		_node.Payload = value
+	}
+	if value, ok := _c.mutation.PayloadRef(); ok {
+		_spec.SetField(triggerevent.FieldPayloadRef, field.TypeString, value)
+		_node.PayloadRef = value
 	}
 	if value, ok := _c.mutation.PayloadBytes(); ok {
 		_spec.SetField(triggerevent.FieldPayloadBytes, field.TypeInt, value)
@@ -741,6 +766,9 @@ func (u *TriggerEventUpsertOne) UpdateNewValues() *TriggerEventUpsertOne {
 		}
 		if _, exists := u.create.mutation.Payload(); exists {
 			s.SetIgnore(triggerevent.FieldPayload)
+		}
+		if _, exists := u.create.mutation.PayloadRef(); exists {
+			s.SetIgnore(triggerevent.FieldPayloadRef)
 		}
 		if _, exists := u.create.mutation.PayloadBytes(); exists {
 			s.SetIgnore(triggerevent.FieldPayloadBytes)
@@ -1120,6 +1148,9 @@ func (u *TriggerEventUpsertBulk) UpdateNewValues() *TriggerEventUpsertBulk {
 			}
 			if _, exists := b.mutation.Payload(); exists {
 				s.SetIgnore(triggerevent.FieldPayload)
+			}
+			if _, exists := b.mutation.PayloadRef(); exists {
+				s.SetIgnore(triggerevent.FieldPayloadRef)
 			}
 			if _, exists := b.mutation.PayloadBytes(); exists {
 				s.SetIgnore(triggerevent.FieldPayloadBytes)

@@ -75,6 +75,13 @@ func (p *purgeCountingStore) PurgeOldTriggerHistory(_ context.Context, _ time.Ti
 	return 0, 0, nil
 }
 
+func (p *purgeCountingStore) PurgeOldTriggerHistoryWithPayloadRefs(_ context.Context, _ time.Time) (int, int, []string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.triggerHistoryPurgeCall++
+	return 0, 0, nil, nil
+}
+
 func (p *purgeCountingStore) ReleaseTerminalTriggerSubjectClaims(_ context.Context, _ time.Time) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

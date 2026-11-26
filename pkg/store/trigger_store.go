@@ -320,6 +320,7 @@ type TriggerEvent struct {
 	Lists        map[string][]string `json:"lists,omitempty"`
 	Headers      map[string]string   `json:"headers"`
 	Payload      string              `json:"payload,omitempty"`
+	PayloadRef   string              `json:"payloadRef,omitempty"`
 	PayloadBytes int                 `json:"payloadBytes"`
 	Status       string              `json:"status"`
 	MatchCount   int                 `json:"matchCount"`
@@ -462,6 +463,13 @@ type TriggerStore interface {
 	GetTriggerEventByBodySHA256(ctx context.Context, projectID, sourceKind, bodySHA256 string) (*TriggerEvent, error)
 	ListTriggerEvents(ctx context.Context, filter TriggerEventFilter, opts ListOptions) (*ListResult[TriggerEvent], error)
 	CountPendingTriggerEvents(ctx context.Context, projectID string) (int, error)
+	// SumTriggerEventOverflowBytes returns the total payload_bytes of trigger_events
+	// in projectID with non-empty payload_ref created at or after since (Stage 2 §8).
+	SumTriggerEventOverflowBytes(ctx context.Context, projectID string, since time.Time) (int64, error)
+	// ExistingTriggerEventPayloadRefs returns the subset of refs belonging to
+	// projectID that currently exist in trigger_events.payload_ref (uses the
+	// (project_id, payload_ref) index during the hourly orphan sweep, Stage 2 §8).
+	ExistingTriggerEventPayloadRefs(ctx context.Context, projectID string, refs []string) (map[string]bool, error)
 	// UpdateTriggerEventAttributes is enrichment-only (Stage 3 §5.5): it updates
 	// attributes and lists on a pending event row before rule evaluation and
 	// never modifies payload, type, subject, headers, dedup_key, or body_sha256.
@@ -498,6 +506,10 @@ type TriggerStore interface {
 	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
 	ReapExpiredTriggerFires(ctx context.Context, now time.Time, limit int) (int, error)
 	PurgeOldTriggerHistory(ctx context.Context, olderThan time.Time) (eventsDeleted int, firesDeleted int, err error)
+	// PurgeOldTriggerHistoryWithPayloadRefs purges terminal trigger_fires and
+	// trigger_events older than olderThan and returns the non-empty payload_ref
+	// values of the purged event rows so the caller can delete their overflow objects.
+	PurgeOldTriggerHistoryWithPayloadRefs(ctx context.Context, olderThan time.Time) (eventsDeleted int, firesDeleted int, payloadRefs []string, err error)
 
 	// Trigger subject claims (Stage 2 §5.6)
 	ClaimTriggerSubject(ctx context.Context, triggerID, subject, eventID, fireID string, now, abandonedBefore time.Time) (claimed *TriggerSubjectClaim, existing *TriggerSubjectClaim, err error)

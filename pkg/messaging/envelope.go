@@ -295,6 +295,22 @@ func NewExternalPayload(verified string, body []byte) *ExternalPayload {
 	return ext
 }
 
+// NewTruncatedExternalPayload constructs an ExternalPayload for an overflow
+// body stored out of line (§8): Truncated is always true, Bytes records the
+// full original payload size (N), and Text carries up to the first 16 KiB
+// (MaxExternalPayloadInlineBytes) cut on a valid UTF-8 rune boundary.
+func NewTruncatedExternalPayload(verified string, prefix []byte, totalBytes int) *ExternalPayload {
+	if totalBytes < len(prefix) {
+		totalBytes = len(prefix)
+	}
+	return &ExternalPayload{
+		Verified:  verified,
+		Truncated: true,
+		Bytes:     totalBytes,
+		Text:      truncateUTF8Bytes(prefix, MaxExternalPayloadInlineBytes),
+	}
+}
+
 func truncateUTF8Bytes(b []byte, maxBytes int) string {
 	if maxBytes <= 0 || len(b) == 0 {
 		return ""

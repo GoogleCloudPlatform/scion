@@ -856,6 +856,7 @@ func (s *Server) newTriggerDispatcher(queue *durablequeue.StoreQueue) (*trigger.
 		Queue:         q,
 		TxRunner:      txRunner,
 		Core:          core,
+		Storage:       s.GetStorage,
 		SubjectClaims: trigger.NewSubjectClaims(s.store, s.store, nil),
 		Rules:         s.TriggerRules(),
 		RuleMetrics:   s.triggers.ruleMetrics,
@@ -922,13 +923,15 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 		return
 	}
 	runAt := time.Now().UTC()
-	res, err := trigger.RunMaintenance(ctx, s.store, runAt)
+	res, err := trigger.RunMaintenanceWithStorage(ctx, s.store, s.GetStorage(), runAt, trigger.MaintenanceOptions{
+		Logger: logging.Subsystem("hub.triggers"),
+	})
 	serverTriggerMetrics{srv: s}.RecordReaperRun(res.FiresReaped, runAt, err)
 	if err != nil {
 		slog.Error("Scheduler: trigger maintenance failed", "error", err)
 	}
 	sweptBound := s.sweepOrphanedBoundWebhookEndpoints(ctx)
-	if res.FiresReaped > 0 || res.EventsReconciled > 0 || res.EventsPurged > 0 || res.FiresPurged > 0 || res.ClaimsReleased > 0 || res.ClaimsPurged > 0 || res.RotatedSecretsPurged > 0 || sweptBound > 0 {
+	if res.FiresReaped > 0 || res.EventsReconciled > 0 || res.EventsPurged > 0 || res.FiresPurged > 0 || res.ClaimsReleased > 0 || res.ClaimsPurged > 0 || res.RotatedSecretsPurged > 0 || res.OverflowObjectsPurged > 0 || res.OverflowOrphansSwept > 0 || res.OverflowDeleteErrors > 0 || sweptBound > 0 {
 		slog.Info("Scheduler: completed trigger maintenance",
 			"fires_reaped", res.FiresReaped,
 			"events_reconciled", res.EventsReconciled,
@@ -937,6 +940,9 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 			"claims_released", res.ClaimsReleased,
 			"claims_purged", res.ClaimsPurged,
 			"rotated_secrets_purged", res.RotatedSecretsPurged,
+			"overflow_objects_purged", res.OverflowObjectsPurged,
+			"overflow_orphans_swept", res.OverflowOrphansSwept,
+			"overflow_delete_errors", res.OverflowDeleteErrors,
 			"orphaned_bound_endpoints_swept", sweptBound)
 	}
 }
@@ -1149,7 +1155,14 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	if len(ev.Lists) > 0 {
 		body.Lists = copyTriggerStringListMap(ev.Lists)
 	}
-	if len(ev.Payload) > 0 {
+	if ev.PayloadRef != "" {
+		preview := ev.PayloadPreview
+		totalBytes := ev.PayloadBytes
+		if totalBytes <= 0 {
+			totalBytes = len(preview)
+		}
+		body.External = messaging.NewTruncatedExternalPayload(verified, preview, totalBytes)
+	} else if len(ev.Payload) > 0 {
 		body.External = messaging.NewExternalPayload(verified, ev.Payload)
 	}
 	return body

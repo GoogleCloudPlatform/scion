@@ -120,6 +120,11 @@ func Payload(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldPayload, v))
 }
 
+// PayloadRef applies equality check predicate on the "payload_ref" field. It's identical to PayloadRefEQ.
+func PayloadRef(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldPayloadRef, v))
+}
+
 // PayloadBytes applies equality check predicate on the "payload_bytes" field. It's identical to PayloadBytesEQ.
 func PayloadBytes(v int) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldEQ(FieldPayloadBytes, v))
@@ -923,6 +928,71 @@ func PayloadEqualFold(v string) predicate.TriggerEvent {
 // PayloadContainsFold applies the ContainsFold predicate on the "payload" field.
 func PayloadContainsFold(v string) predicate.TriggerEvent {
 	return predicate.TriggerEvent(sql.FieldContainsFold(FieldPayload, v))
+}
+
+// PayloadRefEQ applies the EQ predicate on the "payload_ref" field.
+func PayloadRefEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEQ(FieldPayloadRef, v))
+}
+
+// PayloadRefNEQ applies the NEQ predicate on the "payload_ref" field.
+func PayloadRefNEQ(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNEQ(FieldPayloadRef, v))
+}
+
+// PayloadRefIn applies the In predicate on the "payload_ref" field.
+func PayloadRefIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldIn(FieldPayloadRef, vs...))
+}
+
+// PayloadRefNotIn applies the NotIn predicate on the "payload_ref" field.
+func PayloadRefNotIn(vs ...string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldNotIn(FieldPayloadRef, vs...))
+}
+
+// PayloadRefGT applies the GT predicate on the "payload_ref" field.
+func PayloadRefGT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGT(FieldPayloadRef, v))
+}
+
+// PayloadRefGTE applies the GTE predicate on the "payload_ref" field.
+func PayloadRefGTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldGTE(FieldPayloadRef, v))
+}
+
+// PayloadRefLT applies the LT predicate on the "payload_ref" field.
+func PayloadRefLT(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLT(FieldPayloadRef, v))
+}
+
+// PayloadRefLTE applies the LTE predicate on the "payload_ref" field.
+func PayloadRefLTE(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldLTE(FieldPayloadRef, v))
+}
+
+// PayloadRefContains applies the Contains predicate on the "payload_ref" field.
+func PayloadRefContains(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContains(FieldPayloadRef, v))
+}
+
+// PayloadRefHasPrefix applies the HasPrefix predicate on the "payload_ref" field.
+func PayloadRefHasPrefix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasPrefix(FieldPayloadRef, v))
+}
+
+// PayloadRefHasSuffix applies the HasSuffix predicate on the "payload_ref" field.
+func PayloadRefHasSuffix(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldHasSuffix(FieldPayloadRef, v))
+}
+
+// PayloadRefEqualFold applies the EqualFold predicate on the "payload_ref" field.
+func PayloadRefEqualFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldEqualFold(FieldPayloadRef, v))
+}
+
+// PayloadRefContainsFold applies the ContainsFold predicate on the "payload_ref" field.
+func PayloadRefContainsFold(v string) predicate.TriggerEvent {
+	return predicate.TriggerEvent(sql.FieldContainsFold(FieldPayloadRef, v))
 }
 
 // PayloadBytesEQ applies the EQ predicate on the "payload_bytes" field.

@@ -17,11 +17,15 @@ package hub
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -165,5 +169,57 @@ func (s *Server) getTriggerEvent(w http.ResponseWriter, r *http.Request, project
 		return
 	}
 
+	payloadParam := strings.TrimSpace(r.URL.Query().Get("payload"))
+	if payloadParam == "1" || strings.EqualFold(payloadParam, "true") {
+		s.streamTriggerEventPayload(w, r, projectID, ev)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, buildTriggerEventDetailResponse(*ev))
+}
+
+// streamTriggerEventPayload streams the raw JSON payload for ev under the
+// caller's already-verified trigger.read + row-visibility authorization
+// (Stage 2 §8, §9.2, S21). Overflow payloads are streamed directly from
+// hub-private pkg/storage without ever issuing a signed URL.
+func (s *Server) streamTriggerEventPayload(w http.ResponseWriter, r *http.Request, projectID string, ev *store.TriggerEvent) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+
+	if ev.PayloadRef != "" {
+		if !trigger.IsValidOverflowPayloadPath(projectID, ev.PayloadRef) {
+			InternalError(w)
+			return
+		}
+		stor := s.GetStorage()
+		if stor == nil {
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "trigger payload storage unavailable", nil)
+			return
+		}
+		rc, obj, err := stor.Download(r.Context(), ev.PayloadRef)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				NotFound(w, "Trigger event payload")
+				return
+			}
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "trigger payload storage unavailable", nil)
+			return
+		}
+		defer func() { _ = rc.Close() }()
+		if obj != nil && obj.Size >= 0 {
+			w.Header().Set("Content-Length", strconv.FormatInt(obj.Size, 10))
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.Copy(w, rc)
+		return
+	}
+
+	body := ev.Payload
+	if body == "" {
+		body = "{}"
+	}
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, body)
 }

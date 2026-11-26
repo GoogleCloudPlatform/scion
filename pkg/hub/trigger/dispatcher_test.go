@@ -686,6 +686,37 @@ func (m *memTriggerStore) ReapExpiredTriggerFires(_ context.Context, now time.Ti
 func (m *memTriggerStore) PurgeOldTriggerHistory(context.Context, time.Time) (int, int, error) {
 	return 0, 0, nil
 }
+func (m *memTriggerStore) PurgeOldTriggerHistoryWithPayloadRefs(context.Context, time.Time) (int, int, []string, error) {
+	return 0, 0, nil, nil
+}
+func (m *memTriggerStore) SumTriggerEventOverflowBytes(_ context.Context, projectID string, since time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var total int64
+	for _, ev := range m.events {
+		if ev.ProjectID == projectID && ev.PayloadRef != "" && !ev.CreatedAt.Before(since) {
+			total += int64(ev.PayloadBytes)
+		}
+	}
+	return total, nil
+}
+func (m *memTriggerStore) ExistingTriggerEventPayloadRefs(_ context.Context, projectID string, refs []string) (map[string]bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	present := make(map[string]bool, len(m.events))
+	for _, ev := range m.events {
+		if ev.ProjectID == projectID && ev.PayloadRef != "" {
+			present[ev.PayloadRef] = true
+		}
+	}
+	out := make(map[string]bool)
+	for _, ref := range refs {
+		if present[ref] {
+			out[ref] = true
+		}
+	}
+	return out, nil
+}
 func (m *memTriggerStore) ClaimTriggerSubject(context.Context, string, string, string, string, time.Time, time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
 	return nil, nil, nil
 }

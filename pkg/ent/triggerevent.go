@@ -44,6 +44,8 @@ type TriggerEvent struct {
 	Headers string `json:"headers,omitempty"`
 	// Payload holds the value of the "payload" field.
 	Payload string `json:"payload,omitempty"`
+	// PayloadRef holds the value of the "payload_ref" field.
+	PayloadRef string `json:"payload_ref,omitempty"`
 	// PayloadBytes holds the value of the "payload_bytes" field.
 	PayloadBytes int `json:"payload_bytes,omitempty"`
 	// Status holds the value of the "status" field.
@@ -68,7 +70,7 @@ func (*TriggerEvent) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerevent.FieldPayloadBytes, triggerevent.FieldMatchCount, triggerevent.FieldFireCount:
 			values[i] = new(sql.NullInt64)
-		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldBodySha256, triggerevent.FieldAttributes, triggerevent.FieldLists, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldStatus, triggerevent.FieldError:
+		case triggerevent.FieldSourceKind, triggerevent.FieldSourceID, triggerevent.FieldType, triggerevent.FieldSubject, triggerevent.FieldDedupKey, triggerevent.FieldBodySha256, triggerevent.FieldAttributes, triggerevent.FieldLists, triggerevent.FieldHeaders, triggerevent.FieldPayload, triggerevent.FieldPayloadRef, triggerevent.FieldStatus, triggerevent.FieldError:
 			values[i] = new(sql.NullString)
 		case triggerevent.FieldOccurredAt, triggerevent.FieldReceivedAt, triggerevent.FieldProcessedAt, triggerevent.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -172,6 +174,12 @@ func (_m *TriggerEvent) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field payload", values[i])
 			} else if value.Valid {
 				_m.Payload = value.String
+			}
+		case triggerevent.FieldPayloadRef:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field payload_ref", values[i])
+			} else if value.Valid {
+				_m.PayloadRef = value.String
 			}
 		case triggerevent.FieldPayloadBytes:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
@@ -290,6 +298,9 @@ func (_m *TriggerEvent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("payload=")
 	builder.WriteString(_m.Payload)
+	builder.WriteString(", ")
+	builder.WriteString("payload_ref=")
+	builder.WriteString(_m.PayloadRef)
 	builder.WriteString(", ")
 	builder.WriteString("payload_bytes=")
 	builder.WriteString(fmt.Sprintf("%v", _m.PayloadBytes))

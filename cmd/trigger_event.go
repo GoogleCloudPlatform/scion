@@ -19,11 +19,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
@@ -40,7 +43,9 @@ var (
 	triggerEventListLimit   int
 	triggerEventListCursor  string
 
-	triggerEventPayloadOnly bool
+	triggerEventPayloadOnly  bool
+	triggerEventPayloadOut   string
+	triggerEventPayloadForce bool
 )
 
 var triggerEventCmd = &cobra.Command{
@@ -245,14 +250,44 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	detail, err := hubCtx.Client.TriggerEvents(projectID).Get(ctx, fullID)
-	if err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger event: %w", err))
+	outPath := strings.TrimSpace(triggerEventPayloadOut)
+	if outPath != "" && !triggerEventPayloadOnly {
+		return newUsageError("--out requires --payload")
 	}
 
 	if triggerEventPayloadOnly {
-		fmt.Println(formatTriggerEventPayload(detail.Payload, ""))
+		rc, pErr := hubCtx.Client.TriggerEvents(projectID).GetPayload(ctx, fullID)
+		if pErr != nil {
+			return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to stream trigger event payload: %w", pErr))
+		}
+		defer func() { _ = rc.Close() }()
+
+		if outPath != "" {
+			dir, name := filepath.Dir(outPath), filepath.Base(outPath)
+			out, oErr := openOutDir(dir)
+			if oErr != nil {
+				return fmt.Errorf("failed to open output directory %q: %w", dir, oErr)
+			}
+			defer func() { _ = out.Close() }()
+			if wErr := out.WriteFile(name, triggerEventPayloadForce, func(w io.Writer) error {
+				_, copyErr := io.Copy(w, rc)
+				return copyErr
+			}); wErr != nil {
+				return fmt.Errorf("failed to write payload to %q: %w", outPath, wErr)
+			}
+			return nil
+		}
+
+		if err := streamTerminalSafeJSON(os.Stdout, rc); err != nil {
+			return fmt.Errorf("failed to stream trigger event payload: %w", err)
+		}
+		_, _ = fmt.Fprintln(os.Stdout)
 		return nil
+	}
+
+	detail, err := hubCtx.Client.TriggerEvents(projectID).Get(ctx, fullID)
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger event: %w", err))
 	}
 
 	if isTriggerJSONOutput() {
@@ -325,8 +360,56 @@ func runTriggerEventGet(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println("Payload:")
-	fmt.Println(formatTriggerEventPayload(detail.Payload, "  "))
+	if detail.PayloadRef != "" && len(bytes.TrimSpace(detail.Payload)) == 0 {
+		fmt.Printf("  (stored out of line, %d bytes; run 'scion trigger event get %s --payload' to stream)\n",
+			detail.PayloadBytes, triggerTerminalText(detail.ID, false))
+	} else {
+		fmt.Println(formatTriggerEventPayload(detail.Payload, "  "))
+	}
 	return nil
+}
+
+// streamTerminalSafeJSON copies a JSON stream to w in bounded chunks while
+// escaping control and bidi characters as JSON \uXXXX sequences (preserving
+// valid JSON round-tripping and preventing terminal escape injection).
+func streamTerminalSafeJSON(w io.Writer, r io.Reader) error {
+	const chunkSize = 32 * 1024
+	buf := make([]byte, chunkSize+utf8.UTFMax)
+	var carry int
+	for {
+		n, rErr := r.Read(buf[carry : carry+chunkSize])
+		total := carry + n
+		if total > 0 {
+			emitEnd := total
+			if rErr == nil {
+				// Keep any incomplete trailing UTF-8 sequence for the next read.
+				for back := 1; back < utf8.UTFMax && back <= emitEnd; back++ {
+					b := buf[emitEnd-back]
+					if utf8.RuneStart(b) {
+						if !utf8.FullRune(buf[emitEnd-back : emitEnd]) {
+							emitEnd -= back
+						}
+						break
+					}
+				}
+			}
+			if emitEnd > 0 {
+				if _, wErr := io.WriteString(w, escapeTriggerJSONBytes(buf[:emitEnd])); wErr != nil {
+					return wErr
+				}
+			}
+			carry = total - emitEnd
+			if carry > 0 {
+				copy(buf[:carry], buf[emitEnd:total])
+			}
+		}
+		if rErr == io.EOF {
+			return nil
+		}
+		if rErr != nil {
+			return rErr
+		}
+	}
 }
 
 func formatTriggerEventPayload(raw json.RawMessage, prefix string) string {
@@ -356,5 +439,7 @@ func init() {
 	triggerEventListCmd.Flags().IntVar(&triggerEventListLimit, "limit", defaultTriggerEventListLimit, "Maximum number of events to return")
 	triggerEventListCmd.Flags().StringVar(&triggerEventListCursor, "cursor", "", "Pagination cursor from a previous event list response")
 
-	triggerEventGetCmd.Flags().BoolVar(&triggerEventPayloadOnly, "payload", false, "Print only the JSON payload")
+	triggerEventGetCmd.Flags().BoolVar(&triggerEventPayloadOnly, "payload", false, "Stream only the raw JSON payload (supports overflow payloads)")
+	triggerEventGetCmd.Flags().StringVar(&triggerEventPayloadOut, "out", "", "Write --payload stream to a file instead of stdout (refuses to overwrite without --force)")
+	triggerEventGetCmd.Flags().BoolVar(&triggerEventPayloadForce, "force", false, "Overwrite an existing --out file")
 }

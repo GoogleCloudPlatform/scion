@@ -1798,6 +1798,7 @@ func entTriggerEventToStore(e *ent.TriggerEvent) *store.TriggerEvent {
 		Lists:        unmarshalStringListMap(e.Lists),
 		Headers:      unmarshalStringMap(e.Headers),
 		Payload:      e.Payload,
+		PayloadRef:   e.PayloadRef,
 		PayloadBytes: e.PayloadBytes,
 		Status:       e.Status,
 		MatchCount:   e.MatchCount,
@@ -1870,6 +1871,7 @@ func (s *TriggerStore) CreateTriggerEvent(ctx context.Context, evt *store.Trigge
 		SetLists(listsJSON).
 		SetHeaders(headersJSON).
 		SetPayload(evt.Payload).
+		SetPayloadRef(evt.PayloadRef).
 		SetPayloadBytes(payloadBytes).
 		SetStatus(status).
 		SetMatchCount(evt.MatchCount).
@@ -2133,6 +2135,64 @@ func (s *TriggerStore) CountPendingTriggerEvents(ctx context.Context, projectID 
 			triggerevent.StatusEQ(store.TriggerEventStatusPending),
 		).
 		Count(ctx)
+}
+
+func (s *TriggerStore) SumTriggerEventOverflowBytes(ctx context.Context, projectID string, since time.Time) (int64, error) {
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	var rows []struct {
+		SumPayloadBytes *int64 `sql:"sum_payload_bytes"`
+	}
+	err = s.client.TriggerEvent.Query().
+		Where(
+			triggerevent.ProjectIDEQ(pid),
+			triggerevent.PayloadRefGT(""),
+			triggerevent.CreatedGTE(since.UTC()),
+		).
+		Aggregate(ent.As(ent.Sum(triggerevent.FieldPayloadBytes), "sum_payload_bytes")).
+		Scan(ctx, &rows)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if len(rows) == 0 || rows[0].SumPayloadBytes == nil {
+		return 0, nil
+	}
+	return *rows[0].SumPayloadBytes, nil
+}
+
+const existingPayloadRefsChunkSize = 500
+
+func (s *TriggerStore) ExistingTriggerEventPayloadRefs(ctx context.Context, projectID string, refs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(refs))
+	if len(refs) == 0 {
+		return out, nil
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(refs); start += existingPayloadRefsChunkSize {
+		end := min(start+existingPayloadRefsChunkSize, len(refs))
+		chunk := refs[start:end]
+		found, err := s.client.TriggerEvent.Query().
+			Where(
+				triggerevent.ProjectIDEQ(pid),
+				triggerevent.PayloadRefIn(chunk...),
+			).
+			Select(triggerevent.FieldPayloadRef).
+			Strings(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, ref := range found {
+			if ref != "" {
+				out[ref] = true
+			}
+		}
+	}
+	return out, nil
 }
 
 // UpdateTriggerEventAttributes is enrichment-only (Stage 3 §5.5): it updates
@@ -3424,8 +3484,17 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 }
 
 func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan time.Time) (int, int, error) {
+	eventsDeleted, firesDeleted, _, err := s.PurgeOldTriggerHistoryWithPayloadRefs(ctx, olderThan)
+	return eventsDeleted, firesDeleted, err
+}
+
+func (s *TriggerStore) PurgeOldTriggerHistoryWithPayloadRefs(ctx context.Context, olderThan time.Time) (int, int, []string, error) {
 	cutoff := olderThan.UTC()
-	var firesDeleted, eventsDeleted int
+	var (
+		firesDeleted  int
+		eventsDeleted int
+		payloadRefs   []string
+	)
 	err := s.withClientTx(ctx, func(c *ent.Client) error {
 		purgeable := []predicate.TriggerFire{
 			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred, store.TriggerFireStatusWaiting),
@@ -3449,20 +3518,29 @@ func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan tim
 			}
 			firesDeleted += n
 		}
+		evPreds := []predicate.TriggerEvent{
+			triggerevent.StatusNEQ(store.TriggerEventStatusPending),
+			triggerevent.CreatedLT(cutoff),
+		}
+		refs, err := c.TriggerEvent.Query().
+			Where(append(append([]predicate.TriggerEvent{}, evPreds...), triggerevent.PayloadRefGT(""))...).
+			Select(triggerevent.FieldPayloadRef).
+			Strings(ctx)
+		if err != nil {
+			return mapError(err)
+		}
 		evDel, err := c.TriggerEvent.Delete().
-			Where(
-				triggerevent.StatusNEQ(store.TriggerEventStatusPending),
-				triggerevent.CreatedLT(cutoff),
-			).
+			Where(evPreds...).
 			Exec(ctx)
 		if err != nil {
 			return mapError(err)
 		}
 		eventsDeleted = evDel
+		payloadRefs = refs
 		return nil
 	})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
-	return eventsDeleted, firesDeleted, nil
+	return eventsDeleted, firesDeleted, payloadRefs, nil
 }
