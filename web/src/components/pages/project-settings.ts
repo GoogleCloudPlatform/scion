@@ -3048,7 +3048,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
     };
 
-    const renderAuthorizedBy = () => {
+    const renderAuthorizedBy = (): TemplateResult | string => {
       if (!assoc) return '';
       if (!assoc.authorized) {
         if (assoc.verified === false) {
@@ -3060,7 +3060,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
       switch (assoc.basis) {
         case 'admin_binding': {
-          const binder = assoc.bound_by_name || assoc.bound_by || 'hub admin';
+          const binder = assoc.bound_by_name || 'a hub admin';
           return html`<span
             >Bound by
             ${binder}${assoc.bound_at ? ` on ${formatInstantWithZone(assoc.bound_at)}` : ''}</span
@@ -3075,7 +3075,7 @@ export class ScionPageProjectSettings extends LitElement {
       }
     };
 
-    const renderBindPicker = () => {
+    const renderBindPicker = (): TemplateResult | string => {
       if (this.githubBindCandidates.length <= 1) return '';
       return html`
         <div class="github-bind-picker" data-testid="github-bind-picker">
@@ -3092,7 +3092,7 @@ export class ScionPageProjectSettings extends LitElement {
                   size="small"
                   ?loading=${this.githubBindBusy}
                   ?disabled=${this.githubBindBusy}
-                  @click=${() => this.confirmAndBindGitHubInstallation(inst)}
+                  @click=${(): Promise<void> => this.confirmAndBindGitHubInstallation(inst)}
                 >
                   Bind #${inst.installation_id}
                 </sl-button>
@@ -3103,7 +3103,7 @@ export class ScionPageProjectSettings extends LitElement {
       `;
     };
 
-    const renderPermissionsTable = () => {
+    const renderPermissionsTable = (): TemplateResult | string => {
       const perms = info?.permissions;
       if (!perms) return '';
       const cappedSet = new Set(perms.capped ?? []);
@@ -3210,7 +3210,7 @@ export class ScionPageProjectSettings extends LitElement {
                                 data-testid="github-bind-button"
                                 ?loading=${this.githubBindBusy}
                                 ?disabled=${this.githubBindBusy || this.githubAppLoading}
-                                @click=${() => this.startBindGitHubInstallation()}
+                                @click=${(): Promise<void> => this.startBindGitHubInstallation()}
                               >
                                 Bind installation
                               </sl-button>

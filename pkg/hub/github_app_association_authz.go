@@ -916,14 +916,15 @@ func (c *githubAssociationReportCache) lookupFreshProject(projectID string, inst
 // githubAssociationCachedEval is the outcome of evaluating a project's GitHub
 // App association through the shared cached evaluator.
 type githubAssociationCachedEval struct {
-	InstallationID *int64
-	AccountLogin   string
-	Authorized     bool
-	Verified       bool
-	Basis          string
-	WriteAllowed   bool
-	ErrorCode      string
-	Reason         string
+	InstallationID        *int64
+	AccountLogin          string
+	Authorized            bool
+	Verified              bool
+	CreatorAccessUncached bool
+	Basis                 string
+	WriteAllowed          bool
+	ErrorCode             string
+	Reason                string
 }
 
 // evaluateGitHubAssociationCached is the single cached association evaluator
@@ -1125,6 +1126,7 @@ func (s *Server) evaluateGitHubAssociationCached(
 	// Narrow cold-cache creator-proof case for non-calling paths: local checks
 	// passed and creator holds a GITHUB_TOKEN, but access is not cached.
 	eval.Verified = false
+	eval.CreatorAccessUncached = true
 	eval.ErrorCode = githubAppErrAssociationUnverified
 	return eval, nil
 }
@@ -1142,10 +1144,9 @@ func (s *Server) hasAuthorizedGitHubAssociationCached(ctx context.Context, proje
 		return true, nil
 	}
 	// Preserve trigger authoring's cold-cache UX guard: when local checks pass
-	// and the creator holds a GITHUB_TOKEN (Reason == "" on the cold-cache
-	// path), accept without calling GitHub; AuthorizeEventSource re-checks live
-	// at fire time. Missing creator token sets Reason and is refused.
-	if !eval.Verified && eval.ErrorCode == githubAppErrAssociationUnverified && eval.Reason == "" {
+	// and the creator holds a GITHUB_TOKEN but access is not yet cached, accept
+	// without calling GitHub; AuthorizeEventSource re-checks live at fire time.
+	if eval.CreatorAccessUncached {
 		return true, nil
 	}
 	return false, nil

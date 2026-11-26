@@ -205,12 +205,10 @@ func (s *Server) populateAdminBindingDetails(ctx context.Context, project *store
 		info.BoundAt = b.BoundAt.UTC().Format(time.RFC3339)
 	}
 	if b.BoundBy != "" {
-		if u, err := s.store.GetUser(ctx, b.BoundBy); err == nil && u != nil {
-			if u.DisplayName != "" {
-				info.BoundByName = u.DisplayName
-			} else if u.Email != "" {
-				info.BoundByName = u.Email
-			}
+		if u, err := s.store.GetUser(ctx, b.BoundBy); err == nil && u != nil && u.DisplayName != "" {
+			info.BoundByName = u.DisplayName
+		} else {
+			info.BoundByName = "a hub admin"
 		}
 	}
 }
@@ -311,17 +309,13 @@ func (s *Server) computeProjectGitHubCapabilities(r *http.Request, project *stor
 
 	canUpdateProject := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate).Allowed
 	canHubGitHubAppUpdate := s.routePermissionDecision(r, githubInstallationBindPermission).outcome == routePermissionAllowed
-	// project.github.installation.bind and hub.github_app.update admit hub-boundary
-	// credentials (and interactive sessions), never project-scoped UATs.
-	cred := credentialContextForIdentity(identity)
-	hubBoundaryAdmitted := cred.Boundary == nil || cred.Boundary.Kind == "" || cred.Boundary.Kind == BoundaryKindHub
 
 	return ProjectGitHubCapabilities{
-		Bind:            canUpdateProject && canHubGitHubAppUpdate && hubBoundaryAdmitted,
+		Bind:            canUpdateProject && canHubGitHubAppUpdate,
 		Unbind:          canUpdateProject,
 		Check:           canUpdateProject,
 		EditPermissions: canUpdateProject,
 		EditExtraRepos:  canUpdateProject,
-		Discover:        canHubGitHubAppUpdate && hubBoundaryAdmitted,
+		Discover:        canHubGitHubAppUpdate,
 	}
 }

@@ -440,4 +440,73 @@ describe('Project Settings — GitHub App card (M1.1)', () => {
     );
     expect(boundBodies).toEqual([{ installation_id: 4412 }]);
   });
+
+  it('shows multi-candidate bind picker when multiple active installations match owner', async () => {
+    const boundBodies: Array<{ installation_id: number }> = [];
+    vi.mocked(showConfirm).mockResolvedValueOnce(true);
+
+    const el = await mountSettings(
+      createFetchHandler({
+        githubInfo: makeProjectGitHub({
+          association: {
+            installation_id: null,
+            account_login: '',
+            basis: null,
+            write_allowed: false,
+            authorized: false,
+            verified: true,
+            error_code: '',
+            reason: '',
+          },
+        }),
+        installations: [
+          {
+            installation_id: 100,
+            account_login: 'wrong-org',
+            account_type: 'Organization',
+            app_id: 1,
+            status: 'active',
+          },
+          {
+            installation_id: 4412,
+            account_login: 'acme',
+            account_type: 'Organization',
+            app_id: 1,
+            status: 'active',
+          },
+          {
+            installation_id: 5512,
+            account_login: 'ACME',
+            account_type: 'Organization',
+            app_id: 1,
+            status: 'active',
+          },
+        ],
+        onBindPut: (body) => boundBodies.push(body),
+      })
+    );
+
+    const bindBtn = el.shadowRoot!.querySelector(
+      '[data-testid="github-bind-button"]'
+    ) as HTMLElement;
+    bindBtn.click();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+
+    const picker = el.shadowRoot!.querySelector('[data-testid="github-bind-picker"]');
+    expect(picker).not.toBeNull();
+    expect(picker!.textContent).toContain('#4412');
+    expect(picker!.textContent).toContain('#5512');
+    expect(showConfirm).not.toHaveBeenCalled();
+
+    const candidateButtons = picker!.querySelectorAll('sl-button');
+    expect(candidateButtons.length).toBe(2);
+    (candidateButtons[1] as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await el.updateComplete;
+
+    expect(showConfirm).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain('#5512');
+    expect(boundBodies).toEqual([{ installation_id: 5512 }]);
+  });
 });

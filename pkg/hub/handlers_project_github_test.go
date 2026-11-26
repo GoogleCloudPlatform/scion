@@ -273,6 +273,19 @@ func TestProjectGitHub_ReadModelStatesAndNoGitHubCalls(t *testing.T) {
 	assert.NotEmpty(t, resp.Association.BoundAt)
 	assert.True(t, resp.Permissions.AppGrantKnown)
 	assert.Equal(t, "https://github.com/apps/test-scion-bot/installations/new", resp.App.InstallationURL)
+
+	// When the binding admin has no display name, bound_by_name falls back to
+	// a neutral label and must NOT expose the admin's email address.
+	admin.DisplayName = ""
+	require.NoError(t, st.UpdateUser(ctx, admin))
+	recNoName := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+unassoc.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recNoName.Code, recNoName.Body.String())
+	var noNameResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recNoName.Body.Bytes(), &noNameResp))
+	assert.Equal(t, "a hub admin", noNameResp.Association.BoundByName)
+	assert.NotContains(t, noNameResp.Association.BoundByName, admin.Email)
+	admin.DisplayName = "PG Admin"
+	require.NoError(t, st.UpdateUser(ctx, admin))
 	assert.Equal(t, map[string]string{
 		"contents":      "write",
 		"pull_requests": "write",
@@ -371,8 +384,16 @@ func TestProjectGitHub_AuthzAndCapabilities(t *testing.T) {
 		Role:        store.UserRoleMember,
 		Status:      store.UserStatusActive,
 	}
+	projViewer := &store.User{
+		ID:          tid("pg-proj-viewer"),
+		Email:       "pg-proj-viewer@example.com",
+		DisplayName: "Project Viewer",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}
 	require.NoError(t, st.CreateUser(ctx, projAdmin))
 	require.NoError(t, st.CreateUser(ctx, outsider))
+	require.NoError(t, st.CreateUser(ctx, projViewer))
 
 	proj := &store.Project{
 		ID:        tid("pg-authz"),
@@ -402,9 +423,37 @@ func TestProjectGitHub_AuthzAndCapabilities(t *testing.T) {
 		}
 	}
 
+	// Give projViewer the read-only project-viewer role on proj.
+	if viewerRole, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject); err == nil && viewerRole != nil {
+		_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: viewerRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      projViewer.ID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          proj.ID,
+			CreatedBy:        admin.ID,
+			CreatedAt:        time.Now(),
+		})
+		require.NoError(t, err)
+	}
+
 	// Non-member gets 403 or 404.
 	recOut := doRequestAsUser(t, srv, outsider, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
 	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, recOut.Code, "outsider should be denied: %s", recOut.Body.String())
+
+	// Read-only project viewer gets 200 with all write capabilities false and DELETE /github-installation 403.
+	recViewer := doRequestAsUser(t, srv, projViewer, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
+	require.Equal(t, http.StatusOK, recViewer.Code, recViewer.Body.String())
+	var viewerResp ProjectGitHubResponse
+	require.NoError(t, json.Unmarshal(recViewer.Body.Bytes(), &viewerResp))
+	assert.False(t, viewerResp.Can.Bind, "project viewer must not have can.bind")
+	assert.False(t, viewerResp.Can.Unbind, "project viewer must not have can.unbind")
+	assert.False(t, viewerResp.Can.Check, "project viewer must not have can.check")
+	assert.False(t, viewerResp.Can.EditPermissions, "project viewer must not have can.edit_permissions")
+	assert.False(t, viewerResp.Can.Discover, "project viewer must not have can.discover")
+
+	recViewerDel := doRequestAsUser(t, srv, projViewer, http.MethodDelete, "/api/v1/projects/"+proj.ID+"/github-installation", nil)
+	assert.Equal(t, http.StatusForbidden, recViewerDel.Code, "project viewer DELETE /github-installation must be 403: %s", recViewerDel.Body.String())
 
 	// Non-hub-admin project admin gets 200 with can.bind=false, can.unbind=true, can.check=true, can.edit_permissions=true, can.discover=false.
 	recMember := doRequestAsUser(t, srv, projAdmin, http.MethodGet, "/api/v1/projects/"+proj.ID+"/github", nil)
