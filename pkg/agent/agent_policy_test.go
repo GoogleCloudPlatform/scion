@@ -211,17 +211,19 @@ func TestApplyAgentPolicyResources_KubernetesMapOnBindRuntimes(t *testing.T) {
 	}
 	// The map is still checked against the maximum on every runtime.
 	big := &api.KubernetesConfig{Resources: &api.K8sResources{Limits: map[string]string{"memory": "64Gi"}}}
-	for _, rt := range []string{"docker", "podman", "container", "apple-container", "cloudrun"} {
+	for _, rt := range []string{"docker", "podman", "container", "cloudrun"} {
 		_, err := applyAgentPolicyResources(p, "a", rt, nil, big)
 		require.Error(t, err, rt)
 		assert.Contains(t, err.Error(), "kubernetes.resources.limits.memory", rt)
 	}
 }
 
-// Cloud Run and Apple container apply bounded defaults or fall back from
-// limit to request, so missing limits must NOT be filled with max_resources:
-// filling would break Cloud Run CPU/memory bands (e.g. default 2 vCPU paired
-// with 32Gi memory) and silently upsize request-only agents.
+// Cloud Run and Apple container fall back from limit to request and apply
+// platform defaults when both are unset, so missing limits are not filled
+// with max_resources (avoiding Cloud Run CPU/memory band violations and
+// silent upsizing of request-only agents). When both limit and request are
+// unset and the runtime's default exceeds (or may exceed) max_resources,
+// the start is refused fail-closed.
 func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 	p := &config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "8", Memory: "32Gi"}}
 
@@ -246,22 +248,66 @@ func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 		})
 	}
 
-	for _, rt := range []string{"container", "apple-container"} {
-		t.Run(rt+"_no_fill", func(t *testing.T) {
-			in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
-			out, err := applyAgentPolicyResources(p, "a", rt, in, nil)
+	t.Run("container_no_fill", func(t *testing.T) {
+		in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
+		out, err := applyAgentPolicyResources(p, "a", "container", in, nil)
+		require.NoError(t, err)
+		require.NotNil(t, out)
+		assert.Equal(t, "", out.Limits.CPU)
+		assert.Equal(t, "", out.Limits.Memory)
+		assert.Equal(t, "1", out.Requests.CPU)
+		assert.Equal(t, "2Gi", out.Requests.Memory)
+	})
+
+	// Unset memory when runtime default (2Gi on Cloud Run, 2G on Apple
+	// container) exceeds max_resources.memory must be refused fail-closed.
+	lowMem := &config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "8", Memory: "1Gi"}}
+	for _, rt := range []string{"cloudrun", "container"} {
+		t.Run(rt+"_unset_memory_above_low_max_refused", func(t *testing.T) {
+			_, err := applyAgentPolicyResources(lowMem, "a", rt, &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAgentPolicy)
+			assert.Contains(t, err.Error(), "resources.limits.memory")
+			assert.Contains(t, err.Error(), "agent_policy.max_resources.memory")
+		})
+		t.Run(rt+"_explicit_request_within_low_max_allowed", func(t *testing.T) {
+			in := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}, Requests: api.ResourceList{Memory: "512Mi"}}
+			out, err := applyAgentPolicyResources(lowMem, "a", rt, in, nil)
 			require.NoError(t, err)
-			require.NotNil(t, out)
-			assert.Equal(t, "", out.Limits.CPU)
 			assert.Equal(t, "", out.Limits.Memory)
-			assert.Equal(t, "1", out.Requests.CPU)
-			assert.Equal(t, "2Gi", out.Requests.Memory)
+			assert.Equal(t, "512Mi", out.Requests.Memory)
+		})
+	}
+
+	// Boundary: unset memory when runtime default equals max_resources.memory passes.
+	_, err := applyAgentPolicyResources(
+		&config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "8", Memory: "2Gi"}},
+		"a", "cloudrun", &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}, nil,
+	)
+	require.NoError(t, err, "cloudrun default 2Gi equals 2Gi ceiling")
+	_, err = applyAgentPolicyResources(
+		&config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "8", Memory: "2G"}},
+		"a", "container", &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}, nil,
+	)
+	require.NoError(t, err, "container default 2G equals 2G ceiling")
+
+	// Unset CPU (e.g. runtime.enforce_resource_defaults=false) when runtime
+	// default exceeds (Cloud Run: 2 vCPU) or may exceed (Apple container: CLI
+	// default) max_resources.cpu must be refused fail-closed.
+	lowCPU := &config.V1AgentPolicy{MaxResources: &config.V1AgentPolicyResources{CPU: "1", Memory: "8Gi"}}
+	for _, rt := range []string{"cloudrun", "container"} {
+		t.Run(rt+"_unset_cpu_refused", func(t *testing.T) {
+			_, err := applyAgentPolicyResources(lowCPU, "a", rt, &api.ResourceSpec{}, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAgentPolicy)
+			assert.Contains(t, err.Error(), "resources.limits.cpu")
+			assert.Contains(t, err.Error(), "agent_policy.max_resources.cpu")
 		})
 	}
 
 	// Explicit requests and limits above the maximum are still refused on
 	// Cloud Run and Apple container.
-	for _, rt := range []string{"cloudrun", "cloudrun-sandbox", "container", "apple-container"} {
+	for _, rt := range []string{"cloudrun", "cloudrun-sandbox", "container"} {
 		_, err := applyAgentPolicyResources(p, "a", rt, &api.ResourceSpec{Requests: api.ResourceList{Memory: "64Gi"}}, nil)
 		require.Error(t, err, rt)
 		assert.ErrorIs(t, err, ErrAgentPolicy, rt)

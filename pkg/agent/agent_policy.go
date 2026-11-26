@@ -211,14 +211,26 @@ var k8sDefaultRequestFor = map[string]string{"cpu": "250m", "memory": "512Mi"}
 
 // fillMissingLimitRuntimes are the runtimes where omitting a resource limit
 // leaves the container unlimited, so max_resources fills missing limits with
-// the configured maximum. Runtimes with bounded platform defaults or
-// request-as-limit fallback (Cloud Run, Apple container) are not filled so
+// the configured maximum. Runtimes that fall back from limit to request or
+// apply a platform default (Cloud Run, Apple container) are not filled so
 // request-only agents are not silently upsized and Cloud Run CPU/memory
-// bands are not violated.
+// bands are not violated; instead, unset resources whose runtime default
+// exceeds (or may exceed) max_resources are refused fail-closed.
 var fillMissingLimitRuntimes = map[string]bool{
 	"docker":     true,
 	"podman":     true,
 	"kubernetes": true,
+}
+
+// runtimeUnsetDefaults records the known platform defaults applied when a
+// non-fill runtime receives neither a limit nor a request for a resource
+// (see pkg/runtime/cloudrun_resources.go and pkg/runtime/apple_container.go).
+// An empty string means the runtime omits the resource flag altogether and
+// delegates to an external CLI default that may exceed max_resources, so an
+// unset resource is refused whenever max_resources caps it.
+var runtimeUnsetDefaults = map[string]map[string]string{
+	"cloudrun":  {"cpu": "2", "memory": "2Gi"},
+	"container": {"cpu": "", "memory": "2G"},
 }
 
 // applyAgentPolicyResources checks the agent's CPU and memory requests and
@@ -254,6 +266,18 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 		{"cpu", p.MaxResources.CPU, config.AgentPolicyCPUMax, config.AgentPolicyCPUValue, config.AgentPolicyCPUMinValue, 0.001, &out.Limits.CPU, &out.Requests.CPU},
 		{"memory", p.MaxResources.Memory, config.AgentPolicyMemoryMax, config.AgentPolicyMemoryValue, config.AgentPolicyMemoryMinValue, 1, &out.Limits.Memory, &out.Requests.Memory},
 	}
+	type resolvedRule struct {
+		rule          resourceRule
+		maxVal        float64
+		k8sLimit      string
+		k8sRequest    string
+		hasK8sLimit   bool
+		hasK8sRequest bool
+	}
+	resolved := make([]resolvedRule, 0, len(rules))
+	// Pass 1: validate every explicit request and limit across both CPU and
+	// memory so an explicit violation is always reported before unset-default
+	// checks.
 	for _, r := range rules {
 		if r.max == "" {
 			continue
@@ -315,18 +339,43 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 		if runtimeName != "kubernetes" {
 			hasK8sLimit, hasK8sRequest = false, false
 		}
-		// No limit is not "unlimited" on runtimes where omission means
-		// unbounded (Docker, Podman, Kubernetes): the maximum becomes the
-		// limit. Runtimes with bounded defaults or request-as-limit fallback
-		// (Cloud Run, Apple container) keep missing limits unset.
-		if fillMissingLimitRuntimes[runtimeName] && *r.limit == "" && (!hasK8sLimit || k8sLimit == "") {
-			*r.limit = r.max
-			if runtimeName == "kubernetes" && *r.request == "" && (!hasK8sRequest || k8sRequest == "") {
-				req := k8sDefaultRequestFor[r.name]
-				if v, err := r.valueOf(req); err != nil || v > maxVal {
-					req = r.max
+		resolved = append(resolved, resolvedRule{
+			rule:          r,
+			maxVal:        maxVal,
+			k8sLimit:      k8sLimit,
+			k8sRequest:    k8sRequest,
+			hasK8sLimit:   hasK8sLimit,
+			hasK8sRequest: hasK8sRequest,
+		})
+	}
+	// Pass 2: fill missing limits on unlimited-by-default runtimes, or refuse
+	// unset resources on non-fill runtimes when the runtime default exceeds
+	// (or may exceed) the maximum.
+	for _, rr := range resolved {
+		r := rr.rule
+		if fillMissingLimitRuntimes[runtimeName] {
+			if *r.limit == "" && (!rr.hasK8sLimit || rr.k8sLimit == "") {
+				*r.limit = r.max
+				if runtimeName == "kubernetes" && *r.request == "" && (!rr.hasK8sRequest || rr.k8sRequest == "") {
+					req := k8sDefaultRequestFor[r.name]
+					if v, err := r.valueOf(req); err != nil || v > rr.maxVal {
+						req = r.max
+					}
+					*r.request = req
 				}
-				*r.request = req
+			}
+		} else if *r.limit == "" && *r.request == "" {
+			if defs, ok := runtimeUnsetDefaults[runtimeName]; ok {
+				if def, tracked := defs[r.name]; tracked {
+					if def == "" {
+						return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
+							"is unset and this runtime's default may exceed the maximum %s; set it explicitly", r.max))
+					}
+					if defVal, err := r.valueOf(def); err != nil || defVal > rr.maxVal {
+						return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
+							"is unset and this runtime's default (%s) exceeds the maximum %s; set it explicitly", def, r.max))
+					}
+				}
 			}
 		}
 	}
