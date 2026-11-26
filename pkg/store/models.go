@@ -1956,6 +1956,7 @@ type HarnessConfigData struct {
 	NoAuthBehavior   string                           `json:"noAuthBehavior,omitempty"`
 	AuthMeta         *api.HarnessAuthMetadata         `json:"authMeta,omitempty"`
 	Capabilities     *api.HarnessAdvancedCapabilities `json:"capabilities,omitempty"`
+	Usage            *api.HarnessUsageCapabilities    `json:"usage,omitempty"`
 }
 
 // HarnessConfigStatus constants

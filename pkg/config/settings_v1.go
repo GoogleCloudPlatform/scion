@@ -3563,6 +3563,11 @@ type HarnessConfigEntry struct {
 	// bundle has none. It is not part of config.yaml. Read the effective value
 	// with AgentPluginsCapability.
 	AgentPluginsSidecar *api.CapabilityField `json:"-" yaml:"-" koanf:"-"`
+
+	// UsageSidecar is the usage metering capability read from the bundle's
+	// usage.yaml (UsageSidecarFile), nil when the bundle has none or the file
+	// could not be parsed. It is not part of config.yaml.
+	UsageSidecar *api.HarnessUsageCapabilities `json:"-" yaml:"-" koanf:"-"`
 }
 
 // HarnessThinkingConfig maps the canonical 0-100 thinking level

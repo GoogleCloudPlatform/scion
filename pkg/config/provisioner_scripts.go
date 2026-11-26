@@ -31,8 +31,10 @@ import (
 // with it. agent-plugins.yaml (AgentPluginsSidecarFile) is included because it
 // declares what the bundled provision.py can install and must not drift from
 // it. no-auth-env.yaml (NoAuthEnvSidecarFile) is included for the same
-// reason as config.yaml: a fix to it must reach existing nodes. Like
-// config.yaml, these scripts are refreshed from the bundled
+// reason as config.yaml: a fix to it must reach existing nodes. usage.yaml
+// (UsageSidecarFile) is included so live usage metering declarations stay in
+// step with the bundle's provisioner and telemetry wiring on upgrade. Like
+// config.yaml, these files are refreshed from the bundled
 // copy during non-force seeding so that provisioner fixes reach existing
 // nodes. Other user files are preserved.
 var provisionerOwnedFiles = map[string]bool{
@@ -41,6 +43,7 @@ var provisionerOwnedFiles = map[string]bool{
 	"capture_auth.py":       true,
 	AgentPluginsSidecarFile: true,
 	NoAuthEnvSidecarFile:    true,
+	UsageSidecarFile:        true,
 }
 
 // isProvisionerOwnedFile reports whether relPath, relative to the

@@ -53,6 +53,7 @@ list|show|upgrade|reset|sync|pull`.
   dialect.yaml       # optional — data-driven hook-event dialect
   agent-plugins.yaml # optional — native Agent Plugins support (see Capabilities)
   no-auth-env.yaml   # optional — env added only in no-auth mode (see no_auth)
+  usage.yaml         # optional — live usage metering capability (see Usage metering)
   home/              # seeded into the agent home at install time
     .bashrc
     .<tool>/...      # native client settings, hook wiring, notify scripts
@@ -63,7 +64,7 @@ list|show|upgrade|reset|sync|pull`.
 ```
 
 At install time, `provision.py`, `scion_harness.py`, `capture_auth.py`,
-`dialect.yaml`, `agent-plugins.yaml`, `no-auth-env.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
+`dialect.yaml`, `agent-plugins.yaml`, `no-auth-env.yaml`, `usage.yaml` (plus `schema/`, `examples/`, `tests/fixtures/`) stay at the
 bundle root; everything under `home/` is copied into the harness-config's
 `home/` directory verbatim. `Dockerfile`, `cloudbuild.yaml`, `README.md`,
 `provision_test.py`, `.gitkeep`, and `init-firewall.sh` are not installed.
@@ -392,6 +393,51 @@ before Agent Plugins reject `config.yaml` with that key
 (ptone/scion#5196). The same applies to any new key: binaries already deployed
 validate `config.yaml` against their own schema, so data they do not need to
 read belongs in a separate bundle file.
+
+### Usage metering (`usage.yaml`)
+
+**Live usage metering capabilities go in `usage.yaml`, not in `config.yaml`.**
+Like `agent-plugins.yaml` and `no-auth-env.yaml`, `usage.yaml` sits next to
+`config.yaml` so older binaries ignore it and updates ship via seeding and
+`scion harness-config upgrade` without image rebuilds:
+
+```yaml
+# harnesses/<name>/usage.yaml
+schema_version: 1
+usage:
+  live:
+    source: native          # native | hooks | sqlite_native | file_tailer | none
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
+    not_applicable_token_types: []   # e.g. [cache_write] for gemini-cli
+    counts_failed_calls: true
+```
+
+- `schema_version` must be `1`.
+- `usage.live.source` declares the Track 1 live metering mechanism: `native`,
+  `hooks`, `sqlite_native`, `file_tailer`, or `none`.
+- `usage.live.token_types` lists the canonical token types emitted live
+  (`input`, `output`, `cache_read`, `cache_write`, `reasoning`). Leave empty
+  (`[]`) for calls-only harnesses (`source != none`) or unmeasured harnesses
+  (`source: none`).
+- `usage.live.not_applicable_token_types` lists canonical token types that do
+  not apply to the harness's provider API (for example `cache_write` on
+  `gemini-cli`); entries must be disjoint from `token_types`.
+- `usage.live.counts_failed_calls` indicates whether failed model calls are
+  reported live (must be `false` when `source: none`).
+- Unknown keys at any level (including the future `usage.trajectory` section)
+  are ignored for forward compatibility. An unreadable, invalid, or
+  unsupported-version `usage.yaml` — including a newer bundle that introduces a
+  future/unknown `usage.live.source` enum value or an unknown `token_types` /
+  `not_applicable_token_types` entry — logs a warning and causes older runtimes
+  to treat the whole usage capability as `nil` (unknown) while keeping the
+  harness usable. Introducing a new token type therefore requires a
+  `schema_version` bump or retirement of older runtimes. Every bundled harness
+  must ship a valid `usage.yaml`; CI parses them strictly.
 
 ### Auth
 

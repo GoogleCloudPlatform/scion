@@ -37,21 +37,39 @@ func dirFileReader(dir string) func(string) ([]byte, error) {
 // same files: the same entry, name and errors.
 func TestLoadHarnessConfigFromFiles_MatchesLoadHarnessConfigDir(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  string
-		sidecar string
-		wantErr string
+		name         string
+		config       string
+		sidecar      string
+		usageSidecar string
+		wantUsage    bool
+		wantErr      string
 	}{
 		{name: "minimal", config: sidecarTestConfig},
 		{name: "named", config: sidecarTestConfig + "name: other-name\n"},
 		{name: "with sidecar", config: sidecarTestConfig, sidecar: "support: \"partial\"\nreason: r\n"},
 		{name: "invalid sidecar degrades", config: sidecarTestConfig, sidecar: "support: [\n"},
+		{
+			name:         "with usage sidecar",
+			config:       sidecarTestConfig,
+			usageSidecar: "schema_version: 1\nusage:\n  live:\n    source: native\n    token_types: [input, output, cache_read, cache_write]\n    counts_failed_calls: true\n",
+			wantUsage:    true,
+		},
+		{
+			name:         "invalid usage sidecar degrades",
+			config:       sidecarTestConfig,
+			usageSidecar: "schema_version: 1\nusage:\n  live:\n    source: future_unknown\n",
+		},
 		{name: "name refused by the schema", config: sidecarTestConfig + "name: ../escape\n", wantErr: "invalid config.yaml"},
 		{name: "schema violation", config: "image: scion-base:test\n", wantErr: "invalid config.yaml"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := writeSidecarTestDir(t, tt.config, tt.sidecar)
+			if tt.usageSidecar != "" {
+				if err := os.WriteFile(filepath.Join(dir, UsageSidecarFile), []byte(tt.usageSidecar), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
 			fromDir, dirErr := LoadHarnessConfigDir(dir)
 			fromFiles, filesErr := LoadHarnessConfigFromFiles(filepath.Base(dir), dir, dirFileReader(dir))
 			if tt.wantErr != "" {
@@ -73,6 +91,9 @@ func TestLoadHarnessConfigFromFiles_MatchesLoadHarnessConfigDir(t *testing.T) {
 			// resolves it; LoadHarnessConfigFromFiles returns where as given.
 			if fromFiles.Path != fromDir.Path {
 				t.Errorf("path: files %q, dir %q", fromFiles.Path, fromDir.Path)
+			}
+			if tt.wantUsage && (fromFiles.Config.UsageSidecar == nil || fromDir.Config.UsageSidecar == nil) {
+				t.Errorf("expected non-nil UsageSidecar: files %+v, dir %+v", fromFiles.Config.UsageSidecar, fromDir.Config.UsageSidecar)
 			}
 			if !reflect.DeepEqual(fromFiles.Config, fromDir.Config) {
 				t.Errorf("config differs:\nfiles %+v\ndir   %+v", fromFiles.Config, fromDir.Config)

@@ -1,0 +1,14 @@
+# Live Track 1 usage metering capability for claude.
+# Native OTLP logs: api_request (input/output/cache_read/cache_write) and api_error.
+# Claude's OTel api_request does not emit a separate reasoning attribute (output is inclusive).
+schema_version: 1
+usage:
+  live:
+    source: native
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+    not_applicable_token_types: []
+    counts_failed_calls: true

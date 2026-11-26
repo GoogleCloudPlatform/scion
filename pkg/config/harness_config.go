@@ -224,6 +224,8 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	applyNoAuthEnvSidecar(&entry, func(name string) ([]byte, error) {
 		return os.ReadFile(filepath.Join(absPath, name))
 	}, filepath.Join(absPath, NoAuthEnvSidecarFile))
+	// Usage metering capabilities come only from usage.yaml.
+	ApplyUsageSidecarDir(&entry, absPath)
 
 	name, err := harnessConfigDirName(entry, filepath.Base(absPath))
 	if err != nil {
@@ -268,6 +270,7 @@ func LoadHarnessConfigFromFiles(dirName, where string, read func(name string) ([
 		applyAgentPluginsSidecar(&entry, sidecar, sidecarPath)
 	}
 	applyNoAuthEnvSidecar(&entry, read, filepath.Join(where, NoAuthEnvSidecarFile))
+	applyUsageSidecarFromReader(&entry, read, filepath.Join(where, UsageSidecarFile))
 
 	name, err := harnessConfigDirName(entry, dirName)
 	if err != nil {
@@ -604,7 +607,7 @@ func mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, fileName str
 }
 
 func isHarnessConfigRootSupportFile(relPath string) bool {
-	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" || relPath == AgentPluginsSidecarFile || relPath == NoAuthEnvSidecarFile {
+	if relPath == "provision.py" || relPath == "dialect.yaml" || relPath == "capture_auth.py" || relPath == "scion_harness.py" || relPath == AgentPluginsSidecarFile || relPath == NoAuthEnvSidecarFile || relPath == UsageSidecarFile {
 		return true
 	}
 	for _, prefix := range []string{"schema/", "schemas/", "examples/", "tests/fixtures/"} {

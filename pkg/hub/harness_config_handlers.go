@@ -612,30 +612,45 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, hc *st
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// populateHarnessConfigCapabilities backfills Config.Capabilities from stored
-// config.yaml and agent-plugins.yaml when a row predates Capabilities being
-// derived onto HarnessConfigData.
+// populateHarnessConfigCapabilities backfills Config.Capabilities and
+// Config.Usage from stored config.yaml, agent-plugins.yaml, and usage.yaml
+// when a row predates those fields being derived onto HarnessConfigData.
 func (s *Server) populateHarnessConfigCapabilities(ctx context.Context, hc *store.HarnessConfig) {
-	if hc == nil || (hc.Config != nil && hc.Config.Capabilities != nil) {
+	if hc == nil {
 		return
 	}
 	_, hasConfig := templateFileByPath(hc.Files, harnessConfigYAMLPath)
 	_, hasSidecar := templateFileByPath(hc.Files, config.AgentPluginsSidecarFile)
-	if !hasConfig && !hasSidecar {
+	_, hasUsage := templateFileByPath(hc.Files, config.UsageSidecarFile)
+
+	missBase := hc.ID + "@" + hc.ContentHash
+	capsMissKey := "caps:" + missBase
+	usageMissKey := "usage:" + missBase
+
+	needCaps := (hc.Config == nil || hc.Config.Capabilities == nil) && (hasConfig || hasSidecar)
+	if needCaps {
+		if _, missed := s.harnessConfigCapsMisses.Load(capsMissKey); missed {
+			needCaps = false
+		}
+	}
+	needUsage := hasUsage && (hc.Config == nil || hc.Config.Usage == nil)
+	if needUsage {
+		if _, missed := s.harnessConfigCapsMisses.Load(usageMissKey); missed {
+			needUsage = false
+		}
+	}
+	if !needCaps && !needUsage {
 		return
 	}
 	stor := s.GetStorage()
 	if stor == nil || hc.StoragePath == "" {
 		return
 	}
-	missKey := hc.ID + "@" + hc.ContentHash
-	if _, missed := s.harnessConfigCapsMisses.Load(missKey); missed {
-		return
-	}
 
 	var entry config.HarnessConfigEntry
-	transientErr := false
-	if hasConfig {
+	capsTransientErr := false
+	usageTransientErr := false
+	if needCaps && hasConfig {
 		data, err := s.readHarnessConfigFile(ctx, stor, hc, harnessConfigYAMLPath, maxHarnessConfigFileSize)
 		switch {
 		case err == nil:
@@ -644,10 +659,10 @@ func (s *Server) populateHarnessConfigCapabilities(ctx context.Context, hc *stor
 			}
 		case errors.Is(err, storage.ErrNotFound), errors.Is(err, errTemplateObjectTooLarge):
 		default:
-			transientErr = true
+			capsTransientErr = true
 		}
 	}
-	if hasSidecar {
+	if needCaps && hasSidecar {
 		where := hc.Name + "/" + config.AgentPluginsSidecarFile
 		data, err := s.readHarnessConfigFile(ctx, stor, hc, config.AgentPluginsSidecarFile, maxHarnessConfigFileSize)
 		switch {
@@ -657,19 +672,42 @@ func (s *Server) populateHarnessConfigCapabilities(ctx context.Context, hc *stor
 			config.ApplyAgentPluginsSidecarError(&entry, errTemplateObjectTooLarge, where)
 		case errors.Is(err, storage.ErrNotFound):
 		default:
-			transientErr = true
+			capsTransientErr = true
+		}
+	}
+	if needUsage {
+		where := hc.Name + "/" + config.UsageSidecarFile
+		data, err := s.readHarnessConfigFile(ctx, stor, hc, config.UsageSidecarFile, maxHarnessConfigFileSize)
+		switch {
+		case err == nil:
+			config.ApplyUsageSidecarBytes(&entry, data, where)
+		case errors.Is(err, errTemplateObjectTooLarge):
+			config.ApplyUsageSidecarError(&entry, errTemplateObjectTooLarge, where)
+		case errors.Is(err, storage.ErrNotFound):
+		default:
+			usageTransientErr = true
 		}
 	}
 
-	caps := entry.DeclaredCapabilities()
-	if caps == nil {
-		if !transientErr && ctx.Err() == nil {
-			s.harnessConfigCapsMisses.Store(missKey, struct{}{})
+	var caps *api.HarnessAdvancedCapabilities
+	if needCaps {
+		caps = entry.DeclaredCapabilities()
+		if caps != nil && caps.Harness == "" {
+			caps.Harness = hc.Harness
 		}
-		return
+		if caps == nil && !capsTransientErr && ctx.Err() == nil {
+			s.harnessConfigCapsMisses.Store(capsMissKey, struct{}{})
+		}
 	}
-	if caps.Harness == "" {
-		caps.Harness = hc.Harness
+	var usage *api.HarnessUsageCapabilities
+	if needUsage {
+		usage = entry.UsageSidecar
+		if usage == nil && !usageTransientErr && ctx.Err() == nil {
+			s.harnessConfigCapsMisses.Store(usageMissKey, struct{}{})
+		}
+	}
+	if caps == nil && usage == nil {
+		return
 	}
 	var cfgCopy store.HarnessConfigData
 	if hc.Config != nil {
@@ -677,7 +715,12 @@ func (s *Server) populateHarnessConfigCapabilities(ctx context.Context, hc *stor
 	} else {
 		cfgCopy.Harness = hc.Harness
 	}
-	cfgCopy.Capabilities = caps
+	if caps != nil {
+		cfgCopy.Capabilities = caps
+	}
+	if usage != nil {
+		cfgCopy.Usage = usage
+	}
 	hc.Config = &cfgCopy
 }
 

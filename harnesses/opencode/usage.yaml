@@ -1,0 +1,14 @@
+# Live Track 1 usage metering capability for opencode.
+# Hook plugin (scion-bridge.js step-finish); failed/retried calls without step-finish are not counted.
+schema_version: 1
+usage:
+  live:
+    source: hooks
+    token_types:
+      - input
+      - output
+      - cache_read
+      - cache_write
+      - reasoning
+    not_applicable_token_types: []
+    counts_failed_calls: false
