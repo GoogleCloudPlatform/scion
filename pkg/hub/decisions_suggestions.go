@@ -573,9 +573,15 @@ func decisionSuggestionCandidates(
 			}
 			lower := strings.ToLower(a.Name)
 			collides := lower != "" && (nameCounts[lower] > 1 || lower == "me" || (emailsAndIDs[lower] && !strings.EqualFold(a.Name, a.Email)))
-			if collides && a.Email != "" {
-				add(a.Email, a.Name, false)
-				continue
+			if collides {
+				if a.Email != "" {
+					add(a.Email, a.Name, false)
+					continue
+				}
+				if a.ID != "" {
+					add(a.ID, a.Name, false)
+					continue
+				}
 			}
 			val := a.Name
 			if val == "" {

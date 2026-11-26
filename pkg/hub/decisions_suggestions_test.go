@@ -428,6 +428,65 @@ func TestProjectDecisionSuggestions_ValidationCursorRankingAndCollisions(t *test
 	assert.Equal(t, "Me", byMap["me-user@example.com"], "answerer named Me collides with me keyword and inserts email with Me hint")
 	assert.NotContains(t, byMap, "Me", "display name Me must not be inserted directly")
 
+	// O1: remote help-text matching — prefix matching help (email or caller display name)
+	// returns the candidate, and a value match ranks ahead of a help match of the same tier.
+	helpMatchUser := &store.User{ID: tid("sugg-help-rank"), Email: "sam-help@example.com", DisplayName: "Zeta Person", Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC()}
+	require.NoError(t, f.store.CreateUser(ctx, helpMatchUser))
+	ensureHubMembership(ctx, f.store, helpMatchUser.ID)
+	addProjectMemberWithRole(t, f.store, f.project, helpMatchUser.ID, store.GroupMemberRoleAdmin)
+	_, helpRowID := seedSuggestionPrompt(t, f, f.agent.ID, f.agent.Slug, f.agent.Name, f.topicID, "k-by-help", "Help Q")
+	require.Equal(t, http.StatusOK, f.answer(t, helpMatchUser, helpRowID, map[string]interface{}{"choice_id": "yes"}).Code)
+
+	priyaHelpRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=by&prefix="+url.QueryEscape("priya@"), nil)
+	require.Equal(t, http.StatusOK, priyaHelpRR.Code, priyaHelpRR.Body.String())
+	var priyaHelpResp DecisionSuggestionsResponse
+	require.NoError(t, json.Unmarshal(priyaHelpRR.Body.Bytes(), &priyaHelpResp))
+	require.Len(t, priyaHelpResp.Values, 1)
+	assert.Equal(t, "Priya Raman", priyaHelpResp.Values[0].Value)
+
+	callerNameRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=by&prefix="+url.QueryEscape(f.bob.DisplayName), nil)
+	require.Equal(t, http.StatusOK, callerNameRR.Code, callerNameRR.Body.String())
+	var callerNameResp DecisionSuggestionsResponse
+	require.NoError(t, json.Unmarshal(callerNameRR.Body.Bytes(), &callerNameResp))
+	require.NotEmpty(t, callerNameResp.Values)
+	assert.Equal(t, "me", callerNameResp.Values[0].Value)
+
+	samRankRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=by&prefix=sam", nil)
+	require.Equal(t, http.StatusOK, samRankRR.Code, samRankRR.Body.String())
+	var samRankResp DecisionSuggestionsResponse
+	require.NoError(t, json.Unmarshal(samRankRR.Body.Bytes(), &samRankResp))
+	samRankVals := make([]string, 0, len(samRankResp.Values))
+	for _, v := range samRankResp.Values {
+		samRankVals = append(samRankVals, v.Value)
+	}
+	assert.Equal(t, []string{"sam1@example.com", "sam2@example.com", "me-user@example.com", "Zeta Person"}, samRankVals,
+		"value matches (sam1/sam2 prefix, me-user subsequence) must rank ahead of help match (Zeta Person via sam-help@example.com)")
+
+	// O2: two colliding "Sam" answerers with empty emails insert distinct user IDs with "Sam" help.
+	noEmailSam1ID := tid("sugg-sam-noemail-1")
+	noEmailSam2ID := tid("sugg-sam-noemail-2")
+	for idx, uid := range []string{noEmailSam1ID, noEmailSam2ID} {
+		_, rID := seedSuggestionPrompt(t, f, f.agent.ID, f.agent.Slug, f.agent.Name, f.topicID, fmt.Sprintf("k-noemail-%d", idx), fmt.Sprintf("NoEmail Q %d", idx))
+		_, _, rerr := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID: rID, ChoiceID: "yes",
+			AnsweredByUserID: uid, AnsweredByName: "Sam", AnsweredByEmail: "",
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer, Surface: store.DecisionSurfaceNative,
+			ResponseMessage: &store.Message{ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "user:" + uid, Recipient: "agent:" + f.agent.Slug, ThreadID: f.topicID, Msg: "yes"},
+		})
+		require.NoError(t, rerr)
+	}
+	noEmailRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, suggPath+"?key=by", nil)
+	require.Equal(t, http.StatusOK, noEmailRR.Code, noEmailRR.Body.String())
+	var noEmailResp DecisionSuggestionsResponse
+	require.NoError(t, json.Unmarshal(noEmailRR.Body.Bytes(), &noEmailResp))
+	noEmailMap := make(map[string]string, len(noEmailResp.Values))
+	for _, v := range noEmailResp.Values {
+		noEmailMap[v.Value] = v.Help
+	}
+	assert.Equal(t, "Sam", noEmailMap[noEmailSam1ID])
+	assert.Equal(t, "Sam", noEmailMap[noEmailSam2ID])
+	assert.NotContains(t, noEmailMap, "Sam")
+
 	// O3: cancelled/timed-out context aborts decisionSuggestionsCore cleanly.
 	cancelCtx, cancel := context.WithCancel(ctx)
 	cancel()
