@@ -326,6 +326,11 @@ const (
 	// tick evaluates the daily window and writes system.auto_update_state.
 	LockReleaseAutoUpdate AdvisoryLockKey = 0x5C100034
 
+	// LockCommandRunSweep guards the periodic command-run lease-expiry sweeper
+	// ("command-run-sweep", ptone/scion#9278), so one replica per tick
+	// resolves expired queued/waking/dispatching/running command runs.
+	LockCommandRunSweep AdvisoryLockKey = 0x5C100035
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

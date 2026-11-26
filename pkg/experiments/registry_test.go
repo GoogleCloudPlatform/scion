@@ -808,6 +808,41 @@ func TestExecSchedulesExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestCommandRequestsExperimentRegistered pins the hub.command_requests entry
+// (ptone/scion#9278, design §7): alpha, off by default, server and web layers,
+// owned by @ptone, review by 2027-03-31, documenting its dependencies on
+// hub.exec_containers and hub.conduit.
+func TestCommandRequestsExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(CommandRequests)
+	if !ok {
+		t.Fatalf("%s is not registered", CommandRequests)
+	}
+	if CommandRequests != "hub.command_requests" {
+		t.Fatalf("frozen name changed: %q", CommandRequests)
+	}
+	if e.Default {
+		t.Fatal("hub.command_requests must default to off")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must be alpha, got %q", e.Stage)
+	}
+	if len(e.Layers) != 2 || !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must gate both server and web layers, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#9278" {
+		t.Fatalf("issue = %q, want ptone/scion#9278", e.Issue)
+	}
+	if e.Owner != "@ptone" {
+		t.Fatalf("owner = %q, want @ptone", e.Owner)
+	}
+	if e.ReviewBy != "2027-03-31" {
+		t.Fatalf("review_by = %q, want 2027-03-31", e.ReviewBy)
+	}
+	if !strings.Contains(e.Description, "hub.exec_containers") || !strings.Contains(e.Description, "hub.conduit") {
+		t.Fatalf("description must name hub.exec_containers and hub.conduit dependencies: %q", e.Description)
+	}
+}
+
 // TestSystemOneExperimentRegistered pins hub.system_one (ptone/scion#8044):
 // server+web layers and ships off by default.
 func TestSystemOneExperimentRegistered(t *testing.T) {

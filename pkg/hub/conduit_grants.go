@@ -103,6 +103,10 @@ const (
 	// execSchedulesExperiment is experiments.ExecSchedules: the agent
 	// registers the exec control routes (exec-start, exec-status).
 	execSchedulesExperiment = experiments.ExecSchedules
+	// commandRequestsExperiment is experiments.CommandRequests: shell
+	// execution containers register the exec control routes (exec-start,
+	// exec-status).
+	commandRequestsExperiment = experiments.CommandRequests
 
 	// conduitGrantKeySecretName is the ring's secret key (design
 	// "conduit.grant_key").

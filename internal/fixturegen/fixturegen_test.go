@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 120
+const expectedTableCount = 122
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -120,6 +120,18 @@ func TestFixtureLoadable(t *testing.T) {
 	execOut, err := entadapter.NewScheduleStore(client).GetScheduledExecRunOutput(ctx, "5e000000-0000-0000-0000-000000000002")
 	require.NoError(t, err, "exec_run_outputs fixture row must be readable via ScheduleStore")
 	assert.Equal(t, `{"ok":true}`, string(execOut))
+
+	// The command_requests and command_runs rows must be readable through the
+	// real store adapter (field.UUID id/request_id/exec_agent_id/exec_project_id).
+	cmdStore := entadapter.NewCompositeStore(client)
+	cmdReq, err := cmdStore.GetCommandRequest(ctx, "c1000000-0000-0000-0000-000000000001")
+	require.NoError(t, err, "command_requests fixture row must be readable via CommandRequestStore")
+	assert.Equal(t, "check-status", cmdReq.Key)
+	assert.Equal(t, store.CommandRequestStatusApproved, cmdReq.Status)
+	cmdRun, err := cmdStore.GetCommandRun(ctx, "c2000000-0000-0000-0000-000000000001")
+	require.NoError(t, err, "command_runs fixture row must be readable via CommandRequestStore")
+	assert.Equal(t, cmdReq.ID, cmdRun.RequestID)
+	assert.Equal(t, store.CommandRunStatusSucceeded, cmdRun.Status)
 
 	// The thread group rows must be readable through the real store adapter
 	// (field.UUID ids, the stored name_key matching the Go helper, and the

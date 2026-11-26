@@ -68,6 +68,10 @@ type Tx struct {
 	ChatRetentionCursor *ChatRetentionCursorClient
 	// ChatRetentionRun is the client for interacting with the ChatRetentionRun builders.
 	ChatRetentionRun *ChatRetentionRunClient
+	// CommandRequest is the client for interacting with the CommandRequest builders.
+	CommandRequest *CommandRequestClient
+	// CommandRun is the client for interacting with the CommandRun builders.
+	CommandRun *CommandRunClient
 	// ConduitPrincipalEpoch is the client for interacting with the ConduitPrincipalEpoch builders.
 	ConduitPrincipalEpoch *ConduitPrincipalEpochClient
 	// ConduitSession is the client for interacting with the ConduitSession builders.
@@ -409,6 +413,8 @@ func (tx *Tx) init() {
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
 	tx.ChatRetentionCursor = NewChatRetentionCursorClient(tx.config)
 	tx.ChatRetentionRun = NewChatRetentionRunClient(tx.config)
+	tx.CommandRequest = NewCommandRequestClient(tx.config)
+	tx.CommandRun = NewCommandRunClient(tx.config)
 	tx.ConduitPrincipalEpoch = NewConduitPrincipalEpochClient(tx.config)
 	tx.ConduitSession = NewConduitSessionClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)

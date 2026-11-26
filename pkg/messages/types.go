@@ -109,6 +109,13 @@ const (
 	// IsHubMintedType.
 	TypeSecretRequest  = "secret-request"
 	TypeSecretResponse = "secret-response"
+
+	// TypeCommandRequest is an agent message proposing a command for a named
+	// human to approve and run in their execution container. TypeCommandResponse
+	// delivers the run outcome back to the requesting agent. Both are hub-minted:
+	// see IsHubMintedType.
+	TypeCommandRequest  = "command-request"
+	TypeCommandResponse = "command-response"
 )
 
 // IsHubMintedType reports whether t is a message type only the hub may set.
@@ -116,7 +123,8 @@ const (
 // returns true.
 func IsHubMintedType(t string) bool {
 	return t == TypeDecisionPrompt || t == TypeDecisionResponse ||
-		t == TypeSecretRequest || t == TypeSecretResponse
+		t == TypeSecretRequest || t == TypeSecretResponse ||
+		t == TypeCommandRequest || t == TypeCommandResponse
 }
 
 // System message category constants identify the origin of a system message.
@@ -156,6 +164,8 @@ var validTypes = map[string]bool{
 	TypeDecisionResponse: true,
 	TypeSecretRequest:    true,
 	TypeSecretResponse:   true,
+	TypeCommandRequest:   true,
+	TypeCommandResponse:  true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -410,11 +420,22 @@ func (m *StructuredMessage) LogAttrs() []any {
 		"sender", m.Sender,
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
-		"message_content", m.Msg,
+	}
+	if m.Type == TypeCommandRequest {
+		// Command request messages embed the proposed script in their Markdown
+		// fallback body; never emit script text to slog (ptone/scion#9278 G7/S12).
+		attrs = append(attrs,
+			"message_content_omitted", true,
+			"message_content_len", len(m.Msg),
+		)
+	} else {
+		attrs = append(attrs, "message_content", m.Msg)
+	}
+	attrs = append(attrs,
 		"urgent", m.Urgent,
 		"broadcasted", m.Broadcasted,
 		"plain", m.Plain,
-	}
+	)
 	if m.SenderID != "" {
 		attrs = append(attrs, "sender_id", m.SenderID)
 	}

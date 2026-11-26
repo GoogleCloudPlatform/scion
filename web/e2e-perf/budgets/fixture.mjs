@@ -183,6 +183,7 @@ export function buildFixture() {
           'hub.attachment_artifacts': false,
           'hub.chat_retention': false,
           'hub.code_span_mentions': false,
+          'hub.command_requests': false,
           'hub.custom_default_user_role': false,
           'hub.effective_permissions': false,
           'hub.exec_containers': false,

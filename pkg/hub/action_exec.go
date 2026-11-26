@@ -567,7 +567,7 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	// result is only ever polled.
 	startCtx, cancelStart := context.WithCancel(context.WithoutCancel(ctx))
 	stopStart := context.AfterFunc(workCtx, cancelStart)
-	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
+	res, startErr := s.StartAgentExecRun(startCtx, execOwnerScheduled, target.ID, target.RunID, agentcontrol.ExecStartRequest{
 		RunID:          fireID,
 		ScheduleID:     sciontoolScopeID,
 		Argv:           p.Command,

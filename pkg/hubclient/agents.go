@@ -1141,6 +1141,12 @@ type OutboundMessageRequest struct {
 	// SecretRequestsUpdate lets SecretRequests replace pending secret requests
 	// whose keys already exist.
 	SecretRequestsUpdate bool `json:"secret_requests_update,omitempty"`
+	// CommandRequest makes the message a command-execution proposal for a named
+	// human to approve (hub.command_requests experiment).
+	CommandRequest json.RawMessage `json:"command_request,omitempty"`
+	// CommandRequestUpdate lets CommandRequest replace a pending command request
+	// for the same key.
+	CommandRequestUpdate bool `json:"command_request_update,omitempty"`
 }
 
 // DecisionSendResult is one decision of a sent decision prompt.
@@ -1214,6 +1220,10 @@ type OutboundMessageResult struct {
 	// SecretRequests lists the secret requests of a secret-request prompt, one
 	// per key sent; empty for any other message.
 	SecretRequests []messages.SecretRequestSendResult `json:"secret_requests,omitempty"`
+
+	// CommandRequest reports the created command request row when sending a
+	// command-request prompt; nil for any other message.
+	CommandRequest *messages.CommandRequestSendResult `json:"command_request,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.

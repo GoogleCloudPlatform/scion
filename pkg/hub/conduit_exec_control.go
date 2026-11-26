@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -43,11 +44,39 @@ import (
 // exec-start: one attempt per run; on an ambiguous error the caller only
 // polls exec-status.
 
+// execRunOwner identifies which hub subsystem is starting an exec run and
+// therefore which experiment gate and target-kind policy applies (design §4.8).
+type execRunOwner string
+
+const (
+	// execOwnerScheduled is the scheduled-exec / trigger-exec fire pipeline.
+	// Requires hub.exec_schedules + hub.conduit + conduitRoutable().
+	execOwnerScheduled execRunOwner = "scheduled"
+	// execOwnerCommandRun is the human-approved command-run executor.
+	// Requires hub.command_requests + hub.conduit + conduitRoutable() and
+	// refuses any target that is not a shell execution container (AC-S2).
+	execOwnerCommandRun execRunOwner = "command_run"
+)
+
 // ErrExecSchedulesDisabled: exec-start was not sent because the hub gate
 // is closed (hub.exec_schedules or hub.conduit off, or conduit not served;
 // AC18). Only new starts are gated: exec-status recovery of admitted runs
 // is not.
 var ErrExecSchedulesDisabled = errors.New("agent exec: exec schedules are disabled on this hub")
+
+// ErrCommandRequestsDisabled: exec-start for an approved command run was not
+// sent because hub.command_requests or hub.conduit is off, or conduit is not
+// routable.
+var ErrCommandRequestsDisabled = errors.New("agent exec: command requests are disabled on this hub")
+
+// ErrCommandRunTargetNotShell: exec-start for an approved command run was
+// refused because the target agent is not a shell execution container (AC-S2).
+var ErrCommandRunTargetNotShell = errors.New("agent exec: command run target is not an execution container")
+
+// ErrAgentExecWorkdirUnsupported: exec-start carried a non-empty workdir, but
+// the target agent's Conduit session did not advertise agentcontrol.FeatureExecWorkdir.
+// Nothing was sent.
+var ErrAgentExecWorkdirUnsupported = errors.New("agent exec: sciontool lacks exec_workdir.v1")
 
 // ErrAgentExecLaunchChanged: the agent's current launch, or the only
 // session the router can resolve, is not of the launch the run was admitted
@@ -102,9 +131,20 @@ func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunch
 //     outside the schema; never success;
 //   - otherwise the store, router or session error. A timeout or drop after
 //     send is ambiguous: the run may have started.
-func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string, req agentcontrol.ExecStartRequest) (agentcontrol.ExecResult, error) {
-	if !s.execSchedulesEnabled() || !s.conduitRoutable() {
-		return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
+func (s *Server) StartAgentExecRun(ctx context.Context, owner execRunOwner, agentID, launchID string, req agentcontrol.ExecStartRequest) (agentcontrol.ExecResult, error) {
+	var requireShell bool
+	switch owner {
+	case execOwnerScheduled:
+		if !s.execSchedulesEnabled() || !s.conduitRoutable() {
+			return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
+		}
+	case execOwnerCommandRun:
+		if !s.experimentEnabled(experiments.CommandRequests) || !s.experimentEnabled(conduitExperiment) || !s.conduitRoutable() {
+			return agentcontrol.ExecResult{}, ErrCommandRequestsDisabled
+		}
+		requireShell = true
+	default:
+		return agentcontrol.ExecResult{}, fmt.Errorf("agent exec: unknown exec run owner %q", owner)
 	}
 	req.V = agentcontrol.ExecVersion
 	if req.NotAfterUnixMS <= 0 {
@@ -124,7 +164,10 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 	if req.TriggerContext != "" {
 		requireFeatures = append(requireFeatures, agentcontrol.FeatureExecContextV1)
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStart, body, requireFeatures...)
+	if req.Workdir != "" {
+		requireFeatures = append(requireFeatures, agentcontrol.FeatureExecWorkdir)
+	}
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, requireShell, agentcontrol.RouteExecStart, body, requireFeatures...)
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
@@ -149,7 +192,7 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStatus, body)
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, false, agentcontrol.RouteExecStatus, body)
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
@@ -162,7 +205,7 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 // incarnation facts (callAgentControlPinned), so the call can reach only a
 // session of launch launchID, locally or through another relay, never a
 // replacement incarnation.
-func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte, requireFeatures ...string) (int, []byte, error) {
+func (s *Server) callAgentExec(ctx context.Context, agentID, launchID string, requireShell bool, route string, body []byte, requireFeatures ...string) (int, []byte, error) {
 	if launchID == "" {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
@@ -175,6 +218,9 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 		// a store (or wrapper) that breaks it is treated the same way, and
 		// nothing is sent.
 		return 0, nil, store.ErrNotFound
+	}
+	if requireShell && !isShellAgent(agent) {
+		return 0, nil, ErrCommandRunTargetNotShell
 	}
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
@@ -235,6 +281,8 @@ func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent,
 				return fmt.Errorf("%w: agent %s", ErrAgentExecContextUnsupported, agent.ID)
 			case agentcontrol.FeatureExecCapture:
 				return fmt.Errorf("%w: agent %s, feature %s", errExecCaptureUnsupported, agent.ID, requireFeature)
+			case agentcontrol.FeatureExecWorkdir:
+				return fmt.Errorf("%w: agent %s", ErrAgentExecWorkdirUnsupported, agent.ID)
 			default:
 				return fmt.Errorf("%w: agent %s, feature %s", ErrAgentControlNotAdvertised, agent.ID, requireFeature)
 			}

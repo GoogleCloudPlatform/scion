@@ -61,6 +61,7 @@ type OwnerKind string
 // OwnerKind values.
 const (
 	OwnerKindScheduledExec OwnerKind = "scheduled_exec"
+	OwnerKindActionRun     OwnerKind = "action_run"
 )
 
 func (ok OwnerKind) String() string {
@@ -70,7 +71,7 @@ func (ok OwnerKind) String() string {
 // OwnerKindValidator is a validator for the "owner_kind" field enum values. It is called by the builders before save.
 func OwnerKindValidator(ok OwnerKind) error {
 	switch ok {
-	case OwnerKindScheduledExec:
+	case OwnerKindScheduledExec, OwnerKindActionRun:
 		return nil
 	default:
 		return fmt.Errorf("execrunoutput: invalid enum value for owner_kind field: %q", ok)

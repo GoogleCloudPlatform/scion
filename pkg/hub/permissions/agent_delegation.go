@@ -84,6 +84,11 @@ var AgentDelegationSharedKeyExemptions = []AgentDelegationSharedKeyExemption{
 		Operation:  "chat.secretrequest.dismiss",
 		Reason:     "dismissing a secret request is session-only (human user dismissal); it shares agent.attach but is never admitted for an agent delegated credential",
 	},
+	{
+		Permission: "agent.attach",
+		Operation:  "chat.commandrequest.approve",
+		Reason:     "approving a command request is session-only (human user approval to run in their execution container); it shares agent.attach (checked via ResolveExecContainer) but is never admitted for an agent delegated credential",
+	},
 }
 
 // AgentDelegable reports whether permissionID may be delegated to an agent

@@ -16,6 +16,7 @@ package commands
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,4 +121,39 @@ func TestWriteExecContainerMOTD_PersistentAndNonPersistentVariants(t *testing.T)
 		assert.NotContains(t, got, "ops\n")
 		assert.Contains(t, got, "scion exec-container set 'ops[31m;rm -rf /'")
 	})
+}
+
+func TestExecContainerProfileScript_SilentInNonInteractiveShell(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	dir := t.TempDir()
+	motdPath := filepath.Join(dir, "motd")
+	scriptPath := filepath.Join(dir, "scion-exec-container.sh")
+
+	env := map[string]string{
+		"SCION_HARNESS":         "shell",
+		"SCION_AGENT_NAME":      "exec-box",
+		"SCION_HOME_PERSISTENT": "true",
+	}
+	require.NoError(t, writeExecContainerMOTDAt(func(k string) string { return env[k] }, motdPath, scriptPath))
+
+	// Rewrite the profile script paths to temp files so the test is self-contained
+	// without touching /etc/motd or /tmp/.scion-exec-motd-shown.
+	scriptBytes, err := os.ReadFile(scriptPath)
+	require.NoError(t, err)
+	markerPath := filepath.Join(dir, "motd-shown")
+	localized := strings.ReplaceAll(string(scriptBytes), "/etc/motd", motdPath)
+	localized = strings.ReplaceAll(localized, "/tmp/.scion-exec-motd-shown", markerPath)
+	require.NoError(t, os.WriteFile(scriptPath, []byte(localized), 0644))
+
+	// Non-interactive login shell (bash --login -c ...) must not print the MOTD
+	// or create the shown marker, so approved command output tails stay clean (§4.6).
+	cmd := exec.Command(bashPath, "--login", "-c", `. "$1"; echo CLEAN_OUTPUT`, "scion-command", scriptPath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "output: %s", string(out))
+	assert.Equal(t, "CLEAN_OUTPUT\n", string(out))
+	_, statErr := os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(statErr), "non-interactive shell must not consume MOTD marker")
 }

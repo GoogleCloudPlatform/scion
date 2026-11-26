@@ -179,7 +179,8 @@ Examples:
 		bodyFile, _ := cmd.Flags().GetString("body-file")
 		withDecisions := cmd.Flags().Changed("decisions") || cmd.Flags().Changed("decisions-file")
 		withSecretRequests := cmd.Flags().Changed("secret-request") || cmd.Flags().Changed("secret-request-file")
-		if bodyFile != "" || withDecisions || withSecretRequests {
+		withCommandRequest := cmd.Flags().Changed("command-request")
+		if bodyFile != "" || withDecisions || withSecretRequests || withCommandRequest {
 			if len(args) < 1 {
 				return fmt.Errorf("recipient is required")
 			}
@@ -252,11 +253,16 @@ Examples:
 		// JSON is parsed only for early errors; the hub is the authority.
 		msgDecisionsPayload = nil
 		msgSecretRequestsPayload = nil
+		msgCommandReqPayload = nil
 		agentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+		convTarget := convRef != nil && (convRef.Kind == messaging.RefConversation || convRef.Kind == messaging.RefThread)
 		if err := validateDecisionFlags(agentTarget, len(groupRecipients) > 0); err != nil {
 			return err
 		}
 		if err := validateSecretRequestFlags(agentTarget, len(groupRecipients) > 0); err != nil {
+			return err
+		}
+		if err := validateCommandRequestFlags(agentTarget, len(groupRecipients) > 0, convTarget); err != nil {
 			return err
 		}
 		if decisionsRequested() {
@@ -274,6 +280,13 @@ Examples:
 			}
 			msgSecretRequestsPayload = payload
 		}
+		if commandRequestRequested() {
+			payload, err := loadCommandRequestPayload()
+			if err != nil {
+				return err
+			}
+			msgCommandReqPayload = payload
+		}
 
 		// Resolve body from --body-file or stdin
 		var err error
@@ -287,8 +300,8 @@ Examples:
 		// the slug. Code spans and quoted lines are left unchanged.
 		message = messages.RewriteAgentMentions(message)
 
-		// Ensure we have a message body (optional with decisions or secret requests)
-		if message == "" && len(msgArtifacts) == 0 && msgDecisionsPayload == nil && msgSecretRequestsPayload == nil {
+		// Ensure we have a message body (optional with decisions, secret requests, or command requests)
+		if message == "" && len(msgArtifacts) == 0 && msgDecisionsPayload == nil && msgSecretRequestsPayload == nil && msgCommandReqPayload == nil {
 			return fmt.Errorf("message body is empty; provide a message via positional args, --body-file, or pipe to stdin with '-'")
 		}
 
@@ -858,6 +871,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// A decision or secret-request prompt's items, whatever the status.
 		printSentDecisions(result)
 		printSentSecretRequests(result)
+		printSentCommandRequest(result)
 		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil
 	}
@@ -969,6 +983,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	}
 	applyDecisionsToOutbound(outMsg)
 	applySecretRequestsToOutbound(outMsg)
+	applyCommandRequestToOutbound(outMsg)
 
 	attachmentIDs, sendCtx, sendCancel, err := uploadThenSendContext(context.Background())
 	if err != nil {
@@ -978,7 +993,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	outMsg.AttachmentIDs = attachmentIDs
 	result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 	if err != nil {
-		return formatSecretRequestSendError(userRecipient, err)
+		return formatCommandRequestSendError(userRecipient, err)
 	}
 	// The hub stored the prompt: mark the agent waiting for input.
 	defer afterDecisionsSent()
@@ -1002,6 +1017,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		fmt.Printf("Message sent to %s via Hub%s.\n", userRecipient, receiptSuffix(result.MessageID, result.ConversationID))
 		printSentDecisions(result)
 		printSentSecretRequests(result)
+		printSentCommandRequest(result)
 	} else {
 		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
 	}
@@ -1984,6 +2000,12 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
 	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}) from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().StringVar(&msgCommandRequestKey, "command-request", "", "Propose a command to run in the recipient's execution container (DM to user only; agents only; needs the hub.command_requests experiment)")
+	messageCmd.Flags().StringVar(&msgCommandInline, "command", "", "With --command-request: inline shell command/script to propose")
+	messageCmd.Flags().StringVar(&msgCommandFile, "command-file", "", "With --command-request: read the proposed shell script from a file ('-' reads stdin, which then excludes --body-file -)")
+	messageCmd.Flags().StringVar(&msgCommandDescription, "description", "", "With --command-request: plain-text description of what the command does")
+	messageCmd.Flags().StringVar(&msgCommandWorkdir, "workdir", "", "With --command-request: absolute working directory inside the execution container (defaults to $HOME)")
+	messageCmd.Flags().StringVar(&msgCommandTimeout, "timeout", "", "With --command-request: execution timeout duration (e.g. 15m, 90s; default 10m, max 60m)")
 	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
 
 	// Removed flags — kept (hidden) only so their use gets actionable

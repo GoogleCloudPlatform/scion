@@ -96,6 +96,8 @@ var requestPathSites = []requestPathSite{
 	{"decisions_answer.go", "Server.handleDecisionRoutes", "URL.Path", 1, "routing: extracts the decision row id and sub-route"},
 	{"secret_requests_handlers.go", "Server.handleSecretRequestRoutes", "URL.Path", 1, "routing: extracts the secret request card message id and sub-route; not logged"},
 	{"secret_requests_handlers.go", "Server.handleAgentSecretRequestRoutes", "URL.Path", 1, "routing: dispatches agent secret-request list and withdraw sub-routes; not logged"},
+	{"command_requests_handlers.go", "Server.handleCommandRequestRoutes", "URL.Path", 1, "routing: extracts the command request id and sub-route; not logged"},
+	{"command_requests_handlers.go", "Server.handleAgentCommandRequestRoutes", "URL.Path", 1, "routing: dispatches agent command-request list and withdraw sub-routes; not logged"},
 	{"conduit_hub_internal.go", "Server.serveHubInternal", "URL.Path", 1, "routing: picks the hub internal API operation from the path; not logged"},
 	{"conduit_ingress.go", "Server.proxyConduitDial", "URL.Path", 1, "not the served request: sets the fixed path /api/v1/conduit on the outgoing ingress leg to a relay; not logged"},
 	{"conduit_ingress.go", "Server.proxyConduitDial", "URL.RawPath", 1, "not the served request: clears the escaped path of the outgoing ingress leg to a relay; not logged"},

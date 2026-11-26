@@ -42,7 +42,7 @@ func (ExecRunOutput) Fields() []ent.Field {
 			StorageKey("run_id").
 			Immutable(),
 		field.Enum("owner_kind").
-			Values("scheduled_exec").
+			Values("scheduled_exec", "action_run").
 			Immutable(),
 		field.UUID("project_id", uuid.UUID{}).
 			Immutable(),

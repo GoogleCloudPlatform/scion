@@ -32,6 +32,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -48,6 +49,10 @@ const (
 
 // ExperimentExecSchedules is the launch-time flag of the exec routes.
 const ExperimentExecSchedules = "hub.exec_schedules"
+
+// ExperimentCommandRequests is the launch-time flag that registers the exec
+// routes on shell execution containers only (SCION_HARNESS=shell).
+const ExperimentCommandRequests = "hub.command_requests"
 
 // Key store and concurrency bounds (design D5, D9-S2).
 const (
@@ -102,6 +107,7 @@ type execBinding struct {
 	timeoutS             int
 	launchID             string
 	capture              string
+	workdir              string
 }
 
 // execFinal is a finished run's outcome and, when capture was requested, its
@@ -231,6 +237,7 @@ func (e *execRoute) startRun(ctx context.Context, req *agentcontrol.ExecStartReq
 		timeoutS:             req.TimeoutS,
 		launchID:             e.opts.LaunchID,
 		capture:              req.Capture,
+		workdir:              req.Workdir,
 	}
 	deadline := time.UnixMilli(req.NotAfterUnixMS).Add(agentcontrol.ExecClockTolerance)
 
@@ -371,7 +378,10 @@ func (e *execRoute) prepare(req *agentcontrol.ExecStartRequest) (execSpec, error
 	if err != nil {
 		return execSpec{}, err
 	}
-	dir := execWorkdir(o.Workdir, o.Username, env)
+	dir, err := resolveExecWorkdir(req.Workdir, o.Workdir, o.Username, env)
+	if err != nil {
+		return execSpec{}, err
+	}
 	env = setEnv(env, "PWD", dir)
 	if req.TriggerContext != "" {
 		env = setEnv(env, agentcontrol.ExecTriggerContextEnvName, req.TriggerContext)
@@ -526,6 +536,44 @@ func execLogLine(what, runID, scheduleID, capture, outputStatus string, a execAn
 		line += fmt.Sprintf(" output_status=%s", outputStatus)
 	}
 	return line
+}
+
+// errExecWorkdirInvalid: an explicit workdir does not exist or is not a
+// directory after symlink resolution. Never falls back (design §4.6).
+var errExecWorkdirInvalid = errors.New("control: requested workdir is not an existing directory")
+
+// resolveExecWorkdir resolves req.Workdir per exec_workdir.v1 (design §4.6):
+//   - "": unchanged legacy behavior (execWorkdir -> /workspace if present);
+//   - "~": the run environment's HOME (falling back to /home/<username>);
+//   - absolute path: must exist and be a directory after EvalSymlinks, else
+//     errExecWorkdirInvalid (start_failed, never falls back).
+func resolveExecWorkdir(requested, preferred, username string, env []string) (string, error) {
+	switch requested {
+	case "":
+		return execWorkdir(preferred, username, env), nil
+	case "~":
+		if home := envValue(env, "HOME"); home != "" {
+			if resolved, err := filepath.EvalSymlinks(home); err == nil && isDir(resolved) {
+				return resolved, nil
+			}
+		}
+		if username != "" {
+			fallback := "/home/" + username
+			if resolved, err := filepath.EvalSymlinks(fallback); err == nil && isDir(resolved) {
+				return resolved, nil
+			}
+		}
+		return "", errExecWorkdirInvalid
+	default:
+		if !filepath.IsAbs(requested) {
+			return "", errExecWorkdirInvalid
+		}
+		resolved, err := filepath.EvalSymlinks(requested)
+		if err != nil || !isDir(resolved) {
+			return "", errExecWorkdirInvalid
+		}
+		return resolved, nil
+	}
 }
 
 // execWorkdir is preferred if it is a directory, else the run's home: the
@@ -790,17 +838,27 @@ func (r *tailRing) finalizeTail() (string, []byte) {
 }
 
 // ExecEnabled reports whether sciontool should register the exec routes:
-// the platform runs them (Linux) and the agent was launched with
-// hub.exec_schedules in SCION_HUB_EXPERIMENTS (sent by the hub only while
-// hub.conduit is served). Turning the experiment on later does not reach a
-// running agent: it registers the routes only after a restart.
+// the platform runs them (Linux) and the agent was launched with either:
+//   - hub.exec_schedules in SCION_HUB_EXPERIMENTS, or
+//   - hub.command_requests in SCION_HUB_EXPERIMENTS AND the container is a
+//     shell execution container (state.IsShellHarnessEnv(getenv)).
+//
+// LLM agents never gain exec routes from hub.command_requests alone (AC-S2).
+// Turning either experiment on later does not reach a running agent: it
+// registers the routes only after a restart.
 func ExecEnabled(getenv func(string) string) bool {
 	if !execSupported {
 		return false
 	}
+	isShell := state.IsShellHarnessEnv(getenv)
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {
-		if strings.TrimSpace(name) == ExperimentExecSchedules {
+		switch strings.TrimSpace(name) {
+		case ExperimentExecSchedules:
 			return true
+		case ExperimentCommandRequests:
+			if isShell {
+				return true
+			}
 		}
 	}
 	return false

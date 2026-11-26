@@ -186,19 +186,26 @@ func (s *Server) emitSecretRequestRefused(ctx context.Context, ev *MessageAction
 	s.emitMessageActionEvent(ctx, ev)
 }
 
-// secretRequestCaller verifies the caller is a signed-in human user on an
-// interactive web session (or dev credential). Agents, visitors, user access
+// messageActionHumanSessionCaller verifies the caller is a signed-in human user
+// on an interactive session (or dev credential). Agents, visitors, user access
 // tokens, and federated credentials are refused and logged as refused audit
-// events (§4.6, §4.11).
-func (s *Server) secretRequestCaller(w http.ResponseWriter, r *http.Request, msgID string) UserIdentity {
+// events for kind (ptone/scion#8747, ptone/scion#9278 §4.7).
+func (s *Server) messageActionHumanSessionCaller(w http.ResponseWriter, r *http.Request, kind, rowID, msgID string) UserIdentity {
 	ctx := r.Context()
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		s.emitSecretRequestRefused(ctx, &MessageActionEvent{
+	emitRefused := func(actorKind, actorID, reason string) {
+		s.emitMessageActionEvent(ctx, &MessageActionEvent{
+			Kind:      kind,
+			EventType: MessageActionEventRefused,
+			RowID:     rowID,
 			MessageID: msgID,
-			ActorKind: MessageActionActorAgent,
-			ActorID:   agentIdent.ID(),
-			Reason:    ErrCodeUsersOnly,
+			ActorKind: actorKind,
+			ActorID:   actorID,
+			Reason:    reason,
+			Timestamp: time.Now().UTC(),
 		})
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		emitRefused(MessageActionActorAgent, agentIdent.ID(), ErrCodeUsersOnly)
 		writeError(w, http.StatusForbidden, ErrCodeUsersOnly, "this endpoint is only available to users", nil)
 		return nil
 	}
@@ -208,26 +215,22 @@ func (s *Server) secretRequestCaller(w http.ResponseWriter, r *http.Request, msg
 		return nil
 	}
 	if isVisitorIdentity(user) {
-		s.emitSecretRequestRefused(ctx, &MessageActionEvent{
-			MessageID: msgID,
-			ActorKind: MessageActionActorUser,
-			ActorID:   user.ID(),
-			Reason:    "visitor_refused",
-		})
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "secret requests require a signed-in user session", nil)
+		emitRefused(MessageActionActorUser, user.ID(), "visitor_refused")
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "this endpoint requires a signed-in user session", nil)
 		return nil
 	}
 	if cls, _ := inboxCredentialOf(ctx); cls != inboxCredentialSession {
-		s.emitSecretRequestRefused(ctx, &MessageActionEvent{
-			MessageID: msgID,
-			ActorKind: MessageActionActorUser,
-			ActorID:   user.ID(),
-			Reason:    "session_required",
-		})
-		writeSessionOnlyDenial(w, ErrCodeForbidden, "secret requests require a web session", authzop.ReasonInteractiveState)
+		emitRefused(MessageActionActorUser, user.ID(), "session_required")
+		writeSessionOnlyDenial(w, ErrCodeForbidden, "this endpoint requires an interactive session", authzop.ReasonInteractiveState)
 		return nil
 	}
 	return user
+}
+
+// secretRequestCaller verifies the caller is a signed-in human user on an
+// interactive web session (or dev credential).
+func (s *Server) secretRequestCaller(w http.ResponseWriter, r *http.Request, msgID string) UserIdentity {
+	return s.messageActionHumanSessionCaller(w, r, msgaction.KindSecretRequest, "", msgID)
 }
 
 // loadSecretRequestCard loads the card's rows and its chat key.
