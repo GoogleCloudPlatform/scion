@@ -550,6 +550,9 @@ func (p *Pipeline) SettleUsageSource(overlay map[string]string, nativePolicy str
 	if p == nil {
 		return
 	}
+	if nativePolicy == "metering" {
+		p.SetNativeMeteringOnly(true)
+	}
 	sel := resolveUsageSelection(os.LookupEnv, overlay, nativePolicy)
 	h := &p.health
 	h.mu.Lock()

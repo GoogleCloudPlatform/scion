@@ -378,6 +378,12 @@ func TestMergeEnvOverlayWithNativeTelemetryPolicy(t *testing.T) {
 	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy("enabled", nil, generated, map[string]string{NativeTelemetryPolicyKey: "enabled"}); err == nil {
 		t.Fatal("matching spoofed marker accepted")
 	}
+	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy(NativeTelemetryPolicyMetering, []string{"TOKEN=cli"}, generated, map[string]string{"SECRET": "fetched"}); err != nil {
+		t.Fatalf("valid metering merge failed: %v", err)
+	}
+	if _, err := MergeEnvOverlayWithNativeTelemetryPolicy(NativeTelemetryPolicyMetering, []string{"OTEL_EXPORTER_OTLP_ENDPOINT=https://external.invalid"}, generated, nil); err == nil {
+		t.Fatal("metering policy must reject conflicting OTEL_* env")
+	}
 }
 
 func envMap(env []string) map[string]string {

@@ -13,6 +13,21 @@ ROOT = Path(__file__).parent
 
 
 class TelemetryProvisionTest(unittest.TestCase):
+    def setUp(self):
+        # Scrub ambient telemetry/usage-ingest env vars so tests are hermetic
+        # inside Scion agent containers where sciontool sets them (ptone/scion#9492).
+        env_patch = patch.dict(os.environ, {}, clear=False)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+        for key in (
+            'SCION_USAGE_HUB_INGEST',
+            'SCION_TELEMETRY_ENABLED',
+            'SCION_OTEL_GCP_CREDENTIALS',
+            'SCION_OTEL_ENDPOINT',
+            'SCION_TELEMETRY_CLOUD_PROVIDER',
+        ):
+            os.environ.pop(key, None)
+
     def _invoke(self, harness, enabled, port, provider=None, extra_env=None,
                 well_known_gcp_credentials=False, cloud_endpoint=None,
                 port_env_key='SCION_OTEL_GRPC_PORT',
@@ -358,7 +373,7 @@ class TelemetryProvisionTest(unittest.TestCase):
         claude_env, _ = self._invoke_with_env(
             'claude', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
         )
-        self.assertEqual(claude_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(claude_env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
         self.assertEqual(claude_env['CLAUDE_CODE_ENABLE_TELEMETRY'], '1')
         self.assertEqual(claude_env['OTEL_LOGS_EXPORTER'], 'otlp')
         self.assertEqual(claude_env['OTEL_METRICS_EXPORTER'], 'none')
@@ -370,7 +385,7 @@ class TelemetryProvisionTest(unittest.TestCase):
         codex_env, codex_cfg = self._invoke_with_env(
             'codex', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
         )
-        self.assertEqual(codex_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(codex_env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
         self.assertEqual(codex_env['SCION_USAGE_SOURCE'], 'native')
         self.assertIn('exporter."otlp-grpc".endpoint = "http://127.0.0.1:14317"', codex_cfg)
         self.assertIn('metrics_exporter = "none"', codex_cfg)
@@ -380,7 +395,7 @@ class TelemetryProvisionTest(unittest.TestCase):
         gemini_env, gemini_cfg = self._invoke_with_env(
             'gemini-cli', None, 14317, process_env={'SCION_USAGE_HUB_INGEST': '1'},
         )
-        self.assertEqual(gemini_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(gemini_env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
         self.assertEqual(gemini_env['GEMINI_TELEMETRY_ENABLED'], 'true')
         self.assertEqual(gemini_env['GEMINI_TELEMETRY_TARGET'], 'local')
         self.assertEqual(gemini_env['GEMINI_TELEMETRY_OTLP_ENDPOINT'], 'http://127.0.0.1:14317')
@@ -395,7 +410,7 @@ class TelemetryProvisionTest(unittest.TestCase):
             'copilot', None, 14318, port_env_key='SCION_OTEL_HTTP_PORT',
             process_env={'SCION_USAGE_HUB_INGEST': '1'},
         )
-        self.assertEqual(copilot_env['SCION_NATIVE_TELEMETRY_POLICY'], 'enabled')
+        self.assertEqual(copilot_env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
         self.assertEqual(copilot_env['COPILOT_OTEL_ENABLED'], 'true')
         self.assertEqual(copilot_env['OTEL_EXPORTER_OTLP_ENDPOINT'], 'http://127.0.0.1:14318')
         self.assertEqual(copilot_env['OTEL_METRICS_EXPORTER'], 'otlp')
@@ -408,6 +423,37 @@ class TelemetryProvisionTest(unittest.TestCase):
         )
         self.assertEqual(grok_env['SCION_NATIVE_TELEMETRY_POLICY'], 'disabled')
         self.assertNotIn('GROK_TELEMETRY_ENABLED', grok_env)
+
+    def test_hub_usage_ingest_unset_telemetry_with_cloud_creds_or_endpoint_emits_metering_policy(self):
+        # R1 (ptone/scion#9492): when telemetry is unset (None) and
+        # SCION_USAGE_HUB_INGEST=1, even if ambient cloud credentials or an
+        # OTLP endpoint exist, provisioners must emit SCION_NATIVE_TELEMETRY_POLICY=metering
+        # so sciontool derives usage and never forwards native harness signals to cloud.
+        scenarios = (
+            ('well_known_gcp_creds', {}, {'SCION_USAGE_HUB_INGEST': '1'}, True),
+            ('process_gcp_creds', {}, {'SCION_USAGE_HUB_INGEST': '1', 'SCION_OTEL_GCP_CREDENTIALS': '/tmp/key.json'}, False),
+            ('staged_otel_endpoint', {'SCION_OTEL_ENDPOINT': 'https://collector.invalid:4317'}, {'SCION_USAGE_HUB_INGEST': '1'}, False),
+            ('process_otel_endpoint', {}, {'SCION_USAGE_HUB_INGEST': '1', 'SCION_OTEL_ENDPOINT': 'https://collector.invalid:4317'}, False),
+        )
+        for name, staged_env, proc_env, well_known in scenarios:
+            for harness, port_key, port in (
+                ('claude', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('codex', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('gemini-cli', 'SCION_OTEL_GRPC_PORT', 4317),
+                ('copilot', 'SCION_OTEL_HTTP_PORT', 4318),
+            ):
+                with self.subTest(scenario=name, harness=harness):
+                    env, _ = self._invoke_with_env(
+                        harness, None, port, port_env_key=port_key,
+                        extra_staged_env=staged_env, process_env=proc_env,
+                        well_known_gcp_credentials=well_known,
+                    )
+                    self.assertEqual(env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
+                    self.assertEqual(env['SCION_USAGE_SOURCE'], 'native')
+                    if harness == 'claude':
+                        self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'none')
+                        self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
+                        self.assertNotIn('OTEL_LOG_USER_PROMPTS', env)
 
     def test_hub_usage_ingest_off_preserves_default_disabled(self):
         for flag in (None, '0'):
@@ -433,6 +479,7 @@ class TelemetryProvisionTest(unittest.TestCase):
             'claude', {'enabled': True}, 14317,
             process_env={'SCION_USAGE_HUB_INGEST': '1'},
         )
+        self.assertEqual(env['SCION_NATIVE_TELEMETRY_POLICY'], 'metering')
         self.assertEqual(env['CLAUDE_CODE_ENABLE_TELEMETRY'], '1')
         self.assertEqual(env['OTEL_LOGS_EXPORTER'], 'otlp')
         self.assertEqual(env['OTEL_METRICS_EXPORTER'], 'none')

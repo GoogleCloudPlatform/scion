@@ -175,6 +175,7 @@ def _telemetry_output_env(
     telemetry: dict[str, Any] | None,
     *,
     enabled: bool | None = None,
+    policy: str | None = None,
 ) -> dict[str, str]:
     """The telemetry-derived entries of outputs/env.json (ptone/scion#2053
     phase 3c). SCION_USAGE_SOURCE is set only when telemetry is enabled:
@@ -185,7 +186,9 @@ def _telemetry_output_env(
     published at all (D10)."""
     if enabled is None:
         enabled = _telemetry_enabled(telemetry)
-    env = {"SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled"}
+    if policy is None:
+        policy = "enabled" if enabled else "disabled"
+    env = {"SCION_NATIVE_TELEMETRY_POLICY": policy}
     if enabled:
         env["SCION_USAGE_SOURCE"] = "native"
     return env
@@ -774,7 +777,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if resolved.method == "auth-file":
         extra = {"auth_file_written": True}
     env: dict[str, str] = {"CODEX_HOME": os.path.join(ctx.home, ".codex")}
-    env.update(_telemetry_output_env(telemetry, enabled=tel.enabled))
+    env.update(_telemetry_output_env(telemetry, enabled=tel.enabled, policy=tel.policy))
     ctx.write_outputs(resolved, env=env, extra=extra)
 
     scion_harness.apply_mcp_translated(

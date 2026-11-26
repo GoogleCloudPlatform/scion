@@ -791,12 +791,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 		pipeline.SetHubIDResolver(newAnalyticsHubIDResolver(hub.NewClient))
 		var telemetryCancel context.CancelFunc
 		telemetryCtx, telemetryCancel = context.WithCancel(context.Background())
-		probeAndConfigureUsageIngest(telemetryCtx, pipeline, hub.NewClient)
-		if err := pipeline.Start(telemetryCtx); err != nil {
+		if err := startTelemetryWithUsageIngest(telemetryCtx, pipeline, hub.NewClient); err != nil {
 			log.Error("Failed to start telemetry: %v", err)
-			// Reset SCION_USAGE_HUB_INGEST so harness provisioners do not point
-			// native OTel exporters at a loopback receiver that failed to start.
-			_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
 			telemetryCancel()
 			// Continue anyway - telemetry failure shouldn't block agent
 		} else {
@@ -2042,12 +2038,15 @@ func loadHarnessEnvOverlay(ctx context.Context, harnessReq hooks.HarnessManifest
 	}
 	var nativeTelemetryPolicy string
 	if policy, ok := overlay[hooks.NativeTelemetryPolicyKey]; ok {
-		if policy != "enabled" && policy != "disabled" {
+		if !hooks.ValidNativeTelemetryPolicy(policy) {
 			log.Error("Invalid native telemetry policy marker")
 			return nil, "", errors.New("invalid native telemetry policy marker in harness env overlay")
 		}
 		nativeTelemetryPolicy = policy
 		delete(overlay, hooks.NativeTelemetryPolicyKey)
+	}
+	if pipeline != nil {
+		pipeline.SetNativeMeteringOnly(nativeTelemetryPolicy == hooks.NativeTelemetryPolicyMetering)
 	}
 	log.Info("Loaded %d env overlay entries from %s", len(overlay), overlayPath)
 	activateOverlayUsageSource(ctx, pipeline, overlay, nativeTelemetryPolicy)

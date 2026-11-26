@@ -1380,7 +1380,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
     env.update({
-        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
+        "SCION_NATIVE_TELEMETRY_POLICY": tel.policy,
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1" if enabled else "0",
         "OTEL_METRICS_EXPORTER": "otlp" if enabled and not loopback_only and provider != "gcp" else "none",
         "OTEL_LOGS_EXPORTER": "otlp" if enabled else "none",

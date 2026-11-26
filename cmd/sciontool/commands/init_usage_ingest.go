@@ -180,3 +180,17 @@ func probeAndConfigureUsageIngest(ctx context.Context, pipeline *telemetry.Pipel
 	})
 	return false
 }
+
+// startTelemetryWithUsageIngest probes Hub usage capabilities, wires the Hub
+// usage sink onto pipeline when active, and starts the pipeline. If Start fails
+// (e.g. loopback receiver port bind error), it resets SCION_USAGE_HUB_INGEST=0
+// so harness provisioners do not point native OTel exporters at a dead loopback
+// receiver and hook subprocesses do not write to an undrained outbox.
+func startTelemetryWithUsageIngest(ctx context.Context, pipeline *telemetry.Pipeline, newClient func() *hub.Client) error {
+	probeAndConfigureUsageIngest(ctx, pipeline, newClient)
+	if err := pipeline.Start(ctx); err != nil {
+		_ = os.Setenv(telemetry.EnvUsageHubIngest, "0")
+		return err
+	}
+	return nil
+}

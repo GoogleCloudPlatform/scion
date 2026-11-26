@@ -836,7 +836,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         ctx.info(f"telemetry: injected {len(otel_env)} OTel env var(s)")
     # SCION_NATIVE_TELEMETRY_POLICY lets the env guard (hooks/envoverlay.go)
     # protect the OTEL_* vars above from being overridden at runtime.
-    env["SCION_NATIVE_TELEMETRY_POLICY"] = "enabled" if telemetry_enabled else "disabled"
+    env["SCION_NATIVE_TELEMETRY_POLICY"] = tel.policy
     if telemetry_enabled:
         # Copilot's usage (gen_ai.api.calls / scion.usage.tokens) is derived
         # by sciontool's receiver from the native gen_ai.client.inference.*

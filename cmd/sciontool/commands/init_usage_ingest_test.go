@@ -18,13 +18,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -532,5 +536,236 @@ func TestDefaultConfig_HubCapabilityEnablesLoopbackNativeUsageEndToEnd(t *testin
 	}
 	if ev.Input == nil || *ev.Input != 120 || ev.Output == nil || *ev.Output != 30 || ev.CacheRead == nil || *ev.CacheRead != 500 {
 		t.Errorf("unexpected token counts: input=%v output=%v cache_read=%v", ev.Input, ev.Output, ev.CacheRead)
+	}
+}
+
+// TestStartTelemetryWithUsageIngest_ResetsEnvOnStartFailure verifies the init.go
+// seam: when the Hub capability probe succeeds (setting SCION_USAGE_HUB_INGEST=1)
+// but Pipeline.Start fails (e.g. receiver port already in use), SCION_USAGE_HUB_INGEST
+// is reset to "0" so harness provisioners never point at a dead loopback receiver.
+func TestStartTelemetryWithUsageIngest_ResetsEnvOnStartFailure(t *testing.T) {
+	t.Setenv(telemetry.EnvUsageHubIngest, "")
+	// Occupy a loopback TCP port so Pipeline.Start's gRPC receiver bind fails.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer func() { _ = busy.Close() }()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageCapabilitiesResponse{
+			UsageIngestEnabled: true,
+			HubID:              "hub-1",
+			RunID:              "run-1",
+		})
+	}))
+	defer srv.Close()
+
+	p := telemetry.NewWithConfig(&telemetry.Config{
+		Enabled:      true,
+		CloudEnabled: false,
+		GRPCPort:     busyPort,
+		HTTPPort:     0,
+	})
+	p.SetAnalyticsOutbox(t.TempDir(), 0, 0)
+	newClient := func() *hub.Client { return hub.NewClientWithConfig(srv.URL, "tok-1", "agent-1") }
+
+	if err := startTelemetryWithUsageIngest(context.Background(), p, newClient); err == nil {
+		t.Fatal("startTelemetryWithUsageIngest = nil, want bind error")
+	}
+	if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "0" {
+		t.Errorf("%s = %q after Start failure, want \"0\"", telemetry.EnvUsageHubIngest, got)
+	}
+}
+
+// TestProvisionerToOverlayToPipelineMeteringEndToEnd exercises the real hop
+// from probeAndConfigureUsageIngest -> SCION_USAGE_HUB_INGEST=1 -> real
+// harnesses/claude/provision.py -> outputs/env.json (SCION_NATIVE_TELEMETRY_POLICY=metering,
+// SCION_USAGE_SOURCE=native) -> loadHarnessEnvOverlay -> pipeline metering-only +
+// ActivateUsageSource -> loopback OTLP -> httptest Hub usage ingest.
+func TestProvisionerToOverlayToPipelineMeteringEndToEnd(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	provisionScript := filepath.Join("..", "..", "..", "harnesses", "claude", "provision.py")
+	if _, err := os.Stat(provisionScript); err != nil {
+		t.Skipf("claude provision.py not found at %s: %v", provisionScript, err)
+	}
+
+	t.Cleanup(telemetry.SetTelemetryTestSandboxed())
+	agentHome := t.TempDir()
+	t.Setenv("HOME", agentHome)
+	for _, k := range []string{
+		telemetry.EnvEnabled,
+		telemetry.EnvCloudEnabled,
+		telemetry.EnvEndpoint,
+		telemetry.EnvCloudProvider,
+		telemetry.EnvProjectID,
+		telemetry.EnvGCPCredentials,
+		telemetry.EnvUsageHubIngest,
+		"SCION_USAGE_SOURCE",
+	} {
+		t.Setenv(k, "")
+		if err := os.Unsetenv(k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(telemetry.EnvGRPCPort, "0")
+	t.Setenv(telemetry.EnvHTTPPort, "0")
+	t.Setenv("SCION_AGENT_ID", "agent-hop")
+	t.Setenv("SCION_HARNESS", "claude")
+
+	var mu sync.Mutex
+	var gotEvents []telemetrycontract.UsageEvent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agents/agent-hop/usage/capabilities":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageCapabilitiesResponse{
+				UsageIngestEnabled: true,
+				MaxBatchEvents:     500,
+				MaxBatchBytes:      262144,
+				DrainIntervalSec:   1,
+				HubID:              "hub-hop",
+				RunID:              "run-hop-1",
+			})
+		case "/api/v1/agents/agent-hop/usage/events":
+			var req telemetrycontract.UsageIngestRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			gotEvents = append(gotEvents, req.Events...)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	// 1. Default telemetry pipeline + Hub capability probe.
+	p := telemetry.New()
+	if p == nil {
+		t.Fatal("telemetry.New() = nil on default config")
+	}
+	p.SetAnalyticsOutbox(agentHome, 0, 0)
+	newClient := func() *hub.Client { return hub.NewClientWithConfig(srv.URL, "tok-hop", "agent-hop") }
+	ctx := context.Background()
+	if err := startTelemetryWithUsageIngest(ctx, p, newClient); err != nil {
+		t.Fatalf("startTelemetryWithUsageIngest: %v", err)
+	}
+	boundGRPCPort := p.Config().GRPCPort
+
+	// 2. Stage minimal claude bundle inputs (telemetry: null, bound gRPC port)
+	// and run the real harnesses/claude/provision.py inheriting SCION_USAGE_HUB_INGEST=1.
+	bundleDir := filepath.Join(agentHome, ".scion", "harness")
+	if err := os.MkdirAll(filepath.Join(bundleDir, "inputs"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(agentHome, "workspace"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	telJSON, _ := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"telemetry":      nil,
+		"env":            map[string]string{"SCION_OTEL_GRPC_PORT": fmt.Sprintf("%d", boundGRPCPort)},
+	})
+	if err := os.WriteFile(filepath.Join(bundleDir, "inputs", "telemetry.json"), telJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+	absProvision, err := filepath.Abs(provisionScript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pyCode := fmt.Sprintf(`
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location('provision', %q)
+mod = importlib.util.module_from_spec(spec)
+sys.path.insert(0, os.path.dirname(%q))
+spec.loader.exec_module(mod)
+ctx = mod.scion_harness.ProvisionContext('claude', {
+    'harness_bundle_dir': %q,
+    'harness_config': {'no_auth': {'behavior': 'allow'}},
+    'agent_workspace': %q,
+})
+ctx.select_auth = lambda _: mod.scion_harness.ResolvedAuth('none')
+mod.provision(ctx)
+`, absProvision, absProvision, bundleDir, filepath.Join(agentHome, "workspace"))
+	cmd := exec.Command(python, "-c", pyCode)
+	cmd.Env = append(os.Environ(), "PYTHONDONTWRITEBYTECODE=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("claude provision.py failed: %v\n%s", err, out)
+	}
+
+	// 3. Load env overlay via loadHarnessEnvOverlay (the real init.go path).
+	req := hooks.HarnessManifestRequirement{
+		Required:       true,
+		EnvOverlayPath: filepath.Join(bundleDir, "outputs", "env.json"),
+	}
+	overlay, policy, err := loadHarnessEnvOverlay(ctx, req, agentHome, p)
+	if err != nil {
+		t.Fatalf("loadHarnessEnvOverlay: %v", err)
+	}
+	if policy != hooks.NativeTelemetryPolicyMetering {
+		t.Fatalf("nativeTelemetryPolicy = %q, want %q", policy, hooks.NativeTelemetryPolicyMetering)
+	}
+	if !p.NativeMeteringOnly() {
+		t.Fatal("pipeline.NativeMeteringOnly() = false, want true")
+	}
+	if got := overlay["CLAUDE_CODE_ENABLE_TELEMETRY"]; got != "1" {
+		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q, want 1", got)
+	}
+	if got := overlay["SCION_USAGE_SOURCE"]; got != telemetry.UsageSourceNative {
+		t.Errorf("SCION_USAGE_SOURCE = %q, want %q", got, telemetry.UsageSourceNative)
+	}
+
+	// 4. Send a native Claude OTLP log to the bound loopback endpoint from the overlay.
+	conn, err := grpc.NewClient(
+		fmt.Sprintf("127.0.0.1:%d", boundGRPCPort),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	logClient := collogspb.NewLogsServiceClient(conn)
+	if _, err := logClient.Export(ctx, &collogspb.ExportLogsServiceRequest{
+		ResourceLogs: []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{
+				Scope: &commonpb.InstrumentationScope{Name: "com.anthropic.claude_code.events"},
+				LogRecords: []*logspb.LogRecord{{
+					TimeUnixNano: uint64(time.Now().UTC().UnixNano()),
+					Attributes: []*commonpb.KeyValue{
+						{Key: "event.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "api_request"}}},
+						{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-haiku-4-5-20251001"}}},
+						{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 77}}},
+						{Key: "output_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 19}}},
+					},
+				}},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("OTLP gRPC Export: %v", err)
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		t.Fatalf("Pipeline.Stop: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotEvents) != 1 {
+		t.Fatalf("Hub received %d usage events, want 1", len(gotEvents))
+	}
+	if gotEvents[0].Input == nil || *gotEvents[0].Input != 77 || gotEvents[0].Output == nil || *gotEvents[0].Output != 19 {
+		t.Errorf("unexpected token counts: input=%v output=%v", gotEvents[0].Input, gotEvents[0].Output)
 	}
 }

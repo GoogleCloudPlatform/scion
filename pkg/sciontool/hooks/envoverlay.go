@@ -29,12 +29,30 @@ const maxEnvSecretFileBytes = 64 * 1024
 // telemetry. It is a runtime contract, not an environment variable for the child.
 const NativeTelemetryPolicyKey = "SCION_NATIVE_TELEMETRY_POLICY"
 
+// Valid values for NativeTelemetryPolicyKey.
+const (
+	NativeTelemetryPolicyEnabled  = "enabled"
+	NativeTelemetryPolicyDisabled = "disabled"
+	// NativeTelemetryPolicyMetering indicates native OTel was auto-enabled only
+	// for local Hub usage metering: sciontool derives usage from native harness
+	// logs/metrics and must not forward native harness signals to any cloud exporter.
+	NativeTelemetryPolicyMetering = "metering"
+)
+
+// ValidNativeTelemetryPolicy reports whether policy is a recognised
+// SCION_NATIVE_TELEMETRY_POLICY marker value.
+func ValidNativeTelemetryPolicy(policy string) bool {
+	return policy == NativeTelemetryPolicyEnabled ||
+		policy == NativeTelemetryPolicyDisabled ||
+		policy == NativeTelemetryPolicyMetering
+}
+
 // ValidateNativeTelemetryEnv rejects runtime values that could change a
 // provisioner's native telemetry policy. The generated overlay is the complete
 // set of permitted reserved keys; this also rejects alternate endpoint aliases.
 // Errors name keys only, never values.
 func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides map[string]string) error {
-	if policy != "enabled" && policy != "disabled" {
+	if !ValidNativeTelemetryPolicy(policy) {
 		return fmt.Errorf("invalid native telemetry policy")
 	}
 	for _, entry := range env {

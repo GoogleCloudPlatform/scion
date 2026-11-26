@@ -24,6 +24,7 @@ import (
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/grpc/codes"
@@ -52,29 +53,32 @@ type Pipeline struct {
 	config *Config
 	// loopbackConfig is a copy of config whose GRPCPort/HTTPPort are the
 	// ports the receiver actually bound (they differ when config asks for
-	// port 0). Set by Start once the receiver listens; config itself is
-	// never mutated so a restart re-binds against the configured ports.
-	loopbackConfig    atomic.Pointer[Config]
-	receiver          *Receiver
-	exporter          *CloudExporter
-	policy            *receiverPolicy
-	mu                sync.Mutex
-	running           bool
-	cloudInitDegraded bool         // true when cloud export failed/misconfigured at Start while Hub usage sink kept the pipeline running
-	shutdownErr       error        // preserves a completed one-shot SDK shutdown failure
-	deliveryState     atomic.Value // string; readable without taking the lifecycle mutex
-	diagnosticMu      sync.Mutex
-	diagnosticLast    time.Time
-	diagnosticCancel  context.CancelFunc
-	diagnosticDone    chan struct{}
-	healthCancel      context.CancelFunc
-	exportErrors      otelmetric.Int64Counter
-	meter             otelmetric.Meter
-	retryConfig       RetryConfig
-	usageDeriver      atomic.Pointer[UsageDeriver]
-	analytics         analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
-	health            healthEmitter  // telemetry.health events (health.go)
-	sessionUsageSink  atomic.Pointer[SessionUsageSink]
+	// port 0). Set by Start once the receiver listens; config's ports are
+	// never mutated so a restart re-binds against the configured ports
+	// (Start may clear config.CloudEnabled when cloud export is disabled
+	// or degraded).
+	loopbackConfig     atomic.Pointer[Config]
+	nativeMeteringOnly atomic.Bool // when true, native harness logs/metrics/spans are never forwarded to the cloud exporter
+	receiver           *Receiver
+	exporter           *CloudExporter
+	policy             *receiverPolicy
+	mu                 sync.Mutex
+	running            bool
+	cloudInitDegraded  bool         // true when cloud export failed/misconfigured at Start while Hub usage sink kept the pipeline running
+	shutdownErr        error        // preserves a completed one-shot SDK shutdown failure
+	deliveryState      atomic.Value // string; readable without taking the lifecycle mutex
+	diagnosticMu       sync.Mutex
+	diagnosticLast     time.Time
+	diagnosticCancel   context.CancelFunc
+	diagnosticDone     chan struct{}
+	healthCancel       context.CancelFunc
+	exportErrors       otelmetric.Int64Counter
+	meter              otelmetric.Meter
+	retryConfig        RetryConfig
+	usageDeriver       atomic.Pointer[UsageDeriver]
+	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
+	health             healthEmitter  // telemetry.health events (health.go)
+	sessionUsageSink   atomic.Pointer[SessionUsageSink]
 	// apiOutcomeObserver receives model API outcomes (api_outcome.go).
 	apiOutcomeObserver atomic.Pointer[APIOutcomeObserver]
 	intakeMu           sync.Mutex
@@ -731,6 +735,69 @@ func (p *Pipeline) acceptLogs(ctx context.Context, logs []*logspb.ResourceLogs) 
 	return p.handleLogs(ctx, logs)
 }
 
+// SetNativeMeteringOnly restricts native harness signals (any OTLP resource
+// whose service.name is not "sciontool") to local usage derivation only:
+// after the usage deriver inspects them, native harness logs, metrics, and
+// spans are dropped rather than forwarded to any cloud exporter. sciontool's
+// own spans, logs, metrics, and analytics continue flowing normally.
+func (p *Pipeline) SetNativeMeteringOnly(enabled bool) {
+	if p == nil {
+		return
+	}
+	p.nativeMeteringOnly.Store(enabled)
+}
+
+// NativeMeteringOnly reports whether native harness signals are restricted
+// to local usage metering only (not forwarded to any cloud exporter).
+func (p *Pipeline) NativeMeteringOnly() bool {
+	if p == nil {
+		return false
+	}
+	return p.nativeMeteringOnly.Load()
+}
+
+func isSciontoolResource(res *resourcepb.Resource) bool {
+	if res == nil {
+		return false
+	}
+	for _, kv := range res.GetAttributes() {
+		if kv.GetKey() == "service.name" {
+			return kv.GetValue().GetStringValue() == "sciontool"
+		}
+	}
+	return false
+}
+
+func filterSciontoolSpans(spans []*tracepb.ResourceSpans) []*tracepb.ResourceSpans {
+	out := make([]*tracepb.ResourceSpans, 0, len(spans))
+	for _, rs := range spans {
+		if isSciontoolResource(rs.GetResource()) {
+			out = append(out, rs)
+		}
+	}
+	return out
+}
+
+func filterSciontoolMetrics(metrics []*metricpb.ResourceMetrics) []*metricpb.ResourceMetrics {
+	out := make([]*metricpb.ResourceMetrics, 0, len(metrics))
+	for _, rm := range metrics {
+		if isSciontoolResource(rm.GetResource()) {
+			out = append(out, rm)
+		}
+	}
+	return out
+}
+
+func filterSciontoolLogs(logs []*logspb.ResourceLogs) []*logspb.ResourceLogs {
+	out := make([]*logspb.ResourceLogs, 0, len(logs))
+	for _, rl := range logs {
+		if isSciontoolResource(rl.GetResource()) {
+			out = append(out, rl)
+		}
+	}
+	return out
+}
+
 // DeliveryState reports the local destination lifecycle without implying that
 // an intake acknowledgment proves remote delivery.
 func (p *Pipeline) DeliveryState() string {
@@ -796,6 +863,9 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	}
 	filtered := decision.Data
 	p.spanDiagnostics.filtered.Add(decision.Filtered)
+	if p.nativeMeteringOnly.Load() {
+		filtered = filterSciontoolSpans(filtered)
+	}
 	if len(filtered) == 0 {
 		return nil
 	}
@@ -923,6 +993,9 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		// emitted over loopback.
 		processed = stripMatchedUsageMetrics(processed, matchedUsageMetrics)
 	}
+	if p.nativeMeteringOnly.Load() {
+		processed = filterSciontoolMetrics(processed)
+	}
 	if len(processed) == 0 {
 		return nil
 	}
@@ -999,9 +1072,11 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 				metricCount += len(sm.Metrics)
 			}
 		}
-		p.metricsDropWarned.Do(func() {
-			log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
-		})
+		if !p.nativeMeteringOnly.Load() {
+			p.metricsDropWarned.Do(func() {
+				log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
+			})
+		}
 	}
 
 	return nil
@@ -1412,6 +1487,9 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	}
 	processed := decision.Data
 	p.logDiagnostics.filtered.Add(decision.Filtered)
+	if p.nativeMeteringOnly.Load() {
+		processed = filterSciontoolLogs(processed)
+	}
 	if len(processed) == 0 {
 		return nil
 	}
@@ -1456,9 +1534,11 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 		log.Debug("Exported %d log records to cloud", logCount)
 	} else {
 		p.logDiagnostics.dropped.Add(int64(logCount))
-		p.logsDropWarned.Do(func() {
-			log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
-		})
+		if !p.nativeMeteringOnly.Load() {
+			p.logsDropWarned.Do(func() {
+				log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
+			})
+		}
 	}
 
 	return nil
