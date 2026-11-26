@@ -298,6 +298,13 @@ func (s *Server) executeCommandRun(ctx context.Context, req *store.CommandReques
 				finishBeforeDispatch("wake_failed")
 				return
 			}
+			// Re-check lifecycle permission against the refreshed row after
+			// any idle-suspend settle wait so a revocation during the wait
+			// still refuses the wake before startAgentCore.
+			if !s.agentLifecycleAllowed(ctx, approverIdent, agent) {
+				finishBeforeDispatch("wake_not_permitted")
+				return
+			}
 			startCtx, cancelStart := context.WithDeadline(ctx, wakeDeadline)
 			startErr := s.startAgentCore(startCtx, agent, StartOpts{
 				Kind:               store.StartClaimWake,

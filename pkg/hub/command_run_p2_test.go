@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -457,6 +458,91 @@ func TestCommandRunP2_AC_F3_LifecyclePermissionCheckedAtApproveAndWake(t *testin
 		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
 		assert.Equal(t, "wake_not_permitted", fin.Reason)
 		assert.Zero(t, disp.startCount())
+		assert.Zero(t, fx.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+	})
+
+	t.Run("lifecycle_revoked_during_idle_suspend_settle", func(t *testing.T) {
+		disp := &cmdRunP2Dispatcher{}
+		fx := newCmdRunP2Fixture(t, disp, nil)
+		ctx := context.Background()
+
+		// Grant attach+lifecycle so initial check passes and enters waking.
+		ag, rbID := setupDelegatedExecContainer(t, fx, []string{"agent.attach", "agent.lifecycle"})
+
+		// Put the container into an active idle-suspend claim so the executor
+		// must wait in waitForIdleSuspendToSettle before calling startAgentCore.
+		_, err := fx.store.SetRunIntent(ctx, ag.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		ag.Phase = string(state.PhaseRunning)
+		require.NoError(t, fx.store.UpdateAgent(ctx, ag))
+		now := time.Now().UTC()
+		idleSince := now.Add(-30 * time.Minute)
+		_, err = fx.store.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			string(state.ActivityIdle), idleSince, now, ag.ID,
+		)
+		require.NoError(t, err)
+		fresh, err := fx.store.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		require.NotNil(t, fresh.ActivitySince)
+		_, _, _, err = fx.store.ClaimIdleSuspend(ctx, fresh.ID, store.IdleSuspendCondition{
+			RunID:            fresh.RunID,
+			Activity:         fresh.Activity,
+			ActivitySince:    *fresh.ActivitySince,
+			IdleSuspendAfter: 15 * time.Minute,
+			HeartbeatRecency: agentHeartbeatRecency,
+			ClaimTTL:         30 * time.Second,
+		})
+		require.NoError(t, err)
+
+		checked, err := fx.store.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		require.True(t, checked.IdleSuspendClaimActive, "fixture must have an active idle-suspend claim")
+
+		// Once waking begins (right before waitForIdleSuspendToSettle), revoke
+		// agent.lifecycle while keeping agent.attach, then settle the suspend.
+		origHook := commandRunExecHook
+		t.Cleanup(func() { commandRunExecHook = origHook })
+		var settledOnce sync.Once
+		commandRunExecHook = func(stage, _ string) {
+			if stage == commandRunStageWaking {
+				settledOnce.Do(func() {
+					go func() {
+						time.Sleep(150 * time.Millisecond)
+						_ = fx.store.DeleteRoleBinding(ctx, rbID)
+						rdAttach, rerr := fx.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+							Name:        "p2-attach-only-settle-" + api.NewUUID()[:8],
+							ScopeType:   store.RoleScopeProject,
+							Permissions: []string{"agent.attach"},
+						})
+						if rerr == nil {
+							_, _ = fx.store.CreateRoleBinding(ctx, &store.RoleBinding{
+								RoleDefinitionID: rdAttach.ID,
+								PrincipalType:    store.RoleBindingPrincipalUser,
+								PrincipalID:      fx.owner.ID(),
+								ScopeType:        store.RoleScopeProject,
+								ScopeID:          ag.ProjectID,
+								CreatedBy:        "test",
+							})
+						}
+						cur, gerr := fx.store.GetAgent(ctx, ag.ID)
+						if gerr == nil && cur != nil {
+							cur.Phase = string(state.PhaseSuspended)
+							_ = fx.store.UpdateAgent(ctx, cur)
+						}
+						_ = fx.store.ClearIdleSuspendClaim(ctx, ag.ID)
+					}()
+				})
+			}
+		}
+
+		req, run := fx.createApprovedRun(t, "revoke-during-settle", "echo nope", "", 30)
+		fx.srv.EnqueueCommandRun(req, run)
+		fin := fx.waitRunFinished(t, run.ID)
+
+		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
+		assert.Equal(t, "wake_not_permitted", fin.Reason)
+		assert.Zero(t, disp.startCount(), "must not start container when lifecycle was revoked during settle wait")
 		assert.Zero(t, fx.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
 	})
 }

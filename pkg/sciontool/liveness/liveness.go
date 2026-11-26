@@ -121,8 +121,10 @@ type Config struct {
 	// execution containers (ptone/scion#8812 §3.3).
 	CheckAttached func() bool
 	// CheckExec, when non-nil, reports active or uncollected Conduit exec
-	// work (ptone/scion#9282 §4.10). Consulted before tiers 1 and 2 on all
-	// agents with exec routes.
+	// work (ptone/scion#9282 §4.10). Consulted after Tier 1 stall-suppressing
+	// tool calls and Tier 2 CPU work (before falling back to a non-suppressing
+	// tool call) so exec work guards auto-suspend without masking Tier 1/2
+	// stall suppression.
 	CheckExec func() *LiveWork
 }
 
