@@ -1147,6 +1147,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeHostedConfigRefusal(w, err)
 			return
 		}
+		if !s.config.WorkstationMode && req.Config != nil && req.Config.Workspace != "" {
+			if err := agent.ValidateHostedAbsoluteWorkspace(ctx, req.ProjectPath, req.Config.Workspace); err != nil {
+				span.SetStatus(codes.Error, api.LaunchCodeWorkspaceNotPermitted)
+				writeWorkspaceNotPermitted(w, nil)
+				return
+			}
+		}
 	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,

@@ -83,10 +83,12 @@ func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSett
 		roots = append(roots, filepath.Join(layout.HostBase, subPathRoot))
 	}
 
-	if projectDir != "" && !config.IsGlobalProjectDir(projectDir) {
-		projectRoot := structuralProjectRoot(projectDir)
-		if isUsableHostedProjectRoot(projectRoot, globalDir) {
-			roots = append(roots, projectRoot)
+	if projectDir != "" && !config.IsGlobalProjectDir(projectDir) &&
+		filepath.Base(projectDir) == config.DotScion {
+		if fi, statErr := os.Stat(projectDir); statErr == nil && fi.IsDir() {
+			if projectRoot := filepath.Dir(projectDir); isUsableHostedProjectRoot(projectRoot, globalDir) {
+				roots = append(roots, projectRoot)
+			}
 		}
 	}
 
@@ -127,16 +129,6 @@ func markerHoldingDir(projectPath, projectDir string) string {
 	return holderDir
 }
 
-// structuralProjectRoot returns the directory root implied by projectDir's
-// own path (parent of .scion, or projectDir itself) without reading
-// project-level settings.WorkspacePath.
-func structuralProjectRoot(projectDir string) string {
-	if filepath.Base(projectDir) == config.DotScion {
-		return filepath.Dir(projectDir)
-	}
-	return projectDir
-}
-
 // isUsableHostedProjectRoot reports whether candidate can be added to the
 // hosted explicit-workspace root list without tripping ValidateWorkspaceSource's
 // root floors (filesystem root, $HOME, or ~/.scion itself).
@@ -155,6 +147,39 @@ func isUsableHostedProjectRoot(candidate, globalDir string) bool {
 		return false
 	}
 	return true
+}
+
+// ValidateHostedAbsoluteWorkspace validates a caller-supplied absolute
+// workspace against the hosted broker's containment roots for projectPath
+// before any filesystem side effects (such as launch-marker creation).
+// Empty or relative workspaces return nil.
+func ValidateHostedAbsoluteWorkspace(ctx context.Context, projectPath, workspace string) error {
+	if workspace == "" || !filepath.IsAbs(workspace) {
+		return nil
+	}
+	var projectDir string
+	if projectPath != "" {
+		projectDir, _ = config.GetResolvedProjectDir(projectPath)
+	}
+	return validateHostedAbsoluteWorkspace(ctx, projectPath, projectDir, workspace)
+}
+
+// validateHostedAbsoluteWorkspace validates a caller-supplied absolute
+// workspace against the hosted broker's containment roots before any
+// filesystem side effects or existence probes.
+func validateHostedAbsoluteWorkspace(ctx context.Context, projectPath, projectDir, workspace string) error {
+	absWorkspace, err := filepath.Abs(workspace)
+	if err != nil {
+		return fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
+	}
+	roots, err := hostedExplicitWorkspaceRoots(ctx, projectPath, projectDir)
+	if err != nil {
+		return newWorkspaceNotPermittedError(err)
+	}
+	if _, err := runtime.ValidateWorkspaceSource(absWorkspace, roots...); err != nil {
+		return newWorkspaceNotPermittedError(err)
+	}
+	return nil
 }
 
 // newWorkspaceNotPermittedError wraps a hosted explicit-workspace refusal as a

@@ -92,6 +92,100 @@ func TestCreateAgent_HostedBrokerRefusesExternalAbsoluteWorkspace(t *testing.T) 
 	}
 }
 
+// TestCreateAgent_HostedBrokerRefusesExternalAbsoluteWorkspaceWithProjectPath
+// verifies that supplying an uninitialized ProjectPath (either a bare
+// directory without .scion or a nonexistent .scion path) on a direct hosted
+// broker create request does not admit an external absolute workspace as a
+// containment root and writes no agent directory under the outside path.
+func TestCreateAgent_HostedBrokerRefusesExternalAbsoluteWorkspaceWithProjectPath(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		projectPath func(outsideDir string) string
+		checkDir    func(outsideDir, agentName string) string
+	}{
+		{
+			name:        "bare outside directory without .scion",
+			projectPath: func(outsideDir string) string { return outsideDir },
+			checkDir:    func(outsideDir, agentName string) string { return filepath.Join(outsideDir, "agents", agentName) },
+		},
+		{
+			name:        "nonexistent .scion under outside parent",
+			projectPath: func(outsideDir string) string { return filepath.Join(filepath.Dir(outsideDir), ".scion") },
+			checkDir: func(outsideDir, agentName string) string {
+				return filepath.Join(filepath.Dir(outsideDir), ".scion", "agents", agentName)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupTestScionEnv(t)
+
+			outsideDir := filepath.Join(t.TempDir(), "external-host-dir")
+			if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+				t.Fatalf("mkdir outsideDir: %v", err)
+			}
+
+			runCalled := false
+			rt := &runtime.MockRuntime{
+				NameFunc: func() string { return "docker" },
+				RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+					runCalled = true
+					return "unexpected-container", nil
+				},
+			}
+			mgr := agent.NewManager(rt)
+
+			cfg := testServerConfig()
+			cfg.BrokerID = "hosted-ws-broker"
+			cfg.WorkstationMode = false
+			cfg.ForceRuntime = "docker"
+			srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+			endAsyncLaunchesAtCleanup(t, srv)
+
+			agentName := "hosted-uninit-project-agent"
+			bodyBytes, err := json.Marshal(CreateAgentRequest{
+				Name:        agentName,
+				ProjectPath: tc.projectPath(outsideDir),
+				Config: &CreateAgentConfig{
+					Workspace: outsideDir,
+				},
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(string(bodyBytes)))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+			}
+			code, msg := decodeError(t, w)
+			if code != api.LaunchCodeWorkspaceNotPermitted {
+				t.Fatalf("code = %q, want %q", code, api.LaunchCodeWorkspaceNotPermitted)
+			}
+			if msg != launchFailureText[api.LaunchCodeWorkspaceNotPermitted] {
+				t.Fatalf("message = %q, want %q", msg, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+			}
+			if strings.Contains(msg, outsideDir) || strings.Contains(msg, "external-host-dir") {
+				t.Fatalf("message %q must not leak host path", msg)
+			}
+			if runCalled {
+				t.Fatalf("runtime.Run must not be called when workspace is refused")
+			}
+			if _, statErr := os.Stat(tc.checkDir(outsideDir, agentName)); !os.IsNotExist(statErr) {
+				t.Fatalf("expected no agent directory under outside path, stat err = %v", statErr)
+			}
+			if filepath.Base(tc.projectPath(outsideDir)) == config.DotScion {
+				if _, statErr := os.Stat(tc.projectPath(outsideDir)); !os.IsNotExist(statErr) {
+					t.Fatalf("expected nonexistent .scion path not to be created, stat err = %v", statErr)
+				}
+			}
+		})
+	}
+}
+
 // TestReprovision_HostedBrokerRefusesExternalAbsoluteWorkspace verifies that
 // a hosted broker surfaces a Reprovision explicit-workspace refusal as HTTP
 // 400 with typed code workspace_not_permitted and fixed public text (never

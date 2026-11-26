@@ -2021,6 +2021,11 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err := checkExplicitProjectPath(projectPath, projectDir, workspace, ownWorkspace); err != nil {
 		return "", "", nil, err
 	}
+	if api.IsHostedModeFromContext(ctx) && workspace != "" && filepath.IsAbs(workspace) {
+		if err := validateHostedAbsoluteWorkspace(ctx, projectPath, projectDir, workspace); err != nil {
+			return "", "", nil, err
+		}
+	}
 
 	settings, warnings, _ := config.LoadEffectiveSettingsFor(ctx, projectDir)
 	config.PrintDeprecationWarnings(warnings)
@@ -2365,15 +2370,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			absWorkspace, err := filepath.Abs(workspace)
 			if err != nil {
 				return "", "", nil, fmt.Errorf("failed to resolve absolute path for workspace %s: %w", workspace, err)
-			}
-			if api.IsHostedModeFromContext(ctx) {
-				roots, err := hostedExplicitWorkspaceRoots(ctx, projectPath, projectDir)
-				if err != nil {
-					return "", "", nil, newWorkspaceNotPermittedError(err)
-				}
-				if _, err := runtime.ValidateWorkspaceSource(absWorkspace, roots...); err != nil {
-					return "", "", nil, newWorkspaceNotPermittedError(err)
-				}
 			}
 			if _, err := os.Stat(absWorkspace); os.IsNotExist(err) {
 				return "", "", nil, fmt.Errorf("workspace path does not exist: %s", absWorkspace)

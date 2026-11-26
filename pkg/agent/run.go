@@ -241,6 +241,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err := checkStartStorageRefusals(ctx, preDir, refusalProfile); err != nil {
 		return nil, err
 	}
+	// Refuse a hosted request carrying an out-of-root absolute workspace
+	// before any filesystem side effects (such as RecordRunOwner creating
+	// directories under an uninitialized ProjectPath).
+	if opts.HostedMode && opts.Workspace != "" && filepath.IsAbs(opts.Workspace) {
+		if err := validateHostedAbsoluteWorkspace(ctx, opts.ProjectPath, projectDir, opts.Workspace); err != nil {
+			return nil, err
+		}
+	}
 
 	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
 	// mints one per create/start dispatch; local/CLI mode and older hubs
