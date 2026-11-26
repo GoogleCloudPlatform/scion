@@ -125,7 +125,7 @@ func TestReservedTelemetryCredFileTarget_HostedCreateAndPatchRejected(t *testing
 		})
 		require.Equal(t, http.StatusOK, createRec.Code, "body: %s", createRec.Body.String())
 
-		patchRec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+proj.ID+"/secrets/PATCH_ME", UpdateSecretRequest{
+		patchRec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+proj.ID+"/secrets/PATCH_ME", PatchSecretRequest{
 			Target: "~/.scion/telemetry-gcp-credentials.json",
 		})
 		assertReservedTargetErr(t, patchRec)
@@ -204,7 +204,7 @@ func TestReservedTelemetryCredFileTarget_WorkstationModeUnchanged(t *testing.T) 
 }
 
 func TestReservedTelemetryCredFileTarget_ExistingRowsSkippedAtDispatchWithWarning(t *testing.T) {
-	m := newLDFixture(t, ldOptions{})
+	m := newLDFixture(t, "reserved-tel", ldOptions{})
 	ctx := context.Background()
 
 	// Seed hub-scope scion-telemetry-gcp-credentials (must still be delivered).
