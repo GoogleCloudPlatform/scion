@@ -71,6 +71,10 @@ const (
 	// capabilities probe succeeds, allowing hook subprocesses to write to the
 	// analytics outbox even when no GCP exporter is configured.
 	EnvUsageHubIngest = "SCION_USAGE_HUB_INGEST"
+	// EnvNativeMeteringSupported is set to "1" by sciontool init after the
+	// telemetry pipeline starts, advertising to harness provisioners that this
+	// sciontool binary understands SCION_NATIVE_TELEMETRY_POLICY=metering.
+	EnvNativeMeteringSupported = "SCION_NATIVE_METERING_SUPPORTED"
 )
 
 // metadataModeBlock mirrors store.GCPMetadataModeBlock without importing

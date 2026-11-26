@@ -447,8 +447,31 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 		t.Fatalf("Export native metric: %v", err)
 	}
 
-	// 3. Send a sciontool-owned span (service.name="sciontool") — must still reach cloud exporter.
+	// 3. Send a native harness span (service.name="copilot-cli") — must be dropped before cloud export (O2).
 	traceClient := coltracepb.NewTraceServiceClient(conn)
+	if _, err := traceClient.Export(ctx, &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{{
+			Resource: &resourcepb.Resource{
+				Attributes: []*commonpb.KeyValue{
+					{Key: "service.name", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "copilot-cli"}}},
+				},
+			},
+			ScopeSpans: []*tracepb.ScopeSpans{{
+				Scope: &commonpb.InstrumentationScope{Name: "copilot"},
+				Spans: []*tracepb.Span{{
+					TraceId:           []byte{2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+					SpanId:            []byte{2, 2, 3, 4, 5, 6, 7, 8},
+					Name:              "copilot.native.turn",
+					StartTimeUnixNano: uint64(time.Now().Add(-time.Millisecond).UnixNano()),
+					EndTimeUnixNano:   uint64(time.Now().UnixNano()),
+				}},
+			}},
+		}},
+	}); err != nil {
+		t.Fatalf("Export native span: %v", err)
+	}
+
+	// 4. Send a sciontool-owned span (service.name="sciontool") — must still reach cloud exporter.
 	if _, err := traceClient.Export(ctx, &coltracepb.ExportTraceServiceRequest{
 		ResourceSpans: []*tracepb.ResourceSpans{{
 			Resource: &resourcepb.Resource{
@@ -469,6 +492,18 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 		}},
 	}); err != nil {
 		t.Fatalf("Export sciontool span: %v", err)
+	}
+
+	// Verify O5: metering-filtered records are counted in delivery diagnostics.
+	diags := p.Diagnostics()
+	if diags["logs"].Filtered < 1 {
+		t.Errorf("logs.Filtered = %d, want >= 1 (metering-filtered native log)", diags["logs"].Filtered)
+	}
+	if diags["metrics"].Filtered < 1 {
+		t.Errorf("metrics.Filtered = %d, want >= 1 (metering-filtered native metric)", diags["metrics"].Filtered)
+	}
+	if diags["spans"].Filtered < 1 {
+		t.Errorf("spans.Filtered = %d, want >= 1 (metering-filtered native span)", diags["spans"].Filtered)
 	}
 
 	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -492,8 +527,8 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 		t.Errorf("unexpected Hub token counts: input=%v output=%v", firstEv.Input, firstEv.Output)
 	}
 
-	// Fake cloud collector MUST have received ZERO native harness logs or native metrics,
-	// while still receiving sciontool's own span.
+	// Fake cloud collector MUST have received ZERO native harness logs, native
+	// metrics, or native spans, while still receiving sciontool's own span.
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
 	if len(fc.logs) != 0 {
@@ -506,6 +541,11 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 	}
 	if len(fc.spans) == 0 {
 		t.Error("cloud exporter received 0 sciontool spans, want >= 1 (sciontool spans must keep flowing)")
+	}
+	for _, rs := range fc.spans {
+		if !isSciontoolResource(rs.GetResource()) {
+			t.Errorf("cloud exporter received native harness span batch in metering-only mode: %+v", rs.GetResource())
+		}
 	}
 }
 

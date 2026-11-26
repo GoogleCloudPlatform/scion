@@ -404,6 +404,7 @@ func TestDefaultConfig_HubCapabilityEnablesLoopbackNativeUsageEndToEnd(t *testin
 		telemetry.EnvProjectID,
 		telemetry.EnvGCPCredentials,
 		telemetry.EnvUsageHubIngest,
+		telemetry.EnvNativeMeteringSupported,
 		"SCION_USAGE_SOURCE",
 	} {
 		t.Setenv(k, "")
@@ -545,6 +546,7 @@ func TestDefaultConfig_HubCapabilityEnablesLoopbackNativeUsageEndToEnd(t *testin
 // is reset to "0" so harness provisioners never point at a dead loopback receiver.
 func TestStartTelemetryWithUsageIngest_ResetsEnvOnStartFailure(t *testing.T) {
 	t.Setenv(telemetry.EnvUsageHubIngest, "")
+	t.Setenv(telemetry.EnvNativeMeteringSupported, "1")
 	// Occupy a loopback TCP port so Pipeline.Start's gRPC receiver bind fails.
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -578,6 +580,9 @@ func TestStartTelemetryWithUsageIngest_ResetsEnvOnStartFailure(t *testing.T) {
 	if got := os.Getenv(telemetry.EnvUsageHubIngest); got != "0" {
 		t.Errorf("%s = %q after Start failure, want \"0\"", telemetry.EnvUsageHubIngest, got)
 	}
+	if got := os.Getenv(telemetry.EnvNativeMeteringSupported); got != "0" {
+		t.Errorf("%s = %q after Start failure, want \"0\"", telemetry.EnvNativeMeteringSupported, got)
+	}
 }
 
 // TestProvisionerToOverlayToPipelineMeteringEndToEnd exercises the real hop
@@ -606,6 +611,7 @@ func TestProvisionerToOverlayToPipelineMeteringEndToEnd(t *testing.T) {
 		telemetry.EnvProjectID,
 		telemetry.EnvGCPCredentials,
 		telemetry.EnvUsageHubIngest,
+		telemetry.EnvNativeMeteringSupported,
 		"SCION_USAGE_SOURCE",
 	} {
 		t.Setenv(k, "")
@@ -659,6 +665,9 @@ func TestProvisionerToOverlayToPipelineMeteringEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	if err := startTelemetryWithUsageIngest(ctx, p, newClient); err != nil {
 		t.Fatalf("startTelemetryWithUsageIngest: %v", err)
+	}
+	if got := os.Getenv(telemetry.EnvNativeMeteringSupported); got != "1" {
+		t.Fatalf("%s = %q after startTelemetryWithUsageIngest, want \"1\"", telemetry.EnvNativeMeteringSupported, got)
 	}
 	boundGRPCPort := p.Config().GRPCPort
 

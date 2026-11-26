@@ -429,7 +429,7 @@ def _build_telemetry_env(
     compatible if a future Copilot release adds real support, and not left
     to the default, which an unpinned CLI could change.
     """
-    return {
+    otel_env = {
         "COPILOT_OTEL_ENABLED": "true",
         "COPILOT_OTEL_EXPORTER_TYPE": "otlp-http",
         "OTEL_EXPORTER_OTLP_ENDPOINT": _resolve_endpoint(env),
@@ -439,6 +439,9 @@ def _build_telemetry_env(
         "OTEL_METRIC_EXPORT_INTERVAL": "30000",
         "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "delta",
     }
+    if loopback_only:
+        otel_env["OTEL_TRACES_EXPORTER"] = "none"
+    return otel_env
 
 
 # ---------------------------------------------------------------------------

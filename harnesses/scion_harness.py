@@ -2840,12 +2840,19 @@ def resolve_native_telemetry(ctx: ProvisionContext) -> NativeTelemetryDecision:
         if _parse_explicit_bool_env(candidate) is False:
             return NativeTelemetryDecision(False, False, config, source_env)
 
-    # Process env SCION_USAGE_HUB_INGEST (set by sciontool init after the live
-    # Hub capability probe) takes precedence over staged env if present.
+    # Process env SCION_USAGE_HUB_INGEST and SCION_NATIVE_METERING_SUPPORTED
+    # (set by sciontool init after the live Hub capability probe and pipeline
+    # start) take precedence over staged env if present. Metering mode is only
+    # emitted when sciontool advertises SCION_NATIVE_METERING_SUPPORTED=1, so
+    # an older P1-era sciontool that only accepts enabled/disabled never fails
+    # startup on an unknown policy value.
     hub_ingest_val = os.environ.get("SCION_USAGE_HUB_INGEST")
     if hub_ingest_val is None or hub_ingest_val == "":
         hub_ingest_val = source_env.get("SCION_USAGE_HUB_INGEST", "")
-    hub_usage_active = hub_ingest_val == "1"
+    metering_supported_val = os.environ.get("SCION_NATIVE_METERING_SUPPORTED")
+    if metering_supported_val is None or metering_supported_val == "":
+        metering_supported_val = source_env.get("SCION_NATIVE_METERING_SUPPORTED", "")
+    hub_usage_active = hub_ingest_val == "1" and metering_supported_val == "1"
     has_cloud = _has_cloud_telemetry_config(config, source_env, ctx.home)
 
     # 2. Explicit telemetry block (non-empty dict, enabled is True or omitted).

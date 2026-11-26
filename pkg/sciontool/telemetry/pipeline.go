@@ -864,7 +864,11 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	filtered := decision.Data
 	p.spanDiagnostics.filtered.Add(decision.Filtered)
 	if p.nativeMeteringOnly.Load() {
+		before := countSpans(filtered)
 		filtered = filterSciontoolSpans(filtered)
+		if dropped := before - countSpans(filtered); dropped > 0 {
+			p.spanDiagnostics.filtered.Add(dropped)
+		}
 	}
 	if len(filtered) == 0 {
 		return nil
@@ -994,7 +998,11 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 		processed = stripMatchedUsageMetrics(processed, matchedUsageMetrics)
 	}
 	if p.nativeMeteringOnly.Load() {
+		before := countMetricPoints(processed)
 		processed = filterSciontoolMetrics(processed)
+		if dropped := before - countMetricPoints(processed); dropped > 0 {
+			p.metricDiagnostics.filtered.Add(int64(dropped))
+		}
 	}
 	if len(processed) == 0 {
 		return nil
@@ -1072,11 +1080,9 @@ func (p *Pipeline) handleMetrics(ctx context.Context, resourceMetrics []*metricp
 				metricCount += len(sm.Metrics)
 			}
 		}
-		if !p.nativeMeteringOnly.Load() {
-			p.metricsDropWarned.Do(func() {
-				log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
-			})
-		}
+		p.metricsDropWarned.Do(func() {
+			log.Error("Received %d metrics but cloud exporter is not configured — metrics will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", metricCount)
+		})
 	}
 
 	return nil
@@ -1488,7 +1494,11 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	processed := decision.Data
 	p.logDiagnostics.filtered.Add(decision.Filtered)
 	if p.nativeMeteringOnly.Load() {
+		before := countLogs(processed)
 		processed = filterSciontoolLogs(processed)
+		if dropped := before - countLogs(processed); dropped > 0 {
+			p.logDiagnostics.filtered.Add(dropped)
+		}
 	}
 	if len(processed) == 0 {
 		return nil
@@ -1534,11 +1544,9 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 		log.Debug("Exported %d log records to cloud", logCount)
 	} else {
 		p.logDiagnostics.dropped.Add(int64(logCount))
-		if !p.nativeMeteringOnly.Load() {
-			p.logsDropWarned.Do(func() {
-				log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
-			})
-		}
+		p.logsDropWarned.Do(func() {
+			log.Error("Received %d log records but cloud exporter is not configured — logs will be dropped. Set SCION_GCP_PROJECT_ID or configure telemetry.cloud", logCount)
+		})
 	}
 
 	return nil
