@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -34,6 +35,9 @@ const (
 	// rows that match a Runtime Broker's host GCP service account identity when
 	// flagged by the startup scan, and surfaced on status reads.
 	gcpSABrokerHostIdentityFlagError = "reserved: matches a Runtime Broker's host GCP service account identity and cannot be used by agents"
+
+	gcpSAHubIdentityRefusalMsg        = "the Hub's own GCP service account cannot be registered or used as an agent identity"
+	gcpSABrokerHostIdentityRefusalMsg = "a Runtime Broker's host GCP service account cannot be registered or used as an agent identity"
 
 	// reservedSAListPageSize is the page size used when listing Runtime Brokers
 	// to check broker host service accounts.
@@ -85,17 +89,35 @@ func isEmailInSet(set map[string]struct{}, email string) bool {
 	return ok
 }
 
-// brokerHostEmailsFromBroker extracts the normalized configured and observed
-// host GCP service account emails from a Runtime Broker record.
-func brokerHostEmailsFromBroker(b *store.RuntimeBroker) (configured, observed string) {
+// brokerConfiguredHostSAAuthorityBacked reports whether a Runtime Broker's
+// configured GCPHostServiceAccountEmail carries platform or IAM-verified
+// authority and should be reserved hub-wide.
+//
+// HostObservation.Email is always reserved (it is written only by the Hub from
+// GCE metadata). A broker's configured GCPHostServiceAccountEmail is reserved
+// only when:
+//   - the broker is admin-managed (AdminManaged, gated by broker.manage),
+//   - the broker is an embedded broker (hosted by this server or carrying the
+//     Hub-reserved embedded role label),
+//   - the configured email was server-detected (GCPHostSource == "detected",
+//     e.g. embedded flat Cloud Run runtime_target.service_account), or
+//   - the Hub's gcpIamCheckMode is enforce (so evaluateHostSAClaim requires
+//     GCP iam.serviceAccounts.actAs on the claimed email).
+//
+// Under gcpIamCheckMode=off, an unprivileged hub-member's self-registered
+// non-AdminManaged broker does not reserve its configured email hub-wide,
+// preventing cross-tenant DoS against other projects' service accounts.
+func brokerConfiguredHostSAAuthorityBacked(b *store.RuntimeBroker, embedded embeddedBrokerState, enforceMode bool) bool {
 	if b == nil {
-		return "", ""
+		return false
 	}
-	configured = normalizeGCPSAEmail(b.GCPHostServiceAccountEmail)
-	if b.HostObservation != nil {
-		observed = normalizeGCPSAEmail(b.HostObservation.Email)
+	if b.AdminManaged || b.GCPHostSource == store.GCPHostSourceDetected || enforceMode {
+		return true
 	}
-	return configured, observed
+	if embedded.has(b.ID) {
+		return true
+	}
+	return b.Labels[store.BrokerRoleLabel] == brokerownership.BrokerRoleEmbedded
 }
 
 // isHubOwnServiceAccountEmail reports whether email matches the Hub's own GCP
@@ -108,96 +130,112 @@ func (s *Server) isHubOwnServiceAccountEmail(email string) bool {
 	return gcpServiceAccountEmailsEqual(email, s.hubSAEmail())
 }
 
-// isBrokerHostServiceAccountEmail reports whether email matches any Runtime
-// Broker's configured or observed host GCP service account (case-insensitive,
-// trimmed). It paginates ListRuntimeBrokers without holding s.mu across store
-// calls and returns early on the first match.
+// forEachReservedBrokerHostEmail paginates all Runtime Brokers without holding
+// s.mu across store calls and invokes fn for each normalized (lower-cased,
+// trimmed) reserved broker host GCP service account email. Stops early when
+// fn returns false.
+func (s *Server) forEachReservedBrokerHostEmail(ctx context.Context, fn func(email string) bool) error {
+	if s.store == nil {
+		return nil
+	}
+	embedded := s.embeddedBrokerSnapshot()
+	enforceMode := s.saAssignCheckModeValue() == SAAssignCheckEnforce
+	cursor := ""
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{
+			Limit:          reservedSAListPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return fmt.Errorf("list runtime brokers: %w", err)
+		}
+		for i := range page.Items {
+			b := &page.Items[i]
+			if b.HostObservation != nil {
+				if observed := normalizeGCPSAEmail(b.HostObservation.Email); observed != "" {
+					if !fn(observed) {
+						return nil
+					}
+				}
+			}
+			if brokerConfiguredHostSAAuthorityBacked(b, embedded, enforceMode) {
+				if configured := normalizeGCPSAEmail(b.GCPHostServiceAccountEmail); configured != "" {
+					if !fn(configured) {
+						return nil
+					}
+				}
+			}
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// isBrokerHostServiceAccountEmail reports whether email matches any reserved
+// Runtime Broker host GCP service account (case-insensitive, trimmed): any
+// observed HostObservation.Email, or any authority-backed broker's configured
+// GCPHostServiceAccountEmail.
 func (s *Server) isBrokerHostServiceAccountEmail(ctx context.Context, email string) (bool, error) {
 	norm := normalizeGCPSAEmail(email)
 	if norm == "" || s.store == nil {
 		return false, nil
 	}
-	cursor := ""
-	for {
-		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{
-			Limit:          reservedSAListPageSize,
-			Cursor:         cursor,
-			SkipTotalCount: true,
-		})
-		if err != nil {
-			return false, fmt.Errorf("list runtime brokers: %w", err)
+	matched := false
+	err := s.forEachReservedBrokerHostEmail(ctx, func(reserved string) bool {
+		if reserved == norm {
+			matched = true
+			return false
 		}
-		for i := range page.Items {
-			configured, observed := brokerHostEmailsFromBroker(&page.Items[i])
-			if (configured != "" && configured == norm) || (observed != "" && observed == norm) {
-				return true, nil
-			}
-		}
-		if page.NextCursor == "" || page.NextCursor == cursor {
-			return false, nil
-		}
-		cursor = page.NextCursor
+		return true
+	})
+	if err != nil {
+		return false, err
 	}
+	return matched, nil
 }
 
 // brokerHostServiceAccountEmailSet returns the set of normalized (lower-case,
-// trimmed) configured and observed host GCP service account emails across all
-// Runtime Brokers. Callers checking many service accounts (such as
-// ScanReservedGCPServiceAccounts and project clone) call this once to avoid
-// N+1 store queries. Does not hold s.mu across store calls.
+// trimmed) reserved host GCP service account emails across all Runtime Brokers.
+// Callers checking many service accounts (such as ScanReservedGCPServiceAccounts
+// and project clone) call this once to avoid N+1 store queries. Does not hold
+// s.mu across store calls.
 func (s *Server) brokerHostServiceAccountEmailSet(ctx context.Context) (map[string]struct{}, error) {
 	if s.store == nil {
 		return nil, nil
 	}
 	emails := make(map[string]struct{})
-	cursor := ""
-	for {
-		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{
-			Limit:          reservedSAListPageSize,
-			Cursor:         cursor,
-			SkipTotalCount: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list runtime brokers: %w", err)
-		}
-		for i := range page.Items {
-			configured, observed := brokerHostEmailsFromBroker(&page.Items[i])
-			if configured != "" {
-				emails[configured] = struct{}{}
-			}
-			if observed != "" {
-				emails[observed] = struct{}{}
-			}
-		}
-		if page.NextCursor == "" || page.NextCursor == cursor {
-			return emails, nil
-		}
-		cursor = page.NextCursor
+	err := s.forEachReservedBrokerHostEmail(ctx, func(reserved string) bool {
+		emails[reserved] = struct{}{}
+		return true
+	})
+	if err != nil {
+		return nil, err
 	}
+	return emails, nil
 }
 
 // gcpServiceAccountEmailRefusal reports whether email is a reserved identity
 // that may not be registered, verified, assigned, or used for agent or
-// lifecycle-hook token minting. This covers the Hub's own GCP service account
-// and any Runtime Broker's configured or observed host GCP service account.
+// lifecycle-hook token minting. This covers the Hub's own GCP service account,
+// any observed Runtime Broker host GCP service account, and any
+// authority-backed Runtime Broker's configured host GCP service account.
 //
 // Returns ("", "", false, nil) when email is allowed, including when no Hub
 // identity or broker host identities are known. Returns a non-nil error if
 // Runtime Brokers cannot be queried so callers fail closed.
 func (s *Server) gcpServiceAccountEmailRefusal(ctx context.Context, email string) (code, msg string, refused bool, err error) {
 	if s.isHubOwnServiceAccountEmail(email) {
-		return ErrCodeIdentityReserved,
-			"the Hub's own GCP service account cannot be registered or used as an agent identity",
-			true, nil
+		return ErrCodeIdentityReserved, gcpSAHubIdentityRefusalMsg, true, nil
 	}
 	isBrokerHost, err := s.isBrokerHostServiceAccountEmail(ctx, email)
 	if err != nil {
 		return "", "", false, err
 	}
 	if isBrokerHost {
-		return ErrCodeIdentityReserved,
-			"a Runtime Broker's host GCP service account cannot be registered or used as an agent identity",
-			true, nil
+		return ErrCodeIdentityReserved, gcpSABrokerHostIdentityRefusalMsg, true, nil
 	}
 	return "", "", false, nil
 }
@@ -205,8 +243,8 @@ func (s *Server) gcpServiceAccountEmailRefusal(ctx context.Context, email string
 // gcpServiceAccountRefusal is the row-aware counterpart of
 // gcpServiceAccountEmailRefusal for callers that already hold a stored
 // GCPServiceAccount row. It always refuses the Hub's own GCP service account,
-// and refuses any Runtime Broker's configured or observed host service account
-// except on Hub-created passthrough translation records
+// and refuses any reserved Runtime Broker host service account except on
+// Hub-created passthrough translation records
 // (store.IsHostSATranslationRecord), whose email equals their bound broker's
 // host SA and which carry their own dedicated refusals on direct-reference
 // surfaces.
@@ -215,9 +253,7 @@ func (s *Server) gcpServiceAccountRefusal(ctx context.Context, sa *store.GCPServ
 		return "", "", false, nil
 	}
 	if s.isHubOwnServiceAccountEmail(sa.Email) {
-		return ErrCodeIdentityReserved,
-			"the Hub's own GCP service account cannot be registered or used as an agent identity",
-			true, nil
+		return ErrCodeIdentityReserved, gcpSAHubIdentityRefusalMsg, true, nil
 	}
 	if store.IsHostSATranslationRecord(sa) {
 		return "", "", false, nil
@@ -227,9 +263,7 @@ func (s *Server) gcpServiceAccountRefusal(ctx context.Context, sa *store.GCPServ
 		return "", "", false, err
 	}
 	if isBrokerHost {
-		return ErrCodeIdentityReserved,
-			"a Runtime Broker's host GCP service account cannot be registered or used as an agent identity",
-			true, nil
+		return ErrCodeIdentityReserved, gcpSABrokerHostIdentityRefusalMsg, true, nil
 	}
 	return "", "", false, nil
 }

@@ -1369,17 +1369,10 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	if sa == nil {
 		return nil, errGCPSANotAvailable
 	}
-	if s.isHubOwnServiceAccountEmail(sa.Email) {
+	if _, _, refused, err := s.gcpServiceAccountRefusal(ctx, sa); err != nil {
+		return nil, fmt.Errorf("check reserved GCP service account: %w", err)
+	} else if refused {
 		return nil, errGCPSAReserved
-	}
-	if !store.IsHostSATranslationRecord(sa) {
-		isBrokerHost, err := s.isBrokerHostServiceAccountEmail(ctx, sa.Email)
-		if err != nil {
-			return nil, fmt.Errorf("check reserved GCP service account: %w", err)
-		}
-		if isBrokerHost {
-			return nil, errGCPSAReserved
-		}
 	}
 	if !gcpServiceAccountVerified(sa) {
 		return nil, errGCPSANotVerified

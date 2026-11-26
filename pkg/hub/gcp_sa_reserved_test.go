@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -778,6 +779,7 @@ func seedBrokerWithHostSAs(t *testing.T, s store.Store, id, configuredEmail, obs
 		ID:                         id,
 		Name:                       id,
 		Slug:                       id,
+		AdminManaged:               configuredEmail != "",
 		GCPHostServiceAccountEmail: configuredEmail,
 		Status:                     store.BrokerStatusOnline,
 		Created:                    time.Now(),
@@ -1366,4 +1368,249 @@ func TestGCPServiceAccount_BrokerHostCheck_NoNPlusOneAndFailsClosed(t *testing.T
 			"projectId": "host-proj",
 		})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "registration must fail closed on broker list error")
+}
+
+// TestGCPServiceAccount_BrokerHostAuthorityBacked_OffMode verifies that under
+// gcp_iam_check_mode=off, an unprivileged hub-member's self-registered
+// non-AdminManaged broker cannot reserve another project's service account
+// hub-wide (preventing cross-tenant DoS), while authority-backed sources
+// (AdminManaged, embedded, server-detected, and HostObservation.Email) are
+// reserved.
+func TestGCPServiceAccount_BrokerHostAuthorityBacked_OffMode(t *testing.T) {
+	const (
+		victimEmail     = "victim-sa@victim-proj.iam.gserviceaccount.com"
+		adminEmail      = "admin-broker@host-proj.iam.gserviceaccount.com"
+		embeddedIDEmail = "embedded-id-broker@host-proj.iam.gserviceaccount.com"
+		embeddedLblMail = "embedded-label-broker@host-proj.iam.gserviceaccount.com"
+		detectedEmail   = "detected-broker@host-proj.iam.gserviceaccount.com"
+		observedEmail   = "observed-broker@host-proj.iam.gserviceaccount.com"
+	)
+
+	srv, s := testServer(t)
+	gen := &reservedTestTokenGenerator{email: "hub-runner@hub-proj.iam.gserviceaccount.com"}
+	srv.SetGCPTokenGenerator(gen)
+	require.Equal(t, SAAssignCheckOff, srv.saAssignCheckModeValue())
+
+	ctx := context.Background()
+	projectID := createTestProjectForSA(t, srv, s)
+
+	// Project P owner + verified project SA + running agent assigned victimEmail.
+	victimOwnerID := tid("user-victim-owner")
+	createDCUser(t, s, victimOwnerID, "victim-owner@test.com", projectID, store.ProjectRoleOwner)
+	victimSA := &store.GCPServiceAccount{
+		ID:                 tid("sa-victim"),
+		Scope:              store.ScopeProject,
+		ScopeID:            projectID,
+		Email:              victimEmail,
+		ProjectID:          "victim-proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          victimOwnerID,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, victimSA))
+
+	agentID := tid("agent-victim")
+	agent := &store.Agent{
+		ID:        agentID,
+		Slug:      "agent-victim",
+		Name:      "agent-victim",
+		ProjectID: projectID,
+		Phase:     string(state.PhaseRunning),
+		OwnerID:   victimOwnerID,
+		CreatedBy: victimOwnerID,
+		Ancestry:  []string{victimOwnerID},
+		AppliedConfig: &store.AgentAppliedConfig{
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModeAssign,
+				ServiceAccountID:    victimSA.ID,
+				ServiceAccountEmail: victimEmail,
+				ProjectID:           "victim-proj",
+			},
+		},
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	agentRow, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	seedAssignment(t, s, agentRow, victimOwnerID, victimSA.ID)
+
+	// Unprivileged hub-member (not a member of project P) registers a
+	// non-AdminManaged broker claiming victimEmail (both registration and
+	// update-API "admin" source, neither of which is hub-admin-managed).
+	attackerID := tid("user-attacker")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: attackerID, Email: "attacker@test.com", DisplayName: "Attacker",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}))
+	ensureHubMembership(ctx, s, attackerID)
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:                         tid("broker-attacker-reg"),
+		Name:                       "broker-attacker-reg",
+		Slug:                       "broker-attacker-reg",
+		CreatedBy:                  attackerID,
+		AdminManaged:               false,
+		GCPHostServiceAccountEmail: "Victim-SA@Victim-Proj.IAM.GServiceAccount.COM",
+		GCPHostSource:              store.GCPHostSourceRegistration,
+		Status:                     store.BrokerStatusOnline,
+		Created:                    time.Now(),
+		Updated:                    time.Now(),
+	}))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:                         tid("broker-attacker-patch"),
+		Name:                       "broker-attacker-patch",
+		Slug:                       "broker-attacker-patch",
+		CreatedBy:                  attackerID,
+		AdminManaged:               false,
+		GCPHostServiceAccountEmail: victimEmail,
+		GCPHostSource:              store.GCPHostSourceAdmin,
+		Status:                     store.BrokerStatusOnline,
+		Created:                    time.Now(),
+		Updated:                    time.Now(),
+	}))
+
+	// 1. Project P's agent still mints access & ID tokens.
+	token := srv.generateRecordedAgentToken(t, agentID, projectID,
+		[]AgentTokenScope{GCPTokenScopeForSA(victimSA.ID)}, []string{victimOwnerID})
+	recAccess := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/gcp-token",
+		map[string]any{"scopes": []string{"https://www.googleapis.com/auth/cloud-platform"}}, token)
+	assert.Equal(t, http.StatusOK, recAccess.Code, "body: %s", recAccess.Body.String())
+	recID := doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+		map[string]string{"audience": "https://example.com"}, token)
+	assert.Equal(t, http.StatusOK, recID.Code, "body: %s", recID.Body.String())
+
+	// 2. Project P can still verify and assign victimSA.
+	recVerify := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, victimSA.ID), nil)
+	assert.Equal(t, http.StatusOK, recVerify.Code, "body: %s", recVerify.Body.String())
+	_, _, refused, err := srv.gcpServiceAccountRefusal(ctx, victimSA)
+	require.NoError(t, err)
+	assert.False(t, refused)
+
+	// 3. Startup scan does NOT flag victimSA.
+	flagged, err := srv.ScanReservedGCPServiceAccounts(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, flagged)
+	gotVictim, err := s.GetGCPServiceAccount(ctx, victimSA.ID)
+	require.NoError(t, err)
+	assert.True(t, gotVictim.Verified)
+	assert.Equal(t, store.GCPVerificationVerified, gotVictim.VerificationStatus)
+
+	// 4. Authority-backed brokers ARE reserved even in off mode:
+	// AdminManaged, embedded (runtime ID), embedded (reserved label), detected, and observed.
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("broker-auth-admin"), Name: "broker-auth-admin", Slug: "broker-auth-admin",
+		AdminManaged: true, GCPHostServiceAccountEmail: adminEmail,
+		Status: store.BrokerStatusOnline, Created: time.Now(), Updated: time.Now(),
+	}))
+	embeddedID := tid("broker-auth-embedded-id")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: embeddedID, Name: "broker-auth-embedded-id", Slug: "broker-auth-embedded-id",
+		AdminManaged: false, GCPHostServiceAccountEmail: embeddedIDEmail,
+		Status: store.BrokerStatusOnline, Created: time.Now(), Updated: time.Now(),
+	}))
+	srv.SetEmbeddedBrokerID(embeddedID)
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("broker-auth-embedded-lbl"), Name: "broker-auth-embedded-lbl", Slug: "broker-auth-embedded-lbl",
+		AdminManaged: false, GCPHostServiceAccountEmail: embeddedLblMail,
+		Labels: map[string]string{store.BrokerRoleLabel: brokerownership.BrokerRoleEmbedded},
+		Status: store.BrokerStatusOnline, Created: time.Now(), Updated: time.Now(),
+	}))
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("broker-auth-detected"), Name: "broker-auth-detected", Slug: "broker-auth-detected",
+		AdminManaged: false, GCPHostServiceAccountEmail: detectedEmail,
+		GCPHostSource: store.GCPHostSourceDetected,
+		Status:        store.BrokerStatusOnline, Created: time.Now(), Updated: time.Now(),
+	}))
+	seedBrokerWithHostSAs(t, s, tid("broker-auth-observed"), "", observedEmail)
+
+	for _, tc := range []struct {
+		name  string
+		email string
+	}{
+		{"admin_managed", adminEmail},
+		{"embedded_id", embeddedIDEmail},
+		{"embedded_label", embeddedLblMail},
+		{"detected", detectedEmail},
+		{"observed", observedEmail},
+	} {
+		t.Run("reserved_"+tc.name, func(t *testing.T) {
+			code, _, isRefused, err := srv.gcpServiceAccountEmailRefusal(ctx, tc.email)
+			require.NoError(t, err)
+			assert.True(t, isRefused, "expected %s to be reserved in off mode", tc.name)
+			assert.Equal(t, ErrCodeIdentityReserved, code)
+		})
+	}
+}
+
+// TestGCPServiceAccount_BrokerHostAuthorityBacked_EnforceMode verifies that
+// under gcp_iam_check_mode=enforce (where evaluateHostSAClaim requires GCP
+// iam.serviceAccounts.actAs on the claimed email), a non-AdminManaged,
+// non-embedded broker's configured GCPHostServiceAccountEmail IS reserved
+// across registration, verification, assignment, admissibility, clone, and
+// startup scan.
+func TestGCPServiceAccount_BrokerHostAuthorityBacked_EnforceMode(t *testing.T) {
+	const hostEmail = "member-broker-host@host-proj.iam.gserviceaccount.com"
+
+	srv, s := testServer(t)
+	srv.SetGCPTokenGenerator(&reservedTestTokenGenerator{email: "hub-runner@hub-proj.iam.gserviceaccount.com"})
+	srv.saAssignCheckMode = SAAssignCheckEnforce
+
+	ctx := context.Background()
+	projectID := createTestProjectForSA(t, srv, s)
+
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:                         tid("broker-enforce-member"),
+		Name:                       "broker-enforce-member",
+		Slug:                       "broker-enforce-member",
+		AdminManaged:               false,
+		GCPHostServiceAccountEmail: hostEmail,
+		GCPHostSource:              store.GCPHostSourceRegistration,
+		Status:                     store.BrokerStatusOnline,
+		Created:                    time.Now(),
+		Updated:                    time.Now(),
+	}))
+
+	// 1. Registration refused with 400 identity_reserved.
+	rec := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID),
+		map[string]string{"email": hostEmail, "projectId": "host-proj"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeIdentityReserved, errResp.Error.Code)
+
+	// 2. Pre-existing row refused on verify, assignment, admissibility, and flagged on startup scan.
+	sa := &store.GCPServiceAccount{
+		ID:                 tid("sa-enforce-host"),
+		Scope:              store.ScopeProject,
+		ScopeID:            projectID,
+		Email:              hostEmail,
+		ProjectID:          "host-proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          "dev-user",
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, sa))
+
+	recVerify := doRequest(t, srv, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s/verify", projectID, sa.ID), nil)
+	assert.Equal(t, http.StatusBadRequest, recVerify.Code, "body: %s", recVerify.Body.String())
+
+	denial := srv.evaluateSAAssignment(ctx, nil, sa, projectID, SurfaceAgentCreate)
+	require.NotNil(t, denial)
+	assert.Equal(t, ErrCodeIdentityReserved, denial.code)
+
+	_, err := srv.admissibleGCPServiceAccount(ctx, &store.GCPIdentityConfig{
+		MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: sa.ID, ServiceAccountEmail: sa.Email,
+	}, projectID, "")
+	assert.ErrorIs(t, err, errGCPSAReserved)
+
+	flagged, err := srv.ScanReservedGCPServiceAccounts(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, flagged)
 }
