@@ -176,7 +176,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	assert.Equal(t, InboxStateOK, chatCat.State)
 	assert.Equal(t, 0, chatCat.Count)
 	assert.Empty(t, chatCat.Previews)
-	assert.Equal(t, map[string]int{"dms": 0, "mentions": 0, "unreadConversations": 0}, chatCat.Breakdown)
+	assert.Equal(t, map[string]int{"dms": 0, "mentions": 0, "projects": 0, "starredMessages": 0, "unreadConversations": 0}, chatCat.Breakdown)
 
 	// Verify raw JSON wire shape: waiting always emits "agentIds": [] when state=="ok"
 	// and count==0, while other categories omit "agentIds".
