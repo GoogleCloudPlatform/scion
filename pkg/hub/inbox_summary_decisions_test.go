@@ -148,6 +148,10 @@ func TestUserMeInboxSummary_DecisionsFlagOffAndParity(t *testing.T) {
 	assert.Equal(t, profileDec.Counts.WaitingOnYou, summaryResp.Total)
 	assert.False(t, decCat.Capped)
 	assert.Equal(t, "/profile/decisions?tab=pending", decCat.Href)
+	assert.Equal(t, map[string]int{
+		InboxBreakdownAgents:   2,
+		InboxBreakdownProjects: 2,
+	}, decCat.Breakdown)
 
 	// AC5: capped at default 3, ordered oldest first, exact preview shapes.
 	previews := decodeDecisionPreviews(t, decCat.Previews)
@@ -189,10 +193,118 @@ func TestUserMeInboxSummary_DecisionsFlagOffAndParity(t *testing.T) {
 	assert.True(t, previews[2].CanAnswer)
 	assert.Nil(t, previews[2].Inline, "set prompts must omit inline block")
 
-	// previews=0 returns count only with empty previews array.
+	// previews=0 returns count and breakdown with empty previews array.
 	zeroResp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
 	assert.Equal(t, 5, zeroResp.Categories[InboxCategoryDecisions].Count)
+	assert.Equal(t, map[string]int{
+		InboxBreakdownAgents:   2,
+		InboxBreakdownProjects: 2,
+	}, zeroResp.Categories[InboxCategoryDecisions].Breakdown)
 	assert.Empty(t, zeroResp.Categories[InboxCategoryDecisions].Previews)
+}
+
+func TestUserMeInboxSummary_DecisionsBreakdownDistinctCounts(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxAndDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+
+	// Make f.member a member of f.projA, f.projB, and a third project projC.
+	bindProjectMember(t, f.s, f.projB, f.member)
+	projC := &store.Project{
+		ID:      api.NewUUID(),
+		Slug:    "inbox-dec-bd-proj-c",
+		Name:    "Inbox Decisions Breakdown Project C",
+		OwnerID: f.owner,
+		Created: time.Now().UTC(),
+		Updated: time.Now().UTC(),
+	}
+	require.NoError(t, f.s.CreateProject(ctx, projC))
+	bindProjectMember(t, f.s, projC.ID, f.member)
+	topicC := api.NewUUID()
+	require.NoError(t, f.wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicC,
+		ProjectID:      projC.ID,
+		Name:           "general",
+		IsGeneral:      true,
+		CreatedBy:      f.member,
+		CreatedAt:      time.Now().UTC(),
+		LastActivityAt: time.Now().UTC(),
+	}))
+
+	// Second asker agent in projA, and an agent in projC whose only prompt is
+	// waiting on someone else (must not inflate agents or projects breakdown).
+	agentA2 := &store.Agent{
+		ID:          api.NewUUID(),
+		Slug:        "inbox-dec-bd-agent-a2",
+		Name:        "Inbox Decisions Breakdown Agent A2",
+		ProjectID:   f.projA,
+		OwnerID:     f.member,
+		Ancestry:    []string{f.member},
+		MessageMode: store.MessageModeProject,
+		Phase:       "running",
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, agentA2))
+	agentC := &store.Agent{
+		ID:          api.NewUUID(),
+		Slug:        "inbox-dec-bd-agent-c",
+		Name:        "Inbox Decisions Breakdown Agent C",
+		ProjectID:   projC.ID,
+		OwnerID:     f.member,
+		Ancestry:    []string{f.member},
+		MessageMode: store.MessageModeProject,
+		Phase:       "running",
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, agentC))
+
+	for _, ag := range []*store.Agent{f.agentA, f.agentB} {
+		ag.OwnerID = f.member
+		ag.Ancestry = []string{f.member}
+		ag.MessageMode = store.MessageModeProject
+		require.NoError(t, f.s.UpdateAgent(ctx, ag))
+	}
+
+	memberUser, err := f.s.GetUser(ctx, f.member)
+	require.NoError(t, err)
+	otherUser, err := f.s.GetUser(ctx, f.admin)
+	require.NoError(t, err)
+
+	seedPrompt := func(projID, chatKey string, ag *store.Agent, rawJSON string, at time.Time) *store.DecisionPromptResult {
+		decs, nErr := messages.NormalizeDecisions("decisions", decisionInputs(t, rawJSON))
+		require.NoError(t, nErr)
+		res, cErr := f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: projID, Sender: "agent:" + ag.Slug, SenderID: ag.ID,
+				Recipient: "chat", ThreadID: chatKey, Channel: "web", CreatedAt: at,
+			},
+			Intro: "Please decide", AskerAgentID: ag.ID, AskerAgentName: ag.Slug, Decisions: decs,
+		})
+		require.NoError(t, cErr)
+		return res
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// projA, agentA: 2 prompts (1 + 2 = 3 waiting-on-you decisions).
+	seedPrompt(f.projA, f.topicA, f.agentA, `[{"id":"BD1","question":"Q1?","choices":["a","b"]}]`, now.Add(-50*time.Minute))
+	seedPrompt(f.projA, f.topicA, f.agentA, `[{"id":"BD2A","question":"Q2A?","choices":["a","b"]},{"id":"BD2B","question":"Q2B?","choices":["c","d"]}]`, now.Add(-40*time.Minute))
+	// projA, agentA2: 1 prompt (1 waiting-on-you decision).
+	seedPrompt(f.projA, f.topicA, agentA2, `[{"id":"BD3","question":"Q3?","choices":["yes","no"]}]`, now.Add(-30*time.Minute))
+	// projB, agentB: 2 prompts (2 waiting-on-you decisions).
+	seedPrompt(f.projB, f.topicB, f.agentB, `[{"id":"BD4","question":"Q4?","choices":["yes","no"]}]`, now.Add(-20*time.Minute))
+	seedPrompt(f.projB, f.topicB, f.agentB, `[{"id":"BD5","question":"Q5?","choices":["yes","no"]}]`, now.Add(-10*time.Minute))
+	// projC, agentC: 1 prompt waiting on otherUser (must NOT be counted).
+	pOther := seedPrompt(projC.ID, topicC, agentC, `[{"id":"BD6","question":"Not on caller?","choices":["yes","no"]}]`, now.Add(-5*time.Minute))
+	recordTestInterpretedForUser(t, f.s, projC.ID, topicC, agentC, otherUser, pOther.Decisions[0].RowID, "1")
+
+	for _, path := range []string{userMeInboxSummaryPath, userMeInboxSummaryPath + "?previews=0"} {
+		resp := decodeInboxSummary(t, doRequestAsUser(t, f.srv, memberUser, http.MethodGet, path, nil))
+		decCat := resp.Categories[InboxCategoryDecisions]
+		assert.Equal(t, InboxStateOK, decCat.State, path)
+		assert.Equal(t, 6, decCat.Count, path)
+		assert.Equal(t, map[string]int{
+			InboxBreakdownAgents:   3,
+			InboxBreakdownProjects: 2,
+		}, decCat.Breakdown, path)
+	}
 }
 
 // TestUserMeInboxSummary_DecisionsTokenScopingAndSingleflight pins §4.2 token
@@ -413,7 +525,7 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	setInboxAndDecisionsExperiments(t, f.srv, true, true)
 
 	// Seed one open decision and one live pending secret for f.bob so we can
-	// verify approvals remains intact and decisions is excluded from total when
+	// verify pending_secrets remains intact and decisions is excluded from total when
 	// ListOpenPrompts fails.
 	f.topicPrompt(t, oneDecision, false)
 	now := time.Now().UTC()
@@ -436,14 +548,14 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	require.NoError(t, err)
 
 	// 1. Internal store error on ListOpenPrompts -> HTTP 200, decisions error("internal"),
-	// approvals ok(1), total == 1.
+	// pending_secrets ok(1), total == 1.
 	faultStore.setErr(errors.New("forced ListOpenPrompts failure"))
 	fault.Arm()
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
 	resp := decodeInboxSummary(t, rec)
 	assert.Equal(t, 1, resp.Total, "errored decisions category must be excluded from total")
-	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryApprovals].State)
-	assert.Equal(t, 1, resp.Categories[InboxCategoryApprovals].Count)
+	assert.Equal(t, InboxStateOK, resp.Categories[InboxCategoryPendingSecrets].State)
+	assert.Equal(t, 1, resp.Categories[InboxCategoryPendingSecrets].Count)
 	decCat := resp.Categories[InboxCategoryDecisions]
 	assert.Equal(t, InboxStateError, decCat.State)
 	assert.Equal(t, 0, decCat.Count)
@@ -452,12 +564,12 @@ func TestUserMeInboxSummary_DecisionsForcedErrorIsolation(t *testing.T) {
 	assert.Equal(t, "/profile/decisions?tab=pending", decCat.Href)
 
 	// 2. Timeout error on ListOpenPrompts -> HTTP 200, decisions error("timeout"),
-	// approvals still ok(1), total == 1.
+	// pending_secrets still ok(1), total == 1.
 	faultStore.setErr(context.DeadlineExceeded)
 	recTO := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeInboxSummaryPath, nil)
 	respTO := decodeInboxSummary(t, recTO)
 	assert.Equal(t, 1, respTO.Total)
-	assert.Equal(t, InboxStateOK, respTO.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateOK, respTO.Categories[InboxCategoryPendingSecrets].State)
 	assert.Equal(t, InboxStateError, respTO.Categories[InboxCategoryDecisions].State)
 	assert.Equal(t, 0, respTO.Categories[InboxCategoryDecisions].Count)
 	assert.Equal(t, InboxErrorTimeout, respTO.Categories[InboxCategoryDecisions].ErrorCode)

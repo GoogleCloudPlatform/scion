@@ -14,16 +14,20 @@
 
 /**
  * Real-hub end-to-end Playwright suite for Inbox Dashboard live updates
- * (ptone/scion#8962, design §9 AC10).
+ * (ptone/scion#8962, design §9 AC10; updated for Phase 1 summary-of-state
+ * cards in ptone/scion#9289 / ptone/scion#9290).
  *
  * Verifies against a real Go `scion` hub with `web.inbox_dashboard` enabled:
- *   1. Page 1 opens `/profile/inbox` (all caught up) and Page 2 opens `/` in
+ *   1. Page 1 opens `/profile/inbox` (Pending Secrets card shows "Nothing
+ *      Waiting", count badge hidden, no Details link) and Page 2 opens `/` in
  *      the same browser context (mounting the main sidebar and bell tray).
  *   2. An agent creates a pending user-scope secret; within ~5 s and without
- *      reloading, Page 1's Approvals card + Profile nav badge update and
- *      Page 2's main sidebar badge + bell tray Inbox link converge.
- *   3. Resolving the pending secret inline on Page 1 clears the card and
- *      badges on both Page 1 and Page 2 without reloading.
+ *      reloading, Page 1's Pending Secrets card prose/count/Details link +
+ *      Profile nav badge update and Page 2's main sidebar badge + bell tray
+ *      Inbox link converge.
+ *   3. Resolving the pending secret via the Hub API (`POST /api/v1/pending-secrets/{id}/reject`)
+ *      clears the card back to "Nothing Waiting" and clears badges on both
+ *      Page 1 and Page 2 without reloading.
  */
 
 import { test, expect } from '@playwright/test';
@@ -126,18 +130,20 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
     page2.on('pageerror', (err) => pageErrors.push(`page2: ${err.message}`));
 
     try {
-      // Page 1: /profile/inbox starts caught up with 0 pending approvals.
+      // Page 1: /profile/inbox starts with Pending Secrets empty ("Nothing Waiting",
+      // count badge hidden, no Details action).
       await page1.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
-      const approvalsCard = page1.locator('[data-inbox-card="approvals"]');
+      const pendingSecretsCard = page1.locator('[data-inbox-card="pending_secrets"]');
       const profileNavBadge = page1
         .locator('scion-profile-nav')
         .first()
         .locator('[data-inbox-nav-badge]');
-      await expect(approvalsCard).toBeVisible({ timeout: 15_000 });
-      await expect(approvalsCard.locator('[data-card-count]')).toHaveText('0', {
+      await expect(pendingSecretsCard).toBeVisible({ timeout: 15_000 });
+      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveCount(0);
+      await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
         timeout: 10_000,
       });
-      await expect(page1.locator('[data-inbox-caught-up]')).toBeVisible();
+      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveCount(0);
       await expect(profileNavBadge).toHaveCount(0);
 
       // Page 2: main app shell on `/` mounts the sidebar Inbox link and bell tray.
@@ -175,13 +181,19 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       const pendingId = createRes.body.pendingId ?? '';
       expect(pendingId).toBeTruthy();
 
-      // Within ~5 s and without reloading, Page 1's card and profile nav badge update.
-      await expect(approvalsCard.locator('[data-card-count]')).toHaveText('1', {
+      // Within ~5 s and without reloading, Page 1's summary card prose, count badge,
+      // Details -> link, and profile nav badge update.
+      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveText('1', {
         timeout: 7_000,
       });
-      const approvalRow = approvalsCard.locator(`[data-approval-row="${pendingId}"]`);
-      await expect(approvalRow).toBeVisible({ timeout: 7_000 });
-      await expect(approvalRow).toContainText(secretKey);
+      await expect(pendingSecretsCard.locator('[data-card-prose]')).toHaveText(
+        '1 pending secret from 1 agent in 1 project',
+        { timeout: 7_000 }
+      );
+      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveAttribute(
+        'href',
+        '/profile/secrets'
+      );
       await expect(profileNavBadge).toHaveText('1', { timeout: 7_000 });
 
       // Page 2 (second tab in the same context) converges without reload:
@@ -195,15 +207,26 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         { timeout: 7_000 }
       );
 
-      // Resolve the pending secret inline on Page 1 (Reject clears it immediately + via SSE).
-      await approvalRow.getByRole('button', { name: 'Reject' }).click({ timeout: 10_000 });
+      // Resolve the pending secret via the Hub API (reject publishes the SSE hint).
+      const rejectRes = await hubApi<{ state?: string }>(
+        hub,
+        user.accessToken,
+        'POST',
+        `/api/v1/pending-secrets/${encodeURIComponent(pendingId)}/reject`
+      );
+      expect(rejectRes.status, JSON.stringify(rejectRes.body)).toBe(200);
+      expect(rejectRes.body.state).toBe('rejected');
 
-      // Page 1 clears the row, resets count to 0, hides profile nav badge, shows caught-up banner.
-      await expect(approvalRow).toHaveCount(0, { timeout: 7_000 });
-      await expect(approvalsCard.locator('[data-card-count]')).toHaveText('0', {
+      // Page 1 hides the count badge & Details link, restores "Nothing Waiting", and clears profile nav badge.
+      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveCount(0, {
         timeout: 7_000,
       });
-      await expect(page1.locator('[data-inbox-caught-up]')).toBeVisible({ timeout: 7_000 });
+      await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+        timeout: 7_000,
+      });
+      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveCount(0, {
+        timeout: 7_000,
+      });
       await expect(profileNavBadge).toHaveCount(0, { timeout: 7_000 });
 
       // Page 2 converges on resolution too without reload.

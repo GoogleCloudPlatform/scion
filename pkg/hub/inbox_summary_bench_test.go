@@ -208,7 +208,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 			require.NoError(b, err)
 		}
 
-		// Populate pending user-scope secrets (approvals) in 3 projects.
+		// Populate pending user-scope secrets (pending_secrets) in 3 projects.
 		if i < 3 {
 			_, err = s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
 				ID:          api.NewUUID(),
@@ -323,7 +323,7 @@ func BenchmarkUserMeInboxSummary_50Projects(b *testing.B) {
 	require.Equal(b, http.StatusOK, warmRec.Code, warmRec.Body.String())
 	var warmResp InboxSummaryResponse
 	require.NoError(b, json.Unmarshal(warmRec.Body.Bytes(), &warmResp))
-	for _, key := range []string{InboxCategoryDecisions, InboxCategoryWaiting, InboxCategoryApprovals, InboxCategoryReviews, InboxCategoryChat} {
+	for _, key := range []string{InboxCategoryDecisions, InboxCategoryWaiting, InboxCategoryPendingSecrets, InboxCategoryReviews, InboxCategoryChat} {
 		require.Equal(b, InboxStateOK, warmResp.Categories[key].State, "category %s must be ok", key)
 		require.Greater(b, warmResp.Categories[key].Count, 0, "category %s must be populated", key)
 	}

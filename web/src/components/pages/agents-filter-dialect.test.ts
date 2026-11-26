@@ -83,6 +83,189 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     expect(el.shadowRoot?.querySelector('sl-input[placeholder*="label"]')).not.toBeNull();
   });
 
+  it('hydrates ?q=activity%3Awaiting_for_input in both dialect-on and dialect-off modes (ptone/scion#9300)', async () => {
+    const waitingAgent: Agent = {
+      id: 'a-wait',
+      name: 'Waiting Bot',
+      slug: 'waiting-bot',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'waiting_for_input',
+    };
+    const thinkingAgent: Agent = {
+      id: 'a-think',
+      name: 'Thinking Bot',
+      slug: 'thinking-bot',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'thinking',
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        fetchUrls.push(url);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [waitingAgent, thinkingAgent],
+              complete: true,
+              totalCount: 2,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      })
+    );
+
+    // 1. Dialect ON: hydrates <scion-filter-box> and sends q=activity%3Awaiting_for_input.
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
+    const elOn = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(elOn);
+    await new Promise((r) => setTimeout(r, 15));
+    await elOn.updateComplete;
+
+    const box = elOn.shadowRoot?.querySelector('scion-filter-box');
+    expect(box?.value).toBe('activity:waiting_for_input');
+    expect(fetchUrls.some((u) => u.includes('q=activity%3Awaiting_for_input'))).toBe(true);
+    expect(elOn.shadowRoot?.textContent).toContain('Waiting Bot');
+    expect(elOn.shadowRoot?.textContent).not.toContain('Thinking Bot');
+    elOn.remove();
+
+    // 2. Dialect OFF: hydrates activityFilter, ignores persisted scope/phase/mode
+    // for this load, renders removable tag, and filters client-side.
+    fetchUrls = [];
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
+    localStorage.setItem('scion-scope-agents', 'mine');
+    localStorage.setItem('scion-filter-agents-phase', 'error');
+    localStorage.setItem('scion-filter-agents-mode', 'lineage');
+    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
+    const elOff = document.createElement('scion-page-agents') as ScionPageAgents;
+    elOff.pageData = {
+      path: '/agents',
+      title: 'Agents',
+      user: { id: 'u1', email: 'u1@example.com', name: 'U1', role: 'admin' },
+    };
+    document.body.appendChild(elOff);
+    await new Promise((r) => setTimeout(r, 15));
+    await elOff.updateComplete;
+
+    const tag = elOff.shadowRoot?.querySelector('[data-activity-filter-tag]');
+    expect(tag?.textContent?.trim()).toBe('activity:waiting_for_input');
+    expect(fetchUrls.some((u) => u.includes('scope=mine') || u.includes('phase=error'))).toBe(
+      false
+    );
+    expect(elOff.shadowRoot?.textContent).toContain('Waiting Bot');
+    expect(elOff.shadowRoot?.textContent).not.toContain('Thinking Bot');
+
+    // Removing the tag clears the filter and strips ?q= from the URL.
+    tag?.dispatchEvent(new CustomEvent('sl-remove', { bubbles: true }));
+    await elOff.updateComplete;
+    expect(new URLSearchParams(window.location.search).get('q')).toBeNull();
+    expect(elOff.shadowRoot?.querySelector('[data-activity-filter-tag]')).toBeNull();
+    expect(elOff.shadowRoot?.textContent).toContain('Thinking Bot');
+    elOff.remove();
+  });
+
+  it('composes Phase and key-only label filters with the dialect-off activity tag', async () => {
+    const runningWaiting: Agent = {
+      id: 'a-run-wait',
+      name: 'Running Waiting',
+      slug: 'running-waiting',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'waiting_for_input',
+      labels: { team: 'ui' },
+    };
+    const stoppedWaiting: Agent = {
+      id: 'a-stop-wait',
+      name: 'Stopped Waiting',
+      slug: 'stopped-waiting',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'stopped',
+      activity: 'waiting_for_input',
+      labels: { env: 'prod' },
+    };
+    const runningThinking: Agent = {
+      id: 'a-run-think',
+      name: 'Running Thinking',
+      slug: 'running-thinking',
+      projectId: 'p1',
+      template: 'developer',
+      phase: 'running',
+      activity: 'thinking',
+      labels: { team: 'ui' },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              agents: [runningWaiting, stoppedWaiting, runningThinking],
+              complete: true,
+              totalCount: 3,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )
+      )
+    );
+
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
+    window.history.replaceState(null, '', '/agents?q=activity%3Awaiting_for_input');
+    const el = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 15));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.textContent).toContain('Running Waiting');
+    expect(el.shadowRoot?.textContent).toContain('Stopped Waiting');
+    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
+
+    // Choosing Phase=stopped composes with activity:waiting_for_input.
+    const phaseButtons = Array.from(
+      el.shadowRoot?.querySelectorAll('.filter-bar .scope-toggle button') ?? []
+    );
+    const stoppedBtn = phaseButtons.find((b) =>
+      b.textContent?.trim().startsWith('Stopped')
+    ) as HTMLButtonElement;
+    expect(stoppedBtn).toBeDefined();
+    stoppedBtn.click();
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.textContent).toContain('Stopped Waiting');
+    expect(el.shadowRoot?.textContent).not.toContain('Running Waiting');
+    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
+
+    // Reset Phase to All, then type a key-only label filter ("team").
+    const allBtn = phaseButtons.find((b) =>
+      b.textContent?.trim().startsWith('All')
+    ) as HTMLButtonElement;
+    expect(allBtn).toBeDefined();
+    allBtn.click();
+    await el.updateComplete;
+
+    const labelInput = el.shadowRoot?.querySelector('sl-input[placeholder*="label"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(labelInput).not.toBeNull();
+    labelInput!.value = 'team';
+    labelInput!.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.textContent).toContain('Running Waiting');
+    expect(el.shadowRoot?.textContent).not.toContain('Stopped Waiting');
+    expect(el.shadowRoot?.textContent).not.toContain('Running Thinking');
+    el.remove();
+  });
+
   it('migrates localStorage phase once to ?q= and renders <scion-filter-box> when on', async () => {
     setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
     localStorage.setItem('scion-filter-agents-phase', 'running');

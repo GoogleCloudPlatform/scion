@@ -51,9 +51,9 @@ func TestInboxSummaryClientTypeMatchesHub(t *testing.T) {
 			clientType: reflect.TypeOf(hubclient.InboxCategory{}),
 		},
 		{
-			name:       "InboxApprovalPreview",
-			hubType:    reflect.TypeOf(hub.InboxApprovalPreview{}),
-			clientType: reflect.TypeOf(hubclient.InboxApprovalPreview{}),
+			name:       "InboxPendingSecretPreview",
+			hubType:    reflect.TypeOf(hub.InboxPendingSecretPreview{}),
+			clientType: reflect.TypeOf(hubclient.InboxPendingSecretPreview{}),
 		},
 		{
 			name:       "InboxWaitingAgentPreview",
@@ -113,8 +113,16 @@ func TestInboxConstantsMatchHub(t *testing.T) {
 	assert.Equal(t, hub.InboxCategoryDecisions, hubclient.InboxCategoryDecisions)
 	assert.Equal(t, hub.InboxCategoryWaiting, hubclient.InboxCategoryWaiting)
 	assert.Equal(t, hub.InboxCategoryReviews, hubclient.InboxCategoryReviews)
-	assert.Equal(t, hub.InboxCategoryApprovals, hubclient.InboxCategoryApprovals)
+	assert.Equal(t, hub.InboxCategoryPendingSecrets, hubclient.InboxCategoryPendingSecrets)
 	assert.Equal(t, hub.InboxCategoryChat, hubclient.InboxCategoryChat)
+
+	assert.Equal(t, hub.InboxBreakdownAgents, hubclient.InboxBreakdownAgents)
+	assert.Equal(t, hub.InboxBreakdownProjects, hubclient.InboxBreakdownProjects)
+	assert.Equal(t, hub.InboxBreakdownToAddress, hubclient.InboxBreakdownToAddress)
+	assert.Equal(t, hub.InboxBreakdownRequested, hubclient.InboxBreakdownRequested)
+	assert.Equal(t, hub.InboxBreakdownUnreadConversations, hubclient.InboxBreakdownUnreadConversations)
+	assert.Equal(t, hub.InboxBreakdownDMs, hubclient.InboxBreakdownDMs)
+	assert.Equal(t, hub.InboxBreakdownMentions, hubclient.InboxBreakdownMentions)
 
 	assert.Equal(t, hub.InboxStateOK, hubclient.InboxStateOK)
 	assert.Equal(t, hub.InboxStateDisabled, hubclient.InboxStateDisabled)
@@ -128,7 +136,7 @@ func TestInboxConstantsMatchHub(t *testing.T) {
 	assert.Equal(t, hub.InboxChatFilterDMs, hubclient.InboxChatFilterDMs)
 	assert.Equal(t, hub.InboxChatFilterMentions, hubclient.InboxChatFilterMentions)
 
-	assert.Equal(t, hub.InboxApprovalKindPendingSecret, hubclient.InboxApprovalKindPendingSecret)
+	assert.Equal(t, hub.InboxPendingSecretKind, hubclient.InboxPendingSecretKind)
 }
 
 func withInboxFakeHub(t *testing.T, handler http.HandlerFunc) {
@@ -182,6 +190,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "capped": false,
       "countsTowardTotal": true,
       "href": "/profile/decisions?tab=pending",
+      "breakdown": {"agents": 2, "projects": 1},
       "previews": [
         {
           "id": "d1",
@@ -204,8 +213,9 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "count": 1,
       "capped": false,
       "countsTowardTotal": true,
-      "href": "/agents",
+      "href": "/agents?q=activity%3Awaiting_for_input",
       "agentIds": ["a1"],
+      "breakdown": {"projects": 1},
       "previews": [
         {
           "id": "a1",
@@ -221,12 +231,14 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
         }
       ]
     },
-    "approvals": {
+    "pending_secrets": {
       "state": "ok",
       "count": 2,
       "capped": true,
       "countsTowardTotal": true,
       "href": "/profile/secrets",
+      "breakdown": {"agents": 1, "projects": 1},
+      "nextExpiresAt": "2026-11-24T20:02:00Z",
       "previews": [
         {
           "id": "ps1",
@@ -312,30 +324,35 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Contains(t, out, "INBOX  22+ waiting on you  (generated 18:02:00 UTC)")
-		assert.Contains(t, out, "Decisions          3   scion decisions list")
+		assert.Contains(t, out, "Decisions           3   scion decisions list")
+		assert.Contains(t, out, "  3 decisions from 2 agents in 1 project")
 		assert.Contains(t, out, `• core-api · "Pick migration strategy?" · deploy-bot · 2h ago`)
-		assert.Contains(t, out, "Agents waiting     1   scion look <agent>")
+		assert.Contains(t, out, "Agents Waiting      1   scion look <agent>")
+		assert.Contains(t, out, "  1 agent waiting in 1 project")
 		assert.Contains(t, out, `• web / fe-dev · "Need staging creds?" · 14m ago`)
-		assert.Contains(t, out, "Approvals         2+")
+		assert.Contains(t, out, "Pending Secrets    2+")
+		assert.Contains(t, out, "  2+ pending secrets from 1 agent in 1 project")
 		assert.Contains(t, out, "/profile/secrets")
 		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · core-api · expires in 2h")
-		assert.Contains(t, out, "Reviews            2   (1 to address, 1 requested)  scion notifications")
+		assert.Contains(t, out, "Reviews             2   scion notifications")
+		assert.Contains(t, out, "  2 pending reviews")
 		assert.Contains(t, out, "/artifacts?review_pending=1&owner=me")
 		assert.Contains(t, out, "• [to address] API Migration Spec · core-api · 1h ago")
 		assert.Contains(t, out, "• [requested] UI Design Doc · web · from alice · 30m ago")
-		assert.Contains(t, out, "Chat              14   (2 DMs, 1 mention)")
+		assert.Contains(t, out, "Chat               14")
+		assert.Contains(t, out, "  14 unread conversations, 1 with mentions")
 		assert.Contains(t, out, "• [DM] bob · core-api · 7m ago")
 
-		// Verify canonical order: Decisions -> Agents waiting -> Approvals -> Reviews -> Chat.
+		// Verify canonical order: Decisions -> Agents Waiting -> Pending Secrets -> Reviews -> Chat.
 		idxDec := strings.Index(out, "Decisions")
-		idxWait := strings.Index(out, "Agents waiting")
-		idxApp := strings.Index(out, "Approvals")
+		idxWait := strings.Index(out, "Agents Waiting")
+		idxPending := strings.Index(out, "Pending Secrets")
 		idxRev := strings.Index(out, "Reviews")
 		idxChat := strings.Index(out, "Chat")
-		assert.True(t, idxDec < idxWait && idxWait < idxApp && idxApp < idxRev && idxRev < idxChat, "unexpected category order:\n%s", out)
+		assert.True(t, idxDec < idxWait && idxWait < idxPending && idxPending < idxRev && idxRev < idxChat, "unexpected category order:\n%s", out)
 	})
 
-	t.Run("token-like view with unavailable approvals, disabled omitted, and error category exits 0", func(t *testing.T) {
+	t.Run("token-like view with unavailable pending_secrets, disabled omitted, and error category exits 0", func(t *testing.T) {
 		fixture := `{
   "generatedAt": "2026-11-24T18:02:00Z",
   "total": 4,
@@ -347,6 +364,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "capped": false,
       "countsTowardTotal": true,
       "href": "/profile/decisions?tab=pending",
+      "breakdown": {"agents": 2, "projects": 1},
       "previews": []
     },
     "waiting": {
@@ -354,14 +372,14 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "count": 1,
       "capped": false,
       "countsTowardTotal": true,
-      "href": "/agents",
+      "href": "/agents?q=activity%3Awaiting_for_input",
       "previews": []
     },
-    "approvals": {
+    "pending_secrets": {
       "state": "unavailable",
       "count": 0,
       "capped": false,
-      "countsTowardTotal": true,
+      "countsTowardTotal": false,
       "href": "/profile/secrets",
       "previews": []
     },
@@ -378,7 +396,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
       "count": 0,
       "capped": false,
       "countsTowardTotal": true,
-      "href": "/chat?filter=unread",
+      "href": "/chat",
       "errorCode": "timeout",
       "previews": []
     }
@@ -393,10 +411,10 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		out, err := runInboxCmdForTest(t, "")
 		require.NoError(t, err, "category-level errors must still exit 0")
 		assert.Contains(t, out, "INBOX  4 waiting on you")
-		assert.Contains(t, out, "Approvals          –   unavailable with token auth (open ")
+		assert.Contains(t, out, "Pending Secrets     –   unavailable with token auth (open ")
 		assert.Contains(t, out, "/profile/secrets in the browser)")
 		assert.NotContains(t, out, "Reviews", "disabled category must be omitted")
-		assert.Contains(t, out, "Chat               !   error (timeout)")
+		assert.Contains(t, out, "Chat                !   error (timeout)")
 	})
 }
 
@@ -407,11 +425,11 @@ func TestInboxCmd_JSONOutputVerbatim(t *testing.T) {
   "totalCapped": false,
   "extraHubField": {"v": 2},
   "categories": {
-    "approvals": {
+    "pending_secrets": {
       "state": "unavailable",
       "count": 0,
       "capped": false,
-      "countsTowardTotal": true,
+      "countsTowardTotal": false,
       "href": "/profile/secrets",
       "previews": []
     },
@@ -450,10 +468,10 @@ func TestInboxCmd_ChatMentionsAndPreviewsFlags(t *testing.T) {
 			"total":       5,
 			"totalCapped": false,
 			"categories": map[string]any{
-				"decisions": map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/decisions?tab=pending", "previews": []any{}},
-				"waiting":   map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/agents", "previews": []any{}},
-				"approvals": map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/secrets", "previews": []any{}},
-				"reviews":   map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/artifacts?review_pending=1&owner=me", "previews": []any{}},
+				"decisions":       map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/decisions?tab=pending", "previews": []any{}},
+				"waiting":         map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/agents", "previews": []any{}},
+				"pending_secrets": map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/profile/secrets", "previews": []any{}},
+				"reviews":         map[string]any{"state": "disabled", "count": 0, "capped": false, "countsTowardTotal": true, "href": "/artifacts?review_pending=1&owner=me", "previews": []any{}},
 				"chat": map[string]any{
 					"state":             "ok",
 					"count":             5,
@@ -640,7 +658,7 @@ func TestInboxCmd_UnknownCategoryRendersAfterChat(t *testing.T) {
 
 	out, err := runInboxCmdForTest(t, "")
 	require.NoError(t, err)
-	assert.Contains(t, out, "foo                1   http://")
+	assert.Contains(t, out, "foo                 1   http://")
 	assert.Contains(t, out, "/foo")
 	assert.Contains(t, out, "• core-api · Custom future item · 10m ago")
 	assert.Less(t, strings.Index(out, "Chat"), strings.Index(out, "foo"),

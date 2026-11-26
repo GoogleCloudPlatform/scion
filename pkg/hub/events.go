@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
@@ -481,10 +482,21 @@ type eventBuilder struct {
 	// published counts scion.hub.events.published; the embedding
 	// publisher calls it once per event it publishes.
 	published eventstreams.PublishCounter
-	// inboxHintEnabled, when set, gates user.<ownerID>.inbox waiting hints
+	// inboxHintEnabled, when set, gates user.<userID>.inbox waiting hints
 	// emitted by PublishAgentStatus (design §5.2). Stored atomically so
 	// SetInboxHintEnabled is race-free with concurrent publishes.
 	inboxHintEnabled atomic.Pointer[func() bool]
+	// inboxWaitingRecipients, when set, resolves the user IDs that should
+	// receive waiting inbox hints for an agent in projectID owned by ownerID
+	// (owner plus project members, ptone/scion#9300).
+	inboxWaitingRecipients atomic.Pointer[func(ctx context.Context, projectID, ownerID string) []string]
+	// waitingMu guards waitingAgents, which tracks agent IDs whose last
+	// published status had activity == waiting_for_input so PublishAgentStatus
+	// resolves project members and fans out waiting hints whenever the current
+	// or previously published status is waiting_for_input (entering, leaving,
+	// or updating while waiting), while the owner hint remains unconditional.
+	waitingMu     sync.Mutex
+	waitingAgents map[string]struct{}
 }
 
 // inboxHintEnabledSetter is implemented by event publishers backed by
@@ -493,8 +505,14 @@ type inboxHintEnabledSetter interface {
 	SetInboxHintEnabled(fn func() bool)
 }
 
+// inboxWaitingRecipientsSetter is implemented by event publishers backed by
+// eventBuilder so Server.SetEventPublisher can wire project-member hint fanout.
+type inboxWaitingRecipientsSetter interface {
+	SetInboxWaitingRecipients(fn func(ctx context.Context, projectID, ownerID string) []string)
+}
+
 // SetInboxHintEnabled sets the gate checked by PublishAgentStatus before
-// emitting a user.<ownerID>.inbox waiting hint. Passing nil disables hints.
+// emitting user.<userID>.inbox waiting hints. Passing nil disables hints.
 func (p *eventBuilder) SetInboxHintEnabled(fn func() bool) {
 	if fn == nil {
 		p.inboxHintEnabled.Store(nil)
@@ -503,9 +521,60 @@ func (p *eventBuilder) SetInboxHintEnabled(fn func() bool) {
 	p.inboxHintEnabled.Store(&fn)
 }
 
+// SetInboxWaitingRecipients sets the resolver used by PublishAgentStatus to
+// determine which users receive waiting inbox hints. Passing nil falls back to
+// owner-only delivery.
+func (p *eventBuilder) SetInboxWaitingRecipients(fn func(ctx context.Context, projectID, ownerID string) []string) {
+	if fn == nil {
+		p.inboxWaitingRecipients.Store(nil)
+		return
+	}
+	p.inboxWaitingRecipients.Store(&fn)
+}
+
 func (p *eventBuilder) shouldEmitInboxHint() bool {
 	fn := p.inboxHintEnabled.Load()
 	return fn != nil && (*fn)()
+}
+
+func (p *eventBuilder) resolveInboxWaitingRecipients(ctx context.Context, projectID, ownerID string) []string {
+	if fn := p.inboxWaitingRecipients.Load(); fn != nil {
+		return (*fn)(ctx, projectID, ownerID)
+	}
+	if ownerID == "" {
+		return nil
+	}
+	return []string{ownerID}
+}
+
+// trackAgentWaiting records whether agentID is currently waiting_for_input and
+// reports whether its previously published status was waiting_for_input.
+func (p *eventBuilder) trackAgentWaiting(agentID string, isWaiting bool) bool {
+	if agentID == "" {
+		return false
+	}
+	p.waitingMu.Lock()
+	defer p.waitingMu.Unlock()
+	_, wasWaiting := p.waitingAgents[agentID]
+	if isWaiting {
+		if p.waitingAgents == nil {
+			p.waitingAgents = make(map[string]struct{})
+		}
+		p.waitingAgents[agentID] = struct{}{}
+	} else if wasWaiting {
+		delete(p.waitingAgents, agentID)
+	}
+	return wasWaiting
+}
+
+// clearAgentWaiting drops any tracked waiting state for a deleted agent.
+func (p *eventBuilder) clearAgentWaiting(agentID string) {
+	if agentID == "" {
+		return
+	}
+	p.waitingMu.Lock()
+	delete(p.waitingAgents, agentID)
+	p.waitingMu.Unlock()
 }
 
 // SetPublishMetrics wires the scion.hub.events.published counter
@@ -749,12 +818,31 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	if agent.ProjectID != "" {
 		sink("project."+agent.ProjectID+".agent.status", evt)
 	}
-	if agent.OwnerID != "" && p.shouldEmitInboxHint() {
-		p.PublishUserInboxHint(ctx, agent.OwnerID, InboxHint{
+	isWaiting := agent.Activity == string(state.ActivityWaitingForInput)
+	wasWaiting := p.trackAgentWaiting(agent.ID, isWaiting)
+	if p.shouldEmitInboxHint() {
+		ownerHint := InboxHint{
 			Category: InboxCategoryWaiting,
 			AgentID:  agent.ID,
 			Activity: agent.Activity,
-		})
+		}
+		if isWaiting || wasWaiting {
+			// Project members receive a content-free invalidation hint (no
+			// agentId or activity) so a member denied read on this agent never
+			// learns agent IDs or transitions from the hint stream.
+			memberHint := InboxHint{Category: InboxCategoryWaiting}
+			for _, uid := range p.resolveInboxWaitingRecipients(ctx, agent.ProjectID, agent.OwnerID) {
+				if uid == agent.OwnerID {
+					p.PublishUserInboxHint(ctx, uid, ownerHint)
+				} else {
+					p.PublishUserInboxHint(ctx, uid, memberHint)
+				}
+			}
+		} else if agent.OwnerID != "" {
+			// Always deliver the owner hint so a hub restart or cross-replica
+			// leave transition never drops the owner's live refresh.
+			p.PublishUserInboxHint(ctx, agent.OwnerID, ownerHint)
+		}
 	}
 }
 
@@ -808,6 +896,7 @@ func (p *eventBuilder) publishAgentCreated(evt AgentCreatedEvent) {
 // PublishAgentDeleted publishes an agent deleted event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID string) {
+	p.clearAgentWaiting(agentID)
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,

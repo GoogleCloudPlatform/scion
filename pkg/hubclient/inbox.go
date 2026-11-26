@@ -35,12 +35,21 @@ const (
 	InboxSummaryDefaultPreviews = 3
 	InboxSummaryMaxPreviews     = 10
 
-	// InboxCategory* are the five stable keys returned in InboxSummaryResponse.Categories.
-	InboxCategoryDecisions = "decisions"
-	InboxCategoryWaiting   = "waiting"
-	InboxCategoryReviews   = "reviews"
-	InboxCategoryApprovals = "approvals"
-	InboxCategoryChat      = "chat"
+	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
+	InboxCategoryDecisions      = "decisions"
+	InboxCategoryWaiting        = "waiting"
+	InboxCategoryReviews        = "reviews"
+	InboxCategoryPendingSecrets = "pending_secrets"
+	InboxCategoryChat           = "chat"
+
+	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
+	InboxBreakdownAgents              = "agents"
+	InboxBreakdownProjects            = "projects"
+	InboxBreakdownToAddress           = "toAddress"
+	InboxBreakdownRequested           = "requested"
+	InboxBreakdownUnreadConversations = "unreadConversations"
+	InboxBreakdownDMs                 = "dms"
+	InboxBreakdownMentions            = "mentions"
 
 	// InboxState* are the valid values for InboxCategory.State.
 	InboxStateOK          = "ok"
@@ -57,8 +66,8 @@ const (
 	InboxChatFilterDMs      = "dms"
 	InboxChatFilterMentions = "mentions"
 
-	// InboxApprovalKindPendingSecret is the kind value for pending user-scope secrets.
-	InboxApprovalKindPendingSecret = "pending_secret"
+	// InboxPendingSecretKind is the kind value for pending user-scope secrets.
+	InboxPendingSecretKind = "pending_secret"
 )
 
 // InboxSummaryOptions configures GET /api/v1/users/me/inbox/summary.
@@ -98,6 +107,7 @@ type InboxCategory struct {
 	Previews          []json.RawMessage `json:"previews"`
 	AgentIDs          []string          `json:"agentIds,omitempty"`
 	Breakdown         map[string]int    `json:"breakdown,omitempty"`
+	NextExpiresAt     *time.Time        `json:"nextExpiresAt,omitempty"`
 }
 
 // InboxDecisionInlineChoice is one selectable option for an inline decision preview.
@@ -160,9 +170,9 @@ type InboxReviewPreview struct {
 	NotificationID string    `json:"notificationId,omitempty"`
 }
 
-// InboxApprovalPreview is one preview item in the "approvals" category.
-// Never contains secret values or ValueRef. It mirrors hub.InboxApprovalPreview.
-type InboxApprovalPreview struct {
+// InboxPendingSecretPreview is one preview item in the "pending_secrets" category.
+// Never contains secret values or ValueRef. It mirrors hub.InboxPendingSecretPreview.
+type InboxPendingSecretPreview struct {
 	ID               string    `json:"id"`
 	Kind             string    `json:"kind"`
 	ProjectID        string    `json:"projectId"`

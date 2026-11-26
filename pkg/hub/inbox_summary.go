@@ -39,12 +39,21 @@ const (
 	inboxWaitingLimit           = 200
 	inboxPreviewQuestionMax     = 200
 
-	// InboxCategory* are the five stable keys returned in InboxSummaryResponse.Categories.
-	InboxCategoryDecisions = "decisions"
-	InboxCategoryWaiting   = "waiting"
-	InboxCategoryReviews   = "reviews"
-	InboxCategoryApprovals = "approvals"
-	InboxCategoryChat      = "chat"
+	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
+	InboxCategoryDecisions      = "decisions"
+	InboxCategoryWaiting        = "waiting"
+	InboxCategoryReviews        = "reviews"
+	InboxCategoryPendingSecrets = "pending_secrets"
+	InboxCategoryChat           = "chat"
+
+	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
+	InboxBreakdownAgents              = "agents"
+	InboxBreakdownProjects            = "projects"
+	InboxBreakdownToAddress           = "toAddress"
+	InboxBreakdownRequested           = "requested"
+	InboxBreakdownUnreadConversations = "unreadConversations"
+	InboxBreakdownDMs                 = "dms"
+	InboxBreakdownMentions            = "mentions"
 
 	// InboxCategoryNotifications is the SSE hint category emitted when a user
 	// acknowledges one or all bell notifications (design §5.2).
@@ -65,8 +74,8 @@ const (
 	InboxChatFilterDMs      = "dms"
 	InboxChatFilterMentions = "mentions"
 
-	// InboxApprovalKindPendingSecret is the kind value for pending user-scope secrets.
-	InboxApprovalKindPendingSecret = "pending_secret"
+	// InboxPendingSecretKind is the kind value for pending user-scope secrets.
+	InboxPendingSecretKind = "pending_secret"
 )
 
 // InboxSummaryResponse is the body of GET /api/v1/users/me/inbox/summary.
@@ -88,6 +97,10 @@ type InboxCategory struct {
 	Previews          []any          `json:"previews"`
 	AgentIDs          []string       `json:"agentIds,omitempty"`
 	Breakdown         map[string]int `json:"breakdown,omitempty"`
+	// NextExpiresAt is the earliest expiry among the items counted, when the
+	// category's items expire (pending_secrets, agent_secrets). It lets
+	// previews=0 clients schedule expiry refreshes without fetching previews.
+	NextExpiresAt *time.Time `json:"nextExpiresAt,omitempty"`
 }
 
 // MarshalJSON preserves a non-nil empty AgentIDs slice as `"agentIds": []`
@@ -108,9 +121,9 @@ func (c InboxCategory) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(c))
 }
 
-// InboxApprovalPreview is one preview item in the "approvals" category.
+// InboxPendingSecretPreview is one preview item in the "pending_secrets" category.
 // Never contains secret values or ValueRef.
-type InboxApprovalPreview struct {
+type InboxPendingSecretPreview struct {
 	ID               string    `json:"id"`
 	Kind             string    `json:"kind"`
 	ProjectID        string    `json:"projectId"`
@@ -196,13 +209,48 @@ type inboxSourceEntry struct {
 	run inboxSourceFunc
 }
 
-// publishInboxHint emits a content-free invalidation hint on user.<userID>.inbox
-// when the web.inbox_dashboard experiment is enabled.
+// publishInboxHint emits an inbox invalidation hint on user.<userID>.inbox
+// when the web.inbox_dashboard experiment is enabled. Owner waiting hints carry
+// agentId and activity; project-member waiting hints are content-free
+// ({category:"waiting"}) so members without read access to a specific agent
+// never learn agent IDs or activity transitions.
 func (s *Server) publishInboxHint(ctx context.Context, userID string, hint InboxHint) {
 	if userID == "" || !s.experimentEnabled(experiments.InboxDashboard) {
 		return
 	}
 	s.events.PublishUserInboxHint(ctx, userID, hint)
+}
+
+// inboxWaitingHintRecipients returns the deduplicated user IDs that should
+// receive waiting inbox invalidation hints for an agent: its owner (if set)
+// plus all members of projectID, so teammates whose Agents Waiting count
+// includes the agent refresh live (ptone/scion#9300).
+func (s *Server) inboxWaitingHintRecipients(ctx context.Context, projectID, ownerID string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(uid string) {
+		if uid == "" {
+			return
+		}
+		if _, ok := seen[uid]; ok {
+			return
+		}
+		seen[uid] = struct{}{}
+		out = append(out, uid)
+	}
+	add(ownerID)
+	if projectID != "" && s.store != nil {
+		lctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		if members, err := s.store.ListProjectMembers(lctx, projectID); err == nil {
+			for _, m := range members {
+				if m != nil {
+					add(m.UserID)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // handleUserMeInboxSummary serves GET /api/v1/users/me/inbox/summary.
@@ -310,7 +358,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 		return s.inboxSourcesForTest
 	}
 	return []inboxSourceEntry{
-		{key: InboxCategoryApprovals, run: s.inboxApprovalsCategory},
+		{key: InboxCategoryPendingSecrets, run: s.inboxPendingSecretsCategory},
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: s.inboxReviewsCategory},
 		{key: InboxCategoryChat, run: s.inboxChatCategory},
@@ -376,7 +424,7 @@ func inboxCategoryErrorCode(ctx context.Context, err error) string {
 	return InboxErrorInternal
 }
 
-func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
+func (s *Server) inboxPendingSecretsCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
 	const href = "/profile/secrets"
 	if v.token != nil {
 		return InboxCategory{
@@ -393,7 +441,7 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 	if err != nil {
 		code := inboxCategoryErrorCode(ctx, err)
 		slog.Warn("inbox summary: category source failed",
-			"category", InboxCategoryApprovals,
+			"category", InboxCategoryPendingSecrets,
 			"error_code", code,
 			"error", err)
 		return InboxCategory{
@@ -426,6 +474,27 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 		return live[i].ID < live[j].ID
 	})
 
+	seenAgents := make(map[string]struct{}, len(live))
+	seenProjects := make(map[string]struct{}, len(live))
+	for _, p := range live {
+		agentKey := p.AgentID
+		if agentKey == "" {
+			agentKey = p.AgentSlug
+		}
+		if agentKey != "" {
+			seenAgents[agentKey] = struct{}{}
+		}
+		if p.ProjectID != "" {
+			seenProjects[p.ProjectID] = struct{}{}
+		}
+	}
+
+	var nextExpiresAt *time.Time
+	if len(live) > 0 && !live[0].ExpiresAt.IsZero() {
+		t := live[0].ExpiresAt.UTC()
+		nextExpiresAt = &t
+	}
+
 	capN := previews
 	if capN > len(live) {
 		capN = len(live)
@@ -433,9 +502,9 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 	items := make([]any, 0, capN)
 	for i := 0; i < capN; i++ {
 		p := live[i]
-		items = append(items, InboxApprovalPreview{
+		items = append(items, InboxPendingSecretPreview{
 			ID:               p.ID,
-			Kind:             InboxApprovalKindPendingSecret,
+			Kind:             InboxPendingSecretKind,
 			ProjectID:        p.ProjectID,
 			ProjectName:      p.ProjectName,
 			CreatedAt:        p.Created,
@@ -456,6 +525,11 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 		CountsTowardTotal: true,
 		Href:              href,
 		Previews:          items,
+		Breakdown: map[string]int{
+			InboxBreakdownAgents:   len(seenAgents),
+			InboxBreakdownProjects: len(seenProjects),
+		},
+		NextExpiresAt: nextExpiresAt,
 	}
 }
 
@@ -484,14 +558,62 @@ func (s *Server) waitingLimit() int {
 }
 
 func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previews int, _ string) InboxCategory {
-	const href = "/agents"
+	const href = "/agents?q=activity%3Awaiting_for_input"
+	if v.token != nil && !v.token.Ceiling().Allows("agent.list") {
+		return InboxCategory{
+			State:             InboxStateUnavailable,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: false,
+			Href:              href,
+			Previews:          []any{},
+		}
+	}
 	limit := s.waitingLimit()
 
+	scopeResult, err := s.authzService.ResolveListScopes(ctx, v.user, "agent.list")
+	if err != nil {
+		code := inboxCategoryErrorCode(ctx, err)
+		slog.Warn("inbox summary: category source failed",
+			"category", InboxCategoryWaiting,
+			"error_code", code,
+			"error", err)
+		return InboxCategory{
+			State:             InboxStateError,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: false,
+			Href:              href,
+			ErrorCode:         code,
+			Previews:          []any{},
+		}
+	}
+	if scopeResult.Scopes.IsNone() {
+		return InboxCategory{
+			State:             InboxStateOK,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: true,
+			Href:              href,
+			Previews:          []any{},
+			AgentIDs:          []string{},
+			Breakdown: map[string]int{
+				InboxBreakdownProjects: 0,
+			},
+		}
+	}
+
 	filter := store.AgentFilter{
-		OwnerID:  v.userID,
-		Phase:    string(state.PhaseRunning),
 		Activity: string(state.ActivityWaitingForInput),
 	}
+	if !scopeResult.Scopes.IsAll() {
+		filter.AuthorizedProjectIDs = canonicalizeStringSlice(scopeResult.Scopes.ProjectIDs())
+	}
+	if len(scopeResult.ExcludedProjectIDs) > 0 {
+		filter.ExcludedProjectIDs = canonicalizeStringSlice(append([]string{}, scopeResult.ExcludedProjectIDs...))
+	}
+	// Defence in depth behind ResolveListScopes's applyCredentialCaveats:
+	// pin project-bounded tokens to their boundary project in SQL as well.
 	if v.token != nil {
 		if boundaryProject := tokenBoundaryProject(v.token); boundaryProject != "" {
 			filter.ProjectID = boundaryProject
@@ -499,7 +621,7 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 	}
 
 	// Request oldest-updated (COALESCE(last_activity_event, updated) ASC) so
-	// when an owner has more than `limit` waiting agents, the window keeps the
+	// when a caller has more than `limit` waiting agents, the window keeps the
 	// longest-waiting agents rather than dropping them under created DESC.
 	res, err := s.store.ListAgents(ctx, filter, store.ListOptions{
 		Limit:          limit,
@@ -524,20 +646,42 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
+	// Capped is computed on the pre-read-filter window, so if unreadable rows
+	// are dropped by readableAgentRows below it remains a conservative lower-
+	// bound signal ("N+ agents waiting").
 	capped := len(res.Items) >= limit
 
-	var matched []store.Agent
+	// Defence in depth behind ResolveListScopes's applyCredentialCaveats:
+	// re-verify each row's project against the token's inbox:read self-scope.
+	var candidates []store.Agent
 	if v.token != nil {
 		scopeCheck := s.newSelfScopeCheck(ctx, v.token, permInboxRead)
-		matched = make([]store.Agent, 0, len(res.Items))
+		candidates = make([]store.Agent, 0, len(res.Items))
 		for _, a := range res.Items {
 			if scopeCheck.allows(a.ProjectID) {
-				matched = append(matched, a)
+				candidates = append(candidates, a)
 			}
 		}
 	} else {
-		// Copy before sorting in place so callers sharing the slice are unaffected.
-		matched = append([]store.Agent(nil), res.Items...)
+		candidates = res.Items
+	}
+
+	matched, err := s.readableAgentRows(ctx, v.user, candidates)
+	if err != nil {
+		code := inboxCategoryErrorCode(ctx, err)
+		slog.Warn("inbox summary: category source failed",
+			"category", InboxCategoryWaiting,
+			"error_code", code,
+			"error", err)
+		return InboxCategory{
+			State:             InboxStateError,
+			Count:             0,
+			Capped:            false,
+			CountsTowardTotal: false,
+			Href:              href,
+			ErrorCode:         code,
+			Previews:          []any{},
+		}
 	}
 
 	sort.Slice(matched, func(i, j int) bool {
@@ -551,9 +695,13 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		return matched[i].ID < matched[j].ID
 	})
 
+	seenProjects := make(map[string]struct{}, len(matched))
 	agentIDs := make([]string, len(matched))
 	for i, a := range matched {
 		agentIDs[i] = a.ID
+		if a.ProjectID != "" {
+			seenProjects[a.ProjectID] = struct{}{}
+		}
 	}
 
 	capN := previews
@@ -614,6 +762,9 @@ func (s *Server) inboxWaitingCategory(ctx context.Context, v inboxViewer, previe
 		Href:              href,
 		Previews:          items,
 		AgentIDs:          agentIDs,
+		Breakdown: map[string]int{
+			InboxBreakdownProjects: len(seenProjects),
+		},
 	}
 }
 
@@ -733,5 +884,9 @@ func (s *Server) inboxDecisionsCategory(ctx context.Context, v inboxViewer, prev
 		CountsTowardTotal: true,
 		Href:              href,
 		Previews:          items,
+		Breakdown: map[string]int{
+			InboxBreakdownAgents:   res.agents,
+			InboxBreakdownProjects: res.projects,
+		},
 	}
 }

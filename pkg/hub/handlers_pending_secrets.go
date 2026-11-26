@@ -662,7 +662,7 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 	approved := *claimed
 	approved.AllowProgeny = allowProgeny
 	s.auditPendingSecret(ctx, PendingSecretEventApprove, &approved, PendingSecretActorUser, ownerID, "")
-	s.publishInboxHint(ctx, ownerID, InboxHint{Category: InboxCategoryApprovals})
+	s.publishInboxHint(ctx, ownerID, InboxHint{Category: InboxCategoryPendingSecrets})
 
 	writeJSON(w, http.StatusOK, PendingSecretDecisionResponse{
 		ID:    claimed.ID,
@@ -706,7 +706,7 @@ func (s *Server) rejectPendingSecret(w http.ResponseWriter, r *http.Request, own
 	}
 	s.dropPendingValues(ctx, []string{p.ValueRef})
 	s.auditPendingSecret(ctx, PendingSecretEventReject, p, PendingSecretActorUser, ownerID, "")
-	s.publishInboxHint(ctx, ownerID, InboxHint{Category: InboxCategoryApprovals})
+	s.publishInboxHint(ctx, ownerID, InboxHint{Category: InboxCategoryPendingSecrets})
 	writeJSON(w, http.StatusOK, PendingSecretDecisionResponse{
 		ID:    p.ID,
 		Key:   p.Key,

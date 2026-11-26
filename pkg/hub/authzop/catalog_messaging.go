@@ -68,7 +68,7 @@ var messagingOperations = []OperationSpec{
 	{
 		ID:          "inbox.summary.read",
 		Domain:      "inbox",
-		Description: "Read the caller's aggregated inbox summary across categories (approvals, waiting agents, artifact reviews, chat, decisions). Interactive web sessions and dev credentials receive the full view; user access tokens with inbox:read receive the token view (approvals marked unavailable, excluded from total). Agents, visitors, federated users, and UATs without inbox:read get 403; unsupported methods get 405; 404 while web.inbox_dashboard is off",
+		Description: "Read the caller's aggregated inbox summary across categories (pending_secrets, waiting agents, artifact reviews, chat, decisions). Interactive web sessions and dev credentials receive the full view; user access tokens with inbox:read receive the token view (pending_secrets marked unavailable, excluded from total). Agents, visitors, federated users, and UATs without inbox:read get 403; unsupported methods get 405; 404 while web.inbox_dashboard is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/inbox/summary", Method: "GET"},
 		},

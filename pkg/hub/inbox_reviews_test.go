@@ -330,7 +330,7 @@ func TestUserMeInboxSummary_ReviewsDisabledAndError(t *testing.T) {
 	assert.Equal(t, InboxStateError, respErr.Categories[InboxCategoryReviews].State)
 	assert.False(t, respErr.Categories[InboxCategoryReviews].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, respErr.Categories[InboxCategoryReviews].ErrorCode)
-	assert.Equal(t, InboxStateOK, respErr.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateOK, respErr.Categories[InboxCategoryPendingSecrets].State)
 
 	// Error isolation when GetNotifications fails.
 	enableInboxAndArtifacts(t, srv)
@@ -342,7 +342,7 @@ func TestUserMeInboxSummary_ReviewsDisabledAndError(t *testing.T) {
 	assert.Equal(t, InboxStateError, respNotifErr.Categories[InboxCategoryReviews].State)
 	assert.False(t, respNotifErr.Categories[InboxCategoryReviews].CountsTowardTotal)
 	assert.Equal(t, InboxErrorInternal, respNotifErr.Categories[InboxCategoryReviews].ErrorCode)
-	assert.Equal(t, InboxStateOK, respNotifErr.Categories[InboxCategoryApprovals].State)
+	assert.Equal(t, InboxStateOK, respNotifErr.Categories[InboxCategoryPendingSecrets].State)
 }
 
 type inboxNotifFaultStore struct {

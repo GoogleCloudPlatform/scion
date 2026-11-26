@@ -51,7 +51,7 @@ function makeSummary(total: number, totalCapped = false): InboxSummaryResponse {
       decisions: disabled,
       waiting: disabled,
       reviews: disabled,
-      approvals: {
+      pending_secrets: {
         state: 'ok',
         count: total,
         capped: totalCapped,

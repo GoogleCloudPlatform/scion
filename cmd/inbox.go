@@ -39,12 +39,13 @@ const (
 	inboxPreviewQuestionMaxRunes  = 100
 )
 
-// inboxCategoryOrder is the canonical display order for the five inbox
-// categories (design §6.3, §6.7).
+// inboxCategoryOrder is the canonical display order for inbox categories
+// (design §6.3, §9).
 var inboxCategoryOrder = []string{
 	hubclient.InboxCategoryDecisions,
+	"agent_secrets",
 	hubclient.InboxCategoryWaiting,
-	hubclient.InboxCategoryApprovals,
+	hubclient.InboxCategoryPendingSecrets,
 	hubclient.InboxCategoryReviews,
 	hubclient.InboxCategoryChat,
 }
@@ -84,12 +85,12 @@ func newInboxCmd() *cobra.Command {
 		Use:   "inbox",
 		Short: "Show a summary of items waiting on you across your projects",
 		Long: `Show a read-only summary of items waiting on you across your Hub projects:
-decisions, agents waiting for input, pending approvals, artifact reviews, and
-unread chat conversations.
+decisions, agents waiting for input, pending secrets, reviews, and unread chat
+conversations.
 
 Requires the web.inbox_dashboard experiment on the Hub. Under user access token
-(UAT) authentication, the token must carry the inbox:read scope; pending secret
-approvals are session-only and are shown as unavailable with a browser link.
+(UAT) authentication, the token must carry the inbox:read scope; pending secrets
+are session-only and are shown as unavailable with a browser link.
 
 Examples:
   scion inbox
@@ -257,13 +258,16 @@ func writeInboxCategory(out io.Writer, key string, cat hubclient.InboxCategory, 
 	}
 
 	if detail != "" {
-		_, _ = fmt.Fprintf(out, "%-15s %4s   %s\n", label, countStr, detail)
+		_, _ = fmt.Fprintf(out, "%-16s %4s   %s\n", label, countStr, detail)
 	} else {
-		_, _ = fmt.Fprintf(out, "%-15s %4s\n", label, countStr)
+		_, _ = fmt.Fprintf(out, "%-16s %4s\n", label, countStr)
 	}
 
 	if cat.State != hubclient.InboxStateOK {
 		return
+	}
+	if prose := formatInboxProse(key, cat.Count, cat.Capped, cat.Breakdown); prose != "" {
+		_, _ = fmt.Fprintf(out, "  %s\n", prose)
 	}
 	for _, raw := range cat.Previews {
 		if line := formatInboxPreview(key, raw); line != "" {
@@ -276,10 +280,12 @@ func inboxCategoryLabel(key string) string {
 	switch key {
 	case hubclient.InboxCategoryDecisions:
 		return "Decisions"
+	case "agent_secrets":
+		return "Agent Secrets"
 	case hubclient.InboxCategoryWaiting:
-		return "Agents waiting"
-	case hubclient.InboxCategoryApprovals:
-		return "Approvals"
+		return "Agents Waiting"
+	case hubclient.InboxCategoryPendingSecrets:
+		return "Pending Secrets"
 	case hubclient.InboxCategoryReviews:
 		return "Reviews"
 	case hubclient.InboxCategoryChat:
@@ -296,30 +302,18 @@ func inboxCategoryOKDetail(key string, cat hubclient.InboxCategory, hubBaseURL s
 		parts = append(parts, "scion decisions list")
 	case hubclient.InboxCategoryWaiting:
 		parts = append(parts, "scion look <agent>")
-	case hubclient.InboxCategoryApprovals:
+	case hubclient.InboxCategoryPendingSecrets:
 		if target := inboxWebTarget(hubBaseURL, cat.Href); target != "" {
 			parts = append(parts, target)
 		}
 	case hubclient.InboxCategoryReviews:
-		if len(cat.Breakdown) > 0 {
-			toAddr := cat.Breakdown["toAddress"]
-			req := cat.Breakdown["requested"]
-			parts = append(parts, fmt.Sprintf("(%d to address, %d requested)", toAddr, req))
-			if req > 0 {
-				parts = append(parts, "scion notifications")
-			}
+		if cat.Breakdown[hubclient.InboxBreakdownRequested] > 0 {
+			parts = append(parts, "scion notifications")
 		}
 		if target := inboxWebTarget(hubBaseURL, cat.Href); target != "" {
 			parts = append(parts, target)
 		}
 	case hubclient.InboxCategoryChat:
-		if len(cat.Breakdown) > 0 {
-			dms := cat.Breakdown["dms"]
-			mentions := cat.Breakdown["mentions"]
-			parts = append(parts, fmt.Sprintf("(%s, %s)",
-				pluralizeInbox(dms, "DM", "DMs"),
-				pluralizeInbox(mentions, "mention", "mentions")))
-		}
 		if target := inboxWebTarget(hubBaseURL, cat.Href); target != "" {
 			parts = append(parts, target)
 		}
@@ -384,8 +378,8 @@ func formatInboxPreview(category string, raw json.RawMessage) string {
 				return strings.Join(parts, " · ")
 			}
 		}
-	case hubclient.InboxCategoryApprovals:
-		var p hubclient.InboxApprovalPreview
+	case hubclient.InboxCategoryPendingSecrets:
+		var p hubclient.InboxPendingSecretPreview
 		if err := json.Unmarshal(raw, &p); err == nil {
 			var parts []string
 			if k := collapseSingleLine(p.Key); k != "" {

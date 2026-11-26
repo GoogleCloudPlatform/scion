@@ -247,6 +247,10 @@ export class ScionPageAgents extends LitElement {
   @state()
   private phaseFilter: AgentPhase | '' = '';
 
+  /** Activity filter hydrated from `?q=activity:<val>` when dialect is off. */
+  @state()
+  private activityFilter = '';
+
   /** The label input's live value: filters what is loaded while typing, with no request. */
   @state()
   private labelFilter = '';
@@ -709,34 +713,44 @@ export class ScionPageAgents extends LitElement {
       }
       this.applyInitialFilterQuery(this.filterQueryText);
     } else {
-      if (this.pageData?.user) {
-        const scope = localStorage.getItem('scion-scope-agents');
-        if (scope === 'mine' || scope === 'shared') {
-          this.agentScope = scope;
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlQ = urlParams.get('q')?.trim() ?? '';
+      const qActivity = /^activity:([a-z0-9_]+)$/i.exec(urlQ);
+      if (qActivity) {
+        // URL-hydrated activity filter takes precedence over persisted scope,
+        // phase, and mode filters for this load so pre-filtered links show the
+        // full matching set (ptone/scion#9300).
+        this.activityFilter = qActivity[1].toLowerCase();
+      } else {
+        if (this.pageData?.user) {
+          const scope = localStorage.getItem('scion-scope-agents');
+          if (scope === 'mine' || scope === 'shared') {
+            this.agentScope = scope;
+          }
         }
-      }
-      const storedPhase = localStorage.getItem('scion-filter-agents-phase');
-      if (
-        storedPhase === 'running' ||
-        storedPhase === 'stopping' ||
-        storedPhase === 'stopped' ||
-        storedPhase === 'suspended' ||
-        storedPhase === 'error'
-      ) {
-        this.phaseFilter = storedPhase;
-      }
-      // Read persisted mode filter (reset to All if a retired/unknown mode was persisted)
-      const storedMode = localStorage.getItem('scion-filter-agents-mode');
-      if (
-        storedMode &&
-        (storedMode === 'can_message' ||
-          storedMode === 'cannot_message' ||
-          Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
-      ) {
-        this.modeFilter = storedMode;
-      } else if (storedMode) {
-        localStorage.removeItem('scion-filter-agents-mode');
-        this.modeFilter = '';
+        const storedPhase = localStorage.getItem('scion-filter-agents-phase');
+        if (
+          storedPhase === 'running' ||
+          storedPhase === 'stopping' ||
+          storedPhase === 'stopped' ||
+          storedPhase === 'suspended' ||
+          storedPhase === 'error'
+        ) {
+          this.phaseFilter = storedPhase;
+        }
+        // Read persisted mode filter (reset to All if a retired/unknown mode was persisted)
+        const storedMode = localStorage.getItem('scion-filter-agents-mode');
+        if (
+          storedMode &&
+          (storedMode === 'can_message' ||
+            storedMode === 'cannot_message' ||
+            Object.hasOwn(MESSAGE_MODE_DISPLAY, storedMode))
+        ) {
+          this.modeFilter = storedMode;
+        } else if (storedMode) {
+          localStorage.removeItem('scion-filter-agents-mode');
+          this.modeFilter = '';
+        }
       }
     }
 
@@ -846,7 +860,46 @@ export class ScionPageAgents extends LitElement {
       pageSize: this.pagerPageSize,
       view: listViewOf(this.viewMode),
       modeFilter: this.modeFilter,
+      ...(this.activityFilter
+        ? {
+            hasClientOnlyFilter: true,
+            filterPredicate: (a: Agent) => this.matchesLegacyActivityFilters(a),
+          }
+        : {}),
     };
+  }
+
+  /**
+   * Composes the dialect-off URL-hydrated activity filter with the legacy
+   * phase and label filters so those controls keep working while the activity
+   * tag is active (AgentListWindow replaces phase/label filtering whenever
+   * filterPredicate is set).
+   */
+  private matchesLegacyActivityFilters(a: Agent): boolean {
+    if ((a.activity ?? '').toLowerCase() !== this.activityFilter) return false;
+    if (this.phaseFilter && a.phase !== this.phaseFilter) return false;
+    const labelFilter = this.labelFilter.trim();
+    if (labelFilter) {
+      if (!a.labels) return false;
+      const eq = labelFilter.indexOf('=');
+      if (eq >= 0) {
+        const key = labelFilter.slice(0, eq);
+        const val = labelFilter.slice(eq + 1);
+        if (val ? a.labels[key] !== val : !(key in a.labels)) return false;
+      } else if (!(labelFilter in a.labels)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private clearActivityFilter(): void {
+    this.activityFilter = '';
+    const params = new URLSearchParams(window.location.search);
+    params.delete('q');
+    replaceSearch(params);
+    this.agentWindow.setViewState({ hasClientOnlyFilter: false, filterPredicate: null });
+    this.onAgentViewStateChanged();
   }
 
   private applyInitialFilterQuery(raw: string): void {
@@ -1841,6 +1894,19 @@ export class ScionPageAgents extends LitElement {
               >
                 <sl-icon slot="prefix" name="tag"></sl-icon>
               </sl-input>
+              ${this.activityFilter
+                ? html`
+                    <sl-tag
+                      size="small"
+                      variant="primary"
+                      removable
+                      data-activity-filter-tag
+                      @sl-remove=${(): void => this.clearActivityFilter()}
+                    >
+                      activity:${this.activityFilter}
+                    </sl-tag>
+                  `
+                : nothing}
             `}
         ${useDialect
           ? nothing
