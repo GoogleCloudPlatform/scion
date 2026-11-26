@@ -136,8 +136,8 @@ writes YAML by default. The JSON schema lives at
 
 ## 6. Verification
 
-- **Sidebar**: Register new pages in `docs-site/astro.config.mjs` under the correct
-  mode group.
+- **Sidebar**: Register new pages in `docs-site/astro.config.mjs` under hand-listed
+  mode groups (`reference/` and `contributing/` autogenerate).
 - **Redirects**: When moving or renaming a page, add a redirect in the
   `legacyRedirectTargets` map in `docs-site/astro.config.mjs` so old URLs do not 404 on
   either `main` or versioned snapshots.
