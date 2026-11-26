@@ -40,9 +40,9 @@ import { ownerDeletedBadge, ownerDeletedStyles } from './artifact-owner-deleted.
 
 /** Shoelace badge variant for an agent's lifecycle phase. */
 export function phaseBadgeVariant(
-  phase: string
+  phase?: string | null
 ): 'success' | 'warning' | 'danger' | 'neutral' | 'primary' {
-  switch (phase.toLowerCase()) {
+  switch ((phase ?? '').toLowerCase()) {
     case 'running':
       return 'success';
     case 'starting':

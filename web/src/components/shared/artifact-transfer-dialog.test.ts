@@ -258,6 +258,23 @@ describe('artifact transfer dialog', () => {
     expect(button(el, 'Transfer ownership').hasAttribute('disabled')).toBe(true);
   });
 
+  it('handles missing or null agent phase without throwing', async () => {
+    mockFetch({
+      targets: [
+        {
+          id: NEW_OWNER,
+          slug: 'agent-no-phase',
+          name: 'Agent No Phase',
+          phase: undefined as unknown as string,
+        },
+      ],
+    });
+    const el = await mount();
+    const badge = el.shadowRoot!.querySelector('sl-option sl-badge')!;
+    expect(badge.getAttribute('variant')).toBe('neutral');
+    expect(badge.textContent!.trim()).toBe('unknown');
+  });
+
   it('shows empty state with project name and omits submit when no eligible agents exist', async () => {
     mockFetch({ targets: [] });
     const el = await mount({ projectName: 'Docs' });
