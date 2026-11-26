@@ -190,7 +190,10 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
 
 - **MCP:** pi supports stdio and streamable HTTP; SSE servers are skipped
   with a warning.
-- **Usage/tokens:** no token mapping, so `SCION_USAGE_SOURCE` is not set.
+- **Usage/tokens:** `SCION_USAGE_SOURCE` is set to `hooks` via the
+  `scion-bridge.js` assistant `message_end` hook (input, output, cache read,
+  cache write, reasoning, and failed calls); compaction and branch-summary
+  calls are not visible to Track 1, and zero or missing fields are omitted.
 - **In-session `/new`, `/resume`, `/fork` are new sessions; `/reload` is in
   place:** the bridge forwards pi's `session_start` reason as the
   session-start source. Scion classifies `reload` as an in-place restart,
