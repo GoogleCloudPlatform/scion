@@ -398,12 +398,6 @@ func (s *Server) publishSecretRequestRowUpdated(ctx context.Context, row *store.
 	return chatKey
 }
 
-func (s *Server) publishSecretRequestUpdated(ctx context.Context, row *store.SecretRequest, replacedBy *store.SecretRequest) {
-	if chatKey := s.publishSecretRequestRowUpdated(ctx, row, replacedBy); chatKey != "" {
-		s.publishDMActionInboxHint(ctx, chatKey, InboxCategoryAgentSecrets)
-	}
-}
-
 func (s *Server) publishSecretRequestsDMHintsOnce(ctx context.Context, hinted map[string]struct{}, msgID, chatKey string) {
 	if chatKey == "" {
 		return

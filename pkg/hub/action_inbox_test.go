@@ -679,7 +679,8 @@ func TestSecretRequest_DMUpdateEmitsInboxHint(t *testing.T) {
 	dmRes := seedDMSecretRequest(t, f.store, f.project.ID, f.agent.ID, f.agent.Name, f.alice.ID, base, []messages.SecretRequest{
 		{Key: "HINT_DM_KEY", KeyNorm: "HINT_DM_KEY", SecretType: "environment"},
 	})
-	f.srv.publishSecretRequestUpdated(ctx, dmRes.Requests[0].Row, nil)
+	dmChatKey := f.srv.publishSecretRequestRowUpdated(ctx, dmRes.Requests[0].Row, nil)
+	f.srv.publishSecretRequestsDMHintsOnce(ctx, make(map[string]struct{}), dmRes.Requests[0].Row.MessageID, dmChatKey)
 
 	select {
 	case ev := <-ch:
@@ -695,7 +696,8 @@ func TestSecretRequest_DMUpdateEmitsInboxHint(t *testing.T) {
 	threadRes := seedThreadSecretRequest(t, f.store, f.project.ID, f.agent.ID, f.agent.Name, topicA, base.Add(time.Second), []messages.SecretRequest{
 		{Key: "HINT_THREAD_KEY", KeyNorm: "HINT_THREAD_KEY", SecretType: "environment"},
 	}, false)
-	f.srv.publishSecretRequestUpdated(ctx, threadRes.Requests[0].Row, nil)
+	threadChatKey := f.srv.publishSecretRequestRowUpdated(ctx, threadRes.Requests[0].Row, nil)
+	f.srv.publishSecretRequestsDMHintsOnce(ctx, make(map[string]struct{}), threadRes.Requests[0].Row.MessageID, threadChatKey)
 
 	select {
 	case ev := <-ch:
