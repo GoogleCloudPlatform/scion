@@ -40,8 +40,8 @@ for (const vp of VIEWPORTS) {
       await expect(panel.locator('.last-run')).toContainText(
         '1,284 decisions, 1,190 answers deleted in 6 projects'
       );
-      await expect(panel.locator('.preview')).toHaveText(
-        'Preview estimate: 2,310 decisions would be deleted now.'
+      await expect(panel.locator('.preview')).toContainText(
+        '180-day default): 2,310 decisions would be deleted now.'
       );
       await expect(panel.locator('tr.override-row')).toHaveCount(2);
       await expect(panel.locator('tr.override-row').first()).toContainText('payments-api');

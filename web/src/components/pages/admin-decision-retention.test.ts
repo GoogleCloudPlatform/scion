@@ -253,14 +253,29 @@ describe('lastDecisionRunSummary and lastDecisionPreviewSummary', () => {
     expect(text).toContain('1,284 decisions, 1,190 answers deleted in 6 projects');
   });
 
-  it('formats preview count as an estimate', () => {
+  it('formats preview count as an estimate stamped with time and saved policy', () => {
     expect(lastDecisionPreviewSummary([])).toBe('');
     expect(lastDecisionPreviewSummary([], true)).toBe('Preview running…');
-    expect(
-      lastDecisionPreviewSummary([
-        run({ trigger: 'preview', dry_run: true, totals: { decisions: 2310, answers: 2100 } }),
-      ])
-    ).toBe('Preview estimate: 2,310 decisions would be deleted now.');
+    const summary = lastDecisionPreviewSummary([
+      run({
+        trigger: 'preview',
+        dry_run: true,
+        retention_days: 180,
+        totals: { decisions: 2310, answers: 2100 },
+      }),
+    ]);
+    expect(summary).toMatch(
+      /^Preview estimate \(.*2026.*, 180-day default\): 2,310 decisions would be deleted now\.$/
+    );
+    const noWindow = lastDecisionPreviewSummary([
+      run({
+        trigger: 'preview',
+        dry_run: true,
+        retention_days: 0,
+        totals: { decisions: 0, answers: 0 },
+      }),
+    ]);
+    expect(noWindow).toContain('no hub default');
     expect(
       lastDecisionPreviewSummary([
         run({ trigger: 'preview', dry_run: true, status: 'failed', error: 'deadline' }),
@@ -427,8 +442,11 @@ describe('scion-admin-decision-retention', () => {
       expect(q(el, '.last-run')?.textContent).toContain(
         '1,284 decisions, 1,190 answers deleted in 6 projects'
       );
-      expect(q(el, '.preview')?.textContent).toBe(
-        'Preview estimate: 2,310 decisions would be deleted now.'
+      expect(q(el, '.preview')?.textContent).toMatch(
+        /^Preview estimate \(.*2026.*, 180-day default\): 2,310 decisions would be deleted now\.$/
+      );
+      expect(q(el, '.preview-saved-hint')?.textContent).toContain(
+        'Preview evaluates the saved settings.'
       );
 
       const rows = Array.from(el.shadowRoot?.querySelectorAll('tr.override-row') ?? []);
@@ -575,6 +593,37 @@ describe('scion-admin-decision-retention', () => {
       expect(q(el, '.save-errors')?.textContent).toContain('changed by another administrator');
       expect(q<HTMLInputElement>(el, '.retention-days')?.value).toBe('180');
       expect(q(el, '.meta')?.textContent).toContain('Revision: 9');
+    });
+
+    it('does not show a stale 0-decision saved preview in the save confirmation dialog when enabling a new window', async () => {
+      current = settings({
+        enabled: false,
+        retention_days: null,
+        runs: [
+          run({
+            id: 'p0',
+            trigger: 'preview',
+            dry_run: true,
+            retention_days: 0,
+            totals: { decisions: 0, answers: 0 },
+          }),
+        ],
+      });
+      const el = await mount();
+      const sw = q<HTMLInputElement>(el, '.retention-enabled');
+      if (sw) sw.checked = true;
+      sw?.dispatchEvent(new Event('sl-change'));
+      await el.updateComplete;
+      await type(el, '.retention-days', '30');
+      await save(el);
+
+      const dialog = q(el, '.confirm-dialog');
+      expect(dialog?.hasAttribute('open')).toBe(true);
+      expect(dialog?.textContent).not.toContain('0 decisions');
+      expect(q(el, '.confirm-preview-note')?.textContent).toContain(
+        'Preview counts reflect the saved settings, not this change.'
+      );
+      expect(puts()).toEqual([]);
     });
 
     it('says the experiment is off when the hub answers 404', async () => {

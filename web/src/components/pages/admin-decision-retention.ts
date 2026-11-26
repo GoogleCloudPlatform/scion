@@ -347,8 +347,9 @@ export function lastDecisionRunSummary(runs: DecisionRetentionRun[] | null | und
 }
 
 /**
- * The one-line estimate from the most recent dry-run preview. Worded as an
- * estimate because rows can age past the cutoff during a subsequent manual run.
+ * The one-line estimate from the most recent dry-run preview, stamped with its
+ * start time and saved hub default window. Worded as an estimate because rows
+ * can age past the cutoff during a subsequent manual run.
  */
 export function lastDecisionPreviewSummary(
   runs: DecisionRetentionRun[] | null | undefined,
@@ -362,7 +363,11 @@ export function lastDecisionPreviewSummary(
     return `Last preview failed${preview.error ? `: ${preview.error}` : '.'}`;
   }
   const decisions = preview.totals?.decisions ?? 0;
-  return `Preview estimate: ${plural(decisions, 'decision', 'decisions')} would be deleted now.`;
+  const when = formatWhen(preview.started_at);
+  const policyLabel =
+    preview.retention_days > 0 ? `${preview.retention_days}-day default` : 'no hub default';
+  const stamp = when ? `${when}, ${policyLabel}` : policyLabel;
+  return `Preview estimate (${stamp}): ${plural(decisions, 'decision', 'decisions')} would be deleted now.`;
 }
 
 function effectiveDaysForProject(
@@ -668,6 +673,10 @@ export class ScionAdminDecisionRetention extends LitElement {
     .preview {
       font-size: 0.8rem;
       color: var(--scion-text-secondary, #475569);
+    }
+    .preview-saved-hint {
+      text-align: right;
+      margin-top: 0.25rem;
     }
   `;
 
@@ -1111,6 +1120,7 @@ export class ScionAdminDecisionRetention extends LitElement {
           >Save</sl-button
         >
       </div>
+      <div class="hint preview-saved-hint">Preview evaluates the saved settings.</div>
       ${this.renderConfirmDialog()} ${this.renderManualRunDialog()}
     `;
   }
@@ -1231,7 +1241,6 @@ export class ScionAdminDecisionRetention extends LitElement {
     const body = this.pendingSave;
     const s = this.settings;
     const enabling = body !== null && s !== null && !s.enabled;
-    const previewSummary = lastDecisionPreviewSummary(s?.runs);
     return html`
       <sl-dialog
         class="confirm-dialog"
@@ -1248,7 +1257,9 @@ export class ScionAdminDecisionRetention extends LitElement {
             : 'This change shortens or activates a decision retention window and permanently deletes older settled decisions.'}
           Deleted decisions and answers cannot be restored; take a database backup first.
         </p>
-        ${previewSummary ? html`<p class="confirm-preview">${previewSummary}</p>` : nothing}
+        <p class="hint confirm-preview-note">
+          Preview counts reflect the saved settings, not this change.
+        </p>
         <sl-button
           slot="footer"
           class="confirm-cancel"
