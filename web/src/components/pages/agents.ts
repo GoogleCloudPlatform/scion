@@ -45,11 +45,10 @@ import {
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import {
-  canForceSuspend,
-  FORCE_SUSPEND_CONFIRM_OPTIONS,
-  forceSuspendConfirmMessage,
   isNeverSuspendActive,
   neverSuspendBadge,
+  resolveSuspendAction,
+  showSuspendAction,
 } from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
@@ -1394,13 +1393,10 @@ export class ScionPageAgents extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     const shown = this.findShownAgent(agentId);
-    if (action === 'suspend' && shown && isNeverSuspendActive(shown)) {
-      if (
-        !(await showConfirm(forceSuspendConfirmMessage(shown.name), FORCE_SUSPEND_CONFIRM_OPTIONS))
-      ) {
-        return;
-      }
-      action = 'force-suspend';
+    if (action === 'suspend' && shown) {
+      const resolved = await resolveSuspendAction(shown);
+      if (!resolved) return;
+      action = resolved;
     }
 
     if (action === 'force-resume') {
@@ -2139,9 +2135,7 @@ export class ScionPageAgents extends LitElement {
       ${isAgentRunning(agent)
         ? lifecycleOk
           ? html`
-              ${agent.harnessCapabilities?.resume?.support !== 'no' &&
-              (!isNeverSuspendActive(agent) ||
-                canForceSuspend(agent._capabilities, this.pageData?.user))
+              ${showSuspendAction(agent)
                 ? html`
                     <sl-tooltip
                       content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}

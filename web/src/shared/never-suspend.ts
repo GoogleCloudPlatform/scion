@@ -25,8 +25,8 @@
 import { html, nothing, type TemplateResult } from 'lit';
 
 import { neverSuspendEnabled } from '../utils/feature-flags.js';
-import { can, type Agent, type Capabilities, type User } from './types.js';
-import type { ConfirmOptions } from '../components/shared/confirm-dialog.js';
+import { can, type Agent, type Capabilities } from './types.js';
+import { showConfirm, type ConfirmOptions } from '../components/shared/confirm-dialog.js';
 
 /**
  * Reports whether an agent's never-suspend policy is active for presentation
@@ -41,21 +41,46 @@ export function isNeverSuspendActive(
 /**
  * Reports whether the current browser user may force-suspend a flagged agent.
  *
- * Force-suspend requires `agent.lifecycle` and a human user/dev principal;
- * agent principals and federated users cannot force-suspend. Interactive
- * browser sessions are always human user/dev principals unless marked
- * federated.
+ * Force-suspend requires `agent.lifecycle` and an allowlisted human (`user` or
+ * `dev`) principal. Interactive browser sessions are always human `user`/`dev`
+ * principals (agent and federated principals cannot hold web sessions), so the
+ * `lifecycle` capability is sufficient for UI gating; the Hub enforces the
+ * principal-kind check server-side.
  */
-export function canForceSuspend(
-  capabilities: Capabilities | undefined,
-  user?: (User & { federated?: boolean; principalKind?: string }) | null
+export function canForceSuspend(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'lifecycle');
+}
+
+/**
+ * Reports whether the Suspend action button should be rendered for `agent`.
+ * Checks that the agent's harness does not declare `resume.support === 'no'`
+ * and that the caller holds `lifecycle` (which also gates force-suspend on
+ * flagged agents in browser sessions).
+ */
+export function showSuspendAction(
+  agent: Pick<Agent, 'suspendPolicy' | 'harnessCapabilities' | '_capabilities'>,
+  capabilities: Capabilities | undefined = agent._capabilities
 ): boolean {
-  if (!can(capabilities, 'lifecycle')) return false;
-  if (user?.federated) return false;
-  if (user?.principalKind && user.principalKind !== 'user' && user.principalKind !== 'dev') {
-    return false;
-  }
-  return true;
+  if (agent.harnessCapabilities?.resume?.support === 'no') return false;
+  return canForceSuspend(capabilities);
+}
+
+/**
+ * Resolves a Suspend (or Keep suspended) click into the lifecycle action to
+ * send: `'suspend'` for unflagged agents (or when the experiment is off),
+ * `'force-suspend'` after the user confirms the dialog on a flagged agent, or
+ * `null` if the user cancelled the confirmation dialog.
+ */
+export async function resolveSuspendAction(
+  agent: Pick<Agent, 'name' | 'suspendPolicy'>,
+  options?: { keepSuspended?: boolean }
+): Promise<'suspend' | 'force-suspend' | null> {
+  if (!isNeverSuspendActive(agent)) return 'suspend';
+  const message = options?.keepSuspended
+    ? forceKeepSuspendedConfirmMessage(agent.name)
+    : forceSuspendConfirmMessage(agent.name);
+  const confirmed = await showConfirm(message, FORCE_SUSPEND_CONFIRM_OPTIONS);
+  return confirmed ? 'force-suspend' : null;
 }
 
 /** Confirmation copy for force-suspending a never-suspend agent. */

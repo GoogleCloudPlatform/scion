@@ -14,15 +14,23 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { nothing, render } from 'lit';
+
+const confirmMock = vi.fn<(message: string, opts?: unknown) => Promise<boolean>>();
+vi.mock('../components/shared/confirm-dialog.js', () => ({
+  showConfirm: (message: string, opts?: unknown): Promise<boolean> => confirmMock(message, opts),
+}));
 
 import {
   canForceSuspend,
+  FORCE_SUSPEND_CONFIRM_OPTIONS,
   forceKeepSuspendedConfirmMessage,
   forceSuspendConfirmMessage,
   isNeverSuspendActive,
   neverSuspendBadge,
+  resolveSuspendAction,
+  showSuspendAction,
 } from './never-suspend.js';
 import { lifecycleActionRequestInit } from './types.js';
 import {
@@ -46,6 +54,7 @@ function hubError(status: number, code: string, message: string): Response {
 
 describe('never-suspend helpers', () => {
   beforeEach(() => {
+    confirmMock.mockReset();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
   });
@@ -69,53 +78,66 @@ describe('never-suspend helpers', () => {
     expect(isNeverSuspendActive(null)).toBe(false);
   });
 
-  it('canForceSuspend requires lifecycle capability and human user/dev principal', () => {
+  it('canForceSuspend requires lifecycle capability', () => {
+    expect(canForceSuspend({ actions: ['read', 'lifecycle'] })).toBe(true);
+    expect(canForceSuspend({ actions: ['read'] })).toBe(false);
+    expect(canForceSuspend({ actions: [] })).toBe(false);
+    expect(canForceSuspend(undefined)).toBe(false);
+  });
+
+  it('showSuspendAction requires resumable harness and lifecycle capability', () => {
     const lifecycleCap = { actions: ['read', 'lifecycle'] };
     const readOnlyCap = { actions: ['read'] };
 
-    expect(canForceSuspend(readOnlyCap)).toBe(false);
-    expect(canForceSuspend(undefined)).toBe(false);
-    expect(canForceSuspend(lifecycleCap)).toBe(true);
+    expect(showSuspendAction({ suspendPolicy: 'never', _capabilities: lifecycleCap })).toBe(true);
+    expect(showSuspendAction({ suspendPolicy: 'never', _capabilities: readOnlyCap })).toBe(false);
+    expect(showSuspendAction({ suspendPolicy: 'auto', _capabilities: readOnlyCap })).toBe(false);
     expect(
-      canForceSuspend(lifecycleCap, {
-        id: 'u1',
-        email: 'a@example.com',
-        name: 'Alice',
-        principalKind: 'user',
+      showSuspendAction({
+        suspendPolicy: 'never',
+        _capabilities: lifecycleCap,
+        harnessCapabilities: { resume: { support: 'no' } },
       })
+    ).toBe(false);
+    expect(
+      showSuspendAction({ suspendPolicy: 'never', _capabilities: readOnlyCap }, lifecycleCap)
     ).toBe(true);
+  });
+
+  it('resolveSuspendAction confirms flagged agents when experiment is on and skips dialog otherwise', async () => {
+    // Experiment off + flagged -> plain suspend, no dialog
+    expect(await resolveSuspendAction({ name: 'lead', suspendPolicy: 'never' })).toBe('suspend');
+    expect(confirmMock).not.toHaveBeenCalled();
+
+    // Experiment on + unflagged -> plain suspend, no dialog
+    setFeatureFlag(NEVER_SUSPEND_FLAG, true);
+    expect(await resolveSuspendAction({ name: 'worker', suspendPolicy: 'auto' })).toBe('suspend');
+    expect(await resolveSuspendAction({ name: 'worker' })).toBe('suspend');
+    expect(confirmMock).not.toHaveBeenCalled();
+
+    // Experiment on + flagged + confirm -> force-suspend
+    confirmMock.mockResolvedValueOnce(true);
+    expect(await resolveSuspendAction({ name: 'lead', suspendPolicy: 'never' })).toBe(
+      'force-suspend'
+    );
+    expect(confirmMock).toHaveBeenCalledWith(
+      forceSuspendConfirmMessage('lead'),
+      FORCE_SUSPEND_CONFIRM_OPTIONS
+    );
+
+    // Experiment on + flagged + cancel -> null (no request)
+    confirmMock.mockResolvedValueOnce(false);
+    expect(await resolveSuspendAction({ name: 'lead', suspendPolicy: 'never' })).toBeNull();
+
+    // Keep suspended uses keep-suspended confirm copy
+    confirmMock.mockResolvedValueOnce(true);
     expect(
-      canForceSuspend(lifecycleCap, {
-        id: 'dev',
-        email: 'dev@example.com',
-        name: 'Dev',
-        principalKind: 'dev',
-      })
-    ).toBe(true);
-    expect(
-      canForceSuspend(lifecycleCap, {
-        id: 'f1',
-        email: 'v@remote.example',
-        name: 'Visitor',
-        federated: true,
-      })
-    ).toBe(false);
-    expect(
-      canForceSuspend(lifecycleCap, {
-        id: 'a1',
-        email: '',
-        name: 'Agent',
-        principalKind: 'agent',
-      })
-    ).toBe(false);
-    expect(
-      canForceSuspend(lifecycleCap, {
-        id: 'v1',
-        email: 'v@remote.example',
-        name: 'Visitor',
-        principalKind: 'federated',
-      })
-    ).toBe(false);
+      await resolveSuspendAction({ name: 'lead', suspendPolicy: 'never' }, { keepSuspended: true })
+    ).toBe('force-suspend');
+    expect(confirmMock).toHaveBeenLastCalledWith(
+      forceKeepSuspendedConfirmMessage('lead'),
+      FORCE_SUSPEND_CONFIRM_OPTIONS
+    );
   });
 
   it('neverSuspendBadge renders nothing when inactive and a badge when active', () => {
@@ -139,13 +161,13 @@ describe('never-suspend helpers', () => {
     expect(JSON.parse(init.body as string)).toEqual({ force: true });
   });
 
-  it('formats 409 agent_never_suspend and 403 force_suspend_forbidden sensibly', async () => {
-    expect(
-      await lifecycleActionErrorMessage(
-        hubError(409, 'agent_never_suspend', 'agent "lead" has suspend policy "never"'),
-        'fallback'
-      )
-    ).toBe(AGENT_NEVER_SUSPEND_MESSAGE);
+  it('formats 409 agent_never_suspend (with reload hint) and 403 force_suspend_forbidden sensibly', async () => {
+    const msg409 = await lifecycleActionErrorMessage(
+      hubError(409, 'agent_never_suspend', 'agent "lead" has suspend policy "never"'),
+      'fallback'
+    );
+    expect(msg409).toBe(AGENT_NEVER_SUSPEND_MESSAGE);
+    expect(msg409).toContain('Reload to see the current policy');
 
     expect(
       await lifecycleActionErrorMessage(

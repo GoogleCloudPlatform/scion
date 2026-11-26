@@ -33,6 +33,7 @@ import type { ScionPageAgentCreate } from './agent-create.js';
 import type { ScionPageAgentEdit } from './agent-edit.js';
 import type { ScionPageAgentDetail } from './agent-detail.js';
 import type { ScionPageAgents } from './agents.js';
+import type { ScionPageProjectDetail } from './project-detail.js';
 import {
   NEVER_SUSPEND_FLAG,
   resetServerFlagStateForTests,
@@ -443,18 +444,17 @@ describe('Never-suspend agent detail (scion-page-agent-detail)', () => {
     expect(suspendCalls.length).toBe(0);
   });
 
-  it('hides Suspend button on a flagged agent for federated users who cannot force', async () => {
+  it('hides Suspend button on a flagged agent when _capabilities lacks lifecycle', async () => {
     setFeatureFlag(NEVER_SUSPEND_FLAG, true);
-    const federatedUser = {
-      id: 'v1',
-      email: 'visitor@remote.example',
-      name: 'Visitor',
-      federated: true,
-    } as PageData['user'];
+    agentData = makeAgent({
+      suspendPolicy: 'never',
+      phase: 'running',
+      _capabilities: { actions: ['read', 'update'] },
+    });
     const el = await mountDetail({
       path: '/agents/agent-1',
       title: 'Agent',
-      user: federatedUser,
+      user: { id: 'u2', email: 'viewer@example.com', name: 'Viewer', role: 'viewer' },
     });
     expect(el.shadowRoot?.querySelector('[data-testid="header-suspend"]')).toBeNull();
   });
@@ -544,5 +544,94 @@ describe('Never-suspend hub-wide agents view (scion-page-agents)', () => {
     expect(cells.length).toBe(2);
     expect(cells[0].querySelector('[data-testid="never-suspend-badge"]')).not.toBeNull();
     expect(cells[1].textContent?.trim()).toBe('Auto');
+  });
+});
+
+describe('Never-suspend project detail (scion-page-project-detail)', () => {
+  let suspendCalls: Array<{ url: string; body: string | null }>;
+
+  beforeAll(async () => {
+    await import('./project-detail.js');
+  });
+
+  beforeEach(() => {
+    toasts.length = 0;
+    suspendCalls = [];
+    confirmMock.mockReset();
+    confirmMock.mockResolvedValue(true);
+    localStorage.setItem('scion-view-project-agents', 'list');
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+    window.history.pushState({}, '', '/projects/proj-1');
+    vi.stubGlobal('EventSource', FakeEventSource);
+
+    const flagged = makeAgent({ id: 'agent-1', name: 'pinned-lead', suspendPolicy: 'never' });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input);
+        const method = (init?.method ?? 'GET').toUpperCase();
+        if (url.endsWith('/api/v1/agents/agent-1/suspend') && method === 'POST') {
+          suspendCalls.push({
+            url,
+            body: typeof init?.body === 'string' ? init.body : null,
+          });
+          return Promise.resolve(jsonResponse({ ...flagged, phase: 'suspended' }));
+        }
+        if (url.includes('/api/v1/projects/proj-1/agents')) {
+          return Promise.resolve(
+            jsonResponse({
+              agents: [flagged],
+              totalCount: 1,
+              stats: { total: 1, running: 1 },
+            })
+          );
+        }
+        if (url.endsWith('/api/v1/projects/proj-1')) {
+          return Promise.resolve(
+            jsonResponse({
+              id: 'proj-1',
+              name: 'Alpha',
+              slug: 'alpha',
+              status: 'active',
+              _capabilities: { actions: ['read', 'update'] },
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    document.body.innerHTML = '';
+    localStorage.removeItem('scion-view-project-agents');
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+  });
+
+  it('clicks Suspend on a flagged agent row and sends force=true after confirmation', async () => {
+    setFeatureFlag(NEVER_SUSPEND_FLAG, true);
+    const el = document.createElement('scion-page-project-detail') as ScionPageProjectDetail;
+    el.pageData = {
+      path: '/projects/proj-1',
+      title: 'Alpha',
+      user: { id: 'u1', email: 'alice@example.com', name: 'Alice', role: 'admin' },
+    };
+    document.body.appendChild(el);
+
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('[data-testid="agent-row-suspend"]')).not.toBeNull();
+    });
+
+    (el.shadowRoot!.querySelector('[data-testid="agent-row-suspend"]') as HTMLElement).click();
+
+    await vi.waitFor(() => {
+      expect(confirmMock).toHaveBeenCalledTimes(1);
+      expect(suspendCalls.length).toBe(1);
+    });
+    expect(JSON.parse(suspendCalls[0].body!)).toEqual({ force: true });
   });
 });

@@ -607,7 +607,7 @@ create or `PATCH` requests that set `suspendPolicy` with `400 experiment_disable
 
 ### Setting and Changing the Policy
 
-- **CLI at create or start** (host and agent modes):
+- **CLI at create or start** (human and agent modes):
 
   ```bash
   scion create standing-lead --never-suspend

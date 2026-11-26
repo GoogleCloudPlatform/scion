@@ -89,11 +89,10 @@ import {
 } from '../../shared/agent-state-display.js';
 import {
   canForceSuspend,
-  FORCE_SUSPEND_CONFIRM_OPTIONS,
-  forceKeepSuspendedConfirmMessage,
-  forceSuspendConfirmMessage,
   isNeverSuspendActive,
   neverSuspendBadge,
+  resolveSuspendAction,
+  showSuspendAction,
 } from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
@@ -1585,16 +1584,10 @@ export class ScionPageAgentDetail extends LitElement {
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
     if (!this.agent) return;
 
-    if (action === 'suspend' && isNeverSuspendActive(this.agent)) {
-      if (
-        !(await showConfirm(
-          forceSuspendConfirmMessage(this.agent.name),
-          FORCE_SUSPEND_CONFIRM_OPTIONS
-        ))
-      ) {
-        return;
-      }
-      action = 'force-suspend';
+    if (action === 'suspend') {
+      const resolved = await resolveSuspendAction(this.agent);
+      if (!resolved) return;
+      action = resolved;
     }
 
     if (action === 'force-resume') {
@@ -1667,7 +1660,7 @@ export class ScionPageAgentDetail extends LitElement {
   private renderKeepSuspended(agent: Agent) {
     const hubSuspended = agent.suspendReason === 'idle' || agent.suspendReason === 'stalled';
     if (!hubSuspended || !idleSuspendEnabled()) return nothing;
-    if (isNeverSuspendActive(agent) && !canForceSuspend(agent._capabilities, this.pageData?.user)) {
+    if (isNeverSuspendActive(agent) && !canForceSuspend(agent._capabilities)) {
       return nothing;
     }
     return html`
@@ -1691,18 +1684,8 @@ export class ScionPageAgentDetail extends LitElement {
   /** Converts a hub suspension to a user suspension (POST suspend on a suspended agent). */
   private async keepSuspended(): Promise<void> {
     if (!this.agent) return;
-    let action: AgentLifecycleAction = 'suspend';
-    if (isNeverSuspendActive(this.agent)) {
-      if (
-        !(await showConfirm(
-          forceKeepSuspendedConfirmMessage(this.agent.name),
-          FORCE_SUSPEND_CONFIRM_OPTIONS
-        ))
-      ) {
-        return;
-      }
-      action = 'force-suspend';
-    }
+    const action = await resolveSuspendAction(this.agent, { keepSuspended: true });
+    if (!action) return;
     this.actionLoading = { ...this.actionLoading, 'keep-suspended': true };
     try {
       const response = await apiFetch(
@@ -2511,9 +2494,7 @@ export class ScionPageAgentDetail extends LitElement {
             ? html`
                 ${lifecycleOk
                   ? html`
-                      ${agent.harnessCapabilities?.resume?.support !== 'no' &&
-                      (!isNeverSuspendActive(agent) ||
-                        canForceSuspend(agent._capabilities, this.pageData?.user))
+                      ${showSuspendAction(agent)
                         ? html`
                             <sl-button
                               variant="warning"

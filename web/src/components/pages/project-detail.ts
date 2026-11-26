@@ -47,11 +47,10 @@ import {
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import {
-  canForceSuspend,
-  FORCE_SUSPEND_CONFIRM_OPTIONS,
-  forceSuspendConfirmMessage,
   isNeverSuspendActive,
   neverSuspendBadge,
+  resolveSuspendAction,
+  showSuspendAction,
 } from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
@@ -2630,13 +2629,10 @@ export class ScionPageProjectDetail extends LitElement {
     event?: MouseEvent
   ): Promise<void> {
     const shown = this.findShownAgent(agentId);
-    if (action === 'suspend' && shown && isNeverSuspendActive(shown)) {
-      if (
-        !(await showConfirm(forceSuspendConfirmMessage(shown.name), FORCE_SUSPEND_CONFIRM_OPTIONS))
-      ) {
-        return;
-      }
-      action = 'force-suspend';
+    if (action === 'suspend' && shown) {
+      const resolved = await resolveSuspendAction(shown);
+      if (!resolved) return;
+      action = resolved;
     }
 
     if (action === 'force-resume') {
@@ -4355,9 +4351,7 @@ export class ScionPageProjectDetail extends LitElement {
             ${isAgentRunning(agent)
               ? lifecycleOk
                 ? html`
-                    ${agent.harnessCapabilities?.resume?.support !== 'no' &&
-                    (!isNeverSuspendActive(agent) ||
-                      canForceSuspend(agent._capabilities, this.pageData?.user))
+                    ${showSuspendAction(agent)
                       ? html`
                           <sl-tooltip
                             content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
@@ -4366,6 +4360,7 @@ export class ScionPageProjectDetail extends LitElement {
                               variant="warning"
                               size="small"
                               outline
+                              data-testid="agent-row-suspend"
                               ?loading=${isLoading}
                               ?disabled=${isLoading}
                               @click=${() => this.handleAgentAction(agent.id, 'suspend')}
@@ -4528,9 +4523,7 @@ export class ScionPageProjectDetail extends LitElement {
           ${isAgentRunning(agent)
             ? lifecycleOk
               ? html`
-                  ${agent.harnessCapabilities?.resume?.support !== 'no' &&
-                  (!isNeverSuspendActive(agent) ||
-                    canForceSuspend(agent._capabilities, this.pageData?.user))
+                  ${showSuspendAction(agent)
                     ? html`
                         <sl-tooltip
                           content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
@@ -4539,6 +4532,7 @@ export class ScionPageProjectDetail extends LitElement {
                             variant="warning"
                             size="small"
                             outline
+                            data-testid="agent-card-suspend"
                             ?loading=${isLoading}
                             ?disabled=${isLoading}
                             @click=${() => this.handleAgentAction(agent.id, 'suspend')}

@@ -226,7 +226,7 @@ export async function runAgentDelete(opts: AgentDeleteOptions): Promise<AgentDel
  * `force: true` (409 `agent_never_suspend`).
  */
 export const AGENT_NEVER_SUSPEND_MESSAGE =
-  'This agent has Never suspend enabled and cannot be suspended without forcing it.';
+  'This agent has Never suspend enabled and cannot be suspended without forcing it. Reload to see the current policy.';
 
 /**
  * Toast text when the hub refuses a forced suspend because the caller is not
