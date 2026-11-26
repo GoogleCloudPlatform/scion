@@ -577,6 +577,45 @@ describe('the phone drawer', () => {
     expect(root.element.dataset.phoneDrawer).toBe('open');
   });
 
+  it('refresh() keeps an open place menu open on wide viewports', async () => {
+    await mount();
+    const widePlaceBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    widePlaceBtn.click();
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    expect(placeMenu.hidden).toBe(false);
+    (root as unknown as { refresh(): void }).refresh();
+    expect(placeMenu.hidden).toBe(false);
+  });
+
+  it('refresh() keeps an open place menu open inside an open phone drawer, while closing the drawer or leaving drawer mode closes it', async () => {
+    mockNarrowViewport();
+    const pane = await mount();
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+
+    const placeMenu = root.element.querySelector<HTMLElement>('.terminal-place-menu')!;
+    const placeBtn = rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!;
+    placeBtn.click();
+    expect(placeMenu.hidden).toBe(false);
+    (root as unknown as { refresh(): void }).refresh();
+    expect(placeMenu.hidden).toBe(false);
+
+    // Closing the drawer closes the place menu.
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('closed');
+    expect(placeMenu.hidden).toBe(true);
+
+    // Leaving drawer mode (closing the last terminal) also closes the place menu.
+    toggle(pane);
+    expect(root.element.dataset.phoneDrawer).toBe('open');
+    rail().querySelector<HTMLButtonElement>('[data-rail-focus-id$=":place"]')!.click();
+    expect(placeMenu.hidden).toBe(false);
+    pane.session!.close();
+    await flush();
+    expect(root.element.dataset.phoneDrawer).toBe('off');
+    expect(placeMenu.hidden).toBe(true);
+  });
+
   it('re-inserting detached banners while the header is inside the drawer does not throw', async () => {
     mockNarrowViewport();
     await mount();

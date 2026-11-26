@@ -1706,12 +1706,16 @@ export class TerminalWorkspaceRoot {
    */
   private syncDrawer(): void {
     const open = this.drawerMode && this.drawerOpen;
-    this.element.dataset.phoneDrawer = this.drawerMode ? (open ? 'open' : 'closed') : 'off';
+    const nextState = this.drawerMode ? (open ? 'open' : 'closed') : 'off';
+    const prevState = this.element.dataset.phoneDrawer;
+    this.element.dataset.phoneDrawer = nextState;
+    if (prevState !== undefined && prevState !== nextState && !this.placeMenu.hidden) {
+      this.closePlaceMenu();
+    }
     this.rail.inert = this.drawerMode && !open;
     if (this.paneArea) this.paneArea.inert = open;
     this.testHubBannerHost.inert = open;
     this.viewAsMemberBannerHost.inert = open;
-    if (!this.placeMenu.hidden) this.closePlaceMenu();
     if (open) {
       this.rail.setAttribute('role', 'dialog');
       this.rail.setAttribute('aria-modal', 'true');
