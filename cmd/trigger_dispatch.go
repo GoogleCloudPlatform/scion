@@ -21,10 +21,10 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
@@ -33,39 +33,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const (
-	maxTriggerTaskFileBytes                 = 64 * 1024
-	triggerTemplateSlotGitHubCommentBody    = "github.comment.body"
-	triggerTemplateSlotGitHubAckCommentBody = "github.ackComment.body"
-	githubCommentMaxBodyBytes               = 65536
-)
-
-var ensureGitHubCommentSlotsOnce sync.Once
-
-// ensureGitHubCommentTemplateSlots registers the Stage 3 github.comment and
-// ackComment template slots on client-only builds (such as Windows) where
-// pkg/hub's init() is not linked. On builds that import pkg/hub, LookupSlot
-// already succeeds so Register is skipped.
-func ensureGitHubCommentTemplateSlots() {
-	ensureGitHubCommentSlotsOnce.Do(func() {
-		if _, ok := triggertemplate.LookupSlot(triggerTemplateSlotGitHubCommentBody); !ok {
-			_ = triggertemplate.Register(triggertemplate.Slot{
-				Name:     triggerTemplateSlotGitHubCommentBody,
-				Phase:    triggertemplate.PhasePre,
-				MaxBytes: githubCommentMaxBodyBytes,
-				Frame:    false,
-			})
-		}
-		if _, ok := triggertemplate.LookupSlot(triggerTemplateSlotGitHubAckCommentBody); !ok {
-			_ = triggertemplate.Register(triggertemplate.Slot{
-				Name:     triggerTemplateSlotGitHubAckCommentBody,
-				Phase:    triggertemplate.PhasePost,
-				MaxBytes: githubCommentMaxBodyBytes,
-				Frame:    false,
-			})
-		}
-	})
-}
+const maxTriggerTaskFileBytes = 64 * 1024
 
 // dispatchAgentFlagValues groups the CLI flags shared by `trigger create`,
 // `trigger update`, and `trigger preset apply` when authoring a dispatch_agent
@@ -206,8 +174,7 @@ func deriveDispatchUntrustedVars(action *hubclient.TriggerActionSpec) ([]string,
 		return nil, err
 	}
 	if action.AckComment != nil && action.AckComment.Body != "" {
-		ensureGitHubCommentTemplateSlots()
-		if err := collect(action.AckComment.Body, triggerTemplateSlotGitHubAckCommentBody); err != nil {
+		if err := collect(action.AckComment.Body, hub.TriggerTemplateSlotGitHubAckCommentBody); err != nil {
 			return nil, err
 		}
 	}
@@ -221,15 +188,14 @@ func deriveGitHubCommentUntrustedVars(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	ensureGitHubCommentTemplateSlots()
-	tmpl, err := triggertemplate.Parse(raw, triggerTemplateSlotGitHubCommentBody)
+	tmpl, err := triggertemplate.Parse(raw, hub.TriggerTemplateSlotGitHubCommentBody)
 	if err != nil {
 		var pe *triggertemplate.ParseError
 		if errors.As(err, &pe) {
 			return nil, newUsageError("invalid template in slot %q at byte offset %d: %s",
 				triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
 		}
-		return nil, newUsageError("invalid template in slot %q: %v", triggerTemplateSlotGitHubCommentBody, err)
+		return nil, newUsageError("invalid template in slot %q: %v", hub.TriggerTemplateSlotGitHubCommentBody, err)
 	}
 	untrusted := tmpl.Untrusted()
 	if len(untrusted) == 0 {

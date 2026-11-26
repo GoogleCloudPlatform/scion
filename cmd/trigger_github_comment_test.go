@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
@@ -615,4 +616,106 @@ func TestTriggerActionSpec_ClientServerJSONRoundTripAndParity(t *testing.T) {
 	require.NoError(t, decResp.Decode(&clientTrig))
 	require.NotNil(t, clientTrig.Action.AckComment)
 	assert.Equal(t, clientDispatchReq.Action.AckComment.Body, clientTrig.Action.AckComment.Body)
+}
+
+func TestTriggerUpdate_DispatchAckCommentPreserveClearAndRederive(t *testing.T) {
+	const (
+		trigID         = "55555555-5555-5555-5555-555555555555"
+		initialAckBody = "Started **${result.agent_name}**"
+	)
+
+	runUpdateCase := func(t *testing.T, setFlags func(t *testing.T)) (hubclient.UpdateTriggerRequest, map[string]any) {
+		t.Helper()
+		resetTriggerGitHubCommentTestFlags(t)
+
+		var (
+			gotPatch    hubclient.UpdateTriggerRequest
+			gotRawPatch map[string]any
+		)
+		withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Method {
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "gh-dispatch-ack",
+					AuthorizationRevision: 4,
+					Source:                hubclient.TriggerSourceSpec{Kind: "github"},
+					Action: hubclient.TriggerActionSpec{
+						Type:       "dispatch_agent",
+						Template:   "reviewer",
+						Task:       "old task",
+						AckComment: &hubclient.DispatchAgentAckComment{Body: initialAckBody},
+					},
+					Status: "active",
+				})
+			case http.MethodPatch:
+				bodyBytes, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				require.NoError(t, json.Unmarshal(bodyBytes, &gotPatch))
+				require.NoError(t, json.Unmarshal(bodyBytes, &gotRawPatch))
+				_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+					ID:                    trigID,
+					ProjectID:             "proj-1",
+					Name:                  "gh-dispatch-ack",
+					AuthorizationRevision: 5,
+					Source:                hubclient.TriggerSourceSpec{Kind: "github"},
+					Action:                *gotPatch.Action,
+					Status:                "active",
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		origUpdateDispatch := triggerUpdateDispatch
+		t.Cleanup(func() {
+			triggerUpdateDispatch = origUpdateDispatch
+			for _, name := range []string{"task", "ack-comment"} {
+				_ = triggerUpdateCmd.Flags().Set(name, "")
+				triggerUpdateCmd.Flags().Lookup(name).Changed = false
+			}
+		})
+
+		setFlags(t)
+		_ = captureStdout(t, func() {
+			require.NoError(t, runTriggerUpdate(triggerUpdateCmd, []string{trigID}))
+		})
+		return gotPatch, gotRawPatch
+	}
+
+	t.Run("update --task preserves existing ackComment.body", func(t *testing.T) {
+		gotPatch, _ := runUpdateCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("task", "Fix PR #${event.attributes.number}"))
+		})
+		require.NotNil(t, gotPatch.Action)
+		assert.Equal(t, "Fix PR #${event.attributes.number}", gotPatch.Action.Task)
+		require.NotNil(t, gotPatch.Action.AckComment)
+		assert.Equal(t, initialAckBody, gotPatch.Action.AckComment.Body)
+		assert.Equal(t, []string{"event.attributes.number"}, gotPatch.Action.UntrustedVars)
+	})
+
+	t.Run("update --ack-comment empty clears ackComment", func(t *testing.T) {
+		gotPatch, gotRawPatch := runUpdateCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("ack-comment", ""))
+		})
+		require.NotNil(t, gotPatch.Action)
+		assert.Nil(t, gotPatch.Action.AckComment)
+		actionMap, ok := gotRawPatch["action"].(map[string]any)
+		require.True(t, ok)
+		_, hasAckKey := actionMap["ackComment"]
+		assert.False(t, hasAckKey, "cleared ackComment must be omitted from PATCH JSON")
+	})
+
+	t.Run("update --ack-comment Y updates body and re-derives untrustedVars", func(t *testing.T) {
+		const updatedAckBody = "Started **${result.agent_name}** ([open](${result.agent_url})) for @${event.attributes.sender} on ${event.subject}"
+		gotPatch, _ := runUpdateCase(t, func(t *testing.T) {
+			require.NoError(t, triggerUpdateCmd.Flags().Set("ack-comment", updatedAckBody))
+		})
+		require.NotNil(t, gotPatch.Action)
+		require.NotNil(t, gotPatch.Action.AckComment)
+		assert.Equal(t, updatedAckBody, gotPatch.Action.AckComment.Body)
+		assert.Equal(t, []string{"event.attributes.sender", "event.subject"}, gotPatch.Action.UntrustedVars)
+	})
 }
