@@ -287,7 +287,9 @@ func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 		assert.Equal(t, api.ResourceList{CPU: "1", Memory: "1Gi"}, out.Limits)
 	})
 
-	// Unknown/unlisted runtimes fail closed when any capped resource is unset.
+	// Unknown/unlisted runtimes fail closed whenever any capped resource's
+	// limit is unset, even when a request is provided, because their
+	// fallback behavior is unknown.
 	for _, rt := range []string{"future-rt", "cloudrun-sandbox"} {
 		t.Run(rt+"_unset_capped_resource_refused", func(t *testing.T) {
 			_, err := applyAgentPolicyResources(p, "a", rt, &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}, nil)
@@ -295,14 +297,24 @@ func TestApplyAgentPolicyResources_NonUnlimitedRuntimesNoFill(t *testing.T) {
 			assert.ErrorIs(t, err, ErrAgentPolicy)
 			assert.Contains(t, err.Error(), "resources.limits.memory")
 			assert.Contains(t, err.Error(), "agent_policy.max_resources.memory")
+			assert.Contains(t, err.Error(), "fallback behavior is unknown")
 		})
-		t.Run(rt+"_explicit_within_max_allowed", func(t *testing.T) {
+		t.Run(rt+"_request_only_without_limit_refused", func(t *testing.T) {
 			in := &api.ResourceSpec{Requests: api.ResourceList{CPU: "1", Memory: "2Gi"}}
+			_, err := applyAgentPolicyResources(p, "a", rt, in, nil)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAgentPolicy)
+			assert.Contains(t, err.Error(), "resources.limits.cpu")
+			assert.Contains(t, err.Error(), "agent_policy.max_resources.cpu")
+			assert.Contains(t, err.Error(), "fallback behavior is unknown")
+		})
+		t.Run(rt+"_explicit_limits_within_max_allowed", func(t *testing.T) {
+			in := &api.ResourceSpec{Limits: api.ResourceList{CPU: "1", Memory: "2Gi"}}
 			out, err := applyAgentPolicyResources(p, "a", rt, in, nil)
 			require.NoError(t, err)
 			require.NotNil(t, out)
-			assert.Equal(t, "", out.Limits.CPU)
-			assert.Equal(t, "", out.Limits.Memory)
+			assert.Equal(t, "1", out.Limits.CPU)
+			assert.Equal(t, "2Gi", out.Limits.Memory)
 		})
 	}
 

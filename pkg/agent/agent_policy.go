@@ -369,8 +369,13 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 					*r.request = req
 				}
 			}
-		} else if *r.limit == "" && *r.request == "" {
-			if defs, ok := runtimeUnsetDefaults[runtimeName]; ok {
+		} else if *r.limit == "" {
+			defs, isKnownNonFill := runtimeUnsetDefaults[runtimeName]
+			if !isKnownNonFill {
+				return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
+					"is unset and this runtime's fallback behavior is unknown; set it explicitly"))
+			}
+			if *r.request == "" {
 				if def, tracked := defs[r.name]; tracked && def != "" {
 					if defVal, err := r.valueOf(def); err != nil || defVal > rr.maxVal {
 						return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
@@ -378,9 +383,9 @@ func applyAgentPolicyResources(p *config.V1AgentPolicy, agentName, runtimeName s
 					}
 					continue
 				}
+				return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
+					"is unset and this runtime's default may exceed the maximum %s; set it explicitly", r.max))
 			}
-			return nil, refuseAgentPolicy(agentName, NewAgentPolicyError("resources.limits."+r.name, "agent_policy.max_resources."+r.name,
-				"is unset and this runtime's default may exceed the maximum %s; set it explicitly", r.max))
 		}
 	}
 	if spec == nil && !filled {
