@@ -29,25 +29,35 @@ import (
 )
 
 // checkRequestVolumes refuses volumes sent by the Hub (a create's config and
-// inline config, a start's inline config) that reach a Runtime Broker
-// control path, before anything from the request is persisted.
-func checkRequestVolumes(volumeSets ...[]api.VolumeMount) error {
+// inline config, a start's inline config) that use an unsupported volume type
+// for runtimeKind or reach a Runtime Broker control path, before anything from
+// the request is persisted.
+func checkRequestVolumes(runtimeKind string, volumeSets ...[]api.VolumeMount) error {
 	for _, vols := range volumeSets {
-		if err := runtime.CheckVolumeSources(vols); err != nil {
+		if err := runtime.CheckVolumeSourcesForRuntime(vols, runtimeKind); err != nil {
 			return err
 		}
-		if err := runtime.CheckWorkspaceVolumeSources(vols); err != nil {
+		if err := runtime.CheckWorkspaceVolumeSourcesForRuntime(vols, runtimeKind); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// writeControlPathRefusal writes a refused mount source as a 400 with the
-// control_path_mount code. The message names the source as requested and
-// the class of what it reaches, never a resolved host path.
+// volumeRefusalCode returns the API error code for a refusal from
+// checkRequestVolumes.
+func volumeRefusalCode(err error) string {
+	if errors.Is(err, runtime.ErrUnsupportedVolumeType) {
+		return api.LaunchCodeUnsupportedVolumeType
+	}
+	return brokercontrol.ErrorCode
+}
+
+// writeControlPathRefusal writes a refused mount source or unsupported volume
+// type as a 400 with its stable error code. The message names the source or
+// volume type as requested and never leaks a resolved host path.
 func writeControlPathRefusal(w http.ResponseWriter, err error) {
-	writeError(w, http.StatusBadRequest, brokercontrol.ErrorCode, err.Error(), nil)
+	writeError(w, http.StatusBadRequest, volumeRefusalCode(err), err.Error(), nil)
 }
 
 // controlPathsOwner is the brokercontrol.SetExtraPaths owner for one

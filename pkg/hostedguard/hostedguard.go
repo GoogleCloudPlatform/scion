@@ -125,18 +125,15 @@ func checkVolumes(vols []api.VolumeMount, o Origin, runtimeKind string) error {
 
 // volumeRefusal returns why v from o is refused, or "" when it is allowed.
 func volumeRefusal(v api.VolumeMount, o Origin, runtimeKind string) string {
+	rt := strings.ToLower(strings.TrimSpace(runtimeKind))
 	switch t := strings.ToLower(strings.TrimSpace(v.Type)); t {
 	case "", "local":
 		return fmt.Sprintf("host volumes in %s are not allowed on a hosted server; %s", o, volumeRemedy)
 	case "gcs":
-		// Runtimes recognize only the exact spelling.
-		if v.Type != "gcs" {
-			return fmt.Sprintf("volume type must be spelled \"gcs\" in %s on a hosted server; %s", o, volumeRemedy)
-		}
-		if runtimeKind == "" || runtimeKind == RuntimeKubernetes {
+		if rt == "" || rt == RuntimeKubernetes {
 			return ""
 		}
-		if runtimeKind == RuntimeUndetermined {
+		if rt == RuntimeUndetermined {
 			return fmt.Sprintf("gcs volumes in %s are allowed on a hosted server only for agents run on Kubernetes, and this agent's runtime could not be determined; %s", o, volumeRemedy)
 		}
 		return fmt.Sprintf("gcs volumes in %s are allowed on a hosted server only for agents run on Kubernetes; %s", o, volumeRemedy)

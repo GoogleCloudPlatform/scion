@@ -140,7 +140,7 @@ func TestRegisterControlPaths_StateDirIsProtected(t *testing.T) {
 	}
 	registerControlPaths("test-broker", state, "")
 	t.Cleanup(func() { brokercontrol.SetExtraPaths(controlPathsOwner("test-broker"), nil) })
-	err := checkRequestVolumes([]api.VolumeMount{{Source: filepath.Join(outside, "state"), Target: "/x"}})
+	err := checkRequestVolumes("docker", []api.VolumeMount{{Source: filepath.Join(outside, "state"), Target: "/x"}})
 	if !errors.Is(err, brokercontrol.ErrControlPathMount) {
 		t.Fatalf("err = %v, want ErrControlPathMount", err)
 	}
@@ -405,11 +405,23 @@ func TestServerSweptRuntimes_IncludesAuxiliary(t *testing.T) {
 
 func TestCheckRequestVolumes_WorkspaceReachingControlPath(t *testing.T) {
 	global, outside := controlPathTestHome(t)
-	if err := checkRequestVolumes([]api.VolumeMount{{Source: global, Target: "/workspace"}}); !errors.Is(err, brokercontrol.ErrControlPathMount) {
+	if err := checkRequestVolumes("docker", []api.VolumeMount{{Source: global, Target: "/workspace"}}); !errors.Is(err, brokercontrol.ErrControlPathMount) {
 		t.Fatalf("err = %v, want ErrControlPathMount", err)
 	}
-	if err := checkRequestVolumes([]api.VolumeMount{{Source: outside, Target: "/workspace"}}); err != nil {
+	if err := checkRequestVolumes("docker", []api.VolumeMount{{Source: outside, Target: "/workspace"}}); err != nil {
 		t.Fatalf("clean workspace: %v", err)
+	}
+	for _, volType := range []string{"cloudrun-volume", "gke-shared-volume"} {
+		err := checkRequestVolumes("docker", []api.VolumeMount{{Type: volType, VolumeName: "v", Target: "/mnt/x"}})
+		if !errors.Is(err, scionrt.ErrUnsupportedVolumeType) {
+			t.Fatalf("%s on docker: err = %v, want ErrUnsupportedVolumeType", volType, err)
+		}
+		if got := volumeRefusalCode(err); got != api.LaunchCodeUnsupportedVolumeType {
+			t.Fatalf("%s refusal code = %q, want %q", volType, got, api.LaunchCodeUnsupportedVolumeType)
+		}
+	}
+	if err := checkRequestVolumes("kubernetes", []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/mnt/x"}}); err != nil {
+		t.Fatalf("gke-shared-volume on kubernetes: %v", err)
 	}
 }
 

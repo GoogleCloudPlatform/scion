@@ -453,12 +453,19 @@ func TestCheckVolumeSources(t *testing.T) {
 		{Source: outside, Target: "/a"},
 		{Source: "cachevol", Target: "/b"},
 		{Type: "gcs", Bucket: "b", Target: "/c"},
-		{Type: "gke-shared-volume", VolumeName: "v", Target: "/d"},
 		// The workspace is judged where it is decided, not here.
 		{Source: filepath.Join(global, "projects", "p"), Target: "/workspace"},
 	}
 	if err := CheckVolumeSources(ok); err != nil {
 		t.Fatalf("clean volumes: %v", err)
+	}
+	// gke-shared-volume is refused on bind runtimes (default), allowed on kubernetes.
+	gkeVol := []api.VolumeMount{{Type: "gke-shared-volume", VolumeName: "v", Target: "/d"}}
+	if err := CheckVolumeSources(gkeVol); !errors.Is(err, ErrUnsupportedVolumeType) {
+		t.Fatalf("gke-shared-volume on default bind runtime: err = %v, want ErrUnsupportedVolumeType", err)
+	}
+	if err := CheckVolumeSourcesForRuntime(gkeVol, "kubernetes"); err != nil {
+		t.Fatalf("gke-shared-volume on kubernetes: %v", err)
 	}
 	for _, v := range []api.VolumeMount{
 		{Source: filepath.Join(global, "projects", "p"), Target: "/mnt/p"},

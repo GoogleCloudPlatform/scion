@@ -74,7 +74,8 @@ func userVolumeCases() []struct {
 			{Type: "gcs", Bucket: "bucket-b", Prefix: "pre/fix", Mode: "ro", Target: "~/gcs-b", ReadOnly: true},
 			{Source: "/host/data", Target: "/data"},
 		}},
-		{"other-types", false, []api.VolumeMount{
+		// cloudrun-volume is unsupported on bind runtimes and refused before run.
+		{"other-types", true, []api.VolumeMount{
 			{Type: "nfs", Server: "10.0.0.2", Source: "/export/x", Target: "/nfs"},
 			{Type: "cloudrun-volume", VolumeName: "vol", Source: "/cr", Target: "/cr"},
 		}},
