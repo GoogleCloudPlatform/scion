@@ -78,6 +78,11 @@ func (t *TokenUsage) SummableTokens() (int64, bool) {
 // Record represents one deduplicated LLM call decoded from an agy conversation DB.
 type Record struct {
 	// Status is StatusVerified, StatusUnverified, or StatusMalformed.
+	// Note: clean rows in the same file as a malformed row still carry
+	// Record.Status == StatusVerified when the agy version is verified, while
+	// Result.Status is StatusMalformed. Live tailers must gate token/quota
+	// debits on Result.Status == StatusVerified (not only on Record.Status) and
+	// latch schema_drift_detected once any poll reports a non-verified Result.Status.
 	Status DecodeStatus `json:"status"`
 	// SessionID is the conversation identifier (database filename stem without .db).
 	SessionID string `json:"session_id"`
@@ -221,6 +226,12 @@ type Result struct {
 	//   - StatusMalformed if any wire/schema error occurred,
 	//   - StatusUnverified if clean decode but AgyVersion is unknown/unpinned,
 	//   - StatusVerified if clean decode and AgyVersion is in VerifiedVersions.
+	//
+	// Because malformed rows advance the cursor and are not re-read on
+	// subsequent polls, a malformed row is reported only in the poll that
+	// encounters it; later polls with only clean rows return StatusVerified.
+	// Live tailers must therefore latch schema_drift_detected across polls and
+	// gate quota/token debits on Result.Status (not only on Record.Status).
 	Status DecodeStatus `json:"status"`
 	// AgyVersion is the normalized agy version used for pinning (empty if unknown).
 	AgyVersion string `json:"agy_version,omitempty"`
