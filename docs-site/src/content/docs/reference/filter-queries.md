@@ -86,6 +86,18 @@ Text search matches decision **question**, **answer**, **conversation label**, o
 | `by` | ref | `me`, email, user ID, or display name (quote when it contains spaces); Made tab only | server | `by:me`, `by:ada@example.com`, `by:"Ada Lovelace"`, `-by:me` | Answerer (Made tab only) |
 | `provenance` | enum | `direct`, `interpreted`, `confirmed`, `overridden`, `dismissed`; Made tab only | server | `provenance:direct,confirmed`, `-provenance:dismissed` | How it was answered (Made tab only) |
 
+### `profile-decisions` (Profile Decisions page)
+
+Text search matches decision **question**, **answer**, **conversation label**, or **agent name** (case-insensitive substring). Exposes the same keys as `decisions` plus `project:`, which resolves strictly within the caller's readable member projects (up to the 200-project scope). Made-only keys (`by`, `provenance`) are ignored on the Pending tab with a non-blocking warning, and `From` / `To` remain date inputs alongside the filter box on the Made tab.
+
+| Key | Kind | Values | Execution | Example | Description |
+| --- | --- | --- | --- | --- | --- |
+| `agent` | ref | Asking agent name or ID (case-insensitive exact name match over readable scope) | server | `agent:deploy-frontend`, `agent:a,b`, `-agent:cleanup-bot` | Asking agent name or ID |
+| `conversation` | ref | Conversation label (quote when it contains spaces) or chat key | server | `conversation:#ops`, `conversation:"DM with deploy"`, `-conversation:#general` | Conversation label or chat key |
+| `by` | ref | `me`, email, user ID, or display name (quote when it contains spaces); Made tab only | server | `by:me`, `by:ada@example.com`, `by:"Ada Lovelace"`, `-by:me` | Answerer (Made tab only) |
+| `provenance` | enum | `direct`, `interpreted`, `confirmed`, `overridden`, `dismissed`; Made tab only | server | `provenance:direct,confirmed`, `-provenance:dismissed` | How it was answered (Made tab only) |
+| `project` | ref | Project slug or ID within the caller's readable member projects | server | `project:web-app`, `project:alpha,beta`, `-project:archive` | Project slug or ID |
+
 ### `files` (File browser)
 
 Text search matches file **path** as a case-insensitive regular expression, falling back to an ordered-character fuzzy match. For workspace and shared-directory sources, only the text part is sent to the server (`?q=`); key terms post-filter the merged results on the client. Template and harness-config sources filter entirely on the client. Dotfiles visibility remains controlled by the **show .dot files** toggle.

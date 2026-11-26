@@ -189,6 +189,7 @@ func All() []filterquery.Schema {
 		Artifacts,
 		ProjectArtifacts,
 		Decisions,
+		ProfileDecisions,
 		Files,
 		Graph,
 	}

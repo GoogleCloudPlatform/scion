@@ -90,3 +90,69 @@ func TestDecisionsSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestProfileDecisionsSchema(t *testing.T) {
+	if schemas.ProfileDecisions.View != "profile-decisions" {
+		t.Fatalf("View = %q, want profile-decisions", schemas.ProfileDecisions.View)
+	}
+	wantKeys := []string{"agent", "conversation", "by", "provenance", "project"}
+	if len(schemas.ProfileDecisions.Keys) != len(wantKeys) {
+		t.Fatalf("len(Keys) = %d, want %d", len(schemas.ProfileDecisions.Keys), len(wantKeys))
+	}
+	for i, name := range wantKeys {
+		k := schemas.ProfileDecisions.Keys[i]
+		if k.Name != name {
+			t.Errorf("Keys[%d].Name = %q, want %q", i, k.Name, name)
+		}
+		if k.Exec != filterquery.ExecServer {
+			t.Errorf("Keys[%d] (%s) Exec = %v, want ExecServer", i, k.Name, k.Exec)
+		}
+		if name == "by" || name == "provenance" {
+			if !strings.Contains(k.Help, "Made tab only") {
+				t.Errorf("Keys[%d] (%s) Help = %q, want to contain 'Made tab only'", i, k.Name, k.Help)
+			}
+		}
+	}
+
+	validCases := []string{
+		"",
+		"deploy prod",
+		"project:web-app",
+		"project:alpha,beta -project:gamma",
+		`project:demo agent:deploy-frontend -conversation:"#general" by:me provenance:direct,confirmed rollout`,
+	}
+	for _, input := range validCases {
+		q, err := filterquery.Parse(input, schemas.ProfileDecisions.HasKey)
+		if err != nil {
+			t.Errorf("Parse(%q) unexpected error: %v", input, err)
+			continue
+		}
+		if vErr := schemas.ProfileDecisions.Validate(q); vErr != nil {
+			t.Errorf("Validate(%q) unexpected error: %v", input, vErr)
+		}
+	}
+
+	invalidCases := []struct {
+		input    string
+		wantCode string
+	}{
+		{"provenance:bogus", filterquery.ErrCodeValue},
+		{"project:", filterquery.ErrCodeSyntax},
+		{"project:a OR project:b", filterquery.ErrCodeSyntax},
+	}
+	for _, tc := range invalidCases {
+		q, err := filterquery.Parse(tc.input, schemas.ProfileDecisions.HasKey)
+		if err != nil {
+			if err.Code != tc.wantCode {
+				t.Errorf("Parse(%q) error code = %q, want %q", tc.input, err.Code, tc.wantCode)
+			}
+			continue
+		}
+		vErr := schemas.ProfileDecisions.Validate(q)
+		if vErr == nil {
+			t.Errorf("Validate(%q) succeeded, want error code %q", tc.input, tc.wantCode)
+		} else if vErr.Code != tc.wantCode {
+			t.Errorf("Validate(%q) error code = %q, want %q", tc.input, vErr.Code, tc.wantCode)
+		}
+	}
+}

@@ -25,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
@@ -379,40 +378,12 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request, dialectE
 		out.pendingCursor = &cur
 	}
 
-	if rawQ := q.Get("q"); strings.TrimSpace(rawQ) != "" {
-		if dialectEnabled {
-			parsed, fqErr := filterquery.Parse(rawQ, schemas.Decisions.HasKey)
-			if fqErr != nil {
-				writeInvalidFilterQuery(w, fqErr)
-				return projectDecisionsQuery{}, false
-			}
-			if vErr := schemas.Decisions.Validate(parsed); vErr != nil {
-				writeInvalidFilterQuery(w, vErr)
-				return projectDecisionsQuery{}, false
-			}
-			if parsed.Mode == filterquery.ModeText {
-				if parsed.Text != "" {
-					if n := utf8.RuneCountInString(parsed.Text); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-						ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-							map[string]interface{}{"field": "q"})
-						return projectDecisionsQuery{}, false
-					}
-					out.q = parsed.Text
-				}
-			} else {
-				out.parsedQuery = &parsed
-				out.q = parsed.Text
-			}
-		} else {
-			search := strings.TrimSpace(rawQ)
-			if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-				ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-					map[string]interface{}{"field": "q"})
-				return projectDecisionsQuery{}, false
-			}
-			out.q = search
-		}
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.Decisions, dialectEnabled)
+	if !ok {
+		return projectDecisionsQuery{}, false
 	}
+	out.q = textQ
+	out.parsedQuery = parsedQ
 	out.conversation = strings.TrimSpace(q.Get("conversation"))
 	if len(out.conversation) > maxProjectDecisionsConversationBytes {
 		ValidationError(w, fmt.Sprintf("conversation must be at most %d bytes", maxProjectDecisionsConversationBytes),
@@ -901,7 +872,7 @@ func (s *Server) decisionsCore(
 	}
 
 	// tab=made
-	if resolved.impossible {
+	if resolved.impossible || (pq.parsedQuery != nil && len(listKeys) == 0) {
 		if pq.profile {
 			return s.finishProfileMadeDecisions(ctx, wcs, set, pq, nil, nil, pq.madeFilter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
 		}

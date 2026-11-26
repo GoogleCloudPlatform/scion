@@ -27,9 +27,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -112,12 +113,16 @@ func (q projectDecisionsQuery) profileCursorBind() string {
 	if q.madeFilter.To != nil {
 		toStr = q.madeFilter.To.UTC().Format(time.RFC3339Nano)
 	}
+	queryBind := "t:" + q.q
+	if q.parsedQuery != nil {
+		queryBind = "fq:" + filterquery.Canonical(*q.parsedQuery)
+	}
 	h := sha256.New()
 	for _, part := range []string{
 		q.viewerID,
 		q.tab,
 		q.sort,
-		q.q,
+		queryBind,
 		q.conversation,
 		q.agentID,
 		q.projectID,
@@ -237,7 +242,7 @@ func profileDecisionsCaller(w http.ResponseWriter, r *http.Request) (UserIdentit
 	return user, token, true
 }
 
-func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID string) (projectDecisionsQuery, bool) {
+func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID string, dialectEnabled bool) (projectDecisionsQuery, bool) {
 	q := r.URL.Query()
 	out := projectDecisionsQuery{
 		profile:  true,
@@ -284,14 +289,12 @@ func parseProfileDecisionsQuery(w http.ResponseWriter, r *http.Request, viewerID
 		}
 	}
 
-	if search := strings.TrimSpace(q.Get("q")); search != "" {
-		if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
-			ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
-				map[string]interface{}{"field": "q"})
-			return projectDecisionsQuery{}, false
-		}
-		out.q = search
+	textQ, parsedQ, ok := parseDecisionsFilterQ(w, q.Get("q"), schemas.ProfileDecisions, dialectEnabled)
+	if !ok {
+		return projectDecisionsQuery{}, false
 	}
+	out.q = textQ
+	out.parsedQuery = parsedQ
 	out.conversation = strings.TrimSpace(q.Get("conversation"))
 	if len(out.conversation) > maxProjectDecisionsConversationBytes {
 		ValidationError(w, fmt.Sprintf("conversation must be at most %d bytes", maxProjectDecisionsConversationBytes),
@@ -382,7 +385,7 @@ func (s *Server) listUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pq, ok := parseProfileDecisionsQuery(w, r, user.ID())
+	pq, ok := parseProfileDecisionsQuery(w, r, user.ID(), s.experimentEnabled(experiments.FiltersQueryDialect))
 	if !ok {
 		return
 	}

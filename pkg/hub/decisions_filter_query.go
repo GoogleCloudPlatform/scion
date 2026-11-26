@@ -15,15 +15,64 @@
 package hub
 
 import (
+	"fmt"
+	"net/http"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// parseDecisionsFilterQ parses and validates the `q` query parameter for both
+// project and profile decisions handlers (design-8985 §3.2). When dialectEnabled
+// is true, it parses and validates against schema; pure-text queries enforce the
+// 2..256 rune bounds, while structured queries return parsed != nil and text = parsed.Text.
+func parseDecisionsFilterQ(
+	w http.ResponseWriter,
+	rawQ string,
+	schema filterquery.Schema,
+	dialectEnabled bool,
+) (text string, parsed *filterquery.Query, ok bool) {
+	if strings.TrimSpace(rawQ) == "" {
+		return "", nil, true
+	}
+	if dialectEnabled {
+		q, fqErr := filterquery.Parse(rawQ, schema.HasKey)
+		if fqErr != nil {
+			writeInvalidFilterQuery(w, fqErr)
+			return "", nil, false
+		}
+		if vErr := schema.Validate(q); vErr != nil {
+			writeInvalidFilterQuery(w, vErr)
+			return "", nil, false
+		}
+		if q.Mode == filterquery.ModeText {
+			if q.Text != "" {
+				if n := utf8.RuneCountInString(q.Text); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+					ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+						map[string]interface{}{"field": "q"})
+					return "", nil, false
+				}
+				return q.Text, nil, true
+			}
+			return "", nil, true
+		}
+		return q.Text, &q, true
+	}
+	search := strings.TrimSpace(rawQ)
+	if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+		ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+			map[string]interface{}{"field": "q"})
+		return "", nil, false
+	}
+	return search, nil, true
+}
+
 // resolvedDecisionsQuery is the scope-resolved translation of a structured
-// filterquery.Query for GET /api/v1/projects/{id}/decisions (design-8985 §3.2).
+// filterquery.Query for GET /api/v1/projects/{id}/decisions and
+// GET /api/v1/users/me/decisions (design-8985 §3.2).
 // Every value is resolved strictly within the caller's decisionScopeSet and
 // readable facet entries; an unresolvable positive term sets impossible=true so
 // the handler returns an empty 200 without acting as an existence oracle.
@@ -90,6 +139,22 @@ func resolveProjectDecisionsFilterQuery(
 	keySet := make(map[string]bool, len(initialKeys))
 	for _, k := range initialKeys {
 		keySet[k] = true
+	}
+
+	resolveProjects := func(values []string) map[string]bool {
+		matched := make(map[string]bool)
+		for _, raw := range values {
+			for _, pid := range set.projectIDs {
+				p := set.projects[pid]
+				if p == nil {
+					continue
+				}
+				if strings.EqualFold(p.ID, raw) || (p.Slug != "" && strings.EqualFold(p.Slug, raw)) {
+					matched[pid] = true
+				}
+			}
+		}
+		return matched
 	}
 
 	resolveAgents := func(values []string) map[string]bool {
@@ -209,6 +274,32 @@ func resolveProjectDecisionsFilterQuery(
 					}
 				}
 				keySet = next
+				if len(keySet) == 0 {
+					res.impossible = true
+					return res
+				}
+			}
+
+		case "project":
+			matched := resolveProjects(term.Values)
+			if term.Negate {
+				for k := range keySet {
+					if matched[set.keyProject[k]] {
+						delete(keySet, k)
+					}
+				}
+			} else {
+				if len(matched) == 0 {
+					res.impossible = true
+					return res
+				}
+				nextKeys := make(map[string]bool)
+				for k := range keySet {
+					if matched[set.keyProject[k]] {
+						nextKeys[k] = true
+					}
+				}
+				keySet = nextKeys
 				if len(keySet) == 0 {
 					res.impossible = true
 					return res

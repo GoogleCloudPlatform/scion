@@ -364,6 +364,22 @@
       "canonical": "project:demo"
     },
     {
+      "name": "profile-decisions view: project OR, negation, agent, by, and text",
+      "input": "project:alpha,beta -project:gamma agent:deploy by:me rollout",
+      "knownKeys": ["agent", "conversation", "by", "provenance", "project"],
+      "expect": {
+        "mode": "structured",
+        "text": "rollout",
+        "terms": [
+          { "key": "project", "values": ["alpha", "beta"], "negate": false, "offset": 0, "length": 18 },
+          { "key": "project", "values": ["gamma"], "negate": true, "offset": 19, "length": 14 },
+          { "key": "agent", "values": ["deploy"], "negate": false, "offset": 34, "length": 12 },
+          { "key": "by", "values": ["me"], "negate": false, "offset": 47, "length": 5 }
+        ]
+      },
+      "canonical": "agent:deploy by:me project:alpha,beta -project:gamma rollout"
+    },
+    {
       "name": "limit: input exceeds 512 ASCII bytes",
       "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "knownKeys": ["phase", "label"],

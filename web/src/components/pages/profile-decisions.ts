@@ -37,7 +37,6 @@ import type {
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import {
-  buildProfileDecisionsUrlSearch,
   dispatchProfileDecisionsCountChanged,
   dispatchProfileDecisionsNotFound,
   fetchProfileMadeDecisions,
@@ -126,6 +125,8 @@ export class ScionPageProfileDecisions extends LitElement {
         limit,
         filter,
         signal,
+        dialect: this.ctrl.queryDialect,
+        validateQuery: this.ctrl.validateDialectQuery,
       }),
     fetchMade: ({ sort, cursor, limit, filter, signal }): Promise<ProfileMadeDecisionsResponse> =>
       fetchProfileMadeDecisions(filter, {
@@ -133,6 +134,8 @@ export class ScionPageProfileDecisions extends LitElement {
         cursor,
         limit,
         signal,
+        dialect: this.ctrl.queryDialect,
+        validateQuery: this.ctrl.validateDialectQuery,
       }),
   });
 
@@ -146,6 +149,11 @@ export class ScionPageProfileDecisions extends LitElement {
         gap: 0.6rem;
         flex-wrap: wrap;
         margin: 0 0 0.25rem;
+      }
+
+      .sort-bar[slot='dialect-leading'] {
+        margin: 0;
+        flex-shrink: 0;
       }
 
       .sort-bar sl-radio-group::part(form-control-label) {
@@ -294,9 +302,9 @@ export class ScionPageProfileDecisions extends LitElement {
     }
   }
 
-  private renderSortBar(): TemplateResult {
+  private renderSortBar(slotName?: string): TemplateResult {
     return html`
-      <div class="sort-bar" data-sort-bar>
+      <div class="sort-bar" data-sort-bar slot=${slotName ?? nothing}>
         <sl-radio-group
           size="small"
           data-sort-switch
@@ -330,9 +338,11 @@ export class ScionPageProfileDecisions extends LitElement {
       <scion-decisions-filter-panel
         scope="profile"
         .supportsSearch=${this.ctrl.supportsSearch}
+        .queryDialect=${this.ctrl.queryDialect}
         .tab=${this.ctrl.activeTab}
         .q=${this.ctrl.filterQ}
         .searchText=${this.ctrl.searchDraft}
+        .project=${this.ctrl.filterProject}
         .conversation=${this.ctrl.filterConversation}
         .agent=${this.ctrl.filterAgent}
         .user=${this.ctrl.filterUser}
@@ -341,35 +351,50 @@ export class ScionPageProfileDecisions extends LitElement {
         .to=${this.ctrl.filterTo}
         .extraTags=${this.projectExtraTags}
         .currentUserId=${this.ctrl.currentUserId}
+        .projects=${this.ctrl.facetsProjects}
         .conversations=${this.profileConversationFacets}
         .agents=${this.profileAgentFacets}
         .answerers=${this.ctrl.facetsAnswerers}
         @decisions-search-input=${(e: CustomEvent<DecisionsSearchInputDetail>): void =>
           this.ctrl.onSearchInput(e.detail)}
+        @decisions-query-commit=${(e: CustomEvent<{ q: string }>): void =>
+          this.ctrl.applyDialectQueryCommit(e.detail.q)}
         @decisions-filter-change=${(e: CustomEvent<DecisionsFilterPatch>): void =>
           this.ctrl.applyFilterPatch(e.detail)}
         @decisions-filters-clear=${this.ctrl.clearFilters}
       >
-        <scion-facet-combobox
-          slot="leading-controls"
-          data-filter="project"
-          label="Project"
-          placeholder="Any"
-          .options=${this.projectFacetOptions}
-          .value=${this.ctrl.filterProject}
-          @facet-change=${(e: CustomEvent<FacetChangeDetail>): void =>
-            this.ctrl.applyFilterPatch({ project: e.detail.value })}
-        ></scion-facet-combobox>
+        ${this.ctrl.queryDialect
+          ? this.renderSortBar('dialect-leading')
+          : html`
+              <scion-facet-combobox
+                slot="leading-controls"
+                data-filter="project"
+                label="Project"
+                placeholder="Any"
+                .options=${this.projectFacetOptions}
+                .value=${this.ctrl.filterProject}
+                @facet-change=${(e: CustomEvent<FacetChangeDetail>): void =>
+                  this.ctrl.applyFilterPatch({ project: e.detail.value })}
+              ></scion-facet-combobox>
+            `}
       </scion-decisions-filter-panel>
     `;
   }
 
   private renderTruncatedBanner(): TemplateResult | typeof nothing {
-    if (!this.ctrl.truncatedProjects || this.ctrl.filterProject) return nothing;
+    if (
+      !this.ctrl.truncatedProjects ||
+      this.ctrl.filterProject ||
+      this.ctrl.hasPositiveProjectDialectFilter
+    ) {
+      return nothing;
+    }
     return html`
       <sl-alert variant="primary" open data-truncated-projects>
         <sl-icon slot="icon" name="info-circle"></sl-icon>
-        Showing your 200 most recently active projects; pick a project to see others
+        ${this.ctrl.queryDialect
+          ? 'Showing your 200 most recently active projects; only those 200 projects are searched.'
+          : 'Showing your 200 most recently active projects; pick a project to see others'}
       </sl-alert>
     `;
   }
@@ -430,13 +455,17 @@ export class ScionPageProfileDecisions extends LitElement {
 
         <sl-tab-panel name="pending" ?active=${this.ctrl.activeTab === 'pending'}>
           ${this.ctrl.activeTab === 'pending'
-            ? html`${this.renderSortBar()}${this.renderFilterPanel()}`
+            ? html`${this.ctrl.queryDialect
+                ? nothing
+                : this.renderSortBar()}${this.renderFilterPanel()}`
             : nothing}
           ${this.renderPendingPanel()}
         </sl-tab-panel>
         <sl-tab-panel name="made" ?active=${this.ctrl.activeTab === 'made'}>
           ${this.ctrl.activeTab === 'made'
-            ? html`${this.renderSortBar()}${this.renderFilterPanel()}`
+            ? html`${this.ctrl.queryDialect
+                ? nothing
+                : this.renderSortBar()}${this.renderFilterPanel()}`
             : nothing}
           ${this.renderMadePanel()}
         </sl-tab-panel>
@@ -617,18 +646,7 @@ export class ScionPageProfileDecisions extends LitElement {
 
   private renderMadeProjectGroup(g: ProfileDecisionMadeGroupView): TemplateResult {
     const projectName = this.ctrl.projectDisplayName(g.project);
-    const drillSearch = buildProfileDecisionsUrlSearch({
-      tab: 'made',
-      sort: 'recent',
-      project: g.project.id,
-      q: this.ctrl.filterQ,
-      conversation: this.ctrl.filterConversation,
-      agent: this.ctrl.filterAgent,
-      user: this.ctrl.filterUser,
-      provenance: this.ctrl.filterProvenance,
-      from: this.ctrl.filterFrom,
-      to: this.ctrl.filterTo,
-    });
+    const drillSearch = this.ctrl.buildDrillDownMadeProjectSearch(g.project.id);
 
     return html`
       <section class="made-project-group" data-made-group=${g.project.id}>
