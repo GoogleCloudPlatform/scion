@@ -7762,6 +7762,14 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 		slog.Warn("startup scan for reserved GCP service accounts completed with errors", "error", err)
 	}
 
+	// Read-only one-shot scan at hosted Hub startup logging agent IDs whose
+	// stored absolute workspace does not match their resolved project workspace.
+	if !s.workstation {
+		if _, err := s.ScanHostedExplicitWorkspaces(ctx); err != nil {
+			slog.Warn("startup scan for hosted explicit workspaces completed with errors", "error", err)
+		}
+	}
+
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the
 	// background: on a large store the check is a full scan per time column,

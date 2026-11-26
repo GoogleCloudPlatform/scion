@@ -158,3 +158,96 @@ func TestReprovision_HostedBrokerRefusesExternalAbsoluteWorkspace(t *testing.T) 
 		t.Fatalf("message %q must not leak host path", msg)
 	}
 }
+
+// TestRestartAgent_HostedBrokerRefusesExternalAbsoluteWorkspace verifies that
+// a hosted broker restart of an agent whose persisted scion-agent.json holds
+// ExplicitWorkspace=true and a /workspace volume outside permitted roots
+// returns HTTP 400 with typed code workspace_not_permitted (not 500) and
+// fixed public text without starting a container.
+func TestRestartAgent_HostedBrokerRefusesExternalAbsoluteWorkspace(t *testing.T) {
+	setupTestScionEnv(t)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	projectDir := filepath.Join(homeDir, ".scion", "projects", "demo", ".scion")
+	hcDir := filepath.Join(projectDir, "harness-configs", "claude")
+	if err := os.MkdirAll(hcDir, 0o755); err != nil {
+		t.Fatalf("mkdir hcDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: claude\nimage: dummy:latest\n"), 0o644); err != nil {
+		t.Fatalf("write harness config: %v", err)
+	}
+
+	outsideDir := filepath.Join(t.TempDir(), "external-restart-dir")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("mkdir outsideDir: %v", err)
+	}
+
+	agentDir := filepath.Join(projectDir, "agents", "hosted-restart-agent")
+	if err := os.MkdirAll(filepath.Join(agentDir, "home"), 0o755); err != nil {
+		t.Fatalf("mkdir agentDir: %v", err)
+	}
+	cfgBytes, err := json.Marshal(&api.ScionConfig{
+		Harness:           "claude",
+		HarnessConfig:     "claude",
+		Image:             "dummy:latest",
+		ExplicitWorkspace: true,
+		Volumes: []api.VolumeMount{
+			{Source: outsideDir, Target: "/workspace"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal scion-agent.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgBytes, 0o644); err != nil {
+		t.Fatalf("write scion-agent.json: %v", err)
+	}
+
+	runCalled := false
+	rt := &runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(_ context.Context, _ runtime.RunConfig) (string, error) {
+			runCalled = true
+			return "unexpected-container", nil
+		},
+	}
+	mgr := agent.NewManager(rt)
+
+	cfg := testServerConfig()
+	cfg.BrokerID = "hosted-restart-broker"
+	cfg.WorkstationMode = false
+	cfg.ForceRuntime = "docker"
+	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
+	endAsyncLaunchesAtCleanup(t, srv)
+
+	bodyBytes, err := json.Marshal(map[string]string{
+		"projectPath": projectDir,
+		"profile":     "local",
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/hosted-restart-agent/restart", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", w.Code, w.Body.String())
+	}
+	code, msg := decodeError(t, w)
+	if code != api.LaunchCodeWorkspaceNotPermitted {
+		t.Fatalf("code = %q, want %q", code, api.LaunchCodeWorkspaceNotPermitted)
+	}
+	if msg != launchFailureText[api.LaunchCodeWorkspaceNotPermitted] {
+		t.Fatalf("message = %q, want %q", msg, launchFailureText[api.LaunchCodeWorkspaceNotPermitted])
+	}
+	if strings.Contains(msg, outsideDir) || strings.Contains(msg, "external-restart-dir") {
+		t.Fatalf("message %q must not leak host path", msg)
+	}
+	if runCalled {
+		t.Fatalf("runtime.Run must not be called when workspace is refused on restart")
+	}
+}

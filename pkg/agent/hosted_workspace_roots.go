@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -70,16 +71,16 @@ func hostedExplicitWorkspaceRootsFromGlobal(globalSettings *config.VersionedSett
 	if globalSettings != nil {
 		srv = globalSettings.Server
 	}
-	if ps, _, err := config.ResolveProjectStorage(srv); err == nil {
-		if layout, layoutErr := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase); layoutErr == nil {
-			if layout.Backend.Shared() && layout.HostBase != "" {
-				subPathRoot := layout.SubPathRoot
-				if subPathRoot == "" {
-					subPathRoot = projectfs.DefaultSubPathRoot
-				}
-				roots = append(roots, filepath.Join(layout.HostBase, subPathRoot))
-			}
+	if ps, _, err := config.ResolveProjectStorage(srv); err != nil {
+		slog.Warn("hosted workspace validation: failed to resolve global project storage; shared storage root omitted", "error", err)
+	} else if layout, layoutErr := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase); layoutErr != nil {
+		slog.Warn("hosted workspace validation: failed to build global project storage layout; shared storage root omitted", "error", layoutErr)
+	} else if layout.Backend.Shared() && layout.HostBase != "" {
+		subPathRoot := layout.SubPathRoot
+		if subPathRoot == "" {
+			subPathRoot = projectfs.DefaultSubPathRoot
 		}
+		roots = append(roots, filepath.Join(layout.HostBase, subPathRoot))
 	}
 
 	if projectDir != "" && !config.IsGlobalProjectDir(projectDir) {

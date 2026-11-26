@@ -5839,6 +5839,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			writeAgentPolicyRefused(w, pe, "restart agent", details)
 			return
 		}
+		if workspaceNotPermittedFrom(err) {
+			writeWorkspaceNotPermitted(w, details)
+			return
+		}
 		if se, ok := storageMigrationRequiredFrom(err); ok {
 			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
 			return

@@ -162,6 +162,113 @@ func sameWorkspacePath(a, b string) bool {
 	return errA == nil && errB == nil && ra == rb
 }
 
+// ScanHostedExplicitWorkspaces performs a read-only one-shot scan of stored
+// agents on a hosted Hub and logs the IDs of any agents whose stored absolute
+// AppliedConfig.Workspace does not match their project's resolved workspace.
+// It takes no stop or mutation action and returns the list of affected agent
+// IDs. Workstation hubs skip the scan.
+func (s *Server) ScanHostedExplicitWorkspaces(ctx context.Context) ([]string, error) {
+	if s.workstation || s.store == nil {
+		return nil, nil
+	}
+
+	type projectWorkspaceEntry struct {
+		hostPath      string
+		resolveErr    error
+		providerPaths map[string]string
+	}
+	projectCache := make(map[string]projectWorkspaceEntry)
+
+	lookupProject := func(projectID string) (projectWorkspaceEntry, error) {
+		if entry, ok := projectCache[projectID]; ok {
+			return entry, nil
+		}
+		var entry projectWorkspaceEntry
+		if projectID == "" {
+			entry.resolveErr = errNotHubWorkspace
+			projectCache[projectID] = entry
+			return entry, nil
+		}
+		project, err := s.store.GetProject(ctx, projectID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				entry.resolveErr = errNotHubWorkspace
+				projectCache[projectID] = entry
+				return entry, nil
+			}
+			return projectWorkspaceEntry{}, fmt.Errorf("scan hosted explicit workspaces: get project %s: %w", projectID, err)
+		}
+		if resolved, rErr := s.projectWorkspaceResolved(project); rErr != nil {
+			entry.resolveErr = rErr
+		} else {
+			entry.hostPath = resolved.HostPath
+		}
+		if providers, pErr := s.store.GetProjectProviders(ctx, projectID); pErr == nil && len(providers) > 0 {
+			entry.providerPaths = make(map[string]string, len(providers))
+			for _, p := range providers {
+				if p.LocalPath != "" {
+					entry.providerPaths[p.BrokerID] = p.LocalPath
+				}
+			}
+		}
+		projectCache[projectID] = entry
+		return entry, nil
+	}
+
+	const pageSize = 500
+	var affected []string
+	cursor := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return affected, err
+		}
+		res, err := s.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{
+			Limit:  pageSize,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return affected, fmt.Errorf("scan hosted explicit workspaces: list agents: %w", err)
+		}
+		for i := range res.Items {
+			agent := &res.Items[i]
+			if agent.AppliedConfig == nil || !isAbsWorkspace(agent.AppliedConfig.Workspace) {
+				continue
+			}
+			entry, err := lookupProject(agent.ProjectID)
+			if err != nil {
+				return affected, err
+			}
+			linkedPath := ""
+			if entry.providerPaths != nil && agent.RuntimeBrokerID != "" {
+				linkedPath = entry.providerPaths[agent.RuntimeBrokerID]
+			}
+			ws := effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, linkedPath)
+			if !isAbsWorkspace(ws) {
+				continue
+			}
+			if entry.resolveErr != nil || entry.hostPath == "" || !sameWorkspacePath(ws, entry.hostPath) {
+				affected = append(affected, agent.ID)
+				slog.Warn("Hosted startup scan: agent has stored absolute workspace that does not match resolved project workspace",
+					"agent_id", agent.ID,
+					"project_id", agent.ProjectID,
+					"phase", agent.Phase,
+					"code", api.LaunchCodeWorkspaceNotPermitted)
+			}
+		}
+		if res.NextCursor == "" || len(res.Items) == 0 {
+			break
+		}
+		cursor = res.NextCursor
+	}
+
+	if len(affected) > 0 {
+		slog.Warn("Hosted startup scan found agents with non-matching stored absolute workspaces",
+			"count", len(affected),
+			"code", api.LaunchCodeWorkspaceNotPermitted)
+	}
+	return affected, nil
+}
+
 // hostedCheckRefusal maps a stored harness-config or template check's
 // refusal to a 400 hosted_config_refused *RuntimeTargetRefusal; other errors
 // are returned as they are.

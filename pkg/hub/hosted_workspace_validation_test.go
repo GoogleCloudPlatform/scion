@@ -342,3 +342,73 @@ func (s *getProjectFailNthStore) GetProject(ctx context.Context, id string) (*st
 	}
 	return s.Store.GetProject(ctx, id)
 }
+
+// TestScanHostedExplicitWorkspaces verifies the read-only hosted startup scan
+// reports only agents whose stored absolute workspace fails the L2 check, and
+// is a no-op in workstation mode.
+func TestScanHostedExplicitWorkspaces(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	ctx := context.Background()
+
+	cfg := testServerConfig()
+	cfg.Workstation = false
+	s := createTestStore(t)
+	srv, _ := testServerWithStoreConfig(t, s, cfg)
+
+	brokerID := tid("scan-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "scan-broker", Slug: "scan-broker",
+		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
+	}))
+
+	hubProject := &store.Project{ID: tid("scan-hub-proj"), Name: "scan-hub-proj", Slug: "scan-hub-proj"}
+	require.NoError(t, s.CreateProject(ctx, hubProject))
+	wantResolved, err := srv.projectWorkspaceResolved(hubProject)
+	require.NoError(t, err)
+
+	linkedProject := &store.Project{
+		ID: tid("scan-linked-proj"), Name: "scan-linked-proj", Slug: "scan-linked-proj",
+		GitRemote: "https://github.com/example/repo.git",
+	}
+	require.NoError(t, s.CreateProject(ctx, linkedProject))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: linkedProject.ID,
+		BrokerID:  brokerID,
+		LocalPath: "/local/linked/repo",
+	}))
+
+	foreignAgent := &store.Agent{
+		ID: tid("scan-foreign"), Name: "scan-foreign", Slug: "scan-foreign",
+		ProjectID: hubProject.ID, RuntimeBrokerID: brokerID, Phase: string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Workspace: "/var/tmp/foreign-dir"},
+	}
+	matchingAgent := &store.Agent{
+		ID: tid("scan-matching"), Name: "scan-matching", Slug: "scan-matching",
+		ProjectID: hubProject.ID, RuntimeBrokerID: brokerID, Phase: string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Workspace: wantResolved.HostPath},
+	}
+	relativeAgent := &store.Agent{
+		ID: tid("scan-relative"), Name: "scan-relative", Slug: "scan-relative",
+		ProjectID: hubProject.ID, RuntimeBrokerID: brokerID, Phase: string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Workspace: "sub/dir"},
+	}
+	linkedClearedAgent := &store.Agent{
+		ID: tid("scan-linked"), Name: "scan-linked", Slug: "scan-linked",
+		ProjectID: linkedProject.ID, RuntimeBrokerID: brokerID, Phase: string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Workspace: "/var/tmp/ignored-on-linked"},
+	}
+	for _, a := range []*store.Agent{foreignAgent, matchingAgent, relativeAgent, linkedClearedAgent} {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	affected, err := srv.ScanHostedExplicitWorkspaces(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []string{foreignAgent.ID}, affected)
+
+	// Workstation mode skips the scan.
+	srv.workstation = true
+	wsAffected, err := srv.ScanHostedExplicitWorkspaces(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, wsAffected)
+}
