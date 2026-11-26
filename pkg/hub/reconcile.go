@@ -264,6 +264,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Kind = args.Kind
 		opts.PriorPhase = args.PriorPhase
 		opts.PriorStatus = args.PriorStatus
+		opts.WakeForMessage = args.WakeForMessage
 	}
 	// The warning for secrets the start goes without is worded for the
 	// requester, recorded on the row as its initiator (skippedSecretAudienceIsOwner).

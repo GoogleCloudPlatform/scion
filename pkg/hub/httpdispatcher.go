@@ -4357,6 +4357,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		PreviousProjectIDs:          d.previousProjectIDs(ctx, projectInfo),
 		NoAuth:                      launchesWithoutCredentials(agent),
 		PriorStatus:                 priorStatus,
+		WakeForMessage:              opts.WakeForMessage,
 		GitHubTokenInstallationOnly: usesInstallationGitHubToken(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
@@ -4474,9 +4475,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
 		args := &StartDispatchArgs{
-			Task:        task,
-			Resume:      resume,
-			PriorStatus: priorStatus,
+			Task:           task,
+			Resume:         resume,
+			PriorStatus:    priorStatus,
+			WakeForMessage: opts.WakeForMessage,
 		}
 		if opts.Async {
 			// The owner applies its own dispatcher rules; the requester

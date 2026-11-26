@@ -643,6 +643,16 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		// Work the message needs in the container (its attachments) runs
 		// right before the text, on this immediate path too.
 		message += m.runPreDelivery(ctx, agentID, projectID, PreDeliveryFromContext(ctx))
+		var deferredSuffix string
+		if s := ResumeSuffixFromContext(ctx); s != "" {
+			if message != "" {
+				message += "\n\n" + s
+			} else {
+				// Empty interrupt (OpInterruptSubmit): deliver the interrupt as
+				// today and re-buffer the suffix so it is not lost.
+				deferredSuffix = s
+			}
+		}
 		req := deliveryRequest{agentID: agentID, projectID: projectID, message: message, interrupt: true,
 			hasAttachments: PreDeliveryFromContext(ctx) != nil}
 		if id := deliveryMessageIDFromContext(ctx); id != "" {
@@ -651,7 +661,11 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		if onSuccess := DeliverySuccessHandlerFromContext(ctx); onSuccess != nil {
 			req.onSuccess = []DeliverySuccessHandler{onSuccess}
 		}
-		return m.deliver(ctx, req)
+		err := m.deliver(ctx, req)
+		if err == nil && deferredSuffix != "" {
+			m.msgBuffer.Send(agentID, projectID, deferredSuffix)
+		}
+		return err
 	}
 
 	// Before buffering, make sure the target has a running container. A
@@ -672,7 +686,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// A failure handler on ctx (set by the runtime broker) is invoked if the
 	// buffered delivery later fails, so the hub can mark the message failed
 	// rather than leave it "dispatched" (#1820).
-	m.msgBuffer.sendWithIDAndSuccess(agentID, projectID, message, deliveryMessageIDFromContext(ctx), DeliveryFailureHandlerFromContext(ctx), DeliverySuccessHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
+	m.msgBuffer.sendWithSuffix(agentID, projectID, message, deliveryMessageIDFromContext(ctx), ResumeSuffixFromContext(ctx), DeliveryFailureHandlerFromContext(ctx), DeliverySuccessHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
 	return nil
 }
 

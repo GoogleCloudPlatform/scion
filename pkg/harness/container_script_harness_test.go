@@ -96,14 +96,15 @@ func TestContainerScriptHarness_BasicGetters(t *testing.T) {
 		t.Errorf("GetCommand=%v want %v", cmd, want)
 	}
 	cmd2 := h.GetCommand("", true, nil)
-	want2 := []string{"testcli", "--resume", "--prompt", "Continue your previous task. Check for pending work or new messages."}
+	want2 := []string{"testcli", "--resume"}
 	if strings.Join(cmd2, " ") != strings.Join(want2, " ") {
 		t.Errorf("GetCommand resume=%v want %v", cmd2, want2)
 	}
 }
 
-func TestContainerScriptHarness_GetCommand_ResumeWithSyntheticPrompt(t *testing.T) {
-	// Harness with task_flag: resume without explicit task injects synthetic prompt.
+func TestContainerScriptHarness_GetCommand_ResumeDoesNotInjectSyntheticPrompt(t *testing.T) {
+	// AgentManager.Start owns resume-prompt selection so message-triggered wakes
+	// can launch promptless. GetCommand must not inject DefaultResumePrompt on its own.
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), "harness: resumetest\nimage: scion-test:latest\n")
 	writeFile(t, filepath.Join(dir, "provision.py"), "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n")
@@ -136,14 +137,14 @@ func TestContainerScriptHarness_GetCommand_ResumeWithSyntheticPrompt(t *testing.
 		t.Errorf("initial start: GetCommand=%v want %v", cmd, want)
 	}
 
-	// Resume without task: synthetic prompt is injected via task_flag.
+	// Resume without task: promptless (no task_flag injected by GetCommand).
 	cmd = h.GetCommand("", true, nil)
-	want = []string{"opencode-launch", "--continue", "--prompt", "Continue your previous task. Check for pending work or new messages."}
+	want = []string{"opencode-launch", "--continue"}
 	if strings.Join(cmd, " ") != strings.Join(want, " ") {
 		t.Errorf("resume without task: GetCommand=%v want %v", cmd, want)
 	}
 
-	// Resume with explicit task: explicit task is used, not synthetic.
+	// Resume with explicit task: explicit task is passed via task_flag.
 	cmd = h.GetCommand("new work", true, nil)
 	want = []string{"opencode-launch", "--continue", "--prompt", "new work"}
 	if strings.Join(cmd, " ") != strings.Join(want, " ") {
@@ -152,6 +153,43 @@ func TestContainerScriptHarness_GetCommand_ResumeWithSyntheticPrompt(t *testing.
 
 	if !h.HasTaskFlag() {
 		t.Error("HasTaskFlag() = false, want true")
+	}
+}
+
+func TestWakeResumeInstruction(t *testing.T) {
+	ts := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		prior *api.PriorStatus
+		want  string
+	}{
+		{
+			name:  "nil prior status",
+			prior: nil,
+			want:  "Resumed session after suspension to handle the message above. Respond to the message first, then check for other pending work.",
+		},
+		{
+			name:  "empty activity",
+			prior: &api.PriorStatus{Summary: "ignored"},
+			want:  "Resumed session after suspension to handle the message above. Respond to the message first, then check for other pending work.",
+		},
+		{
+			name:  "completed with timestamp and summary",
+			prior: &api.PriorStatus{Activity: "completed", Summary: "PR #123 opened", At: ts},
+			want:  "Resumed session after suspension to handle the message above. Last reported status: task_completed at 2026-11-23T12:00:00Z (PR #123 opened). Respond to the message first; do not repeat completed work.",
+		},
+		{
+			name:  "idle with timestamp and summary",
+			prior: &api.PriorStatus{Activity: "idle", Summary: "waiting for review", At: ts},
+			want:  "Resumed session after suspension to handle the message above. Last reported status: idle at 2026-11-23T12:00:00Z (waiting for review). Respond to the message first, then check for other pending work.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WakeResumeInstruction(tc.prior); got != tc.want {
+				t.Errorf("WakeResumeInstruction() =\n  %q\nwant:\n  %q", got, tc.want)
+			}
+		})
 	}
 }
 

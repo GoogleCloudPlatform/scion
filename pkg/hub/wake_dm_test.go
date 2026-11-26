@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -693,4 +694,76 @@ func TestBrokerQuota_WakeReadinessTimeoutLiveCtxNoTransientRelease(t *testing.T)
 	rec := doRequest(t, u.srv, http.MethodPost, "/api/v1/agents/"+other.ID+"/start", nil)
 	assertBrokerQuotaExceeded(t, rec)
 	assert.EqualValues(t, 0, disp.startCount.Load(), "no second container dispatched")
+}
+
+// wakeOptionsRecordingDispatcher implements both AgentDispatcher and
+// startOptionsDispatcher so tests can verify StartDispatchOptions.WakeForMessage.
+type wakeOptionsRecordingDispatcher struct {
+	wakeTrackingDispatcher
+	optMu      sync.Mutex
+	optCalls   []StartDispatchOptions
+	plainCalls int
+}
+
+func (d *wakeOptionsRecordingDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	d.optMu.Lock()
+	d.plainCalls++
+	d.optMu.Unlock()
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, task, resume)
+}
+
+func (d *wakeOptionsRecordingDispatcher) DispatchAgentStartWithOptions(ctx context.Context, agent *store.Agent, task string, resume bool, opts StartDispatchOptions) (*StartDispatchResult, error) {
+	d.optMu.Lock()
+	d.optCalls = append(d.optCalls, opts)
+	d.optMu.Unlock()
+	if err := d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// TestWakeAgentForDM_SetsWakeForMessage (T9) verifies that wakeAgentForDM
+// dispatches with WakeForMessage=true (synchronous), whereas manual start
+// (StartClaimUser) and restart do not set WakeForMessage.
+func TestWakeAgentForDM_SetsWakeForMessage(t *testing.T) {
+	srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+
+	disp := &wakeOptionsRecordingDispatcher{}
+	srv.SetDispatcher(disp)
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: "idle",
+		})
+	}()
+
+	result, dmErr := srv.wakeAgentForDM(context.Background(), target)
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, WakeResumed, result.Outcome)
+
+	disp.optMu.Lock()
+	require.Len(t, disp.optCalls, 1, "wakeAgentForDM should call DispatchAgentStartWithOptions once")
+	assert.True(t, disp.optCalls[0].WakeForMessage, "wakeAgentForDM must set WakeForMessage=true")
+	assert.False(t, disp.optCalls[0].Async, "wakeAgentForDM must stay synchronous")
+	assert.Equal(t, 0, disp.plainCalls, "wakeAgentForDM should not fall back to plain DispatchAgentStart")
+	disp.optMu.Unlock()
+
+	// Manual start (StartClaimUser) must not set WakeForMessage.
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseSuspended),
+	}))
+	target.Phase = string(state.PhaseSuspended)
+	err := srv.startAgentCore(context.Background(), target, StartOpts{
+		Kind:   store.StartClaimUser,
+		Resume: true,
+	})
+	require.NoError(t, err)
+
+	disp.optMu.Lock()
+	assert.Len(t, disp.optCalls, 1, "manual StartClaimUser must not pass WakeForMessage=true")
+	assert.Equal(t, 1, disp.plainCalls, "synchronous manual StartClaimUser uses plain DispatchAgentStart")
+	disp.optMu.Unlock()
 }

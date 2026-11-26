@@ -2846,14 +2846,22 @@ authDone:
 		}
 	}
 
-	// When resuming without an explicit task, replace the hardcoded generic
-	// resume prompt with a status-aware notice for harnesses that declare
-	// task_flag (antigravity, gemini-cli, copilot, opencode). Non-task_flag
-	// harnesses (claude, codex, grok-build, pi, ...) stay promptless
-	// (ptone/scion#8900).
-	if opts.Resume && task == "" && opts.PriorStatus != nil && harnessUsesTaskFlag(h, finalScionCfg) {
-		task = harness.ResumePromptForPriorStatus(opts.PriorStatus)
-		priorStatusNotice = true
+	// When resuming without an explicit task, handle resume-prompt selection
+	// for harnesses that declare task_flag (antigravity, gemini-cli, copilot,
+	// opencode). Non-task_flag harnesses (claude, codex, grok-build, pi, ...)
+	// stay promptless (ptone/scion#8900).
+	//
+	// On a message-triggered wake, hold the instruction back via
+	// OnDeferredResume so the harness starts promptless and the broker appends
+	// the wake instruction to the waking message(s) in one buffered delivery.
+	if opts.Resume && task == "" && harnessUsesTaskFlag(h, finalScionCfg) {
+		standalone := harness.ResumePromptForPriorStatus(opts.PriorStatus)
+		if opts.WakeForMessage && opts.OnDeferredResume != nil {
+			opts.OnDeferredResume(harness.WakeResumeInstruction(opts.PriorStatus), standalone)
+		} else {
+			task = standalone
+			priorStatusNotice = true
+		}
 	}
 
 	// Write the full task to the agent home, and pass a short pointer to

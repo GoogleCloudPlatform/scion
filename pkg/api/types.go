@@ -1542,6 +1542,8 @@ type StartOptions struct {
 	Name              string
 	Task              string
 	PriorStatus       *PriorStatus
+	WakeForMessage    bool                          // start was triggered by a waking message
+	OnDeferredResume  func(wake, standalone string) `json:"-"` // broker hook; nil outside the broker
 	Template          string
 	TemplateName      string // Human-friendly template slug (overrides Template for labels when hydration replaces Template with a cache path)
 	Profile           string

@@ -1144,6 +1144,10 @@ type StartExtras struct {
 	// before this start, resume, or restart (wire key priorStatus;
 	// ptone/scion#8900). Nil sends nothing.
 	PriorStatus *api.PriorStatus
+	// WakeForMessage is true when this start was triggered by an incoming
+	// message waking a suspended agent (wire key wakeForMessage). False sends
+	// nothing.
+	WakeForMessage bool
 	// InitFirewall carries the hub's operator-authoritative egress firewall
 	// policy (wire key initFirewall). Set unconditionally by the send
 	// wrappers (sendStart, sendRestart) from the hub's server.hub.init_firewall
@@ -1265,6 +1269,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.PriorStatus != nil {
 		payload["priorStatus"] = extras.PriorStatus
+	}
+	if extras.WakeForMessage {
+		payload["wakeForMessage"] = true
 	}
 	if extras.InitFirewall != nil {
 		payload["initFirewall"] = extras.InitFirewall

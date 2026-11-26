@@ -288,6 +288,27 @@ func deliveryMessageIDFromContext(ctx context.Context) string {
 	return id
 }
 
+type resumeSuffixKey struct{}
+
+// WithResumeSuffix returns a context carrying a wake-on-message resume
+// instruction to append after the waking message(s) in the same delivery.
+func WithResumeSuffix(ctx context.Context, suffix string) context.Context {
+	if suffix == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, resumeSuffixKey{}, suffix)
+}
+
+// ResumeSuffixFromContext returns the wake resume suffix attached with
+// WithResumeSuffix, or "".
+func ResumeSuffixFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.Value(resumeSuffixKey{}).(string)
+	return s
+}
+
 // conduitSettings are the resolved harness delivery and readiness settings
 // the route bounds are checked against before a conduit delivery (design
 // v2.22 §1.7): no value is clamped; a setting outside the bounds sends the

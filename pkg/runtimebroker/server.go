@@ -409,6 +409,12 @@ type Server struct {
 	credLastScan    time.Time
 	credWatcherStop chan struct{}
 
+	// pendingResume holds deferred wake-on-message resume instructions keyed
+	// by agentID + "\x00" + projectID until the waking message arrives or the
+	// TTL expires.
+	pendingResume    *pendingResumeRegistry
+	pendingResumeTTL time.Duration // zero uses defaultPendingResumeTTL (override in tests)
+
 	// shutdownContext, when set (SetShutdownContext), returns the context
 	// Start passes to Shutdown once its ctx ends (ptone/scion#5054).
 	shutdownContext func() (context.Context, context.CancelFunc)
@@ -730,6 +736,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		launchRegistry:          newLaunchRegistry(),
 		startsInFlight:          newStartTracker(),
 		retainedPurges:          newRetainedPurgeGuard(),
+		pendingResume:           newPendingResumeRegistry(),
 		launchInstanceID:        uuid.NewString(),
 
 		// Subsystem loggers
@@ -1896,6 +1903,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if reg := s.moveBundleJobs.Load(); reg != nil {
 		reg.cancelAll()
 	}
+
+	// Stop any pending wake-resume TTL fallback timers.
+	s.pendingResume.close()
 
 	// Close the resolution cache: wait, within a bound, for background
 	// refreshes still running, then write any entries still waiting for
