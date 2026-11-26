@@ -27,7 +27,7 @@ import {
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
 import './profile-inbox.js';
-import type { ScionPageProfileInbox } from './profile-inbox.js';
+import { INBOX_LINK_HREFS, type ScionPageProfileInbox } from './profile-inbox.js';
 
 function makeCat(overrides: Partial<InboxCategory> & { href: string }): InboxCategory {
   return {
@@ -130,7 +130,7 @@ describe('<scion-page-profile-inbox>', () => {
     expect(page.shadowRoot?.querySelector('scion-page-404')).not.toBeNull();
   });
 
-  it('renders all five cards in canonical order with descriptors, prose, badges, and Details links (AC-1, AC-2, AC-4, AC-9)', async () => {
+  it('renders all five cards in canonical order with descriptors, prose, badges, and key-noun inline links (AC-1, AC-2, AC-4, AC-9, AC-15, AC-16)', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
     const summary = makeSummary({
       decisions: makeCat({
@@ -189,9 +189,12 @@ describe('<scion-page-profile-inbox>', () => {
       'chat',
     ]);
 
-    // No card header contains a link, and "View all" never appears.
+    // No card header contains a link, no footer actions row or "Details" / "View all" links exist.
     expect(page.shadowRoot?.querySelector('.card-header a')).toBeNull();
+    expect(page.shadowRoot?.querySelector('.card-actions')).toBeNull();
+    expect(page.shadowRoot?.querySelector('[data-card-action]')).toBeNull();
     expect(page.shadowRoot?.textContent).not.toContain('View all');
+    expect(page.shadowRoot?.textContent).not.toContain('Details');
 
     // No inline triage controls anywhere on the page.
     expect(page.shadowRoot?.querySelector('sl-dialog')).toBeNull();
@@ -205,7 +208,7 @@ describe('<scion-page-profile-inbox>', () => {
       title: string,
       badge: string,
       prose: string,
-      href: string
+      expectedLinks: Array<{ text: string; href: string }>
     ): void => {
       const card = page.shadowRoot?.querySelector(`[data-inbox-card="${key}"]`);
       expect(card).not.toBeNull();
@@ -213,44 +216,57 @@ describe('<scion-page-profile-inbox>', () => {
       expect(card?.querySelector('[data-card-descriptor]')?.textContent?.trim()).toBeTruthy();
       expect(card?.querySelector('[data-card-count]')?.textContent?.trim()).toBe(badge);
       expect(card?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(prose);
-      const action = card?.querySelector('[data-card-action]') as HTMLAnchorElement | null;
-      expect(action).not.toBeNull();
-      expect(action?.getAttribute('href')).toBe(href);
-      expect(action?.textContent?.trim()).toContain('Details');
+      expect(card?.querySelector('.card-actions')).toBeNull();
+
+      const links = Array.from(
+        card?.querySelectorAll('[data-card-prose] a.card-prose-link') ?? []
+      ) as HTMLAnchorElement[];
+      expect(
+        links.map((a) => ({
+          text: a.textContent?.trim(),
+          href: a.getAttribute('href'),
+        }))
+      ).toEqual(expectedLinks);
+
+      // AC-15: visible text is the accessible name (no overriding aria-label).
+      for (const a of links) {
+        expect(a.hasAttribute('aria-label')).toBe(false);
+      }
     };
 
-    checkCard(
-      'decisions',
-      'Decisions',
-      '8',
-      '8 decisions from 3 agents in 2 projects',
-      '/profile/decisions?tab=pending'
-    );
-    checkCard(
-      'waiting',
-      'Agents Waiting',
-      '2',
-      '2 agents waiting in 1 project',
-      '/agents?q=activity%3Awaiting_for_input'
-    );
+    checkCard('decisions', 'Decisions', '8', '8 decisions from 3 agents in 2 projects', [
+      { text: '8 decisions', href: '/profile/decisions?tab=pending' },
+    ]);
+    checkCard('waiting', 'Agents Waiting', '2', '2 agents waiting in 1 project', [
+      { text: '2 agents waiting', href: '/agents?q=activity%3Awaiting_for_input' },
+    ]);
     checkCard(
       'pending_secrets',
       'Pending Secrets',
       '50+',
       '50+ pending secrets from 4 agents in 2 projects',
-      '/profile/secrets'
+      [{ text: '50+ pending secrets', href: '/profile/secrets' }]
     );
-    checkCard(
-      'reviews',
-      'Reviews',
-      '3',
-      '3 pending reviews',
-      '/artifacts?review_pending=1&owner=me'
-    );
-    checkCard('chat', 'Chat', '5', '5 unread conversations, 2 with mentions', '/chat');
+    checkCard('reviews', 'Reviews', '3', '3 pending reviews', [
+      { text: '3 pending reviews', href: '/artifacts?review_pending=1&owner=me' },
+    ]);
+    checkCard('chat', 'Chat', '5', '5 unread conversations, 2 with mentions', [
+      { text: '5 unread conversations', href: '/chat' },
+    ]);
+
+    // AC-16: no rendered link targets Phase 3 or Phase 4 unhydrated filter routes.
+    const allLinks = Array.from(page.shadowRoot?.querySelectorAll('a[href]') ?? []);
+    for (const a of allLinks) {
+      const href = a.getAttribute('href') ?? '';
+      expect(href).not.toContain('/chat?filter=');
+      expect(href).not.toContain('requested=1');
+      expect(href).not.toContain('drafts=1');
+      expect(href).not.toContain('review_on_latest=1');
+    }
+    expect(Object.values(INBOX_LINK_HREFS)).toEqual([]);
   });
 
-  it('hides disabled cards, renders unavailable sign-in note, error Retry, and Nothing Waiting with no actions when 0', async () => {
+  it('hides disabled cards, renders unavailable sign-in note, error Retry, and Nothing Waiting with no links when 0', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
     const summary = makeSummary({
       decisions: makeCat({
@@ -301,26 +317,27 @@ describe('<scion-page-profile-inbox>', () => {
     // Disabled card is hidden.
     expect(page.shadowRoot?.querySelector('[data-inbox-card="decisions"]')).toBeNull();
 
-    // Empty ok cards show "Nothing Waiting", no badge, and no action link.
+    // Empty ok cards show "Nothing Waiting", no badge, and no links.
     const waitingCard = page.shadowRoot?.querySelector('[data-inbox-card="waiting"]');
     expect(waitingCard?.querySelector('[data-card-empty]')?.textContent?.trim()).toBe(
       'Nothing Waiting'
     );
     expect(waitingCard?.querySelector('[data-card-count]')).toBeNull();
-    expect(waitingCard?.querySelector('[data-card-action]')).toBeNull();
+    expect(waitingCard?.querySelector('a')).toBeNull();
 
-    // Unavailable card shows descriptor and sign-in message, no badge, no action.
+    // Unavailable card shows descriptor and sign-in message, no badge, no links.
     const pendingCard = page.shadowRoot?.querySelector('[data-inbox-card="pending_secrets"]');
     expect(pendingCard?.querySelector('[data-card-descriptor]')?.textContent?.trim()).toBeTruthy();
     expect(pendingCard?.querySelector('[data-card-unavailable]')?.textContent?.trim()).toBe(
       'Not available with this sign-in'
     );
     expect(pendingCard?.querySelector('[data-card-count]')).toBeNull();
-    expect(pendingCard?.querySelector('[data-card-action]')).toBeNull();
+    expect(pendingCard?.querySelector('a')).toBeNull();
 
-    // Error card shows "Couldn't load" and Retry button.
+    // Error card shows "Couldn't load" and Retry button, no links.
     const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
     expect(reviewsCard?.querySelector('[data-card-error]')?.textContent).toContain("Couldn't load");
+    expect(reviewsCard?.querySelector('a')).toBeNull();
     const retryBtn = reviewsCard?.querySelector(
       '[data-card-error] sl-button'
     ) as HTMLElement | null;
@@ -345,6 +362,7 @@ describe('<scion-page-profile-inbox>', () => {
     await page.updateComplete;
 
     expect(page.shadowRoot?.querySelector('[data-inbox-caught-up]')).not.toBeNull();
-    expect(page.shadowRoot?.querySelectorAll('[data-card-action]').length).toBe(0);
+    expect(page.shadowRoot?.querySelectorAll('.card-prose-link').length).toBe(0);
+    expect(page.shadowRoot?.querySelectorAll('.card-actions').length).toBe(0);
   });
 });

@@ -14,17 +14,18 @@
 
 /**
  * Real-hub end-to-end Playwright suite for Inbox Dashboard live updates
- * (ptone/scion#8962, design §9 AC10; updated for Phase 1 summary-of-state
- * cards in ptone/scion#9289 / ptone/scion#9290).
+ * (ptone/scion#8962, design §9 AC10; updated for Phase 1b key-noun inline
+ * links in ptone/scion#9441).
  *
  * Verifies against a real Go `scion` hub with `web.inbox_dashboard` enabled:
  *   1. Page 1 opens `/profile/inbox` (Pending Secrets card shows "Nothing
- *      Waiting", count badge hidden, no Details link) and Page 2 opens `/` in
- *      the same browser context (mounting the main sidebar and bell tray).
+ *      Waiting", count badge hidden, no inline links or footer actions) and
+ *      Page 2 opens `/` in the same browser context (mounting the main
+ *      sidebar and bell tray).
  *   2. An agent creates a pending user-scope secret; within ~5 s and without
- *      reloading, Page 1's Pending Secrets card prose/count/Details link +
- *      Profile nav badge update and Page 2's main sidebar badge + bell tray
- *      Inbox link converge.
+ *      reloading, Page 1's Pending Secrets card prose/count/inline key-noun
+ *      link + Profile nav badge update and Page 2's main sidebar badge + bell
+ *      tray Inbox link converge.
  *   3. Resolving the pending secret via the Hub API (`POST /api/v1/pending-secrets/{id}/reject`)
  *      clears the card back to "Nothing Waiting" and clears badges on both
  *      Page 1 and Page 2 without reloading.
@@ -131,7 +132,7 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
 
     try {
       // Page 1: /profile/inbox starts with Pending Secrets empty ("Nothing Waiting",
-      // count badge hidden, no Details action).
+      // count badge hidden, no inline links or footer actions).
       await page1.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
       const pendingSecretsCard = page1.locator('[data-inbox-card="pending_secrets"]');
       const profileNavBadge = page1
@@ -143,7 +144,8 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
         timeout: 10_000,
       });
-      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveCount(0);
+      await expect(pendingSecretsCard.locator('a.card-prose-link')).toHaveCount(0);
+      await expect(pendingSecretsCard.locator('.card-actions')).toHaveCount(0);
       await expect(profileNavBadge).toHaveCount(0);
 
       // Page 2: main app shell on `/` mounts the sidebar Inbox link and bell tray.
@@ -182,7 +184,7 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       expect(pendingId).toBeTruthy();
 
       // Within ~5 s and without reloading, Page 1's summary card prose, count badge,
-      // Details -> link, and profile nav badge update.
+      // inline key-noun link, and profile nav badge update.
       await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveText('1', {
         timeout: 7_000,
       });
@@ -190,10 +192,11 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         '1 pending secret from 1 agent in 1 project',
         { timeout: 7_000 }
       );
-      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveAttribute(
-        'href',
-        '/profile/secrets'
-      );
+      const inlineLink = pendingSecretsCard.locator('[data-card-prose] a.card-prose-link');
+      await expect(inlineLink).toHaveCount(1);
+      await expect(inlineLink).toHaveText('1 pending secret');
+      await expect(inlineLink).toHaveAttribute('href', '/profile/secrets');
+      await expect(pendingSecretsCard.locator('.card-actions')).toHaveCount(0);
       await expect(profileNavBadge).toHaveText('1', { timeout: 7_000 });
 
       // Page 2 (second tab in the same context) converges without reload:
@@ -217,14 +220,14 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       expect(rejectRes.status, JSON.stringify(rejectRes.body)).toBe(200);
       expect(rejectRes.body.state).toBe('rejected');
 
-      // Page 1 hides the count badge & Details link, restores "Nothing Waiting", and clears profile nav badge.
+      // Page 1 hides the count badge & inline link, restores "Nothing Waiting", and clears profile nav badge.
       await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveCount(0, {
         timeout: 7_000,
       });
       await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
         timeout: 7_000,
       });
-      await expect(pendingSecretsCard.locator('[data-card-action]')).toHaveCount(0, {
+      await expect(pendingSecretsCard.locator('a.card-prose-link')).toHaveCount(0, {
         timeout: 7_000,
       });
       await expect(profileNavBadge).toHaveCount(0, { timeout: 7_000 });

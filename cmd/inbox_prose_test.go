@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,12 +27,13 @@ import (
 
 type inboxProseFixture struct {
 	Cases []struct {
-		Name      string         `json:"name"`
-		Category  string         `json:"category"`
-		Count     int            `json:"count"`
-		Capped    bool           `json:"capped"`
-		Breakdown map[string]int `json:"breakdown"`
-		Expected  string         `json:"expected"`
+		Name      string              `json:"name"`
+		Category  string              `json:"category"`
+		Count     int                 `json:"count"`
+		Capped    bool                `json:"capped"`
+		Breakdown map[string]int      `json:"breakdown"`
+		Expected  string              `json:"expected"`
+		Segments  []inboxProseSegment `json:"segments"`
 	} `json:"cases"`
 }
 
@@ -45,6 +47,19 @@ func TestFormatInboxProse_SharedFixture(t *testing.T) {
 
 	for _, tc := range fixture.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
+			gotSegments := formatInboxProseSegments(tc.Category, tc.Count, tc.Capped, tc.Breakdown)
+			assert.Equal(t, tc.Segments, gotSegments)
+
+			if len(gotSegments) == 0 {
+				assert.Equal(t, inboxNothingWaitingProse, tc.Expected)
+			} else {
+				var joined strings.Builder
+				for _, seg := range gotSegments {
+					joined.WriteString(seg.Text)
+				}
+				assert.Equal(t, tc.Expected, joined.String())
+			}
+
 			got := formatInboxProse(tc.Category, tc.Count, tc.Capped, tc.Breakdown)
 			assert.Equal(t, tc.Expected, got)
 		})
