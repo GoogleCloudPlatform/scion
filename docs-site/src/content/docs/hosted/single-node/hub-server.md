@@ -148,11 +148,10 @@ For more details on how agents assume these identities via metadata server emula
 
 ### gs:// links in chat
 
-An agent's assigned GCP Identity has a second use beyond Vertex AI: when the
-`web.gcs_links` experiment is enabled on the Hub, a `gs://bucket/object`
-reference that an **agent** posts in Native Web Chat becomes a clickable
-link. Clicking it fetches the object through the Hub using the sending
-agent's *current* assigned Service Account, through a token minted on
+An agent's assigned GCP Identity has a second use beyond Vertex AI: a
+`gs://bucket/object` reference that an **agent** posts in Native Web Chat
+becomes a clickable link. Clicking it fetches the object through the Hub using
+the sending agent's *current* assigned Service Account, through a token minted on
 demand with only the read-only `devstorage.read_only` scope — never the
 broader scope the agent itself uses for Vertex AI or other Google Cloud
 calls, and never a token the browser can see or reuse directly.

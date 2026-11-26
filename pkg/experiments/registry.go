@@ -956,17 +956,6 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
-		Name:        "web.gcs_links",
-		Title:       "gs:// link previews",
-		Description: "Linkifies a gs://bucket/object URI an agent posts in chat and lets the viewer fetch and preview that object through the hub. Gates both the linkifier (LayerWeb) and the GET /api/v1/gcs/object endpoint itself (LayerServer): the endpoint also requires a configured GCP token generator, so this experiment alone does not make links fetchable on a hub without one.",
-		Default:     false,
-		Layers:      []Layer{LayerWeb, LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#2545",
-		Owner:       "native-chat",
-		ReviewBy:    "2026-12-30",
-	},
-	{
 		Name:        K8sNFSHome,
 		Title:       "Persistent agent home on Kubernetes",
 		Description: "Lets Kubernetes agents keep their home directory on the NFS export of their profile's shared-dir storage, across stops and restarts. Takes effect only where server.home_storage, or a profile or runtime home_storage_backend, selects nfs. Agents keep the home storage they were created with.",
@@ -1565,6 +1554,8 @@ var compiledRetired = []string{
 	"filters.query_dialect",
 	// Graduated: authorization decision audit v2 is always on (ptone/scion#9483).
 	"hub.authorization_decision_audit_v2",
+	// Graduated: gs:// link previews are always on (ptone/scion#9482).
+	"web.gcs_links",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

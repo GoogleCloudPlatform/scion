@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -98,9 +97,7 @@ type gcsFixture struct {
 }
 
 // newGCSFixture builds a fixture with the feature enabled: a fake token
-// generator is set (s.gcpTokenGenerator != nil) and the web.gcs_links
-// experiment is overridden on, via setGCSLinksExperiment, since the
-// production registry default is off (ptone/scion#2545).
+// generator is set (s.gcpTokenGenerator != nil).
 func newGCSFixture(t *testing.T) *gcsFixture {
 	t.Helper()
 	srv, s := attachmentTestServer(t)
@@ -117,7 +114,6 @@ func gcsFixtureFor(t *testing.T, srv *Server, s store.Store) *gcsFixture {
 	srv.SetGCPTokenGenerator(gen)
 	srv.gcsLinkSourceFactory = newFakeGCSSourceFactory(gen, source)
 	srv.SetAuditLogger(audit)
-	setGCSLinksExperiment(t, srv, true)
 	return &gcsFixture{srv: srv, store: s, gen: gen, source: source, audit: audit}
 }
 
@@ -496,25 +492,6 @@ type fakeGCSSource struct {
 	// simulating a network stream that fails partway through, after a
 	// successful Attrs/Open and after some real bytes have already gone out.
 	openStreamFailErr error
-}
-
-// setGCSLinksExperiment overrides the web.gcs_links experiment to enabled on
-// srv, via an admin-override document on a fresh OperationalSettings backed
-// by a fake store — the same mechanism an admin toggling it from Admin ->
-// Server Config -> Experiments would produce. srv.experiments is left nil,
-// so every other registered experiment (and every field of this one besides
-// its resolved value) still comes from the real production registry;
-// nothing here can mask a registry-definition bug the way a parallel test
-// registry would.
-func setGCSLinksExperiment(t *testing.T, srv *Server, enabled bool) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(`{"overrides":{%q:%t}}`, gcsLinksExperiment, enabled)))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
 }
 
 func (f *fakeGCSSource) putObject(bucket, object string, attrs *storage.ObjectAttrs, body []byte) {

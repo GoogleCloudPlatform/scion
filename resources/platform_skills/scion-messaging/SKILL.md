@@ -190,7 +190,7 @@ Markdown link:
 | `owner/repo#123` | A link to that GitHub issue or PR. A bare `#123` is not linked. |
 | `/workspace/<path>` or `/scion-volumes/<dir>/<path>` naming a file | A link that opens a file preview |
 | `scion://artifact/<uuid>`, optionally with `@<version>` | A link that opens the artifact preview, when artifacts are enabled |
-| `gs://<bucket>/<object>` | A link that opens the object preview, in agent messages only and when the `web.gcs_links` experiment is on |
+| `gs://<bucket>/<object>` | A link that opens the object preview, in agent messages only |
 | `https://...`, `www....` or an email address | An ordinary link. A descriptive Markdown link still reads better. |
 
 For example, this message body renders both references as links:

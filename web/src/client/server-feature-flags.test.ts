@@ -114,8 +114,8 @@ describe('applyServerFeatureFlags: parallel boot fetch', () => {
     await applyServerFeatureFlags();
 
     expect(isFeatureEnabled('web.native_chat')).toBe(false);
-    // Compiled default for web.gcs_links (OFF) still applies.
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
+    // Compiled default for an off-by-default flag still applies.
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(false);
   });
 
   it.each([401, 404])(
@@ -236,7 +236,7 @@ describe('applyServerFeatureFlags: embedded experiments (ptone/scion#2489)', () 
     await applyServerFeatureFlags({});
 
     expect(requestedUrls(spy)).toEqual(['/api/v1/settings/public']);
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
+    expect(isFeatureEnabled('web.fixture_flag')).toBe(false);
   });
 
   it.each([
@@ -254,56 +254,6 @@ describe('applyServerFeatureFlags: embedded experiments (ptone/scion#2489)', () 
     // The fetched map applies.
     expect(isFeatureEnabled('web.fixture_flag')).toBe(true);
     expect(window.__SCION_FEATURES__ ?? {}).not.toHaveProperty('0');
-  });
-});
-
-describe('applyServerFeatureFlags: web.gcs_links (registered experiment, ptone/scion#2545)', () => {
-  function stubFetch(experimentsBody: unknown, experimentsStatus = 200): void {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        if (url.includes('/api/v1/experiments'))
-          return Promise.resolve(jsonResponse(experimentsBody, experimentsStatus));
-        if (url.includes('/api/v1/settings/public')) return Promise.resolve(jsonResponse({}));
-        throw new Error(`unexpected fetch: ${url}`);
-      })
-    );
-  }
-
-  it('an experiments map with web.gcs_links: true enables it, the same as any other registered experiment', async () => {
-    stubFetch({ experiments: { 'web.gcs_links': true } });
-    await applyServerFeatureFlags();
-    expect(isFeatureEnabled('web.gcs_links')).toBe(true);
-  });
-
-  it('an experiments map with web.gcs_links: false leaves it disabled', async () => {
-    stubFetch({ experiments: { 'web.gcs_links': false } });
-    await applyServerFeatureFlags();
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
-  });
-
-  it('web.gcs_links missing from the experiments map falls through to the compiled default (off: absent from DEFAULT_ON_FLAGS)', async () => {
-    stubFetch({ experiments: {} });
-    await applyServerFeatureFlags();
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
-  });
-
-  it('a non-ok experiments response leaves gcs linkification off when no localStorage override is set', async () => {
-    stubFetch({ experiments: { 'web.gcs_links': true } }, 500);
-    await applyServerFeatureFlags();
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
-  });
-
-  it('a rejected experiments fetch leaves gcs linkification off when no localStorage override is set', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn((url: string) => {
-        if (url.includes('/api/v1/experiments')) return Promise.reject(new Error('down'));
-        return Promise.resolve(jsonResponse({}));
-      })
-    );
-    await applyServerFeatureFlags();
-    expect(isFeatureEnabled('web.gcs_links')).toBe(false);
   });
 });
 
