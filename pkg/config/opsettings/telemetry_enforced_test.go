@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 )
 
 func TestTelemetrySettings_Resolve(t *testing.T) {
@@ -151,6 +153,48 @@ func TestValidate_TelemetryEnforced(t *testing.T) {
 			if !found {
 				t.Fatalf("Validate() errors = %+v, want path=%q containing %q", errs, tc.wantPath, tc.wantErr)
 			}
+			if tc.name == "enforced wrong type" && len(errs) != 1 {
+				t.Fatalf("Validate() returned %d errors for wrong-type enforced, want 1: %+v", len(errs), errs)
+			}
 		})
+	}
+}
+
+func TestExtractSectionFromKoanf_TelemetryStripsDBOnlyEnforced(t *testing.T) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(map[string]interface{}{
+		"telemetry.enabled":        true,
+		"telemetry.enforced":       true,
+		"telemetry.cloud.endpoint": "otel.example.com:4317",
+	}, "."), nil); err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	raw, err := ExtractSectionFromKoanf(k, "telemetry")
+	if err != nil {
+		t.Fatalf("ExtractSectionFromKoanf: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal extracted doc: %v", err)
+	}
+	if _, hasEnforced := m["enforced"]; hasEnforced {
+		t.Fatalf("extracted bootstrap telemetry doc must not contain DB-only key 'enforced': %s", raw)
+	}
+	if enabled, ok := m["enabled"].(bool); !ok || !enabled {
+		t.Fatalf("extracted doc lost enabled=true: %s", raw)
+	}
+}
+
+func TestEnvOverriddenLayer1Keys_ExcludesDBOnlyEnforced(t *testing.T) {
+	got := EnvOverriddenLayer1Keys([]string{"telemetry.enabled", "telemetry.enforced"})
+	if len(got) != 1 || got[0] != "telemetry.enabled" {
+		t.Fatalf("EnvOverriddenLayer1Keys = %v, want [telemetry.enabled]", got)
+	}
+	if !IsDBOnlyKey("telemetry.enforced") {
+		t.Fatal("IsDBOnlyKey(telemetry.enforced) = false, want true")
+	}
+	if IsDBOnlyKey("telemetry.enabled") {
+		t.Fatal("IsDBOnlyKey(telemetry.enabled) = true, want false")
 	}
 }

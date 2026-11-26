@@ -149,6 +149,10 @@ var sectionIndex map[string]*Section
 // keyIndex maps koanf path → section name for ownership lookup.
 var keyIndex map[string]string
 
+// dbOnlyKeyIndex tracks keys registered in Section.DBOnlyKeys (no settings.yaml
+// or environment variable representation).
+var dbOnlyKeyIndex map[string]bool
+
 func init() {
 	Registry = []Section{
 		{
@@ -416,6 +420,7 @@ func init() {
 func ensureIndexes() {
 	sectionIndex = make(map[string]*Section, len(Registry))
 	keyIndex = make(map[string]string)
+	dbOnlyKeyIndex = make(map[string]bool)
 	for i := range Registry {
 		s := &Registry[i]
 		sectionIndex[s.Name] = s
@@ -424,8 +429,15 @@ func ensureIndexes() {
 		}
 		for _, kp := range s.DBOnlyKeys {
 			keyIndex[kp] = s.Name
+			dbOnlyKeyIndex[kp] = true
 		}
 	}
+}
+
+// IsDBOnlyKey reports whether key is registered as a DB-only key (no
+// settings.yaml or environment variable representation).
+func IsDBOnlyKey(key string) bool {
+	return dbOnlyKeyIndex[key]
 }
 
 // SectionByName returns the Section with the given name, or nil if not found.
@@ -1222,7 +1234,8 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 	case "telemetry":
 		var ts TelemetrySettings
 		if err := json.Unmarshal(doc, &ts); err != nil {
-			return []config.ValidationError{{Message: fmt.Sprintf("invalid telemetry JSON: %v", err)}}
+			// ValidateSchema already reported any JSON or field-type error.
+			return nil
 		}
 		if _, err := ts.Resolve(); err != nil {
 			return []config.ValidationError{{Path: "enforced", Message: err.Error()}}

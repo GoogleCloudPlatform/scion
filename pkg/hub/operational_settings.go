@@ -743,6 +743,19 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+	// telemetry.enforced is DB-only: read exclusively from the stored DB
+	// telemetry row (never from bootstrap settings.yaml or env) and only when
+	// the decoded row passes Resolve() (fail closed).
+	if rawTel, inDB := dbSections["telemetry"]; inDB && len(rawTel) > 0 {
+		var ts opsettings.TelemetrySettings
+		if err := json.Unmarshal(rawTel, &ts); err != nil {
+			slog.Error("operational settings: cannot decode telemetry DB row for enforced flag", "error", err)
+		} else if resolved, err := ts.Resolve(); err != nil {
+			slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
+		} else {
+			snap.TelemetryEnforced = resolved.Enforced
+		}
+	}
 	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
@@ -1333,9 +1346,6 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("telemetry.enabled") {
 		v := k.Bool("telemetry.enabled")
 		snap.TelemetryEnabled = &v
-	}
-	if k.Exists("telemetry.enforced") {
-		snap.TelemetryEnforced = k.Bool("telemetry.enforced")
 	}
 
 	// Auto-expose ports

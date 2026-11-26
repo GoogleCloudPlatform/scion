@@ -314,7 +314,7 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 
 	switch sectionName {
 	case "telemetry":
-		return extractSubtree(k, "telemetry")
+		return extractSubtreeExcluding(k, "telemetry", sec.DBOnlyKeys)
 	case BrandingSectionName:
 		return extractSubtree(k, config.BrandingSectionKey)
 	case "runtimes":
@@ -333,11 +333,29 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 }
 
 func extractSubtree(k *koanf.Koanf, prefix string) (json.RawMessage, error) {
+	return extractSubtreeExcluding(k, prefix, nil)
+}
+
+func extractSubtreeExcluding(k *koanf.Koanf, prefix string, excludePaths []string) (json.RawMessage, error) {
 	sub := k.Cut(prefix)
-	if sub.Raw() == nil || len(sub.Keys()) == 0 {
+	raw := sub.Raw()
+	if raw == nil || len(sub.Keys()) == 0 {
 		return json.Marshal(map[string]interface{}{})
 	}
-	data, err := json.Marshal(sub.Raw())
+	if len(excludePaths) > 0 {
+		cleaned := make(map[string]interface{}, len(raw))
+		for key, val := range raw {
+			cleaned[key] = val
+		}
+		dotPrefix := prefix + "."
+		for _, ep := range excludePaths {
+			if rel, ok := strings.CutPrefix(ep, dotPrefix); ok {
+				delete(cleaned, rel)
+			}
+		}
+		raw = cleaned
+	}
+	data, err := json.Marshal(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +505,7 @@ func loadMappedSection(k *koanf.Koanf, sectionName string, raw map[string]interf
 func EnvOverriddenLayer1Keys(envKeys []string) []string {
 	var overridden []string
 	for _, ek := range envKeys {
-		if IsLayer1Key(ek) {
+		if IsLayer1Key(ek) && !IsDBOnlyKey(ek) {
 			overridden = append(overridden, ek)
 		}
 	}
@@ -499,7 +517,15 @@ func EnvOverriddenLayer1Keys(envKeys []string) []string {
 // uses the list to show which fields are env-pinned in the admin UI
 // (both file-mode and DB-mode).
 func DetectEnvOverrides(envKoanf *koanf.Koanf) []string {
-	return envKoanf.Keys()
+	keys := envKoanf.Keys()
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if IsDBOnlyKey(k) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }
 
 // ExtractAllSections extracts all registered section documents from a fully

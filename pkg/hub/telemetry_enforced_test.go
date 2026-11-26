@@ -30,10 +30,13 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -112,6 +115,20 @@ func TestTelemetryEnforced_AdminSettingsDB(t *testing.T) {
 	require.NotNil(t, got.Telemetry.Enabled)
 	assert.True(t, *got.Telemetry.Enabled)
 
+	// Partial telemetry save omitting enforced preserves stored enforced=true and keeps enforcement live.
+	rr = putConfig(`{"telemetry":{"cloud":{"endpoint":"otel-partial.example.com:4317"}}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.True(t, srv.telemetryEnforced())
+	got = getServerConfigDB(t, srv, ops)
+	require.NotNil(t, got.Telemetry)
+	assert.True(t, got.Telemetry.Enforced, "partial telemetry save omitting enforced must keep stored enforced=true")
+
+	// Partial telemetry save setting enabled=false while enforced=true is stored is refused with 422.
+	rr = putConfig(`{"telemetry":{"enabled":false}}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "telemetry.enforced requires telemetry.enabled=true")
+	assert.True(t, srv.telemetryEnforced())
+
 	// Turning the experiment off disables enforcement immediately without touching the stored row.
 	setTelemetryEnforcementExperiment(t, srv, s, false)
 	assert.False(t, srv.telemetryEnforced())
@@ -125,6 +142,82 @@ func TestTelemetryEnforced_AdminSettingsDB(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	assert.False(t, srv.config.TelemetryEnforced)
 	assert.False(t, srv.telemetryEnforced())
+}
+
+// TestTelemetryEnforced_BootstrapAndInvalidDBRowIgnored verifies that
+// telemetry.enforced is strictly DB-only and fail-closed:
+//   - (a) settings.yaml / bootstrap koanf with enforced:true + enabled:true and
+//     no DB row does not enable enforcement and strips enforced on extraction;
+//   - (b) bootstrap enforced:true + enabled:false (and a hand-written invalid DB
+//     row with enforced:true + enabled:false) never enables enforcement;
+//   - (c) an admin PUT with enabled:true + enforced:true still enforces.
+func TestTelemetryEnforced_BootstrapAndInvalidDBRowIgnored(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("bootstrap enabled=true enforced=true with no DB row is not enforced", func(t *testing.T) {
+		srv, s := testServer(t)
+		bootstrap := koanf.New(".")
+		require.NoError(t, bootstrap.Load(confmap.Provider(map[string]any{
+			"telemetry.enabled":  true,
+			"telemetry.enforced": true,
+		}, "."), nil))
+		envK := koanf.New(".")
+		require.NoError(t, envK.Load(confmap.Provider(map[string]any{
+			"telemetry.enforced": true,
+		}, "."), nil))
+
+		ops := NewOperationalSettings(s, bootstrap, envK)
+		ops.server = srv
+		srv.SetOperationalSettings(ops)
+
+		setTelemetryEnforcementExperiment(t, srv, s, true)
+
+		snap := ops.Snapshot()
+		assert.False(t, snap.TelemetryEnforced, "bootstrap telemetry.enforced must not populate snapshot")
+		assert.False(t, srv.telemetryEnforced(), "bootstrap telemetry.enforced must not activate enforcement")
+		assert.NotContains(t, snap.EnvOverrides, "telemetry.enforced", "DB-only key must not appear in env overrides")
+
+		seededDoc, err := opsettings.ExtractSectionFromKoanf(bootstrap, "telemetry")
+		require.NoError(t, err)
+		var seeded map[string]any
+		require.NoError(t, json.Unmarshal(seededDoc, &seeded))
+		assert.NotContains(t, seeded, "enforced", "seeded telemetry row must strip enforced")
+
+		// Admin PUT path still enforces when enabled=true + enforced=true.
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"telemetry":{"enabled":true,"enforced":true}}`), ops)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		assert.True(t, ops.Snapshot().TelemetryEnforced)
+		assert.True(t, srv.telemetryEnforced())
+	})
+
+	t.Run("bootstrap or invalid DB row with enabled=false enforced=true is never enforced", func(t *testing.T) {
+		srv, s := testServer(t)
+		bootstrap := koanf.New(".")
+		require.NoError(t, bootstrap.Load(confmap.Provider(map[string]any{
+			"telemetry.enabled":  false,
+			"telemetry.enforced": true,
+		}, "."), nil))
+
+		ops := NewOperationalSettings(s, bootstrap, emptyKoanf())
+		ops.server = srv
+		srv.SetOperationalSettings(ops)
+
+		setTelemetryEnforcementExperiment(t, srv, s, true)
+		assert.False(t, ops.Snapshot().TelemetryEnforced, "bootstrap enabled=false + enforced=true must never enforce")
+		assert.False(t, srv.telemetryEnforced())
+
+		// Even a hand-written invalid DB row (enabled=false, enforced=true) fails closed.
+		_, err := s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"enabled":false,"enforced":true}`), "test", -1, "managed")
+		require.NoError(t, err)
+		_, err = ops.Refresh(ctx)
+		require.NoError(t, err)
+		ApplySnapshot(srv, ops.Snapshot())
+
+		assert.False(t, ops.Snapshot().TelemetryEnforced, "invalid DB row failing Resolve() must not enforce")
+		assert.False(t, srv.telemetryEnforced())
+	})
 }
 
 func TestTelemetryEnforced_ProjectSettingsPut(t *testing.T) {
