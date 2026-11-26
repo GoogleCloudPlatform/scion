@@ -3388,7 +3388,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// ExecuteAgentDM and must be registered on a thread-derived
 			// group — this is the agent-sender path (scion message
 			// --thread-id between agents).
-			s.registerGroupPrimary(ctx, groupConversationID, agent)
+			if s.registerGroupPrimary(ctx, groupConversationID, agent) {
+				dmResult.copyAdmission.RecordAcknowledgedRegistration(agent.ID)
+			}
 
 			// Post-delivery adapter concerns: notification subscription
 			// and mention processing stay outside the core operation.

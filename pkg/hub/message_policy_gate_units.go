@@ -92,6 +92,7 @@ type policyEvalUnit struct {
 	facts                  messagepolicy.Facts
 	act                    messagepolicy.Activation
 	hasFacts               bool
+	hasUnmentioned         bool
 	factsUnavailable       bool
 	unmentionedUnavailable bool
 }
@@ -284,21 +285,15 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 	// and copy admission pinning use the exact same snapshot.
 	humanMembers := in.preloadedHumans
 	humanMembersLoaded := in.humansLoaded
+	// Compute copy-snapshot unmentioned_agent_slugs needs strictly from active
+	// ENFORCE policies (R2): shadow-only unmentioned lookups must never drive
+	// enforce I/O or copy admission pinning/refusals.
 	needUnmentionedCopies := false
 	for i := 0; i < len(enforceMatches) && i < store.MaxActiveMatchingMessagePolicies; i++ {
 		if slices.ContainsFunc(enforceMatches[i].unitIdxs, func(idx int) bool { return idx > 0 }) &&
 			policyUsesUnmentionedAgentSlugs(&enforceMatches[i].policy) {
 			needUnmentionedCopies = true
 			break
-		}
-	}
-	if !needUnmentionedCopies {
-		for i := range shadowMatches {
-			if slices.ContainsFunc(shadowMatches[i].unitIdxs, func(idx int) bool { return idx > 0 }) &&
-				policyUsesUnmentionedAgentSlugs(&shadowMatches[i].policy) {
-				needUnmentionedCopies = true
-				break
-			}
 		}
 	}
 	var copySnapshots []copyTargetSnapshot
@@ -327,6 +322,7 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 			units[unitIdx].facts = ts.facts
 			units[unitIdx].factsUnavailable = ts.factsErr != nil
 			units[unitIdx].unmentionedUnavailable = ts.unmentionedErr != nil
+			units[unitIdx].hasUnmentioned = needUnmentionedCopies
 			if ts.factsErr == nil {
 				units[unitIdx].act = messagepolicy.NewActivation(ts.facts)
 				units[unitIdx].hasFacts = true
@@ -399,6 +395,7 @@ func (s *Server) evaluateOriginMessagePolicies(ctx context.Context, in originPol
 		humanMembersLoaded = loaded
 		units[0].factsUnavailable = factsErr != nil
 		units[0].unmentionedUnavailable = unmentionedErr != nil
+		units[0].hasUnmentioned = needUnmentionedOrigin
 		if factsErr == nil {
 			units[0].facts = builtFacts
 			units[0].act = messagepolicy.NewActivation(builtFacts)
@@ -650,6 +647,13 @@ func (s *Server) evaluateMatchedPoliciesAcrossUnits(
 
 	// 3. Copy dependent System One batches: one plan per copy unit (U1: no
 	// cross-recipient sharing for dependent units).
+	//
+	// O2 disclosure: dependent per-recipient copy units run SEQUENTIALLY under
+	// the shared soCtx/soBudget in Slice B (groups within each unit still run
+	// concurrently via RunGroupPlan). With many copies and a slow dependent
+	// System One policy, later units can hit the shared deadline and fail as
+	// ClassFailed, yielding a latency-caused 422 under on_failed=reject.
+	// Cross-unit concurrency is deferred to a separate follow-up.
 	type unitMatchKey struct {
 		matchIdx int
 		unitIdx  int
@@ -850,6 +854,23 @@ func buildMultiUnitShadowJob(shadowMatches []matchedPolicyUnits, units []policyE
 			unitIdxs: slices.Clone(shadowMatches[i].unitIdxs),
 		}
 	}
+	// Restore A1/A2 shadowCanReuseFacts separation per unit (R2): if any
+	// matched shadow policy for unit ui reads conversation.unmentioned_agent_slugs
+	// and enforce did not compute unmentioned slugs for unit ui, clear hasFacts
+	// on the shadow copy so the shadow worker rebuilds facts in its own context.
+	for ui := range unitsCopy {
+		shadowNeedsUnmentioned := false
+		for i := range matchesCopy {
+			if slices.Contains(matchesCopy[i].unitIdxs, ui) && policyUsesUnmentionedAgentSlugs(&matchesCopy[i].policy) {
+				shadowNeedsUnmentioned = true
+				break
+			}
+		}
+		if shadowNeedsUnmentioned && !unitsCopy[ui].hasUnmentioned {
+			unitsCopy[ui].hasFacts = false
+			unitsCopy[ui].unmentionedUnavailable = false
+		}
+	}
 	snap := h2FactSnapshot{projectID: projectID}
 	if len(unitsCopy) > 0 {
 		snap = unitsCopy[0].snap
@@ -869,34 +890,39 @@ func (s *Server) processMultiUnitShadowJob(ctx context.Context, job messagePolic
 		return
 	}
 	units := job.multiUnits
-	// Lazily build origin facts if needed and not already built during enforce.
-	if len(units) > 0 && !units[0].hasFacts && !units[0].factsUnavailable {
-		originMatched := false
-		originHasS1 := false
-		needUnmentionedOrigin := false
+	// Lazily build facts for any unit (origin or copy) whose shadow policies
+	// need facts (or unmentioned_agent_slugs) that enforce did not build (R2).
+	for ui := range units {
+		if units[ui].hasFacts || units[ui].factsUnavailable {
+			continue
+		}
+		unitMatched := false
+		unitHasS1 := false
+		needUnmentioned := false
 		for i := range job.shadowMatches {
-			if slices.Contains(job.shadowMatches[i].unitIdxs, 0) {
-				originMatched = true
+			if slices.Contains(job.shadowMatches[i].unitIdxs, ui) {
+				unitMatched = true
 				if strings.TrimSpace(job.shadowMatches[i].policy.SystemOneRule) != "" {
-					originHasS1 = true
+					unitHasS1 = true
 				}
 				if policyUsesUnmentionedAgentSlugs(&job.shadowMatches[i].policy) {
-					needUnmentionedOrigin = true
+					needUnmentioned = true
 				}
 			}
 		}
-		originBodyTruncated := len(units[0].snap.msgBody) > messagepolicy.MaxBodyBytes
-		if originMatched && (!originBodyTruncated || originHasS1) {
-			builtFacts, _, _, factsErr, unmentionedErr := s.buildH2MessagePolicyFacts(ctx, units[0].snap, nil, false, needUnmentionedOrigin)
+		unitBodyTruncated := len(units[ui].snap.msgBody) > messagepolicy.MaxBodyBytes
+		if unitMatched && (!unitBodyTruncated || unitHasS1) {
+			builtFacts, _, _, factsErr, unmentionedErr := s.buildH2MessagePolicyFacts(ctx, units[ui].snap, nil, false, needUnmentioned)
 			if ctx.Err() != nil {
 				return
 			}
-			units[0].factsUnavailable = factsErr != nil
-			units[0].unmentionedUnavailable = unmentionedErr != nil
+			units[ui].factsUnavailable = factsErr != nil
+			units[ui].unmentionedUnavailable = unmentionedErr != nil
+			units[ui].hasUnmentioned = needUnmentioned
 			if factsErr == nil {
-				units[0].facts = builtFacts
-				units[0].act = messagepolicy.NewActivation(builtFacts)
-				units[0].hasFacts = true
+				units[ui].facts = builtFacts
+				units[ui].act = messagepolicy.NewActivation(builtFacts)
+				units[ui].hasFacts = true
 			}
 		}
 	}

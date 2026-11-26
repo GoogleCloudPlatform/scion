@@ -196,6 +196,8 @@ type AgentDMInput struct {
 	// deliverAgentMentionCopy (enforced by TestCopyIntent_ASTGuard).
 	copyIntent                bool
 	copyAdmission             *derivedAdmission
+	copyBoundAttachmentCount  int
+	copyParentMessageID       string
 	mentionExplicit           []string
 	mentionParentConv         *messaging.ConversationResult
 	mentionParentConvVerified bool

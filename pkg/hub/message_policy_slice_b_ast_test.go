@@ -57,6 +57,18 @@ func TestCopyIntent_ASTGuard(t *testing.T) {
 
 	for fileName, f := range files {
 		for _, decl := range f.Decls {
+			// N1: catch package-level `var x derivedAdmission` value declarations.
+			if gd, ok := decl.(*ast.GenDecl); ok && gd.Tok == token.VAR {
+				for _, spec := range gd.Specs {
+					if vs, ok := spec.(*ast.ValueSpec); ok {
+						if ident, ok := vs.Type.(*ast.Ident); ok && ident.Name == "derivedAdmission" {
+							t.Errorf("package-level derivedAdmission value declared outside mintCopyAdmission in %s at %s",
+								fileName, fset.Position(vs.Pos()))
+						}
+					}
+				}
+				continue
+			}
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
@@ -72,6 +84,20 @@ func TestCopyIntent_ASTGuard(t *testing.T) {
 						} else {
 							derivedAdmissionMintHits++
 						}
+					}
+				case *ast.CallExpr:
+					// N1: catch `new(derivedAdmission)` outside mintCopyAdmission.
+					if fun, ok := node.Fun.(*ast.Ident); ok && fun.Name == "new" && len(node.Args) == 1 {
+						if arg, ok := node.Args[0].(*ast.Ident); ok && arg.Name == "derivedAdmission" && funcName != "mintCopyAdmission" {
+							t.Errorf("new(derivedAdmission) called outside mintCopyAdmission in %s (%s) at %s",
+								funcName, fileName, fset.Position(node.Pos()))
+						}
+					}
+				case *ast.ValueSpec:
+					// N1: catch `var x derivedAdmission` value declarations outside mintCopyAdmission.
+					if ident, ok := node.Type.(*ast.Ident); ok && ident.Name == "derivedAdmission" && funcName != "mintCopyAdmission" {
+						t.Errorf("derivedAdmission value declared outside mintCopyAdmission in %s (%s) at %s",
+							funcName, fileName, fset.Position(node.Pos()))
 					}
 				case *ast.KeyValueExpr:
 					if ident, ok := node.Key.(*ast.Ident); ok && ident.Name == "copyIntent" {

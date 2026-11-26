@@ -538,8 +538,10 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		// Trusted copy-intent provenance (Contract §5B): ONLY
 		// deliverAgentMentionCopy may set copyIntent; ExecuteAgentDM uses
 		// copyIntent alone as the mode discriminator.
-		copyIntent:    true,
-		copyAdmission: in.CopyAdmission,
+		copyIntent:               true,
+		copyAdmission:            in.CopyAdmission,
+		copyBoundAttachmentCount: len(in.ParentAttachments),
+		copyParentMessageID:      in.ParentMessageID,
 	})
 	dispatchCancel()
 	switch {
@@ -591,8 +593,11 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		// write matters even if it is. Same pattern as the dispatch
 		// side's own post-dispatch state transitions.
 		registerCtx, registerCancel := finalizationContext(ctx)
-		s.ensureGroupParticipants(registerCtx, convID, []*store.Agent{target})
+		ackIDs := s.ensureGroupParticipants(registerCtx, convID, []*store.Agent{target})
 		registerCancel()
+		for _, id := range ackIDs {
+			in.CopyAdmission.RecordAcknowledgedRegistration(id)
+		}
 	}
 	return out
 }
