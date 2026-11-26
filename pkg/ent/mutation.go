@@ -50,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
@@ -187,6 +188,7 @@ const (
 	TypeDecisionAnswer                = "DecisionAnswer"
 	TypeDecisionFacetEntry            = "DecisionFacetEntry"
 	TypeDecisionKeyCounter            = "DecisionKeyCounter"
+	TypeDecisionRetentionRun          = "DecisionRetentionRun"
 	TypeDelegationAdoption            = "DelegationAdoption"
 	TypeDelegationEdge                = "DelegationEdge"
 	TypeDurableQueueItem              = "DurableQueueItem"
@@ -49412,6 +49414,902 @@ func (m *DecisionKeyCounterMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *DecisionKeyCounterMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown DecisionKeyCounter edge %s", name)
+}
+
+// DecisionRetentionRunMutation represents an operation that mutates the DecisionRetentionRun nodes in the graph.
+type DecisionRetentionRunMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	trigger       *decisionretentionrun.Trigger
+	dry_run       *bool
+	started_at    *time.Time
+	finished_at   *time.Time
+	status        *decisionretentionrun.Status
+	actor         *string
+	policy        *json.RawMessage
+	appendpolicy  json.RawMessage
+	counts        *json.RawMessage
+	appendcounts  json.RawMessage
+	error         *string
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*DecisionRetentionRun, error)
+	predicates    []predicate.DecisionRetentionRun
+}
+
+var _ ent.Mutation = (*DecisionRetentionRunMutation)(nil)
+
+// decisionretentionrunOption allows management of the mutation configuration using functional options.
+type decisionretentionrunOption func(*DecisionRetentionRunMutation)
+
+// newDecisionRetentionRunMutation creates new mutation for the DecisionRetentionRun entity.
+func newDecisionRetentionRunMutation(c config, op Op, opts ...decisionretentionrunOption) *DecisionRetentionRunMutation {
+	m := &DecisionRetentionRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeDecisionRetentionRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withDecisionRetentionRunID sets the ID field of the mutation.
+func withDecisionRetentionRunID(id uuid.UUID) decisionretentionrunOption {
+	return func(m *DecisionRetentionRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *DecisionRetentionRun
+		)
+		m.oldValue = func(ctx context.Context) (*DecisionRetentionRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().DecisionRetentionRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withDecisionRetentionRun sets the old DecisionRetentionRun of the mutation.
+func withDecisionRetentionRun(node *DecisionRetentionRun) decisionretentionrunOption {
+	return func(m *DecisionRetentionRunMutation) {
+		m.oldValue = func(context.Context) (*DecisionRetentionRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m DecisionRetentionRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m DecisionRetentionRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of DecisionRetentionRun entities.
+func (m *DecisionRetentionRunMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *DecisionRetentionRunMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *DecisionRetentionRunMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().DecisionRetentionRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetTrigger sets the "trigger" field.
+func (m *DecisionRetentionRunMutation) SetTrigger(d decisionretentionrun.Trigger) {
+	m.trigger = &d
+}
+
+// Trigger returns the value of the "trigger" field in the mutation.
+func (m *DecisionRetentionRunMutation) Trigger() (r decisionretentionrun.Trigger, exists bool) {
+	v := m.trigger
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTrigger returns the old "trigger" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldTrigger(ctx context.Context) (v decisionretentionrun.Trigger, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTrigger is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTrigger requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTrigger: %w", err)
+	}
+	return oldValue.Trigger, nil
+}
+
+// ResetTrigger resets all changes to the "trigger" field.
+func (m *DecisionRetentionRunMutation) ResetTrigger() {
+	m.trigger = nil
+}
+
+// SetDryRun sets the "dry_run" field.
+func (m *DecisionRetentionRunMutation) SetDryRun(b bool) {
+	m.dry_run = &b
+}
+
+// DryRun returns the value of the "dry_run" field in the mutation.
+func (m *DecisionRetentionRunMutation) DryRun() (r bool, exists bool) {
+	v := m.dry_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDryRun returns the old "dry_run" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldDryRun(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDryRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDryRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDryRun: %w", err)
+	}
+	return oldValue.DryRun, nil
+}
+
+// ResetDryRun resets all changes to the "dry_run" field.
+func (m *DecisionRetentionRunMutation) ResetDryRun() {
+	m.dry_run = nil
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *DecisionRetentionRunMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *DecisionRetentionRunMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *DecisionRetentionRunMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *DecisionRetentionRunMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *DecisionRetentionRunMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldFinishedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ClearFinishedAt clears the value of the "finished_at" field.
+func (m *DecisionRetentionRunMutation) ClearFinishedAt() {
+	m.finished_at = nil
+	m.clearedFields[decisionretentionrun.FieldFinishedAt] = struct{}{}
+}
+
+// FinishedAtCleared returns if the "finished_at" field was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) FinishedAtCleared() bool {
+	_, ok := m.clearedFields[decisionretentionrun.FieldFinishedAt]
+	return ok
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *DecisionRetentionRunMutation) ResetFinishedAt() {
+	m.finished_at = nil
+	delete(m.clearedFields, decisionretentionrun.FieldFinishedAt)
+}
+
+// SetStatus sets the "status" field.
+func (m *DecisionRetentionRunMutation) SetStatus(d decisionretentionrun.Status) {
+	m.status = &d
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *DecisionRetentionRunMutation) Status() (r decisionretentionrun.Status, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldStatus(ctx context.Context) (v decisionretentionrun.Status, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *DecisionRetentionRunMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetActor sets the "actor" field.
+func (m *DecisionRetentionRunMutation) SetActor(s string) {
+	m.actor = &s
+}
+
+// Actor returns the value of the "actor" field in the mutation.
+func (m *DecisionRetentionRunMutation) Actor() (r string, exists bool) {
+	v := m.actor
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActor returns the old "actor" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldActor(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActor is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActor requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActor: %w", err)
+	}
+	return oldValue.Actor, nil
+}
+
+// ClearActor clears the value of the "actor" field.
+func (m *DecisionRetentionRunMutation) ClearActor() {
+	m.actor = nil
+	m.clearedFields[decisionretentionrun.FieldActor] = struct{}{}
+}
+
+// ActorCleared returns if the "actor" field was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) ActorCleared() bool {
+	_, ok := m.clearedFields[decisionretentionrun.FieldActor]
+	return ok
+}
+
+// ResetActor resets all changes to the "actor" field.
+func (m *DecisionRetentionRunMutation) ResetActor() {
+	m.actor = nil
+	delete(m.clearedFields, decisionretentionrun.FieldActor)
+}
+
+// SetPolicy sets the "policy" field.
+func (m *DecisionRetentionRunMutation) SetPolicy(jm json.RawMessage) {
+	m.policy = &jm
+	m.appendpolicy = nil
+}
+
+// Policy returns the value of the "policy" field in the mutation.
+func (m *DecisionRetentionRunMutation) Policy() (r json.RawMessage, exists bool) {
+	v := m.policy
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicy returns the old "policy" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldPolicy(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicy: %w", err)
+	}
+	return oldValue.Policy, nil
+}
+
+// AppendPolicy adds jm to the "policy" field.
+func (m *DecisionRetentionRunMutation) AppendPolicy(jm json.RawMessage) {
+	m.appendpolicy = append(m.appendpolicy, jm...)
+}
+
+// AppendedPolicy returns the list of values that were appended to the "policy" field in this mutation.
+func (m *DecisionRetentionRunMutation) AppendedPolicy() (json.RawMessage, bool) {
+	if len(m.appendpolicy) == 0 {
+		return nil, false
+	}
+	return m.appendpolicy, true
+}
+
+// ClearPolicy clears the value of the "policy" field.
+func (m *DecisionRetentionRunMutation) ClearPolicy() {
+	m.policy = nil
+	m.appendpolicy = nil
+	m.clearedFields[decisionretentionrun.FieldPolicy] = struct{}{}
+}
+
+// PolicyCleared returns if the "policy" field was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) PolicyCleared() bool {
+	_, ok := m.clearedFields[decisionretentionrun.FieldPolicy]
+	return ok
+}
+
+// ResetPolicy resets all changes to the "policy" field.
+func (m *DecisionRetentionRunMutation) ResetPolicy() {
+	m.policy = nil
+	m.appendpolicy = nil
+	delete(m.clearedFields, decisionretentionrun.FieldPolicy)
+}
+
+// SetCounts sets the "counts" field.
+func (m *DecisionRetentionRunMutation) SetCounts(jm json.RawMessage) {
+	m.counts = &jm
+	m.appendcounts = nil
+}
+
+// Counts returns the value of the "counts" field in the mutation.
+func (m *DecisionRetentionRunMutation) Counts() (r json.RawMessage, exists bool) {
+	v := m.counts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCounts returns the old "counts" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldCounts(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCounts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCounts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCounts: %w", err)
+	}
+	return oldValue.Counts, nil
+}
+
+// AppendCounts adds jm to the "counts" field.
+func (m *DecisionRetentionRunMutation) AppendCounts(jm json.RawMessage) {
+	m.appendcounts = append(m.appendcounts, jm...)
+}
+
+// AppendedCounts returns the list of values that were appended to the "counts" field in this mutation.
+func (m *DecisionRetentionRunMutation) AppendedCounts() (json.RawMessage, bool) {
+	if len(m.appendcounts) == 0 {
+		return nil, false
+	}
+	return m.appendcounts, true
+}
+
+// ClearCounts clears the value of the "counts" field.
+func (m *DecisionRetentionRunMutation) ClearCounts() {
+	m.counts = nil
+	m.appendcounts = nil
+	m.clearedFields[decisionretentionrun.FieldCounts] = struct{}{}
+}
+
+// CountsCleared returns if the "counts" field was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) CountsCleared() bool {
+	_, ok := m.clearedFields[decisionretentionrun.FieldCounts]
+	return ok
+}
+
+// ResetCounts resets all changes to the "counts" field.
+func (m *DecisionRetentionRunMutation) ResetCounts() {
+	m.counts = nil
+	m.appendcounts = nil
+	delete(m.clearedFields, decisionretentionrun.FieldCounts)
+}
+
+// SetError sets the "error" field.
+func (m *DecisionRetentionRunMutation) SetError(s string) {
+	m.error = &s
+}
+
+// Error returns the value of the "error" field in the mutation.
+func (m *DecisionRetentionRunMutation) Error() (r string, exists bool) {
+	v := m.error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldError returns the old "error" field's value of the DecisionRetentionRun entity.
+// If the DecisionRetentionRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DecisionRetentionRunMutation) OldError(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldError: %w", err)
+	}
+	return oldValue.Error, nil
+}
+
+// ClearError clears the value of the "error" field.
+func (m *DecisionRetentionRunMutation) ClearError() {
+	m.error = nil
+	m.clearedFields[decisionretentionrun.FieldError] = struct{}{}
+}
+
+// ErrorCleared returns if the "error" field was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) ErrorCleared() bool {
+	_, ok := m.clearedFields[decisionretentionrun.FieldError]
+	return ok
+}
+
+// ResetError resets all changes to the "error" field.
+func (m *DecisionRetentionRunMutation) ResetError() {
+	m.error = nil
+	delete(m.clearedFields, decisionretentionrun.FieldError)
+}
+
+// Where appends a list predicates to the DecisionRetentionRunMutation builder.
+func (m *DecisionRetentionRunMutation) Where(ps ...predicate.DecisionRetentionRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the DecisionRetentionRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *DecisionRetentionRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.DecisionRetentionRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *DecisionRetentionRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *DecisionRetentionRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (DecisionRetentionRun).
+func (m *DecisionRetentionRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *DecisionRetentionRunMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.trigger != nil {
+		fields = append(fields, decisionretentionrun.FieldTrigger)
+	}
+	if m.dry_run != nil {
+		fields = append(fields, decisionretentionrun.FieldDryRun)
+	}
+	if m.started_at != nil {
+		fields = append(fields, decisionretentionrun.FieldStartedAt)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, decisionretentionrun.FieldFinishedAt)
+	}
+	if m.status != nil {
+		fields = append(fields, decisionretentionrun.FieldStatus)
+	}
+	if m.actor != nil {
+		fields = append(fields, decisionretentionrun.FieldActor)
+	}
+	if m.policy != nil {
+		fields = append(fields, decisionretentionrun.FieldPolicy)
+	}
+	if m.counts != nil {
+		fields = append(fields, decisionretentionrun.FieldCounts)
+	}
+	if m.error != nil {
+		fields = append(fields, decisionretentionrun.FieldError)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *DecisionRetentionRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case decisionretentionrun.FieldTrigger:
+		return m.Trigger()
+	case decisionretentionrun.FieldDryRun:
+		return m.DryRun()
+	case decisionretentionrun.FieldStartedAt:
+		return m.StartedAt()
+	case decisionretentionrun.FieldFinishedAt:
+		return m.FinishedAt()
+	case decisionretentionrun.FieldStatus:
+		return m.Status()
+	case decisionretentionrun.FieldActor:
+		return m.Actor()
+	case decisionretentionrun.FieldPolicy:
+		return m.Policy()
+	case decisionretentionrun.FieldCounts:
+		return m.Counts()
+	case decisionretentionrun.FieldError:
+		return m.Error()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *DecisionRetentionRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case decisionretentionrun.FieldTrigger:
+		return m.OldTrigger(ctx)
+	case decisionretentionrun.FieldDryRun:
+		return m.OldDryRun(ctx)
+	case decisionretentionrun.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case decisionretentionrun.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case decisionretentionrun.FieldStatus:
+		return m.OldStatus(ctx)
+	case decisionretentionrun.FieldActor:
+		return m.OldActor(ctx)
+	case decisionretentionrun.FieldPolicy:
+		return m.OldPolicy(ctx)
+	case decisionretentionrun.FieldCounts:
+		return m.OldCounts(ctx)
+	case decisionretentionrun.FieldError:
+		return m.OldError(ctx)
+	}
+	return nil, fmt.Errorf("unknown DecisionRetentionRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DecisionRetentionRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case decisionretentionrun.FieldTrigger:
+		v, ok := value.(decisionretentionrun.Trigger)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTrigger(v)
+		return nil
+	case decisionretentionrun.FieldDryRun:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDryRun(v)
+		return nil
+	case decisionretentionrun.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case decisionretentionrun.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case decisionretentionrun.FieldStatus:
+		v, ok := value.(decisionretentionrun.Status)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case decisionretentionrun.FieldActor:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActor(v)
+		return nil
+	case decisionretentionrun.FieldPolicy:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicy(v)
+		return nil
+	case decisionretentionrun.FieldCounts:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCounts(v)
+		return nil
+	case decisionretentionrun.FieldError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetError(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DecisionRetentionRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *DecisionRetentionRunMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *DecisionRetentionRunMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DecisionRetentionRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown DecisionRetentionRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *DecisionRetentionRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(decisionretentionrun.FieldFinishedAt) {
+		fields = append(fields, decisionretentionrun.FieldFinishedAt)
+	}
+	if m.FieldCleared(decisionretentionrun.FieldActor) {
+		fields = append(fields, decisionretentionrun.FieldActor)
+	}
+	if m.FieldCleared(decisionretentionrun.FieldPolicy) {
+		fields = append(fields, decisionretentionrun.FieldPolicy)
+	}
+	if m.FieldCleared(decisionretentionrun.FieldCounts) {
+		fields = append(fields, decisionretentionrun.FieldCounts)
+	}
+	if m.FieldCleared(decisionretentionrun.FieldError) {
+		fields = append(fields, decisionretentionrun.FieldError)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *DecisionRetentionRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *DecisionRetentionRunMutation) ClearField(name string) error {
+	switch name {
+	case decisionretentionrun.FieldFinishedAt:
+		m.ClearFinishedAt()
+		return nil
+	case decisionretentionrun.FieldActor:
+		m.ClearActor()
+		return nil
+	case decisionretentionrun.FieldPolicy:
+		m.ClearPolicy()
+		return nil
+	case decisionretentionrun.FieldCounts:
+		m.ClearCounts()
+		return nil
+	case decisionretentionrun.FieldError:
+		m.ClearError()
+		return nil
+	}
+	return fmt.Errorf("unknown DecisionRetentionRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *DecisionRetentionRunMutation) ResetField(name string) error {
+	switch name {
+	case decisionretentionrun.FieldTrigger:
+		m.ResetTrigger()
+		return nil
+	case decisionretentionrun.FieldDryRun:
+		m.ResetDryRun()
+		return nil
+	case decisionretentionrun.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case decisionretentionrun.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case decisionretentionrun.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case decisionretentionrun.FieldActor:
+		m.ResetActor()
+		return nil
+	case decisionretentionrun.FieldPolicy:
+		m.ResetPolicy()
+		return nil
+	case decisionretentionrun.FieldCounts:
+		m.ResetCounts()
+		return nil
+	case decisionretentionrun.FieldError:
+		m.ResetError()
+		return nil
+	}
+	return fmt.Errorf("unknown DecisionRetentionRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *DecisionRetentionRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *DecisionRetentionRunMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *DecisionRetentionRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *DecisionRetentionRunMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *DecisionRetentionRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *DecisionRetentionRunMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *DecisionRetentionRunMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown DecisionRetentionRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *DecisionRetentionRunMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown DecisionRetentionRun edge %s", name)
 }
 
 // DelegationAdoptionMutation represents an operation that mutates the DelegationAdoption nodes in the graph.

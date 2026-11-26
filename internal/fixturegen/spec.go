@@ -1266,6 +1266,19 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Decision retention (hub.decision_retention; policy and
+		// per-project counts only, never decision IDs or content) ----
+		{Table: "decision_retention_runs", Rows: []row{
+			{
+				"id": "7d2e3f4a-5b6c-4d7e-8f90-1a2b3c4d5e6f", "trigger": "sweep", "dry_run": false,
+				"started_at": baseTime, "finished_at": baseTime, "status": "ok",
+				"actor":  nil,
+				"policy": `{"retention_days":90,"cutoff":"2025-10-03T12:00:00Z"}`,
+				"counts": `{"` + projectID + `":{"decisions":2,"answers":1}}`,
+				"error":  nil,
+			},
+		}},
+
 		// ---- Secret encryption policy and migrations (ptone/scion#1530
 		// §6; key IDs and progress only, never key material) ----
 		{Table: "hub_encryption_policy", Rows: []row{

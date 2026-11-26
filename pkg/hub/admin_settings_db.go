@@ -3634,6 +3634,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 
 	"agent_delegation_policy": settingsTokenRefused, // which permissions may be delegated to agents
 	"chat_retention":          settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
+	"decision_retention":      settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
 }
 
 // serverConfigTokenKeys classifies each key of a settingsTokenPerKey

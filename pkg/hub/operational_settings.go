@@ -2780,3 +2780,25 @@ func (o *OperationalSettings) ChatRetention() opsettings.ChatRetentionConfig {
 	}
 	return cfg
 }
+
+// DecisionRetention returns the resolved decision retention settings (the
+// "decision_retention" section). Returns opsettings.DefaultDecisionRetentionConfig
+// (retention off, no window) when the section is absent, and fails closed to
+// the same disabled config when the stored document is unreadable or invalid,
+// so a bad document never purges anything.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) DecisionRetention() opsettings.DecisionRetentionConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.DecisionRetentionSectionName]
+	if !ok || state.Malformed {
+		return opsettings.DefaultDecisionRetentionConfig()
+	}
+	cfg, err := opsettings.ParseDecisionRetentionDoc(state.Value)
+	if err != nil {
+		return opsettings.DefaultDecisionRetentionConfig()
+	}
+	return cfg
+}

@@ -1961,6 +1961,12 @@ func (c *CompositeStore) ChatRetention() store.ChatRetentionStore {
 	return NewChatRetentionStore(c.client)
 }
 
+// DecisionRetention returns the settled-decision retention store over this
+// store's database.
+func (c *CompositeStore) DecisionRetention() store.DecisionRetentionStore {
+	return NewDecisionRetentionStore(c)
+}
+
 // Dialect returns the ent dialect of the underlying driver (for example
 // dialect.SQLite or dialect.Postgres).
 func (c *CompositeStore) Dialect() string {

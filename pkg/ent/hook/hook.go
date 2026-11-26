@@ -465,6 +465,18 @@ func (f DecisionKeyCounterFunc) Mutate(ctx context.Context, m ent.Mutation) (ent
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionKeyCounterMutation", m)
 }
 
+// The DecisionRetentionRunFunc type is an adapter to allow the use of ordinary
+// function as DecisionRetentionRun mutator.
+type DecisionRetentionRunFunc func(context.Context, *ent.DecisionRetentionRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DecisionRetentionRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DecisionRetentionRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionRetentionRunMutation", m)
+}
+
 // The DelegationAdoptionFunc type is an adapter to allow the use of ordinary
 // function as DelegationAdoption mutator.
 type DelegationAdoptionFunc func(context.Context, *ent.DelegationAdoptionMutation) (ent.Value, error)

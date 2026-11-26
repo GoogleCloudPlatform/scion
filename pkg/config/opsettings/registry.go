@@ -383,6 +383,15 @@ func init() {
 			KoanfPaths: nil,
 			New:        func() any { return &ChatRetentionSettings{} },
 		},
+		{
+			// decision_retention is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/decision-retention. Absent DB row = retention off,
+			// no window. Seeding skips this section (KoanfPaths nil).
+			Name:       DecisionRetentionSectionName,
+			KoanfPaths: nil,
+			New:        func() any { return &DecisionRetentionSettings{} },
+		},
 	}
 
 	ensureIndexes()
@@ -646,6 +655,9 @@ func compileSchemas() {
 		// chat_retention schema is hand-written -- runtime state with no
 		// $defs in settings-v1.schema.json.
 		ChatRetentionSectionName: chatRetentionSchema(),
+		// decision_retention schema is hand-written -- runtime state with no
+		// $defs in settings-v1.schema.json.
+		DecisionRetentionSectionName: decisionRetentionSchema(),
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{

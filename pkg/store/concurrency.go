@@ -331,6 +331,12 @@ const (
 	// resolves expired queued/waking/dispatching/running command runs.
 	LockCommandRunSweep AdvisoryLockKey = 0x5C100035
 
+	// LockDecisionRetention guards the settled-decision retention sweeper
+	// ("decision-retention", ptone/scion#8984), so one replica per tick
+	// walks and purges settled decision prompts older than the configured
+	// retention window.
+	LockDecisionRetention AdvisoryLockKey = 0x5C100036
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

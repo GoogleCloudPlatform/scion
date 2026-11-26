@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
@@ -220,6 +221,8 @@ type Client struct {
 	DecisionFacetEntry *DecisionFacetEntryClient
 	// DecisionKeyCounter is the client for interacting with the DecisionKeyCounter builders.
 	DecisionKeyCounter *DecisionKeyCounterClient
+	// DecisionRetentionRun is the client for interacting with the DecisionRetentionRun builders.
+	DecisionRetentionRun *DecisionRetentionRunClient
 	// DelegationAdoption is the client for interacting with the DelegationAdoption builders.
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
@@ -435,6 +438,7 @@ func (c *Client) init() {
 	c.DecisionAnswer = NewDecisionAnswerClient(c.config)
 	c.DecisionFacetEntry = NewDecisionFacetEntryClient(c.config)
 	c.DecisionKeyCounter = NewDecisionKeyCounterClient(c.config)
+	c.DecisionRetentionRun = NewDecisionRetentionRunClient(c.config)
 	c.DelegationAdoption = NewDelegationAdoptionClient(c.config)
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
 	c.DurableQueueItem = NewDurableQueueItemClient(c.config)
@@ -648,6 +652,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		DecisionAnswer:                NewDecisionAnswerClient(cfg),
 		DecisionFacetEntry:            NewDecisionFacetEntryClient(cfg),
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
+		DecisionRetentionRun:          NewDecisionRetentionRunClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
 		DurableQueueItem:              NewDurableQueueItemClient(cfg),
@@ -788,6 +793,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		DecisionAnswer:                NewDecisionAnswerClient(cfg),
 		DecisionFacetEntry:            NewDecisionFacetEntryClient(cfg),
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
+		DecisionRetentionRun:          NewDecisionRetentionRunClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
 		DurableQueueItem:              NewDurableQueueItemClient(cfg),
@@ -910,18 +916,18 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun, c.CommandRequest,
 		c.CommandRun, c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
-		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
-		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
-		c.Message, c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision,
-		c.MeterHealth, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.DecisionKeyCounter, c.DecisionRetentionRun, c.DelegationAdoption,
+		c.DelegationEdge, c.DurableQueueItem, c.EntitlementBinding, c.EnvVar,
+		c.ExecRunOutput, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
+		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
+		c.MessagePolicyDecision, c.MeterHealth, c.MutationAudit, c.NonceCache,
+		c.Notification, c.NotificationSubscription, c.PendingSecret, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RunAttribution, c.RuntimeBroker,
 		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
@@ -952,18 +958,18 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun, c.CommandRequest,
 		c.CommandRun, c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
 		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionFacetEntry,
-		c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExecRunOutput,
-		c.ExternalIdentity, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubEncryptionMigration, c.HubEncryptionPolicy, c.HubInstance, c.HubSetting,
-		c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.MembershipLossCheck,
-		c.Message, c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision,
-		c.MeterHealth, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.DecisionKeyCounter, c.DecisionRetentionRun, c.DelegationAdoption,
+		c.DelegationEdge, c.DurableQueueItem, c.EntitlementBinding, c.EnvVar,
+		c.ExecRunOutput, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
+		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
+		c.MessagePolicyDecision, c.MeterHealth, c.MutationAudit, c.NonceCache,
+		c.Notification, c.NotificationSubscription, c.PendingSecret, c.PolicyBinding,
+		c.Project, c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RunAttribution, c.RuntimeBroker,
 		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
@@ -1059,6 +1065,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.DecisionFacetEntry.mutate(ctx, m)
 	case *DecisionKeyCounterMutation:
 		return c.DecisionKeyCounter.mutate(ctx, m)
+	case *DecisionRetentionRunMutation:
+		return c.DecisionRetentionRun.mutate(ctx, m)
 	case *DelegationAdoptionMutation:
 		return c.DelegationAdoption.mutate(ctx, m)
 	case *DelegationEdgeMutation:
@@ -6489,6 +6497,139 @@ func (c *DecisionKeyCounterClient) mutate(ctx context.Context, m *DecisionKeyCou
 		return (&DecisionKeyCounterDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown DecisionKeyCounter mutation op: %q", m.Op())
+	}
+}
+
+// DecisionRetentionRunClient is a client for the DecisionRetentionRun schema.
+type DecisionRetentionRunClient struct {
+	config
+}
+
+// NewDecisionRetentionRunClient returns a client for the DecisionRetentionRun from the given config.
+func NewDecisionRetentionRunClient(c config) *DecisionRetentionRunClient {
+	return &DecisionRetentionRunClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `decisionretentionrun.Hooks(f(g(h())))`.
+func (c *DecisionRetentionRunClient) Use(hooks ...Hook) {
+	c.hooks.DecisionRetentionRun = append(c.hooks.DecisionRetentionRun, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `decisionretentionrun.Intercept(f(g(h())))`.
+func (c *DecisionRetentionRunClient) Intercept(interceptors ...Interceptor) {
+	c.inters.DecisionRetentionRun = append(c.inters.DecisionRetentionRun, interceptors...)
+}
+
+// Create returns a builder for creating a DecisionRetentionRun entity.
+func (c *DecisionRetentionRunClient) Create() *DecisionRetentionRunCreate {
+	mutation := newDecisionRetentionRunMutation(c.config, OpCreate)
+	return &DecisionRetentionRunCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of DecisionRetentionRun entities.
+func (c *DecisionRetentionRunClient) CreateBulk(builders ...*DecisionRetentionRunCreate) *DecisionRetentionRunCreateBulk {
+	return &DecisionRetentionRunCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DecisionRetentionRunClient) MapCreateBulk(slice any, setFunc func(*DecisionRetentionRunCreate, int)) *DecisionRetentionRunCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DecisionRetentionRunCreateBulk{err: fmt.Errorf("calling to DecisionRetentionRunClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DecisionRetentionRunCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DecisionRetentionRunCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for DecisionRetentionRun.
+func (c *DecisionRetentionRunClient) Update() *DecisionRetentionRunUpdate {
+	mutation := newDecisionRetentionRunMutation(c.config, OpUpdate)
+	return &DecisionRetentionRunUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DecisionRetentionRunClient) UpdateOne(_m *DecisionRetentionRun) *DecisionRetentionRunUpdateOne {
+	mutation := newDecisionRetentionRunMutation(c.config, OpUpdateOne, withDecisionRetentionRun(_m))
+	return &DecisionRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DecisionRetentionRunClient) UpdateOneID(id uuid.UUID) *DecisionRetentionRunUpdateOne {
+	mutation := newDecisionRetentionRunMutation(c.config, OpUpdateOne, withDecisionRetentionRunID(id))
+	return &DecisionRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for DecisionRetentionRun.
+func (c *DecisionRetentionRunClient) Delete() *DecisionRetentionRunDelete {
+	mutation := newDecisionRetentionRunMutation(c.config, OpDelete)
+	return &DecisionRetentionRunDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DecisionRetentionRunClient) DeleteOne(_m *DecisionRetentionRun) *DecisionRetentionRunDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DecisionRetentionRunClient) DeleteOneID(id uuid.UUID) *DecisionRetentionRunDeleteOne {
+	builder := c.Delete().Where(decisionretentionrun.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &DecisionRetentionRunDeleteOne{builder}
+}
+
+// Query returns a query builder for DecisionRetentionRun.
+func (c *DecisionRetentionRunClient) Query() *DecisionRetentionRunQuery {
+	return &DecisionRetentionRunQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDecisionRetentionRun},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a DecisionRetentionRun entity by its id.
+func (c *DecisionRetentionRunClient) Get(ctx context.Context, id uuid.UUID) (*DecisionRetentionRun, error) {
+	return c.Query().Where(decisionretentionrun.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DecisionRetentionRunClient) GetX(ctx context.Context, id uuid.UUID) *DecisionRetentionRun {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DecisionRetentionRunClient) Hooks() []Hook {
+	return c.hooks.DecisionRetentionRun
+}
+
+// Interceptors returns the client interceptors.
+func (c *DecisionRetentionRunClient) Interceptors() []Interceptor {
+	return c.inters.DecisionRetentionRun
+}
+
+func (c *DecisionRetentionRunClient) mutate(ctx context.Context, m *DecisionRetentionRunMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DecisionRetentionRunCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DecisionRetentionRunUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DecisionRetentionRunUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DecisionRetentionRunDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown DecisionRetentionRun mutation op: %q", m.Op())
 	}
 }
 
@@ -18167,11 +18308,11 @@ type (
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, CommandRequest,
 		CommandRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, Decision, DecisionAnswer, DecisionFacetEntry,
-		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
-		EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
-		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		DecisionKeyCounter, DecisionRetentionRun, DelegationAdoption, DelegationEdge,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
+		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
 		MessageAddressee, MessagePolicy, MessagePolicyDecision, MeterHealth,
@@ -18198,11 +18339,11 @@ type (
 		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, CommandRequest,
 		CommandRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, Decision, DecisionAnswer, DecisionFacetEntry,
-		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
-		EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
-		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		DecisionKeyCounter, DecisionRetentionRun, DelegationAdoption, DelegationEdge,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExecRunOutput, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
+		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
 		MessageAddressee, MessagePolicy, MessagePolicyDecision, MeterHealth,

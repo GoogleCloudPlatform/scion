@@ -373,6 +373,12 @@ func (c *CompositeStore) IndexDecisionFacetsAnswersPage(ctx context.Context, aft
 	return indexed, nextCursor, err
 }
 
+// testHookAfterAnswersPageRead, when non-nil in tests, runs inside
+// indexDecisionFacetsAnswersPageTx immediately after reading the unlocked
+// pageAnswers snapshot and before acquiring FOR UPDATE SKIP LOCKED on their
+// owning decisions.
+var testHookAfterAnswersPageRead func()
+
 func (c *CompositeStore) indexDecisionFacetsAnswersPageTx(ctx context.Context, afterID uuid.UUID, limit int) (int, string, error) {
 	ansQ := c.client.DecisionAnswer.Query().
 		Where(decisionAnswerFacetIndexedFalse())
@@ -388,6 +394,9 @@ func (c *CompositeStore) indexDecisionFacetsAnswersPageTx(ctx context.Context, a
 	}
 	if len(pageAnswers) == 0 {
 		return 0, "", nil
+	}
+	if hook := testHookAfterAnswersPageRead; hook != nil {
+		hook()
 	}
 	nextCursor := pageAnswers[len(pageAnswers)-1].ID.String()
 

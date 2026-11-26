@@ -50,6 +50,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
@@ -231,6 +232,7 @@ func checkColumn(t, c string) error {
 			decisionanswer.Table:                decisionanswer.ValidColumn,
 			decisionfacetentry.Table:            decisionfacetentry.ValidColumn,
 			decisionkeycounter.Table:            decisionkeycounter.ValidColumn,
+			decisionretentionrun.Table:          decisionretentionrun.ValidColumn,
 			delegationadoption.Table:            delegationadoption.ValidColumn,
 			delegationedge.Table:                delegationedge.ValidColumn,
 			durablequeueitem.Table:              durablequeueitem.ValidColumn,

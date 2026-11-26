@@ -120,6 +120,9 @@ type DecisionFacetEntry func(*sql.Selector)
 // DecisionKeyCounter is the predicate function for decisionkeycounter builders.
 type DecisionKeyCounter func(*sql.Selector)
 
+// DecisionRetentionRun is the predicate function for decisionretentionrun builders.
+type DecisionRetentionRun func(*sql.Selector)
+
 // DelegationAdoption is the predicate function for delegationadoption builders.
 type DelegationAdoption func(*sql.Selector)
 

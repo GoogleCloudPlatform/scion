@@ -540,6 +540,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 
 	"agent_delegation_policy": testAdminPolicyDeny,
 	"chat_retention":          testAdminPolicyDeny,
+	"decision_retention":      testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -726,6 +727,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.Decisions:                    testAdminPolicyDeny,
 	experiments.InboxDashboard:               testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
+	experiments.DecisionRetention:            testAdminPolicyDeny,
 	experiments.ConversationWatch:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
