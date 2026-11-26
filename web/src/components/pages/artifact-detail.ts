@@ -4456,15 +4456,17 @@ export class ScionPageArtifactDetail extends LitElement {
           : nothing}
         <span class="draft-status" role="status" aria-live="polite">${text}</span>
         ${showDownload
-          ? html`<sl-button
-              size="small"
-              variant="text"
-              class="draft-download-btn"
-              @click=${this.downloadCurrentReview}
-            >
-              <sl-icon slot="prefix" name="download"></sl-icon>
-              Download
-            </sl-button>`
+          ? html`<sl-tooltip content="Download">
+              <sl-button
+                size="small"
+                variant="text"
+                class="draft-download-btn"
+                @click=${this.downloadCurrentReview}
+              >
+                <sl-icon slot="prefix" name="download"></sl-icon>
+                <span class="lbl">Download</span>
+              </sl-button>
+            </sl-tooltip>`
           : nothing}
       </span>
     `;

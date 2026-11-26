@@ -114,6 +114,7 @@ interface MockServerState {
   requests: Array<{ method: string; url: string; body?: string }>;
   holdPut?: (res: Response) => Promise<Response>;
   holdFinalize?: (res: Response) => Promise<Response>;
+  putError?: { status: number; body: Record<string, unknown> };
 }
 
 function mockHub(state: MockServerState): void {
@@ -137,6 +138,14 @@ function mockHub(state: MockServerState): void {
         );
       }
       if (method === 'PUT') {
+        if (state.putError) {
+          return reply(
+            new Response(JSON.stringify(state.putError.body), {
+              status: state.putError.status,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
         const parsed = JSON.parse(rawBody ?? '{}') as {
           rev: number;
           base: number;
@@ -491,4 +500,52 @@ describe('ScionPageArtifactDetail sticky review header actions', () => {
     expect(strip).not.toBeNull();
     expect(strip!.textContent?.trim().length).toBeGreaterThan(0);
   });
+
+  for (const draftCase of [
+    {
+      name: 'too_large',
+      putError: { status: 413, body: { code: 'draft_too_large', error: 'draft too large' } },
+    },
+    {
+      name: 'no_access',
+      putError: { status: 403, body: { error: 'forbidden' } },
+    },
+  ]) {
+    it(`wraps the draft Download button in tooltip and .lbl in ${draftCase.name} state across graphical and source views`, async () => {
+      const state: MockServerState = {
+        draft: null,
+        currentSeq: 1,
+        requests: [],
+        putError: draftCase.putError,
+      };
+      mockHub(state);
+      const el = await mountAndStartReview(true);
+
+      emitGraphicalEdit(el, MARKED_TEXT);
+      await el.updateComplete;
+      el.shadowRoot!.querySelector<HTMLElement>('.g-sticky .save-draft-btn')!.click();
+      await settle(el);
+
+      const assertDownloadButton = (): void => {
+        const btn = el.shadowRoot!.querySelector<HTMLElement>(
+          '.g-toolbar .draft-status-wrap sl-button.draft-download-btn'
+        );
+        expect(btn).not.toBeNull();
+        expect(btn!.closest('sl-tooltip')?.getAttribute('content')).toBe('Download');
+        expect(btn!.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe('download');
+        expect(btn!.querySelector('.lbl')?.textContent?.trim()).toBe('Download');
+      };
+
+      assertDownloadButton();
+
+      const viewToggle = el.shadowRoot!.querySelector<HTMLElement & { value: string }>(
+        '.g-toolbar .view-toggle'
+      )!;
+      viewToggle.value = 'source';
+      viewToggle.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+      await settle(el);
+
+      assertDownloadButton();
+    });
+  }
 });

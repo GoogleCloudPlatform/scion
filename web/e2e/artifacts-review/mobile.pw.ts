@@ -709,6 +709,20 @@ async function assertStickyToolbarFitsSingleRow(page: Page, contextLabel: string
         height: r.height,
       };
     });
+    const visibleButtons = Array.from(el.querySelectorAll('sl-button'))
+      .map((btn) => {
+        const r = btn.getBoundingClientRect();
+        return {
+          cls: btn.className || btn.textContent?.trim() || 'sl-button',
+          left: r.left,
+          right: r.right,
+          top: r.top,
+          bottom: r.bottom,
+          width: r.width,
+          height: r.height,
+        };
+      })
+      .filter((r) => r.width > 0 && r.height > 0);
     const visibleControls = Array.from(el.querySelectorAll('sl-button, sl-radio-button'))
       .map((c) => c.getBoundingClientRect())
       .filter((r) => r.width > 0 && r.height > 0);
@@ -724,6 +738,7 @@ async function assertStickyToolbarFitsSingleRow(page: Page, contextLabel: string
       barBottom: barRect.bottom,
       viewportWidth: window.innerWidth,
       actions,
+      visibleButtons,
       rowSpread,
     };
   });
@@ -740,6 +755,8 @@ async function assertStickyToolbarFitsSingleRow(page: Page, contextLabel: string
   for (const btn of metrics.actions) {
     expect(btn.width, `${contextLabel} (${btn.cls}): visible width`).toBeGreaterThan(0);
     expect(btn.height, `${contextLabel} (${btn.cls}): visible height`).toBeGreaterThan(0);
+  }
+  for (const btn of metrics.visibleButtons) {
     expect(btn.left, `${contextLabel} (${btn.cls}): inside toolbar left`).toBeGreaterThanOrEqual(
       metrics.barLeft - 0.5
     );
@@ -801,6 +818,77 @@ test.describe('sticky review toolbar single-row geometry on phone widths', () =>
       await toolbar(page).locator('sl-button', { hasText: 'Delete' }).click();
       await expect(hint(page)).toBeVisible();
       await assertStickyToolbarFitsSingleRow(page, `${width}px source + reviewHint`);
+    });
+  }
+
+  for (const draftCase of [
+    {
+      name: 'too_large',
+      status: 413,
+      body: { code: 'draft_too_large', error: 'draft too large' },
+    },
+    {
+      name: 'no_access',
+      status: 403,
+      body: { error: 'forbidden' },
+    },
+  ]) {
+    test(`fits single row without overflow in ${draftCase.name} draft state at 320px, 375px, and 414px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: 320, height: 740 });
+      const a = await publish({
+        project,
+        title: `Sticky Toolbar ${draftCase.name}`,
+        entry: 'index.md',
+        files: { 'index.md': Buffer.from(DOC) },
+      });
+      await openArtifact(page, project, a.id);
+      await startGraphicalReview(page);
+
+      await page.route('**/review-draft*', async (route) => {
+        if (route.request().method() === 'PUT') {
+          await route.fulfill({
+            status: draftCase.status,
+            contentType: 'application/json',
+            body: JSON.stringify(draftCase.body),
+          });
+          return;
+        }
+        await route.continue();
+      });
+
+      const word = await textBox(page, 'Paragraph 1 line.');
+      await page.mouse.click(word.x, word.y);
+      await expect(editor(page)).toBeFocused();
+      await settleAfterFocus(page);
+      await page.keyboard.type('X');
+
+      const saveBtn = toolbar(page).locator('.g-review-actions sl-button.save-draft-btn');
+      await expect(saveBtn).not.toHaveAttribute('disabled', '');
+      await saveBtn.click();
+
+      const downloadBtn = toolbar(page).locator('sl-button.draft-download-btn');
+      await expect(downloadBtn).toBeVisible();
+
+      for (const width of [320, 375, 414]) {
+        await page.setViewportSize({ width, height: 740 });
+        await expect(downloadBtn).toBeVisible();
+        await assertStickyToolbarFitsSingleRow(page, `${width}px ${draftCase.name} graphical`);
+      }
+
+      await page
+        .locator('scion-page-artifact-detail .view-toggle sl-radio-button[value="source"]')
+        .click();
+      await expect(
+        page.locator('scion-page-artifact-detail scion-code-editor.review-editor')
+      ).toBeVisible();
+
+      for (const width of [320, 375, 414]) {
+        await page.setViewportSize({ width, height: 740 });
+        await expect(downloadBtn).toBeVisible();
+        await assertStickyToolbarFitsSingleRow(page, `${width}px ${draftCase.name} source`);
+      }
     });
   }
 });
