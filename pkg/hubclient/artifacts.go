@@ -210,6 +210,8 @@ type ListArtifactsOptions struct {
 	ReviewPending bool
 	// Requested keeps artifacts where the caller has an open review request.
 	Requested bool
+	// Drafts keeps artifacts where the caller has a saved review draft.
+	Drafts bool
 	// OwnedOnly keeps artifacts the caller owns.
 	OwnedOnly bool
 	// Limit is the page size (0 = the hub's default).
@@ -236,6 +238,7 @@ type ArtifactListItem struct {
 	Artifact
 	ReviewPending   bool `json:"reviewPending"`
 	ReviewRequested bool `json:"reviewRequested,omitempty"`
+	ReviewInDraft   bool `json:"reviewInDraft,omitempty"`
 	// Access is why the caller sees the artifact: "owned", "project" or
 	// "shared".
 	Access string `json:"access,omitempty"`
@@ -347,9 +350,17 @@ type ArtifactTransferTargetsResponse struct {
 	Truncated bool                        `json:"truncated"`
 }
 
+// ArtifactReviewDraftSummary mirrors reviewState.myDraft on ArtifactResponse.
+type ArtifactReviewDraftSummary struct {
+	Base    int       `json:"base"`
+	SavedAt time.Time `json:"savedAt"`
+}
+
 // ArtifactReviewState mirrors reviewState on ArtifactResponse.
 type ArtifactReviewState struct {
-	RequestedOfMe *ArtifactReviewRequest `json:"requestedOfMe"`
+	RequestedOfMe    *ArtifactReviewRequest      `json:"requestedOfMe"`
+	MyDraft          *ArtifactReviewDraftSummary `json:"myDraft,omitempty"`
+	DraftsInProgress int                         `json:"draftsInProgress,omitempty"`
 }
 
 // ArtifactReviewRequestPrincipal identifies a reviewer or requester.
@@ -530,6 +541,9 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 		}
 		if opts.Requested {
 			q.Set("requested", "1")
+		}
+		if opts.Drafts {
+			q.Set("drafts", "1")
 		}
 		if opts.OwnedOnly {
 			q.Set("owner", "me")

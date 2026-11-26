@@ -1006,10 +1006,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 			seq                            sql.NullInt64
 			expires, created, updated      dbTime
 			orphaned, transferred          dbTime
-			requestedByMe                  bool
+			requestedByMe, myDraft         bool
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &orphaned, &sponsor, &formerKind, &formerRef, &transferred, &prevKey, &kind, &requestedByMe); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &sponsor, &formerKind, &formerRef, &transferred, &prevKey, &kind, &requestedByMe, &myDraft); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -1025,6 +1025,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.FormerKey = prevKey.String
 		c.CurrentKind = kind.String
 		c.RequestedByMe = requestedByMe
+		c.MyDraft = myDraft
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -1054,9 +1055,15 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any, error) {
 	var selectArgs []any
 	if q.ReviewRequestsEnabled {
 		selectCols += `, EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?) AS requested_by_me`
-		selectArgs = []any{q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen}
+		selectArgs = append(selectArgs, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
 	} else {
 		selectCols += `, FALSE AS requested_by_me`
+	}
+	if q.ReviewDraftsEnabled {
+		selectCols += `, EXISTS (SELECT 1 FROM artifact_review_draft d WHERE d.artifact_id = a.id AND d.principal_kind = ? AND d.principal_ref = ?) AS my_draft`
+		selectArgs = append(selectArgs, q.PrincipalKind, q.PrincipalRef)
+	} else {
+		selectCols += `, FALSE AS my_draft`
 	}
 	arm := func(from, where string, whereArgs ...any) {
 		if filtErr != nil {
@@ -1147,6 +1154,14 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 		if q.ReviewRequestsEnabled {
 			b.WriteString(" AND EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
 			*args = append(*args, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
+		} else {
+			b.WriteString(" AND 1 = 0")
+		}
+	}
+	if q.DraftsOnly {
+		if q.ReviewDraftsEnabled {
+			b.WriteString(" AND EXISTS (SELECT 1 FROM artifact_review_draft d WHERE d.artifact_id = a.id AND d.principal_kind = ? AND d.principal_ref = ?)")
+			*args = append(*args, q.PrincipalKind, q.PrincipalRef)
 		} else {
 			b.WriteString(" AND 1 = 0")
 		}
@@ -1258,6 +1273,11 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 					b.WriteString(" AND NOT EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
 					*args = append(*args, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
 				}
+			case "draft":
+				if q.ReviewDraftsEnabled {
+					b.WriteString(" AND NOT EXISTS (SELECT 1 FROM artifact_review_draft d WHERE d.artifact_id = a.id AND d.principal_kind = ? AND d.principal_ref = ?)")
+					*args = append(*args, q.PrincipalKind, q.PrincipalRef)
+				}
 			case "mine":
 				b.WriteString(" AND NOT (a.owner_kind = ? AND a.owner_ref = ?)")
 				*args = append(*args, q.PrincipalKind, q.PrincipalRef)
@@ -1287,6 +1307,13 @@ func (s *sqlStore) writeIsTermFilter(b *strings.Builder, args *[]any, q Candidat
 			if q.ReviewRequestsEnabled {
 				clauses = append(clauses, "EXISTS (SELECT 1 FROM artifact_review_request r WHERE r.artifact_id = a.id AND r.reviewer_kind = ? AND r.reviewer_ref = ? AND r.state = ?)")
 				clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef, ReviewRequestStateOpen)
+			} else {
+				clauses = append(clauses, "1 = 0")
+			}
+		case "draft":
+			if q.ReviewDraftsEnabled {
+				clauses = append(clauses, "EXISTS (SELECT 1 FROM artifact_review_draft d WHERE d.artifact_id = a.id AND d.principal_kind = ? AND d.principal_ref = ?)")
+				clauseArgs = append(clauseArgs, q.PrincipalKind, q.PrincipalRef)
 			} else {
 				clauses = append(clauses, "1 = 0")
 			}

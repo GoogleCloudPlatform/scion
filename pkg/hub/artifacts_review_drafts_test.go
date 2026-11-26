@@ -344,12 +344,12 @@ func TestReapArtifactVersionsReapsReviewDraftsWhenExperimentOff(t *testing.T) {
 
 	st := srv.ArtifactStore()
 	now := time.Now().UTC()
-	_, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+	_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
 		ArtifactID: oldArtID, PrincipalKind: artifacts.PrincipalKindUser, PrincipalRef: u.ID,
 		BaseSeq: 1, EntryPath: "old.md", Body: "expired", Note: "",
 	}, 0, now.Add(-artifacts.DraftTTL-time.Hour), artifacts.MaxDraftsPerPrincipal)
 	require.NoError(t, err)
-	_, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+	_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
 		ArtifactID: freshArtID, PrincipalKind: artifacts.PrincipalKindUser, PrincipalRef: u.ID,
 		BaseSeq: 1, EntryPath: "fresh.md", Body: "active", Note: "",
 	}, 0, now.Add(-time.Hour), artifacts.MaxDraftsPerPrincipal)
@@ -500,7 +500,7 @@ func TestReapLostAccessReviewDraftsIndeterminateAuthzFailSafe(t *testing.T) {
 	require.NoError(t, err)
 
 	now := time.Now().UTC()
-	_, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+	_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
 		ArtifactID: artID, PrincipalKind: artifacts.PrincipalKindUser, PrincipalRef: u.ID,
 		BaseSeq: 1, EntryPath: "plan.md", Body: "keep-on-transient-authz-error", Note: "",
 	}, 0, now.Add(-time.Hour), artifacts.MaxDraftsPerPrincipal)

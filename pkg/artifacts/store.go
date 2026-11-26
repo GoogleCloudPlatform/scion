@@ -417,17 +417,27 @@ type Store interface {
 	// PutReviewDraft writes d when the stored revision equals expectRev (0
 	// creates a new row with Rev = 1; a positive expectRev updates an
 	// existing row to expectRev + 1), setting UpdatedAt = now, and returns
-	// the stored row. A revision mismatch returns a *DraftConflictError
-	// wrapping ErrDraftConflict with the stored row's revision, save time
-	// and base version (or zero values when expectRev > 0 and no row
-	// exists), never its body or note. An insert when the principal already
-	// holds maxPerPrincipal drafts returns ErrTooManyDrafts and writes
-	// nothing.
-	PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev int, now time.Time, maxPerPrincipal int) (ReviewDraft, error)
+	// the stored row and whether a new row was inserted (created). A revision
+	// mismatch returns a *DraftConflictError wrapping ErrDraftConflict with
+	// the stored row's revision, save time and base version (or zero values
+	// when expectRev > 0 and no row exists), never its body or note. An insert
+	// when the principal already holds maxPerPrincipal drafts returns
+	// ErrTooManyDrafts and writes nothing.
+	PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev int, now time.Time, maxPerPrincipal int) (ReviewDraft, bool, error)
 
 	// GetReviewDraft returns the principal's saved draft of the artifact,
 	// or ErrNotFound.
 	GetReviewDraft(ctx context.Context, artifactID, kind, ref string) (ReviewDraft, error)
+
+	// GetReviewDraftSummary returns the base version and last save time of
+	// the principal's saved draft of the artifact without reading its body or
+	// note, or ErrNotFound.
+	GetReviewDraftSummary(ctx context.Context, artifactID, kind, ref string) (*ReviewDraftSummary, error)
+
+	// CountOpenRequestReviewDrafts returns the number of saved review drafts
+	// on artifactID held by principals who currently have an open review
+	// request on artifactID. It never reads or exposes draft content.
+	CountOpenRequestReviewDrafts(ctx context.Context, artifactID string) (int, error)
 
 	// DeleteReviewDraft deletes the principal's saved draft of the artifact
 	// and reports whether a row was deleted. When expectRev is 0, any
@@ -438,8 +448,8 @@ type Store interface {
 	DeleteReviewDraft(ctx context.Context, artifactID, kind, ref string, expectRev int) (bool, error)
 
 	// ReapReviewDrafts deletes at most limit review drafts last saved
-	// (updated_at) before cutoff and returns how many it deleted.
-	ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) (int, error)
+	// (updated_at) before cutoff and returns the keys of the deleted rows.
+	ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) ([]ReviewDraftKey, error)
 
 	// ListReviewDraftKeys returns up to limit saved review draft keys ordered
 	// by (artifact_id, principal_kind, principal_ref), strictly after after
@@ -812,6 +822,13 @@ type CandidateQuery struct {
 	// enabled for this query. When false, RequestedOnly and is:requested match
 	// nothing and Candidate.RequestedByMe is always false.
 	ReviewRequestsEnabled bool
+	// DraftsOnly keeps only rows where the caller has a saved review draft
+	// (when ReviewDraftsEnabled is true; matches nothing when false).
+	DraftsOnly bool
+	// ReviewDraftsEnabled reports whether hub.artifacts_review_drafts is
+	// enabled for this query. When false, DraftsOnly and is:draft match
+	// nothing and Candidate.MyDraft is always false.
+	ReviewDraftsEnabled bool
 	// HomeScope, when set, keeps only rows homed in this project, and
 	// with ScopeShares also those carrying an unexpired read, write or
 	// admin scope grant to it. It narrows the other conditions and never
@@ -865,6 +882,7 @@ type Candidate struct {
 	Artifact
 	CurrentKind   string
 	RequestedByMe bool
+	MyDraft       bool
 }
 
 // NewStore returns the Store for db. driverName selects the SQL dialect:

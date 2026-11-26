@@ -124,21 +124,41 @@ func (s *Service) principalDisplayNames(ctx context.Context, refs []string) map[
 }
 
 // populateReviewState sets resp.ReviewState on GET artifact / version responses
-// while FeatureReviewRequests is enabled. While the experiment is off,
-// resp.ReviewState stays nil and is omitted from JSON.
+// while FeatureReviewRequests or FeatureReviewDrafts is enabled. While both
+// experiments are off, resp.ReviewState stays nil and is omitted from JSON.
 func (s *Service) populateReviewState(ctx context.Context, b backend, a *Artifact, resp *ArtifactResponse) {
-	if !s.featureEnabled(ctx, FeatureReviewRequests) {
+	requestsEnabled := s.featureEnabled(ctx, FeatureReviewRequests)
+	draftsEnabled := s.featureEnabled(ctx, FeatureReviewDrafts)
+	if !requestsEnabled && !draftsEnabled {
 		return
 	}
 	state := &ReviewStateInfo{}
 	kind, ref, _, ok := s.host.Principal(ctx)
-	if ok && kind == PrincipalKindUser {
+	if requestsEnabled && ok && kind == PrincipalKindUser {
 		rr, err := b.store.GetOpenReviewRequest(ctx, a.ID, kind, ref)
 		if err == nil && rr != nil {
 			info := s.reviewRequestInfo(ctx, *rr, nil)
 			state.RequestedOfMe = &info
 		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			slog.WarnContext(ctx, "artifacts: get open review request failed", "artifact", a.ID, "error", err)
+		}
+	}
+	if draftsEnabled {
+		if ok {
+			summary, err := b.store.GetReviewDraftSummary(ctx, a.ID, kind, ref)
+			if err == nil && summary != nil {
+				state.MyDraft = summary
+			} else if err != nil && !errors.Is(err, ErrNotFound) {
+				slog.WarnContext(ctx, "artifacts: get review draft summary failed", "artifact", a.ID, "error", err)
+			}
+		}
+		if resp.CanPublish {
+			n, err := b.store.CountOpenRequestReviewDrafts(ctx, a.ID)
+			if err == nil {
+				state.DraftsInProgress = n
+			} else {
+				slog.WarnContext(ctx, "artifacts: count open-request review drafts failed", "artifact", a.ID, "error", err)
+			}
 		}
 	}
 	resp.ReviewState = state
