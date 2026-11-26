@@ -579,6 +579,9 @@ func TestTelemetryEnforced_ResolvedSettings(t *testing.T) {
 
 	// Experiment on + TelemetryEnforced=true, no project annotation.
 	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
 	res = getResolved()
 	tel = res.Settings[projectSettingTelemetryEnabled]
 	require.NotNil(t, tel.LockedBy)
@@ -618,7 +621,7 @@ func TestTelemetryEnforced_InvalidDBRowWarning(t *testing.T) {
 	ops := ensureTestOps(t, srv, s)
 
 	// Directly persist an invalid telemetry DB row (enforced=true with enabled=false).
-	_, err := s.UpsertHubSetting(ctx, "telemetry", `{"enabled":false,"enforced":true}`, "test")
+	_, err := s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"enabled":false,"enforced":true}`), "test", -1, "managed")
 	require.NoError(t, err)
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)
@@ -638,7 +641,7 @@ func TestTelemetryEnforced_InvalidDBRowWarning(t *testing.T) {
 	assert.NotEmpty(t, body.TelemetryEnforcedWarning, "L1: invalid enforced row must surface warning")
 
 	// Valid row clears the warning.
-	_, err = s.UpsertHubSetting(ctx, "telemetry", `{"enabled":true,"enforced":true}`, "test")
+	_, err = s.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"enabled":true,"enforced":true}`), "test", -1, "managed")
 	require.NoError(t, err)
 	_, err = ops.Refresh(ctx)
 	require.NoError(t, err)
@@ -699,7 +702,7 @@ func TestTelemetryEnforced_CreateAndPatchRefusal(t *testing.T) {
 
 	t.Run("PATCH with config.telemetry.enabled=false returns 400 telemetry_enforced_by_hub", func(t *testing.T) {
 		agent := &store.Agent{
-			ID:        "agent-tel-patch",
+			ID:        tid("agent-tel-patch"),
 			Slug:      "agent-tel-patch",
 			Name:      "agent-tel-patch",
 			ProjectID: project.ID,
@@ -743,7 +746,7 @@ func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {
 	defer brokerSrv.Close()
 
 	oldBroker := &store.RuntimeBroker{
-		ID:       "broker-no-tiers",
+		ID:       tid("broker-no-tiers"),
 		Name:     "broker-no-tiers",
 		Slug:     "broker-no-tiers",
 		Endpoint: brokerSrv.URL,
@@ -760,7 +763,7 @@ func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {
 	}))
 
 	agent := &store.Agent{
-		ID:              "agent-old-broker",
+		ID:              tid("agent-old-broker"),
 		Slug:            "agent-old-broker",
 		Name:            "agent-old-broker",
 		ProjectID:       project.ID,
@@ -768,7 +771,7 @@ func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {
 		AppliedConfig:   &store.AgentAppliedConfig{},
 	}
 
-	d := NewHTTPAgentDispatcher(s, brokerSrv.Client(), true, slog.Default())
+	d := NewHTTPAgentDispatcher(s, true, slog.Default())
 	d.SetTelemetryEnforcedProvider(srv.telemetryEnforced)
 
 	// Experiment off + TelemetryEnforced=true: old broker is NOT refused.
@@ -780,13 +783,16 @@ func TestTelemetryEnforced_OldBrokerRefusal(t *testing.T) {
 	// Experiment on + TelemetryEnforced=true: create, start, and restart all
 	// refuse with typed telemetry_enforcement_unsupported and make zero broker calls.
 	setTelemetryEnforcementExperiment(t, srv, s, true)
+	srv.mu.Lock()
+	srv.config.TelemetryEnforced = true
+	srv.mu.Unlock()
 
 	for _, tc := range []struct {
 		name string
 		call func() error
 	}{
 		{"create", func() error { _, err := d.DispatchAgentCreate(ctx, agent); return err }},
-		{"start", func() error { return d.DispatchAgentStart(ctx, agent, "") }},
+		{"start", func() error { return d.DispatchAgentStart(ctx, agent, "", false) }},
 		{"restart", func() error { return d.DispatchAgentRestart(ctx, agent) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
