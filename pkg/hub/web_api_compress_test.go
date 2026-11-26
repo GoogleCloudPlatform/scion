@@ -926,6 +926,8 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		"/api/v1/agents/a1/messages",
 		"/api/v1/agents/a1/message-logs",
 		"/api/v1/agents/a1/logs",
+		"/api/v1/agents/a1/usage/events",
+		"/api/v1/brokers/b1/agents/a1/usage/events",
 		"/api/v1/projects",
 		"/api/v1/projects/p1",
 		"/api/v1/projects/p1/agents",

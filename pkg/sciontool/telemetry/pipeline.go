@@ -304,7 +304,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		} else {
 			p.exporter = exporter
 			p.attachGCPAsyncLogErrorHook(exporter.gcpExporter)
-			p.analytics.start(ctx, exporter.gcpExporter)
 			mode := "OTLP"
 			if p.config.IsGCP() {
 				mode = "GCP-native"
@@ -355,6 +354,15 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start analytics outbox/drainer whenever either the Hub usage sink or a
+	// GCP exporter is active.
+	var gcpExporter *GCPExporter
+	if p.exporter != nil {
+		gcpExporter = p.exporter.gcpExporter
+	}
+	p.analytics.supportedSignals = p.supportedUsageSignals
+	p.analytics.start(ctx, gcpExporter)
+
 	// Create receiver with span and metric handlers
 	p.intakeMu.Lock()
 	p.intakeClosed = false
@@ -404,10 +412,6 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.running = true
 	p.deliveryState.Store("running")
 	p.startDiagnosticSnapshots(ctx)
-	var gcpExporter *GCPExporter
-	if p.exporter != nil {
-		gcpExporter = p.exporter.gcpExporter
-	}
 	p.startHealth(ctx, gcpExporter, p.analytics.handles())
 	// After startHealth, so the first snapshot shows this run's analytics.
 	p.logDeliverySnapshot(true)

@@ -3457,9 +3457,13 @@ func isCompressBypassPath(path string) bool {
 	case "/api/v1/auth", "/api/v1/agent", "/api/v1/brokers", "/api/v1/brokers/join", "/api/v1/projects/register":
 		return true
 	}
+	// /events is a suffix bypass for SSE event streams, except /usage/events
+	// (usage ingest POST routes return a small JSON ack, not an event stream).
+	if strings.HasSuffix(trimmed, "/events") && !strings.HasSuffix(trimmed, "/usage/events") {
+		return true
+	}
 	for _, suffix := range []string{
 		"/stream",
-		"/events",
 		"/token/refresh",
 		"/refresh-token",
 		"/exchange",

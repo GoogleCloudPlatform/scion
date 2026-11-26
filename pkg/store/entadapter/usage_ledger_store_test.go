@@ -228,17 +228,21 @@ func TestUsageLedgerSchemas_MigrationAndNullability(t *testing.T) {
 		Save(ctx)
 	require.Error(t, err, "duplicate usage_scope_counters_daily key must be rejected")
 
-	// 5. meter_health
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     "epoch-1",
-		LastReceiptAt:     now,
-		LastContiguousSeq: 5,
-		MaxSeqSeen:        5,
-		SupportedSignals:  []string{"agent.usage", "telemetry.health"},
-		FinalState:        store.MeterHealthFinalStateOpen,
-	}))
+	// 5. meter_health (via IngestUsageBatch)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:          agentID,
+			RunID:            runID,
+			ProducerEpoch:    "epoch-1",
+			LastReceiptAt:    now,
+			ProducerSeq:      5,
+			ReceivedSeqs:     []int64{1, 2, 3, 4, 5},
+			SupportedSignals: []string{"agent.usage", "telemetry.health"},
+			FinalState:       store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
 	rows, err := cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -1144,36 +1148,54 @@ func TestMeterHealth_UpsertMonotonic(t *testing.T) {
 	cs := NewCompositeStore(enttest.NewClient(t))
 	t.Cleanup(func() { _ = cs.Close() })
 
+	projectID := createTestProject(t, cs, "mh-monotonic")
 	agentID := uuid.NewString()
 	runID := "run-mh-1"
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:     runID,
+		HubID:     "hub-mh",
+		ProjectID: projectID,
+		AgentID:   agentID,
+		Harness:   "claude",
+	})
+	require.NoError(t, err)
+
 	t1 := time.Now().UTC().Truncate(time.Microsecond)
 	t2 := t1.Add(10 * time.Second)
 
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     "ep-1",
-		LastReceiptAt:     t1,
-		LastContiguousSeq: 10,
-		MaxSeqSeen:        15,
-		MissingRanges:     []store.SeqRange{{Start: 11, End: 14}},
-		AnomalousCount:    1,
-		FinalState:        store.MeterHealthFinalStateOpen,
-	}))
+	anomEv := makeStoreUsageEvent("hub-mh", "evt-mh-anom", runID, projectID, agentID, nil, 15, t1, 60_000_000, 0, 0, 0)
+	anomEv.ProducerEpoch = "ep-1"
+	anomEv.Anomalous = true
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{anomEv},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: t1,
+			ProducerSeq:   15,
+			ReceivedSeqs:  []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15},
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
 
 	// Out-of-order / regressive update must not move seqs or timestamps backward.
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:             agentID,
-		RunID:               runID,
-		ProducerEpoch:       "ep-1",
-		LastReceiptAt:       t1.Add(-time.Minute),
-		LastContiguousSeq:   5,
-		MaxSeqSeen:          12,
-		MissingRanges:       []store.SeqRange{{Start: 6, End: 14}},
-		AnomalousCount:      0,
-		SchemaDriftDetected: true,
-		FinalState:          store.MeterHealthFinalStateFinal,
-	}))
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agentID,
+			RunID:               runID,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       t1.Add(-time.Minute),
+			ProducerSeq:         12,
+			SchemaDriftDetected: true,
+			FinalState:          store.MeterHealthFinalStateFinal,
+		},
+	})
+	require.NoError(t, err)
 
 	rows, err := cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
@@ -1185,17 +1207,21 @@ func TestMeterHealth_UpsertMonotonic(t *testing.T) {
 	assert.True(t, rows[0].SchemaDriftDetected)
 	assert.Equal(t, store.MeterHealthFinalStateFinal, rows[0].FinalState)
 
-	// Once final, final_state must not transition to incomplete or open.
-	require.NoError(t, cs.UpsertMeterHealth(ctx, &store.MeterHealth{
-		AgentID:           agentID,
-		RunID:             runID,
-		ProducerEpoch:     "ep-1",
-		LastReceiptAt:     t2,
-		LastContiguousSeq: 15,
-		MaxSeqSeen:        15,
-		MissingRanges:     []store.SeqRange{},
-		FinalState:        store.MeterHealthFinalStateIncomplete,
-	}))
+	// Once final, final_state must not transition to incomplete or open, while
+	// late gap-fill seqs still advance contiguity and close missing_ranges.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: t2,
+			ProducerSeq:   15,
+			ReceivedSeqs:  []int64{11, 12, 13, 14},
+			FinalState:    store.MeterHealthFinalStateIncomplete,
+		},
+	})
+	require.NoError(t, err)
 
 	rows, err = cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)

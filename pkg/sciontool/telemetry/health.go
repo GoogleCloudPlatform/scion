@@ -338,7 +338,8 @@ func lossIndicated(in healthInputs) bool {
 // countingSend wraps the analytics send function and counts retries: a
 // send of the same bytes as the immediately preceding failed send.
 type countingSend struct {
-	send AnalyticsSendFunc
+	send      AnalyticsSendFunc
+	batchSend AnalyticsBatchSendFunc
 
 	mu         sync.Mutex
 	lastFailed [sha256.Size]byte
@@ -347,6 +348,10 @@ type countingSend struct {
 }
 
 func newCountingSend(send AnalyticsSendFunc) *countingSend { return &countingSend{send: send} }
+
+func newCountingBatchSend(send AnalyticsBatchSendFunc) *countingSend {
+	return &countingSend{batchSend: send}
+}
 
 // Send implements AnalyticsSendFunc.
 func (c *countingSend) Send(ctx context.Context, line []byte) error {
@@ -361,6 +366,27 @@ func (c *countingSend) Send(ctx context.Context, line []byte) error {
 	c.hasFailed, c.lastFailed = err != nil, sum
 	c.mu.Unlock()
 	return err
+}
+
+// SendBatch implements AnalyticsBatchSendFunc, counting batch retries by
+// hashing the first line of each batch.
+func (c *countingSend) SendBatch(ctx context.Context, lines [][]byte) (BatchSendOutcome, error) {
+	var sum [sha256.Size]byte
+	if len(lines) > 0 {
+		sum = sha256.Sum256(lines[0])
+		c.mu.Lock()
+		if c.hasFailed && sum == c.lastFailed {
+			c.retries.Add(1)
+		}
+		c.mu.Unlock()
+	}
+	out, err := c.batchSend(ctx, lines)
+	if len(lines) > 0 {
+		c.mu.Lock()
+		c.hasFailed, c.lastFailed = err != nil, sum
+		c.mu.Unlock()
+	}
+	return out, err
 }
 
 // Retries returns the retry count. Safe on nil.
@@ -1032,4 +1058,25 @@ func finalHealthBudget(ctx context.Context, now time.Time) time.Duration {
 // disabled reason was recorded.
 func (h analyticsHandles) enabled() bool {
 	return h.native != nil && h.disabledReason == ""
+}
+
+// supportedUsageSignals returns the usage signal categories this pipeline's
+// active usage source and harness can report (from usageCapabilityTable).
+func (p *Pipeline) supportedUsageSignals() []string {
+	if p == nil {
+		return nil
+	}
+	p.health.mu.Lock()
+	sel := p.health.selection
+	p.health.mu.Unlock()
+
+	source := sel.Source
+	if !sel.Settled || source == "" {
+		source = os.Getenv("SCION_USAGE_SOURCE")
+	}
+	harness := os.Getenv("SCION_HARNESS")
+	if entry, ok := usageCapabilityTable[source+"/"+harness]; ok {
+		return append([]string(nil), entry.caps...)
+	}
+	return nil
 }

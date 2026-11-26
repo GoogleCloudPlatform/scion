@@ -67,6 +67,10 @@ const (
 	// EnvMetadataMode is the GCP metadata server mode ("block", "assign",
 	// or "passthrough"). Set by the broker runtime.
 	EnvMetadataMode = "SCION_METADATA_MODE"
+	// EnvUsageHubIngest is set to "1" by sciontool init when the Hub usage
+	// capabilities probe succeeds, allowing hook subprocesses to write to the
+	// analytics outbox even when no GCP exporter is configured.
+	EnvUsageHubIngest = "SCION_USAGE_HUB_INGEST"
 )
 
 // metadataModeBlock mirrors store.GCPMetadataModeBlock without importing

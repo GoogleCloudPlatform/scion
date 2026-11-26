@@ -862,6 +862,13 @@ func (s *Server) handleBrokerByIDRoutes(w http.ResponseWriter, r *http.Request) 
 	case "rotate-secret":
 		s.handleBrokerRotateSecret(w, r, brokerID)
 	default:
+		// Broker harvest usage ingest: POST /api/v1/brokers/{bid}/agents/{id}/usage/events
+		if subParts := strings.Split(action, "/"); len(subParts) == 4 &&
+			subParts[0] == "agents" && subParts[1] != "" &&
+			subParts[2] == "usage" && subParts[3] == "events" {
+			s.handleBrokerAgentUsageEvents(w, r, brokerID, subParts[1])
+			return
+		}
 		NotFound(w, "broker action")
 	}
 }

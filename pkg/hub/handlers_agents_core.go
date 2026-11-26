@@ -4584,6 +4584,11 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRouteMetricsSummary:
 		s.handleAgentMetricsSummary(w, r, id)
 
+	case AgentRouteUsageEvents:
+		s.handleAgentUsageEvents(w, r, id)
+	case AgentRouteUsageCapabilities:
+		s.handleAgentUsageCapabilities(w, r, id)
+
 	case AgentRouteHoldLift:
 		s.handleAgentHoldLift(w, r, id)
 

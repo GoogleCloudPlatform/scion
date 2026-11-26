@@ -95,6 +95,16 @@ func (rt *usageLedgerRuntime) nextRetryDelay() time.Duration {
 	return delay
 }
 
+// usageLedgerHubID returns the canonical hub_id stamped on usage ledger rows
+// (run_attribution, usage_events) and advertised by usage capabilities.
+// Falls back to "hub-local" when the server has no configured HubID.
+func (s *Server) usageLedgerHubID() string {
+	if id := s.HubID(); id != "" {
+		return id
+	}
+	return "hub-local"
+}
+
 // reconcileUsageLedger synchronizes the store's atomic run_attribution writer
 // with the tokenomics.usage_ledger experiment and, when enabled and not yet
 // succeeded for the current generation, runs the idempotent active-run
@@ -147,7 +157,7 @@ func (s *Server) reconcileUsageLedgerMode(ctx context.Context, async bool) {
 		return
 	}
 
-	hubID := s.HubID()
+	hubID := s.usageLedgerHubID()
 	if !rt.enabled {
 		// OFF -> ON transition: bump generation and clear backfillSucceeded so
 		// any runs minted while off are attributed.

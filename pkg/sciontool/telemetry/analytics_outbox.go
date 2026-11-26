@@ -91,11 +91,24 @@ const (
 // removed at finalize (a commit never takes this long).
 const analyticsTmpSweepAge = time.Hour
 
-// AnalyticsOutboxDirName is the outbox directory under the agent home's
-// .scion directory.
+// AnalyticsOutboxDirName is the GCP analytics outbox directory under the agent
+// home's .scion directory.
 const AnalyticsOutboxDirName = "analytics-outbox"
 
-// AnalyticsOutboxDirFor returns the outbox directory for the AGENT home
+// HubAnalyticsOutboxDirName is the sibling outbox directory under the agent
+// home's .scion directory used by the Scion Hub usage ingest sink. Keeping a
+// separate WAL directory per sink isolates caps, cursors, dead-letter files,
+// and health counters during dual-run.
+const HubAnalyticsOutboxDirName = "analytics-outbox-hub"
+
+// hubOutboxActiveMarker is a small marker file inside the Hub outbox directory
+// written while the Hub usage sink is active and removed on 404 revocation or
+// when a run starts with a negative capability probe. Short-lived hook
+// subprocesses stat this marker to discover whether to tee events to the Hub
+// outbox without relying on a frozen process environment.
+const hubOutboxActiveMarker = "active"
+
+// AnalyticsOutboxDirFor returns the GCP outbox directory for the AGENT home
 // (<home>/.scion/analytics-outbox), or "" if home is empty. Both producers
 // must pass the agent home: sciontool init (which runs as root with
 // HOME=/root) passes its resolved agent home, and hook processes (which run
@@ -106,6 +119,54 @@ func AnalyticsOutboxDirFor(home string) string {
 		return ""
 	}
 	return filepath.Join(home, ".scion", AnalyticsOutboxDirName)
+}
+
+// HubAnalyticsOutboxDirFor returns the Hub usage outbox directory for the
+// AGENT home (<home>/.scion/analytics-outbox-hub), or "" if home is empty.
+func HubAnalyticsOutboxDirFor(home string) string {
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".scion", HubAnalyticsOutboxDirName)
+}
+
+// IsHubOutboxActive reports whether the Hub usage outbox for home is currently
+// marked active on disk.
+func IsHubOutboxActive(home string) bool {
+	return isHubOutboxActiveDir(HubAnalyticsOutboxDirFor(home))
+}
+
+func isHubOutboxActiveDir(hubDir string) bool {
+	if hubDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(hubDir, hubOutboxActiveMarker))
+	return err == nil
+}
+
+// ClearHubOutboxActive removes the Hub outbox active marker in hubDir if
+// present, without creating hubDir.
+func ClearHubOutboxActive(hubDir string) {
+	if hubDir == "" {
+		return
+	}
+	if err := os.Remove(filepath.Join(hubDir, hubOutboxActiveMarker)); err == nil {
+		_ = syncDir(hubDir)
+	}
+}
+
+func (o *AnalyticsOutbox) markHubActive() {
+	if o == nil {
+		return
+	}
+	_ = o.writeFileAtomic(hubOutboxActiveMarker, []byte("1\n"))
+}
+
+func (o *AnalyticsOutbox) clearHubActive() {
+	if o == nil {
+		return
+	}
+	ClearHubOutboxActive(o.dir)
 }
 
 // OutboxOwner is the agent user that must own every outbox file. When the
@@ -500,6 +561,10 @@ func (o *AnalyticsOutbox) appendUsage(ev *telemetrycontract.UsageEvent) (outcome
 	if err := o.recoverIntentLocked(); err != nil {
 		// This observation is refused (held, or recovery failed): consume
 		// a seq for it (after any intent's), so the loss is a visible gap.
+		o.consumeSeqDuringHold()
+		return 0, err
+	}
+	if err := o.ensureRunEpochLocked(ev.RunID); err != nil {
 		o.consumeSeqDuringHold()
 		return 0, err
 	}
@@ -945,14 +1010,64 @@ func (o *AnalyticsOutbox) reindexLastStagingLine() error {
 	return o.writeIndex(name, entry)
 }
 
+// EnsureRunEpoch rotates the outbox's producer_epoch and resets producer_seq
+// to 0 whenever runID differs from the outbox's recorded run_id, so each new
+// agent run starts its sequence numbering at 1 without creating a [1..N] gap
+// for a previous run's sequences. Already-staged/ready events from earlier
+// runs keep their original producer_epoch, producer_seq, and run_id bytes.
+func (o *AnalyticsOutbox) EnsureRunEpoch(runID string) error {
+	if o == nil || strings.TrimSpace(runID) == "" {
+		return nil
+	}
+	unlock, err := o.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := o.recoverIntentLocked(); err != nil {
+		return err
+	}
+	return o.ensureRunEpochLocked(runID)
+}
+
+func (o *AnalyticsOutbox) ensureRunEpochLocked(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil
+	}
+	currentRunID, err := o.readTrimmed("run_id")
+	if err != nil {
+		return err
+	}
+	if currentRunID == runID {
+		return nil
+	}
+	seq, err := o.readInt("seq")
+	if err != nil {
+		return err
+	}
+	// Rotate epoch and reset seq when moving from another run, or when
+	// adopting a persisted legacy outbox that already allocated sequences
+	// without a run_id marker.
+	if currentRunID != "" || seq > 0 {
+		if err := o.writeFileAtomic("epoch", []byte(telemetrycontract.NewEventID())); err != nil {
+			return err
+		}
+		if err := o.writeFileAtomic("seq", []byte("0")); err != nil {
+			return err
+		}
+	}
+	return o.writeFileAtomic("run_id", []byte(runID))
+}
+
 // usageSemanticFingerprint hashes the event's source-determined content:
 // everything except observation and ledger fields (event_id, observed_ts,
-// producer_build, harness_version, hub_id, producer_epoch/seq,
+// producer_build, harness_version, hub_id, run_id, producer_epoch/seq,
 // source_occurrence, identity_ambiguous). A retransmission matches; a
 // conflicting payload (or a changed normalization) does not.
 func usageSemanticFingerprint(ev *telemetrycontract.UsageEvent) (string, error) {
 	c := *ev
-	c.EventID, c.ObservedTS, c.ProducerBuild, c.HarnessVersion, c.HubID = "", "", "", "", ""
+	c.EventID, c.ObservedTS, c.ProducerBuild, c.HarnessVersion, c.HubID, c.RunID = "", "", "", "", "", ""
 	c.ProducerEpoch, c.ProducerSeq, c.SourceOccurrence, c.IdentityAmbiguous = "", 0, 0, false
 	b, err := json.Marshal(&c)
 	if err != nil {
@@ -1433,14 +1548,13 @@ func (o *AnalyticsOutbox) nextReadyNumber() (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Never hand out a number the cursor still points into (a stale cursor at
+	// offset > 0 after an interrupted quarantine or delete), nor one a ready or
+	// quarantine file already uses.
 	cursorFile, cursorOffset, err := o.readCursor()
 	if err != nil {
 		return 0, err
 	}
-	// Never hand out a number the cursor still points into (a stale cursor
-	// at offset > 0 after an interrupted quarantine or delete), nor one a
-	// ready or quarantine file already uses: Drain would seek a new file
-	// to the old offset, or a quarantine rename could overwrite.
 	next := cursorFile
 	if cursorOffset > 0 {
 		next = cursorFile + 1
@@ -1586,10 +1700,217 @@ func (o *AnalyticsOutbox) writeCursor(file, offset int64) error {
 	return o.writeFileAtomic("cursor", []byte(fmt.Sprintf("%d %d", file, offset)))
 }
 
+// advanceCursor updates the cursor to (file, offset) under the outbox lock,
+// only if it moves forward relative to the currently persisted position.
+func (o *AnalyticsOutbox) advanceCursor(file, offset int64) error {
+	unlock, err := o.lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	curFile, curOffset, err := o.readCursor()
+	if err == nil && (curFile > file || (curFile == file && curOffset > offset)) {
+		return nil
+	}
+	return o.writeCursor(file, offset)
+}
+
 // AnalyticsSendFunc delivers one final event line. A nil error means the
 // destination accepted it; an error wrapped by PermanentSendError means it
 // never will (the line is dead-lettered); any other error is retried.
 type AnalyticsSendFunc func(ctx context.Context, line []byte) error
+
+// BatchSendOutcome describes the destination's per-line disposition of one
+// batch of ready outbox lines.
+type BatchSendOutcome struct {
+	// RejectedIndices lists 0-based indices into the batch slice that the
+	// destination permanently rejected; each is dead-lettered and not retried.
+	RejectedIndices []int
+}
+
+// AnalyticsBatchSendFunc delivers an ordered batch of final event lines.
+// A nil error means the batch was acknowledged: lines not listed in
+// outcome.RejectedIndices are counted delivered and rejected lines are
+// dead-lettered. A non-nil error means the batch was not acknowledged: if
+// IsPermanentSendError(err) is true, every line in the batch is dead-lettered;
+// otherwise the cursor does not advance and the exact same bytes are retried
+// on the next drain.
+type AnalyticsBatchSendFunc func(ctx context.Context, lines [][]byte) (BatchSendOutcome, error)
+
+// DrainBatch sends ready lines in order from the cursor in batches bounded by
+// maxEvents and maxBytes (JSON array payload bytes excluding outer envelope),
+// committing the cursor under the outbox lock after each acknowledged batch
+// and deleting a ready file once fully sent. It stops at the first transient
+// send error without advancing the cursor, so the next drain replays the exact
+// same bytes and event IDs. Called only from the pipeline's drainer goroutine.
+func (o *AnalyticsOutbox) DrainBatch(ctx context.Context, maxEvents, maxBytes int, send AnalyticsBatchSendFunc) (int, error) {
+	if o == nil {
+		return 0, errNilOutbox
+	}
+	if maxEvents <= 0 {
+		maxEvents = telemetrycontract.UsageIngestMaxBatchEvents
+	}
+	if maxBytes <= 0 {
+		maxBytes = telemetrycontract.UsageIngestMaxBatchBytes
+	}
+	files, err := o.readyFiles()
+	if err != nil {
+		return 0, err
+	}
+	curFile, curOffset, err := o.readCursor()
+	if err != nil {
+		return 0, err
+	}
+	sent := 0
+	for _, n := range files {
+		if n < curFile {
+			// Fully sent before a crash interrupted the delete.
+			_ = os.Remove(o.path(readyName(n)))
+			continue
+		}
+		offset := int64(0)
+		if n == curFile {
+			offset = curOffset
+		}
+		f, err := o.openFile(o.path(readyName(n)))
+		if err != nil {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			_ = f.Close()
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		r := bufio.NewReaderSize(f, 64<<10)
+		var batch [][]byte
+		batchBytes := 0
+		batchEndOffset := offset
+
+		flushBatch := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			outcome, serr := send(ctx, batch)
+			if serr != nil {
+				o.sendFailures.Add(1)
+				if !IsPermanentSendError(serr) {
+					return serr
+				}
+				for _, line := range batch {
+					if derr := o.deadLetter(line); derr != nil {
+						return derr
+					}
+				}
+			} else {
+				rejected := make(map[int]struct{}, len(outcome.RejectedIndices))
+				for _, idx := range outcome.RejectedIndices {
+					if idx >= 0 && idx < len(batch) {
+						rejected[idx] = struct{}{}
+					}
+				}
+				for i, line := range batch {
+					if _, isRej := rejected[i]; isRej {
+						o.sendFailures.Add(1)
+						if derr := o.deadLetter(line); derr != nil {
+							return derr
+						}
+					} else {
+						sent++
+						o.delivered.Add(1)
+					}
+				}
+			}
+			if werr := o.advanceCursor(n, batchEndOffset); werr != nil {
+				return werr
+			}
+			batch = batch[:0]
+			batchBytes = 0
+			return nil
+		}
+
+		truncated := false
+		for {
+			if err := ctx.Err(); err != nil {
+				_ = f.Close()
+				return sent, err
+			}
+			line, readErr := r.ReadBytes('\n')
+			if readErr == nil {
+				body := line[:len(line)-1]
+				if len(body) == 0 {
+					offset += int64(len(line))
+					batchEndOffset = offset
+					if len(batch) == 0 {
+						if err := o.advanceCursor(n, offset); err != nil {
+							_ = f.Close()
+							return sent, err
+						}
+					}
+					continue
+				}
+				entryBytes := len(body)
+				if len(batch) > 0 {
+					entryBytes++ // JSON comma separator
+				}
+				if len(batch) > 0 && (len(batch) >= maxEvents || batchBytes+entryBytes > maxBytes) {
+					if err := flushBatch(); err != nil {
+						_ = f.Close()
+						return sent, err
+					}
+					entryBytes = len(body)
+				}
+				batch = append(batch, body)
+				batchBytes += entryBytes
+				offset += int64(len(line))
+				batchEndOffset = offset
+				if len(batch) >= maxEvents {
+					if err := flushBatch(); err != nil {
+						_ = f.Close()
+						return sent, err
+					}
+				}
+				continue
+			}
+			if !errors.Is(readErr, io.EOF) {
+				_ = f.Close()
+				return sent, fmt.Errorf("analytics outbox: reading %s: %w", readyName(n), readErr)
+			}
+			truncated = len(line) > 0
+			break
+		}
+		if err := flushBatch(); err != nil {
+			_ = f.Close()
+			return sent, err
+		}
+		_ = f.Close()
+		if truncated {
+			o.quarantined.Add(1)
+			target := o.path(fmt.Sprintf("quarantine-%d.jsonl", n))
+			if _, err := os.Stat(target); err == nil {
+				target = o.path(fmt.Sprintf("quarantine-%d.%d.jsonl", n, o.now().UnixNano()))
+			}
+			if err := os.Rename(o.path(readyName(n)), target); err != nil {
+				return sent, fmt.Errorf("analytics outbox: quarantining %s: %w", readyName(n), err)
+			}
+			if err := syncDir(o.dir); err != nil {
+				return sent, err
+			}
+			if err := o.advanceCursor(n+1, 0); err != nil {
+				return sent, err
+			}
+			continue
+		}
+		if err := o.advanceCursor(n+1, 0); err != nil {
+			return sent, err
+		}
+		if err := os.Remove(o.path(readyName(n))); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return sent, fmt.Errorf("analytics outbox: %w", err)
+		}
+		if err := syncDir(o.dir); err != nil {
+			return sent, err
+		}
+	}
+	return sent, nil
+}
 
 // Drain sends ready lines in order from the cursor, committing the cursor
 // after each accepted line and deleting a ready file once fully sent. It

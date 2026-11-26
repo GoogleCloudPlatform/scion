@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
@@ -58,22 +59,37 @@ type UsageObservation struct {
 	HarnessVersion     string
 }
 
-// UsageAnalytics appends usage observations to the outbox. A nil
-// *UsageAnalytics is a valid no-op (analytics disabled).
+// UsageAnalytics appends usage observations to one or more outboxes (teeing
+// to both the GCP and Hub outboxes in dual-run mode). A nil *UsageAnalytics is
+// a valid no-op (analytics disabled).
 type UsageAnalytics struct {
 	outbox      *AnalyticsOutbox
 	usageSource string
 	now         func() time.Time
 
-	// openOnce/open defer opening the outbox to the first Record (hook
+	// openOnce/open defer opening the primary outbox to the first Record (hook
 	// processes: only a model-end event pays for the open and flock).
-	// failDir is the outbox directory, used to persist append_failed
+	// failDir is the primary outbox directory, used to persist append_failed
 	// lock-free when the open itself fails.
 	openOnce  sync.Once
 	open      func() (*AnalyticsOutbox, error)
 	failDir   string
 	failOwner *OutboxOwner
 
+	// metaMu guards hubOutbox, hubDir, hubOwner, hubOnly, runID, and onRecord.
+	// In in-process dual-run, hubOutbox is attached directly (and cleared on
+	// 404 revocation). In hook subprocesses, hubDir is set and checked via
+	// isHubOutboxActiveDir so hooks discover Hub activation and revocation
+	// from disk without creating the Hub outbox when inactive.
+	metaMu    sync.RWMutex
+	hubOutbox *AnalyticsOutbox
+	hubDir    string
+	hubOwner  *OutboxOwner
+	hubOnly   bool
+	runID     string
+	onRecord  func(time.Time)
+
+	disabled                   atomic.Bool
 	droppedNoIdentity, invalid atomic.Int64
 }
 
@@ -87,6 +103,24 @@ func NewUsageAnalytics(outbox *AnalyticsOutbox, usageSource string) *UsageAnalyt
 	return &UsageAnalytics{outbox: outbox, usageSource: usageSource, now: time.Now}
 }
 
+// NewDualUsageAnalytics returns a producer that tees every observation to both
+// gcpOutbox (primary) and hubOutbox (secondary, independent cap/counters).
+// If either outbox is nil, it falls back to the non-nil one.
+func NewDualUsageAnalytics(gcpOutbox, hubOutbox *AnalyticsOutbox, usageSource string) *UsageAnalytics {
+	if gcpOutbox == nil {
+		return NewUsageAnalytics(hubOutbox, usageSource)
+	}
+	if hubOutbox == nil {
+		return NewUsageAnalytics(gcpOutbox, usageSource)
+	}
+	return &UsageAnalytics{
+		outbox:      gcpOutbox,
+		hubOutbox:   hubOutbox,
+		usageSource: usageSource,
+		now:         time.Now,
+	}
+}
+
 // NewLazyUsageAnalytics returns a producer that opens the outbox at dir
 // (owned by owner, see OpenAnalyticsOutboxOwned) only on the first Record.
 // If the open fails (for example a lock timeout while another process
@@ -98,6 +132,37 @@ func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *
 		failDir:     dir,
 		failOwner:   owner,
 		usageSource: usageSource,
+		now:         time.Now,
+	}
+}
+
+// NewLazyHookUsageAnalytics returns a hook-path producer for agentHome that
+// performs no I/O until the first Record. When gcpEnabled is true, it writes
+// to the GCP outbox (<agentHome>/.scion/analytics-outbox) and tees to the Hub
+// outbox (<agentHome>/.scion/analytics-outbox-hub) whenever the Hub outbox is
+// marked active on disk. When gcpEnabled is false (Hub-only mode), it writes
+// only to the Hub outbox while it is marked active on disk.
+func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxOwner) *UsageAnalytics {
+	gcpDir := AnalyticsOutboxDirFor(agentHome)
+	hubDir := HubAnalyticsOutboxDirFor(agentHome)
+	if !gcpEnabled {
+		return &UsageAnalytics{
+			failDir:     hubDir,
+			failOwner:   owner,
+			hubDir:      hubDir,
+			hubOwner:    owner,
+			hubOnly:     true,
+			usageSource: telemetrycontract.UsageSourceHooks,
+			now:         time.Now,
+		}
+	}
+	return &UsageAnalytics{
+		open:        func() (*AnalyticsOutbox, error) { return OpenAnalyticsOutboxOwned(gcpDir, owner) },
+		failDir:     gcpDir,
+		failOwner:   owner,
+		hubDir:      hubDir,
+		hubOwner:    owner,
+		usageSource: telemetrycontract.UsageSourceHooks,
 		now:         time.Now,
 	}
 }
@@ -161,21 +226,141 @@ func (a *UsageAnalytics) ensureOpen() error {
 }
 
 // AnalyticsEnabledForHooks reports whether a hook process should write
-// analytics events: only when the pipeline's GCP exporter (and so the
+// analytics events: when the Hub usage ingest sink is active
+// (SCION_USAGE_HUB_INGEST=1) or when the pipeline's GCP exporter (and so the
 // drainer) is configured. Otherwise analytics is disabled
 // (AnalyticsDisabledNoGCPExporter) and nothing is written.
 func AnalyticsEnabledForHooks(cfg *Config) bool {
-	return cfg != nil && cfg.Enabled && cfg.IsCloudConfigured() && cfg.IsGCP()
+	if cfg == nil || !cfg.Enabled {
+		return false
+	}
+	if util.ParseBoolEnv(EnvUsageHubIngest, false) {
+		return true
+	}
+	return cfg.IsCloudConfigured() && cfg.IsGCP()
 }
 
 // errNoAgentIdentity is returned when SCION_AGENT_ID is unset: the event
 // would have no stable producer namespace, so it is not written.
 var errNoAgentIdentity = errors.New("analytics: SCION_AGENT_ID is unset; usage event not written")
 
-// Record builds the event for obs and appends it. Safe on nil.
-func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
+func (a *UsageAnalytics) setRunAndActivity(runID string, onRecord func(time.Time)) {
 	if a == nil {
+		return
+	}
+	a.metaMu.Lock()
+	a.runID = runID
+	a.onRecord = onRecord
+	a.metaMu.Unlock()
+}
+
+func (a *UsageAnalytics) setHubOutbox(hubOutbox *AnalyticsOutbox, runID string, onRecord func(time.Time)) {
+	if a == nil {
+		return
+	}
+	a.metaMu.Lock()
+	a.hubOutbox = hubOutbox
+	a.runID = runID
+	a.onRecord = onRecord
+	a.metaMu.Unlock()
+}
+
+func (a *UsageAnalytics) clearHubOutbox() {
+	if a == nil {
+		return
+	}
+	a.metaMu.Lock()
+	a.hubOutbox = nil
+	a.onRecord = nil
+	a.metaMu.Unlock()
+}
+
+// detach disables further Record appends on this producer (used in Hub-only
+// mode after a 404 capability revocation) while keeping the underlying outbox
+// handle readable for diagnostics and ledger snapshots.
+func (a *UsageAnalytics) detach() {
+	if a == nil {
+		return
+	}
+	a.disabled.Store(true)
+	a.metaMu.Lock()
+	a.hubOutbox = nil
+	a.onRecord = nil
+	a.metaMu.Unlock()
+}
+
+// HubOutbox returns the tee Hub outbox when attached, or nil.
+func (a *UsageAnalytics) HubOutbox() *AnalyticsOutbox {
+	if a == nil {
+		return nil
+	}
+	a.metaMu.RLock()
+	defer a.metaMu.RUnlock()
+	return a.hubOutbox
+}
+
+// resolveHubOutbox returns the active Hub outbox for teeing (or as sole target
+// in Hub-only lazy hook mode). For lazy hook handles (hubDir != ""), it checks
+// the on-disk active marker so activation and 404 revocation are discovered
+// across processes without creating the Hub outbox when inactive.
+func (a *UsageAnalytics) resolveHubOutbox() (*AnalyticsOutbox, bool, error) {
+	a.metaMu.RLock()
+	hubDir := a.hubDir
+	hubOutbox := a.hubOutbox
+	a.metaMu.RUnlock()
+
+	if hubDir == "" {
+		return hubOutbox, hubOutbox != nil, nil
+	}
+	if !isHubOutboxActiveDir(hubDir) {
+		if hubOutbox != nil {
+			a.metaMu.Lock()
+			if !isHubOutboxActiveDir(a.hubDir) {
+				a.hubOutbox = nil
+			}
+			a.metaMu.Unlock()
+		}
+		return nil, false, nil
+	}
+	if hubOutbox != nil {
+		return hubOutbox, true, nil
+	}
+	a.metaMu.Lock()
+	defer a.metaMu.Unlock()
+	if !isHubOutboxActiveDir(a.hubDir) {
+		a.hubOutbox = nil
+		return nil, false, nil
+	}
+	if a.hubOutbox != nil {
+		return a.hubOutbox, true, nil
+	}
+	o, err := OpenAnalyticsOutboxOwned(a.hubDir, a.hubOwner)
+	if err != nil {
+		log.Debug("Hub usage analytics outbox unavailable: %v", err)
+		return nil, true, err
+	}
+	a.hubOutbox = o
+	return o, true, nil
+}
+
+// Record builds the event for obs and appends it to every active outbox.
+// Safe on nil. In dual-run mode, a clone of the event is teed to the Hub
+// outbox independently so a Hub outbox overflow or I/O error never affects
+// the primary GCP outbox outcome or counters.
+func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
+	if a == nil || a.disabled.Load() {
 		return 0, nil
+	}
+	a.metaMu.RLock()
+	onRecord := a.onRecord
+	hubOnly := a.hubOnly
+	a.metaMu.RUnlock()
+	if onRecord != nil {
+		t := obs.EventTime
+		if t.IsZero() {
+			t = a.now()
+		}
+		onRecord(t)
 	}
 	ev, err := a.build(obs)
 	if err != nil {
@@ -186,16 +371,56 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 		}
 		return 0, err
 	}
-	if err := a.ensureOpen(); err != nil {
+	if hubOnly {
+		hubOutbox, active, herr := a.resolveHubOutbox()
+		if !active {
+			return 0, nil
+		}
+		if herr != nil {
+			a.invalid.Add(1)
+			a.recordOpenFailure()
+			return 0, herr
+		}
+		outcome, err := hubOutbox.AppendUsage(ev)
+		if err != nil {
+			a.invalid.Add(1)
+		}
+		return outcome, err
+	}
+
+	// Clone before primary AppendUsage mutates ledger fields in place so the
+	// Hub outbox assigns its own independent epoch, seq, and occurrence state.
+	hubEv := *ev
+
+	var outcome AppendOutcome
+	var primaryErr error
+	if oerr := a.ensureOpen(); oerr != nil {
 		a.invalid.Add(1)
 		a.recordOpenFailure()
-		return 0, err
+		primaryErr = oerr
+	} else {
+		outcome, primaryErr = a.outbox.AppendUsage(ev)
+		if primaryErr != nil {
+			a.invalid.Add(1)
+		}
 	}
-	outcome, err := a.outbox.AppendUsage(ev)
-	if err != nil {
-		a.invalid.Add(1)
+
+	if hubOutbox, active, herr := a.resolveHubOutbox(); active {
+		if herr != nil {
+			a.metaMu.RLock()
+			hDir, hOwner := a.hubDir, a.hubOwner
+			a.metaMu.RUnlock()
+			if hDir != "" {
+				if info, serr := os.Stat(hDir); serr == nil && info.IsDir() {
+					newOutboxHandle(hDir, hOwner).bumpAppendFailed()
+				}
+			}
+		} else if hubOutbox != nil {
+			_, _ = hubOutbox.AppendUsage(&hubEv)
+		}
 	}
-	return outcome, err
+
+	return outcome, primaryErr
 }
 
 // DroppedNoIdentity and Invalid are per-process counters for diagnostics.
@@ -215,10 +440,23 @@ func (a *UsageAnalytics) Invalid() int64 {
 	return a.invalid.Load()
 }
 
-// Outbox returns the producer's outbox, opening it if lazy; nil if it
+// Outbox returns the producer's primary outbox, opening it if lazy; nil if it
 // cannot be opened.
 func (a *UsageAnalytics) Outbox() *AnalyticsOutbox {
-	if a == nil || a.ensureOpen() != nil {
+	if a == nil {
+		return nil
+	}
+	a.metaMu.RLock()
+	hubOnly := a.hubOnly
+	a.metaMu.RUnlock()
+	if hubOnly {
+		o, active, err := a.resolveHubOutbox()
+		if !active || err != nil {
+			return nil
+		}
+		return o
+	}
+	if a.ensureOpen() != nil {
 		return nil
 	}
 	return a.outbox
@@ -245,6 +483,17 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 	env.ProducerBuild = version.Short()
 	env.HarnessVersion = obs.HarnessVersion
 
+	// Prefer SCION_LAUNCH_ID (the container's own run_id, shared with hook
+	// subprocesses and the X-Scion-Run-Id header); fall back to a.runID only
+	// when SCION_LAUNCH_ID is unset. Using one source prevents epoch
+	// oscillation between native and hook appenders.
+	runID := strings.TrimSpace(os.Getenv("SCION_LAUNCH_ID"))
+	if runID == "" {
+		a.metaMu.RLock()
+		runID = strings.TrimSpace(a.runID)
+		a.metaMu.RUnlock()
+	}
+
 	model, modelSource := resolveModelWithSource(obs.Model)
 	ev := &telemetrycontract.UsageEvent{
 		Envelope:            env,
@@ -253,6 +502,7 @@ func (a *UsageAnalytics) build(obs UsageObservation) (*telemetrycontract.UsageEv
 		SourceSchemaVersion: UsageRuleSchemaVersion,
 		SourceEventID:       obs.SourceEventID,
 		SourceIdentity:      obs.Identity,
+		RunID:               runID,
 		Harness:             os.Getenv("SCION_HARNESS"),
 		Model:               model,
 		ModelSource:         modelSource,
