@@ -364,7 +364,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		} else {
 			preDispatchConvResult = convResult
-			req.Message.ConversationID = convResult.ConversationID
 			if req.Message.Metadata == nil {
 				req.Message.Metadata = make(map[string]string)
 			}
@@ -442,6 +441,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Message.Broadcasted {
 		effectiveConv = nil
+	}
+	if effectiveConv != nil {
+		req.Message.ConversationID = effectiveConv.ConversationID
 	}
 
 	// F2 fix: validate the value that will actually be persisted, not just

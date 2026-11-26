@@ -308,17 +308,8 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 	copy(buses, f.buses)
 	f.mu.RUnlock()
 
-	targetChannel := ""
-	if msg != nil {
-		if msg.Channel != "" {
-			targetChannel = msg.Channel
-		} else if msg.Conversation != nil && msg.Conversation.Surface != "" && msg.Conversation.Surface != "native" {
-			targetChannel = msg.Conversation.Surface
-		}
-	}
-
-	if targetChannel != "" {
-		if targetChannel == InProcessBusName {
+	if msg != nil && msg.Channel != "" {
+		if msg.Channel == InProcessBusName {
 			return fmt.Errorf("%w: %q", ErrReservedChannel, InProcessBusName)
 		}
 
@@ -328,7 +319,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 				inproc = &buses[i]
 				continue
 			}
-			if routingKey(buses[i].Name, buses[i].ChannelID) == targetChannel {
+			if routingKey(buses[i].Name, buses[i].ChannelID) == msg.Channel {
 				target = &buses[i]
 			}
 		}
@@ -355,14 +346,14 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			if err := results[targetIdx].err; err != nil {
 				if target.Observer {
 					f.log.Error("channel publish failed (observer)",
-						"channel", targetChannel, "topic", topic, "error", err)
+						"channel", msg.Channel, "topic", topic, "error", err)
 				} else {
-					errs[1] = fmt.Errorf("channel %q publish failed: %w", targetChannel, err)
+					errs[1] = fmt.Errorf("channel %q publish failed: %w", msg.Channel, err)
 				}
 			}
 		}
 		if target == nil {
-			errs[1] = fmt.Errorf("no broker registered for channel %q", targetChannel)
+			errs[1] = fmt.Errorf("no broker registered for channel %q", msg.Channel)
 		}
 		return errors.Join(errs...)
 	}

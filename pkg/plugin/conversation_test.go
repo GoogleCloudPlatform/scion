@@ -80,6 +80,24 @@ func TestResolveConversationTarget(t *testing.T) {
 			DisplayName: "Ops Chat",
 		}, got)
 	})
+	t.Run("ignores native conversation so hub keys never become external targets", func(t *testing.T) {
+		msg := &messages.StructuredMessage{
+			ConversationID: "conv-dm-1",
+			Channel:        "discord",
+			ThreadID:       "",
+			Conversation: &messages.Conversation{
+				Surface:     "native",
+				ExternalRef: "dm:agent:a1:user:u1",
+				DisplayName: "DM",
+			},
+		}
+		got := ResolveConversationTarget(msg)
+		assert.Equal(t, ConversationTarget{
+			ConversationID: "conv-dm-1",
+			Surface:        "discord",
+			ExternalRef:    "",
+		}, got)
+	})
 }
 
 func TestMatchesSurface(t *testing.T) {
@@ -102,7 +120,7 @@ func TestMatchesSurface(t *testing.T) {
 			want:    true,
 		},
 		{
-			name: "matching conversation surface",
+			name: "matching conversation surface with empty channel",
 			msg: &messages.StructuredMessage{
 				Conversation: &messages.Conversation{Surface: "slack", ExternalRef: "C1:1.0"},
 			},
@@ -110,7 +128,7 @@ func TestMatchesSurface(t *testing.T) {
 			want:    true,
 		},
 		{
-			name: "other conversation surface rejected",
+			name: "other conversation surface rejected when channel is empty",
 			msg: &messages.StructuredMessage{
 				Conversation: &messages.Conversation{Surface: "discord", ExternalRef: "123"},
 			},
@@ -118,12 +136,22 @@ func TestMatchesSurface(t *testing.T) {
 			want:    false,
 		},
 		{
-			name: "native conversation surface rejected by external plugin",
+			name: "native conversation with empty channel matches (observer mode)",
 			msg: &messages.StructuredMessage{
-				Conversation: &messages.Conversation{Surface: "native", ExternalRef: "thread:p1:t1"},
+				ObserverOnly: true,
+				Conversation: &messages.Conversation{Surface: "native", ExternalRef: "dm:agent:a1:agent:a2"},
 			},
 			surface: "slack",
-			want:    false,
+			want:    true,
+		},
+		{
+			name: "reply affinity: matching channel with native dm conversation matches",
+			msg: &messages.StructuredMessage{
+				Channel:      "discord",
+				Conversation: &messages.Conversation{Surface: "native", ExternalRef: "dm:agent:a1:user:u1"},
+			},
+			surface: "discord",
+			want:    true,
 		},
 		{
 			name: "legacy channel fallback matches",
@@ -134,7 +162,7 @@ func TestMatchesSurface(t *testing.T) {
 			want:    true,
 		},
 		{
-			name: "legacy channel fallback rejects other channel",
+			name: "foreign non-empty channel rejected",
 			msg: &messages.StructuredMessage{
 				Channel: "web",
 			},
@@ -142,12 +170,12 @@ func TestMatchesSurface(t *testing.T) {
 			want:    false,
 		},
 		{
-			name: "conversation surface wins over conflicting legacy channel",
+			name: "P4: non-empty channel takes precedence over conversation surface",
 			msg: &messages.StructuredMessage{
 				Channel:      "discord",
 				Conversation: &messages.Conversation{Surface: "slack"},
 			},
-			surface: "slack",
+			surface: "discord",
 			want:    true,
 		},
 	}

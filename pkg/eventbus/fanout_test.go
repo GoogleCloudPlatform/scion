@@ -1277,15 +1277,16 @@ func waitOverruns(t *testing.T, f *FanOutEventBus, name string, want int) {
 func TestFanOut_ConversationSurfaceRouting(t *testing.T) {
 	inproc := newStubEventBus()
 	slack := newStubEventBus()
-	discord := newStubEventBus()
+	observer := newStubEventBus()
 
 	f := NewFanOutEventBus([]NamedEventBus{
 		{Name: InProcessBusName, Bus: inproc},
 		{Name: "slack", Bus: slack},
-		{Name: "discord", Bus: discord},
+		{Name: "broker-log", Bus: observer, Observer: true},
 	}, slog.Default())
 
-	// External surface without legacy Channel routes to matching spoke + inproc only.
+	// In P4, fanout keys on Channel only: a channel-less message carrying
+	// Conversation.Surface fans out to all spokes (including observers).
 	msg := messages.NewInstruction("agent:bot", "user:alice", "hello slack")
 	msg.Conversation = &messages.Conversation{
 		Surface:     "slack",
@@ -1293,14 +1294,14 @@ func TestFanOut_ConversationSurfaceRouting(t *testing.T) {
 		ParentRef:   "C0123",
 	}
 	if err := f.Publish(context.Background(), "scion.project.p1.user.u1.messages", msg); err != nil {
-		t.Fatalf("Publish(slack surface): %v", err)
+		t.Fatalf("Publish(channel-less with conversation): %v", err)
 	}
-	if len(inproc.published) != 1 || len(slack.published) != 1 || len(discord.published) != 0 {
-		t.Fatalf("counts: inproc=%d slack=%d discord=%d, want 1/1/0",
-			len(inproc.published), len(slack.published), len(discord.published))
+	if len(inproc.published) != 1 || len(slack.published) != 1 || len(observer.published) != 1 {
+		t.Fatalf("counts: inproc=%d slack=%d observer=%d, want 1/1/1",
+			len(inproc.published), len(slack.published), len(observer.published))
 	}
 
-	// Native surface without legacy Channel fans out to all spokes (no "native" spoke required).
+	// Native surface without legacy Channel also fans out to all spokes.
 	nativeMsg := messages.NewInstruction("agent:bot", "user:alice", "hello native")
 	nativeMsg.Conversation = &messages.Conversation{
 		Surface:     "native",
@@ -1309,8 +1310,8 @@ func TestFanOut_ConversationSurfaceRouting(t *testing.T) {
 	if err := f.Publish(context.Background(), "scion.project.p1.user.u1.messages", nativeMsg); err != nil {
 		t.Fatalf("Publish(native surface): %v", err)
 	}
-	if len(inproc.published) != 2 || len(slack.published) != 2 || len(discord.published) != 1 {
-		t.Fatalf("counts after native: inproc=%d slack=%d discord=%d, want 2/2/1",
-			len(inproc.published), len(slack.published), len(discord.published))
+	if len(inproc.published) != 2 || len(slack.published) != 2 || len(observer.published) != 2 {
+		t.Fatalf("counts after native: inproc=%d slack=%d observer=%d, want 2/2/2",
+			len(inproc.published), len(slack.published), len(observer.published))
 	}
 }

@@ -2305,8 +2305,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg = req.StructuredMessage
 		// Conversation is hub-populated for hub→plugin outbound delivery only;
 		// strip any client-supplied value so callers cannot spoof external
-		// surface routing (external chat references use broker-authenticated
-		// top-level Surface/ExternalRef/ParentRef above).
+		// surface routing. Broker-authenticated callers supply top-level
+		// Surface/ExternalRef/ParentRef on MessageRequest instead.
 		structuredMsg.Conversation = nil
 		plainMessage = req.StructuredMessage.Msg
 		if req.Plain {
