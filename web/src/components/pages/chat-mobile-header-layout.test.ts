@@ -15,14 +15,16 @@
  */
 
 /**
- * The phone conversation header (the compact row in the mobile layout)
- * shows the conversation name first with the project crumb indented beneath
- * the name (past the avatar), and otherwise keeps the baseline geometry:
- * padding, gap, borders, button boxes, hit areas, one-line names and their
- * type sizes. The fold between the full and compact rows, and the header's
- * height under the thread's composer sizing (composer-room.ts), depend on
- * that geometry. These are static markup and style contracts, not geometry,
- * rendering or device evidence.
+ * Conversation header layout contract (ptone/scion#9657):
+ * - Far left (title): `# <conversation-name>` for group conversations,
+ *   `<agent-name>` for agent DMs, in the same place and style.
+ * - Right side, immediately left of the terminal icon / actions: agent status
+ *   badge followed by the linked project / agent breadcrumb using `folder` and
+ *   `robot` `<sl-icon>`s (omitted for user DMs and group conversations without
+ *   a default agent; no standalone robot emoji).
+ * - At narrow/mobile widths, the breadcrumb shrinks/truncates before the title
+ *   while preserving header padding, icon hit areas, and keyboard-independent
+ *   geometry.
  */
 
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
@@ -87,6 +89,17 @@ function phonePageWithAgentDM(peerName: string): any {
   el.pageData = { user: { id: 'user-me' } };
   el.isMobileLayout = true;
   el.mobilePanel = 'center';
+  el.v2AgentMembers = [
+    {
+      id: 'agent-1',
+      kind: 'agent',
+      displayName: peerName,
+      slug: 'agent-1',
+      projectId: 'proj-1',
+      phase: 'running',
+      activity: 'working',
+    },
+  ];
   el.v2Conversation = {
     conversationKey: 'dm:agent:agent-1:user:user-me',
     projectId: 'proj-1',
@@ -103,19 +116,78 @@ function phonePageWithAgentDM(peerName: string): any {
   return el;
 }
 
-describe('phone conversation header — markup', () => {
-  it('keeps the full name and project in the DOM text and labels every row action', () => {
+function pageWithGroupConversation(defaultAgent: string): any {
+  const el = document.createElement('scion-page-chat') as any;
+  el.pageData = { user: { id: 'user-me' } };
+  el.isMobileLayout = false;
+  el.v2AgentMembers = [
+    {
+      id: 'agent-1',
+      kind: 'agent',
+      displayName: 'preston-agent',
+      slug: 'preston-agent',
+      projectId: 'proj-1',
+      phase: 'running',
+      activity: 'working',
+    },
+  ];
+  el._projectIdToSlug.set('proj-1', 'scion-fork');
+  el.v2Conversation = {
+    conversationKey: 'topic:proj-1:general',
+    projectId: 'proj-1',
+    projectSlug: 'scion-fork',
+    threadName: 'general',
+    defaultAgent,
+    isDM: false,
+    peerName: '',
+    peerId: '',
+    peerKind: 'user',
+  };
+  return el;
+}
+
+describe('conversation header — consistent layout markup', () => {
+  it('renders agent DM with agent name on the left and status badge + linked project/agent breadcrumb right before actions', () => {
     const name = '会話のとても長いエージェント名 with-a-very-long-unbroken-identifier-0123456789';
     const page = phonePageWithAgentDM(name);
     const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
 
     expect(header?.classList.contains('compact')).toBe(true);
-    // The complete name and project strings are present in the DOM text.
-    // This checks text presence only: on screen each is one line, cut with
-    // an ellipsis, which a static test cannot measure.
-    expect(header?.querySelector('.conv-name .conv-text')?.textContent?.trim()).toBe(name);
-    expect(header?.querySelector('.conv-crumb .conv-text')?.textContent?.trim()).toBe(
+
+    // Far left: agent name only (no folder crumb or robot emoji inside .conv-title).
+    const title = header?.querySelector('.conv-title');
+    expect(title?.querySelector('.conv-name .conv-text')?.textContent?.trim()).toBe(name);
+    expect(title?.querySelector('.conv-crumb')).toBeNull();
+    expect(header?.textContent).not.toContain('🤖');
+    expect(header?.querySelector('.conv-agent-emoji')).toBeNull();
+
+    // Right side, immediately left of .header-actions (which starts with terminal):
+    const context = header?.querySelector('.conv-agent-context');
+    expect(context).not.toBeNull();
+    expect(context?.nextElementSibling?.classList.contains('header-actions')).toBe(true);
+    const statusBadge = context?.querySelector('scion-status-badge.conv-agent-status');
+    const breadcrumb = context?.querySelector('.conv-agent-breadcrumb');
+    expect(statusBadge?.getAttribute('status')).toBe('working');
+    expect(statusBadge?.getAttribute('size')).toBe('small');
+    // Pin exact cluster child order: status badge -> breadcrumb.
+    expect(Array.from(context?.children ?? [])).toEqual([statusBadge, breadcrumb]);
+
+    const projectLink = breadcrumb?.querySelector('a.conv-crumb');
+    const sep = breadcrumb?.querySelector('.conv-crumb-sep');
+    const agentLink = breadcrumb?.querySelector('a.conv-agent-crumb');
+    expect(Array.from(breadcrumb?.children ?? [])).toEqual([projectLink, sep, agentLink]);
+    expect(projectLink?.getAttribute('href')).toBe('/projects/proj-1');
+    expect(projectLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('folder');
+    expect(projectLink?.querySelector('.conv-text')?.textContent?.trim()).toBe(
       'a-project-with-a-long-slug'
+    );
+    expect(agentLink?.getAttribute('href')).toBe('/agents/agent-1');
+    expect(agentLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(agentLink?.querySelector('.conv-text')?.textContent?.trim()).toBe(name);
+
+    // First action button in .header-actions is the terminal icon.
+    expect(header?.querySelector('.header-actions sl-icon-button')?.getAttribute('name')).toBe(
+      'terminal'
     );
 
     // The compact row's controls, each with an accessible name.
@@ -128,34 +200,93 @@ describe('phone conversation header — markup', () => {
     // The folded actions are still mounted (and offered by More), not dropped.
     expect(header?.querySelector('.header-secondary')).not.toBeNull();
   });
-});
 
-describe('phone conversation header — style contract', () => {
-  it('puts the name before the project crumb in the compact column', () => {
-    const name = rules.get(`${MOBILE} .v2-thread-header.compact .conv-name`);
-    const crumb = rules.get(`${MOBILE} .v2-thread-header.compact .conv-crumb`);
-    const nameOrder = Number(decl(name, 'order'));
-    const crumbOrder = Number(decl(crumb, 'order') ?? '0');
-    expect(nameOrder).toBeLessThan(crumbOrder);
-    expect(decl(rules.get('.v2-thread-header.compact .conv-title'), 'flex-direction')).toBe(
-      'column'
+  it('renders group conversation with default agent using the same right-hand status badge + linked breadcrumb', () => {
+    const page = pageWithGroupConversation('preston-agent');
+    const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
+
+    // Far left: # <conversation-name>.
+    expect(header?.querySelector('.conv-title .hash')?.textContent?.trim()).toBe('#');
+    expect(header?.querySelector('.conv-title .conv-name .conv-text')?.textContent?.trim()).toBe(
+      'general'
+    );
+    expect(header?.textContent).not.toContain('🤖');
+    expect(header?.querySelector('.conv-agent-emoji')).toBeNull();
+
+    // Right side, immediately left of .header-actions (which starts with terminal):
+    const context = header?.querySelector('.conv-agent-context');
+    expect(context).not.toBeNull();
+    expect(context?.nextElementSibling?.classList.contains('header-actions')).toBe(true);
+    const statusBadge = context?.querySelector('scion-status-badge.conv-agent-status');
+    const breadcrumb = context?.querySelector('.conv-agent-breadcrumb');
+    expect(statusBadge?.getAttribute('status')).toBe('working');
+    expect(statusBadge?.getAttribute('size')).toBe('small');
+    expect(Array.from(context?.children ?? [])).toEqual([statusBadge, breadcrumb]);
+
+    const projectLink = breadcrumb?.querySelector('a.conv-crumb');
+    const sep = breadcrumb?.querySelector('.conv-crumb-sep');
+    const agentLink = breadcrumb?.querySelector('a.conv-agent-crumb');
+    expect(Array.from(breadcrumb?.children ?? [])).toEqual([projectLink, sep, agentLink]);
+    expect(projectLink?.getAttribute('href')).toBe('/projects/proj-1');
+    expect(projectLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('folder');
+    expect(projectLink?.querySelector('.conv-text')?.textContent?.trim()).toBe('scion-fork');
+    expect(agentLink?.getAttribute('href')).toBe('/agents/agent-1');
+    expect(agentLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(agentLink?.querySelector('.conv-text')?.textContent?.trim()).toBe('preston-agent');
+    expect(header?.querySelector('.header-actions sl-icon-button')?.getAttribute('name')).toBe(
+      'terminal'
     );
   });
 
-  it('indents the project crumb to the conversation name column past the avatar', () => {
-    const title = rules.get(`${MOBILE} .v2-thread-header.compact .conv-title`);
-    const name = rules.get(`${MOBILE} .v2-thread-header.compact .conv-name`);
-    const crumb = rules.get(`${MOBILE} .v2-thread-header.compact .conv-crumb`);
-    expect(decl(title, 'display')).toBe('grid');
-    expect(decl(title, 'grid-template-columns')).toBe('auto minmax(0, 1fr)');
-    expect(decl(title, 'column-gap')).toBe(decl(rules.get('.conv-name'), 'gap'));
-    expect(decl(name, 'display')).toBe('grid');
-    expect(decl(name, 'grid-column')).toBe('1 / -1');
-    expect(decl(name, 'grid-template-columns')).toBe('subgrid');
-    expect(decl(crumb, 'grid-column')).toBe('2');
+  it('omits status badge and breadcrumb for a group conversation without a default agent', () => {
+    const page = pageWithGroupConversation('');
+    const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
+
+    expect(header?.querySelector('.conv-title .conv-name .conv-text')?.textContent?.trim()).toBe(
+      'general'
+    );
+    expect(header?.querySelector('.conv-agent-context')).toBeNull();
+    expect(header?.textContent).not.toContain('🤖');
   });
 
-  it('keeps each title line to one line, cut with an ellipsis', () => {
+  it('omits status badge and breadcrumb for a user-to-user DM', () => {
+    const el = document.createElement('scion-page-chat') as any;
+    el.pageData = { user: { id: 'user-me' } };
+    el.isMobileLayout = false;
+    el.v2Conversation = {
+      conversationKey: 'dm:user:user-2:user:user-me',
+      projectId: '',
+      projectSlug: '',
+      threadName: '',
+      defaultAgent: '',
+      isDM: true,
+      peerName: 'Ada Lovelace',
+      peerId: 'user-2',
+      peerKind: 'user',
+    };
+    const header = renderToFragment(el.renderV2Conversation()).querySelector('.v2-thread-header');
+
+    expect(header?.querySelector('.conv-title .conv-name .conv-text')?.textContent?.trim()).toBe(
+      'Ada Lovelace'
+    );
+    expect(header?.querySelector('.conv-title sl-icon[name="person"]')).not.toBeNull();
+    expect(header?.querySelector('.conv-agent-context')).toBeNull();
+    expect(header?.textContent).not.toContain('🤖');
+  });
+});
+
+describe('phone conversation header — style contract', () => {
+  it('truncates the agent breadcrumb before the conversation title and aligns it immediately left of actions', () => {
+    const titleFlex = decl(rules.get('.conv-title'), 'flex') ?? '';
+    const contextFlex = decl(rules.get('.conv-agent-context'), 'flex') ?? '';
+    const titleShrink = Number(titleFlex.split(/\s+/)[1]);
+    const contextShrink = Number(contextFlex.split(/\s+/)[1]);
+    expect(contextShrink).toBeGreaterThan(titleShrink);
+    expect(decl(rules.get('.conv-agent-context'), 'margin-left')).toBe('auto');
+    expect(decl(rules.get('.conv-agent-context + .header-actions'), 'margin-left')).toBe('0');
+  });
+
+  it('keeps each title and breadcrumb segment to one line, cut with an ellipsis', () => {
     const base = rules.get('.conv-text');
     expect(decl(base, 'white-space')).toBe('nowrap');
     expect(decl(base, 'text-overflow')).toBe('ellipsis');
@@ -168,28 +299,15 @@ describe('phone conversation header — style contract', () => {
     }
   });
 
-  it('adds nothing to the compact row but the name-first order and crumb indent', () => {
-    // The compact rules that predate the hierarchy change, plus the phone
-    // subgrid that aligns the crumb with the name past the avatar, and what
-    // each declares. Anything more would change the header's geometry per state.
+  it('keeps the compact row rules minimal so header geometry stays stable', () => {
     const allowed: Record<string, string[]> = {
+      '.v2-thread-header.compact': ['flex-wrap', 'row-gap'],
       '.v2-thread-header.compact .header-secondary': ['display'],
       '.v2-thread-header.compact .header-more': ['display'],
-      '.v2-thread-header.compact .conv-title': ['flex-direction', 'align-items', 'gap'],
-      '.v2-thread-header.compact .conv-crumb': ['font-size', 'line-height'],
+      '.v2-thread-header.compact .conv-title': ['flex'],
+      '.v2-thread-header.compact .conv-agent-context': ['order', 'flex', 'margin-left'],
+      '.v2-thread-header.compact .conv-agent-breadcrumb': ['font-size'],
       '.v2-thread-header.compact .conv-name': ['line-height'],
-      [`${MOBILE} .v2-thread-header.compact .conv-title`]: [
-        'display',
-        'grid-template-columns',
-        'column-gap',
-      ],
-      [`${MOBILE} .v2-thread-header.compact .conv-name`]: [
-        'order',
-        'display',
-        'grid-column',
-        'grid-template-columns',
-      ],
-      [`${MOBILE} .v2-thread-header.compact .conv-crumb`]: ['grid-column'],
     };
     const isCompact = (key: string): boolean => key.includes('.v2-thread-header.compact');
     const compactKeys = [...rules.keys()].filter(isCompact);
@@ -197,11 +315,9 @@ describe('phone conversation header — style contract', () => {
     for (const key of compactKeys) {
       expect(props(rules.get(key)!).sort(), key).toEqual([...allowed[key]!].sort());
     }
-    // Baseline title type in the compact column.
-    expect(decl(rules.get('.v2-thread-header.compact .conv-crumb'), 'font-size')).toBe(
+    expect(decl(rules.get('.v2-thread-header.compact .conv-agent-breadcrumb'), 'font-size')).toBe(
       'var(--chat-fs-xs)'
     );
-    expect(decl(rules.get('.v2-thread-header.compact .conv-crumb'), 'line-height')).toBe('1.3');
     expect(decl(rules.get('.v2-thread-header.compact .conv-name'), 'line-height')).toBe('1.3');
   });
 
@@ -216,9 +332,6 @@ describe('phone conversation header — style contract', () => {
       [
         `${MOBILE} .v2-thread-header sl-icon-button::part(base)`,
         `${MOBILE} .v2-thread-header sl-icon-button::part(base)::before`,
-        `${MOBILE} .v2-thread-header.compact .conv-title`,
-        `${MOBILE} .v2-thread-header.compact .conv-name`,
-        `${MOBILE} .v2-thread-header.compact .conv-crumb`,
       ].sort()
     );
     // The native-size button with a hit area grown by an invisible overlay.
