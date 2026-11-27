@@ -116,17 +116,19 @@ describe('agent detail — execution container (ptone/scion#8819)', () => {
     expect(buttons).not.toContain('Message');
     expect(buttons).toContain('Terminal');
 
-    // No message-mode badge, Messages tab, composer, or quick-message dialog
+    // No message-mode badge, Messages tab, conversation list, or quick-message dialog
     expect(full.querySelector('scion-message-mode-badge')).toBeNull();
     expect(full.querySelector('sl-tab[panel="messages"]')).toBeNull();
     expect(full.querySelector('sl-tab-panel[name="messages"]')).toBeNull();
     expect(full.querySelector('scion-chat-thread')).toBeNull();
+    expect(full.querySelector('[data-testid="shared-conversations-panel"]')).toBeNull();
     expect(full.querySelector('scion-agent-message-viewer')).toBeNull();
     expect(full.querySelector('scion-quick-message-dialog')).toBeNull();
 
-    // Direct call to renderMessagesPanel also produces no composer
+    // Direct call to renderMessagesPanel also produces no conversation list or message viewer
     const panel = renderMethod(el, 'renderMessagesPanel');
     expect(panel.querySelector('scion-chat-thread')).toBeNull();
+    expect(panel.querySelector('[data-testid="shared-conversations-panel"]')).toBeNull();
     expect(panel.querySelector('scion-agent-message-viewer')).toBeNull();
 
     // Task cards hidden
