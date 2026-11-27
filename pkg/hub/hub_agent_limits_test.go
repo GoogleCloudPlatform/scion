@@ -558,6 +558,7 @@ func TestResolvedSettings_IncludesLimitCeilingsWhenExperimentEnabled(t *testing.
 // onto the single-agent response when recorded.
 func TestGetAgent_IncludesEffectiveConfigLimits(t *testing.T) {
 	srv, s, project, mock := setupThinkingLevelDispatch(t)
+	setProjectBrokerLimitCeilingsCap(t, s, project, true)
 	brokerClient := &limitCeilingsBrokerClient{
 		mockRuntimeBrokerClient: mock,
 		templateMaxTurns:        api.IntPtr(0),
@@ -978,6 +979,38 @@ func TestAgentLimits_OldBrokerRefusalAllDispatchOps(t *testing.T) {
 			assert.Equal(t, api.LaunchCodeLimitCeilingsUnsupported, refusal.Code)
 			assert.Equal(t, http.StatusPreconditionFailed, refusal.Status)
 			assert.Nil(t, brokerClient.lastCreateReq, "refused %s must not call broker", tc.name)
+		})
+	}
+}
+
+// TestPutServerConfigDB_AgentLimitsPaddedDurationRefused_422 verifies that
+// whitespace-padded max_duration values (" 2h", "2h ", "2h\t") sent to
+// PUT /api/v1/admin/server-config in agent_limits are refused with HTTP 422
+// validation_error rather than silently trimmed and accepted.
+func TestPutServerConfigDB_AgentLimitsPaddedDurationRefused_422(t *testing.T) {
+	srv, fakeStore, ops := newTestDBServer(t)
+	ctx := context.Background()
+	fakeStore.seed("experiments", json.RawMessage(fmt.Sprintf(
+		`{"overrides":{%q:true}}`, experiments.AgentPolicyLimitCeilings,
+	)))
+	_, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"leading whitespace", `{"agent_limits":{"max_duration":" 2h"}}`},
+		{"trailing whitespace", `{"agent_limits":{"max_duration":"2h "}}`},
+		{"tab padded", `{"agent_limits":{"max_duration":"2h\t"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tc.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+			require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), "validation_error")
+			assert.Equal(t, "", ops.AgentLimits().MaxDuration, "refused PUT must not store padded ceiling")
 		})
 	}
 }
