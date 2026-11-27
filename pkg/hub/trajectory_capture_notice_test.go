@@ -69,14 +69,14 @@ func TestTrajectoryCaptureNotice_RunAttributionAndUsageRead(t *testing.T) {
 		Name:      "notice-agent",
 		Slug:      "notice-agent",
 		Template:  "claude",
-		Status:    "running",
 		Phase:     "running",
-		RunID:     "run-notice-1",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Lazy ensure via Hub-wired store stamps capture_policy="full" and notice_version="v1".
-	attr, err := s.EnsureRunAttributionForAgent(ctx, agent.ID, agent.RunID, srv.usageLedgerHubID())
+	// Atomic run-ID minting via Hub-wired store stamps capture_policy="full" and notice_version="v1".
+	_, err := s.SetAgentRunID(ctx, agent.ID, "run-notice-1", nil)
+	require.NoError(t, err)
+	attr, err := s.GetRunAttribution(ctx, "run-notice-1")
 	require.NoError(t, err)
 	assert.Equal(t, telemetrycontract.TrajectoryCapturePolicyFull, attr.CapturePolicy)
 	assert.Equal(t, telemetrycontract.TrajectoryNoticeVersion, attr.NoticeVersion)
