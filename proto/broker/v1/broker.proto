@@ -71,7 +71,8 @@ message Conversation {
   string external_ref = 2;
   string parent_ref = 3;
   string display_name = 4;
-  // Conversation kind from conversations.kind: "direct", "group", or "thread".
+  // Conversation kind from conversations.kind: "direct" or "group"
+  // (empty when talking to a pre-P5a hub).
   string kind = 5;
 }
 

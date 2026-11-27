@@ -439,7 +439,8 @@ func (b *SlackBroker) Publish(ctx context.Context, topic string, msg *messages.S
 	var fallbackThreadTS string
 
 	convTarget := plugin.ResolveConversationTarget(msg)
-	isUserDM := convTarget.Kind == "direct" && strings.HasPrefix(msg.Recipient, "user:")
+	isUserDM := (convTarget.Kind == "direct" || (msg.Conversation == nil && strings.HasPrefix(convTarget.ExternalRef, "dm:"))) &&
+		strings.HasPrefix(msg.Recipient, "user:")
 	if convTarget.Kind != "direct" && convTarget.ExternalRef != "" {
 		parts := strings.SplitN(convTarget.ExternalRef, ":", 2)
 		switch {

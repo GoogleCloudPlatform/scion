@@ -251,7 +251,8 @@ type Conversation struct {
 	ExternalRef string                 `protobuf:"bytes,2,opt,name=external_ref,json=externalRef,proto3" json:"external_ref,omitempty"`
 	ParentRef   string                 `protobuf:"bytes,3,opt,name=parent_ref,json=parentRef,proto3" json:"parent_ref,omitempty"`
 	DisplayName string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
-	// Conversation kind from conversations.kind: "direct", "group", or "thread".
+	// Conversation kind from conversations.kind: "direct" or "group"
+	// (empty when talking to a pre-P5a hub).
 	Kind          string `protobuf:"bytes,5,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

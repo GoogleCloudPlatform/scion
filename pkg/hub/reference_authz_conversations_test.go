@@ -223,18 +223,22 @@ func TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused(t *testing.T) {
 	}
 
 	cases := []struct {
-		name                 string
-		caller               Identity
-		surface, ref, parent string
+		name                            string
+		caller                          Identity
+		surface, ref, parent, legacyRef string
 	}{
-		{"user surface and external_ref", alice, "slack", "C0USER:1.1", ""},
-		{"agent surface and external_ref", agentA, "slack", "C0AGENT:1.1", ""},
-		{"user parent_ref alone", alice, "", "", "C0PARENT"},
-		{"agent parent_ref alone", agentA, "", "", "C0PARENT"},
+		{"user surface and external_ref", alice, "slack", "C0USER:1.1", "", ""},
+		{"agent surface and external_ref", agentA, "slack", "C0AGENT:1.1", "", ""},
+		{"user parent_ref alone", alice, "", "", "C0PARENT", ""},
+		{"agent parent_ref alone", agentA, "", "", "C0PARENT", ""},
+		{"user legacy_ref alone", alice, "", "", "", "1700000000.000100"},
+		{"agent legacy_ref alone", agentA, "", "", "", "1700000000.000100"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := postAgentMessageAs(t, f.srv, asIdentity(tc.caller), f.aa, externalRefMessage(f.aa, tc.surface, tc.ref, tc.parent))
+			req := externalRefMessage(f.aa, tc.surface, tc.ref, tc.parent)
+			req.LegacyRef = tc.legacyRef
+			got := postAgentMessageAs(t, f.srv, asIdentity(tc.caller), f.aa, req)
 			require.Equal(t, http.StatusBadRequest, got.status, got.body)
 			assert.Contains(t, got.body, chatIntegrationsOnly)
 			if tc.ref != "" {

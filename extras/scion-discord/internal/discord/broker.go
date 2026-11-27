@@ -698,11 +698,12 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 
 	convTarget := plugin.ResolveConversationTarget(msg)
 
-	// Only an all-digit ExternalRef is a Discord channel or thread ID. Any
-	// other ExternalRef (such as a Scion direct-message conversation key) is
-	// never sent to Discord as a channel ID: the message is resolved to the
-	// addressed user's own Discord channel below and is never broadcast.
-	recipientRouted := convTarget.ExternalRef != "" && !isDiscordSnowflake(convTarget.ExternalRef)
+	// A conversation with Kind=="direct" is always recipient-routed (P5a+).
+	// Against a pre-P5a hub (Conversation == nil), any non-snowflake ExternalRef
+	// (such as a Scion "dm:..." conversation key) is also treated as recipient-
+	// routed so it is never sent to Discord as a channel ID or broadcast.
+	recipientRouted := convTarget.Kind == "direct" ||
+		(msg.Conversation == nil && convTarget.ExternalRef != "" && !isDiscordSnowflake(convTarget.ExternalRef))
 	discordThreadID := convTarget.ExternalRef
 	if recipientRouted {
 		discordThreadID = ""

@@ -461,6 +461,42 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 	assert.Equal(t, "", posted[1].ThreadTS)
 	assert.Equal(t, "C_PUBLIC_OBS", posted[2].Channel)
 	assert.Equal(t, "", posted[2].ThreadTS)
+
+	// 5. Hand-built defense-in-depth test pinning the Kind != "direct" guard:
+	// even if a Conversation carries Kind:"direct" alongside a non-empty Slack
+	// ExternalRef, Slack routes the DM via Recipient and ignores ExternalRef.
+	require.NoError(t, b.Publish(ctx, "scion.project.p1.user.u1.messages", &messages.StructuredMessage{
+		Version:        messages.Version,
+		Sender:         "agent:coder",
+		Recipient:      "user:alice@example.com",
+		Msg:            "direct with unexpected external_ref",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ConversationID: "conv-direct-guard",
+		Conversation: &messages.Conversation{
+			Surface:     "slack",
+			Kind:        "direct",
+			ExternalRef: "C0123ABC:1700000000.000100",
+			ParentRef:   "C0123ABC",
+		},
+	}))
+	posted = getPosted()
+	require.Len(t, posted, 4)
+	assert.Equal(t, "D_ALICE_DM", posted[3].Channel)
+	assert.Equal(t, "", posted[3].ThreadTS)
+
+	// 6. Version-skew guard (pre-P5a hub with Conversation == nil and dm: ThreadID):
+	// an unmapped user DM must not fall through to project-linked channel broadcast.
+	require.NoError(t, b.Publish(ctx, "scion.project.p1.user.u2.messages", &messages.StructuredMessage{
+		Version:   messages.Version,
+		Sender:    "agent:coder",
+		Recipient: "user:bob@example.com",
+		Msg:       "pre-p5a dm for unmapped user",
+		Type:      messages.TypeInstruction,
+		Channel:   "slack",
+		ThreadID:  dmKey,
+	}))
+	assert.Len(t, getPosted(), 4, "pre-P5a dm: ThreadID for unmapped user must not broadcast")
 }
 
 // TestSlackBroker_Publish_PreUpgradeBareTimestampNeverPostsToTS (R-FV1)
