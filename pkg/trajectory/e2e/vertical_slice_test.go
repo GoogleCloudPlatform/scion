@@ -628,6 +628,7 @@ func TestVerticalSlice_RebaselineAfterTruncateBelowBaselineBumpsGeneration(t *te
 	require.NoError(t, err)
 
 	// Truncate below baseline and rewrite shorter line -> gen 1 starts at 0 and commits [0, X).
+	// Notice RawCommittedOffset (len(gen1Line)) < BaselineOffset (len(history)) and Pending == nil.
 	gen1Line := "{\"gen1\":1}\n"
 	require.NoError(t, os.WriteFile(artPath, []byte(gen1Line), 0o644))
 	r1, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
@@ -635,14 +636,13 @@ func TestVerticalSlice_RebaselineAfterTruncateBelowBaselineBumpsGeneration(t *te
 	require.Equal(t, 1, r1.GenerationBumps)
 	require.Equal(t, 1, r1.SegmentsShipped)
 
-	// Append while experiment is OFF -> 404 -> Rebaseline MUST bump to gen 2.
+	// Append while experiment is OFF and call Rebaseline with NO pending segment
+	// (Pending == nil): MUST still bump to gen 2 using GenerationStartOffset
+	// (restoring RawCommittedOffset > BaselineOffset would fail this test).
 	experimentOn.Store(false)
 	offLine := "{\"off\":true}\n"
 	appendFile(t, artPath, offLine)
 
-	rOff, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
-	require.NoError(t, err)
-	require.True(t, rOff.CaptureUnavailable)
 	_, err = s.Rebaseline(ctx, "capture_unavailable")
 	require.NoError(t, err)
 
