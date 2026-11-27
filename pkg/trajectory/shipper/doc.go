@@ -40,11 +40,17 @@
 // canonical owner of the shipper state tree. When called as root (euid == 0),
 // every directory and file created by the shipper (trajectory-shipper/,
 // state.lock, temp files, and state.json) is chowned on its pinned descriptor
-// (fchown / fchownat with AT_SYMLINK_NOFOLLOW) to the home directory's owner.
-// Root readers accept directories, lock files, and state.json owned by either
-// root (0) or the home owner; non-root readers accept only their own euid. This
-// allows root sciontool init, agent-UID hook processes, and P6 broker harvest
-// to share the same state and lock without locking each other out.
+// (fchown) to the home directory's owner. Root readers accept directories, lock
+// files, and state.json owned by either root (0) or the home owner; non-root
+// readers accept only their own euid. This allows root sciontool init,
+// agent-UID hook processes, and P6 broker harvest to share the same state and
+// lock without locking each other out.
+//
+// Root-squashed filesystems (for example NFS exports with root_squash): when
+// euid == 0 and fchown, mkdirat, or openat is refused with EPERM/EACCES, the
+// shipper best-effort removes any directory it just created and fails closed
+// with [ErrRootSquashChownRefused]. On root-squashed homes, callers must run
+// the shipper as the home directory's owner instead of root.
 //
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:
@@ -131,6 +137,55 @@
 // first use with owner-only permissions (0600) and is never unlinked, ensuring
 // that sciontool and broker harvest always synchronize on the same inode.
 //
+// The exclusive lock is held across [Uploader.Ship] (network I/O) for the full
+// duration of a [Shipper.RunRound] call (bounded by MaxRoundBytes and the
+// caller's context), so other lock users (hook processes, P6 broker harvest, P7
+// normalizers using [WithLockedState]) must size LockTimeout and context
+// deadlines accordingly.
+//
+// # Structural Invariants (Append-Only Generations & Write-Once Baseline)
+//
+// Two structural rules enforce byte-verbatim contiguity and pre-baseline privacy:
+//  1. Generations are append-only: RawCommittedOffset may advance within a
+//     generation only through commitSegmentLocked for a committed segment whose
+//     byte_start equals the current RawCommittedOffset. Every other position
+//     change (baseline, Rebaseline, lazy baseline, skip-to-next-newline,
+//     truncation/rotation/conflict bumps, and probe-accept) goes through
+//     startGenerationLocked, which increments Generation unless the current
+//     generation is provably empty (no commits, no pending, and
+//     GenerationStartOffset == RawCommittedOffset), sets GenerationStartOffset,
+//     RawCommittedOffset, and ParsedOffset together, and clears Pending.
+//  2. The run baseline is write-once: BaselineSet, BaselineOffset, and
+//     BaselineGuard* are recorded at most once per artifact via
+//     setBaselineOnceLocked (initial baseline, first untracked creation, or
+//     first lazy baseline when none exists) and are never overwritten
+//     regardless of NeedsBaseline. Refusal-window positions live separately in
+//     RebaselineOffset and RebaselineGuard*.
+//
+// # Policy Refusal Rebaselining
+//
+// When the Hub refuses capture (404 or 403 capture_disabled /
+// capture_metadata_only), callers should invoke [Shipper.Rebaseline] to move
+// every discovered artifact's raw_committed_offset and parsed_offset to EOF
+// (preserving the original baseline_offset / baseline_guard_hash for
+// pre-baseline privacy, clearing any pending segments, bumping generation if
+// the current generation already had committed or pending bytes past its start,
+// and persisting RefusedPendingRebaseline=true) under the lock, then back off.
+// If EOF falls mid-line (the preceding byte is not '\n'), skip_to_next_newline
+// is set on the artifact (and likewise on lazy baseline completion) so the next
+// shipping round skips forward past the remainder of that partial line without
+// shipping it (bounded by MaxSegmentBytes) before emitting new complete lines.
+//
+// When RefusedPendingRebaseline is true and the Uploader implements [Prober],
+// the next round probes segments:prepare without uploading payload bytes or
+// committing; once the Hub accepts capture again, the shipper rebaselines past
+// everything written during the refusal/backoff window and clears the flag.
+// Note that a probe inserts a pending row on the Hub reserving up to one
+// segment (<= 16 MiB) of run-cap headroom until the prepare TTL expires
+// (15 min); any subsequent identity collision (for example when the
+// post-rebaseline offset equals the probe's byte_start) safely hits the Hub's
+// pending-row refresh path.
+//
 // # Safe Artifact Opening and Containment
 //
 // Discovery refuses every symlink at or below a matched harness rule root
@@ -138,9 +193,10 @@
 // trusted resolved home directory once with O_DIRECTORY and walks every
 // component below it (rule-root ancestors, intermediate directories, and leaf)
 // with openat(2) and O_NOFOLLOW (O_DIRECTORY on directories, O_NONBLOCK on the
-// leaf), then verifies the opened descriptor is a regular file via fstat. This
-// prevents TOCTOU symlink swaps at any component between the home directory
-// and the leaf.
+// leaf), then verifies the opened descriptor is a regular file via fstat. When
+// running as root (euid == 0), regular files with Nlink > 1 (hard links) are
+// also refused with [ErrHardLinkRefused]. This prevents TOCTOU symlink swaps
+// and hard-link aliasing at any component between the home directory and leaf.
 //
 // # Generation Bumps and Pre-Baseline Privacy
 //
@@ -165,4 +221,29 @@
 // Only when the file is shorter than baseline_offset or its pre-baseline bytes
 // genuinely changed (baseline guard mismatch) does the new generation restart
 // at offset 0.
+//
+// # P6 Broker Harvest Prerequisites & Threat Model Notes
+//
+// The shipper's privacy invariants (baseline exclusion and refusal-window
+// exclusion) protect against accidental capture on the honest path; they are
+// not a security boundary against a malicious agent holding its own agent token
+// (the Hub's policy check in segments:prepare is the enforcement boundary).
+// Before reusing this package from a host Runtime Broker in P6, note:
+//   - flock coherence across the host/container boundary: virtiofs (depending
+//     on virtiofsd -o posix_lock/flock) and some NFS mounts do not guarantee
+//     coherent flock(2) between guest and host. P6 must verify lock coherence
+//     or add a lease file + generation counter.
+//   - Prefer non-root broker harvest: running broker harvest as the home
+//     owner's UID avoids all root-owned-file risks on host filesystems.
+//   - UID mapping: idmapped or user-namespaced mounts can cause the host view
+//     of homeUID to differ from the container UID, causing ownership checks to
+//     fail closed on one side; P6 must account for mapped UIDs.
+//   - Treat state.json as hostile agent-controlled input: reads are bounded by
+//     MaxStateFileBytes (16 MiB), filesystem paths must always come from live
+//     Discover (never from state.json keys), and foreign origin_hub_id values
+//     must be validated or ignored on the Hub.
+//   - Inode-only rotation identity: rotation detection compares st_ino only
+//     (ignoring st_dev because virtiofs/NFS may report a different device ID
+//     to a host broker). On NFS, a reused inode after delete-and-recreate can
+//     pass as the same file if the 64-byte trailing guard hash also matches.
 package shipper

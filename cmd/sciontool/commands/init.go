@@ -813,6 +813,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// no-op.
 	runWireSessionUsage(telemetryPipeline, agentHome)
 
+	// Start Track 2 raw trajectory shipper (self-gating against the Hub: backs
+	// off cleanly on 404 when tokenomics.trajectory_capture is off).
+	trajectoryCtx, trajectoryCancel := context.WithCancel(context.Background())
+	trajectoryRunner := startTrajectoryRunner(trajectoryCtx, agentHome, targetUID, targetGID, hub.NewClient)
+	defer func() {
+		if trajectoryRunner != nil {
+			trajectoryRunner.PreStop(context.Background())
+		}
+		trajectoryCancel()
+	}()
+
 	// Initialize lifecycle hooks manager. newLifecycleManager also reports
 	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —
 	// both come from the identical requirePrivilegeDrop input, bundled into
@@ -1922,6 +1933,17 @@ waitLoop:
 	stopHeldReportSender()
 	runFlushSQLiteUsageBeforeBackstop(telemetryPipeline)
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
+
+	// Run the bounded Final=true trajectory flush after the supervised wait
+	// loop and open-session report (before stopping/final status reports) so
+	// SIGTERM delivery is not delayed and the flush stays inside the stop
+	// budget. On the stop path, a harness running under tmux may still be
+	// winding down and any SessionEnd arriving after PreStop closes the wake
+	// listener is caught by the next resume_catchup. The deferred PreStop
+	// remains as an idempotent fallback for early-exit paths.
+	if trajectoryRunner != nil {
+		trajectoryRunner.PreStop(context.Background())
+	}
 
 	// Clean up the GitHub token file on exit
 	if hub.IsGitHubAppEnabled() {

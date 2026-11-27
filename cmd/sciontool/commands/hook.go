@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/trajectory"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
@@ -366,6 +367,18 @@ func processHookData(data []byte) error {
 	if strings.EqualFold(event.Name, hooks.EventModelEnd) &&
 		os.Getenv("SCION_USAGE_SOURCE") == telemetrycontract.UsageSourceSQLiteNative {
 		telemetry.NotifyAgySQLiteWake(hookHomeDir())
+	}
+
+	// Wake the Track 2 trajectory shipper in sciontool init on Claude
+	// SessionEnd (immediate) and Stop (debounced ~15s) without blocking the
+	// hook on state.lock or Hub network I/O.
+	if event.Dialect == "claude" {
+		switch {
+		case strings.EqualFold(event.Name, hooks.EventSessionEnd):
+			trajectory.NotifyWake(hookHomeDir(), trajectory.WakeSessionEnd)
+		case strings.EqualFold(event.Name, hooks.EventAgentEnd):
+			trajectory.NotifyWake(hookHomeDir(), trajectory.WakeModelEnd)
+		}
 	}
 
 	runHookTelemetry(hubBudget, event, hubClient)

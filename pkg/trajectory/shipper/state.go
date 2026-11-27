@@ -41,6 +41,10 @@ const (
 	// GuardWindowBytes is the number of trailing bytes before
 	// raw_committed_offset hashed with 64-bit FNV-1a to detect rewrites.
 	GuardWindowBytes = 64
+
+	// MaxStateFileBytes caps the maximum size of state.json read by LoadState
+	// (16 MiB) so an oversized or hostile state file cannot OOM root init.
+	MaxStateFileBytes int64 = 16 << 20
 )
 
 // Generation bump reasons recorded on ArtifactState.LastGenerationReason.
@@ -49,6 +53,23 @@ const (
 	GenReasonGuardMismatch = "guard_mismatch"
 	GenReasonInodeChanged  = "inode_changed"
 	GenReasonConflict      = "segment_conflict"
+	GenReasonRebaseline    = "rebaseline"
+)
+
+// Sentinel errors returned by shipper filesystem safety checks.
+var (
+	// ErrRootSquashChownRefused is returned when running as root (euid == 0)
+	// and fchown on shipper state directories or files is refused (EPERM /
+	// EACCES), such as on a root-squashed NFS home export. Callers on such
+	// filesystems should run the shipper as the home directory's owner.
+	ErrRootSquashChownRefused = errors.New("shipper: chown refused under root-squashed filesystem; run shipper as home owner")
+
+	// ErrHardLinkRefused is returned when running as root (euid == 0) and an
+	// artifact leaf, lock file, state file, or temp file has st_nlink != 1.
+	ErrHardLinkRefused = errors.New("shipper: hard-linked file refused when running as root")
+
+	// ErrStateTooLarge is returned when state.json exceeds MaxStateFileBytes.
+	ErrStateTooLarge = errors.New("shipper: state file exceeds maximum allowed size")
 )
 
 // StateDir returns the absolute path to the shipper state directory under homeDir.
@@ -66,7 +87,9 @@ func LockPath(homeDir string) string {
 	return filepath.Join(StateDir(homeDir), LockFileName)
 }
 
-// ArtifactKey is the logical identity of an artifact generation tracked in state.
+// ArtifactKey is the logical identity of an artifact generation tracked in
+// state. Exported as part of the public API for downstream consumers (such as
+// P6 broker harvest and P7 normalizers).
 type ArtifactKey struct {
 	NativeRelativePath string
 	Inode              uint64
@@ -90,8 +113,12 @@ type State struct {
 	OriginHubID              string                    `json:"origin_hub_id,omitempty"`
 	Baselined                bool                      `json:"baselined"`
 	BaselinedAt              *time.Time                `json:"baselined_at,omitempty"`
+	LastRebaselineReason     string                    `json:"last_rebaseline_reason,omitempty"`
+	LastRebaselineAt         *time.Time                `json:"last_rebaseline_at,omitempty"`
+	RefusedPendingRebaseline bool                      `json:"refused_pending_rebaseline,omitempty"`
 	BackfillExisting         bool                      `json:"backfill_existing,omitempty"`
 	DeferredBaselinePrefixes []string                  `json:"deferred_baseline_prefixes,omitempty"`
+	NextStartPath            string                    `json:"next_start_path,omitempty"`
 	Truncated                bool                      `json:"truncated,omitempty"`
 	TruncatedRunID           string                    `json:"truncated_run_id,omitempty"`
 	TruncatedReason          string                    `json:"truncated_reason,omitempty"`
@@ -104,32 +131,38 @@ type State struct {
 // ArtifactState holds durable per-artifact watermark and guard metadata.
 // Unknown JSON fields are preserved in Extra across load/save cycles.
 type ArtifactState struct {
-	NativeRelativePath   string          `json:"native_relative_path"`
-	ArtifactKind         ArtifactKind    `json:"artifact_kind"`
-	Inode                uint64          `json:"inode,omitempty"`
-	Device               uint64          `json:"device,omitempty"`
-	FileID               string          `json:"file_id,omitempty"`
-	Generation           int             `json:"generation"`
-	RawCommittedOffset   int64           `json:"raw_committed_offset"`
-	ParsedOffset         int64           `json:"parsed_offset"`
-	GuardHash            string          `json:"guard_hash,omitempty"`
-	GuardLen             int             `json:"guard_len,omitempty"`
-	Pending              *PendingSegment `json:"pending,omitempty"`
-	Baseline             bool            `json:"baseline"`
-	BaselineOffset       int64           `json:"baseline_offset,omitempty"`
-	BaselineGuardHash    string          `json:"baseline_guard_hash,omitempty"`
-	BaselineGuardLen     int             `json:"baseline_guard_len,omitempty"`
-	NeedsBaseline        bool            `json:"needs_baseline,omitempty"`
-	OriginHubID          string          `json:"origin_hub_id,omitempty"`
-	ConsecutiveFailures  int             `json:"consecutive_failures"`
-	LastError            string          `json:"last_error,omitempty"`
-	LastGenerationReason string          `json:"last_generation_reason,omitempty"`
-	Rejected             bool            `json:"rejected,omitempty"`
-	RejectedReason       string          `json:"rejected_reason,omitempty"`
-	RejectedRunID        string          `json:"rejected_run_id,omitempty"`
-	Truncated            bool            `json:"truncated"`
-	TruncatedRunID       string          `json:"truncated_run_id,omitempty"`
-	UpdatedAt            *time.Time      `json:"updated_at,omitempty"`
+	NativeRelativePath    string          `json:"native_relative_path"`
+	ArtifactKind          ArtifactKind    `json:"artifact_kind"`
+	Inode                 uint64          `json:"inode,omitempty"`
+	Device                uint64          `json:"device,omitempty"`
+	FileID                string          `json:"file_id,omitempty"`
+	Generation            int             `json:"generation"`
+	GenerationStartOffset *int64          `json:"generation_start_offset,omitempty"`
+	RawCommittedOffset    int64           `json:"raw_committed_offset"`
+	ParsedOffset          int64           `json:"parsed_offset"`
+	GuardHash             string          `json:"guard_hash,omitempty"`
+	GuardLen              int             `json:"guard_len,omitempty"`
+	Pending               *PendingSegment `json:"pending,omitempty"`
+	Baseline              bool            `json:"baseline"`
+	BaselineSet           bool            `json:"baseline_set,omitempty"`
+	BaselineOffset        int64           `json:"baseline_offset,omitempty"`
+	BaselineGuardHash     string          `json:"baseline_guard_hash,omitempty"`
+	BaselineGuardLen      int             `json:"baseline_guard_len,omitempty"`
+	RebaselineOffset      int64           `json:"rebaseline_offset,omitempty"`
+	RebaselineGuardHash   string          `json:"rebaseline_guard_hash,omitempty"`
+	RebaselineGuardLen    int             `json:"rebaseline_guard_len,omitempty"`
+	NeedsBaseline         bool            `json:"needs_baseline,omitempty"`
+	SkipToNextNewline     bool            `json:"skip_to_next_newline,omitempty"`
+	OriginHubID           string          `json:"origin_hub_id,omitempty"`
+	ConsecutiveFailures   int             `json:"consecutive_failures"`
+	LastError             string          `json:"last_error,omitempty"`
+	LastGenerationReason  string          `json:"last_generation_reason,omitempty"`
+	Rejected              bool            `json:"rejected,omitempty"`
+	RejectedReason        string          `json:"rejected_reason,omitempty"`
+	RejectedRunID         string          `json:"rejected_run_id,omitempty"`
+	Truncated             bool            `json:"truncated"`
+	TruncatedRunID        string          `json:"truncated_run_id,omitempty"`
+	UpdatedAt             *time.Time      `json:"updated_at,omitempty"`
 
 	// Extra preserves unknown JSON fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -152,8 +185,12 @@ var knownStateFields = map[string]struct{}{
 	"origin_hub_id":              {},
 	"baselined":                  {},
 	"baselined_at":               {},
+	"last_rebaseline_reason":     {},
+	"last_rebaseline_at":         {},
+	"refused_pending_rebaseline": {},
 	"backfill_existing":          {},
 	"deferred_baseline_prefixes": {},
+	"next_start_path":            {},
 	"truncated":                  {},
 	"truncated_run_id":           {},
 	"truncated_reason":           {},
@@ -211,32 +248,38 @@ func (s State) MarshalJSON() ([]byte, error) {
 type artifactStateAlias ArtifactState
 
 var knownArtifactStateFields = map[string]struct{}{
-	"native_relative_path":   {},
-	"artifact_kind":          {},
-	"inode":                  {},
-	"device":                 {},
-	"file_id":                {},
-	"generation":             {},
-	"raw_committed_offset":   {},
-	"parsed_offset":          {},
-	"guard_hash":             {},
-	"guard_len":              {},
-	"pending":                {},
-	"baseline":               {},
-	"baseline_offset":        {},
-	"baseline_guard_hash":    {},
-	"baseline_guard_len":     {},
-	"needs_baseline":         {},
-	"origin_hub_id":          {},
-	"consecutive_failures":   {},
-	"last_error":             {},
-	"last_generation_reason": {},
-	"rejected":               {},
-	"rejected_reason":        {},
-	"rejected_run_id":        {},
-	"truncated":              {},
-	"truncated_run_id":       {},
-	"updated_at":             {},
+	"native_relative_path":    {},
+	"artifact_kind":           {},
+	"inode":                   {},
+	"device":                  {},
+	"file_id":                 {},
+	"generation":              {},
+	"generation_start_offset": {},
+	"raw_committed_offset":    {},
+	"parsed_offset":           {},
+	"guard_hash":              {},
+	"guard_len":               {},
+	"pending":                 {},
+	"baseline":                {},
+	"baseline_set":            {},
+	"baseline_offset":         {},
+	"baseline_guard_hash":     {},
+	"baseline_guard_len":      {},
+	"rebaseline_offset":       {},
+	"rebaseline_guard_hash":   {},
+	"rebaseline_guard_len":    {},
+	"needs_baseline":          {},
+	"skip_to_next_newline":    {},
+	"origin_hub_id":           {},
+	"consecutive_failures":    {},
+	"last_error":              {},
+	"last_generation_reason":  {},
+	"rejected":                {},
+	"rejected_reason":         {},
+	"rejected_run_id":         {},
+	"truncated":               {},
+	"truncated_run_id":        {},
+	"updated_at":              {},
 }
 
 // UnmarshalJSON decodes ArtifactState while preserving unknown fields in Extra.
