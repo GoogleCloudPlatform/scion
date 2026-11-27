@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package c19driver implements the Criterion 19 Conduit load profile shared by
-// the CI functional smoke test (pkg/hub/conduit_ha_c19_test.go) and the live
-// load-driver binary (hack/conduit-c19/cmd/conduit-c19). It is test/validation
-// tooling and is not shipped in production binaries.
+// Package c19driver implements the Criterion 19 Conduit load profile used by
+// the CI functional smoke test (pkg/hub/conduit_ha_c19_test.go). The live
+// load-driver CLI binary (creating real message rows via the hub API and
+// running the full §3.2.2 live profile) is deferred to Phase 8
+// (ptone/scion#9536). This package is validation tooling and is not shipped in
+// production binaries.
 package c19driver
 
 import (
@@ -128,6 +130,7 @@ type Result struct {
 	RotateTokenErrors       int64
 	BrokerRPCSucceeded      int64
 	BrokerRPCErrors         int64
+	StalledBulkBytesAtStart int64
 	StalledBulkBytesWritten int64
 
 	DeliverLatencies   []time.Duration
@@ -222,7 +225,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}()
 
 	// Open the stalled bulk tunnel stream before the load window starts so its
-	// receive window fills and remains backpressured throughout the workload.
+	// receive window fills and backpressures before any workload begins.
+	var stalledAtStart int64
 	if cfg.StalledTunnel != nil {
 		closeTunnel, err := cfg.StalledTunnel(ctx, cfg.Agents[0].AgentID)
 		if err != nil {
@@ -242,10 +246,36 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				case <-time.After(15 * time.Millisecond):
 				}
 			}
+			// Wait until the bulk producer is actually backpressured (no
+			// further byte progress over 100ms) so StalledBulkBytesAtStart
+			// captures the steady-state stalled watermark.
+			for {
+				before := bulkWritten.Load()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(100 * time.Millisecond):
+				}
+				after := bulkWritten.Load()
+				if after == before {
+					stalledAtStart = after
+					break
+				}
+				if time.Now().After(deadline) {
+					// Record the current count rather than erroring here so
+					// callers asserting StalledBulkBytesAtStart == StalledBulkBytesWritten
+					// can surface the lack of backpressure directly.
+					stalledAtStart = after
+					break
+				}
+			}
 		}
 	}
 
-	res := &Result{AgentCount: len(agents)}
+	res := &Result{
+		AgentCount:              len(agents),
+		StalledBulkBytesAtStart: stalledAtStart,
+	}
 	var (
 		mu             sync.Mutex
 		deliverAttempt atomic.Int64

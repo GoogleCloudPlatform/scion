@@ -146,14 +146,12 @@ func haPTYReadClose(t *testing.T, c *websocket.Conn, timeout time.Duration) *web
 type haTunnelClient struct {
 	ls      conduit.LocalSession
 	mu      sync.Mutex
-	cond    *sync.Cond
 	streams map[uint32]conduit.Stream
 }
 
 func haDialUserTunnel(t *testing.T, node *conduitHANode, user *AuthenticatedUser, token string) *haTunnelClient {
 	t.Helper()
 	c := &haTunnelClient{streams: map[uint32]conduit.Stream{}}
-	c.cond = sync.NewCond(&c.mu)
 	cfg := conduit.Config{
 		Clock: clock.Real(),
 		StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
@@ -163,7 +161,6 @@ func haDialUserTunnel(t *testing.T, node *conduitHANode, user *AuthenticatedUser
 			}
 			c.mu.Lock()
 			c.streams[st.ID()] = st
-			c.cond.Broadcast()
 			c.mu.Unlock()
 			return nil
 		}),
@@ -398,20 +395,21 @@ func TestConduitHA_2796_C10_CapabilityTruthCrossNode(t *testing.T) {
 
 // TestConduitHA_2796_C16b_ActiveAuthzCrossNode validates ptone/scion#2796
 // checkbox "C16b (T2 active authorization)" across two Postgres hub nodes with
-// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (2s):
+// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (3s):
 //   - Renewal: streams whose permission still holds stay open past their
-//     authorization interval (2s) and keep echoing.
+//     authorization interval (3s) and keep echoing.
 //   - Fast-path NOTIFY revocation: revoking u1's attach role binding through
 //     Hub B closes u1's cross-node PTY on Hub A with 4401 authz_expired within
-//     one recheck interval + grace, while u2's stream stays open.
+//     1s, while u2's stream stays open.
 //   - Missed-notification sweep: with Hub A's Postgres LISTEN blocked via
 //     BlockLISTEN, revoking u2's attach role binding through Hub B still closes
-//     u2's PTY on Hub A with 4401 authz_expired within 1s (strictly before u2's
-//     next 2s interval deadline), proving the 200ms periodic sweep caught it.
+//     u2's PTY on Hub A with 4401 authz_expired within 1s, with an explicit
+//     assertion that sweepStart+closeBound < u2Dial+2*authzMax so u2's next
+//     interval renewal deadline cannot satisfy the sweep check.
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
-		authzMax        = 2 * time.Second
+		authzMax        = 3 * time.Second
 		closeBound      = 1 * time.Second
 	)
 	env := newConduitHAEnvWith(t, conduitHAOptions{
@@ -470,13 +468,14 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	pty1 := haWaitFakePTY(t, agent.PTYs.Spawned)
 	haPTYEcho(t, c1, "u1-initial")
 
+	u2Dial := time.Now()
 	c2, _, err := haDialPTY(t, env.HubA, env.Agent.ID, u2Tok, "")
 	require.NoError(t, err)
 	pty2 := haWaitFakePTY(t, agent.PTYs.Spawned)
 	haPTYEcho(t, c2, "u2-initial")
 
 	// 1. Renewal when permission still holds: wait past UserStreamAuthzMax
-	//    (600ms) and verify both streams stay open and echo.
+	//    (3s) and verify both streams stay open and echo.
 	time.Sleep(authzMax + 250*time.Millisecond)
 	haPTYEcho(t, c1, "u1-renewed")
 	haPTYEcho(t, c2, "u2-renewed")
@@ -494,12 +493,16 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	haPTYEcho(t, c2, "u2-still-open")
 
 	// 3. Missed notification: block Hub A's Postgres LISTEN, then revoke u2
-	//    through Hub B. The 200ms periodic sweep on Hub A must still close u2
-	//    with 4401 authz_expired within closeBound.
+	//    through Hub B. The 200ms periodic sweep on Hub A must close u2 with
+	//    4401 authz_expired within closeBound, strictly before u2's next
+	//    interval renewal deadline (u2Dial + 2*authzMax).
 	unblock := env.BlockLISTEN(t, env.HubA)
 	defer unblock()
 
 	sweepStart := time.Now()
+	require.True(t, sweepStart.Add(closeBound).Before(u2Dial.Add(2*authzMax)),
+		"sweep window (%s) must end strictly before u2's next interval deadline (%s)",
+		sweepStart.Add(closeBound).Sub(u2Dial), 2*authzMax)
 	deleteBindingOnHubB(u2BindID)
 	ce2 := haPTYReadClose(t, c2, closeBound)
 	assert.LessOrEqual(t, time.Since(sweepStart), closeBound)

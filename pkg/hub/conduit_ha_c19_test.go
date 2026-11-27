@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	c19driver "github.com/GoogleCloudPlatform/scion/hack/conduit-c19"
+	"github.com/GoogleCloudPlatform/scion/hack/conduit-c19/c19driver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -204,10 +204,10 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 	deliverStats := c19driver.SummarizeLatencies(res.DeliverLatencies)
 	rotateStats := c19driver.SummarizeLatencies(res.RotateLatencies)
 	brokerStats := c19driver.SummarizeLatencies(res.BrokerRPCLatencies)
-	t.Logf("C19 smoke: agents=%d deliveries=%d/%d large=%d rotate=%d brokerRPC=%d 429s=%d errors=%d stalledBytes=%d relayHopsB=%d",
+	t.Logf("C19 smoke: agents=%d deliveries=%d/%d large=%d rotate=%d brokerRPC=%d 429s=%d errors=%d stalledStart=%d stalledEnd=%d relayHopsB=%d",
 		res.AgentCount, res.DeliverSucceeded, res.DeliverAttempts, res.LargeBodySucceeded,
 		res.RotateTokenSucceeded, res.BrokerRPCSucceeded, res.Deliver429s, res.DeliverErrors,
-		res.StalledBulkBytesWritten, env.HubB.InternalRPCHops()-hopsBeforeB)
+		res.StalledBulkBytesAtStart, res.StalledBulkBytesWritten, env.HubB.InternalRPCHops()-hopsBeforeB)
 	t.Logf("C19 latencies (logged, not asserted): deliver(p50=%s p99=%s max=%s) rotate(p50=%s p99=%s max=%s) brokerRPC(p50=%s p99=%s max=%s)",
 		deliverStats.P50, deliverStats.P99, deliverStats.Max,
 		rotateStats.P50, rotateStats.P99, rotateStats.Max,
@@ -224,8 +224,10 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 	assert.Equal(t, int64(0), res.BrokerRPCErrors)
 	assert.Equal(t, int64(20), brokerRPCHandled.Load())
 	assert.GreaterOrEqual(t, res.DeliverSucceeded, int64(numAgents), "every agent must complete at least one delivery")
-	assert.GreaterOrEqual(t, res.StalledBulkBytesWritten, int64(conduit.DefaultStreamWindow),
-		"stalled bulk tunnel must have filled at least one stream receive window")
+	assert.GreaterOrEqual(t, res.StalledBulkBytesAtStart, int64(conduit.DefaultStreamWindow),
+		"stalled bulk tunnel must have filled at least one stream receive window before load starts")
+	assert.Equal(t, res.StalledBulkBytesAtStart, res.StalledBulkBytesWritten,
+		"stalled bulk tunnel must remain backpressured across the entire load window")
 	assert.Greater(t, env.HubB.InternalRPCHops()-hopsBeforeB, int64(0),
 		"cross-node relay hops to Hub B must be exercised")
 
