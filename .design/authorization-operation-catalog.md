@@ -18,7 +18,8 @@
 - [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent. Patch flags also require agent.update for user callers, and --image or --harness requires agent.attach for all callers
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project. An agent delegated credential is admitted on the hub and project forms: its scope is the authorizing user's list scope within the grant boundary (on the project form, within that one project), and each item is also decided for agent.read
-- [agent.update](#agentupdate) — Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach (writes agent.suspend_policy.set audit record only when suspendPolicy changes)
+- [agent.update](#agentupdate) — Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach; agent principals are refused label edits; writes agent.suspend_policy.set when suspendPolicy changes and agent.labels.update when labels change
+- [agent.labels.update](#agentlabelsupdate) — Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically
 - [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
@@ -945,7 +946,7 @@
 
 **Domain:** agent
 
-**Description:** Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach (writes agent.suspend_policy.set audit record only when suspendPolicy changes)
+**Description:** Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach; agent principals are refused label edits; writes agent.suspend_policy.set when suspendPolicy changes and agent.labels.update when labels change
 
 ### Entry Points
 
@@ -983,6 +984,49 @@
 - `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
 - `pkg/hub:TestPatchAgent_ImageEditRequiresAttach`
 - `pkg/hub:TestPendingReauth_ImageEditRequiresAttach`
+
+---
+
+## agent.labels.update
+
+**Domain:** agent
+
+**Description:** Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/agents/{id}/labels` |
+| http_route | PATCH | `/api/v1/projects/{projectId}/agents/{id}/labels` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `agent.labels.update`
+- **Context Fields:** actor_id
+- **Before Fields:** labels
+- **After Fields:** labels
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestPatchAgentLabels_Authorization`
+- `pkg/hub:TestPatchAgentLabels_ConcurrentMerge`
 
 ---
 

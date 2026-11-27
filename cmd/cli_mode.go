@@ -61,6 +61,10 @@ func warnRemovedMode(source string) {
 // Deliberately absent: "inbox". Human-mode only (ptone/scion#9008, parent
 // ptone/scion#8962): GET /api/v1/users/me/inbox/summary refuses agent
 // identities, and agents already have scion decisions and scion notifications.
+//
+// Deliberately absent: "label". Human-mode only (ptone/scion#9521): agent
+// identities are refused label edits on the Hub, and only human callers with
+// agent.update may curate agent labels.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

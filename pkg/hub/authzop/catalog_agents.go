@@ -343,7 +343,7 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.update",
 		Domain:      "agent",
-		Description: "Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach (writes agent.suspend_policy.set audit record only when suspendPolicy changes)",
+		Description: "Update agent configuration or metadata. Changing config.env or config.image also requires agent.attach; agent principals are refused label edits; writes agent.suspend_policy.set when suspendPolicy changes and agent.labels.update when labels change",
 		EntryPoints: []EntryPoint{
 			// handleAgentByID (handlers_agents_core.go) dispatches the
 			// no-action, no-sub-resource case on r.Method: PATCH, not PUT.
@@ -378,6 +378,36 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector"},
 			{Package: "pkg/hub", Function: "TestPatchAgent_ImageEditRequiresAttach"},
 			{Package: "pkg/hub", Function: "TestPendingReauth_ImageEditRequiresAttach"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "agent.labels.update",
+		Domain:      "agent",
+		Description: "Merge-update an agent's labels (add, change, or remove individual keys without replacing unrelated labels). Refuses agent principals and audits every label change atomically",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/labels", Method: "PATCH", Response: ResponseCallerSpecific},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/agents/{id}/labels", Method: "PATCH", Response: ResponseCallerSpecific},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "agent.labels.update",
+			ContextFields: []string{"actor_id"},
+			BeforeFields:  []string{"labels"},
+			AfterFields:   []string{"labels"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"},
+			{Package: "pkg/hub", Function: "TestPatchAgentLabels_Authorization"},
+			{Package: "pkg/hub", Function: "TestPatchAgentLabels_ConcurrentMerge"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

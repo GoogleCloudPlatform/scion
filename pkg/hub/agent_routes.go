@@ -71,6 +71,7 @@ const (
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
 	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
 	AgentRoutePendingConfig      AgentSubRouteID = "agents.pendingConfig"
+	AgentRouteLabels             AgentSubRouteID = "agents.labels"
 	// Agent delegation (.design/agent-delegation.md §18.4).
 	AgentRouteDelegations          AgentSubRouteID = "agents.delegations"
 	AgentRouteDelegationExchange   AgentSubRouteID = "agents.delegations.exchange"
@@ -104,6 +105,7 @@ const (
 	ProjectAgentRouteActionReincarnate AgentSubRouteID = "projects.agents.action.reincarnate"
 	ProjectAgentRouteActionResetAuth   AgentSubRouteID = "projects.agents.action.resetAuth"
 	ProjectAgentRouteActionKeys        AgentSubRouteID = "projects.agents.action.keys"
+	ProjectAgentRouteLabels            AgentSubRouteID = "projects.agents.labels"
 )
 
 // AgentSubRouteSuffix is the typed tail of an agent sub-route.
@@ -186,6 +188,7 @@ func (row agentSubRouteRow) operation(method string) authzop.OperationID {
 const (
 	opAgentRead              authzop.OperationID = "agent.read"
 	opAgentUpdate            authzop.OperationID = "agent.update"
+	opAgentLabelsUpdate      authzop.OperationID = "agent.labels.update"
 	opAgentDelete            authzop.OperationID = "agent.lifecycle.delete"
 	opAgentAttach            authzop.OperationID = "agent.attach"
 	opAgentPortAccess        authzop.OperationID = "agent.portaccess"
@@ -296,6 +299,8 @@ var agentSubRouteTable = []agentSubRouteRow{
 	// Discard of held config edits (ptone/scion#3976), behind
 	// hub.agent_edit_held.
 	{id: AgentRoutePendingConfig, form: agentFormByID, segs: []string{"pending-config"}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPendingDiscard}},
+	// Server-side label merge (ptone/scion#9521).
+	{id: AgentRouteLabels, form: agentFormByID, segs: []string{"labels"}, ops: map[string]authzop.OperationID{http.MethodPatch: opAgentLabelsUpdate}},
 	// Agent delegation (.design/agent-delegation.md §18.4): grant issuance
 	// and credential exchange, behind hub.agent_delegation; grant list,
 	// read, revoke and revoke-all, and delegated credential revoke, which
@@ -350,6 +355,8 @@ var agentSubRouteTable = []agentSubRouteRow{
 	// See AgentRouteActionKeys above: same early-branch choke point
 	// (handleProjectAgentAction's authorizeAgentKeys call).
 	{id: ProjectAgentRouteActionKeys, form: agentFormProject, segs: []string{"keys"}, ops: postOp(opAgentKeys)},
+	// Server-side label merge (ptone/scion#9521).
+	{id: ProjectAgentRouteLabels, form: agentFormProject, segs: []string{"labels"}, ops: map[string]authzop.OperationID{http.MethodPatch: opAgentLabelsUpdate}},
 }
 
 // agentRoutePatternPrefix returns the catalog-style pattern prefix of a form.

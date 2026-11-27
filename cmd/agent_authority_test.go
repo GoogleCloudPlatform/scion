@@ -96,10 +96,10 @@ func TestDisplayAgents_AuthorityMarkerGolden(t *testing.T) {
 	out := captureStdout(t, func() { err = displayAgents(agents, false) })
 	require.NoError(t, err)
 	const want = "" +
-		"NAME           TEMPLATE  HARNESS-CFG  RUNTIME  PROJECT  BROKER  PHASE               CONTAINER  LAST ACTIVITY\n" +
-		"live-agent     default   claude       docker   proj     b1      running             Up         -\n" +
-		"orphan-agent   default   claude       docker   proj     b1      running (ORPHANED)  Up         -\n" +
-		"revoked-agent  default   claude       docker   proj     b1      stopped (REVOKED)   Exited     -\n"
+		"NAME           TEMPLATE  HARNESS-CFG  RUNTIME  PROJECT  BROKER  PHASE               CONTAINER  LAST ACTIVITY  LABELS\n" +
+		"live-agent     default   claude       docker   proj     b1      running             Up         -              -\n" +
+		"orphan-agent   default   claude       docker   proj     b1      running (ORPHANED)  Up         -              -\n" +
+		"revoked-agent  default   claude       docker   proj     b1      stopped (REVOKED)   Exited     -              -\n"
 	assert.Equal(t, want, out)
 }
 

@@ -88,6 +88,10 @@ var windowsAllowed = map[string]bool{
 	// call, no local writes.
 	"inbox": true,
 
+	// Agent label curation (ptone/scion#9521): pure Hub API call, no local
+	// writes.
+	"label": true,
+
 	// Artifact review request and dismiss (ptone/scion#9306): pure Hub API
 	// calls, no local writes. The parent 'artifact' stays gated while its
 	// other subcommands write local files, as for project.use.

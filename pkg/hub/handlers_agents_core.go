@@ -4635,6 +4635,9 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRoutePendingConfig:
 		s.handleAgentPendingConfig(w, r, id)
 
+	case AgentRouteLabels:
+		s.handleAgentLabels(w, r, id)
+
 	case AgentRouteDelegations:
 		s.handleAgentDelegations(w, r, id)
 	case AgentRouteDelegationExchange:
@@ -4990,6 +4993,25 @@ func (s *Server) updateAgent(w http.ResponseWriter, r *http.Request, id string) 
 func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
+	// Agents may never modify agent labels (ptone/scion#9521). Check explicitly
+	// before general authorization when the caller is an agent principal and
+	// the request includes a labels field, without altering non-label behavior.
+	var preReadBody []byte
+	var bodyPreRead bool
+	if isAgentCaller(ctx) && r.Body != nil {
+		var err error
+		preReadBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		bodyPreRead = true
+		if patchBodyHasLabelsField(preReadBody) {
+			writeForbidden(w, errMsgAgentsCannotEditLabels)
+			return
+		}
+	}
+
 	// This handler had no authorization of any kind before #591: any
 	// authenticated caller could rename, relabel and rewrite the config of any
 	// agent on the hub, including its GCP identity.
@@ -5026,7 +5048,9 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// decoded to (every ScionConfig field is `omitempty`, so an omitted key
 	// and an explicit zero value are otherwise indistinguishable).
 	var body []byte
-	if r.Body != nil {
+	if bodyPreRead {
+		body = preReadBody
+	} else if r.Body != nil {
 		var err error
 		body, err = io.ReadAll(r.Body)
 		if err != nil {
@@ -5542,6 +5566,8 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return nil
 	}
 
+	labelsChanged := updates.Labels != nil && !maps.Equal(before.labels, agent.Labels)
+
 	if updates.SuspendPolicy != nil {
 		runPatchTx := func(effectiveLimit int64) error {
 			return s.store.WithTx(ctx, func(tx store.Store) error {
@@ -5557,6 +5583,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 					}
 					if saWrite != nil {
 						if err := saWrite.apply(r, tx, agent.ID); err != nil {
+							return err
+						}
+					}
+					if labelsChanged {
+						if err := writeAgentLabelsAuditTx(ctx, tx, agent.ID, before.labels, agent.Labels); err != nil {
 							return err
 						}
 					}
@@ -5609,7 +5640,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				return err
 			}
 			if saWrite != nil {
-				return saWrite.apply(r, tx, agent.ID)
+				if err := saWrite.apply(r, tx, agent.ID); err != nil {
+					return err
+				}
+			}
+			if labelsChanged {
+				if err := writeAgentLabelsAuditTx(ctx, tx, agent.ID, before.labels, agent.Labels); err != nil {
+					return err
+				}
 			}
 			return nil
 		})
@@ -5624,7 +5662,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			if err := tx.UpdateAgent(ctx, agent); err != nil {
 				return err
 			}
-			return saWrite.apply(r, tx, agent.ID)
+			if err := saWrite.apply(r, tx, agent.ID); err != nil {
+				return err
+			}
+			if labelsChanged {
+				if err := writeAgentLabelsAuditTx(ctx, tx, agent.ID, before.labels, agent.Labels); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	} else if labelsChanged {
+		err := s.store.WithTx(ctx, func(tx store.Store) error {
+			if err := tx.UpdateAgent(ctx, agent); err != nil {
+				return err
+			}
+			return writeAgentLabelsAuditTx(ctx, tx, agent.ID, before.labels, agent.Labels)
 		})
 		if err != nil {
 			writeErrorFromErr(w, err, "")
