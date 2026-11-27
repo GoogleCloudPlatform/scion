@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -49,6 +50,12 @@ type ConversationService interface {
 
 	// GetMessage retrieves a single message from a conversation.
 	GetMessage(ctx context.Context, conversationID, messageID string) (*store.Message, error)
+
+	// DownloadAttachment downloads the bytes of an attachment bound to a
+	// message in a conversation. Follows object-store redirects without
+	// forwarding hub credentials, and retries once with ?stream=1 if the
+	// object store cannot be reached.
+	DownloadAttachment(ctx context.Context, conversationID, messageID, attachmentID string) (io.ReadCloser, error)
 
 	// Create creates a new conversation.
 	Create(ctx context.Context, req *CreateConversationRequest) (*ConversationDetail, error)
@@ -285,6 +292,65 @@ func (s *conversationService) GetMessage(ctx context.Context, conversationID, me
 		return nil, err
 	}
 	return apiclient.DecodeRequired[store.Message](resp)
+}
+
+// DownloadAttachment downloads the bytes of an attachment bound to a message
+// in a conversation. The hub either streams the bytes or redirects to a
+// short-lived signed object-store URL. The redirect is followed without hub
+// credentials (https only unless the hub itself is plain http, no further
+// redirects). If fetching the redirected object fails, DownloadAttachment
+// retries once against the hub with ?stream=1.
+func (s *conversationService) DownloadAttachment(ctx context.Context, conversationID, messageID, attachmentID string) (io.ReadCloser, error) {
+	p := "/api/v1/conversations/" + url.PathEscape(conversationID) +
+		"/messages/" + url.PathEscape(messageID) +
+		"/attachments/" + url.PathEscape(attachmentID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.c.transport.BaseURL+p, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create attachment download request: %w", err)
+	}
+	resp, err := s.c.longTransport().DoNoRetry(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return resp.Body, nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		loc, lerr := resp.Location()
+		_ = resp.Body.Close()
+		if lerr != nil {
+			return nil, fmt.Errorf("attachment redirect without a usable Location: %w", lerr)
+		}
+		rc, ferr := s.c.fetchObject(ctx, loc.String(), nil)
+		if ferr == nil {
+			return rc, nil
+		}
+		if errors.Is(ferr, errArtifactRedirect) || ctx.Err() != nil {
+			return nil, ferr
+		}
+		// Fallback: retry once via the hub with ?stream=1 when the client
+		// cannot reach the object store directly.
+		streamReq, serr := http.NewRequestWithContext(ctx, http.MethodGet, s.c.transport.BaseURL+p+"?stream=1", nil)
+		if serr != nil {
+			return nil, fmt.Errorf("create attachment stream request: %w", serr)
+		}
+		streamResp, serr := s.c.longTransport().DoNoRetry(ctx, streamReq)
+		if serr != nil {
+			return nil, serr
+		}
+		if streamResp.StatusCode == http.StatusOK {
+			return streamResp.Body, nil
+		}
+		if err := apiclient.CheckResponse(streamResp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("attachment download: unexpected status %d", streamResp.StatusCode)
+	default:
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("attachment download: unexpected status %d", resp.StatusCode)
+	}
 }
 
 // Create creates a new conversation.

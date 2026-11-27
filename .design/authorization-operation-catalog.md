@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 473
+**Operations:** 474
 
 ## Table of Contents
 
@@ -170,6 +170,7 @@
 - [inbox.conversation.create](#inboxconversationcreate) — Create a group conversation in a project. Order: project:read on the project, then (for a token) inbox:write for it, then for a user the create_group action of chat-space-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action create_group and reason read_only without it), all before anything is minted. Agents are not decided by chat-space-access; their message-mode join check follows
 - [project.conversation.read](#projectconversationread) — Read a group conversation, its messages and one message. Needs project:read on the conversation's project; a group with no project needs participation, and a token needs inbox:read on a hub boundary for it
 - [inbox.conversation.direct.read](#inboxconversationdirectread) — Read a direct conversation, its messages and one message. A token needs inbox:read for the peer agent's project and agent:read on the peer agent; a direct conversation between users needs a hub boundary
+- [inbox.conversation.message.attachment.download](#inboxconversationmessageattachmentdownload) — Download an artifact-backed attachment of a conversation message. Authorizes the message read identically to conversation message get (DM canonical key + cross-project read gate, or group project membership, plus scoped-UAT inbox:read boundary), then checks MayReadAttachments without requiring project:artifact:read; missing or refused attachments answer 404
 - [inbox.conversation.defaultagent.set](#inboxconversationdefaultagentset) — Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 - [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer. A user on a project conversation then needs the add_participant action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action add_participant and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
@@ -6817,6 +6818,38 @@
 
 - `pkg/hub:TestDirectConversationToken_PeerAgentMustBeInsideBoundary`
 - `pkg/hub:TestConversationWatch_AuthzParity`
+
+---
+
+## inbox.conversation.message.attachment.download
+
+**Domain:** inbox
+
+**Description:** Download an artifact-backed attachment of a conversation message. Authorizes the message read identically to conversation message get (DM canonical key + cross-project read gate, or group project membership, plus scoped-UAT inbox:read boundary), then checks MayReadAttachments without requiring project:artifact:read; missing or refused attachments answer 404
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}/attachments/{attachmentId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestConversationMessageAttachment_DownloadAuthz`
 
 ---
 

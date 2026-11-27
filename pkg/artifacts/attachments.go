@@ -393,6 +393,39 @@ func (s *Service) ServeBoundAttachment(w http.ResponseWriter, r *http.Request, a
 	return ServeWritten
 }
 
+// ServeMessageAttachment serves attachment artifactID bound to message
+// messageID for a conversation message read (ptone/scion#9579). Unlike
+// ServeAttachment, it does not call host.Principal (so agents without
+// project:artifact:read can download attachments of messages they can read);
+// instead it enforces MayReadAttachments against the attachment's recorded
+// MessageProjectID. Unlike ServeBoundAttachment, it honors ?stream=1 via
+// deliveryFor and serves with normal serveFile headers and redirect TTL.
+// On ServeNotFound or ServeRefused nothing is written.
+func (s *Service) ServeMessageAttachment(w http.ResponseWriter, r *http.Request, artifactID, messageID string) ServeOutcome {
+	ctx := r.Context()
+	b, ok := s.backend()
+	if !ok || !canonicalID(artifactID) || messageID == "" {
+		return ServeNotFound
+	}
+	a, err := b.store.GetAttachment(ctx, artifactID)
+	if err != nil || a == nil || a.ID != artifactID || a.ScopeKind != ScopeKindMessage || a.ScopeRef != messageID {
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			slog.ErrorContext(ctx, "artifacts: message attachment lookup failed", "error", err)
+		}
+		return ServeNotFound
+	}
+	if !s.MayReadAttachments(ctx, messageID, a.MessageProjectID) {
+		return ServeRefused
+	}
+	f, err := attachmentFile(ctx, b, a)
+	if err != nil {
+		return ServeNotFound
+	}
+	how := deliveryFor(r, b)
+	serveFile(w, r, b, f, how, false)
+	return ServeWritten
+}
+
 // RedeemDeliveryNonce spends the nonce of an attachment delivery capability
 // and reports whether this was its first use (ptone/scion#4596).
 func (s *Service) RedeemDeliveryNonce(ctx context.Context, nonce string) (bool, error) {

@@ -277,7 +277,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/messages/":             "authenticated", // Message routes
 	"/api/v1/message-channels":      "authenticated", // Message channels
 	"/api/v1/conversations":         "authenticated", // List/create conversations
-	"/api/v1/conversations/":        "authenticated", // Conversation routes
+	"/api/v1/conversations/":        "authenticated", // Conversation routes (including message attachment download for users, UATs, and agents)
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
 	"/api/v1/thread-groups":         "authenticated", // List/create thread groups
 	"/api/v1/thread-groups/":        "authenticated", // Thread group routes

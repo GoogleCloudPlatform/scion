@@ -541,6 +541,51 @@ func dispatchAttachmentsFromContext(ctx context.Context) []messages.WireAttachme
 	return wire
 }
 
+// noteMessageAttachments populates Attachments (and DeferredAttachments for
+// deferred messages) on each message of items when the caller of ctx reads
+// them under the shared read decision (ptone/scion#9579). Only artifact-backed
+// attachments are listed (D5). A non-reader gets neither field.
+func (s *Server) noteMessageAttachments(ctx context.Context, items []store.Message) {
+	if len(items) == 0 || !s.attachmentArtifactsReady() {
+		return
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	svc := s.attachmentService()
+	found, err := svc.MessageAttachments(ctx, ids)
+	if err != nil {
+		s.messageLog.Error("Failed to list message attachments", "error", err)
+		return
+	}
+	ctx = withStandingMemo(ctx)
+	for i := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		list := found[items[i].ID]
+		if len(list) == 0 || !svc.MayReadAttachments(ctx, items[i].ID, list[0].MessageProjectID) {
+			continue
+		}
+		deferred := items[i].DispatchState == store.MessageDispatchDeferred
+		for _, a := range list {
+			items[i].Attachments = append(items[i].Attachments, store.MessageAttachment{
+				ID:          a.ID,
+				Name:        a.Name,
+				Size:        a.Size,
+				ContentType: a.MediaType,
+				SHA256:      a.SHA256,
+				Ref:         artifacts.FormatAttachmentRef(a.ID),
+			})
+			if deferred {
+				items[i].DeferredAttachments = append(items[i].DeferredAttachments,
+					store.DeferredAttachment{Name: reduceAttachmentName(a.Name), Size: a.Size})
+			}
+		}
+	}
+}
+
 // noteDeferredAttachments lists, on each deferred message of items, its
 // attachments stored as artifacts (reduced name and size), when the caller
 // of ctx reads them under the shared read decision (decision D15,

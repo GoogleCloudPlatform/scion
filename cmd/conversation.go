@@ -51,9 +51,12 @@ var (
 
 	convCreateJSON bool
 
-	convGetJSON        bool
-	convGetMessageJSON bool
-	convGetMessageBody bool
+	convGetJSON                   bool
+	convGetMessageJSON            bool
+	convGetMessageBody            bool
+	convGetMessageSaveAttachments string
+	convGetMessageAttachments     []string
+	convGetMessageForce           bool
 
 	convParticipantsJSON bool
 
@@ -313,6 +316,9 @@ func init() {
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageBody, "body", false, "Print only the message body to stdout (no added bytes)")
+	conversationGetMessageCmd.Flags().StringVar(&convGetMessageSaveAttachments, "save-attachments", "", "Save message attachments into this directory")
+	conversationGetMessageCmd.Flags().StringArrayVar(&convGetMessageAttachments, "attachment", nil, "Save only the named attachment (exact ID or name; repeatable)")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageForce, "force", false, "Overwrite existing files when saving attachments")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -697,6 +703,16 @@ func writeMessageBody(w io.Writer, msg *store.Message) error {
 }
 
 func runConversationGetMessage(cmd *cobra.Command, args []string) error {
+	if convGetMessageBody && convGetMessageSaveAttachments != "" {
+		return errors.New("--body cannot be combined with --save-attachments")
+	}
+	if len(convGetMessageAttachments) > 0 && convGetMessageSaveAttachments == "" {
+		return errors.New("--attachment requires --save-attachments")
+	}
+	if convGetMessageForce && convGetMessageSaveAttachments == "" {
+		return errors.New("--force requires --save-attachments")
+	}
+
 	if convGetMessageJSON {
 		outputFormat = "json"
 	}
@@ -706,7 +722,11 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	timeout := 30 * time.Second
+	if convGetMessageSaveAttachments != "" {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(cmdContext(cmd), timeout)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -720,13 +740,44 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	}
 
 	if convGetMessageBody {
-		return writeMessageBody(os.Stdout, msg)
+		return writeMessageBody(cmd.OutOrStdout(), msg)
+	}
+
+	var saveAnnotations []messageAttachmentJSON
+	var saveErr error
+	if convGetMessageSaveAttachments != "" {
+		saveAnnotations, saveErr = saveMessageAttachments(
+			ctx,
+			client.Conversations(),
+			cmd.ErrOrStderr(),
+			conversationID,
+			msg,
+			convGetMessageSaveAttachments,
+			convGetMessageAttachments,
+			convGetMessageForce,
+		)
 	}
 
 	if isJSONOutput() {
+		if convGetMessageSaveAttachments != "" && saveAnnotations != nil {
+			if jerr := outputMessageWithSaveJSON(cmd.OutOrStdout(), msg, saveAnnotations); jerr != nil {
+				return jerr
+			}
+			return saveErr
+		}
+		if saveErr != nil {
+			return saveErr
+		}
 		return outputJSON(msg)
 	}
 
+	if err := writeGetMessageText(ctx, client, cmd.OutOrStdout(), msg); err != nil {
+		return err
+	}
+	return saveErr
+}
+
+func writeGetMessageText(ctx context.Context, client hubclient.Client, out io.Writer, msg *store.Message) error {
 	senderProjectID := ""
 	if msg.SenderProjectID != nil {
 		senderProjectID = *msg.SenderProjectID
@@ -744,7 +795,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		dispatchFailureReason = *msg.DispatchFailureReason
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "ID\t%s\n", msg.ID)
 	_, _ = fmt.Fprintf(tw, "CONVERSATION ID\t%s\n", msg.ConversationID)
 	_, _ = fmt.Fprintf(tw, "PROJECT ID\t%s\n", msg.ProjectID)
@@ -774,7 +825,10 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "DISPATCH STATE\t%s\n", msg.DispatchState)
 	_, _ = fmt.Fprintf(tw, "DISPATCHED AT\t%s\n", dispatchedAt)
 	_, _ = fmt.Fprintf(tw, "DISPATCH FAILURE REASON\t%s\n", dispatchFailureReason)
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeMessageAttachmentsText(out, msg.Attachments)
 }
 
 func runConversationSetDefault(cmd *cobra.Command, args []string) error {

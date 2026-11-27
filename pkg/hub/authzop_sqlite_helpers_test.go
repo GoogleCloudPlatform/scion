@@ -328,6 +328,18 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	return r
 }
 
+// seedInboxMessageAttachment uploads and binds an artifact-backed attachment
+// to messageID for userID in projectID so live-inventory and bearer-matrix
+// probes reach a real downloadable attachment.
+func seedInboxMessageAttachment(t *testing.T, ctx context.Context, srv *Server, userID, projectID, messageID string) string {
+	t.Helper()
+	uploaderCtx := contextWithIdentity(ctx, NewAuthenticatedUser(userID, userID+"@test.com", "LI", "admin", string(ClientTypeWeb)))
+	info, err := srv.attachmentService().CreateAttachment(uploaderCtx, "li.txt", "text/plain", strings.NewReader("live inventory attachment"))
+	require.NoError(t, err)
+	require.NoError(t, srv.attachmentService().BindAttachment(ctx, info.ID, artifacts.PrincipalKindUser, userID, messageID, projectID))
+	return info.ID
+}
+
 // liveInventoryFederationAudience is the peer hub audience the live
 // inventory server allows for POST /api/v1/auth/federation-token.
 const liveInventoryFederationAudience = "https://peer-hub.example.com"
@@ -832,6 +844,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
 			e.Name == experiments.AgentEditHeld ||
 			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
+			e.Name == experiments.AttachmentArtifacts ||
 			e.Name == experiments.ArtifactsOpenReviewCheck || e.Name == experiments.ArtifactsReviewDrafts ||
 			e.Name == experiments.ArtifactsTransfer || e.Name == experiments.ArtifactsReviewRequests ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
@@ -870,6 +883,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.inbox.groupMessageAttachment = seedInboxMessageAttachment(t, ctx, srv, DevUserID, f.project, f.inbox.groupMessage)
 	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 	f.userTemplate, f.userTemplateDel = seedUserTemplates(t, ctx, s, DevUserID)
@@ -1079,6 +1093,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/watch"}:                {"id": f.inbox.directConversation},
+		{"inbox.conversation.message.attachment.download", "/api/v1/conversations/{id}/messages/{messageId}/attachments/{attachmentId}"}: {
+			"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage, "attachmentId": f.inbox.groupMessageAttachment,
+		},
 
 		// Thread group delete uses its disposable twin.
 		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
@@ -1654,18 +1671,19 @@ func decodeErrorCode(t *testing.T, body []byte) string {
 // group conversation for the leave entry, and a direct conversation (with
 // a message) between the user and an agent.
 type inboxRecords struct {
-	message             string
-	notification        string
-	subscription        string
-	template            string
-	groupConversation   string
-	groupMessage        string
-	leaveConversation   string
-	directConversation  string
-	directMessage       string
-	createConversations string // display name prefix for conversations a test creates
-	threadGroup         string // a chat thread group in the project (ptone/scion#4424)
-	threadGroupDel      string // a disposable chat thread group for the delete probes
+	message                string
+	notification           string
+	subscription           string
+	template               string
+	groupConversation      string
+	groupMessage           string
+	groupMessageAttachment string
+	leaveConversation      string
+	directConversation     string
+	directMessage          string
+	createConversations    string // display name prefix for conversations a test creates
+	threadGroup            string // a chat thread group in the project (ptone/scion#4424)
+	threadGroupDel         string // a disposable chat thread group for the delete probes
 }
 
 // seedLiveInventoryArtifact publishes a one-file artifact directly through

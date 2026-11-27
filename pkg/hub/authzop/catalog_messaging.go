@@ -277,6 +277,26 @@ var messagingOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "inbox.conversation.message.attachment.download",
+		Domain:      "inbox",
+		Description: "Download an artifact-backed attachment of a conversation message. Authorizes the message read identically to conversation message get (DM canonical key + cross-project read gate, or group project membership, plus scoped-UAT inbox:read boundary), then checks MayReadAttachments without requiring project:artifact:read; missing or refused attachments answer 404",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/messages/{messageId}/attachments/{attachmentId}", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "conversation-project",
+		BasePermission:   "inbox.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestConversationMessageAttachment_DownloadAuthz"},
+		},
+		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "inbox.conversation.defaultagent.set",
 		Domain:      "inbox",
 		Description: "Set the default agent of a group conversation. Needs project:read on the conversation's project; a token also needs inbox:write for it. A user on a project conversation then needs the set_default_agent action of chat-thread-access (project.chat_post on the account; 403 chat_post_denied with details.chat_action set_default_agent and reason read_only without it), decided before the body is read; agents and groups with no project are not decided by it",

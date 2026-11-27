@@ -659,8 +659,16 @@ func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, file
 // followed, unless the hub itself is reached over plain http (a local
 // development hub), matching fetchRedirect's contract.
 func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io.ReadCloser, error) {
+	return s.c.fetchObject(ctx, signedURL, s.objectClient)
+}
+
+// fetchObject downloads signedURL, an object-store URL, with a client that
+// carries no credential and follows no further redirect. Only https is
+// followed, unless the hub itself is reached over plain http (a local
+// development hub), matching fetchRedirect's contract.
+func (c *client) fetchObject(ctx context.Context, signedURL string, customClient *http.Client) (io.ReadCloser, error) {
 	u, err := url.Parse(signedURL)
-	allowHTTP := strings.HasPrefix(s.c.transport.BaseURL, "http://")
+	allowHTTP := strings.HasPrefix(c.transport.BaseURL, "http://")
 	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !allowHTTP)) || u.Host == "" {
 		return nil, errArtifactRedirect
 	}
@@ -668,7 +676,7 @@ func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io
 	if err != nil {
 		return nil, fmt.Errorf("create object request: %w", err)
 	}
-	hc := s.objectClient
+	hc := customClient
 	if hc == nil {
 		// No whole-exchange timeout: the caller's context bounds it.
 		// An object-store URL follows no further redirect.
@@ -700,7 +708,11 @@ func artifactPath(id string) string { return "/api/v1/artifacts/" + url.PathEsca
 // out on the client while the hub completed it would invite a retry that
 // creates a second artifact or version.
 func (s *artifactService) longTransport() *apiclient.Transport {
-	t := *s.c.transport
+	return s.c.longTransport()
+}
+
+func (c *client) longTransport() *apiclient.Transport {
+	t := *c.transport
 	hc := http.Client{}
 	if t.HTTPClient != nil {
 		hc = *t.HTTPClient
