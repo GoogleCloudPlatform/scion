@@ -780,6 +780,14 @@ func TestPipeline_HubOnlyRevocation404DetachesNativeProducer(t *testing.T) {
 	var hubCalls atomic.Int32
 	revoked := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && len(req.Events) == 0 {
+			// Accept any startup heartbeat that races ahead of Record 1 so
+			// revocation is triggered deterministically by the event-1 drain POST.
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{})
+			return
+		}
 		hubCalls.Add(1)
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte("revoked"))
@@ -857,8 +865,8 @@ func TestPipeline_HubOnlyRevocation404DetachesNativeProducer(t *testing.T) {
 
 	// Subsequent native records must be no-ops: no new seqs, no appends, no overflow, no errors.
 	for i := 2; i <= 50; i++ {
-		if _, err := p.analytics.native.Record(makeObs(fmt.Sprintf("cmp1:ho-rev-%d", i))); err != nil {
-			t.Fatalf("Record %d after revocation returned err: %v", i, err)
+		if out, err := p.analytics.native.Record(makeObs(fmt.Sprintf("cmp1:ho-rev-%d", i))); err != nil || out != AppendDisabled {
+			t.Fatalf("Record %d after revocation = (%v, %v), want (AppendDisabled, nil)", i, out, err)
 		}
 	}
 
