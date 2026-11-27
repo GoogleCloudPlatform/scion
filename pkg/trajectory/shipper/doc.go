@@ -143,6 +143,24 @@
 // normalizers using [WithLockedState]) must size LockTimeout and context
 // deadlines accordingly.
 //
+// # Structural Invariants (Append-Only Generations & Write-Once Baseline)
+//
+// Two structural rules enforce byte-verbatim contiguity and pre-baseline privacy:
+//  1. Generations are append-only: RawCommittedOffset may advance within a
+//     generation only through commitSegmentLocked for a committed segment whose
+//     byte_start equals the current RawCommittedOffset. Every other position
+//     change (baseline, Rebaseline, lazy baseline, skip-to-next-newline,
+//     truncation/rotation/conflict bumps, and probe-accept) goes through
+//     startGenerationLocked, which increments Generation unless the current
+//     generation is provably empty (no commits, no pending, and
+//     GenerationStartOffset == RawCommittedOffset), sets GenerationStartOffset,
+//     RawCommittedOffset, and ParsedOffset together, and clears Pending.
+//  2. The run baseline is write-once: BaselineOffset and BaselineGuard* are
+//     recorded at most once per artifact via setBaselineOnceLocked (initial
+//     baseline, or first lazy baseline when none exists) and are never
+//     overwritten regardless of NeedsBaseline. Refusal-window positions live
+//     separately in RebaselineOffset and RebaselineGuard*.
+//
 // # Policy Refusal Rebaselining
 //
 // When the Hub refuses capture (404 or 403 capture_disabled /

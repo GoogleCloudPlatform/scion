@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -395,65 +396,48 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 		}
 		_ = f.Close()
 
-		gen := 0
-		originHubID := st.OriginHubID
-		lastGenReason := ""
-		genStart := offset
-		if existing != nil {
-			gen = existing.Generation
-			lastGenReason = existing.LastGenerationReason
-			if existing.OriginHubID != "" {
-				originHubID = existing.OriginHubID
-			}
-			hasWork := generationHasCommittedOrPending(existing)
-			shrankOrRotated := existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode))
-			// Bump if the file shrank/rotated, if an in-flight Pending segment
-			// existed (it may already be committed on the Hub), or if advancing
-			// offset within a generation that already has committed bytes would
-			// create a byte hole.
-			createsHole := existing.Pending != nil || (hasWork && offset != existing.RawCommittedOffset)
-			if shrankOrRotated || createsHole {
-				gen++
-				lastGenReason = GenReasonRebaseline
-			} else if hasWork && existing.GenerationStartOffset != nil {
-				// Generation stayed the same and already has committed bytes
-				// (idle artifact with offset == RawCommittedOffset): preserve
-				// GenerationStartOffset so a subsequent Rebaseline knows this
-				// generation still holds committed bytes.
-				genStart = *existing.GenerationStartOffset
-			}
-		}
-
 		// Mutate existing entry in place when present so unknown JSON fields
-		// (Extra, preserved for P7 normalizers) survive Rebaseline. Preserve
-		// the original run BaselineOffset/BaselineGuard* when already baselined
-		// so a later truncation above the initial baseline still protects
-		// pre-baseline history. Explicitly reset transient failure/rejection
-		// state since the artifact is being freshly rebaselined.
+		// (Extra, preserved for P7 normalizers) survive Rebaseline.
+		// Structural Rule 1: position changes go through startGenerationLocked
+		// (which bumps Generation whenever the current generation is not
+		// provably empty, preserving GenerationStartOffset on unchanged idle
+		// artifacts). Structural Rule 2: initial BaselineOffset/BaselineGuard*
+		// is write-once via setBaselineOnceLocked; refusal watermarks live in
+		// RebaselineOffset/RebaselineGuard*.
 		entry := existing
-		preserveOrigBaseline := entry != nil && entry.Baseline && !entry.NeedsBaseline && entry.BaselineOffset > 0
+		originHubID := st.OriginHubID
 		if entry == nil {
-			entry = &ArtifactState{}
+			entry = &ArtifactState{
+				NativeRelativePath: art.NativeRelativePath,
+				ArtifactKind:       art.Kind,
+				OriginHubID:        originHubID,
+			}
 			st.Artifacts[art.NativeRelativePath] = entry
+			startGenerationLocked(entry, offset, guardHash, guardLen, "", false)
+		} else {
+			if entry.OriginHubID != "" {
+				originHubID = entry.OriginHubID
+			}
+			shrankOrRotated := entry.RawCommittedOffset > 0 && (offset < entry.RawCommittedOffset || (entry.Inode != 0 && fid.Ino != entry.Inode))
+			// Move position via startGenerationLocked if the file shrank/rotated,
+			// had an in-flight Pending segment, moved to a different offset, or
+			// landed mid-line on a non-empty generation (so SkipToNextNewline
+			// will start in a fresh generation).
+			needsPositionChange := shrankOrRotated ||
+				entry.Pending != nil ||
+				offset != entry.RawCommittedOffset ||
+				(skipToNextNL && !generationIsProvablyEmpty(entry))
+			if needsPositionChange {
+				forceBump := shrankOrRotated || entry.Pending != nil
+				startGenerationLocked(entry, offset, guardHash, guardLen, GenReasonRebaseline, forceBump)
+			}
 		}
 		entry.NativeRelativePath = art.NativeRelativePath
 		entry.ArtifactKind = art.Kind
 		entry.Inode = fid.Ino
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
-		entry.Generation = gen
-		entry.GenerationStartOffset = int64Ptr(genStart)
-		entry.RawCommittedOffset = offset
-		entry.ParsedOffset = offset
-		entry.GuardHash = guardHash
-		entry.GuardLen = guardLen
-		entry.Pending = nil
-		entry.Baseline = true
-		if !preserveOrigBaseline {
-			entry.BaselineOffset = offset
-			entry.BaselineGuardHash = guardHash
-			entry.BaselineGuardLen = guardLen
-		}
+		setBaselineOnceLocked(entry, offset, guardHash, guardLen)
 		entry.RebaselineOffset = offset
 		entry.RebaselineGuardHash = guardHash
 		entry.RebaselineGuardLen = guardLen
@@ -462,7 +446,6 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 		entry.OriginHubID = originHubID
 		entry.ConsecutiveFailures = 0
 		entry.LastError = ""
-		entry.LastGenerationReason = lastGenReason
 		entry.Rejected = false
 		entry.RejectedReason = ""
 		entry.RejectedRunID = ""
@@ -490,13 +473,13 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 }
 
 // findNextNewlineOffset scans forward from startOffset up to fileSize (bounded
-// by maxScanBytes) for the first '\n'. If found, it returns (pos+1, true, nil).
-// If the scan hits maxScanBytes without finding '\n', it returns
-// (startOffset+maxScanBytes, true, nil) to avoid unbounded waiting. Otherwise
-// it returns (startOffset, false, nil).
-func findNextNewlineOffset(ctx context.Context, r io.ReaderAt, startOffset, fileSize, maxScanBytes int64) (int64, bool, error) {
+// by maxScanBytes) for the first '\n'. If found, it returns
+// (pos+1, true, false, nil). If the scan hits maxScanBytes without finding
+// '\n', it returns (startOffset+maxScanBytes, true, true, nil) to avoid
+// unbounded waiting. Otherwise it returns (startOffset, false, false, nil).
+func findNextNewlineOffset(ctx context.Context, r io.ReaderAt, startOffset, fileSize, maxScanBytes int64) (int64, bool, bool, error) {
 	if fileSize <= startOffset {
-		return startOffset, false, nil
+		return startOffset, false, false, nil
 	}
 	const chunkSize int64 = 64 * 1024
 	avail := fileSize - startOffset
@@ -511,12 +494,12 @@ func findNextNewlineOffset(ctx context.Context, r io.ReaderAt, startOffset, file
 	pos := startOffset
 	for pos < endAt {
 		if err := ctx.Err(); err != nil {
-			return startOffset, false, err
+			return startOffset, false, false, err
 		}
 		readLen := min(endAt-pos, int64(len(buf)))
 		n, err := r.ReadAt(buf[:readLen], pos)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return startOffset, false, err
+			return startOffset, false, false, err
 		}
 		if n == 0 {
 			break
@@ -524,33 +507,92 @@ func findNextNewlineOffset(ctx context.Context, r io.ReaderAt, startOffset, file
 		chunk := buf[:n]
 		for i := 0; i < len(chunk); i++ {
 			if chunk[i] == '\n' {
-				return pos + int64(i) + 1, true, nil
+				return pos + int64(i) + 1, true, false, nil
 			}
 		}
 		pos += int64(n)
 	}
 	if capped {
-		return endAt, true, nil
+		return endAt, true, true, nil
 	}
-	return startOffset, false, nil
+	return startOffset, false, false, nil
 }
 
-func generationHasCommittedOrPending(entry *ArtifactState) bool {
+// generationIsProvablyEmpty reports whether entry's current generation has no
+// committed bytes and no in-flight pending segment.
+func generationIsProvablyEmpty(entry *ArtifactState) bool {
 	if entry == nil {
-		return false
-	}
-	if entry.Pending != nil {
 		return true
 	}
+	if entry.Pending != nil {
+		return false
+	}
 	if entry.GenerationStartOffset != nil {
-		return entry.RawCommittedOffset > *entry.GenerationStartOffset
+		return *entry.GenerationStartOffset == entry.RawCommittedOffset
 	}
+	// Legacy state.json without generation_start_offset: gen 0 started at
+	// BaselineOffset (if baselined) or 0; any gen > 0 is conservatively
+	// treated as non-empty.
 	if entry.Generation == 0 {
-		// Legacy state.json without generation_start_offset: gen 0 started at BaselineOffset.
-		return entry.RawCommittedOffset > entry.BaselineOffset
+		return entry.RawCommittedOffset == entry.BaselineOffset
 	}
-	// Legacy state.json for gen > 0 without generation_start_offset: bump conservatively.
-	return true
+	return false
+}
+
+// startGenerationLocked is the single mutation point for changing an
+// artifact's position outside commitSegmentLocked (Structural Rule 1).
+// It starts a new generation at offset unless forceBump is false and the
+// current generation is provably empty, in which case it moves the empty
+// generation's start to offset. It always sets GenerationStartOffset,
+// RawCommittedOffset, and ParsedOffset together and clears Pending.
+func startGenerationLocked(entry *ArtifactState, offset int64, guardHash string, guardLen int, reason string, forceBump bool) bool {
+	bumped := false
+	if forceBump || !generationIsProvablyEmpty(entry) {
+		entry.Generation++
+		if reason != "" {
+			entry.LastGenerationReason = reason
+		}
+		bumped = true
+	}
+	entry.GenerationStartOffset = int64Ptr(offset)
+	entry.RawCommittedOffset = offset
+	entry.ParsedOffset = offset
+	entry.GuardHash = guardHash
+	entry.GuardLen = guardLen
+	entry.Pending = nil
+	return bumped
+}
+
+// commitSegmentLocked is the single mutation point for advancing
+// RawCommittedOffset within an existing generation (Structural Rule 1).
+// A committed segment must start at the exact current RawCommittedOffset.
+func commitSegmentLocked(entry *ArtifactState, byteStart, byteEnd int64, guardHash string, guardLen int, now time.Time) error {
+	if byteStart != entry.RawCommittedOffset || byteEnd <= byteStart {
+		return fmt.Errorf("shipper: non-contiguous commit [%d,%d) at raw_committed_offset=%d",
+			byteStart, byteEnd, entry.RawCommittedOffset)
+	}
+	entry.RawCommittedOffset = byteEnd
+	entry.GuardHash = guardHash
+	entry.GuardLen = guardLen
+	entry.Pending = nil
+	entry.ConsecutiveFailures = 0
+	entry.LastError = ""
+	entry.UpdatedAt = &now
+	return nil
+}
+
+// setBaselineOnceLocked records an artifact's immutable initial run baseline
+// (Structural Rule 2). Once BaselineOffset or BaselineGuardLen has been set,
+// subsequent calls are a no-op regardless of NeedsBaseline, so pre-baseline
+// history is never overwritten by a later rebaseline or lazy baseline.
+func setBaselineOnceLocked(entry *ArtifactState, offset int64, guardHash string, guardLen int) {
+	entry.Baseline = true
+	if entry.BaselineOffset > 0 || entry.BaselineGuardLen > 0 {
+		return
+	}
+	entry.BaselineOffset = offset
+	entry.BaselineGuardHash = guardHash
+	entry.BaselineGuardLen = guardLen
 }
 
 func markRebaselineSkipped(
@@ -566,30 +608,24 @@ func markRebaselineSkipped(
 		Reason:             err.Error(),
 	})
 	if existing == nil {
-		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-			NativeRelativePath:    art.NativeRelativePath,
-			ArtifactKind:          art.Kind,
-			Generation:            0,
-			GenerationStartOffset: int64Ptr(0),
-			Baseline:              true,
-			NeedsBaseline:         true,
-			OriginHubID:           st.OriginHubID,
-			LastError:             err.Error(),
-			UpdatedAt:             &now,
+		entry := &ArtifactState{
+			NativeRelativePath: art.NativeRelativePath,
+			ArtifactKind:       art.Kind,
+			Baseline:           true,
+			NeedsBaseline:      true,
+			OriginHubID:        st.OriginHubID,
+			LastError:          err.Error(),
+			UpdatedAt:          &now,
 		}
+		startGenerationLocked(entry, 0, "", 0, "", false)
+		st.Artifacts[art.NativeRelativePath] = entry
 		return
 	}
-	// If the current generation already holds committed or pending bytes, bump
-	// Generation now so the later lazy baseline starts a fresh generation
-	// rather than jumping to EOF inside the old generation and leaving a hole.
-	if generationHasCommittedOrPending(existing) {
-		existing.Generation++
-		existing.LastGenerationReason = GenReasonRebaseline
-		existing.GenerationStartOffset = int64Ptr(0)
-		existing.RawCommittedOffset = 0
-		existing.ParsedOffset = 0
-		existing.GuardHash = ""
-		existing.GuardLen = 0
+	// If the current generation already holds committed or pending bytes,
+	// startGenerationLocked bumps Generation now so the later lazy baseline
+	// starts a fresh generation rather than leaving a hole in the old one.
+	if !generationIsProvablyEmpty(existing) {
+		startGenerationLocked(existing, 0, "", 0, GenReasonRebaseline, true)
 	}
 	existing.Pending = nil
 	existing.Baseline = true
@@ -733,25 +769,18 @@ func (s *Shipper) baselineArtifact(resolvedHome string, art DiscoveredArtifact, 
 		}
 	}
 
-	return &ArtifactState{
-		NativeRelativePath:    art.NativeRelativePath,
-		ArtifactKind:          art.Kind,
-		Inode:                 fid.Ino,
-		Device:                fid.Dev,
-		FileID:                fid.String(),
-		Generation:            0,
-		GenerationStartOffset: int64Ptr(offset),
-		RawCommittedOffset:    offset,
-		ParsedOffset:          offset,
-		GuardHash:             guardHash,
-		GuardLen:              guardLen,
-		Baseline:              true,
-		BaselineOffset:        offset,
-		BaselineGuardHash:     guardHash,
-		BaselineGuardLen:      guardLen,
-		OriginHubID:           originHubID,
-		UpdatedAt:             &now,
-	}, nil
+	entry := &ArtifactState{
+		NativeRelativePath: art.NativeRelativePath,
+		ArtifactKind:       art.Kind,
+		Inode:              fid.Ino,
+		Device:             fid.Dev,
+		FileID:             fid.String(),
+		OriginHubID:        originHubID,
+		UpdatedAt:          &now,
+	}
+	startGenerationLocked(entry, offset, guardHash, guardLen, "", false)
+	setBaselineOnceLocked(entry, offset, guardHash, guardLen)
+	return entry, nil
 }
 
 // RoundOptions configures a single RunRound execution.
@@ -1019,19 +1048,16 @@ func (s *Shipper) shipArtifactLocked(
 	if !tracked {
 		now := s.now().UTC()
 		entry = &ArtifactState{
-			NativeRelativePath:    art.NativeRelativePath,
-			ArtifactKind:          art.Kind,
-			Inode:                 fid.Ino,
-			Device:                fid.Dev,
-			FileID:                fid.String(),
-			Generation:            0,
-			GenerationStartOffset: int64Ptr(0),
-			RawCommittedOffset:    0,
-			ParsedOffset:          0,
-			Baseline:              false,
-			OriginHubID:           st.OriginHubID,
-			UpdatedAt:             &now,
+			NativeRelativePath: art.NativeRelativePath,
+			ArtifactKind:       art.Kind,
+			Inode:              fid.Ino,
+			Device:             fid.Dev,
+			FileID:             fid.String(),
+			Baseline:           false,
+			OriginHubID:        st.OriginHubID,
+			UpdatedAt:          &now,
 		}
+		startGenerationLocked(entry, 0, "", 0, "", false)
 		st.Artifacts[art.NativeRelativePath] = entry
 	} else {
 		if entry.NativeRelativePath == "" {
@@ -1086,19 +1112,11 @@ func (s *Shipper) shipArtifactLocked(
 		entry.Inode = fid.Ino
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
-		entry.GenerationStartOffset = int64Ptr(offset)
-		entry.RawCommittedOffset = offset
-		entry.ParsedOffset = offset
-		if entry.BaselineOffset == 0 {
-			entry.BaselineOffset = offset
-			entry.BaselineGuardHash = guardHash
-			entry.BaselineGuardLen = guardLen
-		}
+		startGenerationLocked(entry, offset, guardHash, guardLen, GenReasonRebaseline, false)
+		setBaselineOnceLocked(entry, offset, guardHash, guardLen)
 		entry.RebaselineOffset = offset
 		entry.RebaselineGuardHash = guardHash
 		entry.RebaselineGuardLen = guardLen
-		entry.GuardHash = guardHash
-		entry.GuardLen = guardLen
 		entry.NeedsBaseline = false
 		entry.SkipToNextNewline = skipToNextNL
 		entry.LastError = ""
@@ -1139,7 +1157,7 @@ func (s *Shipper) shipArtifactLocked(
 	// bytes of the partial line) so the first segment of this generation starts
 	// cleanly on a line boundary.
 	if entry.SkipToNextNewline {
-		nextOff, found, serr := findNextNewlineOffset(ctx, f, entry.RawCommittedOffset, fileSize, s.cfg.MaxSegmentBytes)
+		nextOff, found, hitCap, serr := findNextNewlineOffset(ctx, f, entry.RawCommittedOffset, fileSize, s.cfg.MaxSegmentBytes)
 		if serr != nil {
 			if errors.Is(serr, context.Canceled) || errors.Is(serr, context.DeadlineExceeded) {
 				return true, serr
@@ -1151,17 +1169,24 @@ func (s *Shipper) shipArtifactLocked(
 			// Partial line still not terminated; hold back even on Final=true.
 			return false, nil
 		}
+		if hitCap {
+			slog.Debug("trajectory shipper: skip_to_next_newline reached MaxSegmentBytes cap; starting generation mid-line",
+				"artifact", art.NativeRelativePath,
+				"start_offset", entry.RawCommittedOffset,
+				"next_offset", nextOff,
+				"cap_bytes", s.cfg.MaxSegmentBytes,
+			)
+		}
 		gh, gl, gerr := ComputeGuardHash(f, nextOff)
 		if gerr != nil {
 			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("compute guard after partial line skip: %w", gerr)
 			return false, nil
 		}
 		now := s.now().UTC()
-		entry.RawCommittedOffset = nextOff
-		entry.ParsedOffset = nextOff
-		entry.GenerationStartOffset = int64Ptr(nextOff)
-		entry.GuardHash = gh
-		entry.GuardLen = gl
+		startGenerationLocked(entry, nextOff, gh, gl, GenReasonRebaseline, false)
+		entry.RebaselineOffset = nextOff
+		entry.RebaselineGuardHash = gh
+		entry.RebaselineGuardLen = gl
 		entry.SkipToNextNewline = false
 		entry.UpdatedAt = &now
 		if err := SaveState(s.cfg.HomeDir, st); err != nil {
@@ -1373,13 +1398,9 @@ func (s *Shipper) shipArtifactLocked(
 				}
 				return false, nil
 			}
-			entry.RawCommittedOffset = byteEnd
-			entry.GuardHash = nextGuardHash
-			entry.GuardLen = nextGuardLen
-			entry.Pending = nil
-			entry.ConsecutiveFailures = 0
-			entry.LastError = ""
-			entry.UpdatedAt = &now
+			if err := commitSegmentLocked(entry, seg.ByteStart, byteEnd, nextGuardHash, nextGuardLen, now); err != nil {
+				return true, err
+			}
 			if err := SaveState(s.cfg.HomeDir, st); err != nil {
 				return true, err
 			}
@@ -1555,13 +1576,7 @@ func (s *Shipper) bumpGenerationLocked(
 		tryPreserve(entry.BaselineOffset, entry.BaselineGuardHash, entry.BaselineGuardLen)
 	}
 
-	entry.Generation++
-	entry.GenerationStartOffset = int64Ptr(restartOffset)
-	entry.RawCommittedOffset = restartOffset
-	entry.ParsedOffset = restartOffset
-	entry.GuardHash = restartGuardHash
-	entry.GuardLen = restartGuardLen
-	entry.Pending = nil
+	startGenerationLocked(entry, restartOffset, restartGuardHash, restartGuardLen, reason, true)
 	entry.SkipToNextNewline = skipToNextNL
 	entry.Rejected = false
 	entry.RejectedReason = ""
@@ -1569,7 +1584,6 @@ func (s *Shipper) bumpGenerationLocked(
 	entry.Inode = fid.Ino
 	entry.Device = fid.Dev
 	entry.FileID = fid.String()
-	entry.LastGenerationReason = reason
 	if countFailure {
 		entry.ConsecutiveFailures++
 	}

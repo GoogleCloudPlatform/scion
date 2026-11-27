@@ -185,8 +185,19 @@ func (a *smArtifactTracker) recordVersion(data []byte) {
 //
 // Set SCION_SHIPPER_SM_SEEDS and SCION_SHIPPER_SM_STEPS to run deeper sweeps.
 func TestShipperStateMachineInvariants(t *testing.T) {
-	numSeeds := 80
-	numSteps := 35
+	// Pinned regression seeds (R6-1: 1332; R6-2: 236, 627, 977, 1064, 1423)
+	// always run at 80 steps so known failure classes never regress.
+	pinnedSeeds := []int64{236, 627, 977, 1064, 1332, 1423}
+	for _, seed := range pinnedSeeds {
+		seed := seed
+		t.Run(fmt.Sprintf("pinned_%d", seed), func(t *testing.T) {
+			t.Parallel()
+			runStateMachineSeed(t, seed, 80)
+		})
+	}
+
+	numSeeds := 250
+	numSteps := 60
 	if v := os.Getenv("SCION_SHIPPER_SM_SEEDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			numSeeds = n
@@ -201,6 +212,7 @@ func TestShipperStateMachineInvariants(t *testing.T) {
 	for seed := 1; seed <= numSeeds; seed++ {
 		seed := seed
 		t.Run(fmt.Sprintf("seed_%d", seed), func(t *testing.T) {
+			t.Parallel()
 			runStateMachineSeed(t, int64(seed), numSteps)
 		})
 	}
@@ -256,11 +268,13 @@ func runStateMachineSeed(t *testing.T, seed int64, numSteps int) {
 	}
 
 	var history []string
-	// Track whether capture is currently refused (or waiting for probe-accept).
+	// Track client-observed refusal ONLY: bytes are tagged REFUSED_TAG_ only
+	// when the client has actually observed a refusal (after a round returned
+	// CaptureUnavailable/PolicyRefused or after an explicit Rebaseline, which
+	// persists RefusedPendingRebaseline=true) until a probe-accept clears
+	// RefusedPendingRebaseline. Never inspect hub.mode directly — the client
+	// cannot know about a Hub mode flip that no round observed.
 	isRefusalActive := func() bool {
-		if hub.mode == smMode404 || hub.mode == smMode403Disabled {
-			return true
-		}
 		st, ok, err := LoadState(home)
 		return err == nil && ok && st.RefusedPendingRebaseline
 	}
