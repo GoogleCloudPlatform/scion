@@ -1425,6 +1425,88 @@ test.describe('the chat column fits the keyboard frame with a long draft', () =>
       expect(box.fieldScrollHeight).toBeGreaterThan(box.fieldClientHeight);
     });
   });
+
+  test.describe('with hub.attachment_artifacts enabled', () => {
+    test.use({ viewport: { width: 375, height: 667 }, isMobile: true, hasTouch: true });
+
+    test.beforeEach(async ({ page }) => {
+      await page.addInitScript(() => {
+        localStorage.setItem('scion:feature:hub.attachment_artifacts', 'true');
+      });
+    });
+
+    test('a taller frame never gets a shorter field with attachment visibility line', async ({
+      page,
+    }) => {
+      await openThread(page);
+      await applyChrome(page, 'attachment');
+      await expect(page.locator('scion-chat-composer .attachment-visibility')).toHaveCount(1);
+      await focusComposer(page);
+      await setKeyboard(page, 420);
+      await page.locator('scion-chat-composer textarea').fill(LONG_DRAFT);
+      const frames = [150, 200, 250, 280, 300, 340, 380, 420];
+      let previous = 0;
+      for (const frame of frames) {
+        await setKeyboard(page, frame);
+        const box = await measure(page);
+        expectFieldAndSendFit(box, frame, `${frame}px: `);
+        if (frame >= 200 && box.fieldHeight > 42) {
+          expect(box.messagesHeight, `a short row at ${frame}px`).toBeGreaterThanOrEqual(39);
+        }
+        if (frame >= 250) {
+          expect(box.fieldHeight, `two lines at ${frame}px`).toBeGreaterThanOrEqual(62);
+        }
+        expect(box.fieldHeight, `field at ${frame}px`).toBeGreaterThanOrEqual(previous - 1);
+        previous = box.fieldHeight;
+      }
+    });
+
+    test('no targets clipped at 300px with reply bar, error, attachments, and visibility line', async ({
+      page,
+    }) => {
+      await openThread(page);
+      await applyChrome(page, 'reply+error+attachment');
+      await expect(page.locator('scion-chat-composer .attachment-visibility')).toHaveCount(1);
+      await typeLongDraft(page, 300);
+      const result = await page.evaluate((frame) => {
+        const find = (root: ParentNode, sel: string): Element | null => {
+          const hit = root.querySelector(sel);
+          if (hit) return hit;
+          for (const el of root.querySelectorAll('*')) {
+            const nested = el.shadowRoot ? find(el.shadowRoot, sel) : null;
+            if (nested) return nested;
+          }
+          return null;
+        };
+        const thread = find(document, 'scion-chat-thread')!.shadowRoot!;
+        const composer = thread.querySelector('scion-chat-composer')!.shadowRoot!;
+        const context = composer.querySelector('.composer-context')!.getBoundingClientRect();
+        const targets = [
+          ...composer.querySelectorAll(
+            '.input-row sl-icon-button, .send-btn, sl-textarea, .reply-bar sl-icon-button, .edit-bar sl-icon-button, .remove-btn, .destination-chip'
+          ),
+        ];
+        let skipped = 0;
+        let hidden = 0;
+        for (const el of targets) {
+          if (getComputedStyle(el).visibility === 'hidden') {
+            hidden++;
+            continue;
+          }
+          const r = el.getBoundingClientRect();
+          const y = r.top + r.height / 2;
+          const inContext = !!el.closest('.composer-context');
+          if ((inContext && (y < context.top || y > context.bottom)) || y > frame) {
+            skipped++;
+          }
+        }
+        return { checked: targets.length, skipped, hidden };
+      }, 300);
+      expect(result.checked).toBeGreaterThanOrEqual(5);
+      expect(result.skipped, 'targets clipped away').toBe(0);
+      expect(result.hidden, 'the destination chip is shown').toBe(0);
+    });
+  });
 });
 
 test('on desktop the reply cancel button keeps its own hit area', async ({ page }, testInfo) => {

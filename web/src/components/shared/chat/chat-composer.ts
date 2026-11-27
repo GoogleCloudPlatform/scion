@@ -869,10 +869,10 @@ export class ScionChatComposer extends LitElement {
     }
 
     .attachment-visibility {
+      flex: 1 0 100%;
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      padding: 0 0.25rem;
       font-size: var(--chat-fs-xs);
       color: var(--scion-text-muted);
     }
@@ -1102,6 +1102,11 @@ export class ScionChatComposer extends LitElement {
 
       .pending-file {
         flex: none;
+      }
+
+      .attachment-visibility {
+        flex: 0 0 auto;
+        white-space: nowrap;
       }
 
       /* A reply or edit bar's cancel button is a 44px square target with
@@ -1914,10 +1919,10 @@ export class ScionChatComposer extends LitElement {
             </div>
           `
         )}
+        ${isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
+          ? html`<div class="attachment-visibility">${this.attachmentVisibilityText()}</div>`
+          : nothing}
       </div>
-      ${isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
-        ? html`<div class="attachment-visibility">${this.attachmentVisibilityText()}</div>`
-        : nothing}
     `;
   }
 
