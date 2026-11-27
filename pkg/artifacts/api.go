@@ -118,14 +118,24 @@ type ArtifactResponse struct {
 	// agents and non-agent owners.
 	ReviewDelivery *ReviewDeliveryInfo `json:"reviewDelivery,omitempty"`
 	// ReviewState, on a GET of the artifact or of one of its versions while
-	// hub.artifacts_review_requests is enabled, reports the caller's review
-	// request state (ptone/scion#9296). Omitted while the experiment is off.
+	// hub.artifacts_review_requests or hub.artifacts_review_drafts is enabled,
+	// reports the caller's review request and draft state (ptone/scion#9296).
+	// Omitted while both experiments are off.
 	ReviewState *ReviewStateInfo `json:"reviewState,omitempty"`
+}
+
+// ReviewDraftSummary describes the caller's saved review draft on an artifact
+// without exposing its body or note.
+type ReviewDraftSummary struct {
+	Base    int       `json:"base"`
+	SavedAt time.Time `json:"savedAt"`
 }
 
 // ReviewStateInfo carries viewer-specific review state on ArtifactResponse.
 type ReviewStateInfo struct {
-	RequestedOfMe *ReviewRequestInfo `json:"requestedOfMe"`
+	RequestedOfMe    *ReviewRequestInfo  `json:"requestedOfMe"`
+	MyDraft          *ReviewDraftSummary `json:"myDraft,omitempty"`
+	DraftsInProgress int                 `json:"draftsInProgress,omitempty"`
 }
 
 // ReviewRequestPrincipal identifies a reviewer or requester in API responses.

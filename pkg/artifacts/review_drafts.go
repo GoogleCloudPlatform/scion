@@ -28,12 +28,17 @@ import (
 	"unicode/utf8"
 )
 
-// Durable review drafts (ptone/scion#7116, ptone/scion#8470). Each reviewer
-// principal may hold at most one saved draft per artifact, addressed strictly
-// by (artifact, caller principal) with optimistic integer revisions and no
-// administrator, steward, owner or publisher override. Draft writes skip
-// checkReview so in-progress work (including zero marks or edits outside
-// marks) is never stranded, and draft writes never notify the artifact owner.
+// Durable review drafts (ptone/scion#7116, ptone/scion#8470, ptone/scion#9309).
+// Each reviewer principal may hold at most one saved draft per artifact,
+// addressed strictly by (artifact, caller principal) with optimistic integer
+// revisions and no administrator, steward, owner or publisher override. Draft
+// content (body, note, marks, carried text, and base) is never revealed to
+// anyone other than its author. Under [D: draft-author-visibility] = (b),
+// publishers see only whether requested reviewers with an open review request
+// have a draft in progress (reviewState.draftsInProgress); unsolicited drafters
+// remain completely invisible. Draft writes skip checkReview so in-progress
+// work (including zero marks or edits outside marks) is never stranded, and
+// draft writes never notify the artifact owner.
 
 // FeatureReviewDrafts is the server-side experiment that gates the
 // review-draft routes. It equals experiments.ArtifactsReviewDrafts.
@@ -125,14 +130,30 @@ type carriedDraftInput struct {
 }
 
 // ReapReviewDrafts runs one TTL reap pass (Store.ReapReviewDrafts at
-// now - DraftTTL) and writes a count-only summary entry to the artifact
-// decision log when any drafts were removed or an error occurred. It runs
-// whether or not FeatureReviewDrafts is enabled.
-func ReapReviewDrafts(ctx context.Context, st Store, now time.Time, limit int, log *slog.Logger) (int, error) {
+// now - DraftTTL), notifies each distinct user principal whose draft was
+// reaped when notifier is non-nil and has inbox hints active, and writes a
+// count-only summary entry to the artifact decision log when any drafts were
+// removed or an error occurred. It runs whether or not FeatureReviewDrafts is
+// enabled.
+func ReapReviewDrafts(ctx context.Context, st Store, notifier InboxNotifier, now time.Time, limit int, log *slog.Logger) (int, error) {
 	if log == nil {
 		log = discardLogger
 	}
-	reaped, err := st.ReapReviewDrafts(ctx, now.Add(-DraftTTL), limit)
+	keys, err := st.ReapReviewDrafts(ctx, now.Add(-DraftTTL), limit)
+	reaped := len(keys)
+	if reaped > 0 && notifier != nil && notifier.InboxHintsActive(ctx) {
+		seen := make(map[string]struct{}, reaped)
+		for _, k := range keys {
+			if k.PrincipalKind != PrincipalKindUser || k.PrincipalRef == "" {
+				continue
+			}
+			if _, ok := seen[k.PrincipalRef]; ok {
+				continue
+			}
+			seen[k.PrincipalRef] = struct{}{}
+			notifier.InboxChanged(ctx, k.PrincipalRef)
+		}
+	}
 	if reaped > 0 || err != nil {
 		outcome, level := logOutcomeAllowed, slog.LevelInfo
 		attrs := make([]slog.Attr, 0, 7)
@@ -190,7 +211,7 @@ type DraftAccessReapResult struct {
 // When any drafts were deleted or any error occurred, it writes one
 // count-only summary entry to the artifact decision log (never logging draft
 // bodies, notes or principal details).
-func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAuthority, now time.Time, pageSize int, log *slog.Logger) (DraftAccessReapResult, error) {
+func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAuthority, notifier InboxNotifier, now time.Time, pageSize int, log *slog.Logger) (DraftAccessReapResult, error) {
 	var res DraftAccessReapResult
 	if st == nil || auth == nil {
 		return res, nil
@@ -213,6 +234,17 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 		err     error
 	}
 	principals := make(map[string]resolvedPrincipal)
+
+	var hintedUsers map[string]struct{}
+	recordDeleted := func(k ReviewDraftKey) {
+		res.Deleted++
+		if k.PrincipalKind == PrincipalKindUser && k.PrincipalRef != "" {
+			if hintedUsers == nil {
+				hintedUsers = make(map[string]struct{})
+			}
+			hintedUsers[k.PrincipalRef] = struct{}{}
+		}
+	}
 
 	var (
 		after        *ReviewDraftKey
@@ -282,7 +314,7 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 					continue
 				}
 				if deleted {
-					res.Deleted++
+					recordDeleted(k)
 				}
 				continue
 			}
@@ -323,7 +355,7 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 				continue
 			}
 			if deleted {
-				res.Deleted++
+				recordDeleted(k)
 			}
 		}
 		if ctx.Err() != nil {
@@ -334,6 +366,12 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 		}
 		last := page[len(page)-1]
 		after = &last
+	}
+
+	if len(hintedUsers) > 0 && notifier != nil && notifier.InboxHintsActive(ctx) {
+		for uid := range hintedUsers {
+			notifier.InboxChanged(ctx, uid)
+		}
 	}
 
 	if res.Deleted > 0 || firstErr != nil {
@@ -475,6 +513,9 @@ func (s *Service) handleDeleteReviewDraft(w http.ResponseWriter, r *http.Request
 	}
 	if deleted {
 		s.logVersion(r, logActionReviewDraftDeleted, a, 0, access)
+		if kind == PrincipalKindUser {
+			s.notifyInboxChanged(ctx, ref)
+		}
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.WriteHeader(http.StatusNoContent)
@@ -528,7 +569,7 @@ func (s *Service) handlePutReviewDraft(w http.ResponseWriter, r *http.Request, b
 		carriedBody = &cs
 	}
 
-	stored, err := b.store.PutReviewDraft(ctx, ReviewDraft{
+	stored, created, err := b.store.PutReviewDraft(ctx, ReviewDraft{
 		ArtifactID:     a.ID,
 		PrincipalKind:  kind,
 		PrincipalRef:   ref,
@@ -553,6 +594,9 @@ func (s *Service) handlePutReviewDraft(w http.ResponseWriter, r *http.Request, b
 		slog.ErrorContext(ctx, "artifacts: save review draft failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not save the review draft")
 		return
+	}
+	if created && kind == PrincipalKindUser {
+		s.notifyInboxChanged(ctx, ref)
 	}
 	writeJSON(w, http.StatusOK, PutReviewDraftResponse{
 		Rev:        stored.Rev,

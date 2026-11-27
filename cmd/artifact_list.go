@@ -35,6 +35,7 @@ var (
 	artifactListShared        bool
 	artifactListReviewPending bool
 	artifactListRequested     bool
+	artifactListDrafts        bool
 	artifactListQuery         string
 	artifactListLimit         int
 	artifactListAll           bool
@@ -69,6 +70,7 @@ Examples:
 				Query:         artifactListQuery,
 				ReviewPending: artifactListReviewPending,
 				Requested:     artifactListRequested,
+				Drafts:        artifactListDrafts,
 				OwnedOnly:     artifactListMine,
 				Limit:         artifactListLimit,
 				Scope:         artifactListProject,
@@ -87,6 +89,7 @@ func init() {
 	artifactListCmd.Flags().BoolVar(&artifactListShared, "shared", false, "Only artifacts shared with you (with --project-id, shared with that project) from elsewhere")
 	artifactListCmd.Flags().BoolVar(&artifactListReviewPending, "review-pending", false, "Only artifacts whose current version is a review")
 	artifactListCmd.Flags().BoolVar(&artifactListRequested, "requested", false, "Only artifacts where your review has been requested")
+	artifactListCmd.Flags().BoolVar(&artifactListDrafts, "drafts", false, "Only artifacts where you have a saved review draft")
 	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Filter query (e.g. is:review project:my-proj) or plain title/key text")
 	artifactListCmd.Flags().IntVar(&artifactListLimit, "limit", 0, "Page size (default: the hub's)")
 	artifactListCmd.Flags().BoolVar(&artifactListAll, "all", false, "Follow every page instead of printing one")
@@ -156,6 +159,9 @@ func listArtifacts(ctx context.Context, svc hubclient.ArtifactService, out io.Wr
 		}
 		if a.ReviewRequested {
 			access += ", review requested"
+		}
+		if a.ReviewInDraft {
+			access += ", review in draft"
 		}
 		_, _ = fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\n", safeText(artifacts.FormatRef(a.ID, 0)), safeText(a.Title), a.CurrentSeq, access,
 			clitime.Format(a.UpdatedAt, clitime.Minute))

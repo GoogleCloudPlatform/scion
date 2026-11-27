@@ -148,15 +148,15 @@ const reviewDraftLockClass int32 = 0x61727264 // "arrd"
 var reviewDraftPutHook func(ctx context.Context)
 
 // PutReviewDraft implements Store.
-func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev int, now time.Time, maxPerPrincipal int) (ReviewDraft, error) {
+func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev int, now time.Time, maxPerPrincipal int) (ReviewDraft, bool, error) {
 	if d.ArtifactID == "" || d.PrincipalKind == "" || d.PrincipalRef == "" || d.EntryPath == "" {
-		return ReviewDraft{}, errors.New("artifacts: PutReviewDraft needs an artifact, a principal and an entry path")
+		return ReviewDraft{}, false, errors.New("artifacts: PutReviewDraft needs an artifact, a principal and an entry path")
 	}
 	if expectRev < 0 {
-		return ReviewDraft{}, errors.New("artifacts: PutReviewDraft expectRev must be non-negative")
+		return ReviewDraft{}, false, errors.New("artifacts: PutReviewDraft expectRev must be non-negative")
 	}
 	if (d.CarriedBaseSeq == nil) != (d.CarriedBody == nil) {
-		return ReviewDraft{}, errors.New("artifacts: PutReviewDraft carried base and body must both be set or both nil")
+		return ReviewDraft{}, false, errors.New("artifacts: PutReviewDraft carried base and body must both be set or both nil")
 	}
 
 	at := now.UTC().Truncate(time.Microsecond)
@@ -173,7 +173,7 @@ func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev 
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return ReviewDraft{}, fmt.Errorf("artifacts: begin review draft write: %w", err)
+		return ReviewDraft{}, false, fmt.Errorf("artifacts: begin review draft write: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -181,7 +181,7 @@ func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev 
 		if s.dialect == dialectPostgres {
 			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`,
 				reviewDraftLockClass, PrincipalRef(d.PrincipalKind, d.PrincipalRef)); err != nil {
-				return ReviewDraft{}, fmt.Errorf("artifacts: lock review drafts: %w", err)
+				return ReviewDraft{}, false, fmt.Errorf("artifacts: lock review drafts: %w", err)
 			}
 		}
 		res, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_review_draft
@@ -192,14 +192,14 @@ func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev 
 			d.ArtifactID, d.PrincipalKind, d.PrincipalRef, d.BaseSeq, d.EntryPath, d.Body, d.Note,
 			carriedBase, carriedBody, s.timeArg(at), s.timeArg(at), s.nullTimeArg(clientSaved))
 		if err != nil {
-			return ReviewDraft{}, fmt.Errorf("artifacts: insert review draft: %w", err)
+			return ReviewDraft{}, false, fmt.Errorf("artifacts: insert review draft: %w", err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return ReviewDraft{}, fmt.Errorf("artifacts: insert review draft: %w", err)
+			return ReviewDraft{}, false, fmt.Errorf("artifacts: insert review draft: %w", err)
 		}
 		if n == 0 {
-			return ReviewDraft{}, s.readDraftConflict(ctx, tx, d.ArtifactID, d.PrincipalKind, d.PrincipalRef)
+			return ReviewDraft{}, false, s.readDraftConflict(ctx, tx, d.ArtifactID, d.PrincipalKind, d.PrincipalRef)
 		}
 		if hook := reviewDraftPutHook; hook != nil {
 			hook(ctx)
@@ -208,20 +208,20 @@ func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev 
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_review_draft
 			WHERE principal_kind = ? AND principal_ref = ?`),
 			d.PrincipalKind, d.PrincipalRef).Scan(&count); err != nil {
-			return ReviewDraft{}, fmt.Errorf("artifacts: count review drafts: %w", err)
+			return ReviewDraft{}, false, fmt.Errorf("artifacts: count review drafts: %w", err)
 		}
 		if count > maxPerPrincipal {
-			return ReviewDraft{}, ErrTooManyDrafts
+			return ReviewDraft{}, false, ErrTooManyDrafts
 		}
 		if err := tx.Commit(); err != nil {
-			return ReviewDraft{}, fmt.Errorf("artifacts: commit review draft: %w", err)
+			return ReviewDraft{}, false, fmt.Errorf("artifacts: commit review draft: %w", err)
 		}
 		out := d
 		out.Rev = 1
 		out.CreatedAt = at
 		out.UpdatedAt = at
 		out.ClientSavedAt = clientSaved
-		return out, nil
+		return out, true, nil
 	}
 
 	nextRev := expectRev + 1
@@ -240,30 +240,30 @@ func (s *sqlStore) PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev 
 		s.timeArg(at), s.nullTimeArg(clientSaved),
 		d.ArtifactID, d.PrincipalKind, d.PrincipalRef, expectRev)
 	if err != nil {
-		return ReviewDraft{}, fmt.Errorf("artifacts: update review draft: %w", err)
+		return ReviewDraft{}, false, fmt.Errorf("artifacts: update review draft: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return ReviewDraft{}, fmt.Errorf("artifacts: update review draft: %w", err)
+		return ReviewDraft{}, false, fmt.Errorf("artifacts: update review draft: %w", err)
 	}
 	if n == 0 {
-		return ReviewDraft{}, s.readDraftConflict(ctx, tx, d.ArtifactID, d.PrincipalKind, d.PrincipalRef)
+		return ReviewDraft{}, false, s.readDraftConflict(ctx, tx, d.ArtifactID, d.PrincipalKind, d.PrincipalRef)
 	}
 	var created dbTime
 	if err := tx.QueryRowContext(ctx, s.rebind(`SELECT created_at FROM artifact_review_draft
 		WHERE artifact_id = ? AND principal_kind = ? AND principal_ref = ?`),
 		d.ArtifactID, d.PrincipalKind, d.PrincipalRef).Scan(&created); err != nil {
-		return ReviewDraft{}, fmt.Errorf("artifacts: read review draft created_at: %w", err)
+		return ReviewDraft{}, false, fmt.Errorf("artifacts: read review draft created_at: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return ReviewDraft{}, fmt.Errorf("artifacts: commit review draft: %w", err)
+		return ReviewDraft{}, false, fmt.Errorf("artifacts: commit review draft: %w", err)
 	}
 	out := d
 	out.Rev = nextRev
 	out.CreatedAt = created.Time
 	out.UpdatedAt = at
 	out.ClientSavedAt = clientSaved
-	return out, nil
+	return out, false, nil
 }
 
 func (s *sqlStore) readDraftConflict(ctx context.Context, tx *sql.Tx, artifactID, kind, ref string) error {
@@ -315,6 +315,42 @@ func (s *sqlStore) GetReviewDraft(ctx context.Context, artifactID, kind, ref str
 	d.UpdatedAt = updated.Time
 	d.ClientSavedAt = clientT.ptr()
 	return d, nil
+}
+
+// GetReviewDraftSummary implements Store.
+func (s *sqlStore) GetReviewDraftSummary(ctx context.Context, artifactID, kind, ref string) (*ReviewDraftSummary, error) {
+	var (
+		base    int
+		savedAt dbTime
+	)
+	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT base_seq, updated_at
+		FROM artifact_review_draft
+		WHERE artifact_id = ? AND principal_kind = ? AND principal_ref = ?`),
+		artifactID, kind, ref).Scan(&base, &savedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: get review draft summary: %w", err)
+	}
+	return &ReviewDraftSummary{Base: base, SavedAt: savedAt.Time}, nil
+}
+
+// CountOpenRequestReviewDrafts implements Store.
+func (s *sqlStore) CountOpenRequestReviewDrafts(ctx context.Context, artifactID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*)
+		FROM artifact_review_draft d
+		INNER JOIN artifact_review_request r
+			ON r.artifact_id = d.artifact_id
+			AND r.reviewer_kind = d.principal_kind
+			AND r.reviewer_ref = d.principal_ref
+		WHERE d.artifact_id = ? AND r.state = ?`),
+		artifactID, ReviewRequestStateOpen).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("artifacts: count open-request review drafts: %w", err)
+	}
+	return count, nil
 }
 
 // DeleteReviewDraft implements Store.
@@ -391,24 +427,60 @@ func (s *sqlStore) DeleteReviewDraft(ctx context.Context, artifactID, kind, ref 
 }
 
 // ReapReviewDrafts implements Store.
-func (s *sqlStore) ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) (int, error) {
+func (s *sqlStore) ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) ([]ReviewDraftKey, error) {
 	if limit <= 0 {
-		return 0, nil
+		return nil, nil
 	}
-	// The subquery bounds one pass; both dialects accept a row-value IN.
-	res, err := s.db.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_draft
-		WHERE (artifact_id, principal_kind, principal_ref) IN (
-			SELECT artifact_id, principal_kind, principal_ref FROM artifact_review_draft
-			WHERE updated_at < ? ORDER BY updated_at LIMIT `+strconv.Itoa(limit)+`)`),
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: begin reap review drafts: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, s.rebind(`SELECT artifact_id, principal_kind, principal_ref
+		FROM artifact_review_draft
+		WHERE updated_at < ? ORDER BY updated_at LIMIT `+strconv.Itoa(limit)),
 		s.timeArg(cutoff))
 	if err != nil {
-		return 0, fmt.Errorf("artifacts: reap review drafts: %w", err)
+		return nil, fmt.Errorf("artifacts: reap review drafts: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("artifacts: reap review drafts: %w", err)
+	var keys []ReviewDraftKey
+	for rows.Next() {
+		var k ReviewDraftKey
+		if err := rows.Scan(&k.ArtifactID, &k.PrincipalKind, &k.PrincipalRef); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("artifacts: scan expired review draft: %w", err)
+		}
+		keys = append(keys, k)
 	}
-	return int(n), nil
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("artifacts: reap review drafts: %w", err)
+	}
+	_ = rows.Close()
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	var deleted []ReviewDraftKey
+	for _, k := range keys {
+		res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_draft
+			WHERE artifact_id = ? AND principal_kind = ? AND principal_ref = ? AND updated_at < ?`),
+			k.ArtifactID, k.PrincipalKind, k.PrincipalRef, s.timeArg(cutoff))
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: reap review drafts: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: reap review drafts: %w", err)
+		}
+		if n > 0 {
+			deleted = append(deleted, k)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("artifacts: commit reap review drafts: %w", err)
+	}
+	return deleted, nil
 }
 
 // ListReviewDraftKeys implements Store.

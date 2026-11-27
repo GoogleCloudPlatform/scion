@@ -135,15 +135,24 @@ export interface ArtifactResponse {
   reviewDelivery?: ReviewDeliveryInfo;
   /**
    * On a GET of the artifact or one of its versions while
-   * hub.artifacts_review_requests is enabled (ptone/scion#9296): viewer-specific
-   * review request state. Omitted while the experiment is off.
+   * hub.artifacts_review_requests or hub.artifacts_review_drafts is enabled
+   * (ptone/scion#9296): viewer-specific review request and draft state.
+   * Omitted while both experiments are off.
    */
   reviewState?: ReviewStateInfo;
+}
+
+/** Summary of the caller's saved review draft on an artifact (no body or note). */
+export interface ReviewDraftSummary {
+  base: number;
+  savedAt: string;
 }
 
 /** Viewer-specific review state on ArtifactResponse (pkg/artifacts/api.go). */
 export interface ReviewStateInfo {
   requestedOfMe: ReviewRequestInfo | null;
+  myDraft?: ReviewDraftSummary | null;
+  draftsInProgress?: number;
 }
 
 /** A reviewer or requester principal in review-request responses. */
@@ -1356,6 +1365,8 @@ export interface ArtifactListItem extends Artifact {
   reviewPending: boolean;
   /** The caller has an open review request on this artifact (when gate is on). */
   reviewRequested?: boolean;
+  /** The caller has a saved review draft on this artifact (when drafts gate is on). */
+  reviewInDraft?: boolean;
   /** Why the caller sees the artifact. */
   access?: ArtifactAccess;
   /** In a list narrowed to a project: homed elsewhere and shared with it. */

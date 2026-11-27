@@ -1983,6 +1983,34 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.data?.reviewState?.requestedOfMe ?? null;
   }
 
+  /** Whether the signed-in viewer has a saved review draft on this artifact. */
+  private get hasMyDraft(): boolean {
+    if (!this.reviewDraftsEnabled) return false;
+    return this.savedDraft !== null || (this.data?.reviewState?.myDraft ?? null) !== null;
+  }
+
+  /**
+   * Number of open-request reviewers who currently hold a saved draft on this
+   * artifact (publishers only, per [D: draft-author-visibility] = (b)).
+   */
+  private get draftsInProgressCount(): number {
+    if (!this.reviewDraftsEnabled || !this.canPublish) return 0;
+    return this.data?.reviewState?.draftsInProgress ?? 0;
+  }
+
+  private clearMyDraftState(): void {
+    this.savedDraft = null;
+    if (this.data?.reviewState?.myDraft) {
+      this.data = {
+        ...this.data,
+        reviewState: {
+          ...this.data.reviewState,
+          myDraft: null,
+        },
+      };
+    }
+  }
+
   /** Whether the viewer may open the Request review dialog on this artifact. */
   private get canRequestReview(): boolean {
     return (
@@ -2760,7 +2788,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.draftDiscardError = null;
     try {
       await deleteReviewDraft(this.artifactId, { rev: target.rev });
-      this.savedDraft = null;
+      this.clearMyDraftState();
       this.closeDiscardDraftDialog();
     } catch (err) {
       if (err instanceof DraftConflictError) {
@@ -2890,7 +2918,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.staleDraftError = null;
     try {
       await deleteReviewDraft(this.artifactId, { rev: stale.draft.rev });
-      this.savedDraft = null;
+      this.clearMyDraftState();
       this.staleDraft = null;
       if (
         !this.showsCurrent ||
@@ -3328,6 +3356,18 @@ export class ScionPageArtifactDetail extends LitElement {
         ${this.requestedOfMe
           ? html`<sl-badge class="review-requested-badge" variant="primary" pill>
               <sl-icon name="person-check"></sl-icon>&nbsp;Review requested
+            </sl-badge>`
+          : nothing}
+        ${this.hasMyDraft
+          ? html`<sl-badge class="review-in-draft-badge" variant="neutral" pill>
+              <sl-icon name="pencil"></sl-icon>&nbsp;Review in draft
+            </sl-badge>`
+          : nothing}
+        ${this.draftsInProgressCount > 0
+          ? html`<sl-badge class="drafts-in-progress-badge" variant="neutral" pill>
+              <sl-icon name="pencil-square"></sl-icon>&nbsp;${this.draftsInProgressCount === 1
+                ? '1 review in draft'
+                : `${this.draftsInProgressCount} reviews in draft`}
             </sl-badge>`
           : nothing}
         ${a.ownerDeleted ? ownerDeletedBadge(a.ownerKind) : nothing}

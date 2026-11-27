@@ -65,7 +65,7 @@ func TestReviewDraftStorePutGetDelete(t *testing.T) {
 
 		// Conditional update when no row exists returns conflict with Rev=0.
 		t0 := time.Date(2026, 11, 19, 10, 0, 0, 123456000, time.UTC)
-		_, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "v1", ""), 1, t0, 200)
+		_, _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "v1", ""), 1, t0, 200)
 		var ce *DraftConflictError
 		if !errors.Is(err, ErrDraftConflict) || !errors.As(err, &ce) || ce.Rev != 0 || ce.BaseSeq != 0 || !ce.SavedAt.IsZero() {
 			t.Fatalf("PutReviewDraft(expectRev=1) on empty = %v (%+v), want ErrDraftConflict with Rev=0", err, ce)
@@ -77,12 +77,12 @@ func TestReviewDraftStorePutGetDelete(t *testing.T) {
 		clientTime := time.Date(2026, 11, 19, 9, 59, 58, 500000000, time.UTC)
 		in := testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", rawBody, "")
 		in.ClientSavedAt = &clientTime
-		d1, err := st.PutReviewDraft(ctx, in, 0, t0, 200)
+		d1, created1, err := st.PutReviewDraft(ctx, in, 0, t0, 200)
 		if err != nil {
 			t.Fatalf("first PutReviewDraft: %v", err)
 		}
-		if d1.Rev != 1 || d1.Body != rawBody || d1.Note != "" || !d1.CreatedAt.Equal(t0) || !d1.UpdatedAt.Equal(t0) {
-			t.Fatalf("inserted draft = %+v", d1)
+		if !created1 || d1.Rev != 1 || d1.Body != rawBody || d1.Note != "" || !d1.CreatedAt.Equal(t0) || !d1.UpdatedAt.Equal(t0) {
+			t.Fatalf("inserted draft = %+v, created=%v", d1, created1)
 		}
 		if d1.ClientSavedAt == nil || !d1.ClientSavedAt.Equal(clientTime) || d1.CarriedBaseSeq != nil || d1.CarriedBody != nil {
 			t.Fatalf("inserted draft optional fields = %+v", d1)
@@ -97,7 +97,7 @@ func TestReviewDraftStorePutGetDelete(t *testing.T) {
 		}
 
 		// Second insert (expectRev=0) conflicts with Rev=1 and carries no body.
-		_, err = st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "overwrite", "n"), 0, t0.Add(time.Second), 200)
+		_, _, err = st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "overwrite", "n"), 0, t0.Add(time.Second), 200)
 		ce = nil
 		if !errors.Is(err, ErrDraftConflict) || !errors.As(err, &ce) || ce.Rev != 1 || !ce.SavedAt.Equal(t0) || ce.BaseSeq != 1 {
 			t.Fatalf("duplicate insert = %v (%+v), want conflict Rev=1", err, ce)
@@ -111,19 +111,19 @@ func TestReviewDraftStorePutGetDelete(t *testing.T) {
 		upd := testDraft(a, PrincipalKindUser, "u1", 2, "doc.md", "fresh v2 {++add++}", "summary note")
 		upd.CarriedBaseSeq = &cBase
 		upd.CarriedBody = &cBody
-		d2, err := st.PutReviewDraft(ctx, upd, 1, t1, 200)
+		d2, created2, err := st.PutReviewDraft(ctx, upd, 1, t1, 200)
 		if err != nil {
 			t.Fatalf("update PutReviewDraft: %v", err)
 		}
-		if d2.Rev != 2 || !d2.CreatedAt.Equal(t0) || !d2.UpdatedAt.Equal(t1) || d2.Note != "summary note" {
-			t.Fatalf("updated draft = %+v", d2)
+		if created2 || d2.Rev != 2 || !d2.CreatedAt.Equal(t0) || !d2.UpdatedAt.Equal(t1) || d2.Note != "summary note" {
+			t.Fatalf("updated draft = %+v, created=%v", d2, created2)
 		}
 		if d2.CarriedBaseSeq == nil || *d2.CarriedBaseSeq != 1 || d2.CarriedBody == nil || *d2.CarriedBody != cBody {
 			t.Fatalf("carried fields = %v, %v", d2.CarriedBaseSeq, d2.CarriedBody)
 		}
 
 		// Stale update (expectRev=1 when stored is 2) conflicts and leaves rev 2 intact.
-		_, err = st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 2, "doc.md", "stale", ""), 1, t1.Add(time.Second), 200)
+		_, _, err = st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 2, "doc.md", "stale", ""), 1, t1.Add(time.Second), 200)
 		ce = nil
 		if !errors.Is(err, ErrDraftConflict) || !errors.As(err, &ce) || ce.Rev != 2 || !ce.SavedAt.Equal(t1) || ce.BaseSeq != 2 {
 			t.Fatalf("stale update = %v (%+v), want conflict Rev=2", err, ce)
@@ -131,12 +131,12 @@ func TestReviewDraftStorePutGetDelete(t *testing.T) {
 
 		// Clearing carried text on next update sets both carried columns back to nil.
 		t2 := t1.Add(time.Minute)
-		d3, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 2, "doc.md", "dismissed carried", "n2"), 2, t2, 200)
+		d3, created3, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 2, "doc.md", "dismissed carried", "n2"), 2, t2, 200)
 		if err != nil {
 			t.Fatalf("clear carried PutReviewDraft: %v", err)
 		}
-		if d3.Rev != 3 || d3.CarriedBaseSeq != nil || d3.CarriedBody != nil {
-			t.Fatalf("cleared carried = %+v", d3)
+		if created3 || d3.Rev != 3 || d3.CarriedBaseSeq != nil || d3.CarriedBody != nil {
+			t.Fatalf("cleared carried = %+v, created=%v", d3, created3)
 		}
 
 		// Conditional DELETE with wrong rev conflicts and keeps the row.
@@ -178,7 +178,7 @@ func TestReviewDraftStorePrincipalScopedKey(t *testing.T) {
 			{PrincipalKindUser, "u2", "user-2 draft"},
 			{PrincipalKindAgent, "u1", "agent-u1 draft"},
 		} {
-			d, err := st.PutReviewDraft(ctx, testDraft(a, tc.kind, tc.ref, 1, "doc.md", tc.body, ""), 0, now, 200)
+			d, _, err := st.PutReviewDraft(ctx, testDraft(a, tc.kind, tc.ref, 1, "doc.md", tc.body, ""), 0, now, 200)
 			if err != nil || d.Rev != 1 {
 				t.Fatalf("put %s:%s = %+v, %v", tc.kind, tc.ref, d, err)
 			}
@@ -213,23 +213,23 @@ func TestReviewDraftStoreCap(t *testing.T) {
 			arts = append(arts, a)
 		}
 		for i := 0; i < limit; i++ {
-			if _, err := st.PutReviewDraft(ctx, testDraft(arts[i], PrincipalKindUser, "u1", 1, "doc.md", "b", ""), 0, now, limit); err != nil {
+			if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[i], PrincipalKindUser, "u1", 1, "doc.md", "b", ""), 0, now, limit); err != nil {
 				t.Fatalf("draft %d: %v", i+1, err)
 			}
 		}
 		// One past the cap is refused and leaves nothing behind.
-		if _, err := st.PutReviewDraft(ctx, testDraft(arts[limit], PrincipalKindUser, "u1", 1, "doc.md", "over", ""), 0, now, limit); !errors.Is(err, ErrTooManyDrafts) {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[limit], PrincipalKindUser, "u1", 1, "doc.md", "over", ""), 0, now, limit); !errors.Is(err, ErrTooManyDrafts) {
 			t.Fatalf("past cap = %v, want ErrTooManyDrafts", err)
 		}
 		if _, err := st.GetReviewDraft(ctx, arts[limit].ID, PrincipalKindUser, "u1"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("refused insert persisted: %v", err)
 		}
 		// Updating an existing draft at the cap succeeds without changing count.
-		if upd, err := st.PutReviewDraft(ctx, testDraft(arts[0], PrincipalKindUser, "u1", 1, "doc.md", "updated", ""), 1, now.Add(time.Second), limit); err != nil || upd.Rev != 2 {
+		if upd, _, err := st.PutReviewDraft(ctx, testDraft(arts[0], PrincipalKindUser, "u1", 1, "doc.md", "updated", ""), 1, now.Add(time.Second), limit); err != nil || upd.Rev != 2 {
 			t.Fatalf("update at cap = %+v, %v", upd, err)
 		}
 		// Another principal has its own cap.
-		if _, err := st.PutReviewDraft(ctx, testDraft(arts[limit], PrincipalKindUser, "u2", 1, "doc.md", "ok", ""), 0, now, limit); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[limit], PrincipalKindUser, "u2", 1, "doc.md", "ok", ""), 0, now, limit); err != nil {
 			t.Fatalf("other principal at u1's cap: %v", err)
 		}
 	})
@@ -247,7 +247,7 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		now := time.Now().UTC()
 		for i := 0; i < limit-1; i++ {
 			a, _, _, _ := seedArtifact(t, st, "")
-			if _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "seed", ""), 0, now, limit); err != nil {
+			if _, _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "seed", ""), 0, now, limit); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -265,11 +265,12 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		t.Cleanup(func() { reviewDraftPutHook = nil })
 
 		errs := make([]error, 2)
+		created := make([]bool, 2)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, errs[0] = st.PutReviewDraft(
+			_, created[0], errs[0] = st.PutReviewDraft(
 				context.WithValue(ctx, heldKey{}, true),
 				testDraft(raceA, PrincipalKindUser, "u1", 1, "doc.md", "race-a", ""),
 				0, now.Add(time.Millisecond), limit,
@@ -278,7 +279,7 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		<-reached
 		go func() {
 			defer wg.Done()
-			_, errs[1] = st.PutReviewDraft(
+			_, created[1], errs[1] = st.PutReviewDraft(
 				ctx,
 				testDraft(raceB, PrincipalKindUser, "u1", 1, "doc.md", "race-b", ""),
 				0, now.Add(2*time.Millisecond), limit,
@@ -289,19 +290,28 @@ func TestReviewDraftStoreCapConcurrent(t *testing.T) {
 		close(release)
 		wg.Wait()
 
-		ok, refused := 0, 0
-		for _, err := range errs {
+		ok, refused, createdCount := 0, 0, 0
+		for i, err := range errs {
 			switch {
 			case err == nil:
 				ok++
+				if !created[i] {
+					t.Errorf("successful concurrent insert %d reported created=false, want true", i)
+				}
 			case errors.Is(err, ErrTooManyDrafts):
 				refused++
+				if created[i] {
+					t.Errorf("refused concurrent insert %d reported created=true, want false", i)
+				}
 			default:
 				t.Errorf("unexpected error: %v", err)
 			}
+			if created[i] {
+				createdCount++
+			}
 		}
-		if ok != 1 || refused != 1 {
-			t.Errorf("concurrent inserts at cap-1: %d recorded, %d refused; want 1 and 1 (%v)", ok, refused, errs)
+		if ok != 1 || refused != 1 || createdCount != 1 {
+			t.Errorf("concurrent inserts at cap-1: %d recorded, %d refused, %d created; want 1, 1, 1 (%v)", ok, refused, createdCount, errs)
 		}
 		var total int
 		q := st.(*sqlStore).rebind(`SELECT COUNT(*) FROM artifact_review_draft WHERE principal_kind = ? AND principal_ref = ?`)
@@ -327,31 +337,31 @@ func TestReviewDraftStoreReap(t *testing.T) {
 			arts = append(arts, a)
 		}
 		for i, age := range []time.Duration{45 * 24 * time.Hour, 35 * 24 * time.Hour, 31 * 24 * time.Hour} {
-			if _, err := st.PutReviewDraft(ctx, testDraft(arts[i], PrincipalKindUser, "u1", 1, "doc.md", "old", ""), 0, now.Add(-age), 200); err != nil {
+			if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[i], PrincipalKindUser, "u1", 1, "doc.md", "old", ""), 0, now.Add(-age), 200); err != nil {
 				t.Fatal(err)
 			}
 		}
 		// Created 40 days ago, updated 5 days ago -> must survive because TTL is
 		// measured from updated_at.
-		if _, err := st.PutReviewDraft(ctx, testDraft(arts[3], PrincipalKindUser, "u1", 1, "doc.md", "created-old", ""), 0, now.Add(-40*24*time.Hour), 200); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[3], PrincipalKindUser, "u1", 1, "doc.md", "created-old", ""), 0, now.Add(-40*24*time.Hour), 200); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewDraft(ctx, testDraft(arts[3], PrincipalKindUser, "u1", 1, "doc.md", "saved-recently", ""), 1, now.Add(-5*24*time.Hour), 200); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[3], PrincipalKindUser, "u1", 1, "doc.md", "saved-recently", ""), 1, now.Add(-5*24*time.Hour), 200); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewDraft(ctx, testDraft(arts[4], PrincipalKindUser, "u1", 1, "doc.md", "fresh", ""), 0, now.Add(-10*time.Minute), 200); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(arts[4], PrincipalKindUser, "u1", 1, "doc.md", "fresh", ""), 0, now.Add(-10*time.Minute), 200); err != nil {
 			t.Fatal(err)
 		}
 
 		cutoff := now.Add(-30 * 24 * time.Hour)
-		if n, err := st.ReapReviewDrafts(ctx, cutoff, 2); err != nil || n != 2 {
-			t.Fatalf("first reap pass = %d, %v; want 2 (batch limit)", n, err)
+		if keys, err := st.ReapReviewDrafts(ctx, cutoff, 2); err != nil || len(keys) != 2 {
+			t.Fatalf("first reap pass = %d, %v; want 2 (batch limit)", len(keys), err)
 		}
-		if n, err := st.ReapReviewDrafts(ctx, cutoff, 10); err != nil || n != 1 {
-			t.Fatalf("second reap pass = %d, %v; want 1", n, err)
+		if keys, err := st.ReapReviewDrafts(ctx, cutoff, 10); err != nil || len(keys) != 1 {
+			t.Fatalf("second reap pass = %d, %v; want 1", len(keys), err)
 		}
-		if n, err := st.ReapReviewDrafts(ctx, cutoff, 0); err != nil || n != 0 {
-			t.Fatalf("zero-limit reap = %d, %v; want 0", n, err)
+		if keys, err := st.ReapReviewDrafts(ctx, cutoff, 0); err != nil || len(keys) != 0 {
+			t.Fatalf("zero-limit reap = %d, %v; want 0", len(keys), err)
 		}
 		for i := 0; i < 3; i++ {
 			if _, err := st.GetReviewDraft(ctx, arts[i].ID, PrincipalKindUser, "u1"); !errors.Is(err, ErrNotFound) {
@@ -375,14 +385,14 @@ func TestReviewDraftStoreDeletedWithArtifact(t *testing.T) {
 		now := time.Now().UTC()
 
 		for _, u := range []string{"u1", "u2"} {
-			if _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, u, 1, "doc.md", "secret-"+u, "note-"+u), 0, now, 200); err != nil {
+			if _, _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, u, 1, "doc.md", "secret-"+u, "note-"+u), 0, now, 200); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := st.PutReviewDraft(ctx, testDraft(expiring, PrincipalKindUser, "u1", 1, "doc.md", "expiring-draft", ""), 0, now, 200); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(expiring, PrincipalKindUser, "u1", 1, "doc.md", "expiring-draft", ""), 0, now, 200); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.PutReviewDraft(ctx, testDraft(other, PrincipalKindUser, "u1", 1, "doc.md", "keep", ""), 0, now, 200); err != nil {
+		if _, _, err := st.PutReviewDraft(ctx, testDraft(other, PrincipalKindUser, "u1", 1, "doc.md", "keep", ""), 0, now, 200); err != nil {
 			t.Fatal(err)
 		}
 
@@ -444,7 +454,7 @@ func TestMigration0015_ReviewDrafts(t *testing.T) {
 				t.Fatalf("Init over 0014: %v", err)
 			}
 			a, _, _, _ := seedArtifact(t, st, "")
-			d, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "migrated", "note"), 0, time.Now().UTC(), 200)
+			d, _, err := st.PutReviewDraft(ctx, testDraft(a, PrincipalKindUser, "u1", 1, "doc.md", "migrated", "note"), 0, time.Now().UTC(), 200)
 			if err != nil || d.Rev != 1 {
 				t.Fatalf("PutReviewDraft after migration = %+v, %v", d, err)
 			}
@@ -486,7 +496,7 @@ func TestReviewDraftStoreListKeys(t *testing.T) {
 			testDraft(a2, PrincipalKindAgent, "a2", 1, "doc.md", "b5", ""),
 		}
 		for _, d := range drafts {
-			if _, err := st.PutReviewDraft(ctx, d, 0, now, 200); err != nil {
+			if _, _, err := st.PutReviewDraft(ctx, d, 0, now, 200); err != nil {
 				t.Fatalf("PutReviewDraft(%s, %s:%s): %v", d.ArtifactID, d.PrincipalKind, d.PrincipalRef, err)
 			}
 		}
