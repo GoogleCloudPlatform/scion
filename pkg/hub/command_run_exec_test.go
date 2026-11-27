@@ -1008,21 +1008,86 @@ func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
 	require.NoError(t, json.Unmarshal(pendCardRec.Body.Bytes(), &pendCardResp))
 	assert.False(t, pendCardResp.OutputAvailable, "pending request must report outputAvailable=false")
 
-	// Non-approver conversation participant must see outputAvailable=false on a finished run.
-	require.NoError(t, f.store.AddConversationParticipant(ctx, reqShare.ConversationID, "user", bob.ID, "member"))
+	// Non-approver conversation participant must get 200 with outputAvailable=false on a finished run.
+	groupProjID := f.launched.ProjectID
+	groupConv := &store.Conversation{
+		ID:         api.NewUUID(),
+		ProjectID:  &groupProjID,
+		Kind:       "group",
+		Surface:    "native",
+		DriftState: "active",
+	}
+	require.NoError(t, f.store.CreateConversation(ctx, groupConv))
+	for _, p := range []*store.ConversationParticipant{
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "user", PrincipalID: f.owner.ID(), Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "user", PrincipalID: bob.ID, Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "agent", PrincipalID: f.asker.ID, Role: "member", JoinedAt: time.Now().UTC()},
+	} {
+		require.NoError(t, f.store.AddParticipant(ctx, p))
+	}
+	groupNorm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+		Key:      "group-out-avail",
+		Script:   "echo group-output",
+		TimeoutS: 30,
+	})
+	require.NoError(t, err)
+	groupPr, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+		Message: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.launched.ProjectID,
+			ConversationID: groupConv.ID,
+			Sender:         "agent:" + f.asker.Slug,
+			SenderID:       f.asker.ID,
+			Recipient:      "conv:" + groupConv.ID,
+			CreatedAt:      time.Now().UTC(),
+		},
+		AgentID:    f.asker.ID,
+		AgentName:  f.asker.Slug,
+		ApproverID: f.owner.ID(),
+		Request:    groupNorm,
+		Now:        time.Now().UTC(),
+		TTL:        msgaction.CommandRequestTTL,
+	})
+	require.NoError(t, err)
+	groupApp, err := f.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     groupPr.Request.ID,
+		CommandSHA256: groupPr.Request.CommandSHA256,
+		UserID:        f.owner.ID(),
+		Surface:       msgaction.CommandRequestSurfaceCLI,
+		ExecAgentID:   f.launched.ID,
+		ExecProjectID: f.launched.ProjectID,
+		LeaseUntil:    time.Now().UTC().Add(5 * time.Minute),
+		Now:           time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	groupExit := 0
+	groupDur := int64(5)
+	groupOutLen := int64(len("group-raw-output"))
+	groupWon, err := f.store.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:        groupApp.Run.ID,
+		Status:       store.CommandRunStatusSucceeded,
+		ExitCode:     &groupExit,
+		DurationMS:   &groupDur,
+		OutputBytes:  &groupOutLen,
+		OutputStatus: agentcontrol.ExecOutputCaptured,
+		Output:       []byte("group-raw-output"),
+		FinishedAt:   time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.True(t, groupWon)
+
 	grantProjectAccessOnly(t, f.store, bob.ID, f.launched.ProjectID)
-	bobCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+reqShare.ID, nil)
+	bobCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+groupPr.Request.ID, nil)
 	bobCardReq = bobCardReq.WithContext(contextWithCredentialContext(
 		contextWithIdentity(bobCardReq.Context(), NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web")),
 		CredentialContext{Kind: CredentialKindInteractive, ID: bob.ID},
 	))
 	bobCardRec := httptest.NewRecorder()
 	f.srv.mux.ServeHTTP(bobCardRec, bobCardReq)
-	if bobCardRec.Code == http.StatusOK {
-		var bobCardResp messages.CommandRequestDetailResponse
-		require.NoError(t, json.Unmarshal(bobCardRec.Body.Bytes(), &bobCardResp))
-		assert.False(t, bobCardResp.OutputAvailable, "non-approver must see outputAvailable=false")
-	}
+	require.Equal(t, http.StatusOK, bobCardRec.Code, "group non-approver GET body: %s", bobCardRec.Body.String())
+	var bobCardResp messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(bobCardRec.Body.Bytes(), &bobCardResp))
+	assert.False(t, bobCardResp.OutputAvailable, "non-approver must see outputAvailable=false even when output row exists")
 
 	// 3. Approver output view: GET /api/v1/command-requests/{id}/output (AC-S10).
 	outURL := "/api/v1/command-requests/" + reqNoShare.ID + "/output"
