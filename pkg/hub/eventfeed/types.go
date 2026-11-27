@@ -106,6 +106,8 @@ const (
 	StartHead Start = "head"
 	// StartBeginning replays retained history from the first message.
 	StartBeginning Start = "beginning"
+	// StartTail delivers up to Limit newest messages in chronological order.
+	StartTail Start = "tail"
 )
 
 // PollRequest configures one Poll or Watch call.

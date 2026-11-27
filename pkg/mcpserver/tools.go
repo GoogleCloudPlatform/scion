@@ -35,15 +35,15 @@ const (
 // SendMessageInput is the P1 input schema for the send_message tool (agent target only).
 type SendMessageInput struct {
 	Text    string `json:"text" jsonschema:"Message text to send to the agent."`
-	Project string `json:"project" jsonschema:"Target project slug or ID."`
+	Project string `json:"project" jsonschema:"Target project ID (UUID). A project slug is also accepted when the caller's credential has project:list."`
 	Agent   string `json:"agent" jsonschema:"Target agent name/slug or ID within the project."`
 }
 
 // ReadMessagesInput is the input schema for the read_messages tool.
 type ReadMessagesInput struct {
 	ConversationID string `json:"conversation_id" jsonschema:"Conversation ID to read messages from."`
-	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque watch cursor returned by a previous call. Omit to read from the beginning of retained history."`
-	FromStart      bool   `json:"from_start,omitempty" jsonschema:"Read from the beginning of retained history when cursor is omitted."`
+	Cursor         string `json:"cursor,omitempty" jsonschema:"Opaque watch cursor returned by a previous call. When omitted, returns the last 'limit' messages unless from_start is true."`
+	FromStart      bool   `json:"from_start,omitempty" jsonschema:"When cursor is omitted, read from the oldest retained message instead of the latest 'limit' messages."`
 	Limit          int    `json:"limit,omitempty" jsonschema:"Maximum number of messages to return (1-200, default 50)."`
 }
 
@@ -134,9 +134,11 @@ func (s *Server) handleReadMessages(ctx context.Context, req *mcp.CallToolReques
 		Immediate: true,
 	}
 	if watchOpts.Cursor == "" {
-		// Without a cursor, start from the beginning of retained history so
-		// callers can inspect existing messages and receive next_cursor.
-		watchOpts.Start = "beginning"
+		if in.FromStart {
+			watchOpts.Start = "beginning"
+		} else {
+			watchOpts.Start = "tail"
+		}
 	}
 
 	ctx = withClientNameFromRequest(ctx, req, auth.UserAgent)
@@ -165,7 +167,6 @@ func (s *Server) handleReadMessages(ctx context.Context, req *mcp.CallToolReques
 func (s *Server) auditToolCall(req *mcp.CallToolRequest, auth requestAuth, tool, convID, result string, hubStatus int, duration time.Duration) {
 	clientName, clientVersion := extractClientInfo(req, auth.UserAgent)
 	attrs := []any{
-		slog.String("principal_kind", auth.Principal.Kind),
 		slog.String("principal_id", auth.Principal.ID),
 		slog.String("credential_class", auth.Credential.Class()),
 		slog.String("client_name", clientName),
@@ -175,6 +176,9 @@ func (s *Server) auditToolCall(req *mcp.CallToolRequest, auth requestAuth, tool,
 		slog.String("result", result),
 		slog.Int("hub_status", hubStatus),
 		slog.Duration("duration", duration),
+	}
+	if auth.Principal.Kind != "" {
+		attrs = append(attrs, slog.String("principal_kind", auth.Principal.Kind))
 	}
 	if convID != "" {
 		attrs = append(attrs, slog.String("conversation_id", convID))

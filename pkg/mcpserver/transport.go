@@ -83,6 +83,10 @@ func (t *InProcessTransport) RoundTrip(req *http.Request) (*http.Response, error
 				rw.abort(fmt.Errorf("mcpserver: in-process handler panic: %v", r))
 				return
 			}
+			if ctxErr := req.Context().Err(); ctxErr != nil {
+				rw.abort(ctxErr)
+				return
+			}
 			rw.finish()
 		}()
 		t.Handler.ServeHTTP(rw, serverReq)

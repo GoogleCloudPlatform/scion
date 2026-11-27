@@ -110,8 +110,9 @@ func (b *hubBackend) Me(ctx context.Context, c Credential) (Principal, error) {
 	if err != nil {
 		return Principal{}, err
 	}
+	// /api/v1/auth/me does not expose an identity kind field, so leave Kind
+	// empty rather than hard-coding "user" (which would mislabel visitors).
 	return Principal{
-		Kind:    "user",
 		ID:      u.ID,
 		Email:   u.Email,
 		Display: u.DisplayName,
@@ -124,7 +125,10 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 		return SendResult{}, err
 	}
 
-	projectID := resolveProjectID(ctx, cl, project)
+	projectID, err := resolveProjectID(ctx, cl, project)
+	if err != nil {
+		return SendResult{}, err
+	}
 
 	msg := &messages.StructuredMessage{
 		Version: messages.Version,
@@ -136,41 +140,32 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 		return SendResult{}, err
 	}
 
-	res := SendResult{
+	if resp.Cursor == "" {
+		return SendResult{}, errors.New("hub did not return a conversation cursor for the sent message")
+	}
+
+	return SendResult{
 		MessageID:      resp.MessageID,
 		ConversationID: resp.ConversationID,
 		Status:         resp.Status,
 		Deferred:       resp.Deferred,
-	}
-
-	// Obtain a watch cursor positioned at the sent message so the caller can
-	// immediately poll/watch for replies with no gap (§4.4).
-	if resp.ConversationID != "" && resp.MessageID != "" {
-		wRes, wErr := cl.Conversations().Watch(ctx, resp.ConversationID, hubclient.WatchOptions{
-			AfterMessage: resp.MessageID,
-			Immediate:    true,
-			Filter:       "all",
-		})
-		if wErr == nil && wRes != nil {
-			res.Cursor = wRes.NextCursor
-		}
-	}
-	return res, nil
+		Cursor:         resp.Cursor,
+	}, nil
 }
 
 // resolveProjectID resolves a project slug to its UUID via the Hub API using
-// the caller's own credential. If project is already a valid UUID or cannot be
-// resolved via slug lookup, it is returned unchanged so the Hub makes the
-// authoritative 403/404 decision.
-func resolveProjectID(ctx context.Context, cl hubclient.Client, project string) string {
+// the caller's own credential. If project is already a valid UUID it is
+// returned directly. If slug lookup fails or finds no match (for example when
+// a project-scoped UAT lacks project:list), a clear error is returned.
+func resolveProjectID(ctx context.Context, cl hubclient.Client, project string) (string, error) {
 	if _, err := uuid.Parse(project); err == nil {
-		return project
+		return project, nil
 	}
 	list, err := cl.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: project})
 	if err == nil && list != nil && len(list.Projects) == 1 && list.Projects[0].ID != "" {
-		return list.Projects[0].ID
+		return list.Projects[0].ID, nil
 	}
-	return project
+	return "", fmt.Errorf("cannot resolve project slug %q: pass the project ID (UUID) instead (slug lookup requires the project:list scope)", project)
 }
 
 func (b *hubBackend) Watch(ctx context.Context, c Credential, convID string, o hubclient.WatchOptions) (*hubclient.WatchResult, error) {

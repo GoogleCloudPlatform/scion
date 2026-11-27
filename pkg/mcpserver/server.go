@@ -129,8 +129,11 @@ func New(opts Options) (*Server, error) {
 	streamable := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return s.mcpServer },
 		&mcp.StreamableHTTPOptions{
-			Stateless:                  true,
-			Logger:                     opts.Logger,
+			Stateless: true,
+			Logger:    opts.Logger,
+			// Containerized clients reach the embedded listener via host aliases
+			// (e.g. host.docker.internal) or service hostnames; Origin allowlist
+			// and required bearer/federation auth enforce DNS-rebinding defense.
 			DisableLocalhostProtection: true,
 		},
 	)
@@ -177,6 +180,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	httpSrv := &http.Server{
 		Handler:           s.handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// WriteTimeout is intentionally unset so future SSE streams (P3) are not cut off.
 	}
 
 	s.mu.Lock()

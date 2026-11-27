@@ -433,7 +433,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 8)
 
 	// Server boot hook: warn about legacy environment variables scion no
 	// longer reads, before project discovery and storage init. This is the

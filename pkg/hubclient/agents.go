@@ -1001,6 +1001,9 @@ type MessageResponse struct {
 	// the sender can reply into it. Empty on hubs that predate this field,
 	// or when the message was not recorded in a conversation.
 	ConversationID string `json:"conversation_id,omitempty"`
+	// Cursor is the opaque eventfeed cursor positioned at the persisted
+	// message's conversation sequence, allocated atomically with the message.
+	Cursor string `json:"cursor,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.

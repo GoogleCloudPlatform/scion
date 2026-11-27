@@ -93,7 +93,7 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 		return PollResult{}, err
 	}
 
-	after, err := f.resolveAfterSeq(ctx, req, start, head)
+	after, err := f.resolveAfterSeq(ctx, req, start, head, limit)
 	if err != nil {
 		return PollResult{}, err
 	}
@@ -229,7 +229,7 @@ func (f *Feed) Watch(ctx context.Context, p Principal, authz Authorizer, req Pol
 	}
 }
 
-func (f *Feed) resolveAfterSeq(ctx context.Context, req PollRequest, start Start, head int64) (int64, error) {
+func (f *Feed) resolveAfterSeq(ctx context.Context, req PollRequest, start Start, head int64, limit int) (int64, error) {
 	if req.Cursor != "" {
 		seq, err := DecodeCursor(req.Cursor, req.ConversationID)
 		if err != nil {
@@ -251,6 +251,12 @@ func (f *Feed) resolveAfterSeq(ctx context.Context, req PollRequest, start Start
 		return seq, nil
 	}
 	if start == StartBeginning {
+		return 0, nil
+	}
+	if start == StartTail {
+		if head > int64(limit) {
+			return head - int64(limit), nil
+		}
 		return 0, nil
 	}
 	return head, nil
@@ -321,6 +327,8 @@ func normalizeStart(s Start) (Start, error) {
 		return StartHead, nil
 	case StartBeginning:
 		return StartBeginning, nil
+	case StartTail:
+		return StartTail, nil
 	default:
 		return "", fmt.Errorf("%w: invalid start %q", store.ErrInvalidInput, s)
 	}

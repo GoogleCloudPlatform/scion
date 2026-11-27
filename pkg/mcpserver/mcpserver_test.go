@@ -76,6 +76,7 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 				"conversation_id": "conv-1",
 				"status":          "delivered",
 				"agent":           "echo-t",
+				"cursor":          "cur-1",
 			})
 		case strings.HasSuffix(r.URL.Path, "/watch"):
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -224,7 +225,7 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 	}
 
 	// 5. Header allowlist (§10 AC4): Cookie and X-Goog-Iap-Jwt-Assertion never reach the Hub.
-	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"project":"proj-1","agent":"echo-t","text":"hello"}}}`
+	callBody := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_message","arguments":{"project":"11111111-1111-1111-1111-111111111111","agent":"echo-t","text":"hello"}}}`
 	resp = postMCP(map[string]string{
 		"Authorization":            "Bearer scion_pat_valid",
 		"Cookie":                   "session=secret-cookie",
@@ -262,11 +263,10 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 		t.Fatal("expected RemoteAddr to be propagated to in-process Hub request")
 	}
 
-	// 6. Audit log line contains §4.5 fields.
+	// 6. Audit log line contains §4.5 fields (without hard-coded principal_kind).
 	logText := logBuf.String()
 	for _, field := range []string{
 		`"msg":"mcp tool call"`,
-		`"principal_kind":"user"`,
 		`"principal_id":"user-123"`,
 		`"credential_class":"bearer"`,
 		`"tool":"send_message"`,
@@ -278,6 +278,9 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 		if !strings.Contains(logText, field) {
 			t.Errorf("audit log missing %s; got:\n%s", field, logText)
 		}
+	}
+	if strings.Contains(logText, `"principal_kind":"user"`) {
+		t.Errorf("audit log should not hard-code principal_kind when /auth/me does not expose it:\n%s", logText)
 	}
 
 	// 7. Healthz and Readyz.
@@ -425,4 +428,211 @@ func (t *staticHeaderTransport) RoundTrip(req *http.Request) (*http.Response, er
 		clone.Header.Set(k, v)
 	}
 	return t.base.RoundTrip(clone)
+}
+
+func TestSendMessage_MissingCursorReturnsError(t *testing.T) {
+	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
+		case strings.HasSuffix(r.URL.Path, "/message"):
+			// Deliberately omit cursor to verify fail-closed behavior.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"message_id":      "msg-1",
+				"conversation_id": "conv-1",
+				"status":          "delivered",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	backend := NewBackend(BackendOptions{
+		HubBaseURL: "http://in-process",
+		Transport:  &InProcessTransport{Handler: fakeHub},
+		ExperimentChecker: func(_ context.Context, _ Credential, _ string) (bool, error) {
+			return true, nil
+		},
+		DisableTransportAuth: true,
+	})
+	srv, err := New(Options{Backend: backend})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	cl := mcp.NewClient(&mcp.Implementation{Name: "cursor-err-test", Version: "0.1"}, nil)
+	hc := &http.Client{
+		Transport: &staticHeaderTransport{
+			base:    &http.Transport{DisableKeepAlives: true},
+			headers: map[string]string{"Authorization": "Bearer scion_pat_test"},
+		},
+	}
+	ctx := context.Background()
+	sess, err := cl.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:   ts.URL + "/mcp",
+		HTTPClient: hc,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	res, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name: "send_message",
+		Arguments: map[string]any{
+			"project": "11111111-1111-1111-1111-111111111111",
+			"agent":   "echo-t",
+			"text":    "hello",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool protocol error: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected tool error when hub omits cursor, got success: %+v", res.Content)
+	}
+	gotText := res.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(gotText, "cursor") {
+		t.Fatalf("expected cursor error message, got %q", gotText)
+	}
+}
+
+func TestInProcessTransport_StreamingAndCancellation(t *testing.T) {
+	t.Run("streaming", func(t *testing.T) {
+		chunk2Gate := make(chan struct{})
+		rt := &InProcessTransport{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Stream", "yes")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("chunk1\n"))
+				w.(http.Flusher).Flush()
+				<-chunk2Gate
+				_, _ = w.Write([]byte("chunk2\n"))
+			}),
+		}
+
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://in-process/stream", nil)
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		if resp.Header.Get("X-Stream") != "yes" {
+			t.Fatalf("X-Stream header = %q, want yes", resp.Header.Get("X-Stream"))
+		}
+
+		// First chunk must arrive while the handler is still blocked on chunk2Gate.
+		buf := make([]byte, 7)
+		if _, err := io.ReadFull(resp.Body, buf); err != nil {
+			t.Fatalf("ReadFull chunk1: %v", err)
+		}
+		if string(buf) != "chunk1\n" {
+			t.Fatalf("got %q, want chunk1\\n", string(buf))
+		}
+
+		close(chunk2Gate)
+		rest, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("ReadAll rest: %v", err)
+		}
+		if string(rest) != "chunk2\n" {
+			t.Fatalf("got %q, want chunk2\\n", string(rest))
+		}
+	})
+
+	t.Run("cancel_before_headers", func(t *testing.T) {
+		handlerDone := make(chan struct{})
+		rt := &InProcessTransport{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				<-r.Context().Done()
+			}),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://in-process/wait", nil)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+		resp, err := rt.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if err != context.Canceled {
+			t.Fatalf("got err=%v, want context.Canceled", err)
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not exit after cancel before headers")
+		}
+	})
+
+	t.Run("cancel_after_headers", func(t *testing.T) {
+		handlerDone := make(chan struct{})
+		rt := &InProcessTransport{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(handlerDone)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("head"))
+				<-r.Context().Done()
+			}),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://in-process/wait", nil)
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(resp.Body, buf); err != nil {
+			t.Fatalf("ReadFull: %v", err)
+		}
+		cancel()
+		_, err = io.ReadAll(resp.Body)
+		if err != context.Canceled {
+			t.Fatalf("after cancel post-headers, ReadAll err = %v, want context.Canceled", err)
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not exit after cancel post-headers")
+		}
+	})
+
+	t.Run("early_body_close", func(t *testing.T) {
+		handlerDone := make(chan error, 1)
+		rt := &InProcessTransport{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				for {
+					if _, err := w.Write([]byte("data")); err != nil {
+						handlerDone <- err
+						return
+					}
+				}
+			}),
+		}
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://in-process/flood", nil)
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("Body.Close: %v", err)
+		}
+		select {
+		case wErr := <-handlerDone:
+			if wErr == nil {
+				t.Fatal("expected write error after early Body.Close")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler did not exit after early Body.Close")
+		}
+	})
 }
