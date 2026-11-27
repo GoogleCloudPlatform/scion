@@ -237,6 +237,33 @@ type ListAgentsStats struct {
 	Agents *[][2]string `json:"agents,omitempty"`
 }
 
+// maxAgentCreateBodySize bounds POST /api/v1/agents and
+// POST /api/v1/projects/{projectId}/agents request bodies.
+// Create-time secrets allow up to maxCreateAgentSecrets (50) entries of up to
+// maxCreateAgentSecretValueBytes (64 KiB) each (~3.2 MiB raw, ~4.3 MiB when
+// base64-encoded), leaving ~700 KiB for JSON framing, HomeFiles (64 KiB cap),
+// WorkspaceFiles manifests, labels, and ScionConfig.
+const maxAgentCreateBodySize = 5 << 20
+
+// readBoundedAgentJSON caps r.Body with http.MaxBytesReader and decodes JSON
+// into dst. On failure it writes 413 payload_too_large (for *http.MaxBytesError)
+// or 400 invalid_request and returns false.
+func readBoundedAgentJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst interface{}) bool {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	}
+	if err := readJSON(r, dst); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body exceeds maximum size", nil)
+			return false
+		}
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	return true
+}
+
 type CreateAgentRequest struct {
 	Name            string `json:"name"`
 	ProjectID       string `json:"projectId"`
@@ -854,8 +881,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateAgentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxAgentCreateBodySize, &req) {
 		return
 	}
 
@@ -4111,8 +4137,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	ctx := r.Context()
 
 	var req SubmitEnvRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxSettingsBodySize, &req) {
 		return
 	}
 
@@ -6572,8 +6597,7 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 		Command []string `json:"command"`
 		Timeout int      `json:"timeout,omitempty"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxSettingsBodySize, &req) {
 		return
 	}
 	if len(req.Command) == 0 {

@@ -3373,9 +3373,17 @@ func (s *Server) applyProjectAgentFilterQuery(ctx context.Context, w http.Respon
 func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 
+	// Authorization for every caller kind. This route had no gate at all before
+	// #591: any agent token could create an agent in any project, and it is the
+	// route the CLI uses for create/start/sync. The URL project implies no
+	// isolation by itself. Authorize before reading the body so unauthorized
+	// callers consume zero body bytes.
+	if !s.authorizeAgentCreate(w, r, projectID) {
+		return
+	}
+
 	var req CreateAgentRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	if !readBoundedAgentJSON(w, r, maxAgentCreateBodySize, &req) {
 		return
 	}
 
@@ -3390,14 +3398,6 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 	}
 	if err := labels.Validate(req.Labels); err != nil {
 		ValidationError(w, "Invalid labels: "+err.Error(), nil)
-		return
-	}
-
-	// Authorization for every caller kind. This route had no gate at all before
-	// #591: any agent token could create an agent in any project, and it is the
-	// route the CLI uses for create/start/sync. The URL project implies no
-	// isolation by itself.
-	if !s.authorizeAgentCreate(w, r, projectID) {
 		return
 	}
 
