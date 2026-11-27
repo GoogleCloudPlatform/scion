@@ -3122,6 +3122,9 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 			MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 		}
 
+	case ProjectAgentRouteLabels:
+		s.handleProjectAgentLabels(w, r, project.ID, agentIDRaw)
+
 	default:
 		action, ok := projectAgentRouteActions[route.RouteID]
 		if !ok {

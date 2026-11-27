@@ -3504,14 +3504,15 @@ func isCompressBypassPath(path string) bool {
 			return true
 		case "agents":
 			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
-			// project-scoped form) stay uncompressed, as does the agent
-			// returned by DELETE /api/v1/agents/{id}/pending-config.
+			// project-scoped form) stay uncompressed, as do the agents
+			// returned by DELETE /api/v1/agents/{id}/pending-config and
+			// PATCH /api/v1/agents/{id}/labels.
 			if i+2 == len(segs) {
 				return true
 			}
 			if i+2 < len(segs) {
 				switch segs[i+2] {
-				case "pty", "ports", "workspace", "pending-config":
+				case "pty", "ports", "workspace", "pending-config", "labels":
 					return true
 				case "workspace-download":
 					// The broker-self signed workspace download

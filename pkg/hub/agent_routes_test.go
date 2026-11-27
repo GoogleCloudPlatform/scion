@@ -84,6 +84,8 @@ func agentRouteCases() []agentRouteCase {
 		byID(post, "/hold/lift", AgentRouteHoldLift, opAgentHoldLift, none),
 		byID(http.MethodDelete, "/pending-config", AgentRoutePendingConfig, opAgentPendingDiscard, none),
 		byID(get, "/pending-config", AgentRoutePendingConfig, "", none),
+		byID(http.MethodPatch, "/labels", AgentRouteLabels, opAgentLabelsUpdate, none),
+		byID(get, "/labels", AgentRouteLabels, "", none),
 		byID(post, "/delegations", AgentRouteDelegations, opAgentDelegationCreate, none),
 		byID(get, "/delegations", AgentRouteDelegations, opAgentDelegationList, none),
 		byID(http.MethodPut, "/delegations", AgentRouteDelegations, "", none),
@@ -149,6 +151,8 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
 		proj(post, "/keys", ProjectAgentRouteActionKeys, opAgentKeys),
+		proj(http.MethodPatch, "/labels", ProjectAgentRouteLabels, opAgentLabelsUpdate),
+		proj(get, "/labels", ProjectAgentRouteLabels, ""),
 	}
 }
 
@@ -310,6 +314,7 @@ func TestResolveAgentSubRoute_ClientPaths(t *testing.T) {
 		{http.MethodPost, inProject + "/restart", ProjectAgentRouteActionRestart},
 		{http.MethodPost, inProject + "/reset-auth", ProjectAgentRouteActionResetAuth},
 		{http.MethodPost, inProject + "/keys", ProjectAgentRouteActionKeys},
+		{http.MethodPatch, inProject + "/labels", ProjectAgentRouteLabels},
 		{http.MethodPost, inProject + "/restore", ProjectAgentRouteActionRestore},
 		{http.MethodPost, inProject + "/message", ProjectAgentRouteActionMessage},
 		{http.MethodPost, inProject + "/outbound-message", ProjectAgentRouteActionOutbound},
@@ -408,7 +413,7 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentUsageRead, opAgentUsageIngest, opAgentUsageCapabilities,
 		opAgentStatusUpdate, opAgentLogsRead, opAgentScreenRead, opAgentMessagesRead, opAgentMetricsRead,
 		opAgentKeys, opAgentActionMessage, opAgentPortList, opAgentPortRegister,
-		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard,
+		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard, opAgentLabelsUpdate,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

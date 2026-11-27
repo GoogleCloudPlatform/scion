@@ -956,7 +956,7 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY")
+	_, _ = fmt.Fprintln(w, "NAME\tTEMPLATE\tHARNESS-CFG\tRUNTIME\tPROJECT\tBROKER\tPHASE\tCONTAINER\tLAST ACTIVITY\tLABELS")
 	for _, a := range agents {
 		phase := a.Phase
 		if phase == "" {
@@ -994,7 +994,8 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		if broker == "" {
 			broker = a.RuntimeBrokerID
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity)
+		labelsCol := formatListLabels(a.Labels)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", a.Name, a.Template, harnessConfig, a.Runtime, a.Project, broker, phase, containerStatus, lastActivity, labelsCol)
 	}
 	_ = w.Flush()
 	if hint := provisionedOnlyListHint(agents, all); hint != "" {
@@ -1003,6 +1004,19 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		fmt.Fprintln(os.Stderr, hint)
 	}
 	return nil
+}
+
+// listLabelsMaxRunes caps the LABELS column width in scion list table output.
+const listLabelsMaxRunes = 36
+
+// formatListLabels renders an agent's labels for the scion list table: sorted
+// comma-separated key=value pairs truncated to listLabelsMaxRunes, or "-" when
+// empty.
+func formatListLabels(m map[string]string) string {
+	if len(m) == 0 {
+		return "-"
+	}
+	return truncateRunes(formatLabelsSorted(m), listLabelsMaxRunes, true)
 }
 
 // provisionedOnlyHintMaxNames caps the agent names the scion list hint shows.

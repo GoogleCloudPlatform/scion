@@ -535,6 +535,26 @@ scion keys my-agent "Enter"
 
 `scion keys` replaces the removed `scion message --raw` flag. `scion message --raw` now fails locally, before any request is sent, with guidance naming `scion keys`; update scripts and skills to call `scion keys` directly. See [Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
+### `scion label`
+
+Adds, updates, or removes labels on an existing agent using merge semantics. Unmentioned labels are preserved, and concurrent updates from multiple callers are merged server-side without lost updates. Available in human mode only (agent identities cannot modify labels). Every label change is recorded in the Hub mutation audit log.
+
+**Usage:** `scion label <agent-name> [key=value ...] [--remove <key> ...]`
+
+- **Arguments:**
+    - `<agent-name>`: The target agent (slug, name, or ID in the current project, or `--project <project>`).
+    - `key=value ...`: One or more label pairs to add or update. Keys and values must be printable ASCII (max 63 characters each; at most 16 labels per agent).
+- **Flags:**
+    - `-r, --remove <key>`: Remove a label key (repeatable; removing an absent key is an idempotent no-op).
+
+**Examples:**
+
+```bash
+scion label my-agent env=staging team=core
+scion label my-agent --remove team
+scion label my-agent env=prod --remove tmp --project my-project
+```
+
 ### `scion set-message-mode`
 
 Sets the message mode for an agent, controlling which users and agents can send messages to it. Full-role agents can also call this command programmatically.
@@ -789,7 +809,7 @@ Lists all agents and their status.
 
 **Usage:** `scion list [flags]`
 
-**Status display (`PHASE` column).** In human table output, a suspended agent shows its recorded `suspendReason` (`user`, `idle`, or `stalled`) and any retained terminal/idle activity (`completed`, `idle`, or `harness_error`) — for example `suspended (idle)` or `suspended · completed (stalled)` (see [Agent Lifecycle](/scion/local/agent-lifecycle/#suspending-an-agent)). When an agent's Hub authority state is `orphaned` or `revoked`, `scion list` requests `include=authority` and appends `(ORPHANED)` or `(REVOKED)` to its phase (for example `running (ORPHANED)`).
+**Status display (`PHASE` and `LABELS` columns).** In human table output, a suspended agent shows its recorded `suspendReason` (`user`, `idle`, or `stalled`) and any retained terminal/idle activity (`completed`, `idle`, or `harness_error`) — for example `suspended (idle)` or `suspended · completed (stalled)` (see [Agent Lifecycle](/scion/local/agent-lifecycle/#suspending-an-agent)). When an agent's Hub authority state is `orphaned` or `revoked`, `scion list` requests `include=authority` and appends `(ORPHANED)` or `(REVOKED)` to its phase (for example `running (ORPHANED)`). The `LABELS` column displays sorted `key=value` pairs (truncated to keep table width compact, or `-` when unlabeled); `--format json` includes the full `labels` map.
 
 **GCP identity.** With `--format json`, each agent carries a `gcpIdentity` object when the Hub has recorded one: `mode` (`block`, `passthrough` or `assign`) and, for `assign`, `serviceAccountId`, `serviceAccountEmail` and `displayName` (the registered display name, omitted when you cannot read the project's service account registrations). The table output has no identity column.
 
