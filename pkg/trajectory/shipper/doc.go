@@ -54,9 +54,9 @@
 //     within a generation: at baseline parsed_offset is initialized to
 //     baseline_offset (so pre-enablement history is never normalized), on
 //     normal commits parsed_offset is preserved untouched (advanced only by
-//     the normalizer), and on any generation bump parsed_offset resets to the
-//     new generation's starting offset (baseline_offset when pre-baseline bytes
-//     are preserved, or 0 otherwise).
+//     the normalizer via [WithLockedState]), and on any generation bump
+//     parsed_offset resets to the new generation's starting offset
+//     (baseline_offset when pre-baseline bytes are preserved, or 0 otherwise).
 //   - guard_hash / guard_len: hex-encoded 64-bit FNV-1a hash of the up to 64
 //     bytes immediately preceding raw_committed_offset, computed from the
 //     committed byte buffer (plus up to 64 preceding bytes).
@@ -76,13 +76,32 @@
 //   - origin_hub_id: Hub identifier recorded for relocation continuity.
 //   - consecutive_failures / last_error / last_generation_reason: fault and
 //     generation-rotation diagnostics.
-//   - rejected / rejected_reason: terminal parking state set on OutcomeRejected
-//     (e.g. 400 invalid_segment or 413 segment_too_large) so a permanently
-//     invalid artifact is not retried forever.
+//   - rejected / rejected_reason / rejected_run_id: terminal parking state set
+//     on OutcomeRejected (e.g. 400 invalid_segment or 413 segment_too_large) so
+//     a permanently invalid artifact is not retried forever. Cleared
+//     automatically on a generation bump or when a new run_id starts.
+//   - deferred_baseline_prefixes (top-level): home-relative prefixes that
+//     discovery could not read or refused at baseline (other than ENOENT). Any
+//     untracked artifact later discovered under one of these prefixes is
+//     lazily baselined at EOF on first open rather than shipped from offset 0.
 //   - truncated / truncated_run_id: run-scoped cap state set on
 //     OutcomeRunCapExceeded. Truncation stops shipping only for the matching
 //     run_id; when a new run starts (different Config.RunID or ResetForRun),
 //     truncation clears automatically.
+//
+// External consumers (such as P7 normalizers advancing parsed_offset or P6
+// broker harvest) should use [WithLockedState] to perform locked
+// read-modify-write updates against state.json.
+//
+// # Segment Framing and incomplete_tail
+//
+// Non-final rounds plan newline-aligned segments [raw_committed_offset,
+// last_newline+1) capped at min(MaxSegmentBytes, roundMaxBytes). The
+// Segment.IncompleteTail flag is set in two cases:
+//   - On a Final round (RoundOptions.Final=true), when the trailing bytes at
+//     EOF do not end with '\n'.
+//   - On a non-final round, when a single line exceeds the effective segment
+//     cap and is split mid-line at the cap boundary.
 //
 // Both the top-level State object and each ArtifactState entry preserve unknown
 // JSON fields across load/save cycles so newer writers (such as normalizers or

@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -232,8 +234,9 @@ func (s *Shipper) Baseline(ctx context.Context) (*BaselineResult, error) {
 	}, nil
 }
 
-// ResetForRun clears run-scoped truncation state when starting a new run_id.
-// It is safe to call even if state.json does not yet exist.
+// ResetForRun clears run-scoped truncation and per-artifact rejection parks
+// when starting a new run_id. It is safe to call even if state.json does not
+// yet exist.
 func (s *Shipper) ResetForRun(ctx context.Context, runID string) error {
 	lock, err := acquireStateLock(ctx, s.cfg.HomeDir, s.cfg.LockTimeout)
 	if err != nil {
@@ -245,13 +248,22 @@ func (s *Shipper) ResetForRun(ctx context.Context, runID string) error {
 	if err != nil || !exists {
 		return err
 	}
-	if !st.Truncated {
+	changed := false
+	if st.Truncated && (runID == "" || st.TruncatedRunID != runID) {
+		clearRunTruncation(st)
+		changed = true
+	}
+	for _, entry := range st.Artifacts {
+		if entry.Rejected && (runID == "" || entry.RejectedRunID != runID) {
+			entry.Rejected = false
+			entry.RejectedReason = ""
+			entry.RejectedRunID = ""
+			changed = true
+		}
+	}
+	if !changed {
 		return nil
 	}
-	if runID != "" && st.TruncatedRunID == runID {
-		return nil
-	}
-	clearRunTruncation(st)
 	return SaveState(s.cfg.HomeDir, st)
 }
 
@@ -296,6 +308,7 @@ func (s *Shipper) initBaselineLocked(existing *State) (*State, []RefusedPath, []
 	st.Baselined = true
 	st.BaselinedAt = &now
 	st.BackfillExisting = s.cfg.BackfillExisting
+	st.DeferredBaselinePrefixes = mergeDeferredPrefixes(st.DeferredBaselinePrefixes, disc.Refused)
 
 	var skipped []RefusedPath
 	for _, art := range disc.Artifacts {
@@ -484,6 +497,7 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 	remainingBudget := roundMaxBytes
 
 	n := len(disc.Artifacts)
+	completedFullScan := true
 	if n > 0 {
 		start := int(s.nextStart.Load()) % n
 		if start < 0 {
@@ -500,6 +514,7 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 			}
 			if remainingBudget <= 0 {
 				res.BudgetExhausted = true
+				completedFullScan = false
 				s.nextStart.Store(int64(idx))
 				break
 			}
@@ -510,6 +525,7 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 				return res, err
 			}
 			if stopRound {
+				completedFullScan = false
 				s.nextStart.Store(int64((lastIdx + 1) % n))
 				break
 			}
@@ -517,12 +533,26 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 				s.nextStart.Store(int64((idx + 1) % n))
 				if i+1 < n {
 					res.BudgetExhausted = true
+					completedFullScan = false
 				}
 				break
 			}
 		}
 		if remainingBudget > 0 && !res.BudgetExhausted {
 			s.nextStart.Store(int64((lastIdx + 1) % n))
+		}
+	}
+
+	// Prune deferred baseline prefixes that are no longer refused once the
+	// round has scanned every discovered artifact cleanly, so genuinely new
+	// files created later in recovered directories start at offset 0.
+	if completedFullScan && !res.BudgetExhausted && len(st.DeferredBaselinePrefixes) > 0 {
+		pruned := pruneResolvedDeferredPrefixes(st.DeferredBaselinePrefixes, disc.Refused)
+		if len(pruned) != len(st.DeferredBaselinePrefixes) {
+			st.DeferredBaselinePrefixes = pruned
+			if err := SaveState(s.cfg.HomeDir, st); err != nil {
+				return res, err
+			}
 		}
 	}
 
@@ -543,10 +573,6 @@ func (s *Shipper) shipArtifactLocked(
 	remainingBudget *int64,
 	res *RoundResult,
 ) (stopRound bool, fatalErr error) {
-	if existing, ok := st.Artifacts[art.NativeRelativePath]; ok && existing.Rejected {
-		return false, nil
-	}
-
 	f, fi, err := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
 	if err != nil {
 		res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("open artifact: %w", err)
@@ -564,6 +590,7 @@ func (s *Shipper) shipArtifactLocked(
 	entry, tracked := st.Artifacts[art.NativeRelativePath]
 	if !tracked {
 		now := s.now().UTC()
+		deferred := matchesDeferredBaselinePrefix(art.NativeRelativePath, st.DeferredBaselinePrefixes)
 		entry = &ArtifactState{
 			NativeRelativePath: art.NativeRelativePath,
 			ArtifactKind:       art.Kind,
@@ -573,7 +600,8 @@ func (s *Shipper) shipArtifactLocked(
 			Generation:         0,
 			RawCommittedOffset: 0,
 			ParsedOffset:       0,
-			Baseline:           false,
+			Baseline:           deferred,
+			NeedsBaseline:      deferred,
 			OriginHubID:        st.OriginHubID,
 			UpdatedAt:          &now,
 		}
@@ -587,6 +615,18 @@ func (s *Shipper) shipArtifactLocked(
 		}
 		if entry.OriginHubID == "" {
 			entry.OriginHubID = st.OriginHubID
+		}
+	}
+
+	// Clear a per-artifact rejection park when a new run_id starts.
+	if entry.Rejected && s.cfg.RunID != "" && entry.RejectedRunID != "" && entry.RejectedRunID != s.cfg.RunID {
+		now := s.now().UTC()
+		entry.Rejected = false
+		entry.RejectedReason = ""
+		entry.RejectedRunID = ""
+		entry.UpdatedAt = &now
+		if err := SaveState(s.cfg.HomeDir, st); err != nil {
+			return true, err
 		}
 	}
 
@@ -633,13 +673,21 @@ func (s *Shipper) shipArtifactLocked(
 			return true, err
 		}
 	} else {
-		if entry.Inode == 0 {
+		// Adopt current file identity unconditionally when nothing has been
+		// committed or left pending at offset 0 (avoids a spurious inode bump
+		// if a zero-offset file is renamed before its first commit).
+		if entry.Inode == 0 || (entry.RawCommittedOffset == 0 && entry.Pending == nil) {
 			entry.Inode = fid.Ino
 		}
 		// Keep Device current when broker reads via virtiofs/NFS with a
 		// different st_dev on the same inode.
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
+	}
+
+	// If still parked after run-change and generation-bump checks, skip shipping.
+	if entry.Rejected {
+		return false, nil
 	}
 
 	for *remainingBudget > 0 {
@@ -710,7 +758,7 @@ func (s *Shipper) shipArtifactLocked(
 				return false, nil
 			}
 			if !ok {
-				if fileSize > entry.RawCommittedOffset && *remainingBudget < effectiveMaxSeg {
+				if fileSize-entry.RawCommittedOffset > *remainingBudget {
 					res.BudgetExhausted = true
 				}
 				return false, nil
@@ -816,6 +864,7 @@ func (s *Shipper) shipArtifactLocked(
 			entry.Pending = nil
 			entry.Rejected = true
 			entry.RejectedReason = msg
+			entry.RejectedRunID = s.cfg.RunID
 			entry.ConsecutiveFailures++
 			entry.LastError = msg
 			entry.UpdatedAt = &now
@@ -929,6 +978,9 @@ func (s *Shipper) bumpGenerationLocked(
 	entry.GuardHash = restartGuardHash
 	entry.GuardLen = restartGuardLen
 	entry.Pending = nil
+	entry.Rejected = false
+	entry.RejectedReason = ""
+	entry.RejectedRunID = ""
 	entry.Inode = fid.Ino
 	entry.Device = fid.Dev
 	entry.FileID = fid.String()
@@ -987,4 +1039,65 @@ func detectGenerationBump(f *os.File, entry *ArtifactState, current fileID, file
 		}
 	}
 	return "", nil
+}
+
+func mergeDeferredPrefixes(existing []string, refused []RefusedPath) []string {
+	if len(existing) == 0 && len(refused) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(existing)+len(refused))
+	for _, p := range existing {
+		p = strings.Trim(p, "/")
+		if p != "" {
+			set[p] = struct{}{}
+		}
+	}
+	for _, r := range refused {
+		p := strings.Trim(r.NativeRelativePath, "/")
+		if p != "" {
+			set[p] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func matchesDeferredBaselinePrefix(rel string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if rel == p || strings.HasPrefix(rel, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func pruneResolvedDeferredPrefixes(prefixes []string, refused []RefusedPath) []string {
+	if len(prefixes) == 0 {
+		return nil
+	}
+	var keep []string
+	for _, p := range prefixes {
+		stillRefused := false
+		for _, r := range refused {
+			rp := strings.Trim(r.NativeRelativePath, "/")
+			if rp == "" {
+				continue
+			}
+			if rp == p || strings.HasPrefix(p, rp+"/") || strings.HasPrefix(rp, p+"/") {
+				stillRefused = true
+				break
+			}
+		}
+		if stillRefused {
+			keep = append(keep, p)
+		}
+	}
+	return keep
 }

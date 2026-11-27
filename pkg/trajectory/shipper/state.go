@@ -15,6 +15,7 @@
 package shipper
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -87,16 +88,17 @@ type PendingSegment struct {
 // State is the durable state persisted to <home>/.scion/trajectory-shipper/state.json.
 // Unknown top-level JSON fields are preserved in Extra across load/save cycles.
 type State struct {
-	Version          int                       `json:"version"`
-	Harness          string                    `json:"harness,omitempty"`
-	OriginHubID      string                    `json:"origin_hub_id,omitempty"`
-	Baselined        bool                      `json:"baselined"`
-	BaselinedAt      *time.Time                `json:"baselined_at,omitempty"`
-	BackfillExisting bool                      `json:"backfill_existing,omitempty"`
-	Truncated        bool                      `json:"truncated,omitempty"`
-	TruncatedRunID   string                    `json:"truncated_run_id,omitempty"`
-	TruncatedReason  string                    `json:"truncated_reason,omitempty"`
-	Artifacts        map[string]*ArtifactState `json:"artifacts"`
+	Version                  int                       `json:"version"`
+	Harness                  string                    `json:"harness,omitempty"`
+	OriginHubID              string                    `json:"origin_hub_id,omitempty"`
+	Baselined                bool                      `json:"baselined"`
+	BaselinedAt              *time.Time                `json:"baselined_at,omitempty"`
+	BackfillExisting         bool                      `json:"backfill_existing,omitempty"`
+	DeferredBaselinePrefixes []string                  `json:"deferred_baseline_prefixes,omitempty"`
+	Truncated                bool                      `json:"truncated,omitempty"`
+	TruncatedRunID           string                    `json:"truncated_run_id,omitempty"`
+	TruncatedReason          string                    `json:"truncated_reason,omitempty"`
+	Artifacts                map[string]*ArtifactState `json:"artifacts"`
 
 	// Extra preserves unknown JSON fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -127,6 +129,7 @@ type ArtifactState struct {
 	LastGenerationReason string          `json:"last_generation_reason,omitempty"`
 	Rejected             bool            `json:"rejected,omitempty"`
 	RejectedReason       string          `json:"rejected_reason,omitempty"`
+	RejectedRunID        string          `json:"rejected_run_id,omitempty"`
 	Truncated            bool            `json:"truncated"`
 	TruncatedRunID       string          `json:"truncated_run_id,omitempty"`
 	UpdatedAt            *time.Time      `json:"updated_at,omitempty"`
@@ -147,16 +150,17 @@ func (a *ArtifactState) Key() ArtifactKey {
 type stateAlias State
 
 var knownStateFields = map[string]struct{}{
-	"version":           {},
-	"harness":           {},
-	"origin_hub_id":     {},
-	"baselined":         {},
-	"baselined_at":      {},
-	"backfill_existing": {},
-	"truncated":         {},
-	"truncated_run_id":  {},
-	"truncated_reason":  {},
-	"artifacts":         {},
+	"version":                    {},
+	"harness":                    {},
+	"origin_hub_id":              {},
+	"baselined":                  {},
+	"baselined_at":               {},
+	"backfill_existing":          {},
+	"deferred_baseline_prefixes": {},
+	"truncated":                  {},
+	"truncated_run_id":           {},
+	"truncated_reason":           {},
+	"artifacts":                  {},
 }
 
 // UnmarshalJSON decodes State while preserving unknown fields in Extra.
@@ -232,6 +236,7 @@ var knownArtifactStateFields = map[string]struct{}{
 	"last_generation_reason": {},
 	"rejected":               {},
 	"rejected_reason":        {},
+	"rejected_run_id":        {},
 	"truncated":              {},
 	"truncated_run_id":       {},
 	"updated_at":             {},
@@ -360,6 +365,51 @@ func SaveState(homeDir string, st *State) error {
 	}
 	cleanup = false
 	return nil
+}
+
+// WithLockedState acquires the exclusive inter-process state lock for homeDir,
+// loads state.json (passing a newly initialized empty State if it does not yet
+// exist), invokes fn, and atomically saves the state when fn returns save=true
+// and err=nil.
+//
+// This is the supported read-modify-write helper for P7 normalizers advancing
+// parsed_offset and P6 broker harvest consumers.
+func WithLockedState(
+	ctx context.Context,
+	homeDir string,
+	timeout time.Duration,
+	fn func(st *State) (save bool, err error),
+) error {
+	if homeDir == "" {
+		return errors.New("shipper: homeDir is required")
+	}
+	if fn == nil {
+		return errors.New("shipper: callback is required")
+	}
+	lock, err := acquireStateLock(ctx, homeDir, timeout)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+
+	st, exists, err := LoadState(homeDir)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		st = &State{
+			Version:   StateVersion,
+			Artifacts: make(map[string]*ArtifactState),
+		}
+	}
+	save, err := fn(st)
+	if err != nil {
+		return err
+	}
+	if !save {
+		return nil
+	}
+	return SaveState(homeDir, st)
 }
 
 // ComputeGuardHash computes the 64-bit FNV-1a hex digest of the up to

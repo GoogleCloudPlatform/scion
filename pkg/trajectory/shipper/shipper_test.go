@@ -1687,3 +1687,445 @@ func TestRoundFairnessRotatesStartIndex(t *testing.T) {
 		t.Fatalf("round 2 expected relB first due to rotation, got %q", up.attempts[1].NativeRelativePath)
 	}
 }
+
+func TestDeferredBaselinePrefixSymlinkDirReplacedByRealDir(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+
+	// Create a symlinked session directory at baseline time.
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+	sessionDir := filepath.Join(projectsDir, "-w")
+	if err := os.Symlink(outside, sessionDir); err != nil {
+		t.Fatalf("symlink session dir: %v", err)
+	}
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	bres, err := s.Baseline(context.Background())
+	if err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+	if len(bres.RefusedPaths) != 1 || bres.RefusedPaths[0].NativeRelativePath != ".claude/projects/-w" {
+		t.Fatalf("expected refused symlink dir at baseline, got %+v", bres.RefusedPaths)
+	}
+
+	// Replace the symlink with a real directory holding a pre-existing file.
+	if err := os.Remove(sessionDir); err != nil {
+		t.Fatalf("remove symlink: %v", err)
+	}
+	rel := ".claude/projects/-w/old.jsonl"
+	pre := "{\"PRE_BASELINE\":1}\n"
+	abs := writeArtifact(t, home, rel, pre)
+
+	// First round lazily baselines old.jsonl at EOF; nothing pre-existing ships.
+	r1, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if r1.SegmentsShipped != 0 {
+		t.Fatalf("expected 0 segments shipped for pre-existing file under deferred prefix, got %+v", r1)
+	}
+
+	// Subsequent append ships normally.
+	appendArtifact(t, abs, "{\"post\":2}\n")
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.SegmentsShipped != 1 || string(up.reassemble(t, rel, 0)) != "{\"post\":2}\n" {
+		t.Fatalf("expected only post-baseline append to ship, got r2=%+v content=%q", r2, string(up.reassemble(t, rel, 0)))
+	}
+}
+
+func TestPreShipPendingSaveSurvivesKill9BeforeShipReturns(t *testing.T) {
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-kill9-preship.jsonl"
+	pre := "{\"pre\":1}\n"
+	abs := writeArtifact(t, home, rel, pre)
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	lineA := "{\"a\":1}\n"
+	appendArtifact(t, abs, lineA)
+
+	// Inside onShip, snapshot state.json BEFORE Ship returns (proving Pending
+	// was already persisted on disk before calling Uploader.Ship), then let the
+	// fake Hub commit normally.
+	var stateSnapshot []byte
+	up.onShip = func(_ context.Context, _ shipper.Segment, attempt int) (shipper.ShipResult, error, bool) {
+		if attempt == 1 {
+			data, err := os.ReadFile(shipper.StatePath(home))
+			if err != nil {
+				t.Errorf("read state.json inside onShip: %v", err)
+			}
+			stateSnapshot = data
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if len(stateSnapshot) == 0 {
+		t.Fatalf("expected state snapshot from inside onShip")
+	}
+	// Verify snapshot itself contains the persisted pending record.
+	var snapState shipper.State
+	if err := json.Unmarshal(stateSnapshot, &snapState); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if snapState.Artifacts[rel] == nil || snapState.Artifacts[rel].Pending == nil {
+		t.Fatalf("pre-Ship state.json snapshot missing Pending record")
+	}
+
+	// Simulate kill -9 between Hub commit and post-commit SaveState by restoring
+	// the pre-Ship snapshot, then grow the file before the next round.
+	if err := os.WriteFile(shipper.StatePath(home), stateSnapshot, 0o600); err != nil {
+		t.Fatalf("restore state snapshot: %v", err)
+	}
+	lineB := "{\"b\":2}\n"
+	appendArtifact(t, abs, lineB)
+
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.GenerationBumps != 0 || r2.SegmentsShipped != 2 {
+		t.Fatalf("expected idempotent pending replay + lineB with 0 bumps, got %+v", r2)
+	}
+	if got := string(up.reassemble(t, rel, 0)); got != lineA+lineB {
+		t.Fatalf("gen 0 reassembled=%q, want %q", got, lineA+lineB)
+	}
+}
+
+func TestZeroOffsetRenameBeforeFirstCommitDoesNotBumpGeneration(t *testing.T) {
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-zero-rename.jsonl"
+	abs := writeArtifact(t, home, rel, "")
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Replace the empty file via atomic rename before its first commit.
+	tmp := abs + ".tmp"
+	if err := os.WriteFile(tmp, []byte("{\"x\":1}\n"), 0o644); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	if err := os.Rename(tmp, abs); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+
+	r1, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if r1.GenerationBumps != 0 || r1.SegmentsShipped != 1 {
+		t.Fatalf("round 1: unexpected %+v", r1)
+	}
+
+	// Plain append must not trigger a spurious inode_changed bump.
+	appendArtifact(t, abs, "{\"x\":2}\n")
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.GenerationBumps != 0 || r2.SegmentsShipped != 1 {
+		t.Fatalf("round 2: spurious bump after zero-offset rename: %+v", r2)
+	}
+	if got := string(up.reassemble(t, rel, 0)); got != "{\"x\":1}\n{\"x\":2}\n" {
+		t.Fatalf("gen 0=%q, want %q", got, "{\"x\":1}\n{\"x\":2}\n")
+	}
+}
+
+func TestHeldBackPartialLineDoesNotReportBudgetExhausted(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	writeArtifact(t, home, ".claude/projects/-workspace/sess-a.jsonl", "{\"a\":1}\n")
+	writeArtifact(t, home, ".claude/projects/-workspace/sess-b.jsonl", "{\"partial\":")
+
+	r, err := s.RunRound(context.Background(), shipper.RoundOptions{
+		Final:    false,
+		Reason:   shipper.ReasonPeriodic,
+		MaxBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if r.SegmentsShipped != 1 || r.BudgetExhausted {
+		t.Fatalf("held-back partial line must not set BudgetExhausted=true: %+v", r)
+	}
+}
+
+func TestConflictAfterPreBaselineRewriteRestartsAtZero(t *testing.T) {
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-conflict-rewrite.jsonl"
+	pre := "{\"PRE\":\"original-0123456789\"}\n"
+	abs := writeArtifact(t, home, rel, pre)
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	post := "{\"post\":1}\n"
+	appendArtifact(t, abs, post)
+
+	// Rewrite pre-baseline bytes in-place (same size, same inode) right as Hub
+	// returns 409 conflict; conflict path must check BaselineGuardHash and
+	// restart gen 1 at 0 instead of BaselineOffset.
+	rewrittenPre := "{\"PRE\":\"mutated!-0123456789\"}\n"
+	up.onShip = func(_ context.Context, seg shipper.Segment, _ int) (shipper.ShipResult, error, bool) {
+		if seg.Generation == 0 {
+			f, err := os.OpenFile(abs, os.O_WRONLY, 0)
+			if err != nil {
+				t.Errorf("open rw: %v", err)
+			} else {
+				_, _ = f.WriteAt([]byte(rewrittenPre), 0)
+				_ = f.Close()
+			}
+			return shipper.ShipResult{Outcome: shipper.OutcomeConflict, Message: "409 conflict"}, nil, true
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	r1, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if r1.GenerationBumps != 1 {
+		t.Fatalf("GenerationBumps=%d, want 1", r1.GenerationBumps)
+	}
+	st1, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if st1.Artifacts[rel].RawCommittedOffset != 0 || st1.Artifacts[rel].ParsedOffset != 0 {
+		t.Fatalf("expected restart at 0 when pre-baseline guard mismatches on conflict, got raw=%d parsed=%d",
+			st1.Artifacts[rel].RawCommittedOffset, st1.Artifacts[rel].ParsedOffset)
+	}
+}
+
+func TestPendingRangeInPlaceRewriteTriggersGuardMismatch(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+	up.onShip = func(_ context.Context, _ shipper.Segment, attempt int) (shipper.ShipResult, error, bool) {
+		if attempt == 1 {
+			return shipper.ShipResult{Outcome: shipper.OutcomeRetryable}, errors.New("temp error"), true
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	rel := ".claude/projects/-workspace/sess-pending-rewrite.jsonl"
+	orig := "{\"a\":\"1111\"}\n"
+	abs := writeArtifact(t, home, rel, orig)
+
+	if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+
+	// Overwrite the pending range [0, len(orig)) in-place with same-length different bytes.
+	rewritten := "{\"a\":\"9999\"}\n"
+	f, err := os.OpenFile(abs, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open rw: %v", err)
+	}
+	if _, err := f.WriteAt([]byte(rewritten), 0); err != nil {
+		_ = f.Close()
+		t.Fatalf("writeAt: %v", err)
+	}
+	_ = f.Close()
+
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.GenerationBumps != 1 || r2.SegmentsShipped != 1 {
+		t.Fatalf("expected guard_mismatch bump + gen 1 ship, got %+v", r2)
+	}
+	st, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if st.Artifacts[rel].Generation != 1 || st.Artifacts[rel].LastGenerationReason != shipper.GenReasonGuardMismatch {
+		t.Fatalf("expected gen=1 guard_mismatch, got %+v", st.Artifacts[rel])
+	}
+	if got := string(up.reassemble(t, rel, 1)); got != rewritten {
+		t.Fatalf("gen 1=%q, want %q", got, rewritten)
+	}
+}
+
+func TestOutcomeRejectedClearedOnGenerationBumpAndNewRunID(t *testing.T) {
+	t.Run("cleared on generation bump", func(t *testing.T) {
+		home := t.TempDir()
+		up := newFakeUploader()
+		reject := true
+		up.onShip = func(_ context.Context, _ shipper.Segment, _ int) (shipper.ShipResult, error, bool) {
+			if reject {
+				return shipper.ShipResult{Outcome: shipper.OutcomeRejected, Message: "413 segment_too_large"}, nil, true
+			}
+			return shipper.ShipResult{}, nil, false
+		}
+
+		s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-A", Uploader: up, Now: fixedClock()})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, err := s.Baseline(context.Background()); err != nil {
+			t.Fatalf("Baseline: %v", err)
+		}
+
+		rel := ".claude/projects/-workspace/sess-rej-bump.jsonl"
+		abs := writeArtifact(t, home, rel, "{\"line\":1}\n")
+		// Commit line 1 first so truncation triggers a generation bump.
+		reject = false
+		if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+			t.Fatalf("RunRound 1: %v", err)
+		}
+
+		// Append line 2 and reject it.
+		appendArtifact(t, abs, "{\"line\":2}\n")
+		reject = true
+		if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+			t.Fatalf("RunRound 2: %v", err)
+		}
+
+		// Truncate file to trigger a generation bump; park must clear and gen 1 must ship.
+		reject = false
+		if err := os.WriteFile(abs, []byte("{\"g\":1}\n"), 0o644); err != nil {
+			t.Fatalf("truncate: %v", err)
+		}
+		r3, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+		if err != nil {
+			t.Fatalf("RunRound 3: %v", err)
+		}
+		if r3.GenerationBumps != 1 || r3.SegmentsShipped != 1 {
+			t.Fatalf("expected generation bump to clear rejected park, got %+v", r3)
+		}
+	})
+
+	t.Run("cleared on new RunID", func(t *testing.T) {
+		home := t.TempDir()
+		up := newFakeUploader()
+		reject := true
+		up.onShip = func(_ context.Context, _ shipper.Segment, _ int) (shipper.ShipResult, error, bool) {
+			if reject {
+				return shipper.ShipResult{Outcome: shipper.OutcomeRejected, Message: "400 invalid_segment"}, nil, true
+			}
+			return shipper.ShipResult{}, nil, false
+		}
+
+		sA, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-A", Uploader: up, Now: fixedClock()})
+		if err != nil {
+			t.Fatalf("New sA: %v", err)
+		}
+		if _, err := sA.Baseline(context.Background()); err != nil {
+			t.Fatalf("Baseline: %v", err)
+		}
+		rel := ".claude/projects/-workspace/sess-rej-run.jsonl"
+		writeArtifact(t, home, rel, "{\"line\":1}\n")
+
+		if _, err := sA.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+			t.Fatalf("RunRound run-A: %v", err)
+		}
+
+		// New RunID clears the rejection park and ships cleanly.
+		reject = false
+		sB, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-B", Uploader: up, Now: fixedClock()})
+		if err != nil {
+			t.Fatalf("New sB: %v", err)
+		}
+		rB, err := sB.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+		if err != nil {
+			t.Fatalf("RunRound run-B: %v", err)
+		}
+		if rB.SegmentsShipped != 1 {
+			t.Fatalf("expected new RunID to clear rejected park and ship, got %+v", rB)
+		}
+	})
+}
+
+func TestWithLockedStateUpdatesParsedOffset(t *testing.T) {
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-lock-helper.jsonl"
+	writeArtifact(t, home, rel, "{\"a\":1}\n")
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// save=false must not persist mutation.
+	err = shipper.WithLockedState(context.Background(), home, 0, func(st *shipper.State) (bool, error) {
+		st.Artifacts[rel].ParsedOffset = 999
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("WithLockedState(save=false): %v", err)
+	}
+	st1, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState 1: %v", err)
+	}
+	if st1.Artifacts[rel].ParsedOffset == 999 {
+		t.Fatalf("save=false should not have persisted ParsedOffset")
+	}
+
+	// save=true persists updated ParsedOffset atomically under the lock.
+	err = shipper.WithLockedState(context.Background(), home, 0, func(st *shipper.State) (bool, error) {
+		st.Artifacts[rel].ParsedOffset = 4
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("WithLockedState(save=true): %v", err)
+	}
+	st2, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState 2: %v", err)
+	}
+	if st2.Artifacts[rel].ParsedOffset != 4 {
+		t.Fatalf("ParsedOffset=%d, want 4", st2.Artifacts[rel].ParsedOffset)
+	}
+}
