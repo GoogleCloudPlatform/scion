@@ -150,7 +150,8 @@ export interface ReviewDraftSummary {
 
 /** Viewer-specific review state on ArtifactResponse (pkg/artifacts/api.go). */
 export interface ReviewStateInfo {
-  requestedOfMe: ReviewRequestInfo | null;
+  reviewOnLatest?: boolean;
+  requestedOfMe?: ReviewRequestInfo | null;
   myDraft?: ReviewDraftSummary | null;
   draftsInProgress?: number;
 }
@@ -1362,7 +1363,7 @@ export function publishErrorMessage(err: unknown): string {
 /** One row of GET /api/v1/artifacts?mine=1 (pkg/artifacts/list.go). */
 export interface ArtifactListItem extends Artifact {
   /** The current version is a review awaiting the owner. */
-  reviewPending: boolean;
+  reviewOnLatest: boolean;
   /** The caller has an open review request on this artifact (when gate is on). */
   reviewRequested?: boolean;
   /** The caller has a saved review draft on this artifact (when drafts gate is on). */

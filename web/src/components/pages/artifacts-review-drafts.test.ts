@@ -42,7 +42,7 @@ function makeItem(id: string, overrides: Partial<ArtifactListItem> = {}): Artifa
     currentSeq: 1,
     createdAt: '2026-11-26T00:00:00Z',
     updatedAt: '2026-11-26T00:00:00Z',
-    reviewPending: false,
+    reviewOnLatest: false,
     reviewInDraft: false,
     access: 'project',
     ...overrides,

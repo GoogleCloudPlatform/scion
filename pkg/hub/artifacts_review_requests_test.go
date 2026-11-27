@@ -131,7 +131,8 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 
 	rec = doAsUser(bob, http.MethodGet, "/api/v1/artifacts/"+artID, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.NotContains(t, rec.Body.String(), `"reviewState"`)
+	assert.NotContains(t, rec.Body.String(), `"requestedOfMe"`)
+	assert.Contains(t, rec.Body.String(), `"reviewOnLatest":false`)
 
 	rec = doAsUser(bob, http.MethodGet, "/api/v1/artifacts?mine=1&requested=1", nil)
 	require.Equal(t, http.StatusOK, rec.Code)

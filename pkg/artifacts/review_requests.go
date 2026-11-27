@@ -123,16 +123,16 @@ func (s *Service) principalDisplayNames(ctx context.Context, refs []string) map[
 	return namer.PrincipalDisplayNames(ctx, refs)
 }
 
-// populateReviewState sets resp.ReviewState on GET artifact / version responses
-// while FeatureReviewRequests or FeatureReviewDrafts is enabled. While both
-// experiments are off, resp.ReviewState stays nil and is omitted from JSON.
-func (s *Service) populateReviewState(ctx context.Context, b backend, a *Artifact, resp *ArtifactResponse) {
+// populateReviewState sets resp.ReviewState on GET artifact / version responses.
+// ReviewOnLatest is always populated; RequestedOfMe is populated only while
+// FeatureReviewRequests is enabled; MyDraft and DraftsInProgress are populated
+// only while FeatureReviewDrafts is enabled.
+func (s *Service) populateReviewState(ctx context.Context, b backend, a *Artifact, currentIsReview bool, resp *ArtifactResponse) {
 	requestsEnabled := s.featureEnabled(ctx, FeatureReviewRequests)
 	draftsEnabled := s.featureEnabled(ctx, FeatureReviewDrafts)
-	if !requestsEnabled && !draftsEnabled {
-		return
+	state := &ReviewStateInfo{
+		ReviewOnLatest: currentIsReview,
 	}
-	state := &ReviewStateInfo{}
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if requestsEnabled && ok && kind == PrincipalKindUser {
 		rr, err := b.store.GetOpenReviewRequest(ctx, a.ID, kind, ref)

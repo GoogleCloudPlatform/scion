@@ -344,16 +344,20 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
 
     // Artifacts toggleIsFlagInQuery promotes pure text with quoting and preserves meaning on clear.
     const artifactsSchema = getViewSchema('artifacts')!;
-    expect(toggleIsFlagInQuery('-draft', 'review', [], artifactsSchema)).toBe('is:review "-draft"');
-    expect(toggleIsFlagInQuery('a OR b', 'review', [], artifactsSchema)).toBe('is:review "a OR b"');
-    expect(toggleIsFlagInQuery('"hello"', 'review', [], artifactsSchema)).toBe(
-      'is:review "\\"hello\\""'
+    expect(toggleIsFlagInQuery('-draft', 'reviewed', [], artifactsSchema)).toBe(
+      'is:reviewed "-draft"'
+    );
+    expect(toggleIsFlagInQuery('a OR b', 'reviewed', [], artifactsSchema)).toBe(
+      'is:reviewed "a OR b"'
+    );
+    expect(toggleIsFlagInQuery('"hello"', 'reviewed', [], artifactsSchema)).toBe(
+      'is:reviewed "\\"hello\\""'
     );
     expect(
-      toggleIsFlagInQueryWithNotice('is:review -draft', 'review', [], artifactsSchema)
+      toggleIsFlagInQueryWithNotice('is:reviewed -draft', 'reviewed', [], artifactsSchema)
     ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
     expect(
-      toggleIsFlagInQueryWithNotice('is:mine "is:review"', 'mine', ['shared'], artifactsSchema)
+      toggleIsFlagInQueryWithNotice('is:mine "is:reviewed"', 'mine', ['shared'], artifactsSchema)
     ).toEqual({ value: '', notice: UNREPRESENTABLE_CLEAR_NOTICE });
     expect(
       toggleIsFlagInQueryWithNotice('is:mine "a b"', 'mine', ['shared'], artifactsSchema)

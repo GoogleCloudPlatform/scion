@@ -94,7 +94,7 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
     icon: 'clipboard-check',
     title: 'Reviews',
     descriptor: 'Reviews on your artifacts and review requests for you',
-    defaultHref: '/artifacts?review_pending=1&owner=me',
+    defaultHref: '/artifacts?review_on_latest=1&owner=me',
   },
   {
     key: 'chat',

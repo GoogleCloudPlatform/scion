@@ -206,8 +206,8 @@ type ListArtifactsOptions struct {
 	// dialect limits (512 bytes raw, 200 runes text, 20 distinct project values);
 	// invalid queries return 400 invalid_filter_query.
 	Query string
-	// ReviewPending keeps artifacts whose current version is a review.
-	ReviewPending bool
+	// ReviewOnLatest keeps artifacts whose current version is a review.
+	ReviewOnLatest bool
 	// Requested keeps artifacts where the caller has an open review request.
 	Requested bool
 	// Drafts keeps artifacts where the caller has a saved review draft.
@@ -236,7 +236,7 @@ type ArtifactListResponse struct {
 // ArtifactListItem is one listed artifact.
 type ArtifactListItem struct {
 	Artifact
-	ReviewPending   bool `json:"reviewPending"`
+	ReviewOnLatest  bool `json:"reviewOnLatest"`
 	ReviewRequested bool `json:"reviewRequested,omitempty"`
 	ReviewInDraft   bool `json:"reviewInDraft,omitempty"`
 	// Access is why the caller sees the artifact: "owned", "project" or
@@ -358,7 +358,8 @@ type ArtifactReviewDraftSummary struct {
 
 // ArtifactReviewState mirrors reviewState on ArtifactResponse.
 type ArtifactReviewState struct {
-	RequestedOfMe    *ArtifactReviewRequest      `json:"requestedOfMe"`
+	ReviewOnLatest   bool                        `json:"reviewOnLatest"`
+	RequestedOfMe    *ArtifactReviewRequest      `json:"requestedOfMe,omitempty"`
 	MyDraft          *ArtifactReviewDraftSummary `json:"myDraft,omitempty"`
 	DraftsInProgress int                         `json:"draftsInProgress,omitempty"`
 }
@@ -536,8 +537,8 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 		if opts.Query != "" {
 			q.Set("q", opts.Query)
 		}
-		if opts.ReviewPending {
-			q.Set("review_pending", "1")
+		if opts.ReviewOnLatest {
+			q.Set("review_on_latest", "1")
 		}
 		if opts.Requested {
 			q.Set("requested", "1")

@@ -254,7 +254,9 @@ export class ScionArtifactList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     const params = new URLSearchParams(window.location.search);
+    const reviewParam = params.get('review_on_latest') ?? params.get('review_pending');
     const requestedParam = params.get('requested');
+    const hasLegacyReview = reviewParam === '1' || reviewParam === 'true';
     const hasLegacyRequested =
       this.reviewRequestsEnabled && (requestedParam === '1' || requestedParam === 'true');
     const draftsParam = params.get('drafts');
@@ -262,8 +264,9 @@ export class ScionArtifactList extends LitElement {
       this.reviewDraftsEnabled && (draftsParam === '1' || draftsParam === 'true');
     let urlQ = params.get(this.urlParam) ?? '';
     let migratedLegacy = false;
-    if (!urlQ && (hasLegacyRequested || hasLegacyDrafts)) {
+    if (!urlQ && (hasLegacyReview || hasLegacyRequested || hasLegacyDrafts)) {
       const migrated: string[] = [];
+      if (hasLegacyReview) migrated.push('is:reviewed');
       if (hasLegacyRequested) migrated.push('is:requested');
       if (hasLegacyDrafts) migrated.push('is:draft');
       urlQ = migrated.join(' ');
@@ -353,6 +356,8 @@ export class ScionArtifactList extends LitElement {
     } else {
       params.delete(this.urlParam);
     }
+    params.delete('review_on_latest');
+    params.delete('review_pending');
     params.delete('requested');
     params.delete('drafts');
     replaceSearch(params);
@@ -375,7 +380,7 @@ export class ScionArtifactList extends LitElement {
     void this.load();
   };
 
-  private onFlagChipClick(flag: 'shared' | 'requested' | 'draft'): void {
+  private onFlagChipClick(flag: 'shared' | 'reviewed' | 'requested' | 'draft'): void {
     const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
       flag,
@@ -531,8 +536,8 @@ export class ScionArtifactList extends LitElement {
                 <td class="muted">${formatInstant(item.updatedAt)}</td>
                 <td>
                   ${item.ownerDeleted ? ownerDeletedBadge(item.ownerKind) : nothing}
-                  ${item.reviewPending
-                    ? html`<sl-badge pill variant="warning">Review pending</sl-badge>`
+                  ${item.reviewOnLatest
+                    ? html`<sl-badge pill variant="warning">Review on latest</sl-badge>`
                     : nothing}
                   ${item.reviewRequested
                     ? html`<sl-badge pill variant="primary">Review requested</sl-badge>`
@@ -574,6 +579,11 @@ export class ScionArtifactList extends LitElement {
       body = this.renderTable();
     }
     const sharedActive = hasIsFlagInQuery(this.filterQueryText, 'shared', PROJECT_ARTIFACTS_SCHEMA);
+    const reviewedActive = hasIsFlagInQuery(
+      this.filterQueryText,
+      'reviewed',
+      PROJECT_ARTIFACTS_SCHEMA
+    );
     const requestedActive = hasIsFlagInQuery(
       this.filterQueryText,
       'requested',
@@ -588,7 +598,7 @@ export class ScionArtifactList extends LitElement {
           .notice=${this.filterNotice}
           placeholder=${this.reviewRequestsEnabled
             ? 'Filter artifacts… (try is:requested)'
-            : 'Filter artifacts… (try is:shared)'}
+            : 'Filter artifacts… (try is:reviewed)'}
           @filter-input=${this.onFilterInput}
           @filter-commit=${this.onFilterCommit}
         ></scion-filter-box>
@@ -599,6 +609,14 @@ export class ScionArtifactList extends LitElement {
           @click=${(): void => this.onFlagChipClick('shared')}
         >
           Shared with this project
+        </button>
+        <button
+          type="button"
+          class="filter-chip ${reviewedActive ? 'active' : ''}"
+          aria-pressed=${reviewedActive ? 'true' : 'false'}
+          @click=${(): void => this.onFlagChipClick('reviewed')}
+        >
+          Review on latest
         </button>
         ${this.reviewRequestsEnabled
           ? html`<button

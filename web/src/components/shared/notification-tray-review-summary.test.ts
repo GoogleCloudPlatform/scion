@@ -193,12 +193,23 @@ describe('notification tray: review summary', () => {
     const n = summary();
     tray.dispatchBrowserNotification(n);
     expect(popups).toHaveLength(1);
-    expect(popups[0].title).toBe('Review Submitted');
+    expect(popups[0].title).toBe('Review submitted on v3');
     expect(popups[0].options.body).toBe(`${n.message}\n“${HOSTILE_EXCERPT}”`);
 
     popups = [];
-    tray.dispatchBrowserNotification(summary({ excerpt: undefined }));
-    expect(popups[0].options.body).toBe(n.message);
+    tray.dispatchBrowserNotification(
+      summary({ excerpt: undefined, message: 'Review (v7) of your artifact submitted by Alice.' })
+    );
+    expect(popups[0].title).toBe('Review submitted on v7');
+    expect(popups[0].options.body).toBe('Review (v7) of your artifact submitted by Alice.');
+    popups = [];
+    tray.dispatchBrowserNotification(
+      summary({
+        message: 'Review summary from Eve (v1) (v5 of your artifact):',
+        excerpt: 'Looks good.',
+      })
+    );
+    expect(popups[0].title).toBe('Review submitted on v5');
     popups = [];
     tray.dispatchBrowserNotification(summary({ kind: 'artifact_grant' }));
     expect(popups[0].options.body).toBe(n.message);

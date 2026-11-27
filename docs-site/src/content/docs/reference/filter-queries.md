@@ -66,7 +66,7 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
-| `is` | flag_set | `review`, `requested`, `draft`, `mine`, `shared` (`mine` and `shared` are mutually exclusive) | server | `is:review`, `is:requested`, `is:draft`, `is:mine`, `-is:shared` | Artifact state or access |
+| `is` | flag_set | `reviewed`, `requested`, `draft`, `mine`, `shared` (`mine` and `shared` are mutually exclusive) | server | `is:reviewed`, `is:requested`, `is:draft`, `is:mine`, `-is:shared` | Artifact state or access |
 | `project` | ref | Project slug or UUID | server | `project:web-app`, `-project:archive` | Home project slug or ID |
 
 ### `artifacts-project` (Project artifacts list)
@@ -75,7 +75,7 @@ Text search matches artifact **title** or **key** (case-insensitive substring).
 
 | Key | Kind | Values | Execution | Example | Description |
 | --- | --- | --- | --- | --- | --- |
-| `is` | flag_set | `shared`, `requested`, `draft` | server | `is:shared`, `is:requested`, `is:draft`, `-is:shared` | Artifact state or shared with this project |
+| `is` | flag_set | `shared`, `reviewed`, `requested`, `draft` | server | `is:shared`, `is:reviewed`, `is:requested`, `is:draft`, `-is:shared` | Artifact state or shared with this project |
 
 ### `decisions` (Project Decisions page)
 

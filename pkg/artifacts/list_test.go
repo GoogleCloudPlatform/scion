@@ -168,16 +168,31 @@ func TestListFilters(t *testing.T) {
 		t.Fatalf("all: %d, want 2", len(all.Artifacts))
 	}
 	for _, a := range all.Artifacts {
-		if a.ReviewPending != (a.ID == theirs) {
-			t.Errorf("%s reviewPending = %v", a.Title, a.ReviewPending)
+		if a.ReviewOnLatest != (a.ID == theirs) {
+			t.Errorf("%s reviewOnLatest = %v", a.Title, a.ReviewOnLatest)
+		}
+	}
+	// GET artifact also reports reviewState.reviewOnLatest.
+	for id, wantReview := range map[string]bool{theirs: true, own: false} {
+		rec := f.do(&userU, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d", id, rec.Code)
+		}
+		var ar ArtifactResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &ar); err != nil {
+			t.Fatal(err)
+		}
+		if ar.ReviewState == nil || ar.ReviewState.ReviewOnLatest != wantReview {
+			t.Errorf("GET %s reviewState = %+v, want reviewOnLatest=%v", id, ar.ReviewState, wantReview)
 		}
 	}
 	for q, want := range map[string][]string{
-		"&review_pending=1": {theirs},
-		"&owner=me":         {own},
-		"&q=weekly":         {own},
-		"&q=DESIGN":         {theirs},
-		"&q=nomatch":        {},
+		"&review_on_latest=1": {theirs},
+		"&review_pending=1":   {theirs},
+		"&owner=me":           {own},
+		"&q=weekly":           {own},
+		"&q=DESIGN":           {theirs},
+		"&q=nomatch":          {},
 	} {
 		if got := listIDs(f.list(&userU, listPath+q)); !slices.Equal(got, want) {
 			t.Errorf("%s: %v, want %v", q, got, want)
@@ -193,6 +208,7 @@ func TestListBadRequests(t *testing.T) {
 		listPath + "&limit=0",
 		listPath + "&limit=" + strconv.Itoa(MaxListLimit+1),
 		listPath + "&limit=x",
+		listPath + "&review_on_latest=maybe",
 		listPath + "&review_pending=maybe",
 		listPath + "&owner=bob",
 		listPath + "&q=%00",
@@ -262,7 +278,7 @@ func TestListPagination(t *testing.T) {
 	}{
 		"another caller":  {agentB, listPath + "&limit=2&cursor=" + cursor},
 		"another query":   {userU, listPath + "&q=f&cursor=" + cursor},
-		"another filter":  {userU, listPath + "&review_pending=1&cursor=" + cursor},
+		"another filter":  {userU, listPath + "&review_on_latest=1&cursor=" + cursor},
 		"tampered cursor": {userU, listPath + "&cursor=" + cursor + "x"},
 		"garbage cursor":  {userU, listPath + "&cursor=nope"},
 	} {

@@ -154,8 +154,9 @@ func TestListArtifactsRequestedFlag(t *testing.T) {
 	if svc.lastListOpts == nil || !svc.lastListOpts.Requested {
 		t.Fatalf("expected Requested=true, got %+v", svc.lastListOpts)
 	}
-	if !strings.Contains(out.String(), "project, review requested") {
-		t.Errorf("expected 'project, review requested' in output:\n%s", out.String())
+	got := out.String()
+	if !strings.Contains(got, "STATE") || !strings.Contains(got, "review requested") {
+		t.Errorf("expected STATE column with 'review requested' in output:\n%s", got)
 	}
 }
 

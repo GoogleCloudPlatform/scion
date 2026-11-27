@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -30,16 +31,16 @@ import (
 )
 
 var (
-	artifactListMine          bool
-	artifactListProject       string
-	artifactListShared        bool
-	artifactListReviewPending bool
-	artifactListRequested     bool
-	artifactListDrafts        bool
-	artifactListQuery         string
-	artifactListLimit         int
-	artifactListAll           bool
-	artifactListCursor        string
+	artifactListMine      bool
+	artifactListProject   string
+	artifactListShared    bool
+	artifactListReviewed  bool
+	artifactListRequested bool
+	artifactListDrafts    bool
+	artifactListQuery     string
+	artifactListLimit     int
+	artifactListAll       bool
+	artifactListCursor    string
 )
 
 var artifactListCmd = &cobra.Command{
@@ -67,15 +68,15 @@ Examples:
 		defer cancel()
 		return listArtifacts(ctx, client.Artifacts(), cmd.OutOrStdout(), listArtifactsParams{
 			Options: hubclient.ListArtifactsOptions{
-				Query:         artifactListQuery,
-				ReviewPending: artifactListReviewPending,
-				Requested:     artifactListRequested,
-				Drafts:        artifactListDrafts,
-				OwnedOnly:     artifactListMine,
-				Limit:         artifactListLimit,
-				Scope:         artifactListProject,
-				Shared:        artifactListShared,
-				Cursor:        artifactListCursor,
+				Query:          artifactListQuery,
+				ReviewOnLatest: artifactListReviewed,
+				Requested:      artifactListRequested,
+				Drafts:         artifactListDrafts,
+				OwnedOnly:      artifactListMine,
+				Limit:          artifactListLimit,
+				Scope:          artifactListProject,
+				Shared:         artifactListShared,
+				Cursor:         artifactListCursor,
 			},
 			All:  artifactListAll,
 			JSON: isJSONOutput(),
@@ -87,10 +88,10 @@ func init() {
 	artifactListCmd.Flags().BoolVar(&artifactListMine, "mine", false, "Only artifacts you own")
 	artifactListCmd.Flags().StringVar(&artifactListProject, "project-id", "", "Only artifacts homed in, or shared with, this project (a project id)")
 	artifactListCmd.Flags().BoolVar(&artifactListShared, "shared", false, "Only artifacts shared with you (with --project-id, shared with that project) from elsewhere")
-	artifactListCmd.Flags().BoolVar(&artifactListReviewPending, "review-pending", false, "Only artifacts whose current version is a review")
+	artifactListCmd.Flags().BoolVar(&artifactListReviewed, "reviewed", false, "Only artifacts whose current version is a review")
 	artifactListCmd.Flags().BoolVar(&artifactListRequested, "requested", false, "Only artifacts where your review has been requested")
 	artifactListCmd.Flags().BoolVar(&artifactListDrafts, "drafts", false, "Only artifacts where you have a saved review draft")
-	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Filter query (e.g. is:review project:my-proj) or plain title/key text")
+	artifactListCmd.Flags().StringVar(&artifactListQuery, "query", "", "Filter query (e.g. is:reviewed project:my-proj) or plain title/key text")
 	artifactListCmd.Flags().IntVar(&artifactListLimit, "limit", 0, "Page size (default: the hub's)")
 	artifactListCmd.Flags().BoolVar(&artifactListAll, "all", false, "Follow every page instead of printing one")
 	artifactListCmd.Flags().StringVar(&artifactListCursor, "cursor", "", "Start at this page (the nextCursor of a previous --format json list)")
@@ -148,22 +149,27 @@ func listArtifacts(ctx context.Context, svc hubclient.ArtifactService, out io.Wr
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "REF\tTITLE\tVERSION\tACCESS\tUPDATED")
+	_, _ = fmt.Fprintln(tw, "REF\tTITLE\tVERSION\tACCESS\tSTATE\tUPDATED")
 	for _, a := range items {
 		access := safeText(a.Access)
 		if access == "" {
 			access = "-"
 		}
-		if a.ReviewPending {
-			access += ", review pending"
+		var states []string
+		if a.ReviewOnLatest {
+			states = append(states, "review on latest")
 		}
 		if a.ReviewRequested {
-			access += ", review requested"
+			states = append(states, "review requested")
 		}
 		if a.ReviewInDraft {
-			access += ", review in draft"
+			states = append(states, "review in draft")
 		}
-		_, _ = fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\n", safeText(artifacts.FormatRef(a.ID, 0)), safeText(a.Title), a.CurrentSeq, access,
+		state := "-"
+		if len(states) > 0 {
+			state = strings.Join(states, ", ")
+		}
+		_, _ = fmt.Fprintf(tw, "%s\t%s\tv%d\t%s\t%s\t%s\n", safeText(artifacts.FormatRef(a.ID, 0)), safeText(a.Title), a.CurrentSeq, access, state,
 			clitime.Format(a.UpdatedAt, clitime.Minute))
 	}
 	if err := tw.Flush(); err != nil {

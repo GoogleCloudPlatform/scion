@@ -329,7 +329,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}
-	s.populateReviewState(r.Context(), b, a, &resp)
+	currentIsReview := false
 	if a.CurrentSeq > 0 {
 		v, ok := readyVersion(w, r, b, a, 0)
 		if !ok {
@@ -341,9 +341,11 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 			writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 			return
 		}
+		currentIsReview = v.Kind == VersionKindReview
 		resp.Version = versionInfo(v, files)
 		resp.Archive = s.archiveInfo(r.Context(), b, files)
 	}
+	s.populateReviewState(r.Context(), b, a, currentIsReview, &resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 

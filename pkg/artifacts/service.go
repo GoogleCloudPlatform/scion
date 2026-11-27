@@ -491,7 +491,7 @@ func (s *Service) RegisterRoutes(mux Mux, guard Guard) {
 //
 //	POST /api/v1/artifacts?name=<file>[&title=][&scope=]    single-file publish
 //	POST /api/v1/artifacts                                  create a pending version (JSON manifest)
-//	GET  /api/v1/artifacts?mine=1[&q=][&review_pending=1][&owner=me][&limit=][&cursor=]
+//	GET  /api/v1/artifacts?mine=1[&q=][&review_on_latest=1][&owner=me][&limit=][&cursor=]
 //	                                                        artifacts the caller owns, is granted, or shares a project with
 //	GET  /api/v1/artifacts/{id}                             metadata of the current version
 //	GET  /api/v1/artifacts/{id}/files/{path}                a file of the current version
