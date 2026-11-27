@@ -484,3 +484,220 @@ func TestRefusedPendingRebaselineProbesAndDropsBackoffBacklog(t *testing.T) {
 		t.Fatalf("shipped RawSize=%d, want %d", shipped[0].RawSize, len(afterAccept))
 	}
 }
+
+func TestRebaselineAfterRestartAtZeroBumpCreatesNewGeneration(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-trunc-reb.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+
+	// Baseline with 46-byte history.
+	history := "{\"history\":\"0123456789abcdef0123456789ab\"}\n"
+	if err := os.WriteFile(artPath, []byte(history), 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	var shipped []Segment
+	up := &probeAndShipUploader{
+		probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "probe-ok"}, nil
+		},
+		shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+			shipped = append(shipped, seg)
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+		},
+	}
+
+	s, err := New(Config{HomeDir: home, RunID: "run-r1", Uploader: up})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Truncate below baseline and rewrite shorter line -> gen 1 starts at 0 and ships [0, 8).
+	lineA := "{\"a\":1}\n"
+	if err := os.WriteFile(artPath, []byte(lineA), 0o644); err != nil {
+		t.Fatalf("truncate+rewrite: %v", err)
+	}
+	res1, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res1.GenerationBumps != 1 || res1.SegmentsShipped != 1 {
+		t.Fatalf("RunRound after truncate: res=%+v err=%v", res1, err)
+	}
+	if shipped[0].Generation != 1 || shipped[0].ByteStart != 0 || shipped[0].ByteEnd != int64(len(lineA)) {
+		t.Fatalf("unexpected gen 1 segment: %+v", shipped[0])
+	}
+
+	// Append while capture is off, then Rebaseline -> MUST bump to gen 2 (no hole in gen 1).
+	lineOff := "{\"off\":1}\n"
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append off: %v", err)
+	}
+	_, _ = f.WriteString(lineOff)
+	_ = f.Close()
+
+	if _, err := s.Rebaseline(context.Background(), "capture_unavailable"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	entry := st.Artifacts[rel]
+	if entry.Generation != 2 || entry.LastGenerationReason != GenReasonRebaseline {
+		t.Fatalf("expected gen=2 reason=%q after Rebaseline following gen-1 commit, got gen=%d reason=%q",
+			GenReasonRebaseline, entry.Generation, entry.LastGenerationReason)
+	}
+
+	// Probe-accept path: append backoff line, run probe-accept round (rebaselines past it),
+	// then append lineB and ship -> lands in gen 2 cleanly at line boundary!
+	lineBackoff := "{\"backoff\":1}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append backoff: %v", err)
+	}
+	_, _ = f2.WriteString(lineBackoff)
+	_ = f2.Close()
+
+	if _, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonResumeCatchup}); err != nil {
+		t.Fatalf("RunRound probe-accept: %v", err)
+	}
+
+	lineB := "{\"b\":2}\n"
+	f3, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append B: %v", err)
+	}
+	_, _ = f3.WriteString(lineB)
+	_ = f3.Close()
+
+	res2, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res2.SegmentsShipped != 1 {
+		t.Fatalf("RunRound after probe-accept: res=%+v err=%v", res2, err)
+	}
+	if len(shipped) != 2 {
+		t.Fatalf("expected 2 shipped segments, got %d", len(shipped))
+	}
+	wantGen2Start := int64(len(lineA) + len(lineOff) + len(lineBackoff))
+	if shipped[1].Generation != 2 || shipped[1].ByteStart != wantGen2Start || shipped[1].RawSize != int64(len(lineB)) {
+		t.Fatalf("unexpected gen 2 segment: %+v (want gen=2 start=%d len=%d)", shipped[1], wantGen2Start, len(lineB))
+	}
+}
+
+func TestProbeConflictClearsRefusalFlagAndAllowsNextRoundToShip(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-probe-409.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+	if err := os.WriteFile(artPath, []byte("{\"init\":0}\n"), 0o644); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+
+	var shipped []Segment
+	up := &probeAndShipUploader{
+		probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+			// 409 conflict on probe means Hub passed experiment/policy gates.
+			return ShipResult{Outcome: OutcomeConflict, Message: "segment_conflict"}, errors.New("conflict")
+		},
+		shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+			shipped = append(shipped, seg)
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+		},
+	}
+
+	s, err := New(Config{HomeDir: home, RunID: "run-o1", Uploader: up})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Rebaseline(context.Background(), "capture_disabled"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append 1: %v", err)
+	}
+	_, _ = f.WriteString("{\"during_backoff\":1}\n")
+	_ = f.Close()
+
+	// Probe returns OutcomeConflict -> must rebaseline and clear RefusedPendingRebaseline.
+	if _, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic}); err != nil {
+		t.Fatalf("RunRound probe: %v", err)
+	}
+	st, ok, err := LoadState(home)
+	if err != nil || !ok || st.RefusedPendingRebaseline {
+		t.Fatalf("expected RefusedPendingRebaseline=false after probe conflict, got ok=%v flag=%v err=%v", ok, st.RefusedPendingRebaseline, err)
+	}
+
+	// Next round ships newly appended bytes without livelock.
+	nextLine := "{\"after_probe_409\":2}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append 2: %v", err)
+	}
+	_, _ = f2.WriteString(nextLine)
+	_ = f2.Close()
+
+	res, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res.SegmentsShipped != 1 || len(shipped) != 1 || shipped[0].RawSize != int64(len(nextLine)) {
+		t.Fatalf("expected next round to ship %d bytes, got res=%+v shipped=%d err=%v", len(nextLine), res, len(shipped), err)
+	}
+}
+
+func TestFindLastNewlineOffset_CapAndContextCancellation(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-nonl.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+
+	// 1024-byte file with NO newline at all; MaxSegmentBytes capped at 256.
+	content := strings.Repeat("a", 1024)
+	if err := os.WriteFile(artPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(Config{
+		HomeDir:         home,
+		RunID:           "run-o3",
+		MaxSegmentBytes: 256,
+		MaxRoundBytes:   256,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Beyond the scan cap (256 bytes), Rebaseline falls back to EOF (1024).
+	if _, err := s.Rebaseline(context.Background(), "capture_unavailable"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	if got := st.Artifacts[rel].RawCommittedOffset; got != 1024 {
+		t.Fatalf("expected capped scan without newline to rebaseline to EOF=1024, got %d", got)
+	}
+
+	// Cancelled context stops findLastNewlineOffset immediately.
+	f, err := os.Open(artPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := findLastNewlineOffset(cancelCtx, f, 1024, 256); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}

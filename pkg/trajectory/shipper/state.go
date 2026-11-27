@@ -124,32 +124,33 @@ type State struct {
 // ArtifactState holds durable per-artifact watermark and guard metadata.
 // Unknown JSON fields are preserved in Extra across load/save cycles.
 type ArtifactState struct {
-	NativeRelativePath   string          `json:"native_relative_path"`
-	ArtifactKind         ArtifactKind    `json:"artifact_kind"`
-	Inode                uint64          `json:"inode,omitempty"`
-	Device               uint64          `json:"device,omitempty"`
-	FileID               string          `json:"file_id,omitempty"`
-	Generation           int             `json:"generation"`
-	RawCommittedOffset   int64           `json:"raw_committed_offset"`
-	ParsedOffset         int64           `json:"parsed_offset"`
-	GuardHash            string          `json:"guard_hash,omitempty"`
-	GuardLen             int             `json:"guard_len,omitempty"`
-	Pending              *PendingSegment `json:"pending,omitempty"`
-	Baseline             bool            `json:"baseline"`
-	BaselineOffset       int64           `json:"baseline_offset,omitempty"`
-	BaselineGuardHash    string          `json:"baseline_guard_hash,omitempty"`
-	BaselineGuardLen     int             `json:"baseline_guard_len,omitempty"`
-	NeedsBaseline        bool            `json:"needs_baseline,omitempty"`
-	OriginHubID          string          `json:"origin_hub_id,omitempty"`
-	ConsecutiveFailures  int             `json:"consecutive_failures"`
-	LastError            string          `json:"last_error,omitempty"`
-	LastGenerationReason string          `json:"last_generation_reason,omitempty"`
-	Rejected             bool            `json:"rejected,omitempty"`
-	RejectedReason       string          `json:"rejected_reason,omitempty"`
-	RejectedRunID        string          `json:"rejected_run_id,omitempty"`
-	Truncated            bool            `json:"truncated"`
-	TruncatedRunID       string          `json:"truncated_run_id,omitempty"`
-	UpdatedAt            *time.Time      `json:"updated_at,omitempty"`
+	NativeRelativePath    string          `json:"native_relative_path"`
+	ArtifactKind          ArtifactKind    `json:"artifact_kind"`
+	Inode                 uint64          `json:"inode,omitempty"`
+	Device                uint64          `json:"device,omitempty"`
+	FileID                string          `json:"file_id,omitempty"`
+	Generation            int             `json:"generation"`
+	GenerationStartOffset *int64          `json:"generation_start_offset,omitempty"`
+	RawCommittedOffset    int64           `json:"raw_committed_offset"`
+	ParsedOffset          int64           `json:"parsed_offset"`
+	GuardHash             string          `json:"guard_hash,omitempty"`
+	GuardLen              int             `json:"guard_len,omitempty"`
+	Pending               *PendingSegment `json:"pending,omitempty"`
+	Baseline              bool            `json:"baseline"`
+	BaselineOffset        int64           `json:"baseline_offset,omitempty"`
+	BaselineGuardHash     string          `json:"baseline_guard_hash,omitempty"`
+	BaselineGuardLen      int             `json:"baseline_guard_len,omitempty"`
+	NeedsBaseline         bool            `json:"needs_baseline,omitempty"`
+	OriginHubID           string          `json:"origin_hub_id,omitempty"`
+	ConsecutiveFailures   int             `json:"consecutive_failures"`
+	LastError             string          `json:"last_error,omitempty"`
+	LastGenerationReason  string          `json:"last_generation_reason,omitempty"`
+	Rejected              bool            `json:"rejected,omitempty"`
+	RejectedReason        string          `json:"rejected_reason,omitempty"`
+	RejectedRunID         string          `json:"rejected_run_id,omitempty"`
+	Truncated             bool            `json:"truncated"`
+	TruncatedRunID        string          `json:"truncated_run_id,omitempty"`
+	UpdatedAt             *time.Time      `json:"updated_at,omitempty"`
 
 	// Extra preserves unknown JSON fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -235,32 +236,33 @@ func (s State) MarshalJSON() ([]byte, error) {
 type artifactStateAlias ArtifactState
 
 var knownArtifactStateFields = map[string]struct{}{
-	"native_relative_path":   {},
-	"artifact_kind":          {},
-	"inode":                  {},
-	"device":                 {},
-	"file_id":                {},
-	"generation":             {},
-	"raw_committed_offset":   {},
-	"parsed_offset":          {},
-	"guard_hash":             {},
-	"guard_len":              {},
-	"pending":                {},
-	"baseline":               {},
-	"baseline_offset":        {},
-	"baseline_guard_hash":    {},
-	"baseline_guard_len":     {},
-	"needs_baseline":         {},
-	"origin_hub_id":          {},
-	"consecutive_failures":   {},
-	"last_error":             {},
-	"last_generation_reason": {},
-	"rejected":               {},
-	"rejected_reason":        {},
-	"rejected_run_id":        {},
-	"truncated":              {},
-	"truncated_run_id":       {},
-	"updated_at":             {},
+	"native_relative_path":    {},
+	"artifact_kind":           {},
+	"inode":                   {},
+	"device":                  {},
+	"file_id":                 {},
+	"generation":              {},
+	"generation_start_offset": {},
+	"raw_committed_offset":    {},
+	"parsed_offset":           {},
+	"guard_hash":              {},
+	"guard_len":               {},
+	"pending":                 {},
+	"baseline":                {},
+	"baseline_offset":         {},
+	"baseline_guard_hash":     {},
+	"baseline_guard_len":      {},
+	"needs_baseline":          {},
+	"origin_hub_id":           {},
+	"consecutive_failures":    {},
+	"last_error":              {},
+	"last_generation_reason":  {},
+	"rejected":                {},
+	"rejected_reason":         {},
+	"rejected_run_id":         {},
+	"truncated":               {},
+	"truncated_run_id":        {},
+	"updated_at":              {},
 }
 
 // UnmarshalJSON decodes ArtifactState while preserving unknown fields in Extra.

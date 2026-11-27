@@ -145,12 +145,23 @@
 //
 // # Policy Refusal Rebaselining
 //
-// When the Hub refuses capture by policy (e.g. 403 capture_disabled or
+// When the Hub refuses capture (404 or 403 capture_disabled /
 // capture_metadata_only), callers should invoke [Shipper.Rebaseline] to move
 // every discovered artifact's baseline, raw_committed_offset, and parsed_offset
-// to current EOF (clearing any pending segments) and record the reason under
-// the lock, then back off. This prevents a backlog from accumulating while
-// capture is disabled and shipping later if capture is re-enabled.
+// to the byte after the last newline at or before EOF (clearing any pending
+// segments, bumping generation if the current generation already had committed
+// or pending bytes past its start, and persisting RefusedPendingRebaseline=true)
+// under the lock, then back off.
+//
+// When RefusedPendingRebaseline is true and the Uploader implements [Prober],
+// the next round probes segments:prepare without uploading payload bytes or
+// committing; once the Hub accepts capture again, the shipper rebaselines past
+// everything written during the refusal/backoff window and clears the flag.
+// Note that a probe inserts a pending row on the Hub reserving up to one
+// segment (<= 16 MiB) of run-cap headroom until the prepare TTL expires
+// (15 min); any subsequent identity collision (for example when the
+// post-rebaseline offset equals the probe's byte_start) safely hits the Hub's
+// pending-row refresh path.
 //
 // # Safe Artifact Opening and Containment
 //

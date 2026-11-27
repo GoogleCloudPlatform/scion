@@ -262,13 +262,17 @@ type RebaselineResult struct {
 	SkippedPaths     []RefusedPath
 }
 
+func int64Ptr(v int64) *int64 {
+	return &v
+}
+
 // Rebaseline moves every discovered artifact's baseline, raw_committed_offset,
 // and parsed_offset to the byte immediately after the last '\n' at or before
 // EOF under the exclusive state lock, clears any pending segments, and records
 // reason on state.json.
 //
 // When the current generation already has committed or pending bytes past its
-// baseline start (RawCommittedOffset > BaselineOffset, or Pending != nil) and
+// start (RawCommittedOffset > GenerationStartOffset, or Pending != nil) and
 // the new offset differs from RawCommittedOffset, Generation is incremented
 // with LastGenerationReason = GenReasonRebaseline so no generation ever
 // contains a byte hole.
@@ -299,10 +303,13 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 			Artifacts: make(map[string]*ArtifactState),
 		}
 	}
-	return s.rebaselineLocked(st, reason, true)
+	return s.rebaselineLocked(ctx, st, reason, true)
 }
 
-func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending bool) (*RebaselineResult, error) {
+func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string, markRefusalPending bool) (*RebaselineResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	resolvedHome, err := pathcanon.Resolve(s.cfg.HomeDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory %s: %w", s.cfg.HomeDir, err)
@@ -337,6 +344,9 @@ func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending 
 	rebased := 0
 
 	for _, art := range disc.Artifacts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		discoveredSet[art.NativeRelativePath] = struct{}{}
 		existing := st.Artifacts[art.NativeRelativePath]
 
@@ -354,10 +364,14 @@ func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending 
 		}
 
 		// Rebaseline to the byte immediately after the last '\n' at or before
-		// EOF so post-rebaseline segments always begin on a line boundary.
-		offset, nlErr := findLastNewlineOffset(f, fi.Size())
+		// EOF (bounded by MaxSegmentBytes; falls back to EOF beyond the cap)
+		// so post-rebaseline segments begin on a line boundary.
+		offset, nlErr := findLastNewlineOffset(ctx, f, fi.Size(), s.cfg.MaxSegmentBytes)
 		if nlErr != nil {
 			_ = f.Close()
+			if errors.Is(nlErr, context.Canceled) || errors.Is(nlErr, context.DeadlineExceeded) {
+				return nil, nlErr
+			}
 			markRebaselineSkipped(st, art, existing, nlErr, now, &skipped)
 			continue
 		}
@@ -384,7 +398,18 @@ func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending 
 			if existing.OriginHubID != "" {
 				originHubID = existing.OriginHubID
 			}
-			hasCommittedOrPending := existing.RawCommittedOffset > existing.BaselineOffset || existing.Pending != nil
+			hasCommittedOrPending := existing.Pending != nil
+			if !hasCommittedOrPending {
+				if existing.GenerationStartOffset != nil {
+					hasCommittedOrPending = existing.RawCommittedOffset > *existing.GenerationStartOffset
+				} else if existing.Generation == 0 {
+					// Legacy state.json without generation_start_offset: gen 0 started at BaselineOffset.
+					hasCommittedOrPending = existing.RawCommittedOffset > existing.BaselineOffset
+				} else {
+					// Legacy state.json for gen > 0 without generation_start_offset: bump conservatively.
+					hasCommittedOrPending = true
+				}
+			}
 			shrankOrRotated := existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode))
 			createsHole := hasCommittedOrPending && offset != existing.RawCommittedOffset
 			if shrankOrRotated || createsHole {
@@ -394,25 +419,26 @@ func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending 
 		}
 
 		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-			NativeRelativePath:   art.NativeRelativePath,
-			ArtifactKind:         art.Kind,
-			Inode:                fid.Ino,
-			Device:               fid.Dev,
-			FileID:               fid.String(),
-			Generation:           gen,
-			RawCommittedOffset:   offset,
-			ParsedOffset:         offset,
-			GuardHash:            guardHash,
-			GuardLen:             guardLen,
-			Pending:              nil,
-			Baseline:             true,
-			BaselineOffset:       offset,
-			BaselineGuardHash:    guardHash,
-			BaselineGuardLen:     guardLen,
-			NeedsBaseline:        false,
-			OriginHubID:          originHubID,
-			LastGenerationReason: lastGenReason,
-			UpdatedAt:            &now,
+			NativeRelativePath:    art.NativeRelativePath,
+			ArtifactKind:          art.Kind,
+			Inode:                 fid.Ino,
+			Device:                fid.Dev,
+			FileID:                fid.String(),
+			Generation:            gen,
+			GenerationStartOffset: int64Ptr(offset),
+			RawCommittedOffset:    offset,
+			ParsedOffset:          offset,
+			GuardHash:             guardHash,
+			GuardLen:              guardLen,
+			Pending:               nil,
+			Baseline:              true,
+			BaselineOffset:        offset,
+			BaselineGuardHash:     guardHash,
+			BaselineGuardLen:      guardLen,
+			NeedsBaseline:         false,
+			OriginHubID:           originHubID,
+			LastGenerationReason:  lastGenReason,
+			UpdatedAt:             &now,
 		}
 		rebased++
 	}
@@ -436,18 +462,31 @@ func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending 
 	}, nil
 }
 
-// findLastNewlineOffset scans backwards from fileSize in bounded chunks and
-// returns the byte offset immediately after the last '\n' at or before
-// fileSize, or 0 if no '\n' exists.
-func findLastNewlineOffset(r io.ReaderAt, fileSize int64) (int64, error) {
+// findLastNewlineOffset scans backwards from fileSize in bounded chunks up to
+// maxScanBytes and returns the byte offset immediately after the last '\n' at
+// or before fileSize. If no '\n' exists within the entire file, it returns 0.
+// If the backward scan reaches maxScanBytes without encountering '\n', it
+// stops and returns fileSize (EOF) so newline-free files cannot cause
+// unbounded root reads.
+func findLastNewlineOffset(ctx context.Context, r io.ReaderAt, fileSize, maxScanBytes int64) (int64, error) {
 	if fileSize <= 0 {
 		return 0, nil
 	}
 	const chunkSize int64 = 64 * 1024
-	buf := make([]byte, min(fileSize, chunkSize))
+	limit := fileSize
+	capped := false
+	if maxScanBytes > 0 && maxScanBytes < fileSize {
+		limit = maxScanBytes
+		capped = true
+	}
+	stopAt := fileSize - limit
+	buf := make([]byte, min(limit, chunkSize))
 	pos := fileSize
-	for pos > 0 {
-		readLen := min(pos, int64(len(buf)))
+	for pos > stopAt {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		readLen := min(pos-stopAt, int64(len(buf)))
 		start := pos - readLen
 		n, err := r.ReadAt(buf[:readLen], start)
 		if err != nil && !errors.Is(err, io.EOF) {
@@ -460,6 +499,9 @@ func findLastNewlineOffset(r io.ReaderAt, fileSize int64) (int64, error) {
 			}
 		}
 		pos = start
+	}
+	if capped {
+		return fileSize, nil
 	}
 	return 0, nil
 }
@@ -632,22 +674,23 @@ func (s *Shipper) baselineArtifact(resolvedHome string, art DiscoveredArtifact, 
 	}
 
 	return &ArtifactState{
-		NativeRelativePath: art.NativeRelativePath,
-		ArtifactKind:       art.Kind,
-		Inode:              fid.Ino,
-		Device:             fid.Dev,
-		FileID:             fid.String(),
-		Generation:         0,
-		RawCommittedOffset: offset,
-		ParsedOffset:       offset,
-		GuardHash:          guardHash,
-		GuardLen:           guardLen,
-		Baseline:           true,
-		BaselineOffset:     offset,
-		BaselineGuardHash:  guardHash,
-		BaselineGuardLen:   guardLen,
-		OriginHubID:        originHubID,
-		UpdatedAt:          &now,
+		NativeRelativePath:    art.NativeRelativePath,
+		ArtifactKind:          art.Kind,
+		Inode:                 fid.Ino,
+		Device:                fid.Dev,
+		FileID:                fid.String(),
+		Generation:            0,
+		GenerationStartOffset: int64Ptr(offset),
+		RawCommittedOffset:    offset,
+		ParsedOffset:          offset,
+		GuardHash:             guardHash,
+		GuardLen:              guardLen,
+		Baseline:              true,
+		BaselineOffset:        offset,
+		BaselineGuardHash:     guardHash,
+		BaselineGuardLen:      guardLen,
+		OriginHubID:           originHubID,
+		UpdatedAt:             &now,
 	}, nil
 }
 
@@ -916,17 +959,18 @@ func (s *Shipper) shipArtifactLocked(
 	if !tracked {
 		now := s.now().UTC()
 		entry = &ArtifactState{
-			NativeRelativePath: art.NativeRelativePath,
-			ArtifactKind:       art.Kind,
-			Inode:              fid.Ino,
-			Device:             fid.Dev,
-			FileID:             fid.String(),
-			Generation:         0,
-			RawCommittedOffset: 0,
-			ParsedOffset:       0,
-			Baseline:           false,
-			OriginHubID:        st.OriginHubID,
-			UpdatedAt:          &now,
+			NativeRelativePath:    art.NativeRelativePath,
+			ArtifactKind:          art.Kind,
+			Inode:                 fid.Ino,
+			Device:                fid.Dev,
+			FileID:                fid.String(),
+			Generation:            0,
+			GenerationStartOffset: int64Ptr(0),
+			RawCommittedOffset:    0,
+			ParsedOffset:          0,
+			Baseline:              false,
+			OriginHubID:           st.OriginHubID,
+			UpdatedAt:             &now,
 		}
 		st.Artifacts[art.NativeRelativePath] = entry
 	} else {
@@ -972,6 +1016,7 @@ func (s *Shipper) shipArtifactLocked(
 		entry.Inode = fid.Ino
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
+		entry.GenerationStartOffset = int64Ptr(offset)
 		entry.RawCommittedOffset = offset
 		entry.ParsedOffset = offset
 		entry.BaselineOffset = offset
@@ -1139,17 +1184,21 @@ func (s *Shipper) shipArtifactLocked(
 					res.PolicyRefused = true
 					res.PolicyRefusedReason = msg
 					return true, nil
-				case OutcomeCommitted:
-					// Hub accepted prepare: rebaseline past everything written
-					// during the refusal/backoff window and clear the flag.
-					if _, rerr := s.rebaselineLocked(st, "capture_accepted", false); rerr != nil {
-						return true, rerr
+				case OutcomeRetryable, "":
+					// Transient probe error (5xx / network / 401 / non-policy 403):
+					// keep RefusedPendingRebaseline set and retry later.
+					if probeErr != nil {
+						res.ArtifactErrors[art.NativeRelativePath] = probeErr
 					}
 					return true, nil
 				default:
-					// Transient probe error (5xx / network): keep flag set and retry later.
-					if probeErr != nil {
-						res.ArtifactErrors[art.NativeRelativePath] = probeErr
+					// OutcomeCommitted, OutcomeConflict, OutcomeRejected, or
+					// OutcomeRunCapExceeded: the Hub passed the experiment and
+					// policy gates, so capture is accepted. Rebaseline past
+					// everything written during the refusal/backoff window and
+					// clear RefusedPendingRebaseline.
+					if _, rerr := s.rebaselineLocked(ctx, st, "capture_accepted", false); rerr != nil {
+						return true, rerr
 					}
 					return true, nil
 				}
@@ -1360,6 +1409,7 @@ func (s *Shipper) bumpGenerationLocked(
 	}
 
 	entry.Generation++
+	entry.GenerationStartOffset = int64Ptr(restartOffset)
 	entry.RawCommittedOffset = restartOffset
 	entry.ParsedOffset = restartOffset
 	entry.GuardHash = restartGuardHash
