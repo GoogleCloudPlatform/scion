@@ -780,7 +780,7 @@ var errProjectOwnerBinding = errors.New("project owner binding")
 // provenance cannot be resolved fails the create with an error wrapping
 // errFixtureRootUnresolved.
 func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Project, ownerID string) error {
-	return s.store.WithTx(ctx, func(tx store.Store) error {
+	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := stampProject(ctx, tx, project, fixturePrincipalFromContext(ctx)); err != nil {
 			return err
 		}
@@ -794,7 +794,11 @@ func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Proj
 			return fmt.Errorf("%w: %w", errProjectOwnerBinding, err)
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	s.refreshDecisionRetentionAfterProjectChange(project.ID)
+	return nil
 }
 
 // createProjectOwnerRoleBindingTx writes the project-owner role binding for

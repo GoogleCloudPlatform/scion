@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -143,31 +144,33 @@ func (s *Server) decisionRetentionConfig() opsettings.DecisionRetentionConfig {
 	return opsettings.DefaultDecisionRetentionConfig()
 }
 
-// refreshDecisionRetentionAfterProjectDelete refreshes the cached
-// decision_retention operational settings (and notifies peer replicas) when a
-// deleted project had a per-project retention override pruned in DeleteProject,
-// so an immediate same-UUID project create never sees a stale cached override
+// refreshDecisionRetentionAfterProjectChange refreshes and applies operational
+// settings (and notifies peer replicas) after a project delete or create may
+// have pruned a per-project decision_retention override in the store
 // (ptone/scion#9439).
-func (s *Server) refreshDecisionRetentionAfterProjectDelete(projectID string) {
+//
+// Always routes through refreshAndApplyResult so any concurrently changed
+// operational sections or store resets observed by the refresh are applied to
+// the server rather than swallowed. Drops any local-cache gate so a replica
+// whose cache did not yet hold the pruned override still refreshes and notifies
+// peers, and publishes whenever either the local cache previously held the
+// override (even if a concurrent refresh already absorbed the pruned row) or
+// this refresh observed decision_retention change.
+func (s *Server) refreshDecisionRetentionAfterProjectChange(projectID string) {
 	ops := s.GetOperationalSettings()
 	if ops == nil {
 		return
 	}
-	if _, ok := ops.DecisionRetention().ProjectOverrides[projectID]; !ok {
-		return
-	}
+	_, hadCachedOverride := ops.DecisionRetention().ProjectOverrides[projectID]
 	ctx, cancel := context.WithTimeout(context.Background(), decisionRetentionFinalWriteTimeout)
 	defer cancel()
-	changed, err := ops.Refresh(ctx)
+	changed, err := ops.refreshAndApplyResult(ctx, s)
 	if err != nil {
-		slog.Warn("decision retention: refresh settings after project delete", "project_id", projectID, "error", err)
+		slog.Warn("decision retention: refresh settings after project change", "project_id", projectID, "error", err)
 		return
 	}
-	for _, sec := range changed {
-		if sec == opsettings.DecisionRetentionSectionName {
-			ops.publish(opsettings.DecisionRetentionSectionName, ops.SectionRevision(opsettings.DecisionRetentionSectionName))
-			break
-		}
+	if hadCachedOverride || slices.Contains(changed, opsettings.DecisionRetentionSectionName) {
+		ops.publish(opsettings.DecisionRetentionSectionName, ops.SectionRevision(opsettings.DecisionRetentionSectionName))
 	}
 }
 

@@ -3983,7 +3983,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	)
 	srv.deletionService.onProjectDeleted = func(projectID string) {
 		srv.invalidateTriggerRuleCacheForProject(projectID)
-		srv.refreshDecisionRetentionAfterProjectDelete(projectID)
+		srv.refreshDecisionRetentionAfterProjectChange(projectID)
 	}
 
 	// RS4: Initialize user access token service with authorization, audit, and

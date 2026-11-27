@@ -53,10 +53,12 @@ const (
 var decisionRetentionLockPoll = 2 * time.Second
 
 type decisionRetentionPreviewResult struct {
-	ByProject       map[string]store.DecisionRetentionCounts
-	Pages           int
-	EligibleMsgs    int
-	SkippedMsgs     int
+	ByProject    map[string]store.DecisionRetentionCounts
+	Pages        int
+	EligibleMsgs int
+	SkippedMsgs  int
+	// MaxDedupEntries is an internal diagnostic recording the peak size of
+	// the per-timestamp dedup map (for tests; not exposed in API responses).
 	MaxDedupEntries int
 	ReachedCutoff   bool
 	BudgetExhausted bool

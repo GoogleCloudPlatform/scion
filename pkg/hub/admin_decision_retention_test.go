@@ -358,6 +358,13 @@ func TestAdminDecisionRetention_ProjectDeletePrunesOverrideAndSameUUIDStartsClea
 	require.True(t, delRec.Code == http.StatusNoContent || delRec.Code == http.StatusOK,
 		"DELETE project failed (%d): %s", delRec.Code, delRec.Body.String())
 
+	// A stale-revision admin PUT using the pre-delete revision must fail with 409.
+	conflictRec := doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"retention_days":    45,
+		"expected_revision": saved.Revision,
+	})
+	require.Equal(t, http.StatusConflict, conflictRec.Code, "stale-revision PUT after override prune must 409: %s", conflictRec.Body.String())
+
 	// Cached settings must already have pReuse pruned (without manual Refresh),
 	// while pKeep (keep_forever) and pOther (60d) remain untouched.
 	cached := ops.DecisionRetention()
@@ -405,4 +412,192 @@ func TestAdminDecisionRetention_ProjectDeletePrunesOverrideAndSameUUIDStartsClea
 	assert.NoError(t, err, "120d decision in keep_forever project must survive")
 	_, err = cs.GetDecision(ctx, decOther75)
 	assert.ErrorIs(t, err, store.ErrNotFound, "75d decision in 60d-override project must be purged")
+}
+
+// TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride verifies audit
+// finding L1 (ptone/scion#9439) end-to-end: an override left behind by a
+// project deleted before delete-time pruning existed is pruned when a new
+// project is created via POST /api/v1/projects with that client-chosen UUID,
+// refreshing the cache and leaving other projects' overrides and keep_forever
+// holds untouched.
+func TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	ctx := context.Background()
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, "experiments",
+		json.RawMessage(fmt.Sprintf(`{"overrides":{%q:true,%q:true}}`, experiments.Decisions, experiments.DecisionRetention)),
+		"test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+
+	pKeep := uuid.NewString()
+	pLegacy := uuid.NewString()
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects", map[string]any{
+		"id": pKeep, "name": "legacy-keep", "slug": "legacy-keep",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// Seed hub_settings directly with a leftover override for non-existent pLegacy
+	// (simulating a project deleted before delete-time pruning existed).
+	doc := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 30}
+		}
+	}`, pKeep, pLegacy))
+	_, err = s.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, doc, "admin@test.com", 0, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	require.Contains(t, ops.DecisionRetention().ProjectOverrides, pLegacy)
+
+	// Create a new project with the leftover UUID pLegacy.
+	rec = doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects", map[string]any{
+		"id": pLegacy, "name": "legacy-reborn", "slug": "legacy-reborn",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// Leftover override must be pruned from cache and storage; pKeep hold intact.
+	cached := ops.DecisionRetention()
+	assert.NotContains(t, cached.ProjectOverrides, pLegacy, "leftover override must be pruned on project create")
+	require.Contains(t, cached.ProjectOverrides, pKeep)
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, cached.ProjectOverrides[pKeep].Mode)
+
+	// Project Made endpoint reports hub default 90d, not leftover 30d.
+	madeRec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/projects/"+pLegacy+"/decisions?tab=made", nil)
+	require.Equal(t, http.StatusOK, madeRec.Code, madeRec.Body.String())
+	var madeBody map[string]any
+	require.NoError(t, json.Unmarshal(madeRec.Body.Bytes(), &madeBody))
+	retObj, ok := madeBody["retention"].(map[string]any)
+	require.True(t, ok, "created project must report hub default retention")
+	assert.Equal(t, true, retObj["active"])
+	assert.Equal(t, float64(90), retObj["days"])
+}
+
+// TestAdminDecisionRetention_ProjectDeleteRefreshesAndAppliesOtherSectionsAndPublishes
+// verifies rev R1 and audit L2 (ptone/scion#9439):
+//  1. When another operational section (maintenance) was written in the DB
+//     bypassing ops.Update, deleting a project with an override refreshes AND
+//     applies that other section to the server (never swallowing it into cache).
+//  2. Deleting a project whose override was NOT yet in the local replica's cache
+//     still refreshes and publishes the decision_retention settings event.
+//  3. When the local cache held the override and a concurrent refresh already
+//     absorbed the DB row (changed == []), the decision_retention settings event
+//     is still published.
+func TestAdminDecisionRetention_ProjectDeleteRefreshesAndAppliesOtherSectionsAndPublishes(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	ctx := context.Background()
+	ops := srv.GetOperationalSettings()
+
+	pub := NewChannelEventPublisher()
+	ops.SetEventPublisher(pub)
+	ch, unsub := pub.Subscribe(settingsUpdatedSubject)
+	defer unsub()
+
+	drainEvents := func() []SettingsUpdatedEvent {
+		var out []SettingsUpdatedEvent
+		for {
+			select {
+			case ev := <-ch:
+				var payload SettingsUpdatedEvent
+				if err := json.Unmarshal(ev.Data, &payload); err == nil {
+					out = append(out, payload)
+				}
+			default:
+				return out
+			}
+		}
+	}
+
+	createProj := func(id, name string) {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects", map[string]any{
+			"id": id, "name": name, "slug": name,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	p1 := uuid.NewString()
+	p2 := uuid.NewString()
+	p3 := uuid.NewString()
+	createProj(p1, "r1-p1")
+	createProj(p2, "r1-p2")
+	createProj(p3, "r1-p3")
+
+	// Save initial override for p1 via admin PUT (so p1 is in local cache).
+	saved := decodeDecisionRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, decisionRetentionAdminPath, map[string]any{
+		"enabled":        true,
+		"retention_days": 90,
+		"project_overrides": map[string]any{
+			p1: map[string]any{"mode": "days", "days": 30},
+			p3: map[string]any{"mode": "keep_forever"},
+		},
+		"expected_revision": 0,
+	}))
+	_ = drainEvents()
+
+	// 1. Write maintenance section directly to DB (simulating peer replica write
+	// not yet applied locally). Confirm runtime MaintenanceState is still off.
+	_, err := s.UpsertHubSetting(ctx, "maintenance", json.RawMessage(`{"admin_mode":true,"message":"peer-maint"}`), "peer", 0, "managed")
+	require.NoError(t, err)
+	require.False(t, srv.maintenance.IsEnabled(), "maintenance must not yet be applied before refresh")
+
+	// Delete p1 through governed HTTP path.
+	delRec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/projects/"+p1, nil)
+	require.True(t, delRec.Code == http.StatusNoContent || delRec.Code == http.StatusOK, delRec.Body.String())
+
+	// Maintenance change must be applied (not swallowed by a bare Refresh).
+	assert.True(t, srv.maintenance.IsEnabled(), "other operational sections refreshed during project delete must be applied")
+	events := drainEvents()
+	foundDR := false
+	for _, ev := range events {
+		if ev.Section == opsettings.DecisionRetentionSectionName {
+			foundDR = true
+		}
+	}
+	assert.True(t, foundDR, "decision_retention settings event must be published after override prune")
+
+	// 2. Audit L2: write an override for p2 directly to DB bypassing local cache,
+	// then delete p2. Even without p2 in the local cache, refresh + publish must fire.
+	docWithP2 := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			%q: {"mode": "days", "days": 45},
+			%q: {"mode": "keep_forever"}
+		}
+	}`, p2, p3))
+	_, err = s.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, docWithP2, "peer", saved.Revision+1, "managed")
+	require.NoError(t, err)
+	require.NotContains(t, ops.DecisionRetention().ProjectOverrides, p2, "p2 must not be in local cache before delete")
+	_ = drainEvents()
+
+	delRec = doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/projects/"+p2, nil)
+	require.True(t, delRec.Code == http.StatusNoContent || delRec.Code == http.StatusOK, delRec.Body.String())
+
+	assert.NotContains(t, ops.DecisionRetention().ProjectOverrides, p2)
+	events = drainEvents()
+	foundDR = false
+	for _, ev := range events {
+		if ev.Section == opsettings.DecisionRetentionSectionName {
+			foundDR = true
+		}
+	}
+	assert.True(t, foundDR, "decision_retention event must be published even when deleting replica's cache lacked the override")
+
+	// 3. Rev R1: when local cache holds an override (p3) and refresh sees no DB
+	// diff (simulating a concurrent refresh that already absorbed the pruned row),
+	// decision_retention event is still published.
+	require.Contains(t, ops.DecisionRetention().ProjectOverrides, p3)
+	_ = drainEvents()
+	srv.refreshDecisionRetentionAfterProjectChange(p3)
+	events = drainEvents()
+	foundDR = false
+	for _, ev := range events {
+		if ev.Section == opsettings.DecisionRetentionSectionName {
+			foundDR = true
+		}
+	}
+	assert.True(t, foundDR, "decision_retention event must still be published when cached override was present even if refresh returned empty changed")
 }
