@@ -534,16 +534,17 @@ const sessionMetricsReportTimeout = 5 * time.Second
 // hook's shared Hub budget). Nothing is wired when the Hub client is not
 // configured or no home directory is known.
 //
-// When the usage source is native (SCION_USAGE_SOURCE=native), session-end
-// does not send: the report is held so that usage the harness exports after
-// session-end is added to it first, and sciontool init (or a later hook
-// process) sends it (handlers.FileSessionState.HoldReports).
+// When the usage source holds session reports (SCION_USAGE_SOURCE=native or
+// sqlite_native), session-end does not send immediately: the report is held so
+// that usage exported or tailed after session-end is added to it first, and
+// sciontool init (or a later hook process) sends it
+// (handlers.FileSessionState.HoldReports).
 func wireSessionMetrics(parent context.Context, h *handlers.TelemetryHandler, client *hub.Client, home string) {
 	if h == nil || client == nil || !client.IsConfigured() || home == "" {
 		return
 	}
 	store := handlers.NewFileSessionState(home)
-	store.HoldReports = !telemetry.HookUsageFeedsSessionMetrics()
+	store.HoldReports = telemetry.HoldsSessionReports()
 	h.SessionState = store
 	h.OnSessionEnd = func(summary telemetry.SessionSummary) {
 		ctx, cancel := context.WithTimeout(parent, sessionMetricsReportTimeout)

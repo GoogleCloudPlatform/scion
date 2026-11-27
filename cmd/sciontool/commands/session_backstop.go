@@ -179,40 +179,41 @@ var heldReportTicker = func() (<-chan time.Time, func()) {
 	return t.C, t.Stop
 }
 
-// nativeUsageSourceSelected reports whether the harness runs with
-// SCION_USAGE_SOURCE=native, the condition under which its session-end hooks
-// hold their reports (handlers.FileSessionState.HoldReports). The harness's
-// environment is init's own with the env overlay merged under it, and a
-// variable present in init's environment, even empty, wins
-// (supervisor.mergeEnvOverlay), so the same precedence applies here.
-func nativeUsageSourceSelected(overlay map[string]string) bool {
+// heldReportUsageSourceSelected reports whether the harness runs with a
+// SCION_USAGE_SOURCE that holds session-end reports (native or sqlite_native;
+// see telemetry.UsageSourceHoldsSessionReport and
+// handlers.FileSessionState.HoldReports). The harness's environment is init's
+// own with the env overlay merged under it, and a variable present in init's
+// environment, even empty, wins (supervisor.mergeEnvOverlay), so the same
+// precedence applies here.
+func heldReportUsageSourceSelected(overlay map[string]string) bool {
 	if v, ok := os.LookupEnv("SCION_USAGE_SOURCE"); ok {
-		return v == telemetry.UsageSourceNative
+		return telemetry.UsageSourceHoldsSessionReport(v)
 	}
-	return overlay["SCION_USAGE_SOURCE"] == telemetry.UsageSourceNative
+	return telemetry.UsageSourceHoldsSessionReport(overlay["SCION_USAGE_SOURCE"])
 }
 
 // startHeldReportSender starts the init daemon's held-report check: a
-// harness whose usage source is native does not send its session report at
-// session-end but holds it, so that usage it exports afterwards is added
-// first (see "Held reports" in pkg/sciontool/hooks/handlers). Every
-// heldReportCheckInterval this claims the held reports that are due and
-// sends them. The returned func stops the check: it cancels a send in
-// progress and waits for the check to finish, which puts that report back
-// to be sent again. RunInit calls it before the shutdown backstop, which
-// sends the remaining held reports at once (the cancelled one included),
-// so stopping adds at most the state-file lock waits to shutdown, not a
-// Hub call. It may be called more than once.
+// harness whose usage source holds session reports (native or sqlite_native)
+// does not send its session report at session-end but holds it, so that usage
+// it exports or that is tailed afterwards is added first (see "Held reports"
+// in pkg/sciontool/hooks/handlers). Every heldReportCheckInterval this claims
+// the held reports that are due and sends them. The returned func stops the
+// check: it cancels a send in progress and waits for the check to finish,
+// which puts that report back to be sent again. RunInit calls it before the
+// shutdown backstop, which sends the remaining held reports at once (the
+// cancelled one included), so stopping adds at most the state-file lock waits
+// to shutdown, not a Hub call. It may be called more than once.
 //
 // Each check builds its Hub client with newClient, as the shutdown backstop
 // does, so it uses the current agent token: hub.NewClient reads the token
 // file, which the daemon's token refresh rewrites.
 //
 // Nothing is started, and stop is a no-op, when no agent home is known, the
-// Hub is not configured, or the usage source is not native: no hook holds a
-// report then.
+// Hub is not configured, or the usage source does not hold session reports: no
+// hook holds a report then.
 func startHeldReportSender(agentHome string, overlay map[string]string, newClient func() *hub.Client) (stop func()) {
-	if agentHome == "" || !nativeUsageSourceSelected(overlay) {
+	if agentHome == "" || !heldReportUsageSourceSelected(overlay) {
 		return func() {}
 	}
 	if client := newClient(); client == nil || !client.IsConfigured() {

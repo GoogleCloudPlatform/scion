@@ -88,12 +88,33 @@ func TestHookUsageFeedsSessionMetrics(t *testing.T) {
 		want   bool
 	}{
 		{"native", false},
+		{"sqlite_native", true},
 		{"hooks", true},
 		{"", true},
 	} {
 		t.Setenv("SCION_USAGE_SOURCE", tc.source)
 		if got := HookUsageFeedsSessionMetrics(); got != tc.want {
 			t.Errorf("SCION_USAGE_SOURCE=%q: HookUsageFeedsSessionMetrics() = %v, want %v", tc.source, got, tc.want)
+		}
+	}
+}
+
+func TestUsageSourceHoldsSessionReport(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   bool
+	}{
+		{"native", true},
+		{"sqlite_native", true},
+		{"hooks", false},
+		{"", false},
+	} {
+		if got := UsageSourceHoldsSessionReport(tc.source); got != tc.want {
+			t.Errorf("UsageSourceHoldsSessionReport(%q) = %v, want %v", tc.source, got, tc.want)
+		}
+		t.Setenv("SCION_USAGE_SOURCE", tc.source)
+		if got := HoldsSessionReports(); got != tc.want {
+			t.Errorf("SCION_USAGE_SOURCE=%q: HoldsSessionReports() = %v, want %v", tc.source, got, tc.want)
 		}
 	}
 }

@@ -296,6 +296,63 @@ func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
 	}
 }
 
+// Under SCION_USAGE_SOURCE=sqlite_native (Antigravity), model-end hooks
+// still own API call counts while the SQLite tailer supplies token counts
+// asynchronously. SessionEnd must hold the report so late tailer tokens reach
+// it, without dropping the hook-counted APICallCount.
+func TestSessionUsageRecorder_SQLiteNativeHoldsReportAndKeepsHookCalls(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+	hookDialect = "gemini"
+	t.Setenv("SCION_USAGE_SOURCE", "sqlite_native")
+	record := sessionUsageRecorder(home)
+
+	runHooks(t,
+		map[string]interface{}{"hook_event_name": "SessionStart", "session_id": "sess-agy-1"},
+		map[string]interface{}{"hook_event_name": "AfterModel", "session_id": "sess-agy-1"},
+		map[string]interface{}{"hook_event_name": "AfterModel", "session_id": "sess-agy-1"},
+	)
+	// Tailer emits tokens with Calls=0.
+	record(telemetry.SessionUsage{TokensInput: 100, TokensOutput: 20, TokensCached: 300, TokensReasoning: 5})
+	runHooks(t, map[string]interface{}{"hook_event_name": "SessionEnd", "session_id": "sess-agy-1"})
+
+	// With sqlite_native, SessionEnd holds the report so debounced/final
+	// SQLite tailer tokens are added first.
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports at session-end, want the report held", n)
+	}
+	// Verify the held summary preserved hook-counted APICallCount from
+	// model-end hooks (i.e. HookUsageFeedsSessionMetrics stayed true).
+	rawState, err := os.ReadFile(handlers.NewFileSessionState(home).Path)
+	if err != nil {
+		t.Fatalf("read held session state: %v", err)
+	}
+	var heldState struct {
+		Pending []struct {
+			Summary telemetry.SessionSummary `json:"summary"`
+		} `json:"pending"`
+	}
+	if err := json.Unmarshal(rawState, &heldState); err != nil {
+		t.Fatalf("unmarshal held session state: %v", err)
+	}
+	if len(heldState.Pending) != 1 || heldState.Pending[0].Summary.APICallCount != 2 {
+		t.Fatalf("held pending = %+v, want 1 summary with APICallCount=2", heldState.Pending)
+	}
+	record(telemetry.SessionUsage{TokensInput: 40, TokensOutput: 10})
+
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
+	}
+	p := reports[0]
+	if p.Session.ID != "sess-agy-1" {
+		t.Errorf("session ID = %q, want sess-agy-1", p.Session.ID)
+	}
+	if p.Tokens.Input != 140 || p.Tokens.Output != 30 || p.Tokens.Cached != 300 || p.Tokens.Reasoning != 5 {
+		t.Errorf("tokens = %+v, want input 140, output 30, cached 300, reasoning 5", p.Tokens)
+	}
+}
+
 // Without native usage, session-end still sends at once.
 func TestProcessHookData_NonNativeSessionEndSendsAtOnce(t *testing.T) {
 	_, fake, _ := backstopEnv(t)
