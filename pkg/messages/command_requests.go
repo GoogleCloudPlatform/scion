@@ -253,6 +253,8 @@ func NormalizeCommandRequest(root string, in *CommandRequestInput) (*CommandRequ
 		add(root+".key", DecisionErrRequired, "key is required")
 	case !ValidCommandRequestKey(key):
 		add(root+".key", DecisionErrInvalid, "key must match [A-Za-z0-9][A-Za-z0-9._-]{0,%d}", MaxCommandRequestKeyLen-1)
+	case strings.HasPrefix(norm, "md-"):
+		add(root+".key", DecisionErrInvalid, "key must not start with reserved prefix 'md-'")
 	}
 
 	desc := strings.TrimSpace(in.Description)

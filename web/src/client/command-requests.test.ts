@@ -74,5 +74,7 @@ describe('validateCommandRequestScript', () => {
     expect(validateCommandRequestScript('echo \u00a0#')).not.toBeNull();
     expect(validateCommandRequestScript('echo \ufe0f#')).not.toBeNull();
     expect(validateCommandRequestScript('echo \u2800#')).not.toBeNull();
+    // O5: Other_Default_Ignorable_Code_Point (Combining Grapheme Joiner U+034F).
+    expect(validateCommandRequestScript('echo \u034f#')).not.toBeNull();
   });
 });

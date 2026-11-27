@@ -136,7 +136,7 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
             const tokens = (lang ?? '').trim().split(/\s+/).filter(Boolean);
             const firstWord = tokens[0] ?? '';
             const hasNoExecute = tokens.slice(1).some((t) => t.toLowerCase() === 'no-execute');
-            const escapedCode = escapeHtmlAttr(text) + (text.endsWith('\n') ? '' : '\n');
+            const escapedCode = escapeHtmlAttr(text) + (text.length > 0 ? '\n' : '');
             const attrs: string[] = [];
             if (firstWord) {
               attrs.push(`class="language-${escapeHtmlAttr(firstWord)}"`);

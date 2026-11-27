@@ -820,7 +820,7 @@ function isBidiControlCodePoint(cp: number): boolean {
   );
 }
 
-const INVISIBLE_OR_NON_ASCII_WS_RE = /[\p{Cf}\p{Zl}\p{Zp}\p{Zs}]/u;
+const INVISIBLE_OR_NON_ASCII_WS_RE = /[\p{Cf}\p{Zl}\p{Zp}\p{Zs}\p{Default_Ignorable_Code_Point}]/u;
 
 function isInvisibleOrNonASCIIWhitespaceCodePoint(ch: string, cp: number): boolean {
   if (cp <= 0x7e) return false;

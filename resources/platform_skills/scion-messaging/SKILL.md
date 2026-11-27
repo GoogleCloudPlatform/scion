@@ -162,8 +162,7 @@ user-facing format. Agent-only messages do not require it.
   container, you have two surfaces:
   - **Structured command card (`scion message --command-request <key> --command '...'` or `--command-file <path>`):**
     use this when you want versioned tracking (`--update`, `scion command request list`),
-    a custom `--workdir` or `--timeout`, `--share-output`, or an explicit `--approver`
-    in a group conversation.
+    a custom `--workdir` or `--timeout`, or `--share-output`.
   - **Markdown fenced shell blocks (`bash`, `sh`, `shell`, or `console` at line start):**
     in a DM, or in a group conversation addressed to a single human via `@`-mention,
     the web chat shows **Copy** and **Execute** on top-level shell blocks for 24 h

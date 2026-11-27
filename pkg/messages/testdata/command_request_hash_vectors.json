@@ -49,6 +49,13 @@
       "workdir": "/tmp/dir-é",
       "timeout_s": 60,
       "sha256": "c27f9ab7aea9dfaf8b5a9c188ffca419d3695348edbc23344401361752b1f0ea"
+    },
+    {
+      "name": "line_and_paragraph_separators_escaped_like_go_json",
+      "script": "echo a b c\n",
+      "workdir": "",
+      "timeout_s": 600,
+      "sha256": "2ddeb6be8c828dce189877a0dd463d047ee25e932a46a7e1d8e658a6fc1807bf"
     }
   ]
 }

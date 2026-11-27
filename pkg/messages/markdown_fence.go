@@ -91,10 +91,12 @@ func HasVerbatimExecutableShellFence(body, script string) bool {
 
 		if isTopLevelClosingFence(line, fenceChar, fenceLen) {
 			if fenceEligible && len(blockLines) > 0 {
-				// Each line inside a fenced block is terminated by '\n' in
-				// CommonMark / marked's <code> textContent.
+				// Each line inside a fenced block is terminated by '\n'.
+				// Strip at most one trailing '\n' from both sides so a fence
+				// with a trailing blank line matches consistently (O4) while
+				// any other byte difference still fails closed.
 				blockContent := strings.Join(blockLines, "\n") + "\n"
-				if blockContent == script || (!strings.HasSuffix(script, "\n") && blockContent == script+"\n") {
+				if strings.TrimSuffix(blockContent, "\n") == strings.TrimSuffix(script, "\n") {
 					return true
 				}
 			}
@@ -139,17 +141,25 @@ func parseTopLevelOpeningFence(line string) (fenceChar byte, fenceLen int, info 
 }
 
 func isTopLevelClosingFence(line string, fenceChar byte, minLen int) bool {
-	if len(line) < minLen || line[0] != fenceChar {
+	// CommonMark §4.5: a closing code fence may be indented 0..3 spaces.
+	// Matching CommonMark here prevents a 1..3-space closer from being
+	// swallowed into the block body (O2).
+	i := 0
+	for i < len(line) && i < 3 && line[i] == ' ' {
+		i++
+	}
+	if len(line)-i < minLen || line[i] != fenceChar {
 		return false
 	}
 	n := 0
-	for n < len(line) && line[n] == fenceChar {
+	for i < len(line) && line[i] == fenceChar {
+		i++
 		n++
 	}
 	if n < minLen {
 		return false
 	}
-	for i := n; i < len(line); i++ {
+	for ; i < len(line); i++ {
 		if line[i] != ' ' && line[i] != '\t' {
 			return false
 		}

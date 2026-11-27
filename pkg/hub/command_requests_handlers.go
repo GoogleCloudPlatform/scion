@@ -724,6 +724,9 @@ func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.
 
 	// Step 3: send-time script validation, verbatim-fence check, and canonical hash check.
 	if err := messages.ValidateCommandRequestScript(body.Script); err != nil {
+		emitRefused(ErrCodeValidationError, map[string]string{
+			"approver_user_id": user.ID(),
+		})
 		ValidationError(w, err.Error(), map[string]interface{}{"field": "script"})
 		return
 	}
@@ -762,7 +765,7 @@ func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.
 	}
 
 	// Step 5: one transaction — insert v1 approved + command_runs (insert-only).
-	// Share-output opt-in is P4; until P4 merges, record ShareOutput=false.
+	shareOutput := body.ShareOutput != nil && *body.ShareOutput
 	appRes, err := s.store.CreateAndApproveMarkdownCommandRequest(ctx, &store.CreateMarkdownCommandRequestInput{
 		ProjectID:      msg.ProjectID,
 		AgentID:        msg.SenderID,
@@ -778,7 +781,7 @@ func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.
 		IdempotencyKey: body.IdempotencyKey,
 		ExecAgentID:    execRes.Agent.ID,
 		ExecProjectID:  execRes.Agent.ProjectID,
-		ShareOutput:    false,
+		ShareOutput:    shareOutput,
 		LeaseUntil:     now.Add(commandRunWakeBudget + commandRunApprovalLeaseGrace),
 		Now:            now,
 		TTL:            msgaction.CommandRequestTTL,
@@ -906,22 +909,28 @@ func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, u
 		addressedHumans[msg.RecipientID] = struct{}{}
 	}
 
-	// Build mention-name -> userID map for human participants / project members.
-	humanByMention := make(map[string]string)
-	registerHuman := func(id, email, displayName string) {
+	// Build the canonical human roster (participants + project human members +
+	// caller) and resolve mentions via mentionedHumanIDs (same canonical forms
+	// as notifications: display name, hyphenated display-name slug, full email,
+	// email local part). Fail closed on any ambiguous mention or unrecognized
+	// email mention (R2 / D6).
+	humansByID := make(map[string]chatMemberEntry)
+	addHuman := func(id, email, displayName string) {
 		if id == "" {
 			return
 		}
-		if email != "" {
-			humanByMention[strings.ToLower(strings.TrimSpace(email))] = id
+		cur := humansByID[id]
+		cur.ID = id
+		cur.Kind = "user"
+		if email != "" && cur.Email == "" {
+			cur.Email = strings.TrimSpace(email)
 		}
-		if displayName != "" {
-			if slug := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(displayName), " ", "-")); slug != "" {
-				humanByMention[slug] = id
-			}
+		if displayName != "" && cur.DisplayName == "" {
+			cur.DisplayName = strings.TrimSpace(displayName)
 		}
+		humansByID[id] = cur
 	}
-	registerHuman(user.ID(), user.Email(), user.DisplayName())
+	addHuman(user.ID(), user.Email(), user.DisplayName())
 	if msg.ConversationID != "" {
 		if parts, err := s.store.ListParticipants(ctx, msg.ConversationID); err == nil {
 			for _, p := range parts {
@@ -929,7 +938,7 @@ func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, u
 					continue
 				}
 				if u, uerr := s.store.GetUser(ctx, p.PrincipalID); uerr == nil && u != nil {
-					registerHuman(u.ID, u.Email, u.DisplayName)
+					addHuman(u.ID, u.Email, u.DisplayName)
 				}
 			}
 		}
@@ -937,7 +946,36 @@ func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, u
 	if msg.ProjectID != "" {
 		for _, m := range s.resolveProjectHumanMembers(ctx, msg.ProjectID) {
 			if m.Kind == "user" {
-				registerHuman(m.ID, m.Email, m.DisplayName)
+				addHuman(m.ID, m.Email, m.DisplayName)
+			}
+		}
+	}
+
+	humanMembers := make([]chatMemberEntry, 0, len(humansByID))
+	canonicalOwners := make(map[string]map[string]struct{}, len(humansByID)*4)
+	recordKey := func(key, uid string) {
+		if key == "" {
+			return
+		}
+		if canonicalOwners[key] == nil {
+			canonicalOwners[key] = make(map[string]struct{})
+		}
+		canonicalOwners[key][uid] = struct{}{}
+	}
+	for _, m := range humansByID {
+		humanMembers = append(humanMembers, m)
+		if m.DisplayName != "" {
+			lower := strings.ToLower(m.DisplayName)
+			recordKey(lower, m.ID)
+			if slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-")); slug != "" {
+				recordKey(slug, m.ID)
+			}
+		}
+		if m.Email != "" {
+			lower := strings.ToLower(m.Email)
+			recordKey(lower, m.ID)
+			if at := strings.IndexByte(lower, '@'); at > 0 {
+				recordKey(lower[:at], m.ID)
 			}
 		}
 	}
@@ -948,12 +986,18 @@ func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, u
 		if lower == "" {
 			continue
 		}
-		if uid, ok := humanByMention[lower]; ok {
-			addressedHumans[uid] = struct{}{}
-		} else if strings.Contains(lower, "@") {
-			// Fail closed on an unrecognized email mention (another human).
-			addressedHumans["unknown:"+lower] = struct{}{}
+		owners := canonicalOwners[lower]
+		if len(owners) > 1 {
+			// Ambiguous mention (matches multiple distinct humans) -> fail closed.
+			return false
 		}
+		if len(owners) == 0 && strings.Contains(lower, "@") {
+			// Fail closed on an unrecognized email mention (another human).
+			return false
+		}
+	}
+	for _, uid := range mentionedHumanIDs(humanMembers, mentions, "") {
+		addressedHumans[uid] = struct{}{}
 	}
 
 	if len(addressedHumans) != 1 {

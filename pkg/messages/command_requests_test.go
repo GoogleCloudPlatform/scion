@@ -63,6 +63,17 @@ func TestNormalizeCommandRequest(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects reserved md- key prefix (O3)", func(t *testing.T) {
+		for _, k := range []string{"md-abc", "MD-123-def"} {
+			if _, err := NormalizeCommandRequest("command_request", &CommandRequestInput{
+				Key:    k,
+				Script: "echo hi\n",
+			}); err == nil {
+				t.Errorf("NormalizeCommandRequest(%q): expected error for reserved md- prefix", k)
+			}
+		}
+	})
+
 	t.Run("rejects control and bidi chars in script", func(t *testing.T) {
 		cases := []struct {
 			name   string

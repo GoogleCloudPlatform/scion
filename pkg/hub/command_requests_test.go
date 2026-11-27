@@ -896,18 +896,105 @@ func TestCommandRequests_FromMessage_EndToEnd(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateMessage(ctx, dmMsg))
 
-	// 3. Non-session callers (visitor, federated) -> 403.
-	visitorCtx := contextWithIdentity(ctx, NewVisitorIdentity(api.NewUUID(), "https://issuer.cmdreq.test", "cmdreq-visitor", "v@example.com", "Visitor"))
-	visitorBody, _ := json.Marshal(messages.CreateCommandRequestFromMessageBody{
+	// 3. Non-session callers (agent JWT, real PAT, visitor, federated) -> 403 + refused audit (R3).
+	assertFromMsgRefusedReason := func(t *testing.T, label, wantReason string) {
+		t.Helper()
+		for _, ev := range f.audit.snapshot() {
+			if ev.Kind == msgaction.KindCommandRequest && ev.EventType == MessageActionEventRefused && ev.Reason == wantReason {
+				return
+			}
+		}
+		t.Errorf("%s: expected refused audit event with reason %q, got %+v", label, wantReason, f.audit.snapshot())
+	}
+	fromMsgBody := messages.CreateCommandRequestFromMessageBody{
 		MessageID:     dmMsg.ID,
 		Script:        script,
 		CommandSHA256: hash,
+	}
+
+	// 3a. Real agent JWT through Handler().
+	agentJWT, agentCred, err := f.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   f.agent.ID,
+		ProjectID: f.project.ID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh},
+	}, "run-frommsg-r3")
+	require.NoError(t, err)
+	_, err = f.store.SetAgentRunID(ctx, f.agent.ID, "run-frommsg-r3", agentCred)
+	require.NoError(t, err)
+	f.audit.reset()
+	rrAgentJWT := f.doBearerJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", agentJWT, fromMsgBody)
+	assert.Equal(t, http.StatusForbidden, rrAgentJWT.Code, "agent JWT: %s", rrAgentJWT.Body.String())
+	assertFromMsgRefusedReason(t, "agent JWT from-message", ErrCodeUsersOnly)
+
+	// 3b. Real PAT through Handler().
+	patPresented := "scion_pat_cmdreq-frommsg-r3-token"
+	patHash := sha256.Sum256([]byte(patPresented))
+	patExpiry := time.Now().Add(time.Hour)
+	require.NoError(t, f.store.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID:        api.NewUUID(),
+		UserID:    f.alice.ID,
+		Name:      "cmdreq-frommsg-r3-pat",
+		Prefix:    "scion_pat_frm1",
+		KeyHash:   hex.EncodeToString(patHash[:]),
+		ProjectID: f.project.ID,
+		Scopes:    []string{"project:read", "agent:attach"},
+		ExpiresAt: &patExpiry,
+		Created:   time.Now(),
+	}))
+	f.audit.reset()
+	rrPAT := f.doBearerJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", patPresented, fromMsgBody)
+	assert.Equal(t, http.StatusForbidden, rrPAT.Code, "real PAT: %s", rrPAT.Body.String())
+	assertFromMsgRefusedReason(t, "real PAT from-message", "session_required")
+
+	// 3c. Visitor identity (mux + direct handler with visitor_refused audit).
+	visitorIdent := NewVisitorIdentity(api.NewUUID(), "https://issuer.cmdreq.test", "cmdreq-visitor-r3", "v@example.com", "Visitor")
+	visitorBytes, _ := json.Marshal(fromMsgBody)
+	visitorReqMux := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	visitorReqMux = visitorReqMux.WithContext(contextWithCredentialContext(
+		contextWithIdentity(visitorReqMux.Context(), visitorIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+	))
+	visitorReqMux.Header.Set("Content-Type", "application/json")
+	visitorRRMux := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(visitorRRMux, visitorReqMux)
+	assert.Equal(t, http.StatusForbidden, visitorRRMux.Code)
+
+	f.audit.reset()
+	visitorReqDirect := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	visitorReqDirect = visitorReqDirect.WithContext(contextWithCredentialContext(
+		contextWithIdentity(visitorReqDirect.Context(), visitorIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+	))
+	visitorReqDirect.Header.Set("Content-Type", "application/json")
+	visitorRRDirect := httptest.NewRecorder()
+	f.srv.handleCommandRequestRoutes(visitorRRDirect, visitorReqDirect)
+	assert.Equal(t, http.StatusForbidden, visitorRRDirect.Code)
+	assertFromMsgRefusedReason(t, "visitor from-message", "visitor_refused")
+
+	// 3d. Federated identity (403 + session_required audit).
+	fedIdent := NewFederatedUserIdentity("https://issuer.cmdreq.test", "cmdreq-fed-r3", f.alice.Email, "Fed Alice", store.UserRoleMember, nil)
+	f.audit.reset()
+	fedReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBytes))
+	fedReq = fedReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(fedReq.Context(), fedIdent),
+		CredentialContext{Kind: CredentialKindFederation, ID: fedIdent.ID()},
+	))
+	fedReq.Header.Set("Content-Type", "application/json")
+	fedRR := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(fedRR, fedReq)
+	assert.Equal(t, http.StatusForbidden, fedRR.Code)
+	assertFromMsgRefusedReason(t, "federated from-message", "session_required")
+
+	// 3e. Script validation 400 emits a refused audit event (O8).
+	badScript := "echo \u202ehi\n"
+	f.audit.reset()
+	rrBadScript := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     dmMsg.ID,
+		Script:        badScript,
+		CommandSHA256: messages.CommandRequestCanonicalHash(badScript, "", messages.DefaultCommandRequestTimeoutS),
 	})
-	visitorReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(visitorBody)).WithContext(visitorCtx)
-	visitorReq.Header.Set("Content-Type", "application/json")
-	visitorRR := httptest.NewRecorder()
-	f.srv.mux.ServeHTTP(visitorRR, visitorReq)
-	assert.Equal(t, http.StatusForbidden, visitorRR.Code)
+	assert.Equal(t, http.StatusBadRequest, rrBadScript.Code)
+	assertFromMsgRefusedReason(t, "script validation 400", ErrCodeValidationError)
 
 	// 4. Non-recipient (bob) on alice's DM -> 403 not_approver.
 	rrBob := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.bob, messages.CreateCommandRequestFromMessageBody{
@@ -1202,6 +1289,106 @@ func TestCommandRequests_FromMessage_EndToEnd(t *testing.T) {
 		CommandSHA256: hash,
 	})
 	assert.Equal(t, http.StatusAccepted, rrGrpAlice.Code, rrGrpAlice.Body.String())
+
+	// 16. R2: canonical mention resolution — email local part, display name,
+	// 2-human refusal when 2nd human is mentioned by local part only, unknown
+	// email fail-closed, and ambiguous local part refusal.
+	groupLocalPartBoth := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice @bob please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupLocalPartBoth))
+	rrGrpLocalBoth := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupLocalPartBoth.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpLocalBoth.Code, "R2: 2-human mention via email local parts must refuse")
+
+	groupUnknownEmail := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice@example.com @stranger@other.org please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupUnknownEmail))
+	rrGrpUnknown := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupUnknownEmail.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpUnknown.Code, "R2: unrecognized email mention must fail closed")
+
+	groupLocalPartAliceOnly := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupLocalPartAliceOnly))
+	rrGrpLocalAlice := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupLocalPartAliceOnly.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusAccepted, rrGrpLocalAlice.Code, rrGrpLocalAlice.Body.String())
+
+	// Ambiguous email local part: second user with same local part ("alice@other.example").
+	alice2 := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "alice@other.example",
+		DisplayName: "Alice Two",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.store.CreateUser(ctx, alice2))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: groupConv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    alice2.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	groupAmbiguous := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      f.project.ID,
+		ConversationID: groupConv.ID,
+		Sender:         "agent:" + f.agent.Slug,
+		SenderID:       f.agent.ID,
+		Recipient:      "conv:" + groupConv.ID,
+		Msg:            "@alice please run:\n```sh\n" + script + "```\n",
+		Type:           "instruction",
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, groupAmbiguous))
+	rrGrpAmbiguous := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAmbiguous.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous.Code, "R2: ambiguous @alice local-part mention must refuse")
 }
 
 func TestCommandRequests_FromMessage_ConcurrentExecOnce(t *testing.T) {

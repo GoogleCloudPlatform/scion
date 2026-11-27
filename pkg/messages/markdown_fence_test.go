@@ -183,6 +183,36 @@ func TestHasVerbatimExecutableShellFence(t *testing.T) {
 			script: "echo real\n",
 			want:   true,
 		},
+		{
+			name:   "o2_three_space_indented_closing_fence_closes_block",
+			body:   "```sh\necho hi\n   ```\nrm -rf ~\n```\n",
+			script: "echo hi\n",
+			want:   true,
+		},
+		{
+			name:   "o2_three_space_indented_closing_fence_rejects_superset",
+			body:   "```sh\necho hi\n   ```\nrm -rf ~\n```\n",
+			script: "echo hi\n   ```\nrm -rf ~\n",
+			want:   false,
+		},
+		{
+			name:   "o2_four_space_indented_line_does_not_close_fence",
+			body:   "```sh\necho hi\n    ```\n```\n",
+			script: "echo hi\n    ```\n",
+			want:   true,
+		},
+		{
+			name:   "o4_trailing_blank_line_inside_fence_matches",
+			body:   "```sh\necho hi\n\n```\n",
+			script: "echo hi\n\n",
+			want:   true,
+		},
+		{
+			name:   "o4_trailing_blank_line_does_not_match_without_blank_line",
+			body:   "```sh\necho hi\n\n```\n",
+			script: "echo hi\n",
+			want:   false,
+		},
 	}
 
 	for _, tc := range cases {

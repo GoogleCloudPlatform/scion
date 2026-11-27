@@ -64,8 +64,12 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 	if len(refs) == 0 {
 		t.Fatal("no embedded platform skill names an experiment; the scan is broken or the Choices content was removed")
 	}
+	// Experiments dispatched conditionally by dispatchExperiments() under the
+	// Conduit-served branch (pkg/hub/experiments.go) rather than unconditionally
+	// via dispatchExperimentNames.
+	conduitDispatched := []string{experiments.CommandRequests}
 	for id, files := range refs {
-		if !slices.Contains(dispatchExperimentNames, id) {
+		if !slices.Contains(dispatchExperimentNames, id) && !slices.Contains(conduitDispatched, id) {
 			t.Errorf("platform skill file(s) %v gate on experiment %q, which is not in dispatchExperimentNames (pkg/hub/experiments.go); add it so the broker sees its state", files, id)
 		}
 	}

@@ -102,11 +102,15 @@ function extractProseMentions(body: string): string[] {
 }
 
 /**
- * Enforces the §4.14 / D6 recipient presentation rule:
+ * Enforces the §4.14 / D6 recipient presentation rule, mirroring the hub's
+ * canonical `mentionedHumanIDs` resolution (R2):
  * - In a DM, the viewer is the DM human recipient.
  * - In a group conversation or thread, the message must be addressed to
  *   exactly one human (via `recipient`/`recipientId` or a single human
- *   `@-mention` in prose), and that human must be `currentUserId`.
+ *   `@-mention` in prose matching display name, hyphenated display-name slug,
+ *   full email, or email local part), and that human must be `currentUserId`.
+ * - Fails closed on any ambiguous mention (matching multiple distinct humans)
+ *   or unrecognized `@`-containing email mention.
  */
 export function isViewerSingleAddressedHuman(opts: {
   isDirectConversation: boolean;
@@ -115,7 +119,6 @@ export function isViewerSingleAddressedHuman(opts: {
   recipientId?: string | undefined;
   body: string;
   members?: readonly MarkdownExecuteMemberInfo[] | undefined;
-  knownUsersByEmail?: ReadonlyMap<string, string> | null | undefined;
 }): boolean {
   const { currentUserId } = opts;
   if (!currentUserId) return false;
@@ -128,34 +131,57 @@ export function isViewerSingleAddressedHuman(opts: {
     addressedHumans.add(opts.recipientId);
   }
 
-  const humanByMention = new Map<string, string>();
+  const canonicalOwners = new Map<string, Set<string>>();
+  const recordKey = (key: string, memberKey: string): void => {
+    if (!key) return;
+    let owners = canonicalOwners.get(key);
+    if (!owners) {
+      owners = new Set<string>();
+      canonicalOwners.set(key, owners);
+    }
+    owners.add(memberKey);
+  };
+
   if (opts.members) {
     for (const m of opts.members) {
       if (m.kind && m.kind !== 'user') continue;
       const memberKey = m.id || m.email?.trim().toLowerCase() || m.slug?.trim().toLowerCase() || '';
       if (!memberKey) continue;
       if (m.email) {
-        humanByMention.set(m.email.trim().toLowerCase(), memberKey);
+        const lowerEmail = m.email.trim().toLowerCase();
+        recordKey(lowerEmail, memberKey);
+        const at = lowerEmail.indexOf('@');
+        if (at > 0) {
+          recordKey(lowerEmail.slice(0, at), memberKey);
+        }
       }
-      const display = m.displayName || m.name;
+      const display = (m.displayName || m.name || '').trim();
       if (display) {
-        const slug = display.trim().toLowerCase().replace(/\s+/g, '-');
-        if (slug) humanByMention.set(slug, memberKey);
+        const lowerDisplay = display.toLowerCase();
+        recordKey(lowerDisplay, memberKey);
+        const slug = lowerDisplay.replace(/\s+/g, '-');
+        if (slug) recordKey(slug, memberKey);
       }
       if (m.slug) {
-        humanByMention.set(m.slug.trim().toLowerCase(), memberKey);
+        recordKey(m.slug.trim().toLowerCase(), memberKey);
       }
     }
   }
 
   const mentions = extractProseMentions(opts.body);
   for (const m of mentions) {
-    const uid = humanByMention.get(m);
-    if (uid) {
-      addressedHumans.add(uid);
+    const owners = canonicalOwners.get(m);
+    if (owners && owners.size > 1) {
+      // Ambiguous mention (matches multiple distinct humans) -> fail closed.
+      return false;
+    }
+    if (owners && owners.size === 1) {
+      for (const uid of owners) {
+        addressedHumans.add(uid);
+      }
     } else if (m.includes('@')) {
       // Fail closed on an unrecognized email mention (another human).
-      addressedHumans.add(`unknown:${m}`);
+      return false;
     }
   }
 
@@ -180,6 +206,7 @@ export function evaluateMarkdownBlockExecuteState(opts: {
   timestamp: string;
   langTag: string;
   noExecute: boolean;
+  nestedInListOrQuote?: boolean;
   rawScript: string;
   isDirectConversation: boolean;
   currentUserId: string;
@@ -187,7 +214,6 @@ export function evaluateMarkdownBlockExecuteState(opts: {
   recipientId?: string;
   body: string;
   members?: readonly MarkdownExecuteMemberInfo[];
-  knownUsersByEmail?: ReadonlyMap<string, string> | null;
   execContainer: CommandRequestExecContainerView | null;
   nowMs?: number;
 }): MarkdownBlockExecuteState {
@@ -197,6 +223,7 @@ export function evaluateMarkdownBlockExecuteState(opts: {
   if (!opts.messageId) return { mode: 'hidden' };
   if (!SHELL_EXECUTE_LANGS.has(opts.langTag.toLowerCase())) return { mode: 'hidden' };
   if (opts.noExecute) return { mode: 'hidden' };
+  if (opts.nestedInListOrQuote) return { mode: 'hidden' };
   if (!isMessageWithinExecuteWindow(opts.timestamp, opts.nowMs)) return { mode: 'hidden' };
   if (
     !isViewerSingleAddressedHuman({
@@ -206,7 +233,6 @@ export function evaluateMarkdownBlockExecuteState(opts: {
       recipientId: opts.recipientId,
       body: opts.body,
       members: opts.members,
-      knownUsersByEmail: opts.knownUsersByEmail,
     })
   ) {
     return { mode: 'hidden' };

@@ -8054,6 +8054,7 @@ export class ScionChatThread extends LitElement {
             ?isDirectConversation=${this.isDM || this.conversationKey.startsWith('dm:')}
             recipient=${msg.recipient || ''}
             recipientId=${msg.recipientId || ''}
+            .members=${this.members}
             .execContainer=${this.currentUserExecContainer}
             .knownUsersByEmail=${this._knownUsersByEmail}
             .knownMentionSlugs=${this._knownMentionSlugs}

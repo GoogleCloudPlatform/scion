@@ -3451,6 +3451,11 @@ export class ScionChatMessage extends LitElement {
         if (noExecute) {
           wrapper.dataset.noExecute = 'true';
         }
+        // O1: mirror the hub's column-0 fence rule — blocks nested inside list
+        // items or blockquotes will always be refused by the hub, so hide Execute.
+        if (pre.closest('li, blockquote')) {
+          wrapper.dataset.nestedBlock = 'true';
+        }
         this.mdRawScripts.set(wrapper, content);
 
         const toolbar = document.createElement('div');
@@ -3481,6 +3486,7 @@ export class ScionChatMessage extends LitElement {
 
     const langTag = wrapper.dataset.lang ?? 'sh';
     const noExecute = wrapper.dataset.noExecute === 'true';
+    const nestedInListOrQuote = wrapper.dataset.nestedBlock === 'true';
     const rawScript = this.mdRawScripts.get(wrapper) ?? wrapper.dataset.rawScript ?? '';
 
     toolbar.textContent = '';
@@ -3539,6 +3545,7 @@ export class ScionChatMessage extends LitElement {
         timestamp: this.timestamp,
         langTag,
         noExecute,
+        nestedInListOrQuote,
         rawScript,
         isDirectConversation: this.isDirectConversation,
         currentUserId: this.currentUserId,
@@ -3546,7 +3553,6 @@ export class ScionChatMessage extends LitElement {
         recipientId: this.recipientId,
         body: this.body,
         members: this.members,
-        knownUsersByEmail: this.effectiveKnownUsersByEmail(),
         execContainer: this.execContainer,
       });
 

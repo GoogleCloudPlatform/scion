@@ -20,8 +20,19 @@ import {
   computeCommandRequestCanonicalHash,
   type CommandRequestExecContainerView,
 } from '../../../client/command-requests.js';
+
+vi.mock('../../../client/main.js', async () => {
+  const { stateManager } = await import('../../../client/state.js');
+  return {
+    navigateTo: vi.fn(),
+    stateManager,
+  };
+});
+
 import './chat-message.js';
+import './chat-thread.js';
 import type { ScionChatMessage } from './chat-message.js';
+import type { ScionChatThread } from './chat-thread.js';
 import type { ScionCommandConfirmDialog } from './command-confirm-dialog.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -270,6 +281,126 @@ describe('Markdown Execute on fenced shell blocks (§4.14, AC-F9)', () => {
       expect(btn).not.toBeNull();
       expect(btn?.disabled).toBe(true);
       expect(btn?.title).toContain('Start your execution container');
+    });
+  });
+
+  it('O1: hides Execute (keeps Copy) on shell fences nested inside a list item or blockquote', async () => {
+    const listEl = createMessageEl({
+      body: '1. Run this:\n\n   ```sh\n   echo nested\n   ```\n',
+    });
+    await vi.waitFor(() => {
+      const wrapper = listEl.shadowRoot?.querySelector('.code-block[data-shell-block="true"]');
+      expect(wrapper).not.toBeNull();
+      expect(wrapper?.querySelector('[data-testid="code-block-copy-btn"]')).not.toBeNull();
+      expect(wrapper?.querySelector('[data-testid="code-block-execute-btn"]')).toBeNull();
+    });
+
+    const quoteEl = createMessageEl({
+      body: '> ```sh\n> echo quoted\n> ```\n',
+    });
+    await vi.waitFor(() => {
+      const wrapper = quoteEl.shadowRoot?.querySelector('.code-block[data-shell-block="true"]');
+      expect(wrapper).not.toBeNull();
+      expect(wrapper?.querySelector('[data-testid="code-block-copy-btn"]')).not.toBeNull();
+      expect(wrapper?.querySelector('[data-testid="code-block-execute-btn"]')).toBeNull();
+    });
+  });
+
+  it('R1 + R2: wires members from <scion-chat-thread> for group single-@ Execute and hides on 2-human local-part or display-name mentions', async () => {
+    const nowIso = new Date().toISOString();
+    const fetchMock = vi.fn().mockImplementation((input: string | URL) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      if (url.includes('/api/v1/users/me/exec-container')) {
+        return Promise.resolve(
+          jsonResponse({
+            configured: true,
+            state: 'ready',
+            agent: {
+              id: 'exec-1',
+              slug: 'alice-shell',
+              name: 'alice-shell',
+              projectId: 'proj-1',
+              projectName: 'alpha',
+              homePersistent: true,
+            },
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({ messages: [] }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const thread = document.createElement('scion-chat-thread') as ScionChatThread;
+    thread.currentUserId = 'user-alice';
+    thread.isDM = false;
+    thread.members = [
+      { id: 'user-alice', name: 'Alice Smith', email: 'alice@example.com', kind: 'user' },
+      { id: 'user-bob', name: 'Robert Jones', email: 'bob@example.com', kind: 'user' },
+    ];
+    thread.messages = [
+      {
+        id: 'msg-grp-single',
+        sender: 'agent:deploy-bot',
+        senderId: 'agent-1',
+        recipient: 'conv:conv-1',
+        recipientId: '',
+        msg: '@alice@example.com please run:\n\n```sh\necho solo\n```\n',
+        type: 'instruction',
+        createdAt: nowIso,
+      },
+      {
+        id: 'msg-grp-two-slug',
+        sender: 'agent:deploy-bot',
+        senderId: 'agent-1',
+        recipient: 'conv:conv-1',
+        recipientId: '',
+        msg: '@alice-smith @robert-jones please check:\n\n```sh\necho two-slug\n```\n',
+        type: 'instruction',
+        createdAt: nowIso,
+      },
+      {
+        id: 'msg-grp-two-local',
+        sender: 'agent:deploy-bot',
+        senderId: 'agent-1',
+        recipient: 'conv:conv-1',
+        recipientId: '',
+        msg: '@alice-smith @bob please check:\n\n```sh\necho two-local\n```\n',
+        type: 'instruction',
+        createdAt: nowIso,
+      },
+    ];
+    document.body.appendChild(thread);
+    await thread.updateComplete;
+
+    await vi.waitFor(() => {
+      const soloMsg = thread.shadowRoot?.querySelector(
+        'scion-chat-message#msg-msg-grp-single'
+      ) as ScionChatMessage | null;
+      expect(soloMsg).not.toBeNull();
+      expect(
+        soloMsg?.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
+      ).not.toBeNull();
+    });
+
+    await vi.waitFor(() => {
+      const slugMsg = thread.shadowRoot?.querySelector(
+        'scion-chat-message#msg-msg-grp-two-slug'
+      ) as ScionChatMessage | null;
+      const localMsg = thread.shadowRoot?.querySelector(
+        'scion-chat-message#msg-msg-grp-two-local'
+      ) as ScionChatMessage | null;
+      expect(
+        slugMsg?.shadowRoot?.querySelector('[data-testid="code-block-copy-btn"]')
+      ).not.toBeNull();
+      expect(
+        slugMsg?.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
+      ).toBeNull();
+      expect(
+        localMsg?.shadowRoot?.querySelector('[data-testid="code-block-copy-btn"]')
+      ).not.toBeNull();
+      expect(
+        localMsg?.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
+      ).toBeNull();
     });
   });
 });
