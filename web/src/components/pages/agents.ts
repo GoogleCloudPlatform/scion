@@ -396,9 +396,17 @@ export class ScionPageAgents extends LitElement {
         gap: 0.25rem;
       }
 
+      .trait-msg-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
       .trait-pill {
         display: inline-flex;
         align-items: center;
+        align-self: center;
+        gap: 0.25rem;
         flex-shrink: 0;
         padding: 0.0625rem 0.4375rem;
         border-radius: 9999px;
@@ -406,28 +414,21 @@ export class ScionPageAgents extends LitElement {
         font-weight: 500;
         line-height: 1.25;
         white-space: nowrap;
-        background: var(--scion-badge-neutral-bg);
-        color: var(--scion-badge-neutral-text);
       }
 
-      .trait-pill--primary {
-        background: var(--scion-badge-primary-bg);
-        color: var(--scion-badge-primary-text);
+      .trait-pill sl-icon {
+        font-size: 0.72rem;
+        flex-shrink: 0;
       }
 
-      .trait-pill--success {
-        background: var(--scion-badge-success-bg);
-        color: var(--scion-badge-success-text);
-      }
-
-      .trait-pill--warning {
+      .trait-pill--messaging {
         background: var(--scion-badge-warning-bg);
         color: var(--scion-badge-warning-text);
       }
 
-      .trait-pill--danger {
-        background: var(--scion-badge-danger-bg);
-        color: var(--scion-badge-danger-text);
+      .trait-pill--lifecycle {
+        background: var(--scion-badge-primary-bg);
+        color: var(--scion-badge-primary-text);
       }
 
       .agent-meta {
@@ -2443,29 +2444,47 @@ export class ScionPageAgents extends LitElement {
 
     const modeDisplay = hasNonDefaultMode ? getMessageModeDisplay(mode) : null;
     const modeTooltip = modeDisplay
-      ? `Message mode: ${modeDisplay.label} — ${modeDisplay.description}`
+      ? `Messaging: ${modeDisplay.label} — ${modeDisplay.description}`
       : '';
+    const lifecycleTooltip =
+      'Lifecycle: Never suspend — skipped by automatic idle/stalled and bulk suspends';
+
+    const reachabilityEl = hasReachabilityException
+      ? html`
+          <scion-messageability-indicator
+            .messageability=${msg}
+            agentName=${agent.name}
+            size="small"
+          ></scion-messageability-indicator>
+        `
+      : nothing;
 
     return html`
       <span class="traits-pills">
         ${modeDisplay
+          ? html`<span class="trait-msg-group">
+              <span
+                class="trait-pill trait-pill--messaging"
+                data-testid="trait-message-mode"
+                title=${modeTooltip}
+                aria-label=${modeTooltip}
+              >
+                <sl-icon name="chat-dots" aria-hidden="true"></sl-icon>
+                ${modeDisplay.label}
+              </span>
+              ${reachabilityEl}
+            </span>`
+          : reachabilityEl}
+        ${hasNeverSuspend
           ? html`<span
-              class="trait-pill trait-pill--${modeDisplay.color}"
-              data-testid="trait-message-mode"
-              title=${modeTooltip}
-              aria-label=${modeTooltip}
-              >${modeDisplay.label}</span
-            >`
-          : nothing}
-        ${hasNeverSuspend ? neverSuspendBadge(agent, { compact: true }) : nothing}
-        ${hasReachabilityException
-          ? html`
-              <scion-messageability-indicator
-                .messageability=${msg}
-                agentName=${agent.name}
-                size="small"
-              ></scion-messageability-indicator>
-            `
+              class="trait-pill trait-pill--lifecycle"
+              data-testid="never-suspend-badge"
+              title=${lifecycleTooltip}
+              aria-label=${lifecycleTooltip}
+            >
+              <sl-icon name="power" aria-hidden="true"></sl-icon>
+              Never suspend
+            </span>`
           : nothing}
       </span>
     `;

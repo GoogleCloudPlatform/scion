@@ -593,21 +593,28 @@ describe('Never-suspend hub-wide agents view (scion-page-agents)', () => {
     expect(cells[0].querySelector('[data-testid="never-suspend-badge"]')).toBeNull();
     expect(cells[0].querySelector('scion-messageability-indicator')).toBeNull();
 
-    // Sealed agent (none mode, unreachable) -> Sealed pill + reachability indicator, no never-suspend
+    // Sealed agent (none mode, unreachable) -> Messaging family pill (chat-dots) + reachability arrow
     const sealedPill = cells[1].querySelector('[data-testid="trait-message-mode"]');
     expect(sealedPill?.textContent?.trim()).toBe('Sealed');
-    expect(sealedPill?.getAttribute('aria-label')).toContain('Sealed');
+    expect(sealedPill?.classList.contains('trait-pill--messaging')).toBe(true);
+    expect(sealedPill?.querySelector('sl-icon')?.getAttribute('name')).toBe('chat-dots');
+    expect(sealedPill?.getAttribute('aria-label')).toMatch(/^Messaging: Sealed/);
     expect(sealedPill?.getAttribute('title')).toContain('Cannot send or receive messages');
     expect(cells[1].querySelector('[data-testid="never-suspend-badge"]')).toBeNull();
     expect(cells[1].querySelector('scion-messageability-indicator')).not.toBeNull();
 
-    // One-way never-suspend agent (owner mode, never suspend, one-way) -> all three
+    // One-way never-suspend agent (owner mode, never suspend, one-way) -> both families + reachability arrow
     const ownerPill = cells[2].querySelector('[data-testid="trait-message-mode"]');
     expect(ownerPill?.textContent?.trim()).toBe('Owner');
-    expect(ownerPill?.getAttribute('aria-label')).toContain('Owner');
+    expect(ownerPill?.classList.contains('trait-pill--messaging')).toBe(true);
+    expect(ownerPill?.querySelector('sl-icon')?.getAttribute('name')).toBe('chat-dots');
+    expect(ownerPill?.getAttribute('aria-label')).toMatch(/^Messaging: Owner/);
     const nsPill = cells[2].querySelector('[data-testid="never-suspend-badge"]');
     expect(nsPill).not.toBeNull();
-    expect(nsPill?.getAttribute('aria-label')).toContain('Never suspend');
+    expect(nsPill?.classList.contains('trait-pill--lifecycle')).toBe(true);
+    expect(nsPill?.querySelector('sl-icon')?.getAttribute('name')).toBe('power');
+    expect(nsPill?.getAttribute('aria-label')).toMatch(/^Lifecycle: Never suspend/);
+    expect(nsPill?.getAttribute('title')).toMatch(/^Lifecycle: Never suspend/);
     expect(cells[2].querySelector('scion-messageability-indicator')).not.toBeNull();
   });
 });
