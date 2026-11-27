@@ -962,7 +962,8 @@ as stop, start, and restart); an agent can always reincarnate itself.
 `--dry-run` shows the old and new value of each patched setting. For a user, patch flags need
 permission to update the agent (`agent.update`) as well as `agent.lifecycle`, so a user access token
 needs the `agent:update` scope for them; otherwise sign in with `scion hub auth login`. An agent caller, including an agent
-patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
+patching itself, needs the agent lifecycle permission. `--image` and `--harness` also need `agent.attach` on the agent for every caller, checked
+before a dry run is planned, so an agent cannot reincarnate itself with them (an ancestor agent with the full role can). Before a real patched reincarnation the CLI dry-runs
 the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags other than `--harness` combine
 with `--broker`: the move's checks judge the patched configuration, for example the patched service
 account. When a reincarnation that changed the service account fails and the agent returns to its
