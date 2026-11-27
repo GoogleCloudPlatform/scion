@@ -603,6 +603,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 	if rejectSystemOneReservedSecretWrite(w, key) {
 		return
 	}
+	if req.Secret && !s.validateReservedTelemetrySecret(w, scope, key, store.SecretTypeEnvironment, key) {
+		return
+	}
 
 	// allowProgeny is only valid on user-scoped env vars/secrets.
 	// Plain env vars additionally require injection_mode=always;
@@ -1223,25 +1226,35 @@ func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) b
 	return false
 }
 
-// validateFileSecretTarget rejects a non-hub-scope file secret whose target
-// resolves to a hub-only reserved file path (such as
-// ~/.scion/telemetry-gcp-credentials.json) when running in hosted mode
-// (!s.config.Workstation). In workstation mode the user is the operator, so
-// non-hub file secrets may still target the path.
-// On rejection it writes HTTP 400 with error code reserved_target and returns false.
-func (s *Server) validateFileSecretTarget(w http.ResponseWriter, scope, secretType, target string) bool {
-	if s.config.Workstation || secretType != store.SecretTypeFile {
+// validateReservedTelemetrySecret rejects a non-hub-scope secret in hosted
+// mode (!s.config.Workstation) when either:
+//   - its key is the reserved telemetry credential name
+//     (scion-telemetry-gcp-credentials), of any type (including on_demand); or
+//   - it is a file-type secret whose normalized target resolves
+//     case-insensitively to .scion/telemetry-gcp-credentials.json.
+//
+// In workstation mode the user is the operator, so non-hub secrets are
+// unchanged. On rejection it writes HTTP 400 with error code reserved_target
+// and returns false.
+func (s *Server) validateReservedTelemetrySecret(w http.ResponseWriter, scope, key, secretType, target string) bool {
+	if s.config.Workstation {
 		return true
 	}
-	if !secret.IsReservedFileTarget(scope, target) {
+	if !secret.IsReservedNonHubSecret(scope, key, secretType, target) {
 		return true
 	}
-	writeError(w, http.StatusBadRequest, ErrCodeReservedTarget,
-		"target path is reserved for hub-scoped telemetry credentials in hosted mode",
-		map[string]interface{}{
-			"field": "target",
-			"value": target,
-		})
+	field := "target"
+	value := target
+	msg := "target path is reserved for hub-scoped telemetry credentials in hosted mode"
+	if secret.IsReservedTelemetryCredentialSecretName(key) {
+		field = "key"
+		value = key
+		msg = "secret name scion-telemetry-gcp-credentials is reserved for hub-scoped telemetry credentials in hosted mode"
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeReservedTarget, msg, map[string]interface{}{
+		"field": field,
+		"value": value,
+	})
 	return false
 }
 
@@ -1384,6 +1397,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if !validateEnvSecretTarget(w, secretType, target) {
 		return
 	}
+	if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
+		return
+	}
 
 	// Validate file-specific constraints
 	if secretType == store.SecretTypeFile {
@@ -1396,9 +1412,6 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 				"field": "target",
 				"value": target,
 			})
-			return
-		}
-		if !s.validateFileSecretTarget(w, scope, secretType, target) {
 			return
 		}
 		if len(decoded) > 64*1024 {
@@ -1592,7 +1605,7 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 	if !validateEnvSecretTarget(w, effectiveType, effectiveTarget) {
 		return
 	}
-	if !s.validateFileSecretTarget(w, scope, effectiveType, effectiveTarget) {
+	if !s.validateReservedTelemetrySecret(w, scope, key, effectiveType, effectiveTarget) {
 		return
 	}
 
@@ -1972,6 +1985,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		if !validateEnvSecretTarget(w, secretType, target) {
 			return
 		}
+		if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
+			return
+		}
 
 		// Validate file-specific constraints for project/user scopes.
 		if secretType == store.SecretTypeFile {
@@ -1984,9 +2000,6 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 					"field": "target",
 					"value": target,
 				})
-				return
-			}
-			if !s.validateFileSecretTarget(w, scope, secretType, target) {
 				return
 			}
 			if len(decoded) > 64*1024 {
@@ -2667,6 +2680,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		if rejectSystemOneReservedSecretWrite(w, key) {
 			return
 		}
+		if req.Secret && !s.validateReservedTelemetrySecret(w, scope, key, store.SecretTypeEnvironment, key) {
+			return
+		}
 
 		var createdBy string
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
@@ -3015,6 +3031,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		if !validateEnvSecretTarget(w, secretType, target) {
 			return
 		}
+		if !s.validateReservedTelemetrySecret(w, scope, key, secretType, target) {
+			return
+		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {
 				BadRequest(w, "target path must not contain '..'")
@@ -3022,9 +3041,6 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			}
 			if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
 				ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{"field": "target", "value": target})
-				return
-			}
-			if !s.validateFileSecretTarget(w, scope, secretType, target) {
 				return
 			}
 			if len(decoded) > 64*1024 {

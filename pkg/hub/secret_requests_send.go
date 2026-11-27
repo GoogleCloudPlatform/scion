@@ -79,9 +79,9 @@ func (s *Server) validateAgentSecretWriteConstraints(w http.ResponseWriter, ctx 
 			})
 			return false
 		}
-		if !s.validateFileSecretTarget(w, store.ScopeAgent, secretType, target) {
-			return false
-		}
+	}
+	if !s.validateReservedTelemetrySecret(w, store.ScopeAgent, key, secretType, effectiveTarget) {
+		return false
 	}
 	if rejectSystemOneReservedSecretWrite(w, key) {
 		return false

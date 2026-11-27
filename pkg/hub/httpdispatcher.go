@@ -5939,9 +5939,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			continue
 		}
 		// Defense in depth for custom/fake backends that did not honor
-		// DropReservedFileTargets: never deliver a non-hub-scope file secret
-		// targeting the reserved telemetry credential path in hosted mode.
-		if d.hostedMode && sv.SecretType == store.SecretTypeFile && secret.IsReservedFileTarget(sv.Scope, sv.Target) {
+		// DropReservedFileTargets: never deliver a non-hub-scope secret with
+		// the reserved telemetry credential name or file target in hosted mode.
+		if d.hostedMode && secret.IsReservedNonHubSecret(sv.Scope, sv.Name, sv.SecretType, sv.Target) {
 			d.warnReservedTelemetryCredentialSecret(ctx, agent, sv.Name, sv.Scope)
 			continue
 		}
@@ -5982,21 +5982,21 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 }
 
 // warnReservedTelemetryCredentialSecret logs and emits a dispatch warning when
-// a pre-existing non-hub-scope file secret targeting the reserved telemetry
-// credential path is skipped during hosted dispatch. The secret's value is
-// never included.
+// a pre-existing non-hub-scope secret using the reserved telemetry credential
+// name or file target path is skipped during hosted dispatch. The secret's
+// value is never included.
 func (d *HTTPAgentDispatcher) warnReservedTelemetryCredentialSecret(ctx context.Context, agent *store.Agent, name, scope string) {
 	agentID := ""
 	if agent != nil {
 		agentID = agent.ID
 	}
 	if d.log != nil {
-		d.log.WarnContext(ctx, "skipping non-hub file secret targeting reserved telemetry credential path",
+		d.log.WarnContext(ctx, "skipping non-hub secret targeting reserved telemetry credential name or path",
 			"agent_id", agentID, "secret", name, "scope", scope)
 	}
 	addDispatchWarnings(ctx, fmt.Sprintf(
-		"Warning: skipping secret %q (%s scope): target path ~/.scion/telemetry-gcp-credentials.json is reserved for hub-scoped telemetry credentials in hosted mode",
-		name, scope))
+		"Warning: skipping secret %q (%s scope): telemetry credential name %q and target path ~/.scion/telemetry-gcp-credentials.json are reserved for hub-scoped secrets in hosted mode",
+		name, scope, "scion-telemetry-gcp-credentials"))
 }
 
 // filterShellUserSecrets restricts resolved secrets for shell execution

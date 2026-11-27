@@ -594,7 +594,7 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 		})
 		return
 	}
-	if !s.validateFileSecretTarget(w, store.ScopeUser, p.SecretType, p.Target) {
+	if !s.validateReservedTelemetrySecret(w, store.ScopeUser, p.Key, p.SecretType, p.Target) {
 		return
 	}
 

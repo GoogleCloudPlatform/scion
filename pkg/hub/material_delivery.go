@@ -531,6 +531,33 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 					continue
 				}
 			}
+			// Hosted-mode reserved non-hub secrets (name scion-telemetry-gcp-credentials
+			// of any type, or file secrets targeting .scion/telemetry-gcp-credentials.json)
+			// must be dropped BEFORE non-deliverable shadow recording and merging so an
+			// existing non-hub row (including on_demand) can neither displace nor shadow
+			// the hub-scoped telemetry credential.
+			if d.hostedMode && secret.IsReservedNonHubSecret(sc.scope, m.Name, m.SecretType, m.Target) {
+				if !noAuth && !withheld(sc.scope) {
+					warn := true
+					if sc.scope == store.ScopeUser {
+						if startOpts != nil && startOpts.UserScopeCheck != nil && !startOpts.UserScopeCheck(m) {
+							warn = false
+						}
+					} else {
+						allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
+						if err != nil {
+							return nil, nil, nil, err
+						}
+						if !allowed {
+							warn = false
+						}
+					}
+					if warn {
+						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, sc.scope)
+					}
+				}
+				continue
+			}
 			// Record non-deliverable, non-internal rows (e.g. on_demand) in
 			// shadowed before the NoAuth candidate filter so an agent-scope
 			// on_demand GITHUB_TOKEN shadows lower-scope tokens on both start
@@ -557,18 +584,6 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 				// row with the same name stays in effect.
 				continue
 			}
-			if d.hostedMode && m.SecretType == store.SecretTypeFile {
-				effTarget := m.Target
-				if effTarget == "" {
-					effTarget = m.Name
-				}
-				if secret.IsReservedFileTarget(sc.scope, effTarget) {
-					if !withheld(sc.scope) {
-						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, sc.scope)
-					}
-					continue
-				}
-			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, scopeRank: scopeRank})
 		}
 	}
@@ -593,17 +608,11 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 			if !check(m) {
 				continue
 			}
-			if d.hostedMode && m.SecretType == store.SecretTypeFile {
-				effTarget := m.Target
-				if effTarget == "" {
-					effTarget = m.Name
+			if d.hostedMode && secret.IsReservedNonHubSecret(m.Scope, m.Name, m.SecretType, m.Target) {
+				if !withheld(m.Scope) {
+					d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, m.Scope)
 				}
-				if secret.IsReservedFileTarget(m.Scope, effTarget) {
-					if !withheld(m.Scope) {
-						d.warnReservedTelemetryCredentialSecret(ctx, agent, m.Name, m.Scope)
-					}
-					continue
-				}
+				continue
 			}
 			kept = append(kept, secretDeliveryCandidate{meta: m, progeny: true})
 		}

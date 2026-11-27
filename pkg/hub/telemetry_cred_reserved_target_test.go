@@ -72,6 +72,8 @@ func TestReservedTelemetryCredFileTarget_HostedCreateAndPatchRejected(t *testing
 		"~/.scion/telemetry-gcp-credentials.json",
 		"~//.scion/./telemetry-gcp-credentials.json",
 		"/home/scion/.scion/telemetry-gcp-credentials.json",
+		"~/.SCION/telemetry-gcp-credentials.json",
+		"~/.scion/TELEMETRY-GCP-CREDENTIALS.JSON",
 	}
 
 	assertReservedTargetErr := func(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -154,7 +156,67 @@ func TestReservedTelemetryCredFileTarget_HostedCreateAndPatchRejected(t *testing
 		assertReservedTargetErr(t, rec)
 	})
 
-	// 6. Hub-scope scion-telemetry-gcp-credentials is still accepted.
+	// 6. R1(a): non-hub secrets NAMED scion-telemetry-gcp-credentials with any target/type
+	// (including file with non-reserved target, environment, and on_demand) are rejected with 400.
+	t.Run("put_reserved_name_project_file_any_target", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/scion-telemetry-gcp-credentials", SetSecretRequest{
+			Value:  valB64,
+			Type:   store.SecretTypeFile,
+			Target: "~/.config/x.json",
+		})
+		assertReservedTargetErr(t, rec)
+	})
+	t.Run("put_reserved_name_user_file_any_target", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/scion-telemetry-gcp-credentials", SetSecretRequest{
+			Value:  valB64,
+			Type:   store.SecretTypeFile,
+			Target: "~/.config/x.json",
+			Scope:  store.ScopeUser,
+		})
+		assertReservedTargetErr(t, rec)
+	})
+	t.Run("put_reserved_name_project_on_demand", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/scion-telemetry-gcp-credentials", SetSecretRequest{
+			Value:         valB64,
+			Type:          store.SecretTypeOnDemand,
+			InjectionMode: store.InjectionModeAsNeeded,
+		})
+		assertReservedTargetErr(t, rec)
+	})
+	t.Run("create_agent_inline_reserved_name_any_target", func(t *testing.T) {
+		_, vErr := srv.validateCreateAgentSecrets([]AgentSecretInput{
+			{
+				Key:    "scion-telemetry-gcp-credentials",
+				Value:  valB64,
+				Type:   store.SecretTypeFile,
+				Target: "~/.config/x.json",
+			},
+		})
+		require.NotNil(t, vErr)
+		assert.Equal(t, http.StatusBadRequest, vErr.status)
+		assert.Equal(t, ErrCodeReservedTarget, vErr.code)
+	})
+	t.Run("create_agent_inline_reserved_name_on_demand", func(t *testing.T) {
+		_, vErr := srv.validateCreateAgentSecrets([]AgentSecretInput{
+			{
+				Key:           "scion-telemetry-gcp-credentials",
+				Value:         valB64,
+				Type:          store.SecretTypeOnDemand,
+				InjectionMode: store.InjectionModeAsNeeded,
+			},
+		})
+		require.NotNil(t, vErr)
+		assert.Equal(t, http.StatusBadRequest, vErr.status)
+		assert.Equal(t, ErrCodeReservedTarget, vErr.code)
+	})
+	t.Run("agent_secret_write_constraints_reserved_name_any_target", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		ok := srv.validateAgentSecretWriteConstraints(rec, ctx, tid("agent-1"), "scion-telemetry-gcp-credentials", store.SecretTypeFile, "~/.config/x.json")
+		assert.False(t, ok)
+		assertReservedTargetErr(t, rec)
+	})
+
+	// 7. Hub-scope scion-telemetry-gcp-credentials is still accepted.
 	t.Run("hub_scope_telemetry_cred_allowed", func(t *testing.T) {
 		rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/scion-telemetry-gcp-credentials", SetSecretRequest{
 			Value:  valB64,
@@ -189,6 +251,14 @@ func TestReservedTelemetryCredFileTarget_WorkstationModeUnchanged(t *testing.T) 
 		Target: "~/.scion/telemetry-gcp-credentials.json",
 	})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Project-scope file secret named scion-telemetry-gcp-credentials with any target also succeeds in workstation mode.
+	recName := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/scion-telemetry-gcp-credentials", SetSecretRequest{
+		Value:  valB64,
+		Type:   store.SecretTypeFile,
+		Target: "~/.config/x.json",
+	})
+	require.Equal(t, http.StatusOK, recName.Code, "body: %s", recName.Body.String())
 
 	// Inline agent-create secret also succeeds in workstation mode.
 	validated, vErr := srv.validateCreateAgentSecrets([]AgentSecretInput{
@@ -229,8 +299,19 @@ func TestReservedTelemetryCredFileTarget_ExistingRowsSkippedAtDispatchWithWarnin
 	})
 	require.NoError(t, err)
 
-	// Also seed a user-scope secret with the same well-known name to prove it
-	// does not overwrite or displace the hub-scope telemetry credential.
+	// R1(b): seed a project-scope file secret NAMED scion-telemetry-gcp-credentials
+	// with a non-reserved target to prove it does not displace the hub credential.
+	_, _, err = m.backend.Set(ctx, &secret.SetSecretInput{
+		Name:       "scion-telemetry-gcp-credentials",
+		Value:      "project-evil-json",
+		SecretType: store.SecretTypeFile,
+		Target:     "~/.config/evil.json",
+		Scope:      store.ScopeProject,
+		ScopeID:    m.agent.ProjectID,
+	})
+	require.NoError(t, err)
+
+	// Also seed a user-scope secret with the same well-known name targeting the path.
 	_, _, err = m.backend.Set(ctx, &secret.SetSecretInput{
 		Name:       "scion-telemetry-gcp-credentials",
 		Value:      "user-sa-json",
@@ -238,6 +319,20 @@ func TestReservedTelemetryCredFileTarget_ExistingRowsSkippedAtDispatchWithWarnin
 		Target:     "/home/scion/.scion/telemetry-gcp-credentials.json",
 		Scope:      store.ScopeUser,
 		ScopeID:    m.agent.OwnerID,
+	})
+	require.NoError(t, err)
+
+	// R1(c): seed a higher-precedence agent-scope on_demand secret named
+	// scion-telemetry-gcp-credentials to prove it does not shadow the hub credential.
+	m.d.SetAgentSecretsEnabledProvider(func() bool { return true })
+	_, _, err = m.backend.Set(ctx, &secret.SetSecretInput{
+		Name:          "scion-telemetry-gcp-credentials",
+		Value:         "agent-ondemand-shadow",
+		SecretType:    store.SecretTypeOnDemand,
+		Target:        "scion-telemetry-gcp-credentials",
+		InjectionMode: store.InjectionModeAsNeeded,
+		Scope:         store.ScopeAgent,
+		ScopeID:       m.agent.ID,
 	})
 	require.NoError(t, err)
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // reservedEnvTargetPrefixes lists the environment-variable name prefixes that
@@ -46,13 +47,21 @@ func IsReservedEnvTarget(target string) bool {
 
 // IsReservedTelemetryCredentialFileTarget reports whether target resolves to
 // the well-known telemetry GCP credentials path (.scion/telemetry-gcp-credentials.json)
-// at a path-segment boundary, after slash normalization and path cleaning.
+// at a path-segment boundary, after slash normalization, path cleaning, and
+// ASCII/Unicode case folding (to cover case-insensitive broker hosts).
 func IsReservedTelemetryCredentialFileTarget(target string) bool {
 	if target == "" {
 		return false
 	}
-	cleaned := path.Clean(strings.ReplaceAll(target, "\\", "/"))
+	cleaned := strings.ToLower(path.Clean(strings.ReplaceAll(target, "\\", "/")))
 	return cleaned == telemetryCredentialFilePath || strings.HasSuffix(cleaned, "/"+telemetryCredentialFilePath)
+}
+
+// IsReservedTelemetryCredentialSecretName reports whether name is the
+// well-known telemetry credential secret name (scion-telemetry-gcp-credentials),
+// which is reserved for hub scope in hosted mode.
+func IsReservedTelemetryCredentialSecretName(name string) bool {
+	return name == telemetryCredentialFileName
 }
 
 // IsReservedFileTarget reports whether target is reserved for hub-only file
@@ -64,4 +73,32 @@ func IsReservedFileTarget(scope, target string) bool {
 		return false
 	}
 	return IsReservedTelemetryCredentialFileTarget(target)
+}
+
+// IsReservedNonHubSecret reports whether a secret with the given scope, name,
+// type, and target is reserved for hub scope in hosted mode and therefore
+// prohibited for non-hub scopes. A non-hub secret is reserved if either:
+//   - its name is scion-telemetry-gcp-credentials (of any type, including
+//     environment, file, and on_demand, because non-hub rows of that name can
+//     replace or shadow the hub-scoped telemetry credential); or
+//   - it is a file-type secret whose normalized effective target (target, or
+//     name when empty) matches .scion/telemetry-gcp-credentials.json
+//     case-insensitively at a path-segment boundary.
+//
+// Hub-scope secrets (ScopeHub) are never reserved by this check.
+func IsReservedNonHubSecret(scope, name, secretType, target string) bool {
+	if scope == ScopeHub {
+		return false
+	}
+	if IsReservedTelemetryCredentialSecretName(name) {
+		return true
+	}
+	if secretType == store.SecretTypeFile {
+		effTarget := target
+		if effTarget == "" {
+			effTarget = name
+		}
+		return IsReservedTelemetryCredentialFileTarget(effTarget)
+	}
+	return false
 }

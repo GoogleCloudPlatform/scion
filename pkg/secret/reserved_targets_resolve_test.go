@@ -34,6 +34,7 @@ func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *te
 	hubID := tid("hub-1")
 	projID := tid("proj-1")
 	userID := tid("user-1")
+	agentID := tid("agent-1")
 	backend := NewLocalBackend(st, hubID, "test-secret")
 
 	// Hub-scope telemetry credential file.
@@ -53,12 +54,24 @@ func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *te
 		Name:       "ROGUE_TELEMETRY_SA",
 		Value:      "project-sa-json",
 		SecretType: store.SecretTypeFile,
-		Target:     "~/.scion/telemetry-gcp-credentials.json",
+		Target:     "~/.SCION/Telemetry-GCP-Credentials.json",
 		Scope:      ScopeProject,
 		ScopeID:    projID,
 	})
 	if err != nil {
 		t.Fatalf("set project secret: %v", err)
+	}
+	// Pre-existing project-scope secret with the reserved name but a non-reserved target.
+	_, _, err = backend.Set(ctx, &SetSecretInput{
+		Name:       telemetryCredentialFileName,
+		Value:      "project-evil-json",
+		SecretType: store.SecretTypeFile,
+		Target:     "~/.config/evil.json",
+		Scope:      ScopeProject,
+		ScopeID:    projID,
+	})
+	if err != nil {
+		t.Fatalf("set project same-name secret: %v", err)
 	}
 	// Pre-existing user-scope secret with the same well-known name targeting the path.
 	_, _, err = backend.Set(ctx, &SetSecretInput{
@@ -72,9 +85,23 @@ func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *te
 	if err != nil {
 		t.Fatalf("set user secret: %v", err)
 	}
+	// Pre-existing agent-scope on_demand secret with the reserved name (must not shadow hub row).
+	_, _, err = backend.Set(ctx, &SetSecretInput{
+		Name:          telemetryCredentialFileName,
+		Value:         "agent-ondemand-shadow",
+		SecretType:    store.SecretTypeOnDemand,
+		Target:        telemetryCredentialFileName,
+		InjectionMode: store.InjectionModeAsNeeded,
+		Scope:         ScopeAgent,
+		ScopeID:       agentID,
+	})
+	if err != nil {
+		t.Fatalf("set agent on_demand secret: %v", err)
+	}
 
 	var skipped []string
 	resolved, err := backend.Resolve(ctx, userID, projID, "", &ResolveOpts{
+		AgentID:                 agentID,
 		DropReservedFileTargets: true,
 		OnReservedFileTargetSkipped: func(m SecretMeta) {
 			skipped = append(skipped, m.Scope+":"+m.Name)
@@ -90,7 +117,7 @@ func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *te
 	if resolved[0].Scope != ScopeHub || resolved[0].Name != telemetryCredentialFileName || resolved[0].Value != "hub-sa-json" {
 		t.Fatalf("unexpected resolved secret: %+v", resolved[0])
 	}
-	if len(skipped) != 2 {
-		t.Fatalf("expected 2 skipped secrets, got %v", skipped)
+	if len(skipped) != 4 {
+		t.Fatalf("expected 4 skipped secrets, got %d: %v", len(skipped), skipped)
 	}
 }

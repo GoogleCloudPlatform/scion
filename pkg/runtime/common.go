@@ -63,11 +63,13 @@ type gcsVolumeInfo struct {
 }
 
 // findGCPTelemetryCredentialPath scans the resolved secrets for the well-known
-// GCP telemetry credential file secret and returns the expanded container target
-// path. Returns "" if the secret is not present or is not a file type.
+// hub-scoped GCP telemetry credential file secret and returns the expanded
+// container target path. Returns "" if the secret is not present, is not a
+// file type, or did not come from hub scope (defence in depth against
+// member-controlled telemetry credential injection).
 func findGCPTelemetryCredentialPath(secrets []api.ResolvedSecret, containerHome string) string {
 	for _, s := range secrets {
-		if s.Name == telemetryGCPCredentialsSecretName && s.Type == "file" {
+		if s.Name == telemetryGCPCredentialsSecretName && s.Type == "file" && s.Source == "hub" {
 			return expandTildeTarget(s.Target, containerHome)
 		}
 	}

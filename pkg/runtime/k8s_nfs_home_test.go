@@ -26,7 +26,7 @@ import (
 func nfsHomeTestConfig(nfs bool) RunConfig {
 	cfg := homeFileConfig()
 	cfg.ResolvedSecrets = append(cfg.ResolvedSecrets, api.ResolvedSecret{
-		Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/telemetry.json", Value: "c", Source: "user",
+		Name: telemetryGCPCredentialsSecretName, Type: "file", Target: "~/.config/gcloud/telemetry.json", Value: "c", Source: "hub",
 	})
 	if nfs {
 		cfg = withTestHomeStorage(cfg)
