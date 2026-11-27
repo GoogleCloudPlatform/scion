@@ -1036,8 +1036,12 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
 	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
-	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
-		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
+	// project.metrics.read (GET /api/v1/projects/{id}/metrics) and
+	// hub.metrics.read (GET /api/v1/metrics/{name}, GET /api/v1/admin/metrics-dashboard)
+	// are not listed: seedLiveInventoryFixtures enables tokenomics.usage_ledger,
+	// so without a telemetry project they serve 200 from HubRollupSource rather
+	// than 503. Experiment-off 503 behavior for all three routes is pinned by
+	// TestMetricsDashboard_SourceSelectionMatrix.
 	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
@@ -1056,10 +1060,6 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusNotImplemented, "the test server configures no log query service"},
 	{"hub.diagnostics.read", http.MethodGet, "/api/v1/admin/diagnostics/logs/stream"}: {
 		http.StatusNotImplemented, "the test server configures no log query service"},
-	{"hub.metrics.read", http.MethodGet, "/api/v1/metrics/{name}"}: {
-		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
-	{"hub.metrics.read", http.MethodGet, "/api/v1/admin/metrics-dashboard"}: {
-		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
 	{"hub.githubapp.update", http.MethodPut, "/api/v1/github-app/installations/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/installations/discover"}: {

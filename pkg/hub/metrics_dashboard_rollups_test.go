@@ -601,14 +601,20 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 		return doUserUsageReadRequest(t, srv, path, admin)
 	}
 
-	// Case 1: experiment OFF + CM unconfigured -> 503 on dashboard, available=false on project summary.
+	// Case 1: experiment OFF + CM unconfigured -> 503 on all dashboard routes, available=false on project summary.
 	setUsageLedgerExperimentForTest(t, srv, false)
 	srv.mu.Lock()
 	srv.metricsDashboard = nil
 	srv.mu.Unlock()
 
-	rec := doGET("/api/v1/metrics/?view=summary&period=7")
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	for _, path := range []string{
+		"/api/v1/metrics/?view=summary&period=7",
+		"/api/v1/admin/metrics-dashboard?view=summary&period=7",
+		"/api/v1/projects/" + proj.ID + "/metrics?view=summary&period=7",
+	} {
+		rec := doGET(path)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "experiment-off + no CM must return 503 on %s", path)
+	}
 
 	recProjSum := doGET("/api/v1/projects/" + proj.ID + "/metrics-summary")
 	require.Equal(t, http.StatusOK, recProjSum.Code)
@@ -621,7 +627,7 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	srv.metricsDashboard = cmSvc
 	srv.mu.Unlock()
 
-	rec = doGET("/api/v1/metrics/?view=summary&period=7")
+	rec := doGET("/api/v1/metrics/?view=summary&period=7")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var sumCMRaw map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sumCMRaw))
