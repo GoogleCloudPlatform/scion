@@ -508,6 +508,7 @@ export interface RenderCommandConfirmDialogOptions {
   open: boolean;
   label?: string;
   confirmLabel?: string;
+  isConsoleFence?: boolean;
   formatted: FormattedCommandScript;
   workdir: string;
   workdirKind: CommandWorkdirKind;
@@ -547,6 +548,17 @@ export function renderCommandConfirmDialog(
       }}
     >
       <div class="confirm-dialog-body" data-testid="confirm-dialog-body">
+        ${opts.isConsoleFence
+          ? html`
+              <div class="banner warning" role="status" data-testid="console-fence-warning">
+                <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                <span>
+                  This is a <code>console</code> block: every line shown below, including prompt
+                  prefixes and output lines, runs as a command.
+                </span>
+              </div>
+            `
+          : nothing}
         ${renderCommandScriptBlock(opts.formatted)}
 
         <div class="meta-grid">
@@ -648,6 +660,9 @@ export class ScionCommandConfirmDialog extends LitElement {
   shareOutputDefault = false;
 
   @property({ type: Boolean })
+  isConsoleFence = false;
+
+  @property({ type: Boolean })
   submitting = false;
 
   @property({ type: String })
@@ -744,6 +759,7 @@ export class ScionCommandConfirmDialog extends LitElement {
       open: this.open,
       label: 'Approve & run command',
       confirmLabel: 'Approve & run',
+      isConsoleFence: this.isConsoleFence,
       formatted,
       workdir: this.workdir,
       workdirKind,

@@ -1665,6 +1665,9 @@ export class ScionChatMessage extends LitElement {
   private mdExecuteScript = '';
 
   @state()
+  private mdExecuteLangTag = '';
+
+  @state()
   private mdExecuteSubmitting = false;
 
   @state()
@@ -3578,7 +3581,9 @@ export class ScionChatMessage extends LitElement {
         execBtn.className = 'code-block-execute-btn';
         execBtn.dataset.testid = 'code-block-execute-btn';
         execBtn.textContent = 'Execute';
-        execBtn.addEventListener('click', () => this.openMarkdownExecuteDialog(wrapper, rawScript));
+        execBtn.addEventListener('click', () =>
+          this.openMarkdownExecuteDialog(wrapper, rawScript, langTag)
+        );
         actions.appendChild(execBtn);
       }
     }
@@ -3586,10 +3591,15 @@ export class ScionChatMessage extends LitElement {
     toolbar.appendChild(actions);
   }
 
-  private openMarkdownExecuteDialog(wrapper: HTMLElement, rawScript: string): void {
+  private openMarkdownExecuteDialog(
+    wrapper: HTMLElement,
+    rawScript: string,
+    langTag: string
+  ): void {
     if (this.mdExecuteSubmitting) return;
     this.mdExecuteActiveWrapper = wrapper;
     this.mdExecuteScript = rawScript;
+    this.mdExecuteLangTag = langTag.toLowerCase();
     this.mdExecuteError = '';
     this.mdExecuteIdempotencyKey = '';
     this.mdExecuteDialogOpen = true;
@@ -3669,6 +3679,7 @@ export class ScionChatMessage extends LitElement {
     return html`<scion-command-confirm-dialog
       ?open=${this.mdExecuteDialogOpen}
       .script=${this.mdExecuteScript}
+      .isConsoleFence=${this.mdExecuteLangTag === 'console'}
       workdir=""
       .timeoutS=${600}
       .execContainer=${this.execContainer}

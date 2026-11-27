@@ -30,6 +30,17 @@ import {
 /** Fenced code block info-string languages eligible for Markdown Execute (§4.14). */
 export const SHELL_EXECUTE_LANGS: ReadonlySet<string> = new Set(['bash', 'sh', 'shell', 'console']);
 
+/**
+ * Ordinary agent chat message types eligible for Markdown Execute (audit L1 / §4.14).
+ * Hub-composed or non-chat rows (notification, state-change, input-needed,
+ * decision-prompt, secret-request, command-request, system, etc.) are hidden.
+ */
+export const MARKDOWN_EXECUTE_ALLOWED_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+  '',
+  'instruction',
+  'reply',
+]);
+
 /** Maximum message age for Markdown Execute (24 h, D4 / §4.14). */
 export const MARKDOWN_EXECUTE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -219,7 +230,7 @@ export function evaluateMarkdownBlockExecuteState(opts: {
 }): MarkdownBlockExecuteState {
   if (!opts.experimentEnabled) return { mode: 'hidden' };
   if (!opts.senderIsAgent) return { mode: 'hidden' };
-  if (opts.messageType === 'command-request') return { mode: 'hidden' };
+  if (!MARKDOWN_EXECUTE_ALLOWED_MESSAGE_TYPES.has(opts.messageType)) return { mode: 'hidden' };
   if (!opts.messageId) return { mode: 'hidden' };
   if (!SHELL_EXECUTE_LANGS.has(opts.langTag.toLowerCase())) return { mode: 'hidden' };
   if (opts.noExecute) return { mode: 'hidden' };

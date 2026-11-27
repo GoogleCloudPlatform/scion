@@ -691,8 +691,11 @@ func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Message sender must be an agent, and not a structured command-request card.
-	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" || msg.Type == messages.TypeCommandRequest {
+	// Message sender must be an agent, and the message must be an ordinary
+	// agent chat message (allow-list: "", "instruction", "reply") — never a
+	// command-request card, notification/state-change, decision prompt, or
+	// other hub-composed row (audit L1, §4.14).
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" || !isMarkdownExecuteAllowedMessageType(msg.Type) {
 		emitRefused(msgaction.ConflictCmdMarkdownBlock, map[string]string{
 			"approver_user_id": user.ID(),
 		})
@@ -853,6 +856,19 @@ func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.
 		Request: reqView,
 		Run:     runView,
 	})
+}
+
+// isMarkdownExecuteAllowedMessageType allow-lists ordinary agent chat message
+// types for Markdown Execute (audit L1 / §4.14). Hub-composed or non-chat rows
+// (notification, state-change, input-needed, decision-prompt, secret-request,
+// command-request, system, etc.) are refused.
+func isMarkdownExecuteAllowedMessageType(msgType string) bool {
+	switch msgType {
+	case "", messages.TypeInstruction, messages.TypeReply:
+		return true
+	default:
+		return false
+	}
 }
 
 // isSingleAddressedHumanForMarkdownExecute enforces the §4.14 / D6 recipient

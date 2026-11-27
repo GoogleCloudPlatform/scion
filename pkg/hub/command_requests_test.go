@@ -1362,6 +1362,7 @@ func TestCommandRequests_FromMessage_EndToEnd(t *testing.T) {
 		Status:      "active",
 	}
 	require.NoError(t, f.store.CreateUser(ctx, alice2))
+	grantProjectAccessOnly(t, f.store, alice2.ID, f.project.ID)
 	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
 		ID:             api.NewUUID(),
 		ConversationID: groupConv.ID,
@@ -1388,7 +1389,77 @@ func TestCommandRequests_FromMessage_EndToEnd(t *testing.T) {
 		Script:        script,
 		CommandSHA256: hash,
 	})
-	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous.Code, "R2: ambiguous @alice local-part mention must refuse")
+	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous.Code, "R2/V1: ambiguous @alice local-part mention must refuse alice1")
+	rrGrpAmbiguous2 := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", alice2, messages.CreateCommandRequestFromMessageBody{
+		MessageID:     groupAmbiguous.ID,
+		Script:        script,
+		CommandSHA256: hash,
+	})
+	assert.Equal(t, http.StatusForbidden, rrGrpAmbiguous2.Code, "R2/V1: ambiguous @alice local-part mention must refuse alice2")
+
+	// 17. L1: Non-chat and hub-composed message types (notification, state-change,
+	// input-needed, decision-prompt, secret-request, command-request) must be refused
+	// with 422 command_markdown_block_not_executable + refused audit.
+	for _, disallowedType := range []string{
+		"notification",
+		messages.TypeStateChange,
+		messages.TypeInputNeeded,
+		messages.TypeDecisionPrompt,
+		messages.TypeSecretRequest,
+		messages.TypeCommandRequest,
+	} {
+		nonChatMsg := &store.Message{
+			ID:            api.NewUUID(),
+			ProjectID:     f.project.ID,
+			ThreadID:      dmKey,
+			Sender:        "agent:" + f.agent.Slug,
+			SenderID:      f.agent.ID,
+			Recipient:     "user:" + f.alice.Email,
+			RecipientID:   f.alice.ID,
+			Msg:           "```sh\n" + script + "```\n",
+			Type:          disallowedType,
+			DispatchState: store.MessageDispatchDispatched,
+			CreatedAt:     time.Now().UTC(),
+		}
+		require.NoError(t, f.store.CreateMessage(ctx, nonChatMsg))
+		f.audit.reset()
+		rrNonChat := f.doUserJSON(t, http.MethodPost, "/api/v1/command-requests/from-message", f.alice, messages.CreateCommandRequestFromMessageBody{
+			MessageID:     nonChatMsg.ID,
+			Script:        script,
+			CommandSHA256: hash,
+		})
+		assert.Equal(t, http.StatusUnprocessableEntity, rrNonChat.Code, "L1: type %q must be refused", disallowedType)
+		assert.Contains(t, rrNonChat.Body.String(), msgaction.ConflictCmdMarkdownBlock)
+		assertFromMsgRefusedReason(t, "L1 disallowed type "+disallowedType, msgaction.ConflictCmdMarkdownBlock)
+	}
+
+	// 18. I1: Cross-site (CSRF) browser POST to /from-message is refused with 403,
+	// and non-JSON browser POST with Origin is refused with 415.
+	csrfPayload, err := json.Marshal(fromMsgBody)
+	require.NoError(t, err)
+	aliceIdent := NewAuthenticatedUser(f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, "web")
+	aliceSessionCtx := func(base context.Context) context.Context {
+		return contextWithCredentialContext(
+			contextWithIdentity(base, aliceIdent),
+			CredentialContext{Kind: CredentialKindInteractive, ID: f.alice.ID},
+		)
+	}
+	csrfReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(csrfPayload))
+	csrfReq = csrfReq.WithContext(aliceSessionCtx(csrfReq.Context()))
+	csrfReq.Header.Set("Content-Type", "application/json")
+	csrfReq.Header.Set("Origin", "https://evil.example")
+	csrfReq.Header.Set("Sec-Fetch-Site", "cross-site")
+	rrCSRF := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rrCSRF, csrfReq)
+	assert.Equal(t, http.StatusForbidden, rrCSRF.Code, "I1: cross-site POST to from-message must be refused")
+
+	nonJSONReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/from-message", bytes.NewReader(csrfPayload))
+	nonJSONReq = nonJSONReq.WithContext(aliceSessionCtx(nonJSONReq.Context()))
+	nonJSONReq.Header.Set("Content-Type", "text/plain")
+	nonJSONReq.Header.Set("Origin", "http://example.com")
+	rrNonJSON := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rrNonJSON, nonJSONReq)
+	assert.Equal(t, http.StatusUnsupportedMediaType, rrNonJSON.Code, "I1: non-JSON browser POST to from-message must be refused with 415")
 }
 
 func TestCommandRequests_FromMessage_ConcurrentExecOnce(t *testing.T) {

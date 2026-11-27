@@ -34,6 +34,7 @@ import './chat-thread.js';
 import type { ScionChatMessage } from './chat-message.js';
 import type { ScionChatThread } from './chat-thread.js';
 import type { ScionCommandConfirmDialog } from './command-confirm-dialog.js';
+import { evaluateMarkdownBlockExecuteState } from './markdown-execute.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -402,5 +403,97 @@ describe('Markdown Execute on fenced shell blocks (§4.14, AC-F9)', () => {
         localMsg?.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
       ).toBeNull();
     });
+  });
+
+  it('hides Execute on non-chat and hub-composed message types (L1)', () => {
+    const base = {
+      experimentEnabled: true,
+      senderIsAgent: true,
+      messageId: 'msg-l1',
+      timestamp: new Date().toISOString(),
+      langTag: 'bash',
+      noExecute: false,
+      rawScript: 'echo hi\n',
+      isDirectConversation: true,
+      currentUserId: 'user-alice',
+      body: '```bash\necho hi\n```\n',
+      execContainer: READY_CONTAINER,
+    };
+
+    for (const allowedType of ['', 'instruction', 'reply']) {
+      expect(evaluateMarkdownBlockExecuteState({ ...base, messageType: allowedType })).toEqual({
+        mode: 'enabled',
+      });
+    }
+
+    for (const disallowedType of [
+      'notification',
+      'state-change',
+      'input-needed',
+      'decision-prompt',
+      'secret-request',
+      'command-request',
+      'system',
+    ]) {
+      expect(evaluateMarkdownBlockExecuteState({ ...base, messageType: disallowedType })).toEqual({
+        mode: 'hidden',
+      });
+    }
+  });
+
+  it('shows a prominent console-block warning in the confirm dialog for console fences only (L2)', async () => {
+    const consoleEl = createMessageEl({
+      body: '```console\n$ echo hi\nhi\n```\n',
+    });
+    await vi.waitFor(() => {
+      expect(
+        consoleEl.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
+      ).not.toBeNull();
+    });
+    (
+      consoleEl.shadowRoot?.querySelector(
+        '[data-testid="code-block-execute-btn"]'
+      ) as HTMLButtonElement
+    ).click();
+    await consoleEl.updateComplete;
+
+    const consoleDialog = consoleEl.shadowRoot?.querySelector(
+      'scion-command-confirm-dialog'
+    ) as ScionCommandConfirmDialog | null;
+    expect(consoleDialog).not.toBeNull();
+    await consoleDialog?.updateComplete;
+
+    const consoleWarn = consoleDialog?.shadowRoot?.querySelector(
+      '[data-testid="console-fence-warning"]'
+    );
+    expect(consoleWarn).not.toBeNull();
+    expect(consoleWarn?.textContent).toContain('every line');
+    expect(consoleWarn?.textContent).toContain('prompt');
+    expect(consoleWarn?.textContent).toContain('output lines');
+    expect(consoleWarn?.textContent).toContain('runs as a command');
+
+    const bashEl = createMessageEl({
+      body: '```bash\necho hi\n```\n',
+    });
+    await vi.waitFor(() => {
+      expect(
+        bashEl.shadowRoot?.querySelector('[data-testid="code-block-execute-btn"]')
+      ).not.toBeNull();
+    });
+    (
+      bashEl.shadowRoot?.querySelector(
+        '[data-testid="code-block-execute-btn"]'
+      ) as HTMLButtonElement
+    ).click();
+    await bashEl.updateComplete;
+
+    const bashDialog = bashEl.shadowRoot?.querySelector(
+      'scion-command-confirm-dialog'
+    ) as ScionCommandConfirmDialog | null;
+    expect(bashDialog).not.toBeNull();
+    await bashDialog?.updateComplete;
+    expect(
+      bashDialog?.shadowRoot?.querySelector('[data-testid="console-fence-warning"]')
+    ).toBeNull();
   });
 });
