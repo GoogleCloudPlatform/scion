@@ -103,6 +103,7 @@ var layer1RoundTripSamples = map[string]string{
 	"telemetry.retention.hourly_rollups_days":  `7`,
 	"telemetry.retention.daily_rollups_days":   `180`,
 	"telemetry.retention.scope_counters_days":  `75`,
+	"telemetry.retention.group_rollups_days":   `180`,
 	"telemetry.retention.budget_state_days":    `45`,
 	"telemetry.retention.meter_health_days":    `15`,
 	"telemetry.retention.sweep_interval":       `"12h"`,

@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 126
+const expectedTableCount = 127
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -306,6 +306,13 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, int64(185), budgetState.ConsumedAtEval)
 	assert.Equal(t, int64(100000), budgetState.CapAtEval)
 	assert.Equal(t, int64(1), budgetState.StateVersion)
+
+	groupRollupTokens, err := composite.SumUsageGroupRollupTokens(ctx, groupID, "",
+		time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC),
+	)
+	require.NoError(t, err, "usage_group_rollups_daily fixture row must be readable via UsageBudgetStore")
+	assert.Equal(t, int64(185), groupRollupTokens)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

@@ -2203,6 +2203,8 @@ func seedTokenBudgetLimitDefinitions(ctx context.Context, s store.Store) {
 		{store.LimitLLMTokensPerUserMonth, "Maximum LLM tokens per user per UTC calendar month across all projects (0 = unlimited)"},
 		{store.LimitLLMTokensPerUserProjectDay, "Maximum LLM tokens per user within a project per UTC day (0 = unlimited)"},
 		{store.LimitLLMTokensPerUserProjectMonth, "Maximum LLM tokens per user within a project per UTC calendar month (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupDay, "Maximum pooled LLM tokens across all effective members of a group per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerGroupMonth, "Maximum pooled LLM tokens across all effective members of a group per UTC calendar month (0 = unlimited)"},
 	}
 
 	for _, lim := range tokenLimits {

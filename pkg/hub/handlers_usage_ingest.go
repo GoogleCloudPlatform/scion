@@ -499,6 +499,42 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
+	// Populate usage_events.charged_group_ids from the Hub-frozen
+	// run_attribution.BillingUserID (never from the request payload) when
+	// tokenomics.token_budgets is enabled (Tokenomics P3.3, §4.4). Batched:
+	// one cache lookup per distinct billing user, active pooled bindings
+	// loaded once per call.
+	if len(validEvents) > 0 && s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		distinctUsers := make([]string, 0, len(validEvents))
+		seenUsers := make(map[string]struct{}, len(validEvents))
+		for _, ev := range validEvents {
+			if ev.BillingUserID != nil && *ev.BillingUserID != "" {
+				uid := *ev.BillingUserID
+				if _, ok := seenUsers[uid]; !ok {
+					seenUsers[uid] = struct{}{}
+					distinctUsers = append(distinctUsers, uid)
+				}
+			}
+		}
+		if len(distinctUsers) > 0 {
+			if resolver := s.PooledGroupResolver(); resolver != nil {
+				groupsByUser, resolveErr := resolver.ResolveForUsers(ctx, distinctUsers)
+				if resolveErr != nil {
+					slog.Warn("usage ingest: failed to resolve pooled budget groups",
+						"agent_id", agentID, "error", resolveErr)
+				} else {
+					for _, ev := range validEvents {
+						if ev.BillingUserID != nil && *ev.BillingUserID != "" {
+							if gids := groupsByUser[*ev.BillingUserID]; len(gids) > 0 {
+								ev.ChargedGroupIDs = append([]string(nil), gids...)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	res, err := s.store.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID:     agentID,
 		Events:      validEvents,

@@ -128,6 +128,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
@@ -267,6 +268,7 @@ const (
 	TypeTriggerSubjectClaim           = "TriggerSubjectClaim"
 	TypeUsageBudgetState              = "UsageBudgetState"
 	TypeUsageEvent                    = "UsageEvent"
+	TypeUsageGroupRollupDaily         = "UsageGroupRollupDaily"
 	TypeUsageReservation              = "UsageReservation"
 	TypeUsageRollupDaily              = "UsageRollupDaily"
 	TypeUsageRollupHourly             = "UsageRollupHourly"
@@ -143129,6 +143131,1112 @@ func (m *UsageEventMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown UsageEvent edge %s", name)
+}
+
+// UsageGroupRollupDailyMutation represents an operation that mutates the UsageGroupRollupDaily nodes in the graph.
+type UsageGroupRollupDailyMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	day_utc            *time.Time
+	group_id           *string
+	project_scope_id   *string
+	origin             *string
+	tokens_summable    *int64
+	addtokens_summable *int64
+	input              *int64
+	addinput           *int64
+	output             *int64
+	addoutput          *int64
+	cache_read         *int64
+	addcache_read      *int64
+	cache_write        *int64
+	addcache_write     *int64
+	calls              *int64
+	addcalls           *int64
+	events             *int64
+	addevents          *int64
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*UsageGroupRollupDaily, error)
+	predicates         []predicate.UsageGroupRollupDaily
+}
+
+var _ ent.Mutation = (*UsageGroupRollupDailyMutation)(nil)
+
+// usagegrouprollupdailyOption allows management of the mutation configuration using functional options.
+type usagegrouprollupdailyOption func(*UsageGroupRollupDailyMutation)
+
+// newUsageGroupRollupDailyMutation creates new mutation for the UsageGroupRollupDaily entity.
+func newUsageGroupRollupDailyMutation(c config, op Op, opts ...usagegrouprollupdailyOption) *UsageGroupRollupDailyMutation {
+	m := &UsageGroupRollupDailyMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUsageGroupRollupDaily,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUsageGroupRollupDailyID sets the ID field of the mutation.
+func withUsageGroupRollupDailyID(id uuid.UUID) usagegrouprollupdailyOption {
+	return func(m *UsageGroupRollupDailyMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UsageGroupRollupDaily
+		)
+		m.oldValue = func(ctx context.Context) (*UsageGroupRollupDaily, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UsageGroupRollupDaily.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUsageGroupRollupDaily sets the old UsageGroupRollupDaily of the mutation.
+func withUsageGroupRollupDaily(node *UsageGroupRollupDaily) usagegrouprollupdailyOption {
+	return func(m *UsageGroupRollupDailyMutation) {
+		m.oldValue = func(context.Context) (*UsageGroupRollupDaily, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UsageGroupRollupDailyMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UsageGroupRollupDailyMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UsageGroupRollupDaily entities.
+func (m *UsageGroupRollupDailyMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UsageGroupRollupDailyMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UsageGroupRollupDailyMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UsageGroupRollupDaily.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetDayUtc sets the "day_utc" field.
+func (m *UsageGroupRollupDailyMutation) SetDayUtc(t time.Time) {
+	m.day_utc = &t
+}
+
+// DayUtc returns the value of the "day_utc" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) DayUtc() (r time.Time, exists bool) {
+	v := m.day_utc
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDayUtc returns the old "day_utc" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldDayUtc(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDayUtc is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDayUtc requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDayUtc: %w", err)
+	}
+	return oldValue.DayUtc, nil
+}
+
+// ResetDayUtc resets all changes to the "day_utc" field.
+func (m *UsageGroupRollupDailyMutation) ResetDayUtc() {
+	m.day_utc = nil
+}
+
+// SetGroupID sets the "group_id" field.
+func (m *UsageGroupRollupDailyMutation) SetGroupID(s string) {
+	m.group_id = &s
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) GroupID() (r string, exists bool) {
+	v := m.group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldGroupID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *UsageGroupRollupDailyMutation) ResetGroupID() {
+	m.group_id = nil
+}
+
+// SetProjectScopeID sets the "project_scope_id" field.
+func (m *UsageGroupRollupDailyMutation) SetProjectScopeID(s string) {
+	m.project_scope_id = &s
+}
+
+// ProjectScopeID returns the value of the "project_scope_id" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) ProjectScopeID() (r string, exists bool) {
+	v := m.project_scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectScopeID returns the old "project_scope_id" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldProjectScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectScopeID: %w", err)
+	}
+	return oldValue.ProjectScopeID, nil
+}
+
+// ResetProjectScopeID resets all changes to the "project_scope_id" field.
+func (m *UsageGroupRollupDailyMutation) ResetProjectScopeID() {
+	m.project_scope_id = nil
+}
+
+// SetOrigin sets the "origin" field.
+func (m *UsageGroupRollupDailyMutation) SetOrigin(s string) {
+	m.origin = &s
+}
+
+// Origin returns the value of the "origin" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) Origin() (r string, exists bool) {
+	v := m.origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOrigin returns the old "origin" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldOrigin(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOrigin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOrigin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOrigin: %w", err)
+	}
+	return oldValue.Origin, nil
+}
+
+// ResetOrigin resets all changes to the "origin" field.
+func (m *UsageGroupRollupDailyMutation) ResetOrigin() {
+	m.origin = nil
+}
+
+// SetTokensSummable sets the "tokens_summable" field.
+func (m *UsageGroupRollupDailyMutation) SetTokensSummable(i int64) {
+	m.tokens_summable = &i
+	m.addtokens_summable = nil
+}
+
+// TokensSummable returns the value of the "tokens_summable" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) TokensSummable() (r int64, exists bool) {
+	v := m.tokens_summable
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTokensSummable returns the old "tokens_summable" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldTokensSummable(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTokensSummable is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTokensSummable requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTokensSummable: %w", err)
+	}
+	return oldValue.TokensSummable, nil
+}
+
+// AddTokensSummable adds i to the "tokens_summable" field.
+func (m *UsageGroupRollupDailyMutation) AddTokensSummable(i int64) {
+	if m.addtokens_summable != nil {
+		*m.addtokens_summable += i
+	} else {
+		m.addtokens_summable = &i
+	}
+}
+
+// AddedTokensSummable returns the value that was added to the "tokens_summable" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedTokensSummable() (r int64, exists bool) {
+	v := m.addtokens_summable
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTokensSummable resets all changes to the "tokens_summable" field.
+func (m *UsageGroupRollupDailyMutation) ResetTokensSummable() {
+	m.tokens_summable = nil
+	m.addtokens_summable = nil
+}
+
+// SetInput sets the "input" field.
+func (m *UsageGroupRollupDailyMutation) SetInput(i int64) {
+	m.input = &i
+	m.addinput = nil
+}
+
+// Input returns the value of the "input" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) Input() (r int64, exists bool) {
+	v := m.input
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInput returns the old "input" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldInput(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInput is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInput requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInput: %w", err)
+	}
+	return oldValue.Input, nil
+}
+
+// AddInput adds i to the "input" field.
+func (m *UsageGroupRollupDailyMutation) AddInput(i int64) {
+	if m.addinput != nil {
+		*m.addinput += i
+	} else {
+		m.addinput = &i
+	}
+}
+
+// AddedInput returns the value that was added to the "input" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedInput() (r int64, exists bool) {
+	v := m.addinput
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetInput resets all changes to the "input" field.
+func (m *UsageGroupRollupDailyMutation) ResetInput() {
+	m.input = nil
+	m.addinput = nil
+}
+
+// SetOutput sets the "output" field.
+func (m *UsageGroupRollupDailyMutation) SetOutput(i int64) {
+	m.output = &i
+	m.addoutput = nil
+}
+
+// Output returns the value of the "output" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) Output() (r int64, exists bool) {
+	v := m.output
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutput returns the old "output" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldOutput(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutput is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutput requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutput: %w", err)
+	}
+	return oldValue.Output, nil
+}
+
+// AddOutput adds i to the "output" field.
+func (m *UsageGroupRollupDailyMutation) AddOutput(i int64) {
+	if m.addoutput != nil {
+		*m.addoutput += i
+	} else {
+		m.addoutput = &i
+	}
+}
+
+// AddedOutput returns the value that was added to the "output" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedOutput() (r int64, exists bool) {
+	v := m.addoutput
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetOutput resets all changes to the "output" field.
+func (m *UsageGroupRollupDailyMutation) ResetOutput() {
+	m.output = nil
+	m.addoutput = nil
+}
+
+// SetCacheRead sets the "cache_read" field.
+func (m *UsageGroupRollupDailyMutation) SetCacheRead(i int64) {
+	m.cache_read = &i
+	m.addcache_read = nil
+}
+
+// CacheRead returns the value of the "cache_read" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) CacheRead() (r int64, exists bool) {
+	v := m.cache_read
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCacheRead returns the old "cache_read" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldCacheRead(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCacheRead is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCacheRead requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCacheRead: %w", err)
+	}
+	return oldValue.CacheRead, nil
+}
+
+// AddCacheRead adds i to the "cache_read" field.
+func (m *UsageGroupRollupDailyMutation) AddCacheRead(i int64) {
+	if m.addcache_read != nil {
+		*m.addcache_read += i
+	} else {
+		m.addcache_read = &i
+	}
+}
+
+// AddedCacheRead returns the value that was added to the "cache_read" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedCacheRead() (r int64, exists bool) {
+	v := m.addcache_read
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCacheRead resets all changes to the "cache_read" field.
+func (m *UsageGroupRollupDailyMutation) ResetCacheRead() {
+	m.cache_read = nil
+	m.addcache_read = nil
+}
+
+// SetCacheWrite sets the "cache_write" field.
+func (m *UsageGroupRollupDailyMutation) SetCacheWrite(i int64) {
+	m.cache_write = &i
+	m.addcache_write = nil
+}
+
+// CacheWrite returns the value of the "cache_write" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) CacheWrite() (r int64, exists bool) {
+	v := m.cache_write
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCacheWrite returns the old "cache_write" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldCacheWrite(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCacheWrite is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCacheWrite requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCacheWrite: %w", err)
+	}
+	return oldValue.CacheWrite, nil
+}
+
+// AddCacheWrite adds i to the "cache_write" field.
+func (m *UsageGroupRollupDailyMutation) AddCacheWrite(i int64) {
+	if m.addcache_write != nil {
+		*m.addcache_write += i
+	} else {
+		m.addcache_write = &i
+	}
+}
+
+// AddedCacheWrite returns the value that was added to the "cache_write" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedCacheWrite() (r int64, exists bool) {
+	v := m.addcache_write
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCacheWrite resets all changes to the "cache_write" field.
+func (m *UsageGroupRollupDailyMutation) ResetCacheWrite() {
+	m.cache_write = nil
+	m.addcache_write = nil
+}
+
+// SetCalls sets the "calls" field.
+func (m *UsageGroupRollupDailyMutation) SetCalls(i int64) {
+	m.calls = &i
+	m.addcalls = nil
+}
+
+// Calls returns the value of the "calls" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) Calls() (r int64, exists bool) {
+	v := m.calls
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCalls returns the old "calls" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldCalls(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCalls is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCalls requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCalls: %w", err)
+	}
+	return oldValue.Calls, nil
+}
+
+// AddCalls adds i to the "calls" field.
+func (m *UsageGroupRollupDailyMutation) AddCalls(i int64) {
+	if m.addcalls != nil {
+		*m.addcalls += i
+	} else {
+		m.addcalls = &i
+	}
+}
+
+// AddedCalls returns the value that was added to the "calls" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedCalls() (r int64, exists bool) {
+	v := m.addcalls
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCalls resets all changes to the "calls" field.
+func (m *UsageGroupRollupDailyMutation) ResetCalls() {
+	m.calls = nil
+	m.addcalls = nil
+}
+
+// SetEvents sets the "events" field.
+func (m *UsageGroupRollupDailyMutation) SetEvents(i int64) {
+	m.events = &i
+	m.addevents = nil
+}
+
+// Events returns the value of the "events" field in the mutation.
+func (m *UsageGroupRollupDailyMutation) Events() (r int64, exists bool) {
+	v := m.events
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEvents returns the old "events" field's value of the UsageGroupRollupDaily entity.
+// If the UsageGroupRollupDaily object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageGroupRollupDailyMutation) OldEvents(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEvents is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEvents requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEvents: %w", err)
+	}
+	return oldValue.Events, nil
+}
+
+// AddEvents adds i to the "events" field.
+func (m *UsageGroupRollupDailyMutation) AddEvents(i int64) {
+	if m.addevents != nil {
+		*m.addevents += i
+	} else {
+		m.addevents = &i
+	}
+}
+
+// AddedEvents returns the value that was added to the "events" field in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedEvents() (r int64, exists bool) {
+	v := m.addevents
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetEvents resets all changes to the "events" field.
+func (m *UsageGroupRollupDailyMutation) ResetEvents() {
+	m.events = nil
+	m.addevents = nil
+}
+
+// Where appends a list predicates to the UsageGroupRollupDailyMutation builder.
+func (m *UsageGroupRollupDailyMutation) Where(ps ...predicate.UsageGroupRollupDaily) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UsageGroupRollupDailyMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UsageGroupRollupDailyMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UsageGroupRollupDaily, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UsageGroupRollupDailyMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UsageGroupRollupDailyMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UsageGroupRollupDaily).
+func (m *UsageGroupRollupDailyMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UsageGroupRollupDailyMutation) Fields() []string {
+	fields := make([]string, 0, 11)
+	if m.day_utc != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldDayUtc)
+	}
+	if m.group_id != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldGroupID)
+	}
+	if m.project_scope_id != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldProjectScopeID)
+	}
+	if m.origin != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldOrigin)
+	}
+	if m.tokens_summable != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldTokensSummable)
+	}
+	if m.input != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldInput)
+	}
+	if m.output != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldOutput)
+	}
+	if m.cache_read != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCacheRead)
+	}
+	if m.cache_write != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCacheWrite)
+	}
+	if m.calls != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCalls)
+	}
+	if m.events != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldEvents)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UsageGroupRollupDailyMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case usagegrouprollupdaily.FieldDayUtc:
+		return m.DayUtc()
+	case usagegrouprollupdaily.FieldGroupID:
+		return m.GroupID()
+	case usagegrouprollupdaily.FieldProjectScopeID:
+		return m.ProjectScopeID()
+	case usagegrouprollupdaily.FieldOrigin:
+		return m.Origin()
+	case usagegrouprollupdaily.FieldTokensSummable:
+		return m.TokensSummable()
+	case usagegrouprollupdaily.FieldInput:
+		return m.Input()
+	case usagegrouprollupdaily.FieldOutput:
+		return m.Output()
+	case usagegrouprollupdaily.FieldCacheRead:
+		return m.CacheRead()
+	case usagegrouprollupdaily.FieldCacheWrite:
+		return m.CacheWrite()
+	case usagegrouprollupdaily.FieldCalls:
+		return m.Calls()
+	case usagegrouprollupdaily.FieldEvents:
+		return m.Events()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UsageGroupRollupDailyMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case usagegrouprollupdaily.FieldDayUtc:
+		return m.OldDayUtc(ctx)
+	case usagegrouprollupdaily.FieldGroupID:
+		return m.OldGroupID(ctx)
+	case usagegrouprollupdaily.FieldProjectScopeID:
+		return m.OldProjectScopeID(ctx)
+	case usagegrouprollupdaily.FieldOrigin:
+		return m.OldOrigin(ctx)
+	case usagegrouprollupdaily.FieldTokensSummable:
+		return m.OldTokensSummable(ctx)
+	case usagegrouprollupdaily.FieldInput:
+		return m.OldInput(ctx)
+	case usagegrouprollupdaily.FieldOutput:
+		return m.OldOutput(ctx)
+	case usagegrouprollupdaily.FieldCacheRead:
+		return m.OldCacheRead(ctx)
+	case usagegrouprollupdaily.FieldCacheWrite:
+		return m.OldCacheWrite(ctx)
+	case usagegrouprollupdaily.FieldCalls:
+		return m.OldCalls(ctx)
+	case usagegrouprollupdaily.FieldEvents:
+		return m.OldEvents(ctx)
+	}
+	return nil, fmt.Errorf("unknown UsageGroupRollupDaily field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageGroupRollupDailyMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case usagegrouprollupdaily.FieldDayUtc:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDayUtc(v)
+		return nil
+	case usagegrouprollupdaily.FieldGroupID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
+	case usagegrouprollupdaily.FieldProjectScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectScopeID(v)
+		return nil
+	case usagegrouprollupdaily.FieldOrigin:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOrigin(v)
+		return nil
+	case usagegrouprollupdaily.FieldTokensSummable:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTokensSummable(v)
+		return nil
+	case usagegrouprollupdaily.FieldInput:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInput(v)
+		return nil
+	case usagegrouprollupdaily.FieldOutput:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutput(v)
+		return nil
+	case usagegrouprollupdaily.FieldCacheRead:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCacheRead(v)
+		return nil
+	case usagegrouprollupdaily.FieldCacheWrite:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCacheWrite(v)
+		return nil
+	case usagegrouprollupdaily.FieldCalls:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCalls(v)
+		return nil
+	case usagegrouprollupdaily.FieldEvents:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEvents(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageGroupRollupDaily field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedFields() []string {
+	var fields []string
+	if m.addtokens_summable != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldTokensSummable)
+	}
+	if m.addinput != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldInput)
+	}
+	if m.addoutput != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldOutput)
+	}
+	if m.addcache_read != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCacheRead)
+	}
+	if m.addcache_write != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCacheWrite)
+	}
+	if m.addcalls != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldCalls)
+	}
+	if m.addevents != nil {
+		fields = append(fields, usagegrouprollupdaily.FieldEvents)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UsageGroupRollupDailyMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case usagegrouprollupdaily.FieldTokensSummable:
+		return m.AddedTokensSummable()
+	case usagegrouprollupdaily.FieldInput:
+		return m.AddedInput()
+	case usagegrouprollupdaily.FieldOutput:
+		return m.AddedOutput()
+	case usagegrouprollupdaily.FieldCacheRead:
+		return m.AddedCacheRead()
+	case usagegrouprollupdaily.FieldCacheWrite:
+		return m.AddedCacheWrite()
+	case usagegrouprollupdaily.FieldCalls:
+		return m.AddedCalls()
+	case usagegrouprollupdaily.FieldEvents:
+		return m.AddedEvents()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UsageGroupRollupDailyMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case usagegrouprollupdaily.FieldTokensSummable:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTokensSummable(v)
+		return nil
+	case usagegrouprollupdaily.FieldInput:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddInput(v)
+		return nil
+	case usagegrouprollupdaily.FieldOutput:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOutput(v)
+		return nil
+	case usagegrouprollupdaily.FieldCacheRead:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCacheRead(v)
+		return nil
+	case usagegrouprollupdaily.FieldCacheWrite:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCacheWrite(v)
+		return nil
+	case usagegrouprollupdaily.FieldCalls:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCalls(v)
+		return nil
+	case usagegrouprollupdaily.FieldEvents:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddEvents(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UsageGroupRollupDaily numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UsageGroupRollupDailyMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UsageGroupRollupDailyMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UsageGroupRollupDailyMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown UsageGroupRollupDaily nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UsageGroupRollupDailyMutation) ResetField(name string) error {
+	switch name {
+	case usagegrouprollupdaily.FieldDayUtc:
+		m.ResetDayUtc()
+		return nil
+	case usagegrouprollupdaily.FieldGroupID:
+		m.ResetGroupID()
+		return nil
+	case usagegrouprollupdaily.FieldProjectScopeID:
+		m.ResetProjectScopeID()
+		return nil
+	case usagegrouprollupdaily.FieldOrigin:
+		m.ResetOrigin()
+		return nil
+	case usagegrouprollupdaily.FieldTokensSummable:
+		m.ResetTokensSummable()
+		return nil
+	case usagegrouprollupdaily.FieldInput:
+		m.ResetInput()
+		return nil
+	case usagegrouprollupdaily.FieldOutput:
+		m.ResetOutput()
+		return nil
+	case usagegrouprollupdaily.FieldCacheRead:
+		m.ResetCacheRead()
+		return nil
+	case usagegrouprollupdaily.FieldCacheWrite:
+		m.ResetCacheWrite()
+		return nil
+	case usagegrouprollupdaily.FieldCalls:
+		m.ResetCalls()
+		return nil
+	case usagegrouprollupdaily.FieldEvents:
+		m.ResetEvents()
+		return nil
+	}
+	return fmt.Errorf("unknown UsageGroupRollupDaily field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UsageGroupRollupDailyMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UsageGroupRollupDailyMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UsageGroupRollupDailyMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UsageGroupRollupDailyMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UsageGroupRollupDailyMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UsageGroupRollupDailyMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UsageGroupRollupDaily unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UsageGroupRollupDailyMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UsageGroupRollupDaily edge %s", name)
 }
 
 // UsageReservationMutation represents an operation that mutates the UsageReservation nodes in the graph.

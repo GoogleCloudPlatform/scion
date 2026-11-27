@@ -84,11 +84,12 @@ type BudgetExhaustionStatus struct {
 // and persists monotonic state transitions in usage_budget_state using
 // optimistic CAS on state_version (Tokenomics P3.1, D3/D4).
 type TokenBudgetEvaluator struct {
-	store     store.Store
-	quota     *QuotaService
-	logger    *slog.Logger
-	enabledFn func() bool
-	nowFn     func() time.Time
+	store        store.Store
+	quota        *QuotaService
+	pooledGroups *PooledGroupResolver
+	logger       *slog.Logger
+	enabledFn    func() bool
+	nowFn        func() time.Time
 
 	hookMu        sync.RWMutex
 	thresholdHook BudgetThresholdHook
@@ -103,11 +104,20 @@ func NewTokenBudgetEvaluator(st store.Store, qs *QuotaService, logger *slog.Logg
 		logger = slog.Default()
 	}
 	return &TokenBudgetEvaluator{
-		store:     st,
-		quota:     qs,
-		logger:    logger,
-		enabledFn: enabledFn,
-		nowFn:     func() time.Time { return time.Now().UTC() },
+		store:        st,
+		quota:        qs,
+		pooledGroups: NewPooledGroupResolver(st),
+		logger:       logger,
+		enabledFn:    enabledFn,
+		nowFn:        func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// SetPooledGroupResolver wires a shared PooledGroupResolver into the evaluator
+// so ingest, admission, and cache invalidation share the same replica cache.
+func (e *TokenBudgetEvaluator) SetPooledGroupResolver(r *PooledGroupResolver) {
+	if e != nil && r != nil {
+		e.pooledGroups = r
 	}
 }
 
@@ -375,6 +385,56 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 				windowEndUTC:   monthEnd,
 			})
 		}
+
+		// Pooled user-group scopes: evaluate every charged group for both its
+		// system-wide pool (project_scope_id = "") and project-scoped pool
+		// (project_scope_id = ev.ProjectID). Overlapping pools are each
+		// evaluated independently (non-additive, §4.4).
+		for _, gid := range ev.ChargedGroupIDs {
+			if gid == "" {
+				continue
+			}
+			addIfOpen(budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupDay,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: "",
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			})
+			addIfOpen(budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupMonth,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: "",
+				bindingScope:   store.QuotaScopeSystem,
+				bindingScopeID: "",
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			})
+			addIfOpen(budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupDay,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: ev.ProjectID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: ev.ProjectID,
+				windowStartUTC: dayStart,
+				windowEndUTC:   dayEnd,
+			})
+			addIfOpen(budgetEvalSpec{
+				limitName:      store.LimitLLMTokensPerGroupMonth,
+				scopeKind:      store.UsageScopeKindGroup,
+				scopeID:        gid,
+				projectScopeID: ev.ProjectID,
+				bindingScope:   store.QuotaScopeProject,
+				bindingScopeID: ev.ProjectID,
+				windowStartUTC: monthStart,
+				windowEndUTC:   monthEnd,
+			})
+		}
 	}
 
 	evalCache := newTokenLimitEvalCache(e.quota)
@@ -508,6 +568,60 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 				windowEndUTC:   monthEnd,
 			},
 		)
+
+		// Include every active pooled group that billingUserID effectively
+		// belongs to so admission (B1) blocks on exhausted group pools without
+		// further wiring (§4.4).
+		if e.pooledGroups != nil {
+			groupIDs, err := e.pooledGroups.ResolveForUser(ctx, billingUserID)
+			if err != nil {
+				return nil, fmt.Errorf("resolve pooled groups for admission check: %w", err)
+			}
+			for _, gid := range groupIDs {
+				specs = append(specs,
+					budgetEvalSpec{
+						limitName:      store.LimitLLMTokensPerGroupDay,
+						scopeKind:      store.UsageScopeKindGroup,
+						scopeID:        gid,
+						projectScopeID: "",
+						bindingScope:   store.QuotaScopeSystem,
+						bindingScopeID: "",
+						windowStartUTC: dayStart,
+						windowEndUTC:   dayEnd,
+					},
+					budgetEvalSpec{
+						limitName:      store.LimitLLMTokensPerGroupMonth,
+						scopeKind:      store.UsageScopeKindGroup,
+						scopeID:        gid,
+						projectScopeID: "",
+						bindingScope:   store.QuotaScopeSystem,
+						bindingScopeID: "",
+						windowStartUTC: monthStart,
+						windowEndUTC:   monthEnd,
+					},
+					budgetEvalSpec{
+						limitName:      store.LimitLLMTokensPerGroupDay,
+						scopeKind:      store.UsageScopeKindGroup,
+						scopeID:        gid,
+						projectScopeID: projectID,
+						bindingScope:   store.QuotaScopeProject,
+						bindingScopeID: projectID,
+						windowStartUTC: dayStart,
+						windowEndUTC:   dayEnd,
+					},
+					budgetEvalSpec{
+						limitName:      store.LimitLLMTokensPerGroupMonth,
+						scopeKind:      store.UsageScopeKindGroup,
+						scopeID:        gid,
+						projectScopeID: projectID,
+						bindingScope:   store.QuotaScopeProject,
+						bindingScopeID: projectID,
+						windowStartUTC: monthStart,
+						windowEndUTC:   monthEnd,
+					},
+				)
+			}
+		}
 	}
 
 	evalCache := newTokenLimitEvalCache(e.quota)
@@ -558,9 +672,17 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		return nil, "", nil
 	}
 
-	capVal, action, err := evalCache.resolveForDef(
-		ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
-	)
+	var capVal int64
+	var action string
+	if spec.scopeKind == store.UsageScopeKindGroup {
+		capVal, action, err = evalCache.resolveGroupForDef(
+			ctx, def, spec.scopeID, spec.bindingScope, spec.bindingScopeID,
+		)
+	} else {
+		capVal, action, err = evalCache.resolveForDef(
+			ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+		)
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
 	}
@@ -578,9 +700,16 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 	}
 
 	for attempt := 0; attempt < maxBudgetEvalCASRetries; attempt++ {
-		consumed, err := e.store.SumUsageScopeCounterTokens(
-			ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
-		)
+		var consumed int64
+		if spec.scopeKind == store.UsageScopeKindGroup {
+			consumed, err = e.store.SumUsageGroupRollupTokens(
+				ctx, spec.scopeID, spec.projectScopeID, spec.windowStartUTC, spec.windowEndUTC,
+			)
+		} else {
+			consumed, err = e.store.SumUsageScopeCounterTokens(
+				ctx, spec.scopeKind, spec.counterScopeID, spec.windowStartUTC, spec.windowEndUTC,
+			)
+		}
 		if err != nil {
 			return nil, "", fmt.Errorf("sum scope counter tokens: %w", err)
 		}
@@ -699,7 +828,10 @@ func (s *Server) TokenBudgetEvaluator() *TokenBudgetEvaluator {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tokenBudgetEvaluator == nil && s.store != nil && s.quotaService != nil {
-		s.tokenBudgetEvaluator = NewTokenBudgetEvaluator(
+		if s.pooledGroupResolver == nil {
+			s.pooledGroupResolver = NewPooledGroupResolver(s.store)
+		}
+		eval := NewTokenBudgetEvaluator(
 			s.store,
 			s.quotaService,
 			slog.Default(),
@@ -708,6 +840,8 @@ func (s *Server) TokenBudgetEvaluator() *TokenBudgetEvaluator {
 					s.experimentEnabled(experiments.TokenomicsTokenBudgets)
 			},
 		)
+		eval.SetPooledGroupResolver(s.pooledGroupResolver)
+		s.tokenBudgetEvaluator = eval
 	}
 	return s.tokenBudgetEvaluator
 }

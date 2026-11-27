@@ -120,6 +120,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
@@ -4585,6 +4586,52 @@ func init() {
 	usageeventDescID := usageeventFields[0].Descriptor()
 	// usageevent.DefaultID holds the default value on creation for the id field.
 	usageevent.DefaultID = usageeventDescID.Default.(func() uuid.UUID)
+	usagegrouprollupdailyFields := schema.UsageGroupRollupDaily{}.Fields()
+	_ = usagegrouprollupdailyFields
+	// usagegrouprollupdailyDescGroupID is the schema descriptor for group_id field.
+	usagegrouprollupdailyDescGroupID := usagegrouprollupdailyFields[2].Descriptor()
+	// usagegrouprollupdaily.GroupIDValidator is a validator for the "group_id" field. It is called by the builders before save.
+	usagegrouprollupdaily.GroupIDValidator = usagegrouprollupdailyDescGroupID.Validators[0].(func(string) error)
+	// usagegrouprollupdailyDescProjectScopeID is the schema descriptor for project_scope_id field.
+	usagegrouprollupdailyDescProjectScopeID := usagegrouprollupdailyFields[3].Descriptor()
+	// usagegrouprollupdaily.DefaultProjectScopeID holds the default value on creation for the project_scope_id field.
+	usagegrouprollupdaily.DefaultProjectScopeID = usagegrouprollupdailyDescProjectScopeID.Default.(string)
+	// usagegrouprollupdailyDescOrigin is the schema descriptor for origin field.
+	usagegrouprollupdailyDescOrigin := usagegrouprollupdailyFields[4].Descriptor()
+	// usagegrouprollupdaily.OriginValidator is a validator for the "origin" field. It is called by the builders before save.
+	usagegrouprollupdaily.OriginValidator = usagegrouprollupdailyDescOrigin.Validators[0].(func(string) error)
+	// usagegrouprollupdailyDescTokensSummable is the schema descriptor for tokens_summable field.
+	usagegrouprollupdailyDescTokensSummable := usagegrouprollupdailyFields[5].Descriptor()
+	// usagegrouprollupdaily.DefaultTokensSummable holds the default value on creation for the tokens_summable field.
+	usagegrouprollupdaily.DefaultTokensSummable = usagegrouprollupdailyDescTokensSummable.Default.(int64)
+	// usagegrouprollupdailyDescInput is the schema descriptor for input field.
+	usagegrouprollupdailyDescInput := usagegrouprollupdailyFields[6].Descriptor()
+	// usagegrouprollupdaily.DefaultInput holds the default value on creation for the input field.
+	usagegrouprollupdaily.DefaultInput = usagegrouprollupdailyDescInput.Default.(int64)
+	// usagegrouprollupdailyDescOutput is the schema descriptor for output field.
+	usagegrouprollupdailyDescOutput := usagegrouprollupdailyFields[7].Descriptor()
+	// usagegrouprollupdaily.DefaultOutput holds the default value on creation for the output field.
+	usagegrouprollupdaily.DefaultOutput = usagegrouprollupdailyDescOutput.Default.(int64)
+	// usagegrouprollupdailyDescCacheRead is the schema descriptor for cache_read field.
+	usagegrouprollupdailyDescCacheRead := usagegrouprollupdailyFields[8].Descriptor()
+	// usagegrouprollupdaily.DefaultCacheRead holds the default value on creation for the cache_read field.
+	usagegrouprollupdaily.DefaultCacheRead = usagegrouprollupdailyDescCacheRead.Default.(int64)
+	// usagegrouprollupdailyDescCacheWrite is the schema descriptor for cache_write field.
+	usagegrouprollupdailyDescCacheWrite := usagegrouprollupdailyFields[9].Descriptor()
+	// usagegrouprollupdaily.DefaultCacheWrite holds the default value on creation for the cache_write field.
+	usagegrouprollupdaily.DefaultCacheWrite = usagegrouprollupdailyDescCacheWrite.Default.(int64)
+	// usagegrouprollupdailyDescCalls is the schema descriptor for calls field.
+	usagegrouprollupdailyDescCalls := usagegrouprollupdailyFields[10].Descriptor()
+	// usagegrouprollupdaily.DefaultCalls holds the default value on creation for the calls field.
+	usagegrouprollupdaily.DefaultCalls = usagegrouprollupdailyDescCalls.Default.(int64)
+	// usagegrouprollupdailyDescEvents is the schema descriptor for events field.
+	usagegrouprollupdailyDescEvents := usagegrouprollupdailyFields[11].Descriptor()
+	// usagegrouprollupdaily.DefaultEvents holds the default value on creation for the events field.
+	usagegrouprollupdaily.DefaultEvents = usagegrouprollupdailyDescEvents.Default.(int64)
+	// usagegrouprollupdailyDescID is the schema descriptor for id field.
+	usagegrouprollupdailyDescID := usagegrouprollupdailyFields[0].Descriptor()
+	// usagegrouprollupdaily.DefaultID holds the default value on creation for the id field.
+	usagegrouprollupdaily.DefaultID = usagegrouprollupdailyDescID.Default.(func() uuid.UUID)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.

@@ -1696,6 +1696,22 @@ func Spec() []TableFixture {
 				"tokens_summable": int64(185), "calls": int64(1), "unmeasured_calls": int64(0),
 			},
 		}},
+		{Table: "usage_group_rollups_daily", Rows: []row{
+			{
+				"id":               "c6000000-0000-0000-0000-000000000001",
+				"day_utc":          time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+				"group_id":         groupID,
+				"project_scope_id": "",
+				"origin":           "ingest",
+				"tokens_summable":  int64(185),
+				"input":            int64(100),
+				"output":           int64(50),
+				"cache_read":       int64(25),
+				"cache_write":      int64(10),
+				"calls":            int64(1),
+				"events":           int64(1),
+			},
+		}},
 		{Table: "usage_budget_state", Rows: []row{
 			{
 				"id":                  "c5000000-0000-0000-0000-000000000001",

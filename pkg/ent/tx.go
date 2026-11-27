@@ -240,6 +240,8 @@ type Tx struct {
 	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
+	// UsageGroupRollupDaily is the client for interacting with the UsageGroupRollupDaily builders.
+	UsageGroupRollupDaily *UsageGroupRollupDailyClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
 	UsageReservation *UsageReservationClient
 	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
@@ -507,6 +509,7 @@ func (tx *Tx) init() {
 	tx.TriggerSubjectClaim = NewTriggerSubjectClaimClient(tx.config)
 	tx.UsageBudgetState = NewUsageBudgetStateClient(tx.config)
 	tx.UsageEvent = NewUsageEventClient(tx.config)
+	tx.UsageGroupRollupDaily = NewUsageGroupRollupDailyClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)
 	tx.UsageRollupHourly = NewUsageRollupHourlyClient(tx.config)

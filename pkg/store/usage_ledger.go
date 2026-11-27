@@ -86,12 +86,19 @@ func ResolveRunAttributionHarness(ac *AgentAppliedConfig, ec *AgentEffectiveConf
 	return ""
 }
 
-// Usage ledger scope kinds for usage_scope_counters_daily.
+// Usage ledger scope kinds for usage_scope_counters_daily and usage_budget_state.
 const (
 	UsageScopeKindProject     = "project"
 	UsageScopeKindUser        = "user"
 	UsageScopeKindUserProject = "user_project"
+	UsageScopeKindGroup       = "group"
 	UsageScopeKindGlobal      = "global"
+)
+
+// Usage group rollup origins for usage_group_rollups_daily (§4.2 item 5, §4.3).
+const (
+	UsageGroupRollupOriginIngest = "ingest"
+	UsageGroupRollupOriginSeed   = "seed"
 )
 
 // UsageRollupHourlyCoverageSection is the system hub_settings section that
@@ -782,4 +789,8 @@ type UsageRetentionStore interface {
 	// usage_budget_state rows with window_end_utc < cutoff (never touching
 	// active windows).
 	SweepUsageBudgetStateBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageGroupRollupsDailyBatch deletes up to batchSize
+	// usage_group_rollups_daily rows with day_utc < cutoff.
+	SweepUsageGroupRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }

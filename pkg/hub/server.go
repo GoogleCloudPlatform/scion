@@ -3371,6 +3371,10 @@ type Server struct {
 	// ingest commits (token_budget_evaluator.go).
 	tokenBudgetEvaluator *TokenBudgetEvaluator
 
+	// pooledGroupResolver caches effective pooled-budget group memberships per
+	// billing user on this replica (token_budget_groups.go).
+	pooledGroupResolver *PooledGroupResolver
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime

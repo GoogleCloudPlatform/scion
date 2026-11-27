@@ -6045,6 +6045,8 @@ const (
 	LimitLLMTokensPerUserMonth        = "llm_tokens_per_user_month"
 	LimitLLMTokensPerUserProjectDay   = "llm_tokens_per_user_project_day"
 	LimitLLMTokensPerUserProjectMonth = "llm_tokens_per_user_project_month"
+	LimitLLMTokensPerGroupDay         = "llm_tokens_per_group_day"
+	LimitLLMTokensPerGroupMonth       = "llm_tokens_per_group_month"
 )
 
 // =============================================================================

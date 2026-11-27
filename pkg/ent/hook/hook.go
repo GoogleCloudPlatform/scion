@@ -1377,6 +1377,18 @@ func (f UsageEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, 
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageEventMutation", m)
 }
 
+// The UsageGroupRollupDailyFunc type is an adapter to allow the use of ordinary
+// function as UsageGroupRollupDaily mutator.
+type UsageGroupRollupDailyFunc func(context.Context, *ent.UsageGroupRollupDailyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UsageGroupRollupDailyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UsageGroupRollupDailyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UsageGroupRollupDailyMutation", m)
+}
+
 // The UsageReservationFunc type is an adapter to allow the use of ordinary
 // function as UsageReservation mutator.
 type UsageReservationFunc func(context.Context, *ent.UsageReservationMutation) (ent.Value, error)
