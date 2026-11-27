@@ -213,7 +213,7 @@ const CommandRequests = "hub.command_requests"
 const AgentPolicyLimitCeilings = "agent_policy.limit_ceilings"
 
 // AgentPolicyDurationBackstop gates the broker-side max_duration backstop
-// (ptone/scion#9372): stamping an immutable run deadline (scion.io/run-deadline)
+// (ptone/scion#9372): stamping an immutable run deadline (scion.dev/run-deadline)
 // on launched runtimes (plus spec.activeDeadlineSeconds on Kubernetes) and
 // echoing RunDeadline in EffectiveConfig when an agent has a positive effective
 // max_duration. While it is off, new launches are not stamped; the broker's
@@ -800,7 +800,7 @@ var compiled = []Experiment{
 	{
 		Name:        AgentPolicyDurationBackstop,
 		Title:       "Broker max_duration backstop",
-		Description: "Stamps an immutable run deadline (scion.io/run-deadline, plus Kubernetes activeDeadlineSeconds) on launched runtimes when effective max_duration > 0 so the broker's 60s sweeper stops expired runs even if sciontool fails to exit. While off, new launches are not stamped; already-stamped runs continue to be enforced.",
+		Description: "Stamps an immutable run deadline (scion.dev/run-deadline, plus Kubernetes activeDeadlineSeconds) on launched runtimes when effective max_duration > 0 so the broker's 60s sweeper stops expired runs even if sciontool fails to exit. While off, new launches are not stamped; already-stamped runs continue to be enforced.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

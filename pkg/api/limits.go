@@ -25,7 +25,7 @@ const (
 	// LabelRunDeadline is the container label (Docker/Podman/Apple/Cloud Run
 	// Sandbox) or resource annotation (Kubernetes/Cloud Run Instances) storing
 	// an agent run's absolute UTC RFC3339 deadline for the broker backstop.
-	LabelRunDeadline = "scion.io/run-deadline"
+	LabelRunDeadline = "scion.dev/run-deadline"
 
 	// DurationBackstopGrace is the cooperative shutdown grace added on top of
 	// effective max_duration, matching limitsExceededStopGrace so sciontool's
@@ -41,7 +41,7 @@ const (
 
 	// DurationBackstopTotalGrace is the total grace added to effective
 	// max_duration (2m cooperative grace + 10m startup allowance = 12m) when
-	// stamping scion.io/run-deadline and Kubernetes spec.activeDeadlineSeconds.
+	// stamping scion.dev/run-deadline and Kubernetes spec.activeDeadlineSeconds.
 	DurationBackstopTotalGrace = DurationBackstopGrace + DurationBackstopStartupAllowance
 
 	// ReasonMaxDurationBackstop is the status message / reason reported when

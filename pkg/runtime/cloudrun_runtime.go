@@ -1305,7 +1305,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		// that exits 0 may not be restarted. Restoring ALWAYS needs the
 		// native Instance.restartPolicy field, which runpb does not expose
 		// yet; see ptone/scion#5141.
-		// User/custom annotations (such as scion.io/run-deadline) are accepted
+		// User/custom annotations (such as scion.dev/run-deadline) are accepted
 		// and preserve exact RFC3339 UTC values without GCP label sanitization.
 		LaunchStage: googleapi.LaunchStage_ALPHA,
 		Containers:  []*runpb.Container{container},

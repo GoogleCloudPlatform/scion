@@ -408,3 +408,71 @@ func (h *backstopCaptureHandler) Handle(_ context.Context, r slog.Record) error 
 
 func (h *backstopCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *backstopCaptureHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestDurationBackstopSweeper_DistinctRuntimesWithSameName(t *testing.T) {
+	now := time.Date(2026, 11, 26, 21, 0, 0, 0, time.UTC)
+	past := now.Add(-1 * time.Minute).Format(time.RFC3339)
+
+	// Two distinct runtime instances sharing the same Name() (e.g. two Docker
+	// hosts/contexts). Both must be swept independently and a List failure on
+	// one must not conflate reported-key tracking for the other.
+	rtA := &backstopFakeRuntime{
+		name: "docker",
+		agents: []api.AgentInfo{
+			{
+				ContainerID: "ctr-shared-id",
+				Name:        "agent-a",
+				RunID:       "run-a",
+				Phase:       string(state.PhaseRunning),
+				Labels:      map[string]string{"scion.agent": "true", api.LabelRunDeadline: past},
+			},
+		},
+	}
+	rtB := &backstopFakeRuntime{
+		name: "docker",
+		agents: []api.AgentInfo{
+			{
+				ContainerID: "ctr-shared-id",
+				Name:        "agent-b",
+				RunID:       "run-b",
+				Phase:       string(state.PhaseRunning),
+				Labels:      map[string]string{"scion.agent": "true", api.LabelRunDeadline: past},
+			},
+		},
+	}
+
+	var mu sync.Mutex
+	var reported []string
+	sw := newDurationBackstopSweeper(
+		func() []scionrt.Runtime { return []scionrt.Runtime{rtA, rtB} },
+		func(_ context.Context, a api.AgentInfo) {
+			mu.Lock()
+			reported = append(reported, a.Name)
+			mu.Unlock()
+		},
+		slog.Default(),
+	)
+	sw.now = func() time.Time { return now }
+
+	// Tick 1: both distinct "docker" runtimes are swept and both expired agents stopped.
+	sw.sweep(context.Background())
+	if len(rtA.stopped) != 1 || len(rtB.stopped) != 1 {
+		t.Fatalf("expected 1 stop per runtime, got rtA=%d rtB=%d", len(rtA.stopped), len(rtB.stopped))
+	}
+	if len(reported) != 2 {
+		t.Fatalf("expected 2 reports, got %v", reported)
+	}
+
+	// Tick 2: rtA fails List, while rtB succeeds with its container gone.
+	// rtA's reported key must be retained (unlisted), while rtB's must be pruned.
+	rtA.listErr = errors.New("daemon unreachable")
+	rtB.agents = nil
+	sw.sweep(context.Background())
+
+	sw.mu.Lock()
+	remaining := len(sw.reported)
+	sw.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("expected 1 reported key retained (for failing rtA) and rtB's pruned, got %d", remaining)
+	}
+}

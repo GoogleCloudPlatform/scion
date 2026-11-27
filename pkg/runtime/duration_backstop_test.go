@@ -16,6 +16,8 @@ package runtime
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -297,7 +299,7 @@ func TestSubstrateRuntime_RunDeadlineLabel(t *testing.T) {
 	}
 
 	// Verify SubstrateRuntime.List with the sweeper's scion.agent=true filter
-	// surfaces the stamped scion.io/run-deadline label from substrateAgentRecords.
+	// surfaces the stamped scion.dev/run-deadline label from substrateAgentRecords.
 	rec := &callRecorder{}
 	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
 	defer closeServer()
@@ -401,5 +403,72 @@ func TestParseDockerListLabels_DuplicateRunDeadlineFailsClosed(t *testing.T) {
 				t.Errorf("parseDockerListLabels(%q)[scion.agent] = %q, want \"true\"", tc.raw, got["scion.agent"])
 			}
 		})
+	}
+}
+
+func TestDockerRuntime_List_AuthoritativeLabelsPreventCommaInjection(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockDocker := filepath.Join(tmpDir, "mock-docker")
+	argsFile := filepath.Join(tmpDir, "args")
+
+	realDeadline := "2026-11-26T18:00:00Z"
+	// Simulate Docker ps output where a user-controlled label value contains
+	// commas attempting to spoof scion.dev/run-deadline, scion.agent,
+	// scion.run_id, scion.name, agent_id, and scion.project_id, while Docker's
+	// direct `.Label "<key>"` extractions carry the true container label values.
+	line1 := `{"ID":"ctr-1","Names":"proj--real-agent","Status":"Up 5 minutes","Image":"scion:latest","Labels":"scion.agent=true,scion.name=real-agent,scion.run_id=real-run,agent_id=real-id,scion.project_id=real-proj,` + api.LabelRunDeadline + `=` + realDeadline + `,user.note=x,scion.agent=false,scion.name=spoof,scion.run_id=spoof-run,agent_id=spoof-id,scion.project_id=spoof-proj,` + api.LabelRunDeadline + `=2099-01-01T00:00:00Z","RunDeadline":"` + realDeadline + `","ScionAgent":"true","RunID":"real-run","ScionName":"real-agent","AgentID":"real-id","ProjectID":"real-proj"}`
+	// Second container has no run-deadline label at all (RunDeadline="") even
+	// though a comma-injected value appears in .Labels.
+	line2 := `{"ID":"ctr-2","Names":"proj--no-deadline","Status":"Up 5 minutes","Image":"scion:latest","Labels":"scion.agent=true,scion.name=no-deadline,user.note=x,` + api.LabelRunDeadline + `=2099-01-01T00:00:00Z","RunDeadline":"","ScionAgent":"true","RunID":"run-2","ScionName":"no-deadline","AgentID":"id-2","ProjectID":"proj-2"}`
+
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsFile + "\"\nprintf '%s\\n%s\\n' '" + line1 + "' '" + line2 + "'\n"
+	if err := os.WriteFile(mockDocker, []byte(script), 0755); err != nil {
+		t.Fatalf("write mock docker: %v", err)
+	}
+
+	rt := &DockerRuntime{Command: mockDocker}
+	agents, err := rt.List(context.Background(), map[string]string{"scion.agent": "true"})
+	if err != nil {
+		t.Fatalf("DockerRuntime.List: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("len(agents) = %d, want 2", len(agents))
+	}
+
+	a1 := agents[0]
+	if a1.Labels[api.LabelRunDeadline] != realDeadline {
+		t.Errorf("a1 deadline = %q, want %q", a1.Labels[api.LabelRunDeadline], realDeadline)
+	}
+	if a1.Labels["scion.agent"] != "true" {
+		t.Errorf("a1 scion.agent = %q, want \"true\"", a1.Labels["scion.agent"])
+	}
+	if a1.RunID != "real-run" || a1.Labels[api.LabelRunID] != "real-run" {
+		t.Errorf("a1 RunID = %q (label %q), want real-run", a1.RunID, a1.Labels[api.LabelRunID])
+	}
+	if a1.Name != "real-agent" || a1.Labels["scion.name"] != "real-agent" {
+		t.Errorf("a1 Name = %q (label %q), want real-agent", a1.Name, a1.Labels["scion.name"])
+	}
+	if a1.Labels["agent_id"] != "real-id" {
+		t.Errorf("a1 agent_id = %q, want real-id", a1.Labels["agent_id"])
+	}
+	if a1.ProjectID != "real-proj" {
+		t.Errorf("a1 ProjectID = %q, want real-proj", a1.ProjectID)
+	}
+
+	a2 := agents[1]
+	if v, ok := a2.Labels[api.LabelRunDeadline]; ok {
+		t.Errorf("a2 should have no %s label when authoritative .Label is empty, got %q", api.LabelRunDeadline, v)
+	}
+
+	rawArgs, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read args: %v", err)
+	}
+	args := string(rawArgs)
+	if !strings.Contains(args, `.Label "`+api.LabelRunDeadline+`"`) {
+		t.Errorf("docker ps format must extract %s via .Label; got %q", api.LabelRunDeadline, args)
+	}
+	if strings.Contains(args, ".Size") {
+		t.Errorf("docker ps format must not reference .Size; got %q", args)
 	}
 }

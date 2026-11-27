@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -43,7 +44,7 @@ var durationBackstopCallTimeout = 60 * time.Second
 
 // durationBackstopSweeper periodically lists all scion-managed runtimes
 // (primary + auxiliary, with no MountInspector filter and no Hub-connection
-// dependency) and stops any running agent whose immutable scion.io/run-deadline
+// dependency) and stops any running agent whose immutable scion.dev/run-deadline
 // label or annotation is in the past. Because the deadline lives in runtime
 // metadata rather than broker memory, enforcement survives broker restarts.
 type durationBackstopSweeper struct {
@@ -132,26 +133,27 @@ func (sw *durationBackstopSweeper) sweep(ctx context.Context) {
 		unlistedRts = make(map[string]bool)
 	)
 	for _, rt := range rts {
+		rtKey := runtimeInstanceKey(rt)
 		wg.Add(1)
-		go func(rt scionrt.Runtime) {
+		go func(rt scionrt.Runtime, rtKey string) {
 			defer wg.Done()
-			rtKeys, ok := sw.sweepRuntime(ctx, rt, now)
+			rtKeys, ok := sw.sweepRuntime(ctx, rt, rtKey, now)
 			seenMu.Lock()
 			defer seenMu.Unlock()
 			if !ok {
-				unlistedRts[rt.Name()] = true
+				unlistedRts[rtKey] = true
 				return
 			}
 			for k := range rtKeys {
 				activeKeys[k] = true
 			}
-		}(rt)
+		}(rt, rtKey)
 	}
 	wg.Wait()
 
 	sw.mu.Lock()
 	for k := range sw.reported {
-		if activeKeys[k] || unlistedRts[runtimeOfKey(k)] {
+		if activeKeys[k] || unlistedRts[backstopRuntimeOfKey(k)] {
 			continue
 		}
 		delete(sw.reported, k)
@@ -159,14 +161,34 @@ func (sw *durationBackstopSweeper) sweep(ctx context.Context) {
 	sw.mu.Unlock()
 }
 
-func backstopReportKey(runtimeName, containerID, runID string) string {
-	return runtimeName + "\x00" + containerID + "\x00" + runID
+// runtimeInstanceKey returns a stable key distinguishing runtime instances
+// even when multiple configured runtimes share the same Name() (for example
+// two Docker hosts/contexts).
+func runtimeInstanceKey(rt scionrt.Runtime) string {
+	rv := reflect.ValueOf(rt)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return fmt.Sprintf("%s#%x", rt.Name(), rv.Pointer())
+	default:
+		return rt.Name()
+	}
+}
+
+func backstopReportKey(runtimeKey, containerID, runID string) string {
+	return runtimeKey + "\x00" + containerID + "\x00" + runID
+}
+
+func backstopRuntimeOfKey(k string) string {
+	if i := strings.IndexByte(k, 0); i >= 0 {
+		return k[:i]
+	}
+	return k
 }
 
 // sweepRuntime lists one runtime and stops any running agent whose
-// scion.io/run-deadline is at or before now. It returns the set of active
+// scion.dev/run-deadline is at or before now. It returns the set of active
 // container keys observed and false if List failed.
-func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.Runtime, now time.Time) (map[string]bool, bool) {
+func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.Runtime, rtKey string, now time.Time) (map[string]bool, bool) {
 	listCtx, cancel := context.WithTimeout(ctx, durationBackstopCallTimeout)
 	agents, err := rt.List(listCtx, map[string]string{"scion.agent": "true"})
 	cancel()
@@ -189,7 +211,7 @@ func (sw *durationBackstopSweeper) sweepRuntime(ctx context.Context, rt scionrt.
 			continue
 		}
 		opID := scionrt.AgentOperationID(a)
-		key := backstopReportKey(rt.Name(), opID, a.RunID)
+		key := backstopReportKey(rtKey, opID, a.RunID)
 		active[key] = true
 		if now.Before(deadline) {
 			continue
