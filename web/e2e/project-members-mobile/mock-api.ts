@@ -19,9 +19,12 @@ import type { Page } from '@playwright/test';
 export const PROJECT_ID = '33333333-3333-3333-3333-333333333333';
 export const SELF_USER_ID = 'user-owner';
 export const OTHER_USER_ID = 'user-member';
+export const LONG_SELF_NAME = 'Maximiliana Bartholomew-Featherstonehaugh';
+export const LONG_OTHER_NAME = 'jonathan.fitzgerald-smith@example-corp.com';
 
 export interface ProjectMembersMockOptions {
   showVisitorsTab?: boolean;
+  longNames?: boolean;
 }
 
 export async function setupProjectMembersHub(
@@ -29,6 +32,7 @@ export async function setupProjectMembersHub(
   opts: ProjectMembersMockOptions = {}
 ): Promise<void> {
   const showVisitorsTab = opts.showVisitorsTab ?? true;
+  const longNames = opts.longNames ?? false;
 
   await page.addInitScript(
     ({ visitorsFlag }) => {
@@ -144,48 +148,82 @@ export async function setupProjectMembersHub(
   await page.route(`**/api/v1/projects/${PROJECT_ID}/members**`, (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith('/assignable-roles')) return route.fallback();
+    const selfBindings = [
+      {
+        id: 'b-1',
+        roleDefinitionId: 'role-owner',
+        roleName: 'project-owner',
+        roleKind: 'builtin',
+        principalType: 'user',
+        principalId: SELF_USER_ID,
+        scopeType: 'project',
+        scopeId: PROJECT_ID,
+        createdAt: '2026-11-20T00:00:00Z',
+        source: 'direct',
+      },
+      ...(longNames
+        ? [
+            {
+              id: 'b-1-custom',
+              roleDefinitionId: 'role-release-mgr',
+              roleName: 'release-manager',
+              roleKind: 'custom',
+              principalType: 'user',
+              principalId: SELF_USER_ID,
+              scopeType: 'project',
+              scopeId: PROJECT_ID,
+              createdAt: '2026-11-20T00:00:00Z',
+              source: 'direct',
+            },
+          ]
+        : []),
+    ];
+    const otherBindings = [
+      {
+        id: 'b-2',
+        roleDefinitionId: 'role-member',
+        roleName: 'project-member',
+        roleKind: 'builtin',
+        principalType: 'user',
+        principalId: OTHER_USER_ID,
+        scopeType: 'project',
+        scopeId: PROJECT_ID,
+        createdAt: '2026-11-20T00:00:00Z',
+        source: 'direct',
+      },
+      ...(longNames
+        ? [
+            {
+              id: 'b-2-custom',
+              roleDefinitionId: 'role-ci-operator',
+              roleName: 'ci-operator',
+              roleKind: 'custom',
+              principalType: 'user',
+              principalId: OTHER_USER_ID,
+              scopeType: 'project',
+              scopeId: PROJECT_ID,
+              createdAt: '2026-11-20T00:00:00Z',
+              source: 'direct',
+            },
+          ]
+        : []),
+    ];
     return route.fulfill({
       json: {
         items: [
           {
             principalType: 'user',
             principalId: SELF_USER_ID,
-            principalDisplayName: 'Preston Holmes',
+            principalDisplayName: longNames ? LONG_SELF_NAME : 'Preston Holmes',
             principalStatus: 'active',
-            bindings: [
-              {
-                id: 'b-1',
-                roleDefinitionId: 'role-owner',
-                roleName: 'project-owner',
-                roleKind: 'builtin',
-                principalType: 'user',
-                principalId: SELF_USER_ID,
-                scopeType: 'project',
-                scopeId: PROJECT_ID,
-                createdAt: '2026-11-20T00:00:00Z',
-                source: 'direct',
-              },
-            ],
+            bindings: selfBindings,
           },
           {
             principalType: 'user',
             principalId: OTHER_USER_ID,
-            principalDisplayName: 'Alice Anderson',
+            principalDisplayName: longNames ? LONG_OTHER_NAME : 'Alice Anderson',
             principalStatus: 'active',
-            bindings: [
-              {
-                id: 'b-2',
-                roleDefinitionId: 'role-member',
-                roleName: 'project-member',
-                roleKind: 'builtin',
-                principalType: 'user',
-                principalId: OTHER_USER_ID,
-                scopeType: 'project',
-                scopeId: PROJECT_ID,
-                createdAt: '2026-11-20T00:00:00Z',
-                source: 'direct',
-              },
-            ],
+            bindings: otherBindings,
           },
         ],
         totalCount: 2,

@@ -751,11 +751,19 @@ export class ScionProjectMembersEditor extends LitElement {
         background: var(--scion-bg-subtle, #f1f5f9);
       }
 
+      /* Allow the identity column to shrink in table mode so .member-name
+         ellipsizes instead of expanding the table and clipping row actions. */
+      tbody td:first-child {
+        width: 100%;
+        max-width: 0;
+      }
+
       /* Member identity */
       .member-identity {
         display: flex;
         align-items: center;
         gap: 0.75rem;
+        min-width: 0;
       }
 
       .member-icon {
@@ -823,6 +831,7 @@ export class ScionProjectMembersEditor extends LitElement {
         font-weight: 500;
         background: var(--scion-bg-subtle, #f1f5f9);
         color: var(--scion-text-muted, #64748b);
+        white-space: nowrap;
       }
 
       /* Provenance badge */
@@ -1080,6 +1089,8 @@ export class ScionProjectMembersEditor extends LitElement {
 
         tbody td:first-child {
           flex: 1 1 100%;
+          width: auto;
+          max-width: none;
           min-width: 0;
         }
 
@@ -2078,7 +2089,9 @@ export class ScionProjectMembersEditor extends LitElement {
             </div>
             <div class="member-info">
               <div class="member-name-row">
-                <span class="member-name">${principalLabel(group)}</span>
+                <span class="member-name" title=${principalLabel(group)}
+                  >${principalLabel(group)}</span
+                >
                 ${isInvited
                   ? html`<sl-tooltip content=${invitedTip}>
                       <span class="status-badge invited">Invited</span>

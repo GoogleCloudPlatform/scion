@@ -2305,10 +2305,14 @@ describe('narrow-container responsive layout style contract (ptone/scion#9571, p
     // Container query host wraps the layout so narrow sidebar viewports match.
     expect(rules.get('.members-layout')).toContain('container-type: inline-size');
 
-    // Desktop stays a horizontal row with non-wrapping actions.
+    // Desktop stays a horizontal row with non-wrapping actions, and lets the
+    // identity cell shrink so long names ellipsize instead of clipping actions.
     expect(rules.get('.section-header')).toContain('display: flex');
     expect(rules.get('.section-header')).not.toContain('flex-direction: column');
     expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
+    expect(rules.get('tbody td:first-child')).toContain('width: 100%');
+    expect(rules.get('tbody td:first-child')).toContain('max-width: 0');
+    expect(rules.get('.member-identity')).toContain('min-width: 0');
 
     // Narrow container stacks the header and wraps actions.
     expect(rules.get(`${NARROW} .section-header`)).toContain('flex-direction: column');
@@ -2319,6 +2323,7 @@ describe('narrow-container responsive layout style contract (ptone/scion#9571, p
     expect(rules.get(`${NARROW} tbody tr`)).toContain('display: flex');
     expect(rules.get(`${NARROW} tbody tr`)).toContain('flex-wrap: wrap');
     expect(rules.get(`${NARROW} tbody td:first-child`)).toContain('flex: 1 1 100%');
+    expect(rules.get(`${NARROW} tbody td:first-child`)).toContain('max-width: none');
     expect(rules.get(`${NARROW} .actions-cell`)).toContain('flex-wrap: wrap');
     expect(rules.get(`${NARROW} .actions-cell`)).toContain('white-space: normal');
   });
