@@ -134,7 +134,7 @@ func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 	if s.shouldAutoWake(agent) {
 		return true
 	}
-	return s.isHubAutoSuspending(agent) && s != nil && s.experimentEnabled(experiments.IdleSuspend)
+	return s.isHubAutoSuspending(agent) && s.experimentEnabled(experiments.IdleSuspend)
 }
 
 // syncWakeForDM handles mid-dispatch wake recovery on synchronous DM paths
