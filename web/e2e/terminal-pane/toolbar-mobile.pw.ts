@@ -13,16 +13,22 @@
 // limitations under the License.
 
 // Narrow-viewport terminal toolbar overflow regression tests (ptone/scion#9406).
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 import type {} from './fixture.js';
 import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentId = '11111111-1111-4111-8111-111111111111';
 
+interface NarrowPaneControls {
+  disconnect(): Promise<void>;
+  startReconnect(): Promise<void>;
+  completeReconnect(): Promise<void>;
+}
+
 async function setupNarrowPane(
   page: Page,
   options: { keyBar: boolean; compactHeader?: boolean; phoneChrome?: boolean; activity?: string }
-): Promise<void> {
+): Promise<NarrowPaneControls> {
   const {
     keyBar,
     compactHeader = true,
@@ -60,8 +66,15 @@ async function setupNarrowPane(
     }
     return route.fulfill({ json: {} });
   });
+  let activeSocket: WebSocketRoute | null = null;
+  let socketSeq = 0;
+  let deferHandshake = false;
   await page.routeWebSocket('**/pty?*', (socket) => {
-    socket.send(JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') }));
+    activeSocket = socket;
+    socketSeq++;
+    if (!deferHandshake) {
+      socket.send(JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') }));
+    }
   });
 
   await page.goto('/e2e/terminal-pane/fixture.html');
@@ -70,16 +83,51 @@ async function setupNarrowPane(
     .toBe('connected');
 
   await page.evaluate(
-    ({ compact, phone }: { compact: boolean; phone: boolean }) => {
+    async ({ compact, phone }: { compact: boolean; phone: boolean }) => {
       const pane = window.paneFixture.pane;
       pane.compactHeader = compact;
       pane.phoneChrome = phone;
       pane.userId = 'fixture-user';
       pane.requestUpdate();
+      await pane.updateComplete;
     },
     { compact: compactHeader, phone: phoneChrome }
   );
   await page.waitForTimeout(50);
+
+  return {
+    async disconnect(): Promise<void> {
+      // Close with 1000 ('detached') so TerminalSession transitions cleanly to
+      // 'disconnected' without arming an automatic reconnect.
+      await activeSocket?.close({ code: 1000 });
+      await expect
+        .poll(() => page.evaluate(() => window.paneFixture.session.state.connection))
+        .toBe('disconnected');
+      await page.evaluate(() => window.paneFixture.pane.updateComplete);
+    },
+    async startReconnect(): Promise<void> {
+      const prevSeq = socketSeq;
+      deferHandshake = true;
+      await page.evaluate(() => {
+        void window.paneFixture.session.connect();
+      });
+      await expect
+        .poll(() => page.evaluate(() => window.paneFixture.session.state.connection))
+        .toBe('connecting');
+      await expect.poll(() => socketSeq).toBeGreaterThan(prevSeq);
+      await page.evaluate(() => window.paneFixture.pane.updateComplete);
+    },
+    async completeReconnect(): Promise<void> {
+      deferHandshake = false;
+      activeSocket?.send(
+        JSON.stringify({ type: 'data', data: Buffer.from('$ ').toString('base64') })
+      );
+      await expect
+        .poll(() => page.evaluate(() => window.paneFixture.session.state.connection))
+        .toBe('connected');
+      await page.evaluate(() => window.paneFixture.pane.updateComplete);
+    },
+  };
 }
 
 async function assertNoToolbarOverflow(page: Page, viewportWidth: number): Promise<void> {
@@ -158,7 +206,7 @@ for (const width of [390, 375, 320]) {
 test('phoneChrome does not overflow in connected, disconnected, or reconnecting states at 320px/375px/390px', async ({
   page,
 }) => {
-  await setupNarrowPane(page, { keyBar: true, phoneChrome: true });
+  const controls = await setupNarrowPane(page, { keyBar: true, phoneChrome: true });
 
   for (const width of [390, 375, 320]) {
     await page.setViewportSize({ width, height: 844 });
@@ -168,37 +216,14 @@ test('phoneChrome does not overflow in connected, disconnected, or reconnecting 
     await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
     await expect(page.locator('.menu-btn')).toBeVisible();
 
-    // Disconnected state
-    await page.evaluate(() => {
-      const pane = window.paneFixture.pane as unknown as {
-        connected: boolean;
-        idle: boolean;
-        attempting: boolean;
-        requestUpdate: () => void;
-      };
-      pane.connected = false;
-      pane.idle = false;
-      pane.attempting = false;
-      pane.requestUpdate();
-    });
-    await page.waitForTimeout(30);
+    // Disconnected state (driven through TerminalSession so ResizeObserver
+    // sendResize() callbacks cannot race and overwrite pane state)
+    await controls.disconnect();
     await assertNoToolbarOverflow(page, width);
     await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
 
     // Reconnecting... state
-    await page.evaluate(() => {
-      const pane = window.paneFixture.pane as unknown as {
-        connected: boolean;
-        idle: boolean;
-        attempting: boolean;
-        requestUpdate: () => void;
-      };
-      pane.connected = false;
-      pane.idle = false;
-      pane.attempting = true;
-      pane.requestUpdate();
-    });
-    await page.waitForTimeout(30);
+    await controls.startReconnect();
     await assertNoToolbarOverflow(page, width);
     await expect(page.locator('.toolbar-overflow-btn')).toBeVisible();
 
@@ -208,18 +233,10 @@ test('phoneChrome does not overflow in connected, disconnected, or reconnecting 
       'Reconnecting...'
     );
     await page.keyboard.press('Escape');
+    await expect(page.locator('.toolbar-overflow sl-menu')).toBeHidden();
 
     // Restore connected state for next width
-    await page.evaluate(() => {
-      const pane = window.paneFixture.pane as unknown as {
-        connected: boolean;
-        attempting: boolean;
-        requestUpdate: () => void;
-      };
-      pane.connected = true;
-      pane.attempting = false;
-      pane.requestUpdate();
-    });
+    await controls.completeReconnect();
   }
 });
 
