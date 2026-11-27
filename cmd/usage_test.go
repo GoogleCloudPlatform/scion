@@ -1,0 +1,380 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"math"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type stubUsageHubClient struct {
+	hubclient.Client
+	usage    *stubUsageService
+	projects hubclient.ProjectService
+}
+
+func (s *stubUsageHubClient) Usage() hubclient.UsageService { return s.usage }
+func (s *stubUsageHubClient) Projects() hubclient.ProjectService {
+	return s.projects
+}
+func (s *stubUsageHubClient) ProjectAgents(string) hubclient.AgentService { return nil }
+
+type stubUsageService struct {
+	lastMethod string
+	lastID     string
+	lastOpts   *hubclient.UsageQueryOptions
+
+	summaryResp *hubclient.UsageSummaryResponse
+	agentResp   *hubclient.AgentUsageResponse
+	err         error
+}
+
+func (s *stubUsageService) GetProject(_ context.Context, projectID string, opts *hubclient.UsageQueryOptions) (*hubclient.UsageSummaryResponse, error) {
+	s.lastMethod = "project"
+	s.lastID = projectID
+	s.lastOpts = opts
+	return s.summaryResp, s.err
+}
+
+func (s *stubUsageService) GetMe(_ context.Context, opts *hubclient.UsageQueryOptions) (*hubclient.UsageSummaryResponse, error) {
+	s.lastMethod = "me"
+	s.lastID = ""
+	s.lastOpts = opts
+	return s.summaryResp, s.err
+}
+
+func (s *stubUsageService) GetUser(_ context.Context, userID string, opts *hubclient.UsageQueryOptions) (*hubclient.UsageSummaryResponse, error) {
+	s.lastMethod = "user"
+	s.lastID = userID
+	s.lastOpts = opts
+	return s.summaryResp, s.err
+}
+
+func (s *stubUsageService) GetGlobal(_ context.Context, opts *hubclient.UsageQueryOptions) (*hubclient.UsageSummaryResponse, error) {
+	s.lastMethod = "global"
+	s.lastID = ""
+	s.lastOpts = opts
+	return s.summaryResp, s.err
+}
+
+func (s *stubUsageService) GetAgent(_ context.Context, agentID string, opts *hubclient.UsageQueryOptions) (*hubclient.AgentUsageResponse, error) {
+	s.lastMethod = "agent"
+	s.lastID = agentID
+	s.lastOpts = opts
+	return s.agentResp, s.err
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+func strPtr(v string) *string { return &v }
+
+func withUsageTestTarget(t *testing.T, svc *stubUsageService, defaultProjectID string) {
+	t.Helper()
+	origTarget := usageClientTarget
+	origProject := projectPath
+	origGlobal := globalMode
+	origFormat := outputFormat
+	origZone := clitime.Zone()
+
+	t.Cleanup(func() {
+		usageClientTarget = origTarget
+		projectPath = origProject
+		globalMode = origGlobal
+		outputFormat = origFormat
+		clitime.SetZone(origZone)
+	})
+
+	projectPath = ""
+	globalMode = false
+	outputFormat = ""
+	clitime.SetZone(time.UTC)
+
+	usageClientTarget = func(mode CLIMode) (hubclient.Client, string, error) {
+		return &stubUsageHubClient{usage: svc}, defaultProjectID, nil
+	}
+}
+
+func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	baseSummary := &hubclient.UsageSummaryResponse{
+		Scope:             hubclient.UsageScopeRef{Kind: "project", ID: "proj-1"},
+		Window:            hubclient.UsageWindow{Since: now.AddDate(0, 0, -6), Until: now, Granularity: "day"},
+		MeasurementStatus: "measured",
+	}
+
+	t.Run("human mode inside project defaults to project", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "11111111-1111-1111-1111-111111111111")
+
+		cmd := newUsageCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"--since", "7d", "--by", "model,day"})
+		require.NoError(t, cmd.Execute())
+
+		assert.Equal(t, "project", svc.lastMethod)
+		assert.Equal(t, "11111111-1111-1111-1111-111111111111", svc.lastID)
+		require.NotNil(t, svc.lastOpts)
+		assert.Equal(t, "7d", svc.lastOpts.Since)
+		assert.Equal(t, []string{"model", "day"}, svc.lastOpts.GroupBy)
+	})
+
+	t.Run("human mode outside project defaults to /me", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "")
+
+		cmd := newUsageCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		require.NoError(t, cmd.Execute())
+
+		assert.Equal(t, "me", svc.lastMethod)
+	})
+
+	t.Run("--user me routes to GetMe and --user id routes to GetUser", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "11111111-1111-1111-1111-111111111111")
+
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--user", "me"})
+		require.NoError(t, cmd.Execute())
+		assert.Equal(t, "me", svc.lastMethod)
+
+		cmd2 := newUsageCmd()
+		cmd2.SetOut(&bytes.Buffer{})
+		cmd2.SetArgs([]string{"--user", "user-42"})
+		require.NoError(t, cmd2.Execute())
+		assert.Equal(t, "user", svc.lastMethod)
+		assert.Equal(t, "user-42", svc.lastID)
+	})
+
+	t.Run("--all routes to GetGlobal", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "11111111-1111-1111-1111-111111111111")
+
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--all", "--limit", "50"})
+		require.NoError(t, cmd.Execute())
+		assert.Equal(t, "global", svc.lastMethod)
+		assert.Equal(t, 50, svc.lastOpts.Limit)
+	})
+
+	t.Run("--agent routes to GetAgent and rejects --by", func(t *testing.T) {
+		svc := &stubUsageService{
+			agentResp: &hubclient.AgentUsageResponse{
+				AgentID:           "22222222-2222-2222-2222-222222222222",
+				ProjectID:         "11111111-1111-1111-1111-111111111111",
+				Window:            hubclient.UsageWindow{Since: now, Until: now},
+				MeasurementStatus: "measured",
+			},
+		}
+		withUsageTestTarget(t, svc, "")
+
+		cmdBad := newUsageCmd()
+		cmdBad.SetOut(&bytes.Buffer{})
+		cmdBad.SetArgs([]string{"--agent", "22222222-2222-2222-2222-222222222222", "--by", "model"})
+		err := cmdBad.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--by is not supported with --agent")
+
+		cmdOK := newUsageCmd()
+		cmdOK.SetOut(&bytes.Buffer{})
+		cmdOK.SetArgs([]string{"--agent", "22222222-2222-2222-2222-222222222222", "--since", "24h"})
+		require.NoError(t, cmdOK.Execute())
+		assert.Equal(t, "agent", svc.lastMethod)
+		assert.Equal(t, "22222222-2222-2222-2222-222222222222", svc.lastID)
+	})
+
+	t.Run("mutually exclusive scope flags fail", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "")
+
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--user", "me", "--all"})
+		err := cmd.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at most one of")
+
+		projectPath = "proj-x"
+		cmd2 := newUsageCmd()
+		cmd2.SetOut(&bytes.Buffer{})
+		cmd2.SetArgs([]string{"--user", "me"})
+		err = cmd2.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at most one of")
+	})
+
+	t.Run("--by rejects invalid dimension and day+hour combination", func(t *testing.T) {
+		svc := &stubUsageService{summaryResp: baseSummary}
+		withUsageTestTarget(t, svc, "")
+
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs([]string{"--by", "bogus"})
+		err := cmd.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid --by dimension")
+
+		cmd2 := newUsageCmd()
+		cmd2.SetOut(&bytes.Buffer{})
+		cmd2.SetArgs([]string{"--by", "day,hour"})
+		err = cmd2.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "both day and hour")
+	})
+}
+
+func TestUsageCLI_AgentModeBehavior(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	svc := &stubUsageService{
+		summaryResp: &hubclient.UsageSummaryResponse{
+			Scope:             hubclient.UsageScopeRef{Kind: "project", ID: "11111111-1111-1111-1111-111111111111"},
+			Window:            hubclient.UsageWindow{Since: now, Until: now, Granularity: "day"},
+			MeasurementStatus: "measured",
+		},
+	}
+	withUsageTestTarget(t, svc, "11111111-1111-1111-1111-111111111111")
+
+	t.Run("defaults to agent own project", func(t *testing.T) {
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		require.NoError(t, cmd.Execute())
+		assert.Equal(t, "project", svc.lastMethod)
+		assert.Equal(t, "11111111-1111-1111-1111-111111111111", svc.lastID)
+	})
+
+	t.Run("refuses --user and --all in agent mode", func(t *testing.T) {
+		cmdUser := newUsageCmd()
+		cmdUser.SetOut(&bytes.Buffer{})
+		cmdUser.SetArgs([]string{"--user", "me"})
+		err := cmdUser.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--user is available only in human mode")
+
+		cmdAll := newUsageCmd()
+		cmdAll.SetOut(&bytes.Buffer{})
+		cmdAll.SetArgs([]string{"--all"})
+		err = cmdAll.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--all is available only in human mode")
+	})
+
+	t.Run("usage is in agentAllowed and survives applyAgentMode", func(t *testing.T) {
+		assert.True(t, agentAllowed["usage"], "agentAllowed must include usage (D10)")
+	})
+}
+
+func TestUsageCLI_TableRendering_NullPartialSaturated(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	svc := &stubUsageService{
+		summaryResp: &hubclient.UsageSummaryResponse{
+			Scope:   hubclient.UsageScopeRef{Kind: "project", ID: "proj-1"},
+			Window:  hubclient.UsageWindow{Since: now.AddDate(0, 0, -6), Until: now, Granularity: "day"},
+			GroupBy: []string{"model"},
+			Calls:   42,
+			ErrorCalls: 1,
+			Tokens: hubclient.UsageTokens{
+				Input:          int64Ptr(120000),
+				Output:         int64Ptr(34500),
+				CacheRead:      int64Ptr(0),
+				CacheWrite:     nil, // unknown -> must render as "—", never 0
+				Reasoning:      nil,
+				SummableTokens: int64Ptr(math.MaxInt64),
+				UnknownEvents:  &hubclient.UsageBucketUnknownEvents{Output: 3},
+				Saturated:      true,
+			},
+			Groups: []hubclient.UsageGroupRow{
+				{
+					Model:      strPtr("claude-sonnet-4-6"),
+					Calls:      42,
+					ErrorCalls: 1,
+					Tokens: hubclient.UsageTokens{
+						Input:          int64Ptr(120000),
+						Output:         int64Ptr(34500),
+						CacheRead:      int64Ptr(0),
+						CacheWrite:     nil,
+						SummableTokens: int64Ptr(154500),
+						UnknownEvents:  &hubclient.UsageBucketUnknownEvents{Output: 3},
+					},
+				},
+			},
+			Truncated:         true,
+			MeasurementStatus: "stale",
+			StaleAgents:       1,
+			UnmeasuredAgents:  2,
+		},
+	}
+	withUsageTestTarget(t, svc, "proj-1")
+
+	cmd := newUsageCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--by", "model"})
+	require.NoError(t, cmd.Execute())
+
+	got := out.String()
+	assert.Contains(t, got, "Status:  stale (1 stale, 2 unmeasured)")
+	assert.Contains(t, got, "120,000")
+	assert.Contains(t, got, "34,500*")
+	assert.Contains(t, got, usageUnknownCell)
+	assert.Contains(t, got, "9,223,372,036,854,775,807*+")
+	assert.Contains(t, got, "claude-sonnet-4-6")
+	assert.Contains(t, got, "* partial:")
+	assert.Contains(t, got, "+ saturated:")
+	assert.Contains(t, got, "truncated")
+}
+
+func TestUsageCLI_JSONPassthrough(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	raw := json.RawMessage(`{"scope":{"kind":"user","id":"u1"},"measurement_status":"measured","extra_field":123}`)
+	svc := &stubUsageService{
+		summaryResp: &hubclient.UsageSummaryResponse{
+			MeasurementStatus: "measured",
+			Raw:               raw,
+		},
+	}
+	withUsageTestTarget(t, svc, "")
+
+	cmd := newUsageCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--json"})
+	require.NoError(t, cmd.Execute())
+	assert.JSONEq(t, string(raw), out.String())
+}
+
+func TestUsageCLI_WindowsAllowed(t *testing.T) {
+	assert.True(t, windowsAllowed["usage"], "windowsAllowed must include usage (D10)")
+	root, ran := gateTestTree(t)
+	applyPlatformRestrictions(root, "windows")
+
+	root.SetArgs([]string{"usage"})
+	require.NoError(t, root.Execute())
+	assert.Equal(t, []string{"usage"}, *ran)
+}

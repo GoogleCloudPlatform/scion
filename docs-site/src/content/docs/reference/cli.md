@@ -775,6 +775,35 @@ scion inbox --chat mentions
 scion inbox --format json
 ```
 
+### `scion usage`
+
+Shows Track 1 LLM token and API call usage from the Hub usage ledger (`GET /api/v1/projects/{id}/usage`, `/api/v1/me/usage`, `/api/v1/users/{id}/usage`, `/api/v1/usage`, and `/api/v1/agents/{id}/usage`). Requires the `tokenomics.usage_ledger` [experiment](/scion/reference/experiments/) on the Hub. Available in both human and agent CLI modes and on Windows.
+
+By default, `scion usage` scopes to the current project when invoked inside one (or the calling agent's own project in agent mode), and otherwise to your own user usage (`/api/v1/me/usage`). Human output renders a summary header (`Scope`, `Window`, `Status` including `measurement_status` and any `stale` / `unmeasured` agent counts) followed by aligned totals and breakdown tables. Unknown token buckets are shown as `—` (never `0`); partial values (buckets with mixed known and unknown events) are marked with `*`; saturated `int64` sums are marked with `+`.
+
+**Usage:** `scion usage [flags]`
+
+- **Flags:**
+    - `--project <slug|id>` (global flag): Query usage for a specific project. Mutually exclusive with `--user`, `--agent`, and `--all`.
+    - `--user <id|me>`: Query usage for a user (`me` for your own usage, or a user ID if you have `hub.metrics.read`). Human mode only.
+    - `--agent <id|slug>`: Query usage for a single agent (always returns a `by_model` breakdown; `--by` is not supported with `--agent`).
+    - `--all`: Query hub-wide usage across all projects (requires `hub.metrics.read`). Human mode only.
+    - `--since <window>`: Window start as RFC 3339 timestamp, `YYYY-MM-DD`, or relative duration (for example `7d`, `24h`). Defaults to 30 days.
+    - `--until <ts|date>`: Window end as RFC 3339 timestamp or `YYYY-MM-DD`. Defaults to now (DB clock).
+    - `--by <dims>`: Comma-separated grouping dimensions (`model`, `harness`, `agent`, `user`, `project`, `day`, `hour`). `day` and `hour` are mutually exclusive; `hour` requires the window to fall within hourly rollup coverage and retention.
+    - `--limit <n>`: Maximum number of grouped rows returned (`1` to `500`).
+    - `--json` (or global `--format json`): Print the raw Hub API JSON response verbatim.
+
+```bash
+scion usage
+scion usage --since 7d --by model
+scion usage --project my-proj --since 24h --by hour
+scion usage --user me --since 30d --by project,day
+scion usage --agent my-agent --since 7d
+scion usage --all --since 7d --by project
+scion usage --since 7d --json
+```
+
 ### `scion logs`
 
 Displays the logs of an agent.
