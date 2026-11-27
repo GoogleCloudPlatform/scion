@@ -57,6 +57,13 @@ const maxUploadTotalSize = 100 * 1024 * 1024
 // use server.hub.uploads.max_workspace_file_size instead.
 const maxUploadFileSize = 50 * 1024 * 1024
 
+// WorkspaceUploadMaxFileBytes returns the effective per-file size limit for
+// workspace and shared-dir uploads, backed by live Layer-1 opsettings
+// (server.hub.uploads.max_workspace_file_size, ptone/scion#9619).
+func (s *Server) WorkspaceUploadMaxFileBytes(_ context.Context) int64 {
+	return s.ResolvedUploads().EffectiveMaxWorkspaceFileSize()
+}
+
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
 const maxEditableFileSize = 1 * 1024 * 1024
 

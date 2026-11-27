@@ -405,9 +405,9 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any {
 				return s.ResolvedUploads().MaxAttachmentSize
 			}},
-		"server.hub.uploads.max_workspace_file_size": {section: opsettings.UploadsSectionName, doc: `{"max_workspace_file_size":83886080}`,
-			observe: func(s *Server, _ *OperationalSettings) any {
-				return s.ResolvedUploads().MaxWorkspaceFileSize
+		"server.hub.uploads.max_workspace_file_size": {section: opsettings.UploadsSectionName, doc: `{"max_workspace_file_size":83886080,"chunk_bytes":4194304}`,
+			observe: func(s *Server, o *OperationalSettings) any {
+				return []any{s.ResolvedUploads().MaxWorkspaceFileSize, o.Uploads().ChunkBytes}
 			}},
 	}
 	for path, doc := range telemetryProbeDocs {

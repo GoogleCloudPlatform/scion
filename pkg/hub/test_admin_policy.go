@@ -793,6 +793,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentPolicyLimitCeilings:        testAdminPolicyDeny,
 	experiments.AgentPolicyTelemetryEnforcement: testAdminPolicyDeny,
 	experiments.AgentPolicyDurationBackstop:     testAdminPolicyDeny,
+	experiments.LargeUploads:                    testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

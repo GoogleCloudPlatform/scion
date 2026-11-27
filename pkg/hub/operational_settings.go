@@ -2680,6 +2680,31 @@ func (o *OperationalSettings) Artifacts() opsettings.ArtifactsConfig {
 	return cfg
 }
 
+// Uploads returns the resolved resumable chunked upload settings (the
+// "uploads" section, ptone/scion#8654 §3.11). It returns
+// opsettings.DefaultUploadsConfig when the section is absent, and
+// opsettings.MalformedUploadsConfig (compiled defaults with Malformed=true)
+// when the stored document is unreadable or invalid.
+//
+// Hot-reloadable: reads from the DB-backed cache on every request.
+func (o *OperationalSettings) Uploads() opsettings.UploadsConfig {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[opsettings.UploadsSectionName]
+	if !ok {
+		return opsettings.DefaultUploadsConfig()
+	}
+	if state.Malformed {
+		return opsettings.MalformedUploadsConfig()
+	}
+	cfg, err := opsettings.ParseUploadsDoc(state.Value)
+	if err != nil {
+		return opsettings.MalformedUploadsConfig()
+	}
+	return cfg
+}
+
 // CrossProjectSettingResult holds the authoritative cross-project messaging
 // setting and its revision, read directly from the store (not the cache).
 type CrossProjectSettingResult struct {

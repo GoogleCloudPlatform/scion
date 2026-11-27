@@ -642,8 +642,9 @@ func compileSchemas() {
 		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
 		// branding is derived from settings-v1.schema.json (server.hub.branding).
 		BrandingSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "branding")),
-		// uploads is derived from settings-v1.schema.json (server.hub.uploads).
-		UploadsSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "uploads")),
+		// uploads merges settings-v1.schema.json (server.hub.uploads) with the
+		// resumable chunked-upload properties (ptone/scion#9619 & #8654).
+		UploadsSectionName: uploadsSchema(root),
 		"quotas":           schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":    schemaObject(getSchemaProperty(root, "agent_secrets")),
 		"broker_policy":    schemaObject(getSchemaProperty(root, "broker_policy")),
@@ -1243,18 +1244,7 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 		}
 		return errs
 	case UploadsSectionName:
-		var us UploadsSettings
-		if err := json.Unmarshal(doc, &us); err != nil {
-			return []config.ValidationError{{Message: fmt.Sprintf("invalid uploads JSON: %v", err)}}
-		}
-		var cfg config.HubUploadsConfig
-		if us.MaxAttachmentSize != nil {
-			cfg.MaxAttachmentSize = *us.MaxAttachmentSize
-		}
-		if us.MaxWorkspaceFileSize != nil {
-			cfg.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
-		}
-		if err := cfg.Validate(); err != nil {
+		if _, err := ParseUploadsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}
 		}
 		return nil

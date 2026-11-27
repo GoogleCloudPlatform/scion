@@ -59,6 +59,7 @@
         "experiments.hub.flat_runtime_brokers:boolean",
         "experiments.hub.github_triggers:boolean",
         "experiments.hub.k8s_workload_identity_setup:boolean",
+        "experiments.hub.large_uploads:boolean",
         "experiments.hub.message_policies:boolean",
         "experiments.hub.system_one:boolean",
         "experiments.hub.triggers:boolean",

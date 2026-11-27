@@ -3763,15 +3763,15 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
 	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"branding":          settingsTokenRefused,       // unauthenticated /login content, logos, icons and palette
-	"uploads":           settingsTokenConfiguration, // per-file web upload limits
+	"uploads":           settingsTokenConfiguration, // per-file web upload limits and chunked-upload quotas
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
-	"agent_delegation_policy":         settingsTokenRefused, // which permissions may be delegated to agents
-	"chat_retention":                  settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
-	"decision_retention":              settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
+	"agent_delegation_policy":         settingsTokenRefused,       // which permissions may be delegated to agents
+	"chat_retention":                  settingsTokenRefused,       // written through PUT /api/v1/admin/chat-retention
+	"decision_retention":              settingsTokenRefused,       // written through PUT /api/v1/admin/decision-retention
 	opsettings.AgentLimitsSectionName: settingsTokenRefused, // hub-operator run-limit ceilings
 }
 

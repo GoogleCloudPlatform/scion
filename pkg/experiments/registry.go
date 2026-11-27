@@ -250,6 +250,13 @@ const Artifacts = "hub.artifacts"
 // deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
+// LargeUploads gates resumable chunked web uploads (ptone/scion#8654) for chat
+// attachments and project workspace / shared-dir files: the .../uploads routes
+// answer 404 experiment_disabled while off, and the web UI keeps single-request
+// uploads. Sessions in flight when it is turned off stop at their next request
+// and are swept; files already completed are unaffected.
+const LargeUploads = "hub.large_uploads"
+
 // Decisions gates agent decision prompts, cards, routes, pages, CLI listing
 // and coalesced bell notifications (ptone/scion#7514, ptone/scion#8223):
 // agent sends carrying decisions (refused with experiment_disabled while off),
@@ -1533,6 +1540,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#9370",
 		Owner:       "@ptone",
 		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        LargeUploads,
+		Title:       "Large file uploads",
+		Description: "Enables HA-safe, resumable chunked web uploads up to 1 GiB for chat attachments and project workspace / shared-directory files. While off, upload-session routes answer 404 experiment_disabled and the web UI keeps single-request uploads.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8654",
+		Owner:       "uploads-owner",
+		ReviewBy:    "2027-02-25",
 	},
 }
 

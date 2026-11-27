@@ -58,6 +58,15 @@ var sectionSchemaDiffAllowList = map[string]string{
 	// settings.yaml, so it intentionally has no root schema property
 	// (ptone/scion#9370).
 	"telemetry.enforced: missing from root schema": "opsettings-only hub enforcement flag, not in broker settings.yaml; ptone/scion#9370",
+
+	// Resumable chunked-upload keys (ptone/scion#8654 §3.11): DB-only Layer-1
+	// opsettings alongside the settings.yaml-backed per-file limits (#9619).
+	"uploads.chunk_bytes: missing from root schema at chunk_bytes":                               "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
+	"uploads.session_idle_ttl: missing from root schema at session_idle_ttl":                     "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
+	"uploads.session_max_lifetime: missing from root schema at session_max_lifetime":             "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
+	"uploads.max_sessions_per_user: missing from root schema at max_sessions_per_user":           "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
+	"uploads.max_pending_bytes_per_user: missing from root schema at max_pending_bytes_per_user": "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
+	"uploads.max_pending_bytes_hub: missing from root schema at max_pending_bytes_hub":           "opsettings-only chunked-upload setting, not in settings.yaml; ptone/scion#8654",
 }
 
 // TestSectionSchemas_MatchRootSchema checks every Layer-1 section schema
