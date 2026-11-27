@@ -171,25 +171,51 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 	}, nil
 }
 
+// tokenBearingHitRateUnknowns computes per-field counts of token-bearing events
+// (excluding token-less / calls-only events counted in NullTokenEvents) whose
+// input, cache_read, or cache_write bucket was NULL (D11b):
+//
+//	unknown(F) = max(0, (presence_tracked_events - null_token_events) - F_known_events)
+func tokenBearingHitRateUnknowns(t store.UsageRollupTotals) (unknownInput, unknownCacheRead, unknownCacheWrite int64) {
+	tokenBearing := t.PresenceTrackedEvents - t.NullTokenEvents
+	if tokenBearing <= 0 {
+		return 0, 0, 0
+	}
+	if d := tokenBearing - t.InputKnownEvents; d > 0 {
+		unknownInput = d
+	}
+	if d := tokenBearing - t.CacheReadKnownEvents; d > 0 {
+		unknownCacheRead = d
+	}
+	if d := tokenBearing - t.CacheWriteKnownEvents; d > 0 {
+		unknownCacheWrite = d
+	}
+	return unknownInput, unknownCacheRead, unknownCacheWrite
+}
+
 // computeCacheHitRate returns cache_read / (input + cache_read + known_cache_write)
-// and whether the rate is partial (an upper bound because at least one
-// denominator component had unknown events in the scope or bucket, including
-// legacy rows where cache_write is NULL). Returns (nil, false) when input or
-// cacheRead is unknown or the denominator is <= 0.
-func computeCacheHitRate(input, cacheRead, cacheWrite *int64, unknown *AgentUsageBucketUnknownEvents) (*float64, bool) {
-	if input == nil || cacheRead == nil {
+// and whether the rate is partial (a true upper bound because at least one
+// token-bearing event had unknown input or cache_write, including legacy rows
+// where cache_write is NULL).
+//
+// Per D11b:
+//   - Token-less (calls-only) events are excluded via NullTokenEvents and do
+//     not affect the hit rate.
+//   - If input or cacheRead is nil, or unknownCacheRead > 0 (numerator would
+//     be understated), or the denominator is <= 0, returns (nil, false).
+//   - Otherwise computes from known values and sets partial=true whenever
+//     cacheWrite is nil, unknownInput > 0, or unknownCacheWrite > 0.
+func computeCacheHitRate(input, cacheRead, cacheWrite *int64, unknownInput, unknownCacheRead, unknownCacheWrite int64) (*float64, bool) {
+	if input == nil || cacheRead == nil || unknownCacheRead > 0 {
 		return nil, false
 	}
 	var cw float64
-	partial := false
+	partial := unknownInput > 0 || unknownCacheWrite > 0
 	if cacheWrite != nil {
 		cw = float64(*cacheWrite)
 	} else {
-		// cache_write is unknown for all events in this scope/bucket (e.g.
-		// legacy session-metrics rows or harnesses that do not report cache_write).
-		partial = true
-	}
-	if unknown != nil && (unknown.Input > 0 || unknown.CacheRead > 0 || unknown.CacheWrite > 0) {
+		// cache_write is unknown for all token-bearing events in this scope/bucket
+		// (e.g. legacy session-metrics rows or harnesses that do not report cache_write).
 		partial = true
 	}
 	denom := float64(*input) + float64(*cacheRead) + cw
@@ -223,7 +249,8 @@ func dashboardTokenTotalsFromRollup(t store.UsageRollupTotals) *DashboardTokenTo
 	if t.Saturated {
 		resolved.Saturated = true
 	}
-	rate, partial := computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite, resolved.UnknownEvents)
+	unkIn, unkCR, unkCW := tokenBearingHitRateUnknowns(t)
+	rate, partial := computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite, unkIn, unkCR, unkCW)
 	return &DashboardTokenTotals{
 		Input:               resolved.Input,
 		Output:              resolved.Output,
@@ -738,7 +765,8 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 			acc.Input, acc.Output, acc.CacheRead, acc.CacheWrite, acc.CacheWrite1h, acc.Reasoning,
 			presenceFromTotals(*acc),
 		)
-		rate, partial := computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite, tok.UnknownEvents)
+		unkIn, unkCR, unkCW := tokenBearingHitRateUnknowns(*acc)
+		rate, partial := computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite, unkIn, unkCR, unkCW)
 		dailyHitRate = append(dailyHitRate, NullableFloatPoint{
 			Timestamp: dk,
 			Value:     rate,

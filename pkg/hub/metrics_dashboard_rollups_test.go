@@ -127,41 +127,52 @@ func makeDashUsageEvent(eventID, runID, projectID, agentID string, billingUserID
 
 func TestComputeCacheHitRate(t *testing.T) {
 	// Fully known ratio: 36000 / (12000 + 36000 + 2000) = 0.72, partial=false
-	r, partial := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000), nil)
+	r, partial := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000), 0, 0, 0)
 	require.NotNil(t, r)
 	assert.InDelta(t, 0.72, *r, 1e-9)
 	assert.False(t, partial)
 
 	// Zero cache_read with positive input -> 0.0 (known zero, not nil), partial=false
-	rZero, partialZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0), nil)
+	rZero, partialZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0), 0, 0, 0)
 	require.NotNil(t, rZero)
 	assert.Equal(t, 0.0, *rZero)
 	assert.False(t, partialZero)
 
 	// Zero denominator -> (nil, false) (never divide by zero / NaN)
-	rNil, partialNil := computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0), nil)
+	rNil, partialNil := computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0), 0, 0, 0)
 	assert.Nil(t, rNil)
 	assert.False(t, partialNil)
 
 	// Unknown input or cacheRead -> (nil, false)
-	rInNil, pInNil := computeCacheHitRate(nil, i64ptr(100), i64ptr(0), nil)
+	rInNil, pInNil := computeCacheHitRate(nil, i64ptr(100), i64ptr(0), 0, 0, 0)
 	assert.Nil(t, rInNil)
 	assert.False(t, pInNil)
-	rCRNil, pCRNil := computeCacheHitRate(i64ptr(100), nil, i64ptr(0), nil)
+	rCRNil, pCRNil := computeCacheHitRate(i64ptr(100), nil, i64ptr(0), 0, 0, 0)
 	assert.Nil(t, rCRNil)
 	assert.False(t, pCRNil)
 
-	// Unknown cacheWrite (e.g. legacy rows) -> upper bound 50/(100+50) with partial=true
-	rCWNil, pCWNil := computeCacheHitRate(i64ptr(100), i64ptr(50), nil, nil)
+	// Token-bearing unknown cacheRead > 0 (D11b: numerator understated) -> (nil, false)
+	rCRUnk, pCRUnk := computeCacheHitRate(i64ptr(200), i64ptr(0), i64ptr(0), 0, 1, 0)
+	assert.Nil(t, rCRUnk)
+	assert.False(t, pCRUnk)
+
+	// Unknown cacheWrite (e.g. legacy rows) -> true upper bound 50/(100+50) with partial=true
+	rCWNil, pCWNil := computeCacheHitRate(i64ptr(100), i64ptr(50), nil, 0, 0, 1)
 	require.NotNil(t, rCWNil)
 	assert.InDelta(t, 50.0/150.0, *rCWNil, 1e-9)
 	assert.True(t, pCWNil)
 
-	// Mixed known+unknown cacheWrite -> upper bound 900/(1100+900+0)=0.45 with partial=true
-	rMixed, pMixed := computeCacheHitRate(i64ptr(1100), i64ptr(900), i64ptr(0), &AgentUsageBucketUnknownEvents{CacheWrite: 1})
+	// Mixed known+unknown cacheWrite -> true upper bound 900/(1100+900+0)=0.45 with partial=true
+	rMixed, pMixed := computeCacheHitRate(i64ptr(1100), i64ptr(900), i64ptr(0), 0, 0, 1)
 	require.NotNil(t, rMixed)
 	assert.InDelta(t, 0.45, *rMixed, 1e-9)
 	assert.True(t, pMixed)
+
+	// Mixed known+unknown input with known cacheRead -> true upper bound with partial=true
+	rInUnk, pInUnk := computeCacheHitRate(i64ptr(100), i64ptr(100), i64ptr(0), 1, 0, 0)
+	require.NotNil(t, rInUnk)
+	assert.InDelta(t, 0.50, *rInUnk, 1e-9)
+	assert.True(t, pInUnk)
 }
 
 // TestHubRollupSource_SummaryNullableTokensAndHitRate runs against SQLite by
@@ -504,9 +515,9 @@ func TestHubRollupSource_GroupedSeriesModelHarnessUser(t *testing.T) {
 	require.NotNil(t, toksByUser.Totals)
 	assert.Equal(t, int64(300), *toksByUser.Totals.Input)
 	require.Len(t, toksByUser.DailyCacheHitRate, 1)
-	require.NotNil(t, toksByUser.DailyCacheHitRate[0].Value)
-	// Combined day totals: input=300, cacheRead=300, cacheWrite=100 -> 300 / 700
-	assert.InDelta(t, 300.0/700.0, *toksByUser.DailyCacheHitRate[0].Value, 1e-9)
+	// ag2 is a token-bearing event with unknown cacheRead -> per D11b, day hit rate is nil (not partial).
+	assert.Nil(t, toksByUser.DailyCacheHitRate[0].Value)
+	assert.False(t, toksByUser.DailyCacheHitRate[0].Partial)
 
 	// Tokens grouped by harness
 	toksByHarness, err := src.QueryTokens(ctx, 7, WithProjectID(proj.ID), WithGroupBy(store.UsageGroupByHarness))
@@ -937,14 +948,19 @@ func TestHubRollupSource_SessionsMeasurementMatchesSummary(t *testing.T) {
 	assert.Equal(t, sum.Measurement.Status, sess.Measurement.Status, "sessions and summary must agree on measurement.status")
 }
 
-// TestHubRollupSource_PartialCacheHitRateProbe pins R1:
+// TestHubRollupSource_PartialCacheHitRateProbe pins R1 / D11b:
 //   - Mixed known+unknown cache_write (E1 input=100, cache_read=900, cache_write=0;
-//     E2 input=1000, cache_read=0, cache_write=NULL) computes the upper-bound rate
-//     0.45 with cacheHitRatePartial=true and unknownEvents.cacheWrite=1 across
+//     E2 input=1000, cache_read=0, cache_write=NULL) computes the true upper-bound
+//     rate 0.45 with cacheHitRatePartial=true and unknownEvents.cacheWrite=1 across
 //     QuerySummary, QueryTokens (totals + dailyCacheHitRate), and QueryProjectSummary.
+//   - Token-bearing unknown cache_read (E1 100/0/0 + E2 100/NULL/0) returns
+//     cacheHitRate=nil, cacheHitRatePartial=false (numerator understated).
+//   - Claude (100/900/0) mixed with calls-only token-less events (all buckets NULL)
+//     excludes token-less events via null_token_events and returns normal unflagged
+//     rate 0.90 with cacheHitRatePartial=false.
 //   - All-known events emit cacheHitRatePartial=false and omit unknownEvents.
-//   - Legacy-style all-NULL cache_write (input=100, cache_read=50, cache_write=NULL)
-//     computes upper-bound 50/150 with cacheHitRatePartial=true.
+//   - Legacy-style all-NULL cache_write (100/50/NULL) computes true upper-bound
+//     50/150 with cacheHitRatePartial=true.
 func TestHubRollupSource_PartialCacheHitRateProbe(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -961,13 +977,19 @@ func TestHubRollupSource_PartialCacheHitRateProbe(t *testing.T) {
 	projMixed := &store.Project{ID: uuid.NewString(), Name: "hr-mixed", Slug: "hr-mixed-" + uuid.NewString()[:8]}
 	projKnown := &store.Project{ID: uuid.NewString(), Name: "hr-known", Slug: "hr-known-" + uuid.NewString()[:8]}
 	projLegacy := &store.Project{ID: uuid.NewString(), Name: "hr-legacy", Slug: "hr-legacy-" + uuid.NewString()[:8]}
+	projCRUnk := &store.Project{ID: uuid.NewString(), Name: "hr-cr-unk", Slug: "hr-cr-unk-" + uuid.NewString()[:8]}
+	projCallsOnly := &store.Project{ID: uuid.NewString(), Name: "hr-calls-only", Slug: "hr-calls-only-" + uuid.NewString()[:8]}
 	require.NoError(t, cs.CreateProject(ctx, projMixed))
 	require.NoError(t, cs.CreateProject(ctx, projKnown))
 	require.NoError(t, cs.CreateProject(ctx, projLegacy))
+	require.NoError(t, cs.CreateProject(ctx, projCRUnk))
+	require.NoError(t, cs.CreateProject(ctx, projCallsOnly))
 
 	agMixed, runMixed := seedDashboardAgentAndRun(t, cs, projMixed.ID, u1.ID, "ag-mixed", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
 	agKnown, runKnown := seedDashboardAgentAndRun(t, cs, projKnown.ID, u1.ID, "ag-known", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
 	agLegacy, runLegacy := seedDashboardAgentAndRun(t, cs, projLegacy.ID, u1.ID, "ag-legacy", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
+	agCRUnk, runCRUnk := seedDashboardAgentAndRun(t, cs, projCRUnk.ID, u1.ID, "ag-cr-unk", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
+	agCallsOnly, runCallsOnly := seedDashboardAgentAndRun(t, cs, projCallsOnly.ID, u1.ID, "ag-calls-only", "claude", string(state.PhaseRunning), eventTS.Add(-time.Hour))
 
 	// Mixed probe: E1 (100, 900, 0) + E2 (1000, 0, NULL) -> 900 / 2000 = 0.45, partial=true, unknownEvents.cacheWrite=1.
 	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
@@ -993,6 +1015,26 @@ func TestHubRollupSource_PartialCacheHitRateProbe(t *testing.T) {
 		AgentID: agLegacy,
 		Events: []*store.UsageEvent{
 			makeDashUsageEvent("hr-l1", runLegacy, projLegacy.ID, agLegacy, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(20), i64ptr(50), nil),
+		},
+	})
+	require.NoError(t, err)
+
+	// Reviewer's D11b probe: E1 (100, 0, 0) + E2 (100, NULL, 0) -> token-bearing unknown cache_read=1 -> nil, partial=false.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agCRUnk,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("hr-cr1", runCRUnk, projCRUnk.ID, agCRUnk, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(20), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("hr-cr2", runCRUnk, projCRUnk.ID, agCRUnk, &u1.ID, "claude", "claude-sonnet-4-6", 2, eventTS.Add(time.Minute), 1, i64ptr(100), i64ptr(20), nil, i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Claude (100, 900, 0) mixed with calls-only token-less event (all buckets NULL) -> 0.90, partial=false.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agCallsOnly,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("hr-co1", runCallsOnly, projCallsOnly.ID, agCallsOnly, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(50), i64ptr(900), i64ptr(0)),
+			makeDashUsageEvent("hr-co2", runCallsOnly, projCallsOnly.ID, agCallsOnly, &u1.ID, "antigravity", "gemini-2.5-pro", 2, eventTS.Add(time.Minute), 3, nil, nil, nil, nil),
 		},
 	})
 	require.NoError(t, err)
@@ -1052,6 +1094,51 @@ func TestHubRollupSource_PartialCacheHitRateProbe(t *testing.T) {
 	assert.InDelta(t, 50.0/150.0, *sumLegacy.CacheHitRate, 1e-9)
 	assert.True(t, sumLegacy.CacheHitRatePartial)
 	assert.Nil(t, sumLegacy.Tokens.CacheWrite)
+
+	// 4. Reviewer's D11b probe: (100,0,0)+(100,NULL,0) -> nil rate, partial=false everywhere
+	sumCRUnk, err := src.QuerySummary(ctx, 7, WithProjectID(projCRUnk.ID))
+	require.NoError(t, err)
+	assert.Nil(t, sumCRUnk.CacheHitRate, "token-bearing unknown cache_read must return nil hit rate")
+	assert.False(t, sumCRUnk.CacheHitRatePartial)
+	require.NotNil(t, sumCRUnk.Tokens)
+	assert.Nil(t, sumCRUnk.Tokens.CacheHitRate)
+	assert.False(t, sumCRUnk.Tokens.CacheHitRatePartial)
+
+	tokCRUnk, err := src.QueryTokens(ctx, 7, WithProjectID(projCRUnk.ID))
+	require.NoError(t, err)
+	assert.Nil(t, tokCRUnk.Totals.CacheHitRate)
+	assert.False(t, tokCRUnk.Totals.CacheHitRatePartial)
+	require.Len(t, tokCRUnk.DailyCacheHitRate, 1)
+	assert.Nil(t, tokCRUnk.DailyCacheHitRate[0].Value)
+	assert.False(t, tokCRUnk.DailyCacheHitRate[0].Partial)
+
+	psCRUnk, err := src.QueryProjectSummary(ctx, projCRUnk.ID)
+	require.NoError(t, err)
+	assert.Nil(t, psCRUnk.CacheHitRate)
+	assert.False(t, psCRUnk.CacheHitRatePartial)
+
+	// 5. Claude + calls-only token-less mix -> normal unflagged rate 0.90, partial=false everywhere
+	sumCO, err := src.QuerySummary(ctx, 7, WithProjectID(projCallsOnly.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumCO.CacheHitRate)
+	assert.InDelta(t, 0.90, *sumCO.CacheHitRate, 1e-9)
+	assert.False(t, sumCO.CacheHitRatePartial, "calls-only token-less events must not flag hit rate as partial")
+
+	tokCO, err := src.QueryTokens(ctx, 7, WithProjectID(projCallsOnly.ID))
+	require.NoError(t, err)
+	require.NotNil(t, tokCO.Totals.CacheHitRate)
+	assert.InDelta(t, 0.90, *tokCO.Totals.CacheHitRate, 1e-9)
+	assert.False(t, tokCO.Totals.CacheHitRatePartial)
+	require.Len(t, tokCO.DailyCacheHitRate, 1)
+	require.NotNil(t, tokCO.DailyCacheHitRate[0].Value)
+	assert.InDelta(t, 0.90, *tokCO.DailyCacheHitRate[0].Value, 1e-9)
+	assert.False(t, tokCO.DailyCacheHitRate[0].Partial)
+
+	psCO, err := src.QueryProjectSummary(ctx, projCallsOnly.ID)
+	require.NoError(t, err)
+	require.NotNil(t, psCO.CacheHitRate)
+	assert.InDelta(t, 0.90, *psCO.CacheHitRate, 1e-9)
+	assert.False(t, psCO.CacheHitRatePartial)
 }
 
 // TestHubRollupSource_D7bCoverageDayConsistencyDeterministic pins R2

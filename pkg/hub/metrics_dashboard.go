@@ -284,10 +284,12 @@ type DashboardTokenUnknownEvents struct {
 // DashboardTokenTotals holds nullable canonical Track 1 token totals and the
 // derived cache hit rate (cache_read / (input + cache_read + known_cache_write)).
 // Unknown buckets serialize as JSON null and are never fabricated as 0.
-// When any denominator component (input, cacheRead, cacheWrite) has unknown
-// events in the scope (including legacy rows with NULL cache_write),
-// CacheHitRate is computed from known values as an upper bound and
-// CacheHitRatePartial is true.
+// Per D11b, token-less (calls-only) events are excluded from hit-rate unknown
+// checks; if any token-bearing event has unknown cacheRead (or input/cacheRead
+// is nil or the denominator is <= 0), CacheHitRate is nil. Otherwise
+// CacheHitRate is computed from known values, and CacheHitRatePartial is true
+// (a true upper bound) whenever any token-bearing event has unknown input or
+// cacheWrite (including legacy rows with NULL cache_write).
 type DashboardTokenTotals struct {
 	Input               *int64                       `json:"input"`
 	Output              *int64                       `json:"output"`
@@ -313,8 +315,9 @@ type DashboardMeasurement struct {
 
 // NullableFloatPoint represents a time-series point whose value may be unknown
 // (JSON null), such as daily cache hit rate when input or cacheRead is unknown
-// or the denominator is zero. Partial is true when at least one denominator
-// component had unknown events on that day, making Value an upper bound.
+// (including any token-bearing event with unknown cacheRead) or the denominator
+// is zero. Partial is true when at least one token-bearing event had unknown
+// input or cacheWrite on that day, making Value a true upper bound.
 type NullableFloatPoint struct {
 	Timestamp string   `json:"timestamp"`
 	Value     *float64 `json:"value"`
@@ -340,9 +343,11 @@ type DashboardSummary struct {
 	// Tokens carries nullable canonical token buckets when served from Hub rollups.
 	Tokens *DashboardTokenTotals `json:"tokens,omitempty"`
 	// CacheHitRate is cache_read / (input + cache_read + known_cache_write),
-	// or nil when input or cacheRead is unknown or the denominator is zero.
-	// When CacheHitRatePartial is true, at least one denominator component had
-	// unknown events and the rate is an upper bound.
+	// or nil when input or cacheRead is unknown (including any token-bearing
+	// event with unknown cacheRead) or the denominator is zero. Token-less
+	// (calls-only) events do not affect the hit rate. When CacheHitRatePartial
+	// is true, at least one token-bearing event had unknown input or cacheWrite
+	// and the rate is a true upper bound.
 	CacheHitRate        *float64 `json:"cacheHitRate,omitempty"`
 	CacheHitRatePartial bool     `json:"cacheHitRatePartial,omitempty"`
 	// Measurement surfaces Track 1 coverage status and agent counts.
@@ -1315,7 +1320,7 @@ func validateDashboardGroupBy(view, raw string) (string, error) {
 //     2. Route to HubRollupSource for breakdowns Cloud Monitoring cannot
 //     provide (per-user, or per-harness on tokens), even when Cloud Monitoring
 //     is configured.
-//     3. Otherwise use CloudMonitoringSource.
+//     3. Otherwise use MetricsDashboardService (Cloud Monitoring).
 func (s *Server) selectMetricsDashboardSource(ledgerEnabled bool, view, groupBy string) MetricsDashboardSource {
 	cm := s.currentMetricsDashboard()
 	if !ledgerEnabled {
