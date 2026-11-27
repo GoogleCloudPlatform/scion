@@ -17,13 +17,14 @@ import (
 // Sec-Fetch-Site and Origin headers are compared with the request's Host (see
 // requestIsCrossSite). A request that does not match gets 403.
 //
-// Second check (a POST from a browser with a non-empty body): the body must use
-// a content type the route accepts: application/json; multipart/form-data on an
-// upload route (see isMultipartUploadRoute); or a browser policy report type on
-// the policy report route (see isPolicyReportRoute). Other requests, including
-// ones with an absent or unparseable content type, get 415. PUT, PATCH and
-// DELETE are left to the first check, since they legitimately carry file
-// bodies.
+// Second check (a POST, PUT, or PATCH from a browser with a non-empty body):
+// the body must use a content type the route accepts: application/json;
+// multipart/form-data on a POST upload route (see isMultipartUploadRoute);
+// application/octet-stream on a PUT chunked upload route (see
+// isLargeUploadChunkRoute); or a browser policy report type on the POST policy
+// report route (see isPolicyReportRoute). Other requests, including ones with
+// an absent or unparseable content type, get 415. DELETE is left to the first
+// check.
 //
 // Page view requests (/api/v1/portview/, as isPortViewRequest accepts them) are
 // not checked: the route authorizes by capability and serves an agent app's own
@@ -58,8 +59,8 @@ func proxyModeWriteGuardMiddleware(authMode string, match func(*http.Request) bo
 				"this request is not accepted on this endpoint", nil)
 			return
 		}
-		// Second check: the body content type (browser POSTs only).
-		if r.Method == http.MethodPost && requestHasOriginSignal(r) && !acceptableWriteBody(r) {
+		// Second check: the body content type (browser POST/PUT/PATCH).
+		if (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch) && requestHasOriginSignal(r) && !acceptableWriteBody(r) {
 			writeError(w, http.StatusUnsupportedMediaType, errCodeUnsupportedMediaType,
 				"this endpoint requires an application/json request body", nil)
 			return
@@ -92,6 +93,28 @@ var multipartUploadRoutes = []string{
 	"/api/v1/skills/*/versions",              // skill version publish (multipart)
 	"/api/v1/projects/*/workspace/files",     // project workspace file upload
 	"/api/v1/projects/*/shared-dirs/*/files", // shared-dir file upload
+}
+
+// largeUploadChunkRoutes are the PUT /api/v1 routes that receive raw
+// application/octet-stream chunk bodies for resumable large uploads
+// (ptone/scion#8654 §3.9). Each "*" matches exactly one non-empty path
+// segment. Keep in sync with the router as P2 (chat) and P3 (shared-dir) land.
+var largeUploadChunkRoutes = []string{
+	"/api/v1/chat/attachments/uploads/*",
+	"/api/v1/projects/*/workspace/uploads/*",
+	"/api/v1/projects/*/shared-dirs/*/uploads/*",
+}
+
+// isLargeUploadChunkRoute reports whether path matches one of the chunked
+// upload PUT patterns (see largeUploadChunkRoutes).
+func isLargeUploadChunkRoute(path string) bool {
+	segs := strings.Split(strings.TrimRight(path, "/"), "/")
+	for _, pattern := range largeUploadChunkRoutes {
+		if segmentsMatch(strings.Split(pattern, "/"), segs) {
+			return true
+		}
+	}
+	return false
 }
 
 // isMultipartUploadRoute reports whether path matches one of the upload-route
@@ -181,11 +204,12 @@ func requestHasOriginSignal(r *http.Request) bool {
 	return r.Header.Get("Sec-Fetch-Site") != "" || r.Header.Get("Origin") != ""
 }
 
-// acceptableWriteBody reports whether a POST request's body content type is
-// allowed: application/json, multipart/form-data on an upload route, or a
-// browser policy report type on the policy report route. A request with no
-// body is allowed. An absent, empty or unparseable content type on a request
-// that has a body is refused.
+// acceptableWriteBody reports whether a POST, PUT, or PATCH request's body
+// content type is allowed: application/json, multipart/form-data on a POST
+// upload route, application/octet-stream on a PUT large-upload chunk route, or
+// a browser policy report type on the POST policy report route. A request with
+// no body is allowed. An absent, empty or unparseable content type on a
+// request that has a body is refused.
 func acceptableWriteBody(r *http.Request) bool {
 	if r.ContentLength == 0 {
 		return true // no body to classify
@@ -198,9 +222,11 @@ func acceptableWriteBody(r *http.Request) bool {
 	case "application/json":
 		return true
 	case "multipart/form-data":
-		return isMultipartUploadRoute(r.URL.Path)
+		return r.Method == http.MethodPost && isMultipartUploadRoute(r.URL.Path)
+	case "application/octet-stream":
+		return r.Method == http.MethodPut && isLargeUploadChunkRoute(r.URL.Path)
 	case policyReportMediaType, legacyPolicyReportMediaType:
-		return isPolicyReportRoute(r.URL.Path)
+		return r.Method == http.MethodPost && isPolicyReportRoute(r.URL.Path)
 	default:
 		return false
 	}
