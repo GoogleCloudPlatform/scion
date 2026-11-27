@@ -189,15 +189,18 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 		}
 	}
 
+	var opened fs.FileInfo
 	cleanupOnErr := func() {
-		_ = f.Close()
-		if createdFresh {
-			_ = dir.Remove(partialBase)
+		if createdFresh && opened != nil {
+			if cur, lerr := dir.Lstat(partialBase); lerr == nil && os.SameFile(opened, cur) {
+				_ = dir.Remove(partialBase)
+			}
 		}
+		_ = f.Close()
 	}
 
 	// Confirm the opened handle is a regular file matching the directory entry.
-	opened, err := f.Stat()
+	opened, err = f.Stat()
 	if err != nil {
 		cleanupOnErr()
 		return "", err
@@ -267,8 +270,10 @@ func (s *fileUploadSink) WriteChunk(ctx context.Context, sess *store.UploadSessi
 		return "", err
 	}
 	if err := f.Close(); err != nil {
-		if createdFresh {
-			_ = dir.Remove(partialBase)
+		if createdFresh && opened != nil {
+			if cur, lerr := dir.Lstat(partialBase); lerr == nil && os.SameFile(opened, cur) {
+				_ = dir.Remove(partialBase)
+			}
 		}
 		return "", err
 	}
