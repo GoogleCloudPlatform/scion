@@ -72,9 +72,9 @@ describe('upload-limits', () => {
   });
 
   it('validates per-file and total request limits', () => {
-    expect(
-      validateWorkspaceUploadFiles([{ name: 'a.bin', size: 60 << 20 }], 50 << 20)
-    ).toBe(fileTooLargeMessage('a.bin', 50 << 20));
+    expect(validateWorkspaceUploadFiles([{ name: 'a.bin', size: 60 << 20 }], 50 << 20)).toBe(
+      fileTooLargeMessage('a.bin', 50 << 20)
+    );
 
     expect(
       validateWorkspaceUploadFiles(

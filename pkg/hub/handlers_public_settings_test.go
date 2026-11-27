@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
@@ -196,4 +197,68 @@ func TestPublicSettingsAgentSecretsUserScopeOnly(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPublicSettingsUploads(t *testing.T) {
+	t.Run("defaults when unset", func(t *testing.T) {
+		srv := &Server{}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+		rr := httptest.NewRecorder()
+		srv.handlePublicSettings(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var raw map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		uploads, ok := raw["uploads"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected uploads object in response, got %#v", raw["uploads"])
+		}
+		if _, hasChunk := uploads["chunkSize"]; hasChunk {
+			t.Errorf("unexpected chunkSize field in uploads: %#v", uploads)
+		}
+		if len(uploads) != 2 {
+			t.Errorf("expected exactly 2 upload limit fields, got %d: %#v", len(uploads), uploads)
+		}
+
+		var resp PublicSettingsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if resp.Uploads.MaxAttachmentSize != config.DefaultUploadMaxAttachmentSize {
+			t.Errorf("maxAttachmentSize = %d, want %d", resp.Uploads.MaxAttachmentSize, config.DefaultUploadMaxAttachmentSize)
+		}
+		if resp.Uploads.MaxWorkspaceFileSize != config.DefaultUploadMaxWorkspaceFileSize {
+			t.Errorf("maxWorkspaceFileSize = %d, want %d", resp.Uploads.MaxWorkspaceFileSize, config.DefaultUploadMaxWorkspaceFileSize)
+		}
+	})
+
+	t.Run("configured limits", func(t *testing.T) {
+		srv := &Server{config: ServerConfig{
+			Uploads: config.HubUploadsConfig{
+				MaxAttachmentSize:    32 << 20,
+				MaxWorkspaceFileSize: 80 << 20,
+			},
+		}}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+		rr := httptest.NewRecorder()
+		srv.handlePublicSettings(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var resp PublicSettingsResponse
+		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		if resp.Uploads.MaxAttachmentSize != 32<<20 {
+			t.Errorf("maxAttachmentSize = %d, want %d", resp.Uploads.MaxAttachmentSize, 32<<20)
+		}
+		if resp.Uploads.MaxWorkspaceFileSize != 80<<20 {
+			t.Errorf("maxWorkspaceFileSize = %d, want %d", resp.Uploads.MaxWorkspaceFileSize, 80<<20)
+		}
+	})
 }

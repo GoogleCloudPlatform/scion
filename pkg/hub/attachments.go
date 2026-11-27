@@ -299,15 +299,34 @@ func SanitizeFilename(name string) (string, error) {
 // shared-nothing replication.
 type LocalDiskAttachmentStore struct {
 	baseDir string
+	// maxSize is the explicit configured per-file cap in bytes. Zero or
+	// negative means MaxAttachmentSize. Save enforces this cap directly and
+	// never trusts the caller-supplied size argument to raise it.
+	maxSize int64
 }
 
-// NewLocalDiskAttachmentStore creates a new local-disk attachment store.
+// NewLocalDiskAttachmentStore creates a new local-disk attachment store with
+// the default MaxAttachmentSize per-file cap.
 // The baseDir is created if it does not exist.
 func NewLocalDiskAttachmentStore(baseDir string) (*LocalDiskAttachmentStore, error) {
+	return NewLocalDiskAttachmentStoreWithMaxSize(baseDir, MaxAttachmentSize)
+}
+
+// NewLocalDiskAttachmentStoreWithMaxSize creates a new local-disk attachment
+// store enforcing maxSize bytes per file (falling back to MaxAttachmentSize
+// when maxSize <= 0). The baseDir is created if it does not exist.
+func NewLocalDiskAttachmentStoreWithMaxSize(baseDir string, maxSize int64) (*LocalDiskAttachmentStore, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, fmt.Errorf("attachment store: create base dir: %w", err)
 	}
-	return &LocalDiskAttachmentStore{baseDir: baseDir}, nil
+	return &LocalDiskAttachmentStore{baseDir: baseDir, maxSize: maxSize}, nil
+}
+
+func (s *LocalDiskAttachmentStore) effectiveMaxSize() int64 {
+	if s.maxSize > 0 {
+		return s.maxSize
+	}
+	return MaxAttachmentSize
 }
 
 // Save stores file content to disk and returns the metadata.
@@ -330,15 +349,18 @@ func (s *LocalDiskAttachmentStore) Save(_ context.Context, projectID, filename s
 	}
 	defer func() { _ = f.Close() }()
 
-	written, err := io.Copy(f, io.LimitReader(content, MaxAttachmentSize+1))
+	// Enforce the store's explicit configured cap; never trust caller-supplied
+	// size to raise the limit.
+	limit := s.effectiveMaxSize()
+	written, err := io.Copy(f, io.LimitReader(content, limit+1))
 	if err != nil {
 		// Clean up on write failure.
 		_ = os.Remove(filePath)
 		return AttachmentMeta{}, fmt.Errorf("attachment store: write file: %w", err)
 	}
-	if written > MaxAttachmentSize {
+	if written > limit {
 		_ = os.Remove(filePath)
-		return AttachmentMeta{}, fmt.Errorf("file exceeds maximum size of %d bytes", MaxAttachmentSize)
+		return AttachmentMeta{}, fmt.Errorf("file exceeds maximum size of %d bytes", limit)
 	}
 
 	return AttachmentMeta{

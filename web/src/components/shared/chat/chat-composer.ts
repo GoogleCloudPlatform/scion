@@ -2008,7 +2008,8 @@ export class ScionChatComposer extends LitElement {
     this.uploading = true;
     try {
       const { apiFetch } = await import('../../../client/api.js');
-      const { getUploadLimits, formatUploadSize } = await import('../../../client/upload-limits.js');
+      const { getUploadLimits, formatUploadSize } =
+        await import('../../../client/upload-limits.js');
       const limits = await getUploadLimits();
       if (switchedAway()) return;
 
