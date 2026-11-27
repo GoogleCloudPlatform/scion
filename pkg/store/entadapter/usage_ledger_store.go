@@ -86,13 +86,17 @@ func (s *AgentStore) RunAttributionConfigInstalled() bool {
 
 // UsageLedgerStore implements store.UsageLedgerStore using the Ent ORM.
 type UsageLedgerStore struct {
-	client *ent.Client
-	inTx   bool
+	client                 *ent.Client
+	inTx                   bool
+	hourlyCoverageRecorded *atomic.Bool
 }
 
 // NewUsageLedgerStore creates a new Ent-backed UsageLedgerStore.
 func NewUsageLedgerStore(client *ent.Client) *UsageLedgerStore {
-	return &UsageLedgerStore{client: client}
+	return &UsageLedgerStore{
+		client:                 client,
+		hourlyCoverageRecorded: &atomic.Bool{},
+	}
 }
 
 var _ store.UsageLedgerStore = (*UsageLedgerStore)(nil)

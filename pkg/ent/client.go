@@ -130,6 +130,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
@@ -373,6 +374,8 @@ type Client struct {
 	UsageReservation *UsageReservationClient
 	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
 	UsageRollupDaily *UsageRollupDailyClient
+	// UsageRollupHourly is the client for interacting with the UsageRollupHourly builders.
+	UsageRollupHourly *UsageRollupHourlyClient
 	// UsageScopeCounterDaily is the client for interacting with the UsageScopeCounterDaily builders.
 	UsageScopeCounterDaily *UsageScopeCounterDailyClient
 	// User is the client for interacting with the User builders.
@@ -514,6 +517,7 @@ func (c *Client) init() {
 	c.UsageEvent = NewUsageEventClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.UsageRollupDaily = NewUsageRollupDailyClient(c.config)
+	c.UsageRollupHourly = NewUsageRollupHourlyClient(c.config)
 	c.UsageScopeCounterDaily = NewUsageScopeCounterDailyClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
@@ -728,6 +732,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
+		UsageRollupHourly:             NewUsageRollupHourlyClient(cfg),
 		UsageScopeCounterDaily:        NewUsageScopeCounterDailyClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -869,6 +874,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
+		UsageRollupHourly:             NewUsageRollupHourlyClient(cfg),
 		UsageScopeCounterDaily:        NewUsageScopeCounterDailyClient(cfg),
 		User:                          NewUserClient(cfg),
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
@@ -936,9 +942,10 @@ func (c *Client) Use(hooks ...Hook) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
 		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageScopeCounterDaily, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -978,9 +985,10 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
 		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageScopeCounterDaily, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
-		c.UserTerminalWorkspace, c.WebhookEndpoint,
+		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
+		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
+		c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1217,6 +1225,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UsageReservation.mutate(ctx, m)
 	case *UsageRollupDailyMutation:
 		return c.UsageRollupDaily.mutate(ctx, m)
+	case *UsageRollupHourlyMutation:
+		return c.UsageRollupHourly.mutate(ctx, m)
 	case *UsageScopeCounterDailyMutation:
 		return c.UsageScopeCounterDaily.mutate(ctx, m)
 	case *UserMutation:
@@ -17056,6 +17066,139 @@ func (c *UsageRollupDailyClient) mutate(ctx context.Context, m *UsageRollupDaily
 	}
 }
 
+// UsageRollupHourlyClient is a client for the UsageRollupHourly schema.
+type UsageRollupHourlyClient struct {
+	config
+}
+
+// NewUsageRollupHourlyClient returns a client for the UsageRollupHourly from the given config.
+func NewUsageRollupHourlyClient(c config) *UsageRollupHourlyClient {
+	return &UsageRollupHourlyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagerolluphourly.Hooks(f(g(h())))`.
+func (c *UsageRollupHourlyClient) Use(hooks ...Hook) {
+	c.hooks.UsageRollupHourly = append(c.hooks.UsageRollupHourly, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagerolluphourly.Intercept(f(g(h())))`.
+func (c *UsageRollupHourlyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageRollupHourly = append(c.inters.UsageRollupHourly, interceptors...)
+}
+
+// Create returns a builder for creating a UsageRollupHourly entity.
+func (c *UsageRollupHourlyClient) Create() *UsageRollupHourlyCreate {
+	mutation := newUsageRollupHourlyMutation(c.config, OpCreate)
+	return &UsageRollupHourlyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageRollupHourly entities.
+func (c *UsageRollupHourlyClient) CreateBulk(builders ...*UsageRollupHourlyCreate) *UsageRollupHourlyCreateBulk {
+	return &UsageRollupHourlyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageRollupHourlyClient) MapCreateBulk(slice any, setFunc func(*UsageRollupHourlyCreate, int)) *UsageRollupHourlyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageRollupHourlyCreateBulk{err: fmt.Errorf("calling to UsageRollupHourlyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageRollupHourlyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageRollupHourlyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageRollupHourly.
+func (c *UsageRollupHourlyClient) Update() *UsageRollupHourlyUpdate {
+	mutation := newUsageRollupHourlyMutation(c.config, OpUpdate)
+	return &UsageRollupHourlyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageRollupHourlyClient) UpdateOne(_m *UsageRollupHourly) *UsageRollupHourlyUpdateOne {
+	mutation := newUsageRollupHourlyMutation(c.config, OpUpdateOne, withUsageRollupHourly(_m))
+	return &UsageRollupHourlyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageRollupHourlyClient) UpdateOneID(id uuid.UUID) *UsageRollupHourlyUpdateOne {
+	mutation := newUsageRollupHourlyMutation(c.config, OpUpdateOne, withUsageRollupHourlyID(id))
+	return &UsageRollupHourlyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageRollupHourly.
+func (c *UsageRollupHourlyClient) Delete() *UsageRollupHourlyDelete {
+	mutation := newUsageRollupHourlyMutation(c.config, OpDelete)
+	return &UsageRollupHourlyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageRollupHourlyClient) DeleteOne(_m *UsageRollupHourly) *UsageRollupHourlyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageRollupHourlyClient) DeleteOneID(id uuid.UUID) *UsageRollupHourlyDeleteOne {
+	builder := c.Delete().Where(usagerolluphourly.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageRollupHourlyDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageRollupHourly.
+func (c *UsageRollupHourlyClient) Query() *UsageRollupHourlyQuery {
+	return &UsageRollupHourlyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageRollupHourly},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageRollupHourly entity by its id.
+func (c *UsageRollupHourlyClient) Get(ctx context.Context, id uuid.UUID) (*UsageRollupHourly, error) {
+	return c.Query().Where(usagerolluphourly.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageRollupHourlyClient) GetX(ctx context.Context, id uuid.UUID) *UsageRollupHourly {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageRollupHourlyClient) Hooks() []Hook {
+	return c.hooks.UsageRollupHourly
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageRollupHourlyClient) Interceptors() []Interceptor {
+	return c.inters.UsageRollupHourly
+}
+
+func (c *UsageRollupHourlyClient) mutate(ctx context.Context, m *UsageRollupHourlyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageRollupHourlyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageRollupHourlyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageRollupHourlyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageRollupHourlyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageRollupHourly mutation op: %q", m.Op())
+	}
+}
+
 // UsageScopeCounterDailyClient is a client for the UsageScopeCounterDaily schema.
 type UsageScopeCounterDailyClient struct {
 	config
@@ -18325,8 +18468,8 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageEvent,
-		UsageReservation, UsageRollupDaily, UsageScopeCounterDaily, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
 		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
@@ -18356,8 +18499,8 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageEvent,
-		UsageReservation, UsageRollupDaily, UsageScopeCounterDaily, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
+		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
+		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
 		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

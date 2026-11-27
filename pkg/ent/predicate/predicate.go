@@ -348,6 +348,9 @@ type UsageReservation func(*sql.Selector)
 // UsageRollupDaily is the predicate function for usagerollupdaily builders.
 type UsageRollupDaily func(*sql.Selector)
 
+// UsageRollupHourly is the predicate function for usagerolluphourly builders.
+type UsageRollupHourly func(*sql.Selector)
+
 // UsageScopeCounterDaily is the predicate function for usagescopecounterdaily builders.
 type UsageScopeCounterDaily func(*sql.Selector)
 

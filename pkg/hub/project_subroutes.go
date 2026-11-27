@@ -48,6 +48,7 @@ const (
 	projectSubRouteDecisions         projectSubRouteKind = "decisions"
 	projectSubRouteTriggerSources    projectSubRouteKind = "trigger-sources"
 	projectSubRouteSystemOne         projectSubRouteKind = "system-one"
+	projectSubRouteUsage             projectSubRouteKind = "usage"
 )
 
 // projectSubRouteTable lists every first path segment after
@@ -96,6 +97,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"decisions":                projectSubRouteDecisions,
 	"trigger-sources":          projectSubRouteTriggerSources,
 	"system-one":               projectSubRouteSystemOne,
+	"usage":                    projectSubRouteUsage,
 }
 
 // projectSubRouteListed reports whether subPath (the path after

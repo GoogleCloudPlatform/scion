@@ -67,6 +67,13 @@ The `hub.async_agent_start` [experiment](/scion/reference/experiments/#server-ex
 - **Multi-node upgrade from a version before the `hub_instances` registry:** replicas on a version that does not register in `hub_instances` are not visible to that capability check. Set an explicit override turning `hub.async_agent_start` **off** before upgrading the first replica (`scion hub experiments disable hub.async_agent_start` or in **Admin -> Server Config -> Experiments**), upgrade every Hub replica, and then reset the override (`scion hub experiments reset hub.async_agent_start`). Single-node Hubs need no extra step.
 - **Before downgrading a Hub node:** turn `hub.async_agent_start` **off** and wait `launch_timeout` (`server.hub.async_launch.launch_timeout`, default `2m` or `5m` for Kubernetes) plus 15 seconds so every in-flight asynchronous start settles before an older binary runs.
 
+### `tokenomics.usage_ledger` (hourly rollups during rolling upgrade or rollback)
+
+When a Hub build with `usage_rollups_hourly` ingests its first usage batch, it records a write-once UTC hour-aligned coverage marker (`system.usage_rollups_hourly_coverage`) set to the next complete UTC hour (`ceil_hour(DB now)`).
+
+- **Rolling upgrade or rollback:** If an older Hub binary (without `usage_rollups_hourly`) ingests usage events concurrently with a newer replica during a multi-replica rolling upgrade, or after a binary rollback, those events land in `usage_rollups_daily` without corresponding `usage_rollups_hourly` rows. Before serving hourly granularity on the scoped usage APIs (`/api/v1/projects/:id/usage`, `/api/v1/users/:id/usage`, `/api/v1/me/usage`, `/api/v1/usage`), the Hub compares full-day `SUM(events)` between `usage_rollups_hourly` and `usage_rollups_daily` across every UTC day the requested window overlaps (including partial edge days and the coverage-marker day). On any mismatch, auto-granularity falls back to `day` (serving complete daily totals) and explicit `groupBy=hour` returns `400`.
+- **Coverage-marker day:** Because the coverage-marker day's daily rollup includes pre-marker events that have no hourly rows, windows touching the coverage-marker day mismatch the full-day cross-check and are served at `day` granularity (explicit `groupBy=hour` returns `400`). Hourly granularity becomes available for windows starting on the first complete UTC day after the upgrade (or on the coverage day itself only if no pre-marker events were ingested on that day).
+
 ## What a newer build rewrites one way
 
 | Stored data | What startup does | Effect on an older binary |

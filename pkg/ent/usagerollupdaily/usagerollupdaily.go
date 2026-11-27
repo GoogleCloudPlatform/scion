@@ -48,6 +48,20 @@ const (
 	FieldEvents = "events"
 	// FieldNullTokenEvents holds the string denoting the null_token_events field in the database.
 	FieldNullTokenEvents = "null_token_events"
+	// FieldInputKnownEvents holds the string denoting the input_known_events field in the database.
+	FieldInputKnownEvents = "input_known_events"
+	// FieldOutputKnownEvents holds the string denoting the output_known_events field in the database.
+	FieldOutputKnownEvents = "output_known_events"
+	// FieldCacheReadKnownEvents holds the string denoting the cache_read_known_events field in the database.
+	FieldCacheReadKnownEvents = "cache_read_known_events"
+	// FieldCacheWriteKnownEvents holds the string denoting the cache_write_known_events field in the database.
+	FieldCacheWriteKnownEvents = "cache_write_known_events"
+	// FieldCacheWrite1hKnownEvents holds the string denoting the cache_write_1h_known_events field in the database.
+	FieldCacheWrite1hKnownEvents = "cache_write_1h_known_events"
+	// FieldReasoningKnownEvents holds the string denoting the reasoning_known_events field in the database.
+	FieldReasoningKnownEvents = "reasoning_known_events"
+	// FieldPresenceTrackedEvents holds the string denoting the presence_tracked_events field in the database.
+	FieldPresenceTrackedEvents = "presence_tracked_events"
 	// FieldFirstEventTs holds the string denoting the first_event_ts field in the database.
 	FieldFirstEventTs = "first_event_ts"
 	// FieldLastEventTs holds the string denoting the last_event_ts field in the database.
@@ -77,6 +91,13 @@ var Columns = []string{
 	FieldReportedCostMicros,
 	FieldEvents,
 	FieldNullTokenEvents,
+	FieldInputKnownEvents,
+	FieldOutputKnownEvents,
+	FieldCacheReadKnownEvents,
+	FieldCacheWriteKnownEvents,
+	FieldCacheWrite1hKnownEvents,
+	FieldReasoningKnownEvents,
+	FieldPresenceTrackedEvents,
 	FieldFirstEventTs,
 	FieldLastEventTs,
 }
@@ -126,6 +147,20 @@ var (
 	DefaultEvents int64
 	// DefaultNullTokenEvents holds the default value on creation for the "null_token_events" field.
 	DefaultNullTokenEvents int64
+	// DefaultInputKnownEvents holds the default value on creation for the "input_known_events" field.
+	DefaultInputKnownEvents int64
+	// DefaultOutputKnownEvents holds the default value on creation for the "output_known_events" field.
+	DefaultOutputKnownEvents int64
+	// DefaultCacheReadKnownEvents holds the default value on creation for the "cache_read_known_events" field.
+	DefaultCacheReadKnownEvents int64
+	// DefaultCacheWriteKnownEvents holds the default value on creation for the "cache_write_known_events" field.
+	DefaultCacheWriteKnownEvents int64
+	// DefaultCacheWrite1hKnownEvents holds the default value on creation for the "cache_write_1h_known_events" field.
+	DefaultCacheWrite1hKnownEvents int64
+	// DefaultReasoningKnownEvents holds the default value on creation for the "reasoning_known_events" field.
+	DefaultReasoningKnownEvents int64
+	// DefaultPresenceTrackedEvents holds the default value on creation for the "presence_tracked_events" field.
+	DefaultPresenceTrackedEvents int64
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -226,6 +261,41 @@ func ByEvents(opts ...sql.OrderTermOption) OrderOption {
 // ByNullTokenEvents orders the results by the null_token_events field.
 func ByNullTokenEvents(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldNullTokenEvents, opts...).ToFunc()
+}
+
+// ByInputKnownEvents orders the results by the input_known_events field.
+func ByInputKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldInputKnownEvents, opts...).ToFunc()
+}
+
+// ByOutputKnownEvents orders the results by the output_known_events field.
+func ByOutputKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOutputKnownEvents, opts...).ToFunc()
+}
+
+// ByCacheReadKnownEvents orders the results by the cache_read_known_events field.
+func ByCacheReadKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCacheReadKnownEvents, opts...).ToFunc()
+}
+
+// ByCacheWriteKnownEvents orders the results by the cache_write_known_events field.
+func ByCacheWriteKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCacheWriteKnownEvents, opts...).ToFunc()
+}
+
+// ByCacheWrite1hKnownEvents orders the results by the cache_write_1h_known_events field.
+func ByCacheWrite1hKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCacheWrite1hKnownEvents, opts...).ToFunc()
+}
+
+// ByReasoningKnownEvents orders the results by the reasoning_known_events field.
+func ByReasoningKnownEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReasoningKnownEvents, opts...).ToFunc()
+}
+
+// ByPresenceTrackedEvents orders the results by the presence_tracked_events field.
+func ByPresenceTrackedEvents(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPresenceTrackedEvents, opts...).ToFunc()
 }
 
 // ByFirstEventTs orders the results by the first_event_ts field.

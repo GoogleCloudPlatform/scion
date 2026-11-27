@@ -29,7 +29,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -57,10 +59,31 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	userID := createTestUser(t, cs, "pg-concurrent-user@example.com")
 	agentID := uuid.NewString()
 	runID := "run-" + uuid.NewString()
-	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
-
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Slug:      "pg-conc-agent",
+		Name:      "pg-conc-agent",
+		ProjectID: projectID,
+		OwnerID:   userID,
+		CreatedBy: userID,
+		Phase:     string(state.PhaseRunning),
+	}))
+	_, err := cs.SetAgentRunID(ctx, agentID, runID, nil)
+	require.NoError(t, err)
 	ts := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
 	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		Generation:    1,
+		HubID:         "hub-pg",
+		ProjectID:     projectID,
+		AgentID:       agentID,
+		BillingUserID: &userID,
+		Harness:       "claude",
+		CreatedAt:     ts.Add(-time.Minute),
+	})
+	require.NoError(t, err)
 
 	const totalEvents = 30
 	allEvents := make([]*store.UsageEvent, totalEvents)
@@ -144,6 +167,32 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	assert.Equal(t, int64(totalEvents*5), rollup.Output)
 	assert.Equal(t, int64(totalEvents*2), rollup.CacheRead)
 	assert.Equal(t, int64(totalEvents*3), rollup.CacheWrite)
+	assert.Equal(t, int64(totalEvents), rollup.InputKnownEvents)
+	assert.Equal(t, int64(totalEvents), rollup.PresenceTrackedEvents)
+
+	// Hourly rollups and hourly coverage marker must be exact under concurrent Postgres ingest.
+	hourUTC := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	hRollup, err := client.UsageRollupHourly.Query().
+		Where(
+			usagerolluphourly.BucketStartEQ(hourUTC),
+			usagerolluphourly.AgentIDEQ(agentID),
+		).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(totalEvents), hRollup.Events)
+	assert.Equal(t, int64(totalEvents*10), hRollup.Input)
+	assert.Equal(t, int64(totalEvents*5), hRollup.Output)
+	assert.Equal(t, int64(totalEvents*2), hRollup.CacheRead)
+	assert.Equal(t, int64(totalEvents*3), hRollup.CacheWrite)
+	assert.Equal(t, int64(totalEvents), hRollup.InputKnownEvents)
+	assert.Equal(t, int64(totalEvents), hRollup.PresenceTrackedEvents)
+
+	covStart, hasCov, err := cs.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	require.True(t, hasCov)
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	assert.False(t, covStart.Before(utcHourStart(dbNow)), "coverage marker %s must be >= current UTC hour %s", covStart, utcHourStart(dbNow))
 
 	for _, tc := range []struct {
 		kind string
@@ -185,6 +234,42 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	require.NoError(t, rows.Scan(&malformedType, &chargedType))
 	assert.Equal(t, "array", malformedType)
 	assert.Equal(t, "array", chargedType)
+
+	// Exercise QueryUsageRollups (hourly, day-from-hourly date_trunc, limit/truncated) and GetUsageScopeCoverage on Postgres.
+	qRes, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityHour,
+		Since:       hourUTC,
+		Until:       hourUTC,
+		ProjectID:   projectID,
+		GroupBy:     []string{store.UsageGroupByDay, store.UsageGroupByModel},
+		Limit:       10,
+	})
+	require.NoError(t, err)
+	assert.False(t, qRes.Truncated)
+	require.Len(t, qRes.Groups, 1)
+	require.NotNil(t, qRes.Groups[0].BucketStart)
+	assert.Equal(t, dayUTC, *qRes.Groups[0].BucketStart)
+	assert.Equal(t, int64(totalEvents*10), qRes.Totals.Input)
+	assert.Equal(t, int64(totalEvents), qRes.Totals.PresenceTrackedEvents)
+
+	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projectID,
+		Since:      ts.Add(-time.Hour),
+		Until:      ts.Add(2 * time.Minute),
+		StaleAfter: 3 * time.Minute,
+		DBNow:      ts.Add(2 * time.Minute),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cov)
+	require.Len(t, cov.Buckets, 1, "Postgres coverage query must match the running agent via CAST(a.id AS TEXT)")
+	assert.Equal(t, 1, cov.Buckets[0].AgentCount)
+	assert.True(t, cov.Buckets[0].IsRunning)
+	assert.True(t, cov.Buckets[0].HasMeterHealth)
+	assert.Equal(t, store.MeterHealthFinalStateOpen, cov.Buckets[0].LatestFinalState)
+	assert.False(t, cov.Buckets[0].IsReceiptStale)
+	assert.True(t, cov.Buckets[0].HasUsageData)
+	require.NotNil(t, cov.LastReceiptAt)
+	assert.Equal(t, ts.Add(time.Minute), *cov.LastReceiptAt)
 }
 
 func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {

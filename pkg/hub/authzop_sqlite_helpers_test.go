@@ -1234,6 +1234,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/metrics-summary":                   {"id": f.project},
 		"/api/v1/projects/{id}/metrics/summary":                   {"id": f.project},
 		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
+		"/api/v1/projects/{id}/usage":                             {"id": f.project},
 		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
@@ -1267,6 +1268,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
 		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
+		"/api/v1/users/{id}/usage":           {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},

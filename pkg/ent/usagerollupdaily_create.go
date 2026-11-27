@@ -244,6 +244,104 @@ func (_c *UsageRollupDailyCreate) SetNillableNullTokenEvents(v *int64) *UsageRol
 	return _c
 }
 
+// SetInputKnownEvents sets the "input_known_events" field.
+func (_c *UsageRollupDailyCreate) SetInputKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetInputKnownEvents(v)
+	return _c
+}
+
+// SetNillableInputKnownEvents sets the "input_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableInputKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetInputKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (_c *UsageRollupDailyCreate) SetOutputKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetOutputKnownEvents(v)
+	return _c
+}
+
+// SetNillableOutputKnownEvents sets the "output_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableOutputKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetOutputKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (_c *UsageRollupDailyCreate) SetCacheReadKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetCacheReadKnownEvents(v)
+	return _c
+}
+
+// SetNillableCacheReadKnownEvents sets the "cache_read_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableCacheReadKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetCacheReadKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (_c *UsageRollupDailyCreate) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetCacheWriteKnownEvents(v)
+	return _c
+}
+
+// SetNillableCacheWriteKnownEvents sets the "cache_write_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableCacheWriteKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetCacheWriteKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (_c *UsageRollupDailyCreate) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetCacheWrite1hKnownEvents(v)
+	return _c
+}
+
+// SetNillableCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableCacheWrite1hKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetCacheWrite1hKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (_c *UsageRollupDailyCreate) SetReasoningKnownEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetReasoningKnownEvents(v)
+	return _c
+}
+
+// SetNillableReasoningKnownEvents sets the "reasoning_known_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillableReasoningKnownEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetReasoningKnownEvents(*v)
+	}
+	return _c
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (_c *UsageRollupDailyCreate) SetPresenceTrackedEvents(v int64) *UsageRollupDailyCreate {
+	_c.mutation.SetPresenceTrackedEvents(v)
+	return _c
+}
+
+// SetNillablePresenceTrackedEvents sets the "presence_tracked_events" field if the given value is not nil.
+func (_c *UsageRollupDailyCreate) SetNillablePresenceTrackedEvents(v *int64) *UsageRollupDailyCreate {
+	if v != nil {
+		_c.SetPresenceTrackedEvents(*v)
+	}
+	return _c
+}
+
 // SetFirstEventTs sets the "first_event_ts" field.
 func (_c *UsageRollupDailyCreate) SetFirstEventTs(v time.Time) *UsageRollupDailyCreate {
 	_c.mutation.SetFirstEventTs(v)
@@ -361,6 +459,34 @@ func (_c *UsageRollupDailyCreate) defaults() {
 		v := usagerollupdaily.DefaultNullTokenEvents
 		_c.mutation.SetNullTokenEvents(v)
 	}
+	if _, ok := _c.mutation.InputKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultInputKnownEvents
+		_c.mutation.SetInputKnownEvents(v)
+	}
+	if _, ok := _c.mutation.OutputKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultOutputKnownEvents
+		_c.mutation.SetOutputKnownEvents(v)
+	}
+	if _, ok := _c.mutation.CacheReadKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultCacheReadKnownEvents
+		_c.mutation.SetCacheReadKnownEvents(v)
+	}
+	if _, ok := _c.mutation.CacheWriteKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultCacheWriteKnownEvents
+		_c.mutation.SetCacheWriteKnownEvents(v)
+	}
+	if _, ok := _c.mutation.CacheWrite1hKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultCacheWrite1hKnownEvents
+		_c.mutation.SetCacheWrite1hKnownEvents(v)
+	}
+	if _, ok := _c.mutation.ReasoningKnownEvents(); !ok {
+		v := usagerollupdaily.DefaultReasoningKnownEvents
+		_c.mutation.SetReasoningKnownEvents(v)
+	}
+	if _, ok := _c.mutation.PresenceTrackedEvents(); !ok {
+		v := usagerollupdaily.DefaultPresenceTrackedEvents
+		_c.mutation.SetPresenceTrackedEvents(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := usagerollupdaily.DefaultID()
 		_c.mutation.SetID(v)
@@ -437,6 +563,27 @@ func (_c *UsageRollupDailyCreate) check() error {
 	}
 	if _, ok := _c.mutation.NullTokenEvents(); !ok {
 		return &ValidationError{Name: "null_token_events", err: errors.New(`ent: missing required field "UsageRollupDaily.null_token_events"`)}
+	}
+	if _, ok := _c.mutation.InputKnownEvents(); !ok {
+		return &ValidationError{Name: "input_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.input_known_events"`)}
+	}
+	if _, ok := _c.mutation.OutputKnownEvents(); !ok {
+		return &ValidationError{Name: "output_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.output_known_events"`)}
+	}
+	if _, ok := _c.mutation.CacheReadKnownEvents(); !ok {
+		return &ValidationError{Name: "cache_read_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.cache_read_known_events"`)}
+	}
+	if _, ok := _c.mutation.CacheWriteKnownEvents(); !ok {
+		return &ValidationError{Name: "cache_write_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.cache_write_known_events"`)}
+	}
+	if _, ok := _c.mutation.CacheWrite1hKnownEvents(); !ok {
+		return &ValidationError{Name: "cache_write_1h_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.cache_write_1h_known_events"`)}
+	}
+	if _, ok := _c.mutation.ReasoningKnownEvents(); !ok {
+		return &ValidationError{Name: "reasoning_known_events", err: errors.New(`ent: missing required field "UsageRollupDaily.reasoning_known_events"`)}
+	}
+	if _, ok := _c.mutation.PresenceTrackedEvents(); !ok {
+		return &ValidationError{Name: "presence_tracked_events", err: errors.New(`ent: missing required field "UsageRollupDaily.presence_tracked_events"`)}
 	}
 	if _, ok := _c.mutation.FirstEventTs(); !ok {
 		return &ValidationError{Name: "first_event_ts", err: errors.New(`ent: missing required field "UsageRollupDaily.first_event_ts"`)}
@@ -551,6 +698,34 @@ func (_c *UsageRollupDailyCreate) createSpec() (*UsageRollupDaily, *sqlgraph.Cre
 	if value, ok := _c.mutation.NullTokenEvents(); ok {
 		_spec.SetField(usagerollupdaily.FieldNullTokenEvents, field.TypeInt64, value)
 		_node.NullTokenEvents = value
+	}
+	if value, ok := _c.mutation.InputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldInputKnownEvents, field.TypeInt64, value)
+		_node.InputKnownEvents = value
+	}
+	if value, ok := _c.mutation.OutputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldOutputKnownEvents, field.TypeInt64, value)
+		_node.OutputKnownEvents = value
+	}
+	if value, ok := _c.mutation.CacheReadKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheReadKnownEvents, field.TypeInt64, value)
+		_node.CacheReadKnownEvents = value
+	}
+	if value, ok := _c.mutation.CacheWriteKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWriteKnownEvents, field.TypeInt64, value)
+		_node.CacheWriteKnownEvents = value
+	}
+	if value, ok := _c.mutation.CacheWrite1hKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWrite1hKnownEvents, field.TypeInt64, value)
+		_node.CacheWrite1hKnownEvents = value
+	}
+	if value, ok := _c.mutation.ReasoningKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldReasoningKnownEvents, field.TypeInt64, value)
+		_node.ReasoningKnownEvents = value
+	}
+	if value, ok := _c.mutation.PresenceTrackedEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldPresenceTrackedEvents, field.TypeInt64, value)
+		_node.PresenceTrackedEvents = value
 	}
 	if value, ok := _c.mutation.FirstEventTs(); ok {
 		_spec.SetField(usagerollupdaily.FieldFirstEventTs, field.TypeTime, value)
@@ -807,6 +982,132 @@ func (u *UsageRollupDailyUpsert) UpdateNullTokenEvents() *UsageRollupDailyUpsert
 // AddNullTokenEvents adds v to the "null_token_events" field.
 func (u *UsageRollupDailyUpsert) AddNullTokenEvents(v int64) *UsageRollupDailyUpsert {
 	u.Add(usagerollupdaily.FieldNullTokenEvents, v)
+	return u
+}
+
+// SetInputKnownEvents sets the "input_known_events" field.
+func (u *UsageRollupDailyUpsert) SetInputKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldInputKnownEvents, v)
+	return u
+}
+
+// UpdateInputKnownEvents sets the "input_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateInputKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldInputKnownEvents)
+	return u
+}
+
+// AddInputKnownEvents adds v to the "input_known_events" field.
+func (u *UsageRollupDailyUpsert) AddInputKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldInputKnownEvents, v)
+	return u
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (u *UsageRollupDailyUpsert) SetOutputKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldOutputKnownEvents, v)
+	return u
+}
+
+// UpdateOutputKnownEvents sets the "output_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateOutputKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldOutputKnownEvents)
+	return u
+}
+
+// AddOutputKnownEvents adds v to the "output_known_events" field.
+func (u *UsageRollupDailyUpsert) AddOutputKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldOutputKnownEvents, v)
+	return u
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsert) SetCacheReadKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldCacheReadKnownEvents, v)
+	return u
+}
+
+// UpdateCacheReadKnownEvents sets the "cache_read_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateCacheReadKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldCacheReadKnownEvents)
+	return u
+}
+
+// AddCacheReadKnownEvents adds v to the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsert) AddCacheReadKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldCacheReadKnownEvents, v)
+	return u
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsert) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldCacheWriteKnownEvents, v)
+	return u
+}
+
+// UpdateCacheWriteKnownEvents sets the "cache_write_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateCacheWriteKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldCacheWriteKnownEvents)
+	return u
+}
+
+// AddCacheWriteKnownEvents adds v to the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsert) AddCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldCacheWriteKnownEvents, v)
+	return u
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsert) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldCacheWrite1hKnownEvents, v)
+	return u
+}
+
+// UpdateCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateCacheWrite1hKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldCacheWrite1hKnownEvents)
+	return u
+}
+
+// AddCacheWrite1hKnownEvents adds v to the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsert) AddCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldCacheWrite1hKnownEvents, v)
+	return u
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsert) SetReasoningKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldReasoningKnownEvents, v)
+	return u
+}
+
+// UpdateReasoningKnownEvents sets the "reasoning_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdateReasoningKnownEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldReasoningKnownEvents)
+	return u
+}
+
+// AddReasoningKnownEvents adds v to the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsert) AddReasoningKnownEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldReasoningKnownEvents, v)
+	return u
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsert) SetPresenceTrackedEvents(v int64) *UsageRollupDailyUpsert {
+	u.Set(usagerollupdaily.FieldPresenceTrackedEvents, v)
+	return u
+}
+
+// UpdatePresenceTrackedEvents sets the "presence_tracked_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsert) UpdatePresenceTrackedEvents() *UsageRollupDailyUpsert {
+	u.SetExcluded(usagerollupdaily.FieldPresenceTrackedEvents)
+	return u
+}
+
+// AddPresenceTrackedEvents adds v to the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsert) AddPresenceTrackedEvents(v int64) *UsageRollupDailyUpsert {
+	u.Add(usagerollupdaily.FieldPresenceTrackedEvents, v)
 	return u
 }
 
@@ -1131,6 +1432,153 @@ func (u *UsageRollupDailyUpsertOne) AddNullTokenEvents(v int64) *UsageRollupDail
 func (u *UsageRollupDailyUpsertOne) UpdateNullTokenEvents() *UsageRollupDailyUpsertOne {
 	return u.Update(func(s *UsageRollupDailyUpsert) {
 		s.UpdateNullTokenEvents()
+	})
+}
+
+// SetInputKnownEvents sets the "input_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetInputKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetInputKnownEvents(v)
+	})
+}
+
+// AddInputKnownEvents adds v to the "input_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddInputKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddInputKnownEvents(v)
+	})
+}
+
+// UpdateInputKnownEvents sets the "input_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateInputKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateInputKnownEvents()
+	})
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetOutputKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetOutputKnownEvents(v)
+	})
+}
+
+// AddOutputKnownEvents adds v to the "output_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddOutputKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddOutputKnownEvents(v)
+	})
+}
+
+// UpdateOutputKnownEvents sets the "output_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateOutputKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateOutputKnownEvents()
+	})
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetCacheReadKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheReadKnownEvents(v)
+	})
+}
+
+// AddCacheReadKnownEvents adds v to the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddCacheReadKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheReadKnownEvents(v)
+	})
+}
+
+// UpdateCacheReadKnownEvents sets the "cache_read_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateCacheReadKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheReadKnownEvents()
+	})
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheWriteKnownEvents(v)
+	})
+}
+
+// AddCacheWriteKnownEvents adds v to the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheWriteKnownEvents(v)
+	})
+}
+
+// UpdateCacheWriteKnownEvents sets the "cache_write_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateCacheWriteKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheWriteKnownEvents()
+	})
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheWrite1hKnownEvents(v)
+	})
+}
+
+// AddCacheWrite1hKnownEvents adds v to the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheWrite1hKnownEvents(v)
+	})
+}
+
+// UpdateCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateCacheWrite1hKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheWrite1hKnownEvents()
+	})
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsertOne) SetReasoningKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetReasoningKnownEvents(v)
+	})
+}
+
+// AddReasoningKnownEvents adds v to the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsertOne) AddReasoningKnownEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddReasoningKnownEvents(v)
+	})
+}
+
+// UpdateReasoningKnownEvents sets the "reasoning_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdateReasoningKnownEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateReasoningKnownEvents()
+	})
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsertOne) SetPresenceTrackedEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetPresenceTrackedEvents(v)
+	})
+}
+
+// AddPresenceTrackedEvents adds v to the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsertOne) AddPresenceTrackedEvents(v int64) *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddPresenceTrackedEvents(v)
+	})
+}
+
+// UpdatePresenceTrackedEvents sets the "presence_tracked_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertOne) UpdatePresenceTrackedEvents() *UsageRollupDailyUpsertOne {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdatePresenceTrackedEvents()
 	})
 }
 
@@ -1626,6 +2074,153 @@ func (u *UsageRollupDailyUpsertBulk) AddNullTokenEvents(v int64) *UsageRollupDai
 func (u *UsageRollupDailyUpsertBulk) UpdateNullTokenEvents() *UsageRollupDailyUpsertBulk {
 	return u.Update(func(s *UsageRollupDailyUpsert) {
 		s.UpdateNullTokenEvents()
+	})
+}
+
+// SetInputKnownEvents sets the "input_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetInputKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetInputKnownEvents(v)
+	})
+}
+
+// AddInputKnownEvents adds v to the "input_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddInputKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddInputKnownEvents(v)
+	})
+}
+
+// UpdateInputKnownEvents sets the "input_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateInputKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateInputKnownEvents()
+	})
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetOutputKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetOutputKnownEvents(v)
+	})
+}
+
+// AddOutputKnownEvents adds v to the "output_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddOutputKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddOutputKnownEvents(v)
+	})
+}
+
+// UpdateOutputKnownEvents sets the "output_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateOutputKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateOutputKnownEvents()
+	})
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetCacheReadKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheReadKnownEvents(v)
+	})
+}
+
+// AddCacheReadKnownEvents adds v to the "cache_read_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddCacheReadKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheReadKnownEvents(v)
+	})
+}
+
+// UpdateCacheReadKnownEvents sets the "cache_read_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateCacheReadKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheReadKnownEvents()
+	})
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheWriteKnownEvents(v)
+	})
+}
+
+// AddCacheWriteKnownEvents adds v to the "cache_write_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddCacheWriteKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheWriteKnownEvents(v)
+	})
+}
+
+// UpdateCacheWriteKnownEvents sets the "cache_write_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateCacheWriteKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheWriteKnownEvents()
+	})
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetCacheWrite1hKnownEvents(v)
+	})
+}
+
+// AddCacheWrite1hKnownEvents adds v to the "cache_write_1h_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddCacheWrite1hKnownEvents(v)
+	})
+}
+
+// UpdateCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateCacheWrite1hKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateCacheWrite1hKnownEvents()
+	})
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetReasoningKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetReasoningKnownEvents(v)
+	})
+}
+
+// AddReasoningKnownEvents adds v to the "reasoning_known_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddReasoningKnownEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddReasoningKnownEvents(v)
+	})
+}
+
+// UpdateReasoningKnownEvents sets the "reasoning_known_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdateReasoningKnownEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdateReasoningKnownEvents()
+	})
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsertBulk) SetPresenceTrackedEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.SetPresenceTrackedEvents(v)
+	})
+}
+
+// AddPresenceTrackedEvents adds v to the "presence_tracked_events" field.
+func (u *UsageRollupDailyUpsertBulk) AddPresenceTrackedEvents(v int64) *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.AddPresenceTrackedEvents(v)
+	})
+}
+
+// UpdatePresenceTrackedEvents sets the "presence_tracked_events" field to the value that was provided on create.
+func (u *UsageRollupDailyUpsertBulk) UpdatePresenceTrackedEvents() *UsageRollupDailyUpsertBulk {
+	return u.Update(func(s *UsageRollupDailyUpsert) {
+		s.UpdatePresenceTrackedEvents()
 	})
 }
 

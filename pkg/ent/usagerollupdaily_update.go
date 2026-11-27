@@ -259,6 +259,153 @@ func (_u *UsageRollupDailyUpdate) AddNullTokenEvents(v int64) *UsageRollupDailyU
 	return _u
 }
 
+// SetInputKnownEvents sets the "input_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetInputKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetInputKnownEvents()
+	_u.mutation.SetInputKnownEvents(v)
+	return _u
+}
+
+// SetNillableInputKnownEvents sets the "input_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableInputKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetInputKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddInputKnownEvents adds value to the "input_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddInputKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddInputKnownEvents(v)
+	return _u
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetOutputKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetOutputKnownEvents()
+	_u.mutation.SetOutputKnownEvents(v)
+	return _u
+}
+
+// SetNillableOutputKnownEvents sets the "output_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableOutputKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetOutputKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddOutputKnownEvents adds value to the "output_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddOutputKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddOutputKnownEvents(v)
+	return _u
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetCacheReadKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetCacheReadKnownEvents()
+	_u.mutation.SetCacheReadKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheReadKnownEvents sets the "cache_read_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableCacheReadKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetCacheReadKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheReadKnownEvents adds value to the "cache_read_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddCacheReadKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddCacheReadKnownEvents(v)
+	return _u
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetCacheWriteKnownEvents()
+	_u.mutation.SetCacheWriteKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheWriteKnownEvents sets the "cache_write_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableCacheWriteKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetCacheWriteKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheWriteKnownEvents adds value to the "cache_write_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddCacheWriteKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddCacheWriteKnownEvents(v)
+	return _u
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetCacheWrite1hKnownEvents()
+	_u.mutation.SetCacheWrite1hKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableCacheWrite1hKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetCacheWrite1hKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheWrite1hKnownEvents adds value to the "cache_write_1h_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddCacheWrite1hKnownEvents(v)
+	return _u
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (_u *UsageRollupDailyUpdate) SetReasoningKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetReasoningKnownEvents()
+	_u.mutation.SetReasoningKnownEvents(v)
+	return _u
+}
+
+// SetNillableReasoningKnownEvents sets the "reasoning_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillableReasoningKnownEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetReasoningKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddReasoningKnownEvents adds value to the "reasoning_known_events" field.
+func (_u *UsageRollupDailyUpdate) AddReasoningKnownEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddReasoningKnownEvents(v)
+	return _u
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (_u *UsageRollupDailyUpdate) SetPresenceTrackedEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.ResetPresenceTrackedEvents()
+	_u.mutation.SetPresenceTrackedEvents(v)
+	return _u
+}
+
+// SetNillablePresenceTrackedEvents sets the "presence_tracked_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdate) SetNillablePresenceTrackedEvents(v *int64) *UsageRollupDailyUpdate {
+	if v != nil {
+		_u.SetPresenceTrackedEvents(*v)
+	}
+	return _u
+}
+
+// AddPresenceTrackedEvents adds value to the "presence_tracked_events" field.
+func (_u *UsageRollupDailyUpdate) AddPresenceTrackedEvents(v int64) *UsageRollupDailyUpdate {
+	_u.mutation.AddPresenceTrackedEvents(v)
+	return _u
+}
+
 // SetFirstEventTs sets the "first_event_ts" field.
 func (_u *UsageRollupDailyUpdate) SetFirstEventTs(v time.Time) *UsageRollupDailyUpdate {
 	_u.mutation.SetFirstEventTs(v)
@@ -393,6 +540,48 @@ func (_u *UsageRollupDailyUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if value, ok := _u.mutation.AddedNullTokenEvents(); ok {
 		_spec.AddField(usagerollupdaily.FieldNullTokenEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.InputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldInputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedInputKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldInputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.OutputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldOutputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedOutputKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldOutputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheReadKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheReadKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheReadKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheReadKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheWriteKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWriteKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheWriteKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheWriteKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheWrite1hKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWrite1hKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheWrite1hKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheWrite1hKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.ReasoningKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldReasoningKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedReasoningKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldReasoningKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.PresenceTrackedEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldPresenceTrackedEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresenceTrackedEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldPresenceTrackedEvents, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.FirstEventTs(); ok {
 		_spec.SetField(usagerollupdaily.FieldFirstEventTs, field.TypeTime, value)
@@ -651,6 +840,153 @@ func (_u *UsageRollupDailyUpdateOne) AddNullTokenEvents(v int64) *UsageRollupDai
 	return _u
 }
 
+// SetInputKnownEvents sets the "input_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetInputKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetInputKnownEvents()
+	_u.mutation.SetInputKnownEvents(v)
+	return _u
+}
+
+// SetNillableInputKnownEvents sets the "input_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableInputKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetInputKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddInputKnownEvents adds value to the "input_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddInputKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddInputKnownEvents(v)
+	return _u
+}
+
+// SetOutputKnownEvents sets the "output_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetOutputKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetOutputKnownEvents()
+	_u.mutation.SetOutputKnownEvents(v)
+	return _u
+}
+
+// SetNillableOutputKnownEvents sets the "output_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableOutputKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetOutputKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddOutputKnownEvents adds value to the "output_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddOutputKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddOutputKnownEvents(v)
+	return _u
+}
+
+// SetCacheReadKnownEvents sets the "cache_read_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetCacheReadKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetCacheReadKnownEvents()
+	_u.mutation.SetCacheReadKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheReadKnownEvents sets the "cache_read_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableCacheReadKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetCacheReadKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheReadKnownEvents adds value to the "cache_read_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddCacheReadKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddCacheReadKnownEvents(v)
+	return _u
+}
+
+// SetCacheWriteKnownEvents sets the "cache_write_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetCacheWriteKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetCacheWriteKnownEvents()
+	_u.mutation.SetCacheWriteKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheWriteKnownEvents sets the "cache_write_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableCacheWriteKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetCacheWriteKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheWriteKnownEvents adds value to the "cache_write_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddCacheWriteKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddCacheWriteKnownEvents(v)
+	return _u
+}
+
+// SetCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetCacheWrite1hKnownEvents()
+	_u.mutation.SetCacheWrite1hKnownEvents(v)
+	return _u
+}
+
+// SetNillableCacheWrite1hKnownEvents sets the "cache_write_1h_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableCacheWrite1hKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetCacheWrite1hKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddCacheWrite1hKnownEvents adds value to the "cache_write_1h_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddCacheWrite1hKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddCacheWrite1hKnownEvents(v)
+	return _u
+}
+
+// SetReasoningKnownEvents sets the "reasoning_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetReasoningKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetReasoningKnownEvents()
+	_u.mutation.SetReasoningKnownEvents(v)
+	return _u
+}
+
+// SetNillableReasoningKnownEvents sets the "reasoning_known_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillableReasoningKnownEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetReasoningKnownEvents(*v)
+	}
+	return _u
+}
+
+// AddReasoningKnownEvents adds value to the "reasoning_known_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddReasoningKnownEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddReasoningKnownEvents(v)
+	return _u
+}
+
+// SetPresenceTrackedEvents sets the "presence_tracked_events" field.
+func (_u *UsageRollupDailyUpdateOne) SetPresenceTrackedEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.ResetPresenceTrackedEvents()
+	_u.mutation.SetPresenceTrackedEvents(v)
+	return _u
+}
+
+// SetNillablePresenceTrackedEvents sets the "presence_tracked_events" field if the given value is not nil.
+func (_u *UsageRollupDailyUpdateOne) SetNillablePresenceTrackedEvents(v *int64) *UsageRollupDailyUpdateOne {
+	if v != nil {
+		_u.SetPresenceTrackedEvents(*v)
+	}
+	return _u
+}
+
+// AddPresenceTrackedEvents adds value to the "presence_tracked_events" field.
+func (_u *UsageRollupDailyUpdateOne) AddPresenceTrackedEvents(v int64) *UsageRollupDailyUpdateOne {
+	_u.mutation.AddPresenceTrackedEvents(v)
+	return _u
+}
+
 // SetFirstEventTs sets the "first_event_ts" field.
 func (_u *UsageRollupDailyUpdateOne) SetFirstEventTs(v time.Time) *UsageRollupDailyUpdateOne {
 	_u.mutation.SetFirstEventTs(v)
@@ -815,6 +1151,48 @@ func (_u *UsageRollupDailyUpdateOne) sqlSave(ctx context.Context) (_node *UsageR
 	}
 	if value, ok := _u.mutation.AddedNullTokenEvents(); ok {
 		_spec.AddField(usagerollupdaily.FieldNullTokenEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.InputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldInputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedInputKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldInputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.OutputKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldOutputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedOutputKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldOutputKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheReadKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheReadKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheReadKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheReadKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheWriteKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWriteKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheWriteKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheWriteKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.CacheWrite1hKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldCacheWrite1hKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCacheWrite1hKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldCacheWrite1hKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.ReasoningKnownEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldReasoningKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedReasoningKnownEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldReasoningKnownEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.PresenceTrackedEvents(); ok {
+		_spec.SetField(usagerollupdaily.FieldPresenceTrackedEvents, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPresenceTrackedEvents(); ok {
+		_spec.AddField(usagerollupdaily.FieldPresenceTrackedEvents, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.FirstEventTs(); ok {
 		_spec.SetField(usagerollupdaily.FieldFirstEventTs, field.TypeTime, value)

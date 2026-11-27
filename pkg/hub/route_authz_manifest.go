@@ -129,7 +129,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/pending-secrets/": "authenticated",
 
 	// ── Usage ──────────────────────────────────────────────────────────
-	"/api/v1/usage/me": "authenticated", // Caller's own quota usage
+	"/api/v1/usage/me": "authenticated", // Caller's own quota usage (distinct from /api/v1/me/usage token usage)
+	"/api/v1/me/usage": "authenticated", // Caller's own Track 1 token usage (behind tokenomics.usage_ledger)
+	"/api/v1/usage":    "admin",         // Global Track 1 token usage — hub.metrics.read (behind tokenomics.usage_ledger)
 
 	// ── Session metrics ────────────────────────────────────────────────
 	"/api/v1/metrics/session/": "authenticated", // Session metrics (DB-backed)

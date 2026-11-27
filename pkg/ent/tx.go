@@ -240,6 +240,8 @@ type Tx struct {
 	UsageReservation *UsageReservationClient
 	// UsageRollupDaily is the client for interacting with the UsageRollupDaily builders.
 	UsageRollupDaily *UsageRollupDailyClient
+	// UsageRollupHourly is the client for interacting with the UsageRollupHourly builders.
+	UsageRollupHourly *UsageRollupHourlyClient
 	// UsageScopeCounterDaily is the client for interacting with the UsageScopeCounterDaily builders.
 	UsageScopeCounterDaily *UsageScopeCounterDailyClient
 	// User is the client for interacting with the User builders.
@@ -501,6 +503,7 @@ func (tx *Tx) init() {
 	tx.UsageEvent = NewUsageEventClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)
+	tx.UsageRollupHourly = NewUsageRollupHourlyClient(tx.config)
 	tx.UsageScopeCounterDaily = NewUsageScopeCounterDailyClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)

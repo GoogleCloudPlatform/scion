@@ -976,6 +976,51 @@ var identityOperations = []OperationSpec{
 		}},
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
+	{
+		ID:          "hub.user.usage.read",
+		Domain:      "hub",
+		Description: "Read another user's Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger). Requires hub.metrics.read on the hub",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage", Method: "GET", Variant: "cross_user"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.metrics.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+		},
+		Bearer: AdmitOn(BearerTargetHubInstance, BearerBoundaryHub),
+	},
+	{
+		ID:          "user.usage.self.read",
+		Domain:      "user",
+		Description: "Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger). A project-boundary user access token is restricted to its boundary project",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage", Method: "GET", Variant: "self"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserUsageRead_SelfTokenReadsOwn"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionAuthenticationOnly,
+			Reason: "Returns only the caller's own Track 1 token usage; carries no other user's records",
+			Scope:  "caller's own Track 1 token usage only",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestUserUsageRead_SelfTokenReadsOwn"},
+	},
 
 	// =====================================================================
 	// Domain: role — role definition and binding reads

@@ -2900,6 +2900,16 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Tokenomics Track 1 project usage summary (GET /api/v1/projects/{id}/usage).
+	if subPath == "usage" {
+		s.handleProjectUsage(w, r, projectID)
+		return
+	}
+	if strings.HasPrefix(subPath, "usage/") {
+		NotFound(w, "Project usage route")
+		return
+	}
+
 	// Check for nested /metrics/summary path (DB-backed session metrics summary)
 	if subPath == "metrics/summary" {
 		s.handleProjectSessionMetricsSummary(w, r, projectID)

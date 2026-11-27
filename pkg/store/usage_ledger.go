@@ -88,6 +88,31 @@ const (
 	UsageScopeKindProject     = "project"
 	UsageScopeKindUser        = "user"
 	UsageScopeKindUserProject = "user_project"
+	UsageScopeKindGlobal      = "global"
+)
+
+// UsageRollupHourlyCoverageSection is the system hub_settings section that
+// records the UTC hour-aligned timestamp when usage_rollups_hourly coverage
+// began (set idempotently on first hourly rollup write).
+// LegacyUsageRollupHourlyCoverageSection is the earlier internal.* key accepted
+// on read for any rows already written before the rename.
+const (
+	UsageRollupHourlyCoverageSection       = "system.usage_rollups_hourly_coverage"
+	LegacyUsageRollupHourlyCoverageSection = "internal.usage_rollups_hourly_coverage"
+)
+
+// Usage rollup granularities and supported groupBy dimensions.
+const (
+	UsageGranularityHour = "hour"
+	UsageGranularityDay  = "day"
+
+	UsageGroupByModel   = "model"
+	UsageGroupByHarness = "harness"
+	UsageGroupByAgent   = "agent"
+	UsageGroupByUser    = "user"
+	UsageGroupByProject = "project"
+	UsageGroupByDay     = "day"
+	UsageGroupByHour    = "hour"
 )
 
 // Usage ledger source values for usage_events.usage_source and
@@ -203,28 +228,39 @@ type UsageEvent struct {
 // UsageRollupDaily is one row in usage_rollups_daily. BillingUserID uses ""
 // for NULL billing_user_id so the composite unique key is dialect-uniform.
 type UsageRollupDaily struct {
-	ID                 string    `json:"id,omitempty"`
-	BucketStart        time.Time `json:"bucketStart"`
-	ProjectID          string    `json:"projectId"`
-	BillingUserID      string    `json:"billingUserId"`
-	AgentID            string    `json:"agentId"`
-	Harness            string    `json:"harness"`
-	Model              string    `json:"model"`
-	UsageSource        string    `json:"usageSource"`
-	Calls              int64     `json:"calls"`
-	ErrorCalls         int64     `json:"errorCalls"`
-	Input              int64     `json:"input"`
-	Output             int64     `json:"output"`
-	CacheRead          int64     `json:"cacheRead"`
-	CacheWrite         int64     `json:"cacheWrite"`
-	CacheWrite1h       int64     `json:"cacheWrite1h"`
-	Reasoning          int64     `json:"reasoning"`
-	ReportedCostMicros int64     `json:"reportedCostMicros"`
-	Events             int64     `json:"events"`
-	NullTokenEvents    int64     `json:"nullTokenEvents"`
-	FirstEventTS       time.Time `json:"firstEventTs"`
-	LastEventTS        time.Time `json:"lastEventTs"`
+	ID                      string    `json:"id,omitempty"`
+	BucketStart             time.Time `json:"bucketStart"`
+	ProjectID               string    `json:"projectId"`
+	BillingUserID           string    `json:"billingUserId"`
+	AgentID                 string    `json:"agentId"`
+	Harness                 string    `json:"harness"`
+	Model                   string    `json:"model"`
+	UsageSource             string    `json:"usageSource"`
+	Calls                   int64     `json:"calls"`
+	ErrorCalls              int64     `json:"errorCalls"`
+	Input                   int64     `json:"input"`
+	Output                  int64     `json:"output"`
+	CacheRead               int64     `json:"cacheRead"`
+	CacheWrite              int64     `json:"cacheWrite"`
+	CacheWrite1h            int64     `json:"cacheWrite1h"`
+	Reasoning               int64     `json:"reasoning"`
+	ReportedCostMicros      int64     `json:"reportedCostMicros"`
+	Events                  int64     `json:"events"`
+	NullTokenEvents         int64     `json:"nullTokenEvents"`
+	InputKnownEvents        int64     `json:"inputKnownEvents"`
+	OutputKnownEvents       int64     `json:"outputKnownEvents"`
+	CacheReadKnownEvents    int64     `json:"cacheReadKnownEvents"`
+	CacheWriteKnownEvents   int64     `json:"cacheWriteKnownEvents"`
+	CacheWrite1hKnownEvents int64     `json:"cacheWrite1hKnownEvents"`
+	ReasoningKnownEvents    int64     `json:"reasoningKnownEvents"`
+	PresenceTrackedEvents   int64     `json:"presenceTrackedEvents"`
+	FirstEventTS            time.Time `json:"firstEventTs"`
+	LastEventTS             time.Time `json:"lastEventTs"`
 }
+
+// UsageRollupHourly is one row in usage_rollups_hourly (UTC hour-aligned
+// bucket_start). Shares the exact same dimensions and counters as daily.
+type UsageRollupHourly = UsageRollupDaily
 
 // UsageScopeCounterDaily is one row in usage_scope_counters_daily for O(1)
 // exact quota accounting. For ScopeKind == "user_project", ScopeID is
@@ -317,20 +353,94 @@ type UsageIngestBatchResult struct {
 	InsertedEvents []*UsageEvent
 }
 
-// UsageTokenPresence reports per-(model, harness, usage_source) non-null event
-// counts from usage_events over a query window so read APIs can distinguish
-// measured 0 from all-NULL (unknown) buckets in usage_rollups_daily (§3.1).
-type UsageTokenPresence struct {
-	Model             string
-	Harness           string
-	UsageSource       string
-	EventCount        int64
-	InputCount        int64
-	OutputCount       int64
-	CacheReadCount    int64
-	CacheWriteCount   int64
-	CacheWrite1hCount int64
-	ReasoningCount    int64
+// UsageRollupTotals holds aggregated counter sums and presence counters over a
+// query window or group. Saturated is true when any summed counter reached or
+// exceeded math.MaxInt64 and was clamped.
+type UsageRollupTotals struct {
+	Calls                   int64
+	ErrorCalls              int64
+	Input                   int64
+	Output                  int64
+	CacheRead               int64
+	CacheWrite              int64
+	CacheWrite1h            int64
+	Reasoning               int64
+	ReportedCostMicros      int64
+	Events                  int64
+	NullTokenEvents         int64
+	InputKnownEvents        int64
+	OutputKnownEvents       int64
+	CacheReadKnownEvents    int64
+	CacheWriteKnownEvents   int64
+	CacheWrite1hKnownEvents int64
+	ReasoningKnownEvents    int64
+	PresenceTrackedEvents   int64
+	Saturated               bool
+}
+
+// UsageRollupGroup is one aggregated group row returned by QueryUsageRollups.
+type UsageRollupGroup struct {
+	BucketStart   *time.Time
+	ProjectID     string
+	BillingUserID string
+	AgentID       string
+	Harness       string
+	Model         string
+	UsageRollupTotals
+}
+
+// UsageRollupQuery describes a bounded SQL-aggregated rollup query over
+// usage_rollups_hourly or usage_rollups_daily.
+type UsageRollupQuery struct {
+	Granularity   string // UsageGranularityHour or UsageGranularityDay
+	Since         time.Time
+	Until         time.Time
+	ProjectID     string
+	BillingUserID string
+	AgentID       string
+	Harness       string
+	Model         string
+	UsageSource   string
+	GroupBy       []string
+	Limit         int
+}
+
+// UsageRollupQueryResult holds overall totals and optional bounded grouped rows
+// returned by QueryUsageRollups.
+type UsageRollupQueryResult struct {
+	Totals    UsageRollupTotals
+	Groups    []*UsageRollupGroup
+	Truncated bool
+}
+
+// UsageCoverageFilter scopes a single-query aggregate meter-health and
+// measurement-coverage summary over non-deleted agents overlapping [Since, Until].
+type UsageCoverageFilter struct {
+	ProjectID     string
+	BillingUserID string
+	AgentID       string
+	Since         time.Time
+	Until         time.Time
+	StaleAfter    time.Duration
+	DBNow         time.Time
+}
+
+// UsageCoverageBucket aggregates agent counts sharing the same
+// measurement-status derivation inputs so the Hub derives status through a
+// single Go function (deriveMeasurementStatus) without per-agent queries.
+type UsageCoverageBucket struct {
+	IsRunning        bool
+	HasMeterHealth   bool
+	LatestFinalState string
+	IsReceiptStale   bool
+	HasUsageData     bool
+	AgentCount       int
+}
+
+// UsageScopeCoverage summarizes measurement coverage inputs across agents in scope.
+type UsageScopeCoverage struct {
+	Buckets       []UsageCoverageBucket
+	LastReceiptAt *time.Time
 }
 
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
@@ -393,10 +503,28 @@ type UsageLedgerStore interface {
 	// with bucket_start in [sinceDay, untilDay] (inclusive, UTC day boundaries).
 	ListUsageRollupsDailyByAgent(ctx context.Context, agentID string, sinceDay, untilDay time.Time) ([]*UsageRollupDaily, error)
 
-	// GetUsageTokenPresenceByAgent returns per-(model, harness, usage_source)
-	// non-null counts for each canonical token column in usage_events for
-	// agentID with event_ts in [since, until] (inclusive).
-	GetUsageTokenPresenceByAgent(ctx context.Context, agentID string, since, until time.Time) ([]*UsageTokenPresence, error)
+	// GetUsageHourlyCoverageStart returns the UTC hour-aligned timestamp when
+	// usage_rollups_hourly coverage began, and ok=false if hourly rollups have
+	// not yet received any writes.
+	GetUsageHourlyCoverageStart(ctx context.Context) (startedAt time.Time, ok bool, err error)
+
+	// CheckUsageHourlyConsistency compares SUM(events) between
+	// usage_rollups_hourly and usage_rollups_daily over the inclusive whole UTC
+	// days [utcDayStart(q.Since), utcDayStart(q.Until)] with the same scope and
+	// dimension filters. Returns true when both sums match (or when the day
+	// range is empty), and false when hourly rollups are incomplete relative to
+	// daily rollups (for example after a rolling upgrade or rollback).
+	CheckUsageHourlyConsistency(ctx context.Context, q UsageRollupQuery) (bool, error)
+
+	// QueryUsageRollups aggregates usage_rollups_hourly or usage_rollups_daily
+	// in SQL for the requested window, filters, and optional groupBy dimensions,
+	// bounding returned groups to q.Limit.
+	QueryUsageRollups(ctx context.Context, q UsageRollupQuery) (*UsageRollupQueryResult, error)
+
+	// GetUsageScopeCoverage computes aggregate agent measurement coverage
+	// (measured/unmeasured/stale counts and latest last_receipt_at) in a single
+	// bounded SQL query for a project, billing user, or global hub scope.
+	GetUsageScopeCoverage(ctx context.Context, filter UsageCoverageFilter) (*UsageScopeCoverage, error)
 
 	// HasUsageEventsForRun reports whether at least one usage_events row exists
 	// for (agentID, runID).

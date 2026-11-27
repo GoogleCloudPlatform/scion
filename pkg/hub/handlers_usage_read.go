@@ -16,12 +16,14 @@ package hub
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -69,6 +71,7 @@ type AgentUsageTokens struct {
 	Reasoning      *int64                         `json:"reasoning"`
 	SummableTokens *int64                         `json:"summable_tokens"`
 	UnknownEvents  *AgentUsageBucketUnknownEvents `json:"unknown_events,omitempty"`
+	Saturated      bool                           `json:"saturated,omitempty"`
 }
 
 // AgentUsageModelBreakdown reports per-model usage totals over the query window.
@@ -161,12 +164,6 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	presence, err := s.store.GetUsageTokenPresenceByAgent(ctx, agent.ID, since, until)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
 	runs, err := s.store.ListRunAttributionsByAgent(ctx, agent.ID, defaultUsageRunSummaryCap)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -189,7 +186,7 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, presence, runs, targetRunID, meterRows, currentRunHasEvents)
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunHasEvents)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -326,8 +323,16 @@ func parseUsageTimeParam(raw string, ref time.Time, endOfDay bool) (time.Time, e
 	return time.Time{}, fmt.Errorf("expected RFC 3339 timestamp, YYYY-MM-DD date, or positive duration (e.g. 7d, 24h), got %q", raw)
 }
 
+func saturatingAddInt64(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64, true
+	}
+	sum := a + b
+	return sum, sum == math.MaxInt64
+}
+
 type usageBucketPresence struct {
-	eventCount        int64
+	trackedEvents     int64
 	inputCount        int64
 	outputCount       int64
 	cacheReadCount    int64
@@ -336,14 +341,35 @@ type usageBucketPresence struct {
 	reasoningCount    int64
 }
 
-func (p *usageBucketPresence) add(src *store.UsageTokenPresence) {
-	p.eventCount += src.EventCount
-	p.inputCount += src.InputCount
-	p.outputCount += src.OutputCount
-	p.cacheReadCount += src.CacheReadCount
-	p.cacheWriteCount += src.CacheWriteCount
-	p.cacheWrite1hCount += src.CacheWrite1hCount
-	p.reasoningCount += src.ReasoningCount
+func (p *usageBucketPresence) addRollup(r *store.UsageRollupDaily) bool {
+	var sat, s bool
+	p.trackedEvents, s = saturatingAddInt64(p.trackedEvents, r.PresenceTrackedEvents)
+	sat = sat || s
+	p.inputCount, s = saturatingAddInt64(p.inputCount, r.InputKnownEvents)
+	sat = sat || s
+	p.outputCount, s = saturatingAddInt64(p.outputCount, r.OutputKnownEvents)
+	sat = sat || s
+	p.cacheReadCount, s = saturatingAddInt64(p.cacheReadCount, r.CacheReadKnownEvents)
+	sat = sat || s
+	p.cacheWriteCount, s = saturatingAddInt64(p.cacheWriteCount, r.CacheWriteKnownEvents)
+	sat = sat || s
+	p.cacheWrite1hCount, s = saturatingAddInt64(p.cacheWrite1hCount, r.CacheWrite1hKnownEvents)
+	sat = sat || s
+	p.reasoningCount, s = saturatingAddInt64(p.reasoningCount, r.ReasoningKnownEvents)
+	sat = sat || s
+	return sat
+}
+
+func presenceFromTotals(t store.UsageRollupTotals) usageBucketPresence {
+	return usageBucketPresence{
+		trackedEvents:     t.PresenceTrackedEvents,
+		inputCount:        t.InputKnownEvents,
+		outputCount:       t.OutputKnownEvents,
+		cacheReadCount:    t.CacheReadKnownEvents,
+		cacheWriteCount:   t.CacheWriteKnownEvents,
+		cacheWrite1hCount: t.CacheWrite1hKnownEvents,
+		reasoningCount:    t.ReasoningKnownEvents,
+	}
 }
 
 type modelRollupAgg struct {
@@ -361,13 +387,13 @@ type modelRollupAgg struct {
 	events          int64
 	nullTokenEvents int64
 	presence        usageBucketPresence
+	saturated       bool
 }
 
 func buildAgentUsageResponse(
 	agent *store.Agent,
 	since, until, dbNow time.Time,
 	rollups []*store.UsageRollupDaily,
-	presence []*store.UsageTokenPresence,
 	runs []*store.RunAttribution,
 	targetRunID string,
 	meterRows []*store.MeterHealth,
@@ -379,22 +405,7 @@ func buildAgentUsageResponse(
 		usageSource string
 	}
 
-	presenceByKey := make(map[modelKey]*usageBucketPresence, len(presence))
 	var totalPresence usageBucketPresence
-	for _, p := range presence {
-		if p == nil {
-			continue
-		}
-		k := modelKey{model: p.Model, harness: p.Harness, usageSource: p.UsageSource}
-		dst, ok := presenceByKey[k]
-		if !ok {
-			dst = &usageBucketPresence{}
-			presenceByKey[k] = dst
-		}
-		dst.add(p)
-		totalPresence.add(p)
-	}
-
 	byModelMap := make(map[modelKey]*modelRollupAgg)
 	var (
 		totalCalls           int64
@@ -407,22 +418,34 @@ func buildAgentUsageResponse(
 		totalCacheWrite      int64
 		totalCacheWrite1h    int64
 		totalReasoning       int64
+		totalSaturated       bool
 	)
+
+	addSat := func(dst *int64, delta int64, satFlag *bool) {
+		v, s := saturatingAddInt64(*dst, delta)
+		*dst = v
+		if s {
+			*satFlag = true
+		}
+	}
 
 	for _, r := range rollups {
 		if r == nil {
 			continue
 		}
-		totalCalls += r.Calls
-		totalErrorCalls += r.ErrorCalls
-		totalEvents += r.Events
-		totalNullTokenEvents += r.NullTokenEvents
-		totalInput += r.Input
-		totalOutput += r.Output
-		totalCacheRead += r.CacheRead
-		totalCacheWrite += r.CacheWrite
-		totalCacheWrite1h += r.CacheWrite1h
-		totalReasoning += r.Reasoning
+		addSat(&totalCalls, r.Calls, &totalSaturated)
+		addSat(&totalErrorCalls, r.ErrorCalls, &totalSaturated)
+		addSat(&totalEvents, r.Events, &totalSaturated)
+		addSat(&totalNullTokenEvents, r.NullTokenEvents, &totalSaturated)
+		addSat(&totalInput, r.Input, &totalSaturated)
+		addSat(&totalOutput, r.Output, &totalSaturated)
+		addSat(&totalCacheRead, r.CacheRead, &totalSaturated)
+		addSat(&totalCacheWrite, r.CacheWrite, &totalSaturated)
+		addSat(&totalCacheWrite1h, r.CacheWrite1h, &totalSaturated)
+		addSat(&totalReasoning, r.Reasoning, &totalSaturated)
+		if totalPresence.addRollup(r) {
+			totalSaturated = true
+		}
 
 		k := modelKey{model: r.Model, harness: r.Harness, usageSource: r.UsageSource}
 		agg, ok := byModelMap[k]
@@ -432,21 +455,21 @@ func buildAgentUsageResponse(
 				harness:     r.Harness,
 				usageSource: r.UsageSource,
 			}
-			if p, hasP := presenceByKey[k]; hasP {
-				agg.presence = *p
-			}
 			byModelMap[k] = agg
 		}
-		agg.calls += r.Calls
-		agg.errorCalls += r.ErrorCalls
-		agg.input += r.Input
-		agg.output += r.Output
-		agg.cacheRead += r.CacheRead
-		agg.cacheWrite += r.CacheWrite
-		agg.cacheWrite1h += r.CacheWrite1h
-		agg.reasoning += r.Reasoning
-		agg.events += r.Events
-		agg.nullTokenEvents += r.NullTokenEvents
+		addSat(&agg.calls, r.Calls, &agg.saturated)
+		addSat(&agg.errorCalls, r.ErrorCalls, &agg.saturated)
+		addSat(&agg.input, r.Input, &agg.saturated)
+		addSat(&agg.output, r.Output, &agg.saturated)
+		addSat(&agg.cacheRead, r.CacheRead, &agg.saturated)
+		addSat(&agg.cacheWrite, r.CacheWrite, &agg.saturated)
+		addSat(&agg.cacheWrite1h, r.CacheWrite1h, &agg.saturated)
+		addSat(&agg.reasoning, r.Reasoning, &agg.saturated)
+		addSat(&agg.events, r.Events, &agg.saturated)
+		addSat(&agg.nullTokenEvents, r.NullTokenEvents, &agg.saturated)
+		if agg.presence.addRollup(r) {
+			agg.saturated = true
+		}
 	}
 
 	byModel := make([]AgentUsageModelBreakdown, 0, len(byModelMap))
@@ -456,6 +479,9 @@ func buildAgentUsageResponse(
 			agg.input, agg.output, agg.cacheRead, agg.cacheWrite, agg.cacheWrite1h, agg.reasoning,
 			agg.presence,
 		)
+		if agg.saturated {
+			tokens.Saturated = true
+		}
 		byModel = append(byModel, AgentUsageModelBreakdown{
 			Model:           agg.model,
 			Harness:         agg.harness,
@@ -496,6 +522,9 @@ func buildAgentUsageResponse(
 		totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCacheWrite1h, totalReasoning,
 		totalPresence,
 	)
+	if totalSaturated {
+		totalTokens.Saturated = true
+	}
 
 	runSummaries := make([]AgentUsageRunSummary, 0, len(runs))
 	for _, ra := range runs {
@@ -541,6 +570,7 @@ func buildAgentUsageResponse(
 		MeterHealth:       currentRunMeterRows,
 		HasRunUsageEvents: hasRunData,
 		DBNow:             dbNow,
+		AgentPhase:        agent.Phase,
 	})
 
 	return AgentUsageResponse{
@@ -560,10 +590,21 @@ func buildAgentUsageResponse(
 	}
 }
 
-// resolveNullableTokens converts non-nullable daily rollup sums into canonical
-// three-state nullable token buckets (§3.1). A bucket with zero non-null
-// contributions — or whose presence cannot be verified (for example, events
-// past ledger retention) — surfaces as nil (JSON null), never 0.
+// resolveNullableTokens converts non-nullable rollup sums into canonical
+// three-state nullable token buckets (§3.1) using the rollup's per-bucket
+// presence counters (no usage_events scan required). A bucket with zero
+// non-null contributions — including pre-migration legacy daily rows where
+// presence_tracked_events == 0 — surfaces as nil (JSON null), never 0.
+//
+// Mixed legacy + tracked bucket caveat: pre-migration daily rollup rows have
+// presence_tracked_events == 0 and *_known_events == 0 (no backfill). Because
+// unknown_events for a bucket is computed as presence_tracked_events - known
+// only when presence_tracked_events > 0 && known > 0 && known < presence_tracked_events:
+//   - legacy rows never contribute to unknown_events;
+//   - if a bucket mixes legacy rows (which supply sum > 0 with known == 0) and
+//     tracked rows where that bucket was NULL (presence_tracked_events > 0,
+//     known == 0), unknown_events reports 0 for that bucket rather than the
+//     tracked unknown count. The token sum itself remains exact.
 func resolveNullableTokens(
 	events, nullTokenEvents int64,
 	input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning int64,
@@ -575,17 +616,17 @@ func resolveNullableTokens(
 
 	resolveBucket := func(sum int64, nonNullCount int64) (*int64, int64) {
 		var unknownCount int64
-		if presence.eventCount > 0 && nonNullCount > 0 && nonNullCount < presence.eventCount {
-			unknownCount = presence.eventCount - nonNullCount
+		if presence.trackedEvents > 0 && nonNullCount > 0 && nonNullCount < presence.trackedEvents {
+			unknownCount = presence.trackedEvents - nonNullCount
 		}
 		if sum > 0 {
 			v := sum
 			return &v, unknownCount
 		}
-		// Sum is 0. Only emit measured 0 when usage_events presence confirms at
-		// least one non-null event for this bucket; otherwise surface nil
+		// Sum is 0. Only emit measured 0 when rollup presence counters confirm
+		// at least one non-null event for this bucket; otherwise surface nil
 		// (unknown) — never fabricate 0 (§3.1).
-		if presence.eventCount > 0 && nonNullCount > 0 {
+		if nonNullCount > 0 {
 			var zero int64
 			return &zero, unknownCount
 		}
@@ -621,17 +662,35 @@ func resolveNullableTokens(
 
 	// SummableTokens = sum of known {input, output, cache_read, cache_write} (§3.1).
 	// Reasoning and cache_write_1h are subsets and are never added to SummableTokens.
+	// Saturate at math.MaxInt64 so large sums never wrap negative.
 	var summable int64
 	hasAnySummable := false
+	saturated := false
 	for _, p := range []*int64{out.Input, out.Output, out.CacheRead, out.CacheWrite} {
 		if p != nil {
-			summable += *p
+			v := *p
+			if v == math.MaxInt64 {
+				saturated = true
+			}
+			if v > math.MaxInt64-summable {
+				summable = math.MaxInt64
+				saturated = true
+			} else {
+				summable += v
+			}
 			hasAnySummable = true
 		}
+	}
+	if out.CacheWrite1h != nil && *out.CacheWrite1h == math.MaxInt64 {
+		saturated = true
+	}
+	if out.Reasoning != nil && *out.Reasoning == math.MaxInt64 {
+		saturated = true
 	}
 	if hasAnySummable {
 		out.SummableTokens = &summable
 	}
+	out.Saturated = saturated
 	return out
 }
 
@@ -642,13 +701,18 @@ type measurementStatusInput struct {
 	MeterHealth       []*store.MeterHealth
 	HasRunUsageEvents bool
 	DBNow             time.Time
+	// AgentPhase, when non-empty, restricts open-meter staleness to running
+	// agents (PhaseRunning) so stopped or crashed agents do not remain stale
+	// indefinitely (O1b).
+	AgentPhase string
 }
 
 // deriveMeasurementStatus computes the P1 measurement_status for an agent's
 // current run:
 //   - "stale" when an open meter_health row for the run has had no receipt for
 //     more than 3 heartbeat intervals (180s), evaluated at read time from DBNow
-//     (§4.2 item 7);
+//     (§4.2 item 7), and (when AgentPhase is provided) the agent is in a
+//     running phase;
 //   - "measured" when the current run has received Track 1 usage events and its
 //     meter is fresh (or cleanly closed with final_state="final");
 //   - "unmeasured" when no Track 1 usage data has been received for the current
@@ -670,7 +734,9 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 
 	if latest != nil {
 		staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
-		if latest.FinalState == store.MeterHealthFinalStateOpen &&
+		isRunning := in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning)
+		if isRunning &&
+			latest.FinalState == store.MeterHealthFinalStateOpen &&
 			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
 			return MeasurementStatusStale
 		}

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -723,7 +724,7 @@ func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *t
 		{Model: "claude-sonnet-4-6", Harness: "claude", UsageSource: store.UsageSourceHooks, Calls: 2, Input: 10, Output: 5, Events: 2},
 		{Model: "claude-sonnet-4-6", Harness: "", UsageSource: store.UsageSourceNative, Calls: 2, Input: 10, Output: 5, Events: 2},
 	}
-	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, nil, ag.RunID, nil, false)
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, false)
 	require.Len(t, resp.ByModel, 4)
 	assert.Equal(t, "", resp.ByModel[0].Harness)
 	assert.Equal(t, store.UsageSourceNative, resp.ByModel[0].UsageSource)
@@ -733,4 +734,75 @@ func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *t
 	assert.Equal(t, store.UsageSourceNative, resp.ByModel[2].UsageSource)
 	assert.Equal(t, "codex", resp.ByModel[3].Harness)
 	assert.Equal(t, store.UsageSourceNative, resp.ByModel[3].UsageSource)
+
+	// (c) Pre-migration legacy daily rows (presence_tracked_events == 0):
+	// sum == 0 must surface as nil (never fabricated 0), while sum > 0 surfaces
+	// &sum without falsely flagging all legacy events as unknown.
+	legacyRollups := []*store.UsageRollupDaily{
+		{
+			Model:                 "claude-sonnet-4-6",
+			Harness:               "claude",
+			UsageSource:           store.UsageSourceNative,
+			Calls:                 3,
+			Input:                 100,
+			Output:                50,
+			CacheRead:             0, // legacy 0 without presence counter -> must read as nil
+			CacheWrite:            0,
+			Events:                3,
+			PresenceTrackedEvents: 0,
+		},
+	}
+	legacyResp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, legacyRollups, nil, ag.RunID, nil, false)
+	require.NotNil(t, legacyResp.Tokens.Input)
+	assert.Equal(t, int64(100), *legacyResp.Tokens.Input)
+	require.NotNil(t, legacyResp.Tokens.Output)
+	assert.Equal(t, int64(50), *legacyResp.Tokens.Output)
+	assert.Nil(t, legacyResp.Tokens.CacheRead, "legacy row with sum=0 and presence_tracked_events=0 must read as null, never 0")
+	assert.Nil(t, legacyResp.Tokens.CacheWrite)
+	assert.Nil(t, legacyResp.Tokens.UnknownEvents, "pure legacy row must not fabricate unknown_events counts")
+}
+
+func TestAgentUsageRead_SaturatesOnOverflow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ag := &store.Agent{ID: "ag-sat", ProjectID: "proj-sat", RunID: "run-sat", Phase: string(state.PhaseRunning)}
+	rollups := []*store.UsageRollupDaily{
+		{
+			Model:                 "claude-sonnet-4-6",
+			Harness:               "claude",
+			UsageSource:           store.UsageSourceNative,
+			Calls:                 1,
+			Input:                 math.MaxInt64 - 10,
+			Output:                50,
+			Events:                1,
+			InputKnownEvents:      1,
+			OutputKnownEvents:     1,
+			PresenceTrackedEvents: 1,
+		},
+		{
+			Model:                 "claude-sonnet-4-6",
+			Harness:               "claude",
+			UsageSource:           store.UsageSourceNative,
+			Calls:                 1,
+			Input:                 100,
+			Output:                25,
+			Events:                1,
+			InputKnownEvents:      1,
+			OutputKnownEvents:     1,
+			PresenceTrackedEvents: 1,
+		},
+	}
+
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, true)
+	require.NotNil(t, resp.Tokens.Input)
+	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.Input)
+	require.NotNil(t, resp.Tokens.Output)
+	assert.Equal(t, int64(75), *resp.Tokens.Output)
+	require.NotNil(t, resp.Tokens.SummableTokens)
+	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.SummableTokens)
+	assert.True(t, resp.Tokens.Saturated)
+
+	require.Len(t, resp.ByModel, 1)
+	require.NotNil(t, resp.ByModel[0].Tokens.Input)
+	assert.Equal(t, int64(math.MaxInt64), *resp.ByModel[0].Tokens.Input)
+	assert.True(t, resp.ByModel[0].Tokens.Saturated)
 }

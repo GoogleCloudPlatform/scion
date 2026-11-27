@@ -54,6 +54,20 @@ type UsageRollupDaily struct {
 	Events int64 `json:"events,omitempty"`
 	// NullTokenEvents holds the value of the "null_token_events" field.
 	NullTokenEvents int64 `json:"null_token_events,omitempty"`
+	// InputKnownEvents holds the value of the "input_known_events" field.
+	InputKnownEvents int64 `json:"input_known_events,omitempty"`
+	// OutputKnownEvents holds the value of the "output_known_events" field.
+	OutputKnownEvents int64 `json:"output_known_events,omitempty"`
+	// CacheReadKnownEvents holds the value of the "cache_read_known_events" field.
+	CacheReadKnownEvents int64 `json:"cache_read_known_events,omitempty"`
+	// CacheWriteKnownEvents holds the value of the "cache_write_known_events" field.
+	CacheWriteKnownEvents int64 `json:"cache_write_known_events,omitempty"`
+	// CacheWrite1hKnownEvents holds the value of the "cache_write_1h_known_events" field.
+	CacheWrite1hKnownEvents int64 `json:"cache_write_1h_known_events,omitempty"`
+	// ReasoningKnownEvents holds the value of the "reasoning_known_events" field.
+	ReasoningKnownEvents int64 `json:"reasoning_known_events,omitempty"`
+	// PresenceTrackedEvents holds the value of the "presence_tracked_events" field.
+	PresenceTrackedEvents int64 `json:"presence_tracked_events,omitempty"`
 	// FirstEventTs holds the value of the "first_event_ts" field.
 	FirstEventTs time.Time `json:"first_event_ts,omitempty"`
 	// LastEventTs holds the value of the "last_event_ts" field.
@@ -66,7 +80,7 @@ func (*UsageRollupDaily) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case usagerollupdaily.FieldCalls, usagerollupdaily.FieldErrorCalls, usagerollupdaily.FieldInput, usagerollupdaily.FieldOutput, usagerollupdaily.FieldCacheRead, usagerollupdaily.FieldCacheWrite, usagerollupdaily.FieldCacheWrite1h, usagerollupdaily.FieldReasoning, usagerollupdaily.FieldReportedCostMicros, usagerollupdaily.FieldEvents, usagerollupdaily.FieldNullTokenEvents:
+		case usagerollupdaily.FieldCalls, usagerollupdaily.FieldErrorCalls, usagerollupdaily.FieldInput, usagerollupdaily.FieldOutput, usagerollupdaily.FieldCacheRead, usagerollupdaily.FieldCacheWrite, usagerollupdaily.FieldCacheWrite1h, usagerollupdaily.FieldReasoning, usagerollupdaily.FieldReportedCostMicros, usagerollupdaily.FieldEvents, usagerollupdaily.FieldNullTokenEvents, usagerollupdaily.FieldInputKnownEvents, usagerollupdaily.FieldOutputKnownEvents, usagerollupdaily.FieldCacheReadKnownEvents, usagerollupdaily.FieldCacheWriteKnownEvents, usagerollupdaily.FieldCacheWrite1hKnownEvents, usagerollupdaily.FieldReasoningKnownEvents, usagerollupdaily.FieldPresenceTrackedEvents:
 			values[i] = new(sql.NullInt64)
 		case usagerollupdaily.FieldProjectID, usagerollupdaily.FieldBillingUserID, usagerollupdaily.FieldAgentID, usagerollupdaily.FieldHarness, usagerollupdaily.FieldModel, usagerollupdaily.FieldUsageSource:
 			values[i] = new(sql.NullString)
@@ -203,6 +217,48 @@ func (_m *UsageRollupDaily) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.NullTokenEvents = value.Int64
 			}
+		case usagerollupdaily.FieldInputKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field input_known_events", values[i])
+			} else if value.Valid {
+				_m.InputKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldOutputKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field output_known_events", values[i])
+			} else if value.Valid {
+				_m.OutputKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldCacheReadKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field cache_read_known_events", values[i])
+			} else if value.Valid {
+				_m.CacheReadKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldCacheWriteKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field cache_write_known_events", values[i])
+			} else if value.Valid {
+				_m.CacheWriteKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldCacheWrite1hKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field cache_write_1h_known_events", values[i])
+			} else if value.Valid {
+				_m.CacheWrite1hKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldReasoningKnownEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field reasoning_known_events", values[i])
+			} else if value.Valid {
+				_m.ReasoningKnownEvents = value.Int64
+			}
+		case usagerollupdaily.FieldPresenceTrackedEvents:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field presence_tracked_events", values[i])
+			} else if value.Valid {
+				_m.PresenceTrackedEvents = value.Int64
+			}
 		case usagerollupdaily.FieldFirstEventTs:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field first_event_ts", values[i])
@@ -304,6 +360,27 @@ func (_m *UsageRollupDaily) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("null_token_events=")
 	builder.WriteString(fmt.Sprintf("%v", _m.NullTokenEvents))
+	builder.WriteString(", ")
+	builder.WriteString("input_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.InputKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("output_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.OutputKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("cache_read_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CacheReadKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("cache_write_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CacheWriteKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("cache_write_1h_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CacheWrite1hKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("reasoning_known_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ReasoningKnownEvents))
+	builder.WriteString(", ")
+	builder.WriteString("presence_tracked_events=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PresenceTrackedEvents))
 	builder.WriteString(", ")
 	builder.WriteString("first_event_ts=")
 	builder.WriteString(_m.FirstEventTs.Format(time.ANSIC))

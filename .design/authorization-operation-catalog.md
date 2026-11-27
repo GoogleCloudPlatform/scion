@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 462
+**Operations:** 467
 
 ## Table of Contents
 
@@ -130,6 +130,7 @@
 - [project.messagelogs.read](#projectmessagelogsread) — Read and stream a project's message log. A stream opened by a token ends once the token stops validating or loses project.read
 - [project.broadcast](#projectbroadcast) — Broadcast a message to a project's agents. Each recipient is then filtered by agent.message
 - [project.metrics.read](#projectmetricsread) — Read a project's metrics summary, session metrics summary and metrics dashboard
+- [project.usage.read](#projectusageread) — Read a project's Track 1 token usage summary and aggregate meter health (behind tokenomics.usage_ledger)
 - [project.prestarthooks.read](#projectprestarthooksread) — List or read a project's pre-start hooks
 - [project.prestarthooks.write](#projectprestarthookswrite) — Create, update, delete or activate a project pre-start hook
 - [project.settings.read](#projectsettingsread) — Read a project's settings and its resolved settings
@@ -286,6 +287,8 @@
 - [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
 - [user.update](#userupdate) — Update another user's profile (display name and preferences). The same PATCH dispatches user.admin.suspend for a status field and user.admin.promote for a role field, and every field's check passes before any write. A token needs user:update on a hub boundary, checked on the hub-level user record; a token PATCH that names no status field is checked as a profile update
 - [user.self.update](#userselfupdate) — Update the caller's own profile (display name and preferences) through PATCH /api/v1/users/{id} naming the caller's own record. A status field on the caller's own record is refused by the self-status guard
+- [hub.user.usage.read](#hubuserusageread) — Read another user's Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger). Requires hub.metrics.read on the hub
+- [user.usage.self.read](#userusageselfread) — Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger). A project-boundary user access token is restricted to its boundary project
 - [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes also need their own selector
 - [role.binding.read](#rolebindingread) — Read role binding assignments
 - [role.binding.effectivepermissions](#rolebindingeffectivepermissions) — Resolve a user principal's effective permissions and grant provenance. A token needs role_binding:read on a hub boundary; HEAD answers whether the caller may read it
@@ -343,6 +346,7 @@
 - [hub.integrations.install](#hubintegrationsinstall) — Install an integration and start an integration update; both build and install code on the hub host, so an interactive session only
 - [hub.teamsmanifest.read](#hubteamsmanifestread) — Read Teams integration manifest
 - [hub.metrics.read](#hubmetricsread) — Read metrics dashboard data
+- [hub.usage.read](#hubusageread) — Read hub-wide Track 1 token usage summary and aggregate meter health across all projects (behind tokenomics.usage_ledger). Distinct from /api/v1/usage/me (quota usage)
 - [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
 - [hub.githubapp.update](#hubgithubappupdate) — Create, update and delete GitHub App installations, discover installations and sync permissions
 - [hub.githubapp.config.update](#hubgithubappconfigupdate) — Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
@@ -351,7 +355,8 @@
 - [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update
 - [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
-- [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only (distinct from GET /api/v1/me/usage, which returns Track 1 token usage)
+- [hub.usage.self.read](#hubusageselfread) — Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage). A project-boundary user access token is restricted to its boundary project
 - [hub.experiments.read](#hubexperimentsread) — Read the resolved experiment flags. Any signed-in identity (user, agent or broker) reads them, and any user access token reads them
 - [hub.profiling.read](#hubprofilingread) — Read the client profiling switch. Any signed-in identity (user, agent or broker) reads it, and any user access token reads it
 - [hub.injectedskills.read](#hubinjectedskillsread) — Read the hub injected skill references. Any signed-in identity reads them, and any token reads them
@@ -5383,6 +5388,38 @@
 | http_route | GET | `/api/v1/projects/{id}/metrics-summary` |
 | http_route | GET | `/api/v1/projects/{id}/metrics/summary` |
 | http_route | GET | `/api/v1/projects/{id}/metrics` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.usage.read
+
+**Domain:** project
+
+**Description:** Read a project's Track 1 token usage summary and aggregate meter health (behind tokenomics.usage_ledger)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/usage` |
 
 **Principals:** `user`, `agent`
 
@@ -11019,6 +11056,72 @@
 
 ---
 
+## hub.user.usage.read
+
+**Domain:** hub
+
+**Description:** Read another user's Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger). Requires hub.metrics.read on the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/usage` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.metrics.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## user.usage.self.read
+
+**Domain:** user
+
+**Description:** Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger). A project-boundary user access token is restricted to its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/usage` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestUserUsageRead_SelfTokenReadsOwn`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserUsageRead_SelfTokenReadsOwn`
+
+### Exemptions
+
+- **authentication_only:** Returns only the caller's own Track 1 token usage; carries no other user's records (scope: caller's own Track 1 token usage only) — waives: `base_permission`
+
+---
+
 ## role.read
 
 **Domain:** role
@@ -13039,6 +13142,38 @@
 
 ---
 
+## hub.usage.read
+
+**Domain:** hub
+
+**Description:** Read hub-wide Track 1 token usage summary and aggregate meter health across all projects (behind tokenomics.usage_ledger). Distinct from /api/v1/usage/me (quota usage)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/usage` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `hub.metrics.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
 ## hub.githubapp.read
 
 **Domain:** hub
@@ -13324,7 +13459,7 @@
 
 **Domain:** quota
 
-**Description:** Read the caller's own quota usage: each limit's effective value and active count for the caller only
+**Description:** Read the caller's own quota usage: each limit's effective value and active count for the caller only (distinct from GET /api/v1/me/usage, which returns Track 1 token usage)
 
 ### Entry Points
 
@@ -13351,6 +13486,40 @@
 ### Exemptions
 
 - **authentication_only:** Returns only the caller's own usage; carries no other user's records (scope: caller's own quota usage only) — waives: `base_permission`
+
+---
+
+## hub.usage.self.read
+
+**Domain:** hub
+
+**Description:** Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage). A project-boundary user access token is restricted to its boundary project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/me/usage` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestMeUsageRead_SelfTokenReadsOwn`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestMeUsageRead_SelfTokenReadsOwn`
+
+### Exemptions
+
+- **authentication_only:** Returns only the caller's own Track 1 token usage; carries no other user's records (scope: caller's own Track 1 token usage only) — waives: `base_permission`
 
 ---
 
