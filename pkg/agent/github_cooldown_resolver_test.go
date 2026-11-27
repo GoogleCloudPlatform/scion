@@ -95,7 +95,7 @@ func TestGitHubSkillResolver_CooldownServesStaleWithoutRefresh(t *testing.T) {
 	}
 	r.resolutionCache.mu.Unlock()
 
-	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 
 	var served, started atomic.Int64
 	hook := func(_ string, refreshStarted bool) {
@@ -135,7 +135,7 @@ func TestGitHubSkillResolver_CooldownMissFailsFast(t *testing.T) {
 	serveTestSkill(mux, "owner", "repo", "s", &calls)
 	clock := newFakeClock()
 	r := newCooldownTestResolver(t, mux, clock)
-	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 
 	const uri = "gh://owner/repo/s@main"
 	res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
@@ -404,7 +404,7 @@ func TestGitHubSkillResolver_CooldownWritesNothingToDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.resolutionCache = cache
-	r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 
 	res, err := r.Resolve(context.Background(), []api.SkillReference{
 		{URI: staleURI}, {URI: noContentURI}, {URI: missURI},
@@ -477,7 +477,7 @@ func TestGitHubSkillResolver_CooldownDuringBackoffFailsWithoutSleeping(t *testin
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		commitCalls.Add(1)
-		r.cooldown.record(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
+		r.cooldown.RecordUntil(GitHubCooldownIdentity(r.token), clock.Now().Add(time.Minute))
 		w.Header().Set("Retry-After", "10")
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
