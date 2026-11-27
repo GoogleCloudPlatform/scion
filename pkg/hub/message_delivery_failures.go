@@ -464,7 +464,7 @@ func (s *Server) notifyStoredMessageSenderDelivered(ctx context.Context, msg *st
 	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
 		cp := *msg
 		cp.DispatchState = store.MessageDispatchDelivered
-		s.events.PublishUserMessage(ctx, &cp, nil, nil)
+		s.events.PublishUserMessage(ctx, &cp, nil, nil, s.decisionResponseEventOption(ctx, &cp))
 	}
 }
 
@@ -502,7 +502,7 @@ func (s *Server) notifyStoredMessageSenderFailed(ctx context.Context, agent *sto
 		cp := *msg
 		cp.DispatchState = store.MessageDispatchFailed
 		cp.DispatchFailureReason = &reason
-		s.events.PublishUserMessage(ctx, &cp, nil, nil)
+		s.events.PublishUserMessage(ctx, &cp, nil, nil, s.decisionResponseEventOption(ctx, &cp))
 	}
 }
 
@@ -538,7 +538,7 @@ func (s *Server) notifyStoredMessageSenderUnconfirmed(ctx context.Context, agent
 		cp.DispatchState = store.MessageDispatchFailed
 		reason := store.MessageExpiredStuckPendingReason
 		cp.DispatchFailureReason = &reason
-		s.events.PublishUserMessage(ctx, &cp, nil, nil)
+		s.events.PublishUserMessage(ctx, &cp, nil, nil, s.decisionResponseEventOption(ctx, &cp))
 	}
 }
 

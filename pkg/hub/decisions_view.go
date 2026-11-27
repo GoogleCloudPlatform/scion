@@ -655,3 +655,24 @@ type decisionEventPayload struct {
 func withDecisionEvent(p *decisionEventPayload) ChatEventOption {
 	return func(o *chatEventOptions) { o.decision = p }
 }
+
+// decisionResponseEventOption returns the ChatEventOption carrying the
+// DecisionResponseView or DecisionResponseSetView of msg when msg is a
+// decision-response row and web.decisions is enabled; otherwise nil.
+// Used by delivery-state SSE re-publishes (delivered / failed / unconfirmed)
+// so follow-up events keep the compact decision-response view attached.
+func (s *Server) decisionResponseEventOption(ctx context.Context, msg *store.Message) ChatEventOption {
+	if s == nil || s.store == nil || msg == nil || msg.Type != messages.TypeDecisionResponse || !s.experimentEnabled(experiments.Decisions) {
+		return nil
+	}
+	responses, sets := s.decisionResponseViews(ctx, []*store.Message{msg})
+	if v, ok := responses[msg.ID]; ok {
+		vCopy := v
+		return withDecisionEvent(&decisionEventPayload{Response: &vCopy})
+	}
+	if v, ok := sets[msg.ID]; ok {
+		vCopy := v
+		return withDecisionEvent(&decisionEventPayload{ResponseSet: &vCopy})
+	}
+	return nil
+}

@@ -656,3 +656,158 @@ describe('mobile touch on choice cards (ptone/scion#7839)', () => {
     );
   });
 });
+
+describe('live SSE decision-response rendering (ptone/scion#9543)', () => {
+  it('renders SSE single and set decision-response messages as compact summaries and keeps them compact on delivered updates', async () => {
+    const thread = await open();
+
+    const singleResp = {
+      rowId: 'row-1',
+      promptMessageId: 'p1',
+      key: 'D234',
+      ref: 'D234',
+      version: 1,
+      question: 'Ship it?',
+      choiceId: 'yes',
+      label: 'Yes',
+      answeredByUserId: 'u-me',
+      answeredByName: 'Me',
+      provenance: 'direct',
+    };
+
+    // 1. Initial SSE event for single decision-response carries decisionResponse.
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'resp-single-1',
+            projectId: 'proj-1',
+            sender: 'user:me@example.com',
+            senderId: 'u-me',
+            recipient: 'agent:release-bot',
+            recipientId: 'a1',
+            msg: 'Me chose "Yes" for D234 "Ship it?"',
+            type: 'decision-response',
+            agentId: 'a1',
+            createdAt: '2026-11-12T15:42:00Z',
+            threadId: KEY,
+            dispatchState: 'dispatched',
+            decisionResponse: singleResp,
+          },
+        },
+      })
+    );
+    await settle();
+    await thread.updateComplete;
+
+    let singleEl = await messageEl(thread, 'resp-single-1');
+    expect(singleEl.shadowRoot!.querySelector('scion-chat-decision-response')).not.toBeNull();
+
+    // 2. Follow-up delivery-state SSE update (even if stripped of decisionResponse) must keep the compact summary.
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'resp-single-1',
+            projectId: 'proj-1',
+            sender: 'user:me@example.com',
+            senderId: 'u-me',
+            recipient: 'agent:release-bot',
+            recipientId: 'a1',
+            msg: 'Me chose "Yes" for D234 "Ship it?"',
+            type: 'decision-response',
+            agentId: 'a1',
+            createdAt: '2026-11-12T15:42:00Z',
+            threadId: KEY,
+            dispatchState: 'delivered',
+          },
+        },
+      })
+    );
+    await settle();
+    await thread.updateComplete;
+
+    singleEl = await messageEl(thread, 'resp-single-1');
+    expect(singleEl.shadowRoot!.querySelector('scion-chat-decision-response')).not.toBeNull();
+    expect((singleEl as unknown as { dispatchState?: string }).dispatchState).toBe('delivered');
+
+    // 3. Set decision-response over SSE + follow-up delivered update.
+    const setResp = {
+      promptMessageId: 'p1',
+      batchId: 'batch-1',
+      answers: [
+        {
+          ...singleResp,
+          rowId: 'row-2',
+          key: 'region',
+          ref: 'region',
+          label: 'us-central1',
+          outcome: 'answer',
+          matchedDefault: false,
+        },
+        {
+          ...singleResp,
+          rowId: 'row-3',
+          key: 'rollback',
+          ref: 'rollback',
+          label: 'Yes',
+          outcome: 'answer',
+          matchedDefault: false,
+        },
+      ],
+    };
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'resp-set-1',
+            projectId: 'proj-1',
+            sender: 'user:me@example.com',
+            senderId: 'u-me',
+            recipient: 'agent:release-bot',
+            recipientId: 'a1',
+            msg: 'Me answered 2 decisions: region us-central1 · rollback Yes',
+            type: 'decision-response',
+            agentId: 'a1',
+            createdAt: '2026-11-12T15:43:00Z',
+            threadId: KEY,
+            dispatchState: 'dispatched',
+            decisionResponseSet: setResp,
+          },
+        },
+      })
+    );
+    await settle();
+    await thread.updateComplete;
+
+    let setEl = await messageEl(thread, 'resp-set-1');
+    expect(setEl.shadowRoot!.querySelector('scion-chat-decision-response')).not.toBeNull();
+
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: {
+            id: 'resp-set-1',
+            projectId: 'proj-1',
+            sender: 'user:me@example.com',
+            senderId: 'u-me',
+            recipient: 'agent:release-bot',
+            recipientId: 'a1',
+            msg: 'Me answered 2 decisions: region us-central1 · rollback Yes',
+            type: 'decision-response',
+            agentId: 'a1',
+            createdAt: '2026-11-12T15:43:00Z',
+            threadId: KEY,
+            dispatchState: 'delivered',
+          },
+        },
+      })
+    );
+    await settle();
+    await thread.updateComplete;
+
+    setEl = await messageEl(thread, 'resp-set-1');
+    expect(setEl.shadowRoot!.querySelector('scion-chat-decision-response')).not.toBeNull();
+    expect((setEl as unknown as { dispatchState?: string }).dispatchState).toBe('delivered');
+  });
+});

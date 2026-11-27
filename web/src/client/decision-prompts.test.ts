@@ -312,6 +312,126 @@ describe('carryDecisionFields', () => {
     expect(incoming.decisionIntro).toBe('Intro');
     expect(incoming.answerMode).toBe('single');
   });
+
+  it('keeps held decisionResponse when a delivery-state update omits it (ptone/scion#9543)', () => {
+    const resp = {
+      rowId: 'row-1',
+      promptMessageId: 'p1',
+      key: 'D234',
+      ref: 'D234',
+      version: 1,
+      question: 'Ship it?',
+      choiceId: 'yes',
+      label: 'Yes',
+      answeredByUserId: 'u-me',
+      answeredByName: 'Alice',
+      provenance: 'direct',
+    };
+    const existing = msg({
+      type: 'decision-response',
+      dispatchState: 'dispatched',
+      decisionResponse: resp,
+    });
+    const incoming = msg({
+      type: 'decision-response',
+      dispatchState: 'delivered',
+    });
+    carryDecisionFields(existing, incoming);
+    expect(incoming.decisionResponse).toBe(resp);
+  });
+
+  it('keeps held decisionResponseSet when a delivery-state update omits it (ptone/scion#9543)', () => {
+    const respSet = {
+      promptMessageId: 'p2',
+      batchId: 'b1',
+      answers: [
+        {
+          rowId: 'row-2',
+          promptMessageId: 'p2',
+          key: 'region',
+          ref: 'region',
+          version: 1,
+          question: 'Which region?',
+          choiceId: '1',
+          label: 'us-central1',
+          outcome: 'answer',
+          matchedDefault: false,
+          answeredByUserId: 'u-me',
+          answeredByName: 'Alice',
+          provenance: 'direct',
+        },
+      ],
+    };
+    const existing = msg({
+      type: 'decision-response',
+      dispatchState: 'dispatched',
+      decisionResponseSet: respSet,
+    });
+    const incoming = msg({
+      type: 'decision-response',
+      dispatchState: 'delivered',
+    });
+    carryDecisionFields(existing, incoming);
+    expect(incoming.decisionResponseSet).toBe(respSet);
+  });
+
+  it('does not preserve stale decisionResponse when the message genuinely changes', () => {
+    const oldResp = {
+      rowId: 'row-1',
+      promptMessageId: 'p1',
+      key: 'D234',
+      ref: 'D234',
+      version: 1,
+      question: 'Ship it?',
+      choiceId: 'yes',
+      label: 'Yes',
+      answeredByUserId: 'u-me',
+      answeredByName: 'Alice',
+      provenance: 'direct',
+    };
+    const existing = msg({
+      type: 'decision-response',
+      msg: 'Alice chose "Yes" for D234 "Ship it?"',
+      decisionResponse: oldResp,
+    });
+
+    // Different message body -> do not carry stale view.
+    const edited = msg({
+      type: 'decision-response',
+      msg: 'Alice chose "No" for D234 "Ship it?"',
+    });
+    carryDecisionFields(existing, edited);
+    expect(edited.decisionResponse).toBeUndefined();
+
+    // Incoming carries a replacement view -> incoming wins without mixing single and set.
+    const newSet = {
+      promptMessageId: 'p1',
+      batchId: 'b2',
+      answers: [
+        {
+          ...oldResp,
+          outcome: 'answer',
+          matchedDefault: false,
+        },
+      ],
+    };
+    const replaced = msg({
+      type: 'decision-response',
+      msg: 'Alice chose "Yes" for D234 "Ship it?"',
+      decisionResponseSet: newSet,
+    });
+    carryDecisionFields(existing, replaced);
+    expect(replaced.decisionResponse).toBeUndefined();
+    expect(replaced.decisionResponseSet).toBe(newSet);
+
+    // Different message type -> do not carry.
+    const differentType = msg({
+      type: 'chat',
+      msg: 'Alice chose "Yes" for D234 "Ship it?"',
+    });
+    carryDecisionFields(existing, differentType);
+    expect(differentType.decisionResponse).toBeUndefined();
+  });
 });
 
 describe('answerDecision', () => {
