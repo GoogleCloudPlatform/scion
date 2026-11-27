@@ -675,6 +675,62 @@ func TestRenderDecisionFallback_NoIntroSingleDecisionNoURL(t *testing.T) {
 	}
 }
 
+func TestRenderDecisionFallbackWithRefs(t *testing.T) {
+	ds := []Decision{{Key: "D1", Question: "Approve mock-up?", Choices: []Choice{{ID: "1", Label: "Approve"}, {ID: "2", Label: "Revise"}}}}
+	const refA = "scion://artifact/5f1c2d3e-0000-4000-8000-0000000000aa@2"
+	const refAUnpinned = "scion://artifact/5f1c2d3e-0000-4000-8000-0000000000aa"
+	const refA20 = "scion://artifact/5f1c2d3e-0000-4000-8000-0000000000aa@20"
+	const refB = "scion://artifact/5f1c2d3e-0000-4000-8000-0000000000bb"
+
+	t.Run("missing refs listed after decisions without changing intro", func(t *testing.T) {
+		msg, introLen := RenderDecisionFallback("Please review.", ds, "https://hub.example/c/1", refA, refB)
+		if got := DecisionIntro(msg, introLen); got != "Please review." {
+			t.Fatalf("DecisionIntro = %q, want %q", got, "Please review.")
+		}
+		wantRefs := "\n**References:**\n- " + refA + "\n- " + refB + "\n\n_Answer in Scion:"
+		if !strings.Contains(msg, wantRefs) {
+			t.Errorf("msg missing expected references block:\n%s", msg)
+		}
+	})
+
+	t.Run("refs already in intro are not duplicated", func(t *testing.T) {
+		intro := "Please review.\n\n" + refA
+		msg, introLen := RenderDecisionFallback(intro, ds, "", refA)
+		if got := DecisionIntro(msg, introLen); got != intro {
+			t.Fatalf("DecisionIntro = %q, want %q", got, intro)
+		}
+		if strings.Contains(msg, "**References:**") {
+			t.Errorf("unexpected References block when all refs are in intro:\n%s", msg)
+		}
+		if strings.Count(msg, refA) != 1 {
+			t.Errorf("refA appeared %d times, want 1:\n%s", strings.Count(msg, refA), msg)
+		}
+	})
+
+	t.Run("only refs missing from intro are appended", func(t *testing.T) {
+		intro := "See " + refA + "."
+		msg, _ := RenderDecisionFallback(intro, ds, "", refA, refB)
+		if strings.Count(msg, refA) != 1 {
+			t.Errorf("refA appeared %d times, want 1", strings.Count(msg, refA))
+		}
+		if !strings.Contains(msg, "\n**References:**\n- "+refB+"\n") {
+			t.Errorf("missing refB in References block:\n%s", msg)
+		}
+	})
+
+	t.Run("boundary-aware match distinguishes X@2 from X@20 and unpinned X from X@2", func(t *testing.T) {
+		msg, _ := RenderDecisionFallback("Compare "+refA20+" first.", ds, "", refA)
+		if !strings.Contains(msg, "\n**References:**\n- "+refA+"\n") {
+			t.Errorf("X@2 must not be treated as present when intro only has X@20:\n%s", msg)
+		}
+
+		msg2, _ := RenderDecisionFallback("Pinned "+refA+" in intro.", ds, "", refAUnpinned)
+		if !strings.Contains(msg2, "\n**References:**\n- "+refAUnpinned+"\n") {
+			t.Errorf("unpinned X must not be treated as present when intro only has X@2:\n%s", msg2)
+		}
+	})
+}
+
 func TestRenderDecisionFallback_NeutralizesMentionsAndEscapesLabels(t *testing.T) {
 	ds := []Decision{{
 		Key:      "D1",

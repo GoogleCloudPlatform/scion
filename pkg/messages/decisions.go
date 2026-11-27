@@ -822,7 +822,11 @@ func EscapeMarkdownPlain(s string) string {
 // surface that shows msg shows the decisions. Each decision must already
 // have its key. Questions and descriptions pass through as markdown with
 // mentions neutralized; keys, choice ids and labels are escaped as plain
-// text. answerURL, when set, is the link to answer in Scion.
+// text. answerURL, when set, is the link to answer in Scion. Optional
+// artifactRefs are canonical scion://artifact/<id>[@<seq>] URIs admitted for
+// this prompt; any ref not already present as a complete ref token in intro is
+// listed after the decisions without baking artifact titles or metadata into
+// stored message text.
 //
 // A prompt with two or more decisions is a set (design choices v5,
 // section 6): its header asks for all answers together, and its closing
@@ -832,7 +836,7 @@ func EscapeMarkdownPlain(s string) string {
 // introLen is the byte offset in msg where the fallback block starts (0
 // with no intro). The hub stores it on the message's first decision row and
 // recovers the intro with DecisionIntro.
-func RenderDecisionFallback(intro string, decisions []Decision, answerURL string) (msg string, introLen int) {
+func RenderDecisionFallback(intro string, decisions []Decision, answerURL string, artifactRefs ...string) (msg string, introLen int) {
 	var b strings.Builder
 	intro = strings.TrimRight(intro, " \t\r\n")
 	if intro != "" {
@@ -877,6 +881,22 @@ func RenderDecisionFallback(intro string, decisions []Decision, answerURL string
 			b.WriteString(" — *your own answer, in words*\n")
 		}
 	}
+	var missingRefs []string
+	for _, ref := range artifactRefs {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || introContainsArtifactRef(intro, ref) {
+			continue
+		}
+		missingRefs = append(missingRefs, ref)
+	}
+	if len(missingRefs) > 0 {
+		b.WriteString("\n**References:**\n")
+		for _, ref := range missingRefs {
+			b.WriteString("- ")
+			b.WriteString(ref)
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("\n")
 	switch {
 	case set && answerURL != "":
@@ -889,6 +909,38 @@ func RenderDecisionFallback(intro string, decisions []Decision, answerURL string
 		b.WriteString("_Reply here and the agent will record your answer._")
 	}
 	return b.String(), introLen
+}
+
+// introContainsArtifactRef reports whether intro contains ref as a complete
+// artifact reference token rather than a prefix of a longer token (so X@2 does
+// not match X@20, and unpinned X does not match pinned X@3).
+func introContainsArtifactRef(intro, ref string) bool {
+	if intro == "" || ref == "" {
+		return false
+	}
+	for off := 0; off < len(intro); {
+		idx := strings.Index(intro[off:], ref)
+		if idx < 0 {
+			return false
+		}
+		start := off + idx
+		end := start + len(ref)
+		leftOK := start == 0 || !isArtifactTokenPrefixByte(intro[start-1])
+		rightOK := end == len(intro) || !isArtifactTokenContinuationByte(intro[end])
+		if leftOK && rightOK {
+			return true
+		}
+		off = start + 1
+	}
+	return false
+}
+
+func isArtifactTokenPrefixByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '-'
+}
+
+func isArtifactTokenContinuationByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '@' || b == '-' || b == '_'
 }
 
 // setReplyExample is the reply hint of a set: the first two decisions, each

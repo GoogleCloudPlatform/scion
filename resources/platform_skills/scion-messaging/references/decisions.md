@@ -155,7 +155,7 @@ result.
 After a successful send the CLI marks you as waiting for input, the same as
 `sciontool status ask_user`, with the first question as the summary.
 
-You cannot combine decisions with `--attach`, `--artifact` or `--wake`.
+You can combine decisions with `--artifact` to attach published artifact references to the decision card; you cannot combine decisions with `--attach` or `--wake`. On `--update`, artifact references are explicit per prompt (only `--artifact` flags passed on that send appear on the new card); if the replaced prompt had artifact references that were omitted, the CLI prints a `Note:` naming them so you can re-attach if unintentional.
 
 ## Let the user answer in their own words: `allow_other`
 

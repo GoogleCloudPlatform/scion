@@ -20,7 +20,7 @@
   "$comment-isolatedChunks": "The review editor chunks (ptone/scion#5913) are reached only through import(): no other chunk, lazy ones included, may import them statically (a shared package placed in them would make, for example, the CodeMirror chunk download the whole editor).",
   "isolatedChunks": ["assets/review-editor-"],
   "chunkImports": {
-    "$comment": "The review editor chunks (ptone/scion#5913) may import statically only each other, the small shared chunks made for them (key names, CommonJS helpers) and what the artifact page has already loaded (the entry, Lit, Shoelace, the preview frame, the Markdown renderer and the shared chunk with the artifacts client, which the build names after the publish dialog).",
+    "$comment": "The review editor chunks (ptone/scion#5913) may import statically only each other, the small shared chunks made for them (key names, CommonJS helpers) and what the artifact page has already loaded (the entry, Lit, Shoelace, the preview frame, the Markdown renderer and the shared chunk with the artifacts client).",
     "assets/review-editor-": [
       "assets/review-editor-",
       "assets/w3c-keyname-",
@@ -30,6 +30,7 @@
       "assets/shoelace-",
       "assets/untrusted-view-frame-",
       "assets/markdown-",
+      "assets/artifacts-",
       "assets/artifact-publish-dialog-"
     ]
   },

@@ -1237,6 +1237,11 @@ type OutboundMessageResult struct {
 	// sent; empty for any other message.
 	Decisions []DecisionSendResult `json:"decisions,omitempty"`
 
+	// DecisionArtifactNotice is set when a --update decision prompt replaces
+	// a prompt that carried artifact references which were omitted from the
+	// new prompt, so the sending agent can catch an accidental drop.
+	DecisionArtifactNotice string `json:"decision_artifact_notice,omitempty"`
+
 	// SecretRequests lists the secret requests of a secret-request prompt, one
 	// per key sent; empty for any other message.
 	SecretRequests []messages.SecretRequestSendResult `json:"secret_requests,omitempty"`

@@ -131,14 +131,14 @@ func validateDecisionFlags(agentTarget, group bool) error {
 	if agentTarget || group {
 		return errors.New("decisions can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
 	}
-	// The hub refuses these too (attachments) or ignores them for a decision
+	// The hub refuses file attachments or ignores --wake for a decision
 	// prompt; refuse them here, before anything is read or sent.
+	// Artifact references (--artifact) are allowed on decision prompts.
 	for _, f := range []struct {
 		name string
 		set  bool
 	}{
 		{"--attach", len(msgAttach) > 0},
-		{"--artifact", len(msgArtifacts) > 0},
 		{"--wake", msgWake},
 	} {
 		if f.set {
@@ -257,13 +257,17 @@ func decisionSendLine(d hubclient.DecisionSendResult) string {
 	return fmt.Sprintf("%s v%d (new, replaces v%d which was %s)", d.Key, d.Version, d.Replaced.Version, state)
 }
 
-// printSentDecisions prints one line per decision of a sent prompt.
+// printSentDecisions prints one line per decision of a sent prompt, plus any
+// notice when --update dropped artifact references from the replaced prompt.
 func printSentDecisions(result *hubclient.OutboundMessageResult) {
 	if result == nil {
 		return
 	}
 	for _, d := range result.Decisions {
 		fmt.Println(decisionSendLine(d))
+	}
+	if result.DecisionArtifactNotice != "" {
+		fmt.Fprintf(os.Stderr, "Note: %s\n", result.DecisionArtifactNotice)
 	}
 }
 
