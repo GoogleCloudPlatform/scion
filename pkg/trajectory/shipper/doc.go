@@ -221,4 +221,25 @@
 // Only when the file is shorter than baseline_offset or its pre-baseline bytes
 // genuinely changed (baseline guard mismatch) does the new generation restart
 // at offset 0.
+//
+// # P6 Broker Harvest Prerequisites & Threat Model Notes
+//
+// The shipper's privacy invariants (baseline exclusion and refusal-window
+// exclusion) protect against accidental capture on the honest path; they are
+// not a security boundary against a malicious agent holding its own agent token
+// (the Hub's policy check in segments:prepare is the enforcement boundary).
+// Before reusing this package from a host Runtime Broker in P6, note:
+//   - flock coherence across the host/container boundary: virtiofs (depending
+//     on virtiofsd -o posix_lock/flock) and some NFS mounts do not guarantee
+//     coherent flock(2) between guest and host. P6 must verify lock coherence
+//     or add a lease file + generation counter.
+//   - Prefer non-root broker harvest: running broker harvest as the home
+//     owner's UID avoids all root-owned-file risks on host filesystems.
+//   - UID mapping: idmapped or user-namespaced mounts can cause the host view
+//     of homeUID to differ from the container UID, causing ownership checks to
+//     fail closed on one side; P6 must account for mapped UIDs.
+//   - Treat state.json as hostile agent-controlled input: reads are bounded by
+//     MaxStateFileBytes (16 MiB), filesystem paths must always come from live
+//     Discover (never from state.json keys), and foreign origin_hub_id values
+//     must be validated or ignored on the Hub.
 package shipper

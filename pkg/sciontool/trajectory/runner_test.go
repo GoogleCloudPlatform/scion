@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -482,5 +483,88 @@ func TestRunner_PeriodicTickerTriggersRound(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for periodic ticker to trigger a round")
+	}
+}
+
+type funcUploader func(ctx context.Context, seg shipper.Segment) (shipper.ShipResult, error)
+
+func (f funcUploader) Ship(ctx context.Context, seg shipper.Segment) (shipper.ShipResult, error) {
+	return f(ctx, seg)
+}
+
+// TestRunnerRefusalBackoffAppliesWhenPersistFails pins V-1: if SaveState fails
+// inside RunRound while persisting RefusedPendingRebaseline on a 404/403
+// refusal, the runner logs the error AND still applies refusal backoff instead
+// of hammering the Hub on subsequent ticks.
+func TestRunnerRefusalBackoffAppliesWhenPersistFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0500 does not block root temp file creation")
+	}
+
+	for _, outcome := range []shipper.ShipOutcome{shipper.OutcomeCaptureUnavailable, shipper.OutcomePolicyRefused} {
+		t.Run(string(outcome), func(t *testing.T) {
+			home := t.TempDir()
+			projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+			if err := os.MkdirAll(projDir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			artPath := filepath.Join(projDir, "sess-v1.jsonl")
+			if err := os.WriteFile(artPath, []byte("{\"init\":0}\n"), 0o644); err != nil {
+				t.Fatalf("write baseline: %v", err)
+			}
+
+			stateDir := shipper.StateDir(home)
+			t.Cleanup(func() { _ = os.Chmod(stateDir, 0o700) })
+
+			var calls atomic.Int32
+			up := funcUploader(func(_ context.Context, _ shipper.Segment) (shipper.ShipResult, error) {
+				calls.Add(1)
+				// Make stateDir read-only right as the refusal arrives so
+				// SaveState(RefusedPendingRebaseline=true) fails with EACCES.
+				_ = os.Chmod(stateDir, 0o500)
+				return shipper.ShipResult{Outcome: outcome, Message: "refused"}, nil
+			})
+
+			r, err := NewRunner(Config{
+				HomeDir:            home,
+				RunID:              "run-v1",
+				Harness:            "claude",
+				Uploader:           up,
+				PeriodicInterval:   20 * time.Millisecond,
+				UnavailableBackoff: time.Hour,
+				PreStopTimeout:     time.Second,
+			})
+			if err != nil {
+				t.Fatalf("NewRunner: %v", err)
+			}
+			// Baseline first while stateDir is writable, then append a line.
+			if _, err := r.shipper.Baseline(context.Background()); err != nil {
+				t.Fatalf("Baseline: %v", err)
+			}
+			f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			_, _ = f.WriteString("{\"line\":1}\n")
+			_ = f.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := r.Start(ctx); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) && calls.Load() == 0 {
+				time.Sleep(10 * time.Millisecond)
+			}
+			// Let several periodic intervals elapse: backoff must suppress retries.
+			time.Sleep(120 * time.Millisecond)
+			r.PreStop(context.Background())
+
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("expected exactly 1 Hub call (backoff applied despite SaveState failure), got %d", got)
+			}
+		})
 	}
 }

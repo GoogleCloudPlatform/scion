@@ -177,7 +177,7 @@ func (c *Client) UploadTrajectorySegment(
 
 	req, err := http.NewRequestWithContext(reqCtx, method, inst.URL, bytes.NewReader(compressed))
 	if err != nil {
-		return 0, fmt.Errorf("create trajectory upload request: %w", err)
+		return 0, fmt.Errorf("create trajectory upload request to %s: %w", redactTrajectoryUploadURL(inst.URL), unwrapURLOpErr(err))
 	}
 	req.ContentLength = int64(len(compressed))
 	for k, v := range inst.Headers {
@@ -206,9 +206,12 @@ func (c *Client) UploadTrajectorySegment(
 				log.Error("Trajectory upload URL matches Hub-proxied path but scheme/host differs from Hub URL (likely Hub behind a TLS-terminating proxy without server.trusted_proxies); refusing to send agent token off-origin")
 			}
 		}
-		// External signed URL (e.g. GCS): use a clean client with no Hub
-		// agent token, run header, or transport OIDC credentials, and refuse
-		// redirects so signed PUTs cannot be bounced elsewhere.
+		// External signed URL (e.g. GCS, or a plain HTTP workstation/local
+		// storage proxy issued by the trusted Hub): use a clean client with no
+		// Hub agent token, run header, or transport OIDC credentials, and
+		// refuse redirects so signed PUTs cannot be bounced elsewhere. Plain
+		// http:// external URLs are intentionally permitted to support local
+		// workstation proxies.
 		extClient := &http.Client{
 			Timeout: trajectoryUploadHTTPTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -218,7 +221,7 @@ func (c *Client) UploadTrajectorySegment(
 		resp, err = extClient.Do(req)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("send trajectory upload request: %w", err)
+		return 0, fmt.Errorf("send trajectory upload request to %s: %w", redactTrajectoryUploadURL(inst.URL), unwrapURLOpErr(err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -247,6 +250,34 @@ func (c *Client) isHubProxiedUploadURL(rawURL string) bool {
 	return strings.EqualFold(hubU.Scheme, targetU.Scheme) &&
 		strings.EqualFold(hubU.Host, targetU.Host) &&
 		strings.HasPrefix(targetU.Path, "/api/v1/agents/")
+}
+
+// redactTrajectoryUploadURL strips query parameters, fragments, and userinfo
+// from a signed upload URL so credentials such as X-Goog-Signature or HMAC sig
+// parameters are never persisted into state.json LastError or logs.
+func redactTrajectoryUploadURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		if idx := strings.IndexAny(rawURL, "?#"); idx >= 0 {
+			return rawURL[:idx]
+		}
+		return "<invalid-url>"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.User = nil
+	return u.String()
+}
+
+// unwrapURLOpErr strips the outer *url.Error wrapper (whose Error() string
+// includes the full raw URL with query parameters) while preserving the
+// underlying transport error for errors.Is / errors.As.
+func unwrapURLOpErr(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) && uerr.Err != nil {
+		return uerr.Err
+	}
+	return err
 }
 
 func (c *Client) looksHubProxiedPathWithOriginMismatch(rawURL string) bool {

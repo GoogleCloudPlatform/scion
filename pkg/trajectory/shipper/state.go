@@ -41,6 +41,10 @@ const (
 	// GuardWindowBytes is the number of trailing bytes before
 	// raw_committed_offset hashed with 64-bit FNV-1a to detect rewrites.
 	GuardWindowBytes = 64
+
+	// MaxStateFileBytes caps the maximum size of state.json read by LoadState
+	// (16 MiB) so an oversized or hostile state file cannot OOM root init.
+	MaxStateFileBytes int64 = 16 << 20
 )
 
 // Generation bump reasons recorded on ArtifactState.LastGenerationReason.
@@ -61,8 +65,11 @@ var (
 	ErrRootSquashChownRefused = errors.New("shipper: chown refused under root-squashed filesystem; run shipper as home owner")
 
 	// ErrHardLinkRefused is returned when running as root (euid == 0) and an
-	// artifact leaf has more than one hard link (st_nlink > 1).
-	ErrHardLinkRefused = errors.New("shipper: hard-linked artifact refused when running as root")
+	// artifact leaf, lock file, state file, or temp file has st_nlink != 1.
+	ErrHardLinkRefused = errors.New("shipper: hard-linked file refused when running as root")
+
+	// ErrStateTooLarge is returned when state.json exceeds MaxStateFileBytes.
+	ErrStateTooLarge = errors.New("shipper: state file exceeds maximum allowed size")
 )
 
 // StateDir returns the absolute path to the shipper state directory under homeDir.

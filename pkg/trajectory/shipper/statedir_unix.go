@@ -212,6 +212,11 @@ func openStateLockFile(homeDir string) (*os.File, error) {
 	}
 
 	if created {
+		if geteuidFn() == 0 && st.Nlink != 1 {
+			_ = unix.Close(fd)
+			_ = unix.Unlinkat(dirFD, LockFileName, 0)
+			return nil, fmt.Errorf("refusing hard-linked lock file %s (nlink=%d): %w", lockPath, st.Nlink, ErrHardLinkRefused)
+		}
 		if err := unix.Fchmod(fd, 0o600); err != nil {
 			_ = unix.Close(fd)
 			return nil, fmt.Errorf("fchmod lock file %s: %w", lockPath, err)
@@ -223,17 +228,17 @@ func openStateLockFile(homeDir string) (*os.File, error) {
 			}
 		}
 	} else {
+		if geteuidFn() == 0 && st.Nlink != 1 {
+			_ = unix.Close(fd)
+			return nil, fmt.Errorf("refusing hard-linked lock file %s (nlink=%d): %w", lockPath, st.Nlink, ErrHardLinkRefused)
+		}
 		ownerUID, _ := statOwnerFn(lockPath, &st)
 		if err := checkOwnerUID("lock file "+lockPath, ownerUID, homeUID); err != nil {
 			_ = unix.Close(fd)
 			return nil, err
 		}
-		if geteuidFn() == 0 && ownerUID != homeUID {
-			if err := fchownFD(fd, int(homeUID), int(homeGID), lockPath); err != nil {
-				_ = unix.Close(fd)
-				return nil, wrapRootChownErr("fchown lock file "+lockPath, err)
-			}
-		}
+		// Never fchown a pre-existing lock file: root only chowns files it
+		// freshly created via O_CREAT|O_EXCL with Nlink == 1.
 	}
 
 	f := os.NewFile(uintptr(fd), lockPath)
@@ -288,13 +293,30 @@ func readStateFile(homeDir string) ([]byte, bool, error) {
 			privatefs.ErrNotPrivate, statePath, st.Mode&0o777)
 	}
 	ownerUID, _ := statOwnerFn(statePath, &st)
+	if geteuidFn() == 0 {
+		if st.Nlink != 1 {
+			return nil, false, fmt.Errorf("refusing hard-linked state file %s (nlink=%d): %w", statePath, st.Nlink, ErrHardLinkRefused)
+		}
+		if homeUID != 0 && ownerUID != homeUID {
+			return nil, false, fmt.Errorf("state file %s owned by uid %d, want %d: %w",
+				statePath, ownerUID, homeUID, privatefs.ErrNotPrivate)
+		}
+	}
 	if err := checkOwnerUID("state file "+statePath, ownerUID, homeUID); err != nil {
 		return nil, false, err
 	}
+	if st.Size > MaxStateFileBytes {
+		return nil, false, fmt.Errorf("shipper state %s exceeds maximum size of %d bytes (size=%d): %w",
+			statePath, MaxStateFileBytes, st.Size, ErrStateTooLarge)
+	}
 
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.LimitReader(f, MaxStateFileBytes+1))
 	if err != nil {
 		return nil, false, fmt.Errorf("read shipper state %s: %w", statePath, err)
+	}
+	if int64(len(data)) > MaxStateFileBytes {
+		return nil, false, fmt.Errorf("shipper state %s exceeds maximum size of %d bytes: %w",
+			statePath, MaxStateFileBytes, ErrStateTooLarge)
 	}
 	return data, true, nil
 }
@@ -351,6 +373,13 @@ func writeStateFile(homeDir string, data []byte) error {
 		return fmt.Errorf("fchmod temp shipper state file: %w", err)
 	}
 	if geteuidFn() == 0 {
+		var tmpStat unix.Stat_t
+		if err := unix.Fstat(tmpFD, &tmpStat); err != nil {
+			return fmt.Errorf("fstat temp shipper state file: %w", err)
+		}
+		if tmpStat.Mode&unix.S_IFMT != unix.S_IFREG || tmpStat.Nlink != 1 {
+			return fmt.Errorf("refusing hard-linked temp state file %s (nlink=%d): %w", tmpPath, tmpStat.Nlink, ErrHardLinkRefused)
+		}
 		if err := fchownFD(tmpFD, int(homeUID), int(homeGID), tmpPath); err != nil {
 			return wrapRootChownErr("fchown temp shipper state file", err)
 		}

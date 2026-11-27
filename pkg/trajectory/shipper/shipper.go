@@ -1453,15 +1453,13 @@ func (s *Shipper) shipArtifactLocked(
 			return false, nil
 
 		case OutcomeCaptureUnavailable:
-			// Persist RefusedPendingRebaseline under the lock already held so
-			// even if a subsequent Rebaseline call fails (e.g. cancelled ctx
-			// during PreStop or lock timeout), the next round still probes and
-			// drops refusal-window bytes before shipping.
+			// Set result flag before SaveState so callers still observe the
+			// refusal (and apply backoff) even if persisting state fails.
+			res.CaptureUnavailable = true
 			st.RefusedPendingRebaseline = true
 			if err := SaveState(s.cfg.HomeDir, st); err != nil {
 				return true, err
 			}
-			res.CaptureUnavailable = true
 			return true, nil
 
 		case OutcomePolicyRefused:
@@ -1472,12 +1470,12 @@ func (s *Shipper) shipArtifactLocked(
 			if msg == "" {
 				msg = "capture_policy_refused"
 			}
+			res.PolicyRefused = true
+			res.PolicyRefusedReason = msg
 			st.RefusedPendingRebaseline = true
 			if err := SaveState(s.cfg.HomeDir, st); err != nil {
 				return true, err
 			}
-			res.PolicyRefused = true
-			res.PolicyRefusedReason = msg
 			return true, nil
 
 		case OutcomeRunCapExceeded:

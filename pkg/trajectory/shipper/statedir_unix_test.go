@@ -130,6 +130,7 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 		if err := os.WriteFile(artPath, []byte(line1), 0o644); err != nil {
 			t.Fatalf("write line1: %v", err)
 		}
+		sim.setOwner(artPath, homeUID)
 
 		// Root (euid=0) initializes baseline and ships appended line2.
 		up := &noopUploader{}
@@ -229,6 +230,7 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 		if err := os.WriteFile(artPath, []byte(line1), 0o644); err != nil {
 			t.Fatalf("write line1: %v", err)
 		}
+		sim.setOwner(artPath, homeUID)
 
 		// Home owner (euid=1000) baselines and ships line2.
 		up := &noopUploader{}
@@ -436,5 +438,173 @@ func TestOwnerUIDRuleTable(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// TestAuditRegression_LockHardlinkRefused pins security audit finding M-1:
+// when running as root (euid == 0), a pre-existing hard-linked state.lock
+// pointing to a root-owned inode must be refused with ErrHardLinkRefused and
+// must never trigger fchownFD.
+func TestAuditRegression_LockHardlinkRefused(t *testing.T) {
+	home := t.TempDir()
+	sys := t.TempDir()
+	victim := filepath.Join(sys, "sciontool-binary")
+	if err := os.WriteFile(victim, []byte("ELF"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(StateDir(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, LockPath(home)); err != nil {
+		t.Fatal(err)
+	}
+
+	var chowned []string
+	origEUID, origStat, origFchown := geteuidFn, statOwnerFn, fchownFD
+	t.Cleanup(func() { geteuidFn, statOwnerFn, fchownFD = origEUID, origStat, origFchown })
+	geteuidFn = func() int { return 0 }
+	statOwnerFn = func(p string, _ *unix.Stat_t) (uint32, uint32) {
+		if filepath.Base(p) == LockFileName {
+			return 0, 0
+		}
+		return 1000, 1000
+	}
+	fchownFD = func(_ int, _, _ int, p string) error {
+		chowned = append(chowned, p)
+		return nil
+	}
+
+	lock, err := acquireStateLock(context.Background(), home, 0)
+	if lock != nil {
+		lock.Unlock()
+	}
+	if !errors.Is(err, ErrHardLinkRefused) {
+		t.Fatalf("expected ErrHardLinkRefused for hard-linked state.lock, got %v", err)
+	}
+	if len(chowned) != 0 {
+		t.Fatalf("expected zero fchown calls on hard-linked state.lock, got %v", chowned)
+	}
+}
+
+// TestAuditRegression_StateHardlinkAndRootOwnedRefused pins security audit
+// finding M-2: when running as root (euid == 0), readStateFile must refuse both
+// a hard-linked state.json (ErrHardLinkRefused) and a single-link root-owned
+// state.json when homeUID != 0 (privatefs.ErrNotPrivate).
+func TestAuditRegression_StateHardlinkAndRootOwnedRefused(t *testing.T) {
+	t.Run("hard-linked root JSON refused", func(t *testing.T) {
+		home := t.TempDir()
+		sys := t.TempDir()
+		victim := filepath.Join(sys, "adc.json")
+		if err := os.WriteFile(victim, []byte(`{"private_key":"-----BEGIN SECRET-----","artifacts":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(StateDir(home), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(victim, StatePath(home)); err != nil {
+			t.Fatal(err)
+		}
+
+		origEUID, origStat, origFchown := geteuidFn, statOwnerFn, fchownFD
+		t.Cleanup(func() { geteuidFn, statOwnerFn, fchownFD = origEUID, origStat, origFchown })
+		geteuidFn = func() int { return 0 }
+		statOwnerFn = func(p string, _ *unix.Stat_t) (uint32, uint32) {
+			if filepath.Base(p) == StateFileName {
+				return 0, 0
+			}
+			return 1000, 1000
+		}
+		fchownFD = func(_ int, _, _ int, _ string) error { return nil }
+
+		err := WithLockedState(context.Background(), home, 0, func(st *State) (bool, error) {
+			return true, nil
+		})
+		if !errors.Is(err, ErrHardLinkRefused) {
+			t.Fatalf("expected ErrHardLinkRefused for hard-linked state.json, got %v", err)
+		}
+	})
+
+	t.Run("single-link root-owned state.json refused when home owner is non-root", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.MkdirAll(StateDir(home), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(StatePath(home), []byte(`{"private_key":"-----BEGIN SECRET-----","artifacts":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		origEUID, origStat := geteuidFn, statOwnerFn
+		t.Cleanup(func() { geteuidFn, statOwnerFn = origEUID, origStat })
+		geteuidFn = func() int { return 0 }
+		statOwnerFn = func(p string, _ *unix.Stat_t) (uint32, uint32) {
+			if filepath.Base(p) == StateFileName {
+				return 0, 0
+			}
+			return 1000, 1000
+		}
+
+		_, _, err := LoadState(home)
+		if !errors.Is(err, privatefs.ErrNotPrivate) {
+			t.Fatalf("expected ErrNotPrivate for root-owned state.json under non-root home, got %v", err)
+		}
+	})
+}
+
+// TestAuditRegression_RootArtifactOpenRefusesForeignOwner pins security audit
+// finding L-1 (rename variant): when running as root (euid == 0), a single-link
+// artifact owned by uid 0 (or any non-home UID) renamed into the harness
+// directory must be refused with privatefs.ErrNotPrivate.
+func TestAuditRegression_RootArtifactOpenRefusesForeignOwner(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel := ".claude/projects/-workspace/renamed-root-secret.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+	if err := os.WriteFile(artPath, []byte("{\"root_secret\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	origEUID, origStat := geteuidFn, statOwnerFn
+	t.Cleanup(func() { geteuidFn, statOwnerFn = origEUID, origStat })
+	geteuidFn = func() int { return 0 }
+	statOwnerFn = func(p string, _ *unix.Stat_t) (uint32, uint32) {
+		if filepath.Base(p) == "renamed-root-secret.jsonl" {
+			return 0, 0 // single-link root-owned file renamed into agent dir
+		}
+		return 1000, 1000
+	}
+
+	f, _, err := openArtifactNoFollow(home, rel)
+	if f != nil {
+		_ = f.Close()
+	}
+	if !errors.Is(err, privatefs.ErrNotPrivate) {
+		t.Fatalf("expected ErrNotPrivate for root-owned artifact under non-root home, got %v", err)
+	}
+}
+
+// TestAuditRegression_StateFileSizeCap pins security audit finding L-2:
+// LoadState fails closed with ErrStateTooLarge when state.json exceeds
+// MaxStateFileBytes.
+func TestAuditRegression_StateFileSizeCap(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(StateDir(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(StatePath(home), os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxStateFileBytes + 1); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	_, _, err = LoadState(home)
+	if !errors.Is(err, ErrStateTooLarge) {
+		t.Fatalf("expected ErrStateTooLarge for oversized state.json, got %v", err)
 	}
 }

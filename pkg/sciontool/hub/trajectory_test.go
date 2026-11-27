@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -430,5 +431,31 @@ func TestTrajectoryUploader_ProxiedPathOriginMismatchRefusesTokenOffOrigin(t *te
 	}
 	if lastOriginMismatchLogUnix.Load() == 0 {
 		t.Fatalf("expected rate-limited mismatch warning timestamp to be recorded")
+	}
+}
+
+func TestUploadTrajectorySegmentScrubsSignedURLQueryFromTransportError(t *testing.T) {
+	// Start and immediately close a test server so the PUT fails with a
+	// connection-refused *url.Error carrying the full signed URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := srv.URL
+	srv.Close()
+
+	client := NewClientWithConfig("https://hub.example.com", "secret-agent-token", "agent-1")
+	signedURL := closedURL + "/bucket/agent/seg.jsonl.gz?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=TOP_SECRET_SIG_VALUE"
+
+	_, err := client.UploadTrajectorySegment(context.Background(), telemetrycontract.TrajectorySegmentUploadInstruction{
+		Method: http.MethodPut,
+		URL:    signedURL,
+	}, []byte("payload"))
+	if err == nil {
+		t.Fatal("expected transport error against closed server")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "TOP_SECRET_SIG_VALUE") || strings.Contains(msg, "X-Goog-Signature") {
+		t.Fatalf("signed URL query leaked into transport error: %s", msg)
+	}
+	if !strings.Contains(msg, closedURL+"/bucket/agent/seg.jsonl.gz") {
+		t.Fatalf("expected redacted base URL in transport error, got: %s", msg)
 	}
 }

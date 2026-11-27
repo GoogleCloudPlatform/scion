@@ -52,6 +52,16 @@ func openArtifactNoFollow(resolvedHome, nativeRelativePath string) (*os.File, os
 		return nil, nil, fmt.Errorf("open home %s: %w", resolvedHome, err)
 	}
 
+	var homeUID uint32
+	if geteuidFn() == 0 {
+		var homeStat unix.Stat_t
+		if err := unix.Fstat(dirFD, &homeStat); err != nil {
+			_ = unix.Close(dirFD)
+			return nil, nil, fmt.Errorf("fstat home %s: %w", resolvedHome, err)
+		}
+		homeUID, _ = statOwnerFn(resolvedHome, &homeStat)
+	}
+
 	for _, dirComp := range parts[:len(parts)-1] {
 		nextFD, err := unix.Openat(dirFD, dirComp, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		_ = unix.Close(dirFD)
@@ -93,11 +103,17 @@ func openArtifactNoFollow(resolvedHome, nativeRelativePath string) (*os.File, os
 		var st unix.Stat_t
 		if err := unix.Fstat(leafFD, &st); err != nil {
 			_ = f.Close()
-			return nil, nil, fmt.Errorf("fstat artifact nlink: %w", err)
+			return nil, nil, fmt.Errorf("fstat artifact: %w", err)
 		}
-		if st.Nlink > 1 {
+		if st.Nlink != 1 {
 			_ = f.Close()
 			return nil, nil, fmt.Errorf("refusing hard-linked artifact %s (nlink=%d): %w", nativeRelativePath, st.Nlink, ErrHardLinkRefused)
+		}
+		ownerUID, _ := statOwnerFn(resolvedHome+"/"+nativeRelativePath, &st)
+		if ownerUID != homeUID {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("refusing artifact %s owned by uid %d, want home owner %d: %w",
+				nativeRelativePath, ownerUID, homeUID, privatefs.ErrNotPrivate)
 		}
 	}
 	return f, fi, nil

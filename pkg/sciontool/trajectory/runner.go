@@ -453,7 +453,12 @@ func (r *Runner) executeRound(parent context.Context, opts shipper.RoundOptions,
 		}
 		// Never log payload contents; log only operational error details.
 		log.Warn("Trajectory ship round (%s) failed: %v", opts.Reason, err)
-		return
+		// If the round observed a refusal before a state-persistence failure,
+		// still fall through to apply the refusal backoff so the runner does
+		// not spin against the Hub.
+		if res == nil || (!res.PolicyRefused && !res.CaptureUnavailable) {
+			return
+		}
 	}
 	if res == nil {
 		return
