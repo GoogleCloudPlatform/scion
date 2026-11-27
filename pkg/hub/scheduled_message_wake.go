@@ -145,6 +145,11 @@ var errStartInProgressNotReady = errors.New("target agent was already starting a
 // settle budget (or the caller's request/wake deadline).
 var errIdleSuspendInProgressNotSettled = errors.New("target agent was suspending and did not finish stopping in time")
 
+// errAutoSuspendSettleReadFailed is returned when the store read that confirms
+// an in-flight auto-suspend settled fails. The underlying store error is logged
+// server-side so raw database/driver details never surface in DM responses.
+var errAutoSuspendSettleReadFailed = errors.New("could not confirm the agent finished suspending")
+
 // idleSuspendSettleTimeoutOverride is a test-only seam overriding
 // idleSuspendSettleBudget when positive. Tests that set it must not use
 // t.Parallel and must restore it in t.Cleanup.
@@ -229,7 +234,9 @@ func (s *Server) waitForHubAutoSuspendToSettle(ctx context.Context, agent *store
 		}
 		fresh, err := s.store.GetAgent(wctx, agent.ID)
 		if err != nil {
-			return fmt.Errorf("failed to check agent status after auto-suspend: %w", err)
+			s.messageLog.Error("wake: failed to re-read agent after auto-suspend settled",
+				"agent_id", agent.ID, "error", err)
+			return errAutoSuspendSettleReadFailed
 		}
 		if fresh == nil {
 			return store.ErrNotFound
@@ -261,7 +268,9 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 	for {
 		fresh, claimActive, err := s.store.MarkAgentDelivery(ctx, agent.ID)
 		if err != nil {
-			return fmt.Errorf("failed to check agent status during idle suspend: %w", err)
+			s.messageLog.Error("wake: failed to check agent status during idle suspend",
+				"agent_id", agent.ID, "error", err)
+			return errAutoSuspendSettleReadFailed
 		}
 		if fresh == nil {
 			return store.ErrNotFound
@@ -307,6 +316,13 @@ func startInProgressDMError(agent *store.Agent, awaitErr error) *AgentDMError {
 		return &AgentDMError{
 			Code:       ErrCodeUnavailable,
 			Message:    fmt.Sprintf("agent %q is suspending and did not finish stopping in time: %v", agent.Slug, awaitErr),
+			HTTPStatus: http.StatusServiceUnavailable,
+		}
+	}
+	if errors.Is(awaitErr, errAutoSuspendSettleReadFailed) {
+		return &AgentDMError{
+			Code:       ErrCodeUnavailable,
+			Message:    fmt.Sprintf("could not confirm agent %q finished suspending; retry shortly", agent.Slug),
 			HTTPStatus: http.StatusServiceUnavailable,
 		}
 	}

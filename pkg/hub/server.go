@@ -6681,8 +6681,6 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		claimUntil  time.Time
 		claimedIdle bool
 	)
-	endAutoSuspend := s.autoSuspending.begin(agent.ID, reason)
-	defer endAutoSuspend()
 	if reason == state.SuspendReasonIdle {
 		if !s.experimentEnabled(experiments.IdleSuspend) {
 			s.clearWorkspaceAtStop(ctx, agent)
@@ -6740,6 +6738,8 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			return false
 		}
 	}
+	endAutoSuspend := s.autoSuspending.begin(agent.ID, reason)
+	defer endAutoSuspend()
 	stopRunID := agent.RunID
 	if agent.RuntimeBrokerID != "" {
 		// As for stop and suspend, the dispatch is bounded by

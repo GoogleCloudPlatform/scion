@@ -265,6 +265,9 @@ func isContainerNotRunningDispatchError(err error) bool {
 	if isBrokerAgentNotFound(err) {
 		return true
 	}
+	// Defensive fallback for runtimes/proxies that surface Docker's raw
+	// daemon text directly; the current runtime broker translates stopped or
+	// missing containers to a 404 agent_not_found (*brokerStatusError) above.
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "container") && strings.Contains(msg, "is not running")
 }

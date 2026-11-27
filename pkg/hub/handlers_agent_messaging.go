@@ -2775,7 +2775,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	if !userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		if s.isHubAutoSuspending(agent) {
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-				fmt.Sprintf("Agent %q is suspended. Use --wake to resume and deliver.", agent.Slug), nil)
+				fmt.Sprintf("Agent %q is suspending. Use --wake to resume and deliver.", agent.Slug), nil)
 			return
 		}
 		rest := store.EffectiveRestingPhase(agent)

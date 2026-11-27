@@ -600,7 +600,7 @@ func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 	if agent != nil && s != nil && s.autoSuspending.isActive(agent.ID) {
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", agentTargetLabel(agent)),
+			Message:    fmt.Sprintf("agent %q is suspending; use --wake to resume and deliver", agentTargetLabel(agent)),
 			HTTPStatus: http.StatusConflict,
 		}
 	}

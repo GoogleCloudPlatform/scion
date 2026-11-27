@@ -89,6 +89,16 @@ func (d *stalledRaceDispatcher) DispatchAgentStart(ctx context.Context, agent *s
 	return nil
 }
 
+// brokerAgentNotFoundErr returns the real *brokerStatusError (HTTP 404 with
+// error.code == "agent_not_found") that pkg/runtimebroker returns synchronously
+// when DispatchAgentMessage targets a stopped or missing container.
+func brokerAgentNotFoundErr() error {
+	return &brokerStatusError{
+		StatusCode: http.StatusNotFound,
+		Body:       `{"error":{"code":"agent_not_found"}}`,
+	}
+}
+
 func (d *stalledRaceDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	d.msgCalls.Add(1)
 	d.mu.Lock()
@@ -99,7 +109,7 @@ func (d *stalledRaceDispatcher) DispatchAgentMessage(ctx context.Context, agent 
 		return errOnce
 	}
 	if d.containerDown.Load() {
-		return fmt.Errorf("Error response from daemon: container %s is not running", agent.ID)
+		return brokerAgentNotFoundErr()
 	}
 	return d.wakeTrackingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg)
 }
@@ -353,32 +363,53 @@ func TestStalledAutoSuspend_DM_StaleRunningSnapshotAfterStop_WakesOnce(t *testin
 
 // TestStalledAutoSuspend_DM_BrokerNotRunningError_ReChecksAndWakesOnce tests
 // the synchronous broker error recovery path when DispatchAgentMessage itself
-// returns "container ... is not running" (e.g. on a replica where
+// returns the real broker 404 (*brokerStatusError agent_not_found) or the
+// raw container-not-running string fallback (e.g. on a replica where
 // MarkAgentDelivery ran just before the stop).
 func TestStalledAutoSuspend_DM_BrokerNotRunningError_ReChecksAndWakesOnce(t *testing.T) {
-	srv, s, sender, target, disp := setupStalledDMFixtures(t, true)
+	t.Run("broker 404 agent_not_found wakes once and delivers", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, true)
 
-	// Transition target to suspended(stalled) on the first DispatchAgentMessage
-	// attempt and return Docker's "container ... is not running" error.
-	transitioningDisp := &stalledTransitionOnFirstMsgDispatcher{
-		stalledRaceDispatcher: disp,
-		onFirstMsg: func() {
-			awSuspendFor(t, s, target, state.SuspendReasonStalled)
-		},
-		firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
-	}
-	srv.SetDispatcher(transitioningDisp)
+		transitioningDisp := &stalledTransitionOnFirstMsgDispatcher{
+			stalledRaceDispatcher: disp,
+			onFirstMsg: func() {
+				awSuspendFor(t, s, target, state.SuspendReasonStalled)
+			},
+			firstErr: brokerAgentNotFoundErr(),
+		}
+		srv.SetDispatcher(transitioningDisp)
 
-	res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, target, "hello racing broker"))
-	require.Nil(t, dmErr, "broker container-not-running error when target just stalled-suspended must wake and retry once")
-	require.NotNil(t, res)
-	assert.Equal(t, AgentDMAccepted, res.Outcome)
-	assert.Len(t, disp.getStartCalls(), 1)
-	assert.Equal(t, int32(2), transitioningDisp.calls.Load(), "one failed attempt + one retry after wake")
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, target, "hello racing broker"))
+		require.Nil(t, dmErr, "broker 404 agent_not_found when target just stalled-suspended must wake and retry once")
+		require.NotNil(t, res)
+		assert.Equal(t, AgentDMAccepted, res.Outcome)
+		assert.Len(t, disp.getStartCalls(), 1)
+		assert.Equal(t, int32(2), transitioningDisp.calls.Load(), "one failed attempt + one retry after wake")
 
-	msg, err := s.GetMessage(context.Background(), res.MessageID)
-	require.NoError(t, err)
-	assert.Equal(t, store.MessageDispatchDispatched, msg.DispatchState)
+		msg, err := s.GetMessage(context.Background(), res.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, msg.DispatchState)
+	})
+
+	t.Run("raw container-not-running string fallback wakes once and delivers", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, true)
+
+		transitioningDisp := &stalledTransitionOnFirstMsgDispatcher{
+			stalledRaceDispatcher: disp,
+			onFirstMsg: func() {
+				awSuspendFor(t, s, target, state.SuspendReasonStalled)
+			},
+			firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+		}
+		srv.SetDispatcher(transitioningDisp)
+
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, target, "hello raw container err"))
+		require.Nil(t, dmErr, "raw container-not-running fallback when target just stalled-suspended must wake and retry once")
+		require.NotNil(t, res)
+		assert.Equal(t, AgentDMAccepted, res.Outcome)
+		assert.Len(t, disp.getStartCalls(), 1)
+		assert.Equal(t, int32(2), transitioningDisp.calls.Load())
+	})
 }
 
 type stalledTransitionOnFirstMsgDispatcher struct {
@@ -531,6 +562,7 @@ func TestStalledAutoSuspend_DM_AuthzAndExclusions(t *testing.T) {
 		require.NotNil(t, dmErr)
 		assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
 		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Contains(t, dmErr.Message, "suspending")
 		assert.Empty(t, disp.getStartCalls())
 		assert.Equal(t, int32(0), disp.msgCalls.Load())
 	})
@@ -787,7 +819,7 @@ func TestStalledAutoSuspend_DM_PostAdmissionExplicitWake_AuthzEnforced(t *testin
 			onFirstMsg: func() {
 				awSuspendFor(t, s, target, state.SuspendReasonStalled)
 			},
-			firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+			firstErr: brokerAgentNotFoundErr(),
 		}
 		srv.SetDispatcher(transitioningDisp)
 
@@ -814,7 +846,7 @@ func TestStalledAutoSuspend_DM_PostAdmissionExplicitWake_AuthzEnforced(t *testin
 			onFirstMsg: func() {
 				awSuspendFor(t, s, target, state.SuspendReasonStalled)
 			},
-			firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+			firstErr: brokerAgentNotFoundErr(),
 		}
 		srv.SetDispatcher(transitioningDisp)
 
@@ -887,7 +919,7 @@ func TestStalledAutoSuspend_ChatV2_PostAdmissionExplicitWake_AuthzEnforced(t *te
 			onFirstMsg: func() {
 				awSuspendFor(t, s, target, state.SuspendReasonStalled)
 			},
-			firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+			firstErr: brokerAgentNotFoundErr(),
 		}
 		srv.SetDispatcher(transitioningDisp)
 		return srv, s, proj, topicID, target, baseDisp, transitioningDisp
@@ -1107,7 +1139,7 @@ func TestStalledAutoSuspend_HandleAgentMessage_ExperimentOffNoWake_Refuses409(t 
 		"message": "hello without wake",
 	})
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "suspended")
+	assert.Contains(t, rec.Body.String(), "suspending")
 	assert.Empty(t, disp.getStartCalls())
 	assert.Equal(t, int32(0), disp.msgCalls.Load())
 	// Pre-persistence refusal must not persist a failed message row.
@@ -1155,14 +1187,14 @@ func TestStalledAutoSuspend_ScheduledMessage_FreshReReadAnd404Preserved(t *testi
 		return req, ma
 	}
 
-	t.Run("container-not-running re-reads fresh suspended row and wakes once", func(t *testing.T) {
+	t.Run("broker 404 re-reads fresh suspended row and wakes once", func(t *testing.T) {
 		srv, s, _, target, disp := setupStalledDMFixtures(t, true)
 		transitioningDisp := &stalledTransitionOnFirstMsgDispatcher{
 			stalledRaceDispatcher: disp,
 			onFirstMsg: func() {
 				awSuspendFor(t, s, target, state.SuspendReasonStalled)
 			},
-			firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+			firstErr: brokerAgentNotFoundErr(),
 		}
 		srv.SetDispatcher(transitioningDisp)
 
@@ -1178,15 +1210,16 @@ func TestStalledAutoSuspend_ScheduledMessage_FreshReReadAnd404Preserved(t *testi
 		srv, _, _, target, disp := setupStalledDMFixtures(t, true)
 		transitioningDisp := &stalledTransitionOnFirstMsgDispatcher{
 			stalledRaceDispatcher: disp,
-			firstErr:              fmt.Errorf("broker returned status 404: agent %s not found", target.ID),
+			firstErr:              brokerAgentNotFoundErr(),
 		}
 		srv.SetDispatcher(transitioningDisp)
 
 		req, ma := makeFireReq(t, target, "scheduled 404")
 		_, err := srv.deliverMessageAction(context.Background(), req, ma)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "404")
+		assert.Contains(t, err.Error(), "has no running container")
 		assert.NotContains(t, err.Error(), "no wake recovery applicable")
+		assert.NotContains(t, err.Error(), "auto-wake failed")
 		assert.Empty(t, disp.getStartCalls())
 		assert.Equal(t, int32(1), transitioningDisp.calls.Load())
 	})
@@ -1323,9 +1356,9 @@ type alwaysContainerNotRunningDispatcher struct {
 	msgCalls atomic.Int32
 }
 
-func (d *alwaysContainerNotRunningDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
+func (d *alwaysContainerNotRunningDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
 	d.msgCalls.Add(1)
-	return fmt.Errorf("Error response from daemon: container %s is not running", agent.ID)
+	return brokerAgentNotFoundErr()
 }
 
 func placeTestHold(t *testing.T, s store.Store, target *store.Agent) {
@@ -1435,6 +1468,31 @@ func TestStalledAutoSuspend_ExplicitWake_PostSettleAuthzAndHold(t *testing.T) {
 		res, dmErr := srv.ExecuteAgentDM(context.Background(), input)
 		assert.Nil(t, res)
 		require.NotNil(t, dmErr, "soft-delete during settle must refuse explicit wake")
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assert.Empty(t, disp.getStartCalls())
+	})
+
+	t.Run("ExecuteAgentDM deletion in progress during settle refuses with 409 even when phase stays running", func(t *testing.T) {
+		srv, s, sender, target, disp := setupStalledDMFixtures(t, false) // experiment OFF
+
+		end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+		db := s.(*entadapter.CompositeStore).DB()
+		go func() {
+			time.Sleep(150 * time.Millisecond)
+			_, _ = db.ExecContext(context.Background(),
+				"UPDATE agents SET deletion_state = ?, deletion_lease_at = ?, phase = ? WHERE id = ?",
+				string(store.DeletionStateDeleting), time.Now().UTC().Add(time.Minute), string(state.PhaseRunning), target.ID,
+			)
+			end()
+		}()
+
+		input := awAgentDMInput(sender, target, "explicit wake deleting during settle")
+		input.Wake = true
+		input.SenderIdentity = wakeDMSenderIdentity(sender, ScopeProjectRead, ScopeAgentLifecycle)
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), input)
+		assert.Nil(t, res)
+		require.NotNil(t, dmErr, "deletion in progress during settle must refuse explicit wake even when phase stays running")
+		assert.Equal(t, ErrCodeDeleteInProgress, dmErr.Code)
 		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
 		assert.Empty(t, disp.getStartCalls())
 	})
@@ -1663,7 +1721,7 @@ func TestStalledAutoSuspend_ExplicitWake_PostSettleAuthzAndHold(t *testing.T) {
 						close(disp.releaseStop)
 					}()
 				},
-				firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+				firstErr: brokerAgentNotFoundErr(),
 			}
 			srv.SetDispatcher(transitioning)
 
@@ -1709,6 +1767,259 @@ func TestStalledAutoSuspend_ExplicitWake_PostSettleAuthzAndHold(t *testing.T) {
 		assert.Contains(t, strings.ToLower(info.Message), "hold")
 		assert.Empty(t, disp.getStartCalls())
 	})
+
+	t.Run("chat v2 pre-persist explicit wake permission revoked during settle refuses with 403 and 0 starts", func(t *testing.T) {
+		srv, s, wcs, proj, db := setupSendTest(t)
+		setIdleSuspendExperiment(t, srv, false)
+		ctx := t.Context()
+		srv.seedProjectCreatorMembership(ctx, proj)
+
+		broker := &store.RuntimeBroker{ID: tid("cv2-perm-pre-broker"), Name: "CV2 Perm Pre Broker", Slug: "cv2-perm-pre-broker", Status: store.BrokerStatusOnline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		}))
+
+		member := &store.User{
+			ID: tid("cv2-perm-pre-member"), Email: "cv2-perm-pre-member@example.com",
+			DisplayName: "Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, member))
+		msgAuthzAddProjectMember(t, s, member.ID, proj.ID, proj.Slug, store.GroupMemberRoleMember)
+		msgAuthzGrantAgentMessage(t, s, member.ID, proj.ID)
+
+		target := &store.Agent{
+			ID: tid("cv2-perm-pre-target"), ProjectID: proj.ID, Name: "CV2PermPreTarget", Slug: "cv2-perm-pre-target",
+			Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+			OwnerID: member.ID, CreatedBy: member.ID, MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, s.CreateAgent(ctx, target))
+		_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		storeDB := s.(*entadapter.CompositeStore).DB()
+		_, err = storeDB.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+			"run-cv2-pre-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+		require.NoError(t, err)
+		fresh, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		*target = *fresh
+		awReadyOnStart(t, s, target.ID)
+		require.True(t, srv.agentLifecycleAllowed(ctx, userIdentityFor(member), target), "member must have lifecycle permission before settle")
+
+		topicID := tid("cv2-perm-pre-topic")
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID: topicID, ProjectID: proj.ID, Name: "cv2-perm-pre-topic",
+			CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: target.Slug,
+		}))
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+
+		disp := newStalledRaceDispatcher()
+		srv.SetDispatcher(disp)
+
+		suspendDone := make(chan bool, 1)
+		go func() {
+			suspendDone <- srv.autoSuspendAgent(context.Background(), disp, target, state.SuspendReasonStalled)
+		}()
+		select {
+		case <-disp.stopEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for DispatchAgentStop")
+		}
+
+		// BeforeWake runs strictly after the pre-persist agentLifecycleAllowed
+		// check passes and right before wakeAgentForDMAuthorized settles.
+		resp, sendErr := srv.sendAgentRouted(
+			ctx, "topic:"+topicID, proj.ID, userIdentityFor(member),
+			"chat pre-persist perm revoked during settle", member.DisplayName,
+			[]*store.Agent{target}, nil, nil, nil, time.Now().UTC(), "", nil,
+			chatSendOptions{
+				Wake: true,
+				BeforeWake: func(int) {
+					_, uerr := storeDB.ExecContext(context.Background(),
+						"UPDATE agents SET owner_id = ?, created_by = ? WHERE id = ?",
+						DevUserID, DevUserID, target.ID)
+					if uerr != nil {
+						t.Errorf("failed to reassign target ownership: %v", uerr)
+					}
+					go func() {
+						time.Sleep(100 * time.Millisecond)
+						close(disp.releaseStop)
+					}()
+				},
+			},
+		)
+		<-suspendDone
+		assert.Nil(t, resp)
+		require.NotNil(t, sendErr, "revoked lifecycle permission during settle must refuse pre-persist chat wake")
+		assert.Equal(t, http.StatusForbidden, sendErr.Status)
+		assert.Equal(t, ErrCodeForbidden, sendErr.Code)
+		assert.Empty(t, disp.getStartCalls(), "must not start agent when post-settle explicitWakeAuthorize denies")
+	})
+
+	t.Run("chat v2 mid-dispatch explicit wake permission revoked during settle refuses with 0 starts", func(t *testing.T) {
+		srv, s, wcs, proj, db := setupSendTest(t)
+		setIdleSuspendExperiment(t, srv, false)
+		ctx := t.Context()
+		srv.seedProjectCreatorMembership(ctx, proj)
+
+		broker := &store.RuntimeBroker{ID: tid("cv2-perm-mid-broker"), Name: "CV2 Perm Mid Broker", Slug: "cv2-perm-mid-broker", Status: store.BrokerStatusOnline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		}))
+
+		member := &store.User{
+			ID: tid("cv2-perm-mid-member"), Email: "cv2-perm-mid-member@example.com",
+			DisplayName: "Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, member))
+		msgAuthzAddProjectMember(t, s, member.ID, proj.ID, proj.Slug, store.GroupMemberRoleMember)
+		msgAuthzGrantAgentMessage(t, s, member.ID, proj.ID)
+
+		target := &store.Agent{
+			ID: tid("cv2-perm-mid-target"), ProjectID: proj.ID, Name: "CV2PermMidTarget", Slug: "cv2-perm-mid-target",
+			Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+			OwnerID: member.ID, CreatedBy: member.ID, MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, s.CreateAgent(ctx, target))
+		_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		storeDB := s.(*entadapter.CompositeStore).DB()
+		_, err = storeDB.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+			"run-cv2-mid-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+		require.NoError(t, err)
+		fresh, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		*target = *fresh
+		awReadyOnStart(t, s, target.ID)
+		require.True(t, srv.agentLifecycleAllowed(ctx, userIdentityFor(member), target))
+
+		topicID := tid("cv2-perm-mid-topic")
+		require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+			ID: topicID, ProjectID: proj.ID, Name: "cv2-perm-mid-topic",
+			CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: target.Slug,
+		}))
+		setTopicConversationID(t, db, s, topicID, proj.ID)
+
+		baseDisp := newStalledRaceDispatcher()
+		suspendDone := make(chan bool, 1)
+		transitioning := &stalledTransitionOnFirstMsgDispatcher{
+			stalledRaceDispatcher: baseDisp,
+			onFirstMsg: func() {
+				go func() {
+					suspendDone <- srv.autoSuspendAgent(context.Background(), baseDisp, target, state.SuspendReasonStalled)
+				}()
+				select {
+				case <-baseDisp.stopEntered:
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting for DispatchAgentStop")
+				}
+			},
+			firstErr: brokerAgentNotFoundErr(),
+		}
+		srv.SetDispatcher(transitioning)
+
+		// Mid-dispatch hook checks canExplicitWake (passes while member still
+		// owns target), then invokes BeforeWake before wakeAgentForDMAuthorized.
+		resp, sendErr := srv.sendAgentRouted(
+			ctx, "topic:"+topicID, proj.ID, userIdentityFor(member),
+			"chat mid-dispatch perm revoked during settle", member.DisplayName,
+			[]*store.Agent{target}, nil, nil, nil, time.Now().UTC(), "", nil,
+			chatSendOptions{
+				Wake: true,
+				BeforeWake: func(int) {
+					_, uerr := storeDB.ExecContext(context.Background(),
+						"UPDATE agents SET owner_id = ?, created_by = ? WHERE id = ?",
+						DevUserID, DevUserID, target.ID)
+					if uerr != nil {
+						t.Errorf("failed to reassign target ownership: %v", uerr)
+					}
+					go func() {
+						time.Sleep(100 * time.Millisecond)
+						close(baseDisp.releaseStop)
+					}()
+				},
+			},
+		)
+		<-suspendDone
+		require.Nil(t, sendErr)
+		require.NotNil(t, resp)
+		assert.Equal(t, store.MessageDispatchFailed, resp.DispatchState)
+		assert.Empty(t, baseDisp.getStartCalls(), "must not start agent when mid-dispatch post-settle explicitWakeAuthorize denies")
+	})
+
+	t.Run("artifacts review explicit wake permission revoked during settle refuses with 0 starts", func(t *testing.T) {
+		srv, s, hookStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *holdInterceptStore {
+			return &holdInterceptStore{Store: inner, fault: f}
+		})
+		setIdleSuspendExperiment(t, srv, false)
+		ctx := context.Background()
+
+		proj := &store.Project{ID: tid("art-perm-proj"), Name: "Art Perm", Slug: "art-perm-proj"}
+		require.NoError(t, s.CreateProject(ctx, proj))
+		srv.seedProjectCreatorMembership(ctx, proj)
+
+		broker := &store.RuntimeBroker{ID: tid("art-perm-broker"), Name: "Art Perm Broker", Slug: "art-perm-broker", Status: store.BrokerStatusOnline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+		}))
+
+		member := &store.User{
+			ID: tid("art-perm-member"), Email: "art-perm-member@example.com",
+			DisplayName: "Member", Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, member))
+		msgAuthzAddProjectMember(t, s, member.ID, proj.ID, proj.Slug, store.GroupMemberRoleMember)
+		msgAuthzGrantAgentMessage(t, s, member.ID, proj.ID)
+
+		target := &store.Agent{
+			ID: tid("art-perm-target"), ProjectID: proj.ID, Name: "ArtPermTarget", Slug: "art-perm-target",
+			Phase: string(state.PhaseSuspended), SuspendReason: string(state.SuspendReasonStalled),
+			RuntimeBrokerID: broker.ID, OwnerID: member.ID, CreatedBy: member.ID,
+			MessageMode: store.MessageModeProject,
+		}
+		require.NoError(t, s.CreateAgent(ctx, target))
+		awReadyOnStart(t, s, target.ID)
+		require.True(t, srv.agentLifecycleAllowed(ctx, userIdentityFor(member), target))
+
+		disp := newStalledRaceDispatcher()
+		srv.SetDispatcher(disp)
+
+		db := s.(*entadapter.CompositeStore).DB()
+		end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+		// Fires at agentHeldOrUnknown strictly after agentLifecycleAllowed passes
+		// and right before wakeAgentForDMAuthorized settles.
+		hookStore.onHoldCheck = func(_ string) {
+			_, uerr := db.ExecContext(context.Background(),
+				"UPDATE agents SET owner_id = ?, created_by = ? WHERE id = ?",
+				DevUserID, DevUserID, target.ID)
+			if uerr != nil {
+				t.Errorf("failed to reassign target ownership: %v", uerr)
+			}
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				end()
+			}()
+		}
+		fault.Arm()
+
+		reqCtx := contextWithIdentity(ctx, userIdentityFor(member))
+		info := srv.notifyArtifactReviewWithDelivery(reqCtx, nil, artifacts.ReviewNotice{
+			ArtifactID:   "art-explicit-perm-revoked-settle",
+			Seq:          1,
+			ScopeKind:    artifacts.ScopeKindProject,
+			ScopeRef:     target.ProjectID,
+			OwnerKind:    artifacts.PrincipalKindAgent,
+			OwnerRef:     target.ID,
+			ReviewerKind: artifacts.PrincipalKindUser,
+			ReviewerRef:  member.ID,
+			Wake:         true,
+		})
+		require.NotNil(t, info)
+		assert.Equal(t, artifacts.ReviewDeliveryWakeRefused, info.Status)
+		assert.Empty(t, disp.getStartCalls(), "must not start agent when post-settle explicitWakeAuthorize denies")
+	})
 }
 
 // TestStalledAutoSuspend_ContainerNotRunningRetry_NoDuplicateRecordLog verifies
@@ -1721,7 +2032,7 @@ func TestStalledAutoSuspend_ContainerNotRunningRetry_NoDuplicateRecordLog(t *tes
 		onFirstMsg: func() {
 			awSuspendFor(t, s, target, state.SuspendReasonStalled)
 		},
-		firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+		firstErr: brokerAgentNotFoundErr(),
 	}
 	srv.SetDispatcher(transitioning)
 
@@ -1808,7 +2119,7 @@ func TestStalledAutoSuspend_ChatV2_MidDispatchExplicitWake_HeldTargetSkipsWake(t
 				endTracker()
 			}()
 		},
-		firstErr: fmt.Errorf("Error response from daemon: container %s is not running", target.ID),
+		firstErr: brokerAgentNotFoundErr(),
 	}
 	srv.SetDispatcher(transitioning)
 
@@ -1890,4 +2201,168 @@ func TestStalledAutoSuspend_ContainerNotRunningRetry_WakesAtMostOnce(t *testing.
 	require.Error(t, err)
 	assert.Equal(t, int32(1), wakeCalls.Load(), "container-not-running retry must invoke syncAutoWake at most once")
 	assert.Equal(t, int32(2), alwaysFail.msgCalls.Load(), "expected initial attempt plus exactly one retry")
+}
+
+type getAgentFaultStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	errToFail  error
+	failNext   atomic.Bool
+	failedOnce atomic.Bool
+}
+
+func (g *getAgentFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if g.fault.Active() && g.failNext.Load() && g.failedOnce.CompareAndSwap(false, true) {
+		return nil, g.errToFail
+	}
+	return g.Store.GetAgent(ctx, id)
+}
+
+// TestStalledAutoSuspend_SettleReadError_UserFacingNoRawStoreText verifies
+// O3 and security round-3 L2: a store read failure after the in-flight
+// auto-suspend tracker finishes returns a user-facing 503 message about
+// confirming suspend (not "was already starting") and never exposes raw
+// store/driver error text in the DM response.
+func TestStalledAutoSuspend_SettleReadError_UserFacingNoRawStoreText(t *testing.T) {
+	srv, s, faultStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *getAgentFaultStore {
+		return &getAgentFaultStore{
+			Store:     inner,
+			fault:     f,
+			errToFail: errors.New("sqlite3: secret_internal_table_xyz constraint failed"),
+		}
+	})
+	setIdleSuspendExperiment(t, srv, true)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("settle-err-proj"), Name: "Settle Err", Slug: "settle-err-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	broker := &store.RuntimeBroker{ID: tid("settle-err-broker"), Name: "Settle Err Broker", Slug: "settle-err-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+	}))
+	sender := &store.Agent{
+		ID: tid("settle-err-sender"), ProjectID: proj.ID, Name: "Sender", Slug: "settle-err-sender",
+		Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID, MessageMode: store.MessageModeProject,
+	}
+	target := &store.Agent{
+		ID: tid("settle-err-target"), ProjectID: proj.ID, Name: "Target", Slug: "settle-err-target",
+		Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID, MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, s.CreateAgent(ctx, sender))
+	require.NoError(t, s.CreateAgent(ctx, target))
+	disp := newStalledRaceDispatcher()
+	srv.SetDispatcher(disp)
+
+	end := srv.autoSuspending.begin(target.ID, state.SuspendReasonStalled)
+	fault.Arm()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		faultStore.failNext.Store(true)
+		end()
+	}()
+
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "dm hitting settle read error"))
+	assert.Nil(t, res)
+	require.NotNil(t, dmErr)
+	assert.Equal(t, ErrCodeUnavailable, dmErr.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Contains(t, dmErr.Message, "suspending")
+	assert.NotContains(t, dmErr.Message, "was already starting")
+	assert.NotContains(t, dmErr.Message, "sqlite3")
+	assert.NotContains(t, dmErr.Message, "secret_internal_table_xyz")
+	assert.Empty(t, disp.getStartCalls())
+}
+
+type swapIntentPauseStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *swapIntentPauseStore) SwapAutoSuspendRunIntent(ctx context.Context, id string, newIntent store.RunIntent, requireSuspendPolicyAuto bool) (store.RunIntent, time.Time, error) {
+	if w.fault.Active() {
+		w.once.Do(func() { close(w.entered) })
+		select {
+		case <-w.release:
+		case <-ctx.Done():
+			return "", time.Time{}, ctx.Err()
+		}
+		return "", time.Time{}, store.ErrAgentNeverSuspend
+	}
+	return w.Store.SwapAutoSuspendRunIntent(ctx, id, newIntent, requireSuspendPolicyAuto)
+}
+
+// TestStalledAutoSuspend_NeverSuspendPreconditionAbort_DoesNotRefuseConcurrentDM
+// verifies O1: autoSuspendAgent registers the in-flight tracker only after the
+// claim/intent swap succeeds, so a precondition abort (e.g. never-suspend)
+// never transiently marks the running agent as suspending or refuses a
+// concurrent DM.
+func TestStalledAutoSuspend_NeverSuspendPreconditionAbort_DoesNotRefuseConcurrentDM(t *testing.T) {
+	srv, s, pauseStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *swapIntentPauseStore {
+		return &swapIntentPauseStore{
+			Store:   inner,
+			fault:   f,
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+	})
+	setIdleSuspendExperiment(t, srv, false) // experiment OFF so any spurious tracker active refuses with 409
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("ns-abort-proj"), Name: "NS Abort", Slug: "ns-abort-proj"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	broker := &store.RuntimeBroker{ID: tid("ns-abort-broker"), Name: "NS Abort Broker", Slug: "ns-abort-broker", Status: store.BrokerStatusOnline}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: proj.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: store.BrokerStatusOnline,
+	}))
+	sender := &store.Agent{
+		ID: tid("ns-abort-sender"), ProjectID: proj.ID, Name: "Sender", Slug: "ns-abort-sender",
+		Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+	}
+	target := &store.Agent{
+		ID: tid("ns-abort-target"), ProjectID: proj.ID, Name: "Target", Slug: "ns-abort-target",
+		Phase: string(state.PhaseRunning), RuntimeBrokerID: broker.ID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, sender))
+	require.NoError(t, s.CreateAgent(ctx, target))
+	_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err = db.ExecContext(ctx, "UPDATE agents SET run_id = ?, activity = ?, last_seen = ? WHERE id = ?",
+		"run-ns-"+target.ID, string(state.ActivityStalled), time.Now().UTC(), target.ID)
+	require.NoError(t, err)
+	fresh, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	*target = *fresh
+
+	disp := newStalledRaceDispatcher()
+	srv.SetDispatcher(disp)
+
+	fault.Arm()
+	suspendDone := make(chan bool, 1)
+	go func() {
+		suspendDone <- srv.autoSuspendAgent(ctx, disp, target, state.SuspendReasonStalled)
+	}()
+
+	select {
+	case <-pauseStore.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for SwapAutoSuspendRunIntent")
+	}
+
+	assert.False(t, srv.autoSuspending.isActive(target.ID), "tracker must not be active before SwapAutoSuspendRunIntent succeeds")
+
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "dm during never-suspend precondition abort"))
+	close(pauseStore.release)
+	assert.False(t, <-suspendDone, "never-suspend precondition must abort auto-suspend")
+
+	require.Nil(t, dmErr, "concurrent DM during precondition-aborted auto-suspend must deliver without refusal")
+	require.NotNil(t, res)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	assert.Empty(t, disp.getStartCalls())
+	assert.Equal(t, int32(1), disp.msgCalls.Load())
 }
