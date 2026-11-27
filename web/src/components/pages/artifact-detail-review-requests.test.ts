@@ -21,6 +21,7 @@ import type { ScionPageArtifactDetail } from './artifact-detail.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import type { ArtifactResponse, ReviewRequestInfo } from '../../client/artifacts.js';
 import {
+  ARTIFACT_REVIEW_EDITOR_FLAG,
   ARTIFACTS_REVIEW_REQUESTS_FLAG,
   resetServerFlagStateForTests,
 } from '../../utils/feature-flags.js';
@@ -382,6 +383,9 @@ describe('artifact-detail: review requests panel, withdraw, carry-forward & subm
     onFinalize?: () => ArtifactResponse;
   }): Promise<ScionPageArtifactDetail> {
     localStorage.setItem(`scion:feature:${ARTIFACTS_FLAG}`, 'true');
+    // Pin the source review editor; this suite tests review-request lifecycle flows,
+    // not the graphical review editor (which now defaults to on).
+    localStorage.setItem(`scion:feature:${ARTIFACT_REVIEW_EDITOR_FLAG}`, 'false');
     if (opts.reviewRequestsOn !== false) {
       localStorage.setItem(`scion:feature:${ARTIFACTS_REVIEW_REQUESTS_FLAG}`, 'true');
     }
