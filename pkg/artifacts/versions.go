@@ -756,6 +756,7 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusBadRequest, "size_mismatch", "Content-Length does not match the manifest")
 		return
 	}
+	ExtendUploadDeadlines(ctx, w, f.Size)
 	spool, err := spoolBody(r.Body, f.Size)
 	if errors.Is(err, errTooLarge) {
 		writeError(w, http.StatusBadRequest, "size_mismatch", "the body is larger than the manifest says")

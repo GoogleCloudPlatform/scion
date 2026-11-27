@@ -265,6 +265,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeTooLarge(w, limit)
 		return
 	}
+	ExtendUploadDeadlines(ctx, w, ExpectedUploadBytes(r.ContentLength, limit))
 	spool, err := spoolBody(r.Body, limit)
 	if errors.Is(err, errTooLarge) {
 		writeTooLarge(w, limit)
