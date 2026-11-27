@@ -55,11 +55,33 @@ type resolvedRollupWindow struct {
 	startDayKey string // earliest local day key in reportLoc
 }
 
+// checkHourlyConsistency applies P2.1a's CheckUsageHourlyConsistency read-time
+// cross-check over all whole covered UTC days inside win. Returns true when
+// hourly rollups are safe to serve, false when the caller must fall back to
+// daily rollups.
+func (s *HubRollupSource) checkHourlyConsistency(ctx context.Context, win UsageWindow, hourlyCoverageStart time.Time, projectID string) (bool, error) {
+	sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
+	untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
+	checkFirstDay := sinceDay
+	if sinceDay.Before(hourlyCoverageStart) {
+		checkFirstDay = sinceDay.AddDate(0, 0, 1)
+	}
+	if checkFirstDay.After(untilDay) {
+		return true, nil
+	}
+	return s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     checkFirstDay,
+		Until:     untilDay,
+		ProjectID: projectID,
+	})
+}
+
 // resolveWindow computes the dashboard window and delegates hourly-vs-daily
-// granularity selection to P2.1a's shared resolveUsageWindowAndGranularity.
-// When hourly rollups are eligible, UTC hour buckets are re-bucketed into the
-// viewer's requested timezone; when falling back to daily rollups, the window
-// and reported timeZone are UTC so day keys match the actual bucket boundaries.
+// granularity selection to P2.1a's shared resolveUsageWindowAndGranularity plus
+// CheckUsageHourlyConsistency. When hourly rollups are eligible and consistent,
+// UTC hour buckets are re-bucketed into the viewer's requested timezone; when
+// falling back to daily rollups, the window and reported timeZone are UTC so
+// day keys match the actual bucket boundaries.
 func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg *queryConfig) (resolvedRollupWindow, error) {
 	dbNow, err := s.store.DBNow(ctx)
 	if err != nil {
@@ -84,35 +106,32 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 	}
 
 	if win.Granularity == store.UsageGranularityHour {
-		loc := cfg.location()
-		return resolvedRollupWindow{
-			dbNow:       dbNow,
-			since:       win.Since,
-			until:       win.Until,
-			granularity: store.UsageGranularityHour,
-			reportLoc:   loc,
-			startDayKey: dayKey(reqWindow.start, loc),
-		}, nil
+		consistent, err := s.checkHourlyConsistency(ctx, win, hourlyCoverageStart, cfg.ProjectID)
+		if err != nil {
+			return resolvedRollupWindow{}, fmt.Errorf("check hourly rollup consistency: %w", err)
+		}
+		if consistent {
+			loc := cfg.location()
+			return resolvedRollupWindow{
+				dbNow:       dbNow,
+				since:       win.Since,
+				until:       win.Until,
+				granularity: store.UsageGranularityHour,
+				reportLoc:   loc,
+				startDayKey: dayKey(reqWindow.start, loc),
+			}, nil
+		}
 	}
 
 	// Daily fallback: usage_rollups_daily is keyed by UTC calendar day, so
 	// report timeZone="UTC" and compute the periodDays window in UTC.
 	utcWindow := metricsQueryWindowFor(dbNow, periodDays, &queryConfig{ProjectID: cfg.ProjectID})
-	utcWin, err := resolveUsageWindowAndGranularity(
-		utcWindow.start.UTC().Format(time.RFC3339Nano),
-		utcWindow.end.UTC().Format(time.RFC3339Nano),
-		dbNow,
-		hourlyCoverageStart,
-		hasHourlyCoverage,
-		false,
-	)
-	if err != nil {
-		return resolvedRollupWindow{}, fmt.Errorf("resolve daily rollup window: %w", err)
-	}
+	sinceDay := time.Date(utcWindow.start.Year(), utcWindow.start.Month(), utcWindow.start.Day(), 0, 0, 0, 0, time.UTC)
+	untilDay := time.Date(utcWindow.end.Year(), utcWindow.end.Month(), utcWindow.end.Day(), 0, 0, 0, 0, time.UTC)
 	return resolvedRollupWindow{
 		dbNow:       dbNow,
-		since:       utcWin.Since,
-		until:       utcWin.Until,
+		since:       sinceDay,
+		until:       untilDay.Add(24*time.Hour - time.Microsecond),
 		granularity: store.UsageGranularityDay,
 		reportLoc:   time.UTC,
 		startDayKey: dayKey(utcWindow.start, time.UTC),
@@ -120,8 +139,8 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 }
 
 // resolve24hWindow resolves the rolling 24-hour window for QueryProjectSummary
-// through P2.1a's shared granularity helper.
-func (s *HubRollupSource) resolve24hWindow(ctx context.Context) (resolvedRollupWindow, error) {
+// through P2.1a's shared granularity helper and CheckUsageHourlyConsistency.
+func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string) (resolvedRollupWindow, error) {
 	dbNow, err := s.store.DBNow(ctx)
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("read DB clock: %w", err)
@@ -142,6 +161,21 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context) (resolvedRollupW
 	)
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("resolve 24h rollup granularity: %w", err)
+	}
+	if win.Granularity == store.UsageGranularityHour {
+		consistent, err := s.checkHourlyConsistency(ctx, win, hourlyCoverageStart, projectID)
+		if err != nil {
+			return resolvedRollupWindow{}, fmt.Errorf("check 24h hourly rollup consistency: %w", err)
+		}
+		if !consistent {
+			sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
+			untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
+			win = UsageWindow{
+				Since:       sinceDay,
+				Until:       untilDay.Add(24*time.Hour - time.Microsecond),
+				Granularity: store.UsageGranularityDay,
+			}
+		}
 	}
 	return resolvedRollupWindow{
 		dbNow:       dbNow,
@@ -600,7 +634,7 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 // QueryProjectSummary returns lightweight scalar metrics for a project over
 // the last 24 hours from Hub rollups and Pipeline C session metadata.
 func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error) {
-	w, err := s.resolve24hWindow(ctx)
+	w, err := s.resolve24hWindow(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}

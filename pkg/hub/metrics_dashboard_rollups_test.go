@@ -383,6 +383,35 @@ func TestHubRollupSource_TimezoneBucketingAndDailyFallback(t *testing.T) {
 	assert.Equal(t, store.UsageGranularityDay, callsDaily.Granularity)
 	require.Len(t, callsDaily.ByModel, 1)
 	assert.Equal(t, dayKey(yesterdayUTC, time.UTC), callsDaily.ByModel[0].Points[0].Timestamp)
+
+	// Hourly vs daily consistency mismatch (D7a): add a daily-only rollup row inside the 7d window
+	// so CheckUsageHourlyConsistency returns false -> must fall back to daily and report timeZone="UTC".
+	yesterdayDay := time.Date(yesterdayUTC.Year(), yesterdayUTC.Month(), yesterdayUTC.Day(), 0, 0, 0, 0, time.UTC)
+	_, err = client.UsageRollupDaily.Create().
+		SetBucketStart(yesterdayDay).
+		SetProjectID(proj.ID).
+		SetBillingUserID(u1.ID).
+		SetAgentID(ag).
+		SetHarness("claude").
+		SetModel("claude-haiku-4-5").
+		SetUsageSource(store.UsageSourceNative).
+		SetCalls(3).
+		SetInput(50).
+		SetOutput(25).
+		SetEvents(1).
+		SetInputKnownEvents(1).
+		SetOutputKnownEvents(1).
+		SetPresenceTrackedEvents(1).
+		SetFirstEventTs(yesterdayUTC).
+		SetLastEventTs(yesterdayUTC).
+		Save(ctx)
+	require.NoError(t, err)
+
+	callsMismatch, err := src.QueryModelCalls(ctx, 7, WithProjectID(proj.ID), WithTimeZone(chicago))
+	require.NoError(t, err)
+	assert.Equal(t, "UTC", callsMismatch.TimeZone, "hourly/daily mismatch must fall back to daily and report timeZone=UTC")
+	assert.Equal(t, store.UsageGranularityDay, callsMismatch.Granularity)
+	require.Len(t, callsMismatch.ByModel, 2, "daily fallback must include the daily-only row")
 }
 
 func TestHubRollupSource_GroupedSeriesModelHarnessUser(t *testing.T) {
