@@ -20,6 +20,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 | Building on another unmerged branch (stacked PRs) | `docs-repo/agents/stacked-branches.md` |
 | Adding or changing a user-visible runtime launch failure | `docs-repo/agents/typed-launch-failures.md` |
 | Live verification runs, or hosted/production-mode hardening that removes a workstation convenience | `docs-repo/agents/live-verification-gates.md` |
+| sciontool code (`cmd/sciontool/`, `pkg/sciontool/`) that adds or changes process execution (`exec.Command*`) | `docs-repo/agents/sciontool-rootexec.md` |
 
 ## Sandbox
 
