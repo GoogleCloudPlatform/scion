@@ -105,7 +105,7 @@ const (
 // persists shared usage-retention sweeper progress (last completed pass,
 // resume index for multi-tick passes) and the monotonic hourly swept-through
 // watermark across replicas and restarts.
-const UsageRetentionStateSection = "internal.usage_retention_state"
+const UsageRetentionStateSection = "system.usage_retention_state"
 
 // Usage rollup granularities and supported groupBy dimensions.
 const (

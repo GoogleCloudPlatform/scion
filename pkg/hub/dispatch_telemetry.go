@@ -190,12 +190,14 @@ func (t telemetryDispatch) inlineConfig(stored *api.ScionConfig) *api.ScionConfi
 
 // wireTelemetry is the hub telemetry default the hub-defaults builder
 // (remoteHubAgentDefaults / startHubAgentDefaults) puts in
-// HubAgentDefaults.Telemetry: a copy, nil when there is none.
+// HubAgentDefaults.Telemetry: a copy with Hub-only Retention cleared, nil when
+// there is none.
 func (t telemetryDispatch) wireTelemetry() *api.TelemetryConfig {
 	if t.hubDefault == nil {
 		return nil
 	}
 	c := *t.hubDefault
+	c.Retention = nil
 	return &c
 }
 

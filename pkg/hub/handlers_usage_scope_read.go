@@ -27,13 +27,8 @@ import (
 )
 
 const (
-	defaultHourlyRollupRetentionDays = 14
-	defaultUsageGroupsLimit          = 100
-	// defaultHourlyUsageGroupsLimit covers a full 14-day hourly time series
-	// plus the current partial hour (14 * 24 + 1 = 337 buckets) without
-	// truncation when limit is omitted.
-	defaultHourlyUsageGroupsLimit = defaultHourlyRollupRetentionDays*24 + 1
-	maxUsageGroupsLimit           = 500
+	defaultUsageGroupsLimit = 100
+	maxUsageGroupsLimit     = 500
 )
 
 // UsageScopeRef identifies the scope evaluated by a scoped usage summary API.
@@ -286,7 +281,9 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	limit, err := parseUsageLimit(qParams.Get("limit"), hasHourGroup)
+	hourlyRetentionDays := s.usageRetentionConfig().HourlyRollupsDays
+
+	limit, err := parseUsageLimit(qParams.Get("limit"), hasHourGroup, hourlyRetentionDays)
 	if err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
@@ -345,8 +342,6 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 	if retentionState != nil && retentionState.HourlySweptThrough != nil {
 		hourlySweptThrough = *retentionState.HourlySweptThrough
 	}
-
-	hourlyRetentionDays := s.usageRetentionConfig().HourlyRollupsDays
 
 	win, err := resolveUsageWindowAndGranularity(
 		qParams.Get("since"),
@@ -483,11 +478,25 @@ func parseUsageGroupBy(rawValues []string) ([]string, bool, error) {
 	return out, hasHour, nil
 }
 
-func parseUsageLimit(raw string, hasHourGroup bool) (int, error) {
+func defaultHourlyLimitForRetention(hourlyRetentionDays int) int {
+	if hourlyRetentionDays <= 0 {
+		return maxUsageGroupsLimit
+	}
+	n := hourlyRetentionDays*24 + 1
+	if n > maxUsageGroupsLimit {
+		return maxUsageGroupsLimit
+	}
+	if n < defaultUsageGroupsLimit {
+		return defaultUsageGroupsLimit
+	}
+	return n
+}
+
+func parseUsageLimit(raw string, hasHourGroup bool, hourlyRetentionDays int) (int, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		if hasHourGroup {
-			return defaultHourlyUsageGroupsLimit, nil
+			return defaultHourlyLimitForRetention(hourlyRetentionDays), nil
 		}
 		return defaultUsageGroupsLimit, nil
 	}

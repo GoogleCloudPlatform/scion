@@ -72,14 +72,15 @@ type UsageRetentionTarget struct {
 
 // UsageRetentionTableReport records the outcome of sweeping one table in a tick.
 type UsageRetentionTableReport struct {
-	Table    string
-	Deleted  int64
-	Batches  int
-	Duration time.Duration
-	Skipped  bool
-	Drained  bool
-	Cutoff   time.Time
-	Err      error
+	Table         string
+	Deleted       int64
+	Batches       int
+	Duration      time.Duration
+	Skipped       bool
+	SkippedReason string
+	Drained       bool
+	Cutoff        time.Time
+	Err           error
 }
 
 // UsageRetentionRunReport summarizes one tick (or full pass) of UsageRetentionSweeper.
@@ -400,9 +401,10 @@ func (sw *UsageRetentionSweeper) Run(ctx context.Context, cfg config.ResolvedTel
 		}
 		if days <= 0 {
 			report.Tables = append(report.Tables, UsageRetentionTableReport{
-				Table:   t.Name,
-				Skipped: true,
-				Drained: true,
+				Table:         t.Name,
+				Skipped:       true,
+				SkippedReason: "unlimited",
+				Drained:       true,
 			})
 			continue
 		}
@@ -412,6 +414,37 @@ func (sw *UsageRetentionSweeper) Run(ctx context.Context, cfg config.ResolvedTel
 			cutoff = t.ComputeCutoff(now, days)
 		} else {
 			cutoff = now.Add(-time.Duration(days) * 24 * time.Hour)
+		}
+
+		// O-d: if usage_events has an export-cursor provider installed that
+		// reports no cursor yet (nil, nil), fail closed and record an explicit
+		// skipped_reason so operators see that usage_events was held back.
+		if t.Name == "usage_events" {
+			_, skipCursor, curErr := sw.resolveExportCursor(tickCtx)
+			if curErr != nil {
+				report.ErrorCount++
+				allDrained = false
+				if !advancedNextIdx {
+					nextIdx = (idx + 1) % len(targets)
+					advancedNextIdx = true
+				}
+				report.Tables = append(report.Tables, UsageRetentionTableReport{
+					Table:  t.Name,
+					Cutoff: cutoff,
+					Err:    curErr,
+				})
+				continue
+			}
+			if skipCursor {
+				report.Tables = append(report.Tables, UsageRetentionTableReport{
+					Table:         t.Name,
+					Cutoff:        cutoff,
+					Skipped:       true,
+					SkippedReason: "export_cursor_unavailable",
+					Drained:       true,
+				})
+				continue
+			}
 		}
 
 		// Fair-share slice for this target within the remaining tick budget so
@@ -571,10 +604,19 @@ func (s *Server) usageRetentionHandler() func(ctx context.Context) {
 
 func logUsageRetentionReport(ctx context.Context, report UsageRetentionRunReport) {
 	deletedByTable := make(map[string]int64, len(report.Tables))
+	cutoffByTable := make(map[string]string, len(report.Tables))
+	skippedByTable := make(map[string]string)
 	var errs []string
 	for _, tr := range report.Tables {
-		if !tr.Skipped {
+		if tr.Skipped {
+			if tr.SkippedReason != "" {
+				skippedByTable[tr.Table] = tr.SkippedReason
+			}
+		} else {
 			deletedByTable[tr.Table] = tr.Deleted
+		}
+		if !tr.Cutoff.IsZero() {
+			cutoffByTable[tr.Table] = tr.Cutoff.UTC().Format(time.RFC3339)
 		}
 		if tr.Err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", tr.Table, tr.Err))
@@ -585,7 +627,11 @@ func logUsageRetentionReport(ctx context.Context, report UsageRetentionRunReport
 		"duration_ms", report.Duration.Milliseconds(),
 		"pass_completed", report.PassCompleted,
 		"deleted_by_table", deletedByTable,
+		"cutoff_by_table", cutoffByTable,
 		"error_count", report.ErrorCount,
+	}
+	if len(skippedByTable) > 0 {
+		attrs = append(attrs, "skipped_by_table", skippedByTable)
 	}
 	if report.ErrorCount > 0 {
 		slog.ErrorContext(ctx, "usage retention sweep tick completed with errors",

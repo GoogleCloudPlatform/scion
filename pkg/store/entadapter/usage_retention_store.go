@@ -82,7 +82,7 @@ func (s *UsageLedgerStore) SaveUsageRetentionState(ctx context.Context, state *s
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	q := usageRebindSQL(dialectName, fmt.Sprintf(`
 INSERT INTO hub_settings (id, section, value, revision, updated_by, origin, create_time, update_time)
-VALUES (?, ?, %s, 1, 'system', 'seeded', ?, ?)
+VALUES (?, ?, %s, 1, 'seed', 'seeded', ?, ?)
 ON CONFLICT (section) DO UPDATE SET
 	value = EXCLUDED.value,
 	revision = hub_settings.revision + 1,

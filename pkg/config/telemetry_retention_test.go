@@ -15,6 +15,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -141,4 +143,32 @@ func TestConvertV1TelemetryToAPI_PreservesRetentionNotEmittedToEnv(t *testing.T)
 	// Hub-only retention config must never be emitted to agent container env.
 	env := TelemetryConfigToEnv(apiCfg)
 	assert.Empty(t, env)
+}
+
+func TestLoadVersionedSettings_TelemetryRetentionValidation(t *testing.T) {
+	t.Run("below-minimum value is rejected on load", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(
+			"schema_version: \"1\"\ntelemetry:\n  retention:\n    usage_events_days: 10\n",
+		), 0644))
+		_, err := LoadVersionedSettings(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "usage_events_days")
+	})
+
+	t.Run("explicit zero loads and resolves to unlimited", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(
+			"schema_version: \"1\"\ntelemetry:\n  retention:\n    usage_events_days: 0\n",
+		), 0644))
+		settings, err := LoadVersionedSettings(dir)
+		require.NoError(t, err)
+		require.NotNil(t, settings.Telemetry)
+		require.NotNil(t, settings.Telemetry.Retention)
+		require.NotNil(t, settings.Telemetry.Retention.UsageEventsDays)
+		assert.Equal(t, 0, *settings.Telemetry.Retention.UsageEventsDays)
+
+		resolved := ResolveTelemetryRetention(ConvertV1TelemetryToAPI(settings.Telemetry).Retention)
+		assert.Equal(t, 0, resolved.UsageEventsDays)
+	})
 }

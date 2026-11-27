@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -247,7 +249,8 @@ func TestUsageRetention_UnlimitedZeroExportCursorAndCustomTarget(t *testing.T) {
 	assert.Equal(t, 1, calls["usage_rollups_hourly"], "other tables must still run")
 	assert.Equal(t, 1, customCalled, "registered custom target must run")
 
-	// 2b. Test O1: installed provider returning (nil, nil) must ALSO fail closed (skip usage_events).
+	// 2b. Test O1/O-d: installed provider returning (nil, nil) must ALSO fail closed (skip usage_events)
+	// and record explicit skipped_reason="export_cursor_unavailable".
 	fake.resetState()
 	calls = map[string]int{}
 	sw.SetExportCursorProvider(funcExportCursorProvider(func(context.Context) (*store.UsageExportCursor, error) {
@@ -256,6 +259,17 @@ func TestUsageRetention_UnlimitedZeroExportCursorAndCustomTarget(t *testing.T) {
 	rep = sw.Run(ctx, cfgDefault)
 	assert.Equal(t, 0, rep.ErrorCount)
 	assert.Equal(t, 0, calls["usage_events"], "installed cursor provider returning (nil, nil) must fail closed without calling SweepUsageEventsBatch")
+	var foundEventsReport *UsageRetentionTableReport
+	for i := range rep.Tables {
+		if rep.Tables[i].Table == "usage_events" {
+			foundEventsReport = &rep.Tables[i]
+			break
+		}
+	}
+	require.NotNil(t, foundEventsReport)
+	assert.True(t, foundEventsReport.Skipped)
+	assert.Equal(t, "export_cursor_unavailable", foundEventsReport.SkippedReason)
+	assert.False(t, foundEventsReport.Cutoff.IsZero())
 
 	// 3. Test P8 export cursor provider returning a valid cursor + multi-batch loop.
 	fake.resetState()
@@ -274,97 +288,430 @@ func TestUsageRetention_UnlimitedZeroExportCursorAndCustomTarget(t *testing.T) {
 
 func TestUsageRetention_TickBudgetNoStarvationAndCadence(t *testing.T) {
 	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
-	var mu sync.Mutex
-	curNow := now
-	eventsInfinite := true
-	swept := map[string]int{}
 
-	fake := &fakeUsageRetentionStore{
-		onSweep: func(table string, cutoff time.Time, cur *store.UsageExportCursor, batchSize int) (int64, error) {
+	t.Run("deterministic resume-past-undrained on ctx expiry and cadence", func(t *testing.T) {
+		var mu sync.Mutex
+		curNow := now
+		eventsInfinite := true
+		eventsCallsInTick1 := 0
+		swept := map[string]int{}
+
+		ctx1, cancel1 := context.WithCancel(context.Background())
+		defer cancel1()
+
+		fake := &fakeUsageRetentionStore{
+			onSweep: func(table string, cutoff time.Time, cur *store.UsageExportCursor, batchSize int) (int64, error) {
+				mu.Lock()
+				swept[table]++
+				inf := eventsInfinite
+				if table == "usage_events" && inf {
+					eventsCallsInTick1++
+					if eventsCallsInTick1 == 2 {
+						// Deterministically expire ctx1 mid-usage_events on batch 2.
+						cancel1()
+					}
+					mu.Unlock()
+					return int64(batchSize), nil
+				}
+				mu.Unlock()
+				return 1, nil
+			},
+		}
+
+		sw := NewUsageRetentionSweeper(fake, func(context.Context) (time.Time, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return curNow, nil
+		})
+		sw.SetBatchYield(0)
+		// Large tickBudget so tick 1 ends strictly via deterministic ctx1 cancellation.
+		sw.SetTickBudget(10 * time.Second)
+
+		cfg := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{
+			SweepInterval: "24h",
+			BatchSize:     retentionIntPtr(5),
+		})
+
+		// Tick 1: ctx1 cancels mid-usage_events -> must save NextTargetIndex=1 and InProgress=true.
+		rep1 := sw.Run(ctx1, cfg)
+		assert.False(t, rep1.PassCompleted, "incomplete tick must not mark pass completed")
+		assert.False(t, rep1.Skipped)
+		st1, err := fake.GetUsageRetentionState(context.Background())
+		require.NoError(t, err)
+		assert.True(t, st1.InProgress)
+		assert.Equal(t, 1, st1.NextTargetIndex, "must advance NextTargetIndex past interrupted target 0")
+
+		// Tick 2: starts at NextTargetIndex=1 (usage_rollups_hourly) and sweeps all later targets
+		// even if usage_events still returns full batches once visited last.
+		ctx2, cancel2 := context.WithCancel(context.Background())
+		defer cancel2()
+		fake.onSweep = func(table string, cutoff time.Time, cur *store.UsageExportCursor, batchSize int) (int64, error) {
 			mu.Lock()
 			swept[table]++
 			inf := eventsInfinite
-			mu.Unlock()
 			if table == "usage_events" && inf {
-				time.Sleep(5 * time.Millisecond)
+				cancel2()
+				mu.Unlock()
 				return int64(batchSize), nil
 			}
+			mu.Unlock()
 			return 1, nil
+		}
+		rep2 := sw.Run(ctx2, cfg)
+		assert.False(t, rep2.PassCompleted, "usage_events still undrained")
+		mu.Lock()
+		assert.Equal(t, 1, swept["usage_rollups_hourly"], "hourly rollups must not be starved")
+		assert.Equal(t, 1, swept["usage_rollups_daily"], "daily rollups must not be starved")
+		assert.Equal(t, 1, swept["usage_scope_counters_daily"], "scope counters must not be starved")
+		assert.Equal(t, 1, swept["meter_health"], "meter_health must not be starved")
+		assert.Equal(t, 1, swept["run_attribution"], "run_attribution must not be starved")
+		eventsInfinite = false
+		mu.Unlock()
+
+		// Tick 3: drains remaining targets and completes the pass.
+		rep3 := sw.Run(context.Background(), cfg)
+		assert.True(t, rep3.PassCompleted)
+		assert.Equal(t, 0, rep3.ErrorCount)
+
+		// Immediate next tick (1 minute later) must wait sweep_interval (24h).
+		mu.Lock()
+		curNow = curNow.Add(time.Minute)
+		beforeSkipped := swept["usage_events"]
+		mu.Unlock()
+		rep4 := sw.Run(context.Background(), cfg)
+		assert.True(t, rep4.Skipped, "must wait sweep_interval after completed pass")
+		mu.Lock()
+		assert.Equal(t, beforeSkipped, swept["usage_events"])
+		mu.Unlock()
+
+		// Live cadence update (O3): advance 2 hours and lower sweep_interval to 1h -> runs immediately!
+		mu.Lock()
+		curNow = curNow.Add(2 * time.Hour)
+		mu.Unlock()
+		cfgShorter := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{
+			SweepInterval: "1h",
+			BatchSize:     retentionIntPtr(5),
+		})
+		rep5 := sw.Run(context.Background(), cfgShorter)
+		assert.False(t, rep5.Skipped, "shorter sweep_interval must apply live on next tick")
+		assert.True(t, rep5.PassCompleted)
+
+		// Mid-tick experiment disable (O4): disabling experiment prevents further work.
+		mu.Lock()
+		curNow = curNow.Add(2 * time.Hour)
+		beforeDisabled := swept["usage_events"]
+		mu.Unlock()
+		sw.SetEnabledCheck(func() bool { return false })
+		rep6 := sw.Run(context.Background(), cfgShorter)
+		assert.True(t, rep6.Skipped)
+		mu.Lock()
+		assert.Equal(t, beforeDisabled, swept["usage_events"])
+		mu.Unlock()
+	})
+
+	t.Run("deterministic fair-share slice prevents single-tick starvation", func(t *testing.T) {
+		var mu sync.Mutex
+		swept := map[string]int{}
+		fake := &fakeUsageRetentionStore{
+			onSweep: func(table string, cutoff time.Time, cur *store.UsageExportCursor, batchSize int) (int64, error) {
+				mu.Lock()
+				swept[table]++
+				mu.Unlock()
+				if table == "usage_events" {
+					// Exceeds the 1/6 fair-share slice of tickBudget (60ms/6 = 10ms) in one batch,
+					// while leaving ~40ms in the tick for the remaining 5 targets.
+					time.Sleep(15 * time.Millisecond)
+					return int64(batchSize), nil
+				}
+				return 1, nil
+			},
+		}
+		sw := NewUsageRetentionSweeper(fake, func(context.Context) (time.Time, error) { return now, nil })
+		sw.SetBatchYield(0)
+		sw.SetTickBudget(60 * time.Millisecond)
+
+		cfg := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{BatchSize: retentionIntPtr(5)})
+		rep := sw.Run(context.Background(), cfg)
+		assert.False(t, rep.PassCompleted, "usage_events did not drain")
+		mu.Lock()
+		assert.Equal(t, 1, swept["usage_events"], "fair-share slice must yield after target 0 exceeds slice")
+		assert.Equal(t, 1, swept["usage_rollups_hourly"], "later targets must run in the same tick")
+		assert.Equal(t, 1, swept["usage_rollups_daily"])
+		assert.Equal(t, 1, swept["usage_scope_counters_daily"])
+		assert.Equal(t, 1, swept["meter_health"])
+		assert.Equal(t, 1, swept["run_attribution"])
+		mu.Unlock()
+	})
+}
+
+// TestUsageRetention_ResolveWindowAndGranularity_WatermarkAndRetention tests
+// resolveUsageWindowAndGranularity directly (without the D7a cross-check) so
+// disabling either hourlySweptThrough or hourlyRetentionDays fails immediately.
+func TestUsageRetention_ResolveWindowAndGranularity_WatermarkAndRetention(t *testing.T) {
+	now := time.Date(2026, 11, 26, 15, 30, 0, 0, time.UTC)
+	covStart := now.AddDate(0, 0, -60).Truncate(time.Hour)
+	watermark := time.Date(2026, 11, 12, 14, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name            string
+		since           time.Time
+		retentionDays   int
+		sweptThrough    time.Time
+		requireHourly   bool
+		wantGranularity string
+		wantErrContains string
+	}{
+		{
+			name:            "1h before watermark falls back to day (retention=30d)",
+			since:           watermark.Add(-time.Hour),
+			retentionDays:   30,
+			sweptThrough:    watermark,
+			wantGranularity: store.UsageGranularityDay,
+		},
+		{
+			name:            "1h before watermark rejects explicit groupBy=hour (retention=30d)",
+			since:           watermark.Add(-time.Hour),
+			retentionDays:   30,
+			sweptThrough:    watermark,
+			requireHourly:   true,
+			wantErrContains: "swept",
+		},
+		{
+			name:            "1h before watermark falls back to day even when retention=0 unlimited",
+			since:           watermark.Add(-time.Hour),
+			retentionDays:   0,
+			sweptThrough:    watermark,
+			wantGranularity: store.UsageGranularityDay,
+		},
+		{
+			name:            "1h before watermark rejects groupBy=hour even when retention=0 unlimited",
+			since:           watermark.Add(-time.Hour),
+			retentionDays:   0,
+			sweptThrough:    watermark,
+			requireHourly:   true,
+			wantErrContains: "swept",
+		},
+		{
+			name:            "exact watermark allows hour granularity",
+			since:           watermark,
+			retentionDays:   30,
+			sweptThrough:    watermark,
+			requireHourly:   true,
+			wantGranularity: store.UsageGranularityHour,
+		},
+		{
+			name:            "non-hour-aligned watermark truncates down to UTC hour",
+			since:           watermark, // 14:00 == truncate(14:37)
+			retentionDays:   30,
+			sweptThrough:    watermark.Add(37 * time.Minute),
+			requireHourly:   true,
+			wantGranularity: store.UsageGranularityHour,
+		},
+		{
+			name:            "1h before non-hour-aligned watermark rejected",
+			since:           watermark.Add(-time.Hour), // 13:00 < truncate(14:37)
+			retentionDays:   30,
+			sweptThrough:    watermark.Add(37 * time.Minute),
+			requireHourly:   true,
+			wantErrContains: "swept",
+		},
+		{
+			name:            "configured retention days (7d) rejects 8d ago when watermark is zero",
+			since:           now.Truncate(time.Hour).AddDate(0, 0, -8),
+			retentionDays:   7,
+			sweptThrough:    time.Time{},
+			requireHourly:   true,
+			wantErrContains: "7-day hourly retention",
+		},
+		{
+			name:            "configured retention days (7d) allows exact 7d cutoff when watermark is zero",
+			since:           now.Truncate(time.Hour).AddDate(0, 0, -7),
+			retentionDays:   7,
+			sweptThrough:    time.Time{},
+			requireHourly:   true,
+			wantGranularity: store.UsageGranularityHour,
+		},
+		{
+			name:            "unlimited retention (0) allows 40d ago after coverage when watermark is zero",
+			since:           now.Truncate(time.Hour).AddDate(0, 0, -40),
+			retentionDays:   0,
+			sweptThrough:    time.Time{},
+			requireHourly:   true,
+			wantGranularity: store.UsageGranularityHour,
 		},
 	}
 
-	sw := NewUsageRetentionSweeper(fake, func(context.Context) (time.Time, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		return curNow, nil
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			win, err := resolveUsageWindowAndGranularity(
+				tc.since.Format(time.RFC3339),
+				now.Format(time.RFC3339),
+				now,
+				covStart,
+				true,
+				tc.requireHourly,
+				tc.retentionDays,
+				tc.sweptThrough,
+			)
+			if tc.wantErrContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrContains)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantGranularity, win.Granularity)
+		})
+	}
+}
+
+// TestUsageRetention_HourlyWatermarkAdvanceInvariants tests UsageRetentionSweeper
+// directly against a fake store to pin HourlySweptThrough persistence,
+// monotonicity, unlimited-mode no-op, and error safety.
+func TestUsageRetention_HourlyWatermarkAdvanceInvariants(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 26, 15, 42, 0, 0, time.UTC)
+
+	var hourlyErr error
+	fake := &fakeUsageRetentionStore{
+		onSweep: func(table string, cutoff time.Time, cur *store.UsageExportCursor, batchSize int) (int64, error) {
+			if table == "usage_rollups_hourly" && hourlyErr != nil {
+				return 0, hourlyErr
+			}
+			return 0, nil
+		},
+	}
+
+	sw := NewUsageRetentionSweeper(fake, func(context.Context) (time.Time, error) { return now, nil })
 	sw.SetBatchYield(0)
-	sw.SetTickBudget(30 * time.Millisecond)
 
-	cfg := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{
-		SweepInterval: "24h",
-		BatchSize:     retentionIntPtr(5),
+	// 1. Hourly error must NOT advance HourlySweptThrough.
+	hourlyErr = errors.New("db unavailable")
+	cfg14 := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{HourlyRollupsDays: retentionIntPtr(14)})
+	repErr := sw.Run(ctx, cfg14)
+	assert.Equal(t, 1, repErr.ErrorCount)
+	st, err := fake.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, st.HourlySweptThrough, "watermark must not advance when hourly sweep errors")
+
+	// 2. Unlimited (0) must NOT advance HourlySweptThrough and records SkippedReason="unlimited".
+	hourlyErr = nil
+	fake.resetState()
+	cfgUnlim := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{HourlyRollupsDays: retentionIntPtr(0)})
+	repUnlim := sw.Run(ctx, cfgUnlim)
+	assert.Equal(t, 0, repUnlim.ErrorCount)
+	st, err = fake.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, st.HourlySweptThrough, "watermark must not advance when hourly retention is unlimited (0)")
+	for _, tr := range repUnlim.Tables {
+		if tr.Table == "usage_rollups_hourly" {
+			assert.True(t, tr.Skipped)
+			assert.Equal(t, "unlimited", tr.SkippedReason)
+		}
+	}
+
+	// 3. Normal run at 14d advances HourlySweptThrough to the UTC hour-aligned cutoff.
+	fake.resetState()
+	rep14 := sw.Run(ctx, cfg14)
+	assert.True(t, rep14.PassCompleted)
+	st, err = fake.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	wantWM := hourlyRollupsRetentionCutoff(now, 14)
+	require.NotNil(t, st.HourlySweptThrough)
+	assert.Equal(t, wantWM, *st.HourlySweptThrough)
+
+	// 4. Raising hourly_rollups_days to 30d must NEVER move HourlySweptThrough backward.
+	st.LastCompletedAt = nil // allow immediate next pass
+	require.NoError(t, fake.SaveUsageRetentionState(ctx, st))
+	cfg30 := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{HourlyRollupsDays: retentionIntPtr(30)})
+	rep30 := sw.Run(ctx, cfg30)
+	assert.True(t, rep30.PassCompleted)
+	st, err = fake.GetUsageRetentionState(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, st.HourlySweptThrough)
+	assert.Equal(t, wantWM, *st.HourlySweptThrough, "watermark must be monotonic and never move backward")
+}
+
+func TestUsageRetention_HourlyDefaultLimitAndWireStripping(t *testing.T) {
+	// O-c: default hourly limit derived from configured retention days, capped at 500.
+	n14, err := parseUsageLimit("", true, 14)
+	require.NoError(t, err)
+	assert.Equal(t, 337, n14)
+
+	n20, err := parseUsageLimit("", true, 20)
+	require.NoError(t, err)
+	assert.Equal(t, 481, n20)
+
+	n30, err := parseUsageLimit("", true, 30)
+	require.NoError(t, err)
+	assert.Equal(t, maxUsageGroupsLimit, n30)
+
+	nUnlim, err := parseUsageLimit("", true, 0)
+	require.NoError(t, err)
+	assert.Equal(t, maxUsageGroupsLimit, nUnlim)
+
+	nShort, err := parseUsageLimit("", true, 2)
+	require.NoError(t, err)
+	assert.Equal(t, defaultUsageGroupsLimit, nShort)
+
+	nNonHour, err := parseUsageLimit("", false, 20)
+	require.NoError(t, err)
+	assert.Equal(t, defaultUsageGroupsLimit, nNonHour)
+
+	// O-e: wireTelemetry strips Hub-only Retention before sending to brokers.
+	td := telemetryDispatch{
+		hubDefault: &api.TelemetryConfig{
+			Retention: &api.TelemetryRetentionConfig{UsageEventsDays: retentionIntPtr(40)},
+		},
+	}
+	wire := td.wireTelemetry()
+	require.NotNil(t, wire)
+	assert.Nil(t, wire.Retention, "Hub-only Retention must be cleared from broker wire telemetry")
+}
+
+func TestUsageRetention_AdminSettingsValidation(t *testing.T) {
+	t.Run("DB-backed handlePutServerConfigDB rejects below-min and accepts 0 unlimited", func(t *testing.T) {
+		srv, _ := testServerWithOps(t, nil)
+		ops := srv.GetOperationalSettings()
+		require.NotNil(t, ops)
+		ops.server = srv
+
+		rrBad := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rrBad, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"telemetry":{"retention":{"usage_events_days":10}}}`), ops)
+		assert.Equal(t, http.StatusUnprocessableEntity, rrBad.Code, rrBad.Body.String())
+
+		rrZero := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rrZero, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"telemetry":{"retention":{"usage_events_days":0}}}`), ops)
+		require.Equal(t, http.StatusOK, rrZero.Code, rrZero.Body.String())
+		snap := ops.Snapshot()
+		require.NotNil(t, snap.TelemetryConfig)
+		require.NotNil(t, snap.TelemetryConfig.Retention)
+		require.NotNil(t, snap.TelemetryConfig.Retention.UsageEventsDays)
+		assert.Equal(t, 0, *snap.TelemetryConfig.Retention.UsageEventsDays)
+		assert.Equal(t, 0, srv.usageRetentionConfig().UsageEventsDays)
 	})
 
-	// Tick 1: context expires mid-usage_events (infinite backlog).
-	ctx1, cancel1 := context.WithTimeout(context.Background(), 12*time.Millisecond)
-	defer cancel1()
-	rep1 := sw.Run(ctx1, cfg)
-	assert.False(t, rep1.PassCompleted, "incomplete tick must not mark pass completed")
-	assert.False(t, rep1.Skipped)
+	t.Run("file-mode handlePutServerConfig rejects below-min and accepts 0 unlimited", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		scionDir := filepath.Join(home, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0644))
 
-	// Tick 2: resumes past usage_events and sweeps later tables even while usage_events still has infinite backlog!
-	rep2 := sw.Run(context.Background(), cfg)
-	assert.False(t, rep2.PassCompleted, "usage_events still undrained")
-	mu.Lock()
-	assert.GreaterOrEqual(t, swept["usage_rollups_hourly"], 1, "hourly rollups must not be starved")
-	assert.GreaterOrEqual(t, swept["usage_rollups_daily"], 1, "daily rollups must not be starved")
-	assert.GreaterOrEqual(t, swept["usage_scope_counters_daily"], 1, "scope counters must not be starved")
-	assert.GreaterOrEqual(t, swept["meter_health"], 1, "meter_health must not be starved")
-	assert.GreaterOrEqual(t, swept["run_attribution"], 1, "run_attribution must not be starved")
-	// Now allow usage_events to drain.
-	eventsInfinite = false
-	mu.Unlock()
+		srv, _ := testServer(t)
 
-	// Tick 3: drains remaining targets and completes the pass.
-	rep3 := sw.Run(context.Background(), cfg)
-	assert.True(t, rep3.PassCompleted)
-	assert.Equal(t, 0, rep3.ErrorCount)
+		rrBad := httptest.NewRecorder()
+		srv.handlePutServerConfig(rrBad, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"telemetry":{"retention":{"usage_events_days":10}}}`))
+		assert.Equal(t, http.StatusUnprocessableEntity, rrBad.Code, rrBad.Body.String())
 
-	// Immediate next tick (1 minute later) must wait sweep_interval (24h).
-	mu.Lock()
-	curNow = curNow.Add(time.Minute)
-	beforeSkipped := swept["usage_events"]
-	mu.Unlock()
-	rep4 := sw.Run(context.Background(), cfg)
-	assert.True(t, rep4.Skipped, "must wait sweep_interval after completed pass")
-	mu.Lock()
-	assert.Equal(t, beforeSkipped, swept["usage_events"])
-	mu.Unlock()
-
-	// Live cadence update (O3): advance 2 hours and lower sweep_interval to 1h -> runs immediately!
-	mu.Lock()
-	curNow = curNow.Add(2 * time.Hour)
-	mu.Unlock()
-	cfgShorter := config.ResolveTelemetryRetention(&api.TelemetryRetentionConfig{
-		SweepInterval: "1h",
-		BatchSize:     retentionIntPtr(5),
+		rrZero := httptest.NewRecorder()
+		srv.handlePutServerConfig(rrZero, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"telemetry":{"retention":{"usage_events_days":0}}}`))
+		require.Equal(t, http.StatusOK, rrZero.Code, rrZero.Body.String())
+		assert.Equal(t, 0, srv.usageRetentionConfig().UsageEventsDays)
 	})
-	rep5 := sw.Run(context.Background(), cfgShorter)
-	assert.False(t, rep5.Skipped, "shorter sweep_interval must apply live on next tick")
-	assert.True(t, rep5.PassCompleted)
-
-	// Mid-tick experiment disable (O4): disabling experiment prevents further work.
-	mu.Lock()
-	curNow = curNow.Add(2 * time.Hour)
-	beforeDisabled := swept["usage_events"]
-	mu.Unlock()
-	sw.SetEnabledCheck(func() bool { return false })
-	rep6 := sw.Run(context.Background(), cfgShorter)
-	assert.True(t, rep6.Skipped)
-	mu.Lock()
-	assert.Equal(t, beforeDisabled, swept["usage_events"])
-	mu.Unlock()
 }
 
 func TestUsageRetention_HourlyHorizonSweptThroughWatermark(t *testing.T) {
