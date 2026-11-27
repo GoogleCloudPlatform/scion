@@ -20,7 +20,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 )
+
+func verifyAgyParentDir(dir string, _ *OutboxOwner) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("antigravity parent dir %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("antigravity parent dir %s is not a directory", dir)
+	}
+	return nil
+}
 
 func startAgySQLiteWakeListener(_ string, _ *OutboxOwner, _ func()) (io.Closer, error) {
 	return nil, fmt.Errorf("antigravity sqlite wake listener: %w on this platform", errors.ErrUnsupported)

@@ -17,6 +17,9 @@
 package telemetry
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -24,54 +27,67 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const agySQLiteWakeWriteTimeout = 50 * time.Millisecond
 
+// agyWakeAfterBindHook is a test-only seam invoked immediately after binding
+// the staged Unix socket and before fchmodat/fchownat/renameat. Always nil in
+// production.
+var agyWakeAfterBindHook func(parentDir, stageName string)
+
 type unixWakeListener struct {
-	conn  *net.UnixConn
-	path  string
-	owner *OutboxOwner
-	done  chan struct{}
+	conn     *net.UnixConn
+	scionFd  int
+	sockBase string
+	done     chan struct{}
 }
 
 func (l *unixWakeListener) Close() error {
 	err := l.conn.Close()
 	<-l.done
-	// Re-verify parent dir is still a non-symlink directory owned by the
-	// expected user before unlinking so root never unlinks through a swapped
-	// symlinked .scion directory.
-	if verifyWakeParentDir(filepath.Dir(l.path), l.owner) == nil {
-		_ = os.Remove(l.path)
+	if l.scionFd >= 0 {
+		_ = unix.Unlinkat(l.scionFd, l.sockBase, 0)
+		_ = unix.Close(l.scionFd)
+		l.scionFd = -1
 	}
 	return err
 }
 
-// verifyWakeParentDir checks via Lstat that dir is a real directory (never a
+// verifyAgyParentDir checks via Lstat that dir is a real directory (never a
 // symlink) and, when running as root with an expected agent owner, is owned by
-// owner.UID. Refuses symlinks and unexpected owners so root never binds,
-// chowns, or unlinks inside an attacker-redirected directory.
-func verifyWakeParentDir(dir string, owner *OutboxOwner) error {
+// owner.UID.
+func verifyAgyParentDir(dir string, owner *OutboxOwner) error {
 	fi, err := os.Lstat(dir)
 	if err != nil {
 		return err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("wake socket parent %s is a symlink", dir)
+		return fmt.Errorf("antigravity parent dir %s is a symlink", dir)
 	}
 	if !fi.IsDir() {
-		return fmt.Errorf("wake socket parent %s is not a directory", dir)
+		return fmt.Errorf("antigravity parent dir %s is not a directory", dir)
 	}
 	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
 		st, ok := fi.Sys().(*syscall.Stat_t)
 		if !ok {
-			return fmt.Errorf("wake socket parent %s: cannot inspect owner", dir)
+			return fmt.Errorf("antigravity parent dir %s: cannot inspect owner", dir)
 		}
 		if int(st.Uid) != owner.UID {
-			return fmt.Errorf("wake socket parent %s owned by uid %d, want %d", dir, st.Uid, owner.UID)
+			return fmt.Errorf("antigravity parent dir %s owned by uid %d, want %d", dir, st.Uid, owner.UID)
 		}
 	}
 	return nil
+}
+
+func randomStageName() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return ".w" + hex.EncodeToString(b[:]), nil
 }
 
 // startAgySQLiteWakeListener binds a Unix domain datagram socket at sockPath
@@ -79,16 +95,23 @@ func verifyWakeParentDir(dir string, owner *OutboxOwner) error {
 // send a non-blocking 1-byte wake datagram on PostInvocation without polling
 // the filesystem or depending on OTLP export.
 //
-// Security: validates that the parent `.scion` directory is a real directory
-// (not a symlink) owned by the expected agent UID, then binds the socket inside
-// a fresh root-owned 0700 staging directory, sets 0600 + Lchown inside that
-// private staging directory (no process-wide umask mutation and no post-bind
-// chmod symlink race), and atomically renames the socket into place.
+// All staging, permission/ownership changes, rename, and Close cleanup are
+// performed relative to pinned directory file descriptors (`O_NOFOLLOW |
+// O_DIRECTORY` + `mkdirat` + `/proc/self/fd/<stageFd>/s` + `fchmodat` +
+// `fchownat(AT_SYMLINK_NOFOLLOW)` + `renameat` + `unlinkat`) so path swaps in
+// the agent-owned parent directory cannot redirect root operations. Fails closed
+// if `/proc/self/fd` is unavailable (the tailer's 15s fallback ticker still
+// runs).
 func startAgySQLiteWakeListener(sockPath string, owner *OutboxOwner, onWake func()) (io.Closer, error) {
 	if sockPath == "" {
 		return nil, fmt.Errorf("empty wake socket path")
 	}
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		return nil, fmt.Errorf("wake socket listener requires /proc/self/fd: %w", err)
+	}
+
 	dir := filepath.Dir(sockPath)
+	sockBase := filepath.Base(sockPath)
 	if _, err := os.Lstat(dir); os.IsNotExist(err) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("mkdir wake socket dir: %w", err)
@@ -97,47 +120,99 @@ func startAgySQLiteWakeListener(sockPath string, owner *OutboxOwner, onWake func
 			_ = os.Lchown(dir, owner.UID, owner.GID)
 		}
 	}
-	if err := verifyWakeParentDir(dir, owner); err != nil {
-		return nil, err
-	}
 
-	// Stage the socket inside a fresh 0700 directory owned by this process (root
-	// in sciontool init) so the agent user cannot traverse or swap anything
-	// between ListenUnixgram, Chmod, and Lchown, and without touching the
-	// process-wide umask.
-	// Use a short prefix so <dir>/.w<digits>/s stays shorter than sockPath
-	// itself and well within Linux's 108-byte sun_path limit.
-	stageDir, err := os.MkdirTemp(dir, ".w")
+	scionFd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("create wake staging dir: %w", err)
+		return nil, fmt.Errorf("open wake parent dir %s: %w", dir, err)
 	}
-	defer func() { _ = os.RemoveAll(stageDir) }()
+	keepScionFd := false
+	defer func() {
+		if !keepScionFd {
+			_ = unix.Close(scionFd)
+		}
+	}()
 
-	stagedSock := filepath.Join(stageDir, "s")
-	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: stagedSock, Net: "unixgram"})
+	var parentStat unix.Stat_t
+	if err := unix.Fstat(scionFd, &parentStat); err != nil {
+		return nil, fmt.Errorf("fstat wake parent dir %s: %w", dir, err)
+	}
+	if parentStat.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil, fmt.Errorf("wake socket parent %s is not a directory", dir)
+	}
+	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 && int(parentStat.Uid) != owner.UID {
+		return nil, fmt.Errorf("wake socket parent %s owned by uid %d, want %d", dir, parentStat.Uid, owner.UID)
+	}
+
+	var stage string
+	for attempt := 0; attempt < 8; attempt++ {
+		cand, rerr := randomStageName()
+		if rerr != nil {
+			return nil, fmt.Errorf("generate wake staging name: %w", rerr)
+		}
+		if merr := unix.Mkdirat(scionFd, cand, 0o700); merr != nil {
+			if errors.Is(merr, unix.EEXIST) {
+				continue
+			}
+			return nil, fmt.Errorf("mkdirat wake staging dir: %w", merr)
+		}
+		stage = cand
+		break
+	}
+	if stage == "" {
+		return nil, fmt.Errorf("mkdirat wake staging dir: exhausted name attempts")
+	}
+
+	stageFd, err := unix.Openat(scionFd, stage, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		_ = unix.Unlinkat(scionFd, stage, unix.AT_REMOVEDIR)
+		return nil, fmt.Errorf("openat wake staging dir: %w", err)
+	}
+	// Register close before cleanup so LIFO defers unlink before closing stageFd.
+	defer func() { _ = unix.Close(stageFd) }()
+	defer func() {
+		_ = unix.Unlinkat(stageFd, "s", 0)
+		_ = unix.Unlinkat(scionFd, stage, unix.AT_REMOVEDIR)
+	}()
+
+	var stageStat unix.Stat_t
+	if err := unix.Fstat(stageFd, &stageStat); err != nil {
+		return nil, fmt.Errorf("fstat wake staging dir: %w", err)
+	}
+	if int(stageStat.Uid) != os.Geteuid() || stageStat.Mode&0o777 != 0o700 {
+		return nil, fmt.Errorf("wake staging dir unexpected owner/mode (uid=%d mode=%#o)", stageStat.Uid, stageStat.Mode&0o777)
+	}
+
+	bindPath := fmt.Sprintf("/proc/self/fd/%d/s", stageFd)
+	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: bindPath, Net: "unixgram"})
 	if err != nil {
 		return nil, fmt.Errorf("listen wake unixgram %s: %w", sockPath, err)
 	}
-	if err := os.Chmod(stagedSock, 0o600); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("chmod staged wake socket: %w", err)
-	}
-	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
-		if err := os.Lchown(stagedSock, owner.UID, owner.GID); err != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("lchown staged wake socket: %w", err)
-		}
-	}
-	if err := os.Rename(stagedSock, sockPath); err != nil {
-		_ = conn.Close()
-		return nil, fmt.Errorf("rename wake socket %s: %w", sockPath, err)
+
+	if agyWakeAfterBindHook != nil {
+		agyWakeAfterBindHook(dir, stage)
 	}
 
+	if err := unix.Fchmodat(stageFd, "s", 0o600, 0); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("fchmodat staged wake socket: %w", err)
+	}
+	if owner != nil && os.Geteuid() == 0 && owner.UID > 0 {
+		if err := unix.Fchownat(stageFd, "s", owner.UID, owner.GID, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("fchownat staged wake socket: %w", err)
+		}
+	}
+	if err := unix.Renameat(stageFd, "s", scionFd, sockBase); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("renameat wake socket %s: %w", sockPath, err)
+	}
+
+	keepScionFd = true
 	l := &unixWakeListener{
-		conn:  conn,
-		path:  sockPath,
-		owner: owner,
-		done:  make(chan struct{}),
+		conn:     conn,
+		scionFd:  scionFd,
+		sockBase: sockBase,
+		done:     make(chan struct{}),
 	}
 	go func() {
 		defer close(l.done)

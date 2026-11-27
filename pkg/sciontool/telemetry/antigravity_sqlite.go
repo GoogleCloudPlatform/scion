@@ -455,6 +455,10 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			return err
 		}
 		dbPath := filepath.Join(t.cfg.ConversationsDir, name)
+		if err := verifyRegularAgyDB(dbPath); err != nil {
+			log.Warn("Antigravity SQLite tailer skipping non-regular conversation file %s: %v", name, err)
+			continue
+		}
 		fp, err := agydecode.Fingerprint(dbPath)
 		if err != nil {
 			continue
@@ -806,20 +810,49 @@ func (t *AntigravitySQLiteTailer) resolveVersionLocked(ctx context.Context) (str
 	return t.agyVersion, nil
 }
 
+// agyVersionOutput is a test-only seam for capturing the constructed exec.Cmd
+// (including its hardened cmd.Env) without modifying production behavior.
+var agyVersionOutput = procreap.OutputManaged
+
 func detectAgyVersionManaged(ctx context.Context) (string, error) {
+	return detectAgyVersionBinary(ctx, "agy")
+}
+
+func detectAgyVersionBinary(ctx context.Context, binaryName string) (string, error) {
 	// Resolve against trusted root-owned SearchPath directories so an
 	// agent-writable directory earlier on PATH cannot hijack root execution.
-	agyPath, err := rootexec.Resolve("agy")
+	agyPath, err := rootexec.Resolve(binaryName)
 	if err != nil {
-		return "", fmt.Errorf("resolve agy: %w", err)
+		return "", fmt.Errorf("resolve %s: %w", binaryName, err)
 	}
 	cctx, cancel := context.WithTimeout(ctx, agyVersionDetectTimeout)
 	defer cancel()
-	out, err := procreap.OutputManaged(exec.CommandContext(cctx, agyPath, "--version"))
+	cmd := exec.CommandContext(cctx, agyPath, "--version")
+	cmd.Env = rootexec.Env("HOME=/nonexistent")
+	out, err := agyVersionOutput(cmd)
 	if err != nil {
 		return "", fmt.Errorf("run %s --version: %w", agyPath, err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func verifyRegularAgyDB(dbPath string) error {
+	fi, err := os.Lstat(dbPath)
+	if err != nil {
+		return err
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("mode %s is not regular", fi.Mode())
+	}
+	walPath := dbPath + "-wal"
+	if wfi, werr := os.Lstat(walPath); werr == nil {
+		if !wfi.Mode().IsRegular() {
+			return fmt.Errorf("wal mode %s is not regular", wfi.Mode())
+		}
+	} else if !errors.Is(werr, os.ErrNotExist) {
+		return werr
+	}
+	return nil
 }
 
 func (t *AntigravitySQLiteTailer) loadState() {
@@ -832,7 +865,14 @@ func (t *AntigravitySQLiteTailer) loadState() {
 		t.stateInitialized = true
 		return
 	}
-	tree, err := privatefs.OpenTree(filepath.Dir(t.cfg.StatePath), privatefs.TreeOptions{})
+	stateDir := filepath.Dir(t.cfg.StatePath)
+	if err := verifyAgyParentDir(stateDir, t.cfg.WakeOwner); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("Antigravity SQLite tailer refusing to load state from untrusted parent %s: %v", stateDir, err)
+		}
+		return
+	}
+	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{})
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Warn("Antigravity SQLite tailer could not open state dir for %s (will re-baseline): %v", t.cfg.StatePath, err)
@@ -915,6 +955,10 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 			return err
 		}
 		dbPath := filepath.Join(t.cfg.ConversationsDir, name)
+		if err := verifyRegularAgyDB(dbPath); err != nil {
+			log.Warn("Antigravity SQLite tailer skipping non-regular conversation file %s during baseline: %v", name, err)
+			continue
+		}
 		fp, cur, err := agydecode.BaselineFile(ctx, dbPath, t.cfg.BusyTimeoutMs)
 		if err != nil {
 			// Record a per-file baseline_pending marker and keep going so one
@@ -953,6 +997,10 @@ func (t *AntigravitySQLiteTailer) saveStateLocked() error {
 
 	dir := filepath.Dir(t.cfg.StatePath)
 	base := filepath.Base(t.cfg.StatePath)
+	if err := verifyAgyParentDir(dir, t.cfg.WakeOwner); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Warn("Antigravity SQLite tailer skipping state save in untrusted parent %s: %v", dir, err)
+		return nil
+	}
 	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {
 		return fmt.Errorf("open private state dir: %w", err)

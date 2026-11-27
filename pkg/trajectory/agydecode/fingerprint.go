@@ -22,25 +22,33 @@ import (
 )
 
 // Fingerprint computes a change fingerprint over dbPath and its companion
-// SQLite WAL file (dbPath + "-wal"). Callers can compare consecutive
-// fingerprints with FileFingerprint.Equal to skip re-opening unchanged files.
+// SQLite WAL file (dbPath + "-wal"). Uses Lstat and requires regular files so
+// symlinks, FIFOs, and device nodes are never passed to SQLite. Callers can
+// compare consecutive fingerprints with FileFingerprint.Equal to skip re-opening
+// unchanged files.
 func Fingerprint(dbPath string) (FileFingerprint, error) {
-	dbInfo, err := os.Stat(dbPath)
+	dbInfo, err := os.Lstat(dbPath)
 	if err != nil {
-		return FileFingerprint{}, fmt.Errorf("stat db %s: %w", dbPath, err)
+		return FileFingerprint{}, fmt.Errorf("lstat db %s: %w", dbPath, err)
+	}
+	if !dbInfo.Mode().IsRegular() {
+		return FileFingerprint{}, fmt.Errorf("agy db %s is not a regular file (mode %s)", dbPath, dbInfo.Mode())
 	}
 	fp := FileFingerprint{
 		DBSize:      dbInfo.Size(),
 		DBModTimeNS: dbInfo.ModTime().UnixNano(),
 	}
 	walPath := dbPath + "-wal"
-	walInfo, err := os.Stat(walPath)
+	walInfo, err := os.Lstat(walPath)
 	if err == nil {
+		if !walInfo.Mode().IsRegular() {
+			return FileFingerprint{}, fmt.Errorf("agy wal %s is not a regular file (mode %s)", walPath, walInfo.Mode())
+		}
 		fp.WALPresent = true
 		fp.WALSize = walInfo.Size()
 		fp.WALModTimeNS = walInfo.ModTime().UnixNano()
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return FileFingerprint{}, fmt.Errorf("stat wal %s: %w", walPath, err)
+		return FileFingerprint{}, fmt.Errorf("lstat wal %s: %w", walPath, err)
 	}
 	return fp, nil
 }
