@@ -56,11 +56,20 @@ function makeFileList(files: File[]): FileList {
 describe('WorkspaceFileBrowserDataSource upload routing', () => {
   it('uses legacy single multipart POST when hub.large_uploads is off', async () => {
     setFeatureFlag('hub.large_uploads', false);
-    const urls: string[] = [];
+    const uploadUrls: string[] = [];
     vi.stubGlobal(
       'fetch',
       vi.fn((input: string | URL | Request) => {
-        urls.push(requestUrl(input));
+        const url = requestUrl(input);
+        if (url === '/api/v1/settings/public') {
+          return Promise.resolve(
+            new Response(JSON.stringify({}), {
+              status: 200,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        uploadUrls.push(url);
         return Promise.resolve(
           new Response(JSON.stringify({ files: [] }), {
             status: 200,
@@ -76,7 +85,7 @@ describe('WorkspaceFileBrowserDataSource upload routing', () => {
     Object.defineProperty(big, 'size', { value: 9 * 1024 * 1024 });
     await ds.uploadFiles(makeFileList([big]));
 
-    expect(urls).toEqual(['/api/v1/projects/proj-1/workspace/files']);
+    expect(uploadUrls).toEqual(['/api/v1/projects/proj-1/workspace/files']);
   });
 
   it('uses chunked upload session when hub.large_uploads is on and file exceeds chunkBytes', async () => {
