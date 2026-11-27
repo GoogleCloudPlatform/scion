@@ -19,7 +19,10 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +30,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
@@ -768,4 +772,590 @@ func TestCommandRunExec_ApproveHandlerDefaultLauncherEndToEnd(t *testing.T) {
 	require.NotNil(t, fin.ExitCode)
 	assert.Equal(t, 0, *fin.ExitCode)
 	assert.Equal(t, 1, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "real approve handler must trigger exactly one exec-start")
+}
+
+// TestCommandRequestOutput_AuthzAndSharing verifies P4 end-to-end through the
+// real approve handler, real Conduit executor, real agent list handler, and
+// real GET /api/v1/command-requests/{id}/output handler (AC F8, S9, S10, S1).
+func TestCommandRequestOutput_AuthzAndSharing(t *testing.T) {
+	f := newCmdRunExecFixture(t, nil)
+	ctx := context.Background()
+
+	// Capture slog + messageLog + SSE to prove output never leaks (AC-S9).
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	testLogger := slog.New(slog.NewJSONHandler(&captureLogWriter{w: &logBuf, mu: &logMu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	prevLogger := slog.Default()
+	slog.SetDefault(testLogger)
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	f.srv.messageLog = testLogger
+
+	var sseMu sync.Mutex
+	var sseEvents []string
+	if pub, ok := f.srv.events.(*ChannelEventPublisher); ok {
+		ch, unsub := pub.Subscribe("project." + f.launched.ProjectID + ".>")
+		t.Cleanup(unsub)
+		go func() {
+			for ev := range ch {
+				sseMu.Lock()
+				sseEvents = append(sseEvents, string(ev.Data))
+				sseMu.Unlock()
+			}
+		}()
+	}
+
+	// Create a second human (bob) who is NOT the approver.
+	bob := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "bob-output@example.com",
+		DisplayName: "Bob Output",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.store.CreateUser(ctx, bob))
+
+	createPendingReq := func(key, script string, shareRequested bool) *store.CommandRequest {
+		t.Helper()
+		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+			Key:                  key,
+			Script:               script,
+			TimeoutS:             30,
+			ShareOutputRequested: shareRequested,
+		})
+		require.NoError(t, err)
+		pr, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+			Message: &store.Message{
+				ID:             api.NewUUID(),
+				ProjectID:      f.launched.ProjectID,
+				ConversationID: api.NewUUID(),
+				ThreadID:       "dm:user:" + f.owner.ID() + ":agent:" + f.asker.ID,
+				Sender:         "agent:" + f.asker.Slug,
+				SenderID:       f.asker.ID,
+				Recipient:      "user:" + f.owner.Email(),
+				RecipientID:    f.owner.ID(),
+			},
+			AgentID:    f.asker.ID,
+			AgentName:  f.asker.Slug,
+			ApproverID: f.owner.ID(),
+			Request:    norm,
+			Now:        time.Now().UTC(),
+			TTL:        msgaction.CommandRequestTTL,
+		})
+		require.NoError(t, err)
+		return pr.Request
+	}
+
+	approveViaHandler := func(req *store.CommandRequest, shareOverride *bool) messages.ApproveCommandRequestResponse {
+		t.Helper()
+		body, err := json.Marshal(messages.ApproveCommandRequestBody{
+			RowID:          req.ID,
+			CommandSHA256:  req.CommandSHA256,
+			ShareOutput:    shareOverride,
+			Surface:        msgaction.CommandRequestSurfaceCLI,
+			IdempotencyKey: api.NewUUID(),
+		})
+		require.NoError(t, err)
+		httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/command-requests/"+req.ID+"/approve", bytes.NewReader(body))
+		httpReq.Header.Set("Content-Type", "application/json")
+		httpReq = httpReq.WithContext(contextWithCredentialContext(
+			contextWithIdentity(httpReq.Context(), f.owner),
+			CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+		))
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, httpReq)
+		require.Equal(t, http.StatusAccepted, rec.Code, "approve body: %s", rec.Body.String())
+		var resp messages.ApproveCommandRequestResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	listAsAgent := func(key string) messages.AgentCommandRequestListResponse {
+		t.Helper()
+		httpReq := httptest.NewRequest(http.MethodGet, "/api/v1/agent/command-requests?key="+key, nil)
+		httpReq = httpReq.WithContext(agentCtx(httpReq.Context(), f.asker))
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, httpReq)
+		require.Equal(t, http.StatusOK, rec.Code, "list body: %s", rec.Body.String())
+		var resp messages.AgentCommandRequestListResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	// 1. share_output omitted (nil) on a request where agent asked for share_output_requested=true:
+	//    explicit opt-in only (M1) -> records share_output=false, agent receives outcome only,
+	//    no output_tail in command-response or agent list.
+	privateCanary := "PRIVATE_OUTPUT_CANARY_" + api.NewUUID()
+	reqNoShare := createPendingReq("no-share", "echo "+privateCanary, true)
+	appNoShare := approveViaHandler(reqNoShare, nil)
+	assert.False(t, appNoShare.Run.ShareOutput, "omitted share_output must default to false even when share_output_requested=true")
+	finNoShare := f.waitRunFinished(t, appNoShare.Run.RunID)
+	assert.Equal(t, store.CommandRunStatusSucceeded, finNoShare.Status)
+	assert.False(t, finNoShare.ShareOutput)
+
+	// Wait briefly for outcome message persistence.
+	require.Eventually(t, func() bool {
+		r, err := f.store.GetCommandRun(ctx, finNoShare.ID)
+		return err == nil && r.OutcomeMessageID != ""
+	}, 5*time.Second, 25*time.Millisecond)
+	finNoShare, err := f.store.GetCommandRun(ctx, finNoShare.ID)
+	require.NoError(t, err)
+	noShareMsg, err := f.store.GetMessage(ctx, finNoShare.OutcomeMessageID)
+	require.NoError(t, err)
+	assert.NotContains(t, noShareMsg.Msg, privateCanary, "share_output=false must not include output in command-response")
+
+	agentListNoShare := listAsAgent("no-share")
+	require.Len(t, agentListNoShare.Items, 1)
+	require.NotNil(t, agentListNoShare.Items[0].Run)
+	assert.Empty(t, agentListNoShare.Items[0].Run.OutputTail, "share_output=false must not include outputTail in agent list")
+
+	// 2. share_output=true (explicit opt-in):
+	//    fixture with ghp_..., PEM private key block, and > 4 KiB UTF-8 comes back redacted & bounded (AC F8).
+	//    Construct the visible canary dynamically in bash so the literal string
+	//    never appears in request.script (tightening card/SSE/slog leak checks).
+	ghpSecret := "ghp_1234567890abcdef1234567890abcdef1234"
+	pemBody := "MIIEpAIBAAKCAQEASecretPemPayload98765"
+	sharedUUID := api.NewUUID()
+	sharedCanary := "SHARED_VISIBLE_TAIL_" + sharedUUID
+	scriptWithSecrets := strings.Join([]string{
+		"printf '%0.s€' {1..1500}", // 4500 bytes of 3-byte UTF-8 before the tail
+		"echo ''",
+		"echo 'token=" + ghpSecret + "'",
+		"echo '-----BEGIN RSA PRIVATE KEY-----'",
+		"echo '" + pemBody + "'",
+		"echo '-----END RSA PRIVATE KEY-----'",
+		"printf 'SHARED_%s_%s\\n' 'VISIBLE_TAIL' '" + sharedUUID + "'",
+	}, "\n")
+	reqShare := createPendingReq("with-share", scriptWithSecrets, true)
+	shareTrue := true
+	appShare := approveViaHandler(reqShare, &shareTrue)
+	assert.True(t, appShare.Run.ShareOutput, "explicit share_output=true must be recorded on the run")
+	finShare := f.waitRunFinished(t, appShare.Run.RunID)
+	assert.Equal(t, store.CommandRunStatusSucceeded, finShare.Status)
+	assert.True(t, finShare.ShareOutput)
+
+	require.Eventually(t, func() bool {
+		r, err := f.store.GetCommandRun(ctx, finShare.ID)
+		return err == nil && r.OutcomeMessageID != ""
+	}, 5*time.Second, 25*time.Millisecond)
+	finShare, err = f.store.GetCommandRun(ctx, finShare.ID)
+	require.NoError(t, err)
+	shareMsg, err := f.store.GetMessage(ctx, finShare.OutcomeMessageID)
+	require.NoError(t, err)
+	assert.Contains(t, shareMsg.Msg, sharedCanary, "shared tail must reach asker in command-response")
+	assert.Contains(t, shareMsg.Msg, "[REDACTED]")
+	assert.NotContains(t, shareMsg.Msg, ghpSecret, "ghp_ token must be redacted in command-response")
+	assert.NotContains(t, shareMsg.Msg, pemBody, "PEM block must be redacted in command-response")
+
+	// Agent list returns the same bounded, redacted UTF-8 tail.
+	agentListShare := listAsAgent("with-share")
+	require.Len(t, agentListShare.Items, 1)
+	require.NotNil(t, agentListShare.Items[0].Run)
+	agentTail := agentListShare.Items[0].Run.OutputTail
+	assert.NotEmpty(t, agentTail)
+	assert.LessOrEqual(t, len(agentTail), commandOutputShareMaxBytes)
+	assert.True(t, utf8.ValidString(agentTail), "outputTail must be valid UTF-8")
+	assert.Contains(t, agentTail, sharedCanary)
+	assert.Contains(t, agentTail, "[REDACTED]")
+	assert.NotContains(t, agentTail, ghpSecret)
+	assert.NotContains(t, agentTail, pemBody)
+
+	// Audit event output_returned emitted for shared run with output_bytes and redaction_count (never for no-share).
+	var foundOutputReturned bool
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == msgaction.EventCmdOutputReturned {
+			assert.Equal(t, finShare.ID, ev.Details["run_id"], "output_returned must only fire for shared run")
+			assert.NotEmpty(t, ev.Details["output_bytes"])
+			assert.Equal(t, "2", ev.Details["redaction_count"])
+			foundOutputReturned = true
+		}
+		for _, v := range ev.Details {
+			assert.NotContains(t, v, privateCanary, "output must never appear in audit details")
+			assert.NotContains(t, v, sharedCanary, "output must never appear in audit details")
+			assert.NotContains(t, v, ghpSecret, "secret must never appear in audit details")
+			assert.NotContains(t, v, pemBody, "PEM must never appear in audit details")
+		}
+	}
+	assert.True(t, foundOutputReturned, "expected output_returned audit event")
+
+	// Card GET /api/v1/command-requests/{id} never returns outputTail, and sets
+	// outputAvailable=true for the approver when finished and an output row exists.
+	cardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+reqShare.ID, nil)
+	cardReq = cardReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(cardReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	cardRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(cardRec, cardReq)
+	require.Equal(t, http.StatusOK, cardRec.Code)
+	var cardResp messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(cardRec.Body.Bytes(), &cardResp))
+	require.NotNil(t, cardResp.Run)
+	assert.Empty(t, cardResp.Run.OutputTail, "card GET must never populate run.outputTail")
+	assert.True(t, cardResp.OutputAvailable, "card GET must set outputAvailable=true for approver when output row exists")
+	assert.NotContains(t, cardRec.Body.String(), sharedCanary, "card GET must never include output")
+
+	// Pending request (no run yet) must have outputAvailable=false for approver.
+	pendingReq := createPendingReq("pending-no-output", "echo pending", false)
+	pendCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+pendingReq.ID, nil)
+	pendCardReq = pendCardReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(pendCardReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	pendCardRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(pendCardRec, pendCardReq)
+	require.Equal(t, http.StatusOK, pendCardRec.Code)
+	var pendCardResp messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(pendCardRec.Body.Bytes(), &pendCardResp))
+	assert.False(t, pendCardResp.OutputAvailable, "pending request must report outputAvailable=false")
+
+	// Non-approver conversation participant must get 200 with outputAvailable=false on a finished run.
+	groupProjID := f.launched.ProjectID
+	groupConv := &store.Conversation{
+		ID:         api.NewUUID(),
+		ProjectID:  &groupProjID,
+		Kind:       "group",
+		Surface:    "native",
+		DriftState: "active",
+	}
+	require.NoError(t, f.store.CreateConversation(ctx, groupConv))
+	for _, p := range []*store.ConversationParticipant{
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "user", PrincipalID: f.owner.ID(), Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "user", PrincipalID: bob.ID, Role: "member", JoinedAt: time.Now().UTC()},
+		{ID: api.NewUUID(), ConversationID: groupConv.ID, PrincipalKind: "agent", PrincipalID: f.asker.ID, Role: "member", JoinedAt: time.Now().UTC()},
+	} {
+		require.NoError(t, f.store.AddParticipant(ctx, p))
+	}
+	groupNorm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+		Key:      "group-out-avail",
+		Script:   "echo group-output",
+		TimeoutS: 30,
+	})
+	require.NoError(t, err)
+	groupPr, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+		Message: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.launched.ProjectID,
+			ConversationID: groupConv.ID,
+			Sender:         "agent:" + f.asker.Slug,
+			SenderID:       f.asker.ID,
+			Recipient:      "conv:" + groupConv.ID,
+			CreatedAt:      time.Now().UTC(),
+		},
+		AgentID:    f.asker.ID,
+		AgentName:  f.asker.Slug,
+		ApproverID: f.owner.ID(),
+		Request:    groupNorm,
+		Now:        time.Now().UTC(),
+		TTL:        msgaction.CommandRequestTTL,
+	})
+	require.NoError(t, err)
+	groupApp, err := f.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     groupPr.Request.ID,
+		CommandSHA256: groupPr.Request.CommandSHA256,
+		UserID:        f.owner.ID(),
+		Surface:       msgaction.CommandRequestSurfaceCLI,
+		ExecAgentID:   f.launched.ID,
+		ExecProjectID: f.launched.ProjectID,
+		LeaseUntil:    time.Now().UTC().Add(5 * time.Minute),
+		Now:           time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	groupExit := 0
+	groupDur := int64(5)
+	groupOutLen := int64(len("group-raw-output"))
+	groupWon, err := f.store.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:        groupApp.Run.ID,
+		Status:       store.CommandRunStatusSucceeded,
+		ExitCode:     &groupExit,
+		DurationMS:   &groupDur,
+		OutputBytes:  &groupOutLen,
+		OutputStatus: agentcontrol.ExecOutputCaptured,
+		Output:       []byte("group-raw-output"),
+		FinishedAt:   time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.True(t, groupWon)
+
+	grantProjectAccessOnly(t, f.store, bob.ID, f.launched.ProjectID)
+	bobCardReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+groupPr.Request.ID, nil)
+	bobCardReq = bobCardReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(bobCardReq.Context(), NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web")),
+		CredentialContext{Kind: CredentialKindInteractive, ID: bob.ID},
+	))
+	bobCardRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(bobCardRec, bobCardReq)
+	require.Equal(t, http.StatusOK, bobCardRec.Code, "group non-approver GET body: %s", bobCardRec.Body.String())
+	var bobCardResp messages.CommandRequestDetailResponse
+	require.NoError(t, json.Unmarshal(bobCardRec.Body.Bytes(), &bobCardResp))
+	assert.False(t, bobCardResp.OutputAvailable, "non-approver must see outputAvailable=false even when output row exists")
+
+	// 3. Approver output view: GET /api/v1/command-requests/{id}/output (AC-S10).
+	outURL := "/api/v1/command-requests/" + reqNoShare.ID + "/output"
+
+	// 3a. Approver with interactive session + live agent.attach -> 200 + Cache-Control: no-store.
+	getOutReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	getOutReq = getOutReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(getOutReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	getOutRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(getOutRec, getOutReq)
+	require.Equal(t, http.StatusOK, getOutRec.Code, "approver output body: %s", getOutRec.Body.String())
+	assert.Equal(t, "no-store", getOutRec.Header().Get("Cache-Control"))
+	var outResp messages.CommandRequestOutputResponse
+	require.NoError(t, json.Unmarshal(getOutRec.Body.Bytes(), &outResp))
+	assert.Equal(t, finNoShare.ID, outResp.RunID)
+	assert.Contains(t, outResp.Output, privateCanary)
+
+	// output_viewed audit event emitted.
+	var foundOutputViewed bool
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == msgaction.EventCmdOutputViewed && ev.Details["run_id"] == finNoShare.ID {
+			foundOutputViewed = true
+		}
+	}
+	assert.True(t, foundOutputViewed, "expected output_viewed audit event")
+
+	// 3b. Non-GET method on /output -> 405.
+	postOutReq := httptest.NewRequest(http.MethodPost, outURL, nil)
+	postOutReq = postOutReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(postOutReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	postOutRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(postOutRec, postOutReq)
+	assert.Equal(t, http.StatusMethodNotAllowed, postOutRec.Code)
+
+	// 3c. Non-approver human (bob) -> 403 not_approver.
+	bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web")
+	bobReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	bobReq = bobReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(bobReq.Context(), bobIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: bob.ID},
+	))
+	bobRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(bobRec, bobReq)
+	assert.Equal(t, http.StatusForbidden, bobRec.Code)
+	assert.NotContains(t, bobRec.Body.String(), privateCanary)
+
+	// 3d. Session-only credential checks through Handler() (AC-S1):
+	//     real agent JWT, real PAT/UAT, visitor, federated identity -> all 403.
+	agentJWT, err := f.srv.GenerateAgentToken(f.asker.ID, f.launched.ProjectID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	agentOutReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	agentOutReq.Header.Set("Authorization", "Bearer "+agentJWT)
+	agentOutRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(agentOutRec, agentOutReq)
+	assert.Equal(t, http.StatusForbidden, agentOutRec.Code, "agent JWT must be refused on /output")
+
+	patPresented := "scion_pat_cmdreq-p4-output-token"
+	patHash := sha256.Sum256([]byte(patPresented))
+	patExpiry := time.Now().Add(time.Hour)
+	require.NoError(t, f.store.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID:        api.NewUUID(),
+		UserID:    f.owner.ID(),
+		Name:      "cmdreq-p4-pat",
+		Prefix:    "scion_pat_p401",
+		KeyHash:   hex.EncodeToString(patHash[:]),
+		ProjectID: f.launched.ProjectID,
+		Scopes:    []string{"project:read", "agent:attach"},
+		ExpiresAt: &patExpiry,
+		Created:   time.Now(),
+	}))
+	patOutReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	patOutReq.Header.Set("Authorization", "Bearer "+patPresented)
+	patOutRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(patOutRec, patOutReq)
+	assert.Equal(t, http.StatusForbidden, patOutRec.Code, "PAT must be refused on /output")
+
+	visitorIdent := NewVisitorIdentity(api.NewUUID(), "https://issuer.p4.test", "p4-visitor", "visitor@p4.test", "Visitor")
+	visReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	visReq = visReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(visReq.Context(), visitorIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: visitorIdent.ID()},
+	))
+	visRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(visRec, visReq)
+	assert.Equal(t, http.StatusForbidden, visRec.Code, "visitor must be refused on /output")
+
+	fedIdent := NewFederatedUserIdentity("https://issuer.p4.test", "p4-fed", f.owner.Email(), "Fed Owner", store.UserRoleMember, nil)
+	fedReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	fedReq = fedReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(fedReq.Context(), fedIdent),
+		CredentialContext{Kind: CredentialKindFederation, ID: fedIdent.ID()},
+	))
+	fedRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(fedRec, fedReq)
+	assert.Equal(t, http.StatusForbidden, fedRec.Code, "federated user must be refused on /output")
+
+	// 3e. Approver without live agent.attach on exec_agent_id -> 403 (AC-S10).
+	//     Seed a finished run where bob is the named approver (so the approver
+	//     check passes), pointing at f.launched which bob cannot attach to.
+	bobNorm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+		Key:      "bob-no-attach",
+		Script:   "echo secret-for-bob",
+		TimeoutS: 30,
+	})
+	require.NoError(t, err)
+	bobPrompt, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+		Message: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.launched.ProjectID,
+			ConversationID: api.NewUUID(),
+			ThreadID:       "dm:user:" + bob.ID + ":agent:" + f.asker.ID,
+			Sender:         "agent:" + f.asker.Slug,
+			SenderID:       f.asker.ID,
+			Recipient:      "user:" + bob.Email,
+			RecipientID:    bob.ID,
+		},
+		AgentID:    f.asker.ID,
+		AgentName:  f.asker.Slug,
+		ApproverID: bob.ID,
+		Request:    bobNorm,
+		Now:        time.Now().UTC(),
+		TTL:        msgaction.CommandRequestTTL,
+	})
+	require.NoError(t, err)
+	bobApp, err := f.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     bobPrompt.Request.ID,
+		CommandSHA256: bobPrompt.Request.CommandSHA256,
+		UserID:        bob.ID,
+		Surface:       msgaction.CommandRequestSurfaceCLI,
+		ExecAgentID:   f.launched.ID,
+		ExecProjectID: f.launched.ProjectID,
+		LeaseUntil:    time.Now().UTC().Add(5 * time.Minute),
+		Now:           time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	bobExit := 0
+	bobDur := int64(5)
+	bobOutBytes := int64(len("revoked-attach-output"))
+	bobWon, err := f.store.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:        bobApp.Run.ID,
+		Status:       store.CommandRunStatusSucceeded,
+		ExitCode:     &bobExit,
+		DurationMS:   &bobDur,
+		OutputBytes:  &bobOutBytes,
+		OutputStatus: agentcontrol.ExecOutputCaptured,
+		Output:       []byte("revoked-attach-output"),
+		FinishedAt:   time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.True(t, bobWon)
+
+	noAttachReq := httptest.NewRequest(http.MethodGet, "/api/v1/command-requests/"+bobPrompt.Request.ID+"/output", nil)
+	noAttachReq = noAttachReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(noAttachReq.Context(), bobIdent),
+		CredentialContext{Kind: CredentialKindInteractive, ID: bob.ID},
+	))
+	noAttachRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(noAttachRec, noAttachReq)
+	assert.Equal(t, http.StatusForbidden, noAttachRec.Code, "approver without live agent.attach must be refused")
+	assert.NotContains(t, noAttachRec.Body.String(), "revoked-attach-output")
+
+	// 3f. Soft-delete exec container -> must fail closed with 403 for real approver (AC-S10).
+	ag, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	ag.DeletedAt = time.Now().UTC()
+	require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	deletedReq := httptest.NewRequest(http.MethodGet, outURL, nil)
+	deletedReq = deletedReq.WithContext(contextWithCredentialContext(
+		contextWithIdentity(deletedReq.Context(), f.owner),
+		CredentialContext{Kind: CredentialKindInteractive, ID: f.owner.ID()},
+	))
+	deletedRec := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(deletedRec, deletedReq)
+	assert.Equal(t, http.StatusForbidden, deletedRec.Code, "deleted execution container must fail closed on /output")
+	assert.NotContains(t, deletedRec.Body.String(), privateCanary)
+
+	// 4. Verify output canaries never reached slog/messageLog or SSE (AC-S9).
+	logMu.Lock()
+	logged := logBuf.String()
+	logMu.Unlock()
+	assert.NotContains(t, logged, privateCanary, "private output must never appear in slog/messageLog")
+	assert.NotContains(t, logged, sharedCanary, "shared output must never appear in slog/messageLog")
+	assert.NotContains(t, logged, ghpSecret, "ghp secret must never appear in slog/messageLog")
+	assert.NotContains(t, logged, pemBody, "PEM body must never appear in slog/messageLog")
+
+	sseMu.Lock()
+	allSSE := strings.Join(sseEvents, "\n")
+	sseMu.Unlock()
+	assert.NotContains(t, allSSE, privateCanary, "private output must never appear in SSE")
+	assert.NotContains(t, allSSE, sharedCanary, "shared output must never appear in SSE")
+}
+
+// TestCommandRunSweeper_PurgesOldActionRunOutputs verifies carry-forward I1:
+// sweepCommandRuns purges action_run exec_run_outputs rows older than 7 days
+// while keeping newer rows.
+func TestCommandRunSweeper_PurgesOldActionRunOutputs(t *testing.T) {
+	f := newCmdRunExecFixture(t, nil)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	seedFinished := func(key string, finishedAt time.Time, content string) *store.CommandRun {
+		t.Helper()
+		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+			Key:      key,
+			Script:   "echo " + key,
+			TimeoutS: 30,
+		})
+		require.NoError(t, err)
+		pr, err := f.store.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+			Message: &store.Message{
+				ID:             api.NewUUID(),
+				ProjectID:      f.launched.ProjectID,
+				ConversationID: api.NewUUID(),
+				ThreadID:       "dm:user:" + f.owner.ID() + ":agent:" + f.asker.ID,
+				Sender:         "agent:" + f.asker.Slug,
+				SenderID:       f.asker.ID,
+				Recipient:      "user:" + f.owner.Email(),
+				RecipientID:    f.owner.ID(),
+			},
+			AgentID:    f.asker.ID,
+			AgentName:  f.asker.Slug,
+			ApproverID: f.owner.ID(),
+			Request:    norm,
+			Now:        finishedAt.Add(-time.Minute),
+			TTL:        msgaction.CommandRequestTTL,
+		})
+		require.NoError(t, err)
+		app, err := f.store.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+			RequestID:     pr.Request.ID,
+			CommandSHA256: pr.Request.CommandSHA256,
+			UserID:        f.owner.ID(),
+			Surface:       msgaction.CommandRequestSurfaceCLI,
+			ExecAgentID:   f.launched.ID,
+			ExecProjectID: f.launched.ProjectID,
+			LeaseUntil:    finishedAt.Add(5 * time.Minute),
+			Now:           finishedAt.Add(-30 * time.Second),
+		})
+		require.NoError(t, err)
+		code := 0
+		dur := int64(5)
+		outLen := int64(len(content))
+		won, err := f.store.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+			RunID:        app.Run.ID,
+			Status:       store.CommandRunStatusSucceeded,
+			ExitCode:     &code,
+			DurationMS:   &dur,
+			OutputBytes:  &outLen,
+			OutputStatus: agentcontrol.ExecOutputCaptured,
+			Output:       []byte(content),
+			FinishedAt:   finishedAt,
+		})
+		require.NoError(t, err)
+		require.True(t, won)
+		return app.Run
+	}
+
+	oldRun := seedFinished("sweep-old", now.Add(-8*24*time.Hour), "stale-output")
+	freshRun := seedFinished("sweep-fresh", now.Add(-24*time.Hour), "fresh-output")
+
+	f.srv.sweepCommandRuns(ctx)
+
+	_, err := f.store.GetActionRunOutput(ctx, oldRun.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "8-day-old action_run output must be purged by sweepCommandRuns")
+	gotFresh, err := f.store.GetActionRunOutput(ctx, freshRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "fresh-output", string(gotFresh))
 }

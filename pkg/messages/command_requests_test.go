@@ -244,6 +244,33 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 	if !foundPlain {
 		t.Errorf("non-command-request message should still emit message_content")
 	}
+
+	outputMarker := "SHARED_OUTPUT_NEVER_IN_SLOG"
+	respMsg := &StructuredMessage{
+		Sender:    "system:hub",
+		Recipient: "agent:builder",
+		Type:      TypeCommandResponse,
+		Msg:       "Finished.\n```\n" + outputMarker + "\n```",
+		Metadata: map[string]string{
+			"command_run_status": "succeeded",
+		},
+	}
+	respAttrs := respMsg.LogAttrs()
+	respKV := make(map[string]any, len(respAttrs)/2)
+	for i := 0; i+1 < len(respAttrs); i += 2 {
+		if k, ok := respAttrs[i].(string); ok {
+			respKV[k] = respAttrs[i+1]
+		}
+	}
+	if _, hasContent := respKV["message_content"]; hasContent {
+		t.Fatalf("TypeCommandResponse LogAttrs must omit message_content, got %v", respKV["message_content"])
+	}
+	if respKV["message_content_omitted"] != true {
+		t.Errorf("TypeCommandResponse message_content_omitted = %v, want true", respKV["message_content_omitted"])
+	}
+	if respKV["meta_command_run_status"] != "succeeded" {
+		t.Errorf("meta_command_run_status = %v, want succeeded", respKV["meta_command_run_status"])
+	}
 }
 
 func TestCommandWorkdirKind(t *testing.T) {

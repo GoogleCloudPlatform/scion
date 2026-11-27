@@ -218,6 +218,9 @@ func TestCommandRequests_ExperimentOff(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusNotFound, rrApprove.Code)
 
+	rrOutput := f.doUserJSON(t, http.MethodGet, "/api/v1/command-requests/"+api.NewUUID()+"/output", f.alice, nil)
+	assert.Equal(t, http.StatusNotFound, rrOutput.Code)
+
 	rrList := f.doAgentJSON(t, http.MethodGet, "/api/v1/agent/command-requests", nil)
 	assert.Equal(t, http.StatusNotFound, rrList.Code)
 }

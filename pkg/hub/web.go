@@ -3485,6 +3485,10 @@ func isCompressBypassPath(path string) bool {
 	if len(segs) >= 2 && segs[0] == "secret-requests" {
 		return true
 	}
+	// Command request output returns captured execution container output.
+	if len(segs) == 3 && segs[0] == "command-requests" && segs[2] == "output" {
+		return true
+	}
 	// POST /api/v1/projects/{projectId}/webhook-endpoints and
 	// POST /api/v1/projects/{projectId}/webhook-endpoints/{id}/rotate-secret
 	// return one-time HMAC signing secrets.

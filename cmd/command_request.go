@@ -107,6 +107,8 @@ request's canonical command_sha256.`,
 		RunE: runCommandRequestApprove,
 	}
 	cmd.Flags().String("confirm-sha256", "", "Full 64-character hex command_sha256 for non-interactive confirmation")
+	cmd.Flags().Bool("share-output", false, "Share a redacted <= 4 KiB output tail with the requesting agent (defaults to what the agent requested)")
+	cmd.Flags().Bool("no-share-output", false, "Do not share command output with the requesting agent (overrides agent's share_output_requested)")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
 }
@@ -209,6 +211,13 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 	confirmHash, _ := cmd.Flags().GetString("confirm-sha256")
 	confirmHash = strings.ToLower(strings.TrimSpace(confirmHash))
 
+	shareFlagSet := cmd.Flags().Changed("share-output")
+	noShareFlagSet := cmd.Flags().Changed("no-share-output")
+	if shareFlagSet && noShareFlagSet {
+		return newUsageError("--share-output and --no-share-output are mutually exclusive")
+	}
+	shareFlagVal, _ := cmd.Flags().GetBool("share-output")
+
 	client, err := commandRequestsClientFactory()
 	if err != nil {
 		return err
@@ -229,6 +238,15 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 		return errors.New("command request hash does not match the displayed script; refusing to approve")
 	}
 
+	shareOutput := detail.Request.ShareOutputRequested
+	switch {
+	case shareFlagSet:
+		shareOutput = shareFlagVal
+	case noShareFlagSet:
+		// Any use of --no-share-output means do not share output.
+		shareOutput = false
+	}
+
 	out := cmd.OutOrStdout()
 	containerLabel := "your execution container"
 	if detail.ExecContainer != nil && detail.ExecContainer.AgentName != "" {
@@ -240,7 +258,7 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 
 	wantJSON := commandRequestsWantJSON(cmd)
 	if !wantJSON {
-		printCommandRequestConfirmationSummary(out, detail, containerLabel)
+		printCommandRequestConfirmationSummary(out, detail, containerLabel, shareOutput)
 	}
 
 	if commandApproveIsTerminal() && !wantJSON {
@@ -275,6 +293,7 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 	resp, err := client.CommandRequests().Approve(ctx, reqID, &messages.ApproveCommandRequestBody{
 		RowID:          detail.Request.RowID,
 		CommandSHA256:  detail.Request.CommandSHA256,
+		ShareOutput:    &shareOutput,
 		Surface:        msgaction.CommandRequestSurfaceCLI,
 		IdempotencyKey: uuid.NewString(),
 	})
@@ -290,7 +309,7 @@ func runCommandRequestApprove(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.CommandRequestDetailResponse, containerLabel string) {
+func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.CommandRequestDetailResponse, containerLabel string, shareOutput bool) {
 	req := detail.Request
 	_, _ = fmt.Fprintf(out, "Command request: %s v%d (%s)\n", safeText(req.Key), req.Version, safeText(req.RowID))
 	_, _ = fmt.Fprintf(out, "Requested by:    %s\n", safeText(req.AgentName))
@@ -309,6 +328,14 @@ func printCommandRequestConfirmationSummary(out io.Writer, detail *messages.Comm
 		_, _ = fmt.Fprintln(out, "WARNING:         workdir is a shared directory (agent-writable)")
 	}
 	_, _ = fmt.Fprintf(out, "Timeout:         %ds\n", req.TimeoutS)
+	shareStr := "no"
+	if shareOutput {
+		shareStr = "yes (redacted <= 4 KiB tail)"
+	}
+	if req.ShareOutputRequested {
+		shareStr += " [agent requested]"
+	}
+	_, _ = fmt.Fprintf(out, "Share output:    %s\n", shareStr)
 	_, _ = fmt.Fprintf(out, "Container:       %s", containerLabel)
 	if detail.ExecContainer != nil && detail.ExecContainer.State != "" {
 		_, _ = fmt.Fprintf(out, " [%s]", safeText(detail.ExecContainer.State))

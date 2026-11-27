@@ -749,6 +749,11 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture) string { return "/api/v1/pending-secrets/ps-1/reveal" },
 		},
+		"GET /api/v1/command-requests/{id}/output": {
+			reason: "user session only (approver + live attach); refuses agent tokens",
+			method: http.MethodGet,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/command-requests/cr-1/output" },
+		},
 		"POST /api/v1/projects/register": {
 			reason: "user/broker project registration; refuses agent tokens",
 			method: http.MethodPost,
@@ -992,6 +997,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				e.Name == experiments.Triggers ||
 				e.Name == experiments.Artifacts ||
 				e.Name == experiments.FederationProjectVisitors ||
+				e.Name == experiments.CommandRequests ||
 				e.Name == conduitExperiment {
 				e.Default = true
 			}

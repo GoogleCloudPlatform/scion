@@ -57,6 +57,7 @@ var (
 	commandRunWakeTimeout      = commandRunWakeBudget
 	commandRunReadyPollInitial = 1 * time.Second
 	commandRunReadyPollMax     = 5 * time.Second
+	commandRunOutputRetention  = 7 * 24 * time.Hour
 )
 
 // Stages of a command run at which commandRunExecHook runs (test seam only).
@@ -896,9 +897,11 @@ func (s *Server) finishCommandRun(
 		s.publishActionUpdated(msgaction.KindCommandRequest, req.ProjectID, req.MessageID, req.ChatKey, commandRequestSSEView(req, nil, run))
 	}
 
-	// 3. Deliver outcome-only command-response message to the asker agent (§4.9, P1).
+	// 3. Deliver command-response message to the asker agent (§4.9).
+	// Output tail is included only when run.ShareOutput is true, after
+	// best-effort redaction and 4 KiB UTF-8 bounding.
 	if req != nil {
-		s.deliverCommandRunOutcome(postCtx, req, run)
+		s.deliverCommandRunOutcome(postCtx, req, run, fin.Output)
 	}
 
 	return true, nil
@@ -957,10 +960,11 @@ func (s *Server) emitCommandRunAudit(ctx context.Context, req *store.CommandRequ
 	s.emitMessageActionEvent(ctx, ev)
 }
 
-// deliverCommandRunOutcome sends one outcome-only command-response message to
-// the asking agent via dispatchActionResponse (design §4.9, P1: no output_tail,
-// no retry loop). Deleting the asker makes delivery a no-op (C2).
-func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.CommandRequest, run *store.CommandRun) {
+// deliverCommandRunOutcome sends one command-response message to the asking
+// agent via dispatchActionResponse (design §4.9). Output tail is attached only
+// when run.ShareOutput is true, after best-effort redaction and 4 KiB UTF-8
+// bounding. Deleting the asker makes delivery a no-op (C2).
+func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.CommandRequest, run *store.CommandRun, capturedOutput []byte) {
 	if req.AgentID == "" {
 		return
 	}
@@ -975,7 +979,17 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 		return
 	}
 
-	respText := formatCommandRunOutcomeMessage(req, run)
+	var outputTail string
+	var redactionCount int
+	if run.ShareOutput {
+		if len(capturedOutput) > 0 {
+			outputTail, redactionCount = redactAndBoundCommandOutput(capturedOutput)
+		} else {
+			outputTail, redactionCount = s.loadSharedCommandRunOutputTail(ctx, run)
+		}
+	}
+
+	respText := formatCommandRunOutcomeMessage(req, run, outputTail)
 	respMsg := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      req.ProjectID,
@@ -1036,9 +1050,16 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 		LogPrefix: "command_run",
 		Label:     "command-response",
 	})
+
+	if outputTail != "" {
+		s.emitCommandRunAudit(ctx, req, run, msgaction.EventCmdOutputReturned, "", map[string]string{
+			"output_bytes":    strconv.Itoa(len(outputTail)),
+			"redaction_count": strconv.Itoa(redactionCount),
+		})
+	}
 }
 
-func formatCommandRunOutcomeMessage(req *store.CommandRequest, run *store.CommandRun) string {
+func formatCommandRunOutcomeMessage(req *store.CommandRequest, run *store.CommandRun, outputTail string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Command request `%s` (v%d) finished with status **%s**", req.Key, req.Version, run.Status)
 	if run.ExitCode != nil {
@@ -1056,6 +1077,20 @@ func formatCommandRunOutcomeMessage(req *store.CommandRequest, run *store.Comman
 	b.WriteByte('.')
 	if run.OutputStatus != "" {
 		fmt.Fprintf(&b, " Output status: `%s`.", run.OutputStatus)
+	}
+	if outputTail != "" {
+		fence := "```"
+		for strings.Contains(outputTail, fence) {
+			fence += "`"
+		}
+		b.WriteString("\n\nShared output tail:\n")
+		b.WriteString(fence)
+		b.WriteByte('\n')
+		b.WriteString(outputTail)
+		if !strings.HasSuffix(outputTail, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteString(fence)
 	}
 	return b.String()
 }
@@ -1117,6 +1152,16 @@ func (s *Server) sweepCommandRuns(ctx context.Context) {
 		expiredReqs += len(rows)
 		if len(rows) < batch {
 			break
+		}
+	}
+
+	// Purge action_run exec_run_outputs older than 7 days (design §4.9, carry-forward I1).
+	if ctx.Err() == nil {
+		cutoff := time.Now().UTC().Add(-execSeamDuration(&commandRunOutputRetention))
+		if purged, err := s.store.PurgeOldActionRunOutputs(ctx, cutoff); err != nil {
+			slog.Warn("Command run sweep: purge old action_run outputs failed", "error", err)
+		} else if purged > 0 {
+			slog.Info("Command run sweep: purged old action_run outputs", "purged", purged)
 		}
 	}
 

@@ -2010,6 +2010,7 @@ func init() {
 	messageCmd.Flags().StringVar(&msgCommandDescription, "description", "", "With --command-request: plain-text description of what the command does")
 	messageCmd.Flags().StringVar(&msgCommandWorkdir, "workdir", "", "With --command-request: absolute working directory inside the execution container (defaults to $HOME)")
 	messageCmd.Flags().StringVar(&msgCommandTimeout, "timeout", "", "With --command-request: execution timeout duration (e.g. 15m, 90s; default 10m, max 60m)")
+	messageCmd.Flags().BoolVar(&msgCommandShareOutput, "share-output", false, "With --command-request: ask the approver to share a redacted <= 4 KiB output tail back on completion")
 	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
 
 	// Removed flags — kept (hidden) only so their use gets actionable

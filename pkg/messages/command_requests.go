@@ -355,6 +355,7 @@ type CommandRequestRunView struct {
 	DurationMS    *int64     `json:"durationMs,omitempty"`
 	OutputBytes   *int64     `json:"outputBytes,omitempty"`
 	OutputStatus  string     `json:"outputStatus,omitempty"`
+	OutputTail    string     `json:"outputTail,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	DispatchedAt  *time.Time `json:"dispatchedAt,omitempty"`
 	FinishedAt    *time.Time `json:"finishedAt,omitempty"`
@@ -425,7 +426,8 @@ type CommandRequestDetailResponse struct {
 	CanApprove             bool                             `json:"canApprove"`
 	// CanDismiss is a P5 feature-detect hook; false until the dismiss API lands in P5.
 	CanDismiss bool `json:"canDismiss,omitempty"`
-	// OutputAvailable is a P4 feature-detect hook; false until the output API lands in P4.
+	// OutputAvailable is true for the approver when the run has finished and
+	// an action_run output row exists in exec_run_outputs.
 	OutputAvailable bool   `json:"outputAvailable,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 }
@@ -434,9 +436,19 @@ type CommandRequestDetailResponse struct {
 type ApproveCommandRequestBody struct {
 	RowID          string `json:"row_id,omitempty"`
 	CommandSHA256  string `json:"command_sha256"`
-	ShareOutput    bool   `json:"share_output,omitempty"`
+	ShareOutput    *bool  `json:"share_output,omitempty"`
 	Surface        string `json:"surface,omitempty"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// CommandRequestOutputResponse is the 200 response of
+// GET /api/v1/command-requests/{id}/output (approver-only, Cache-Control: no-store).
+type CommandRequestOutputResponse struct {
+	RunID        string `json:"runId"`
+	CaptureMode  string `json:"captureMode"`
+	OutputStatus string `json:"outputStatus,omitempty"`
+	OutputBytes  *int64 `json:"outputBytes,omitempty"`
+	Output       string `json:"output,omitempty"`
 }
 
 // ApproveCommandRequestResponse is the 202 (or 200 on idempotent replay) response

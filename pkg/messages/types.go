@@ -421,9 +421,10 @@ func (m *StructuredMessage) LogAttrs() []any {
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
 	}
-	if m.Type == TypeCommandRequest {
+	if m.Type == TypeCommandRequest || m.Type == TypeCommandResponse {
 		// Command request messages embed the proposed script in their Markdown
-		// fallback body; never emit script text to slog (ptone/scion#9278 G7/S12).
+		// fallback body, and command response messages may embed a shared
+		// output tail; never emit either to slog (ptone/scion#9278 G7/S9/S12).
 		attrs = append(attrs,
 			"message_content_omitted", true,
 			"message_content_len", len(m.Msg),

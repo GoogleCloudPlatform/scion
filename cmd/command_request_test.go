@@ -286,7 +286,7 @@ func TestPrintCommandRequestConfirmationSummary_EscapesUnsafeRunes(t *testing.T)
 		},
 	}
 	var out bytes.Buffer
-	printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+	printCommandRequestConfirmationSummary(&out, detail, "my-shell", false)
 	rendered := out.String()
 
 	assert.False(t, strings.ContainsRune(rendered, 0x9b), "raw C1 CSI must never appear in terminal output")
@@ -316,7 +316,7 @@ func TestPrintCommandRequestConfirmationSummary_FramingAndWorkdirWarnings(t *tes
 			},
 		}
 		var out bytes.Buffer
-		printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+		printCommandRequestConfirmationSummary(&out, detail, "my-shell", false)
 		rendered := out.String()
 		assert.Contains(t, rendered, "   1 │ echo one\n")
 		assert.Contains(t, rendered, "   2 │ --- end script ---\n")
@@ -350,7 +350,7 @@ func TestPrintCommandRequestConfirmationSummary_FramingAndWorkdirWarnings(t *tes
 				},
 			}
 			var out bytes.Buffer
-			printCommandRequestConfirmationSummary(&out, detail, "my-shell")
+			printCommandRequestConfirmationSummary(&out, detail, "my-shell", false)
 			rendered := out.String()
 			if tc.wantWarn != "" {
 				assert.Contains(t, rendered, tc.wantWarn, "workdir=%s", tc.workdir)
@@ -426,9 +426,151 @@ func TestPrintCommandRequestConfirmationSummary_EscapesNonASCIIWorkdir(t *testin
 			TimeoutS:      600,
 			CommandSHA256: messages.CommandRequestCanonicalHash("pwd\n", homoglyphWorkdir, 600),
 		},
-	}, "alice-shell")
+	}, "alice-shell", false)
 
 	got := out.String()
 	assert.Contains(t, got, `/w\u{043E}rkspace/app`, "CLI confirmation must escape non-ASCII workdir code points")
 	assert.NotContains(t, got, homoglyphWorkdir, "CLI confirmation must not print raw non-ASCII workdir homoglyph")
+}
+
+func TestCommandRequestCLI_ShareOutputFlags(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	prevTTY := commandApproveIsTerminal
+	commandApproveIsTerminal = func() bool { return false }
+	t.Cleanup(func() { commandApproveIsTerminal = prevTTY })
+
+	script := "echo hi"
+	hash := messages.CommandRequestCanonicalHash(script, "", 600)
+
+	cases := []struct {
+		name            string
+		agentRequested  bool
+		setShare        bool
+		noShareVal      string
+		wantErrContains string
+		wantShareOutput bool
+	}{
+		{
+			name:            "defaults to agent share_output_requested=true",
+			agentRequested:  true,
+			wantShareOutput: true,
+		},
+		{
+			name:            "defaults to agent share_output_requested=false",
+			agentRequested:  false,
+			wantShareOutput: false,
+		},
+		{
+			name:            "--no-share-output overrides agent requested=true",
+			agentRequested:  true,
+			noShareVal:      "true",
+			wantShareOutput: false,
+		},
+		{
+			name:            "--no-share-output=false still means do not share",
+			agentRequested:  true,
+			noShareVal:      "false",
+			wantShareOutput: false,
+		},
+		{
+			name:            "--share-output overrides agent requested=false",
+			agentRequested:  false,
+			setShare:        true,
+			wantShareOutput: true,
+		},
+		{
+			name:            "both flags mutually exclusive",
+			agentRequested:  true,
+			setShare:        true,
+			noShareVal:      "true",
+			wantErrContains: "mutually exclusive",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody messages.ApproveCommandRequestBody
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/v1/command-requests/req-share":
+					_ = json.NewEncoder(w).Encode(messages.CommandRequestDetailResponse{
+						Request: messages.CommandRequestView{
+							RowID:                "req-share",
+							AgentName:            "builder",
+							Key:                  "share-test",
+							Version:              1,
+							Script:               script,
+							TimeoutS:             600,
+							ShareOutputRequested: tc.agentRequested,
+							CommandSHA256:        hash,
+							Status:               "pending",
+						},
+						CanApprove: true,
+					})
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/command-requests/req-share/approve":
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+					w.WriteHeader(http.StatusAccepted)
+					share := gotBody.ShareOutput != nil && *gotBody.ShareOutput
+					_ = json.NewEncoder(w).Encode(messages.ApproveCommandRequestResponse{
+						Request: messages.CommandRequestView{RowID: "req-share", Key: "share-test", Version: 1, Status: "approved"},
+						Run:     messages.CommandRequestRunView{RunID: "run-share", RequestID: "req-share", Status: "queued", ShareOutput: share},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+
+			prevFactory := commandRequestsClientFactory
+			commandRequestsClientFactory = func() (hubclient.Client, error) {
+				return hubclient.New(ts.URL)
+			}
+			t.Cleanup(func() { commandRequestsClientFactory = prevFactory })
+
+			cmd := newCommandRequestApproveCmd()
+			require.NoError(t, cmd.Flags().Set("confirm-sha256", hash))
+			if tc.setShare {
+				require.NoError(t, cmd.Flags().Set("share-output", "true"))
+			}
+			if tc.noShareVal != "" {
+				require.NoError(t, cmd.Flags().Set("no-share-output", tc.noShareVal))
+			}
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+
+			err := runCommandRequestApprove(cmd, []string{"req-share"})
+			if tc.wantErrContains != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrContains)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, gotBody.ShareOutput)
+			assert.Equal(t, tc.wantShareOutput, *gotBody.ShareOutput)
+		})
+	}
+}
+
+func TestValidateCommandRequestFlags_ShareOutput(t *testing.T) {
+	t.Cleanup(resetCommandRequestFlags)
+	t.Setenv("SCION_CLI_MODE", "agent")
+	t.Setenv("SCION_AGENT_NAME", "builder")
+
+	resetCommandRequestFlags()
+	msgCommandShareOutput = true
+	err := validateCommandRequestFlags(false, false, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--command-request")
+
+	resetCommandRequestFlags()
+	msgCommandRequestKey = "share-send"
+	msgCommandInline = "echo ok"
+	msgCommandShareOutput = true
+	require.NoError(t, validateCommandRequestFlags(false, false, false))
+	raw, err := loadCommandRequestPayload()
+	require.NoError(t, err)
+	var decoded messages.CommandRequestInput
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	assert.True(t, decoded.ShareOutputRequested)
 }
