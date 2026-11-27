@@ -747,3 +747,360 @@ func TestUsageReadAPI_RestartedAgentPriorRunRollupsStillStale(t *testing.T) {
 	assert.Equal(t, MeasurementStatusUnmeasured, unkProjResp.MeasurementStatus)
 	assert.Equal(t, 1, unkProjResp.UnmeasuredAgents)
 }
+
+type usageCoverageFilterSpyStore struct {
+	store.Store
+	lastFilter store.UsageCoverageFilter
+	called     bool
+}
+
+func (s *usageCoverageFilterSpyStore) GetUsageScopeCoverage(ctx context.Context, filter store.UsageCoverageFilter) (*store.UsageScopeCoverage, error) {
+	s.lastFilter = filter
+	s.called = true
+	return s.Store.GetUsageScopeCoverage(ctx, filter)
+}
+
+// TestHubRollupSource_MeasurementStatusParityWithScopedAPI verifies that
+// HubRollupSource (constructed via Server.selectMetricsDashboardSource) agrees
+// with GET /api/v1/projects/{id}/usage?since=24h across capability-aware,
+// startup-grace, and zero-bucket legacy rollup cases (R1, O1).
+func TestHubRollupSource_MeasurementStatusParityWithScopedAPI(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.workstation = false
+	srv.SetHubID("hub-dash-parity")
+	setUsageLedgerExperimentForTest(t, srv, true)
+
+	admin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "dash-parity-admin@example.com",
+		DisplayName: "Dash Parity Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	// Seed global harness configs: calls_only (hooks) and full live-metered (native).
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "dash-calls-only",
+		Slug:    "dash-calls-only",
+		Harness: "antigravity",
+		Scope:   store.HarnessConfigScopeGlobal,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "antigravity",
+			Usage:   makeUsageCap(api.UsageLiveSourceHooks, nil, nil, false),
+		},
+	}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "dash-live-full",
+		Slug:    "dash-live-full",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeGlobal,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage: makeUsageCap(
+				api.UsageLiveSourceNative,
+				[]string{"input", "output", "cache_read", "cache_write"},
+				nil,
+				true,
+			),
+		},
+	}))
+
+	// Construct the dashboard source through the production Server factory so
+	// its newCapabilityLookup closure is exercised.
+	srcIface := srv.selectMetricsDashboardSource(true, "summary", "")
+	require.NotNil(t, srcIface)
+	src, ok := srcIface.(*HubRollupSource)
+	require.True(t, ok, "expected *HubRollupSource when usage_ledger is enabled without Cloud Monitoring")
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+
+	mkProject := func(slug string) *store.Project {
+		p := &store.Project{ID: uuid.NewString(), Name: slug, Slug: slug, OwnerID: admin.ID}
+		require.NoError(t, s.CreateProject(ctx, p))
+		bindProjectRoleForUsageReadTest(t, s, admin.ID, p.ID, store.ProjectRoleOwner)
+		return p
+	}
+
+	assertParity := func(t *testing.T, projectID, wantStatus string, wantUnmeasured, wantStale int) {
+		t.Helper()
+
+		summary, err := src.QuerySummary(ctx, 1, WithProjectID(projectID))
+		require.NoError(t, err)
+		require.NotNil(t, summary.Measurement)
+		assert.Equal(t, wantStatus, summary.Measurement.Status, "QuerySummary status")
+		assert.Equal(t, wantUnmeasured, summary.Measurement.UnmeasuredAgents, "QuerySummary unmeasured_agents")
+		assert.Equal(t, wantStale, summary.Measurement.StaleAgents, "QuerySummary stale_agents")
+
+		projSum, err := src.QueryProjectSummary(ctx, projectID)
+		require.NoError(t, err)
+		require.NotNil(t, projSum.Measurement)
+		assert.Equal(t, wantStatus, projSum.Measurement.Status, "QueryProjectSummary status")
+		assert.Equal(t, wantUnmeasured, projSum.Measurement.UnmeasuredAgents, "QueryProjectSummary unmeasured_agents")
+		assert.Equal(t, wantStale, projSum.Measurement.StaleAgents, "QueryProjectSummary stale_agents")
+
+		rec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+projectID+"/usage?since=24h", admin)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var apiResp UsageSummaryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiResp))
+		assert.Equal(t, wantStatus, apiResp.MeasurementStatus, "scoped usage API status")
+		assert.Equal(t, wantUnmeasured, apiResp.UnmeasuredAgents, "scoped usage API unmeasured_agents")
+		assert.Equal(t, wantStale, apiResp.StaleAgents, "scoped usage API stale_agents")
+	}
+
+	t.Run("m1a: hooks/calls_only agent with fresh heartbeat reads calls_only on dashboard and API", func(t *testing.T) {
+		proj := mkProject("dash-parity-calls-only")
+		ag := &store.Agent{
+			ID:            uuid.NewString(),
+			Slug:          "ag-calls-only",
+			Name:          "ag-calls-only",
+			ProjectID:     proj.ID,
+			OwnerID:       admin.ID,
+			HarnessConfig: "dash-calls-only",
+			Phase:         string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := s.SetAgentRunID(ctx, ag.ID, "run-co-1", nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         "run-co-1",
+			Generation:    1,
+			ProjectID:     proj.ID,
+			AgentID:       ag.ID,
+			BillingUserID: &admin.ID,
+			Harness:       "antigravity",
+			HarnessConfig: "dash-calls-only",
+			CreatedAt:     dbNow.Add(-5 * time.Minute),
+		})
+		require.NoError(t, err)
+		_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: ag.ID,
+			MeterHealth: &store.UsageMeterHealthUpdate{
+				AgentID:       ag.ID,
+				RunID:         "run-co-1",
+				ProducerEpoch: "ep-1",
+				LastReceiptAt: dbNow.Add(-15 * time.Second),
+				ProducerSeq:   1,
+				FinalState:    store.MeterHealthFinalStateOpen,
+			},
+		})
+		require.NoError(t, err)
+
+		assertParity(t, proj.ID, MeasurementStatusCallsOnly, 0, 0)
+	})
+
+	t.Run("m1b: live-metered agent past grace with no receipt reads stale on dashboard and API", func(t *testing.T) {
+		proj := mkProject("dash-parity-past-grace")
+		ag := &store.Agent{
+			ID:            uuid.NewString(),
+			Slug:          "ag-past-grace",
+			Name:          "ag-past-grace",
+			ProjectID:     proj.ID,
+			OwnerID:       admin.ID,
+			HarnessConfig: "dash-live-full",
+			Phase:         string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := s.SetAgentRunID(ctx, ag.ID, "run-pg-1", nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         "run-pg-1",
+			Generation:    1,
+			ProjectID:     proj.ID,
+			AgentID:       ag.ID,
+			BillingUserID: &admin.ID,
+			Harness:       "claude",
+			HarnessConfig: "dash-live-full",
+			CreatedAt:     dbNow.Add(-5 * time.Minute),
+		})
+		require.NoError(t, err)
+
+		assertParity(t, proj.ID, MeasurementStatusStale, 0, 1)
+	})
+
+	t.Run("m2: live-metered agent inside 60s startup grace reads unmeasured and passes StartupGrace", func(t *testing.T) {
+		proj := mkProject("dash-parity-in-grace")
+		ag := &store.Agent{
+			ID:            uuid.NewString(),
+			Slug:          "ag-in-grace",
+			Name:          "ag-in-grace",
+			ProjectID:     proj.ID,
+			OwnerID:       admin.ID,
+			HarnessConfig: "dash-live-full",
+			Phase:         string(state.PhaseRunning),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := s.SetAgentRunID(ctx, ag.ID, "run-ig-1", nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         "run-ig-1",
+			Generation:    1,
+			ProjectID:     proj.ID,
+			AgentID:       ag.ID,
+			BillingUserID: &admin.ID,
+			Harness:       "claude",
+			HarnessConfig: "dash-live-full",
+			CreatedAt:     dbNow.Add(-15 * time.Second),
+		})
+		require.NoError(t, err)
+
+		assertParity(t, proj.ID, MeasurementStatusUnmeasured, 1, 0)
+
+		// Also assert HubRollupSource passes explicit StartupGrace == defaultUsageStartupGrace
+		// (not 0) to GetUsageScopeCoverage.
+		spy := &usageCoverageFilterSpyStore{Store: src.store}
+		origStore := src.store
+		src.store = spy
+		t.Cleanup(func() { src.store = origStore })
+
+		_, err = src.QuerySummary(ctx, 1, WithProjectID(proj.ID))
+		require.NoError(t, err)
+		require.True(t, spy.called)
+		assert.Equal(t, defaultUsageStartupGrace, spy.lastFilter.StartupGrace)
+	})
+
+	t.Run("m3a: deleted-agent legacy-only rollups read legacy_client on dashboard and API", func(t *testing.T) {
+		proj := mkProject("dash-parity-legacy-only")
+		ag := &store.Agent{
+			ID:            uuid.NewString(),
+			Slug:          "ag-del-legacy",
+			Name:          "ag-del-legacy",
+			ProjectID:     proj.ID,
+			OwnerID:       admin.ID,
+			HarnessConfig: "dash-live-full",
+			Phase:         string(state.PhaseStopped),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := s.SetAgentRunID(ctx, ag.ID, "run-dl-1", nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         "run-dl-1",
+			Generation:    1,
+			ProjectID:     proj.ID,
+			AgentID:       ag.ID,
+			BillingUserID: &admin.ID,
+			Harness:       "claude",
+			HarnessConfig: "dash-live-full",
+			CreatedAt:     dbNow.Add(-10 * time.Minute),
+		})
+		require.NoError(t, err)
+		inVal, outVal := int64(100), int64(50)
+		_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: ag.ID,
+			Events: []*store.UsageEvent{{
+				HubID:         "hub-dash-parity",
+				EventID:       "ev-dl-1",
+				RunID:         "run-dl-1",
+				ProjectID:     proj.ID,
+				AgentID:       ag.ID,
+				BillingUserID: &admin.ID,
+				Harness:       "claude",
+				Model:         "claude-sonnet-4-6",
+				ModelSource:   "legacy",
+				UsageSource:   store.UsageSourceLegacySessionMetrics,
+				Status:        "ok",
+				Calls:         1,
+				Input:         &inVal,
+				Output:        &outVal,
+				TokenStatus:   "ok",
+				EventTS:       dbNow.Add(-5 * time.Minute),
+				ReceivedAt:    dbNow.Add(-5 * time.Minute),
+				ProducerSeq:   1,
+			}},
+		})
+		require.NoError(t, err)
+		require.NoError(t, s.DeleteAgent(ctx, ag.ID))
+
+		assertParity(t, proj.ID, MeasurementStatusLegacyClient, 0, 0)
+	})
+
+	t.Run("m3b + O1: deleted-agent mixed legacy + non-legacy rollups read partial on dashboard (including QueryAPICalls by user) and API", func(t *testing.T) {
+		proj := mkProject("dash-parity-legacy-mixed")
+		ag := &store.Agent{
+			ID:            uuid.NewString(),
+			Slug:          "ag-del-mixed",
+			Name:          "ag-del-mixed",
+			ProjectID:     proj.ID,
+			OwnerID:       admin.ID,
+			HarnessConfig: "dash-live-full",
+			Phase:         string(state.PhaseStopped),
+		}
+		require.NoError(t, s.CreateAgent(ctx, ag))
+		_, err := s.SetAgentRunID(ctx, ag.ID, "run-dm-1", nil)
+		require.NoError(t, err)
+		_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         "run-dm-1",
+			Generation:    1,
+			ProjectID:     proj.ID,
+			AgentID:       ag.ID,
+			BillingUserID: &admin.ID,
+			Harness:       "claude",
+			HarnessConfig: "dash-live-full",
+			CreatedAt:     dbNow.Add(-10 * time.Minute),
+		})
+		require.NoError(t, err)
+		inVal, outVal := int64(100), int64(50)
+		_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: ag.ID,
+			Events: []*store.UsageEvent{
+				{
+					HubID:         "hub-dash-parity",
+					EventID:       "ev-dm-leg-1",
+					RunID:         "run-dm-1",
+					ProjectID:     proj.ID,
+					AgentID:       ag.ID,
+					BillingUserID: &admin.ID,
+					Harness:       "claude",
+					Model:         "claude-sonnet-4-6",
+					ModelSource:   "legacy",
+					UsageSource:   store.UsageSourceLegacySessionMetrics,
+					Status:        "ok",
+					Calls:         1,
+					Input:         &inVal,
+					Output:        &outVal,
+					TokenStatus:   "ok",
+					EventTS:       dbNow.Add(-6 * time.Minute),
+					ReceivedAt:    dbNow.Add(-6 * time.Minute),
+					ProducerSeq:   1,
+				},
+				{
+					HubID:         "hub-dash-parity",
+					EventID:       "ev-dm-t1-1",
+					RunID:         "run-dm-1",
+					ProjectID:     proj.ID,
+					AgentID:       ag.ID,
+					BillingUserID: &admin.ID,
+					Harness:       "claude",
+					Model:         "claude-sonnet-4-6",
+					ModelSource:   "native",
+					UsageSource:   store.UsageSourceNative,
+					Status:        "ok",
+					Calls:         1,
+					Input:         &inVal,
+					Output:        &outVal,
+					TokenStatus:   "ok",
+					EventTS:       dbNow.Add(-5 * time.Minute),
+					ReceivedAt:    dbNow.Add(-5 * time.Minute),
+					ProducerSeq:   2,
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, s.DeleteAgent(ctx, ag.ID))
+
+		assertParity(t, proj.ID, MeasurementStatusPartial, 0, 0)
+
+		// O1: QueryModelCalls grouped by user (only qs.byUser populated) also reads partial.
+		callsView, err := src.QueryModelCalls(ctx, 1, WithProjectID(proj.ID), WithGroupBy("user"))
+		require.NoError(t, err)
+		require.NotNil(t, callsView.Measurement)
+		assert.Equal(t, MeasurementStatusPartial, callsView.Measurement.Status)
+	})
+}
