@@ -242,4 +242,8 @@
 //     MaxStateFileBytes (16 MiB), filesystem paths must always come from live
 //     Discover (never from state.json keys), and foreign origin_hub_id values
 //     must be validated or ignored on the Hub.
+//   - Inode-only rotation identity: rotation detection compares st_ino only
+//     (ignoring st_dev because virtiofs/NFS may report a different device ID
+//     to a host broker). On NFS, a reused inode after delete-and-recreate can
+//     pass as the same file if the 64-byte trailing guard hash also matches.
 package shipper
