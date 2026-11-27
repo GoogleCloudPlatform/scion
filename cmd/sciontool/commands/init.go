@@ -1933,10 +1933,13 @@ waitLoop:
 	stopHeldReportSender()
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
-	// Run the bounded Final=true trajectory flush AFTER the harness has exited
-	// so shutdown bytes and any late SessionEnd wake are captured without
-	// delaying SIGTERM delivery or exceeding the stop budget. The deferred
-	// PreStop remains as an idempotent fallback for early-exit paths.
+	// Run the bounded Final=true trajectory flush after the supervised wait
+	// loop and open-session report (before stopping/final status reports) so
+	// SIGTERM delivery is not delayed and the flush stays inside the stop
+	// budget. On the stop path, a harness running under tmux may still be
+	// winding down and any SessionEnd arriving after PreStop closes the wake
+	// listener is caught by the next resume_catchup. The deferred PreStop
+	// remains as an idempotent fallback for early-exit paths.
 	if trajectoryRunner != nil {
 		trajectoryRunner.PreStop(context.Background())
 	}

@@ -455,18 +455,33 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 	client := scionhub.NewClientWithConfig(switchingSrv.URL, env.token, env.agent.ID)
 	uploader := scionhub.NewTrajectoryUploader(client)
 
-	// Baseline first, then append lineA while experiment is OFF so the runner
-	// probes prepare, receives 404, rebaselines past lineA, and backs off.
+	// 1. Start with experiment ON: baseline initLine, append preOffLine, and
+	// commit [B, X) in generation 0.
+	experimentOn.Store(true)
 	s, err := shipper.New(shipper.Config{HomeDir: env.homeDir, RunID: env.runID, Uploader: uploader})
 	require.NoError(t, err)
 	_, err = s.Baseline(ctx)
 	require.NoError(t, err)
-	lineA := "{\"written_while_off\":\"A\"}\n"
-	appendFile(t, artPath, lineA)
+
+	preOffLine := "{\"gen0_before_off\":true}\n"
+	appendFile(t, artPath, preOffLine)
+	rPre, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 1, rPre.SegmentsShipped)
+
+	// 2. Append bytes ending in a partial line, switch experiment OFF, and let
+	// Runner probe -> 404 -> Rebaseline (bumps generation to 1, aligns to byte
+	// after last '\n', sets RefusedPendingRebaseline=true) + backoff.
+	experimentOn.Store(false)
+	hubCalls.Store(0)
+	offComplete := "{\"written_while_off\":\"A\"}\n"
+	offPartial := "{\"partial_while_off"
+	appendFile(t, artPath, offComplete+offPartial)
 
 	runner, err := trajectory.NewRunner(trajectory.Config{
 		HomeDir:            env.homeDir,
 		RunID:              env.runID,
+		Harness:            "claude",
 		Uploader:           uploader,
 		PeriodicInterval:   20 * time.Millisecond,
 		UnavailableBackoff: time.Hour,
@@ -486,29 +501,31 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 
 	require.Equal(t, int32(1), hubCalls.Load(), "expected exactly 1 prepare probe (404) followed by backoff")
 
-	// State file must remain valid JSON and be rebaselined past lineA with reason "capture_unavailable".
+	// State file must remain valid JSON, bump generation to 1, align to byte
+	// after offComplete (not mid-line), and persist RefusedPendingRebaseline=true.
 	st, ok, err := shipper.LoadState(env.homeDir)
 	require.NoError(t, err)
 	require.True(t, ok)
-	wantRebasedEOF := int64(len(initLine) + len(lineA))
-	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].RawCommittedOffset)
-	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].ParsedOffset)
+	wantRebasedOffset := int64(len(initLine) + len(preOffLine) + len(offComplete))
+	require.Equal(t, 1, st.Artifacts[rel].Generation)
+	require.Equal(t, shipper.GenReasonRebaseline, st.Artifacts[rel].LastGenerationReason)
+	require.Equal(t, wantRebasedOffset, st.Artifacts[rel].RawCommittedOffset)
+	require.Equal(t, wantRebasedOffset, st.Artifacts[rel].ParsedOffset)
 	require.Equal(t, "capture_unavailable", st.LastRebaselineReason)
+	require.True(t, st.RefusedPendingRebaseline)
 
-	rows, err := env.entClient.TrajectorySegment.Query().All(ctx)
-	require.NoError(t, err)
-	require.Empty(t, rows)
-
-	// Now flip the experiment ON, append lineB, and simulate a container restart
-	// (fresh Runner on the same home running resume_catchup): ONLY lineB ships;
-	// lineA written while the experiment was off NEVER ships.
+	// 3. Flip experiment ON, finish the partial line + append a backoff-window
+	// line, then simulate a container restart (fresh Runner running
+	// resume_catchup): it probes prepare (200), rebaselines past the backoff
+	// bytes without shipping them, and clears RefusedPendingRebaseline.
 	experimentOn.Store(true)
-	lineB := "{\"written_while_on\":\"B\"}\n"
-	appendFile(t, artPath, lineB)
+	finishPartialAndBackoff := "\":1}\n{\"written_during_backoff\":true}\n"
+	appendFile(t, artPath, finishPartialAndBackoff)
 
 	runnerRestart, err := trajectory.NewRunner(trajectory.Config{
 		HomeDir:            env.homeDir,
 		RunID:              env.runID,
+		Harness:            "claude",
 		Uploader:           uploader,
 		PeriodicInterval:   time.Hour,
 		UnavailableBackoff: time.Hour,
@@ -518,17 +535,47 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 	require.NoError(t, runnerRestart.Start(ctx))
 
 	require.Eventually(t, func() bool {
-		curRows, qerr := env.entClient.TrajectorySegment.Query().All(ctx)
-		return qerr == nil && len(curRows) == 1 && curRows[0].Status == telemetrycontract.TrajectorySegmentStatusCommitted
-	}, 5*time.Second, 10*time.Millisecond, "expected lineB to commit via resume_catchup after restart")
+		curSt, curOK, lerr := shipper.LoadState(env.homeDir)
+		return lerr == nil && curOK && !curSt.RefusedPendingRebaseline
+	}, 5*time.Second, 10*time.Millisecond, "expected resume_catchup probe to clear RefusedPendingRebaseline")
 	runnerRestart.PreStop(ctx)
+
+	// Nothing written while off or during the backoff window was committed.
+	rows, err := env.entClient.TrajectorySegment.Query().All(ctx)
+	require.NoError(t, err)
+	var committedGen0, committedGen1 int
+	for _, r := range rows {
+		if r.Status == telemetrycontract.TrajectorySegmentStatusCommitted {
+			switch r.Generation {
+			case 0:
+				committedGen0++
+			case 1:
+				committedGen1++
+			}
+		}
+	}
+	require.Equal(t, 1, committedGen0)
+	require.Equal(t, 0, committedGen1)
+
+	// 4. Append lineB AFTER capture is accepted again and ship: lands in
+	// generation 1, starts at a line boundary, and both generations reassemble
+	// to contiguous byte ranges of the file.
+	lineB := "{\"written_after_accept\":\"B\"}\n"
+	appendFile(t, artPath, lineB)
+
+	rAfter, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 1, rAfter.SegmentsShipped)
 
 	rows, err = env.entClient.TrajectorySegment.Query().All(ctx)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	gotReassembled := string(reassembleGeneration(t, ctx, env.storage, rows, 0))
-	require.Equal(t, lineB, gotReassembled, "only bytes written after experiment enable must ship")
-	require.NotContains(t, gotReassembled, "written_while_off", "bytes written while experiment off must never ship")
+	gotGen0 := string(reassembleGeneration(t, ctx, env.storage, rows, 0))
+	gotGen1 := string(reassembleGeneration(t, ctx, env.storage, rows, 1))
+	require.Equal(t, preOffLine, gotGen0, "gen 0 must reassemble contiguously to preOffLine")
+	require.Equal(t, lineB, gotGen1, "gen 1 must reassemble contiguously to lineB starting at a line boundary")
+	require.True(t, gotGen1[0] == '{', "first post-rebaseline segment must start at a line boundary")
+	require.NotContains(t, gotGen1, "written_while_off")
+	require.NotContains(t, gotGen1, "written_during_backoff")
 }
 
 func TestVerticalSlice_WrongAgentTokenRefused(t *testing.T) {
