@@ -26231,6 +26231,7 @@ type AgentSessionMetricsMutation struct {
 	languages           *[]string
 	appendlanguages     []string
 	created_at          *time.Time
+	converted_at        *time.Time
 	clearedFields       map[string]struct{}
 	done                bool
 	oldValue            func(context.Context) (*AgentSessionMetrics, error)
@@ -27132,6 +27133,55 @@ func (m *AgentSessionMetricsMutation) ResetCreatedAt() {
 	m.created_at = nil
 }
 
+// SetConvertedAt sets the "converted_at" field.
+func (m *AgentSessionMetricsMutation) SetConvertedAt(t time.Time) {
+	m.converted_at = &t
+}
+
+// ConvertedAt returns the value of the "converted_at" field in the mutation.
+func (m *AgentSessionMetricsMutation) ConvertedAt() (r time.Time, exists bool) {
+	v := m.converted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConvertedAt returns the old "converted_at" field's value of the AgentSessionMetrics entity.
+// If the AgentSessionMetrics object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentSessionMetricsMutation) OldConvertedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConvertedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConvertedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConvertedAt: %w", err)
+	}
+	return oldValue.ConvertedAt, nil
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (m *AgentSessionMetricsMutation) ClearConvertedAt() {
+	m.converted_at = nil
+	m.clearedFields[agentsessionmetrics.FieldConvertedAt] = struct{}{}
+}
+
+// ConvertedAtCleared returns if the "converted_at" field was cleared in this mutation.
+func (m *AgentSessionMetricsMutation) ConvertedAtCleared() bool {
+	_, ok := m.clearedFields[agentsessionmetrics.FieldConvertedAt]
+	return ok
+}
+
+// ResetConvertedAt resets all changes to the "converted_at" field.
+func (m *AgentSessionMetricsMutation) ResetConvertedAt() {
+	m.converted_at = nil
+	delete(m.clearedFields, agentsessionmetrics.FieldConvertedAt)
+}
+
 // Where appends a list predicates to the AgentSessionMetricsMutation builder.
 func (m *AgentSessionMetricsMutation) Where(ps ...predicate.AgentSessionMetrics) {
 	m.predicates = append(m.predicates, ps...)
@@ -27166,7 +27216,7 @@ func (m *AgentSessionMetricsMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentSessionMetricsMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 16)
 	if m.agent_id != nil {
 		fields = append(fields, agentsessionmetrics.FieldAgentID)
 	}
@@ -27212,6 +27262,9 @@ func (m *AgentSessionMetricsMutation) Fields() []string {
 	if m.created_at != nil {
 		fields = append(fields, agentsessionmetrics.FieldCreatedAt)
 	}
+	if m.converted_at != nil {
+		fields = append(fields, agentsessionmetrics.FieldConvertedAt)
+	}
 	return fields
 }
 
@@ -27250,6 +27303,8 @@ func (m *AgentSessionMetricsMutation) Field(name string) (ent.Value, bool) {
 		return m.Languages()
 	case agentsessionmetrics.FieldCreatedAt:
 		return m.CreatedAt()
+	case agentsessionmetrics.FieldConvertedAt:
+		return m.ConvertedAt()
 	}
 	return nil, false
 }
@@ -27289,6 +27344,8 @@ func (m *AgentSessionMetricsMutation) OldField(ctx context.Context, name string)
 		return m.OldLanguages(ctx)
 	case agentsessionmetrics.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
+	case agentsessionmetrics.FieldConvertedAt:
+		return m.OldConvertedAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentSessionMetrics field %s", name)
 }
@@ -27402,6 +27459,13 @@ func (m *AgentSessionMetricsMutation) SetField(name string, value ent.Value) err
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetCreatedAt(v)
+		return nil
+	case agentsessionmetrics.FieldConvertedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConvertedAt(v)
 		return nil
 	}
 	return fmt.Errorf("unknown AgentSessionMetrics field %s", name)
@@ -27526,6 +27590,9 @@ func (m *AgentSessionMetricsMutation) ClearedFields() []string {
 	if m.FieldCleared(agentsessionmetrics.FieldLanguages) {
 		fields = append(fields, agentsessionmetrics.FieldLanguages)
 	}
+	if m.FieldCleared(agentsessionmetrics.FieldConvertedAt) {
+		fields = append(fields, agentsessionmetrics.FieldConvertedAt)
+	}
 	return fields
 }
 
@@ -27569,6 +27636,9 @@ func (m *AgentSessionMetricsMutation) ClearField(name string) error {
 		return nil
 	case agentsessionmetrics.FieldLanguages:
 		m.ClearLanguages()
+		return nil
+	case agentsessionmetrics.FieldConvertedAt:
+		m.ClearConvertedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentSessionMetrics nullable field %s", name)
@@ -27622,6 +27692,9 @@ func (m *AgentSessionMetricsMutation) ResetField(name string) error {
 		return nil
 	case agentsessionmetrics.FieldCreatedAt:
 		m.ResetCreatedAt()
+		return nil
+	case agentsessionmetrics.FieldConvertedAt:
+		m.ResetConvertedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentSessionMetrics field %s", name)

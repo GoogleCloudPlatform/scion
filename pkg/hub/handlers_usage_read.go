@@ -177,16 +177,16 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 	}
 
 	targetRunID, _ := resolveCurrentRunForUsage(agent, runs)
-	var currentRunHasEvents bool
+	var currentRunSources store.RunUsageSourceSummary
 	if targetRunID != "" {
-		currentRunHasEvents, err = s.store.HasUsageEventsForRun(ctx, agent.ID, targetRunID)
+		currentRunSources, err = s.store.GetRunUsageSourceSummary(ctx, agent.ID, targetRunID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
 	}
 
-	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunHasEvents)
+	resp := buildAgentUsageResponse(agent, since, until, dbNow, rollups, runs, targetRunID, meterRows, currentRunSources)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -397,7 +397,7 @@ func buildAgentUsageResponse(
 	runs []*store.RunAttribution,
 	targetRunID string,
 	meterRows []*store.MeterHealth,
-	currentRunHasEvents bool,
+	currentRunSources store.RunUsageSourceSummary,
 ) AgentUsageResponse {
 	type modelKey struct {
 		model       string
@@ -561,16 +561,28 @@ func buildAgentUsageResponse(
 	// If no active/attributed run exists at all (e.g. legacy/backfill-free
 	// agent with historical rollups only), fall back to window events;
 	// otherwise strictly evaluate the current run's events and meter_health.
-	hasRunData := currentRunHasEvents
+	hasRunData := currentRunSources.HasTrack1Events || currentRunSources.HasLegacyEvents
+	hasLegacyOnly := currentRunSources.HasLegacyEvents && !currentRunSources.HasTrack1Events
 	if targetRunID == "" {
 		hasRunData = totalEvents > 0
+		if hasRunData {
+			allLegacy := true
+			for _, r := range rollups {
+				if r != nil && r.Events > 0 && r.UsageSource != store.UsageSourceLegacySessionMetrics {
+					allLegacy = false
+					break
+				}
+			}
+			hasLegacyOnly = allLegacy
+		}
 	}
 
 	status := deriveMeasurementStatus(measurementStatusInput{
-		MeterHealth:       currentRunMeterRows,
-		HasRunUsageEvents: hasRunData,
-		DBNow:             dbNow,
-		AgentPhase:        agent.Phase,
+		MeterHealth:        currentRunMeterRows,
+		HasRunUsageEvents:  hasRunData,
+		HasLegacyUsageOnly: hasLegacyOnly,
+		DBNow:              dbNow,
+		AgentPhase:         agent.Phase,
 	})
 
 	return AgentUsageResponse{
@@ -698,29 +710,27 @@ func resolveNullableTokens(
 // Kept in a single struct + single function so P2 can extend it with usage.yaml
 // harness capability metadata without changing call sites.
 type measurementStatusInput struct {
-	MeterHealth       []*store.MeterHealth
-	HasRunUsageEvents bool
-	DBNow             time.Time
+	MeterHealth        []*store.MeterHealth
+	HasRunUsageEvents  bool
+	HasLegacyUsageOnly bool
+	DBNow              time.Time
 	// AgentPhase, when non-empty, restricts open-meter staleness to running
 	// agents (PhaseRunning) so stopped or crashed agents do not remain stale
 	// indefinitely (O1b).
 	AgentPhase string
 }
 
-// deriveMeasurementStatus computes the P1 measurement_status for an agent's
-// current run:
+// deriveMeasurementStatus computes measurement_status for an agent's current run:
 //   - "stale" when an open meter_health row for the run has had no receipt for
 //     more than 3 heartbeat intervals (180s), evaluated at read time from DBNow
 //     (§4.2 item 7), and (when AgentPhase is provided) the agent is in a
 //     running phase;
+//   - "legacy_client" when the current run has usage events solely from
+//     legacy_session_metrics (and no Track 1 meter_health);
 //   - "measured" when the current run has received Track 1 usage events and its
 //     meter is fresh (or cleanly closed with final_state="final");
 //   - "unmeasured" when no Track 1 usage data has been received for the current
 //     run.
-//
-// P2 extends this function with usage.yaml capability metadata (partial,
-// calls_only, legacy_client, and no-receipt-past-grace staleness when a
-// harness is declared live-metered).
 func deriveMeasurementStatus(in measurementStatusInput) string {
 	var latest *store.MeterHealth
 	for _, mh := range in.MeterHealth {
@@ -745,6 +755,9 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 	}
 
 	if in.HasRunUsageEvents {
+		if in.HasLegacyUsageOnly && latest == nil {
+			return MeasurementStatusLegacyClient
+		}
 		return MeasurementStatusMeasured
 	}
 	return MeasurementStatusUnmeasured

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -89,6 +90,7 @@ type UsageLedgerStore struct {
 	client                 *ent.Client
 	inTx                   bool
 	hourlyCoverageRecorded *atomic.Bool
+	legacyBackfillMu       *sync.Mutex
 }
 
 // NewUsageLedgerStore creates a new Ent-backed UsageLedgerStore.
@@ -96,6 +98,7 @@ func NewUsageLedgerStore(client *ent.Client) *UsageLedgerStore {
 	return &UsageLedgerStore{
 		client:                 client,
 		hourlyCoverageRecorded: &atomic.Bool{},
+		legacyBackfillMu:       &sync.Mutex{},
 	}
 }
 

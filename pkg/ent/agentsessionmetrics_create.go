@@ -186,6 +186,20 @@ func (_c *AgentSessionMetricsCreate) SetNillableCreatedAt(v *time.Time) *AgentSe
 	return _c
 }
 
+// SetConvertedAt sets the "converted_at" field.
+func (_c *AgentSessionMetricsCreate) SetConvertedAt(v time.Time) *AgentSessionMetricsCreate {
+	_c.mutation.SetConvertedAt(v)
+	return _c
+}
+
+// SetNillableConvertedAt sets the "converted_at" field if the given value is not nil.
+func (_c *AgentSessionMetricsCreate) SetNillableConvertedAt(v *time.Time) *AgentSessionMetricsCreate {
+	if v != nil {
+		_c.SetConvertedAt(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentSessionMetricsCreate) SetID(v uuid.UUID) *AgentSessionMetricsCreate {
 	_c.mutation.SetID(v)
@@ -392,6 +406,10 @@ func (_c *AgentSessionMetricsCreate) createSpec() (*AgentSessionMetrics, *sqlgra
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(agentsessionmetrics.FieldCreatedAt, field.TypeTime, value)
 		_node.CreatedAt = value
+	}
+	if value, ok := _c.mutation.ConvertedAt(); ok {
+		_spec.SetField(agentsessionmetrics.FieldConvertedAt, field.TypeTime, value)
+		_node.ConvertedAt = &value
 	}
 	return _node, _spec
 }
@@ -700,6 +718,24 @@ func (u *AgentSessionMetricsUpsert) UpdateLanguages() *AgentSessionMetricsUpsert
 // ClearLanguages clears the value of the "languages" field.
 func (u *AgentSessionMetricsUpsert) ClearLanguages() *AgentSessionMetricsUpsert {
 	u.SetNull(agentsessionmetrics.FieldLanguages)
+	return u
+}
+
+// SetConvertedAt sets the "converted_at" field.
+func (u *AgentSessionMetricsUpsert) SetConvertedAt(v time.Time) *AgentSessionMetricsUpsert {
+	u.Set(agentsessionmetrics.FieldConvertedAt, v)
+	return u
+}
+
+// UpdateConvertedAt sets the "converted_at" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsert) UpdateConvertedAt() *AgentSessionMetricsUpsert {
+	u.SetExcluded(agentsessionmetrics.FieldConvertedAt)
+	return u
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (u *AgentSessionMetricsUpsert) ClearConvertedAt() *AgentSessionMetricsUpsert {
+	u.SetNull(agentsessionmetrics.FieldConvertedAt)
 	return u
 }
 
@@ -1052,6 +1088,27 @@ func (u *AgentSessionMetricsUpsertOne) UpdateLanguages() *AgentSessionMetricsUps
 func (u *AgentSessionMetricsUpsertOne) ClearLanguages() *AgentSessionMetricsUpsertOne {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.ClearLanguages()
+	})
+}
+
+// SetConvertedAt sets the "converted_at" field.
+func (u *AgentSessionMetricsUpsertOne) SetConvertedAt(v time.Time) *AgentSessionMetricsUpsertOne {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.SetConvertedAt(v)
+	})
+}
+
+// UpdateConvertedAt sets the "converted_at" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsertOne) UpdateConvertedAt() *AgentSessionMetricsUpsertOne {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.UpdateConvertedAt()
+	})
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (u *AgentSessionMetricsUpsertOne) ClearConvertedAt() *AgentSessionMetricsUpsertOne {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.ClearConvertedAt()
 	})
 }
 
@@ -1571,6 +1628,27 @@ func (u *AgentSessionMetricsUpsertBulk) UpdateLanguages() *AgentSessionMetricsUp
 func (u *AgentSessionMetricsUpsertBulk) ClearLanguages() *AgentSessionMetricsUpsertBulk {
 	return u.Update(func(s *AgentSessionMetricsUpsert) {
 		s.ClearLanguages()
+	})
+}
+
+// SetConvertedAt sets the "converted_at" field.
+func (u *AgentSessionMetricsUpsertBulk) SetConvertedAt(v time.Time) *AgentSessionMetricsUpsertBulk {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.SetConvertedAt(v)
+	})
+}
+
+// UpdateConvertedAt sets the "converted_at" field to the value that was provided on create.
+func (u *AgentSessionMetricsUpsertBulk) UpdateConvertedAt() *AgentSessionMetricsUpsertBulk {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.UpdateConvertedAt()
+	})
+}
+
+// ClearConvertedAt clears the value of the "converted_at" field.
+func (u *AgentSessionMetricsUpsertBulk) ClearConvertedAt() *AgentSessionMetricsUpsertBulk {
+	return u.Update(func(s *AgentSessionMetricsUpsert) {
+		s.ClearConvertedAt()
 	})
 }
 

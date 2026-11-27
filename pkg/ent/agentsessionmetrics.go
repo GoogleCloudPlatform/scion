@@ -48,7 +48,9 @@ type AgentSessionMetrics struct {
 	// Languages holds the value of the "languages" field.
 	Languages []string `json:"languages,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
-	CreatedAt    time.Time `json:"created_at,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	// ConvertedAt holds the value of the "converted_at" field.
+	ConvertedAt  *time.Time `json:"converted_at,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -63,7 +65,7 @@ func (*AgentSessionMetrics) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case agentsessionmetrics.FieldAgentID, agentsessionmetrics.FieldProjectID, agentsessionmetrics.FieldSessionID, agentsessionmetrics.FieldStatus, agentsessionmetrics.FieldModel:
 			values[i] = new(sql.NullString)
-		case agentsessionmetrics.FieldStartedAt, agentsessionmetrics.FieldEndedAt, agentsessionmetrics.FieldCreatedAt:
+		case agentsessionmetrics.FieldStartedAt, agentsessionmetrics.FieldEndedAt, agentsessionmetrics.FieldCreatedAt, agentsessionmetrics.FieldConvertedAt:
 			values[i] = new(sql.NullTime)
 		case agentsessionmetrics.FieldID:
 			values[i] = new(uuid.UUID)
@@ -183,6 +185,13 @@ func (_m *AgentSessionMetrics) assignValues(columns []string, values []any) erro
 			} else if value.Valid {
 				_m.CreatedAt = value.Time
 			}
+		case agentsessionmetrics.FieldConvertedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field converted_at", values[i])
+			} else if value.Valid {
+				_m.ConvertedAt = new(time.Time)
+				*_m.ConvertedAt = value.Time
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -265,6 +274,11 @@ func (_m *AgentSessionMetrics) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.ConvertedAt; v != nil {
+		builder.WriteString("converted_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	entasm "github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -126,7 +127,7 @@ func (s *UsageLedgerStore) IngestUsageBatch(ctx context.Context, in *store.Usage
 	if in == nil {
 		return nil, fmt.Errorf("%w: ingest input is required", store.ErrInvalidInput)
 	}
-	if len(in.Events) == 0 && in.MeterHealth == nil {
+	if len(in.Events) == 0 && in.MeterHealth == nil && len(in.MarkSessionMetricsConverted) == 0 {
 		return &store.UsageIngestBatchResult{}, nil
 	}
 
@@ -168,10 +169,33 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 
 	// §4.3: Acquire Postgres shared advisory lock per agent_id so ingest runs
 	// concurrently across replicas while serializing against admin repair.
-	if dialectName == dialect.Postgres && in.AgentID != "" {
-		var res sql.Result
-		if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtext('usage_rollup:' || $1))", []any{in.AgentID}, &res); err != nil {
-			return nil, false, mapError(err)
+	// When in.AgentID is empty (multi-agent catch-up batch), acquire locks for
+	// all distinct event agent_ids in canonical sorted order to avoid deadlocks.
+	if dialectName == dialect.Postgres {
+		if in.AgentID != "" {
+			var res sql.Result
+			if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtext('usage_rollup:' || $1))", []any{in.AgentID}, &res); err != nil {
+				return nil, false, mapError(err)
+			}
+		} else if len(in.Events) > 0 {
+			seenAgents := make(map[string]struct{}, len(in.Events))
+			agentIDs := make([]string, 0, len(in.Events))
+			for _, ev := range in.Events {
+				if ev == nil || ev.AgentID == "" {
+					continue
+				}
+				if _, ok := seenAgents[ev.AgentID]; !ok {
+					seenAgents[ev.AgentID] = struct{}{}
+					agentIDs = append(agentIDs, ev.AgentID)
+				}
+			}
+			sort.Strings(agentIDs)
+			for _, aid := range agentIDs {
+				var res sql.Result
+				if err := drv.Exec(ctx, "SELECT pg_advisory_xact_lock_shared(hashtext('usage_rollup:' || $1))", []any{aid}, &res); err != nil {
+					return nil, false, mapError(err)
+				}
+			}
 		}
 	}
 
@@ -283,26 +307,91 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 		if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_daily", utcDayStart, insertedEvents); err != nil {
 			return nil, false, err
 		}
-		if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_hourly", utcHourStart, insertedEvents); err != nil {
-			return nil, false, err
+		if in.IsBackfill {
+			// Backfill/catch-up (D9a ruling 3): never create or move the hourly
+			// coverage marker; write hourly rollups only for events whose hour
+			// is at or after the existing coverage start so hourly and daily
+			// agree for post-coverage rows without polluting pre-coverage dates.
+			coverageStart, hasCoverage, err := getUsageHourlyCoverageStartTx(ctx, client)
+			if err != nil {
+				return nil, false, err
+			}
+			if hasCoverage {
+				hourlyEvents := make([]*store.UsageEvent, 0, len(insertedEvents))
+				for _, ev := range insertedEvents {
+					if !utcHourStart(ev.EventTS).Before(coverageStart) {
+						hourlyEvents = append(hourlyEvents, ev)
+					}
+				}
+				if len(hourlyEvents) > 0 {
+					if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_hourly", utcHourStart, hourlyEvents); err != nil {
+						return nil, false, err
+					}
+				}
+			}
+		} else {
+			if err := upsertRollupsTx(ctx, drv, dialectName, "usage_rollups_hourly", utcHourStart, insertedEvents); err != nil {
+				return nil, false, err
+			}
+			if s.hourlyCoverageRecorded == nil || !s.hourlyCoverageRecorded.Load() {
+				// R1: Set hourly coverage start to the next complete UTC hour after
+				// DB now (ceil_hour(DB now)) so pre-upgrade daily-only events written
+				// earlier in the upgrade hour — or back-dated events in the first
+				// batch — never cause silent hourly under-counting.
+				dbNow, err := dbNowFromDriver(ctx, drv, dialectName)
+				if err != nil {
+					return nil, false, err
+				}
+				coverageStart := utcHourStart(dbNow).Add(time.Hour)
+				if err := ensureHourlyCoverageMarkerTx(ctx, drv, dialectName, coverageStart); err != nil {
+					return nil, false, err
+				}
+				wroteHourly = true
+			}
 		}
 		if err := upsertScopeCountersDailyTx(ctx, drv, dialectName, insertedEvents); err != nil {
 			return nil, false, err
 		}
-		if s.hourlyCoverageRecorded == nil || !s.hourlyCoverageRecorded.Load() {
-			// R1: Set hourly coverage start to the next complete UTC hour after
-			// DB now (ceil_hour(DB now)) so pre-upgrade daily-only events written
-			// earlier in the upgrade hour — or back-dated events in the first
-			// batch — never cause silent hourly under-counting.
-			dbNow, err := dbNowFromDriver(ctx, drv, dialectName)
+	}
+
+	// Atomically stamp converted_at on converted/skipped agent_session_metrics
+	// rows in the same transaction as the ledger and rollup writes (D9a).
+	// Rows whose event was rejected at persistence time are NOT stamped so
+	// non-rejected rows still make forward progress without livelock (O1).
+	if len(in.MarkSessionMetricsConverted) > 0 {
+		rejectedIDs := make(map[string]struct{}, len(rejectedRows))
+		for _, r := range rejectedRows {
+			rejectedIDs[r.EventID] = struct{}{}
+		}
+		seenIDs := make(map[uuid.UUID]struct{}, len(in.MarkSessionMetricsConverted))
+		uuids := make([]uuid.UUID, 0, len(in.MarkSessionMetricsConverted))
+		for _, m := range in.MarkSessionMetricsConverted {
+			if m.EventID != "" {
+				if _, rejected := rejectedIDs[m.EventID]; rejected {
+					continue
+				}
+			}
+			uid, err := uuid.Parse(m.ID)
 			if err != nil {
-				return nil, false, err
+				return nil, false, fmt.Errorf("%w: invalid session_metrics id %q", store.ErrInvalidInput, m.ID)
 			}
-			coverageStart := utcHourStart(dbNow).Add(time.Hour)
-			if err := ensureHourlyCoverageMarkerTx(ctx, drv, dialectName, coverageStart); err != nil {
-				return nil, false, err
+			if _, dup := seenIDs[uid]; dup {
+				continue
 			}
-			wroteHourly = true
+			seenIDs[uid] = struct{}{}
+			uuids = append(uuids, uid)
+		}
+		sort.Slice(uuids, func(i, j int) bool {
+			return uuids[i].String() < uuids[j].String()
+		})
+		if len(uuids) > 0 {
+			convertedAt := time.Now().UTC().Truncate(time.Microsecond)
+			if _, err := client.AgentSessionMetrics.Update().
+				Where(entasm.IDIn(uuids...), entasm.ConvertedAtIsNil()).
+				SetConvertedAt(convertedAt).
+				Save(ctx); err != nil {
+				return nil, false, mapError(err)
+			}
 		}
 	}
 

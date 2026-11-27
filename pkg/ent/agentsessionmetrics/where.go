@@ -120,6 +120,11 @@ func CreatedAt(v time.Time) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldCreatedAt, v))
 }
 
+// ConvertedAt applies equality check predicate on the "converted_at" field. It's identical to ConvertedAtEQ.
+func ConvertedAt(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldConvertedAt, v))
+}
+
 // AgentIDEQ applies the EQ predicate on the "agent_id" field.
 func AgentIDEQ(v string) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldAgentID, v))
@@ -863,6 +868,56 @@ func CreatedAtLT(v time.Time) predicate.AgentSessionMetrics {
 // CreatedAtLTE applies the LTE predicate on the "created_at" field.
 func CreatedAtLTE(v time.Time) predicate.AgentSessionMetrics {
 	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldCreatedAt, v))
+}
+
+// ConvertedAtEQ applies the EQ predicate on the "converted_at" field.
+func ConvertedAtEQ(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldEQ(FieldConvertedAt, v))
+}
+
+// ConvertedAtNEQ applies the NEQ predicate on the "converted_at" field.
+func ConvertedAtNEQ(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldNEQ(FieldConvertedAt, v))
+}
+
+// ConvertedAtIn applies the In predicate on the "converted_at" field.
+func ConvertedAtIn(vs ...time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldIn(FieldConvertedAt, vs...))
+}
+
+// ConvertedAtNotIn applies the NotIn predicate on the "converted_at" field.
+func ConvertedAtNotIn(vs ...time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldNotIn(FieldConvertedAt, vs...))
+}
+
+// ConvertedAtGT applies the GT predicate on the "converted_at" field.
+func ConvertedAtGT(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldGT(FieldConvertedAt, v))
+}
+
+// ConvertedAtGTE applies the GTE predicate on the "converted_at" field.
+func ConvertedAtGTE(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldGTE(FieldConvertedAt, v))
+}
+
+// ConvertedAtLT applies the LT predicate on the "converted_at" field.
+func ConvertedAtLT(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldLT(FieldConvertedAt, v))
+}
+
+// ConvertedAtLTE applies the LTE predicate on the "converted_at" field.
+func ConvertedAtLTE(v time.Time) predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldLTE(FieldConvertedAt, v))
+}
+
+// ConvertedAtIsNil applies the IsNil predicate on the "converted_at" field.
+func ConvertedAtIsNil() predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldIsNull(FieldConvertedAt))
+}
+
+// ConvertedAtNotNil applies the NotNil predicate on the "converted_at" field.
+func ConvertedAtNotNil() predicate.AgentSessionMetrics {
+	return predicate.AgentSessionMetrics(sql.FieldNotNull(FieldConvertedAt))
 }
 
 // And groups predicates with the AND operator between them.

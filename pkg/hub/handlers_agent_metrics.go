@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -27,13 +29,14 @@ import (
 // metricsPayloadRequest is the JSON body POSTed by sciontool on session-end.
 // It mirrors the Hub Reporting Protocol from the design doc Section 4.2.
 type metricsPayloadRequest struct {
-	Type      string               `json:"type"`
-	AgentID   string               `json:"agent_id"`
-	Timestamp string               `json:"timestamp"`
-	Session   metricsSession       `json:"session"`
-	Tokens    metricsTokens        `json:"tokens"`
-	Tools     map[string]toolStats `json:"tools"`
-	Languages []string             `json:"languages"`
+	Type               string               `json:"type"`
+	AgentID            string               `json:"agent_id"`
+	Timestamp          string               `json:"timestamp"`
+	UsageEventsEnabled bool                 `json:"usage_events_enabled"`
+	Session            metricsSession       `json:"session"`
+	Tokens             metricsTokens        `json:"tokens"`
+	Tools              map[string]toolStats `json:"tools"`
+	Languages          []string             `json:"languages"`
 }
 
 type metricsSession struct {
@@ -133,7 +136,15 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Build the store model.
+	// Build the store model. When the producer marks usage_events_enabled=true,
+	// its Hub usage sink is already writing Track 1 usage_events, so we stamp
+	// converted_at immediately to prevent the legacy catch-up backfill from
+	// double counting this row later (D9a).
+	var convertedAt *time.Time
+	if req.UsageEventsEnabled {
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		convertedAt = &now
+	}
 	newID := uuid.New().String()
 	metrics := &store.AgentSessionMetrics{
 		ID:              newID,
@@ -151,6 +162,7 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 		TokensReasoning: req.Tokens.Reasoning,
 		ToolCalls:       toolCalls,
 		Languages:       req.Languages,
+		ConvertedAt:     convertedAt,
 	}
 
 	if err := s.store.CreateAgentSessionMetrics(ctx, metrics); err != nil {
@@ -184,4 +196,18 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": metrics.ID})
+
+	// Legacy converter (D9/D9a, R3): write 201 Created first, then enqueue
+	// asynchronous conversion onto the server's bounded worker queue (derived
+	// from the server's worker context with a bounded timeout, decoupled from
+	// the HTTP request context) so live conversion never slows or fails POST
+	// /metrics. If the queue is full or conversion fails, converted_at stays
+	// NULL and periodic catch-up retries automatically.
+	if !req.UsageEventsEnabled && s.experimentEnabled(experiments.TokenomicsUsageLedger) {
+		preferredRunID := strings.TrimSpace(presentedAgentTokenRunID(ctx))
+		if preferredRunID == "" {
+			preferredRunID = strings.TrimSpace(agent.RunID)
+		}
+		s.enqueueLiveLegacySessionMetrics(metrics, preferredRunID)
+	}
 }
