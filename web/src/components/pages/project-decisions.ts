@@ -34,6 +34,8 @@ import { current, projectTrail, projectsRoot, type Named } from '../../client/cr
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import '../shared/breadcrumb.js';
+import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
+import type { DecisionArtifactOpenDetail } from '../shared/chat/chat-decisions.js';
 import {
   fetchProjectDecisionSuggestions,
   fetchProjectMadeDecisions,
@@ -303,8 +305,30 @@ export class ScionPageProjectDecisions extends LitElement {
         onCancel: this.ctrl.closeBulkDismissDialog,
         onConfirm: () => void this.ctrl.confirmBulkDismiss(),
       })}
+      ${this.previewTarget
+        ? html`<scion-chat-file-preview
+            .target=${this.previewTarget}
+            .currentUserId=${this.ctrl.currentUserId}
+            @chat-file-preview-close=${(): void => {
+              this.previewTarget = null;
+            }}
+          ></scion-chat-file-preview>`
+        : nothing}
     `;
   }
+
+  @state()
+  private previewTarget: PreviewTarget | null = null;
+
+  private readonly onArtifactOpen = (e: CustomEvent<DecisionArtifactOpenDetail>): void => {
+    void import('../shared/chat/chat-file-preview.js');
+    this.previewTarget = {
+      kind: 'artifact',
+      id: e.detail.id,
+      seq: e.detail.seq,
+      name: e.detail.title || 'Artifact',
+    };
+  };
 
   private renderPendingPanel(): TemplateResult {
     if (this.ctrl.pendingSearchTimeout) {
@@ -350,6 +374,7 @@ export class ScionPageProjectDecisions extends LitElement {
                   onDismissTooRecent: this.ctrl.onPromptDismissTooRecent,
                   onAnswered: this.ctrl.onPromptDecisionAnswered,
                   onJump: this.ctrl.onPromptMessageJump,
+                  onArtifactOpen: this.onArtifactOpen,
                 })
             )}
           `}

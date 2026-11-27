@@ -81,6 +81,7 @@ import {
   type MentionRosterAgent,
 } from './prose-mentions.js';
 import './chat-decisions.js';
+import type { DecisionArtifactOpenDetail } from './chat-decisions.js';
 import './chat-decision-response.js';
 import './chat-secret-request.js';
 import './chat-command-request.js';
@@ -4344,7 +4345,7 @@ export class ScionChatMessage extends LitElement {
                         : nothing}${this.renderActionsButton()}
                 </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
-          ${isDeleted ? nothing : this.renderArtifactChips()}
+          ${isDeleted || decisionCard ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${this.showsStarMeta() ? this.renderStarMeta() : nothing}
@@ -4632,6 +4633,11 @@ export class ScionChatMessage extends LitElement {
       .answerability=${this.answerability ?? ANSWERABLE}
       .createdAt=${this.timestamp}
       .conversationLabel=${this.conversationLabel}
+      .artifactRefs=${this.artifactRefs}
+      .intro=${this.displayBody}
+      @decision-artifact-open=${(e: CustomEvent<DecisionArtifactOpenDetail>): void => {
+        this.openArtifactPreview(e.detail.id, e.detail.seq, e.detail.title);
+      }}
     ></scion-chat-decisions>`;
   }
 

@@ -100,6 +100,16 @@ import type {
   DecisionView,
   OtherOption,
 } from '../../../shared/types.js';
+import { ARTIFACTS_FLAG } from '../../../client/artifacts-flag.js';
+import type { MessageArtifactRef } from '../../../client/artifacts.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+
+/** Detail emitted when the viewer clicks an artifact chip on a decision card. */
+export interface DecisionArtifactOpenDetail {
+  id: string;
+  seq: number;
+  title?: string;
+}
 
 let hintSeq = 0;
 
@@ -163,6 +173,14 @@ export class ScionChatDecisions extends LitElement {
   /** Hint from parent facets that the asking agent was deleted. */
   @property({ type: Boolean })
   askerGone = false;
+
+  /** Resolved artifact references attached to this prompt message (ptone/scion#9424). */
+  @property({ attribute: false })
+  artifactRefs: MessageArtifactRef[] = [];
+
+  /** Optional prompt intro text, used to order artifact chips to match mention order. */
+  @property()
+  intro = '';
 
   /** Injectable clock for deterministic dismissal-age tests. */
   clockNow: () => number = () => Date.now();
@@ -299,6 +317,59 @@ export class ScionChatDecisions extends LitElement {
 
     .row {
       padding: 0.65rem 0.75rem;
+    }
+
+    .card-artifacts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      padding: 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-bg-subtle, #f8fafc);
+    }
+
+    .artifact-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      max-width: 100%;
+      padding: 0.25rem 0.625rem;
+      background: var(--scion-surface, #fff);
+      border: 1px solid var(--scion-border, #cbd5e1);
+      border-radius: var(--scion-radius);
+      font: inherit;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text, #0f172a);
+      cursor: pointer;
+    }
+
+    .artifact-chip:hover,
+    .artifact-chip:focus-visible {
+      border-color: var(--sl-color-primary-500, #3b82f6);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+
+    .artifact-chip sl-icon {
+      flex: none;
+      font-size: var(--chat-fs-base, 0.9375rem);
+    }
+
+    .artifact-chip .artifact-title {
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .artifact-chip .artifact-meta {
+      flex: none;
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .artifact-chip.unavailable {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-style: dashed;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .row + .row {
@@ -2008,10 +2079,54 @@ export class ScionChatDecisions extends LitElement {
           </span>
           ${this.renderSingleBadge(d)} ${this.renderCardMenu([d])}
         </div>
-        ${this.renderRow(d, showEnterHint)} ${this.renderAskerGoneNote()}
+        ${this.renderArtifacts()} ${this.renderRow(d, showEnterHint)} ${this.renderAskerGoneNote()}
       </div>
       ${this.renderDismissDialog([d])}
     `;
+  }
+
+  private renderArtifacts(): TemplateResult | typeof nothing {
+    if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;
+    if (!isFeatureEnabled(ARTIFACTS_FLAG)) return nothing;
+    const refs = orderDecisionArtifactRefs(this.artifactRefs, this.intro ?? '');
+    return html`
+      <div class="card-artifacts" role="group" aria-label="Referenced artifacts">
+        ${refs.map((r) =>
+          r.available
+            ? html`<button
+                type="button"
+                class="artifact-chip"
+                title=${r.ref}
+                @click=${() => this.emitArtifactOpen(r.id, r.seq ?? 0, r.title)}
+              >
+                <sl-icon name="file-earmark-richtext" aria-hidden="true"></sl-icon>
+                <span class="artifact-title">${r.title}</span>
+                <span class="artifact-meta"
+                  >· v${r.version}${r.ownerName ? html` · ${r.ownerName}` : nothing}</span
+                >
+              </button>`
+            : html`<button
+                type="button"
+                class="artifact-chip unavailable"
+                @click=${() => this.emitArtifactOpen(r.id, r.seq ?? 0)}
+              >
+                <sl-icon name="lock" aria-hidden="true"></sl-icon>
+                <span>Artifact unavailable</span>
+              </button>`
+        )}
+      </div>
+    `;
+  }
+
+  private emitArtifactOpen(id: string, seq: number, title?: string): void {
+    const detail: DecisionArtifactOpenDetail = title ? { id, seq, title } : { id, seq };
+    this.dispatchEvent(
+      new CustomEvent<DecisionArtifactOpenDetail>('decision-artifact-open', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   private renderSingleBadge(d: DecisionView): TemplateResult | typeof nothing {
@@ -3118,6 +3233,7 @@ export class ScionChatDecisions extends LitElement {
           </span>
           ${this.renderCardMenu(views)}
         </div>
+        ${this.renderArtifacts()}
         ${this.changedAlert?.length
           ? html`<sl-alert variant="warning" open class="changed">
               <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
@@ -3704,6 +3820,20 @@ export class ScionChatDecisions extends LitElement {
           </div>`
         : nothing}`;
   }
+}
+
+/** Order artifact chips by where each reference appears in intro, then original order. */
+function orderDecisionArtifactRefs(
+  refs: readonly MessageArtifactRef[],
+  intro: string
+): MessageArtifactRef[] {
+  const lower = intro.toLowerCase();
+  const indexed = refs.map((r, i) => {
+    const at = lower.indexOf(`scion://artifact/${r.id.toLowerCase()}`);
+    return { r, i, at: at < 0 ? Number.MAX_SAFE_INTEGER : at };
+  });
+  indexed.sort((a, b) => a.at - b.at || a.i - b.i);
+  return indexed.map((x) => x.r);
 }
 
 /** Whether c is the decision's recommended choice. */

@@ -38,7 +38,7 @@ import type {
   ProjectDecisionPromptView,
 } from '../../client/project-decisions.js';
 import { formatInstant, formatInstantWithZone, formatRelative } from '../../utils/time.js';
-import { dismissDialogStyles } from './chat/chat-decisions.js';
+import { dismissDialogStyles, type DecisionArtifactOpenDetail } from './chat/chat-decisions.js';
 import {
   MAX_BULK_DISMISS_SELECTION,
   MAX_DISMISS_REASON_RUNES,
@@ -987,6 +987,7 @@ export function renderPromptCard(
       | undefined;
     onAnswered: (p: ProjectDecisionPromptView, e: CustomEvent<DecisionAnsweredDetail>) => void;
     onJump: (p: ProjectDecisionPromptView, e: CustomEvent<{ messageId?: string }>) => void;
+    onArtifactOpen?: ((e: CustomEvent<DecisionArtifactOpenDetail>) => void) | undefined;
   }
 ): TemplateResult {
   const projectId = opts.defaultProjectId || p.project?.id || '';
@@ -1103,7 +1104,10 @@ export function renderPromptCard(
         .permalinkHref=${permalink ?? ''}
         .waitingReasons=${p.waitingReasons}
         .askerGone=${Boolean(opts.askerGone)}
+        .artifactRefs=${p.artifacts ?? []}
         surface="decisions_page"
+        @decision-artifact-open=${(e: CustomEvent<DecisionArtifactOpenDetail>): void =>
+          opts.onArtifactOpen?.(e)}
       ></scion-chat-decisions>
     </div>
   `;

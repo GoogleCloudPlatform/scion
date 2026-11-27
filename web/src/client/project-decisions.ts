@@ -21,6 +21,7 @@
  */
 
 import { apiFetch, parseApiError } from './api.js';
+import type { MessageArtifactRef } from './artifacts.js';
 import type {
   AnswerView,
   ChoiceOption,
@@ -100,6 +101,7 @@ export interface ProjectDecisionPromptView {
   canAnswer: boolean;
   disabledReason?: string;
   waitingReasons?: Record<string, ProjectDecisionWaitingReason>;
+  artifacts?: MessageArtifactRef[];
   decisions: DecisionView[];
 }
 
