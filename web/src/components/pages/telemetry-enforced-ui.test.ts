@@ -71,38 +71,46 @@ describe('Telemetry enforcement UI (P3b)', () => {
 
     it('renders disabled dropdown with override helper text and omits telemetryEnabled from PUT', async () => {
       const putBodies: Array<Record<string, unknown>> = [];
-      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         const method = (init?.method || 'GET').toUpperCase();
         if (url.includes('/settings/resolved')) {
-          return jsonResponse({
-            project: { telemetryEnabled: false, defaultTemplate: 'claude' },
-            settings: {
-              'scion.io/telemetry-enabled': {
-                projectSet: true,
-                projectValue: 'false',
-                hubDefault: 'present',
-                hubValue: true,
-                lockedBy: 'hub',
-                effective: true,
-                storedValue: false,
+          return Promise.resolve(
+            jsonResponse({
+              project: { telemetryEnabled: false, defaultTemplate: 'claude' },
+              settings: {
+                'scion.io/telemetry-enabled': {
+                  projectSet: true,
+                  projectValue: 'false',
+                  hubDefault: 'present',
+                  hubValue: true,
+                  lockedBy: 'hub',
+                  effective: true,
+                  storedValue: false,
+                },
               },
-            },
-          });
+            })
+          );
         }
         if (url.includes('/settings') && method === 'PUT') {
-          putBodies.push(JSON.parse(String(init?.body || '{}')) as Record<string, unknown>);
-          return jsonResponse({ telemetryEnabled: false, defaultTemplate: 'claude' });
+          const rawBody = typeof init?.body === 'string' ? init.body : '{}';
+          putBodies.push(JSON.parse(rawBody) as Record<string, unknown>);
+          return Promise.resolve(
+            jsonResponse({ telemetryEnabled: false, defaultTemplate: 'claude' })
+          );
         }
         if (url.endsWith('/projects/proj-1')) {
-          return jsonResponse({
-            id: 'proj-1',
-            name: 'Test Project',
-            slug: 'test-project',
-            _capabilities: { actions: ['update'] },
-          });
+          return Promise.resolve(
+            jsonResponse({
+              id: 'proj-1',
+              name: 'Test Project',
+              slug: 'test-project',
+              _capabilities: { actions: ['update'] },
+            })
+          );
         }
-        return jsonResponse({});
+        return Promise.resolve(jsonResponse({}));
       });
 
       const el = document.createElement('scion-page-project-settings') as HTMLElement & {
@@ -126,8 +134,9 @@ describe('Telemetry enforcement UI (P3b)', () => {
       expect(select.getAttribute('value') || select.value).toBe('enabled');
 
       const help = el.shadowRoot!.querySelector('[data-testid="project-telemetry-locked-help"]');
-      expect(help?.textContent).toContain('Required by hub operator');
-      expect(help?.textContent).toContain('Project setting (Disabled) is overridden');
+      const helpText = (help?.textContent ?? '').replace(/\s+/g, ' ').trim();
+      expect(helpText).toContain('Required by hub operator');
+      expect(helpText).toContain('Project setting (Disabled) is overridden');
 
       // Trigger save and verify telemetryEnabled is omitted from PUT payload.
       const saveBtn = el.shadowRoot!.querySelector(
@@ -149,21 +158,24 @@ describe('Telemetry enforcement UI (P3b)', () => {
     });
 
     it('disables enforce toggle unless telemetry.enabled is true and surfaces telemetry_enforced_warning', async () => {
-      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+        const url =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         if (url.includes('/api/v1/admin/server-config/schema')) {
-          return jsonResponse({ sections: {} });
+          return Promise.resolve(jsonResponse({ sections: {} }));
         }
         if (url.includes('/api/v1/admin/server-config')) {
-          return jsonResponse({
-            settings_tier: 'db',
-            schema_version: '1',
-            telemetry: { enabled: false, enforced: false },
-            telemetry_enforced_warning:
-              'stored telemetry settings have enforced=true but failed validation',
-          });
+          return Promise.resolve(
+            jsonResponse({
+              settings_tier: 'db',
+              schema_version: '1',
+              telemetry: { enabled: false, enforced: false },
+              telemetry_enforced_warning:
+                'stored telemetry settings have enforced=true but failed validation',
+            })
+          );
         }
-        return jsonResponse({});
+        return Promise.resolve(jsonResponse({}));
       });
 
       const el = document.createElement('scion-page-admin-server-config') as HTMLElement & {

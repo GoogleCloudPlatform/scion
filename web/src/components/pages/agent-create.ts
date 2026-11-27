@@ -823,13 +823,20 @@ export class ScionPageAgentCreate extends LitElement {
     try {
       const resolvedRes = await apiFetch(`/api/v1/projects/${projectId}/settings/resolved`);
       if (resolvedRes.ok) {
-        const resolved = (await resolvedRes.json()) as {
-          project?: ProjectCreateDefaults;
-          settings?: Record<string, { lockedBy?: string | null }>;
-        };
-        const data = resolved.project ?? {};
-        const locked = resolved.settings?.['scion.io/telemetry-enabled']?.lockedBy === 'hub';
-        this.projectTelemetryLockedCache.set(projectId, locked);
+        const raw = (await resolvedRes.json()) as Record<string, unknown>;
+        if (raw && typeof raw === 'object' && 'project' in raw && 'settings' in raw) {
+          const resolved = raw as {
+            project?: ProjectCreateDefaults;
+            settings?: Record<string, { lockedBy?: string | null }>;
+          };
+          const data = resolved.project ?? {};
+          const locked = resolved.settings?.['scion.io/telemetry-enabled']?.lockedBy === 'hub';
+          this.projectTelemetryLockedCache.set(projectId, locked);
+          this.projectSettingsCache.set(projectId, data);
+          return data;
+        }
+        const data = raw as ProjectCreateDefaults;
+        this.projectTelemetryLockedCache.set(projectId, false);
         this.projectSettingsCache.set(projectId, data);
         return data;
       }

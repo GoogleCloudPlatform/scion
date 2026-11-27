@@ -3438,7 +3438,8 @@ export class ScionPageProjectSettings extends LitElement {
                 </sl-select>
                 ${this.isTelemetryLockedByHub()
                   ? html`<span class="field-help" data-testid="project-telemetry-locked-help"
-                      >Required by hub operator${this.isTelemetryShadowedDisabled()
+                      >Required by hub
+                      operator${this.isTelemetryShadowedDisabled()
                         ? '. Project setting (Disabled) is overridden.'
                         : ''}</span
                     >`
