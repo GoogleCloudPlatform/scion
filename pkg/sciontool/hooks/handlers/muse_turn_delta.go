@@ -139,6 +139,11 @@ const (
 // Tests may override it to exercise TTL expiry without sleeping.
 var museVersionNow = time.Now
 
+// museProbeBinaryName is the bare command name resolved via rootexec.Resolve
+// by detectLocalMuseVersion. Tests may override it (e.g. to "false") to
+// exercise probe-failure metadata preservation against a real root-owned binary.
+var museProbeBinaryName = "muse"
+
 // museVersionTokenRe extracts a complete version token (optional leading "v",
 // X.Y.Z, plus any extra numeric segments, prerelease "-...", or build metadata
 // "+...") bounded by whitespace or parentheses/commas. Capturing the full token
@@ -184,25 +189,9 @@ type museVersionCheckMarker struct {
 }
 
 var (
-	museVersionMemoMu      sync.Mutex
-	museVersionMemo        = make(map[string]museVersionCheckMarker)
-	museVersionPathLocksMu sync.Mutex
-	museVersionPathLocks   = make(map[string]*sync.Mutex)
+	museVersionMemoMu sync.Mutex
+	museVersionMemo   = make(map[string]museVersionCheckMarker)
 )
-
-func museVersionPathLock(path string) *sync.Mutex {
-	museVersionPathLocksMu.Lock()
-	defer museVersionPathLocksMu.Unlock()
-	if mu, ok := museVersionPathLocks[path]; ok {
-		return mu
-	}
-	if len(museVersionPathLocks) >= museVersionProcessMemoMax {
-		clear(museVersionPathLocks)
-	}
-	mu := &sync.Mutex{}
-	museVersionPathLocks[path] = mu
-	return mu
-}
 
 func readMuseVersionProcessMemo(markerPath string, now time.Time) (museVersionCheckMarker, bool) {
 	museVersionMemoMu.Lock()
@@ -243,6 +232,12 @@ func (h *TelemetryHandler) museVersionCheckPath() string {
 	return ""
 }
 
+// museVersionMarkerValid reports whether m is still valid at now. Positive
+// markers remain valid until MuseCodeVerifiedVersions or the binary's
+// mtime/size changes. Negative markers (ProbeFailed) remain valid for
+// museVersionFailureMarkerTTL; a non-positive or future CheckedAtUnixNS
+// (elapsed < 0, e.g. from clock skew or a tampered marker) is treated as
+// expired so probing is never suppressed indefinitely.
 func museVersionMarkerValid(m museVersionCheckMarker, now time.Time) bool {
 	if !slices.Equal(m.VerifiedVersions, MuseCodeVerifiedVersions) {
 		return false
@@ -321,27 +316,6 @@ func writeMuseVersionCheckMarker(path string, m museVersionCheckMarker) error {
 	return nil
 }
 
-func lockMuseVersionCheckMarker(path string) (unlock func(), ok bool) {
-	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
-	if err != nil {
-		return func() {}, false
-	}
-	defer func() { _ = tree.Close() }()
-	lockRel := filepath.Base(path) + ".lock"
-	lockFile, err := tree.Create(lockRel, false, privatefs.Private)
-	if err != nil {
-		return func() {}, false
-	}
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
-		_ = lockFile.Close()
-		return func() {}, false
-	}
-	return func() {
-		_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
-		_ = lockFile.Close()
-	}, true
-}
-
 func museBinaryMatchesMarker(m museVersionCheckMarker) bool {
 	if m.BinaryPath == "" {
 		return true
@@ -394,7 +368,7 @@ func runMuseProbeCmd(cmd *exec.Cmd) ([]byte, error) {
 // on binary replacement) so the hook path never fails or blocks past the
 // timeout + WaitDelay bound.
 func detectLocalMuseVersion(ctx context.Context) (ver, binPath string, mtimeNS, size int64) {
-	museBin, err := rootexec.Resolve("muse")
+	museBin, err := rootexec.Resolve(museProbeBinaryName)
 	if err != nil {
 		return "", "", 0, 0
 	}
@@ -414,38 +388,32 @@ func detectLocalMuseVersion(ctx context.Context) (ver, binPath string, mtimeNS, 
 	return normalizeMuseVersion(string(out)), binPath, mtimeNS, size
 }
 
-// checkMuseVersionOnce probes the installed muse CLI version once per
-// installed version across short-lived hook processes (persisted atomically in
-// a private 0600 marker file alongside MuseTurnUsageStatePath, serialized by a
-// sibling flock so concurrent first hooks emit at most one warning, or once
-// per handler when no state path is configured) and logs a one-time operator
-// warning if the parseable version is outside MuseCodeVerifiedVersions. Failed
-// or unparseable probes are memoized as a negative marker with a short TTL
-// (museVersionFailureMarkerTTL); when the marker cannot be read or written
-// (symlink, read-only directory), results are memoized per process so broken
-// environments cannot pay the probe timeout on every hook. Missing, corrupt,
-// symlinked, or unwritable markers and probe errors never fail or panic the
-// hook path.
+// checkMuseVersionOnce probes the installed muse CLI version across
+// short-lived hook processes (persisted atomically via same-directory 0600
+// temp file + rename in a marker file alongside MuseTurnUsageStatePath, or
+// once per handler when no state path is configured) and logs a warning if the
+// parseable version is outside MuseCodeVerifiedVersions.
+//
+// No cross-process or in-process lock is taken across the probe: a hook never
+// waits on another hook process. On a rare first-run race before the marker is
+// in place, up to N probes and N warnings may occur where N is the number of
+// concurrently racing hook processes (not strictly 1); atomic temp+rename
+// ensures the marker on disk is never corrupted and suppresses later hooks.
+//
+// Failed or unparseable probes are memoized as a negative marker with a short
+// TTL (museVersionFailureMarkerTTL; future timestamps are treated as expired).
+// When the marker cannot be read or written (symlink, directory, read-only
+// directory), results are memoized per process (bounded at
+// museVersionProcessMemoMax entries) so an unusable marker costs at most one
+// probe per process and worst-case per-hook latency stays bounded by
+// museVersionProbeTimeout + museVersionProbeWaitDelay (1.5s). Missing,
+// corrupt, symlinked, or unwritable markers and probe errors never fail or
+// panic the hook path.
 func (h *TelemetryHandler) checkMuseVersionOnce() {
 	h.museVersionCheckOnce.Do(func() {
 		markerPath := h.museVersionCheckPath()
 		now := museVersionNow()
 		if markerPath != "" {
-			if m, ok := readMuseVersionCheckMarker(markerPath); ok && museVersionMarkerValid(m, now) {
-				return
-			}
-			if _, ok := readMuseVersionProcessMemo(markerPath, now); ok {
-				return
-			}
-			unlock, locked := lockMuseVersionCheckMarker(markerPath)
-			if locked {
-				defer unlock()
-			} else {
-				inProcMu := museVersionPathLock(markerPath)
-				inProcMu.Lock()
-				defer inProcMu.Unlock()
-			}
-			now = museVersionNow()
 			if m, ok := readMuseVersionCheckMarker(markerPath); ok && museVersionMarkerValid(m, now) {
 				return
 			}
