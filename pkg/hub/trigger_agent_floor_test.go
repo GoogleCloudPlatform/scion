@@ -167,7 +167,7 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 	})
 	require.NoError(t, err)
 	roAttr := store.InitiatorAttribution{
-		AttributionVersion:      store.AttributionVersionV1,
+		AttributionVersion:      1,
 		AuthorizationRevision:   1,
 		InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
 		InitiatorPrincipalID:    roAgent.ID,
