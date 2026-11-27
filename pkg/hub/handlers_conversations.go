@@ -120,6 +120,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	kindFilter := q.Get("kind")
 	surfaceFilter := q.Get("surface")
 	projectFilter := q.Get("project_id")
+	agentIDFilter := q.Get("agent_id")
 	includeProjectGroups := q.Get("include_project_groups")
 	limitStr := q.Get("limit")
 
@@ -160,6 +161,24 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// Optional participant filter: restrict to conversations that the
+	// specified agent also actively participates in. We never look up the
+	// agent row to return 403/404 — unknown, inaccessible, or cross-project
+	// agents simply yield an empty intersection (200 OK) so this parameter
+	// cannot be used as an existence oracle.
+	var agentConvIDs map[string]struct{}
+	if agentIDFilter != "" {
+		agentConvs, agentErr := s.store.GetConversationsForPrincipal(ctx, "agent", agentIDFilter)
+		if agentErr != nil {
+			writeErrorFromErr(w, agentErr, "")
+			return
+		}
+		agentConvIDs = make(map[string]struct{}, len(agentConvs))
+		for _, c := range agentConvs {
+			agentConvIDs[c.ID] = struct{}{}
+		}
+	}
+
 	// Apply client-side filtering.
 	// For direct conversations, verify canonical DM key authorization to ensure
 	// stale or forged participant rows cannot grant list visibility.
@@ -189,6 +208,17 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		}
 		if projectFilter != "" {
 			if conv.ProjectID == nil || *conv.ProjectID != projectFilter {
+				continue
+			}
+		}
+		if agentConvIDs != nil {
+			if _, ok := agentConvIDs[conv.ID]; !ok {
+				continue
+			}
+			// For direct conversations, also verify the target agent is named
+			// in the canonical DM key so stale or forged participant rows
+			// cannot produce a false match.
+			if conv.Kind == "direct" && !isCanonicalDMParticipant(conv.ExternalRef, "agent", agentIDFilter) {
 				continue
 			}
 		}
