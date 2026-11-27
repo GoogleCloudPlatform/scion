@@ -160,6 +160,10 @@ func TestProbeAndConfigureUsageIngest_PositiveWithoutGCPExporter(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{
 				Accepted: len(req.Events),
+				// Echo suppress_direct_otel=true consistently with the capabilities
+				// probe above so the background drainer's startup heartbeat does not
+				// revalidate suppression back to false before the assertion below.
+				SuppressDirectOTel: true,
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)

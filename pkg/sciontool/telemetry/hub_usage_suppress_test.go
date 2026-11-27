@@ -575,11 +575,15 @@ func TestPipeline_SuppressRevalidatedPerResponse(t *testing.T) {
 func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T) {
 	// 1. Revocation (O4): onHubRevoked flips suppression from true -> false.
 	t.Run("revocation clears suppression", func(t *testing.T) {
+		var revoke atomic.Bool
 		p := NewWithConfig(&Config{Enabled: true, CloudEnabled: false, GRPCPort: 0, HTTPPort: 0})
 		p.SetAnalyticsOutbox(t.TempDir(), -1, -1)
 		p.SetHubUsageSink(HubUsageSinkConfig{
 			Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
-				return nil, ErrUsageIngestRevoked
+				if revoke.Load() {
+					return nil, ErrUsageIngestRevoked
+				}
+				return &telemetrycontract.UsageIngestResponse{SuppressDirectOTel: true}, nil
 			},
 			RunID:              "run-revoke",
 			HubID:              "hub-revoke",
@@ -597,6 +601,10 @@ func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T
 		if p.analytics.drainer.onHubRevoked == nil {
 			t.Fatal("expected onHubRevoked callback to be wired")
 		}
+		// Stop the background drainer before enabling revocation so an in-flight
+		// startup heartbeat cannot race with onHubRevoked and re-enable suppression.
+		p.analytics.drainer.Stop(ctx)
+		revoke.Store(true)
 		p.analytics.drainer.onHubRevoked()
 		if p.SuppressDirectOTel() {
 			t.Fatal("expected SuppressDirectOTel=false after onHubRevoked")
