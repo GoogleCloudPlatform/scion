@@ -62,6 +62,7 @@ export type InboxBreakdownKey =
   | 'projects'
   | 'toAddress'
   | 'requested'
+  | 'drafts'
   | 'unreadConversations'
   | 'dms'
   | 'mentions'

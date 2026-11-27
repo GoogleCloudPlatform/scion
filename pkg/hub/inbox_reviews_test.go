@@ -942,3 +942,153 @@ func TestNotificationAck_ReviewRequestSiblingErrBestEffort(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 }
+
+// TestUserMeInboxSummary_ReviewsStateSummaryAndGates verifies §13 item 6:
+//   - when hub.artifacts_review_requests and hub.artifacts_review_drafts are on,
+//     breakdown has {toAddress, requested, drafts} matching the filtered lists,
+//     count == toAddress + requested (drafts excluded from count/total),
+//     requested previews carry RequestedBy with no NotificationID, and legacy
+//     notifications are not double-counted;
+//   - when hub.artifacts_review_drafts is off, breakdown omits "drafts";
+//   - when hub.artifacts_review_requests is off, requested falls back to the
+//     notification-scan source.
+func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
+	srv, s := testServer(t)
+	st := enableInboxAndArtifacts(t, srv)
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:          true,
+		experiments.Artifacts:               true,
+		experiments.ArtifactsReviewRequests: true,
+		experiments.ArtifactsReviewDrafts:   true,
+	})
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "rev-p3-p1")
+	p2 := artifactProject(t, s, "rev-p3-p2")
+	viewerID := tid("rev-p3-viewer")
+	authorID := tid("rev-p3-author")
+	createTestUserWithProjectRole(t, s, viewerID, "viewer@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, authorID, "author@test.com", p2.ID, store.ProjectRoleMember)
+	author, err := s.GetUser(ctx, authorID)
+	require.NoError(t, err)
+	author.DisplayName = "Author Alice"
+	require.NoError(t, s.UpdateUser(ctx, author))
+	viewer, err := s.GetUser(ctx, viewerID)
+	require.NoError(t, err)
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+
+	// 1 owned artifact with review on latest -> toAddress = 1.
+	seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, viewer.ID, "My Reviewed Doc", artifacts.VersionKindReview, base.Add(1*time.Minute))
+
+	// 1 readable artifact with an open durable review request -> requested = 1.
+	reqArt := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, author.ID, "Requested Doc", artifacts.VersionKindPublish, base.Add(2*time.Minute))
+	_, _, err = st.CreateOrRemindReviewRequest(ctx, artifacts.ReviewRequest{
+		ArtifactID:    reqArt,
+		ReviewerKind:  artifacts.PrincipalKindUser,
+		ReviewerRef:   viewer.ID,
+		RequesterKind: artifacts.PrincipalKindUser,
+		RequesterRef:  author.ID,
+		Note:          "Please review section 1",
+		Access:        artifacts.ReviewRequestAccessExisting,
+	}, 24*time.Hour, base.Add(3*time.Minute), &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: author.ID, Authority: artifacts.AuthorityOwner}, nil)
+	require.NoError(t, err)
+
+	// 1 unreadable artifact (in p2, no grant) with an open durable review request -> excluded.
+	unreadableArt := seedHubReviewArtifact(t, st, p2.ID, artifacts.PrincipalKindUser, author.ID, "Hidden Requested Doc", artifacts.VersionKindPublish, base.Add(4*time.Minute))
+	_, _, err = st.CreateOrRemindReviewRequest(ctx, artifacts.ReviewRequest{
+		ArtifactID:    unreadableArt,
+		ReviewerKind:  artifacts.PrincipalKindUser,
+		ReviewerRef:   viewer.ID,
+		RequesterKind: artifacts.PrincipalKindUser,
+		RequesterRef:  author.ID,
+		Access:        artifacts.ReviewRequestAccessExisting,
+	}, 24*time.Hour, base.Add(5*time.Minute), &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: author.ID, Authority: artifacts.AuthorityOwner}, nil)
+	require.NoError(t, err)
+
+	// 1 legacy unacked notification on a DIFFERENT readable artifact (no durable request row).
+	// Must NOT be counted when requests gate is ON, and MUST be counted when gate is OFF.
+	legacyNotifArt := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, author.ID, "Legacy Notif Doc", artifacts.VersionKindPublish, base.Add(6*time.Minute))
+	legacyNotifID := seedReviewRequestNotification(t, s, viewer.ID, p1.ID, legacyNotifArt, "Legacy Requester", base.Add(7*time.Minute), false)
+
+	// 2 readable drafts + 1 unreadable draft -> drafts = 2.
+	for _, artID := range []string{reqArt, legacyNotifArt, unreadableArt} {
+		_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+			ArtifactID:    artID,
+			PrincipalKind: artifacts.PrincipalKindUser,
+			PrincipalRef:  viewer.ID,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "draft",
+		}, 0, base.Add(8*time.Minute), artifacts.MaxDraftsPerPrincipal)
+		require.NoError(t, err)
+	}
+
+	// Parity with the three filtered artifact list endpoints.
+	toAddrList := decodeArtifactList(t, userArtifactRequest(t, srv, viewer, http.MethodGet, "/api/v1/artifacts?mine=1&owner=me&review_on_latest=1", nil))
+	reqList := decodeArtifactList(t, userArtifactRequest(t, srv, viewer, http.MethodGet, "/api/v1/artifacts?mine=1&requested=1", nil))
+	draftList := decodeArtifactList(t, userArtifactRequest(t, srv, viewer, http.MethodGet, "/api/v1/artifacts?mine=1&drafts=1", nil))
+	require.Len(t, toAddrList.Artifacts, 1)
+	require.Len(t, reqList.Artifacts, 1)
+	require.Len(t, draftList.Artifacts, 2)
+
+	// 1. Both gates ON.
+	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=5", nil))
+	rev := resp.Categories[InboxCategoryReviews]
+	assert.Equal(t, InboxStateOK, rev.State)
+	assert.Equal(t, 2, rev.Count, "count must be toAddress + requested (drafts excluded)")
+	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, "/artifacts?review_on_latest=1&owner=me", rev.Href)
+	assert.Equal(t, "/artifacts?requested=1", InboxReviewsRequestedHref)
+	assert.Equal(t, "/artifacts?drafts=1", InboxReviewsDraftsHref)
+	assert.Equal(t, map[string]int{
+		InboxBreakdownToAddress: 1,
+		InboxBreakdownRequested: 1,
+		InboxBreakdownDrafts:    2,
+	}, rev.Breakdown)
+
+	previews := decodeReviewPreviews(t, rev)
+	require.Len(t, previews, 2)
+	assert.Equal(t, InboxReviewKindRequested, previews[0].Kind)
+	assert.Equal(t, reqArt, previews[0].ArtifactID)
+	assert.Equal(t, "Author Alice", previews[0].RequestedBy)
+	assert.Empty(t, previews[0].NotificationID, "request-sourced preview must not carry NotificationID")
+	assert.Equal(t, InboxReviewKindToAddress, previews[1].Kind)
+
+	// 2. Drafts gate OFF -> "drafts" key omitted from breakdown.
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:          true,
+		experiments.Artifacts:               true,
+		experiments.ArtifactsReviewRequests: true,
+		experiments.ArtifactsReviewDrafts:   false,
+	})
+	respNoDrafts := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath, nil))
+	revNoDrafts := respNoDrafts.Categories[InboxCategoryReviews]
+	_, hasDrafts := revNoDrafts.Breakdown[InboxBreakdownDrafts]
+	assert.False(t, hasDrafts, "drafts key must be omitted when hub.artifacts_review_drafts is off")
+	assert.Equal(t, map[string]int{
+		InboxBreakdownToAddress: 1,
+		InboxBreakdownRequested: 1,
+	}, revNoDrafts.Breakdown)
+
+	// 3. Requests gate OFF -> requested falls back to notification scan.
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:          true,
+		experiments.Artifacts:               true,
+		experiments.ArtifactsReviewRequests: false,
+		experiments.ArtifactsReviewDrafts:   true,
+	})
+	respFallback := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=5", nil))
+	revFallback := respFallback.Categories[InboxCategoryReviews]
+	assert.Equal(t, 2, revFallback.Count)
+	assert.Equal(t, map[string]int{
+		InboxBreakdownToAddress: 1,
+		InboxBreakdownRequested: 1,
+		InboxBreakdownDrafts:    2,
+	}, revFallback.Breakdown)
+	fallbackPreviews := decodeReviewPreviews(t, revFallback)
+	require.Len(t, fallbackPreviews, 2)
+	assert.Equal(t, InboxReviewKindRequested, fallbackPreviews[0].Kind)
+	assert.Equal(t, legacyNotifArt, fallbackPreviews[0].ArtifactID)
+	assert.Equal(t, legacyNotifID, fallbackPreviews[0].NotificationID)
+}

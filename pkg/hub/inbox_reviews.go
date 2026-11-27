@@ -22,12 +22,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 const (
 	inboxReviewsHref = "/artifacts?review_on_latest=1&owner=me"
+
+	// InboxReviewsRequestedHref and InboxReviewsDraftsHref are the legacy-param
+	// filter URLs for the requested and drafts buckets (design §4.10).
+	InboxReviewsRequestedHref = "/artifacts?requested=1"
+	InboxReviewsDraftsHref    = "/artifacts?drafts=1"
 
 	// InboxReviewKind* are the valid values for InboxReviewPreview.Kind.
 	InboxReviewKindToAddress = "to_address"
@@ -102,18 +108,153 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 	}
 
 	svc := s.artifactRefResolver()
+	draftsEnabled := s.experimentEnabled(experiments.ArtifactsReviewDrafts)
+	requestsEnabled := s.experimentEnabled(experiments.ArtifactsReviewRequests)
 
-	// 1. Owned artifacts whose current version is a submitted review awaiting owner action.
-	toAddressCount, toAddressCapped, toAddressItems, err := svc.ReviewOnLatestSummary(ctx, previews)
+	// 1. Owned artifacts with review on latest, plus durable open review
+	// requests (when hub.artifacts_review_requests is on) and saved drafts
+	// (when hub.artifacts_review_drafts is on).
+	summary, err := svc.ReviewStateSummary(ctx, artifacts.ReviewSummaryOptions{
+		Previews: previews,
+		Drafts:   draftsEnabled,
+	})
 	if err != nil {
 		return inboxReviewsErrorCategory(ctx, err)
 	}
 
-	// 2. Unacknowledged ARTIFACT_REVIEW_REQUESTED notifications, deduped by
-	// ResourceID (newest first), whose artifact the caller can still read.
+	toAddressCount := summary.ToAddress.Count
+	toAddressCapped := summary.ToAddress.Capped
+	toAddressItems := summary.ToAddress.Items
+	draftsCapped := summary.Drafts != nil && summary.Drafts.Capped
+
+	var (
+		requestedCount    int
+		requestedCapped   bool
+		requestedPreviews []InboxReviewPreview
+	)
+	if requestsEnabled {
+		requestedCount = summary.Requested.Count
+		requestedCapped = summary.Requested.Capped
+		if previews > 0 && len(summary.Requested.Items) > 0 {
+			requestedPreviews = make([]InboxReviewPreview, 0, len(summary.Requested.Items))
+			for _, it := range summary.Requested.Items {
+				previewID := it.ID
+				createdAt := it.UpdatedAt
+				requestedBy := ""
+				if it.Request != nil {
+					if it.Request.ID != "" {
+						previewID = it.Request.ID
+					}
+					if !it.Request.CreatedAt.IsZero() {
+						createdAt = it.Request.CreatedAt
+					}
+					requestedBy = it.Request.Requester.DisplayName
+					if requestedBy == "" {
+						requestedBy = it.Request.Requester.Ref
+					}
+				}
+				requestedPreviews = append(requestedPreviews, InboxReviewPreview{
+					ID:          previewID,
+					Kind:        InboxReviewKindRequested,
+					ProjectID:   it.ScopeRef,
+					CreatedAt:   createdAt,
+					Href:        artifactPagePath(it.ScopeRef, it.ID),
+					ArtifactID:  it.ID,
+					Title:       it.Title,
+					ScopeRef:    it.ScopeRef,
+					RequestedBy: requestedBy,
+				})
+			}
+		}
+	} else {
+		// Gate-off fallback (§4.9): keep the notification-scan source while
+		// hub.artifacts_review_requests is off. Delete this branch when the
+		// experiment graduates.
+		requestedCount, requestedCapped, requestedPreviews, err = s.inboxRequestedFromNotifications(ctx, v, svc, previews)
+		if err != nil {
+			return inboxReviewsErrorCategory(ctx, err)
+		}
+	}
+
+	items := make([]any, 0, previews)
+	if previews > 0 && (len(toAddressItems) > 0 || len(requestedPreviews) > 0) {
+		candidates := make([]InboxReviewPreview, 0, len(toAddressItems)+len(requestedPreviews))
+		for _, it := range toAddressItems {
+			candidates = append(candidates, InboxReviewPreview{
+				ID:         it.ID,
+				Kind:       InboxReviewKindToAddress,
+				ProjectID:  it.ScopeRef,
+				CreatedAt:  it.UpdatedAt,
+				Href:       artifactPagePath(it.ScopeRef, it.ID),
+				ArtifactID: it.ID,
+				Title:      it.Title,
+				ScopeRef:   it.ScopeRef,
+			})
+		}
+		candidates = append(candidates, requestedPreviews...)
+
+		sort.Slice(candidates, func(i, j int) bool {
+			if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+				return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
+			}
+			return candidates[i].ID > candidates[j].ID
+		})
+		if len(candidates) > previews {
+			candidates = candidates[:previews]
+		}
+
+		identity := GetIdentityFromContext(ctx)
+		projectNames := make(map[string]string, len(candidates))
+		for i := range candidates {
+			pid := candidates[i].ProjectID
+			if pid == "" {
+				continue
+			}
+			name, cached := projectNames[pid]
+			if !cached {
+				if s.authzService != nil && !isNilIdentity(identity) {
+					if proj, perr := s.store.GetProject(ctx, pid); perr == nil && proj != nil {
+						if s.authzService.CheckAccess(ctx, identity, projectResource(proj), ActionRead).Allowed {
+							name = proj.Name
+						}
+					}
+				}
+				projectNames[pid] = name
+			}
+			candidates[i].ProjectName = name
+		}
+
+		for i := range candidates {
+			items = append(items, candidates[i])
+		}
+	}
+
+	breakdown := map[string]int{
+		InboxBreakdownToAddress: toAddressCount,
+		InboxBreakdownRequested: requestedCount,
+	}
+	if summary.Drafts != nil {
+		breakdown[InboxBreakdownDrafts] = summary.Drafts.Count
+	}
+
+	return InboxCategory{
+		State:             InboxStateOK,
+		Count:             toAddressCount + requestedCount,
+		Capped:            toAddressCapped || requestedCapped || draftsCapped,
+		CountsTowardTotal: true,
+		Href:              inboxReviewsHref,
+		Previews:          items,
+		Breakdown:         breakdown,
+	}
+}
+
+// inboxRequestedFromNotifications is the legacy notification-scan source for
+// the "requested" review count while hub.artifacts_review_requests is off
+// (design §4.9). Delete this helper when the experiment graduates.
+func (s *Server) inboxRequestedFromNotifications(ctx context.Context, v inboxViewer, svc *artifacts.Service, previews int) (int, bool, []InboxReviewPreview, error) {
 	notifs, err := s.store.GetNotifications(ctx, store.SubscriberTypeUser, v.userID, true)
 	if err != nil {
-		return inboxReviewsErrorCategory(ctx, err)
+		return 0, false, nil, err
 	}
 	if v.token != nil {
 		notifs = scopeNotificationsForToken(s.newSelfScopeCheck(ctx, v.token, permInboxRead), notifs)
@@ -155,7 +296,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 	var readableNotifs []store.Notification
 	readableInfo, requestedCapped, err := svc.ReadableArtifacts(ctx, requestedIDs)
 	if err != nil {
-		return inboxReviewsErrorCategory(ctx, err)
+		return 0, false, nil, err
 	}
 	for _, n := range deduped {
 		if _, ok := readableInfo[n.ResourceID]; ok {
@@ -166,24 +307,12 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 		}
 	}
 
-	items := make([]any, 0, previews)
-	if previews > 0 && (len(toAddressItems) > 0 || len(readableNotifs) > 0) {
-		candidates := make([]InboxReviewPreview, 0, len(toAddressItems)+len(readableNotifs))
-		for _, it := range toAddressItems {
-			candidates = append(candidates, InboxReviewPreview{
-				ID:         it.ID,
-				Kind:       InboxReviewKindToAddress,
-				ProjectID:  it.ScopeRef,
-				CreatedAt:  it.UpdatedAt,
-				Href:       artifactPagePath(it.ScopeRef, it.ID),
-				ArtifactID: it.ID,
-				Title:      it.Title,
-				ScopeRef:   it.ScopeRef,
-			})
-		}
+	var out []InboxReviewPreview
+	if previews > 0 && len(readableNotifs) > 0 {
+		out = make([]InboxReviewPreview, 0, len(readableNotifs))
 		for _, n := range readableNotifs {
 			art := readableInfo[n.ResourceID]
-			candidates = append(candidates, InboxReviewPreview{
+			out = append(out, InboxReviewPreview{
 				ID:             n.ID,
 				Kind:           InboxReviewKindRequested,
 				ProjectID:      art.ScopeRef,
@@ -196,53 +325,6 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 				NotificationID: n.ID,
 			})
 		}
-
-		sort.Slice(candidates, func(i, j int) bool {
-			if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
-				return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
-			}
-			return candidates[i].ID > candidates[j].ID
-		})
-		if len(candidates) > previews {
-			candidates = candidates[:previews]
-		}
-
-		identity := GetIdentityFromContext(ctx)
-		projectNames := make(map[string]string, len(candidates))
-		for i := range candidates {
-			pid := candidates[i].ProjectID
-			if pid == "" {
-				continue
-			}
-			name, cached := projectNames[pid]
-			if !cached {
-				if s.authzService != nil && !isNilIdentity(identity) {
-					if proj, perr := s.store.GetProject(ctx, pid); perr == nil && proj != nil {
-						if s.authzService.CheckAccess(ctx, identity, projectResource(proj), ActionRead).Allowed {
-							name = proj.Name
-						}
-					}
-				}
-				projectNames[pid] = name
-			}
-			candidates[i].ProjectName = name
-		}
-
-		for i := range candidates {
-			items = append(items, candidates[i])
-		}
 	}
-
-	return InboxCategory{
-		State:             InboxStateOK,
-		Count:             toAddressCount + requestedCount,
-		Capped:            toAddressCapped || requestedCapped,
-		CountsTowardTotal: true,
-		Href:              inboxReviewsHref,
-		Previews:          items,
-		Breakdown: map[string]int{
-			"toAddress": toAddressCount,
-			"requested": requestedCount,
-		},
-	}
+	return requestedCount, requestedCapped, out, nil
 }

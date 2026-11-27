@@ -53,6 +53,7 @@ const (
 	InboxBreakdownSecretsProjects       = "secretsProjects"
 	InboxBreakdownToAddress             = "toAddress"
 	InboxBreakdownRequested             = "requested"
+	InboxBreakdownDrafts                = "drafts"
 	InboxBreakdownUnreadConversations   = "unreadConversations"
 	InboxBreakdownDMs                   = "dms"
 	InboxBreakdownMentions              = "mentions"

@@ -105,15 +105,22 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		writeError(w, http.StatusInternalServerError, "internal", "could not delete the artifact")
 	default:
 		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: authority})
-		notifiedOwner := ""
+		notified := make(map[string]bool)
+		hint := func(uid string) {
+			if uid == "" || notified[uid] {
+				return
+			}
+			notified[uid] = true
+			s.notifyInboxChanged(ctx, uid)
+		}
 		if a.OwnerKind == PrincipalKindUser {
-			s.notifyInboxChanged(ctx, a.OwnerRef)
-			notifiedOwner = a.OwnerRef
+			hint(a.OwnerRef)
 		}
 		for _, uid := range delRes.OpenRequestReviewers {
-			if uid != "" && uid != notifiedOwner {
-				s.notifyInboxChanged(ctx, uid)
-			}
+			hint(uid)
+		}
+		for _, uid := range delRes.DraftHolders {
+			hint(uid)
 		}
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
