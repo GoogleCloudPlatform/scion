@@ -377,7 +377,7 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 		"loadServerKeyring",
 		"initPluginManagerFn",
 		"initHubServerFn",
-		"startConduit",
+		"startHubCommandBusAndConduit",
 		"initWebServer",
 		"startRuntimeBroker",
 	} {

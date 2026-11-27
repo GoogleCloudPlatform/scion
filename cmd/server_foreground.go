@@ -734,22 +734,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetObservabilityExportStatus(obs)
 		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 
-		// Wire command bus for cross-node dispatch (B2-4).
-		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
-		if err != nil {
-			return shutdownSeq.startupErr(ctx, err)
-		}
-		hubSrv.SetCommandBus(cmdBus)
-
-		// Conduit relay (hub.conduit): after operational settings are
-		// loaded (initHubServer) and before the background services start,
-		// which register the registry singleton only when a relay runs.
-		// Mark the hub shutting down first when the shutdown begins
-		// (/readyz 503, new work refused, streams ended).
-		shutdownSeq.addStep(shutdownPhaseMark, hubSrv.BeginShutdown)
-		hubSrv.SetShutdownHooks(frontShutdownHooks)
-
-		if err := startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
+		if err := startHubCommandBusAndConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), frontShutdownHooks, &wg, errCh); err != nil {
 			return shutdownSeq.startupErr(ctx, err)
 		}
 
@@ -3617,7 +3602,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	// sessions unavailable; it never stops startup.
 	hubCfg.TestIdentityWebSessionKey = loadTestIdentityWebSessionKey(ctx, entClient, hubCfg.HubID, hubCfg.EnableTestIdentities)
 
-	hubSrv, err := hub.New(hubCfg, s)
+	hubSrv, err := hubNewFn(hubCfg, s)
 	if err != nil {
 		return nil, fmt.Errorf("hub server initialization failed: %w", err)
 	}
@@ -4150,14 +4135,15 @@ func syncHubSettingsBeforeMeta(ctx context.Context, s store.HubSettingStore, boo
 // enabled in hub_settings when server.hub.conduit.relay_mode is "external" and
 // no explicit "hub.conduit" override (true or false) has been recorded yet.
 //
-// Why: "experiments" is DB-only (KoanfPaths nil) and "hub.conduit" defaults to
-// false so single-binary / Cloud Run deployments do not implicitly start an
-// in-process relay. On a fresh database in external relay mode, however, both
-// Hub (errConduitExternalNeedsExperiment) and --role relay (ErrExperimentOff)
-// refuse to start before binding an HTTP listener if hub.conduit is off.
-// Seeding hub.conduit=true only when absent breaks the fresh-DB deadlock while
-// preserving explicit admin overrides ("hub.conduit": false) and leaving
-// malformed documents untouched (fail-closed).
+// Why: "experiments" is DB-only (KoanfPaths nil) and although "hub.conduit"
+// compiles to default-on, hosted HA deployments override it to default-off via
+// SetConduitDeploymentDefault (ptone/scion#9491). On a fresh database in
+// external relay mode, both Hub (errConduitExternalNeedsExperiment) and
+// --role relay (ErrExperimentOff) refuse to start before binding an HTTP
+// listener if hub.conduit is off. Seeding hub.conduit=true only when absent
+// breaks the fresh-DB deadlock while preserving explicit admin overrides
+// ("hub.conduit": false) and leaving malformed documents untouched
+// (fail-closed).
 func seedExternalRelayConduitExperiment(ctx context.Context, s store.HubSettingStore) error {
 	const (
 		sectionName    = "experiments"
@@ -4333,9 +4319,11 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbme
 // a no-op bus (single-process SQLite always owns all brokers locally).
 //
 // If the Postgres bus cannot start, the hub normally falls back to the
-// no-op bus. In hosted HA with hub.conduit on that is a startup error
-// instead (C8): cross-replica conduit routing and dispatch depend on the
-// listener, so a replica without it must not serve.
+// no-op bus. In hosted HA with hub.conduit explicitly overridden on, that is
+// a startup error instead (C8): cross-replica conduit routing and dispatch
+// depend on the listener, so a replica without it must not serve. When
+// hub.conduit is not an explicit override, startup falls back to the no-op
+// bus and configureConduitDeploymentDefault sets the deployment default off.
 func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) (hub.CommandBus, error) {
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
 		return hub.NoopCommandBus{}, nil
@@ -4349,7 +4337,8 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	}
 	bus, err := startPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
 	if err != nil {
-		if hubSrv.ConduitEnabled() && hostedHAGuardsRequired(cfg) {
+		overrideVal, explicit, _ := hubSrv.ConduitOverrideState()
+		if explicit && overrideVal && hostedHAGuardsRequired(cfg) {
 			return nil, fmt.Errorf("postgres command bus startup failed (hosted HA with hub.conduit on): %w", err)
 		}
 		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
@@ -4362,6 +4351,39 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 // startPostgresCommandBus starts the Postgres command bus (a test seam).
 var startPostgresCommandBus = func(ctx context.Context, dsn string, ownsLocally func(string) bool, reconcile func(context.Context, string), logger *slog.Logger) (hub.CommandBus, error) {
 	return hub.NewPostgresCommandBus(ctx, dsn, ownsLocally, reconcile, logger)
+}
+
+// hubNewFn constructs the hub.Server inside initHubServer (a test seam so
+// startup-ordering tests can arm guards on ServerConfig before hub.New runs).
+var hubNewFn = hub.New
+
+// startHubCommandBusAndConduit runs the hub's command-bus, deployment-default,
+// shutdown-mark, and Conduit startup sequence in the required order:
+// newCommandBus → SetCommandBus → configureConduitDeploymentDefault →
+// startConduit. Extracted from runServerStart so tests can drive the exact
+// production sequence with the early-resolution guard armed.
+func startHubCommandBusAndConduit(ctx context.Context, shutdownSeq *serverShutdownSequence, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, frontShutdownHooks hub.ShutdownHooks, wg *sync.WaitGroup, errCh chan<- error) error {
+	// Wire command bus for cross-node dispatch (B2-4).
+	cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
+	if err != nil {
+		return err
+	}
+	hubSrv.SetCommandBus(cmdBus)
+
+	// Decide the hub.conduit deployment default once, after newCommandBus
+	// and before startConduit (ptone/scion#9491).
+	_, cmdBusNoop := cmdBus.(hub.NoopCommandBus)
+	configureConduitDeploymentDefault(cfg, hubSrv, hubEndpoint, !cmdBusNoop)
+
+	// Conduit relay (hub.conduit): after operational settings are
+	// loaded (initHubServer) and before the background services start,
+	// which register the registry singleton only when a relay runs.
+	// Mark the hub shutting down first when the shutdown begins
+	// (/readyz 503, new work refused, streams ended).
+	shutdownSeq.addStep(shutdownPhaseMark, hubSrv.BeginShutdown)
+	hubSrv.SetShutdownHooks(frontShutdownHooks)
+
+	return startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoint, wg, errCh)
 }
 
 // initWebServer creates and configures the Web server. The provided context is

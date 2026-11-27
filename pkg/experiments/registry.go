@@ -1067,8 +1067,8 @@ var compiled = []Experiment{
 	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
-		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
-		Default:     false,
+		Description: "Enables Conduit, the unified agent/broker connection layer: Ed25519 stream grants (GET /api/v1/conduit/grant-keys), the agent and broker Conduit session endpoint (GET /api/v1/conduit), the in-process relay, port proxy, PTY, tunnel and SSH over Conduit, broker dual-dial and broker RPC routing, and the agent control RPCs used together with hub.conduit_deliver, hub.exec_schedules and hub.command_requests. Read at startup: turning it on or off for the relay takes effect after a restart. Defaults on outside hosted HA; in hosted HA it defaults off (with the reason logged at startup), while an explicit override to on keeps the strict HA startup checks.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#2774",
