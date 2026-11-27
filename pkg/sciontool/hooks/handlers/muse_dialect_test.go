@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,17 +16,21 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"gopkg.in/yaml.v3"
@@ -909,9 +914,13 @@ func TestMuseCodeUnverifiedVersionWarning(t *testing.T) {
 			t.Fatalf("probes after verified_versions change = %d, want 1", probes.Load())
 		}
 
-		// 2. Changed binary metadata forces re-probe.
+		// 2. Mtime-only binary metadata change forces re-probe.
 		fakeBin := filepath.Join(t.TempDir(), "muse")
 		if err := os.WriteFile(fakeBin, []byte("v1"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		binInfo, err := os.Stat(fakeBin)
+		if err != nil {
 			t.Fatal(err)
 		}
 		if err := writeMuseVersionCheckMarker(markerPath, museVersionCheckMarker{
@@ -919,8 +928,8 @@ func TestMuseCodeUnverifiedVersionWarning(t *testing.T) {
 			Verified:         true,
 			VerifiedVersions: slices.Clone(MuseCodeVerifiedVersions),
 			BinaryPath:       fakeBin,
-			BinaryModTimeNS:  1, // mismatched mtime
-			BinarySize:       999,
+			BinaryModTimeNS:  binInfo.ModTime().UnixNano() - 1, // mtime-only mismatch
+			BinarySize:       binInfo.Size(),                   // exact size match
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -933,28 +942,409 @@ func TestMuseCodeUnverifiedVersionWarning(t *testing.T) {
 		}
 		h2.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 200))
 		if probes.Load() != 2 {
-			t.Fatalf("probes after binary metadata change = %d, want 2", probes.Load())
+			t.Fatalf("probes after mtime-only binary change = %d, want 2", probes.Load())
+		}
+
+		// 3. Size-only binary metadata change forces re-probe.
+		if err := writeMuseVersionCheckMarker(markerPath, museVersionCheckMarker{
+			CheckedVersion:   "1.4.25",
+			Verified:         true,
+			VerifiedVersions: slices.Clone(MuseCodeVerifiedVersions),
+			BinaryPath:       fakeBin,
+			BinaryModTimeNS:  binInfo.ModTime().UnixNano(), // exact mtime match
+			BinarySize:       binInfo.Size() + 1,           // size-only mismatch
+		}); err != nil {
+			t.Fatal(err)
+		}
+		h3 := &TelemetryHandler{
+			MuseTurnUsageStatePath: statePath,
+			museVersionProbe: func(context.Context) string {
+				probes.Add(1)
+				return "Muse Code 1.4.25"
+			},
+		}
+		h3.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 300))
+		if probes.Load() != 3 {
+			t.Fatalf("probes after size-only binary change = %d, want 3", probes.Load())
+		}
+	})
+
+	t.Run("failed or unparseable probe writes negative marker with TTL and re-probes on expiry", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		now := time.Date(2026, 11, 27, 17, 0, 0, 0, time.UTC)
+		prevNow := museVersionNow
+		museVersionNow = func() time.Time { return now }
+		defer func() { museVersionNow = prevNow }()
+
+		statePath := filepath.Join(t.TempDir(), ".scion", "muse-turn-usage.json")
+		markerPath := filepath.Join(filepath.Dir(statePath), museVersionMarkerFileName)
+
+		var probes atomic.Int32
+		probeOutput := "muse dev" // unparseable
+		probeFn := func(context.Context) string {
+			probes.Add(1)
+			return probeOutput
+		}
+
+		// 5 fresh handlers before TTL expiry: only 1 probe, 0 warnings.
+		for i := 0; i < 5; i++ {
+			h := &TelemetryHandler{
+				MuseTurnUsageStatePath: statePath,
+				museVersionProbe:       probeFn,
+			}
+			h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", int64((i+1)*100)))
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probes before TTL expiry = %d, want 1", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 0 {
+			t.Fatalf("warnings for failed probe = %+v, want 0", warns)
+		}
+		info, err := os.Stat(markerPath)
+		if err != nil {
+			t.Fatalf("stat negative marker: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("negative marker mode = %04o, want 0600", mode)
+		}
+		m, ok := readMuseVersionCheckMarker(markerPath)
+		if !ok || !m.ProbeFailed || m.CheckedVersion != "" || m.CheckedAtUnixNS != now.UnixNano() {
+			t.Fatalf("negative marker = (%+v, %v), want ProbeFailed=true CheckedVersion='' CheckedAtUnixNS=%d", m, ok, now.UnixNano())
+		}
+
+		// Just before TTL expiry: still memoized.
+		now = now.Add(museVersionFailureMarkerTTL - time.Second)
+		(&TelemetryHandler{MuseTurnUsageStatePath: statePath, museVersionProbe: probeFn}).normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 600))
+		if probes.Load() != 1 {
+			t.Fatalf("probes just before TTL expiry = %d, want 1", probes.Load())
+		}
+
+		// At TTL expiry: re-probes; if probe now succeeds with unverified version,
+		// writes positive marker and warns once.
+		now = now.Add(time.Second)
+		probeOutput = "Muse Code 1.5.0"
+		(&TelemetryHandler{MuseTurnUsageStatePath: statePath, museVersionProbe: probeFn}).normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 700))
+		if probes.Load() != 2 {
+			t.Fatalf("probes after TTL expiry = %d, want 2", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 1 || warns[0].attrs["installed_version"] != "1.5.0" {
+			t.Fatalf("warnings after TTL expiry = %+v, want 1 warning for 1.5.0", warns)
+		}
+		// Positive marker now suppresses subsequent probes even after another TTL window.
+		now = now.Add(2 * museVersionFailureMarkerTTL)
+		(&TelemetryHandler{MuseTurnUsageStatePath: statePath, museVersionProbe: probeFn}).normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 800))
+		if probes.Load() != 2 {
+			t.Fatalf("probes after positive marker = %d, want 2", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 1 {
+			t.Fatalf("warnings after positive marker = %d, want 1", len(warns))
+		}
+	})
+
+	t.Run("0644 marker is replaced atomically with 0600 and stops repeat probes", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		dir := filepath.Join(t.TempDir(), ".scion")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statePath := filepath.Join(dir, "muse-turn-usage.json")
+		markerPath := filepath.Join(dir, museVersionMarkerFileName)
+		if err := os.WriteFile(markerPath, []byte(`{"checked_version":"1.5.0","verified":false}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(markerPath, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		var probes atomic.Int32
+		probeFn := func(context.Context) string {
+			probes.Add(1)
+			return "Muse Code 1.5.0"
+		}
+		for i := 0; i < 5; i++ {
+			h := &TelemetryHandler{
+				MuseTurnUsageStatePath: statePath,
+				museVersionProbe:       probeFn,
+			}
+			h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", int64((i+1)*100)))
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probes after 0644 marker = %d, want 1", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 1 {
+			t.Fatalf("warnings after 0644 marker = %d, want 1", len(warns))
+		}
+		info, err := os.Stat(markerPath)
+		if err != nil {
+			t.Fatalf("stat healed marker: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("healed marker mode = %04o, want 0600", mode)
+		}
+	})
+
+	t.Run("unwritable marker path memoizes per process and respects failure TTL", func(t *testing.T) {
+		now := time.Date(2026, 11, 27, 17, 0, 0, 0, time.UTC)
+		prevNow := museVersionNow
+		museVersionNow = func() time.Time { return now }
+		defer func() { museVersionNow = prevNow }()
+
+		blocker := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		unwritableMarker := filepath.Join(blocker, museVersionMarkerFileName)
+		defer deleteMuseVersionProcessMemo(unwritableMarker)
+
+		var probes atomic.Int32
+		probeFn := func(context.Context) string {
+			probes.Add(1)
+			return ""
+		}
+		for i := 0; i < 5; i++ {
+			h := &TelemetryHandler{
+				MuseVersionCheckStatePath: unwritableMarker,
+				museVersionProbe:          probeFn,
+			}
+			h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", int64((i+1)*100)))
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probes on unwritable marker before TTL = %d, want 1", probes.Load())
+		}
+		now = now.Add(museVersionFailureMarkerTTL)
+		(&TelemetryHandler{
+			MuseVersionCheckStatePath: unwritableMarker,
+			museVersionProbe:          probeFn,
+		}).normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 600))
+		if probes.Load() != 2 {
+			t.Fatalf("probes on unwritable marker after TTL = %d, want 2", probes.Load())
+		}
+	})
+
+	t.Run("symlinked marker is refused without touching target and memoized per process", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		base := t.TempDir()
+		target := filepath.Join(base, "victim.txt")
+		const sentinel = "sentinel-do-not-overwrite"
+		if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(base, ".scion")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		statePath := filepath.Join(dir, "muse-turn-usage.json")
+		markerPath := filepath.Join(dir, museVersionMarkerFileName)
+		defer deleteMuseVersionProcessMemo(markerPath)
+		if err := os.Symlink(target, markerPath); err != nil {
+			t.Fatal(err)
+		}
+
+		// Direct write must refuse the symlink with ErrReparsePoint.
+		if err := writeMuseVersionCheckMarker(markerPath, museVersionCheckMarker{CheckedVersion: "1.5.0"}); !errors.Is(err, privatefs.ErrReparsePoint) {
+			t.Fatalf("writeMuseVersionCheckMarker(symlink) err = %v, want ErrReparsePoint", err)
+		}
+
+		var probes atomic.Int32
+		probeFn := func(context.Context) string {
+			probes.Add(1)
+			return "Muse Code 1.5.0"
+		}
+		for i := 0; i < 5; i++ {
+			h := &TelemetryHandler{
+				MuseTurnUsageStatePath: statePath,
+				museVersionProbe:       probeFn,
+			}
+			h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", int64((i+1)*100)))
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probes on symlinked marker = %d, want 1", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 1 {
+			t.Fatalf("warnings on symlinked marker = %d, want 1", len(warns))
+		}
+		gotTarget, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read target: %v", err)
+		}
+		if string(gotTarget) != sentinel {
+			t.Fatalf("symlink target was overwritten: got %q, want %q", string(gotTarget), sentinel)
+		}
+		if fi, err := os.Lstat(markerPath); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("markerPath symlink was modified: fi=%v err=%v", fi, err)
+		}
+	})
+
+	t.Run("concurrent first writers serialize and emit exactly one warning", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		statePath := filepath.Join(t.TempDir(), ".scion", "muse-turn-usage.json")
+		markerPath := filepath.Join(filepath.Dir(statePath), museVersionMarkerFileName)
+
+		var probes atomic.Int32
+		probeFn := func(context.Context) string {
+			probes.Add(1)
+			time.Sleep(5 * time.Millisecond)
+			return "Muse Code 1.5.0"
+		}
+
+		const workers = 50
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				h := &TelemetryHandler{
+					MuseTurnUsageStatePath: statePath,
+					museVersionProbe:       probeFn,
+				}
+				h.normalizeMuseTurnUsage(makeEvent("muse-code", fmt.Sprintf("t%d", idx), 100))
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		if probes.Load() != 1 {
+			t.Fatalf("concurrent probes = %d, want 1", probes.Load())
+		}
+		if warns := cap.warnings(); len(warns) != 1 {
+			t.Fatalf("concurrent warnings = %d, want 1 (%+v)", len(warns), warns)
+		}
+		info, err := os.Stat(markerPath)
+		if err != nil {
+			t.Fatalf("stat marker: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Errorf("marker mode = %04o, want 0600", mode)
 		}
 	})
 }
 
-func TestMuseVersionProbeWaitDelayBoundsGrandchildHoldingStdout(t *testing.T) {
-	// Reproduce M2: direct child prints a version and exits while a background
-	// grandchild keeps stdout open for 6s. With configureMuseProbeCmd (WaitDelay
-	// + process group), OutputManaged must return well before 6s.
-	cctx, cancel := context.WithTimeout(context.Background(), museVersionProbeTimeout)
+func readGrandchildPID(t *testing.T, pidFile string) int {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read grandchild pidfile %s: %v", pidFile, err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("parse grandchild pid %q: %v", string(raw), err)
+	}
+	return pid
+}
+
+func waitForProcessDead(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestConfigureMuseProbeCmdSetsHardenedEnvAndProcessGroup(t *testing.T) {
+	t.Setenv("SCION_PROBE_TEST_LEAK", "must-not-inherit")
+	cmd := exec.Command("/bin/true")
+	configureMuseProbeCmd(cmd)
+
+	wantEnv := rootexec.Env("MUSE_NO_AUTO_UPDATE=1")
+	if !slices.Equal(cmd.Env, wantEnv) {
+		t.Fatalf("cmd.Env = %v, want %v", cmd.Env, wantEnv)
+	}
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "SCION_PROBE_TEST_LEAK=") {
+			t.Fatalf("cmd.Env leaked caller env var: %q", kv)
+		}
+	}
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Fatalf("cmd.SysProcAttr = %+v, want Setpgid=true", cmd.SysProcAttr)
+	}
+	if cmd.WaitDelay != museVersionProbeWaitDelay {
+		t.Fatalf("cmd.WaitDelay = %v, want %v", cmd.WaitDelay, museVersionProbeWaitDelay)
+	}
+	if cmd.Cancel == nil {
+		t.Fatal("cmd.Cancel = nil, want process-group SIGKILL cancel func")
+	}
+}
+
+func TestMuseVersionProbeCancelKillsProcessGroup(t *testing.T) {
+	// Hanging leader spawns a background grandchild; on timeout, cmd.Cancel
+	// must SIGKILL the entire process group (not just cmd.Process.Kill()), so
+	// the grandchild is dead as soon as OutputManaged returns.
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	cctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", "sleep 6 & echo 1.4.25")
+	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", `sleep 6 & echo $! > "$1"; exec sleep 6`, "_", pidFile)
 	configureMuseProbeCmd(cmd)
 
 	start := time.Now()
 	_, err := procreap.OutputManaged(cmd)
 	elapsed := time.Since(start)
 
-	if elapsed >= 2500*time.Millisecond {
-		t.Fatalf("probe took %v (err=%v), expected WaitDelay bound well under 2.5s (grandchild held stdout open)", elapsed, err)
-	}
+	pid := readGrandchildPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
 	if err == nil {
-		t.Fatalf("expected WaitDelay/timeout error when grandchild holds stdout open, got nil (elapsed=%v)", elapsed)
+		t.Fatalf("expected timeout error, got nil (elapsed=%v)", elapsed)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("hanging probe took %v, expected well under 2s", elapsed)
+	}
+	if !waitForProcessDead(pid, 300*time.Millisecond) {
+		t.Fatalf("grandchild pid %d survived probe cancel (process-group SIGKILL failed)", pid)
+	}
+}
+
+func TestMuseVersionProbeWaitDelayPreservesOutputAndKillsGrandchild(t *testing.T) {
+	// Reproduce L2: direct child prints a version and exits normally while a
+	// background grandchild keeps stdout open for 6s. runMuseProbeCmd must
+	// return well before 6s (~WaitDelay), preserve the version already printed,
+	// and kill the surviving grandchild in the probe's process group.
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	cctx, cancel := context.WithTimeout(context.Background(), museVersionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", `sleep 6 & echo $! > "$1"; echo 1.4.25`, "_", pidFile)
+	configureMuseProbeCmd(cmd)
+
+	start := time.Now()
+	out, err := runMuseProbeCmd(cmd)
+	elapsed := time.Since(start)
+
+	pid := readGrandchildPID(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	if elapsed >= 2500*time.Millisecond {
+		t.Fatalf("probe took %v (err=%v), expected WaitDelay bound well under 2.5s", elapsed, err)
+	}
+	if err != nil {
+		t.Fatalf("runMuseProbeCmd returned err=%v, want nil (WaitDelay after normal exit should preserve stdout)", err)
+	}
+	if got := normalizeMuseVersion(string(out)); got != "1.4.25" {
+		t.Fatalf("normalizeMuseVersion(%q) = %q, want 1.4.25", string(out), got)
+	}
+	if !waitForProcessDead(pid, 300*time.Millisecond) {
+		t.Fatalf("grandchild pid %d survived WaitDelay expiry (post-wait process-group SIGKILL failed)", pid)
 	}
 }

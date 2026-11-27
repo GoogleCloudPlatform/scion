@@ -619,4 +619,30 @@ func TestGrokBuildUnverifiedVersionWarning(t *testing.T) {
 			}()
 		}
 	})
+
+	t.Run("non-grok harness rule with unverified version emits no grok warning", func(t *testing.T) {
+		cap := &captureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		d := &UsageDeriver{
+			rules: []usageRule{claudeUsageRule{}},
+			seen:  newBoundedLRU(usageDedupeCapacity, usageDedupeTTL),
+		}
+		claudeRec := &logspb.LogRecord{
+			EventName: "api_request",
+			Attributes: []*commonpb.KeyValue{
+				{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "claude-sonnet-4-6"}}},
+				grokIntAttr("input_tokens", 100),
+				grokIntAttr("output_tokens", 20),
+			},
+		}
+		if !d.observeRecord(context.Background(), claudeUsageScope, resAttrs("9.9.9"), claudeRec) {
+			t.Fatal("observeRecord for claude rule returned false, want true")
+		}
+		if warns := cap.warnings(); len(warns) != 0 {
+			t.Fatalf("warnings for non-grok rule = %+v, want 0", warns)
+		}
+	})
 }
