@@ -124,13 +124,17 @@ event, and antigravity publishes calls only; a tokens follow-up would need
 `agy` to add usage data to this hook payload, or a different capture
 mechanism.
 
-**Model label.** The `model` label on `gen_ai.api.calls` comes from the
-hook payload's per-invocation `modelName` (`dialect.yaml` maps it on
+**Model selection & label.** `config.yaml` sets `model: medium` (resolved
+through `model_aliases`), so both `SCION_MODEL` and the `--model` argv flag
+carry the concrete default model when no explicit `--model` is supplied, and
+`agy-wrapper.sh` passes `--model` as a fallback if caller argv omits it.
+`provision.py` does not write `"model"` into `settings.json` because `agy`
+matches `settings.json`'s `"model"` field against display labels only while
+`--model` accepts model IDs. The `model` label on `gen_ai.api.calls` comes
+from the hook payload's per-invocation `modelName` (`dialect.yaml` maps it on
 `PreInvocation`/`PostInvocation`), following design §3.2's precedence: the
 payload's own value, then the agent's configured `SCION_MODEL`, then
-`unknown`, truncated to 128 bytes. `SCION_MODEL` is only set when the
-agent's config names a model, so without the payload value many antigravity
-calls would carry no model at all. Note that `modelName` is `agy`'s display alias
+`unknown`, truncated to 128 bytes. Note that `modelName` is `agy`'s display alias
 for the configured model, not necessarily the concrete API model: this
 project's own capture sent `gemini-3.1-pro-low` to `agy` and saw it call the
 API as `gemini-3.1-pro-preview`. The alias is still the closest per-call

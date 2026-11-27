@@ -431,14 +431,14 @@ class ModelResolutionTest(unittest.TestCase):
 
 
 class SettingsJsonReprovisionTest(unittest.TestCase):
-    """Covers ptone/scion#2453: _prestage_onboarding used to write the model
-    key into settings.json only on first creation, so re-provisioning an
-    already-provisioned home left a stale model and never touched
-    modelProvider either. Both must now refresh on every provision while
-    preserving unrelated keys already present in the file.
+    """Covers settings.json pre-staging and re-provisioning (ptone/scion#2453,
+    ptone/scion#9679): onboarding defaults and api-key modelProvider are
+    maintained while unrelated keys are preserved, and _prestage_onboarding
+    does NOT write model IDs into settings.json's "model" field (agy 1.5.18
+    matches display labels only in settings.json; models reach agy via --model).
     """
 
-    def test_existing_settings_model_key_updated_other_keys_preserved(self) -> None:
+    def test_existing_settings_preserves_other_keys_and_does_not_write_model_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
             os.makedirs(cli_dir, exist_ok=True)
@@ -447,7 +447,6 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
                 json.dump(
                     {
                         "colorScheme": "light",
-                        "model": "Gemini 3.1 Pro (Low)",
                         "customUserSetting": "keep-me",
                     },
                     f,
@@ -456,13 +455,13 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="Gemini 3.8 Flash (Medium)",
+                model="gemini-4-hydrogen-medium",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "Gemini 3.8 Flash (Medium)")
+        self.assertNotIn("model", settings)
         self.assertEqual(settings["customUserSetting"], "keep-me")
         self.assertEqual(settings["colorScheme"], "light")
 
@@ -476,18 +475,19 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             os.makedirs(cli_dir, exist_ok=True)
             settings_path = os.path.join(cli_dir, "settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump({"colorScheme": "light", "model": "old-model"}, f)
+                json.dump({"colorScheme": "light"}, f)
 
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
         self.assertEqual(settings["colorScheme"], "light")
+        self.assertNotIn("model", settings)
 
     def test_existing_settings_missing_onboarding_complete_is_backfilled(self) -> None:
         # Upstream Gemini review comment: a valid existing settings.json that
@@ -500,12 +500,12 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             os.makedirs(cli_dir, exist_ok=True)
             settings_path = os.path.join(cli_dir, "settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump({"model": "old-model", "customUserSetting": "keep-me"}, f)
+                json.dump({"customUserSetting": "keep-me"}, f)
 
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
@@ -513,6 +513,7 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
 
         self.assertIs(settings["onboardingComplete"], True)
         self.assertEqual(settings["customUserSetting"], "keep-me")
+        self.assertNotIn("model", settings)
 
     def test_existing_settings_workspace_appended_to_trusted_workspaces(self) -> None:
         # Upstream Gemini review comment: the current workspace must be
@@ -525,12 +526,12 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             settings_path = os.path.join(cli_dir, "settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
                 json.dump(
-                    {"model": "old-model", "trustedWorkspaces": ["/some/other/workspace"]},
+                    {"trustedWorkspaces": ["/some/other/workspace"]},
                     f,
                 )
 
             workspace = os.path.join(tmp, "workspace")
-            provision._prestage_onboarding(tmp, workspace=workspace, model="new-model")
+            provision._prestage_onboarding(tmp, workspace=workspace, model="gemini-4-hydrogen-medium")
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
@@ -538,6 +539,7 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         self.assertEqual(
             settings["trustedWorkspaces"], ["/some/other/workspace", workspace]
         )
+        self.assertNotIn("model", settings)
 
     def test_existing_settings_model_provider_still_set_for_api_key_auth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,19 +547,19 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             os.makedirs(cli_dir, exist_ok=True)
             settings_path = os.path.join(cli_dir, "settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump({"model": "old-model"}, f)
+                json.dump({}, f)
 
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
                 auth_method="api-key",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("model", settings)
         self.assertEqual(settings["modelProvider"], "gemini")
 
     def test_existing_settings_model_provider_absent_for_non_api_key_auth(self) -> None:
@@ -570,19 +572,19 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             os.makedirs(cli_dir, exist_ok=True)
             settings_path = os.path.join(cli_dir, "settings.json")
             with open(settings_path, "w", encoding="utf-8") as f:
-                json.dump({"model": "old-model"}, f)
+                json.dump({}, f)
 
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
                 auth_method="vertex-ai",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("model", settings)
         self.assertNotIn("modelProvider", settings)
 
     def test_malformed_existing_settings_model_provider_absent_for_non_api_key_auth(self) -> None:
@@ -599,14 +601,14 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             provision._prestage_onboarding(
                 tmp,
                 workspace=os.path.join(tmp, "workspace"),
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
                 auth_method="vertex-ai",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("model", settings)
         self.assertNotIn("modelProvider", settings)
 
     def test_non_utf8_existing_settings_falls_back_to_fresh_defaults(self) -> None:
@@ -626,14 +628,14 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             provision._prestage_onboarding(
                 tmp,
                 workspace=workspace,
-                model="new-model",
+                model="gemini-4-hydrogen-medium",
                 auth_method="vertex-ai",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "new-model")
+        self.assertNotIn("model", settings)
         self.assertNotIn("modelProvider", settings)
         self.assertIs(settings["onboardingComplete"], True)
         self.assertEqual(settings["trustedWorkspaces"], [workspace])
@@ -645,7 +647,7 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
         # exists to pre-stage so a headless agent skips AGY's interactive
         # onboarding/trust prompts. It should fall back to the same fresh
         # defaults the first-creation path writes, same as if the file never
-        # existed, with model (and modelProvider for api-key) applied on top.
+        # existed, with modelProvider for api-key applied on top.
         with tempfile.TemporaryDirectory() as tmp:
             cli_dir = os.path.join(tmp, ".gemini", "antigravity-cli")
             os.makedirs(cli_dir, exist_ok=True)
@@ -657,64 +659,147 @@ class SettingsJsonReprovisionTest(unittest.TestCase):
             provision._prestage_onboarding(
                 tmp,
                 workspace=workspace,
-                model="Gemini 3.8 Flash (Medium)",
+                model="gemini-4-hydrogen-medium",
                 auth_method="api-key",
             )
 
             with open(settings_path, "r", encoding="utf-8") as f:
                 settings = json.load(f)
 
-        self.assertEqual(settings["model"], "Gemini 3.8 Flash (Medium)")
+        self.assertNotIn("model", settings)
         self.assertEqual(settings["modelProvider"], "gemini")
         self.assertIs(settings["onboardingComplete"], True)
         self.assertEqual(settings["trustedWorkspaces"], [workspace])
 
 
 class ProvisionModelWiringTest(unittest.TestCase):
-    """Review round 4, O1: every model test above calls _resolve_model or
-    _prestage_onboarding directly, so none pins the provision() call site
-    that actually had the #2453 bug (harness_config.get("model") passed raw,
-    SCION_MODEL never read). Drive the real provision() entry point via the
-    existing _invoke harness and assert the resolved model lands in
-    settings.json. Verified by hand: reverting the provision() call site to
-    main's raw expression (ctx.harness_config.get("model") or
-    os.environ.get("AGY_MODEL", "") or FLASH_MODEL) makes this test fail
-    while the rest of the suite (which exercises _resolve_model and
-    _prestage_onboarding directly, not through provision()) still passes.
+    """Covers ptone/scion#2453, #9153, and #9679: drive the real provision()
+    entry point via _invoke and execute the generated agy-wrapper.sh against a
+    stub agy binary so we verify both:
+      1. The resolved model reaches agy via --model on argv when omitted by the
+         caller (default, SCION_MODEL, AGY_MODEL), while an explicit --model
+         passed on argv wins without duplication.
+      2. settings.json is never given a model ID in its "model" key (which agy
+         1.5.18 matches against display labels only).
     """
 
-    def test_scion_model_tier_lands_in_settings_json_via_provision(self) -> None:
+    def _run_wrapper(
+        self,
+        tmp: str,
+        wrapper_args: list[str],
+        *,
+        scion_model: str | None = None,
+        agy_model: str | None = None,
+        harness_config: dict[str, Any] | None = None,
+    ) -> tuple[list[str], dict[str, Any]]:
+        """Provision with vertex-ai (ADC, skips dbus/keyring) and execute
+        agy-wrapper.sh with stubbed agy, returning (agy_argv, settings_json)."""
+        if harness_config is None:
+            harness_config = {"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)}
+        with env_vars(
+            SCION_MODEL=scion_model,
+            AGY_MODEL=agy_model,
+            GOOGLE_CLOUD_PROJECT="test-proj",
+            GOOGLE_CLOUD_LOCATION="global",
+            GOOGLE_CLOUD_REGION=None,
+        ), unittest.mock.patch.object(provision, "_get_agy_version", return_value=(1, 5, 18)):
+            _invoke(
+                tmp,
+                env_vars=["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"],
+                explicit_type="vertex-ai",
+                harness_config=harness_config,
+            )
+
+        wrapper_path = os.path.join(tmp, ".scion", "harness", "agy-wrapper.sh")
+        check = subprocess.run(["bash", "-n", wrapper_path], capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, f"bash -n failed: {check.stderr}")
+
+        stub_bin = os.path.join(tmp, "stub-bin")
+        os.makedirs(stub_bin, exist_ok=True)
+        argv_out = os.path.join(tmp, "agy-argv.json")
+        stub_agy = os.path.join(stub_bin, "agy")
+        with open(stub_agy, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                f"with open({argv_out!r}, 'w', encoding='utf-8') as out:\n"
+                "    json.dump(sys.argv[1:], out)\n"
+            )
+        os.chmod(stub_agy, 0o755)
+
+        run_env = {
+            "PATH": stub_bin + os.pathsep + os.environ.get("PATH", ""),
+            "HOME": tmp,
+            "GOOGLE_CLOUD_PROJECT": "test-proj",
+            "GOOGLE_CLOUD_LOCATION": "global",
+        }
+        res = subprocess.run(
+            [wrapper_path, *wrapper_args],
+            env=run_env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"wrapper failed: {res.stderr}")
+        with open(argv_out, "r", encoding="utf-8") as f:
+            agy_argv = json.load(f)
+        settings_path = os.path.join(tmp, ".gemini", "antigravity-cli", "settings.json")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+        return agy_argv, settings
+
+    def test_unset_model_passes_default_medium_alias_on_argv_and_not_settings_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with env_vars(SCION_MODEL="large", AGY_MODEL=None):
-                _invoke(
-                    tmp,
-                    env_vars=[],
-                    explicit_type="none",
-                    harness_config={"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)},
-                )
+            argv, settings = self._run_wrapper(tmp, ["-prompt-interactive", "hello"])
+        self.assertNotIn("model", settings)
+        self.assertEqual(argv.count("--model"), 1)
+        idx = argv.index("--model")
+        self.assertEqual(argv[idx + 1], ANTIGRAVITY_MODEL_ALIASES["medium"])
+        self.assertNotEqual(argv[idx + 1], provision.FLASH_MODEL)
+        self.assertEqual(argv[-2:], ["-prompt-interactive", "hello"])
 
-            settings_path = os.path.join(tmp, ".gemini", "antigravity-cli", "settings.json")
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
-
-        self.assertEqual(settings["model"], "gemini-4-neon-medium")
-
-    def test_unset_model_defaults_to_medium_alias_via_provision(self) -> None:
+    def test_scion_model_tier_reaches_agy_via_wrapper_and_not_settings_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with env_vars(SCION_MODEL=None, AGY_MODEL=None):
-                _invoke(
-                    tmp,
-                    env_vars=[],
-                    explicit_type="none",
-                    harness_config={"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)},
-                )
+            argv, settings = self._run_wrapper(tmp, [], scion_model="large")
+        self.assertNotIn("model", settings)
+        self.assertEqual(argv.count("--model"), 1)
+        idx = argv.index("--model")
+        self.assertEqual(argv[idx + 1], "gemini-4-neon-medium")
 
-            settings_path = os.path.join(tmp, ".gemini", "antigravity-cli", "settings.json")
-            with open(settings_path, "r", encoding="utf-8") as f:
-                settings = json.load(f)
+    def test_explicit_caller_model_flag_wins_without_duplication(self) -> None:
+        for flag_args in (
+            ["--model", "user-model", "-prompt-interactive", "hi"],
+            ["--model=user-model", "-prompt-interactive", "hi"],
+            ["-model", "user-model", "-prompt-interactive", "hi"],
+            ["-model=user-model", "-prompt-interactive", "hi"],
+        ):
+            with self.subTest(flag_args=flag_args), tempfile.TemporaryDirectory() as tmp:
+                argv, settings = self._run_wrapper(tmp, flag_args)
+                self.assertNotIn("model", settings)
+                self.assertNotIn(ANTIGRAVITY_MODEL_ALIASES["medium"], argv)
+                self.assertEqual(argv[1:], flag_args)
 
-        self.assertEqual(settings["model"], ANTIGRAVITY_MODEL_ALIASES["medium"])
-        self.assertNotEqual(settings["model"], provision.FLASH_MODEL)
+    def test_model_flag_after_double_dash_still_injects_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            argv, _ = self._run_wrapper(tmp, ["--", "--model", "not-a-flag"])
+        self.assertEqual(argv[1:3], ["--model", ANTIGRAVITY_MODEL_ALIASES["medium"]])
+        self.assertEqual(argv[3:], ["--", "--model", "not-a-flag"])
+
+    def test_resume_without_model_flag_receives_default_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            argv, _ = self._run_wrapper(tmp, ["-continue"])
+        self.assertEqual(argv[1:3], ["--model", ANTIGRAVITY_MODEL_ALIASES["medium"]])
+        self.assertIn("-continue", argv)
+
+    def test_agy_model_env_fallback_reaches_agy_via_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            argv, settings = self._run_wrapper(tmp, [], agy_model="agy-operator-model")
+        self.assertNotIn("model", settings)
+        self.assertEqual(argv[1:3], ["--model", "agy-operator-model"])
+
+    def test_model_with_spaces_is_shell_quoted_as_single_argv_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            argv, _ = self._run_wrapper(tmp, [], scion_model="Gemini 4 Hydrogen (Medium)")
+        self.assertEqual(argv[1:3], ["--model", "Gemini 4 Hydrogen (Medium)"])
 
 
 
