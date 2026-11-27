@@ -927,6 +927,9 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 				setSuppress(v)
 			}
 			cfg.OnSuppressChanged = applySuppress
+			if cfg.IsSuppressed == nil && a.isSuppressed != nil {
+				cfg.IsSuppressed = a.isSuppressed
+			}
 			sink := NewHubUsageSink(hubOutbox, cfg)
 			a.native = NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 			a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
@@ -966,6 +969,9 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 			setSuppress(v)
 		}
 		cfg.OnSuppressChanged = applySuppress
+		if cfg.IsSuppressed == nil && a.isSuppressed != nil {
+			cfg.IsSuppressed = a.isSuppressed
+		}
 		sink := NewHubUsageSink(hubOutbox, cfg)
 		a.native = NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceNative)
 		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
@@ -1016,6 +1022,9 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 					setSuppress(v)
 				}
 				sink.cfg.OnSuppressChanged = applySuppress
+				if sink.cfg.IsSuppressed == nil && a.isSuppressed != nil {
+					sink.cfg.IsSuppressed = a.isSuppressed
+				}
 				if native != nil {
 					native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 				}

@@ -322,10 +322,11 @@ func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
 		agentHome, _ = os.UserHomeDir()
 	}
 	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
-		AgentHome:    agentHome,
-		WakeOwner:    p.analytics.owner,
-		Analytics:    p.analytics.sqliteNative,
-		SessionUsage: p.forwardSessionUsage,
+		AgentHome:      agentHome,
+		WakeOwner:      p.analytics.owner,
+		Analytics:      p.analytics.sqliteNative,
+		LoopbackConfig: p.loopbackConfig.Load(),
+		SessionUsage:   p.forwardSessionUsage,
 	})
 	if err := tailer.Start(ctx); err != nil {
 		return err
@@ -611,6 +612,21 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		cancel()
 		p.captureFinalUsage(deriver)
 	}
+	// Shut the Antigravity SQLite tailer down before intake/receiver close so
+	// its final PollOnce appends any last DB rows to the still-open analytics
+	// outbox AND flushes any buffered scion.usage.tokens increments over
+	// loopback into the still-open receiver before flushMetricsOnStop runs.
+	// Capture active status and drift latch before clearing agyTailer so the
+	// final health event and heartbeat remain accurate.
+	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		p.agyActiveAtStop.Store(true)
+		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
+		if tailer.SchemaDriftDetected() {
+			p.driftLatched.Store(true)
+		}
+	}
 
 	var errs []error
 	intakeDone := p.closeIntake()
@@ -712,21 +728,6 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	p.metricStateMu.Unlock()
 	if unconfirmed := p.spanDiagnostics.unconfirmed.Load() + p.metricDiagnostics.unconfirmed.Load() + p.logDiagnostics.unconfirmed.Load(); unconfirmed > 0 {
 		errs = append(errs, fmt.Errorf("telemetry delivery unconfirmed for %d admitted records", unconfirmed))
-	}
-
-	// Final bounded drain of the Antigravity SQLite tailer before stopping the
-	// analytics outbox drainer so any final DB rows flushed as agy exited are
-	// appended and drained to the Hub. Capture active status and drift latch
-	// before clearing agyTailer so the final health event and heartbeat remain
-	// accurate.
-	if tailer := p.agyTailer.Swap(nil); tailer != nil {
-		p.agyActiveAtStop.Store(true)
-		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
-		}
-		if tailer.SchemaDriftDetected() {
-			p.driftLatched.Store(true)
-		}
 	}
 
 	// Final bounded analytics drain while the exporter is still open.

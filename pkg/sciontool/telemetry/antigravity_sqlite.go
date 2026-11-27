@@ -35,6 +35,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/trajectory/agydecode"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
+	"go.opentelemetry.io/otel/attribute"
+	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -110,6 +112,13 @@ type AntigravitySQLiteConfig struct {
 	// Analytics receives canonical agent.usage events (calls=0 for tokens;
 	// drift sentinels with nil tokens on unverified/malformed decodes).
 	Analytics *UsageAnalytics
+	// LoopbackConfig, when set, constructs an in-process OTel MeterProvider
+	// targeting the pipeline's loopback receiver so AppendWritten token deltas
+	// are recorded on scion.usage.tokens (mirroring UsageDeriver). When direct
+	// OTel suppression is active, Pipeline.handleMetrics strips those counters
+	// and the Hub re-emits the stamped UsageEvents instead; when suppression is
+	// off, direct container export delivers them to Cloud Monitoring / OTLP.
+	LoopbackConfig *Config
 	// SessionUsage, when set, receives decoded token counts (calls=0) so
 	// session-level metrics stay in sync with the live tailer.
 	SessionUsage SessionUsageSink
@@ -185,6 +194,8 @@ type AntigravitySQLiteTailer struct {
 
 	wakeCh     chan struct{}
 	wakeCloser io.Closer
+	providers  *Providers
+	tokens     otelmetric.Int64Counter
 	cancel     context.CancelFunc
 	done       chan struct{}
 	started    bool
@@ -278,6 +289,25 @@ func (t *AntigravitySQLiteTailer) Start(ctx context.Context) error {
 		}
 	}
 
+	if t.cfg.LoopbackConfig != nil && t.providers == nil {
+		if providers, err := NewProviders(ctx, t.cfg.LoopbackConfig, false); err != nil {
+			log.Error("Antigravity SQLite tailer failed to create loopback OTel providers: %v", err)
+		} else if providers != nil && providers.MeterProvider != nil {
+			meter := providers.MeterProvider.Meter(usageMetricScope)
+			tokens, err := meter.Int64Counter(telemetrycontract.MetricUsageTokens,
+				otelmetric.WithUnit("{token}"),
+				otelmetric.WithDescription("Tokens attributed to model requests, derived from Antigravity SQLite usage"),
+			)
+			if err != nil {
+				log.Error("Antigravity SQLite tailer failed to create usage tokens counter: %v", err)
+				_ = providers.Shutdown(ctx)
+			} else {
+				t.providers = providers
+				t.tokens = tokens
+			}
+		}
+	}
+
 	if !t.cfg.DisableWakeSocket && t.cfg.WakePath != "" {
 		closer, err := startAgySQLiteWakeListener(t.cfg.WakePath, t.cfg.WakeOwner, t.TriggerWake)
 		if err != nil {
@@ -325,10 +355,29 @@ func (t *AntigravitySQLiteTailer) Stop(ctx context.Context) error {
 		select {
 		case <-done:
 		case <-ctx.Done():
+			t.shutdownProviders(ctx)
 			return ctx.Err()
 		}
 	}
-	return t.PollOnce(ctx)
+	pollErr := t.PollOnce(ctx)
+	t.shutdownProviders(ctx)
+	return pollErr
+}
+
+func (t *AntigravitySQLiteTailer) shutdownProviders(ctx context.Context) {
+	t.mu.Lock()
+	providers := t.providers
+	t.providers = nil
+	t.tokens = nil
+	t.mu.Unlock()
+	if providers == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+	defer cancel()
+	if err := providers.Shutdown(sctx); err != nil {
+		log.Error("Antigravity SQLite tailer OTel provider shutdown error: %v", err)
+	}
 }
 
 func (t *AntigravitySQLiteTailer) loop(ctx context.Context) {
@@ -392,8 +441,28 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+	var flushProviders *Providers
+	err := func() error {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		var recorded bool
+		err := t.pollOnceLocked(ctx, &recorded)
+		if recorded {
+			flushProviders = t.providers
+		}
+		return err
+	}()
+	if flushProviders != nil && flushProviders.MeterProvider != nil {
+		fctx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		if ferr := flushProviders.MeterProvider.ForceFlush(fctx); ferr != nil && ctx.Err() == nil {
+			log.Debug("Antigravity SQLite tailer OTel force flush error: %v", ferr)
+		}
+		cancel()
+	}
+	return err
+}
+
+func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool) error {
 
 	// Do not consume rows or advance persisted cursors when no analytics sink
 	// is configured (O2).
@@ -605,10 +674,13 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 				appendFailed = true
 				break
 			}
-			// Only accumulate session usage on an actual append, not on a
-			// replayed AppendCertainDuplicate (O5).
+			// Only accumulate session usage and OTel token counters on an actual
+			// append, never on a replayed AppendCertainDuplicate (O5, R1).
 			if outcome == AppendWritten {
 				accumulateSessionUsage(&sessionDelta, rec.Tokens)
+				if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
+					*otelRecorded = true
+				}
 			}
 		}
 		if appendFailed {
@@ -770,6 +842,32 @@ func agyRecordToObservation(rec agydecode.Record, agyVersion string, now time.Ti
 		}
 	}
 	return obs
+}
+
+func (t *AntigravitySQLiteTailer) recordOTelTokens(ctx context.Context, recModel string, tok *agydecode.TokenUsage) bool {
+	if t.tokens == nil || tok == nil {
+		return false
+	}
+	model := telemetrycontract.ResolveModelLabel(recModel, os.Getenv("SCION_MODEL"))
+	harness := os.Getenv("SCION_HARNESS")
+	baseTokenAttrs := contractLabelAttrs(telemetrycontract.UsageTokenPointAttrs(harness, model))
+	recorded := false
+	addToken := func(tokenType string, ptr *int64) {
+		if ptr == nil || *ptr <= 0 {
+			return
+		}
+		pointAttrs := make([]attribute.KeyValue, len(baseTokenAttrs), len(baseTokenAttrs)+1)
+		copy(pointAttrs, baseTokenAttrs)
+		pointAttrs = append(pointAttrs, attribute.String(telemetrycontract.TokenTypeLabel, tokenType))
+		t.tokens.Add(ctx, *ptr, otelmetric.WithAttributes(pointAttrs...))
+		recorded = true
+	}
+	addToken(telemetrycontract.TokenTypeInput, tok.Input)
+	addToken(telemetrycontract.TokenTypeOutput, tok.Output)
+	addToken(telemetrycontract.TokenTypeCacheRead, tok.CacheRead)
+	addToken(telemetrycontract.TokenTypeCacheWrite, tok.CacheWrite)
+	addToken(telemetrycontract.TokenTypeReasoning, tok.Reasoning)
+	return recorded
 }
 
 func accumulateSessionUsage(dst *SessionUsage, tok *agydecode.TokenUsage) {

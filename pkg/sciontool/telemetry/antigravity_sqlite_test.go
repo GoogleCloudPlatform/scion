@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1703,157 +1704,553 @@ func TestAntigravitySQLiteTailer_Rev4_BadDBDoesNotBlockBaselineForOtherDBs(t *te
 	}
 }
 
-func TestPipeline_AgySQLiteTailer_SuppressDirectOTel(t *testing.T) {
-	cases := []struct {
-		name     string
-		suppress bool
-	}{
-		{name: "suppression_active", suppress: true},
-		{name: "suppression_inactive", suppress: false},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Cleanup(SetTelemetryTestSandboxed())
-			setTestAgyEnv(t)
-			home := t.TempDir()
-			t.Setenv("HOME", home)
-			t.Setenv("SCION_USAGE_SOURCE", "")
-			if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
-				t.Fatalf("unset SCION_USAGE_SOURCE: %v", err)
-			}
-
-			addr, backend := startCaptureOTLPBackend(t)
-
-			var mu sync.Mutex
-			var gotReqs []telemetrycontract.UsageIngestRequest
-			cfg := &Config{
-				Enabled:      true,
-				CloudEnabled: true,
-				Endpoint:     addr,
-				Protocol:     "grpc",
-				Insecure:     true,
-				GRPCPort:     0,
-				HTTPPort:     0,
-			}
-			p := NewWithConfig(cfg)
-			p.SetAnalyticsOutbox(home, 0, 0)
-			p.SetHubUsageSink(HubUsageSinkConfig{
-				Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
-					mu.Lock()
-					gotReqs = append(gotReqs, req)
-					mu.Unlock()
-					return &telemetrycontract.UsageIngestResponse{
-						Accepted:           len(req.Events),
-						SuppressDirectOTel: tc.suppress,
-					}, nil
-				},
-				RunID:              "run-agy-suppress",
-				HubID:              "hub-test",
-				SuppressDirectOTel: tc.suppress,
-				DrainInterval:      20 * time.Millisecond,
-			})
-
-			ctx := context.Background()
-			if err := p.Start(ctx); err != nil {
-				t.Fatalf("Pipeline.Start: %v", err)
-			}
-
-			if got := p.SuppressDirectOTel(); got != tc.suppress {
-				t.Fatalf("SuppressDirectOTel() = %v, want %v", got, tc.suppress)
-			}
-
-			outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative)
-			if err != nil {
-				t.Fatalf("ActivateUsageSource: %v", err)
-			}
-			if outcome != UsageActivated {
-				t.Fatalf("ActivateUsageSource = %q, want %q", outcome, UsageActivated)
-			}
-			tailer := p.agyTailer.Load()
-			if tailer == nil {
-				t.Fatal("expected active agyTailer")
-			}
-			tailer.mu.Lock()
-			tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
-			tailer.mu.Unlock()
-
-			// Insert a conversation DB row after initial baseline and poll.
-			dbPath := filepath.Join(AgyConversationsDir(home), "conv-suppress.db")
-			db := createTestAgyDB(t, dbPath)
-			defer func() { _ = db.Close() }()
-			gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730000, testAgyUsage{
-				modelID: 1466, input: 500, output: 100, id11: "suppress-call-1",
-			})
-			if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
-				t.Fatalf("insert gen0: %v", err)
-			}
-			if err := tailer.PollOnce(ctx); err != nil {
-				t.Fatalf("tailer.PollOnce: %v", err)
-			}
-
-			// Feed a canonical counter metrics batch into handleMetrics to verify
-			// direct canonical counter export obeys SuppressDirectOTel.
-			if err := p.handleMetrics(ctx, testMixedMetricsBatch()); err != nil {
-				t.Fatalf("handleMetrics: %v", err)
-			}
-			if err := p.Stop(ctx); err != nil {
-				t.Fatalf("Pipeline.Stop: %v", err)
-			}
-
-			// Verify Hub received the sqlite_native event with matching DirectOTelSuppressed stamp.
-			mu.Lock()
-			reqs := append([]telemetrycontract.UsageIngestRequest(nil), gotReqs...)
-			mu.Unlock()
-			var matchedEv *telemetrycontract.UsageEvent
-			var matchedReq *telemetrycontract.UsageIngestRequest
-			for i := range reqs {
-				for j := range reqs[i].Events {
-					ev := &reqs[i].Events[j]
-					if ev.UsageSource == telemetrycontract.UsageSourceSQLiteNative && ev.Input != nil && *ev.Input == 500 {
-						matchedEv = ev
-						matchedReq = &reqs[i]
-						break
+// collectExportedAgyTokens extracts the latest cumulative value per token_type
+// for scion.usage.tokens (harness="antigravity") and counts any gen_ai.api.calls
+// exported to backend.
+func collectExportedAgyTokens(backend *captureOTLPBackend) (tokens map[string]int64, apiCalls int64) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	tokens = make(map[string]int64)
+	for _, rm := range backend.metrics {
+		for _, sm := range rm.GetScopeMetrics() {
+			for _, m := range sm.GetMetrics() {
+				switch m.GetName() {
+				case telemetrycontract.MetricAPICalls:
+					for _, dp := range m.GetSum().GetDataPoints() {
+						apiCalls += dp.GetAsInt()
 					}
-				}
-			}
-			if matchedEv == nil || matchedReq == nil {
-				t.Fatalf("expected Hub to receive sqlite_native event (input=500), got reqs=%+v", reqs)
-			}
-			evSuppressed := matchedEv.DirectOTelSuppressed != nil && *matchedEv.DirectOTelSuppressed
-			if evSuppressed != tc.suppress {
-				t.Fatalf("event.DirectOTelSuppressed = %v, want %v", evSuppressed, tc.suppress)
-			}
-			if matchedReq.DirectOTelSuppressed != tc.suppress {
-				t.Fatalf("req.DirectOTelSuppressed = %v, want %v", matchedReq.DirectOTelSuppressed, tc.suppress)
-			}
-
-			// Verify direct OTLP export of canonical counters is suppressed iff tc.suppress is true.
-			backend.mu.Lock()
-			var gotAPICalls, gotUsageTokens bool
-			for _, rm := range backend.metrics {
-				for _, sm := range rm.GetScopeMetrics() {
-					for _, m := range sm.GetMetrics() {
-						switch m.GetName() {
-						case telemetrycontract.MetricAPICalls:
-							gotAPICalls = true
-						case telemetrycontract.MetricUsageTokens:
-							gotUsageTokens = true
+				case telemetrycontract.MetricUsageTokens:
+					for _, dp := range m.GetSum().GetDataPoints() {
+						var harness, tokenType string
+						for _, kv := range dp.GetAttributes() {
+							switch kv.GetKey() {
+							case telemetrycontract.HarnessLabel:
+								harness = kv.GetValue().GetStringValue()
+							case telemetrycontract.TokenTypeLabel:
+								tokenType = kv.GetValue().GetStringValue()
+							}
+						}
+						if harness == "antigravity" && tokenType != "" {
+							if v := dp.GetAsInt(); v > tokens[tokenType] {
+								tokens[tokenType] = v
+							}
 						}
 					}
 				}
 			}
-			backend.mu.Unlock()
+		}
+	}
+	return tokens, apiCalls
+}
 
-			if tc.suppress {
-				if gotAPICalls || gotUsageTokens {
-					t.Fatalf("expected canonical counters suppressed from direct OTLP export, got api_calls=%v usage_tokens=%v", gotAPICalls, gotUsageTokens)
-				}
-			} else {
-				if !gotAPICalls || !gotUsageTokens {
-					t.Fatalf("expected canonical counters exported directly when suppression is off, got api_calls=%v usage_tokens=%v", gotAPICalls, gotUsageTokens)
+func TestPipeline_AgySQLiteTailer_SuppressDirectOTel(t *testing.T) {
+	// (a) Unsuppressed Hub sink: OTLP backend gets the tailer's scion.usage.tokens
+	// (no gen_ai.api.calls) and the Hub batch is unsuppressed.
+	t.Run("unsuppressed_hub_sink", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		var mu sync.Mutex
+		var gotReqs []telemetrycontract.UsageIngestRequest
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+		})
+		p.SetAnalyticsOutbox(home, 0, 0)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				mu.Lock()
+				gotReqs = append(gotReqs, req)
+				mu.Unlock()
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: false}, nil
+			},
+			RunID:              "run-agy-unsup",
+			HubID:              "hub-test",
+			SuppressDirectOTel: false,
+			DrainInterval:      20 * time.Millisecond,
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		if p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=false")
+		}
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-unsup.db"))
+		defer func() { _ = db.Close() }()
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730000, testAgyUsage{
+			modelID: 1466, input: 500, output: 100, cacheRead: 1200, reasoning: 40, id11: "unsup-call-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce: %v", err)
+		}
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		// Hub received unsuppressed sqlite_native event.
+		mu.Lock()
+		reqs := append([]telemetrycontract.UsageIngestRequest(nil), gotReqs...)
+		mu.Unlock()
+		var matchedReq *telemetrycontract.UsageIngestRequest
+		var matchedEv *telemetrycontract.UsageEvent
+		for i := range reqs {
+			for j := range reqs[i].Events {
+				if reqs[i].Events[j].UsageSource == telemetrycontract.UsageSourceSQLiteNative && reqs[i].Events[j].Input != nil && *reqs[i].Events[j].Input == 500 {
+					matchedReq = &reqs[i]
+					matchedEv = &reqs[i].Events[j]
+					break
 				}
 			}
+		}
+		if matchedReq == nil || matchedEv == nil {
+			t.Fatalf("expected Hub to receive sqlite_native event (in=500), got %+v", reqs)
+		}
+		if matchedReq.DirectOTelSuppressed || (matchedEv.DirectOTelSuppressed != nil && *matchedEv.DirectOTelSuppressed) {
+			t.Fatalf("expected unsuppressed Hub batch and event, got req=%v ev=%v", matchedReq.DirectOTelSuppressed, matchedEv.DirectOTelSuppressed)
+		}
+
+		// OTLP backend received the tailer's exact token deltas directly (and 0 api calls).
+		tokens, apiCalls := collectExportedAgyTokens(backend)
+		if apiCalls != 0 {
+			t.Fatalf("tailer must not emit gen_ai.api.calls, got %d", apiCalls)
+		}
+		if tokens[telemetrycontract.TokenTypeInput] != 500 ||
+			tokens[telemetrycontract.TokenTypeOutput] != 100 ||
+			tokens[telemetrycontract.TokenTypeCacheRead] != 1200 ||
+			tokens[telemetrycontract.TokenTypeReasoning] != 40 {
+			t.Fatalf("exported tailer tokens = %v, want input=500 output=100 cache_read=1200 reasoning=40", tokens)
+		}
+	})
+
+	// (b) Suppressed Hub sink: OTLP backend gets NO tailer tokens, Hub batch is
+	// suppressed, and heartbeats carry DirectOTelSuppressed=true.
+	t.Run("suppressed_hub_sink", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		var mu sync.Mutex
+		var gotReqs []telemetrycontract.UsageIngestRequest
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
 		})
-	}
+		p.SetAnalyticsOutbox(home, 0, 0)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				mu.Lock()
+				gotReqs = append(gotReqs, req)
+				mu.Unlock()
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: true}, nil
+			},
+			RunID:              "run-agy-sup",
+			HubID:              "hub-test",
+			SuppressDirectOTel: true,
+			DrainInterval:      20 * time.Millisecond,
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		if !p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=true")
+		}
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-sup.db"))
+		defer func() { _ = db.Close() }()
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730100, testAgyUsage{
+			modelID: 1466, input: 500, output: 100, id11: "sup-call-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce: %v", err)
+		}
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		mu.Lock()
+		reqs := append([]telemetrycontract.UsageIngestRequest(nil), gotReqs...)
+		mu.Unlock()
+		var matchedReq *telemetrycontract.UsageIngestRequest
+		var matchedEv *telemetrycontract.UsageEvent
+		var sawSuppressedHeartbeat bool
+		for i := range reqs {
+			if len(reqs[i].Events) == 0 && reqs[i].DirectOTelSuppressed {
+				sawSuppressedHeartbeat = true
+			}
+			for j := range reqs[i].Events {
+				if reqs[i].Events[j].UsageSource == telemetrycontract.UsageSourceSQLiteNative && reqs[i].Events[j].Input != nil && *reqs[i].Events[j].Input == 500 {
+					matchedReq = &reqs[i]
+					matchedEv = &reqs[i].Events[j]
+				}
+			}
+		}
+		if matchedReq == nil || matchedEv == nil {
+			t.Fatalf("expected Hub to receive sqlite_native event (in=500), got %+v", reqs)
+		}
+		if !matchedReq.DirectOTelSuppressed || matchedEv.DirectOTelSuppressed == nil || !*matchedEv.DirectOTelSuppressed {
+			t.Fatalf("expected suppressed Hub batch and event, got req=%v ev=%v", matchedReq.DirectOTelSuppressed, matchedEv.DirectOTelSuppressed)
+		}
+		if !sawSuppressedHeartbeat {
+			t.Fatalf("expected at least one heartbeat with DirectOTelSuppressed=true, got %+v", reqs)
+		}
+
+		tokens, apiCalls := collectExportedAgyTokens(backend)
+		if len(tokens) != 0 || apiCalls != 0 {
+			t.Fatalf("expected 0 direct OTLP tokens/calls while suppressed, got tokens=%v apiCalls=%d", tokens, apiCalls)
+		}
+	})
+
+	// (c) GCP-only before late SetHubProbe activation: row 1 exports directly to
+	// OTLP; after late Hub activation with suppress_direct_otel=true, row 2 is
+	// stamped suppressed for Hub and NOT exported directly.
+	t.Run("gcp_only_then_late_activation_with_suppression", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		var mu sync.Mutex
+		var gotReqs []telemetrycontract.UsageIngestRequest
+		var probeReady atomic.Bool
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+		})
+		p.SetAnalyticsOutbox(home, -1, -1)
+		p.SetHubIDResolver(func(context.Context) (string, error) { return "hub-late", nil })
+		p.SetHubUsageProbeInterval(5 * time.Millisecond)
+		p.SetHubUsageProbe(func(context.Context) (*HubUsageSinkConfig, error) {
+			if !probeReady.Load() {
+				return nil, errors.New("hub not ready yet")
+			}
+			return &HubUsageSinkConfig{
+				Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					mu.Lock()
+					gotReqs = append(gotReqs, req)
+					mu.Unlock()
+					return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: true}, nil
+				},
+				RunID:              "run-agy-late",
+				HubID:              "hub-late",
+				SuppressDirectOTel: true,
+				DrainInterval:      20 * time.Millisecond,
+			}, nil
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		// Enter GCP-only + hubProbe branch directly with a non-nil *GCPExporter stub.
+		p.analytics.startDrainer(ctx, &GCPExporter{})
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-late.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 1 while GCP-only (suppression off): must reach direct OTLP backend.
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730200, testAgyUsage{
+			modelID: 1466, input: 300, output: 60, id11: "late-call-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1: %v", err)
+		}
+		p.flushMetricsOnStop(ctx)
+		tokensBefore, _ := collectExportedAgyTokens(backend)
+		if tokensBefore[telemetrycontract.TokenTypeInput] != 300 || tokensBefore[telemetrycontract.TokenTypeOutput] != 60 {
+			t.Fatalf("before late activation exported tokens = %v, want input=300 output=60", tokensBefore)
+		}
+
+		// Enable late Hub activation with suppression=true and drive one
+		// deterministic drainer cycle (drainer's default ticker is 5s).
+		p.analytics.drainer.Stop(ctx)
+		probeReady.Store(true)
+		time.Sleep(10 * time.Millisecond)
+		p.analytics.drainer.RunOnce(ctx)
+		if !p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=true after late Hub activation")
+		}
+		// Restart drainer so row 2 drains cleanly on Pipeline.Stop.
+		p.analytics.drainer.Start(ctx)
+
+		// Row 2 while suppressed: must reach Hub stamped suppressed and NOT be exported directly.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730205, testAgyUsage{
+			modelID: 1466, input: 700, output: 140, id11: "late-call-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 2: %v", err)
+		}
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		mu.Lock()
+		reqs := append([]telemetrycontract.UsageIngestRequest(nil), gotReqs...)
+		mu.Unlock()
+		var gotRow2Suppressed bool
+		for _, r := range reqs {
+			for _, ev := range r.Events {
+				if ev.UsageSource == telemetrycontract.UsageSourceSQLiteNative && ev.Input != nil && *ev.Input == 700 &&
+					ev.DirectOTelSuppressed != nil && *ev.DirectOTelSuppressed && r.DirectOTelSuppressed {
+					gotRow2Suppressed = true
+				}
+			}
+		}
+		if !gotRow2Suppressed {
+			t.Fatalf("expected Hub to receive row 2 (in=700) stamped suppressed, got %+v", reqs)
+		}
+		tokensAfter, _ := collectExportedAgyTokens(backend)
+		if tokensAfter[telemetrycontract.TokenTypeInput] != 300 || tokensAfter[telemetrycontract.TokenTypeOutput] != 60 {
+			t.Fatalf("after late suppression exported tokens = %v, want unchanged input=300 output=60", tokensAfter)
+		}
+	})
+
+	// (d) Suppression revoked mid-run: row 1 is suppressed, Hub revokes (404),
+	// then row 2 is exported directly to OTLP.
+	t.Run("suppression_revoked_mid_run_then_direct_export", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		var revoke atomic.Bool
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+		})
+		p.SetAnalyticsOutbox(home, -1, -1)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				if revoke.Load() {
+					return nil, ErrUsageIngestRevoked
+				}
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: true}, nil
+			},
+			RunID:              "run-agy-rev",
+			HubID:              "hub-rev",
+			SuppressDirectOTel: true,
+			DrainInterval:      time.Hour,
+			HeartbeatInterval:  time.Millisecond,
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		if !p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=true initially")
+		}
+		// Switch analytics drainer to eager dual-sink with GCP stub so revocation
+		// keeps GCP analytics active while clearing Hub outbox and suppression.
+		p.analytics.drainer.Stop(ctx)
+		p.analytics.drainer = nil
+		p.analytics.startDrainer(ctx, &GCPExporter{})
+		p.analytics.drainer.Stop(ctx)
+
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 1 while suppressed: OTLP backend gets 0 tokens.
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730300, testAgyUsage{
+			modelID: 1466, input: 400, output: 80, id11: "rev-call-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1: %v", err)
+		}
+		p.flushMetricsOnStop(ctx)
+		if tokensBefore, _ := collectExportedAgyTokens(backend); len(tokensBefore) != 0 {
+			t.Fatalf("before revocation expected 0 direct tokens, got %v", tokensBefore)
+		}
+
+		// Revoke Hub sink (404) -> clears suppression.
+		revoke.Store(true)
+		time.Sleep(2 * time.Millisecond)
+		p.analytics.drainer.RunOnce(ctx)
+		if p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=false after Hub 404 revocation")
+		}
+
+		// Row 2 after revocation: must now export directly to OTLP backend.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730305, testAgyUsage{
+			modelID: 1466, input: 250, output: 50, id11: "rev-call-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 2: %v", err)
+		}
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		tokensAfter, apiCalls := collectExportedAgyTokens(backend)
+		if apiCalls != 0 {
+			t.Fatalf("tailer must not emit gen_ai.api.calls, got %d", apiCalls)
+		}
+		if tokensAfter[telemetrycontract.TokenTypeInput] < 250 || tokensAfter[telemetrycontract.TokenTypeOutput] < 50 {
+			t.Fatalf("after revocation expected direct OTLP tokens for row 2 (>=250/50), got %v", tokensAfter)
+		}
+	})
+
+	// (e) Crash between outbox append and state persist followed by replay must
+	// NOT double-count tokens in OTel (AppendCertainDuplicate skips OTel Add).
+	t.Run("crash_before_persist_replay_no_otel_double_count", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+		})
+		p.SetAnalyticsOutbox(home, 0, 0)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: false}, nil
+			},
+			RunID:              "run-agy-replay-otel",
+			HubID:              "hub-test",
+			SuppressDirectOTel: false,
+			DrainInterval:      20 * time.Millisecond,
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-replay-otel.db"))
+		defer func() { _ = db.Close() }()
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730400, testAgyUsage{
+			modelID: 1466, input: 600, output: 120, id11: "replay-otel-1",
+		})
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730405, testAgyUsage{
+			modelID: 1466, input: 400, output: 80, id11: "replay-otel-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?), (1, ?, ?)`, gen0, len(gen0), gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen0/gen1: %v", err)
+		}
+
+		// Fail 2nd append on poll 1 so record 0 is appended + OTel-recorded while
+		// state is NOT persisted (simulating crash/partial failure before persist).
+		callNum := 0
+		p.analytics.sqliteNative.setRunAndActivity("run-agy-replay-otel", func(time.Time) {
+			callNum++
+			if callNum == 2 {
+				_ = os.Setenv("SCION_AGENT_ID", "")
+			}
+		})
+		if err := tailer.PollOnce(ctx); err == nil {
+			t.Fatal("expected PollOnce to fail on 2nd record append")
+		}
+
+		// Restore agent identity and replay: record 0 hits AppendCertainDuplicate
+		// (must NOT re-add to OTel), record 1 hits AppendWritten (added once).
+		t.Setenv("SCION_AGENT_ID", "agent-agy-test")
+		p.analytics.sqliteNative.setRunAndActivity("run-agy-replay-otel", nil)
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("retry PollOnce: %v", err)
+		}
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		tokens, apiCalls := collectExportedAgyTokens(backend)
+		if apiCalls != 0 {
+			t.Fatalf("tailer must not emit gen_ai.api.calls, got %d", apiCalls)
+		}
+		if tokens[telemetrycontract.TokenTypeInput] != 1000 || tokens[telemetrycontract.TokenTypeOutput] != 200 {
+			t.Fatalf("exported tokens after replay = %v, want exact input=1000 output=200 (no double-count)", tokens)
+		}
+	})
 }

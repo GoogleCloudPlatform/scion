@@ -69,6 +69,9 @@ type HubUsageSinkConfig struct {
 	// response with resp.SuppressDirectOTel (an omitted field decodes as false
 	// and un-suppresses direct container export).
 	OnSuppressChanged func(bool)
+	// IsSuppressed reports the live direct-OTel suppression state so heartbeats
+	// carry the current DirectOTelSuppressed value for diagnostics.
+	IsSuppressed func() bool
 	// SchemaDriftDetected reports whether the producer has latched a schema
 	// drift condition (e.g. unknown harness version or malformed decode) and
 	// degraded to calls_only.
@@ -173,6 +176,13 @@ func (s *HubUsageSink) schemaDriftDetected() bool {
 		return false
 	}
 	return s.cfg.SchemaDriftDetected()
+}
+
+func (s *HubUsageSink) directOTelSuppressed() bool {
+	if s.cfg.IsSuppressed != nil {
+		return s.cfg.IsSuppressed()
+	}
+	return s.cfg.SuppressDirectOTel
 }
 
 func (s *HubUsageSink) ledgerMeta() (epoch string, seq int64) {
@@ -391,6 +401,7 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
+		DirectOTelSuppressed: s.directOTelSuppressed(),
 		SchemaDriftDetected:  s.schemaDriftDetected(),
 		FinalState:           finalState,
 	}
