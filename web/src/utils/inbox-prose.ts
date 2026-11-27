@@ -166,14 +166,73 @@ export function formatInboxProseSegments(
         projects
       );
 
-    case 'reviews':
-      if (count <= 0) return 'nothing';
-      return [
-        {
-          text: formatCountNoun(count, capped, 'pending review', 'pending reviews'),
-          link: 'primary',
-        },
-      ];
+    case 'reviews': {
+      const hasToAddress = breakdown !== undefined && typeof breakdown.toAddress === 'number';
+      const hasRequested = breakdown !== undefined && typeof breakdown.requested === 'number';
+      const hasDrafts = breakdown !== undefined && typeof breakdown.drafts === 'number';
+      if (!hasToAddress && !hasRequested && !hasDrafts) {
+        if (count <= 0) return 'nothing';
+        return [
+          {
+            text: formatCountNoun(count, capped, 'pending review', 'pending reviews'),
+            link: 'primary',
+          },
+        ];
+      }
+      const toAddress = breakdown?.toAddress ?? 0;
+      const requested = breakdown?.requested ?? 0;
+      const drafts = breakdown?.drafts ?? 0;
+      const explicitToAddressCapped = (breakdown?.toAddressCapped ?? 0) > 0;
+      const explicitRequestedCapped = (breakdown?.requestedCapped ?? 0) > 0;
+      const hasExplicitCap = explicitToAddressCapped || explicitRequestedCapped;
+      const toAddressCapped = explicitToAddressCapped || (capped && !hasExplicitCap);
+      const requestedCapped = explicitRequestedCapped || (capped && !hasExplicitCap);
+      const draftsCapped = (breakdown?.draftsCapped ?? 0) > 0;
+
+      const segments: ProseSegment[] = [];
+      let hasClause = false;
+      if (toAddress > 0) {
+        segments.push({
+          text: formatCountNoun(
+            toAddress,
+            toAddressCapped,
+            'review to address',
+            'reviews to address'
+          ),
+          link: 'reviews-to-address',
+        });
+        hasClause = true;
+      }
+      if (requested > 0) {
+        if (hasClause) {
+          appendUnlinked(segments, ', ');
+        }
+        segments.push({
+          text: formatCountNoun(
+            requested,
+            requestedCapped,
+            'review requested',
+            'reviews requested'
+          ),
+          link: 'reviews-requested',
+        });
+        hasClause = true;
+      }
+      if (drafts > 0) {
+        if (hasClause) {
+          appendUnlinked(segments, ', ');
+        }
+        segments.push({
+          text: formatCountNoun(drafts, draftsCapped, 'unfinished draft', 'unfinished drafts'),
+          link: 'reviews-drafts',
+        });
+        hasClause = true;
+      }
+      if (!hasClause) {
+        return 'nothing';
+      }
+      return segments;
+    }
 
     case 'chat': {
       const unread =

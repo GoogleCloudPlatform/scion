@@ -158,7 +158,7 @@ describe('<scion-page-profile-inbox>', () => {
       reviews: makeCat({
         count: 3,
         href: '/artifacts?review_on_latest=1&owner=me',
-        breakdown: { toAddress: 2, requested: 1 },
+        breakdown: { toAddress: 2, requested: 1, drafts: 4 },
       }),
       chat: makeCat({
         count: 5,
@@ -261,9 +261,17 @@ describe('<scion-page-profile-inbox>', () => {
     checkCard('waiting', 'Agents Waiting', '2', '2 agents waiting in 1 project', [
       { text: '2 agents waiting', href: '/agents?q=activity%3Awaiting_for_input' },
     ]);
-    checkCard('reviews', 'Reviews', '3', '3 pending reviews', [
-      { text: '3 pending reviews', href: '/artifacts?review_on_latest=1&owner=me' },
-    ]);
+    checkCard(
+      'reviews',
+      'Artifact Reviews',
+      '3',
+      '2 reviews to address, 1 review requested, 4 unfinished drafts',
+      [
+        { text: '2 reviews to address', href: '/artifacts?review_on_latest=1&owner=me' },
+        { text: '1 review requested', href: '/artifacts?requested=1' },
+        { text: '4 unfinished drafts', href: '/artifacts?drafts=1' },
+      ]
+    );
     checkCard(
       'chat',
       'Chat',
@@ -276,21 +284,17 @@ describe('<scion-page-profile-inbox>', () => {
       ]
     );
 
-    // AC-16: Phase 3 chat filter links are active; no rendered link targets Phase 4 unhydrated reviews filter routes.
-    const allLinks = Array.from(page.shadowRoot?.querySelectorAll('a[href]') ?? []);
-    for (const a of allLinks) {
-      const href = a.getAttribute('href') ?? '';
-      expect(href).not.toContain('requested=1');
-      expect(href).not.toContain('drafts=1');
-    }
+    // AC-16: Phase 3 chat and Phase 4 reviews filter links are active; reviews-to-address resolves via hub primary href.
     expect(Object.keys(INBOX_LINK_HREFS).sort()).toEqual([
       'chat-mentions',
       'chat-starred',
       'chat-unread',
+      'reviews-drafts',
+      'reviews-requested',
     ]);
     expect(INBOX_LINK_HREFS['reviews-to-address']).toBeUndefined();
-    expect(INBOX_LINK_HREFS['reviews-requested']).toBeUndefined();
-    expect(INBOX_LINK_HREFS['reviews-drafts']).toBeUndefined();
+    expect(INBOX_LINK_HREFS['reviews-requested']).toBe('/artifacts?requested=1');
+    expect(INBOX_LINK_HREFS['reviews-drafts']).toBe('/artifacts?drafts=1');
   });
 
   it('hides disabled cards, renders unavailable sign-in note, error Retry, and Nothing Waiting with no links when 0', async () => {
@@ -596,5 +600,126 @@ describe('<scion-page-profile-inbox>', () => {
     await page3.updateComplete;
 
     expect(page3.shadowRoot?.querySelector('[data-inbox-card="secrets"]')).toBeNull();
+  });
+
+  it('renders Artifact Reviews drafts-only without badge (AC-10), hides drafts when gated off (AC-13), and applies per-clause caps', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const draftsOnly = makeSummary({
+      reviews: makeCat({
+        count: 0,
+        capped: false,
+        href: '/artifacts?review_on_latest=1&owner=me',
+        breakdown: { toAddress: 0, requested: 0, drafts: 3 },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(draftsOnly), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
+    expect(reviewsCard?.querySelector('.card-title')?.textContent?.trim()).toBe('Artifact Reviews');
+    expect(reviewsCard?.querySelector('[data-card-descriptor]')?.textContent?.trim()).toBe(
+      'Reviews on your artifacts, review requests for you, and your unfinished drafts'
+    );
+    expect(reviewsCard?.querySelector('[data-card-count]')).toBeNull();
+    expect(reviewsCard?.querySelector('[data-card-empty]')).toBeNull();
+    expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '3 unfinished drafts'
+    );
+    const draftsOnlyLinks = Array.from(
+      reviewsCard?.querySelectorAll('a.card-prose-link') ?? []
+    ) as HTMLAnchorElement[];
+    expect(
+      draftsOnlyLinks.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
+    ).toEqual([{ text: '3 unfinished drafts', href: '/artifacts?drafts=1' }]);
+
+    // AC-13: when drafts key is omitted (hub.artifacts_review_drafts off), no drafts number or link renders.
+    const draftsGateOff = makeSummary({
+      reviews: makeCat({
+        count: 3,
+        capped: false,
+        href: '/artifacts?review_on_latest=1&owner=me',
+        breakdown: { toAddress: 2, requested: 1 },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(draftsGateOff), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+
+    expect(reviewsCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('3');
+    expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '2 reviews to address, 1 review requested'
+    );
+    const gateOffLinks = Array.from(
+      reviewsCard?.querySelectorAll('a.card-prose-link') ?? []
+    ) as HTMLAnchorElement[];
+    expect(
+      gateOffLinks.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
+    ).toEqual([
+      { text: '2 reviews to address', href: '/artifacts?review_on_latest=1&owner=me' },
+      { text: '1 review requested', href: '/artifacts?requested=1' },
+    ]);
+
+    // AC-10: draftsCapped renders N+ on drafts clause only, never on badge or other clauses.
+    const cappedDrafts = makeSummary({
+      reviews: makeCat({
+        count: 2,
+        capped: false,
+        href: '/artifacts?review_on_latest=1&owner=me',
+        breakdown: { toAddress: 1, requested: 1, drafts: 500, draftsCapped: 1 },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(cappedDrafts), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+
+    expect(reviewsCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('2');
+    expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '1 review to address, 1 review requested, 500+ unfinished drafts'
+    );
+
+    // Per-clause cap on toAddress only leaves requested exact.
+    const cappedToAddressOnly = makeSummary({
+      reviews: makeCat({
+        count: 502,
+        capped: true,
+        href: '/artifacts?review_on_latest=1&owner=me',
+        breakdown: { toAddress: 500, toAddressCapped: 1, requested: 2 },
+      }),
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(cappedToAddressOnly), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    inboxSummaryStore.requestRefresh({ immediate: true, force: true });
+    await flush();
+    await page.updateComplete;
+
+    expect(reviewsCard?.querySelector('[data-card-count]')?.textContent?.trim()).toBe('502+');
+    expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '500+ reviews to address, 2 reviews requested'
+    );
   });
 });

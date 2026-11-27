@@ -31,6 +31,7 @@
  *      Page 1 and Page 2 without reloading.
  */
 
+import { createHash } from 'node:crypto';
 import { test, expect } from '@playwright/test';
 import { createTestAgent, type AgentSender } from '../harness/agent.js';
 import { createSession, type AuthSession } from '../harness/auth.js';
@@ -449,6 +450,209 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         'true'
       );
       await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
+
+      expect(pageErrors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test('Artifact Reviews card renders to-address, requested and drafts links, live-updates on draft create/delete without changing badge total, and hydrates /artifacts filters (Phase 4 AC-9, AC-10)', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      baseURL: hub.baseURL,
+      storageState: user.storageStatePath,
+    });
+    const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on('pageerror', (err) => pageErrors.push(err.message));
+
+    const publishArtifact = async (
+      token: string,
+      opts: {
+        artifactId?: string;
+        title?: string;
+        kind?: 'publish' | 'review';
+        bodyText: string;
+      }
+    ): Promise<{ id: string; seq: number }> => {
+      const data = Buffer.from(opts.bodyText, 'utf-8');
+      const sha256 = createHash('sha256').update(data).digest('hex');
+      const req: Record<string, unknown> = {
+        entry: 'doc.md',
+        files: [{ path: 'doc.md', size: data.length, sha256 }],
+      };
+      if (opts.title) req.title = opts.title;
+      if (opts.kind) req.kind = opts.kind;
+      if (!opts.artifactId) req.scope = projectId;
+
+      const created = await hubApi<{
+        artifact: { id: string };
+        version: { seq: number };
+        upload: { required?: string[] };
+      }>(
+        hub,
+        token,
+        'POST',
+        opts.artifactId
+          ? `/api/v1/artifacts/${encodeURIComponent(opts.artifactId)}/versions`
+          : '/api/v1/artifacts',
+        req
+      );
+      expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
+      const { id } = created.body.artifact;
+      const { seq } = created.body.version;
+      for (const path of created.body.upload.required ?? []) {
+        const upRes = await fetch(
+          `${hub.baseURL}/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/files/${encodeURIComponent(path)}`,
+          {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/octet-stream',
+              'X-Content-SHA256': sha256,
+            },
+            body: data,
+            signal: AbortSignal.timeout(15_000),
+          }
+        );
+        expect(upRes.status, await upRes.text()).toBeLessThan(300);
+      }
+      const fin = await hubApi(
+        hub,
+        token,
+        'POST',
+        `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/finalize`,
+        opts.kind === 'review' ? { base: 1 } : undefined
+      );
+      expect(fin.status, JSON.stringify(fin.body)).toBeLessThan(300);
+      return { id, seq };
+    };
+
+    try {
+      const stamp = Date.now();
+      const ownedTitle = `Owned Reviewed Doc ${stamp}`;
+      const requestedTitle = `Requested Review Doc ${stamp}`;
+
+      // 1. User owns an artifact with a submitted review on latest -> toAddress = 1.
+      const owned = await publishArtifact(user.accessToken, {
+        title: ownedTitle,
+        bodyText: '# Owned doc\nInitial version.\n',
+      });
+      await publishArtifact(user.accessToken, {
+        artifactId: owned.id,
+        kind: 'review',
+        bodyText: '# Owned doc\nInitial version.{>>Looks good with minor edits<<}\n',
+      });
+
+      // 2. Dev admin publishes an artifact in the project and requests review from user -> requested = 1.
+      const reqArt = await publishArtifact(hub.devToken, {
+        title: requestedTitle,
+        bodyText: '# Requested doc\nPlease review.\n',
+      });
+      const reqRes = await hubApi(
+        hub,
+        hub.devToken,
+        'POST',
+        `/api/v1/artifacts/${encodeURIComponent(reqArt.id)}/review-requests`,
+        { reviewers: [`user:${user.user.id}`], note: 'Please check' }
+      );
+      expect(reqRes.status, JSON.stringify(reqRes.body)).toBe(200);
+
+      // Open /profile/inbox and verify Artifact Reviews card with toAddress=1, requested=1 (drafts=0 dropped).
+      await page.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+      const reviewsCard = page.locator('[data-inbox-card="reviews"]');
+      await expect(reviewsCard).toBeVisible({ timeout: 15_000 });
+      await expect(reviewsCard.locator('.card-title')).toHaveText('Artifact Reviews');
+      await expect(reviewsCard.locator('[data-card-count]')).toHaveText('2', { timeout: 10_000 });
+      await expect(reviewsCard.locator('[data-card-prose]')).toHaveText(
+        '1 review to address, 1 review requested',
+        { timeout: 10_000 }
+      );
+      await expect(
+        reviewsCard.locator('a[data-card-prose-link="reviews-to-address"]')
+      ).toHaveAttribute('href', '/artifacts?review_on_latest=1&owner=me');
+      await expect(
+        reviewsCard.locator('a[data-card-prose-link="reviews-requested"]')
+      ).toHaveAttribute('href', '/artifacts?requested=1');
+      await expect(reviewsCard.locator('a[data-card-prose-link="reviews-drafts"]')).toHaveCount(0);
+
+      // Plant sentinel to verify draft create/delete live-updates via SSE without page reload.
+      await page.evaluate(() => {
+        (window as unknown as { __reviewsSentinel?: string }).__reviewsSentinel = 'alive';
+      });
+
+      // 3. Save a review draft -> live update adds "1 unfinished draft" without changing badge count 2 (AC-10).
+      const putDraftRes = await hubApi(
+        hub,
+        user.accessToken,
+        'PUT',
+        `/api/v1/artifacts/${encodeURIComponent(reqArt.id)}/review-draft`,
+        {
+          rev: 0,
+          base: 1,
+          entry: 'doc.md',
+          body: '# Requested doc\nPlease review.{>>WIP note<<}\n',
+        }
+      );
+      expect(putDraftRes.status, JSON.stringify(putDraftRes.body)).toBe(200);
+
+      await expect(reviewsCard.locator('[data-card-prose]')).toHaveText(
+        '1 review to address, 1 review requested, 1 unfinished draft',
+        { timeout: 7_000 }
+      );
+      await expect(reviewsCard.locator('a[data-card-prose-link="reviews-drafts"]')).toHaveAttribute(
+        'href',
+        '/artifacts?drafts=1'
+      );
+      await expect(reviewsCard.locator('[data-card-count]')).toHaveText('2');
+
+      const sentinel = await page.evaluate(
+        () => (window as unknown as { __reviewsSentinel?: string }).__reviewsSentinel
+      );
+      expect(sentinel).toBe('alive');
+
+      // 4. Verify each of the three links hydrates the /artifacts list with its matching 1 artifact (AC-9).
+      const checkArtifactsLink = async (
+        linkKey: string,
+        expectedTitle: string,
+        unexpectedTitle: string
+      ): Promise<void> => {
+        await page.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+        const link = page.locator(
+          `[data-inbox-card="reviews"] a[data-card-prose-link="${linkKey}"]`
+        );
+        await expect(link).toBeVisible({ timeout: 15_000 });
+        await link.click();
+        const artifactsPage = page.locator('scion-page-artifacts');
+        await expect(artifactsPage).toBeVisible({ timeout: 15_000 });
+        await expect(artifactsPage).toContainText(expectedTitle, { timeout: 15_000 });
+        await expect(artifactsPage).not.toContainText(unexpectedTitle);
+      };
+
+      await checkArtifactsLink('reviews-to-address', ownedTitle, requestedTitle);
+      await checkArtifactsLink('reviews-requested', requestedTitle, ownedTitle);
+      await checkArtifactsLink('reviews-drafts', requestedTitle, ownedTitle);
+
+      // 5. Delete the draft -> live update removes the drafts clause without reload.
+      await page.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
+      await expect(reviewsCard.locator('[data-card-prose]')).toHaveText(
+        '1 review to address, 1 review requested, 1 unfinished draft',
+        { timeout: 10_000 }
+      );
+      const delDraftRes = await hubApi(
+        hub,
+        user.accessToken,
+        'DELETE',
+        `/api/v1/artifacts/${encodeURIComponent(reqArt.id)}/review-draft`
+      );
+      expect(delDraftRes.status, JSON.stringify(delDraftRes.body)).toBe(204);
+      await expect(reviewsCard.locator('[data-card-prose]')).toHaveText(
+        '1 review to address, 1 review requested',
+        { timeout: 7_000 }
+      );
+      await expect(reviewsCard.locator('a[data-card-prose-link="reviews-drafts"]')).toHaveCount(0);
 
       expect(pageErrors).toEqual([]);
     } finally {

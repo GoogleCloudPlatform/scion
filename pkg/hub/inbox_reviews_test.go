@@ -1092,9 +1092,15 @@ func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
 	assert.Equal(t, legacyNotifID, fallbackPreviews[0].NotificationID)
 }
 
-// TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly verifies that
-// inboxReviewsCategory sets Capped=true when only the requested bucket or only
-// the drafts bucket hits the maxListScan (500) budget while ToAddress is empty.
+// TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly verifies per-clause
+// cap semantics for inboxReviewsCategory (AC-10):
+//   - when only requested hits the maxListScan (500) budget while ToAddress is
+//     exact, category Capped and TotalCapped are true and only requestedCapped=1
+//     is set in Breakdown;
+//   - when only drafts hits the budget while toAddress and requested are exact
+//     (both 0 and non-zero), category Capped and TotalCapped stay false (drafts
+//     are informational and never affect the badge total) and only draftsCapped=1
+//     is set in Breakdown.
 func TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly(t *testing.T) {
 	srv, s := testServer(t)
 	st := enableInboxAndArtifacts(t, srv)
@@ -1137,10 +1143,16 @@ func TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly(t *testing.T) {
 	revReqCap := respReqCap.Categories[InboxCategoryReviews]
 	assert.Equal(t, InboxStateOK, revReqCap.State)
 	assert.True(t, revReqCap.Capped, "category Capped must be true when only requested is capped")
+	assert.True(t, respReqCap.TotalCapped, "summary TotalCapped must be true when requested is capped")
 	assert.Equal(t, 0, revReqCap.Breakdown[InboxBreakdownToAddress])
 	assert.Equal(t, 500, revReqCap.Breakdown[InboxBreakdownRequested])
+	assert.Equal(t, 1, revReqCap.Breakdown[InboxBreakdownRequestedCapped])
+	_, hasToAddrCap := revReqCap.Breakdown[InboxBreakdownToAddressCapped]
+	assert.False(t, hasToAddrCap, "toAddressCapped must be omitted when toAddress is not capped")
+	_, hasDraftsCap := revReqCap.Breakdown[InboxBreakdownDraftsCapped]
+	assert.False(t, hasDraftsCap, "draftsCapped must be omitted when drafts gate is off")
 
-	// 2. Only drafts is capped (toAddress=0, requests gate off with 0 legacy notifications).
+	// 2. Only drafts is capped with toAddress=0 and requested=0 (requests gate off, 0 legacy notifications).
 	for i, id := range artIDs {
 		ts := base.Add(time.Duration(i) * time.Second)
 		_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
@@ -1162,8 +1174,38 @@ func TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly(t *testing.T) {
 	respDraftCap := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
 	revDraftCap := respDraftCap.Categories[InboxCategoryReviews]
 	assert.Equal(t, InboxStateOK, revDraftCap.State)
-	assert.True(t, revDraftCap.Capped, "category Capped must be true when only drafts is capped")
+	assert.Equal(t, 0, revDraftCap.Count)
+	assert.Equal(t, 0, respDraftCap.Total)
+	assert.False(t, revDraftCap.Capped, "category Capped must stay false when only drafts is capped (AC-10)")
+	assert.False(t, respDraftCap.TotalCapped, "summary TotalCapped must stay false when only drafts is capped (AC-10)")
 	assert.Equal(t, 0, revDraftCap.Breakdown[InboxBreakdownToAddress])
 	assert.Equal(t, 0, revDraftCap.Breakdown[InboxBreakdownRequested])
 	assert.Equal(t, 500, revDraftCap.Breakdown[InboxBreakdownDrafts])
+	assert.Equal(t, 1, revDraftCap.Breakdown[InboxBreakdownDraftsCapped])
+	_, hasToAddrCap = revDraftCap.Breakdown[InboxBreakdownToAddressCapped]
+	assert.False(t, hasToAddrCap)
+	_, hasReqCap := revDraftCap.Breakdown[InboxBreakdownRequestedCapped]
+	assert.False(t, hasReqCap)
+
+	// 3. Drafts capped with exact non-zero toAddress (1) and requested (1):
+	// Count and Total are exact (2), Capped and TotalCapped remain false, and
+	// only draftsCapped=1 is set.
+	seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, viewer.ID, "My Reviewed Doc", artifacts.VersionKindReview, base.Add(time.Hour))
+	seedReviewRequestNotification(t, s, viewer.ID, p1.ID, artIDs[0], "Author", base.Add(time.Hour), false)
+
+	respExactPlusDraftCap := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
+	revExactPlusDraftCap := respExactPlusDraftCap.Categories[InboxCategoryReviews]
+	assert.Equal(t, InboxStateOK, revExactPlusDraftCap.State)
+	assert.Equal(t, 2, revExactPlusDraftCap.Count)
+	assert.Equal(t, 2, respExactPlusDraftCap.Total)
+	assert.False(t, revExactPlusDraftCap.Capped, "exact toAddress and requested with capped drafts must keep Capped false (AC-10)")
+	assert.False(t, respExactPlusDraftCap.TotalCapped, "exact toAddress and requested with capped drafts must keep TotalCapped false (AC-10)")
+	assert.Equal(t, 1, revExactPlusDraftCap.Breakdown[InboxBreakdownToAddress])
+	assert.Equal(t, 1, revExactPlusDraftCap.Breakdown[InboxBreakdownRequested])
+	assert.Equal(t, 500, revExactPlusDraftCap.Breakdown[InboxBreakdownDrafts])
+	assert.Equal(t, 1, revExactPlusDraftCap.Breakdown[InboxBreakdownDraftsCapped])
+	_, hasToAddrCap = revExactPlusDraftCap.Breakdown[InboxBreakdownToAddressCapped]
+	assert.False(t, hasToAddrCap)
+	_, hasReqCap = revExactPlusDraftCap.Breakdown[InboxBreakdownRequestedCapped]
+	assert.False(t, hasReqCap)
 }

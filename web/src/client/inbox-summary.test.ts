@@ -175,7 +175,7 @@ describe('InboxSummaryStore', () => {
     );
     await vi.advanceTimersByTimeAsync(300);
     stateManager.dispatchEvent(
-      new CustomEvent('inbox-changed', { detail: { category: 'pending_secrets' } })
+      new CustomEvent('inbox-changed', { detail: { category: 'reviews' } })
     );
     await vi.advanceTimersByTimeAsync(300);
     window.dispatchEvent(new CustomEvent(PENDING_SECRETS_CHANGED_EVENT, { detail: {} }));
