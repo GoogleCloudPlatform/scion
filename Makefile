@@ -714,7 +714,8 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestCustomDefaultUserRole_ConcurrentFirstSignIn_Postgres \
 	TestTriggers_ConcurrentCaps_Postgres \
 	TestWebhookIngress_ConcurrentPendingCap_Postgres \
-	TestNeverSuspend_QuotaConcurrencyAndIsolation_Postgres
+	TestNeverSuspend_QuotaConcurrencyAndIsolation_Postgres \
+	TestConduitHA_DeliverCrossNode
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
