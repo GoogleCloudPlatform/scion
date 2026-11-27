@@ -132,6 +132,10 @@ type AntigravitySQLiteConfig struct {
 	Debounce time.Duration
 	// PollInterval is the fallback periodic poll interval (default 15s).
 	PollInterval time.Duration
+	// ShutdownPollTimeout bounds the final synchronous PollOnce executed by
+	// Stop so a slow or blocked SQLite read cannot consume the caller's entire
+	// shutdown deadline (default usageDeriverFlushTimeout = 5s).
+	ShutdownPollTimeout time.Duration
 	// MaxDedupeRoots caps retained canonical roots in DedupeState via LRU
 	// pruning (default agydecode.DefaultMaxDedupeRoots).
 	MaxDedupeRoots int
@@ -224,6 +228,9 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = defaultAgySQLitePollInterval
+	}
+	if cfg.ShutdownPollTimeout <= 0 {
+		cfg.ShutdownPollTimeout = usageDeriverFlushTimeout
 	}
 	if cfg.MaxDedupeRoots <= 0 {
 		cfg.MaxDedupeRoots = agydecode.DefaultMaxDedupeRoots
@@ -364,7 +371,13 @@ func (t *AntigravitySQLiteTailer) Stop(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	pollErr := t.PollOnce(ctx)
+	pollTimeout := t.cfg.ShutdownPollTimeout
+	if pollTimeout <= 0 {
+		pollTimeout = usageDeriverFlushTimeout
+	}
+	pollCtx, pollCancel := context.WithTimeout(ctx, pollTimeout)
+	pollErr := t.PollOnce(pollCtx)
+	pollCancel()
 	t.shutdownProviders(ctx)
 	return pollErr
 }

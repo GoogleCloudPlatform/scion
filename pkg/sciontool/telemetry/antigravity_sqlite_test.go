@@ -2702,3 +2702,55 @@ func TestAntigravitySQLiteTailer_RevocationCursorCommit(t *testing.T) {
 		}
 	})
 }
+
+func TestAntigravitySQLiteTailer_StopBoundsFinalPollTimeout(t *testing.T) {
+	setTestAgyEnv(t)
+	origTimeout := usageDeriverFlushTimeout
+	usageDeriverFlushTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { usageDeriverFlushTimeout = origTimeout })
+
+	home := t.TempDir()
+	seedEmptyAgyState(t, home)
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-stop-bound.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795740000, testAgyUsage{
+		modelID: 1466, input: 100, output: 20, id11: "stop-bound-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+		t.Fatalf("insert gen0: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		PollInterval:      time.Hour,
+		DetectVersion: func(ctx context.Context) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	})
+	if err := tailer.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	stopErr := tailer.Stop(parentCtx)
+	elapsed := time.Since(start)
+
+	if !errors.Is(stopErr, context.DeadlineExceeded) {
+		t.Fatalf("Stop err = %v, want context.DeadlineExceeded", stopErr)
+	}
+	if parentCtx.Err() != nil {
+		t.Fatalf("Stop consumed the entire parent shutdown deadline (elapsed=%s, parentCtx.Err=%v)", elapsed, parentCtx.Err())
+	}
+}
