@@ -490,7 +490,9 @@ export class ScionAgentTrajectoryPanel extends LitElement {
           size="small"
           variant="default"
           ?loading=${this.loading}
-          @click=${() => void this.loadSegments()}
+          @click=${(): void => {
+            void this.loadSegments();
+          }}
           data-testid="trajectory-refresh-btn"
         >
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -502,7 +504,13 @@ export class ScionAgentTrajectoryPanel extends LitElement {
         ? html`
             <div class="error-state" data-testid="trajectory-download-error" role="alert">
               <span>${this.downloadError}</span>
-              <sl-button size="small" variant="default" @click=${() => (this.downloadError = null)}>
+              <sl-button
+                size="small"
+                variant="default"
+                @click=${(): void => {
+                  this.downloadError = null;
+                }}
+              >
                 Dismiss
               </sl-button>
             </div>
@@ -519,7 +527,13 @@ export class ScionAgentTrajectoryPanel extends LitElement {
           ? html`
               <div class="error-state" data-testid="trajectory-error" role="alert">
                 <span>${this.error}</span>
-                <sl-button size="small" variant="default" @click=${() => void this.loadSegments()}>
+                <sl-button
+                  size="small"
+                  variant="default"
+                  @click=${(): void => {
+                    void this.loadSegments();
+                  }}
+                >
                   Retry
                 </sl-button>
               </div>
@@ -602,7 +616,9 @@ export class ScionAgentTrajectoryPanel extends LitElement {
                                                   ?disabled=${this.downloadingSegmentId !== null &&
                                                   this.downloadingSegmentId !== seg.segment_id}
                                                   data-testid="trajectory-download-btn"
-                                                  @click=${() => void this.handleDownload(seg)}
+                                                  @click=${(): void => {
+                                                    void this.handleDownload(seg);
+                                                  }}
                                                 >
                                                   <sl-icon slot="prefix" name="download"></sl-icon>
                                                   Download
@@ -631,7 +647,9 @@ export class ScionAgentTrajectoryPanel extends LitElement {
                           variant="default"
                           ?loading=${this.loadingMore}
                           data-testid="trajectory-load-more-btn"
-                          @click=${() => void this.loadSegments(this.nextCursor)}
+                          @click=${(): void => {
+                            void this.loadSegments(this.nextCursor);
+                          }}
                         >
                           Load more segments
                         </sl-button>

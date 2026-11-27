@@ -421,7 +421,7 @@ The `hub-admin` role is at revision 16 (and `super-admin` is at revision 17). Re
 
 - **Built-in roles:** granted to `project-owner` (revision 19), `project-admin` (revision 17), `hub-admin` (revision 21), and `super-admin` (revision 22). Never bundled into `agent.read`, `project-member`, `project-viewer`, or `project-visitor`.
 - **Mandatory read audit:** every segment download issues a short-lived signed GET URL (5 minutes) and synchronously records a `trajectory_segment_read` audit row before the URL is returned.
-- **UAT scope:** `project:trajectory_read` (project or hub boundary).
+- **Sign-in only:** `project.trajectory.read` has no user access token (UAT) selector in P5; UATs are refused (`403`).
 
 ### Admin-managed Runtime Brokers (`broker.manage`)
 

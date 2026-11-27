@@ -114,43 +114,48 @@ func (s *Server) signTrajectoryDownloadURL(agentID, segmentID, kind, objectPath 
 	return prefix + expPart + skillFileSigParam + "=" + url.QueryEscape(sig), nil
 }
 
-// verifyTrajectoryDownloadSignature validates the HMAC capability query
-// parameters on GET /api/v1/agents/{id}/trajectory/segments/{segment_id}/content.
-func (s *Server) verifyTrajectoryDownloadSignature(r *http.Request, agentID, segmentID, kind, objectPath string, now time.Time) bool {
+// parseTrajectoryDownloadSigParams validates the query parameter shape, expiry,
+// and base64url encoding of a trajectory download capability URL without
+// reading from the store, so unsigned or expired requests fail identically with
+// 403 regardless of whether the target segment exists.
+func (s *Server) parseTrajectoryDownloadSigParams(r *http.Request, now time.Time) (kid string, exp int64, sig []byte, ok bool) {
 	if !s.downloadKeys.configured() {
-		return false
+		return "", 0, nil, false
 	}
 	q := r.URL.Query()
 	if len(q[skillFileSigParam]) != 1 || len(q[skillFileExpParam]) != 1 {
-		return false
+		return "", 0, nil, false
 	}
 	kv, hasKV := q[skillFileVersionParam]
 	kids, hasKid := q[skillFileKeyIDParam]
-	kid := ""
 	switch {
 	case !hasKV && !hasKid:
 	case len(kv) == 1 && len(kids) == 1 && kv[0] == skillFileVersion2 && capabilityKeyIDPattern.MatchString(kids[0]):
 		kid = kids[0]
 	default:
-		return false
+		return "", 0, nil, false
 	}
 	expStr := q.Get(skillFileExpParam)
 	exp, err := strconv.ParseInt(expStr, 10, 64)
 	if err != nil || strconv.FormatInt(exp, 10) != expStr {
-		return false
+		return "", 0, nil, false
 	}
 	nowUnix := now.Unix()
 	if nowUnix > exp {
-		return false
+		return "", 0, nil, false
 	}
 	maxTTL := s.trajectoryDownloadURLTTLDuration() + trajectoryDownloadURLClockSkew
 	if exp > nowUnix+int64(maxTTL/time.Second) {
-		return false
+		return "", 0, nil, false
 	}
-	got, err := base64.RawURLEncoding.Strict().DecodeString(q.Get(skillFileSigParam))
+	sig, err = base64.RawURLEncoding.Strict().DecodeString(q.Get(skillFileSigParam))
 	if err != nil {
-		return false
+		return "", 0, nil, false
 	}
+	return kid, exp, sig, true
+}
+
+func (s *Server) matchTrajectoryDownloadMAC(kid string, exp int64, got []byte, agentID, segmentID, kind, objectPath string) bool {
 	for _, k := range s.downloadKeys.candidates(kid) {
 		var want []byte
 		if kid == "" {
@@ -288,6 +293,7 @@ func (s *Server) handleAgentTrajectorySegmentsList(w http.ResponseWriter, r *htt
 
 	q := r.URL.Query()
 	filter := store.TrajectorySegmentListFilter{
+		ProjectID:          agent.ProjectID,
 		AgentID:            agent.ID,
 		RunID:              strings.TrimSpace(q.Get("run_id")),
 		NativeRelativePath: strings.TrimSpace(q.Get("native_relative_path")),
@@ -578,18 +584,13 @@ func (s *Server) handleAgentTrajectorySegmentContentRead(w http.ResponseWriter, 
 		return
 	}
 
-	ctx := r.Context()
-	seg, err := s.store.GetTrajectorySegment(ctx, segmentID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			NotFound(w, "Trajectory segment")
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if seg == nil || seg.AgentID != id || seg.Status != telemetrycontract.TrajectorySegmentStatusCommitted {
-		NotFound(w, "Trajectory segment")
+	// Validate signature shape, expiry, and kind BEFORE looking up the segment
+	// so unsigned, malformed, or expired requests return an identical 403
+	// whether or not the segment exists (no existence oracle).
+	kid, exp, gotSig, ok := s.parseTrajectoryDownloadSigParams(r, s.trajectoryNow())
+	if !ok {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Invalid or expired trajectory download signature", nil)
 		return
 	}
 
@@ -597,6 +598,29 @@ func (s *Server) handleAgentTrajectorySegmentContentRead(w http.ResponseWriter, 
 	if kind == "" {
 		kind = trajectoryDownloadKindSegment
 	}
+	if kind != trajectoryDownloadKindSegment && kind != trajectoryDownloadKindManifest {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Invalid or expired trajectory download signature", nil)
+		return
+	}
+
+	ctx := r.Context()
+	seg, err := s.store.GetTrajectorySegment(ctx, segmentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Invalid or expired trajectory download signature", nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if seg == nil || seg.AgentID != id || seg.Status != telemetrycontract.TrajectorySegmentStatusCommitted {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Invalid or expired trajectory download signature", nil)
+		return
+	}
+
 	var objectPath, contentType string
 	switch kind {
 	case trajectoryDownloadKindSegment:
@@ -604,18 +628,15 @@ func (s *Server) handleAgentTrajectorySegmentContentRead(w http.ResponseWriter, 
 		contentType = trajectoryContentTypeGzip
 	case trajectoryDownloadKindManifest:
 		if seg.ManifestPath == "" {
-			NotFound(w, "Trajectory segment manifest")
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Invalid or expired trajectory download signature", nil)
 			return
 		}
 		objectPath = seg.ManifestPath
 		contentType = trajectoryContentTypeJSON
-	default:
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Invalid trajectory download kind", nil)
-		return
 	}
 
-	if !s.verifyTrajectoryDownloadSignature(r, id, seg.ID, kind, objectPath, s.trajectoryNow()) {
+	if !s.matchTrajectoryDownloadMAC(kid, exp, gotSig, id, seg.ID, kind, objectPath) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Invalid or expired trajectory download signature", nil)
 		return

@@ -279,7 +279,8 @@ var Registry = []Permission{
 	// project.trajectory.read governs Track 2 raw trajectory segment listing
 	// and signed downloads (ptone/scion#9250). Never bundled into agent.read or
 	// member/viewer roles; downloads write a mandatory read-audit row.
-	{ID: "project.trajectory.read", Resource: ResourceProject, Action: ActionTrajectoryRead, CapabilityKind: CapabilityResource, UATScope: "project:trajectory_read", Description: "List and download unredacted Track 2 raw agent trajectory segments for a project (audit-logged; project owner/admin or hub admin)", Enforcement: []string{"pkg/hub/handlers_trajectory_read.go"}},
+	// Session-only in P5 (no UATScope); UAT delegation is deferred to P7.
+	{ID: "project.trajectory.read", Resource: ResourceProject, Action: ActionTrajectoryRead, CapabilityKind: CapabilityResource, Description: "List and download unredacted Track 2 raw agent trajectory segments for a project (audit-logged; project owner/admin or hub admin)", Enforcement: []string{"pkg/hub/handlers_trajectory_read.go"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},

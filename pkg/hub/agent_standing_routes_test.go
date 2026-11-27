@@ -624,6 +624,13 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 	// Explicit ResponseCredential routes that do not admit agent tokens at all
 	// (every entry is behaviorally probed below with an active agent token).
 	nonAgentCallableCredentialRoutes := map[string]nonAgentCredentialRoute{
+		"GET /api/v1/agents/{id}/trajectory/segments/{segmentId}/download": {
+			reason: "user-only audit-logged trajectory download; refuses agent tokens",
+			method: http.MethodGet,
+			path: func(f *standingCoverageFixture) string {
+				return "/api/v1/agents/" + f.agentA.ID + "/trajectory/segments/seg-1/download"
+			},
+		},
 		"POST /api/v1/agents/{id}/workspace/sync-from": {
 			reason: "user/broker-only workspace sync; refuses agent tokens",
 			method: http.MethodPost,

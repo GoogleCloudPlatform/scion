@@ -266,27 +266,17 @@ func TestTrajectoryRead_AuthzMatrixAndReadAudit(t *testing.T) {
 	require.Equal(t, http.StatusOK, doTrajectoryUserGet(t, srv, dlPath, hubAdminTok).Code)
 	assert.Len(t, listTrajectoryReadAudits(t, s, segID), 3)
 
-	// 7. Scoped UATs: project:trajectory_read succeeds; agent:read-only UAT is refused.
-	uatReadOnly, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminA.ID), CreateTokenParams{
+	// 7. Scoped UATs are refused (session-only in P5; project.trajectory.read has no UATScope).
+	uatAdmin, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminA.ID), CreateTokenParams{
 		UserID:   adminA.ID,
-		Name:     "traj-uat-agent-read-only",
+		Name:     "traj-uat-admin-session-only",
 		Boundary: projectBoundary(projA.ID),
-		Scopes:   []string{"agent:read"},
+		Scopes:   []string{"agent:read", "project:read"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, listPath, uatReadOnly).Code)
-	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, dlPath, uatReadOnly).Code)
-
-	uatTraj, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminA.ID), CreateTokenParams{
-		UserID:   adminA.ID,
-		Name:     "traj-uat-read",
-		Boundary: projectBoundary(projA.ID),
-		Scopes:   []string{"project:trajectory_read"},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, doTrajectoryUserGet(t, srv, listPath, uatTraj).Code)
-	assert.Equal(t, http.StatusOK, doTrajectoryUserGet(t, srv, dlPath, uatTraj).Code)
-	assert.Len(t, listTrajectoryReadAudits(t, s, segID), 4)
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, listPath, uatAdmin).Code)
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, dlPath, uatAdmin).Code)
+	assert.Len(t, listTrajectoryReadAudits(t, s, segID), 3)
 }
 
 func TestTrajectoryRead_ExperimentOffReturns404(t *testing.T) {
@@ -338,13 +328,18 @@ func (f *trajectoryAuditFailStore) CreateMutationAudit(ctx context.Context, r *s
 }
 
 func TestTrajectoryRead_AuditFailureBlocksDownload(t *testing.T) {
-	srv, s, _, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
+	srv, s, loc, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
 	_, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *trajectoryAuditFailStore {
 		return &trajectoryAuditFailStore{Store: inner, fault: sw}
 	})
 
 	segID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
 		".claude/projects/-workspace/sess-audit-fail.jsonl", 0, 0, []byte("{\"audit\":\"required\"}\n"))
+
+	// Swap in the GCS storage double to prove GenerateSignedURL is never even
+	// invoked when the mandatory read-audit write fails (strict audit-before-sign).
+	fakeGCS := &fakeGCSSignedGetStorage{Storage: loc}
+	srv.SetStorage(fakeGCS)
 
 	adminA := createTrajectoryTestUserWithRole(t, s, "audit-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
 	adminTok := trajectoryUserSessionToken(t, srv, adminA)
@@ -354,6 +349,7 @@ func TestTrajectoryRead_AuditFailureBlocksDownload(t *testing.T) {
 	dlRec := doTrajectoryUserGet(t, srv, telemetrycontract.TrajectorySegmentDownloadAgentPath(agentA.ID, segID), adminTok)
 	assert.Equal(t, http.StatusInternalServerError, dlRec.Code)
 	assert.NotContains(t, dlRec.Body.String(), "sig=", "must not issue a signed URL when audit write fails")
+	assert.Zero(t, fakeGCS.signCalls, "GenerateSignedURL must not be called when audit write fails")
 }
 
 func TestTrajectoryRead_LocalHMACDownloadEndToEnd(t *testing.T) {
@@ -409,18 +405,113 @@ func TestTrajectoryRead_LocalHMACDownloadEndToEnd(t *testing.T) {
 	_, expectedRawSHA, _ := gzipAndHash(t, raw)
 	assert.Equal(t, expectedRawSHA, manifest.RawSHA256)
 
-	// 3. Unsigned GET /content is rejected even with admin bearer token (cannot bypass audit).
-	unsignedContent := telemetrycontract.TrajectorySegmentContentAgentPath(agentA.ID, segID)
-	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, unsignedContent, adminTok).Code)
+	// 3. Unsigned GET /content returns identical 403 for a real segment and a
+	// random non-existent UUID (no existence oracle, and cannot bypass audit).
+	unsignedReal := telemetrycontract.TrajectorySegmentContentAgentPath(agentA.ID, segID)
+	unsignedMissing := telemetrycontract.TrajectorySegmentContentAgentPath(agentA.ID, api.NewUUID())
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, unsignedReal, adminTok).Code)
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, unsignedMissing, adminTok).Code)
 
-	// 4. Tampered signature is rejected.
+	// 4. Tampered signature returns identical 403 for real and non-existent segments.
 	tampered := strings.Replace(segURL.RequestURI(), "sig=", "sig=AAAA", 1)
+	tamperedMissing := strings.Replace(tampered, segID, api.NewUUID(), 1)
 	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, tampered, "").Code)
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, tamperedMissing, "").Code)
 
 	// 5. Signed URL expires after TTL.
 	now = now.Add(6 * time.Minute)
 	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, segURL.RequestURI(), "").Code)
 	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, manURL.RequestURI(), "").Code)
+}
+
+func TestTrajectoryRead_CapabilityReplayProtection(t *testing.T) {
+	srv, s, _, projA, agentA, agentTok := setupTrajectorySegmentFixture(t)
+
+	raw1 := []byte("{\"seg\":1}\n")
+	raw2 := []byte("{\"seg\":2}\n")
+	seg1ID, gz1 := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+		".claude/projects/-workspace/sess-replay.jsonl", 0, 0, raw1)
+	seg2ID, _ := commitSampleTrajectorySegment(t, srv, agentA.ID, agentTok,
+		".claude/projects/-workspace/sess-replay.jsonl", 0, int64(len(raw1)), raw2)
+
+	adminA := createTrajectoryTestUserWithRole(t, s, "replay-admin@example.com", store.ProjectRoleAdmin, store.RoleScopeProject, projA.ID)
+	adminTok := trajectoryUserSessionToken(t, srv, adminA)
+
+	// Issue a valid download URL (segment + manifest) for seg1.
+	dlRec := doTrajectoryUserGet(t, srv,
+		telemetrycontract.TrajectorySegmentDownloadAgentPath(agentA.ID, seg1ID)+"?include_manifest=true", adminTok)
+	require.Equal(t, http.StatusOK, dlRec.Code, dlRec.Body.String())
+	var dlResp telemetrycontract.TrajectorySegmentDownloadResponse
+	require.NoError(t, json.Unmarshal(dlRec.Body.Bytes(), &dlResp))
+	require.NotNil(t, dlResp.Manifest)
+
+	seg1URL, err := url.Parse(dlResp.URL)
+	require.NoError(t, err)
+	man1URL, err := url.Parse(dlResp.Manifest.URL)
+	require.NoError(t, err)
+
+	// 1. Segment-ID swap: seg1 download capability replayed against seg2 -> 403.
+	swappedSegPath := telemetrycontract.TrajectorySegmentContentAgentPath(agentA.ID, seg2ID) + "?" + seg1URL.RawQuery
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, swappedSegPath, "").Code)
+
+	// 2. kind=manifest swap: segment capability with kind=manifest -> 403,
+	//    and manifest capability with kind=manifest stripped -> 403.
+	segAsManifest := seg1URL.Path + "?" + seg1URL.RawQuery + "&kind=manifest"
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, segAsManifest, "").Code)
+	manQ := man1URL.Query()
+	manQ.Del("kind")
+	manAsSeg := man1URL.Path + "?" + manQ.Encode()
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, manAsSeg, "").Code)
+
+	// 3. Download capability replayed as PUT upload (without and with agent token).
+	putNoTok := httptest.NewRequest(http.MethodPut, seg1URL.RequestURI(), bytes.NewReader(gz1))
+	putNoTokRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putNoTokRec, putNoTok)
+	assert.Equal(t, http.StatusUnauthorized, putNoTokRec.Code)
+
+	putWithTok := httptest.NewRequest(http.MethodPut, seg1URL.RequestURI(), bytes.NewReader(gz1))
+	putWithTok.Header.Set("X-Scion-Agent-Token", agentTok)
+	putWithTokRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putWithTokRec, putWithTok)
+	assert.Equal(t, http.StatusForbidden, putWithTokRec.Code)
+
+	// 4. Upload capability (from segments:prepare) replayed as GET download
+	//    (without and with agent token) -> 403.
+	raw3 := []byte("{\"seg\":3}\n")
+	gz3, raw3SHA, comp3SHA := gzipAndHash(t, raw3)
+	prepRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agentA.ID), agentTok,
+		telemetrycontract.TrajectorySegmentPrepareRequest{
+			Harness:            "claude",
+			NativeRelativePath: ".claude/projects/-workspace/sess-replay.jsonl",
+			ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+			Generation:         0,
+			ByteStart:          int64(len(raw1) + len(raw2)),
+			ByteEnd:            int64(len(raw1) + len(raw2) + len(raw3)),
+			RawSHA256:          raw3SHA,
+			CompressedSize:     int64(len(gz3)),
+			CompressedSHA256:   comp3SHA,
+			ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
+		})
+	require.Equal(t, http.StatusOK, prepRec.Code, prepRec.Body.String())
+	var prepResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(prepRec.Body.Bytes(), &prepResp))
+	uploadURL, err := url.Parse(prepResp.Upload.URL)
+	require.NoError(t, err)
+
+	// Replay upload capability as GET against both the pending segment and a committed segment.
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, uploadURL.RequestURI(), "").Code)
+	getWithAgentTok := httptest.NewRequest(http.MethodGet, uploadURL.RequestURI(), nil)
+	getWithAgentTok.Header.Set("X-Scion-Agent-Token", agentTok)
+	getWithAgentTokRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getWithAgentTokRec, getWithAgentTok)
+	assert.Equal(t, http.StatusForbidden, getWithAgentTokRec.Code)
+
+	uploadQueryOnCommitted := telemetrycontract.TrajectorySegmentContentAgentPath(agentA.ID, seg1ID) + "?" + uploadURL.RawQuery
+	assert.Equal(t, http.StatusForbidden, doTrajectoryUserGet(t, srv, uploadQueryOnCommitted, "").Code)
+
+	// Confirm the audit count stayed at exactly 1 (only the legitimate download).
+	assert.Len(t, listTrajectoryReadAudits(t, s, seg1ID), 1)
 }
 
 func TestTrajectoryRead_ListFiltersAndPagination(t *testing.T) {
@@ -470,13 +561,15 @@ func TestTrajectoryRead_ListFiltersAndPagination(t *testing.T) {
 
 type fakeGCSSignedGetStorage struct {
 	storage.Storage
-	lastPath string
-	lastOpts storage.SignedURLOptions
+	signCalls int
+	lastPath  string
+	lastOpts  storage.SignedURLOptions
 }
 
 func (f *fakeGCSSignedGetStorage) Provider() storage.Provider { return storage.ProviderGCS }
 
 func (f *fakeGCSSignedGetStorage) GenerateSignedURL(_ context.Context, objectPath string, opts storage.SignedURLOptions) (*storage.SignedURL, error) {
+	f.signCalls++
 	f.lastPath = objectPath
 	f.lastOpts = opts
 	return &storage.SignedURL{

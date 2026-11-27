@@ -482,6 +482,9 @@ func (s *TrajectorySegmentStore) ListCommittedTrajectorySegments(ctx context.Con
 			trajectorysegment.AgentIDEQ(filter.AgentID),
 			trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusCommitted),
 		)
+	if filter.ProjectID != "" {
+		q = q.Where(trajectorysegment.ProjectIDEQ(filter.ProjectID))
+	}
 	if filter.RunID != "" {
 		q = q.Where(trajectorysegment.RunIDEQ(filter.RunID))
 	}

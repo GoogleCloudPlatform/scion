@@ -150,9 +150,6 @@ var expectedSelectorRegistry = map[string][]string{
 	// Project System One instance allowlist (owner/admin rule applies on top).
 	"project:manage_system_one_instances": {"project.manage_system_one_instances"},
 
-	// Track 2 raw trajectory segment read access (project owner/admin or hub admin; audit-logged).
-	"project:trajectory_read": {"project.trajectory.read"},
-
 	// scheduled_event selectors (reads, cancellation, pause and authoring).
 	"scheduled_event:delete": {"scheduled_event.delete"},
 	"scheduled_event:list":   {"scheduled_event.list"},

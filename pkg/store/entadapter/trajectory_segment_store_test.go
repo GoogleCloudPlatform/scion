@@ -386,9 +386,10 @@ func TestTrajectorySegmentStore_ListCommittedFiltersAndPaging(t *testing.T) {
 	assert.Equal(t, s3.ID, page2[0].ID)
 	assert.Equal(t, s4.ID, page2[1].ID)
 
-	// Filters by run_id, generation, native_relative_path.
+	// Filters by project_id, run_id, generation, native_relative_path.
 	gen1 := 1
 	filtered, moreF, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		ProjectID:          "proj-1",
 		AgentID:            "agent-1",
 		RunID:              "run-1",
 		Generation:         &gen1,
@@ -399,4 +400,14 @@ func TestTrajectorySegmentStore_ListCommittedFiltersAndPaging(t *testing.T) {
 	assert.False(t, moreF)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, s3.ID, filtered[0].ID)
+
+	// Mismatched ProjectID returns empty.
+	wrongProj, moreWP, err := cs.ListCommittedTrajectorySegments(ctx, store.TrajectorySegmentListFilter{
+		ProjectID: "proj-other",
+		AgentID:   "agent-1",
+		Limit:     10,
+	})
+	require.NoError(t, err)
+	assert.False(t, moreWP)
+	assert.Empty(t, wrongProj)
 }

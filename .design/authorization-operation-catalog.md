@@ -42,8 +42,8 @@
 - [agent.trajectory.segments.prepare](#agenttrajectorysegmentsprepare) — Prepare a Track 2 raw trajectory segment upload and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.commit](#agenttrajectorysegmentscommit) — Verify and commit a prepared Track 2 raw trajectory segment and write its Hub-authored manifest for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.content](#agenttrajectorysegmentscontent) — Upload raw trajectory segment bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
-- [project.trajectory.segments.list](#projecttrajectorysegmentslist) — List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
-- [project.trajectory.segments.download](#projecttrajectorysegmentsdownload) — Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+- [project.trajectory.segments.list](#projecttrajectorysegmentslist) — List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
+- [project.trajectory.segments.download](#projecttrajectorysegmentsdownload) — Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
 - [agent.trajectory.segments.content.read](#agenttrajectorysegmentscontentread) — Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
@@ -1872,7 +1872,7 @@
 
 **Domain:** project
 
-**Description:** List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+**Description:** List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
 
 ### Entry Points
 
@@ -1882,9 +1882,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.trajectory.read`
 
@@ -1892,7 +1892,7 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_insufficient`
 
 ### Tests
 
@@ -1904,7 +1904,7 @@
 
 **Domain:** project
 
-**Description:** Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+**Description:** Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project; session-only in P5)
 
 ### Entry Points
 
@@ -1914,9 +1914,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+**Bearer:** `session_only` (reason `GOV_PENDING`)
 
 **Base Permission:** `project.trajectory.read`
 
@@ -1924,7 +1924,7 @@
 
 **Effects:** `read-one`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `credential_insufficient`
 
 ### Tests
 

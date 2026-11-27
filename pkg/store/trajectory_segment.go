@@ -137,6 +137,7 @@ type TrajectorySegmentStore interface {
 
 // TrajectorySegmentListFilter scopes committed trajectory segment listing for an agent.
 type TrajectorySegmentListFilter struct {
+	ProjectID          string
 	AgentID            string
 	RunID              string
 	Generation         *int
