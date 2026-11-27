@@ -621,16 +621,23 @@ func (s *UsageLedgerStore) backfillActiveRunAttributionsPaged(ctx context.Contex
 
 // upsertMeterHealthTx performs a race-safe monotonic upsert of meter_health
 // inside IngestUsageBatch's transaction. The Hub is the sole authority on
-// sequence gaps and contiguity: (existingMax, maxSeq] minus receivedSeqs is
-// always added to missing_ranges, and last_contiguous_seq advances strictly
-// through receivedSeqs.
+// sequence gaps and contiguity: (existingMax, maxSeq] minus
+// (receivedSeqs ∪ rejectedSeqs) is added to missing_ranges, rejectedSeqs are
+// tracked separately in rejected_ranges/rejected_count so Hub-rejected events
+// are never misclassified as lost data gaps, and last_contiguous_seq advances
+// strictly through accounted (received or rejected) sequences.
+//
+// Returns the merged (supportedSignals, schemaDriftDetected) state for this
+// (agent_id, run_id, producer_epoch) so scope-counter accounting in the same
+// transaction can evaluate companion token-metering state without an extra query.
 func (s *UsageLedgerStore) upsertMeterHealthTx(
 	ctx context.Context,
 	client *ent.Client,
 	mh *store.MeterHealth,
 	anomalousDelta int64,
 	receivedSeqs []int64,
-) error {
+	rejectedSeqs []int64,
+) ([]string, bool, error) {
 	lastReceipt := mh.LastReceiptAt
 	if lastReceipt.IsZero() {
 		lastReceipt = time.Now()
@@ -665,13 +672,20 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 
 	existing, err := queryExisting()
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 
 	if existing == nil {
-		initContig, initMax, initMissing, coalesced := advanceIngestSeqState(0, 0, nil, mh.MaxSeqSeen, receivedSeqs)
-		if coalesced {
+		initContig, initMax, initMissing, initRejCount, initRejRanges, missingCoalesced, rejectedCoalesced := advanceIngestSeqState(
+			0, 0, nil, 0, nil, mh.MaxSeqSeen, receivedSeqs, rejectedSeqs,
+		)
+		if missingCoalesced {
 			slog.Warn("meter_health: missing_ranges exceeded cap; conservatively coalesced adjacent gaps",
+				"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
+				"cap", maxMeterHealthMissingRanges, "max_seq_seen", initMax)
+		}
+		if rejectedCoalesced {
+			slog.Warn("meter_health: rejected_ranges exceeded cap; conservatively coalesced adjacent ranges",
 				"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
 				"cap", maxMeterHealthMissingRanges, "max_seq_seen", initMax)
 		}
@@ -684,6 +698,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 			SetLastReceiptAt(lastReceipt).
 			SetLastContiguousSeq(initContig).
 			SetMaxSeqSeen(initMax).
+			SetRejectedCount(initRejCount).
 			SetNillableLastSourceActivityAt(lastSourceActivity).
 			SetAnomalousCount(anomalousDelta).
 			SetSchemaDriftDetected(mh.SchemaDriftDetected).
@@ -692,6 +707,9 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 		if len(initMissing) > 0 {
 			b = b.SetMissingRanges(initMissing)
 		}
+		if len(initRejRanges) > 0 {
+			b = b.SetRejectedRanges(initRejRanges)
+		}
 		if len(mh.SupportedSignals) > 0 {
 			b = b.SetSupportedSignals(mh.SupportedSignals)
 		}
@@ -699,7 +717,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 			OnConflictColumns(meterhealth.FieldAgentID, meterhealth.FieldRunID, meterhealth.FieldProducerEpoch).
 			DoNothing().
 			Exec(ctx); err != nil {
-			return mapError(err)
+			return nil, false, mapError(err)
 		}
 
 		// Check whether our insert won the first-insert race. If another
@@ -708,10 +726,10 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 		// or anomaly count is silently lost (P1.1 review O6).
 		row, err := queryExisting()
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		if row == nil || row.ID == newID {
-			return nil
+			return mh.SupportedSignals, mh.SchemaDriftDetected, nil
 		}
 		existing = row
 	}
@@ -720,12 +738,18 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	if lastReceipt.After(nextReceipt) {
 		nextReceipt = lastReceipt
 	}
-	nextContig, nextMax, nextMissing, coalesced := advanceIngestSeqState(
+	nextContig, nextMax, nextMissing, nextRejCount, nextRejRanges, missingCoalesced, rejectedCoalesced := advanceIngestSeqState(
 		existing.LastContiguousSeq, existing.MaxSeqSeen, existing.MissingRanges,
-		mh.MaxSeqSeen, receivedSeqs,
+		existing.RejectedCount, existing.RejectedRanges,
+		mh.MaxSeqSeen, receivedSeqs, rejectedSeqs,
 	)
-	if coalesced {
+	if missingCoalesced {
 		slog.Warn("meter_health: missing_ranges exceeded cap; conservatively coalesced adjacent gaps",
+			"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
+			"cap", maxMeterHealthMissingRanges, "max_seq_seen", nextMax)
+	}
+	if rejectedCoalesced {
+		slog.Warn("meter_health: rejected_ranges exceeded cap; conservatively coalesced adjacent ranges",
 			"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
 			"cap", maxMeterHealthMissingRanges, "max_seq_seen", nextMax)
 	}
@@ -738,10 +762,16 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 		nextFinal = finalState
 	}
 
+	effectiveSignals := existing.SupportedSignals
+	if len(mh.SupportedSignals) > 0 {
+		effectiveSignals = mh.SupportedSignals
+	}
+
 	u := client.MeterHealth.UpdateOneID(existing.ID).
 		SetLastReceiptAt(nextReceipt).
 		SetLastContiguousSeq(nextContig).
 		SetMaxSeqSeen(nextMax).
+		SetRejectedCount(nextRejCount).
 		SetAnomalousCount(nextAnomalous).
 		SetSchemaDriftDetected(nextDrift).
 		SetFinalState(nextFinal).
@@ -760,9 +790,15 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 	} else if len(existing.MissingRanges) > 0 {
 		u = u.SetMissingRanges([]store.SeqRange{})
 	}
+	if nextRejRanges != nil {
+		u = u.SetRejectedRanges(nextRejRanges)
+	}
 
 	_, err = u.Save(ctx)
-	return mapError(err)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	return effectiveSignals, nextDrift, nil
 }
 
 // GetMeterHealth implements store.UsageLedgerStore.GetMeterHealth.
@@ -828,6 +864,8 @@ func entMeterHealthToStore(r *ent.MeterHealth) *store.MeterHealth {
 		LastContiguousSeq:    r.LastContiguousSeq,
 		MaxSeqSeen:           r.MaxSeqSeen,
 		MissingRanges:        append([]store.SeqRange(nil), r.MissingRanges...),
+		RejectedCount:        r.RejectedCount,
+		RejectedRanges:       append([]store.SeqRange(nil), r.RejectedRanges...),
 		LastSourceActivityAt: copyTimePtr(r.LastSourceActivityAt),
 		SupportedSignals:     append([]string(nil), r.SupportedSignals...),
 		AnomalousCount:       r.AnomalousCount,

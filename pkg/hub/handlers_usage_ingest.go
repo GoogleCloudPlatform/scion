@@ -261,7 +261,40 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		return attr, "", "", nil
 	}
 
+	type rejectedEventSeq struct {
+		runID string
+		epoch string
+		seq   int64
+	}
 	rejected := make([]telemetrycontract.UsageIngestRejection, 0)
+	rejectedSeqs := make([]rejectedEventSeq, 0)
+	recordRejectedSeq := func(ev *telemetrycontract.UsageEvent) {
+		if ev == nil || ev.ProducerSeq < 1 || ev.ProducerSeq > telemetrycontract.MaxSafeInteger {
+			return
+		}
+		if ev.AgentID != "" && ev.AgentID != agentID {
+			return
+		}
+		runID := strings.TrimSpace(ev.RunID)
+		if runID == "" {
+			runID = strings.TrimSpace(req.RunID)
+		}
+		if runID == "" {
+			runID = strings.TrimSpace(tokenRunID)
+		}
+		epoch := strings.TrimSpace(ev.ProducerEpoch)
+		if epoch == "" {
+			epoch = strings.TrimSpace(req.ProducerEpoch)
+		}
+		if runID == "" || epoch == "" {
+			return
+		}
+		rejectedSeqs = append(rejectedSeqs, rejectedEventSeq{
+			runID: runID,
+			epoch: epoch,
+			seq:   ev.ProducerSeq,
+		})
+	}
 	validEvents := make([]*store.UsageEvent, 0, len(req.Events))
 	eventIndexByID := make(map[string]int, len(req.Events))
 
@@ -275,6 +308,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 				Code:    telemetrycontract.UsageRejectInvalidEvent,
 				Reason:  err.Error(),
 			})
+			recordRejectedSeq(ev)
 			continue
 		}
 
@@ -287,6 +321,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 				Code:    telemetrycontract.UsageRejectInvalidEvent,
 				Reason:  err.Error(),
 			})
+			recordRejectedSeq(ev)
 			continue
 		}
 
@@ -309,6 +344,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 				Code:    telemetrycontract.UsageRejectHubMismatch,
 				Reason:  "event hub_id does not match this hub",
 			})
+			recordRejectedSeq(ev)
 			continue
 		}
 
@@ -320,6 +356,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 				Code:    telemetrycontract.UsageRejectValueOutOfRange,
 				Reason:  err.Error(),
 			})
+			recordRejectedSeq(ev)
 			continue
 		}
 
@@ -332,6 +369,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 				Code:    telemetrycontract.UsageRejectInvalidTimestamp,
 				Reason:  err.Error(),
 			})
+			recordRejectedSeq(ev)
 			continue
 		}
 		if eventTS.After(maxFuture) {
@@ -444,7 +482,17 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 
 	// Build meter_health update for events and/or empty heartbeats.
 	mhUpdate, err := buildMeterHealthUpdate(
-		agentID, agent, &req, tokenRunID, receivedAt, lastSourceActivity, validEvents, resolveAttribution,
+		agentID, agent, &req, tokenRunID, receivedAt, lastSourceActivity, validEvents,
+		func(runID, epoch string) []int64 {
+			var out []int64
+			for _, rs := range rejectedSeqs {
+				if rs.runID == runID && rs.epoch == epoch && rs.seq > 0 {
+					out = append(out, rs.seq)
+				}
+			}
+			return out
+		},
+		resolveAttribution,
 	)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -503,6 +551,7 @@ func buildMeterHealthUpdate(
 	receivedAt time.Time,
 	lastSourceActivity *time.Time,
 	validEvents []*store.UsageEvent,
+	rejectedSeqsFor func(runID, epoch string) []int64,
 	resolveAttribution func(runID string) (*store.RunAttribution, string, string, error),
 ) (*store.UsageMeterHealthUpdate, error) {
 	mhRunID := strings.TrimSpace(req.RunID)
@@ -540,6 +589,10 @@ func buildMeterHealthUpdate(
 			receivedSeqs = append(receivedSeqs, ev.ProducerSeq)
 		}
 	}
+	var rejectedSeqs []int64
+	if rejectedSeqsFor != nil {
+		rejectedSeqs = rejectedSeqsFor(mhRunID, mhEpoch)
+	}
 
 	return &store.UsageMeterHealthUpdate{
 		AgentID:              agentID,
@@ -548,6 +601,7 @@ func buildMeterHealthUpdate(
 		LastReceiptAt:        receivedAt,
 		ProducerSeq:          req.ProducerSeq,
 		ReceivedSeqs:         receivedSeqs,
+		RejectedSeqs:         rejectedSeqs,
 		LastSourceActivityAt: lastSourceActivity,
 		SupportedSignals:     append([]string(nil), req.SupportedSignals...),
 		SchemaDriftDetected:  req.SchemaDriftDetected,

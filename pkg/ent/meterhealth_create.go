@@ -83,6 +83,26 @@ func (_c *MeterHealthCreate) SetMissingRanges(v []store.SeqRange) *MeterHealthCr
 	return _c
 }
 
+// SetRejectedCount sets the "rejected_count" field.
+func (_c *MeterHealthCreate) SetRejectedCount(v int64) *MeterHealthCreate {
+	_c.mutation.SetRejectedCount(v)
+	return _c
+}
+
+// SetNillableRejectedCount sets the "rejected_count" field if the given value is not nil.
+func (_c *MeterHealthCreate) SetNillableRejectedCount(v *int64) *MeterHealthCreate {
+	if v != nil {
+		_c.SetRejectedCount(*v)
+	}
+	return _c
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (_c *MeterHealthCreate) SetRejectedRanges(v []store.SeqRange) *MeterHealthCreate {
+	_c.mutation.SetRejectedRanges(v)
+	return _c
+}
+
 // SetLastSourceActivityAt sets the "last_source_activity_at" field.
 func (_c *MeterHealthCreate) SetLastSourceActivityAt(v time.Time) *MeterHealthCreate {
 	_c.mutation.SetLastSourceActivityAt(v)
@@ -216,6 +236,10 @@ func (_c *MeterHealthCreate) defaults() {
 		v := meterhealth.DefaultMaxSeqSeen
 		_c.mutation.SetMaxSeqSeen(v)
 	}
+	if _, ok := _c.mutation.RejectedCount(); !ok {
+		v := meterhealth.DefaultRejectedCount
+		_c.mutation.SetRejectedCount(v)
+	}
 	if _, ok := _c.mutation.AnomalousCount(); !ok {
 		v := meterhealth.DefaultAnomalousCount
 		_c.mutation.SetAnomalousCount(v)
@@ -272,6 +296,9 @@ func (_c *MeterHealthCreate) check() error {
 	}
 	if _, ok := _c.mutation.MaxSeqSeen(); !ok {
 		return &ValidationError{Name: "max_seq_seen", err: errors.New(`ent: missing required field "MeterHealth.max_seq_seen"`)}
+	}
+	if _, ok := _c.mutation.RejectedCount(); !ok {
+		return &ValidationError{Name: "rejected_count", err: errors.New(`ent: missing required field "MeterHealth.rejected_count"`)}
 	}
 	if _, ok := _c.mutation.AnomalousCount(); !ok {
 		return &ValidationError{Name: "anomalous_count", err: errors.New(`ent: missing required field "MeterHealth.anomalous_count"`)}
@@ -348,6 +375,14 @@ func (_c *MeterHealthCreate) createSpec() (*MeterHealth, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.MissingRanges(); ok {
 		_spec.SetField(meterhealth.FieldMissingRanges, field.TypeJSON, value)
 		_node.MissingRanges = value
+	}
+	if value, ok := _c.mutation.RejectedCount(); ok {
+		_spec.SetField(meterhealth.FieldRejectedCount, field.TypeInt64, value)
+		_node.RejectedCount = value
+	}
+	if value, ok := _c.mutation.RejectedRanges(); ok {
+		_spec.SetField(meterhealth.FieldRejectedRanges, field.TypeJSON, value)
+		_node.RejectedRanges = value
 	}
 	if value, ok := _c.mutation.LastSourceActivityAt(); ok {
 		_spec.SetField(meterhealth.FieldLastSourceActivityAt, field.TypeTime, value)
@@ -488,6 +523,42 @@ func (u *MeterHealthUpsert) UpdateMissingRanges() *MeterHealthUpsert {
 // ClearMissingRanges clears the value of the "missing_ranges" field.
 func (u *MeterHealthUpsert) ClearMissingRanges() *MeterHealthUpsert {
 	u.SetNull(meterhealth.FieldMissingRanges)
+	return u
+}
+
+// SetRejectedCount sets the "rejected_count" field.
+func (u *MeterHealthUpsert) SetRejectedCount(v int64) *MeterHealthUpsert {
+	u.Set(meterhealth.FieldRejectedCount, v)
+	return u
+}
+
+// UpdateRejectedCount sets the "rejected_count" field to the value that was provided on create.
+func (u *MeterHealthUpsert) UpdateRejectedCount() *MeterHealthUpsert {
+	u.SetExcluded(meterhealth.FieldRejectedCount)
+	return u
+}
+
+// AddRejectedCount adds v to the "rejected_count" field.
+func (u *MeterHealthUpsert) AddRejectedCount(v int64) *MeterHealthUpsert {
+	u.Add(meterhealth.FieldRejectedCount, v)
+	return u
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (u *MeterHealthUpsert) SetRejectedRanges(v []store.SeqRange) *MeterHealthUpsert {
+	u.Set(meterhealth.FieldRejectedRanges, v)
+	return u
+}
+
+// UpdateRejectedRanges sets the "rejected_ranges" field to the value that was provided on create.
+func (u *MeterHealthUpsert) UpdateRejectedRanges() *MeterHealthUpsert {
+	u.SetExcluded(meterhealth.FieldRejectedRanges)
+	return u
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (u *MeterHealthUpsert) ClearRejectedRanges() *MeterHealthUpsert {
+	u.SetNull(meterhealth.FieldRejectedRanges)
 	return u
 }
 
@@ -712,6 +783,48 @@ func (u *MeterHealthUpsertOne) UpdateMissingRanges() *MeterHealthUpsertOne {
 func (u *MeterHealthUpsertOne) ClearMissingRanges() *MeterHealthUpsertOne {
 	return u.Update(func(s *MeterHealthUpsert) {
 		s.ClearMissingRanges()
+	})
+}
+
+// SetRejectedCount sets the "rejected_count" field.
+func (u *MeterHealthUpsertOne) SetRejectedCount(v int64) *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.SetRejectedCount(v)
+	})
+}
+
+// AddRejectedCount adds v to the "rejected_count" field.
+func (u *MeterHealthUpsertOne) AddRejectedCount(v int64) *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.AddRejectedCount(v)
+	})
+}
+
+// UpdateRejectedCount sets the "rejected_count" field to the value that was provided on create.
+func (u *MeterHealthUpsertOne) UpdateRejectedCount() *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.UpdateRejectedCount()
+	})
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (u *MeterHealthUpsertOne) SetRejectedRanges(v []store.SeqRange) *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.SetRejectedRanges(v)
+	})
+}
+
+// UpdateRejectedRanges sets the "rejected_ranges" field to the value that was provided on create.
+func (u *MeterHealthUpsertOne) UpdateRejectedRanges() *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.UpdateRejectedRanges()
+	})
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (u *MeterHealthUpsertOne) ClearRejectedRanges() *MeterHealthUpsertOne {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.ClearRejectedRanges()
 	})
 }
 
@@ -1118,6 +1231,48 @@ func (u *MeterHealthUpsertBulk) UpdateMissingRanges() *MeterHealthUpsertBulk {
 func (u *MeterHealthUpsertBulk) ClearMissingRanges() *MeterHealthUpsertBulk {
 	return u.Update(func(s *MeterHealthUpsert) {
 		s.ClearMissingRanges()
+	})
+}
+
+// SetRejectedCount sets the "rejected_count" field.
+func (u *MeterHealthUpsertBulk) SetRejectedCount(v int64) *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.SetRejectedCount(v)
+	})
+}
+
+// AddRejectedCount adds v to the "rejected_count" field.
+func (u *MeterHealthUpsertBulk) AddRejectedCount(v int64) *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.AddRejectedCount(v)
+	})
+}
+
+// UpdateRejectedCount sets the "rejected_count" field to the value that was provided on create.
+func (u *MeterHealthUpsertBulk) UpdateRejectedCount() *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.UpdateRejectedCount()
+	})
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (u *MeterHealthUpsertBulk) SetRejectedRanges(v []store.SeqRange) *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.SetRejectedRanges(v)
+	})
+}
+
+// UpdateRejectedRanges sets the "rejected_ranges" field to the value that was provided on create.
+func (u *MeterHealthUpsertBulk) UpdateRejectedRanges() *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.UpdateRejectedRanges()
+	})
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (u *MeterHealthUpsertBulk) ClearRejectedRanges() *MeterHealthUpsertBulk {
+	return u.Update(func(s *MeterHealthUpsert) {
+		s.ClearRejectedRanges()
 	})
 }
 

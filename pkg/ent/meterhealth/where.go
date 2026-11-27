@@ -85,6 +85,11 @@ func MaxSeqSeen(v int64) predicate.MeterHealth {
 	return predicate.MeterHealth(sql.FieldEQ(FieldMaxSeqSeen, v))
 }
 
+// RejectedCount applies equality check predicate on the "rejected_count" field. It's identical to RejectedCountEQ.
+func RejectedCount(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldEQ(FieldRejectedCount, v))
+}
+
 // LastSourceActivityAt applies equality check predicate on the "last_source_activity_at" field. It's identical to LastSourceActivityAtEQ.
 func LastSourceActivityAt(v time.Time) predicate.MeterHealth {
 	return predicate.MeterHealth(sql.FieldEQ(FieldLastSourceActivityAt, v))
@@ -433,6 +438,56 @@ func MissingRangesIsNil() predicate.MeterHealth {
 // MissingRangesNotNil applies the NotNil predicate on the "missing_ranges" field.
 func MissingRangesNotNil() predicate.MeterHealth {
 	return predicate.MeterHealth(sql.FieldNotNull(FieldMissingRanges))
+}
+
+// RejectedCountEQ applies the EQ predicate on the "rejected_count" field.
+func RejectedCountEQ(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldEQ(FieldRejectedCount, v))
+}
+
+// RejectedCountNEQ applies the NEQ predicate on the "rejected_count" field.
+func RejectedCountNEQ(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldNEQ(FieldRejectedCount, v))
+}
+
+// RejectedCountIn applies the In predicate on the "rejected_count" field.
+func RejectedCountIn(vs ...int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldIn(FieldRejectedCount, vs...))
+}
+
+// RejectedCountNotIn applies the NotIn predicate on the "rejected_count" field.
+func RejectedCountNotIn(vs ...int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldNotIn(FieldRejectedCount, vs...))
+}
+
+// RejectedCountGT applies the GT predicate on the "rejected_count" field.
+func RejectedCountGT(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldGT(FieldRejectedCount, v))
+}
+
+// RejectedCountGTE applies the GTE predicate on the "rejected_count" field.
+func RejectedCountGTE(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldGTE(FieldRejectedCount, v))
+}
+
+// RejectedCountLT applies the LT predicate on the "rejected_count" field.
+func RejectedCountLT(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldLT(FieldRejectedCount, v))
+}
+
+// RejectedCountLTE applies the LTE predicate on the "rejected_count" field.
+func RejectedCountLTE(v int64) predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldLTE(FieldRejectedCount, v))
+}
+
+// RejectedRangesIsNil applies the IsNil predicate on the "rejected_ranges" field.
+func RejectedRangesIsNil() predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldIsNull(FieldRejectedRanges))
+}
+
+// RejectedRangesNotNil applies the NotNil predicate on the "rejected_ranges" field.
+func RejectedRangesNotNil() predicate.MeterHealth {
+	return predicate.MeterHealth(sql.FieldNotNull(FieldRejectedRanges))
 }
 
 // LastSourceActivityAtEQ applies the EQ predicate on the "last_source_activity_at" field.

@@ -34,6 +34,10 @@ type MeterHealth struct {
 	MaxSeqSeen int64 `json:"max_seq_seen,omitempty"`
 	// MissingRanges holds the value of the "missing_ranges" field.
 	MissingRanges []store.SeqRange `json:"missing_ranges,omitempty"`
+	// RejectedCount holds the value of the "rejected_count" field.
+	RejectedCount int64 `json:"rejected_count,omitempty"`
+	// RejectedRanges holds the value of the "rejected_ranges" field.
+	RejectedRanges []store.SeqRange `json:"rejected_ranges,omitempty"`
 	// LastSourceActivityAt holds the value of the "last_source_activity_at" field.
 	LastSourceActivityAt *time.Time `json:"last_source_activity_at,omitempty"`
 	// SupportedSignals holds the value of the "supported_signals" field.
@@ -54,11 +58,11 @@ func (*MeterHealth) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case meterhealth.FieldMissingRanges, meterhealth.FieldSupportedSignals:
+		case meterhealth.FieldMissingRanges, meterhealth.FieldRejectedRanges, meterhealth.FieldSupportedSignals:
 			values[i] = new([]byte)
 		case meterhealth.FieldSchemaDriftDetected:
 			values[i] = new(sql.NullBool)
-		case meterhealth.FieldLastContiguousSeq, meterhealth.FieldMaxSeqSeen, meterhealth.FieldAnomalousCount:
+		case meterhealth.FieldLastContiguousSeq, meterhealth.FieldMaxSeqSeen, meterhealth.FieldRejectedCount, meterhealth.FieldAnomalousCount:
 			values[i] = new(sql.NullInt64)
 		case meterhealth.FieldAgentID, meterhealth.FieldRunID, meterhealth.FieldProducerEpoch, meterhealth.FieldFinalState:
 			values[i] = new(sql.NullString)
@@ -129,6 +133,20 @@ func (_m *MeterHealth) assignValues(columns []string, values []any) error {
 			} else if value != nil && len(*value) > 0 {
 				if err := json.Unmarshal(*value, &_m.MissingRanges); err != nil {
 					return fmt.Errorf("unmarshal field missing_ranges: %w", err)
+				}
+			}
+		case meterhealth.FieldRejectedCount:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field rejected_count", values[i])
+			} else if value.Valid {
+				_m.RejectedCount = value.Int64
+			}
+		case meterhealth.FieldRejectedRanges:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field rejected_ranges", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.RejectedRanges); err != nil {
+					return fmt.Errorf("unmarshal field rejected_ranges: %w", err)
 				}
 			}
 		case meterhealth.FieldLastSourceActivityAt:
@@ -226,6 +244,12 @@ func (_m *MeterHealth) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("missing_ranges=")
 	builder.WriteString(fmt.Sprintf("%v", _m.MissingRanges))
+	builder.WriteString(", ")
+	builder.WriteString("rejected_count=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RejectedCount))
+	builder.WriteString(", ")
+	builder.WriteString("rejected_ranges=")
+	builder.WriteString(fmt.Sprintf("%v", _m.RejectedRanges))
 	builder.WriteString(", ")
 	if v := _m.LastSourceActivityAt; v != nil {
 		builder.WriteString("last_source_activity_at=")

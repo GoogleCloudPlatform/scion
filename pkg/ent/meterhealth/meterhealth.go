@@ -28,6 +28,10 @@ const (
 	FieldMaxSeqSeen = "max_seq_seen"
 	// FieldMissingRanges holds the string denoting the missing_ranges field in the database.
 	FieldMissingRanges = "missing_ranges"
+	// FieldRejectedCount holds the string denoting the rejected_count field in the database.
+	FieldRejectedCount = "rejected_count"
+	// FieldRejectedRanges holds the string denoting the rejected_ranges field in the database.
+	FieldRejectedRanges = "rejected_ranges"
 	// FieldLastSourceActivityAt holds the string denoting the last_source_activity_at field in the database.
 	FieldLastSourceActivityAt = "last_source_activity_at"
 	// FieldSupportedSignals holds the string denoting the supported_signals field in the database.
@@ -54,6 +58,8 @@ var Columns = []string{
 	FieldLastContiguousSeq,
 	FieldMaxSeqSeen,
 	FieldMissingRanges,
+	FieldRejectedCount,
+	FieldRejectedRanges,
 	FieldLastSourceActivityAt,
 	FieldSupportedSignals,
 	FieldAnomalousCount,
@@ -83,6 +89,8 @@ var (
 	DefaultLastContiguousSeq int64
 	// DefaultMaxSeqSeen holds the default value on creation for the "max_seq_seen" field.
 	DefaultMaxSeqSeen int64
+	// DefaultRejectedCount holds the default value on creation for the "rejected_count" field.
+	DefaultRejectedCount int64
 	// DefaultAnomalousCount holds the default value on creation for the "anomalous_count" field.
 	DefaultAnomalousCount int64
 	// DefaultSchemaDriftDetected holds the default value on creation for the "schema_drift_detected" field.
@@ -133,6 +141,11 @@ func ByLastContiguousSeq(opts ...sql.OrderTermOption) OrderOption {
 // ByMaxSeqSeen orders the results by the max_seq_seen field.
 func ByMaxSeqSeen(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMaxSeqSeen, opts...).ToFunc()
+}
+
+// ByRejectedCount orders the results by the rejected_count field.
+func ByRejectedCount(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRejectedCount, opts...).ToFunc()
 }
 
 // ByLastSourceActivityAt orders the results by the last_source_activity_at field.

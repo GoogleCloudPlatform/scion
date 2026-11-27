@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	entasm "github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/meterhealth"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runattribution"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -237,66 +238,168 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 	dbDuplicates := 0
 
 	if len(uniqueEvents) > 0 {
-		jsonbParam := "?"
-		if dialectName == dialect.Postgres {
-			jsonbParam = "CAST(? AS jsonb)"
+		// Fast path: insert each chunk of canonical key-sorted events in a
+		// single multi-row INSERT ... ON CONFLICT DO NOTHING RETURNING hub_id,
+		// event_id wrapped in one batch savepoint. Only if the multi-row insert
+		// fails with a per-row data/constraint error do we roll back the chunk
+		// savepoint and fall back to per-row savepoints to isolate bad rows.
+		// Chunk size 500 -> 500 * 36 = 18,000 bind parameters, safely below both
+		// SQLite (32,766) and Postgres (65,535) limits.
+		// Chunk size: Postgres handles 500 rows (18,000 params, well under its
+		// 65,535 limit) in a single statement; SQLite's parser/VDBE codegen
+		// scales superlinearly with thousands of bind variables in one VALUES
+		// list, so cap SQLite chunks at 25 rows (900 params — 20 statements
+		// for 500 events instead of 1,500 per-row savepoint statements).
+		maxMultiRowInsertChunk := 500
+		if dialectName != dialect.Postgres {
+			maxMultiRowInsertChunk = 25
 		}
-		insertSQL := usageRebindSQL(dialectName, fmt.Sprintf(`
-INSERT INTO usage_events (
-	id, hub_id, event_id, run_id, project_id, agent_id, billing_user_id, broker_id,
-	harness, model, model_source, usage_source, source_kind, source_identity,
-	native_request_id, session_id_hash, status, calls,
-	input, output, cache_read, cache_write, cache_write_1h, reasoning,
-	token_status, malformed_fields, reported_cost_micros, reported_cost_currency,
-	reported_cost_source, event_ts, received_at, producer_epoch, producer_seq,
-	anomalous, charged_group_ids, relocated_from_hub_id
-) VALUES (
-	?, ?, ?, ?, ?, ?, ?, ?,
-	?, ?, ?, ?, ?, ?,
-	?, ?, ?, ?,
-	?, ?, ?, ?, ?, ?,
-	?, %s, ?, ?,
-	?, ?, ?, ?, ?,
-	?, %s, ?
-)
-ON CONFLICT (hub_id, event_id) DO NOTHING
-RETURNING event_id`, jsonbParam, jsonbParam))
+		var singleInsertSQL string
 
-		for _, ev := range uniqueEvents {
-			// Wrap each row insert in a SAVEPOINT so a per-row DB/data error
-			// (e.g., Postgres invalid byte sequence 22021 or constraint error
-			// 23xxx) rolls back only that row and becomes a per-event rejection
-			// instead of aborting the whole batch transaction.
+		for start := 0; start < len(uniqueEvents); start += maxMultiRowInsertChunk {
+			end := start + maxMultiRowInsertChunk
+			if end > len(uniqueEvents) {
+				end = len(uniqueEvents)
+			}
+			chunk := uniqueEvents[start:end]
+
 			var spRes sql.Result
-			if err := drv.Exec(ctx, "SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
+			if err := drv.Exec(ctx, "SAVEPOINT sp_usage_event_batch", []any{}, &spRes); err != nil {
 				return nil, false, mapError(err)
 			}
-			inserted, err := insertUsageEventReturning(ctx, drv, insertSQL, ev)
-			if err != nil {
-				if isUsageEventRowDataError(err) {
-					if rbErr := drv.Exec(ctx, "ROLLBACK TO SAVEPOINT sp_usage_event", []any{}, &spRes); rbErr != nil {
-						return nil, false, mapError(rbErr)
-					}
-					if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); relErr != nil {
-						return nil, false, mapError(relErr)
-					}
-					rejectedRows = append(rejectedRows, store.UsageIngestRowRejection{
-						EventID: ev.EventID,
-						Reason:  err.Error(),
-					})
-					rejectedEvents = append(rejectedEvents, ev)
-					continue
+			returnedKeys, err := insertUsageEventsBatchReturning(ctx, drv, dialectName, chunk)
+			if err == nil {
+				if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event_batch", []any{}, &spRes); relErr != nil {
+					return nil, false, mapError(relErr)
 				}
+				// Map RETURNING rows by (hub_id, event_id) rather than position
+				// because SQL RETURNING row order is not guaranteed.
+				for _, ev := range chunk {
+					if _, ok := returnedKeys[usageEventKey{hubID: ev.HubID, eventID: ev.EventID}]; ok {
+						insertedEvents = append(insertedEvents, ev)
+					} else {
+						dbDuplicates++
+					}
+				}
+				continue
+			}
+
+			if !isUsageEventRowDataError(err) {
 				return nil, false, mapError(err)
 			}
-			if err := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
-				return nil, false, mapError(err)
+
+			// Per-row data/constraint error in this chunk: roll back the batch
+			// savepoint and isolate the offending row(s) with per-row savepoints.
+			if rbErr := drv.Exec(ctx, "ROLLBACK TO SAVEPOINT sp_usage_event_batch", []any{}, &spRes); rbErr != nil {
+				return nil, false, mapError(rbErr)
 			}
-			if inserted {
-				insertedEvents = append(insertedEvents, ev)
-			} else {
-				dbDuplicates++
+			if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event_batch", []any{}, &spRes); relErr != nil {
+				return nil, false, mapError(relErr)
 			}
+
+			if singleInsertSQL == "" {
+				singleInsertSQL = buildUsageEventsInsertSQL(dialectName, 1)
+			}
+			for _, ev := range chunk {
+				if err := drv.Exec(ctx, "SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
+					return nil, false, mapError(err)
+				}
+				inserted, rowErr := insertUsageEventReturning(ctx, drv, singleInsertSQL, ev)
+				if rowErr != nil {
+					if isUsageEventRowDataError(rowErr) {
+						if rbErr := drv.Exec(ctx, "ROLLBACK TO SAVEPOINT sp_usage_event", []any{}, &spRes); rbErr != nil {
+							return nil, false, mapError(rbErr)
+						}
+						if relErr := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); relErr != nil {
+							return nil, false, mapError(relErr)
+						}
+						rejectedRows = append(rejectedRows, store.UsageIngestRowRejection{
+							EventID: ev.EventID,
+							Reason:  rowErr.Error(),
+						})
+						rejectedEvents = append(rejectedEvents, ev)
+						continue
+					}
+					return nil, false, mapError(rowErr)
+				}
+				if err := drv.Exec(ctx, "RELEASE SAVEPOINT sp_usage_event", []any{}, &spRes); err != nil {
+					return nil, false, mapError(err)
+				}
+				if inserted {
+					insertedEvents = append(insertedEvents, ev)
+				} else {
+					dbDuplicates++
+				}
+			}
+		}
+	}
+
+	// Update meter_health (for events and/or heartbeats) before scope counters
+	// so companion token-metering state (supported_signals + schema_drift_detected)
+	// is already merged for this transaction (ptone/scion#9559).
+	type meterHealthKey struct {
+		agentID       string
+		runID         string
+		producerEpoch string
+	}
+	type meterHealthTokenState struct {
+		signals []string
+		drifted bool
+	}
+	resolvedMHState := make(map[meterHealthKey]meterHealthTokenState, 1)
+
+	if in.MeterHealth != nil && in.MeterHealth.AgentID != "" && in.MeterHealth.RunID != "" && in.MeterHealth.ProducerEpoch != "" {
+		mhUpd := in.MeterHealth
+		var anomalousDelta int64
+		for _, ev := range insertedEvents {
+			if ev.Anomalous && ev.RunID == mhUpd.RunID && ev.ProducerEpoch == mhUpd.ProducerEpoch {
+				anomalousDelta++
+			}
+		}
+		receivedSeqs := mhUpd.ReceivedSeqs
+		rejectedSeqs := append([]int64(nil), mhUpd.RejectedSeqs...)
+		if len(rejectedEvents) > 0 {
+			dropSeqCounts := make(map[int64]int, len(rejectedEvents))
+			for _, ev := range rejectedEvents {
+				if ev.RunID == mhUpd.RunID && ev.ProducerEpoch == mhUpd.ProducerEpoch && ev.ProducerSeq > 0 {
+					dropSeqCounts[ev.ProducerSeq]++
+					rejectedSeqs = append(rejectedSeqs, ev.ProducerSeq)
+				}
+			}
+			if len(dropSeqCounts) > 0 && len(receivedSeqs) > 0 {
+				filtered := make([]int64, 0, len(receivedSeqs))
+				for _, seq := range receivedSeqs {
+					if dropSeqCounts[seq] > 0 {
+						dropSeqCounts[seq]--
+						continue
+					}
+					filtered = append(filtered, seq)
+				}
+				receivedSeqs = filtered
+			}
+		}
+		mh := &store.MeterHealth{
+			AgentID:              mhUpd.AgentID,
+			RunID:                mhUpd.RunID,
+			ProducerEpoch:        mhUpd.ProducerEpoch,
+			LastReceiptAt:        mhUpd.LastReceiptAt,
+			MaxSeqSeen:           mhUpd.ProducerSeq,
+			LastSourceActivityAt: mhUpd.LastSourceActivityAt,
+			SupportedSignals:     mhUpd.SupportedSignals,
+			SchemaDriftDetected:  mhUpd.SchemaDriftDetected,
+			FinalState:           mhUpd.FinalState,
+		}
+		effSignals, effDrift, err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, receivedSeqs, rejectedSeqs)
+		if err != nil {
+			return nil, false, err
+		}
+		resolvedMHState[meterHealthKey{
+			agentID:       mhUpd.AgentID,
+			runID:         mhUpd.RunID,
+			producerEpoch: mhUpd.ProducerEpoch,
+		}] = meterHealthTokenState{
+			signals: effSignals,
+			drifted: effDrift,
 		}
 	}
 
@@ -349,7 +452,51 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 				wroteHourly = true
 			}
 		}
-		if err := upsertScopeCountersDailyTx(ctx, drv, dialectName, insertedEvents); err != nil {
+
+		// Resolve companion token-metering state for any hooks calls-only events
+		// whose (agent_id, run_id, producer_epoch) was not covered by in.MeterHealth
+		// (e.g. broker harvest batches that omit MeterHealth or mix epochs).
+		companionTokenMetered := make(map[meterHealthKey]bool, len(resolvedMHState))
+		for k, st := range resolvedMHState {
+			companionTokenMetered[k] = supportedSignalsHasTokens(st.signals) && !st.drifted
+		}
+		for _, ev := range insertedEvents {
+			if !isHooksCallsOnlyEvent(ev) || ev.AgentID == "" || ev.RunID == "" || ev.ProducerEpoch == "" {
+				continue
+			}
+			k := meterHealthKey{
+				agentID:       ev.AgentID,
+				runID:         ev.RunID,
+				producerEpoch: ev.ProducerEpoch,
+			}
+			if _, ok := companionTokenMetered[k]; ok {
+				continue
+			}
+			row, err := client.MeterHealth.Query().Where(
+				meterhealth.AgentIDEQ(k.agentID),
+				meterhealth.RunIDEQ(k.runID),
+				meterhealth.ProducerEpochEQ(k.producerEpoch),
+			).Only(ctx)
+			if err != nil {
+				if ent.IsNotFound(err) {
+					companionTokenMetered[k] = false
+					continue
+				}
+				return nil, false, mapError(err)
+			}
+			companionTokenMetered[k] = supportedSignalsHasTokens(row.SupportedSignals) && !row.SchemaDriftDetected
+		}
+
+		if err := upsertScopeCountersDailyTx(ctx, drv, dialectName, insertedEvents, func(ev *store.UsageEvent) bool {
+			if !isHooksCallsOnlyEvent(ev) {
+				return false
+			}
+			return companionTokenMetered[meterHealthKey{
+				agentID:       ev.AgentID,
+				runID:         ev.RunID,
+				producerEpoch: ev.ProducerEpoch,
+			}]
+		}); err != nil {
 			return nil, false, err
 		}
 	}
@@ -395,51 +542,6 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 		}
 	}
 
-	// Update meter_health (for events and/or heartbeats).
-	if in.MeterHealth != nil && in.MeterHealth.AgentID != "" && in.MeterHealth.RunID != "" && in.MeterHealth.ProducerEpoch != "" {
-		mhUpd := in.MeterHealth
-		var anomalousDelta int64
-		for _, ev := range insertedEvents {
-			if ev.Anomalous && ev.RunID == mhUpd.RunID && ev.ProducerEpoch == mhUpd.ProducerEpoch {
-				anomalousDelta++
-			}
-		}
-		receivedSeqs := mhUpd.ReceivedSeqs
-		if len(rejectedEvents) > 0 && len(receivedSeqs) > 0 {
-			dropSeqCounts := make(map[int64]int, len(rejectedEvents))
-			for _, ev := range rejectedEvents {
-				if ev.RunID == mhUpd.RunID && ev.ProducerEpoch == mhUpd.ProducerEpoch && ev.ProducerSeq > 0 {
-					dropSeqCounts[ev.ProducerSeq]++
-				}
-			}
-			if len(dropSeqCounts) > 0 {
-				filtered := make([]int64, 0, len(receivedSeqs))
-				for _, seq := range receivedSeqs {
-					if dropSeqCounts[seq] > 0 {
-						dropSeqCounts[seq]--
-						continue
-					}
-					filtered = append(filtered, seq)
-				}
-				receivedSeqs = filtered
-			}
-		}
-		mh := &store.MeterHealth{
-			AgentID:              mhUpd.AgentID,
-			RunID:                mhUpd.RunID,
-			ProducerEpoch:        mhUpd.ProducerEpoch,
-			LastReceiptAt:        mhUpd.LastReceiptAt,
-			MaxSeqSeen:           mhUpd.ProducerSeq,
-			LastSourceActivityAt: mhUpd.LastSourceActivityAt,
-			SupportedSignals:     mhUpd.SupportedSignals,
-			SchemaDriftDetected:  mhUpd.SchemaDriftDetected,
-			FinalState:           mhUpd.FinalState,
-		}
-		if err := s.upsertMeterHealthTx(ctx, client, mh, anomalousDelta, receivedSeqs); err != nil {
-			return nil, false, err
-		}
-	}
-
 	return &store.UsageIngestBatchResult{
 		Accepted:       len(insertedEvents),
 		Duplicates:     intraDuplicates + dbDuplicates,
@@ -472,7 +574,50 @@ func isUsageEventRowDataError(err error) bool {
 	return false
 }
 
-func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQL string, ev *store.UsageEvent) (bool, error) {
+type usageEventKey struct {
+	hubID   string
+	eventID string
+}
+
+func buildUsageEventsInsertSQL(dialectName string, rowCount int) string {
+	jsonbParam := "?"
+	if dialectName == dialect.Postgres {
+		jsonbParam = "CAST(? AS jsonb)"
+	}
+	rowTuple := fmt.Sprintf(`(
+	?, ?, ?, ?, ?, ?, ?, ?,
+	?, ?, ?, ?, ?, ?,
+	?, ?, ?, ?,
+	?, ?, ?, ?, ?, ?,
+	?, %s, ?, ?,
+	?, ?, ?, ?, ?,
+	?, %s, ?
+)`, jsonbParam, jsonbParam)
+
+	var b strings.Builder
+	b.WriteString(`
+INSERT INTO usage_events (
+	id, hub_id, event_id, run_id, project_id, agent_id, billing_user_id, broker_id,
+	harness, model, model_source, usage_source, source_kind, source_identity,
+	native_request_id, session_id_hash, status, calls,
+	input, output, cache_read, cache_write, cache_write_1h, reasoning,
+	token_status, malformed_fields, reported_cost_micros, reported_cost_currency,
+	reported_cost_source, event_ts, received_at, producer_epoch, producer_seq,
+	anomalous, charged_group_ids, relocated_from_hub_id
+) VALUES `)
+	for i := 0; i < rowCount; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(rowTuple)
+	}
+	b.WriteString(`
+ON CONFLICT (hub_id, event_id) DO NOTHING
+RETURNING hub_id, event_id`)
+	return usageRebindSQL(dialectName, b.String())
+}
+
+func appendUsageEventInsertArgs(dst []any, ev *store.UsageEvent) ([]any, error) {
 	id := uuid.New()
 	if ev.ID != "" {
 		if parsed, err := uuid.Parse(ev.ID); err == nil {
@@ -481,11 +626,11 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 	}
 	malformedJSON, err := nullableStringSliceJSON(ev.MalformedFields)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	chargedGroupsJSON, err := nullableStringSliceJSON(ev.ChargedGroupIDs)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	eventTS := ev.EventTS.UTC().Truncate(time.Microsecond)
 	receivedAt := ev.ReceivedAt
@@ -494,7 +639,7 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 	}
 	receivedAt = receivedAt.UTC().Truncate(time.Microsecond)
 
-	args := []any{
+	return append(dst,
 		id,
 		ev.HubID,
 		ev.EventID,
@@ -531,6 +676,46 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 		ev.Anomalous,
 		chargedGroupsJSON,
 		nullableStringArg(ev.RelocatedFromHubID),
+	), nil
+}
+
+func insertUsageEventsBatchReturning(ctx context.Context, drv dialect.Driver, dialectName string, events []*store.UsageEvent) (map[usageEventKey]struct{}, error) {
+	insertSQL := buildUsageEventsInsertSQL(dialectName, len(events))
+	args := make([]any, 0, len(events)*36)
+	var err error
+	for _, ev := range events {
+		args, err = appendUsageEventInsertArgs(args, ev)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, insertSQL, args, rows); err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	returned := make(map[usageEventKey]struct{}, len(events))
+	for rows.Next() {
+		var hubID, eventID string
+		if err := rows.Scan(&hubID, &eventID); err != nil {
+			return nil, err
+		}
+		if eventID != "" {
+			returned[usageEventKey{hubID: hubID, eventID: eventID}] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return returned, nil
+}
+
+func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQL string, ev *store.UsageEvent) (bool, error) {
+	args, err := appendUsageEventInsertArgs(make([]any, 0, 36), ev)
+	if err != nil {
+		return false, err
 	}
 
 	rows := &entsql.Rows{}
@@ -541,8 +726,8 @@ func insertUsageEventReturning(ctx context.Context, drv dialect.Driver, insertSQ
 
 	inserted := false
 	if rows.Next() {
-		var returnedEventID string
-		if err := rows.Scan(&returnedEventID); err != nil {
+		var returnedHubID, returnedEventID string
+		if err := rows.Scan(&returnedHubID, &returnedEventID); err != nil {
 			return false, err
 		}
 		inserted = returnedEventID != ""
@@ -833,7 +1018,50 @@ type scopeCounterAgg struct {
 	unmeasuredCalls int64
 }
 
-func upsertScopeCountersDailyTx(ctx context.Context, drv dialect.Driver, dialectName string, events []*store.UsageEvent) error {
+// isHooksCallsOnlyEvent reports whether ev is a calls-only hook event
+// (usage_source=hooks, token_status=not_reported, calls>0, no summable tokens).
+// Split-stream harnesses such as Antigravity emit calls via PostInvocation hooks
+// and tokens asynchronously via a companion tailer (sqlite_native).
+func isHooksCallsOnlyEvent(ev *store.UsageEvent) bool {
+	if ev == nil || ev.Calls <= 0 {
+		return false
+	}
+	return ev.UsageSource == store.UsageSourceHooks &&
+		ev.TokenStatus == telemetrycontract.TokenStatusNotReported &&
+		ev.Input == nil && ev.Output == nil && ev.CacheRead == nil && ev.CacheWrite == nil
+}
+
+// supportedSignalsHasTokens reports whether a producer's declared
+// supported_signals list includes at least one canonical token signal
+// (input, output, cache_read, cache_write, reasoning).
+func supportedSignalsHasTokens(signals []string) bool {
+	for _, s := range signals {
+		if telemetrycontract.ValidTokenType(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// upsertScopeCountersDailyTx updates usage_scope_counters_daily for newly
+// inserted events.
+//
+// Companion token-metering trust model (ptone/scion#9559, P2 D12):
+// A hooks calls-only event (usage_source=hooks, token_status=not_reported) is
+// excluded from unmeasured_calls when companionTokenMetered(ev) returns true —
+// i.e., the producer for that (agent_id, run_id, producer_epoch) declares token
+// signals in supported_signals and schema_drift_detected is false (from the
+// ingest request, falling back to persisted meter_health for harvest batches).
+// Producer-declared signals are trusted for unmeasured accounting at the same
+// trust level as producer-reported token counts (design §2 non-goal 1); P3
+// quota enforcement revisits this in its threat model.
+func upsertScopeCountersDailyTx(
+	ctx context.Context,
+	drv dialect.Driver,
+	dialectName string,
+	events []*store.UsageEvent,
+	companionTokenMetered func(*store.UsageEvent) bool,
+) error {
 	aggs := make(map[scopeCounterKey]*scopeCounterAgg, len(events)*3)
 	addScope := func(kind, id string, dayUTC time.Time, tokens, calls, unmeasured int64) {
 		k := scopeCounterKey{scopeKind: kind, scopeID: id, dayUTC: dayUTC}
@@ -871,7 +1099,9 @@ func upsertScopeCountersDailyTx(ctx context.Context, drv dialect.Driver, dialect
 		var unmeasured int64
 		if ev.Calls > 0 && (ev.TokenStatus == telemetrycontract.TokenStatusNotReported ||
 			(ev.Input == nil && ev.Output == nil && ev.CacheRead == nil && ev.CacheWrite == nil)) {
-			unmeasured = ev.Calls
+			if companionTokenMetered == nil || !companionTokenMetered(ev) {
+				unmeasured = ev.Calls
+			}
 		}
 
 		// Project scope is always updated.
@@ -939,30 +1169,53 @@ DO UPDATE SET
 const maxMeterHealthMissingRanges = 1024
 
 // advanceIngestSeqState computes (last_contiguous_seq, max_seq_seen,
-// missing_ranges, coalesced) for IngestUsageBatch where the Hub is the sole
-// authority on sequence gaps and contiguity (RV1, R1):
-//   - Always adds (existingMax, nextMax] minus receivedSeqs to missing_ranges,
-//     regardless of any producer-supplied missing_ranges.
+// missing_ranges, rejected_count, rejected_ranges, missingCoalesced,
+// rejectedCoalesced) for IngestUsageBatch where the Hub is the sole authority
+// on sequence gaps and contiguity (RV1, R1):
+//   - Always adds (existingMax, nextMax] minus (receivedSeqs ∪ rejectedSeqs) to
+//     missing_ranges, regardless of any producer-supplied missing_ranges.
+//   - Hub-rejected seqs are recorded in rejected_ranges/rejected_count rather
+//     than missing_ranges so rejected events are never misclassified as lost
+//     data gaps and do not permanently stall last_contiguous_seq.
+//   - rejected_count increments only for distinct rejected seqs not already
+//     covered by existingRejected (idempotent across retries).
 //   - Producer-supplied missing_ranges and last_contiguous_seq are ignored so
 //     they can never shrink or close Hub-recorded gaps for unreceived seqs.
-//   - last_contiguous_seq advances strictly through received sequences.
+//   - last_contiguous_seq advances strictly through accounted (received or
+//     rejected) sequences.
 //   - Range subtraction is a single linear merge over sorted ranges.
-//   - Stored missing_ranges are capped at maxMeterHealthMissingRanges via
-//     conservative coalescing of the closest adjacent ranges.
+//   - Both missing_ranges and rejected_ranges are capped at
+//     maxMeterHealthMissingRanges via conservative coalescing of the closest
+//     adjacent ranges.
 func advanceIngestSeqState(
 	existingContig, existingMax int64,
 	existingMissing []store.SeqRange,
+	existingRejectedCount int64,
+	existingRejected []store.SeqRange,
 	producerSeq int64,
 	receivedSeqs []int64,
-) (nextContig, nextMax int64, nextMissing []store.SeqRange, coalesced bool) {
+	rejectedSeqs []int64,
+) (nextContig, nextMax int64, nextMissing []store.SeqRange, nextRejectedCount int64, nextRejected []store.SeqRange, missingCoalesced, rejectedCoalesced bool) {
 	nextContig = existingContig
 	nextMax = existingMax
 	if producerSeq > nextMax {
 		nextMax = producerSeq
 	}
+	accounted := make([]int64, 0, len(receivedSeqs)+len(rejectedSeqs))
 	for _, seq := range receivedSeqs {
-		if seq > nextMax {
-			nextMax = seq
+		if seq > 0 {
+			accounted = append(accounted, seq)
+			if seq > nextMax {
+				nextMax = seq
+			}
+		}
+	}
+	for _, seq := range rejectedSeqs {
+		if seq > 0 {
+			accounted = append(accounted, seq)
+			if seq > nextMax {
+				nextMax = seq
+			}
 		}
 	}
 
@@ -977,12 +1230,12 @@ func advanceIngestSeqState(
 			cur = append(cur, newRange)
 		}
 	}
-	if len(receivedSeqs) > 0 {
-		cur = subtractSeqsFromRanges(cur, receivedSeqs)
+	if len(accounted) > 0 {
+		cur = subtractSeqsFromRanges(cur, accounted)
 	}
 	cur = pruneRangesAtOrBelow(cur, nextContig)
 
-	if len(receivedSeqs) > 0 && nextMax > nextContig {
+	if len(accounted) > 0 && nextMax > nextContig {
 		if len(cur) == 0 {
 			nextContig = nextMax
 		} else if cur[0].Start-1 > nextContig {
@@ -991,11 +1244,65 @@ func advanceIngestSeqState(
 		cur = pruneRangesAtOrBelow(cur, nextContig)
 	}
 
-	cur, coalesced = capSeqRanges(cur, maxMeterHealthMissingRanges)
-	if len(cur) == 0 {
-		return nextContig, nextMax, nil, coalesced
+	cur, missingCoalesced = capSeqRanges(cur, maxMeterHealthMissingRanges)
+
+	rejNorm := normalizeSeqRanges(existingRejected)
+	var newlyRejected int64
+	if len(rejectedSeqs) > 0 {
+		rejNorm, newlyRejected = mergeSeqsIntoRanges(rejNorm, rejectedSeqs)
+		rejNorm, rejectedCoalesced = capSeqRanges(rejNorm, maxMeterHealthMissingRanges)
 	}
-	return nextContig, nextMax, cur, coalesced
+	nextRejectedCount = saturatingAddInt64(existingRejectedCount, newlyRejected)
+
+	if len(cur) == 0 {
+		cur = nil
+	}
+	if len(rejNorm) == 0 {
+		rejNorm = nil
+	}
+	return nextContig, nextMax, cur, nextRejectedCount, rejNorm, missingCoalesced, rejectedCoalesced
+}
+
+// mergeSeqsIntoRanges adds positive seqs into sorted, disjoint ranges and
+// returns the merged normalized ranges plus the count of distinct seqs that
+// were not already covered by existing (making rejected_count idempotent on
+// retries).
+func mergeSeqsIntoRanges(existing []store.SeqRange, seqs []int64) ([]store.SeqRange, int64) {
+	sorted := make([]int64, 0, len(seqs))
+	for _, s := range seqs {
+		if s > 0 {
+			sorted = append(sorted, s)
+		}
+	}
+	if len(sorted) == 0 {
+		return existing, 0
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	// Deduplicate sorted seqs and count how many are outside existing ranges.
+	var newlyAdded int64
+	newRanges := make([]store.SeqRange, 0, len(existing)+len(sorted))
+	newRanges = append(newRanges, existing...)
+	ri := 0
+	var prev int64
+	for _, s := range sorted {
+		if s == prev {
+			continue
+		}
+		prev = s
+		for ri < len(existing) && existing[ri].End < s {
+			ri++
+		}
+		if ri < len(existing) && existing[ri].Start <= s && s <= existing[ri].End {
+			continue
+		}
+		newlyAdded++
+		newRanges = append(newRanges, store.SeqRange{Start: s, End: s})
+	}
+	if newlyAdded == 0 {
+		return existing, 0
+	}
+	return normalizeSeqRanges(newRanges), newlyAdded
 }
 
 func normalizeSeqRanges(in []store.SeqRange) []store.SeqRange {

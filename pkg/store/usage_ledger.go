@@ -294,6 +294,8 @@ type MeterHealth struct {
 	LastContiguousSeq    int64      `json:"lastContiguousSeq"`
 	MaxSeqSeen           int64      `json:"maxSeqSeen"`
 	MissingRanges        []SeqRange `json:"missingRanges,omitempty"`
+	RejectedCount        int64      `json:"rejectedCount"`
+	RejectedRanges       []SeqRange `json:"rejectedRanges,omitempty"`
 	LastSourceActivityAt *time.Time `json:"lastSourceActivityAt,omitempty"`
 	SupportedSignals     []string   `json:"supportedSignals,omitempty"`
 	AnomalousCount       int64      `json:"anomalousCount"`
@@ -320,6 +322,7 @@ type UsageMeterHealthUpdate struct {
 	LastReceiptAt        time.Time
 	ProducerSeq          int64
 	ReceivedSeqs         []int64
+	RejectedSeqs         []int64
 	LastSourceActivityAt *time.Time
 	SupportedSignals     []string
 	SchemaDriftDetected  bool

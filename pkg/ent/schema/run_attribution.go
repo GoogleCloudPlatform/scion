@@ -150,7 +150,10 @@ func (RunAttribution) Indexes() []ent.Index {
 		index.Fields("agent_id", "created_at"),
 		index.Fields("project_id", "created_at"),
 		index.Fields("billing_user_id", "created_at"),
-		index.Fields("created_at"),
+		// Leading created_at serves retention SweepRunAttributionBatch
+		// (WHERE created_at < ? ORDER BY created_at ASC) and covers
+		// (created_at, agent_id) for global GetUsageScopeCoverage index-only scans.
+		index.Fields("created_at", "agent_id"),
 	}
 }
 
