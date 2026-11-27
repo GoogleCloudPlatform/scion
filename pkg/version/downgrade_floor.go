@@ -35,7 +35,8 @@ package version
 // that contains it. Setting the floor a day late causes that nightly and any
 // preview or stable release published on the same day to sort below the floor
 // and be refused as downgrade targets (below_downgrade_floor).
-// Current floor (nightly-20261126):
+//
+// Earlier guarded migrations (nightly-20261126):
 //   - scheduled_exec_runs makes event_id nullable and adds fire_id plus the
 //     scheduled_exec_runs_single_owner CHECK constraint (Stage 2 P8,
 //     ptone/scion#8241); pre-P8 binaries fail AutoMigrate on Postgres once any
@@ -52,7 +53,7 @@ package version
 //     reject the new enum values in Ent MessageModeValidator and deny unknown
 //     modes in message authorization.
 //
-// Current floor (nightly-20261128):
+// Earlier guarded migrations (nightly-20261128):
 //   - Ordered actions[] per trigger (Stage 2 P9, ptone/scion#9065): loosens
 //     trigger_fires uniqueness from (event_id, trigger_id) to
 //     (event_id, trigger_id, action_index) and trigger_subject_claims
@@ -61,10 +62,12 @@ package version
 //     re-tighten those unique indexes on AutoMigrate (failing once multi-action
 //     rows exist) and cannot read triggers stored in triggers.actions with empty
 //     legacy action_type.
+//
+// Current floor (nightly-20261129):
 //   - Agent review requests write bounded principal review grants marked with
 //     created_by_ref = "system:review_request" (BoundedReviewCreator,
 //     ptone/scion#5548, ptone/scion#9296 Phase 4); older binaries do not
 //     recognize that marker in isRoleGated / readGrantFilter / ResolveLink and
 //     would treat bounded review grants as ordinary review grants that confer
 //     read access without a home-project role.
-const DowngradeFloor = "nightly-20261128"
+const DowngradeFloor = "nightly-20261129"
