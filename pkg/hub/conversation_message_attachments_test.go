@@ -32,6 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -531,4 +532,125 @@ func TestConversationMessageAttachment_ListMessagesPayload(t *testing.T) {
 	assert.Empty(t, items[0].Attachments, "non-reader must not receive attachments")
 	assert.Empty(t, items[1].Attachments, "non-reader must not receive attachments on deferred message")
 	assert.Empty(t, items[1].DeferredAttachments, "non-reader must not receive deferredAttachments")
+}
+
+func TestConversationMessageAttachment_PublishedAs(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+
+	dm := seedDirectConversation(t, f.st, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	msg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      f.projA.ID,
+		Sender:         "user:alice",
+		SenderID:       f.ua.ID,
+		Recipient:      "agent:aa",
+		RecipientID:    f.aa.ID,
+		Msg:            "check published ref",
+		Type:           "instruction",
+		Channel:        "web",
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.st.CreateMessage(ctx, msg))
+
+	const body = "published attachment body"
+	sum := sha256.Sum256([]byte(body))
+	bodySHA := hex.EncodeToString(sum[:])
+	attID := f.uploadAs(t, f.ua, f.projA.ID, "spec.md", body)
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, attID, artifacts.PrincipalKindUser, f.ua.ID, msg.ID, f.projA.ID))
+
+	// Seed two published artifacts referencing attID:
+	// 1. readableArt in projA (ua can read it)
+	// 2. secretArt in projB owned by ub (ua cannot read it)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	seedPublished := func(scopeRef, ownerRef string, createdAt time.Time) string {
+		artID := uuid.NewString()
+		verID := uuid.NewString()
+		a := &artifacts.Artifact{
+			ID:         artID,
+			ScopeKind:  artifacts.ScopeKindProject,
+			ScopeRef:   scopeRef,
+			OwnerKind:  artifacts.PrincipalKindUser,
+			OwnerRef:   ownerRef,
+			Title:      "spec.md",
+			CurrentSeq: 1,
+			CreatedAt:  createdAt,
+			UpdatedAt:  createdAt,
+		}
+		v := &artifacts.Version{
+			ID:                 verID,
+			ArtifactID:         artID,
+			Seq:                1,
+			Kind:               artifacts.VersionKindPublish,
+			EntryPath:          "spec.md",
+			TotalBytes:         int64(len(body)),
+			FileCount:          1,
+			CreatedByKind:      artifacts.PrincipalKindUser,
+			CreatedByRef:       ownerRef,
+			CreatedAt:          createdAt,
+			State:              artifacts.VersionStateReady,
+			SourceAttachmentID: attID,
+			SourceMessageID:    msg.ID,
+		}
+		files := []artifacts.File{{VersionID: verID, Path: "spec.md", Size: int64(len(body)), SHA256: bodySHA, MediaType: "text/markdown"}}
+		require.NoError(t, f.srv.ArtifactStore().CreatePublished(ctx, a, v, files, nil))
+		return artID
+	}
+
+	readableArtID := seedPublished(f.projA.ID, f.ua.ID, now)
+	_ = seedPublished(f.projB.ID, f.ub.ID, now.Add(time.Second))
+
+	uaCtx := contextWithIdentity(context.Background(), NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb)))
+
+	fetchGetMessage := func() store.Message {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+dm.ID+"/messages/"+msg.ID, nil).WithContext(uaCtx)
+		rec := httptest.NewRecorder()
+		f.srv.handleConversationRoutes(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var got store.Message
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		return got
+	}
+
+	fetchListMessages := func() []store.Message {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+dm.ID+"/messages", nil).WithContext(uaCtx)
+		rec := httptest.NewRecorder()
+		f.srv.handleConversationRoutes(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp struct {
+			Items []store.Message `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.Items
+	}
+
+	// 1. With hub.artifacts enabled: publishedAs contains ONLY readableArtID (secretArt omitted).
+	setServerExperimentDefault(t, f.srv, experiments.Artifacts, true)
+	require.True(t, f.srv.experimentEnabled(experiments.Artifacts))
+
+	gotMsg := fetchGetMessage()
+	require.Len(t, gotMsg.Attachments, 1)
+	assert.Equal(t, []string{artifacts.FormatRef(readableArtID, 0)}, gotMsg.Attachments[0].PublishedAs)
+
+	listed := fetchListMessages()
+	require.Len(t, listed, 1)
+	require.Len(t, listed[0].Attachments, 1)
+	assert.Equal(t, []string{artifacts.FormatRef(readableArtID, 0)}, listed[0].Attachments[0].PublishedAs)
+
+	// 2. With hub.artifacts disabled (hub.attachment_artifacts still ready): publishedAs is omitted.
+	setServerExperimentDefault(t, f.srv, experiments.Artifacts, false)
+	require.False(t, f.srv.experimentEnabled(experiments.Artifacts))
+
+	gotDisabled := fetchGetMessage()
+	require.Len(t, gotDisabled.Attachments, 1)
+	assert.Empty(t, gotDisabled.Attachments[0].PublishedAs)
+
+	listedDisabled := fetchListMessages()
+	require.Len(t, listedDisabled, 1)
+	require.Len(t, listedDisabled[0].Attachments, 1)
+	assert.Empty(t, listedDisabled[0].Attachments[0].PublishedAs)
 }

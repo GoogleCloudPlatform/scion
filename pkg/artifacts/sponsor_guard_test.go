@@ -59,6 +59,8 @@ var sponsorRefSites = []struct{ file, line, role string }{
 	{"pkg/artifacts/sponsor_review.go", "err := policy.SponsorReviewGrant(ctx, a.ScopeRef, a.SponsorRef)", "subject"},
 	{"pkg/artifacts/sponsor_review.go", "SubjectRef: PrincipalRef(PrincipalKindUser, a.SponsorRef), Permission: GrantReview,", "subject"},
 	{"pkg/artifacts/store.go", "SponsorRef string", "read"},
+	{"pkg/artifacts/store_attachments.go", "a.SponsorRef = sponsor.String", "read"},
+	{"pkg/artifacts/store_attachments.go", "a.orphaned_at, a.message_project_id, a.sponsor_ref, a.former_owner_kind, a.former_owner_ref, a.transferred_at, a.former_key`", "read"},
 	{"pkg/artifacts/store_sql.go", "(id, scope_kind, scope_ref, owner_kind, owner_ref, \"key\", title, current_seq, expires_at, created_at, updated_at, sponsor_ref)", "write"},
 	{"pkg/artifacts/store_sql.go", "a.SponsorRef = sponsor.String", "read"},
 	{"pkg/artifacts/store_sql.go", "a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, a.sponsor_ref,", "read"},

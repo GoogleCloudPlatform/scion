@@ -188,6 +188,96 @@ func (s *sqlStore) listMessageAttachmentsChunk(ctx context.Context, chunk []stri
 	return nil
 }
 
+// artifactColumnsAliased is artifactColumns qualified with table alias "a".
+const artifactColumnsAliased = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title, a.current_seq, a.expires_at, a.created_at, a.updated_at, a.deleted_at,
+		a.orphaned_at, a.message_project_id, a.sponsor_ref, a.former_owner_kind, a.former_owner_ref, a.transferred_at, a.former_key`
+
+// ListArtifactsBySourceAttachments implements Store.
+func (s *sqlStore) ListArtifactsBySourceAttachments(ctx context.Context, attIDs []string) (map[string][]*Artifact, error) {
+	out := make(map[string][]*Artifact)
+	if len(attIDs) == 0 {
+		return out, nil
+	}
+	unique := make([]string, 0, len(attIDs))
+	seen := make(map[string]struct{}, len(attIDs))
+	for _, id := range attIDs {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	for start := 0; start < len(unique); start += maxMessageRefQueryIDs {
+		end := min(start+maxMessageRefQueryIDs, len(unique))
+		if err := s.listArtifactsBySourceAttachmentsChunk(ctx, unique[start:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (s *sqlStore) listArtifactsBySourceAttachmentsChunk(ctx context.Context, chunk []string, out map[string][]*Artifact) error {
+	args := make([]any, len(chunk))
+	for i, id := range chunk {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT DISTINCT v.source_attachment_id, `+artifactColumnsAliased+`
+		FROM artifact_version v
+		JOIN artifact a ON a.id = v.artifact_id
+		WHERE v.source_attachment_id IN (`+placeholders+`)
+		AND a.deleted_at IS NULL
+		AND `+notAttachmentScope("a.scope_kind")+`
+		ORDER BY v.source_attachment_id, a.created_at DESC, a.id DESC`), args...)
+	if err != nil {
+		return fmt.Errorf("artifacts: list artifacts by source attachments: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			srcAttID                       string
+			a                              Artifact
+			key                            sql.NullString
+			seq                            sql.NullInt64
+			expires, created               dbTime
+			updated, deletedTime           dbTime
+			orphaned, transferred          dbTime
+			messageProject                 sql.NullString
+			sponsor                        sql.NullString
+			formerKind, formerRef, prevKey sql.NullString
+		)
+		if err := rows.Scan(
+			&srcAttID,
+			&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
+			&expires, &created, &updated, &deletedTime, &orphaned, &messageProject, &sponsor,
+			&formerKind, &formerRef, &transferred, &prevKey); err != nil {
+			return fmt.Errorf("artifacts: scan source attachment artifact: %w", err)
+		}
+		a.Key = key.String
+		a.CurrentSeq = int(seq.Int64)
+		a.ExpiresAt = expires.ptr()
+		a.CreatedAt = created.Time
+		a.UpdatedAt = updated.Time
+		a.DeletedAt = deletedTime.ptr()
+		a.OrphanedAt = orphaned.ptr()
+		a.MessageProjectID = nullStringPtr(messageProject)
+		a.SponsorRef = sponsor.String
+		a.FormerOwnerKind = formerKind.String
+		a.FormerOwnerRef = formerRef.String
+		a.TransferredAt = transferred.ptr()
+		a.FormerKey = prevKey.String
+		aCopy := a
+		out[srcAttID] = append(out[srcAttID], &aCopy)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("artifacts: list artifacts by source attachments: %w", err)
+	}
+	return nil
+}
+
 // RetireScope implements Store.
 func (s *sqlStore) RetireScope(ctx context.Context, kind, ref string, actor *Actor, limit int) (int, error) {
 	if kind == "" || ref == "" || limit <= 0 {

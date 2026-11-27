@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -560,6 +561,7 @@ func (s *Server) noteMessageAttachments(ctx context.Context, items []store.Messa
 		return
 	}
 	ctx = withStandingMemo(ctx)
+	var attIDs []string
 	for i := range items {
 		if ctx.Err() != nil {
 			break
@@ -578,9 +580,22 @@ func (s *Server) noteMessageAttachments(ctx context.Context, items []store.Messa
 				SHA256:      a.SHA256,
 				Ref:         artifacts.FormatAttachmentRef(a.ID),
 			})
+			attIDs = append(attIDs, a.ID)
 			if deferred {
 				items[i].DeferredAttachments = append(items[i].DeferredAttachments,
 					store.DeferredAttachment{Name: reduceAttachmentName(a.Name), Size: a.Size})
+			}
+		}
+	}
+	if len(attIDs) > 0 && s.experimentEnabled(experiments.Artifacts) {
+		published := svc.PublishedFromAttachments(ctx, attIDs)
+		if len(published) > 0 {
+			for i := range items {
+				for j := range items[i].Attachments {
+					if refs := published[items[i].Attachments[j].ID]; len(refs) > 0 {
+						items[i].Attachments[j].PublishedAs = refs
+					}
+				}
 			}
 		}
 	}

@@ -304,6 +304,66 @@ func (s *Service) MessageAttachments(ctx context.Context, messageIDs []string) (
 	return out, nil
 }
 
+// maxPublishedRefsPerAttachment caps how many published artifact references
+// PublishedFromAttachments returns per attachment (design §3.5, Q2).
+const maxPublishedRefsPerAttachment = 5
+
+// PublishedFromAttachments returns, for each attachment ID in attIDs, up to
+// maxPublishedRefsPerAttachment canonical artifact references
+// ("scion://artifact/<id>") of live artifacts whose versions record that
+// attachment as source_attachment_id, newest first, filtered to those the
+// caller of ctx may read via canReadErr (ptone/scion#4599, ptone/scion#9579).
+// Candidates the caller cannot read are dropped silently so no artifact ID
+// leaks.
+func (s *Service) PublishedFromAttachments(ctx context.Context, attIDs []string) map[string][]string {
+	if len(attIDs) == 0 {
+		return nil
+	}
+	b, ok := s.backend()
+	if !ok {
+		return nil
+	}
+	if _, _, _, ok := s.host.Principal(ctx); !ok {
+		return nil
+	}
+	byAtt, err := b.store.ListArtifactsBySourceAttachments(ctx, attIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list artifacts by source attachments failed", "error", err)
+		return nil
+	}
+	if len(byAtt) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(byAtt))
+	for attID, candidates := range byAtt {
+		if ctx.Err() != nil {
+			break
+		}
+		var refs []string
+		for _, a := range candidates {
+			if ctx.Err() != nil {
+				break
+			}
+			readable, rerr := s.canReadErr(ctx, b, a)
+			if rerr != nil {
+				slog.ErrorContext(ctx, "artifacts: published attachment read check failed", "artifact", a.ID, "error", rerr)
+				continue
+			}
+			if !readable {
+				continue
+			}
+			refs = append(refs, FormatRef(a.ID, 0))
+			if len(refs) >= maxPublishedRefsPerAttachment {
+				break
+			}
+		}
+		if len(refs) > 0 {
+			out[attID] = refs
+		}
+	}
+	return out
+}
+
 // MayReadAttachments reports whether the caller of ctx may read the
 // attachments bound to message messageID, for the paths that list them
 // (history, the send echo, delivery planning; ptone/scion#4596). It asks

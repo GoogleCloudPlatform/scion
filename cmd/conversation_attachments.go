@@ -196,6 +196,7 @@ func saveMessageAttachments(
 	dir string,
 	filters []string,
 	force bool,
+	includePublished bool,
 ) ([]messageAttachmentJSON, error) {
 	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
 		return nil, fmt.Errorf("%s exists and is not a directory", dir)
@@ -217,7 +218,23 @@ func saveMessageAttachments(
 		return annotations, nil
 	}
 
-	names, err := planAttachmentFilenames(selected)
+	toDownload := make([]store.MessageAttachment, 0, len(selected))
+	for _, a := range selected {
+		if !includePublished && len(a.PublishedAs) > 0 {
+			if idx, ok := indexByID[a.ID]; ok {
+				annotations[idx].Skipped = "published"
+			}
+			_, _ = fmt.Fprintf(stderr, "skipped %s: published as %s (use 'scion artifact get', or --include-published)\n", a.Name, a.PublishedAs[0])
+			continue
+		}
+		toDownload = append(toDownload, a)
+	}
+
+	if len(toDownload) == 0 {
+		return annotations, nil
+	}
+
+	names, err := planAttachmentFilenames(toDownload)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +246,7 @@ func saveMessageAttachments(
 	defer func() { _ = out.Close() }()
 
 	var existsErr error
-	for i, a := range selected {
+	for i, a := range toDownload {
 		filename := names[i]
 		rc, derr := svc.DownloadAttachment(ctx, conversationID, msg.ID, a.ID)
 		if derr != nil {

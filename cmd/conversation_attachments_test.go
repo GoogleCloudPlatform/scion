@@ -113,7 +113,7 @@ func TestSaveMessageAttachments_AllFilterForceAndJSON(t *testing.T) {
 	var stderr bytes.Buffer
 
 	// 1. Save filtered by name ("two.txt") only.
-	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{"two.txt"}, false)
+	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{"two.txt"}, false, false)
 	require.NoError(t, err)
 	assert.Len(t, downloads, 1)
 	assert.Empty(t, anns[0].SavedPath)
@@ -123,7 +123,7 @@ func TestSaveMessageAttachments_AllFilterForceAndJSON(t *testing.T) {
 	assert.Equal(t, content2, string(got2))
 
 	// 2. Save all without --force: one.txt succeeds, two.txt is refused and annotated skipped: "exists".
-	anns, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false)
+	anns, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false, false)
 	require.Error(t, err)
 	assert.Equal(t, filepath.Join(dir, "one.txt"), anns[0].SavedPath)
 	assert.Equal(t, "exists", anns[1].Skipped)
@@ -144,14 +144,14 @@ func TestSaveMessageAttachments_AllFilterForceAndJSON(t *testing.T) {
 	assert.Equal(t, "exists", decoded.Attachments[1].Skipped)
 
 	// 3. Save with --force overwrites existing file.
-	anns, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{att2ID}, true)
+	anns, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{att2ID}, true, false)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "two.txt"), anns[1].SavedPath)
 	assert.Empty(t, anns[1].Skipped)
 
 	// 4. Unknown --attachment filter returns an error without downloading.
 	prevDownloads := len(downloads)
-	_, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{"nonexistent.txt"}, false)
+	_, err = saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, []string{"nonexistent.txt"}, false, false)
 	require.Error(t, err)
 	assert.Equal(t, prevDownloads, len(downloads))
 }
@@ -209,7 +209,7 @@ func TestSaveMessageAttachments_MaliciousNamesAndCollisions(t *testing.T) {
 	msg := &store.Message{ID: msgID, ConversationID: convID, Attachments: atts}
 
 	var stderr bytes.Buffer
-	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false)
+	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false, false)
 	require.NoError(t, err)
 
 	entries, err := os.ReadDir(dir)
@@ -281,7 +281,7 @@ func TestSaveMessageAttachments_DigestAndSizeMismatchLeaveNoPartialFile(t *testi
 			dir := t.TempDir()
 			msg := &store.Message{ID: msgID, ConversationID: convID, Attachments: []store.MessageAttachment{tc.att}}
 			var stderr bytes.Buffer
-			_, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false)
+			_, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false, false)
 			require.Error(t, err)
 			entries, rerr := os.ReadDir(dir)
 			require.NoError(t, rerr)
@@ -324,7 +324,7 @@ func TestSaveMessageAttachments_404ContinuesRemaining(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false)
+	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir, nil, false, false)
 	require.NoError(t, err)
 	assert.Contains(t, stderr.String(), "attachment gone.txt no longer available")
 	assert.Empty(t, anns[0].SavedPath)
@@ -512,4 +512,130 @@ func TestConversationMessagesAndCatchUp_AttachmentsDisplay(t *testing.T) {
 		assert.Equal(t, "My_Report.pdf", decoded.Items[2].DeferredAttachments[0].Name, name)
 	}
 	assert.Zero(t, downloadHits, "--json and text list modes must never download attachment bytes")
+}
+
+func TestConversationAttachments_PublishedAsDisplayAndSave(t *testing.T) {
+	const (
+		convID   = "conv-pub"
+		msgID    = "msg-pub"
+		pubAttID = "11111111-1111-1111-1111-111111111111"
+		rawAttID = "22222222-2222-2222-2222-222222222222"
+		artRef1  = "scion://artifact/aaaaaaaa-1111-1111-1111-111111111111"
+		artRef2  = "scion://artifact/bbbbbbbb-2222-2222-2222-222222222222"
+	)
+	const (
+		pubBody = "published bytes"
+		rawBody = "unpublished bytes"
+	)
+
+	msg := &store.Message{
+		ID:             msgID,
+		ConversationID: convID,
+		Sender:         "user:alice",
+		Recipient:      "agent:bot",
+		Msg:            "files attached",
+		CreatedAt:      time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC),
+		Attachments: []store.MessageAttachment{
+			{
+				ID:          pubAttID,
+				Name:        "spec.md",
+				Size:        int64(len(pubBody)),
+				ContentType: "text/markdown",
+				SHA256:      strSHA256(pubBody),
+				Ref:         artifacts.FormatAttachmentRef(pubAttID),
+				PublishedAs: []string{artRef1, artRef2},
+			},
+			{
+				ID:          rawAttID,
+				Name:        "notes.txt",
+				Size:        int64(len(rawBody)),
+				ContentType: "text/plain",
+				SHA256:      strSHA256(rawBody),
+				Ref:         artifacts.FormatAttachmentRef(rawAttID),
+			},
+		},
+	}
+
+	// 1. get-message text and messages/catch-up --full print published as lines.
+	var getBuf bytes.Buffer
+	require.NoError(t, writeGetMessageText(context.Background(), nil, &getBuf, msg))
+	var fullBuf bytes.Buffer
+	require.NoError(t, writeConversationMessagesFull(&fullBuf, []store.Message{*msg}, func(s string) string { return s }))
+	for name, out := range map[string]string{"get-message": getBuf.String(), "messages/catch-up --full": fullBuf.String()} {
+		assert.Contains(t, out, "Attachment: spec.md (15 bytes, text/markdown) scion://attachment/"+pubAttID+"\n  published as "+artRef1+"\n  published as "+artRef2+"\n", name)
+		assert.Contains(t, out, "Attachment: notes.txt (17 bytes, text/plain) scion://attachment/"+rawAttID+"\n", name)
+	}
+
+	// 2. --save-attachments skips published attachments by default and downloads unpublished ones.
+	var downloaded []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloaded = append(downloaded, r.URL.Path)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/"+pubAttID):
+			_, _ = w.Write([]byte(pubBody))
+		case strings.HasSuffix(r.URL.Path, "/"+rawAttID):
+			_, _ = w.Write([]byte(rawBody))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	dir1 := t.TempDir()
+	var stderr bytes.Buffer
+	anns, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir1, nil, false, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"/api/v1/conversations/" + convID + "/messages/" + msgID + "/attachments/" + rawAttID}, downloaded)
+	assert.Contains(t, stderr.String(), "skipped spec.md: published as "+artRef1+" (use 'scion artifact get', or --include-published)\n")
+	assert.Empty(t, anns[0].SavedPath)
+	assert.Equal(t, "published", anns[0].Skipped)
+	assert.Equal(t, filepath.Join(dir1, "notes.txt"), anns[1].SavedPath)
+	assert.Empty(t, anns[1].Skipped)
+
+	// Verify --json + --save-attachments carries publishedAs[] and skipped: "published".
+	var jsonBuf bytes.Buffer
+	require.NoError(t, outputMessageWithSaveJSON(&jsonBuf, msg, anns))
+	var decoded struct {
+		Attachments []struct {
+			ID          string   `json:"id"`
+			PublishedAs []string `json:"publishedAs"`
+			SavedPath   string   `json:"savedPath"`
+			Skipped     string   `json:"skipped"`
+		} `json:"attachments"`
+	}
+	require.NoError(t, json.Unmarshal(jsonBuf.Bytes(), &decoded))
+	require.Len(t, decoded.Attachments, 2)
+	assert.Equal(t, []string{artRef1, artRef2}, decoded.Attachments[0].PublishedAs)
+	assert.Equal(t, "published", decoded.Attachments[0].Skipped)
+	assert.Empty(t, decoded.Attachments[0].SavedPath)
+	assert.Equal(t, filepath.Join(dir1, "notes.txt"), decoded.Attachments[1].SavedPath)
+	assert.Empty(t, decoded.Attachments[1].Skipped)
+
+	// 3. --save-attachments --include-published downloads the published attachment too.
+	downloaded = nil
+	stderr.Reset()
+	dir2 := t.TempDir()
+	annsInc, err := saveMessageAttachments(context.Background(), client.Conversations(), &stderr, convID, msg, dir2, nil, false, true)
+	require.NoError(t, err)
+	assert.Len(t, downloaded, 2)
+	assert.Empty(t, stderr.String())
+	assert.Equal(t, filepath.Join(dir2, "spec.md"), annsInc[0].SavedPath)
+	assert.Empty(t, annsInc[0].Skipped)
+	assert.Equal(t, filepath.Join(dir2, "notes.txt"), annsInc[1].SavedPath)
+	gotPub, err := os.ReadFile(filepath.Join(dir2, "spec.md"))
+	require.NoError(t, err)
+	assert.Equal(t, pubBody, string(gotPub))
+
+	// 4. --include-published without --save-attachments returns an error.
+	origSave, origInc := convGetMessageSaveAttachments, convGetMessageIncludePublished
+	defer func() {
+		convGetMessageSaveAttachments, convGetMessageIncludePublished = origSave, origInc
+	}()
+	convGetMessageSaveAttachments = ""
+	convGetMessageIncludePublished = true
+	err = runConversationGetMessage(&cobra.Command{}, []string{convID, msgID})
+	require.EqualError(t, err, "--include-published requires --save-attachments")
 }

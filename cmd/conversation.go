@@ -51,12 +51,13 @@ var (
 
 	convCreateJSON bool
 
-	convGetJSON                   bool
-	convGetMessageJSON            bool
-	convGetMessageBody            bool
-	convGetMessageSaveAttachments string
-	convGetMessageAttachments     []string
-	convGetMessageForce           bool
+	convGetJSON                    bool
+	convGetMessageJSON             bool
+	convGetMessageBody             bool
+	convGetMessageSaveAttachments  string
+	convGetMessageAttachments      []string
+	convGetMessageForce            bool
+	convGetMessageIncludePublished bool
 
 	convParticipantsJSON bool
 
@@ -319,6 +320,7 @@ func init() {
 	conversationGetMessageCmd.Flags().StringVar(&convGetMessageSaveAttachments, "save-attachments", "", "Save message attachments into this directory")
 	conversationGetMessageCmd.Flags().StringArrayVar(&convGetMessageAttachments, "attachment", nil, "Save only the named attachment (exact ID or name; repeatable)")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageForce, "force", false, "Overwrite existing files when saving attachments")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageIncludePublished, "include-published", false, "Download attachments even when already published as an artifact")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -700,6 +702,9 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	if convGetMessageForce && convGetMessageSaveAttachments == "" {
 		return errors.New("--force requires --save-attachments")
 	}
+	if convGetMessageIncludePublished && convGetMessageSaveAttachments == "" {
+		return errors.New("--include-published requires --save-attachments")
+	}
 
 	if convGetMessageJSON {
 		outputFormat = "json"
@@ -743,6 +748,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 			convGetMessageSaveAttachments,
 			convGetMessageAttachments,
 			convGetMessageForce,
+			convGetMessageIncludePublished,
 		)
 	}
 
