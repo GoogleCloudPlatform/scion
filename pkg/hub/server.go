@@ -371,6 +371,9 @@ type ServerConfig struct {
 	// DefaultChatSearchMaxConcurrent. On Postgres the effective cap is
 	// clamped to a quarter of DatabaseMaxOpenConns (EffectiveChatSearchCap).
 	ChatSearchMaxConcurrent int
+	// Uploads holds the web upload limits (server config
+	// hub.uploads): per-file maximums. Zero fields mean the defaults.
+	Uploads config.HubUploadsConfig
 	// DatabaseMaxOpenConns is the hub's main pool size (server config
 	// database.max_open_conns after the driver defaults). It bounds the
 	// Postgres chat search cap. Zero means unknown (read as the default pool).

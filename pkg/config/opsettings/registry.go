@@ -248,6 +248,16 @@ func init() {
 			New:        func() any { return &BrandingSettings{} },
 		},
 		{
+			// uploads holds web upload limits (server.hub.uploads), applied live
+			// across replicas via OperationalSettings.
+			Name: UploadsSectionName,
+			KoanfPaths: []string{
+				config.HubUploadsMaxAttachmentSizeKey,
+				config.HubUploadsMaxWorkspaceFileSizeKey,
+			},
+			New: func() any { return &UploadsSettings{} },
+		},
+		{
 			Name: "agent_secrets",
 			KoanfPaths: []string{
 				"agent_secrets.user_scope_only",
@@ -631,9 +641,11 @@ func compileSchemas() {
 		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
 		// branding is derived from settings-v1.schema.json (server.hub.branding).
 		BrandingSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "branding")),
-		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
-		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
-		"broker_policy":     schemaObject(getSchemaProperty(root, "broker_policy")),
+		// uploads is derived from settings-v1.schema.json (server.hub.uploads).
+		UploadsSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "uploads")),
+		"quotas":           schemaObject(getSchemaProperty(root, "quotas")),
+		"agent_secrets":    schemaObject(getSchemaProperty(root, "agent_secrets")),
+		"broker_policy":    schemaObject(getSchemaProperty(root, "broker_policy")),
 		// gcp_iam schema is hand-written -- the keys have no definition in
 		// settings-v1.schema.json. An empty string is not a valid value:
 		// clearing a key is done by resetting the section.
@@ -1229,6 +1241,22 @@ func validateCrossField(section string, doc json.RawMessage) []config.Validation
 			}
 		}
 		return errs
+	case UploadsSectionName:
+		var us UploadsSettings
+		if err := json.Unmarshal(doc, &us); err != nil {
+			return []config.ValidationError{{Message: fmt.Sprintf("invalid uploads JSON: %v", err)}}
+		}
+		var cfg config.HubUploadsConfig
+		if us.MaxAttachmentSize != nil {
+			cfg.MaxAttachmentSize = *us.MaxAttachmentSize
+		}
+		if us.MaxWorkspaceFileSize != nil {
+			cfg.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
+		}
+		if err := cfg.Validate(); err != nil {
+			return []config.ValidationError{{Message: err.Error()}}
+		}
+		return nil
 	case AgentLimitsSectionName:
 		if _, err := ParseAgentLimitsDoc(doc); err != nil {
 			return []config.ValidationError{{Message: err.Error()}}

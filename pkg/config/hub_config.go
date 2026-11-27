@@ -116,6 +116,9 @@ type HubServerConfig struct {
 	// Chat holds web chat server limits (settings server.hub.chat).
 	Chat HubChatConfig `json:"chat" yaml:"chat" koanf:"chat"`
 
+	// Uploads holds web upload limits (settings server.hub.uploads).
+	Uploads HubUploadsConfig `json:"uploads" yaml:"uploads" koanf:"uploads"`
+
 	// HubID is a unique identifier for this hub instance.
 	// Used to namespace secrets and other hub-scoped resources in shared GCP projects.
 	// Defaults to sha256(hostname)[:12] if not set.

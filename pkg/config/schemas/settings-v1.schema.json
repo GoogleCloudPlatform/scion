@@ -1581,6 +1581,30 @@
           },
           "x-since": "1"
         },
+        "uploads": {
+          "type": "object",
+          "description": "Web upload limits, in bytes; 0 or unset means the default. Layer-1 operational setting (section: uploads), applied live across replicas without a restart.",
+          "additionalProperties": false,
+          "properties": {
+            "max_attachment_size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 104857600,
+              "description": "Per-file limit of a chat attachment stored by the hub's attachment store (default 10485760, 10 MiB; max 104857600, 100 MiB). Attachments stored in the artifact service keep that service's file size limit.",
+              "x-env-var": "SCION_SERVER_HUB_UPLOADS_MAXATTACHMENTSIZE",
+              "x-since": "1"
+            },
+            "max_workspace_file_size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 104857600,
+              "description": "Per-file limit of an upload to a project workspace or shared directory (default 52428800, 50 MiB; max 104857600, 100 MiB, matching the single-request body cap).",
+              "x-env-var": "SCION_SERVER_HUB_UPLOADS_MAXWORKSPACEFILESIZE",
+              "x-since": "1"
+            }
+          },
+          "x-since": "1"
+        },
         "gcp_iam_check_mode": {
           "type": "string",
           "description": "Whether the IAM actAs permission is checked when a GCP service account is bound to an agent: 'off' (default) or 'enforce'. Any other non-empty value is treated as 'enforce', with a warning."

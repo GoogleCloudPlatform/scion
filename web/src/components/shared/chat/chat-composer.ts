@@ -2007,6 +2007,32 @@ export class ScionChatComposer extends LitElement {
 
     this.uploading = true;
     try {
+      const { apiFetch } = await import('../../../client/api.js');
+      const { getUploadLimits, formatUploadSize } =
+        await import('../../../client/upload-limits.js');
+      const limits = await getUploadLimits();
+      if (switchedAway()) return;
+
+      // A file over the hub's per-file limit is named with that limit here,
+      // before anything is sent.
+      const failures: UploadFailure[] = [];
+      const accepted: File[] = [];
+      for (const file of files) {
+        if (file.size > limits.maxAttachmentSize) {
+          failures.push({
+            name: file.name,
+            error: `exceeds the maximum size of ${formatUploadSize(limits.maxAttachmentSize)}`,
+          });
+        } else {
+          accepted.push(file);
+        }
+      }
+
+      if (accepted.length === 0) {
+        this.uploadFailures = failures;
+        return;
+      }
+
       const formData = new FormData();
       // A DM belongs to no project, and the hub accepts only project-less
       // uploads there. The composer can still hold a projectId in a DM (an
@@ -2015,11 +2041,10 @@ export class ScionChatComposer extends LitElement {
       if (!this.isDirectMessage()) {
         formData.append('project_id', this.projectId);
       }
-      for (const file of files) {
+      for (const file of accepted) {
         formData.append('files', file);
       }
 
-      const { apiFetch } = await import('../../../client/api.js');
       const res = await apiFetch('/api/v1/chat/attachments', {
         method: 'POST',
         body: formData,
@@ -2039,7 +2064,7 @@ export class ScionChatComposer extends LitElement {
       // The server reports per file: some may be stored while others are
       // refused. Anything it did take is attached, and the refusals are named
       // rather than collapsed into one "upload failed".
-      this.uploadFailures = data.failures ?? [];
+      this.uploadFailures = [...failures, ...(data.failures ?? [])];
       if (data.attachments?.length) {
         this.pendingFiles = [...this.pendingFiles, ...data.attachments];
       }

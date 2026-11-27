@@ -52,7 +52,9 @@ const errWorkspaceWritesUnavailable = "Workspace writes are not available in thi
 // maxUploadTotalSize is the maximum total request body size for file uploads (100MB).
 const maxUploadTotalSize = 100 * 1024 * 1024
 
-// maxUploadFileSize is the maximum size for a single uploaded file (50MB).
+// maxUploadFileSize is the maximum size for a single uploaded template or
+// harness-config file (50MB). Project workspace and shared directory uploads
+// use server.hub.uploads.max_workspace_file_size instead.
 const maxUploadFileSize = 50 * 1024 * 1024
 
 // maxEditableFileSize is the maximum file size the editor will serve for inline editing (1MB).
@@ -728,14 +730,15 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 
 	// Validate every file (the field name is its relative path) before
 	// writing any, so a refused file leaves the workspace unchanged.
+	maxFile := s.ResolvedUploads().EffectiveMaxWorkspaceFileSize()
 	for relPath, fileHeaders := range r.MultipartForm.File {
 		if err := validateWorkspaceWritePath(relPath); err != nil {
 			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))
 			return
 		}
 		for _, fh := range fileHeaders {
-			if fh.Size > maxUploadFileSize {
-				BadRequest(w, fmt.Sprintf("File %q exceeds 50MB limit", relPath))
+			if fh.Size > maxFile {
+				writeFileTooLarge(w, relPath, maxFile)
 				return
 			}
 		}
@@ -777,6 +780,13 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, ProjectWorkspaceUploadResponse{
 		Files: uploaded,
 	})
+}
+
+// writeFileTooLarge answers 413 for a file above the per-file upload limit.
+func writeFileTooLarge(w http.ResponseWriter, name string, limit int64) {
+	writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+		fmt.Sprintf("File %q exceeds the maximum size of %s (%d bytes)", name, formatByteSize(limit), limit),
+		map[string]interface{}{"maxSize": limit})
 }
 
 // handleProjectWorkspaceDownload serves a single file from a project workspace.

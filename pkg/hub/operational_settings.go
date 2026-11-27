@@ -161,6 +161,11 @@ type Layer1Snapshot struct {
 	BrandingInDB     bool
 	BrandingFromFile bool
 
+	// Uploads (uploads section: server.hub.uploads); zero fields mean default.
+	Uploads         config.HubUploadsConfig
+	UploadsInDB     bool
+	UploadsFromFile bool
+
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
@@ -767,6 +772,7 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		}
 	}
 	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
+	_, snap.UploadsInDB = dbSections[opsettings.UploadsSectionName]
 	snap.FromOperationalSettings = true
 	snap.Revision = revision
 	snap.Seq = seq
@@ -1406,6 +1412,14 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.HubTracingEnabled = &v
 	}
 
+	// Uploads (server.hub.uploads)
+	if k.Exists(config.HubUploadsMaxAttachmentSizeKey) {
+		snap.Uploads.MaxAttachmentSize = k.Int64(config.HubUploadsMaxAttachmentSizeKey)
+	}
+	if k.Exists(config.HubUploadsMaxWorkspaceFileSizeKey) {
+		snap.Uploads.MaxWorkspaceFileSize = k.Int64(config.HubUploadsMaxWorkspaceFileSizeKey)
+	}
+
 	// Branding
 	brandSub := k.Cut(config.BrandingSectionKey)
 	if brandSub != nil && len(brandSub.Keys()) > 0 {
@@ -1644,6 +1658,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Branding — applied live in file mode too.
 	snap.Branding = gc.Hub.Branding.Clone()
 	snap.BrandingFromFile = true
+
+	// Uploads — applied live in file mode too.
+	snap.Uploads = gc.Hub.Uploads
+	snap.UploadsFromFile = true
 
 	// Agent defaults — read from settings.yaml top-level keys
 	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
@@ -2192,6 +2210,25 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 	if s.applyBrandingLocked(brandingCfg) {
 		applied = append(applied, opsettings.BrandingSectionName)
+	}
+
+	// Uploads (server.hub.uploads)
+	nextUploads := s.config.Uploads
+	switch {
+	case !snap.Uploads.IsZero():
+		nextUploads = snap.Uploads
+	case snap.FromOperationalSettings:
+		if snap.UploadsInDB {
+			nextUploads = config.HubUploadsConfig{}
+		} else {
+			nextUploads = s.startupLayer1.Uploads
+		}
+	case snap.UploadsFromFile:
+		nextUploads = config.HubUploadsConfig{}
+	}
+	if s.config.Uploads != nextUploads {
+		s.config.Uploads = nextUploads
+		applied = append(applied, opsettings.UploadsSectionName)
 	}
 
 	s.mu.Unlock()

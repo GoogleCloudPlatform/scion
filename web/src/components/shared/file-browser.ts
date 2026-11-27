@@ -29,6 +29,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
 import { showConfirm } from './confirm-dialog.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { formatInstant, zoneLabel } from '../../utils/time.js';
@@ -160,6 +161,11 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
   }
 
   async uploadFiles(files: FileList): Promise<void> {
+    const limits = await getUploadLimits();
+    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    if (sizeErr) {
+      throw new Error(sizeErr);
+    }
     const formData = new FormData();
     for (let i = 0; i < files.length; i++) {
       formData.append(files[i].name, files[i]);
@@ -232,6 +238,11 @@ export class SharedDirFileBrowserDataSource implements FileBrowserDataSource {
   }
 
   async uploadFiles(files: FileList): Promise<void> {
+    const limits = await getUploadLimits();
+    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    if (sizeErr) {
+      throw new Error(sizeErr);
+    }
     const formData = new FormData();
     for (let i = 0; i < files.length; i++) {
       formData.append(files[i].name, files[i]);

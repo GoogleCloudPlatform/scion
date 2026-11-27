@@ -34,6 +34,12 @@ const showToast = vi.fn();
 vi.mock('../../../client/api.js', () => ({ apiFetch }));
 vi.mock('../../../utils/toast.js', () => ({ showToast }));
 
+/** The hub's upload limits as GET /api/v1/settings/public publishes them. */
+let publicUploads: Record<string, number> | undefined;
+vi.mock('../../../client/server-feature-flags.js', () => ({
+  getPublicSettings: () => Promise.resolve(publicUploads ? { uploads: publicUploads } : null),
+}));
+
 let ATTACHMENT_ACCEPT: string;
 let PASTE_TO_ATTACHMENT_THRESHOLD: number;
 
@@ -71,7 +77,41 @@ beforeAll(async () => {
 
 afterEach(() => {
   vi.clearAllMocks();
+  publicUploads = undefined;
   document.body.innerHTML = '';
+});
+
+describe('composer — upload limits from the hub', () => {
+  it('names the hub limit for a file over it and does not send it', async () => {
+    publicUploads = { maxAttachmentSize: 1024 };
+    const el = createComposer();
+    const big = new File(['x'], 'big.log');
+    Object.defineProperty(big, 'size', { value: 2048 });
+
+    await el.uploadFiles([big]);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(el.uploadFailures).toEqual([
+      { name: 'big.log', error: 'exceeds the maximum size of 1 KiB' },
+    ]);
+  });
+
+  it('sends accepted files and records pre-send size failures for oversized ones', async () => {
+    publicUploads = { maxAttachmentSize: 1024 };
+    const el = createComposer();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    const ok = new File(['hello'], 'compose.yaml');
+    const big = new File(['x'], 'huge.bin');
+    Object.defineProperty(big, 'size', { value: 2048 });
+
+    await el.uploadFiles([ok, big]);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(el.pendingFiles).toEqual([STORED]);
+    expect(el.uploadFailures).toEqual([
+      { name: 'huge.bin', error: 'exceeds the maximum size of 1 KiB' },
+    ]);
+  });
 });
 
 describe('composer — partial upload results', () => {

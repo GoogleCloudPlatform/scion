@@ -940,7 +940,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
 				} else {
 					attachDir := filepath.Join(globalDir, "attachments")
-					attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
+					attachStore, err := hub.NewLocalDiskAttachmentStoreWithLimit(attachDir, func() int64 {
+						return hubSrv.ResolvedUploads().EffectiveMaxAttachmentSize()
+					})
 					if err != nil {
 						log.Printf("Warning: failed to initialize attachment store: %v", err)
 					} else {
@@ -1937,6 +1939,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 		return err
 	}
 	if err := config.ValidateDefaultMessageMode(cfg.Hub.DefaultMessageMode); err != nil {
+		return err
+	}
+	if err := cfg.Hub.Uploads.Validate(); err != nil {
 		return err
 	}
 	if err := validateLongLivedRequestSettings(cfg); err != nil {
@@ -3095,6 +3100,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		AuditRetentionDays:           cfg.Hub.AuditRetentionDays,
 		ChatSearchTimeout:            chatSearchTimeout(cfg),
 		ChatSearchMaxConcurrent:      cfg.Hub.Chat.Search.MaxConcurrent,
+		Uploads:                      cfg.Hub.Uploads,
 		DatabaseMaxOpenConns:         cfg.Database.MaxOpenConns,
 		PerfTrace:                    cfg.Hub.PerfTrace,
 		CSPReportRawSamples:          cfg.Hub.CSPReportRawSamples,

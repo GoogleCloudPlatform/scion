@@ -6775,6 +6775,9 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	cleanup, err := parseMultipartUpload(r, uploadFormMemory)
 	defer cleanup()
 	if err != nil {
+		if writeWorkspaceBodyTooLarge(w, err) {
+			return
+		}
 		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}
@@ -6842,7 +6845,7 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		if toArtifacts {
 			result, err = s.storeUploadedArtifact(ctx, maxFile, fh)
 		} else {
-			result, err = s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), fh)
+			result, err = s.storeUploadedFile(ctx, as, wcs, projectID, user.ID(), maxFile, fh)
 		}
 		if err != nil {
 			var rejection attachmentRejection
@@ -6972,7 +6975,7 @@ func openClassifiedUpload(fh *multipart.FileHeader, maxFile int64) (multipart.Fi
 // storeUploadedFile validates, classifies, and stores one uploaded file.
 func (s *Server) storeUploadedFile(
 	ctx context.Context, as AttachmentStore, wcs WebChatStore,
-	projectID, userID string, fh *multipart.FileHeader,
+	projectID, userID string, maxFile int64, fh *multipart.FileHeader,
 ) (attachmentUploadResult, error) {
 	// The filename error is passed through without a prefix. Every error
 	// SanitizeFilename can return already names the problem — "invalid
@@ -6983,7 +6986,7 @@ func (s *Server) storeUploadedFile(
 	// blocklists (#1045). The type is classified from the content, not from
 	// the Content-Type the client put on the part: that header is a claim
 	// the uploader controls.
-	file, safeName, mimeType, err := openClassifiedUpload(fh, MaxAttachmentSize)
+	file, safeName, mimeType, err := openClassifiedUpload(fh, maxFile)
 	if err != nil {
 		return attachmentUploadResult{}, err
 	}

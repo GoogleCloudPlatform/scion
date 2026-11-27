@@ -115,6 +115,9 @@ var layer1RoundTripSamples = map[string]string{
 	// hub_observability
 	"server.hub.observability.metrics_enabled": `true`,
 	"server.hub.observability.tracing_enabled": `false`,
+	// uploads
+	"server.hub.uploads.max_attachment_size":     `20971520`,
+	"server.hub.uploads.max_workspace_file_size": `83886080`,
 	// branding (deep-merged)
 	"server.hub.branding.name":                         `"Acme Cloud"`,
 	"server.hub.branding.short_name":                   `"Acme"`,
@@ -600,6 +603,7 @@ func TestPutServerConfigDB_MergedSections_ConcurrentWrite409(t *testing.T) {
 		{"broker_policy", `{"admin_managed_only":true}`, `{"admin_managed_only":false}`, `{"broker_policy": {"admin_managed_only": null}}`},
 		{"hub_observability", `{"metrics_enabled":true}`, `{"metrics_enabled":false}`, `{"server": {"hub": {"observability": {"metrics_enabled": null}}}}`},
 		{"branding", `{"name":"Acme"}`, `{"name":"Other"}`, `{"server": {"hub": {"branding": {"subtitle": "Platform"}}}}`},
+		{"uploads", `{"max_attachment_size":20971520}`, `{"max_attachment_size":31457280}`, `{"server": {"hub": {"uploads": {"max_workspace_file_size": 83886080}}}}`},
 		{"notifications", `{"notification_channels":[{"type":"slack","params":{"channel":"#a"}}]}`, `{"notification_channels":[{"type":"slack","params":{"channel":"#b"}}]}`, `{"server": {"notification_channels": []}}`},
 		{"project_defaults", `{"default_scratchpad":true}`, `{"default_scratchpad":false}`, `{"default_scratchpad": null}`},
 	} {

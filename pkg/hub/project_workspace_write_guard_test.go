@@ -142,6 +142,29 @@ func TestProjectWorkspaceUpload_OversizedBodyRefused(t *testing.T) {
 	assert.Equal(t, "small", string(content))
 }
 
+func TestProjectWorkspaceUpload_ConfigurablePerFileLimit(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.config.Uploads.MaxWorkspaceFileSize = 1024
+	project, workspacePath := createTestHubManagedProject(t, srv, "WS Upload Limit")
+
+	// A file above the configured per-file limit gets 413 payload_too_large
+	// naming the real limit and leaves nothing written.
+	rec := doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID),
+		map[string][]byte{"too-big.bin": []byte(strings.Repeat("x", 1025))})
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "payload_too_large")
+	assert.Contains(t, rec.Body.String(), "1024")
+	assertNoEntry(t, workspacePath, "too-big.bin")
+
+	// A file at the configured per-file limit succeeds.
+	rec = doMultipartRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID),
+		map[string][]byte{"ok.bin": []byte(strings.Repeat("y", 1024))})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	content, err := os.ReadFile(filepath.Join(workspacePath, "ok.bin"))
+	require.NoError(t, err)
+	assert.Len(t, content, 1024)
+}
+
 func TestValidateWorkspaceWritePath(t *testing.T) {
 	refused := []string{".git", ".git/config", ".GIT/config", "a/.git/b", "a/.Git", ".git./x", `a\.git\config`, "../x", ""}
 	for _, p := range refused {

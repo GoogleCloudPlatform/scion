@@ -201,6 +201,10 @@
       "telemetry.retention.sweep_interval",
       "telemetry.retention.batch_size",
       "telemetry.resource"
+    ],
+    "uploads": [
+      "server.hub.uploads.max_attachment_size",
+      "server.hub.uploads.max_workspace_file_size"
     ]
   },
   "layer0_prefixes": [

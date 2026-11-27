@@ -279,7 +279,7 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 		return AttachmentRef{}, err
 	}
 	defer func() { _ = f.Close() }()
-	if info.Size() > MaxAttachmentSize {
+	if info.Size() > s.ResolvedUploads().EffectiveMaxAttachmentSize() {
 		return AttachmentRef{}, errAttachmentTooLarge
 	}
 

@@ -92,6 +92,7 @@ Controls the central Hub API server.
 | `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
 | `schedules` | object | | Limits on recurring schedules (see [Recurring schedules](#recurring-schedules-serverhubschedules)). |
 | `default_message_mode` | string | `"project"` | [Message mode](/scion/reference/messaging-authorization/) of a new agent when neither the create request, its template nor its parent agent sets one: `none`, `owner`, `direct`, `tree` or `project`. `hub` is refused: hub mode is granted per agent. Existing agents keep their mode. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_DEFAULTMESSAGEMODE`. |
+| `uploads` | object | | Web upload limits (see [Uploads](#uploads-serverhubuploads)). |
 | `init_firewall` | object | | Hub-wide operator-authoritative egress firewall policy sealed onto every broker dispatch and unioned with `server.broker.init_firewall` when an agent opts into `SCION_INIT_FIREWALL` (see [Hub Init Firewall](#hub-init-firewall-serverhubinit_firewall)). Startup-only: restart required to change. |
 
 #### Hub Init Firewall (`server.hub.init_firewall`)
@@ -226,6 +227,15 @@ Bounds on web chat search, so one search cannot stall the hub. Each search runs 
 | :--- | :--- | :--- | :--- |
 | `timeout` | duration | `"3s"` | Time limit of one search; a positive Go duration. The admin settings update refuses an invalid value with `422`; at startup an invalid value is logged and the default used. Env: `SCION_SERVER_HUB_CHAT_SEARCH_TIMEOUT`. |
 | `max_concurrent` | int | `2` | Searches running hub-wide at once. `0` means the default. On SQLite it is also the size of the read-only search connection pool. On Postgres, where search shares the main connection pool, the hub lowers it to a quarter of `database.max_open_conns` (at least 1; 1 with the default pool of 5) and logs one startup line with the configured and effective values. Env: `SCION_SERVER_HUB_CHAT_SEARCH_MAXCONCURRENT`. |
+
+#### Uploads (`server.hub.uploads`)
+
+Per-file limits for files users upload from the web UI: chat attachments (legacy attachment store), and project workspace and shared directory files (the **Files** tab and terminal drag and drop). Both are Layer-1 operational settings in the `uploads` section, applied live across replicas without a restart: you can set them through `PUT /api/v1/admin/server-config` as a Hub admin, in `settings.yaml`, or with the environment variables below. The web UI reads them from `GET /api/v1/settings/public` (`uploads`) and refuses a file over the limit before sending it. Single-request workspace and shared-directory uploads are also bounded by the 100 MiB total request body cap. All sizes are in bytes; `0` means the default.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `max_attachment_size` | int | `10485760` (10 MiB) | Per-file limit of a chat attachment stored by the Hub's attachment store. Attachments stored in the artifact service keep that service's `artifacts.max_file_bytes` limit instead. At most 100 MiB (`104857600`). Env: `SCION_SERVER_HUB_UPLOADS_MAXATTACHMENTSIZE`. |
+| `max_workspace_file_size` | int | `52428800` (50 MiB) | Per-file limit of an upload to a project workspace or shared directory. At most 100 MiB (`104857600`), matching the single-request body cap. Env: `SCION_SERVER_HUB_UPLOADS_MAXWORKSPACEFILESIZE`. |
 
 #### Observability export (`server.hub.observability`)
 

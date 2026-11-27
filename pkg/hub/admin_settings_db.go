@@ -405,6 +405,15 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Branding: saved or bootstrap value; nil when unset.
 	resp.Server.Hub.Branding = snap.Branding.Clone()
 
+	// Uploads: saved or bootstrap value; nil when unset.
+	resp.Server.Hub.Uploads = nil
+	if !snap.Uploads.IsZero() {
+		resp.Server.Hub.Uploads = &config.V1ServerHubUploadsConfig{
+			MaxAttachmentSize:    snap.Uploads.MaxAttachmentSize,
+			MaxWorkspaceFileSize: snap.Uploads.MaxWorkspaceFileSize,
+		}
+	}
+
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
 		resp.Server.GitHubApp = &config.V1GitHubAppConfig{}
@@ -2690,6 +2699,14 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 					keys = append(keys, config.HubTracingEnabledKey)
 				}
 			}
+			if u := hub.Uploads; u != nil {
+				if u.MaxAttachmentSize != 0 {
+					keys = append(keys, config.HubUploadsMaxAttachmentSizeKey)
+				}
+				if u.MaxWorkspaceFileSize != 0 {
+					keys = append(keys, config.HubUploadsMaxWorkspaceFileSizeKey)
+				}
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -3228,6 +3245,20 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		}
 		doc = d
 
+	case opsettings.UploadsSectionName:
+		// handlePutServerConfigDB merges this doc on the current row
+		// (bodyMergedSections): an omitted key keeps its value, null clears it.
+		d := &opsettings.UploadsSettings{}
+		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Uploads != nil {
+			if v := req.Server.Hub.Uploads.MaxAttachmentSize; v != 0 {
+				d.MaxAttachmentSize = &v
+			}
+			if v := req.Server.Hub.Uploads.MaxWorkspaceFileSize; v != 0 {
+				d.MaxWorkspaceFileSize = &v
+			}
+		}
+		doc = d
+
 	case "agent_secrets":
 		if req.AgentSecrets != nil {
 			doc = req.AgentSecrets
@@ -3732,6 +3763,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
 	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"branding":          settingsTokenRefused,       // unauthenticated /login content, logos, icons and palette
+	"uploads":           settingsTokenConfiguration, // per-file web upload limits
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
