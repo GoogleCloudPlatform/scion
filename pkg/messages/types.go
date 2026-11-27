@@ -189,6 +189,12 @@ type StructuredMessage struct {
 	Channel        string            `json:"channel,omitempty"`
 	ThreadID       string            `json:"thread_id,omitempty"`
 	ConversationID string            `json:"conversation_id,omitempty"`
+	// Conversation carries the resolved conversation metadata for broker
+	// plugin routing (surface, external_ref, parent_ref, display_name).
+	// Populated by the hub alongside the legacy Channel/ThreadID fields
+	// during Phase 11 so plugins can route by conversation while older
+	// plugin binaries keep reading Channel/ThreadID.
+	Conversation *Conversation `json:"conversation,omitempty"`
 
 	// ConversationAsserted records that ConversationID was NAMED BY THE CALLER
 	// and authorized, rather than derived by the hub from message fields.
@@ -261,6 +267,15 @@ type StructuredMessage struct {
 	// formatting. Phase 13 deletes this field along with the rest of
 	// StructuredMessage.
 	DeliveryText string `json:"delivery_text,omitempty"`
+}
+
+// Conversation carries the resolved conversation metadata on a
+// StructuredMessage for broker plugin routing (Phase 11).
+type Conversation struct {
+	Surface     string `json:"surface,omitempty"`
+	ExternalRef string `json:"external_ref,omitempty"`
+	ParentRef   string `json:"parent_ref,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // LogTypeOther is what LogType returns for a type outside the closed enum.

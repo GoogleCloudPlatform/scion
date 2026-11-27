@@ -58,6 +58,7 @@ type StructuredMessage struct {
 	ThreadId       string                 `protobuf:"bytes,19,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	ConversationId string                 `protobuf:"bytes,21,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
 	DeliveryText   string                 `protobuf:"bytes,22,opt,name=delivery_text,json=deliveryText,proto3" json:"delivery_text,omitempty"`
+	Conversation   *Conversation          `protobuf:"bytes,23,opt,name=conversation,proto3" json:"conversation,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -232,6 +233,84 @@ func (x *StructuredMessage) GetDeliveryText() string {
 	return ""
 }
 
+func (x *StructuredMessage) GetConversation() *Conversation {
+	if x != nil {
+		return x.Conversation
+	}
+	return nil
+}
+
+// Conversation carries the resolved conversation metadata for a message on
+// the hub-to-plugin wire (Phase 11). Plugins choose their spoke from surface
+// and target external_ref instead of reading legacy channel/thread_id fields.
+type Conversation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Surface       string                 `protobuf:"bytes,1,opt,name=surface,proto3" json:"surface,omitempty"`
+	ExternalRef   string                 `protobuf:"bytes,2,opt,name=external_ref,json=externalRef,proto3" json:"external_ref,omitempty"`
+	ParentRef     string                 `protobuf:"bytes,3,opt,name=parent_ref,json=parentRef,proto3" json:"parent_ref,omitempty"`
+	DisplayName   string                 `protobuf:"bytes,4,opt,name=display_name,json=displayName,proto3" json:"display_name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Conversation) Reset() {
+	*x = Conversation{}
+	mi := &file_broker_v1_broker_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Conversation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Conversation) ProtoMessage() {}
+
+func (x *Conversation) ProtoReflect() protoreflect.Message {
+	mi := &file_broker_v1_broker_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Conversation.ProtoReflect.Descriptor instead.
+func (*Conversation) Descriptor() ([]byte, []int) {
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Conversation) GetSurface() string {
+	if x != nil {
+		return x.Surface
+	}
+	return ""
+}
+
+func (x *Conversation) GetExternalRef() string {
+	if x != nil {
+		return x.ExternalRef
+	}
+	return ""
+}
+
+func (x *Conversation) GetParentRef() string {
+	if x != nil {
+		return x.ParentRef
+	}
+	return ""
+}
+
+func (x *Conversation) GetDisplayName() string {
+	if x != nil {
+		return x.DisplayName
+	}
+	return ""
+}
+
 type ConfigureRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Config        map[string]string      `protobuf:"bytes,1,rep,name=config,proto3" json:"config,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -241,7 +320,7 @@ type ConfigureRequest struct {
 
 func (x *ConfigureRequest) Reset() {
 	*x = ConfigureRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[1]
+	mi := &file_broker_v1_broker_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -253,7 +332,7 @@ func (x *ConfigureRequest) String() string {
 func (*ConfigureRequest) ProtoMessage() {}
 
 func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[1]
+	mi := &file_broker_v1_broker_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -266,7 +345,7 @@ func (x *ConfigureRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureRequest.ProtoReflect.Descriptor instead.
 func (*ConfigureRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{1}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ConfigureRequest) GetConfig() map[string]string {
@@ -284,7 +363,7 @@ type ConfigureResponse struct {
 
 func (x *ConfigureResponse) Reset() {
 	*x = ConfigureResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[2]
+	mi := &file_broker_v1_broker_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -296,7 +375,7 @@ func (x *ConfigureResponse) String() string {
 func (*ConfigureResponse) ProtoMessage() {}
 
 func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[2]
+	mi := &file_broker_v1_broker_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -309,7 +388,7 @@ func (x *ConfigureResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConfigureResponse.ProtoReflect.Descriptor instead.
 func (*ConfigureResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{2}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{3}
 }
 
 type PublishRequest struct {
@@ -322,7 +401,7 @@ type PublishRequest struct {
 
 func (x *PublishRequest) Reset() {
 	*x = PublishRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[3]
+	mi := &file_broker_v1_broker_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +413,7 @@ func (x *PublishRequest) String() string {
 func (*PublishRequest) ProtoMessage() {}
 
 func (x *PublishRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[3]
+	mi := &file_broker_v1_broker_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +426,7 @@ func (x *PublishRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishRequest.ProtoReflect.Descriptor instead.
 func (*PublishRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{3}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PublishRequest) GetTopic() string {
@@ -372,7 +451,7 @@ type PublishResponse struct {
 
 func (x *PublishResponse) Reset() {
 	*x = PublishResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[4]
+	mi := &file_broker_v1_broker_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -384,7 +463,7 @@ func (x *PublishResponse) String() string {
 func (*PublishResponse) ProtoMessage() {}
 
 func (x *PublishResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[4]
+	mi := &file_broker_v1_broker_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -397,7 +476,7 @@ func (x *PublishResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PublishResponse.ProtoReflect.Descriptor instead.
 func (*PublishResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{4}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{5}
 }
 
 type SubscribeRequest struct {
@@ -409,7 +488,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[5]
+	mi := &file_broker_v1_broker_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -421,7 +500,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[5]
+	mi := &file_broker_v1_broker_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -434,7 +513,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{5}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SubscribeRequest) GetPattern() string {
@@ -452,7 +531,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[6]
+	mi := &file_broker_v1_broker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -464,7 +543,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[6]
+	mi := &file_broker_v1_broker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -477,7 +556,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{6}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{7}
 }
 
 type UnsubscribeRequest struct {
@@ -489,7 +568,7 @@ type UnsubscribeRequest struct {
 
 func (x *UnsubscribeRequest) Reset() {
 	*x = UnsubscribeRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[7]
+	mi := &file_broker_v1_broker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -501,7 +580,7 @@ func (x *UnsubscribeRequest) String() string {
 func (*UnsubscribeRequest) ProtoMessage() {}
 
 func (x *UnsubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[7]
+	mi := &file_broker_v1_broker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -514,7 +593,7 @@ func (x *UnsubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsubscribeRequest.ProtoReflect.Descriptor instead.
 func (*UnsubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{7}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *UnsubscribeRequest) GetPattern() string {
@@ -532,7 +611,7 @@ type UnsubscribeResponse struct {
 
 func (x *UnsubscribeResponse) Reset() {
 	*x = UnsubscribeResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[8]
+	mi := &file_broker_v1_broker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -544,7 +623,7 @@ func (x *UnsubscribeResponse) String() string {
 func (*UnsubscribeResponse) ProtoMessage() {}
 
 func (x *UnsubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[8]
+	mi := &file_broker_v1_broker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -557,7 +636,7 @@ func (x *UnsubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnsubscribeResponse.ProtoReflect.Descriptor instead.
 func (*UnsubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{8}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{9}
 }
 
 type HealthCheckRequest struct {
@@ -568,7 +647,7 @@ type HealthCheckRequest struct {
 
 func (x *HealthCheckRequest) Reset() {
 	*x = HealthCheckRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[9]
+	mi := &file_broker_v1_broker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -580,7 +659,7 @@ func (x *HealthCheckRequest) String() string {
 func (*HealthCheckRequest) ProtoMessage() {}
 
 func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[9]
+	mi := &file_broker_v1_broker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -593,7 +672,7 @@ func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckRequest.ProtoReflect.Descriptor instead.
 func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{9}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{10}
 }
 
 type HealthCheckResponse struct {
@@ -607,7 +686,7 @@ type HealthCheckResponse struct {
 
 func (x *HealthCheckResponse) Reset() {
 	*x = HealthCheckResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[10]
+	mi := &file_broker_v1_broker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -619,7 +698,7 @@ func (x *HealthCheckResponse) String() string {
 func (*HealthCheckResponse) ProtoMessage() {}
 
 func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[10]
+	mi := &file_broker_v1_broker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -632,7 +711,7 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{10}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *HealthCheckResponse) GetStatus() string {
@@ -664,7 +743,7 @@ type GetInfoRequest struct {
 
 func (x *GetInfoRequest) Reset() {
 	*x = GetInfoRequest{}
-	mi := &file_broker_v1_broker_proto_msgTypes[11]
+	mi := &file_broker_v1_broker_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -676,7 +755,7 @@ func (x *GetInfoRequest) String() string {
 func (*GetInfoRequest) ProtoMessage() {}
 
 func (x *GetInfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[11]
+	mi := &file_broker_v1_broker_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -689,7 +768,7 @@ func (x *GetInfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetInfoRequest.ProtoReflect.Descriptor instead.
 func (*GetInfoRequest) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{11}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{12}
 }
 
 type GetInfoResponse struct {
@@ -705,7 +784,7 @@ type GetInfoResponse struct {
 
 func (x *GetInfoResponse) Reset() {
 	*x = GetInfoResponse{}
-	mi := &file_broker_v1_broker_proto_msgTypes[12]
+	mi := &file_broker_v1_broker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -717,7 +796,7 @@ func (x *GetInfoResponse) String() string {
 func (*GetInfoResponse) ProtoMessage() {}
 
 func (x *GetInfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_broker_v1_broker_proto_msgTypes[12]
+	mi := &file_broker_v1_broker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -730,7 +809,7 @@ func (x *GetInfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetInfoResponse.ProtoReflect.Descriptor instead.
 func (*GetInfoResponse) Descriptor() ([]byte, []int) {
-	return file_broker_v1_broker_proto_rawDescGZIP(), []int{12}
+	return file_broker_v1_broker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetInfoResponse) GetName() string {
@@ -772,7 +851,7 @@ var File_broker_v1_broker_proto protoreflect.FileDescriptor
 
 const file_broker_v1_broker_proto_rawDesc = "" +
 	"\n" +
-	"\x16broker/v1/broker.proto\x12\x0fscion.broker.v1\"\xe3\x05\n" +
+	"\x16broker/v1/broker.proto\x12\x0fscion.broker.v1\"\xa6\x06\n" +
 	"\x11StructuredMessage\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\x05R\aversion\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\tR\ttimestamp\x12\x16\n" +
@@ -796,11 +875,18 @@ const file_broker_v1_broker_proto_rawDesc = "" +
 	"\achannel\x18\x12 \x01(\tR\achannel\x12\x1b\n" +
 	"\tthread_id\x18\x13 \x01(\tR\bthreadId\x12'\n" +
 	"\x0fconversation_id\x18\x15 \x01(\tR\x0econversationId\x12#\n" +
-	"\rdelivery_text\x18\x16 \x01(\tR\fdeliveryText\x1a;\n" +
+	"\rdelivery_text\x18\x16 \x01(\tR\fdeliveryText\x12A\n" +
+	"\fconversation\x18\x17 \x01(\v2\x1d.scion.broker.v1.ConversationR\fconversation\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01J\x04\b\v\x10\fJ\x04\b\x14\x10\x15R\x03rawR\n" +
-	"visibility\"\x94\x01\n" +
+	"visibility\"\x8d\x01\n" +
+	"\fConversation\x12\x18\n" +
+	"\asurface\x18\x01 \x01(\tR\asurface\x12!\n" +
+	"\fexternal_ref\x18\x02 \x01(\tR\vexternalRef\x12\x1d\n" +
+	"\n" +
+	"parent_ref\x18\x03 \x01(\tR\tparentRef\x12!\n" +
+	"\fdisplay_name\x18\x04 \x01(\tR\vdisplayName\"\x94\x01\n" +
 	"\x10ConfigureRequest\x12E\n" +
 	"\x06config\x18\x01 \x03(\v2-.scion.broker.v1.ConfigureRequest.ConfigEntryR\x06config\x1a9\n" +
 	"\vConfigEntry\x12\x10\n" +
@@ -853,47 +939,49 @@ func file_broker_v1_broker_proto_rawDescGZIP() []byte {
 	return file_broker_v1_broker_proto_rawDescData
 }
 
-var file_broker_v1_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_broker_v1_broker_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_broker_v1_broker_proto_goTypes = []any{
 	(*StructuredMessage)(nil),   // 0: scion.broker.v1.StructuredMessage
-	(*ConfigureRequest)(nil),    // 1: scion.broker.v1.ConfigureRequest
-	(*ConfigureResponse)(nil),   // 2: scion.broker.v1.ConfigureResponse
-	(*PublishRequest)(nil),      // 3: scion.broker.v1.PublishRequest
-	(*PublishResponse)(nil),     // 4: scion.broker.v1.PublishResponse
-	(*SubscribeRequest)(nil),    // 5: scion.broker.v1.SubscribeRequest
-	(*SubscribeResponse)(nil),   // 6: scion.broker.v1.SubscribeResponse
-	(*UnsubscribeRequest)(nil),  // 7: scion.broker.v1.UnsubscribeRequest
-	(*UnsubscribeResponse)(nil), // 8: scion.broker.v1.UnsubscribeResponse
-	(*HealthCheckRequest)(nil),  // 9: scion.broker.v1.HealthCheckRequest
-	(*HealthCheckResponse)(nil), // 10: scion.broker.v1.HealthCheckResponse
-	(*GetInfoRequest)(nil),      // 11: scion.broker.v1.GetInfoRequest
-	(*GetInfoResponse)(nil),     // 12: scion.broker.v1.GetInfoResponse
-	nil,                         // 13: scion.broker.v1.StructuredMessage.MetadataEntry
-	nil,                         // 14: scion.broker.v1.ConfigureRequest.ConfigEntry
-	nil,                         // 15: scion.broker.v1.HealthCheckResponse.DetailsEntry
+	(*Conversation)(nil),        // 1: scion.broker.v1.Conversation
+	(*ConfigureRequest)(nil),    // 2: scion.broker.v1.ConfigureRequest
+	(*ConfigureResponse)(nil),   // 3: scion.broker.v1.ConfigureResponse
+	(*PublishRequest)(nil),      // 4: scion.broker.v1.PublishRequest
+	(*PublishResponse)(nil),     // 5: scion.broker.v1.PublishResponse
+	(*SubscribeRequest)(nil),    // 6: scion.broker.v1.SubscribeRequest
+	(*SubscribeResponse)(nil),   // 7: scion.broker.v1.SubscribeResponse
+	(*UnsubscribeRequest)(nil),  // 8: scion.broker.v1.UnsubscribeRequest
+	(*UnsubscribeResponse)(nil), // 9: scion.broker.v1.UnsubscribeResponse
+	(*HealthCheckRequest)(nil),  // 10: scion.broker.v1.HealthCheckRequest
+	(*HealthCheckResponse)(nil), // 11: scion.broker.v1.HealthCheckResponse
+	(*GetInfoRequest)(nil),      // 12: scion.broker.v1.GetInfoRequest
+	(*GetInfoResponse)(nil),     // 13: scion.broker.v1.GetInfoResponse
+	nil,                         // 14: scion.broker.v1.StructuredMessage.MetadataEntry
+	nil,                         // 15: scion.broker.v1.ConfigureRequest.ConfigEntry
+	nil,                         // 16: scion.broker.v1.HealthCheckResponse.DetailsEntry
 }
 var file_broker_v1_broker_proto_depIdxs = []int32{
-	13, // 0: scion.broker.v1.StructuredMessage.metadata:type_name -> scion.broker.v1.StructuredMessage.MetadataEntry
-	14, // 1: scion.broker.v1.ConfigureRequest.config:type_name -> scion.broker.v1.ConfigureRequest.ConfigEntry
-	0,  // 2: scion.broker.v1.PublishRequest.message:type_name -> scion.broker.v1.StructuredMessage
-	15, // 3: scion.broker.v1.HealthCheckResponse.details:type_name -> scion.broker.v1.HealthCheckResponse.DetailsEntry
-	1,  // 4: scion.broker.v1.BrokerService.Configure:input_type -> scion.broker.v1.ConfigureRequest
-	3,  // 5: scion.broker.v1.BrokerService.Publish:input_type -> scion.broker.v1.PublishRequest
-	5,  // 6: scion.broker.v1.BrokerService.Subscribe:input_type -> scion.broker.v1.SubscribeRequest
-	7,  // 7: scion.broker.v1.BrokerService.Unsubscribe:input_type -> scion.broker.v1.UnsubscribeRequest
-	9,  // 8: scion.broker.v1.BrokerService.HealthCheck:input_type -> scion.broker.v1.HealthCheckRequest
-	11, // 9: scion.broker.v1.BrokerService.GetInfo:input_type -> scion.broker.v1.GetInfoRequest
-	2,  // 10: scion.broker.v1.BrokerService.Configure:output_type -> scion.broker.v1.ConfigureResponse
-	4,  // 11: scion.broker.v1.BrokerService.Publish:output_type -> scion.broker.v1.PublishResponse
-	6,  // 12: scion.broker.v1.BrokerService.Subscribe:output_type -> scion.broker.v1.SubscribeResponse
-	8,  // 13: scion.broker.v1.BrokerService.Unsubscribe:output_type -> scion.broker.v1.UnsubscribeResponse
-	10, // 14: scion.broker.v1.BrokerService.HealthCheck:output_type -> scion.broker.v1.HealthCheckResponse
-	12, // 15: scion.broker.v1.BrokerService.GetInfo:output_type -> scion.broker.v1.GetInfoResponse
-	10, // [10:16] is the sub-list for method output_type
-	4,  // [4:10] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	14, // 0: scion.broker.v1.StructuredMessage.metadata:type_name -> scion.broker.v1.StructuredMessage.MetadataEntry
+	1,  // 1: scion.broker.v1.StructuredMessage.conversation:type_name -> scion.broker.v1.Conversation
+	15, // 2: scion.broker.v1.ConfigureRequest.config:type_name -> scion.broker.v1.ConfigureRequest.ConfigEntry
+	0,  // 3: scion.broker.v1.PublishRequest.message:type_name -> scion.broker.v1.StructuredMessage
+	16, // 4: scion.broker.v1.HealthCheckResponse.details:type_name -> scion.broker.v1.HealthCheckResponse.DetailsEntry
+	2,  // 5: scion.broker.v1.BrokerService.Configure:input_type -> scion.broker.v1.ConfigureRequest
+	4,  // 6: scion.broker.v1.BrokerService.Publish:input_type -> scion.broker.v1.PublishRequest
+	6,  // 7: scion.broker.v1.BrokerService.Subscribe:input_type -> scion.broker.v1.SubscribeRequest
+	8,  // 8: scion.broker.v1.BrokerService.Unsubscribe:input_type -> scion.broker.v1.UnsubscribeRequest
+	10, // 9: scion.broker.v1.BrokerService.HealthCheck:input_type -> scion.broker.v1.HealthCheckRequest
+	12, // 10: scion.broker.v1.BrokerService.GetInfo:input_type -> scion.broker.v1.GetInfoRequest
+	3,  // 11: scion.broker.v1.BrokerService.Configure:output_type -> scion.broker.v1.ConfigureResponse
+	5,  // 12: scion.broker.v1.BrokerService.Publish:output_type -> scion.broker.v1.PublishResponse
+	7,  // 13: scion.broker.v1.BrokerService.Subscribe:output_type -> scion.broker.v1.SubscribeResponse
+	9,  // 14: scion.broker.v1.BrokerService.Unsubscribe:output_type -> scion.broker.v1.UnsubscribeResponse
+	11, // 15: scion.broker.v1.BrokerService.HealthCheck:output_type -> scion.broker.v1.HealthCheckResponse
+	13, // 16: scion.broker.v1.BrokerService.GetInfo:output_type -> scion.broker.v1.GetInfoResponse
+	11, // [11:17] is the sub-list for method output_type
+	5,  // [5:11] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_broker_v1_broker_proto_init() }
@@ -907,7 +995,7 @@ func file_broker_v1_broker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_broker_v1_broker_proto_rawDesc), len(file_broker_v1_broker_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

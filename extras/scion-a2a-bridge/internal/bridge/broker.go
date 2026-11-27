@@ -147,11 +147,20 @@ func (b *BrokerServer) applyOverlay(overlay *AdminOverlay) {
 }
 
 // Publish receives a message from the Hub and routes it to the handler.
+// As an A2A bridge, it preserves bridge semantics without spoke surface
+// filtering so agent replies on any conversation (including native/untargeted)
+// can correlate to active A2A tasks. It resolves conversation addressing via
+// plugin.ResolveConversationTarget for structured debug logging.
 func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	if msg == nil {
+		return nil
+	}
+	target := plugin.ResolveConversationTarget(msg)
 	b.log.Debug("received message via broker",
 		"topic_kind", topicKindLabel(topic),
 		"sender_kind", senderKindLabel(msg.Sender),
 		"type", msg.Type,
+		"surface", target.Surface,
 	)
 	b.mu.RLock()
 	h := b.handler

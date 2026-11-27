@@ -37,6 +37,7 @@ type routedInboundRequest struct {
 	Surface      string                      `json:"surface,omitempty"`
 	ExternalRef  string                      `json:"external_ref,omitempty"`
 	ParentRef    string                      `json:"parent_ref,omitempty"`
+	DisplayName  string                      `json:"display_name,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
 
 	// AttachmentIDs is not supported on this route yet; a request naming
@@ -140,6 +141,9 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	clearInboundClientEvent(req.Message)
+	// Conversation is hub-populated for hub→plugin outbound delivery only;
+	// inbound broker plugins supply top-level Surface/ExternalRef/ParentRef/DisplayName.
+	req.Message.Conversation = nil
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)
@@ -523,21 +527,17 @@ func (s *Server) dispatchRoutedRecipient(
 	var effectiveConv *messaging.ConversationResult
 
 	if params.req.Surface != "" && params.req.ExternalRef != "" {
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(params.req.Surface))
-		if params.req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(params.req.ParentRef))
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, params.req.ExternalRef); keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("broker.routed.phase11")
+			result.Status = "conversation_not_resolved"
+			result.Error = "invalid external_ref for thread conversation"
+			return result
 		}
-		agentID := agent.ID
-		keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			ctx, s.store, s.messageLog, params.req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			ctx, s.messageLog, agent.ProjectID,
+			params.req.Surface, params.req.ExternalRef, params.req.ParentRef, params.req.DisplayName, agent.ID,
+			params.req.Message.Channel, params.req.Message.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(ctx, routedInboundRoute, reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
@@ -616,6 +616,11 @@ func (s *Server) dispatchRoutedRecipient(
 		ThreadID:      msg.ThreadID,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     params.now,
+	}
+	if storeMsg.Channel == "" && params.req.Surface != "" {
+		if ch, chErr := messaging.SurfaceToChannel(params.req.Surface); chErr == nil {
+			storeMsg.Channel = ch
+		}
 	}
 	if effectiveConv != nil {
 		storeMsg.ConversationID = effectiveConv.ConversationID

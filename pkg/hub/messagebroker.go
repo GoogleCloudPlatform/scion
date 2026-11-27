@@ -282,16 +282,260 @@ func (p *MessageBrokerProxy) CancelSubscription(pattern string) error {
 	return nil
 }
 
+// translateConversationForBroker translates a stored conversation row into the
+// surface-native Conversation attached to outbound broker messages (Phase 11).
+//
+// Hub-derived internal keys ("thread:<project>:<ref>", "dm:...") are never
+// emitted as Conversation.ExternalRef:
+//   - Conversations on an external surface whose ExternalRef has the canonical
+//     "thread:<project>:<ref>" form emit the translated surface-native <ref>.
+//   - Native conversations, direct/dm:* conversations, and any ref that cannot
+//     be translated safely return nil so Conversation is omitted and plugins
+//     fall back to legacy Channel/ThreadID (while ConversationID is preserved).
+func translateConversationForBroker(conv *store.Conversation) *messages.Conversation {
+	if conv == nil {
+		return nil
+	}
+	if conv.Surface == "" || conv.Surface == "native" {
+		return nil
+	}
+	if conv.Kind == "direct" || strings.HasPrefix(conv.ExternalRef, "dm:") {
+		return nil
+	}
+	if conv.ExternalRef == "" {
+		return nil
+	}
+	extRef := conv.ExternalRef
+	if strings.HasPrefix(extRef, "thread:") {
+		_, nativeRef, err := messaging.ParseThreadConversationExternalRef(extRef)
+		if err != nil || nativeRef == "" {
+			return nil
+		}
+		extRef = nativeRef
+	}
+	return &messages.Conversation{
+		Surface:     conv.Surface,
+		ExternalRef: extRef,
+		ParentRef:   conv.ParentRef,
+		DisplayName: conv.DisplayName,
+	}
+}
+
+// deriveBrokerInboundThreadKey maps a plugin-supplied surface-native
+// external_ref onto the canonical "thread:<projectID>:<externalRef>" key
+// derived by the outbound thread path (messaging.DeriveConversationKey), so
+// inbound and outbound messages on the same external thread share one
+// conversation row. Already-canonical "thread:" refs are returned as-is;
+// "dm:" refs are rejected because 1:1 DMs resolve via Phase 5 instead.
+func deriveBrokerInboundThreadKey(projectID, externalRef string) (string, error) {
+	if strings.HasPrefix(externalRef, "thread:") {
+		return externalRef, nil
+	}
+	key, kind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		ThreadID:  externalRef,
+		ProjectID: projectID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if kind != "group" {
+		return "", fmt.Errorf("external_ref %q resolved to %q conversation, expected group thread", externalRef, kind)
+	}
+	return key, nil
+}
+
+// resolveBrokerInboundConversation resolves or creates a Phase 11 external
+// thread conversation under the canonical key thread:<projectID>:<externalRef>.
+//
+// Pre-P4 continuity (read-only fallback):
+//  1. If a conversation already exists under the new key (surface, newKey),
+//     the new key wins.
+//  2. Otherwise, check read-only whether a pre-P4 Phase-5 row exists under
+//     legacy keys derived from legacyThreadID/legacyChannel (Slack
+//     thread:<p>:<ts>, Teams thread:<p>:<replyToId> and stripped parent
+//     thread:<p>:<parentRef>, Telegram forum thread:<p>:<topic>). If found and
+//     owned by projectID (and not deleted), reuse it without creating any row.
+//  3. When neither exists (or when the new key exists), resolve-or-create
+//     under the new key.
+func (s *Server) resolveBrokerInboundConversation(
+	ctx context.Context,
+	log *slog.Logger,
+	projectID, surface, externalRef, parentRef, displayName, defaultAgentID string,
+	legacyChannel, legacyThreadID string,
+) (*messaging.ConversationResult, error) {
+	newKey, keyErr := deriveBrokerInboundThreadKey(projectID, externalRef)
+	if keyErr != nil {
+		return nil, keyErr
+	}
+
+	// Step 1 & 2: Check whether the new key already exists. Only when it does
+	// NOT exist do we attempt a read-only lookup for pre-P4 Phase-5 rows.
+	existingNew, lookupErr := s.store.GetConversationByExternalRef(ctx, surface, newKey)
+	if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
+		return nil, lookupErr
+	}
+	if errors.Is(lookupErr, store.ErrNotFound) || existingNew == nil {
+		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID); err != nil {
+			return nil, err
+		} else if legacyConv != nil {
+			return &messaging.ConversationResult{
+				ConversationID: legacyConv.ID,
+				ExternalRef:    legacyConv.ExternalRef,
+				Kind:           legacyConv.Kind,
+				Surface:        legacyConv.Surface,
+				DisplayName:    legacyConv.DisplayName,
+			}, nil
+		}
+	}
+
+	// Step 3: Resolve or create under the canonical new key.
+	var keyOpts []messaging.ConversationByKeyOption
+	keyOpts = append(keyOpts, messaging.WithSurface(surface))
+	if parentRef != "" {
+		keyOpts = append(keyOpts, messaging.WithParentRef(parentRef))
+	}
+	if displayName != "" {
+		keyOpts = append(keyOpts, messaging.WithDisplayName(displayName))
+	}
+	if defaultAgentID != "" {
+		aid := defaultAgentID
+		keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&aid))
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs != nil {
+		keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
+	}
+	return messaging.ResolveOrCreateConversationByKey(
+		ctx, s.store, log, newKey, "group", &projectID, keyOpts...)
+}
+
+// isContainerScopedLegacyThreadID reports whether legacyThreadID identifies
+// the parent container (channel/chat) rather than a specific thread. Reusing a
+// container-scoped pre-P4 row for a post-upgrade thread or root post would
+// fold distinct threads into one channel-wide conversation (e.g. a Teams root
+// post whose legacy ThreadID is the stripped channel ID, or a Slack/Telegram
+// legacy key equal to the channel/chat ID).
+func isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID string) bool {
+	if legacyThreadID == "" {
+		return false
+	}
+	if parentRef != "" && legacyThreadID == parentRef {
+		return true
+	}
+	if idx := strings.Index(externalRef, ";messageid="); idx > 0 {
+		if legacyThreadID == externalRef[:idx] {
+			return true
+		}
+	}
+	if idx := strings.IndexByte(externalRef, ':'); idx > 0 {
+		if legacyThreadID == externalRef[:idx] {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupLegacyPhase5Conversation performs a strictly read-only lookup for a
+// pre-P4 Phase-5 conversation row matching legacyThreadID. It never creates a
+// row and skips container-scoped legacy keys (where legacyThreadID equals
+// parentRef or the container portion of externalRef).
+func (s *Server) lookupLegacyPhase5Conversation(
+	ctx context.Context,
+	log *slog.Logger,
+	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID string,
+) (*store.Conversation, error) {
+	if isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID) {
+		return nil, nil
+	}
+	type candidate struct {
+		surface string
+		key     string
+	}
+	var candidates []candidate
+	seen := map[candidate]bool{}
+	addCandidate := func(surf, threadID string) {
+		if surf == "" || threadID == "" || strings.HasPrefix(threadID, "dm:") {
+			return
+		}
+		key, err := messaging.ThreadConversationExternalRef(projectID, threadID)
+		if err != nil || key == newKey {
+			return
+		}
+		c := candidate{surface: surf, key: key}
+		if !seen[c] {
+			seen[c] = true
+			candidates = append(candidates, c)
+		}
+	}
+
+	legacySurface := surface
+	if legacyChannel != "" {
+		if mapped := messaging.ChannelToSurface(legacyChannel, log); mapped != "" {
+			legacySurface = mapped
+		}
+	}
+	if legacyThreadID != "" {
+		addCandidate(legacySurface, legacyThreadID)
+		if legacySurface != surface {
+			addCandidate(surface, legacyThreadID)
+		}
+	}
+
+	for _, c := range candidates {
+		conv, err := s.store.GetConversationByExternalRef(ctx, c.surface, c.key)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if conv == nil || conv.DeletedAt != nil {
+			continue
+		}
+		if conv.ProjectID != nil && *conv.ProjectID == projectID {
+			return conv, nil
+		}
+	}
+	return nil, nil
+}
+
+// enrichConversation populates msg.Conversation from the conversations table
+// when msg.ConversationID is set. It always overwrites any pre-existing
+// Conversation from the authoritative store row (translating stored thread
+// keys to surface-native refs or omitting Conversation for native/DM rows),
+// returns a shallow copy so callers' structs are never mutated, and preserves
+// ConversationID and all legacy fields (Channel, ThreadID, etc.) untouched for
+// older plugin binaries.
+func (p *MessageBrokerProxy) enrichConversation(ctx context.Context, msg *messages.StructuredMessage) *messages.StructuredMessage {
+	if msg == nil || msg.ConversationID == "" || p.store == nil {
+		return msg
+	}
+	conv, err := p.store.GetConversation(ctx, msg.ConversationID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && p.log != nil {
+			p.log.Warn("failed to load conversation for broker publish",
+				"conversation_id", msg.ConversationID, "error", err)
+		}
+		return msg
+	}
+	cp := *msg
+	cp.Conversation = translateConversationForBroker(conv)
+	return &cp
+}
+
 // PublishMessage publishes a message to the appropriate broker topic based on
 // the message's recipient. This is the entry point for Hub handlers to route
 // messages through the broker instead of direct dispatch.
 func (p *MessageBrokerProxy) PublishMessage(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicAgentMessages(projectID, recipientSlug(msg.Recipient))
-	return p.bus.Publish(ctx, topic, msg)
+	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
 }
 
 // PublishBroadcast publishes a broadcast message to the project or global broadcast topic.
 func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID string, msg *messages.StructuredMessage) error {
+	msg = p.enrichConversation(ctx, msg)
 	if projectID == "" {
 		return p.bus.Publish(ctx, eventbus.TopicGlobalBroadcast(), msg)
 	}
@@ -304,7 +548,7 @@ func (p *MessageBrokerProxy) PublishBroadcast(ctx context.Context, projectID str
 // here to avoid double-delivery.
 func (p *MessageBrokerProxy) PublishUserMessage(ctx context.Context, projectID, userID string, msg *messages.StructuredMessage) error {
 	topic := eventbus.TopicUserMessages(projectID, userID)
-	return p.bus.Publish(ctx, topic, msg)
+	return p.bus.Publish(ctx, topic, p.enrichConversation(ctx, msg))
 }
 
 // PublishToGroup fans out a message to a parsed set of recipients, delegating

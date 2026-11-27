@@ -59,26 +59,28 @@ var hubKeys = map[string]bool{
 	"plugin_name": true, "project_slug_map": true,
 	"transport_mode": true, "transport_audience": true,
 	"database_driver": true, "database_url": true,
+	plugin.ConfigKeyHubInboundConversation: true,
 }
 
 var reconfigureRuntimeKeys = map[string]bool{
-	"config_file":      true,
-	"hub_url":          true,
-	"public_url":       true,
-	"hmac_key":         true,
-	"broker_id":        true,
-	"plugin_name":      true,
-	"project_slug_map": true,
-	"database_url":     true,
-	"database_driver":  true,
-	"bot_id":           true,
-	"mode":             true,
-	"path":             true,
-	"address":          true,
-	"tls_cert_file":    true,
-	"tls_key_file":     true,
-	"tls_ca_file":      true,
-	"tls_skip_verify":  true,
+	"config_file":                          true,
+	"hub_url":                              true,
+	"public_url":                           true,
+	"hmac_key":                             true,
+	"broker_id":                            true,
+	"plugin_name":                          true,
+	"project_slug_map":                     true,
+	"database_url":                         true,
+	"database_driver":                      true,
+	plugin.ConfigKeyHubInboundConversation: true,
+	"bot_id":                               true,
+	"mode":                                 true,
+	"path":                                 true,
+	"address":                              true,
+	"tls_cert_file":                        true,
+	"tls_key_file":                         true,
+	"tls_ca_file":                          true,
+	"tls_skip_verify":                      true,
 }
 
 // IntegrationManager is the narrow interface satisfied by *plugin.Manager.
@@ -1765,6 +1767,10 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 
 	// plugin_name: the plugin's own name.
 	creds["plugin_name"] = name
+	// hub_inbound_conversation: advertise Phase 11 inbound conversation key
+	// alignment support so upgraded plugins safely gate top-level
+	// surface/external_ref against older hubs.
+	creds[plugin.ConfigKeyHubInboundConversation] = "1"
 
 	// project_slug_map: from the store.
 	if s.store != nil {

@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,7 +31,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -370,7 +374,11 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 			}
 
 			if tt.wantConv {
-				// Verify conversation was created in the store.
+				// Verify conversation was created in the store under the canonical
+				// thread:<projectID>:<externalRef> key so inbound and outbound share one row.
+				wantKey, keyErr := messaging.ThreadConversationExternalRef(project.ID, tt.externalRef)
+				require.NoError(t, keyErr)
+
 				convs, err := s.ListConversations(ctx, store.ConversationFilter{
 					Surface: tt.surface,
 				}, store.ListOptions{Limit: 10})
@@ -378,7 +386,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 
 				found := false
 				for _, c := range convs.Items {
-					if c.ExternalRef == tt.externalRef && c.Surface == tt.surface {
+					if c.ExternalRef == wantKey && c.Surface == tt.surface {
 						found = true
 						assert.Equal(t, tt.parentRef, c.ParentRef)
 						assert.Equal(t, "group", c.Kind)
@@ -386,7 +394,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 						assert.Equal(t, project.ID, *c.ProjectID)
 					}
 				}
-				assert.True(t, found, "expected conversation with surface=%s external_ref=%s to exist", tt.surface, tt.externalRef)
+				assert.True(t, found, "expected conversation with surface=%s external_ref=%s to exist", tt.surface, wantKey)
 			}
 		})
 	}
@@ -1073,4 +1081,1295 @@ func parseCoAddrEnvelope(t *testing.T, deliveryText string) coAddrEnvelope {
 	require.NoError(t, json.Unmarshal([]byte(jsonStr), &env),
 		"failed to unmarshal envelope JSON: %s", jsonStr)
 	return env
+}
+
+func TestHandleBrokerInbound_SurfaceExternalRefWithoutLegacyFields(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-surface"),
+		Email:       "p4-surface@example.com",
+		DisplayName: "P4 Surface User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-surface"),
+		Slug:      "p4-surface",
+		Name:      "P4 Surface",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-surface"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Cut-over plugin sends top-level surface/external_ref/parent_ref/display_name
+	// with NO legacy Channel or ThreadID on Message.
+	payload := inboundMessageRequest{
+		Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000100",
+		ParentRef:   "C0123ABC",
+		DisplayName: "#engineering",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from cut-over slack plugin",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// Conversation was created under the canonical thread:<project>:<external_ref>
+	// key with surface, parent_ref, and display_name.
+	wantExtRef, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC:1700000000.000100")
+	require.NoError(t, err)
+	conv, err := s.GetConversationByExternalRef(ctx, "slack", wantExtRef)
+	require.NoError(t, err)
+	assert.Equal(t, "C0123ABC", conv.ParentRef)
+	assert.Equal(t, "#engineering", conv.DisplayName)
+	assert.Equal(t, "group", conv.Kind)
+
+	// No spurious Phase 5 DM conversation was minted.
+	allConvs, err := s.ListConversations(ctx, store.ConversationFilter{}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	assert.Len(t, allConvs.Items, 1, "must not create a spurious DM conversation when Phase 11 resolves")
+
+	// Persisted message carries the resolved ConversationID and derived Channel.
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, conv.ID, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+}
+
+func TestHandleBrokerInbound_LegacyChannelThreadIDOnly(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-legacy"),
+		Email:       "p4-legacy@example.com",
+		DisplayName: "P4 Legacy User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-legacy"),
+		Slug:      "p4-legacy",
+		Name:      "P4 Legacy",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-legacy"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Old plugin binary sends only legacy Channel + ThreadID (no Surface/ExternalRef).
+	payload := inboundMessageRequest{
+		Topic: "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "C9999:1700000001.000200",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "hello from legacy plugin binary",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.NotEmpty(t, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+	assert.Equal(t, "C9999:1700000001.000200", msgs.Items[0].ThreadID)
+}
+
+func TestHandleBrokerInbound_ParentRefWithoutExternalRef(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("user-p4-parent"),
+		Email:       "p4-parent@example.com",
+		DisplayName: "P4 Parent User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-parent"),
+		Slug:      "p4-parent",
+		Name:      "P4 Parent",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-p4-parent"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	payload := inboundMessageRequest{
+		Topic:     "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Surface:   "slack",
+		ParentRef: "C0123ABC",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "missing external_ref",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleAgentMessage_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-p4-strip-conv"),
+		Email:       "p4-strip-conv@example.com",
+		DisplayName: "P4 Strip Conv User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-p4-strip-conv"),
+		Slug:      "p4-strip-conv",
+		Name:      "P4 Strip Conv",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	brokerID := tid("broker-p4-strip-conv")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "p4-strip-conv-broker", Slug: "p4-strip-conv-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: brokerID,
+		BrokerName: "p4-strip-conv-broker", Status: store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-p4-strip-conv"),
+		Slug:            "coder",
+		Name:            "Coder",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseRunning),
+		MessageMode:     store.MessageModeProject,
+		StateVersion:    1,
+		Created:         time.Now(),
+		Updated:         time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// A user caller attempts to spoof structured_message.conversation on
+	// POST /api/v1/agents/{id}/message. The hub must strip it before dispatch.
+	reqBody := MessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "attempt spoofed conversation",
+			Type:      messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_SPOOFED:999",
+				ParentRef:   "C_SPOOFED",
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Nil(t, calls[0].StructuredMessage.Conversation, "client-supplied Conversation must be stripped on HTTP ingress")
+}
+
+// TestHandleBrokerInbound_R1_InboundAndOutboundShareConversation verifies that
+// inbound broker messages and real agent outbound replies (via
+// handleAgentOutboundMessage / POST /api/v1/agents/{id}/outbound-message)
+// converge on the same conversation_id:
+//  1. A new inbound Discord thread message followed by the agent's outbound
+//     `--channel discord --thread-id <snowflake>` reply AND a `conv:<id>`
+//     conversation-ref reply all resolve to the same conversation_id.
+//  2. An inbound Telegram private-chat message (no thread, omitting
+//     surface/external_ref) followed by the agent's outbound `user:<email>`
+//     reply resolves to the same direct dm: conversation_id.
+func TestHandleBrokerInbound_R1_InboundAndOutboundShareConversation(t *testing.T) {
+	t.Parallel()
+
+	postInbound := func(t *testing.T, srv *Server, payload inboundMessageRequest) {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	}
+
+	setupEnv := func(t *testing.T, suffix string, channels ...string) (*Server, store.Store, *store.User, *store.Project, *store.Agent) {
+		t.Helper()
+		srv, s := testServer(t)
+		ctx := context.Background()
+		srv.SetDispatcher(&recordingDispatcher{})
+
+		user := &store.User{
+			ID:          tid("user-r1-" + suffix),
+			Email:       "r1-" + suffix + "@example.com",
+			DisplayName: "R1 User",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, user))
+		ensureHubMembership(ctx, s, user.ID)
+
+		project := &store.Project{
+			ID:        tid("proj-r1-" + suffix),
+			Slug:      "r1-" + suffix,
+			Name:      "R1 " + suffix,
+			OwnerID:   user.ID,
+			CreatedBy: user.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		srv.seedProjectCreatorMembership(ctx, project)
+		msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+		agent := &store.Agent{
+			ID:           tid("agent-r1-" + suffix),
+			Slug:         "coder",
+			Name:         "Coder",
+			ProjectID:    project.ID,
+			Phase:        string(state.PhaseRunning),
+			MessageMode:  store.MessageModeProject,
+			StateVersion: 1,
+			Created:      time.Now(),
+			Updated:      time.Now(),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		if len(channels) > 0 {
+			setupThreadTestChannels(t, srv, s, project, channels...)
+		}
+		return srv, s, user, project, agent
+	}
+
+	t.Run("new_discord_thread_shares_conversation_with_real_outbound_replies", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "discord-new", "discord")
+		ctx := context.Background()
+
+		// 1. Inbound Discord thread message with raw snowflake external_ref.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "discord",
+			ExternalRef: "777777777777777777",
+			ParentRef:   "200000000000000001",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "discord",
+				ThreadID:  "777777777777777777",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "hello from discord thread",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		inboundConvID := msgs.Items[0].ConversationID
+		require.NotEmpty(t, inboundConvID)
+
+		// 2. Real agent outbound reply via `--channel discord --thread-id 777777777777777777`.
+		rrThread := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+			Recipient: "user:" + user.Email,
+			Msg:       "reply via --channel/--thread-id",
+			Channel:   "discord",
+			ThreadID:  "777777777777777777",
+		})
+		require.Equal(t, http.StatusOK, rrThread.Code, "body: %s", rrThread.Body.String())
+		var threadResp map[string]any
+		require.NoError(t, json.Unmarshal(rrThread.Body.Bytes(), &threadResp))
+		assert.Equal(t, inboundConvID, threadResp["conversation_id"],
+			"inbound Discord thread and real outbound --thread-id reply must share one conversation")
+
+		// 3. Real agent outbound reply via conversation ref `conv:<id>`.
+		rrConv := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+			ConversationRef: "conv:" + inboundConvID,
+			Msg:             "reply via conv:<id>",
+		})
+		require.Equal(t, http.StatusOK, rrConv.Code, "body: %s", rrConv.Body.String())
+		var convResp map[string]any
+		require.NoError(t, json.Unmarshal(rrConv.Body.Bytes(), &convResp))
+		assert.Equal(t, inboundConvID, convResp["conversation_id"],
+			"conversation-ref reply must land in the same conversation")
+	})
+
+	t.Run("telegram_private_chat_dm_shares_direct_conversation_with_real_outbound_dm", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "tg-dm", "telegram")
+		ctx := context.Background()
+
+		// 1. Inbound Telegram private-chat message (no forum topic, so
+		// telegramInboundConversation omits surface/external_ref and ThreadID is empty).
+		postInbound(t, srv, inboundMessageRequest{
+			Topic: "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "telegram",
+				Sender:    "user:" + user.Email,
+				SenderID:  user.ID,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "hello from telegram private chat",
+				Type:      messages.TypeInstruction,
+				Metadata: map[string]string{
+					"telegram_chat_id": "998877",
+				},
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		inboundConvID := msgs.Items[0].ConversationID
+		require.NotEmpty(t, inboundConvID)
+
+		conv, err := s.GetConversation(ctx, inboundConvID)
+		require.NoError(t, err)
+		assert.Equal(t, "direct", conv.Kind)
+
+		// 2. Real agent outbound `scion message user:<x>` (no ThreadID -> direct dm:).
+		rrDM := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+			Recipient: "user:" + user.Email,
+			Msg:       "direct reply to telegram user",
+			Channel:   "telegram",
+		})
+		require.Equal(t, http.StatusOK, rrDM.Code, "body: %s", rrDM.Body.String())
+		var dmResp map[string]any
+		require.NoError(t, json.Unmarshal(rrDM.Body.Bytes(), &dmResp))
+		assert.Equal(t, inboundConvID, dmResp["conversation_id"],
+			"inbound Telegram private chat and real outbound user DM must share one direct conversation")
+	})
+
+	t.Run("telegram_forum_topic_shares_conversation_with_real_outbound_thread_reply", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "tg-forum", "telegram")
+		ctx := context.Background()
+
+		// 1. Inbound Telegram forum topic (external_ref == "42", parent_ref == "-100123456").
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "telegram",
+			ExternalRef: "42",
+			ParentRef:   "-100123456",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "telegram",
+				ThreadID:  "42",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "hello from telegram forum topic 42",
+				Type:      messages.TypeInstruction,
+				Metadata: map[string]string{
+					"telegram_chat_id": "-100123456",
+				},
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		inboundConvID := msgs.Items[0].ConversationID
+		require.NotEmpty(t, inboundConvID)
+
+		// 2. Real agent outbound reply via `--channel telegram --thread-id 42`.
+		rrTopic := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+			Recipient: "user:" + user.Email,
+			Msg:       "reply on telegram forum topic 42",
+			Channel:   "telegram",
+			ThreadID:  "42",
+		})
+		require.Equal(t, http.StatusOK, rrTopic.Code, "body: %s", rrTopic.Body.String())
+		var topicResp map[string]any
+		require.NoError(t, json.Unmarshal(rrTopic.Body.Bytes(), &topicResp))
+		assert.Equal(t, inboundConvID, topicResp["conversation_id"],
+			"inbound Telegram forum topic and real outbound --thread-id 42 reply must share one conversation")
+	})
+}
+
+// TestHandleBrokerInbound_R2_PreP4LegacyFallback verifies read-only legacy
+// Phase-5 fallback against REAL pre-P4 stored row shapes for Slack, Teams
+// (replyToId and stripped channel ID), and Telegram forum topics, plus:
+//   - when a row already exists under the new P4 key, the new key wins;
+//   - when neither exists, only the new P4 key is created (legacy is never created).
+func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
+	t.Parallel()
+
+	setupEnv := func(t *testing.T, suffix string) (*Server, store.Store, *store.User, *store.Project, *store.Agent) {
+		t.Helper()
+		srv, s := testServer(t)
+		ctx := context.Background()
+		srv.SetDispatcher(&recordingDispatcher{})
+
+		user := &store.User{
+			ID:          tid("user-r2-" + suffix),
+			Email:       "r2-" + suffix + "@example.com",
+			DisplayName: "R2 User",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, user))
+		ensureHubMembership(ctx, s, user.ID)
+
+		project := &store.Project{
+			ID:        tid("proj-r2-" + suffix),
+			Slug:      "r2-" + suffix,
+			Name:      "R2 " + suffix,
+			OwnerID:   user.ID,
+			CreatedBy: user.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		srv.seedProjectCreatorMembership(ctx, project)
+		msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+		agent := &store.Agent{
+			ID:           tid("agent-r2-" + suffix),
+			Slug:         "coder",
+			Name:         "Coder",
+			ProjectID:    project.ID,
+			Phase:        string(state.PhaseRunning),
+			MessageMode:  store.MessageModeProject,
+			StateVersion: 1,
+			Created:      time.Now(),
+			Updated:      time.Now(),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		return srv, s, user, project, agent
+	}
+
+	postInbound := func(t *testing.T, srv *Server, payload inboundMessageRequest) {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	}
+
+	cases := []struct {
+		name           string
+		surface        string
+		legacyThreadID string // real pre-P4 Phase-5 thread ID seeded in DB
+		p4ExternalRef  string // real P4 plugin external_ref
+		p4ParentRef    string // real P4 plugin parent_ref
+		msgChannel     string // real P4 plugin Message.Channel
+		msgThreadID    string // real P4 plugin Message.ThreadID
+	}{
+		{
+			name:           "slack_pre_p4_ts_thread_reused",
+			surface:        "slack",
+			legacyThreadID: "1700000000.000100",
+			p4ExternalRef:  "C0123ABC:1700000000.000100",
+			p4ParentRef:    "C0123ABC",
+			msgChannel:     "slack",
+			msgThreadID:    "1700000000.000100",
+		},
+		{
+			name:           "teams_pre_p4_replyToId_reused",
+			surface:        "teams",
+			legacyThreadID: "1700000000100",
+			p4ExternalRef:  "19:chan-1@thread.tacv2;messageid=1700000000100",
+			p4ParentRef:    "19:chan-1@thread.tacv2",
+			msgChannel:     "teams",
+			msgThreadID:    "1700000000100",
+		},
+		{
+			name:           "telegram_pre_p4_forum_topic_reused",
+			surface:        "telegram",
+			legacyThreadID: "42",
+			p4ExternalRef:  "42",
+			p4ParentRef:    "-100123456",
+			msgChannel:     "telegram",
+			msgThreadID:    "42",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, user, project, agent := setupEnv(t, tc.name)
+			ctx := context.Background()
+
+			// Seed REAL pre-P4 Phase-5 row.
+			legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, tc.legacyThreadID)
+			require.NoError(t, err)
+			seeded, err := messaging.ResolveOrCreateConversationByKey(
+				ctx, s, slog.Default(), legacyKey, "group", &project.ID,
+				messaging.WithSurface(tc.surface),
+			)
+			require.NoError(t, err)
+
+			// Send REAL P4 plugin inbound payload.
+			postInbound(t, srv, inboundMessageRequest{
+				Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+				Surface:     tc.surface,
+				ExternalRef: tc.p4ExternalRef,
+				ParentRef:   tc.p4ParentRef,
+				Message: &messages.StructuredMessage{
+					Version:   messages.Version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Channel:   tc.msgChannel,
+					ThreadID:  tc.msgThreadID,
+					Sender:    "user:" + user.Email,
+					Recipient: "agent:" + agent.Slug,
+					Msg:       "follow-up in pre-p4 thread",
+					Type:      messages.TypeInstruction,
+				},
+			})
+
+			msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			require.Len(t, msgs.Items, 1)
+			assert.Equal(t, seeded.ConversationID, msgs.Items[0].ConversationID,
+				"must reuse pre-P4 conversation row rather than splitting")
+
+			allConvs, err := s.ListConversations(ctx, store.ConversationFilter{Surface: tc.surface}, store.ListOptions{Limit: 10})
+			require.NoError(t, err)
+			assert.Len(t, allConvs.Items, 1, "must not create a duplicate conversation row")
+		})
+	}
+
+	t.Run("new_key_wins_when_both_new_and_legacy_exist", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "new-wins")
+		ctx := context.Background()
+
+		legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000100")
+		require.NoError(t, err)
+		_, err = messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), legacyKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		newKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC:1700000000.000100")
+		require.NoError(t, err)
+		newConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), newKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000100",
+			ParentRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "1700000000.000100",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "new key should win",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, newConv.ConversationID, msgs.Items[0].ConversationID,
+			"when both new and legacy rows exist, the new key must win")
+	})
+
+	t.Run("neither_exists_creates_only_new_key_never_legacy", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "new-only")
+		ctx := context.Background()
+
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000999",
+			ParentRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "1700000000.000999",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "brand new thread",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		newKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC:1700000000.000999")
+		require.NoError(t, err)
+		newConv, err := s.GetConversationByExternalRef(ctx, "slack", newKey)
+		require.NoError(t, err)
+		assert.Equal(t, "C0123ABC", newConv.ParentRef)
+
+		legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000999")
+		require.NoError(t, err)
+		_, legacyErr := s.GetConversationByExternalRef(ctx, "slack", legacyKey)
+		assert.ErrorIs(t, legacyErr, store.ErrNotFound, "legacy row must never be created")
+	})
+
+	t.Run("teams_post_upgrade_threads_do_not_merge_into_pre_upgrade_channel_row", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "teams-no-merge")
+		ctx := context.Background()
+
+		// Seed a pre-upgrade channel-level row (from a pre-P4 root post).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("teams"),
+		)
+		require.NoError(t, err)
+
+		// Scenario 1: Reply in post-upgrade thread A (ThreadID=root-a) must get
+		// a new canonical conversation, NOT reuse the channel-level row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-a",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-a",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply in thread A",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		// Scenario 2: Reply in a second post-upgrade thread B (ThreadID=root-b)
+		// must get its own distinct conversation, separate from thread A and the channel row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-b",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-b",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply in thread B",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		keyA, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2;messageid=root-a")
+		require.NoError(t, err)
+		convA, err := s.GetConversationByExternalRef(ctx, "teams", keyA)
+		require.NoError(t, err)
+		assert.NotEqual(t, chanConv.ConversationID, convA.ID, "thread A must not merge into pre-upgrade channel row")
+
+		keyB, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2;messageid=root-b")
+		require.NoError(t, err)
+		convB, err := s.GetConversationByExternalRef(ctx, "teams", keyB)
+		require.NoError(t, err)
+		assert.NotEqual(t, chanConv.ConversationID, convB.ID, "thread B must not merge into pre-upgrade channel row")
+		assert.NotEqual(t, convA.ID, convB.ID, "thread A and thread B must get two distinct conversations")
+	})
+
+	t.Run("teams_post_upgrade_root_and_reply_share_new_key_not_channel_row", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "teams-root-reply")
+		ctx := context.Background()
+
+		// Seed a pre-P4 channel-wide row (stripped channel ID).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("teams"),
+		)
+		require.NoError(t, err)
+
+		// 1. Post-upgrade Teams ROOT post (legacy ThreadID == stripped channel ID == parentRef)
+		// must NOT reuse the pre-P4 channel-wide row; it creates the new-key row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-new",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "19:chan@thread.tacv2",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "post-upgrade root post",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		// 2. Reply in that same thread (ThreadID == root-new) shares the new-key row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-new",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-new",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply to post-upgrade root",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 2)
+		assert.Equal(t, msgs.Items[0].ConversationID, msgs.Items[1].ConversationID,
+			"root post and its reply must share ONE new-key conversation")
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"post-upgrade root post must NOT reuse the pre-P4 channel-wide row")
+	})
+
+	t.Run("slack_container_scoped_channel_row_not_reused_for_new_thread", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "slack-chan-no-reuse")
+		ctx := context.Background()
+
+		// Seed a channel-wide Slack row (thread:<p>:C0123ABC).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		// Inbound thread whose legacy ThreadID equals the container channel ID
+		// must NOT reuse the channel-wide row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000777",
+			ParentRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "C0123ABC",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "new thread in slack channel",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"container-scoped Slack channel row must not be reused for a new thread")
+	})
+}
+
+type inboundTestCaptureBus struct {
+	mu        sync.Mutex
+	published []*messages.StructuredMessage
+}
+
+func (b *inboundTestCaptureBus) Publish(_ context.Context, _ string, msg *messages.StructuredMessage) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.published = append(b.published, msg)
+	return nil
+}
+
+func (b *inboundTestCaptureBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return &inboundTestNoopSub{}, nil
+}
+
+func (b *inboundTestCaptureBus) Close() error { return nil }
+
+type inboundTestNoopSub struct{}
+
+func (*inboundTestNoopSub) Unsubscribe() error { return nil }
+
+// TestHandleBroadcast_StripsClientSuppliedConversation (O1) verifies that a
+// client-supplied structured_message.conversation on POST /projects/{id}/broadcast
+// is stripped before reaching the event bus (where enrichConversation is a no-op
+// because broadcasts have no ConversationID).
+func TestHandleBroadcast_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	capBus := &inboundTestCaptureBus{}
+	events := NewChannelEventPublisher()
+	t.Cleanup(func() { events.Close() })
+	proxy := NewMessageBrokerProxy(capBus, s, events, func() AgentDispatcher { return &recordingDispatcher{} }, slog.Default())
+	srv.SetMessageBrokerProxy(proxy)
+
+	user := &store.User{
+		ID:          tid("user-bcast-strip"),
+		Email:       "bcast-strip@example.com",
+		DisplayName: "Broadcast Strip User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-bcast-strip"),
+		Slug:      "bcast-strip",
+		Name:      "Broadcast Strip",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-bcast-strip"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	reqBody := BroadcastMessageRequest{
+		StructuredMessage: &messages.StructuredMessage{
+			Version: messages.Version,
+			Msg:     "broadcast attempting spoofed conversation",
+			Type:    messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_OTHER:1",
+			},
+		},
+	}
+	body, err := json.Marshal(reqBody)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/broadcast", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+
+	capBus.mu.Lock()
+	defer capBus.mu.Unlock()
+	require.Len(t, capBus.published, 1)
+	assert.Nil(t, capBus.published[0].Conversation,
+		"client-supplied Conversation on broadcast must be stripped before reaching the bus")
+}
+
+// TestHandleBrokerInbound_StripsClientSuppliedConversation (O1) verifies that
+// structured_message.conversation on POST /api/v1/broker/inbound is stripped.
+func TestHandleBrokerInbound_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	user := &store.User{
+		ID:          tid("user-inb-strip"),
+		Email:       "inb-strip@example.com",
+		DisplayName: "Inbound Strip User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-inb-strip"),
+		Slug:      "inb-strip",
+		Name:      "Inbound Strip",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+
+	agent := &store.Agent{
+		ID:           tid("agent-inb-strip"),
+		Slug:         "coder",
+		Name:         "Coder",
+		ProjectID:    project.ID,
+		Phase:        string(state.PhaseRunning),
+		MessageMode:  store.MessageModeProject,
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	payload := inboundMessageRequest{
+		Topic: "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "inbound attempting spoofed conversation",
+			Type:      messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_OTHER:1",
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Nil(t, calls[0].StructuredMessage.Conversation,
+		"client-supplied Conversation must be stripped on /api/v1/broker/inbound")
+}
+
+// TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback (O2) verifies that
+// the broker-authenticated Phase 11 block in handleAgentMessage routes through
+// deriveBrokerInboundThreadKey plus the read-only legacy Phase-5 fallback.
+func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	broker := &store.RuntimeBroker{
+		ID:      tid("broker-o2"),
+		Slug:    "o2-broker",
+		Name:    "O2 Broker",
+		Status:  store.BrokerStatusOnline,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	user := &store.User{
+		ID:          tid("user-o2"),
+		Email:       "o2@example.com",
+		DisplayName: "O2 User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	project := &store.Project{
+		ID:        tid("proj-o2"),
+		Slug:      "o2",
+		Name:      "O2",
+		OwnerID:   user.ID,
+		CreatedBy: user.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	srv.seedProjectCreatorMembership(ctx, project)
+	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-o2"),
+		Slug:            "coder",
+		Name:            "Coder",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+		MessageMode:     store.MessageModeProject,
+		StateVersion:    1,
+		Created:         time.Now(),
+		Updated:         time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// 1. Seed a pre-P4 Slack thread row (thread:<proj>:<ts>).
+	legacyKey, err := messaging.ThreadConversationExternalRef(project.ID, "1700000000.000500")
+	require.NoError(t, err)
+	seeded, err := messaging.ResolveOrCreateConversationByKey(
+		ctx, s, slog.Default(), legacyKey, "group", &project.ID,
+		messaging.WithSurface("slack"),
+	)
+	require.NoError(t, err)
+
+	// Broker-authenticated POST /api/v1/agents/{id}/message with P4 surface+ref
+	// and legacy ThreadID reuses the pre-P4 row.
+	reqBody1 := MessageRequest{
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000500",
+		ParentRef:   "C0123ABC",
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "1700000000.000500",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "broker agent-message hitting legacy fallback",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	b1, err := json.Marshal(reqBody1)
+	require.NoError(t, err)
+	r1 := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(b1))
+	r1.Header.Set("Content-Type", "application/json")
+	r1 = r1.WithContext(contextWithBrokerIdentity(
+		contextWithIdentity(r1.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")),
+		NewBrokerIdentity("test-broker"),
+	))
+	rec1 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec1, r1)
+	require.Equal(t, http.StatusOK, rec1.Code, "body: %s", rec1.Body.String())
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	assert.Equal(t, seeded.ConversationID, calls[0].StructuredMessage.Metadata["conversation_id"],
+		"broker agent-message Phase 11 path must reuse pre-P4 legacy row")
+
+	// 2. Brand-new thread creates under canonical thread:<proj>:<external_ref>.
+	reqBody2 := MessageRequest{
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000600",
+		ParentRef:   "C0123ABC",
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			ThreadID:  "1700000000.000600",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "broker agent-message creating new canonical thread",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	b2, err := json.Marshal(reqBody2)
+	require.NoError(t, err)
+	r2 := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(b2))
+	r2.Header.Set("Content-Type", "application/json")
+	r2 = r2.WithContext(contextWithBrokerIdentity(
+		contextWithIdentity(r2.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")),
+		NewBrokerIdentity("test-broker"),
+	))
+	rec2 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec2, r2)
+	require.Equal(t, http.StatusOK, rec2.Code, "body: %s", rec2.Body.String())
+
+	wantNewKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC:1700000000.000600")
+	require.NoError(t, err)
+	newConv, err := s.GetConversationByExternalRef(ctx, "slack", wantNewKey)
+	require.NoError(t, err)
+	assert.Equal(t, "C0123ABC", newConv.ParentRef)
+
+	// 3. parent_ref without external_ref is rejected with 400 (matching contract §4).
+	reqBody3 := MessageRequest{
+		Surface:   "slack",
+		ParentRef: "C0123ABC",
+		StructuredMessage: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + user.Email,
+			Recipient: "agent:" + agent.Slug,
+			Msg:       "parent_ref without external_ref",
+			Type:      messages.TypeInstruction,
+		},
+	}
+	b3, err := json.Marshal(reqBody3)
+	require.NoError(t, err)
+	r3 := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/message", bytes.NewReader(b3))
+	r3.Header.Set("Content-Type", "application/json")
+	r3 = r3.WithContext(contextWithBrokerIdentity(
+		contextWithIdentity(r3.Context(), NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "test")),
+		NewBrokerIdentity("test-broker"),
+	))
+	rec3 := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec3, r3)
+	require.Equal(t, http.StatusBadRequest, rec3.Code, "body: %s", rec3.Body.String())
+	assert.Contains(t, rec3.Body.String(), "parent_ref requires external_ref")
 }

@@ -2314,6 +2314,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Determine the message content and structured message to forward
 	if req.StructuredMessage != nil {
 		structuredMsg = req.StructuredMessage
+		// Conversation is hub-populated for hub→plugin outbound delivery only;
+		// strip any client-supplied value so callers cannot spoof external
+		// surface routing. Broker-authenticated callers supply top-level
+		// Surface/ExternalRef/ParentRef on MessageRequest instead.
+		structuredMsg.Conversation = nil
 		plainMessage = req.StructuredMessage.Msg
 		if req.Plain {
 			structuredMsg.Plain = true
@@ -2643,6 +2648,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return
 	}
+	if req.ParentRef != "" && req.ExternalRef == "" {
+		ValidationError(w, "parent_ref requires external_ref to be set", nil)
+		return
+	}
 
 	// A held target (ptone/scion#3433) is refused for a user send, with or
 	// without wake, with the refusal an agent send gets (ptone/scion#6859).
@@ -2660,23 +2669,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	if req.Surface != "" && req.ExternalRef != "" {
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
-		if req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
+			ValidationError(w, "invalid external_ref for thread conversation", nil)
+			return
 		}
-		if agent.ID != "" {
-			agentID := agent.ID
-			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		}
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			ctx, s.messageLog, agent.ProjectID,
+			req.Surface, req.ExternalRef, req.ParentRef, "", agent.ID,
+			structuredMsg.Channel, structuredMsg.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(ctx, logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
@@ -4379,6 +4381,8 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.StructuredMessage.Channel), nil)
 		return
 	}
+	// Strip client-supplied Conversation (hub-populated for outbound plugin delivery only).
+	req.StructuredMessage.Conversation = nil
 	// A broadcast carries text: attachment ids are refused above, and the
 	// messages store accepts an empty body (attachment-only chat messages,
 	// ptone/scion#6146), so an empty one is refused here, before fan-out.

@@ -487,11 +487,10 @@ func (s *ConversationStore) UpsertConversationByExternalRef(ctx context.Context,
 
 			// Only update optional fields if a non-empty value is provided,
 			// preventing accidental clobber of existing values.
+			// DisplayName is set on create only so inbound plugin upserts never
+			// overwrite user renames or drift from P2's webchat_topic mirror.
 			if conv.ParentRef != "" {
 				update.SetParentRef(conv.ParentRef)
-			}
-			if conv.DisplayName != "" {
-				update.SetDisplayName(conv.DisplayName)
 			}
 
 			if conv.DriftState != "" {

@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
@@ -1428,4 +1429,394 @@ func TestMessageBrokerProxy_CreatedForDeletedAgentDoesNotSubscribe(t *testing.T)
 			assert.Equal(t, tc.subscribe, got)
 		})
 	}
+}
+
+type captureEventBus struct {
+	mu        sync.Mutex
+	published []*messages.StructuredMessage
+}
+
+func (c *captureEventBus) Publish(_ context.Context, _ string, msg *messages.StructuredMessage) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.published = append(c.published, msg)
+	return nil
+}
+
+func (c *captureEventBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return &noopBrokerSub{}, nil
+}
+
+func (c *captureEventBus) Close() error { return nil }
+
+type noopBrokerSub struct{}
+
+func (*noopBrokerSub) Unsubscribe() error { return nil }
+
+func TestMessageBrokerProxy_EnrichConversationDualPopulatesLegacyFields(t *testing.T) {
+	s := newBrokerTestStore(t)
+	ctx := context.Background()
+	projectID := setupBrokerTestProject(t, s)
+
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		ProjectID:   &projectID,
+		Kind:        "group",
+		Surface:     "slack",
+		ExternalRef: "C0123ABC:1700000000.000100",
+		ParentRef:   "C0123ABC",
+		DisplayName: "#engineering",
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	capBus := &captureEventBus{}
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(capBus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+
+	orig := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Sender:         "agent:coder",
+		SenderID:       "agent-1",
+		Recipient:      "user:alice",
+		RecipientID:    "user-1",
+		Msg:            "build succeeded",
+		Type:           messages.TypeInstruction,
+		Channel:        "slack",
+		ThreadID:       "C0123ABC:1700000000.000100",
+		ConversationID: conv.ID,
+	}
+
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-1", orig))
+	require.NoError(t, proxy.PublishMessage(ctx, projectID, orig))
+
+	// Defense-in-depth: even if a caller passes a pre-populated/spoofed
+	// Conversation alongside ConversationID, enrichConversation must overwrite
+	// it from the authoritative conversations row.
+	spoofed := *orig
+	spoofed.Conversation = &messages.Conversation{
+		Surface:     "discord",
+		ExternalRef: "spoofed-ref",
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, "user-1", &spoofed))
+
+	// Caller's struct must not be mutated.
+	assert.Nil(t, orig.Conversation)
+
+	capBus.mu.Lock()
+	defer capBus.mu.Unlock()
+	require.Len(t, capBus.published, 3)
+	for i, got := range capBus.published[:2] {
+		require.NotNil(t, got.Conversation, "publish %d must carry Conversation", i)
+		assert.Equal(t, "slack", got.Conversation.Surface)
+		assert.Equal(t, "C0123ABC:1700000000.000100", got.Conversation.ExternalRef)
+		assert.Equal(t, "C0123ABC", got.Conversation.ParentRef)
+		assert.Equal(t, "#engineering", got.Conversation.DisplayName)
+		// Legacy fields must remain populated alongside Conversation (P4 dual-population).
+		assert.Equal(t, "slack", got.Channel)
+		assert.Equal(t, "C0123ABC:1700000000.000100", got.ThreadID)
+		assert.Equal(t, conv.ID, got.ConversationID)
+	}
+	gotSpoofed := capBus.published[2]
+	require.NotNil(t, gotSpoofed.Conversation)
+	assert.Equal(t, "slack", gotSpoofed.Conversation.Surface)
+	assert.Equal(t, "C0123ABC:1700000000.000100", gotSpoofed.Conversation.ExternalRef)
+	assert.Equal(t, "C0123ABC", gotSpoofed.Conversation.ParentRef)
+	assert.Equal(t, "#engineering", gotSpoofed.Conversation.DisplayName)
+}
+
+func TestTranslateConversationForBroker(t *testing.T) {
+	tests := []struct {
+		name string
+		conv *store.Conversation
+		want *messages.Conversation
+	}{
+		{
+			name: "nil conversation",
+			conv: nil,
+			want: nil,
+		},
+		{
+			name: "slack thread key translated to native channel:ts",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "thread:proj-1:C0123ABC:1700000000.000100",
+				ParentRef:   "C0123ABC",
+				DisplayName: "#engineering",
+			},
+			want: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C0123ABC:1700000000.000100",
+				ParentRef:   "C0123ABC",
+				DisplayName: "#engineering",
+			},
+		},
+		{
+			name: "discord thread key translated to native snowflake",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "discord",
+				ExternalRef: "thread:proj-1:777777777777777777",
+				ParentRef:   "200000000000000001",
+			},
+			want: &messages.Conversation{
+				Surface:     "discord",
+				ExternalRef: "777777777777777777",
+				ParentRef:   "200000000000000001",
+			},
+		},
+		{
+			name: "telegram forum topic key translated to native chat:thread",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "telegram",
+				ExternalRef: "thread:proj-1:-100123456:42",
+				ParentRef:   "-100123456",
+			},
+			want: &messages.Conversation{
+				Surface:     "telegram",
+				ExternalRef: "-100123456:42",
+				ParentRef:   "-100123456",
+			},
+		},
+		{
+			name: "teams thread key translated to native conversation id",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "teams",
+				ExternalRef: "thread:proj-1:19:chan-1@thread.tacv2;messageid=100",
+				ParentRef:   "19:chan-1@thread.tacv2",
+			},
+			want: &messages.Conversation{
+				Surface:     "teams",
+				ExternalRef: "19:chan-1@thread.tacv2;messageid=100",
+				ParentRef:   "19:chan-1@thread.tacv2",
+			},
+		},
+		{
+			name: "gchat thread key translated to native thread resource",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "gchat",
+				ExternalRef: "thread:proj-1:spaces/AAQAx/threads/t1",
+				ParentRef:   "spaces/AAQAx",
+			},
+			want: &messages.Conversation{
+				Surface:     "gchat",
+				ExternalRef: "spaces/AAQAx/threads/t1",
+				ParentRef:   "spaces/AAQAx",
+			},
+		},
+		{
+			name: "native surface omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "native",
+				ExternalRef: "thread:proj-1:topic-1",
+			},
+			want: nil,
+		},
+		{
+			name: "empty surface omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "",
+				ExternalRef: "thread:proj-1:topic-1",
+			},
+			want: nil,
+		},
+		{
+			name: "direct DM on native surface omitted",
+			conv: &store.Conversation{
+				Kind:        "direct",
+				Surface:     "native",
+				ExternalRef: "dm:agent:a1:user:u1",
+			},
+			want: nil,
+		},
+		{
+			name: "direct kind omitted even on external surface",
+			conv: &store.Conversation{
+				Kind:        "direct",
+				Surface:     "slack",
+				ExternalRef: "D0123ABC",
+			},
+			want: nil,
+		},
+		{
+			name: "dm-prefixed ref omitted even if kind is group",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "dm:agent:a1:user:u1",
+			},
+			want: nil,
+		},
+		{
+			name: "empty external_ref omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "",
+			},
+			want: nil,
+		},
+		{
+			name: "malformed thread ref without project omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "thread::C0123ABC",
+			},
+			want: nil,
+		},
+		{
+			name: "malformed thread ref without native id omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "thread:proj-1:",
+			},
+			want: nil,
+		},
+		{
+			name: "malformed thread ref wrapping dm key omitted",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "thread:proj-1:dm:agent:a1:user:u1",
+			},
+			want: nil,
+		},
+		{
+			name: "already surface-native ref on external surface passed through",
+			conv: &store.Conversation{
+				Kind:        "group",
+				Surface:     "slack",
+				ExternalRef: "C0123ABC:1700000000.000100",
+				ParentRef:   "C0123ABC",
+			},
+			want: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C0123ABC:1700000000.000100",
+				ParentRef:   "C0123ABC",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := translateConversationForBroker(tt.conv)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMessageBrokerProxy_EnrichConversation_RealOutboundAndDMRows(t *testing.T) {
+	s := newBrokerTestStore(t)
+	ctx := context.Background()
+	projectID := setupBrokerTestProject(t, s)
+	agent := setupBrokerTestAgent(t, s, projectID, "coder", "running")
+	userID := api.NewUUID()
+
+	capBus := &captureEventBus{}
+	events := NewChannelEventPublisher()
+	defer events.Close()
+	proxy := NewMessageBrokerProxy(capBus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+
+	// 1. Real outbound thread rows for all 5 external channels, created via the
+	// same DeriveConversationKey + outboundThreadSurface + ResolveOrCreateConversationByKey
+	// path as `scion message --channel <ch> --thread-id <native id>`.
+	threadCases := []struct {
+		channel  string
+		surface  string
+		threadID string
+	}{
+		{"slack", "slack", "C0123ABC:1700000000.000100"},
+		{"discord", "discord", "777777777777777777"},
+		{"telegram", "telegram", "-100123456:42"},
+		{"teams", "teams", "19:chan-1@thread.tacv2;messageid=100"},
+		{"gchat", "gchat", "spaces/AAQAx/threads/thread-1"},
+	}
+
+	for _, tc := range threadCases {
+		extRef, kind, projID, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+			ThreadID:  tc.threadID,
+			ProjectID: projectID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, "group", kind)
+		surface := outboundThreadSurface(kind, tc.channel)
+		require.Equal(t, tc.surface, surface)
+
+		convRes, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), extRef, kind, projID, messaging.WithSurface(surface))
+		require.NoError(t, err)
+
+		msg := &messages.StructuredMessage{
+			Version:        messages.Version,
+			Timestamp:      time.Now().UTC().Format(time.RFC3339),
+			Sender:         "agent:coder",
+			SenderID:       agent.ID,
+			Recipient:      "user:alice",
+			RecipientID:    userID,
+			Msg:            "reply on " + tc.channel,
+			Type:           messages.TypeInstruction,
+			Channel:        tc.channel,
+			ThreadID:       tc.threadID,
+			ConversationID: convRes.ConversationID,
+		}
+		require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, msg))
+	}
+
+	// 2. Real DM row created via DeriveConversationKey (empty ThreadID -> direct dm:).
+	dmRef, dmKind, dmProjID, err := messaging.DeriveConversationKey(messaging.KeyInputs{
+		SenderKind:    "agent",
+		SenderID:      agent.ID,
+		RecipientKind: "user",
+		RecipientID:   userID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "direct", dmKind)
+	dmConvRes, err := messaging.ResolveOrCreateConversationByKey(ctx, s, slog.Default(), dmRef, dmKind, dmProjID)
+	require.NoError(t, err)
+
+	dmMsg := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		Sender:         "agent:coder",
+		SenderID:       agent.ID,
+		Recipient:      "user:alice",
+		RecipientID:    userID,
+		Msg:            "dm reply with affinity",
+		Type:           messages.TypeInstruction,
+		Channel:        "discord",
+		ThreadID:       dmRef,
+		ConversationID: dmConvRes.ConversationID,
+		// Even a pre-existing Conversation must be cleared to nil for DM rows.
+		Conversation: &messages.Conversation{Surface: "discord", ExternalRef: "spoofed"},
+	}
+	require.NoError(t, proxy.PublishUserMessage(ctx, projectID, userID, dmMsg))
+
+	capBus.mu.Lock()
+	defer capBus.mu.Unlock()
+	require.Len(t, capBus.published, len(threadCases)+1)
+
+	for i, tc := range threadCases {
+		got := capBus.published[i]
+		require.NotNil(t, got.Conversation, "channel %s must emit translated Conversation", tc.channel)
+		assert.Equal(t, tc.surface, got.Conversation.Surface)
+		assert.Equal(t, tc.threadID, got.Conversation.ExternalRef, "channel %s must strip thread:<proj>: prefix", tc.channel)
+		assert.Equal(t, tc.channel, got.Channel)
+		assert.Equal(t, tc.threadID, got.ThreadID)
+		assert.NotEmpty(t, got.ConversationID)
+	}
+
+	gotDM := capBus.published[len(threadCases)]
+	assert.Nil(t, gotDM.Conversation, "DM conversation must omit Conversation so plugins fall back to Channel/ThreadID")
+	assert.Equal(t, dmConvRes.ConversationID, gotDM.ConversationID)
+	assert.Equal(t, "discord", gotDM.Channel)
+	assert.Equal(t, dmRef, gotDM.ThreadID)
 }

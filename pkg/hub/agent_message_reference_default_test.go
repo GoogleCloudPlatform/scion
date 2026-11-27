@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -86,10 +87,12 @@ func TestAgentMessageReference_SoftDeletedRecipientCreatesNoConversation(t *test
 	f := acceptanceSetup(t)
 	deleted := softDeletedAgentB(t, f, "ref-default-deleted-new")
 	const externalRef = "spaces/ref-default/threads/new"
+	wantKey, err := messaging.ThreadConversationExternalRef(f.projectB, externalRef)
+	require.NoError(t, err)
 
 	got := postThreadRequestAs(t, f.srv, refDefaultBroker(), deleted, refDefaultRequest(externalRef))
 
-	conv, lookupErr := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, externalRef)
+	conv, lookupErr := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, wantKey)
 	if lookupErr == nil && conv != nil && conv.DefaultAgentID != nil {
 		t.Logf("conversation %s has default agent %s", conv.ID, *conv.DefaultAgentID)
 	}
@@ -105,8 +108,10 @@ func TestAgentMessageReference_SoftDeletedRecipientKeepsExistingDefault(t *testi
 	const externalRef = "spaces/ref-default/threads/existing"
 	projectID := f.projectB
 	liveID := f.hubAgentB.ID
+	wantKey, err := messaging.ThreadConversationExternalRef(projectID, externalRef)
+	require.NoError(t, err)
 	seeded, err := f.store.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
-		Kind: "group", Surface: refDefaultSurface, ExternalRef: externalRef,
+		Kind: "group", Surface: refDefaultSurface, ExternalRef: wantKey,
 		ProjectID: &projectID, DefaultAgentID: &liveID, DriftState: "active",
 	})
 	require.NoError(t, err)
@@ -115,7 +120,7 @@ func TestAgentMessageReference_SoftDeletedRecipientKeepsExistingDefault(t *testi
 
 	got := postThreadRequestAs(t, f.srv, refDefaultBroker(), deleted, refDefaultRequest(externalRef))
 
-	conv, err := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, externalRef)
+	conv, err := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, wantKey)
 	require.NoError(t, err)
 	require.NotNil(t, conv.DefaultAgentID, "the conversation keeps a default agent")
 	assert.Equal(t, liveID, *conv.DefaultAgentID,
@@ -129,13 +134,15 @@ func TestAgentMessageReference_UnknownRecipientMatchesSoftDeleted(t *testing.T) 
 	f := acceptanceSetup(t)
 	deleted := softDeletedAgentB(t, f, "ref-default-deleted-parity")
 	const externalRef = "spaces/ref-default/threads/parity"
+	wantKey, err := messaging.ThreadConversationExternalRef(f.projectB, externalRef)
+	require.NoError(t, err)
 
 	deletedAnswer := postThreadRequestAs(t, f.srv, refDefaultBroker(), deleted, refDefaultRequest(externalRef))
 	unknownAnswer := unknownAgentAnswer(t, f)
 
 	assert.Equal(t, unknownAnswer, deletedAnswer,
 		"parity check: the soft-deleted answer equals the unknown-agent answer")
-	_, convErr := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, externalRef)
+	_, convErr := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, wantKey)
 	assert.True(t, errors.Is(convErr, store.ErrNotFound), "no conversation is created (err=%v)", convErr)
 }
 
@@ -143,10 +150,12 @@ func TestAgentMessageReference_LiveRecipientSetsDefault(t *testing.T) {
 	f := acceptanceSetup(t)
 	live := f.hubAgentB
 	const externalRef = "spaces/ref-default/threads/live"
+	wantKey, err := messaging.ThreadConversationExternalRef(f.projectB, externalRef)
+	require.NoError(t, err)
 
 	got := postThreadRequestAs(t, f.srv, refDefaultBroker(), live, refDefaultRequest(externalRef))
 
-	conv, err := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, externalRef)
+	conv, err := f.store.GetConversationByExternalRef(context.Background(), refDefaultSurface, wantKey)
 	require.NoError(t, err, "the conversation is created for a live recipient (status %d: %s)", got.status, got.body)
 	require.NotNil(t, conv.DefaultAgentID, "the conversation has a default agent")
 	assert.Equal(t, live.ID, *conv.DefaultAgentID, "the default agent is the live recipient")

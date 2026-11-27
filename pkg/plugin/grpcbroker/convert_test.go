@@ -48,10 +48,24 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 		ThreadID:       "thread-123",
 		ConversationID: "conversation-456",
 		DeliveryText:   "rendered delivery text",
+		Conversation: &messages.Conversation{
+			Surface:     "discord",
+			ExternalRef: "123456789012345678",
+			ParentRef:   "guild-channel-99",
+			DisplayName: "#general",
+		},
 	}
 
 	pb := StructuredMessageToProto(original)
 	require.NotNil(t, pb)
+	require.NotNil(t, pb.Conversation)
+	// P4 dual-population: both conversation and legacy fields must be on the wire.
+	assert.Equal(t, "discord", pb.Channel)
+	assert.Equal(t, "thread-123", pb.ThreadId)
+	assert.Equal(t, "discord", pb.Conversation.Surface)
+	assert.Equal(t, "123456789012345678", pb.Conversation.ExternalRef)
+	assert.Equal(t, "guild-channel-99", pb.Conversation.ParentRef)
+	assert.Equal(t, "#general", pb.Conversation.DisplayName)
 
 	roundTripped := ProtoToStructuredMessage(pb)
 	require.NotNil(t, roundTripped)
@@ -76,6 +90,7 @@ func TestStructuredMessageRoundTrip(t *testing.T) {
 	assert.Equal(t, original.ThreadID, roundTripped.ThreadID)
 	assert.Equal(t, original.ConversationID, roundTripped.ConversationID)
 	assert.Equal(t, original.DeliveryText, roundTripped.DeliveryText)
+	assert.Equal(t, original.Conversation, roundTripped.Conversation)
 }
 
 func TestStructuredMessageNilHandling(t *testing.T) {
@@ -98,6 +113,7 @@ func TestStructuredMessageEmptyFields(t *testing.T) {
 	assert.Equal(t, original.Msg, roundTripped.Msg)
 	assert.Nil(t, roundTripped.Attachments)
 	assert.Nil(t, roundTripped.Metadata)
+	assert.Nil(t, roundTripped.Conversation)
 }
 
 func TestStructuredMessageProtoSchema(t *testing.T) {
@@ -105,6 +121,14 @@ func TestStructuredMessageProtoSchema(t *testing.T) {
 
 	assert.Equal(t, protoreflect.FieldNumber(21), descriptor.Fields().ByName("conversation_id").Number())
 	assert.Equal(t, protoreflect.FieldNumber(22), descriptor.Fields().ByName("delivery_text").Number())
+	convField := descriptor.Fields().ByName("conversation")
+	require.NotNil(t, convField)
+	assert.Equal(t, protoreflect.FieldNumber(23), convField.Number())
+	convDesc := (&brokerv1.Conversation{}).ProtoReflect().Descriptor()
+	assert.Equal(t, protoreflect.FieldNumber(1), convDesc.Fields().ByName("surface").Number())
+	assert.Equal(t, protoreflect.FieldNumber(2), convDesc.Fields().ByName("external_ref").Number())
+	assert.Equal(t, protoreflect.FieldNumber(3), convDesc.Fields().ByName("parent_ref").Number())
+	assert.Equal(t, protoreflect.FieldNumber(4), convDesc.Fields().ByName("display_name").Number())
 	assert.Nil(t, descriptor.Fields().ByName("visibility"))
 	assert.True(t, descriptor.ReservedRanges().Has(20))
 	assert.True(t, descriptor.ReservedNames().Has("visibility"))

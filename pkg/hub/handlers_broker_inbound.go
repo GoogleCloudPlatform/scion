@@ -47,6 +47,7 @@ type inboundMessageRequest struct {
 	Surface     string `json:"surface,omitempty"`
 	ExternalRef string `json:"external_ref,omitempty"`
 	ParentRef   string `json:"parent_ref,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
 
 	// AttachmentIDs names attachments stored as artifacts that the sender
 	// uploaded (POST /api/v1/broker/inbound/attachments). Each must be an
@@ -123,6 +124,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// processing, render, or dispatch.
 	req.Message.Metadata = messaging.StripReservedMetadata(req.Message.Metadata)
 	clearInboundClientEvent(req.Message)
+	// Conversation is hub-populated for hub→plugin outbound delivery only;
+	// inbound broker plugins supply top-level Surface/ExternalRef/ParentRef/DisplayName.
+	req.Message.Conversation = nil
 
 	// Parse topic to extract project ID and agent slug
 	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
@@ -319,27 +323,26 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"external_ref requires surface to be set", nil)
 		return
 	}
+	if req.ParentRef != "" && req.ExternalRef == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"parent_ref requires external_ref to be set", nil)
+		return
+	}
 	// preDispatchConvResult is declared here so Phase 9b(ii) rendering can
 	// use it after the Phase 11 block and before dispatch.
 	var preDispatchConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
-		var keyOpts []messaging.ConversationByKeyOption
-		keyOpts = append(keyOpts, messaging.WithSurface(req.Surface))
-		if req.ParentRef != "" {
-			keyOpts = append(keyOpts, messaging.WithParentRef(req.ParentRef))
+		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
+			messaging.WriteDenialMetrics.Inc("broker.phase11")
+			log.Error("conversation key derivation failed", "error", keyErr)
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError, "invalid external_ref for thread conversation", nil)
+			return
 		}
-		if agent.ID != "" {
-			agentID := agent.ID
-			keyOpts = append(keyOpts, messaging.WithDefaultAgentID(&agentID))
-		}
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs != nil {
-			keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
-		}
-		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
-			r.Context(), s.store, log, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
+		convResult, convErr := s.resolveBrokerInboundConversation(
+			r.Context(), log, agent.ProjectID,
+			req.Surface, req.ExternalRef, req.ParentRef, req.DisplayName, agent.ID,
+			req.Message.Channel, req.Message.ThreadID,
+		)
 		if convErr != nil {
 			if externalRefOfOtherProject(convErr) {
 				logReferenceRefused(r.Context(), logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(r.Context()))
@@ -382,12 +385,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	// and other native-DM messages.
 	senderUserID := resolveSenderUserID(r.Context(), s.store, req.Message.SenderID, req.Message.Sender)
 
-	// Phase 5 dual-write: resolve-or-create conversation for broker-inbound
-	// messages. Skip broadcasts — they are ephemeral and do not belong to a
-	// conversation. Resolution errors return 409 BEFORE dispatch (DEF-135
-	// consequence 1: fail-closed, retry-safe).
+	// Phase 5 dual-write: resolve-or-create conversation for legacy broker-inbound
+	// messages that did not supply Phase 11 (surface + external_ref). Skip
+	// broadcasts — they are ephemeral and do not belong to a conversation.
+	// Skipping when preDispatchConvResult != nil avoids minting a spurious DM
+	// conversation when cut-over plugins omit legacy ThreadID.
 	var convFromPhase5 *messaging.ConversationResult
-	if !req.Message.Broadcasted {
+	if !req.Message.Broadcasted && preDispatchConvResult == nil {
 		var convErr error
 		convFromPhase5, convErr = s.resolvePhase5Conversation(r.Context(), req.Message.ThreadID, agent.ProjectID, senderUserID, agent.ID, req.Message.Channel)
 		if convErr != nil {
@@ -429,6 +433,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if req.Message.Broadcasted {
 		effectiveConv = nil
 	}
+	if effectiveConv != nil {
+		req.Message.ConversationID = effectiveConv.ConversationID
+	}
 
 	// F2 fix: validate the value that will actually be persisted, not just
 	// the Phase 5 result. When Phase 11 wins, effectiveConv differs from
@@ -467,6 +474,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	if storeMsg.Channel == "" && req.Surface != "" {
+		if ch, chErr := messaging.SurfaceToChannel(req.Surface); chErr == nil {
+			storeMsg.Channel = ch
+		}
 	}
 	if agentReincarnating {
 		storeMsg.DispatchState = store.MessageDispatchDeferred

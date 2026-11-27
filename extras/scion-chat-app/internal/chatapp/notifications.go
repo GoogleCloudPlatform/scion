@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
@@ -330,9 +331,10 @@ func (n *NotificationRelay) handleUserMessage(ctx context.Context, projectID str
 		// Chat API renders them as interactive user pills.
 		mentions := n.buildMentions(mapping.PlatformUserID, agentSlug, link)
 
+		convTarget := plugin.ResolveConversationTarget(msg)
 		sendReq := SendMessageRequest{
 			SpaceID:     link.SpaceID,
-			ThreadID:    msg.ThreadID,
+			ThreadID:    convTarget.ExternalRef,
 			Text:        mentions,
 			Card:        &card,
 			Attachments: attachments,

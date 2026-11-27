@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -824,4 +825,96 @@ func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
 	})
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestHandleBrokerInboundRouted_SurfaceExternalRefWithoutLegacyFields(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Surface:      "slack",
+		ExternalRef:  "C0123ABC:1700000000.000100",
+		ParentRef:    "C0123ABC",
+		DisplayName:  "#eng-routed",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Sender:  "user:" + env.user.Email,
+			Msg:     "hello routed without legacy fields",
+			Type:    messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	wantExtRef, err := messaging.ThreadConversationExternalRef(env.project.ID, "C0123ABC:1700000000.000100")
+	require.NoError(t, err)
+	conv, err := env.store.GetConversationByExternalRef(ctx, "slack", wantExtRef)
+	require.NoError(t, err)
+	assert.Equal(t, "C0123ABC", conv.ParentRef)
+	assert.Equal(t, "#eng-routed", conv.DisplayName)
+
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, conv.ID, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+}
+
+func TestHandleBrokerInboundRouted_LegacyChannelThreadIDOnly(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version:  messages.Version,
+			Channel:  "slack",
+			ThreadID: "C9999:1700000002.000300",
+			Sender:   "user:" + env.user.Email,
+			Msg:      "hello routed legacy binary",
+			Type:     messages.TypeInstruction,
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	msgs, err := env.store.ListMessages(ctx, store.MessageFilter{AgentID: env.agent1.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.NotEmpty(t, msgs.Items[0].ConversationID)
+	assert.Equal(t, "slack", msgs.Items[0].Channel)
+	assert.Equal(t, "C9999:1700000002.000300", msgs.Items[0].ThreadID)
+}
+
+func TestHandleBrokerInboundRouted_StripsClientSuppliedConversation(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedInboundRequest{
+		ProjectID:    env.project.ID,
+		DefaultAgent: "alpha",
+		Message: &messages.StructuredMessage{
+			Version: messages.Version,
+			Channel: "slack",
+			Sender:  "user:" + env.user.Email,
+			Msg:     "attempt spoofed conversation on routed inbound",
+			Type:    messages.TypeInstruction,
+			Conversation: &messages.Conversation{
+				Surface:     "slack",
+				ExternalRef: "C_OTHER:1",
+			},
+		},
+	})
+
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	calls := env.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.Nil(t, calls[0].StructuredMessage.Conversation,
+		"client-supplied Conversation must be stripped on /api/v1/broker/inbound/routed")
 }

@@ -313,19 +313,23 @@ func TestUpsertConversationByExternalRef_UpdateIfExists(t *testing.T) {
 	r1, err := s.UpsertConversationByExternalRef(ctx, conv1)
 	require.NoError(t, err)
 
-	// Second upsert with same (surface, external_ref) updates
+	// Second upsert with same (surface, external_ref) updates activity/parent_ref
+	// but preserves the existing display_name (create-only, protecting user
+	// renames and P2's webchat_topic mirror).
 	conv2 := &store.Conversation{
 		Kind:        "group",
 		Surface:     "slack",
 		ExternalRef: "C99999",
+		ParentRef:   "parent-chan-1",
 		DisplayName: "updated-name",
 	}
 	r2, err := s.UpsertConversationByExternalRef(ctx, conv2)
 	require.NoError(t, err)
 
-	// Same conversation
+	// Same conversation; ParentRef updated, DisplayName preserved.
 	assert.Equal(t, r1.ID, r2.ID)
-	assert.Equal(t, "updated-name", r2.DisplayName)
+	assert.Equal(t, "parent-chan-1", r2.ParentRef)
+	assert.Equal(t, "original-name", r2.DisplayName)
 }
 
 func TestUpsertConversationByExternalRef_EmptyDisplayNamePreservesExisting(t *testing.T) {
@@ -673,9 +677,10 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 	r3, err := s.UpsertConversationByExternalRef(ctx, overwrite)
 	require.NoError(t, err)
 
-	// Bucket C — non-empty input DOES overwrite.
+	// Bucket C — non-empty input DOES overwrite (DisplayName is create-only so
+	// inbound upserts never overwrite user renames or drift from webchat_topic).
 	t.Run("C_overwrite_when_nonempty", func(t *testing.T) {
-		assert.Equal(t, "Updated Name", r3.DisplayName, "DisplayName must update when non-empty")
+		assert.Equal(t, "Original Name", r3.DisplayName, "DisplayName is create-only and must not be overwritten on upsert")
 		assert.Equal(t, "orphaned", r3.DriftState, "DriftState must update when non-empty")
 		require.NotNil(t, r3.ProjectID)
 		assert.Equal(t, projectID, *r3.ProjectID, "ProjectID must stay the same")
@@ -692,6 +697,7 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 			Kind:        "group",
 			Surface:     "native",
 			ExternalRef: initial.ExternalRef,
+			ParentRef:   "other-parent",
 			DisplayName: "Other Name",
 			ProjectID:   &otherProjectID,
 		})
@@ -700,7 +706,8 @@ func TestUpsertConversationByExternalRef_FieldClassification(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, got.ProjectID)
 		assert.Equal(t, projectID, *got.ProjectID)
-		assert.Equal(t, "Updated Name", got.DisplayName, "a refused upsert writes nothing")
+		assert.Equal(t, "parent-updated", got.ParentRef, "a refused upsert writes nothing")
+		assert.Equal(t, "Original Name", got.DisplayName, "a refused upsert writes nothing")
 
 		projectless := &store.Conversation{
 			Kind:        "group",
@@ -764,20 +771,22 @@ func TestUpsertConversationByExternalRef_KeepsOwningProject(t *testing.T) {
 	assert.Equal(t, agentA, *after.DefaultAgentID, "default agent")
 	assert.True(t, before.LastActivityAt.Equal(after.LastActivityAt), "last activity")
 
-	// The owning project (and no project) still update the row.
+	// The owning project (and no project) still update mutable fields; DisplayName stays create-only.
 	same, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Thread A2", ProjectID: &projectA,
+		Kind: "group", Surface: "slack", ExternalRef: ref, ParentRef: "parent-a2", DisplayName: "Thread A2", ProjectID: &projectA,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, same.ID)
-	assert.Equal(t, "Thread A2", same.DisplayName)
+	assert.Equal(t, "parent-a2", same.ParentRef)
+	assert.Equal(t, "Thread A", same.DisplayName)
 
 	none, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind: "group", Surface: "slack", ExternalRef: ref, DisplayName: "Thread A3",
+		Kind: "group", Surface: "slack", ExternalRef: ref, ParentRef: "parent-a3", DisplayName: "Thread A3",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, created.ID, none.ID)
-	assert.Equal(t, "Thread A3", none.DisplayName)
+	assert.Equal(t, "parent-a3", none.ParentRef)
+	assert.Equal(t, "Thread A", none.DisplayName)
 	require.NotNil(t, none.ProjectID)
 	assert.Equal(t, projectA, *none.ProjectID, "no project in the request keeps the stored one")
 }
@@ -813,7 +822,7 @@ func TestUpsertConversationByExternalRef_ProjectlessRowStaysProjectless(t *testi
 	stored, err := s.GetConversation(ctx, created.ID)
 	require.NoError(t, err)
 	assert.Nil(t, stored.ProjectID, "stored row has no project")
-	assert.Equal(t, "After", stored.DisplayName)
+	assert.Equal(t, "Before", stored.DisplayName, "DisplayName is create-only")
 	assert.Equal(t, "parent-a", stored.ParentRef)
 	require.NotNil(t, stored.DefaultAgentID)
 	assert.Equal(t, agentA, *stored.DefaultAgentID)

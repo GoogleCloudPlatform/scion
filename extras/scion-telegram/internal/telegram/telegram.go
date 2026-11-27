@@ -65,6 +65,96 @@ type inboundPayload struct {
 	// AttachmentIDs names hub uploads of the sender delivered with the
 	// message.
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
+	plugin.InboundConversation
+}
+
+// parseTelegramConversationTarget extracts the Telegram chat ID and optional
+// forum topic thread ID from msg using plugin.ResolveConversationTarget.
+//
+// Supported formats:
+//   - "<chatID>:<threadID>" in ExternalRef (Phase 11 forum topic format)
+//   - ParentRef="<chatID>" + ExternalRef="<threadID>"
+//   - Bare "<chatID>" in msg.Conversation.ExternalRef (Phase 11 non-threaded chat)
+//   - Bare "<threadID>" when msg.Conversation is nil (legacy hub fallback where
+//     msg.ThreadID carried only the Telegram forum MessageThreadID)
+func parseTelegramConversationTarget(msg *messages.StructuredMessage) (chatID int64, hasChatID bool, threadID int64) {
+	target := plugin.ResolveConversationTarget(msg)
+	if target.ExternalRef == "" {
+		return 0, false, 0
+	}
+	// Never parse a foreign surface's external_ref (e.g. a Discord snowflake)
+	// as a Telegram chat/thread ID; fall through to recipient/project routing.
+	if target.Surface != "" && target.Surface != "telegram" {
+		return 0, false, 0
+	}
+	if parts := strings.SplitN(target.ExternalRef, ":", 2); len(parts) == 2 {
+		cid, err1 := strconv.ParseInt(parts[0], 10, 64)
+		tid, err2 := strconv.ParseInt(parts[1], 10, 64)
+		if err1 == nil && cid != 0 {
+			if err2 == nil && tid != 0 {
+				return cid, true, tid
+			}
+			return cid, true, 0
+		}
+		return 0, false, 0
+	}
+	if target.ParentRef != "" {
+		cid, err1 := strconv.ParseInt(target.ParentRef, 10, 64)
+		tid, err2 := strconv.ParseInt(target.ExternalRef, 10, 64)
+		if err1 == nil && cid != 0 {
+			if err2 == nil && tid != 0 {
+				return cid, true, tid
+			}
+			return cid, true, 0
+		}
+		return 0, false, 0
+	}
+	id, err := strconv.ParseInt(target.ExternalRef, 10, 64)
+	if err != nil || id == 0 {
+		return 0, false, 0
+	}
+	if msg != nil && msg.Conversation != nil && msg.Conversation.ExternalRef != "" {
+		// Group/supergroup chat IDs in Telegram are negative; positive bare
+		// integers are forum topic MessageThreadIDs (from pre-upgrade
+		// thread:<project>:<topic> rows or --channel telegram --thread-id <topic>).
+		// Never treat a bare positive integer as a chat ID — fall through to
+		// metadata/recipient/project chat routing with threadID=id.
+		if id < 0 {
+			return id, true, 0
+		}
+		return 0, false, id
+	}
+	return 0, false, id
+}
+
+// telegramInboundConversation derives the Phase 11 top-level conversation
+// addressing (surface, external_ref, parent_ref) for an inbound Telegram message.
+//
+// Only threaded messages (forum topics where msg.ThreadID is set) emit
+// (surface, external_ref, parent_ref) with external_ref == threadID and
+// parent_ref == chatID so inbound threads share the exact thread:<project>:<topic>
+// key used by pre-P4 rows and by outbound `--channel telegram --thread-id <topic>`
+// replies, while outbound composes (parent_ref, external_ref) to address the
+// forum chat + topic. Non-threaded messages (1:1 private chats and flat chats
+// without a forum topic) omit external_ref so the hub resolves them through
+// Phase 5 as direct dm: conversations, matching `scion message user:<x>`.
+func telegramInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
+	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	threadID := msg.ThreadID
+	if threadID == "" {
+		return plugin.InboundConversation{}
+	}
+	var chatID string
+	if msg.Metadata != nil {
+		chatID = msg.Metadata["telegram_chat_id"]
+	}
+	return plugin.InboundConversation{
+		Surface:     "telegram",
+		ExternalRef: threadID,
+		ParentRef:   chatID,
+	}
 }
 
 // hubError represents a structured error returned by the hub API.
@@ -133,10 +223,11 @@ type TelegramBroker struct {
 	botInfo *BotUser
 
 	// Hub API callback config (set via Configure)
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	pluginName string
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	pluginName             string
+	hubInboundConversation bool
 
 	httpClient *http.Client
 
@@ -207,6 +298,9 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 	}
 	if v, ok := config["plugin_name"]; ok {
 		b.pluginName = v
+	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.hubInboundConversation = plugin.HubSupportsInboundConversation(config)
 	}
 
 	// Bot token is required
@@ -374,6 +468,7 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 		return fmt.Errorf("telegram broker not configured")
 	}
 
+	// Telegram relays all messages (no channel filter, matching pre-P4 behavior).
 	// Dedup: skip if we've already sent this exact message recently.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -397,8 +492,37 @@ func (b *TelegramBroker) Publish(ctx context.Context, topic string, msg *message
 	// Collect target chat IDs
 	var chatIDs []int64
 
+	// Priority 0: Conversation external_ref (Phase 11).
+	// When chatRoutes or topicChats are configured, only post to the
+	// conversation's chat if it is registered in the broker's routes;
+	// otherwise fall back to the pre-P4 routing path.
+	if convChatID, ok, _ := parseTelegramConversationTarget(msg); ok {
+		allowConvChat := true
+		if len(chatRoutes) > 0 || len(topicChats) > 0 {
+			allowConvChat = false
+			if _, exists := chatRoutes[convChatID]; exists {
+				allowConvChat = true
+			} else {
+				for _, chats := range topicChats {
+					for _, cid := range chats {
+						if cid == convChatID {
+							allowConvChat = true
+							break
+						}
+					}
+					if allowConvChat {
+						break
+					}
+				}
+			}
+		}
+		if allowConvChat {
+			chatIDs = append(chatIDs, convChatID)
+		}
+	}
+
 	// Priority 1: Direct routing via metadata
-	if msg != nil && msg.Metadata != nil {
+	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
 		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
 			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
 				chatIDs = append(chatIDs, chatID)
@@ -789,6 +913,7 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	httpClient := b.httpClient
 	b.mu.RUnlock()
 
@@ -806,6 +931,9 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	payload := inboundPayload{
 		Topic:   topic,
 		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = telegramInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

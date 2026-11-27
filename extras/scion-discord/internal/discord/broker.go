@@ -83,16 +83,15 @@ type Config struct {
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+	plugin.InboundConversation
 }
 
 // routedInboundPayload is the JSON body sent to the hub routed inbound endpoint.
 type routedInboundPayload struct {
 	ProjectID    string                      `json:"project_id"`
 	DefaultAgent string                      `json:"default_agent,omitempty"`
-	Surface      string                      `json:"surface,omitempty"`
-	ExternalRef  string                      `json:"external_ref,omitempty"`
-	ParentRef    string                      `json:"parent_ref,omitempty"`
 	Message      *messages.StructuredMessage `json:"message"`
+	plugin.InboundConversation
 }
 
 // routedInboundResult is the success response from the hub routed endpoint.
@@ -190,11 +189,12 @@ type DiscordBroker struct {
 	session *discordgo.Session // Discord gateway session
 	botUser *discordgo.User    // Bot's own user info
 
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	pluginName string
-	httpClient *http.Client
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	pluginName             string
+	hubInboundConversation bool
+	httpClient             *http.Client
 
 	store Store
 
@@ -293,6 +293,9 @@ func (b *DiscordBroker) Configure(config map[string]string) error {
 	}
 	if v, ok := config["plugin_name"]; ok {
 		b.pluginName = v
+	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.hubInboundConversation = plugin.HubSupportsInboundConversation(config)
 	}
 
 	// Phase 1: Bot token configuration.
@@ -633,10 +636,10 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return fmt.Errorf("message is nil")
 	}
 
-	// Channel filtering: if the message targets a specific channel that
-	// isn't ours, skip it. FanOutEventBus already does this, but
-	// belt-and-suspenders.
-	if msg != nil && msg.Channel != "" && msg.Channel != "discord" {
+	// Surface filtering: if the message targets a specific surface that
+	// isn't ours (including "native"/"web"), skip it. FanOutEventBus
+	// already does this, but belt-and-suspenders.
+	if !plugin.MatchesSurface(msg, "discord") {
 		return nil
 	}
 
@@ -693,12 +696,14 @@ func (b *DiscordBroker) Publish(ctx context.Context, topic string, msg *messages
 		return nil
 	}
 
-	// Only an all-digit ThreadID is a Discord channel or thread ID. Any
-	// other ThreadID (such as a Scion direct-message conversation key) is
+	convTarget := plugin.ResolveConversationTarget(msg)
+
+	// Only an all-digit ExternalRef is a Discord channel or thread ID. Any
+	// other ExternalRef (such as a Scion direct-message conversation key) is
 	// never sent to Discord as a channel ID: the message is resolved to the
 	// addressed user's own Discord channel below and is never broadcast.
-	recipientRouted := msg.ThreadID != "" && !isDiscordSnowflake(msg.ThreadID)
-	discordThreadID := msg.ThreadID
+	recipientRouted := convTarget.ExternalRef != "" && !isDiscordSnowflake(convTarget.ExternalRef)
+	discordThreadID := convTarget.ExternalRef
 	if recipientRouted {
 		discordThreadID = ""
 		if !strings.HasPrefix(msg.Recipient, "user:") {
@@ -2027,6 +2032,40 @@ func (b *DiscordBroker) handleRoutedInbound(
 
 // --- Hub delivery ---
 
+// discordInboundConversation derives the Phase 11 top-level conversation
+// addressing (surface, external_ref, parent_ref) for an inbound Discord message.
+func (b *DiscordBroker) discordInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
+	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	var channelID, parentID string
+	if msg.Metadata != nil {
+		channelID = msg.Metadata["discord_channel_id"]
+		parentID = msg.Metadata["discord_parent_channel_id"]
+	}
+	if channelID == "" {
+		channelID = msg.ThreadID
+	}
+	if channelID == "" {
+		return plugin.InboundConversation{}
+	}
+	if parentID == "" {
+		b.mu.RLock()
+		if b.threadParents != nil {
+			parentID = b.threadParents[channelID]
+		}
+		b.mu.RUnlock()
+	}
+	if parentID == channelID {
+		parentID = ""
+	}
+	return plugin.InboundConversation{
+		Surface:     "discord",
+		ExternalRef: channelID,
+		ParentRef:   parentID,
+	}
+}
+
 // deliverInbound sends a message to the hub API or InboundHandler.
 // Returns a non-nil *hubError when the hub rejects the message with an HTTP
 // error status (4xx/5xx), allowing callers to surface feedback to the sender.
@@ -2037,6 +2076,7 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -2052,6 +2092,9 @@ func (b *DiscordBroker) deliverInbound(topic string, msg *messages.StructuredMes
 	payload := inboundPayload{
 		Topic:   topic,
 		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = b.discordInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -2103,6 +2146,7 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if hubURL == "" {
@@ -2115,6 +2159,9 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 		ProjectID:    projectID,
 		DefaultAgent: defaultAgent,
 		Message:      msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = b.discordInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

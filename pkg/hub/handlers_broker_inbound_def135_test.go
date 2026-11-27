@@ -199,6 +199,8 @@ func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
 		calls := f.dispatcher.getCalls()
 		require.Equal(t, 1, len(calls))
 		require.NotNil(t, calls[0].StructuredMessage)
+		assert.Empty(t, calls[0].StructuredMessage.ConversationID,
+			"AC-3/F3: dispatched broadcast message must not carry a ConversationID even with surface+external_ref")
 
 		deliveryText := calls[0].StructuredMessage.DeliveryText
 		require.NotEmpty(t, deliveryText)
@@ -232,6 +234,8 @@ func TestDEF135_AC3_Broadcast_NoConversation(t *testing.T) {
 		calls := f.dispatcher.getCalls()
 		require.Equal(t, 1, len(calls))
 		require.NotNil(t, calls[0].StructuredMessage)
+		assert.Empty(t, calls[0].StructuredMessage.ConversationID,
+			"AC-3/F3: dispatched broadcast message must not carry a ConversationID even with surface+external_ref")
 
 		deliveryText := calls[0].StructuredMessage.DeliveryText
 		require.NotEmpty(t, deliveryText)

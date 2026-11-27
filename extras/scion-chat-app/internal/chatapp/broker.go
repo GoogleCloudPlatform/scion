@@ -101,6 +101,14 @@ func (b *BrokerServer) Publish(ctx context.Context, topic string, msg *messages.
 		return nil
 	}
 
+	// Single surface/channel gate: match configured routing key (ChannelName,
+	// e.g. "googlechat") against Channel, and canonical surface "gchat" against
+	// Conversation.Surface. Native/web user DMs and untargeted observer copies
+	// are always relayed (matching pre-P4 behavior).
+	if !b.shouldRelay(msg) {
+		return nil
+	}
+
 	// Dedup check: compute SHA256 fingerprint and skip if seen within TTL.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -168,6 +176,25 @@ func (b *BrokerServer) ChannelName() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.channelName
+}
+
+// shouldRelay reports whether msg should be handled by this chat-app instance.
+// It matches the configured routing key (ChannelName, e.g. "googlechat")
+// against msg.Channel, and the canonical surface "gchat" against
+// msg.Conversation.Surface. Native/web messages and untargeted observer copies
+// are always relayed (matching pre-P4 behavior).
+func (b *BrokerServer) shouldRelay(msg *messages.StructuredMessage) bool {
+	if msg == nil {
+		return true
+	}
+	routingKey := b.ChannelName()
+	if msg.Channel != "" {
+		return msg.Channel == "web" || msg.Channel == "gchat" || (routingKey != "" && msg.Channel == routingKey)
+	}
+	if msg.Conversation != nil && msg.Conversation.Surface != "" && msg.Conversation.Surface != "native" {
+		return msg.Conversation.Surface == "gchat" || (routingKey != "" && msg.Conversation.Surface == routingKey)
+	}
+	return true
 }
 
 // Subscribe registers a topic pattern for receiving messages.

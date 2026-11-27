@@ -25,19 +25,31 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 )
 
 // HubClient delivers inbound messages to the Scion Hub.
 type HubClient struct {
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	httpClient *http.Client
-	log        *slog.Logger
+	mu                     sync.RWMutex
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	hubInboundConversation bool
+	httpClient             *http.Client
+	log                    *slog.Logger
+}
+
+// SetHubInboundConversation toggles whether DeliverInbound emits top-level
+// Phase 11 conversation addressing (surface, external_ref, parent_ref).
+func (c *HubClient) SetHubInboundConversation(enabled bool) {
+	c.mu.Lock()
+	c.hubInboundConversation = enabled
+	c.mu.Unlock()
 }
 
 // NewHubClient creates a new HubClient for delivering messages to the hub.
@@ -55,13 +67,54 @@ func NewHubClient(hubURL, hmacKey, brokerID string, log *slog.Logger) *HubClient
 type inboundPayload struct {
 	Topic   string                      `json:"topic"`
 	Message *messages.StructuredMessage `json:"message"`
+	plugin.InboundConversation
+}
+
+// teamsInboundConversation derives the Phase 11 top-level conversation
+// addressing (surface, external_ref, parent_ref) for an inbound Teams message.
+func teamsInboundConversation(msg *messages.StructuredMessage) plugin.InboundConversation {
+	if msg == nil {
+		return plugin.InboundConversation{}
+	}
+	var convID string
+	if msg.Metadata != nil {
+		convID = msg.Metadata["teams_conversation_id"]
+	}
+	if convID != "" {
+		parentID := stripThreadSuffix(convID)
+		if parentID != "" && parentID != convID {
+			return plugin.InboundConversation{
+				Surface:     "teams",
+				ExternalRef: convID,
+				ParentRef:   parentID,
+			}
+		}
+		return plugin.InboundConversation{
+			Surface:     "teams",
+			ExternalRef: convID,
+		}
+	}
+	if msg.ThreadID != "" {
+		return plugin.InboundConversation{
+			Surface:     "teams",
+			ExternalRef: msg.ThreadID,
+		}
+	}
+	return plugin.InboundConversation{}
 }
 
 // DeliverInbound sends a structured message to the hub's inbound endpoint.
 func (c *HubClient) DeliverInbound(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
+	c.mu.RLock()
+	hubInboundConv := c.hubInboundConversation
+	c.mu.RUnlock()
+
 	payload := inboundPayload{
 		Topic:   topic,
 		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = teamsInboundConversation(msg)
 	}
 
 	body, err := json.Marshal(payload)

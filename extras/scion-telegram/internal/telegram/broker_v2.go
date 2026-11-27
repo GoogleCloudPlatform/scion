@@ -60,11 +60,12 @@ type TelegramBrokerV2 struct {
 	api     *TelegramAPIClient
 	botInfo *BotUser
 
-	hubURL     string
-	hmacKey    string
-	brokerID   string
-	pluginName string
-	httpClient *http.Client
+	hubURL                 string
+	hmacKey                string
+	brokerID               string
+	pluginName             string
+	hubInboundConversation bool
+	httpClient             *http.Client
 
 	store Store
 
@@ -519,6 +520,9 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 	}
 	if v, ok := config["plugin_name"]; ok {
 		b.pluginName = v
+	}
+	if _, ok := config[plugin.ConfigKeyHubInboundConversation]; ok {
+		b.hubInboundConversation = plugin.HubSupportsInboundConversation(config)
 	}
 
 	// Commit. The previous store, send queue and generation are retired;
@@ -977,6 +981,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		return fmt.Errorf("telegram v2 broker not configured")
 	}
 
+	// Telegram v2 relays all messages (no channel filter, matching pre-P4 behavior).
+
 	// Dedup check.
 	dedupKey := msgDedupKey(msg)
 	if dedupKey != "" {
@@ -1068,8 +1074,30 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 	// Collect target chat IDs via dynamic routing.
 	var chatIDs []int64
 
+	// Priority 0: Conversation external_ref (Phase 11).
+	// When a store and projectID are present, only post to the conversation's
+	// chat if it is still an active GroupLink for this project; otherwise fall
+	// back to the pre-P4 routing path so unlinking a group stops replies into
+	// existing forum-topic conversations.
+	convChatID, hasConvChatID, convThreadID := parseTelegramConversationTarget(msg)
+	if hasConvChatID {
+		allowConvChat := true
+		if store != nil && projectID != "" {
+			link, err := store.GetGroupLink(ctx, convChatID)
+			if err != nil {
+				b.log.Warn("Failed to verify group link for conversation chat", "chat_id", convChatID, "error", err)
+				allowConvChat = false
+			} else if link == nil || !link.Active || link.ProjectID != projectID {
+				allowConvChat = false
+			}
+		}
+		if allowConvChat {
+			chatIDs = append(chatIDs, convChatID)
+		}
+	}
+
 	// Priority 1: Direct chat ID from metadata.
-	if msg != nil && msg.Metadata != nil {
+	if len(chatIDs) == 0 && msg != nil && msg.Metadata != nil {
 		if chatIDStr, ok := msg.Metadata["telegram_chat_id"]; ok {
 			if chatID, err := strconv.ParseInt(chatIDStr, 10, 64); err == nil {
 				chatIDs = append(chatIDs, chatID)
@@ -1146,10 +1174,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 
 	// Determine thread ID for Telegram forum topics.
 	var threadOpts []SendOption
-	if msg != nil && msg.ThreadID != "" {
-		if tid, err := strconv.ParseInt(msg.ThreadID, 10, 64); err == nil && tid != 0 {
-			threadOpts = append(threadOpts, SendOption{MessageThreadID: tid})
-		}
+	if convThreadID != 0 {
+		threadOpts = append(threadOpts, SendOption{MessageThreadID: convThreadID})
 	}
 
 	// File attachment: check msg.Attachments (scion CLI --attach flag convention)
@@ -3289,6 +3315,7 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -3304,6 +3331,9 @@ func (b *TelegramBrokerV2) deliverInbound(topic string, msg *messages.Structured
 	payload := inboundPayload{
 		Topic:   topic,
 		Message: msg,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = telegramInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -3398,6 +3428,7 @@ func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic stri
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	hubInboundConv := b.hubInboundConversation
 	b.mu.RUnlock()
 
 	if handler != nil {
@@ -3414,6 +3445,9 @@ func (b *TelegramBrokerV2) deliverInboundOutcome(ctx context.Context, topic stri
 		Topic:         topic,
 		Message:       msg,
 		AttachmentIDs: attachmentIDs,
+	}
+	if hubInboundConv {
+		payload.InboundConversation = telegramInboundConversation(msg)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
