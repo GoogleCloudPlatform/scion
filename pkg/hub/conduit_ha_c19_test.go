@@ -51,10 +51,13 @@ import (
 //   - one cross-node bulk TCP tunnel stream to agent 0 (on Hub B) with a
 //     completely stalled reader throughout the run.
 //
-// Asserts: no session-window stall of other stream kinds, zero 429s at default
-// MaxConcurrentRPCs, zero errors, and every persisted delivery message row
-// reaches a terminal state (delivered) in Postgres. Latencies are logged for
-// visibility and not asserted on CI loopback.
+// Asserts: no session-window stall of other stream kinds, no 429s observed
+// under the §3.2.2 profile (per-session RPC concurrency is about <=3, so
+// MaxConcurrentRPCs is not saturated; a saturating concurrent-churn profile is
+// left to the live C19 run, ptone/scion#9536), zero non-delivered outcomes,
+// zero errors, and every persisted delivery message row reaches a terminal
+// state (delivered) in Postgres. Latencies are logged for visibility and not
+// asserted on CI loopback.
 func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 	env := newConduitHAEnv(t)
 	ctx := context.Background()

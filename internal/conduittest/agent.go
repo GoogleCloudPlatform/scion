@@ -114,6 +114,12 @@ type AgentOptions struct {
 	EnablePTY bool
 	SpawnPTY  sconduit.PTYSpawner
 	Backoff   *conduit.Backoff
+	// Session configures the underlying conduit session. Leaving
+	// Session.RPCHandler nil installs the default control.Handler (serving
+	// deliver-message and rotate-token and recording RPCCount/RPCPaths/
+	// KickCount). Setting Session.RPCHandler replaces the control handler, so
+	// deliver-message, rotate-token, and RPCCount/RPCPaths/KickCount stop
+	// working.
 	Session   conduit.Config
 	Clock     clock.Clock
 	OnSession func(*conduitv1.Welcome)
@@ -170,6 +176,9 @@ func StartAgent(opts AgentOptions) (*Agent, error) {
 		return baseRPC.HandleRPC(ctx, req)
 	})
 
+	// Setting opts.Session.RPCHandler replaces the default control.Handler
+	// (deliver-message, rotate-token, and RPCCount/RPCPaths/KickCount stop
+	// working).
 	sessCfg := opts.Session
 	if sessCfg.RPCHandler == nil {
 		sessCfg.RPCHandler = countedRPC

@@ -447,19 +447,24 @@ func (m *haAuthzMetrics) waitCount(t *testing.T, key string, want int, timeout t
 // TestConduitHA_2796_C16b_ActiveAuthzCrossNode validates ptone/scion#2796
 // checkbox "C16b (T2 active authorization)" across two Postgres hub nodes with
 // a deterministic fake AuthzClock, short authz_recheck_interval (200ms), and
-// UserStreamAuthzMax (5s):
-//   - Renewal: advancing AuthzClock by UserStreamAuthzMax fires the interval
-//     check and records interval/renewed/pty for both streams while permission
-//     holds; both PTYs keep echoing.
-//   - Fast-path NOTIFY revocation: with AuthzClock frozen (so the periodic
-//     sweep cannot fire), revoking u1's attach role binding through Hub B
-//     closes u1's cross-node PTY on Hub A with 4401 authz_expired and records
+// UserStreamAuthzMax (5s).
+//
+// Clauses covered:
+//   - Renewal at interval: advancing AuthzClock by UserStreamAuthzMax fires
+//     the interval check and records interval/renewed/pty for both streams
+//     while permission holds; both PTYs keep echoing.
+//   - NOTIFY revocation: with AuthzClock frozen (so the periodic sweep cannot
+//     fire), revoking u1's attach role binding through Hub B closes u1's
+//     cross-node PTY on Hub A with 4401 authz_expired and records
 //     notify/closed/pty, while u2's stream stays open.
-//   - Missed-notification sweep: with Hub A's Postgres LISTEN blocked via
-//     BlockLISTEN, revoking u2's attach role binding through Hub B and
-//     advancing AuthzClock by one recheckInterval (200ms, far below authzMax)
-//     closes u2's PTY on Hub A with 4401 authz_expired and records
+//   - Missed-notification sweep revocation: with Hub A's Postgres LISTEN
+//     blocked via BlockLISTEN, revoking u2's attach role binding through Hub B
+//     and advancing AuthzClock by one recheckInterval (200ms, far below
+//     authzMax) closes u2's PTY on Hub A with 4401 authz_expired and records
 //     sweep/closed/pty.
+//
+// Clause not covered here: interval-deny (closing with 4401 authz_expired when
+// permission no longer holds at the authorization interval).
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
