@@ -752,9 +752,6 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		messageLog:        logging.Subsystem("broker.messages"),
 		envSecretLog:      logging.Subsystem("broker.env-secrets"),
 	}
-	if mgr != nil {
-		srv.applyConduitDeliverRuntimes(mgr)
-	}
 	// A flat instance's own loggers carry its identity, so several
 	// instances in one process log distinguishably without changing the
 	// process-wide default logger.

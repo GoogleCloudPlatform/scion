@@ -16,8 +16,10 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,5 +67,24 @@ func TestKubernetesRuntime_ListReturnsConduitDeliverLabel(t *testing.T) {
 	}
 	if got := agents[0].Labels["scion.conduit_deliver"]; got != "true" {
 		t.Fatalf("Labels[scion.conduit_deliver] = %q, want %q (labels=%v)", got, "true", agents[0].Labels)
+	}
+}
+
+// TestKnownConduitDeliverRuntimes_MatchRuntimeNames guards against drift
+// between config.KnownConduitDeliverRuntimes and the Runtime.Name() values of
+// the concrete runtime implementations.
+func TestKnownConduitDeliverRuntimes_MatchRuntimeNames(t *testing.T) {
+	want := []string{
+		(&CloudRunRuntime{}).Name(),
+		(&KubernetesRuntime{}).Name(),
+		(&DockerRuntime{}).Name(),
+		(&PodmanRuntime{}).Name(),
+		(&AppleContainerRuntime{}).Name(),
+		(&SubstrateRuntime{}).Name(),
+		(&CloudRunSandboxRuntime{}).Name(),
+	}
+	got := config.KnownConduitDeliverRuntimes()
+	if !slices.Equal(got, want) {
+		t.Fatalf("config.KnownConduitDeliverRuntimes() = %v, want %v", got, want)
 	}
 }

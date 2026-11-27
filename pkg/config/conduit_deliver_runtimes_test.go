@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,27 +71,34 @@ func TestConduitDeliverRuntimes_DefaultsAndValidation(t *testing.T) {
 }
 
 func TestConduitDeliverRuntimes_V1RoundTrip(t *testing.T) {
+	in := []string{"cloudrun", "podman"}
 	gc := ConvertV1ServerToGlobalConfig(&V1ServerConfig{
 		Broker: &V1BrokerConfig{
-			ConduitDeliverRuntimes: []string{"cloudrun", "podman"},
+			ConduitDeliverRuntimes: &in,
 		},
 	})
 	assert.Equal(t, []string{"cloudrun", "podman"}, gc.RuntimeBroker.ConduitDeliverRuntimes)
 
 	v1 := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, v1.Broker)
-	assert.Equal(t, []string{"cloudrun", "podman"}, v1.Broker.ConduitDeliverRuntimes)
+	require.NotNil(t, v1.Broker.ConduitDeliverRuntimes)
+	assert.Equal(t, []string{"cloudrun", "podman"}, *v1.Broker.ConduitDeliverRuntimes)
 
 	// Unset stays nil.
 	unset := ConvertV1ServerToGlobalConfig(&V1ServerConfig{Broker: &V1BrokerConfig{}})
 	assert.Nil(t, unset.RuntimeBroker.ConduitDeliverRuntimes)
+	assert.Nil(t, ConvertGlobalToV1ServerConfig(unset).Broker.ConduitDeliverRuntimes)
 
-	// Explicit empty list stays non-nil empty.
+	// Explicit empty list stays non-nil empty through round-trip.
+	emptySlice := []string{}
 	empty := ConvertV1ServerToGlobalConfig(&V1ServerConfig{
-		Broker: &V1BrokerConfig{ConduitDeliverRuntimes: []string{}},
+		Broker: &V1BrokerConfig{ConduitDeliverRuntimes: &emptySlice},
 	})
 	assert.NotNil(t, empty.RuntimeBroker.ConduitDeliverRuntimes)
 	assert.Empty(t, empty.RuntimeBroker.ConduitDeliverRuntimes)
+	emptyV1 := ConvertGlobalToV1ServerConfig(empty)
+	require.NotNil(t, emptyV1.Broker.ConduitDeliverRuntimes)
+	assert.Empty(t, *emptyV1.Broker.ConduitDeliverRuntimes)
 }
 
 func TestConduitDeliverRuntimes_LoadGlobalConfig(t *testing.T) {
@@ -174,4 +182,24 @@ server:
 		assert.Contains(t, err.Error(), "server.broker.conduit_deliver_runtimes")
 		assert.Contains(t, err.Error(), "unknown-rt")
 	})
+}
+
+func TestConduitDeliverRuntimes_SchemaEnumMatchesKnownList(t *testing.T) {
+	raw, err := schemasFS.ReadFile("schemas/settings-v1.schema.json")
+	require.NoError(t, err)
+	var schema struct {
+		Defs struct {
+			ServerBroker struct {
+				Properties struct {
+					ConduitDeliverRuntimes struct {
+						Items struct {
+							Enum []string `json:"enum"`
+						} `json:"items"`
+					} `json:"conduit_deliver_runtimes"`
+				} `json:"properties"`
+			} `json:"serverBroker"`
+		} `json:"$defs"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &schema))
+	assert.Equal(t, KnownConduitDeliverRuntimes(), schema.Defs.ServerBroker.Properties.ConduitDeliverRuntimes.Items.Enum)
 }

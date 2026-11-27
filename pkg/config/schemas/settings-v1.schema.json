@@ -2088,7 +2088,7 @@
             "type": "string",
             "enum": ["cloudrun", "kubernetes", "docker", "podman", "container", "substrate", "cloudrun-sandbox"]
           },
-          "description": "Runtime names whose agents may deliver messages over Conduit when the hub enables hub.conduit_deliver. When unset, defaults to [\"cloudrun\", \"kubernetes\", \"docker\"]; an explicit empty list disables Conduit delivery on all runtimes. Brokers connected to several hubs always use exec regardless of this setting.",
+          "description": "Runtime names whose agents may deliver messages over Conduit when the hub enables hub.conduit_deliver. When unset, defaults to [\"cloudrun\", \"kubernetes\", \"docker\"]; an explicit empty list in settings.yaml disables Conduit delivery on all runtimes (an empty environment variable is treated as unset). Unknown runtime names fail server startup. Brokers connected to several hubs always use exec regardless of this setting.",
           "x-env-var": "SCION_SERVER_RUNTIMEBROKER_CONDUITDELIVERRUNTIMES"
         },
         "instances": {

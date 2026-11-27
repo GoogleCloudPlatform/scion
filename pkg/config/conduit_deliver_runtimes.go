@@ -46,6 +46,12 @@ func DefaultConduitDeliverRuntimes() []string {
 	return append([]string(nil), defaultConduitDeliverRuntimes...)
 }
 
+// KnownConduitDeliverRuntimes returns a fresh copy of the known runtime names
+// accepted by server.broker.conduit_deliver_runtimes.
+func KnownConduitDeliverRuntimes() []string {
+	return append([]string(nil), knownConduitDeliverRuntimes...)
+}
+
 // NormalizeConduitDeliverRuntimes validates and deduplicates a configured
 // server.broker.conduit_deliver_runtimes list.
 //

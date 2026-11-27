@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -51,15 +52,20 @@ const (
 // not import the registry).
 const experimentConduitDeliver = "hub.conduit_deliver"
 
+func defaultConduitDeliverRuntimesMap() map[string]bool {
+	defaults := config.DefaultConduitDeliverRuntimes()
+	m := make(map[string]bool, len(defaults))
+	for _, rt := range defaults {
+		m[rt] = true
+	}
+	return m
+}
+
 // conduitDeliverRuntimes is the default set of runtimes whose agents may
 // deliver over conduit when a manager has not been configured with
-// SetConduitDeliverRuntimes (cloudrun, kubernetes, docker). Kept as a package
-// variable only as a test seam.
-var conduitDeliverRuntimes = map[string]bool{
-	"cloudrun":   true,
-	"kubernetes": true,
-	"docker":     true,
-}
+// SetConduitDeliverRuntimes, seeded from config.DefaultConduitDeliverRuntimes.
+// Kept as a package variable only as a test seam.
+var conduitDeliverRuntimes = defaultConduitDeliverRuntimesMap()
 
 // conduitNotReachedAttempts and conduitRetryBackoff bound the retries of a
 // conduit delivery that provably did not reach the agent (design v2.22
