@@ -137,20 +137,40 @@ func TestReadInitPrivilege_MountIDNotReported(t *testing.T) {
 	wantInitPrivilege(t, initPrivUnknown)
 }
 
-// startSleeper starts another process, running sleep, and returns its
-// pid; it is killed when the test ends.
+// startSleeper starts another process, running sleep, waits until
+// /proc/<pid>/exe resolves to the sleep binary, and returns its pid;
+// it is killed when the test ends.
 func startSleeper(t *testing.T) int {
 	t.Helper()
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Skip("no sleep binary")
 	}
+	wantInfo, err := os.Stat(sleep)
+	if err != nil {
+		t.Fatalf("stat %s: %v", sleep, err)
+	}
 	cmd := exec.Command(sleep, "60")
 	if err := cmd.Start(); err != nil {
 		t.Skipf("cannot start sleep: %v", err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	return cmd.Process.Pid
+
+	exePath := fmt.Sprintf("/proc/%d/exe", cmd.Process.Pid)
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		gotInfo, err := os.Stat(exePath)
+		if err == nil && os.SameFile(wantInfo, gotInfo) {
+			return cmd.Process.Pid
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			gotLink, _ := os.Readlink(exePath)
+			t.Fatalf("timed out waiting for %s to resolve to %s (last link=%q, err=%v)", exePath, sleep, gotLink, lastErr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // PID 1 must be this binary: another process's exe gives unknown.
