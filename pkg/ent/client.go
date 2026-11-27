@@ -123,6 +123,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -360,6 +361,8 @@ type Client struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// TrajectorySegment is the client for interacting with the TrajectorySegment builders.
+	TrajectorySegment *TrajectorySegmentClient
 	// Trigger is the client for interacting with the Trigger builders.
 	Trigger *TriggerClient
 	// TriggerEvent is the client for interacting with the TriggerEvent builders.
@@ -510,6 +513,7 @@ func (c *Client) init() {
 	c.TestInfraMarker = NewTestInfraMarkerClient(c.config)
 	c.ThreadGroup = NewThreadGroupClient(c.config)
 	c.ThreadGroupMember = NewThreadGroupMemberClient(c.config)
+	c.TrajectorySegment = NewTrajectorySegmentClient(c.config)
 	c.Trigger = NewTriggerClient(c.config)
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
@@ -725,6 +729,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
@@ -867,6 +872,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TestInfraMarker:               NewTestInfraMarkerClient(cfg),
 		ThreadGroup:                   NewThreadGroupClient(cfg),
 		ThreadGroupMember:             NewThreadGroupMemberClient(cfg),
+		TrajectorySegment:             NewTrajectorySegmentClient(cfg),
 		Trigger:                       NewTriggerClient(cfg),
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
@@ -940,8 +946,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
-		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
 		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
 		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
 		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
@@ -983,8 +989,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ScheduledExecRun, c.Secret, c.SecretRequest, c.Skill, c.SkillInjection,
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.Trigger,
-		c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
 		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
 		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
 		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
@@ -1211,6 +1217,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.ThreadGroup.mutate(ctx, m)
 	case *ThreadGroupMemberMutation:
 		return c.ThreadGroupMember.mutate(ctx, m)
+	case *TrajectorySegmentMutation:
+		return c.TrajectorySegment.mutate(ctx, m)
 	case *TriggerMutation:
 		return c.Trigger.mutate(ctx, m)
 	case *TriggerEventMutation:
@@ -16087,6 +16095,139 @@ func (c *ThreadGroupMemberClient) mutate(ctx context.Context, m *ThreadGroupMemb
 	}
 }
 
+// TrajectorySegmentClient is a client for the TrajectorySegment schema.
+type TrajectorySegmentClient struct {
+	config
+}
+
+// NewTrajectorySegmentClient returns a client for the TrajectorySegment from the given config.
+func NewTrajectorySegmentClient(c config) *TrajectorySegmentClient {
+	return &TrajectorySegmentClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `trajectorysegment.Hooks(f(g(h())))`.
+func (c *TrajectorySegmentClient) Use(hooks ...Hook) {
+	c.hooks.TrajectorySegment = append(c.hooks.TrajectorySegment, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `trajectorysegment.Intercept(f(g(h())))`.
+func (c *TrajectorySegmentClient) Intercept(interceptors ...Interceptor) {
+	c.inters.TrajectorySegment = append(c.inters.TrajectorySegment, interceptors...)
+}
+
+// Create returns a builder for creating a TrajectorySegment entity.
+func (c *TrajectorySegmentClient) Create() *TrajectorySegmentCreate {
+	mutation := newTrajectorySegmentMutation(c.config, OpCreate)
+	return &TrajectorySegmentCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of TrajectorySegment entities.
+func (c *TrajectorySegmentClient) CreateBulk(builders ...*TrajectorySegmentCreate) *TrajectorySegmentCreateBulk {
+	return &TrajectorySegmentCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *TrajectorySegmentClient) MapCreateBulk(slice any, setFunc func(*TrajectorySegmentCreate, int)) *TrajectorySegmentCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &TrajectorySegmentCreateBulk{err: fmt.Errorf("calling to TrajectorySegmentClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*TrajectorySegmentCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &TrajectorySegmentCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for TrajectorySegment.
+func (c *TrajectorySegmentClient) Update() *TrajectorySegmentUpdate {
+	mutation := newTrajectorySegmentMutation(c.config, OpUpdate)
+	return &TrajectorySegmentUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *TrajectorySegmentClient) UpdateOne(_m *TrajectorySegment) *TrajectorySegmentUpdateOne {
+	mutation := newTrajectorySegmentMutation(c.config, OpUpdateOne, withTrajectorySegment(_m))
+	return &TrajectorySegmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *TrajectorySegmentClient) UpdateOneID(id string) *TrajectorySegmentUpdateOne {
+	mutation := newTrajectorySegmentMutation(c.config, OpUpdateOne, withTrajectorySegmentID(id))
+	return &TrajectorySegmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for TrajectorySegment.
+func (c *TrajectorySegmentClient) Delete() *TrajectorySegmentDelete {
+	mutation := newTrajectorySegmentMutation(c.config, OpDelete)
+	return &TrajectorySegmentDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *TrajectorySegmentClient) DeleteOne(_m *TrajectorySegment) *TrajectorySegmentDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *TrajectorySegmentClient) DeleteOneID(id string) *TrajectorySegmentDeleteOne {
+	builder := c.Delete().Where(trajectorysegment.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &TrajectorySegmentDeleteOne{builder}
+}
+
+// Query returns a query builder for TrajectorySegment.
+func (c *TrajectorySegmentClient) Query() *TrajectorySegmentQuery {
+	return &TrajectorySegmentQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeTrajectorySegment},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a TrajectorySegment entity by its id.
+func (c *TrajectorySegmentClient) Get(ctx context.Context, id string) (*TrajectorySegment, error) {
+	return c.Query().Where(trajectorysegment.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *TrajectorySegmentClient) GetX(ctx context.Context, id string) *TrajectorySegment {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *TrajectorySegmentClient) Hooks() []Hook {
+	return c.hooks.TrajectorySegment
+}
+
+// Interceptors returns the client interceptors.
+func (c *TrajectorySegmentClient) Interceptors() []Interceptor {
+	return c.inters.TrajectorySegment
+}
+
+func (c *TrajectorySegmentClient) mutate(ctx context.Context, m *TrajectorySegmentMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&TrajectorySegmentCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&TrajectorySegmentUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&TrajectorySegmentUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&TrajectorySegmentDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown TrajectorySegment mutation op: %q", m.Op())
+	}
+}
+
 // TriggerClient is a client for the Trigger schema.
 type TriggerClient struct {
 	config
@@ -18467,10 +18608,10 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageEvent,
-		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
+		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -18498,9 +18639,9 @@ type (
 		SecretRequest, Skill, SkillInjection, SkillRegistry, SkillVersion,
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim, UsageEvent,
-		UsageReservation, UsageRollupDaily, UsageRollupHourly, UsageScopeCounterDaily,
-		User, UserAccessToken, UserDeletion, UserDeletionAgent, UserExecContainer,
-		UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
+		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
+		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )

@@ -122,11 +122,23 @@ func (s *LocalStorage) Upload(ctx context.Context, objectPath string, reader io.
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Write to a temporary file beside the target and rename it over the
-	// target once complete, so a reader never sees a partial file and a
-	// failed or interrupted write leaves the old content in place.
+	// Write to a temporary file beside the target and move it into place once
+	// complete, so a reader never sees a partial file and a failed or
+	// interrupted write leaves any existing content in place.
 	hash := sha256.New()
-	size, info, err := writeFileAtomic(fullPath, io.TeeReader(reader, hash))
+	var (
+		size int64
+		info os.FileInfo
+		err  error
+	)
+	if opts.IfGenerationMatch != nil {
+		if *opts.IfGenerationMatch != 0 {
+			return nil, fmt.Errorf("local storage only supports IfGenerationMatch=0, got %d", *opts.IfGenerationMatch)
+		}
+		size, info, err = writeFileAtomicCreateOnly(fullPath, io.TeeReader(reader, hash))
+	} else {
+		size, info, err = writeFileAtomic(fullPath, io.TeeReader(reader, hash))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -414,6 +426,46 @@ func writeFileAtomic(path string, r io.Reader) (int64, os.FileInfo, error) {
 		return 0, nil, fmt.Errorf("failed to move file into place: %w", err)
 	}
 	done = true
+	if err := syncDir(dir); err != nil {
+		return 0, nil, fmt.Errorf("failed to sync directory: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+	return size, info, nil
+}
+
+// writeFileAtomicCreateOnly writes r to a temporary file in path's directory,
+// syncs it, and atomically hard-links it to path so an existing file is never
+// overwritten. Returns ErrPreconditionFailed if path already exists.
+func writeFileAtomicCreateOnly(path string, r io.Reader) (int64, os.FileInfo, error) {
+	dir := filepath.Dir(path)
+	tmp, tmpName, err := createTemp(dir, UploadTempPrefix+filepath.Base(path)+"-")
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create file: %w", err)
+	}
+	defer func() {
+		_ = os.Remove(tmpName)
+	}()
+	size, err := io.Copy(tmp, r)
+	if err != nil {
+		_ = tmp.Close()
+		return 0, nil, fmt.Errorf("failed to write data: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return 0, nil, fmt.Errorf("failed to sync file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, nil, fmt.Errorf("failed to close file: %w", err)
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if os.IsExist(err) {
+			return 0, nil, ErrPreconditionFailed
+		}
+		return 0, nil, fmt.Errorf("failed to link file into place: %w", err)
+	}
 	if err := syncDir(dir); err != nil {
 		return 0, nil, fmt.Errorf("failed to sync directory: %w", err)
 	}

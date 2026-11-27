@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +115,15 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 		signOpts.Headers = append(signOpts.Headers, "x-goog-content-length-range:"+contentLengthRangeHeader)
 	}
 
+	var ifGenerationMatchHeader string
+	if opts.Method == "PUT" && opts.IfGenerationMatch != nil {
+		if *opts.IfGenerationMatch < 0 {
+			return nil, fmt.Errorf("invalid if-generation-match %d", *opts.IfGenerationMatch)
+		}
+		ifGenerationMatchHeader = strconv.FormatInt(*opts.IfGenerationMatch, 10)
+		signOpts.Headers = append(signOpts.Headers, "x-goog-if-generation-match:"+ifGenerationMatchHeader)
+	}
+
 	// Response header overrides (GET only), carried as signed query
 	// parameters so the object store applies them to its response.
 	if opts.Method == "GET" || opts.Method == "" {
@@ -142,13 +152,16 @@ func (s *GCSStorage) GenerateSignedURL(ctx context.Context, objectPath string, o
 	}
 
 	// Add required headers for uploads
-	if opts.Method == "PUT" && (opts.ContentType != "" || contentLengthRangeHeader != "") {
+	if opts.Method == "PUT" && (opts.ContentType != "" || contentLengthRangeHeader != "" || ifGenerationMatchHeader != "") {
 		result.Headers = make(map[string]string)
 		if opts.ContentType != "" {
 			result.Headers["Content-Type"] = opts.ContentType
 		}
 		if contentLengthRangeHeader != "" {
 			result.Headers["x-goog-content-length-range"] = contentLengthRangeHeader
+		}
+		if ifGenerationMatchHeader != "" {
+			result.Headers["x-goog-if-generation-match"] = ifGenerationMatchHeader
 		}
 	}
 
@@ -163,6 +176,16 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
+	if opts.IfGenerationMatch != nil {
+		if *opts.IfGenerationMatch < 0 {
+			return nil, fmt.Errorf("invalid if-generation-match %d", *opts.IfGenerationMatch)
+		}
+		if *opts.IfGenerationMatch == 0 {
+			obj = obj.If(storage.Conditions{DoesNotExist: true})
+		} else {
+			obj = obj.If(storage.Conditions{GenerationMatch: *opts.IfGenerationMatch})
+		}
+	}
 	// Cancelling ctx aborts the upload (and stops a pending retry); see
 	// the copy-error path for why a failed copy also uses CloseWithError.
 	ctx, cancel := context.WithCancel(ctx)
@@ -221,6 +244,10 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	// Close and finalize
 	if err := writer.Close(); err != nil {
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+			return nil, ErrPreconditionFailed
+		}
 		return nil, fmt.Errorf("failed to finalize upload: %w", err)
 	}
 

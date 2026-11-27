@@ -634,6 +634,9 @@ type Store interface {
 	// Tokenomics Track 1 operational usage ledger (ptone/scion#9233)
 	UsageLedgerStore
 
+	// Tokenomics Track 2 raw trajectory segments (ptone/scion#9250)
+	TrajectorySegmentStore
+
 	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
 	AgentSuspendScreenStore
 }

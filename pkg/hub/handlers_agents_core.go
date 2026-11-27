@@ -4630,6 +4630,13 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRouteUsageCapabilities:
 		s.handleAgentUsageCapabilities(w, r, id)
 
+	case AgentRouteTrajectoryPrepare:
+		s.handleAgentTrajectorySegmentsPrepare(w, r, id)
+	case AgentRouteTrajectoryCommit:
+		s.handleAgentTrajectorySegmentsCommit(w, r, id)
+	case AgentRouteTrajectoryContent:
+		s.handleAgentTrajectorySegmentContent(w, r, id, route.Suffix.Param)
+
 	case AgentRouteHoldLift:
 		s.handleAgentHoldLift(w, r, id)
 

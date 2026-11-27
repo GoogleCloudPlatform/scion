@@ -2324,6 +2324,13 @@ type Server struct {
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
+	// Track 2 trajectory segment test overrides (zero values use defaults).
+	trajectoryCapturePolicyOverride func(context.Context, *store.Project) string
+	trajectoryMaxSegmentRawBytes    int64
+	trajectoryMaxRunRawBytes        int64
+	trajectoryPrepareTTL            time.Duration
+	trajectoryUploadURLExpiry       time.Duration
+
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
 	chatSpacesBatch chatSpacesBatchSizes

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 470
+**Operations:** 473
 
 ## Table of Contents
 
@@ -41,6 +41,9 @@
 - [agent.usage.read](#agentusageread) — Read an agent's Track 1 token usage summary and meter health (behind tokenomics.usage_ledger)
 - [agent.usage.ingest](#agentusageingest) — Ingest canonical Track 1 usage events and meter health heartbeats for the calling agent (behind tokenomics.usage_ledger)
 - [agent.usage.capabilities](#agentusagecapabilities) — Probe Hub Track 1 usage ingest capabilities for the calling agent (behind tokenomics.usage_ledger)
+- [agent.trajectory.segments.prepare](#agenttrajectorysegmentsprepare) — Prepare a Track 2 raw trajectory segment upload and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
+- [agent.trajectory.segments.commit](#agenttrajectorysegmentscommit) — Verify and commit a prepared Track 2 raw trajectory segment and write its Hub-authored manifest for the calling agent (behind tokenomics.trajectory_capture)
+- [agent.trajectory.segments.content](#agenttrajectorysegmentscontent) — Upload raw trajectory segment bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
@@ -1756,6 +1759,108 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT for its own usage capability probe; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.trajectory.segments.prepare
+
+**Domain:** agent
+
+**Description:** Prepare a Track 2 raw trajectory segment upload and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/trajectory/segments:prepare` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own trajectory segment prepare; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.trajectory.segments.commit
+
+**Domain:** agent
+
+**Description:** Verify and commit a prepared Track 2 raw trajectory segment and write its Hub-authored manifest for the calling agent (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/trajectory/segments:commit` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT for its own trajectory segment commit; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.trajectory.segments.content
+
+**Domain:** agent
+
+**Description:** Upload raw trajectory segment bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/agents/{id}/trajectory/segments/{segmentId}/content` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDisposition_EveryRoutePatternCovered`
+
+### Exemptions
+
+- **internal_only:** The agent authenticates with its own agent JWT and a Hub-issued HMAC capability URL for its own trajectory segment upload; no user permission applies (scope: agent self access) — waives: `base_permission`
 
 ---
 

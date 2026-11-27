@@ -136,6 +136,11 @@ type SignedURLOptions struct {
 	// via a signed header (x-goog-content-length-range on GCS) and returns
 	// that header in SignedURL.Headers.
 	ContentLengthRange *ContentLengthRange
+	// IfGenerationMatch, when non-nil on a PUT URL, binds the
+	// x-goog-if-generation-match precondition header (e.g. 0 for create-only
+	// no-overwrite semantics) via a signed header on GCS and returns that
+	// header in SignedURL.Headers.
+	IfGenerationMatch *int64
 	// ResponseContentType, when set on a GET URL, overrides the
 	// Content-Type the object store answers with. Providers that cannot
 	// override response headers ignore it.
@@ -238,6 +243,11 @@ type UploadOptions struct {
 	// turns off its client's retrying and sends the object in a single
 	// non-resumable request) and returns its error.
 	Idempotent bool
+	// IfGenerationMatch, when non-nil, enforces a write precondition. A value
+	// of 0 requires that the object does not already exist (create-only /
+	// no-overwrite); if the precondition fails, Upload returns
+	// ErrPreconditionFailed without modifying the existing object.
+	IfGenerationMatch *int64
 }
 
 // New creates a new storage client based on the configuration.
