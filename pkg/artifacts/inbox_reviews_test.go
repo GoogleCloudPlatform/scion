@@ -204,8 +204,8 @@ func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 
 	ctx := context.WithValue(context.Background(), principalKey{}, userU)
 
-	// Full summary with Drafts: true and Previews: 2.
-	sum, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Drafts: true})
+	// Full summary with Requests: true, Drafts: true, and Previews: 2.
+	sum, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: true, Drafts: true})
 	if err != nil {
 		t.Fatalf("ReviewStateSummary: %v", err)
 	}
@@ -273,9 +273,9 @@ func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 	}
 
 	// Drafts: false omits Drafts (nil); Previews: 0 returns counts with empty Items.
-	sumNoDrafts, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 0, Drafts: false})
+	sumNoDrafts, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 0, Requests: true, Drafts: false})
 	if err != nil {
-		t.Fatalf("ReviewStateSummary(0, false): %v", err)
+		t.Fatalf("ReviewStateSummary(0, true, false): %v", err)
 	}
 	if sumNoDrafts.Drafts != nil {
 		t.Fatalf("expected Drafts=nil when opts.Drafts=false, got %+v", sumNoDrafts.Drafts)
@@ -287,20 +287,30 @@ func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 		t.Fatalf("Requested(previews=0) = %+v", sumNoDrafts.Requested)
 	}
 
-	// Requests gate off -> Requested is empty (0, false, []).
-	recHost.requestsOn = false
-	sumGateOff, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Drafts: true})
+	// opts.Requests: false -> Requested is empty (0, false, []).
+	sumReqOff, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: false, Drafts: true})
 	if err != nil {
-		t.Fatalf("ReviewStateSummary(requests gate off): %v", err)
+		t.Fatalf("ReviewStateSummary(requests=false): %v", err)
 	}
-	if sumGateOff.Requested.Count != 0 || sumGateOff.Requested.Capped || len(sumGateOff.Requested.Items) != 0 {
-		t.Fatalf("Requested with gate off = %+v, want empty", sumGateOff.Requested)
+	if sumReqOff.Requested.Count != 0 || sumReqOff.Requested.Capped || len(sumReqOff.Requested.Items) != 0 {
+		t.Fatalf("Requested with opts.Requests=false = %+v, want empty", sumReqOff.Requested)
+	}
+
+	// opts.Requests: true with FeatureGate OFF -> Requested is still populated
+	// because ReviewStateSummary relies on opts.Requests (single hub gate read).
+	recHost.requestsOn = false
+	sumOptOverridesGate, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(opts.Requests=true, gate=false): %v", err)
+	}
+	if sumOptOverridesGate.Requested.Count != 2 || len(sumOptOverridesGate.Requested.Items) != 2 {
+		t.Fatalf("Requested with opts.Requests=true and FeatureGate=false = %+v, want count=2", sumOptOverridesGate.Requested)
 	}
 	recHost.requestsOn = true
 
 	// Token boundary denial on project-2 excludes idMid and req2.
 	f.host.deny(userU, "project-2", PermissionRead)
-	sumDenied, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Drafts: true})
+	sumDenied, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
 	if err != nil {
 		t.Fatalf("ReviewStateSummary(denied): %v", err)
 	}
@@ -318,7 +328,7 @@ func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 	origScan := maxListScan
 	maxListScan = 2
 	t.Cleanup(func() { maxListScan = origScan })
-	sumCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Drafts: true})
+	sumCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
 	if err != nil {
 		t.Fatalf("ReviewStateSummary(capped): %v", err)
 	}
@@ -327,15 +337,73 @@ func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 	}
 
 	// Unauthenticated caller returns empty without error.
-	sumAnon, err := f.svc.ReviewStateSummary(context.Background(), ReviewSummaryOptions{Previews: 3, Drafts: true})
+	sumAnon, err := f.svc.ReviewStateSummary(context.Background(), ReviewSummaryOptions{Previews: 3, Requests: true, Drafts: true})
 	if err != nil || sumAnon.ToAddress.Count != 0 || sumAnon.Requested.Count != 0 || sumAnon.Drafts == nil || sumAnon.Drafts.Count != 0 {
 		t.Fatalf("unauthenticated: got (%+v, %v)", sumAnon, err)
 	}
 
 	// Unconfigured backend returns ErrBackendUnavailable.
 	unconfigured := NewService(f.host)
-	if _, err := unconfigured.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 3}); err != ErrBackendUnavailable {
+	if _, err := unconfigured.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 3, Requests: true}); err != ErrBackendUnavailable {
 		t.Fatalf("expected ErrBackendUnavailable, got %v", err)
+	}
+}
+
+func TestReviewStateSummary_RequestedAndDraftsCapped(t *testing.T) {
+	f := newFixture(t, false)
+	origScan := maxListScan
+	maxListScan = 2
+	t.Cleanup(func() { maxListScan = origScan })
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	var reqIDs []string
+	for i := 0; i < 3; i++ {
+		id := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, outside.ref, fmt.Sprintf("req-%d", i), VersionKindPublish, base.Add(time.Duration(i)*time.Minute), nil)
+		if _, _, err := f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+			ArtifactID:    id,
+			ReviewerKind:  PrincipalKindUser,
+			ReviewerRef:   userU.ref,
+			RequesterKind: PrincipalKindUser,
+			RequesterRef:  outside.ref,
+			Access:        ReviewRequestAccessExisting,
+		}, 24*time.Hour, base.Add(time.Duration(i)*time.Minute), &Actor{Kind: PrincipalKindUser, Ref: outside.ref, Authority: AuthorityOwner}, nil); err != nil {
+			t.Fatalf("create request %d: %v", i, err)
+		}
+		reqIDs = append(reqIDs, id)
+	}
+
+	ctx := context.WithValue(context.Background(), principalKey{}, userU)
+
+	// Requested exceeds maxListScan while ToAddress and Drafts have 0 rows.
+	sumReqCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: true, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(requested capped): %v", err)
+	}
+	if sumReqCap.ToAddress.Capped || !sumReqCap.Requested.Capped || sumReqCap.Drafts == nil || sumReqCap.Drafts.Capped {
+		t.Fatalf("got capped=(toAddr:%v req:%v drafts:%v), want (false, true, false)",
+			sumReqCap.ToAddress.Capped, sumReqCap.Requested.Capped, sumReqCap.Drafts != nil && sumReqCap.Drafts.Capped)
+	}
+
+	// Add 3 drafts on the same artifacts, query with Requests: false so only Drafts is capped.
+	for i, id := range reqIDs {
+		if _, _, err := f.store.PutReviewDraft(context.Background(), ReviewDraft{
+			ArtifactID:    id,
+			PrincipalKind: PrincipalKindUser,
+			PrincipalRef:  userU.ref,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "draft",
+		}, 0, base.Add(time.Duration(i)*time.Minute), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("put draft %d: %v", i, err)
+		}
+	}
+	sumDraftCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: false, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(drafts capped): %v", err)
+	}
+	if sumDraftCap.ToAddress.Capped || sumDraftCap.Requested.Capped || sumDraftCap.Drafts == nil || !sumDraftCap.Drafts.Capped {
+		t.Fatalf("got capped=(toAddr:%v req:%v drafts:%v), want (false, false, true)",
+			sumDraftCap.ToAddress.Capped, sumDraftCap.Requested.Capped, sumDraftCap.Drafts != nil && sumDraftCap.Drafts.Capped)
 	}
 }
 

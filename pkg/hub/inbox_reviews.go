@@ -28,12 +28,10 @@ import (
 )
 
 const (
+	// inboxReviewsHref is the To-address filter link. Secondary filter links
+	// (/artifacts?requested=1 and /artifacts?drafts=1) are presentation routes
+	// owned by the web INBOX_LINK_HREFS map (inbox-cleanup design §6.3, §7.2).
 	inboxReviewsHref = "/artifacts?review_on_latest=1&owner=me"
-
-	// InboxReviewsRequestedHref and InboxReviewsDraftsHref are the legacy-param
-	// filter URLs for the requested and drafts buckets (design §4.10).
-	InboxReviewsRequestedHref = "/artifacts?requested=1"
-	InboxReviewsDraftsHref    = "/artifacts?drafts=1"
 
 	// InboxReviewKind* are the valid values for InboxReviewPreview.Kind.
 	InboxReviewKindToAddress = "to_address"
@@ -116,6 +114,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 	// (when hub.artifacts_review_drafts is on).
 	summary, err := svc.ReviewStateSummary(ctx, artifacts.ReviewSummaryOptions{
 		Previews: previews,
+		Requests: requestsEnabled,
 		Drafts:   draftsEnabled,
 	})
 	if err != nil {
@@ -139,14 +138,10 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			requestedPreviews = make([]InboxReviewPreview, 0, len(summary.Requested.Items))
 			for _, it := range summary.Requested.Items {
 				previewID := it.ID
-				createdAt := it.UpdatedAt
 				requestedBy := ""
 				if it.Request != nil {
 					if it.Request.ID != "" {
 						previewID = it.Request.ID
-					}
-					if !it.Request.CreatedAt.IsZero() {
-						createdAt = it.Request.CreatedAt
 					}
 					requestedBy = it.Request.Requester.DisplayName
 					if requestedBy == "" {
@@ -157,7 +152,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 					ID:          previewID,
 					Kind:        InboxReviewKindRequested,
 					ProjectID:   it.ScopeRef,
-					CreatedAt:   createdAt,
+					CreatedAt:   it.UpdatedAt,
 					Href:        artifactPagePath(it.ScopeRef, it.ID),
 					ArtifactID:  it.ID,
 					Title:       it.Title,

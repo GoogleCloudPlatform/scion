@@ -815,15 +815,16 @@ type ReviewStateSummary struct {
 // ReviewSummaryOptions configures Service.ReviewStateSummary.
 type ReviewSummaryOptions struct {
 	Previews int
+	Requests bool // hub passes experimentEnabled(ArtifactsReviewRequests)
 	Drafts   bool // hub passes experimentEnabled(ArtifactsReviewDrafts)
 }
 
-// ReviewStateSummary returns the caller's ToAddress, Requested, and (when
-// opts.Drafts is true) Drafts counts and previews. Each bucket runs through
-// collect with the maxListScan candidate budget so every counted row passes
-// canReadWith. Requested is populated only while FeatureReviewRequests is
-// enabled; Requested.Items carry ArtifactListItem.Request with the requester,
-// requestedSeq, and cleaned note excerpt.
+// ReviewStateSummary returns the caller's ToAddress, Requested (when
+// opts.Requests is true), and Drafts (when opts.Drafts is true) counts and
+// previews. Each bucket runs through collect with the maxListScan candidate
+// budget so every counted row passes canReadWith. Requested.Items carry
+// ArtifactListItem.Request with the requester, requestedSeq, and cleaned note
+// excerpt.
 func (s *Service) ReviewStateSummary(ctx context.Context, opts ReviewSummaryOptions) (ReviewStateSummary, error) {
 	if opts.Previews < 0 {
 		opts.Previews = 0
@@ -871,9 +872,8 @@ func (s *Service) ReviewStateSummary(ctx context.Context, opts ReviewSummaryOpti
 		return ReviewStateSummary{}, err
 	}
 
-	requestsEnabled := s.featureEnabled(ctx, FeatureReviewRequests)
 	var scopes []string
-	if requestsEnabled || opts.Drafts {
+	if opts.Requests || opts.Drafts {
 		rawScopes, err := host.MemberScopes(ctx)
 		if err != nil {
 			return ReviewStateSummary{}, err
@@ -882,7 +882,7 @@ func (s *Service) ReviewStateSummary(ctx context.Context, opts ReviewSummaryOpti
 	}
 
 	requested := ReviewStateCount{Items: []ArtifactListItem{}}
-	if requestsEnabled {
+	if opts.Requests {
 		requested, err = collectCount(CandidateQuery{
 			PrincipalKind:         kind,
 			PrincipalRef:          ref,

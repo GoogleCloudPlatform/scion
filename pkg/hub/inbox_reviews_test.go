@@ -1039,8 +1039,6 @@ func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
 	assert.Equal(t, 2, rev.Count, "count must be toAddress + requested (drafts excluded)")
 	assert.Equal(t, 2, resp.Total)
 	assert.Equal(t, "/artifacts?review_on_latest=1&owner=me", rev.Href)
-	assert.Equal(t, "/artifacts?requested=1", InboxReviewsRequestedHref)
-	assert.Equal(t, "/artifacts?drafts=1", InboxReviewsDraftsHref)
 	assert.Equal(t, map[string]int{
 		InboxBreakdownToAddress: 1,
 		InboxBreakdownRequested: 1,
@@ -1051,6 +1049,7 @@ func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
 	require.Len(t, previews, 2)
 	assert.Equal(t, InboxReviewKindRequested, previews[0].Kind)
 	assert.Equal(t, reqArt, previews[0].ArtifactID)
+	assert.True(t, previews[0].CreatedAt.Equal(base.Add(2*time.Minute)), "requested preview CreatedAt should match artifact UpdatedAt")
 	assert.Equal(t, "Author Alice", previews[0].RequestedBy)
 	assert.Empty(t, previews[0].NotificationID, "request-sourced preview must not carry NotificationID")
 	assert.Equal(t, InboxReviewKindToAddress, previews[1].Kind)
@@ -1091,4 +1090,80 @@ func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
 	assert.Equal(t, InboxReviewKindRequested, fallbackPreviews[0].Kind)
 	assert.Equal(t, legacyNotifArt, fallbackPreviews[0].ArtifactID)
 	assert.Equal(t, legacyNotifID, fallbackPreviews[0].NotificationID)
+}
+
+// TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly verifies that
+// inboxReviewsCategory sets Capped=true when only the requested bucket or only
+// the drafts bucket hits the maxListScan (500) budget while ToAddress is empty.
+func TestUserMeInboxSummary_ReviewsCappedByRequestedOrDraftsOnly(t *testing.T) {
+	srv, s := testServer(t)
+	st := enableInboxAndArtifacts(t, srv)
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "rev-cap-p1")
+	viewerID := tid("rev-cap-viewer")
+	authorID := tid("rev-cap-author")
+	createTestUserWithProjectRole(t, s, viewerID, "cap-viewer@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, authorID, "cap-author@test.com", p1.ID, store.ProjectRoleMember)
+	viewer, err := s.GetUser(ctx, viewerID)
+	require.NoError(t, err)
+
+	base := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	const overBudget = 501
+	artIDs := make([]string, overBudget)
+	for i := 0; i < overBudget; i++ {
+		ts := base.Add(time.Duration(i) * time.Second)
+		id := seedHubReviewArtifact(t, st, p1.ID, artifacts.PrincipalKindUser, authorID, fmt.Sprintf("Doc %d", i), artifacts.VersionKindPublish, ts)
+		artIDs[i] = id
+		_, _, err = st.CreateOrRemindReviewRequest(ctx, artifacts.ReviewRequest{
+			ArtifactID:    id,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   viewer.ID,
+			RequesterKind: artifacts.PrincipalKindUser,
+			RequesterRef:  authorID,
+			Access:        artifacts.ReviewRequestAccessExisting,
+		}, 24*time.Hour, ts, &artifacts.Actor{Kind: artifacts.PrincipalKindUser, Ref: authorID, Authority: artifacts.AuthorityOwner}, nil)
+		require.NoError(t, err)
+	}
+
+	// 1. Only requested is capped (toAddress=0, drafts gate off).
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:          true,
+		experiments.Artifacts:               true,
+		experiments.ArtifactsReviewRequests: true,
+		experiments.ArtifactsReviewDrafts:   false,
+	})
+	respReqCap := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
+	revReqCap := respReqCap.Categories[InboxCategoryReviews]
+	assert.Equal(t, InboxStateOK, revReqCap.State)
+	assert.True(t, revReqCap.Capped, "category Capped must be true when only requested is capped")
+	assert.Equal(t, 0, revReqCap.Breakdown[InboxBreakdownToAddress])
+	assert.Equal(t, 500, revReqCap.Breakdown[InboxBreakdownRequested])
+
+	// 2. Only drafts is capped (toAddress=0, requests gate off with 0 legacy notifications).
+	for i, id := range artIDs {
+		ts := base.Add(time.Duration(i) * time.Second)
+		_, _, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+			ArtifactID:    id,
+			PrincipalKind: artifacts.PrincipalKindUser,
+			PrincipalRef:  viewer.ID,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "wip",
+		}, 0, ts, overBudget+10)
+		require.NoError(t, err)
+	}
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.InboxDashboard:          true,
+		experiments.Artifacts:               true,
+		experiments.ArtifactsReviewRequests: false,
+		experiments.ArtifactsReviewDrafts:   true,
+	})
+	respDraftCap := decodeInboxSummary(t, doRequestAsUser(t, srv, viewer, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil))
+	revDraftCap := respDraftCap.Categories[InboxCategoryReviews]
+	assert.Equal(t, InboxStateOK, revDraftCap.State)
+	assert.True(t, revDraftCap.Capped, "category Capped must be true when only drafts is capped")
+	assert.Equal(t, 0, revDraftCap.Breakdown[InboxBreakdownToAddress])
+	assert.Equal(t, 0, revDraftCap.Breakdown[InboxBreakdownRequested])
+	assert.Equal(t, 500, revDraftCap.Breakdown[InboxBreakdownDrafts])
 }
