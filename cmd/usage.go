@@ -183,7 +183,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		}
 		resp, err := client.Usage().GetAgent(ctx, agentID, opts)
 		if err != nil {
-			return formatUsageAPIError(err)
+			return formatUsageAPIError(err, true)
 		}
 		if wantJSON {
 			return writeUsageRawJSON(cmd.OutOrStdout(), resp.Raw, resp)
@@ -192,7 +192,10 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		return nil
 	}
 
-	var summary *hubclient.UsageSummaryResponse
+	var (
+		summary      *hubclient.UsageSummaryResponse
+		entityScoped bool
+	)
 	switch {
 	case f.all:
 		summary, err = client.Usage().GetGlobal(ctx, opts)
@@ -201,6 +204,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		if strings.EqualFold(u, "me") {
 			summary, err = client.Usage().GetMe(ctx, opts)
 		} else {
+			entityScoped = true
 			summary, err = client.Usage().GetUser(ctx, u, opts)
 		}
 	case explicitProject:
@@ -214,6 +218,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		if res.ID == "" {
 			return errCannotInferProject
 		}
+		entityScoped = true
 		summary, err = client.Usage().GetProject(ctx, res.ID, opts)
 	case mode == ModeAgent:
 		res, resolveErr := usageResolveProject(ctx, client, uat, true)
@@ -223,6 +228,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		if res.ID == "" {
 			return errors.New("cannot determine the agent's project")
 		}
+		entityScoped = true
 		summary, err = client.Usage().GetProject(ctx, res.ID, opts)
 	default:
 		res, resolveErr := usageResolveProject(ctx, client, uat, false)
@@ -230,6 +236,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 			return resolveErr
 		}
 		if res.ID != "" {
+			entityScoped = true
 			summary, err = client.Usage().GetProject(ctx, res.ID, opts)
 		} else {
 			if res.UnlinkedDir != "" {
@@ -239,7 +246,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		}
 	}
 	if err != nil {
-		return formatUsageAPIError(err)
+		return formatUsageAPIError(err, entityScoped)
 	}
 
 	if wantJSON {
@@ -314,15 +321,18 @@ func resolveUsageAgentID(ctx context.Context, client hubclient.Client, uat bool,
 	return id, nil
 }
 
-func formatUsageAPIError(err error) error {
+// errUsageExperimentDisabled is returned when a non-entity usage route
+// (/api/v1/me/usage or /api/v1/usage) responds with HTTP 404, indicating that
+// the tokenomics.usage_ledger experiment is disabled on the Hub.
+var errUsageExperimentDisabled = errors.New("usage reporting is not enabled on this hub (experiment tokenomics.usage_ledger)")
+
+func formatUsageAPIError(err error, entityScoped bool) error {
 	var apiErr *apiclient.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case http.StatusNotFound:
-			if strings.Contains(strings.ToLower(apiErr.Message), "route") {
-				return errors.New("usage reporting is not enabled on this hub (experiment tokenomics.usage_ledger)")
-			}
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if !entityScoped {
+			return errUsageExperimentDisabled
 		}
+		return fmt.Errorf("%w (if the target exists, verify experiment tokenomics.usage_ledger is enabled on this hub)", err)
 	}
 	return err
 }

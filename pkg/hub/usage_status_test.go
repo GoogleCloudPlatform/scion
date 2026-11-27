@@ -329,6 +329,17 @@ func TestDeriveMeasurementStatus_TruthTable(t *testing.T) {
 			want: MeasurementStatusCallsOnly,
 		},
 		{
+			name: "drift-unknown: schema_drift_detected with unknown capability keeps prior measured behavior (O1)",
+			in: measurementStatusInput{
+				Usage:             nil,
+				AgentPhase:        running,
+				MeterHealth:       driftMH,
+				HasRunUsageEvents: true,
+				DBNow:             now,
+			},
+			want: MeasurementStatusMeasured,
+		},
+		{
 			name: "row11: calls_only capability with events -> calls_only",
 			in: measurementStatusInput{
 				Usage:             capCallsOnly,
@@ -391,7 +402,7 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 	projectCaps := map[harnessRefKey]*api.HarnessUsageCapabilities{
 		{projectID: "proj-override", ref: "hermes"}: makeUsageCap(api.UsageLiveSourceHooks, []string{"input", "output", "cache_read", "cache_write"}, nil, false),
 	}
-	resolveHosted := func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+	resolveHosted := func(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
 		if cap, ok := globalCaps[harnessConfig]; ok {
 			return cap
 		}
@@ -400,9 +411,9 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 				return cap
 			}
 		}
-		return globalCaps[harness]
+		return nil
 	}
-	resolveWorkstation := func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+	resolveWorkstation := func(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
 		if projectID != "" {
 			if cap, ok := projectCaps[harnessRefKey{projectID: projectID, ref: harnessConfig}]; ok {
 				return cap
@@ -411,7 +422,7 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 		if cap, ok := globalCaps[harnessConfig]; ok {
 			return cap
 		}
-		return globalCaps[harness]
+		return nil
 	}
 
 	t.Run("stale wins over partial, measured, calls_only, unmeasured", func(t *testing.T) {
@@ -542,7 +553,7 @@ func TestUsageCapabilityMemo_HostedGlobalStoreErrorDoesNotConsultProjectScope(t 
 	srv := &Server{store: stub, workstation: false}
 	memo := newUsageCapabilityMemo(context.Background(), srv)
 
-	got := memo.resolve("proj-1", "err-cfg", "antigravity")
+	got := memo.resolve("proj-1", "err-cfg")
 	assert.Nil(t, got, "hosted global store error must yield unknown capability (nil)")
 	assert.False(t, stub.projectQueried, "hosted hub must never consult project scope after non-NotFound global store error")
 }

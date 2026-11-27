@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
@@ -590,4 +591,14 @@ func TestUsageCLI_WindowsAllowed(t *testing.T) {
 	root.SetArgs([]string{"usage"})
 	require.NoError(t, root.Execute())
 	assert.Equal(t, []string{"usage"}, *ran)
+}
+
+func TestUsageCLI_FormatAPIError(t *testing.T) {
+	notFound := &apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "anything"}
+
+	assert.ErrorIs(t, formatUsageAPIError(notFound, false), errUsageExperimentDisabled)
+
+	entityErr := formatUsageAPIError(notFound, true)
+	assert.ErrorIs(t, entityErr, notFound)
+	assert.Contains(t, entityErr.Error(), "tokenomics.usage_ledger")
 }

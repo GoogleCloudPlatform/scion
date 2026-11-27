@@ -910,9 +910,10 @@ agent_flags AS (
 		%s AS is_past_grace,
 		am.has_schema_drift AS has_schema_drift,
 		CASE
-			WHEN am.run_id <> '' AND EXISTS (
-				SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
-			) THEN 1
+			WHEN am.run_id <> '' THEN
+				CASE WHEN EXISTS (
+					SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
+				) THEN 1 ELSE 0 END
 			WHEN EXISTS (
 				SELECT 1 FROM usage_rollups_daily rd WHERE %s
 			) THEN 1

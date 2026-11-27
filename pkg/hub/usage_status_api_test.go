@@ -524,3 +524,226 @@ func TestUsageReadAPI_ShadowedConfigWithoutUsageYAML(t *testing.T) {
 	assert.Equal(t, MeasurementStatusUnmeasured, getAgentStatus(agWS.ID), "workstation per-agent must not fall through to shadowed global config")
 	assert.Equal(t, MeasurementStatusUnmeasured, getScopedStatus(agWS.ID), "workstation scoped must not fall through to shadowed global config")
 }
+
+func TestUsageReadAPI_RestartedAgentPriorRunRollupsStillStale(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetHubID("hub-usage-restart")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	ctx := context.Background()
+
+	admin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "usage-restart-admin@example.com",
+		DisplayName: "Usage Restart Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Slug:    "usage-restart-proj",
+		Name:    "Usage Restart Proj",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, admin.ID, proj.ID, store.ProjectRoleOwner)
+
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "claude-live",
+		Slug:    "claude-live",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeGlobal,
+		ScopeID: "",
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage:   makeUsageCap(api.UsageLiveSourceNative, []string{"input", "output", "cache_read", "cache_write"}, nil, true),
+		},
+	}))
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+
+	inVal := int64(100)
+	outVal := int64(50)
+
+	// Case 1 (R1): Restarted agent on claude-live: run-1 had usage 2h ago (creating
+	// daily rollups in the 24h window); run-2 started 5m ago (past 60s grace) with
+	// NO meter_health and NO events. Both per-agent and scoped must read stale.
+	agStale := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "ag-restarted-stale",
+		Name:          "ag-restarted-stale",
+		ProjectID:     proj.ID,
+		OwnerID:       admin.ID,
+		HarnessConfig: "claude-live",
+		Phase:         string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agStale))
+	_, err = s.SetAgentRunID(ctx, agStale.ID, "run-r1", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-r1",
+		Generation:    1,
+		ProjectID:     proj.ID,
+		AgentID:       agStale.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude-live",
+		CreatedAt:     dbNow.Add(-2 * time.Hour),
+	})
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agStale.ID,
+		Events: []*store.UsageEvent{{
+			HubID:       "hub-usage-restart",
+			EventID:     "ev-r1-1",
+			RunID:       "run-r1",
+			ProjectID:   proj.ID,
+			AgentID:     agStale.ID,
+			Harness:     "claude",
+			Model:       "claude-sonnet-4-6",
+			ModelSource: "native",
+			UsageSource: store.UsageSourceNative,
+			Status:      "ok",
+			Calls:       1,
+			Input:       &inVal,
+			Output:      &outVal,
+			TokenStatus: "ok",
+			EventTS:     dbNow.Add(-2 * time.Hour),
+			ReceivedAt:  dbNow.Add(-2 * time.Hour),
+			ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+
+	// Restart onto run-r2 (5m ago, past grace, no meter, no events).
+	_, err = s.SetAgentRunID(ctx, agStale.ID, "run-r2", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-r2",
+		Generation:    2,
+		ProjectID:     proj.ID,
+		AgentID:       agStale.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude-live",
+		CreatedAt:     dbNow.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	recAg := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+agStale.ID+"/usage", admin)
+	require.Equal(t, http.StatusOK, recAg.Code, recAg.Body.String())
+	var agResp AgentUsageResponse
+	require.NoError(t, json.Unmarshal(recAg.Body.Bytes(), &agResp))
+	assert.Equal(t, MeasurementStatusStale, agResp.MeasurementStatus)
+
+	recProj := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since=24h&agent_id="+agStale.ID, admin)
+	require.Equal(t, http.StatusOK, recProj.Code, recProj.Body.String())
+	var projResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recProj.Body.Bytes(), &projResp))
+	assert.Equal(t, MeasurementStatusStale, projResp.MeasurementStatus)
+	assert.Equal(t, 1, projResp.StaleAgents)
+
+	recMe := doUserUsageReadRequest(t, srv, "/api/v1/me/usage?since=24h&agent_id="+agStale.ID, admin)
+	require.Equal(t, http.StatusOK, recMe.Code, recMe.Body.String())
+	var meResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recMe.Body.Bytes(), &meResp))
+	assert.Equal(t, MeasurementStatusStale, meResp.MeasurementStatus)
+	assert.Equal(t, 1, meResp.StaleAgents)
+
+	// Case 2 (R1 + O2): Unknown-capability agent (no matching slug; AppliedConfig.Harness
+	// set to "claude-live" to also verify O2 drops the AppliedConfig/harness-name fallback)
+	// with prior-run rollups and a fresh heartbeat-only current run must read unmeasured
+	// on BOTH per-agent and scoped routes.
+	agUnk := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "ag-restarted-unknown",
+		Name:          "ag-restarted-unknown",
+		ProjectID:     proj.ID,
+		OwnerID:       admin.ID,
+		HarnessConfig: "",
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude-live"},
+		Phase:         string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agUnk))
+	_, err = s.SetAgentRunID(ctx, agUnk.ID, "run-u1", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-u1",
+		Generation:    1,
+		ProjectID:     proj.ID,
+		AgentID:       agUnk.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude-live",
+		HarnessConfig: "",
+		CreatedAt:     dbNow.Add(-2 * time.Hour),
+	})
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agUnk.ID,
+		Events: []*store.UsageEvent{{
+			HubID:       "hub-usage-restart",
+			EventID:     "ev-u1-1",
+			RunID:       "run-u1",
+			ProjectID:   proj.ID,
+			AgentID:     agUnk.ID,
+			Harness:     "claude-live",
+			Model:       "claude-sonnet-4-6",
+			ModelSource: "native",
+			UsageSource: store.UsageSourceNative,
+			Status:      "ok",
+			Calls:       1,
+			Input:       &inVal,
+			Output:      &outVal,
+			TokenStatus: "ok",
+			EventTS:     dbNow.Add(-2 * time.Hour),
+			ReceivedAt:  dbNow.Add(-2 * time.Hour),
+			ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+
+	// Restart onto run-u2 (5m ago, fresh heartbeat, no events).
+	_, err = s.SetAgentRunID(ctx, agUnk.ID, "run-u2", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-u2",
+		Generation:    2,
+		ProjectID:     proj.ID,
+		AgentID:       agUnk.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude-live",
+		HarnessConfig: "",
+		CreatedAt:     dbNow.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agUnk.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agUnk.ID,
+			RunID:         "run-u2",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: dbNow.Add(-15 * time.Second),
+			ProducerSeq:   1,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	recUnkAg := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+agUnk.ID+"/usage", admin)
+	require.Equal(t, http.StatusOK, recUnkAg.Code, recUnkAg.Body.String())
+	var unkAgResp AgentUsageResponse
+	require.NoError(t, json.Unmarshal(recUnkAg.Body.Bytes(), &unkAgResp))
+	assert.Equal(t, MeasurementStatusUnmeasured, unkAgResp.MeasurementStatus)
+
+	recUnkProj := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since=24h&agent_id="+agUnk.ID, admin)
+	require.Equal(t, http.StatusOK, recUnkProj.Code, recUnkProj.Body.String())
+	var unkProjResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recUnkProj.Body.Bytes(), &unkProjResp))
+	assert.Equal(t, MeasurementStatusUnmeasured, unkProjResp.MeasurementStatus)
+	assert.Equal(t, 1, unkProjResp.UnmeasuredAgents)
+}

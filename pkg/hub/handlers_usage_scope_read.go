@@ -786,7 +786,7 @@ func deriveScopeCoverageSummary(
 			}
 			var usageCap *api.HarnessUsageCapabilities
 			if resolveCap != nil {
-				usageCap = resolveCap(b.CapabilityProjectID, b.HarnessConfig, b.Harness)
+				usageCap = resolveCap(b.CapabilityProjectID, b.HarnessConfig)
 			}
 			s := deriveMeasurementStatus(measurementStatusInput{
 				MeterHealth:       mhRows,

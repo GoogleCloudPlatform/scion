@@ -190,18 +190,14 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	var hcName, harnessName string
+	var hcName string
 	if currentRA != nil {
 		hcName = strings.TrimSpace(currentRA.HarnessConfig)
-		harnessName = strings.TrimSpace(currentRA.Harness)
 	}
 	if hcName == "" {
 		hcName = strings.TrimSpace(agent.HarnessConfig)
 	}
-	if harnessName == "" && agent.AppliedConfig != nil {
-		harnessName = strings.TrimSpace(agent.AppliedConfig.Harness)
-	}
-	usageCap := newUsageCapabilityMemo(ctx, s).resolve(agent.ProjectID, hcName, harnessName)
+	usageCap := newUsageCapabilityMemo(ctx, s).resolve(agent.ProjectID, hcName)
 	var runStartedAt time.Time
 	if currentRA != nil {
 		runStartedAt = currentRA.CreatedAt
@@ -794,8 +790,8 @@ type usageConfigLookupResult struct {
 }
 
 // usageCapabilityLookup resolves the current harness-config revision's
-// usage.yaml capability for one (projectID, harnessConfig, harness) tuple.
-type usageCapabilityLookup func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities
+// usage.yaml capability for one (projectID, harnessConfig) tuple.
+type usageCapabilityLookup func(projectID, harnessConfig string) *api.HarnessUsageCapabilities
 
 // usageCapabilityMemo is the single shared harness-config usage capability
 // resolver used by both per-agent reads and scoped aggregate reads.
@@ -808,8 +804,8 @@ type usageCapabilityLookup func(projectID, harnessConfig, harness string) *api.H
 //     never falls through to a shadowed same-slug config in another scope;
 //   - on hosted hubs, a non-NotFound error on global lookup stops immediately
 //     without consulting project scope (returning unknown/nil);
-//   - falls back to global lookup of harness only when NO config was found
-//     for harnessConfig (and no store error occurred).
+//   - never falls back to a global config named after the harness type;
+//     capability comes strictly from what dispatch's slug lookup finds.
 //
 // Memoizes per-scope lookups (hits, not-found, and errors) for one request.
 // Note: capability reflects the current harness-config revision, not a
@@ -875,30 +871,20 @@ func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*stor
 	return nil, lookupErr
 }
 
-func (m *usageCapabilityMemo) resolve(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+func (m *usageCapabilityMemo) resolve(projectID, harnessConfig string) *api.HarnessUsageCapabilities {
 	if m == nil || m.s == nil {
 		return nil
 	}
 	hcName := strings.TrimSpace(harnessConfig)
-	hName := strings.TrimSpace(harness)
-	if hcName != "" {
-		hc, err := m.resolveConfigBySlug(projectID, hcName)
-		if err != nil {
-			return nil
-		}
-		if hc != nil {
-			m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-			return usageCapabilityFromHarnessConfig(hc)
-		}
+	if hcName == "" {
+		return nil
 	}
-	if hName != "" && hName != hcName {
-		hc, err := m.lookupScope(hName, store.HarnessConfigScopeGlobal, "")
-		if err == nil && hc != nil {
-			m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-			return usageCapabilityFromHarnessConfig(hc)
-		}
+	hc, err := m.resolveConfigBySlug(projectID, hcName)
+	if err != nil || hc == nil {
+		return nil
 	}
-	return nil
+	m.s.populateHarnessConfigCapabilities(m.ctx, hc)
+	return usageCapabilityFromHarnessConfig(hc)
 }
 
 // usageCapabilityFromHarnessConfig extracts the parsed usage.yaml capability
@@ -1001,7 +987,7 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		return MeasurementStatusLegacyClient
 	}
 
-	if latest != nil && latest.SchemaDriftDetected {
+	if latest != nil && latest.SchemaDriftDetected && (capKind == usageCapFull || capKind == usageCapPartial) {
 		return MeasurementStatusCallsOnly
 	}
 	if capKind == usageCapCallsOnly {

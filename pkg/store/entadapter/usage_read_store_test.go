@@ -1679,4 +1679,52 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 	assert.True(t, foundInGrace, "expected bucket for claude within 60s grace")
 	assert.True(t, foundDrift, "expected bucket for antigravity with schema drift")
 	assert.True(t, foundOverride, "expected bucket for hermes with projOverride capability_project_id")
+
+	// 5. Restarted agent with prior-run rollups inside the window and a new
+	// current run with NO events/meter must report HasUsageData=false (R1) so
+	// past-grace staleness is not suppressed by prior-run rollups.
+	agRestarted := seedAgent(projGlobal, "ag-restarted", "run-restarted-1", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-restarted-1",
+		ProjectID:     projGlobal,
+		AgentID:       agRestarted.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-2 * time.Hour),
+	})
+	require.NoError(t, err)
+	evPrior := makeStoreUsageEvent("hub-cov", "ev-prior-1", "run-restarted-1", projGlobal, agRestarted.ID, &user1, 1, now.Add(-2*time.Hour), 100, 50, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRestarted.ID,
+		Events:  []*store.UsageEvent{evPrior},
+	})
+	require.NoError(t, err)
+	// Restart onto run-restarted-2 (5m ago, past 60s grace, no events, no meter).
+	_, err = cs.SetAgentRunID(ctx, agRestarted.ID, "run-restarted-2", nil)
+	require.NoError(t, err)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-restarted-2",
+		ProjectID:     projGlobal,
+		AgentID:       agRestarted.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	covRestarted, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agRestarted.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covRestarted.Buckets, 1)
+	assert.True(t, covRestarted.Buckets[0].IsRunning)
+	assert.True(t, covRestarted.Buckets[0].IsPastGrace)
+	assert.False(t, covRestarted.Buckets[0].HasMeterHealth)
+	assert.False(t, covRestarted.Buckets[0].HasUsageData, "prior-run rollups must not set HasUsageData when current run has no events")
 }
