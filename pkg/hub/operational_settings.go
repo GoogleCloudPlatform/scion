@@ -139,10 +139,11 @@ type Layer1Snapshot struct {
 	HasMaintenanceRow bool
 
 	// Telemetry
-	TelemetryEnabled         *bool
-	TelemetryEnforced        bool
-	TelemetryEnforcedInvalid bool
-	TelemetryConfig          *config.V1TelemetryConfig
+	TelemetryEnabled             *bool
+	TelemetryEnforced            bool
+	TelemetryEnforcedInvalid     bool
+	TrajectoryAllowProjectOptOut *bool
+	TelemetryConfig              *config.V1TelemetryConfig
 
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
@@ -762,13 +763,18 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 			if json.Unmarshal(rawTel, &probe) == nil && probe.Enforced {
 				snap.TelemetryEnforcedInvalid = true
 			}
-		} else if resolved, err := ts.Resolve(); err != nil {
-			slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
-			if ts.Enforced {
-				snap.TelemetryEnforcedInvalid = true
-			}
 		} else {
-			snap.TelemetryEnforced = resolved.Enforced
+			if ts.Trajectory != nil {
+				snap.TrajectoryAllowProjectOptOut = copyBoolPtr(ts.Trajectory.AllowProjectOptOut)
+			}
+			if resolved, err := ts.Resolve(); err != nil {
+				slog.Error("operational settings: ignoring invalid telemetry.enforced in DB row", "error", err)
+				if ts.Enforced {
+					snap.TelemetryEnforcedInvalid = true
+				}
+			} else {
+				snap.TelemetryEnforced = resolved.Enforced
+			}
 		}
 	}
 	_, snap.BrandingInDB = dbSections[opsettings.BrandingSectionName]
@@ -1846,6 +1852,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "telemetry_enforced")
 	}
 	s.config.TelemetryEnforced = telemetryEnforced
+	trajectoryAllowOptOut := copyBoolPtr(s.config.TrajectoryAllowProjectOptOut)
+	if snap.FromOperationalSettings {
+		trajectoryAllowOptOut = copyBoolPtr(snap.TrajectoryAllowProjectOptOut)
+	}
+	if !boolPtrEqual(s.config.TrajectoryAllowProjectOptOut, trajectoryAllowOptOut) {
+		applied = append(applied, "telemetry_trajectory_allow_project_opt_out")
+	}
+	s.config.TrajectoryAllowProjectOptOut = trajectoryAllowOptOut
 	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
 		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)

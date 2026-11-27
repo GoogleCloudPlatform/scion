@@ -422,6 +422,11 @@ type ServerConfig struct {
 	// dispatches when experiment agent_policy.telemetry_enforcement is on.
 	// Read through Server.telemetryEnforced().
 	TelemetryEnforced bool
+	// TrajectoryAllowProjectOptOut controls whether projects may lower
+	// telemetry.trajectory.capture below "full" when experiment
+	// tokenomics.trajectory_capture is on. Nil (unset) defaults to true.
+	// Read through Server.trajectoryAllowProjectOptOut().
+	TrajectoryAllowProjectOptOut *bool
 	// AutoExposePortsDefault is the default auto-expose-ports enabled state for new agents.
 	// Exposed via GET /api/v1/settings/public so the web UI can pre-populate the checkbox.
 	AutoExposePortsDefault *bool

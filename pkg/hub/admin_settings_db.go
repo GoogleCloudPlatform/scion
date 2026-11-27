@@ -336,10 +336,15 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.DefaultGCPIdentityServiceAccountID = snap.DefaultGCPIdentityServiceAccountID
 
 	// Telemetry — always set from snapshot (nil = no telemetry configured).
-	if snap.TelemetryConfig != nil || snap.TelemetryEnforced {
+	if snap.TelemetryConfig != nil || snap.TelemetryEnforced || snap.TrajectoryAllowProjectOptOut != nil {
 		ts := &opsettings.TelemetrySettings{Enforced: snap.TelemetryEnforced}
 		if snap.TelemetryConfig != nil {
 			ts.V1TelemetryConfig = *snap.TelemetryConfig
+		}
+		if snap.TrajectoryAllowProjectOptOut != nil {
+			ts.Trajectory = &opsettings.TelemetryTrajectorySettings{
+				AllowProjectOptOut: copyBoolPtr(snap.TrajectoryAllowProjectOptOut),
+			}
 		}
 		resp.Telemetry = ts
 	} else {
@@ -1711,6 +1716,29 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				}
 				if !storedEnforced {
 					writeTelemetryEnforcementExperimentDisabled(w)
+					return
+				}
+			}
+		}
+		// telemetry.trajectory.allow_project_opt_out=false is refused while
+		// experiment tokenomics.trajectory_capture is off (412
+		// experiment_disabled; ptone/scion#9250). Echoing an already-stored
+		// false value or resetting to true passes so other telemetry settings
+		// can still be saved.
+		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			var candidate opsettings.TelemetrySettings
+			if json.Unmarshal(merged, &candidate) == nil &&
+				candidate.Trajectory != nil &&
+				candidate.Trajectory.AllowProjectOptOut != nil &&
+				!*candidate.Trajectory.AllowProjectOptOut {
+				var existing opsettings.TelemetrySettings
+				storedDisallowed := false
+				if len(bytes.TrimSpace(cur)) > 0 && json.Unmarshal(cur, &existing) == nil &&
+					existing.Trajectory != nil && existing.Trajectory.AllowProjectOptOut != nil {
+					storedDisallowed = !*existing.Trajectory.AllowProjectOptOut
+				}
+				if !storedDisallowed {
+					writeTrajectoryCaptureExperimentDisabled(w, "telemetry.trajectory.allow_project_opt_out")
 					return
 				}
 			}

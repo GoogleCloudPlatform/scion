@@ -810,6 +810,18 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// telemetry.trajectory.allow_project_opt_out is opsettings-only
+	// (database-backed hubs) and gated by experiment
+	// tokenomics.trajectory_capture (ptone/scion#9250).
+	if req.Telemetry != nil && req.Telemetry.Trajectory != nil && req.Telemetry.Trajectory.AllowProjectOptOut != nil {
+		if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			writeTrajectoryCaptureExperimentDisabled(w, "telemetry.trajectory.allow_project_opt_out")
+			return
+		}
+		writeSettingsFieldError(w, "telemetry.trajectory.allow_project_opt_out", "telemetry.trajectory.allow_project_opt_out is only supported on database-backed hubs")
+		return
+	}
+
 	// GET masks secrets and clients send the GET body back on save: restore
 	// every still-masked field before anything is written. The stored view
 	// is decoded from the same read that is merged and written below, so the

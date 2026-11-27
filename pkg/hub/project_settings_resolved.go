@@ -15,13 +15,17 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // GET /api/v1/projects/{projectId}/settings/resolved
@@ -166,6 +170,11 @@ type ResolvedProjectSettings struct {
 	// Settings is keyed by annotation key. Its key set is exactly
 	// projectSettingKeys — enforced by TestResolvedSettings_RegistryNoDrift.
 	Settings map[string]ResolvedProjectSetting `json:"settings"`
+
+	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
+	// and Hub opt-out lock status when experiment tokenomics.trajectory_capture
+	// is enabled.
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // hubDefaultSource identifies which hub-side configuration source is consulted
@@ -277,6 +286,9 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	},
 	projectSettingTelemetryEnabled: {
 		source: hubSourceTelemetryDefault,
+	},
+	projectSettingTrajectoryCapture: {
+		source: hubSourceNone,
 	},
 	projectSettingAutoExposePortsEnabled: {
 		source: hubSourceAutoExposePortsDefault,
@@ -463,13 +475,34 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 				entry.StoredValue = false
 			}
 		}
+		if key == projectSettingTrajectoryCapture && s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+			status := s.resolveTrajectoryCapturePolicy(context.Background(), project)
+			if status.EnforcedByHub {
+				lockedBy := "hub"
+				entry.LockedBy = &lockedBy
+				entry.Effective = status.Policy
+				if project.Annotations != nil {
+					if raw := strings.TrimSpace(project.Annotations[projectSettingTrajectoryCapture]); raw == telemetrycontract.TrajectoryCapturePolicyMetadataOnly || raw == telemetrycontract.TrajectoryCapturePolicyOff {
+						entry.StoredValue = raw
+					}
+				}
+			}
+		}
 		settings[key] = entry
 	}
 
-	return &ResolvedProjectSettings{
-		Project:  projectSettingsFromAnnotations(project),
+	projSettings := projectSettingsFromAnnotations(project)
+	resp := &ResolvedProjectSettings{
+		Project:  projSettings,
 		Settings: settings,
 	}
+	if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+		status := s.resolveTrajectoryCapturePolicy(context.Background(), project)
+		resp.TrajectoryCapture = &status
+	} else {
+		projSettings.TrajectoryCapture = ""
+	}
+	return resp
 }
 
 func limitCeilingForSetting(key string, ceilings opsettings.AgentLimitsSettings) any {
@@ -501,6 +534,9 @@ func projectAnnotationInEffect(key, val string) bool {
 	if key == projectSettingDefaultThinkingLevel {
 		n, err := strconv.Atoi(val)
 		return err == nil && validDefaultThinkingLevel(n)
+	}
+	if key == projectSettingTrajectoryCapture {
+		return telemetrycontract.IsValidTrajectoryCapturePolicy(strings.TrimSpace(val))
 	}
 	return true
 }

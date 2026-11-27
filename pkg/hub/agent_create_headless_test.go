@@ -975,6 +975,7 @@ func TestHeadlessCreate_ProjectDefaultsParityTable(t *testing.T) {
 			projectSettingDefaultModel:                   "claude-sonnet-4-5",
 			projectSettingDefaultThinkingLevel:           "medium",
 			projectSettingTelemetryEnabled:               "true",
+			projectSettingTrajectoryCapture:              "metadata_only",
 			projectSettingAutoExposePortsEnabled:         "true",
 			projectSettingActiveProfile:                  "k8s-standard",
 			projectSettingDefaultMaxTurns:                "42",

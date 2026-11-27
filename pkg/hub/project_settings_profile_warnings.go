@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
 // Save-time warnings for per-profile default GCP service accounts
@@ -45,7 +46,8 @@ import (
 // decode the settings fields are unaffected.
 type projectSettingsWithWarnings struct {
 	*hubclient.ProjectSettings
-	Warnings []string `json:"warnings,omitempty"`
+	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
+	Warnings          []string                                         `json:"warnings,omitempty"`
 }
 
 // profileDefaultSAWarnings returns the warnings for the per-profile default
