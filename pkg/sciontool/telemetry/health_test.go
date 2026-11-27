@@ -297,6 +297,9 @@ func TestDeriveUsageCollection(t *testing.T) {
 		{"runtime native before settle", UsageSourceSelection{}, "codex", true, true, "enabled", "", "calls,input,output,cache_read,cache_write,reasoning", "static_table", "request", false},
 		{"hooks antigravity", UsageSourceSelection{Settled: true, Source: "hooks"}, "antigravity", false, false, "enabled", "", "calls", "static_table", "invocation", false},
 		{"hooks other", UsageSourceSelection{Settled: true, Source: "hooks"}, "opencode", false, false, "enabled", "", "", "unknown", "invocation", true},
+		{"sqlite_native antigravity active", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "antigravity", true, false, "enabled", "", "calls,input,output,cache_read,cache_write,reasoning", "static_table", "request", false},
+		{"sqlite_native non-antigravity harness", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "claude", false, true, "disabled", "no_harness_rule", "", "", "", false},
+		{"sqlite_native antigravity inactive", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "antigravity", false, false, "disabled", "deriver_failed", "", "", "", false},
 	}
 	for _, c := range cases {
 		got := deriveUsageCollection(c.sel, c.harness, c.active, c.hasRul)

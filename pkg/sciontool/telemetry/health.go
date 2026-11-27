@@ -129,6 +129,15 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 		if nativeActive {
 			return enabledUsage(telemetrycontract.UsageSourceSQLiteNative, harness)
 		}
+		if harness != "antigravity" {
+			u := disabled(telemetrycontract.UsageDisabledNoHarnessRule)
+			u.Source = telemetrycontract.UsageSourceSQLiteNative
+			return u
+		}
+		// Keep the 5-value usage_disabled_reason contract: when sqlite_native
+		// is inactive on antigravity (including when analytics is disabled),
+		// report deriver_failed; analytics_state and analytics_disabled_reason
+		// on the same health event give the exact analytics reason.
 		u := disabled(telemetrycontract.UsageDisabledDeriverFailed)
 		u.Source = telemetrycontract.UsageSourceSQLiteNative
 		return u

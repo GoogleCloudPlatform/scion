@@ -227,14 +227,17 @@ func NewWithConfig(config *Config) *Pipeline {
 
 // UsageActivation is the outcome of Pipeline.ActivateUsageSource. Every
 // value other than UsageActivated names the reason activation was skipped,
-// so callers can explain to operators why native usage stayed off.
+// so callers can explain to operators why pipeline-side usage collection
+// stayed off.
 type UsageActivation string
 
 const (
-	// UsageActivated means a native deriver was built and stored.
+	// UsageActivated means a native deriver or SQLite native tailer was built
+	// and started.
 	UsageActivated UsageActivation = "activated"
-	// UsageActivationNotNative means the requested source is not
-	// UsageSourceNative, so there is nothing for the receiver to do.
+	// UsageActivationNotNative means the requested source is neither
+	// UsageSourceNative nor UsageSourceSQLiteNative, so there is nothing for
+	// the pipeline to activate.
 	UsageActivationNotNative UsageActivation = "source is not native"
 	// UsageActivationRuntimeEnvPrecedence means SCION_USAGE_SOURCE is
 	// present in this process's environment (even if empty), and so wins.
@@ -243,40 +246,44 @@ const (
 	// not been started, has been stopped, or has no bound loopback config
 	// (which cannot happen once Start has succeeded).
 	UsageActivationNotRunning UsageActivation = "telemetry pipeline is not running"
-	// UsageActivationAlreadyActive means a deriver with rules is already in
-	// place and is left untouched.
+	// UsageActivationAlreadyActive means a deriver with rules or an active
+	// SQLite native tailer is already in place and is left untouched.
 	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
-	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
+	// UsageActivationNoHarnessRule means SCION_HARNESS has no matching rule
+	// for the requested usage source (no native rule, or non-antigravity for
+	// sqlite_native).
 	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
 	// UsageActivationAnalyticsDisabled means sqlite_native could not start
 	// because no analytics outbox sink is active.
 	UsageActivationAnalyticsDisabled UsageActivation = "analytics outbox is not enabled"
 )
 
-// ActivateUsageSource enables native usage derivation on an already-running
-// pipeline when the usage source is selected after Start, e.g. by a
-// container-script provisioner's env overlay, which sciontool init loads only
-// after the receiver is up (ptone/scion#3391). Without this, Start's
-// environment-only check sees the source unset and the deriver stays a no-op
-// for the lifetime of the process.
+// ActivateUsageSource enables pipeline-side usage collection (the native OTLP
+// deriver for UsageSourceNative, or the Antigravity SQLite tailer for
+// UsageSourceSQLiteNative) on an already-running pipeline when the usage
+// source is selected after Start, e.g. by a container-script provisioner's env
+// overlay, which sciontool init loads only after the receiver is up
+// (ptone/scion#3391). Without this, Start's environment-only check sees the
+// source unset and pipeline-side usage collection stays off for the lifetime
+// of the process.
 //
 // It is deliberately narrow:
-//   - only UsageSourceNative activates anything; every other value
-//     (including "hooks", which the hook subprocess handles on its own) is
-//     ignored;
+//   - only UsageSourceNative and UsageSourceSQLiteNative activate anything;
+//     every other value (including "hooks", which the hook subprocess handles
+//     on its own) is ignored;
 //   - if SCION_USAGE_SOURCE is present in this process's environment, even
 //     with an empty value, it wins. This matches the additive overlay merge,
 //     which keeps any existing key for the harness child, so Start has
 //     already made the authoritative choice;
-//   - an already-active deriver is left untouched, so usage is never counted
-//     twice;
-//   - SCION_HARNESS gating still applies: a harness with no native rule stays
-//     a no-op;
+//   - an already-active deriver or tailer is left untouched, so usage is never
+//     counted twice;
+//   - SCION_HARNESS gating still applies: a harness with no matching rule (or
+//     a non-antigravity harness for sqlite_native) stays a no-op;
 //   - activation is refused before Start and after Stop (this assumes Stop
 //     completed; sciontool init activates once, before any Stop).
 //
-// It returns UsageActivated when a new deriver was stored, and otherwise the
-// reason it was skipped.
+// It returns UsageActivated when the deriver or tailer was started, and
+// otherwise the reason it was skipped.
 func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
 	if source != UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative {
 		return UsageActivationNotNative, nil
