@@ -6,7 +6,7 @@ description: Connect external webhooks and events to Scion agents with signed en
 Triggers let external systems—CI pipelines, issue trackers, payment providers, monitoring tools, or other Scion agents—deliver events to a project and run automated actions under your recorded authority.
 
 :::caution[Experimental]
-Triggers and webhook endpoints are behind the `hub.triggers` [experiment](/scion/reference/experiments/), which is off by default. While it is off, all trigger, webhook, event, and ingress routes answer `404`, the project **Triggers** page is hidden, and trigger drainers do not claim queued events. GitHub App repository sources additionally require `hub.github_triggers`.
+Triggers and webhook endpoints are behind the `hub.triggers` [experiment](/scion/reference/experiments/), which is off by default. While it is off, all trigger, webhook, event, and ingress routes answer `404`, the project **Triggers** page renders `404`, and trigger drainers do not claim queued events. GitHub App repository sources additionally require `hub.github_triggers`.
 :::
 
 :::note[Workstation mode]
@@ -33,7 +33,7 @@ Webhook endpoints are project-owned (`POST /api/v1/hooks/{id}`) and managed with
 scion trigger webhook create --name deploys --description "CI deploy callbacks"
 ```
 
-For HMAC endpoints (the default), the Hub generates a 32-byte base64url signing secret and prints it **once** in the creation output, along with the endpoint URL and a `curl` + `openssl` sender example. Save the secret immediately; subsequent `get` and `list` calls never return it.
+For HMAC endpoints (the default), the Hub generates a 32-byte base64url signing secret and prints it **once** in the creation output alongside the endpoint URL. Save the secret immediately; subsequent `get` and `list` calls never return it. Per-mode `curl` + `openssl` sender examples are available in `scion trigger webhook create --help` and in the Web UI's endpoint creation dialog.
 
 ### Authentication modes (`--auth`)
 
@@ -45,8 +45,9 @@ For HMAC endpoints (the default), the Hub generates a 32-byte base64url signing 
 For `hub_token` endpoints:
 
 - Project members, admins, and owners hold `webhook_endpoint.send` by default.
-- Agents may send only if they own the endpoint or are its bound agent—or, if `--allow-project-agents` is enabled on the endpoint (off by default), any agent in the same project whose token holds `project:agent:notify`.
+- Agent senders must be in the same project and hold `project:agent:notify` (including the owning agent and the bound agent); by default only the owning agent and bound agent may send, or any same-project agent holding `project:agent:notify` when `--allow-project-agents` is enabled (off by default).
 - Unsigned `X-Scion-Event`, `X-Scion-Subject`, and `X-Scion-Delivery` headers are honoured because the caller is authenticated. `attributes.signature_mode` is `"hub_token"`, `attributes.sender` records `<principal kind>:<id>`, and `external_payload.verified` is `"hub-token"`.
+- **Use unpredictable (UUID) delivery IDs:** deduplication is keyed on `(endpoint, delivery)` and is not scoped by sender. Any authorized sender on a `hub_token` endpoint can pre-claim a predictable delivery ID, causing a later sender's delivery with that ID to be dropped as `202 duplicate`.
 
 ### Signature modes (`--signature-mode`)
 
@@ -159,7 +160,7 @@ CEL expressions are compiled at authoring time against:
 
 | Variable | Type / Notes |
 | :--- | :--- |
-| `event.id`, `event.type`, `event.subject` | strings |
+| `event.id`, `event.type`, `event.subject` | strings (for webhook events, `event.subject` is stored prefixed as `webhook:<endpoint-id>/<subject>`; the raw header/hint value is in `event.attributes.subject`) |
 | `event.source.kind`, `event.source.id` | strings |
 | `event.occurred_at`, `event.received_at` | timestamps |
 | `event.attributes` | `map<string, string>` (webhook keys: `endpoint_name`, `event`, `delivery`, `subject`, `signature_mode`, `content_type`, `payload_bytes`, `remote_ip`, and `sender` for `hub_token`) |
@@ -233,18 +234,18 @@ scion trigger create --name triage-pr --webhook ci-hooks --type webhook.build.fa
 ```
 
 - **Identity & role:** dispatched agents are owned by the trigger's recorded author, with credentials enabled and role chosen from the project/Hub default ladder (capped by project max and the author's delegation ceiling), or set explicitly via `--agent-role`.
-- **Agent name & collisions:** `--agent-name` is optional; when omitted, the Hub generates `<trigger-name>-<6 base32>`. If a live agent already holds the slug, `--on-name-conflict suffix` (default) appends `-<4 hex>` (up to 3 retries), while `skip` records `skipped` (`agent name in use`). Soft-deleted names are reusable.
+- **Agent name & collisions:** `--agent-name` is optional; when omitted, the Hub generates `<trigger-name>-<6 base32>`. If a live agent already holds the slug, `--on-name-conflict suffix` (default) appends `-<4 hex>` (up to 3 retries; if all retries collide, the fire finishes `failed` with reason `name exhausted`), while `skip` records `skipped` (`agent name in use`). Soft-deleted names are reusable.
 - **GitHub token precedence (`--github-token`):** chooses `installation` (suppress user/project GitHub PATs and inject only the project's GitHub App installation token) or `user_preferred` (standard precedence). Defaults to `installation` for `github` sources and `user_preferred` for webhook sources, resolved and stored at authoring time.
   - When `installation` is active and no GitHub App installation is available for the project, the agent receives no GitHub token and its task trailer notes that GitHub access is unavailable. That note keys on whether a mint project resolves (not on whether a later token mint succeeds, such as a revoked installation)—the agent still never receives a PAT.
   - Note: `GH_{OWNER}` custom secrets or Copilot sign-in material stored outside standard `GITHUB_TOKEN`/`GH_TOKEN` keys are not automatically classified as GitHub PATs; keep user-scoped GitHub credentials out of projects where untrusted event-driven agents run.
-- **Replay protection required:** `dispatch_agent` triggers may only attach to replay-protected sources (`scion_v1`, `stripe_v1`, `hub_token`, or `github` App). Attaching to `github_v1` is refused at authoring (`400 source_not_replay_protected`), switching an endpoint's mode while such triggers are active is refused (`409`), and events ingested under a non-replay-protected mode are refused at fire time.
+- **Replay protection and delivery ID required:** `dispatch_agent` triggers may only attach to replay-protected sources (`scion_v1`, `stripe_v1`, `hub_token`, or `github` App). Attaching to `github_v1` is refused at authoring (`400 source_not_replay_protected`), switching an endpoint's mode while such triggers are active is refused (`409`), and events ingested under a non-replay-protected mode are refused at fire time. On `scion_v1` and `stripe_v1` endpoints, senders must also include a unique delivery ID (`X-Scion-Delivery` or `--dedup-path` value); events without a delivery ID are refused at fire time (`missing delivery id`).
 - **Ephemeral flag (`--ephemeral`):** currently refused by the Hub (`400 ephemeral_unsupported`) until ephemeral trigger-agent reaping lands.
 
 ### Event context injected into dispatched agents
 
 Every agent started by a `dispatch_agent` trigger receives:
 
-1. **Labels (hub-applied, reserved):** `trigger=<trigger-id>`, `trigger_event=<event-id>`, `trigger_source=<source-kind>` (3 of the 16-label max; authoring refuses these three keys as custom `--label` inputs). Find sibling agents with `scion list --label trigger=<trigger-id>`.
+1. **Labels (hub-applied, reserved):** `trigger=<trigger-id>`, `trigger_event=<event-id>`, `trigger_source=<source-kind>` (3 of the 16-label max). Authoring refuses these three provenance keys and `scion.dev/github-token-source-project` (four reserved keys total) as custom `--label` inputs. Find sibling agents with `scion list --label trigger=<trigger-id>`.
 2. **Environment variables:** `SCION_TRIGGER_ID`, `SCION_TRIGGER_EVENT_ID`, and `SCION_TRIGGER_EVENT_FILE` (the resolved path to `~/.scion/trigger-event.json`).
 3. **Home file (`~/.scion/trigger-event.json`):** written by the Runtime Broker before the harness starts, containing the same `EventBody` JSON as a message envelope (`event_id`, `event_type`, `source`, `trigger`, `fire_id`, `subject`, `attributes`, `external_payload` bounded to 16 KiB with `truncated`/`bytes`). Works for every agent role including `none`. If the Runtime Broker does not advertise home-file support, the fire fails rather than starting the agent without its event file. A `ResetHome` reprovision drops this file.
 4. **Event read access:** the created agent can fetch its own event (including overflow payloads) with `scion trigger event get "$SCION_TRIGGER_EVENT_ID" --payload` when its role allows API calls.
@@ -329,9 +330,9 @@ Editing `notify` settings bumps `authorization_revision`.
 When `hub.triggers` is enabled, each project displays a **Triggers** button in its header linking to `/projects/{id}/triggers` with four tabs:
 
 - **Endpoints** — create endpoints (shows the one-time signing secret and sender example in a result dialog; secrets are never kept in component state), edit settings/bindings, disable/enable, rotate secrets, and delete (listing rules that will pause).
-- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, <!-- P7a: verify -->notify settings,<!-- /P7a: verify --> and a **Preview** button calling `POST .../render` against recent events with untrusted values highlighted.
+- **Rules** — create and edit triggers with an ordered `where` rule list editor (add/remove/reorder rows, admitted-dialect selector, per-row compile errors), ordered action editors, limits, <!-- P7a: verify -->notify settings,<!-- /P7a: verify --> and a **Preview** button calling `POST .../render` against the endpoint's latest event with untrusted values highlighted.
 - **Events** — browse received events filtered by endpoint, status, or time; inspect attributes, headers, `external_payload` (with download for overflow bodies), and resulting fires.
-- **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or outcome, linking to the event, created agent, or `waiting` deadline (`wait_until`).
+- **History** — project-wide fire history (`GET .../trigger-fires`) filtered by trigger, status, or time, linking to the event, created agent, or `waiting` deadline (`wait_until`).
 
 Hub administrators can also inspect durable queue health (`durableQueues`) on the Admin Scheduler page.
 
@@ -343,7 +344,7 @@ Hub administrators can also inspect durable queue health (`durableQueues`) on th
 - **`exec` security:**
   - `SCION_TRIGGER_CONTEXT` is untrusted, sender-influenced JSON. Always parse it with a JSON parser (such as `jq` or Python `json`) and **never** expand `$SCION_TRIGGER_CONTEXT` unquoted in a shell command.
   - Never put secrets in `exec` `argv`: `commandSha256` and `argc` are visible to trigger readers without `agent.attach`, so low-entropy secrets in `argv` could be guessed offline. Use agent secrets or environment variables instead.
-  - **Authenticated vs. unauthenticated attributes:** on `scion_v1`, `event`, `delivery`, `subject`, and the JSON body are covered by the HMAC signature; `endpoint_name` and `signature_mode` are Hub-derived; **`content_type` and `remote_ip` are NOT covered by the signature**. On `github_v1`, `X-GitHub-Event` (`event`) and `X-GitHub-Delivery` (`delivery`) are unsigned headers—only the body is signed.
+  - **Authenticated vs. unauthenticated attributes:** on `scion_v1`, `event`, `delivery`, `subject`, and the JSON body are covered by the HMAC signature; `endpoint_name` and `signature_mode` are Hub-derived; **`content_type` and `remote_ip` are NOT covered by the signature**. On `stripe_v1`, only the timestamp `t` and the raw JSON body are signed (routing-hint values come from the signed body; HTTP headers are unsigned). On `github_v1`, `X-GitHub-Event` (`event`) and `X-GitHub-Delivery` (`delivery`) are unsigned headers—only the body is signed. On `hub_token`, the caller is authenticated by their Hub credential, but every header is caller-chosen.
 - **Pre-authentication memory on large-body endpoints:** raising `--max-body` above the 64 KiB default increases the maximum request body buffered before signature verification (up to 1 MiB per in-flight request, bounded by per-IP and per-endpoint rate limits). Leave `--max-body` at 64 KiB unless your sender requires larger payloads.
 - **Overflow payload stream & timing:** overflow payloads are served only through the authorized Hub endpoint (`application/json`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, never via signed URLs). The 5-minute orphan-sweep grace assumes Hub and object-storage clocks stay within ~4 minutes of each other. The 256 MiB per-project budget window counts rows over the 7-day retention window and can transiently overshoot by up to ~1 hour of ingress while aged rows await the hourly purge.
 - **Agent-mode secrets:** running `scion trigger webhook create` or `rotate-secret` inside an agent prints the one-time secret into the agent's transcript; agent-owned endpoints are isolated so that secret only feeds that agent's own endpoint.

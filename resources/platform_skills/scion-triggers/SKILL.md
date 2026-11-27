@@ -33,9 +33,10 @@ yourself in one atomic command:
 scion trigger webhook create --name ci-callbacks --to-self
 ```
 
-- The Hub prints the endpoint URL and a **one-time HMAC signing secret** (plus
-  a `curl` + `openssl` sender example). Hand the URL and secret to the external
-  system—subsequent `get`/`list` calls never show the secret again.
+- The Hub prints the endpoint URL and a **one-time HMAC signing secret**. Hand
+  the URL and secret to the external system—subsequent `get`/`list` calls never
+  show the secret again. Per-mode `curl` + `openssl` sender examples are in
+  `scion trigger webhook create --help`.
 - `--message` is optional for `--to-self` (defaults to `Webhook event received.`).
 - By default, `--to-self` binds with lifetime **`agent`**: when you are deleted
   (including soft delete), the endpoint, its secret, and your own triggers on it
@@ -84,7 +85,7 @@ trigger with `--offline queue` (and optional `--queue-ttl`, `60s`–`48h`, defau
 
 ```bash
 scion trigger create --name ci-queued --webhook ci-callbacks \
-  --action message --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
+  --action message --agent "$(scion whoami)" \
   --message "CI callback arrived" --offline queue --queue-ttl 24h
 ```
 
@@ -154,18 +155,19 @@ When a `dispatch_agent` trigger creates you:
 
 | Operation | Agent authority |
 | :--- | :--- |
-| Create a webhook endpoint (`--to-self`) | Allowed at `baseline` and above (max 5 bound endpoints per agent; agents can bind only themselves) |
+| Create a webhook endpoint (unbound or `--to-self`) | Allowed for an in-standing agent with `project:read` (includes `readonly`) <!-- floor: pending ptone decision agent-authoring-floor --> (binding is optional; max 5 bound endpoints per agent; agents can bind only themselves) |
 | `webhook update`, `disable`, `enable`, `rotate-secret`, `delete` | Allowed on endpoints you own (binding changes are user-only) |
-| Create a `message` trigger to yourself | Allowed at `baseline` and above (`--wake` needs lifecycle permission within your ceiling) |
-| Create a `dispatch-agent` trigger | Requires `full` role within your delegation ceiling and a replay-protected source (`scion_v1`, `stripe_v1`, `hub_token`, or `github`) |
+| Create a `message` trigger | Allowed for an in-standing agent with `project:read` (includes `readonly`) <!-- floor: pending ptone decision agent-authoring-floor -->. On webhook sources you may target any agent you are allowed to message; on `github` sources you may target only yourself. `--wake` permission (`agent.lifecycle`) is checked at **fire time** (not authoring), so a missing permission refuses the wake when the trigger fires |
+| Create a `dispatch-agent` trigger | Requires `full` role within your delegation ceiling and a replay-protected source (`scion_v1`, `stripe_v1`, `hub_token`, or `github`). Senders on `scion_v1`/`stripe_v1` endpoints must always send a unique `X-Scion-Delivery` (or `--dedup-path` value) or the fire is refused (`missing delivery id`) |
 | `scion trigger update` (`PATCH`) | User-only (not available in agent mode) |
-| Visibility (`list` / `get` / `event`) | You see only triggers you own, endpoints you own or are bound to, and events for those endpoints or that dispatched you |
+| Visibility (`list` / `get` / `event`) | You see only triggers you own, endpoints you own or are bound to, and events for those endpoints, events that fired a trigger you hold, or events that dispatched you |
 
-## GitHub App triggers (extended by GitHub App work)
+<!-- scion:experiment hub.github_triggers -->
+<!-- github-app-triggers -->
+## GitHub App triggers
 
-<!-- gar-arch: GitHub-specific trigger guidance lives in this section -->
-When `hub.github_triggers` is also enabled, triggers can attach to the
-project's GitHub App source (`--github` with `--type github.<event>`, or via
+When `hub.github_triggers` is enabled, triggers can attach to the project's
+GitHub App source (`--github` with `--type github.<event>`, or via
 `scion trigger preset list|show|apply`).
 
 - For `dispatch-agent` triggers on `--github` sources, `--github-token`
@@ -173,11 +175,8 @@ project's GitHub App source (`--github` with `--type github.<event>`, or via
   as the GitHub App). When no installation is available for the project, the
   agent receives no GitHub token and its task trailer notes that GitHub access
   is unavailable.
-- For generic GitHub repository webhooks without the GitHub App, use a webhook
-  endpoint with `--signature-mode github_v1`; because GitHub signs only the raw
-  body (no replay protection), `github_v1` endpoints serve `message` triggers
-  only.
-<!-- /gar-arch -->
+<!-- /github-app-triggers -->
+<!-- scion:end-experiment -->
 
 ## Gotchas
 
@@ -189,6 +188,9 @@ project's GitHub App source (`--github` with `--type github.<event>`, or via
   bodies) are purged after 7 days.
 - **`ResetHome` drops `~/.scion/trigger-event.json`:** the event file is
   written on create only; a reprovision with `ResetHome` removes it.
+- **`github_v1` is `message`-only:** generic GitHub repository webhooks
+  (`--signature-mode github_v1`) sign only the raw body (no replay protection)
+  and cannot feed `dispatch-agent` or `exec` triggers.
 - **Rotate secret on signature-mode change:** when changing `--signature-mode`
   on an existing endpoint, also run `scion trigger webhook rotate-secret`.
 - **Literal `${` in message text:** escape literal `${` as `$${` in trigger
