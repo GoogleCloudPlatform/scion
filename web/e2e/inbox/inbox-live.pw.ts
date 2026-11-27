@@ -613,9 +613,10 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       );
       expect(sentinel).toBe('alive');
 
-      // 4. Verify each of the three links hydrates the /artifacts list with its matching 1 artifact (AC-9).
+      // 4. Verify each of the three links hydrates the /artifacts list with row count matching the card's number (AC-9).
       const checkArtifactsLink = async (
         linkKey: string,
+        expectedCount: number,
         expectedTitle: string,
         unexpectedTitle: string
       ): Promise<void> => {
@@ -627,13 +628,16 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         await link.click();
         const artifactsPage = page.locator('scion-page-artifacts');
         await expect(artifactsPage).toBeVisible({ timeout: 15_000 });
+        await expect(artifactsPage.locator('tbody tr')).toHaveCount(expectedCount, {
+          timeout: 15_000,
+        });
         await expect(artifactsPage).toContainText(expectedTitle, { timeout: 15_000 });
         await expect(artifactsPage).not.toContainText(unexpectedTitle);
       };
 
-      await checkArtifactsLink('reviews-to-address', ownedTitle, requestedTitle);
-      await checkArtifactsLink('reviews-requested', requestedTitle, ownedTitle);
-      await checkArtifactsLink('reviews-drafts', requestedTitle, ownedTitle);
+      await checkArtifactsLink('reviews-to-address', 1, ownedTitle, requestedTitle);
+      await checkArtifactsLink('reviews-requested', 1, requestedTitle, ownedTitle);
+      await checkArtifactsLink('reviews-drafts', 1, requestedTitle, ownedTitle);
 
       // 5. Delete the draft -> live update removes the drafts clause without reload.
       await page.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });

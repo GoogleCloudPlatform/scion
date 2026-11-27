@@ -136,6 +136,7 @@ func formatInboxProseSegments(category string, count int, capped bool, breakdown
 		drafts := breakdown[hubclient.InboxBreakdownDrafts]
 		explicitToAddressCapped := breakdown[hubclient.InboxBreakdownToAddressCapped] > 0
 		explicitRequestedCapped := breakdown[hubclient.InboxBreakdownRequestedCapped] > 0
+		// Fallback for a CLI talking to an older hub that omits per-clause *Capped keys.
 		hasExplicitCap := explicitToAddressCapped || explicitRequestedCapped
 		toAddressCapped := explicitToAddressCapped || (capped && !hasExplicitCap)
 		requestedCapped := explicitRequestedCapped || (capped && !hasExplicitCap)

@@ -45,8 +45,11 @@ import {
   type ProfileDecisionVisibility,
 } from '../../client/profile-decisions.js';
 import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
+  ARTIFACTS_REVIEW_REQUESTS_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   decisionsEnabled,
+  isFeatureEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
 import {
@@ -234,6 +237,12 @@ function resolveInboxLinkHref(
   }
   if (link === 'secrets-pending') {
     return categories?.pending_secrets?.href || '/profile/secrets';
+  }
+  if (link === 'reviews-requested' && !isFeatureEnabled(ARTIFACTS_REVIEW_REQUESTS_FLAG)) {
+    return undefined;
+  }
+  if (link === 'reviews-drafts' && !isFeatureEnabled(ARTIFACTS_REVIEW_DRAFTS_FLAG)) {
+    return undefined;
   }
   return INBOX_LINK_HREFS[link];
 }

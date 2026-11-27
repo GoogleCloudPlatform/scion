@@ -184,6 +184,7 @@ export function formatInboxProseSegments(
       const drafts = breakdown?.drafts ?? 0;
       const explicitToAddressCapped = (breakdown?.toAddressCapped ?? 0) > 0;
       const explicitRequestedCapped = (breakdown?.requestedCapped ?? 0) > 0;
+      // Fallback when a summary omits per-clause *Capped keys (mirrors CLI older-hub compat).
       const hasExplicitCap = explicitToAddressCapped || explicitRequestedCapped;
       const toAddressCapped = explicitToAddressCapped || (capped && !hasExplicitCap);
       const requestedCapped = explicitRequestedCapped || (capped && !hasExplicitCap);

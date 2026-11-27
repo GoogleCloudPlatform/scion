@@ -22,6 +22,8 @@ import {
   type InboxSummaryResponse,
 } from '../../client/inbox-summary.js';
 import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
+  ARTIFACTS_REVIEW_REQUESTS_FLAG,
   INBOX_DASHBOARD_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
@@ -132,6 +134,8 @@ describe('<scion-page-profile-inbox>', () => {
 
   it('renders all five cards in canonical order with descriptors, prose, badges, and key-noun inline links (AC-1, AC-2, AC-4, AC-9, AC-15, AC-16)', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    setFeatureFlag(ARTIFACTS_REVIEW_REQUESTS_FLAG, true);
+    setFeatureFlag(ARTIFACTS_REVIEW_DRAFTS_FLAG, true);
     const summary = makeSummary({
       decisions: makeCat({
         count: 8,
@@ -604,6 +608,8 @@ describe('<scion-page-profile-inbox>', () => {
 
   it('renders Artifact Reviews drafts-only without badge (AC-10), hides drafts when gated off (AC-13), and applies per-clause caps', async () => {
     setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    setFeatureFlag(ARTIFACTS_REVIEW_REQUESTS_FLAG, true);
+    setFeatureFlag(ARTIFACTS_REVIEW_DRAFTS_FLAG, true);
     const draftsOnly = makeSummary({
       reviews: makeCat({
         count: 0,
@@ -721,5 +727,60 @@ describe('<scion-page-profile-inbox>', () => {
     expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
       '500+ reviews to address, 2 reviews requested'
     );
+  });
+
+  it('leaves reviews-requested and reviews-drafts unlinked while their browser flags are off (AC-9, AC-13)', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const summary = makeSummary({
+      reviews: makeCat({
+        count: 3,
+        capped: false,
+        href: '/artifacts?review_on_latest=1&owner=me',
+        breakdown: { toAddress: 1, requested: 2, drafts: 3 },
+      }),
+    });
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(summary), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    const reviewsCard = page.shadowRoot?.querySelector('[data-inbox-card="reviews"]');
+    expect(reviewsCard?.querySelector('[data-card-prose]')?.textContent?.trim()).toBe(
+      '1 review to address, 2 reviews requested, 3 unfinished drafts'
+    );
+    const getLinks = (): Array<{ text: string | undefined; href: string | null }> =>
+      Array.from(reviewsCard?.querySelectorAll('a.card-prose-link') ?? []).map((a) => ({
+        text: a.textContent?.trim(),
+        href: a.getAttribute('href'),
+      }));
+
+    // Both flags off: only to-address is linked; requested and drafts stay plain text.
+    expect(getLinks()).toEqual([
+      { text: '1 review to address', href: '/artifacts?review_on_latest=1&owner=me' },
+    ]);
+
+    // Enabling hub.artifacts_review_requests links requested while drafts stays plain text.
+    setFeatureFlag(ARTIFACTS_REVIEW_REQUESTS_FLAG, true);
+    await page.updateComplete;
+    expect(getLinks()).toEqual([
+      { text: '1 review to address', href: '/artifacts?review_on_latest=1&owner=me' },
+      { text: '2 reviews requested', href: '/artifacts?requested=1' },
+    ]);
+
+    // Enabling hub.artifacts_review_drafts links drafts too.
+    setFeatureFlag(ARTIFACTS_REVIEW_DRAFTS_FLAG, true);
+    await page.updateComplete;
+    expect(getLinks()).toEqual([
+      { text: '1 review to address', href: '/artifacts?review_on_latest=1&owner=me' },
+      { text: '2 reviews requested', href: '/artifacts?requested=1' },
+      { text: '3 unfinished drafts', href: '/artifacts?drafts=1' },
+    ]);
   });
 });
