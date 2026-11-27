@@ -210,15 +210,17 @@ func TestTriggerAgentFloor_PrincipalRouteMatrix(t *testing.T) {
 	require.NoError(t, f.store.CreateTrigger(ctx, roPausedTrigger))
 
 	roEvent := &store.TriggerEvent{
-		ID:          api.NewUUID(),
-		ProjectID:   f.projectID,
-		SourceKind:  store.TriggerSourceKindWebhook,
-		SourceID:    roEp.ID,
-		EventType:   "webhook.received",
-		Status:      store.TriggerEventStatusProcessed,
-		Payload:     `{"ok":true}`,
-		ContentType: "application/json",
-		ReceivedAt:  now,
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     roEp.ID,
+		Type:         "webhook.received",
+		Status:       store.TriggerEventStatusProcessed,
+		Payload:      `{"ok":true}`,
+		PayloadBytes: len(`{"ok":true}`),
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		CreatedAt:    now,
 	}
 	require.NoError(t, f.store.CreateTriggerEvent(ctx, roEvent))
 
