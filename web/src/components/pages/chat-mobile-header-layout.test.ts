@@ -18,10 +18,10 @@
  * Conversation header layout contract (ptone/scion#9657):
  * - Far left (title): `# <conversation-name>` for group conversations,
  *   `<agent-name>` for agent DMs, in the same place and style.
- * - Right side, immediately left of the terminal icon / actions: robot emoji
- *   followed by the project / agent breadcrumb using `folder` and `robot`
- *   `<sl-icon>`s (omitted for user DMs and group conversations without a
- *   default agent).
+ * - Right side, immediately left of the terminal icon / actions: agent status
+ *   badge followed by the linked project / agent breadcrumb using `folder` and
+ *   `robot` `<sl-icon>`s (omitted for user DMs and group conversations without
+ *   a default agent; no standalone robot emoji).
  * - At narrow/mobile widths, the breadcrumb shrinks/truncates before the title
  *   while preserving header padding, icon hit areas, and keyboard-independent
  *   geometry.
@@ -147,7 +147,7 @@ function pageWithGroupConversation(defaultAgent: string): any {
 }
 
 describe('conversation header — consistent layout markup', () => {
-  it('renders agent DM with agent name on the left and robot emoji + project/agent breadcrumb right before actions', () => {
+  it('renders agent DM with agent name on the left and status badge + linked project/agent breadcrumb right before actions', () => {
     const name = '会話のとても長いエージェント名 with-a-very-long-unbroken-identifier-0123456789';
     const page = phonePageWithAgentDM(name);
     const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
@@ -158,23 +158,32 @@ describe('conversation header — consistent layout markup', () => {
     const title = header?.querySelector('.conv-title');
     expect(title?.querySelector('.conv-name .conv-text')?.textContent?.trim()).toBe(name);
     expect(title?.querySelector('.conv-crumb')).toBeNull();
-    expect(title?.textContent).not.toContain('🤖');
+    expect(header?.textContent).not.toContain('🤖');
+    expect(header?.querySelector('.conv-agent-emoji')).toBeNull();
 
     // Right side, immediately left of .header-actions (which starts with terminal):
     const context = header?.querySelector('.conv-agent-context');
     expect(context).not.toBeNull();
     expect(context?.nextElementSibling?.classList.contains('header-actions')).toBe(true);
     const statusBadge = context?.querySelector('scion-status-badge.conv-agent-status');
+    const breadcrumb = context?.querySelector('.conv-agent-breadcrumb');
     expect(statusBadge?.getAttribute('status')).toBe('working');
     expect(statusBadge?.getAttribute('size')).toBe('small');
-    expect(context?.firstElementChild).toBe(statusBadge);
-    expect(context?.querySelector('.conv-agent-emoji')?.textContent?.trim()).toBe('🤖');
-    expect(context?.querySelector('.conv-crumb sl-icon')?.getAttribute('name')).toBe('folder');
-    expect(context?.querySelector('.conv-crumb .conv-text')?.textContent?.trim()).toBe(
+    // Pin exact cluster child order: status badge -> breadcrumb.
+    expect(Array.from(context?.children ?? [])).toEqual([statusBadge, breadcrumb]);
+
+    const projectLink = breadcrumb?.querySelector('a.conv-crumb');
+    const sep = breadcrumb?.querySelector('.conv-crumb-sep');
+    const agentLink = breadcrumb?.querySelector('a.conv-agent-crumb');
+    expect(Array.from(breadcrumb?.children ?? [])).toEqual([projectLink, sep, agentLink]);
+    expect(projectLink?.getAttribute('href')).toBe('/projects/proj-1');
+    expect(projectLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('folder');
+    expect(projectLink?.querySelector('.conv-text')?.textContent?.trim()).toBe(
       'a-project-with-a-long-slug'
     );
-    expect(context?.querySelector('.conv-agent-crumb sl-icon')?.getAttribute('name')).toBe('robot');
-    expect(context?.querySelector('.conv-agent-crumb .conv-text')?.textContent?.trim()).toBe(name);
+    expect(agentLink?.getAttribute('href')).toBe('/agents/agent-1');
+    expect(agentLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(agentLink?.querySelector('.conv-text')?.textContent?.trim()).toBe(name);
 
     // First action button in .header-actions is the terminal icon.
     expect(header?.querySelector('.header-actions sl-icon-button')?.getAttribute('name')).toBe(
@@ -192,7 +201,7 @@ describe('conversation header — consistent layout markup', () => {
     expect(header?.querySelector('.header-secondary')).not.toBeNull();
   });
 
-  it('renders group conversation with default agent using the same right-hand emoji + project/agent breadcrumb', () => {
+  it('renders group conversation with default agent using the same right-hand status badge + linked breadcrumb', () => {
     const page = pageWithGroupConversation('preston-agent');
     const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
 
@@ -201,30 +210,35 @@ describe('conversation header — consistent layout markup', () => {
     expect(header?.querySelector('.conv-title .conv-name .conv-text')?.textContent?.trim()).toBe(
       'general'
     );
+    expect(header?.textContent).not.toContain('🤖');
+    expect(header?.querySelector('.conv-agent-emoji')).toBeNull();
 
     // Right side, immediately left of .header-actions (which starts with terminal):
     const context = header?.querySelector('.conv-agent-context');
     expect(context).not.toBeNull();
     expect(context?.nextElementSibling?.classList.contains('header-actions')).toBe(true);
     const statusBadge = context?.querySelector('scion-status-badge.conv-agent-status');
+    const breadcrumb = context?.querySelector('.conv-agent-breadcrumb');
     expect(statusBadge?.getAttribute('status')).toBe('working');
     expect(statusBadge?.getAttribute('size')).toBe('small');
-    expect(context?.firstElementChild).toBe(statusBadge);
-    expect(context?.querySelector('.conv-agent-emoji')?.textContent?.trim()).toBe('🤖');
-    expect(context?.querySelector('.conv-crumb sl-icon')?.getAttribute('name')).toBe('folder');
-    expect(context?.querySelector('.conv-crumb .conv-text')?.textContent?.trim()).toBe(
-      'scion-fork'
-    );
-    expect(context?.querySelector('.conv-agent-crumb sl-icon')?.getAttribute('name')).toBe('robot');
-    expect(context?.querySelector('.conv-agent-crumb .conv-text')?.textContent?.trim()).toBe(
-      'preston-agent'
-    );
+    expect(Array.from(context?.children ?? [])).toEqual([statusBadge, breadcrumb]);
+
+    const projectLink = breadcrumb?.querySelector('a.conv-crumb');
+    const sep = breadcrumb?.querySelector('.conv-crumb-sep');
+    const agentLink = breadcrumb?.querySelector('a.conv-agent-crumb');
+    expect(Array.from(breadcrumb?.children ?? [])).toEqual([projectLink, sep, agentLink]);
+    expect(projectLink?.getAttribute('href')).toBe('/projects/proj-1');
+    expect(projectLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('folder');
+    expect(projectLink?.querySelector('.conv-text')?.textContent?.trim()).toBe('scion-fork');
+    expect(agentLink?.getAttribute('href')).toBe('/agents/agent-1');
+    expect(agentLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(agentLink?.querySelector('.conv-text')?.textContent?.trim()).toBe('preston-agent');
     expect(header?.querySelector('.header-actions sl-icon-button')?.getAttribute('name')).toBe(
       'terminal'
     );
   });
 
-  it('omits robot emoji and breadcrumb for a group conversation without a default agent', () => {
+  it('omits status badge and breadcrumb for a group conversation without a default agent', () => {
     const page = pageWithGroupConversation('');
     const header = renderToFragment(page.renderV2Conversation()).querySelector('.v2-thread-header');
 
@@ -235,7 +249,7 @@ describe('conversation header — consistent layout markup', () => {
     expect(header?.textContent).not.toContain('🤖');
   });
 
-  it('omits robot emoji and breadcrumb for a user-to-user DM', () => {
+  it('omits status badge and breadcrumb for a user-to-user DM', () => {
     const el = document.createElement('scion-page-chat') as any;
     el.pageData = { user: { id: 'user-me' } };
     el.isMobileLayout = false;

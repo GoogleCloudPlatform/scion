@@ -43,7 +43,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
 import type { PageData, Agent, Project, DeletionInfo } from '../../shared/types.js';
-import { ACTIVITY_DISPLAY, suspendedStatusLabel } from '../../shared/agent-state-display.js';
+import { agentMemberBadgeStatus, suspendedStatusLabel } from '../../shared/agent-state-display.js';
 import '../shared/status-badge.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
@@ -1557,7 +1557,7 @@ export class ScionPageChat extends LitElement {
       max-width: 100%;
     }
 
-    /* Right-hand agent context (robot emoji + project/agent breadcrumb),
+    /* Right-hand agent context (agent status badge + project/agent breadcrumb),
        rendered immediately left of the terminal icon for both agent DMs and
        group conversations with a default agent. Shrinks well before the
        conversation title so the title stays readable at narrow widths. */
@@ -1566,7 +1566,7 @@ export class ScionPageChat extends LitElement {
       align-items: center;
       gap: 0.375rem;
       margin-left: auto;
-      flex: 0 50 auto;
+      flex: 0 2 auto;
       min-width: 0;
       overflow: hidden;
     }
@@ -1575,18 +1575,8 @@ export class ScionPageChat extends LitElement {
       margin-left: 0;
     }
 
-    .conv-agent-context sl-tooltip {
-      flex: none;
-    }
-
     .conv-agent-status {
       flex: none;
-    }
-
-    .conv-agent-emoji {
-      flex: none;
-      font-size: var(--chat-fs-md);
-      line-height: 1;
     }
 
     .conv-agent-breadcrumb {
@@ -1606,6 +1596,26 @@ export class ScionPageChat extends LitElement {
       gap: 0.25rem;
       min-width: 0;
       flex: 0 1 auto;
+    }
+
+    a.conv-crumb,
+    a.conv-agent-crumb {
+      color: inherit;
+      text-decoration: none;
+      border-radius: var(--scion-radius-sm);
+    }
+
+    a.conv-crumb:hover,
+    a.conv-crumb:focus-visible,
+    a.conv-agent-crumb:hover,
+    a.conv-agent-crumb:focus-visible {
+      color: var(--scion-primary);
+    }
+
+    a.conv-crumb:focus-visible,
+    a.conv-agent-crumb:focus-visible {
+      outline: 2px solid var(--scion-primary);
+      outline-offset: -1px;
     }
 
     .conv-crumb sl-icon,
@@ -6813,9 +6823,9 @@ export class ScionPageChat extends LitElement {
     return '';
   }
 
-  /** Look up the project ID for an agent DM peer. */
+  /** Look up the project ID for an agent (DM peer or thread default agent). */
   private getAgentProjectId(peerId: string): string {
-    const agent = this.v2AgentMembers.find((a) => a.id === peerId);
+    const agent = peerId ? this.v2AgentMembers.find((a) => a.id === peerId) : undefined;
     if (agent?.projectId) return agent.projectId;
     return this.v2Conversation?.projectId || '';
   }
@@ -7111,38 +7121,37 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
-   * Render the right-hand agent context cluster (agent status badge + robot
-   * emoji + project/agent breadcrumb) immediately left of the terminal icon.
+   * Render the right-hand agent context cluster (agent status badge +
+   * project/agent breadcrumb links) immediately left of the terminal icon.
    * Shared by agent DMs and group conversations with a default agent; omitted
    * for user DMs and group conversations without a default agent.
    */
   private renderHeaderAgentContext(conv: V2ConversationState): TemplateResult | typeof nothing {
     let agent: ChatAgentMember | undefined;
+    let agentId: string;
     let agentName: string;
+    let projectId: string;
     let projectSlug: string;
-    let tooltipLabel: string;
 
     if (conv.isDM && conv.peerKind === 'agent') {
-      agent = conv.peerId ? this.v2AgentMembers.find((a) => a.id === conv.peerId) : undefined;
+      agentId = conv.peerId || '';
+      agent = agentId ? this.v2AgentMembers.find((a) => a.id === agentId) : undefined;
       agentName = conv.peerName;
-      projectSlug = conv.peerId ? this.getAgentProjectSlug(conv.peerId) : '';
+      projectId = this.getAgentProjectId(agentId);
+      projectSlug = agentId ? this.getAgentProjectSlug(agentId) : '';
       if (!agentName && !projectSlug) return nothing;
-      tooltipLabel = agentName ? `Agent: ${agentName}` : 'Agent';
     } else if (!conv.isDM && conv.defaultAgent) {
       agent = this.findDefaultAgentMember(conv.defaultAgent);
-      const agentId = agent?.id || '';
+      agentId = agent?.id || '';
       agentName = this.resolveDefaultAgentName(conv.defaultAgent);
+      projectId = this.getAgentProjectId(agentId);
       projectSlug = this.getAgentProjectSlug(agentId);
-      tooltipLabel = `Default agent: ${agentName}`;
     } else {
       return nothing;
     }
 
     const lowerActivity = (agent?.activity || '').toLowerCase();
-    const badgeStatus =
-      agent?.phase === 'running' && Object.hasOwn(ACTIVITY_DISPLAY, lowerActivity)
-        ? lowerActivity
-        : agent?.phase || '';
+    const badgeStatus = agentMemberBadgeStatus(agent);
     const suspendedLabel = agent
       ? suspendedStatusLabel({
           phase: agent.phase,
@@ -7150,6 +7159,9 @@ export class ScionPageChat extends LitElement {
           suspendReason: agent.suspendReason,
         })
       : undefined;
+
+    const projectHref = projectId ? `/projects/${encodeURIComponent(projectId)}` : '';
+    const agentHref = agentId ? `/agents/${encodeURIComponent(agentId)}` : '';
 
     return html`
       <div class="conv-agent-context">
@@ -7161,26 +7173,33 @@ export class ScionPageChat extends LitElement {
               size="small"
             ></scion-status-badge>`
           : nothing}
-        <sl-tooltip content=${tooltipLabel}>
-          <span class="conv-agent-emoji" aria-hidden="true">🤖</span>
-        </sl-tooltip>
-        <span class="conv-agent-breadcrumb">
+        <nav class="conv-agent-breadcrumb" aria-label="Breadcrumb">
           ${projectSlug
-            ? html`<span class="conv-crumb" title=${projectSlug}>
-                <sl-icon name="folder" aria-hidden="true"></sl-icon>
-                <span class="conv-text">${projectSlug}</span>
-              </span>`
+            ? projectHref
+              ? html`<a class="conv-crumb" href=${projectHref} title=${projectSlug}>
+                  <sl-icon name="folder" aria-hidden="true"></sl-icon>
+                  <span class="conv-text">${projectSlug}</span>
+                </a>`
+              : html`<span class="conv-crumb" title=${projectSlug}>
+                  <sl-icon name="folder" aria-hidden="true"></sl-icon>
+                  <span class="conv-text">${projectSlug}</span>
+                </span>`
             : nothing}
           ${projectSlug && agentName
             ? html`<span class="conv-crumb-sep" aria-hidden="true">/</span>`
             : nothing}
           ${agentName
-            ? html`<span class="conv-agent-crumb" title=${agentName}>
-                <sl-icon name="robot" aria-hidden="true"></sl-icon>
-                <span class="conv-text">${agentName}</span>
-              </span>`
+            ? agentHref
+              ? html`<a class="conv-agent-crumb" href=${agentHref} title=${agentName}>
+                  <sl-icon name="robot" aria-hidden="true"></sl-icon>
+                  <span class="conv-text">${agentName}</span>
+                </a>`
+              : html`<span class="conv-agent-crumb" title=${agentName}>
+                  <sl-icon name="robot" aria-hidden="true"></sl-icon>
+                  <span class="conv-text">${agentName}</span>
+                </span>`
             : nothing}
-        </span>
+        </nav>
       </div>
     `;
   }

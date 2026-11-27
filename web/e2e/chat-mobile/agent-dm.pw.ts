@@ -202,6 +202,7 @@ async function measureHeader(page: Page) {
       });
     const h = header.getBoundingClientRect();
     const a = actions.getBoundingClientRect();
+    const statusBadgeEl = header.querySelector<HTMLElement>('scion-status-badge.conv-agent-status');
     return {
       height: h.height,
       left: h.left,
@@ -211,19 +212,19 @@ async function measureHeader(page: Page) {
       contextLeft: contextBox ? contextBox.getBoundingClientRect().left : null,
       contextRight: contextBox ? contextBox.getBoundingClientRect().right : null,
       actionsLeft: a.left,
-      statusBadge: header.querySelector<HTMLElement>('scion-status-badge.conv-agent-status')
+      statusBadge: statusBadgeEl
         ? {
-            status: header
-              .querySelector('scion-status-badge.conv-agent-status')!
-              .getAttribute('status'),
-            right: header
-              .querySelector('scion-status-badge.conv-agent-status')!
-              .getBoundingClientRect().right,
+            status: statusBadgeEl.getAttribute('status'),
+            right: statusBadgeEl.getBoundingClientRect().right,
           }
         : null,
       breadcrumbLeft:
         header.querySelector('.conv-agent-breadcrumb')?.getBoundingClientRect().left ?? null,
-      hasEmoji: Boolean(header.querySelector('.conv-agent-emoji')?.textContent?.includes('🤖')),
+      hasEmoji: Boolean(header.textContent?.includes('🤖')),
+      projectHref:
+        header.querySelector<HTMLAnchorElement>('a.conv-crumb')?.getAttribute('href') ?? null,
+      agentHref:
+        header.querySelector<HTMLAnchorElement>('a.conv-agent-crumb')?.getAttribute('href') ?? null,
       folderIcon: header.querySelector('.conv-crumb sl-icon')?.getAttribute('name') ?? null,
       robotIcon: header.querySelector('.conv-agent-crumb sl-icon')?.getAttribute('name') ?? null,
       crumb: line('.conv-crumb .conv-text'),
@@ -265,7 +266,13 @@ test.describe('agent DM header', () => {
         m.statusBadge!.right,
         'agent status badge sits to the left of the agent breadcrumb'
       ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
-      expect(m.hasEmoji, 'robot emoji sits in the agent context').toBe(true);
+      expect(m.hasEmoji, 'no standalone robot emoji in the header').toBe(false);
+      expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+        `/projects/${PROJECT_A.id}`
+      );
+      expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+        `/agents/${AGENT_MEMBER_ID}`
+      );
       expect(m.folderIcon, 'project breadcrumb uses folder icon').toBe('folder');
       expect(m.robotIcon, 'agent breadcrumb uses robot icon').toBe('robot');
       expect(m.contextRight, 'agent context stays inside the header').toBeLessThanOrEqual(
@@ -482,7 +489,7 @@ test.describe('agent DM header in touch landscape (844x390)', () => {
 });
 
 test.describe('agent DM header on a wide desktop', () => {
-  test('keeps the full row of actions with robot emoji and breadcrumb immediately left of terminal', async ({
+  test('keeps the full row of actions with status badge and linked breadcrumb immediately left of terminal', async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop-1440', 'the wide layout');
@@ -496,7 +503,13 @@ test.describe('agent DM header on a wide desktop', () => {
       m.statusBadge!.right,
       'agent status badge sits to the left of the agent breadcrumb'
     ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
-    expect(m.hasEmoji, 'robot emoji rendered').toBe(true);
+    expect(m.hasEmoji, 'no standalone robot emoji rendered').toBe(false);
+    expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+      `/projects/${PROJECT_A.id}`
+    );
+    expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+      `/agents/${AGENT_MEMBER_ID}`
+    );
     expect(m.folderIcon, 'folder icon rendered').toBe('folder');
     expect(m.robotIcon, 'robot icon rendered').toBe('robot');
     const terminalBtn = m.buttons.find((b) => b.label === 'Open terminal');
@@ -523,16 +536,24 @@ test.describe('agent DM header on a wide desktop', () => {
     for (const b of m.buttons) {
       expect(b.right, `${b.label} ends inside the header`).toBeLessThanOrEqual(m.right + 0.5);
     }
+
+    // Clicking the breadcrumb segments navigates to the console pages.
+    await page.locator('.v2-thread-header a.conv-crumb').click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_A.id}$`));
+    await page.goBack();
+    await expect(page.locator('.v2-thread-header a.conv-agent-crumb')).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.locator('.v2-thread-header a.conv-agent-crumb').click();
+    await expect(page).toHaveURL(new RegExp(`/agents/${AGENT_MEMBER_ID}$`));
   });
 
-  test('group conversation with default agent uses the same right-hand emoji + breadcrumb layout', async ({
+  test('group conversation with default agent uses the same right-hand status badge + linked breadcrumb layout', async ({
     page,
   }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop-1440', 'the wide layout');
     await openChatRail(page, async (p) => {
       await p.route(/\/api\/v1\/chat\/spaces\/([^/]+)\/threads/, async (route) => {
-        const res = await route.fetch().catch(() => null);
-        void res;
         await route.fulfill({
           json: {
             threads: [
@@ -585,7 +606,13 @@ test.describe('agent DM header on a wide desktop', () => {
       m.statusBadge!.right,
       'agent status badge sits to the left of the agent breadcrumb'
     ).toBeLessThanOrEqual(m.breadcrumbLeft! + 0.5);
-    expect(m.hasEmoji, 'robot emoji rendered').toBe(true);
+    expect(m.hasEmoji, 'no standalone robot emoji rendered').toBe(false);
+    expect(m.projectHref, 'project breadcrumb links to project overview').toBe(
+      `/projects/${PROJECT_A.id}`
+    );
+    expect(m.agentHref, 'agent breadcrumb links to agent detail').toBe(
+      `/agents/${AGENT_MEMBER_ID}`
+    );
     expect(m.folderIcon, 'folder icon rendered').toBe('folder');
     expect(m.robotIcon, 'robot icon rendered').toBe('robot');
     const terminalBtn = m.buttons.find((b) => b.label === 'Open terminal');
