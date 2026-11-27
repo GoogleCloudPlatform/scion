@@ -2469,6 +2469,18 @@ func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "C0123ABC", newConv.ParentRef)
 
+	msgsAfter2, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	var foundNewStored bool
+	for _, m := range msgsAfter2.Items {
+		if m.Msg == "broker agent-message creating new canonical thread" {
+			foundNewStored = true
+			assert.Equal(t, newConv.ID, m.ConversationID,
+				"stored message conversation_id must equal Phase-11 canonical conversation")
+		}
+	}
+	assert.True(t, foundNewStored, "expected stored message for new canonical thread request")
+
 	// 3. parent_ref without external_ref is rejected with 400 (matching contract §4).
 	reqBody3 := MessageRequest{
 		Surface:   "slack",
@@ -2545,4 +2557,18 @@ func TestHandleAgentMessage_Phase11_ThreadKeyAndLegacyFallback(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.GetConversationByExternalRef(ctx, "slack", dupKey)
 	assert.ErrorIs(t, err, store.ErrNotFound, "legacy_ref reuse must not create a duplicate canonical conversation row")
+
+	// Verify the STORED message row carries the seeded pre-P4 conversation_id
+	// (not a Phase-5 fallback DM conversation).
+	storedMsgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	var foundLegacyStored bool
+	for _, m := range storedMsgs.Items {
+		if m.Msg == "broker agent-message hitting legacy_ref without thread_id" {
+			foundLegacyStored = true
+			assert.Equal(t, seededLegacyRef.ConversationID, m.ConversationID,
+				"stored message conversation_id must equal seeded pre-P4 row")
+		}
+	}
+	assert.True(t, foundLegacyStored, "expected stored message for legacy_ref agent-message request")
 }

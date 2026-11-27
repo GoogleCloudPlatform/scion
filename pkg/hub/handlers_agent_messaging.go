@@ -2715,6 +2715,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
+	var phase11ConvResult *messaging.ConversationResult
 	if req.Surface != "" && req.ExternalRef != "" {
 		if _, keyErr := deriveBrokerInboundThreadKey(agent.ProjectID, req.ExternalRef); keyErr != nil {
 			messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
@@ -2737,6 +2738,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
 			return
 		} else {
+			phase11ConvResult = convResult
 			if structuredMsg.Metadata == nil {
 				structuredMsg.Metadata = make(map[string]string)
 			}
@@ -3198,6 +3200,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Surface:        conv.Surface,
 				DisplayName:    conv.DisplayName,
 			}
+		} else if phase11ConvResult != nil {
+			// Broker-authenticated Phase 11 resolution already resolved or created
+			// the project-scoped external thread conversation (new key or read-only
+			// legacy_ref/thread_id fallback); persist that conversation_id directly
+			// instead of falling through to Phase-5 derivation.
+			convResult = phase11ConvResult
+			storeMsg.ConversationID = phase11ConvResult.ConversationID
 		} else {
 			// B5 SECURITY: derive sender identity for the conversation key
 			// from the authenticated context, never from the message payload.
