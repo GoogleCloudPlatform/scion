@@ -824,3 +824,128 @@ func TestHookPath_DirectOTelSuppressedFromMarker(t *testing.T) {
 		})
 	}
 }
+
+func TestPipeline_NativeMeteringOnlyCombinedWithSuppressDirectOTel(t *testing.T) {
+	mkBatch := func() []*metricpb.ResourceMetrics {
+		now := uint64(time.Now().UnixNano())
+		mkCounter := func(name string, val int64) *metricpb.Metric {
+			return &metricpb.Metric{
+				Name: name,
+				Data: &metricpb.Metric_Sum{
+					Sum: &metricpb.Sum{
+						AggregationTemporality: metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+						IsMonotonic:            true,
+						DataPoints: []*metricpb.NumberDataPoint{{
+							StartTimeUnixNano: now - 1000,
+							TimeUnixNano:      now,
+							Value:             &metricpb.NumberDataPoint_AsInt{AsInt: val},
+						}},
+					},
+				},
+			}
+		}
+		mkRM := func(serviceName string, metrics ...*metricpb.Metric) *metricpb.ResourceMetrics {
+			return &metricpb.ResourceMetrics{
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{{
+						Key:   "service.name",
+						Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: serviceName}},
+					}},
+				},
+				ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: metrics}},
+			}
+		}
+		return []*metricpb.ResourceMetrics{
+			// Native harness metric (non-sciontool resource): always dropped by metering-only.
+			mkRM("claude-code", mkCounter("native.harness.metric", 99)),
+			// sciontool-derived canonical usage counters: exported when suppress=false, stripped when suppress=true.
+			mkRM("sciontool",
+				mkCounter(telemetrycontract.MetricAPICalls, 1),
+				mkCounter(telemetrycontract.MetricUsageTokens, 500),
+				// sciontool non-canonical metric: always passes both filters.
+				mkCounter("agent.tool.calls", 3),
+			),
+		}
+	}
+
+	for _, tc := range []struct {
+		name           string
+		suppressDirect bool
+		wantCanonical  bool
+	}{
+		{
+			name:           "metering_only_on_suppress_off",
+			suppressDirect: false,
+			wantCanonical:  true,
+		},
+		{
+			name:           "metering_only_on_suppress_on",
+			suppressDirect: true,
+			wantCanonical:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, backend := startCaptureOTLPBackend(t)
+			p := NewWithConfig(&Config{
+				Enabled:      true,
+				CloudEnabled: true,
+				Endpoint:     addr,
+				Protocol:     "grpc",
+				Insecure:     true,
+				GRPCPort:     0,
+				HTTPPort:     0,
+			})
+			p.SetNativeMeteringOnly(true)
+			p.SetAnalyticsOutbox(t.TempDir(), -1, -1)
+			p.SetHubUsageSink(HubUsageSinkConfig{
+				Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					return &telemetrycontract.UsageIngestResponse{SuppressDirectOTel: tc.suppressDirect}, nil
+				},
+				RunID:              "run-metering-suppress",
+				HubID:              "hub-metering-suppress",
+				SuppressDirectOTel: tc.suppressDirect,
+				DrainInterval:      time.Hour,
+				HeartbeatInterval:  time.Hour,
+			})
+
+			ctx := context.Background()
+			if err := p.Start(ctx); err != nil {
+				t.Fatalf("Pipeline.Start: %v", err)
+			}
+			if p.SuppressDirectOTel() != tc.suppressDirect {
+				t.Fatalf("SuppressDirectOTel() = %v, want %v", p.SuppressDirectOTel(), tc.suppressDirect)
+			}
+			if !p.NativeMeteringOnly() {
+				t.Fatal("expected NativeMeteringOnly() = true")
+			}
+
+			if err := p.handleMetrics(ctx, mkBatch()); err != nil {
+				t.Fatalf("handleMetrics: %v", err)
+			}
+
+			stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			_ = p.Stop(stopCtx)
+
+			backend.mu.Lock()
+			defer backend.mu.Unlock()
+			names := exportedMetricNames(backend.metrics)
+
+			if names["native.harness.metric"] != 0 {
+				t.Fatalf("expected native.harness.metric dropped by metering-only, got %v", names)
+			}
+			if names["agent.tool.calls"] == 0 {
+				t.Fatalf("expected sciontool non-canonical agent.tool.calls to pass both filters, got %v", names)
+			}
+			if tc.wantCanonical {
+				if names[telemetrycontract.MetricAPICalls] == 0 || names[telemetrycontract.MetricUsageTokens] == 0 {
+					t.Fatalf("expected sciontool canonical counters exported when suppress=false, got %v", names)
+				}
+			} else {
+				if names[telemetrycontract.MetricAPICalls] != 0 || names[telemetrycontract.MetricUsageTokens] != 0 {
+					t.Fatalf("expected sciontool canonical counters stripped when suppress=true, got %v", names)
+				}
+			}
+		})
+	}
+}
