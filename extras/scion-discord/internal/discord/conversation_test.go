@@ -424,8 +424,19 @@ func TestDiscordBroker_Publish_HubEnrichedDirectConversationNeverBroadcasts(t *t
 		assert.Empty(t, sentChannelIDs(f.transport), "must never broadcast private DM to project channel links")
 	})
 
-	t.Run("agent recipient with direct kind is dropped and never broadcast to non-observer links", func(t *testing.T) {
+	t.Run("agent-to-agent observer DM reaches only ShowAgentToAgent link", func(t *testing.T) {
 		f := newDMRouteFixture(t)
+		const observeCh = "210000000000000001"
+		require.NoError(t, f.store.CreateChannelLink(ctx, &ChannelLink{
+			ChannelID:        observeCh,
+			GuildID:          testGuildID,
+			ProjectID:        dmTestProjectID,
+			ProjectSlug:      dmTestProjectID,
+			LinkedBy:         "test",
+			LinkedAt:         time.Now(),
+			Active:           true,
+			ShowAgentToAgent: true,
+		}))
 		proxy := hub.NewMessageBrokerProxy(&discordForwardingBus{broker: f.broker}, convStore, nil, nil, slog.Default())
 
 		err := proxy.PublishMessage(ctx, projectID, &messages.StructuredMessage{
@@ -434,13 +445,14 @@ func TestDiscordBroker_Publish_HubEnrichedDirectConversationNeverBroadcasts(t *t
 			SenderID:       dmTestAgentID,
 			Recipient:      "agent:reviewer",
 			RecipientID:    "33333333-3333-4333-8333-333333333333",
-			Msg:            "agent-to-agent direct message",
+			Msg:            "agent-to-agent direct observer copy",
 			Type:           messages.TypeInstruction,
-			Channel:        "discord",
+			ObserverOnly:   true,
 			ConversationID: "conv-dm-a2a",
 		})
 		require.NoError(t, err)
 		assert.Empty(t, f.dmCreateCalls())
-		assert.Empty(t, sentChannelIDs(f.transport))
+		assert.Equal(t, []string{observeCh}, sentChannelIDs(f.transport),
+			"observer copy must reach ShowAgentToAgent link and not non-observe link")
 	})
 }

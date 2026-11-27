@@ -352,6 +352,12 @@ func TestSlackBroker_Publish_HubEnrichedOptionAShapes(t *testing.T) {
 		Active:           true,
 		ShowAgentToAgent: true,
 	}))
+	require.NoError(t, b.store.CreateChannelLink(ctx, &ChannelLink{
+		ChannelID:        "C_PUBLIC_NO_OBS",
+		ProjectID:        "p1",
+		Active:           true,
+		ShowAgentToAgent: false,
+	}))
 
 	projectID := "p1"
 	threadKey, threadKind, _, err := messaging.DeriveConversationKey(messaging.KeyInputs{
