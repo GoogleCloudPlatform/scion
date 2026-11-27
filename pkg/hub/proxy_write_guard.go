@@ -20,11 +20,11 @@ import (
 // Second check (a POST, PUT, or PATCH from a browser with a non-empty body):
 // the body must use a content type the route accepts: application/json;
 // multipart/form-data on a POST upload route (see isMultipartUploadRoute);
-// application/octet-stream on a PUT chunked upload route (see
-// isLargeUploadChunkRoute); or a browser policy report type on the POST policy
-// report route (see isPolicyReportRoute). Other requests, including ones with
-// an absent or unparseable content type, get 415. DELETE is left to the first
-// check.
+// application/octet-stream on a PUT chunked upload or artifact version-file
+// route (see isOctetStreamPutRoute); or a browser policy report type on the
+// POST policy report route (see isPolicyReportRoute). Other requests, including
+// ones with an absent or unparseable content type, get 415. DELETE is left to
+// the first check.
 //
 // Page view requests (/api/v1/portview/, as isPortViewRequest accepts them) are
 // not checked: the route authorizes by capability and serves an agent app's own
@@ -115,6 +115,35 @@ func isLargeUploadChunkRoute(path string) bool {
 		}
 	}
 	return false
+}
+
+// isArtifactVersionFileRoute reports whether p matches
+// /api/v1/artifacts/{id}/versions/{seq}/files/{path...} where id, seq, and at
+// least one file path segment (any depth) are non-empty. Browser artifact
+// publishing (web/src/client/artifacts.ts publishFiles) uploads version files
+// via PUT with Content-Type: application/octet-stream.
+func isArtifactVersionFileRoute(p string) bool {
+	segs := strings.Split(strings.TrimRight(p, "/"), "/")
+	// ["", "api", "v1", "artifacts", id, "versions", seq, "files", file...]
+	if len(segs) < 9 {
+		return false
+	}
+	if segs[0] != "" || segs[1] != "api" || segs[2] != "v1" || segs[3] != "artifacts" ||
+		segs[4] == "" || segs[5] != "versions" || segs[6] == "" || segs[7] != "files" {
+		return false
+	}
+	for _, s := range segs[8:] {
+		if s == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// isOctetStreamPutRoute reports whether p is an /api/v1 PUT route that
+// legitimately accepts an application/octet-stream body from a browser.
+func isOctetStreamPutRoute(p string) bool {
+	return isLargeUploadChunkRoute(p) || isArtifactVersionFileRoute(p)
 }
 
 // isMultipartUploadRoute reports whether path matches one of the upload-route
@@ -224,7 +253,7 @@ func acceptableWriteBody(r *http.Request) bool {
 	case "multipart/form-data":
 		return r.Method == http.MethodPost && isMultipartUploadRoute(r.URL.Path)
 	case "application/octet-stream":
-		return r.Method == http.MethodPut && isLargeUploadChunkRoute(r.URL.Path)
+		return r.Method == http.MethodPut && isOctetStreamPutRoute(r.URL.Path)
 	case policyReportMediaType, legacyPolicyReportMediaType:
 		return r.Method == http.MethodPost && isPolicyReportRoute(r.URL.Path)
 	default:

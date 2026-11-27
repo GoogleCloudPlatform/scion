@@ -332,6 +332,61 @@ func TestProxyWriteGuard_LargeUploadOctetStreamCarveOut(t *testing.T) {
 	}
 }
 
+func TestProxyWriteGuard_ArtifactVersionFilePutOctetStream(t *testing.T) {
+	// Browser artifact publishing (web/src/client/artifacts.ts publishFiles)
+	// uploads version files via PUT application/octet-stream at arbitrary path
+	// depth. In proxy auth mode, same-origin PUT must reach the handler while
+	// cross-site PUT gets 403 and POST/PATCH with octet-stream get 415.
+	validPaths := []string{
+		"/api/v1/artifacts/art-123/versions/1/files/readme.md",
+		"/api/v1/artifacts/art-123/versions/42/files/a/b/c.md",
+	}
+	for _, route := range validPaths {
+		code, reached := doGuardBody(proxyAuthMode, http.MethodPut, route, "rawbytes", map[string]string{
+			"Sec-Fetch-Site": "same-origin",
+			"Content-Type":   "application/octet-stream",
+		})
+		if !reached || code != http.StatusOK {
+			t.Fatalf("PUT octet-stream %q: want pass-through, got code=%d reached=%v", route, code, reached)
+		}
+		codeXS, reachedXS := doGuardBody(proxyAuthMode, http.MethodPut, route, "rawbytes", map[string]string{
+			"Sec-Fetch-Site": "cross-site",
+			"Content-Type":   "application/octet-stream",
+		})
+		if reachedXS || codeXS != http.StatusForbidden {
+			t.Fatalf("PUT octet-stream cross-site %q: want 403 not reached, got code=%d reached=%v", route, codeXS, reachedXS)
+		}
+		for _, m := range []string{http.MethodPost, http.MethodPatch} {
+			codeM, reachedM := doGuardBody(proxyAuthMode, m, route, "rawbytes", map[string]string{
+				"Sec-Fetch-Site": "same-origin",
+				"Content-Type":   "application/octet-stream",
+			})
+			if reachedM || codeM != http.StatusUnsupportedMediaType {
+				t.Fatalf("%s octet-stream %q: want 415 not reached, got code=%d reached=%v", m, route, codeM, reachedM)
+			}
+		}
+	}
+
+	// Incomplete or empty-segment artifact paths must still be refused (415).
+	invalidPaths := []string{
+		"/api/v1/artifacts/art-123/versions/1/files",
+		"/api/v1/artifacts/art-123/versions/1/files/",
+		"/api/v1/artifacts/art-123/versions/1",
+		"/api/v1/artifacts//versions/1/files/a.md",
+		"/api/v1/artifacts/art-123/versions//files/a.md",
+		"/api/v1/artifacts/art-123/versions/1/files/a//b.md",
+	}
+	for _, route := range invalidPaths {
+		code, reached := doGuardBody(proxyAuthMode, http.MethodPut, route, "rawbytes", map[string]string{
+			"Sec-Fetch-Site": "same-origin",
+			"Content-Type":   "application/octet-stream",
+		})
+		if reached || code != http.StatusUnsupportedMediaType {
+			t.Fatalf("PUT octet-stream invalid artifact path %q: want 415 not reached, got code=%d reached=%v", route, code, reached)
+		}
+	}
+}
+
 func TestProxyWriteGuard_Belt2BrowserOnly(t *testing.T) {
 	// A POST that is not from a browser (neither Origin nor Sec-Fetch-Site) is
 	// not subject to the second check.
