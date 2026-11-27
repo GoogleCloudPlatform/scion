@@ -25,11 +25,38 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { DISPLAY_TIMEZONE_CHANGED_EVENT, setPreferredTimeZone } from '../../utils/time.js';
+import {
+  resetServerFlagStateForTests,
+  setFeatureFlag,
+  TOKENOMICS_USAGE_LEDGER_FLAG,
+} from '../../utils/feature-flags.js';
+
+interface ChartDataset {
+  label: string;
+  data: (number | null)[];
+  spanGaps?: boolean;
+  pointStyle?: string | string[];
+  pointRadius?: number | number[];
+  partialPoints?: boolean[];
+}
 
 interface ChartConfig {
   type: string;
-  data: { labels: string[] };
-  options: { scales: { x: { title: { display: boolean; text: string } } } };
+  data: { labels: string[]; datasets: ChartDataset[] };
+  options: {
+    scales: { x: { title: { display: boolean; text: string } } };
+    plugins?: {
+      tooltip?: {
+        callbacks?: {
+          label?: (ctx: {
+            dataIndex: number;
+            dataset: { partialPoints?: boolean[] };
+            parsed: { y: number | null };
+          }) => string;
+        };
+      };
+    };
+  };
 }
 
 const chartConfigs: ChartConfig[] = [];
@@ -519,5 +546,590 @@ describe('scion-page-metrics — day-bucket zone', () => {
     } finally {
       globalThis.fetch = origFetch;
     }
+  });
+});
+
+describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', () => {
+  let element: MetricsPage | null = null;
+
+  beforeAll(async () => {
+    await import('./metrics-dashboard.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    chartConfigs.length = 0;
+    requestedZones.length = 0;
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function stubResponses(responses: Record<string, unknown>): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string | URL | Request) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        const params = new URL(path, 'http://localhost').searchParams;
+        const view = params.get('view') ?? 'summary';
+        const body = responses[view] ?? SUMMARY;
+        return Promise.resolve(
+          new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+  }
+
+  it('renders canonical tokens, cache hit rate KPI, measurement badge, and source/granularity on Summary', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: {
+        periodDays: 7,
+        timeZone: 'America/Chicago',
+        source: 'hub_rollups',
+        granularity: 'hour',
+        totalSessions: 4,
+        totalApiCalls: 12,
+        totalTokens: 54_500,
+        uniqueAgents: 3,
+        tokens: {
+          input: 12_000,
+          output: 4_500,
+          cacheRead: 36_000,
+          cacheWrite: 2_000,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 54_500,
+          cacheHitRate: 0.72,
+        },
+        cacheHitRate: 0.72,
+        measurement: {
+          status: 'measured',
+          unmeasuredAgents: 0,
+          staleAgents: 0,
+          lastReceiptAt: '2026-11-27T00:05:00Z',
+        },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-source-indicator"]')?.textContent?.trim()
+    ).toBe('Hub rollups · Local-day buckets');
+    expect(root.querySelector('[data-testid="metrics-summary-tokens"]')?.textContent?.trim()).toBe(
+      '54.5K'
+    );
+    expect(
+      root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]')?.textContent?.trim()
+    ).toBe('72.0%');
+
+    const badge = root.querySelector(
+      '[data-testid="metrics-summary-measurement"] scion-measurement-status-badge'
+    );
+    expect(badge).not.toBeNull();
+    expect(
+      badge?.shadowRoot
+        ?.querySelector('[data-testid="measurement-status-pill"]')
+        ?.textContent?.trim()
+    ).toBe('Measured');
+    expect(root.querySelector('[data-testid="metrics-summary-measurement-partial"]')).toBeNull();
+  });
+
+  it('renders null tokens and null cacheHitRate as em dash (never 0) and marks partial coverage', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        totalSessions: 2,
+        totalApiCalls: 5,
+        totalTokens: 0,
+        uniqueAgents: 3,
+        tokens: {
+          input: null,
+          output: null,
+          cacheRead: null,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: null,
+          cacheHitRate: null,
+        },
+        cacheHitRate: null,
+        measurement: {
+          status: 'stale',
+          unmeasuredAgents: 1,
+          staleAgents: 2,
+        },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-source-indicator"]')?.textContent?.trim()
+    ).toBe('Hub rollups · Daily (UTC)');
+    expect(root.querySelector('[data-testid="metrics-summary-tokens"]')?.textContent?.trim()).toBe(
+      '—'
+    );
+    expect(
+      root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]')?.textContent?.trim()
+    ).toBe('—');
+
+    const badge = root.querySelector(
+      '[data-testid="metrics-summary-measurement"] scion-measurement-status-badge'
+    );
+    expect(
+      badge?.shadowRoot
+        ?.querySelector('[data-testid="measurement-status-counts"]')
+        ?.textContent?.trim()
+    ).toBe('1 unmeasured · 2 stale');
+    expect(
+      root.querySelector('[data-testid="metrics-summary-measurement-partial"]')
+    ).not.toBeNull();
+  });
+
+  it('renders cacheRead, cacheWrite, and dailyCacheHitRate charts with null gaps and UTC fallback axis', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: SUMMARY,
+      tokens: {
+        periodDays: 14,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [{ label: 'claude-sonnet', points: [{ timestamp: '2026-11-25', value: 1000 }] }],
+        output: [{ label: 'claude-sonnet', points: [{ timestamp: '2026-11-25', value: 500 }] }],
+        cacheRead: [{ label: 'claude-sonnet', points: [{ timestamp: '2026-11-25', value: 3000 }] }],
+        cacheWrite: [{ label: 'claude-sonnet', points: [{ timestamp: '2026-11-25', value: 200 }] }],
+        totals: {
+          input: 1000,
+          output: 500,
+          cacheRead: 3000,
+          cacheWrite: 200,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 4700,
+          cacheHitRate: 0.7143,
+        },
+        dailyCacheHitRate: [
+          { timestamp: '2026-11-24', value: null },
+          { timestamp: '2026-11-25', value: 0 },
+          { timestamp: '2026-11-26', value: 0.7143 },
+        ],
+        measurement: {
+          status: 'partial',
+          unmeasuredAgents: 1,
+          staleAgents: 0,
+        },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-source-indicator"]')?.textContent?.trim()
+    ).toBe('Hub rollups · Daily (UTC)');
+    expect(root.querySelector('[data-testid="metrics-tokens-summable"]')?.textContent?.trim()).toBe(
+      '≥ 4.7K'
+    );
+    expect(
+      root.querySelector('[data-testid="metrics-tokens-cache-hit-rate-total"]')?.textContent?.trim()
+    ).toBe('≈ 71.4%');
+
+    expect(headings(element, 'tokens')).toEqual([
+      'Daily Input Tokens by Model (UTC)',
+      'Daily Output Tokens by Model (UTC)',
+      'Daily Cache Read Tokens by Model (UTC)',
+      'Daily Cache Write Tokens by Model (UTC)',
+      'Daily Cache Hit Rate (UTC)',
+    ]);
+
+    // 5 charts: input, output, cacheRead, cacheWrite, dailyCacheHitRate
+    expect(chartConfigs).toHaveLength(5);
+    const hitRateChart = chartConfigs[4];
+    expect(hitRateChart.type).toBe('line');
+    expect(hitRateChart.data.labels).toEqual(['2026-11-24', '2026-11-25', '2026-11-26']);
+    expect(hitRateChart.data.datasets[0].data).toEqual([null, 0, 71.4]);
+    expect(hitRateChart.data.datasets[0].spanGaps).toBe(false);
+    expect(hitRateChart.options.scales.x.title.text).toBe('Day (UTC)');
+  });
+
+  it('keeps working with Cloud Monitoring source (tokenomics fields absent) and gates UI when experiment is off', async () => {
+    // Experiment ON, but Cloud Monitoring response has no tokens/cacheHitRate/measurement/cacheRead/cacheWrite.
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: { ...SUMMARY, source: 'cloud_monitoring', timeZone: 'UTC' },
+      tokens: { ...TOKENS, source: 'cloud_monitoring', timeZone: 'UTC' },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-source-indicator"]')?.textContent?.trim()
+    ).toBe('Cloud Monitoring');
+    expect(root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]')).toBeNull();
+    expect(root.querySelector('[data-testid="metrics-summary-measurement"]')).toBeNull();
+
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-tokens-cache-charts"]')).toBeNull();
+    expect(root.querySelector('[data-testid="metrics-tokens-hit-rate-section"]')).toBeNull();
+    expect(chartConfigs).toHaveLength(2);
+
+    // Experiment OFF hides tokenomics UI even when HubRollupSource fields exist.
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-source-indicator"]')).toBeNull();
+  });
+
+  it('uses null gaps on HubRollupSource bar series, distinguishes unknown empty cache charts, marks partial totals on null buckets, and applies saturation only to Summable Total', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: SUMMARY,
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [
+          {
+            label: 'model-a',
+            points: [
+              { timestamp: '2026-11-24', value: 1000 },
+              { timestamp: '2026-11-25', value: 2000 },
+            ],
+          },
+          {
+            label: 'model-b',
+            points: [{ timestamp: '2026-11-25', value: 500 }],
+          },
+        ],
+        output: [
+          {
+            label: 'model-a',
+            points: [{ timestamp: '2026-11-24', value: 400 }],
+          },
+        ],
+        cacheRead: [],
+        cacheWrite: [],
+        totals: {
+          input: 3500,
+          output: 400,
+          cacheRead: 0,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 3900,
+          cacheHitRate: null,
+          saturated: true,
+        },
+        measurement: {
+          status: 'measured',
+          unmeasuredAgents: 0,
+          staleAgents: 0,
+        },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    // O3 + N2: summableTokens is marked partial (≥) because cacheWrite is null, and saturated (+) applies only to Summable Total.
+    expect(root.querySelector('[data-testid="metrics-tokens-summable"]')?.textContent?.trim()).toBe(
+      '≥ 3.9K+'
+    );
+    expect(
+      root.querySelector('[data-testid="metrics-tokens-input-total"]')?.textContent?.trim()
+    ).toBe('3.5K');
+    expect(
+      root.querySelector('[data-testid="metrics-tokens-cache-write-total"]')?.textContent?.trim()
+    ).toBe('—');
+
+    // O2: measured 0 cacheRead says "No cache read tokens", while null cacheWrite says "not reported".
+    expect(
+      root.querySelector('[data-testid="metrics-cache-read-empty"]')?.textContent?.trim()
+    ).toBe('No cache read tokens in this period.');
+    expect(
+      root.querySelector('[data-testid="metrics-cache-write-empty"]')?.textContent?.trim()
+    ).toBe('Cache write tokens not reported in this period.');
+
+    // O4: multi-series hub_rollups bar chart uses null (not 0) for omitted dates on model-b.
+    const inputChart = chartConfigs[0];
+    expect(inputChart.data.labels).toEqual(['2026-11-24', '2026-11-25']);
+    expect(inputChart.data.datasets[0].data).toEqual([1000, 2000]);
+    expect(inputChart.data.datasets[1].data).toEqual([null, 500]);
+  });
+
+  it('shows not-reported text on empty cacheRead chart when totals.cacheRead is null', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: SUMMARY,
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [{ label: 'model-a', points: [{ timestamp: '2026-11-25', value: 1000 }] }],
+        output: [{ label: 'model-a', points: [{ timestamp: '2026-11-25', value: 500 }] }],
+        cacheRead: [],
+        cacheWrite: [],
+        totals: {
+          input: 1000,
+          output: 500,
+          cacheRead: null,
+          cacheWrite: 0,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 1500,
+          cacheHitRate: null,
+        },
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-cache-read-empty"]')?.textContent?.trim()
+    ).toBe('Cache read tokens not reported in this period.');
+    expect(
+      root.querySelector('[data-testid="metrics-cache-write-empty"]')?.textContent?.trim()
+    ).toBe('No cache write tokens in this period.');
+  });
+
+  it('renders truncated notices on sessions/model-calls/tokens, shows generic partialFailure copy without leaking raw errors, and logs details to console', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubResponses({
+      summary: {
+        ...SUMMARY,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        totalSessions: null,
+        partialFailure: true,
+        partialErrors: ['daily sessions: sql: driver internal error'],
+      },
+      sessions: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        dailyCounts: [],
+        activeAgents: [{ timestamp: '2026-11-25', value: 2 }],
+        truncated: true,
+        partialFailure: true,
+        partialErrors: ['daily sessions: sql: driver internal error'],
+      },
+      'model-calls': {
+        ...MODEL_CALLS,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        truncated: true,
+      },
+      tokens: {
+        ...TOKENS,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        truncated: true,
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    // Summary: totalSessions=null renders Unavailable (never 0) + generic partial-failure alert (no raw SQL/driver text).
+    expect(
+      root.querySelector('[data-testid="metrics-summary-sessions"]')?.textContent?.trim()
+    ).toBe('Unavailable');
+    const summaryAlert = root.querySelector('[data-testid="metrics-summary-partial-failure"]');
+    expect(summaryAlert).not.toBeNull();
+    expect(summaryAlert?.textContent).toContain('Some metrics could not be loaded');
+    expect(summaryAlert?.textContent).not.toContain('sql: driver internal error');
+    expect(warnSpy).toHaveBeenCalledWith('[metrics-dashboard] partial failure on view=summary:', [
+      'daily sessions: sql: driver internal error',
+    ]);
+
+    // Sessions: partialFailure with empty dailyCounts shows unavailable placeholder + truncated notice.
+    element.activeTab = 'sessions';
+    await element.loadView('sessions');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-sessions-unavailable"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="metrics-sessions-partial-failure"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="metrics-sessions-partial-failure"]')?.textContent
+    ).not.toContain('sql: driver internal error');
+    expect(root.querySelector('[data-testid="metrics-sessions-truncated"]')?.textContent).toContain(
+      'earliest boundary day was omitted'
+    );
+
+    // Model calls & Tokens: truncated notice shown.
+    element.activeTab = 'model-calls';
+    await element.loadView('model-calls');
+    await settle(element);
+    expect(
+      root.querySelector('[data-testid="metrics-model-calls-truncated"]')?.textContent
+    ).toContain('daily granularity');
+
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-tokens-truncated"]')?.textContent).toContain(
+      'earliest boundary day was omitted'
+    );
+  });
+
+  it('marks cacheHitRatePartial and dailyCacheHitRate partial points as upper bounds (≤ with tooltip), keeps null as —, and handles absent source when experiment is off', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: {
+        periodDays: 7,
+        timeZone: 'America/Chicago',
+        source: 'hub_rollups',
+        granularity: 'hour',
+        totalSessions: 2,
+        totalApiCalls: 6,
+        totalTokens: 50_000,
+        uniqueAgents: 1,
+        tokens: {
+          input: 12_000,
+          output: 2_000,
+          cacheRead: 36_000,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 50_000,
+          cacheHitRate: 0.75,
+          cacheHitRatePartial: true,
+        },
+        cacheHitRate: 0.75,
+        cacheHitRatePartial: true,
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 1000 }] }],
+        output: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 500 }] }],
+        cacheRead: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 3000 }] }],
+        cacheWrite: [],
+        totals: {
+          input: 1000,
+          output: 500,
+          cacheRead: 3000,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 4500,
+          cacheHitRate: 0.75,
+          cacheHitRatePartial: true,
+        },
+        dailyCacheHitRate: [
+          { timestamp: '2026-11-24', value: null, partial: false },
+          { timestamp: '2026-11-25', value: 0.75, partial: true },
+          { timestamp: '2026-11-26', value: 0.5, partial: false },
+        ],
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    const summaryHitRate = root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]');
+    expect(summaryHitRate?.textContent?.trim()).toBe('≤ 75.0%');
+    expect(summaryHitRate?.getAttribute('title')).toContain('Upper bound');
+
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const tokensHitRate = root.querySelector('[data-testid="metrics-tokens-cache-hit-rate-total"]');
+    expect(tokensHitRate?.textContent?.trim()).toBe('≤ 75.0%');
+    expect(tokensHitRate?.getAttribute('title')).toContain('Upper bound');
+    expect(root.querySelector('[data-testid="metrics-hit-rate-partial-note"]')).not.toBeNull();
+
+    // Hit rate chart marks partial point with triangle and upper-bound tooltip, null stays null.
+    const hitRateChart = chartConfigs[chartConfigs.length - 1];
+    expect(hitRateChart.data.datasets[0].data).toEqual([null, 75, 50]);
+    expect(hitRateChart.data.datasets[0].pointStyle).toEqual(['circle', 'triangle', 'circle']);
+    const tooltipLabel = hitRateChart.options.plugins?.tooltip?.callbacks?.label;
+    expect(tooltipLabel).toBeDefined();
+    expect(
+      tooltipLabel!({
+        dataIndex: 0,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: null },
+      })
+    ).toBe('Cache Hit Rate: —');
+    expect(
+      tooltipLabel!({
+        dataIndex: 1,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: 75 },
+      })
+    ).toContain('≤ 75.0%');
+    expect(
+      tooltipLabel!({
+        dataIndex: 2,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: 50 },
+      })
+    ).toBe('Cache Hit Rate: 50.0%');
+
+    // Experiment OFF with `source` absent on response works cleanly.
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+    stubResponses({
+      summary: { ...SUMMARY, timeZone: 'UTC' },
+      tokens: { ...TOKENS, timeZone: 'UTC' },
+    });
+    await element.loadView('summary');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-source-indicator"]')).toBeNull();
+    expect(root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]')).toBeNull();
   });
 });

@@ -163,9 +163,23 @@ import {
   decisionsEnabled,
   isFeatureEnabled,
   triggersEnabled,
+  usageLedgerEnabled,
 } from '../../utils/feature-flags.js';
 import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
+import '../shared/measurement-status-badge.js';
+import type {
+  DashboardMeasurement,
+  DashboardTokenTotals,
+  ScopedUsageResponse,
+} from '../../shared/types.js';
+import {
+  formatCompactUsageToken,
+  formatUsageWindowLabel,
+  hasPartialDashboardTotals,
+  isMeasurementPartial,
+  summableUnknownEvents,
+} from '../../utils/usage-format.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import '../shared/artifact-list.js';
 
@@ -222,11 +236,19 @@ function isProjectShaped(value: unknown): value is { id: string; name: string } 
 
 /** Project metrics from GET /api/v1/projects/{id}/metrics-summary. */
 interface ProjectMetricsSummary {
-  sessionsCount24h: number;
+  source?: string;
+  granularity?: string;
+  sessionsCount24h: number | null;
   apiCalls24h: number;
   tokenUsage24h: number;
   activeAgents24h: number;
   periodLabel: string;
+  tokens?: DashboardTokenTotals;
+  cacheHitRate?: number | null;
+  cacheHitRatePartial?: boolean;
+  measurement?: DashboardMeasurement;
+  partialFailure?: boolean;
+  partialErrors?: string[];
 }
 
 @customElement('scion-page-project-detail')
@@ -552,6 +574,9 @@ export class ScionPageProjectDetail extends LitElement {
   private triggersEnabled = false;
 
   @state()
+  private usageLedgerEnabled = false;
+
+  @state()
   private waitingOnYouDecisionsCount = 0;
 
   private decisionsCountAbort: AbortController | null = null;
@@ -559,6 +584,15 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnFeatureFlagsChanged = (): void => {
     this.triggersEnabled = triggersEnabled();
+    const nextUsage = usageLedgerEnabled();
+    if (nextUsage !== this.usageLedgerEnabled) {
+      this.usageLedgerEnabled = nextUsage;
+      if (!nextUsage) {
+        this.projectUsage = null;
+      } else if (this.projectId) {
+        void this.loadProjectUsage();
+      }
+    }
     const next = decisionsEnabled();
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
@@ -647,6 +681,13 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private sessionMetricsSummary: ProjectSessionMetricsSummary | null = null;
+
+  /**
+   * Track 1 canonical project token usage summary (loaded only when
+   * tokenomics.usage_ledger is enabled).
+   */
+  @state()
+  private projectUsage: ScopedUsageResponse | null = null;
 
   /**
    * Whether the messages section is expanded (lazy-load trigger)
@@ -1433,6 +1474,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     this.decisionsEnabled = decisionsEnabled();
     this.triggersEnabled = triggersEnabled();
+    this.usageLedgerEnabled = usageLedgerEnabled();
 
     // Set SSE scope to this project (receives all agent events within
     // project) before the first load: a drain belongs to the scope
@@ -1830,6 +1872,9 @@ export class ScionPageProjectDetail extends LitElement {
     // Fetch metrics summary (non-blocking, gracefully degrades)
     void this.loadMetricsSummary();
     void this.loadSessionMetricsSummary();
+    if (this.usageLedgerEnabled) {
+      void this.loadProjectUsage();
+    }
     if (this.decisionsEnabled) {
       void this.loadDecisionsCount();
     }
@@ -1859,6 +1904,9 @@ export class ScionPageProjectDetail extends LitElement {
       if (data && data.available === false) {
         this.metricsSummary = null;
         return;
+      }
+      if (data?.partialFailure && data.partialErrors?.length) {
+        console.warn('[project-detail] metrics-summary partial failure:', data.partialErrors);
       }
       this.metricsSummary = data;
     } catch {
@@ -1916,6 +1964,26 @@ export class ScionPageProjectDetail extends LitElement {
       }
     } catch {
       this.sessionMetricsSummary = null;
+    }
+  }
+
+  private async loadProjectUsage(): Promise<void> {
+    if (!this.usageLedgerEnabled || !this.projectId) return;
+    const projectId = this.projectId;
+    try {
+      const res = await apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/usage`, {
+        suppressAccessDeniedToast: true,
+      });
+      if (!this.isConnected || this.projectId !== projectId || !this.usageLedgerEnabled) return;
+      if (res.ok) {
+        this.projectUsage = (await res.json()) as ScopedUsageResponse;
+      } else {
+        this.projectUsage = null;
+      }
+    } catch {
+      if (this.projectId === projectId) {
+        this.projectUsage = null;
+      }
     }
   }
 
@@ -3282,36 +3350,87 @@ export class ScionPageProjectDetail extends LitElement {
       </div>
 
       ${this.metricsSummary
-        ? html`
-            <div class="stats-row" style="margin-top: 0.5rem;">
-              <div class="stat">
-                <span class="stat-label">Sessions (24h)</span>
-                <span class="stat-value">${this.metricsSummary.sessionsCount24h}</span>
+        ? (() => {
+            const ms = this.metricsSummary;
+            const isDailyFallback =
+              this.usageLedgerEnabled &&
+              (ms.granularity === 'day' ||
+                (Boolean(ms.periodLabel) && ms.periodLabel.startsWith('Since ')));
+            const showPeriodLabel =
+              this.usageLedgerEnabled &&
+              Boolean(ms.periodLabel) &&
+              ms.periodLabel !== 'Last 24 hours';
+            const windowSuffix = isDailyFallback ? '' : ' (24h)';
+            const sessionsUnavailable =
+              ms.sessionsCount24h === null || ms.sessionsCount24h === undefined;
+            return html`
+              <div class="stats-row" style="margin-top: 0.5rem;">
+                <div class="stat">
+                  <span class="stat-label" data-testid="project-sessions-24h-label"
+                    >Sessions${windowSuffix}</span
+                  >
+                  <span class="stat-value" data-testid="project-sessions-24h"
+                    >${sessionsUnavailable ? 'Unavailable' : ms.sessionsCount24h}</span
+                  >
+                </div>
+                <div class="stat">
+                  <span class="stat-label">API Calls${windowSuffix}</span>
+                  <span class="stat-value">${ms.apiCalls24h}</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label" data-testid="project-tokens-24h-label"
+                    >Tokens${windowSuffix}</span
+                  >
+                  <span class="stat-value" data-testid="project-tokens-24h"
+                    >${this.usageLedgerEnabled && ms.tokens
+                      ? formatCompactUsageToken(
+                          ms.tokens.summableTokens,
+                          isMeasurementPartial(ms.measurement) ||
+                            hasPartialDashboardTotals(ms.tokens),
+                          Boolean(ms.tokens.saturated)
+                        )
+                      : this.formatTokenCount(ms.tokenUsage24h)}</span
+                  >
+                  ${this.usageLedgerEnabled && ms.measurement
+                    ? html`<scion-measurement-status-badge
+                        .status=${ms.measurement.status}
+                        .unmeasuredAgents=${ms.measurement.unmeasuredAgents}
+                        .staleAgents=${ms.measurement.staleAgents}
+                        data-testid="project-metrics-24h-measurement"
+                      ></scion-measurement-status-badge>`
+                    : nothing}
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Active Agents${windowSuffix}</span>
+                  <span class="stat-value">${ms.activeAgents24h}</span>
+                </div>
+                ${showPeriodLabel
+                  ? html`<div
+                      style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-text-muted);"
+                      data-testid="project-metrics-period-label"
+                    >
+                      ${ms.periodLabel}
+                    </div>`
+                  : nothing}
+                ${this.usageLedgerEnabled && ms.partialFailure
+                  ? html`<div
+                      style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-warning-600);"
+                      data-testid="project-metrics-24h-partial-failure"
+                    >
+                      Some data unavailable
+                    </div>`
+                  : nothing}
+                <div style="display: flex; align-items: center; margin-left: auto;">
+                  <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
+                    <sl-button size="small" variant="text">
+                      <sl-icon slot="prefix" name="graph-up"></sl-icon>
+                      View Details
+                    </sl-button>
+                  </a>
+                </div>
               </div>
-              <div class="stat">
-                <span class="stat-label">API Calls (24h)</span>
-                <span class="stat-value">${this.metricsSummary.apiCalls24h}</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">Tokens (24h)</span>
-                <span class="stat-value"
-                  >${this.formatTokenCount(this.metricsSummary.tokenUsage24h)}</span
-                >
-              </div>
-              <div class="stat">
-                <span class="stat-label">Active Agents (24h)</span>
-                <span class="stat-value">${this.metricsSummary.activeAgents24h}</span>
-              </div>
-              <div style="display: flex; align-items: center; margin-left: auto;">
-                <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
-                  <sl-button size="small" variant="text">
-                    <sl-icon slot="prefix" name="graph-up"></sl-icon>
-                    View Details
-                  </sl-button>
-                </a>
-              </div>
-            </div>
-          `
+            `;
+          })()
         : nothing}
       ${this.sessionMetricsSummary
         ? html`
@@ -3321,13 +3440,44 @@ export class ScionPageProjectDetail extends LitElement {
                 <span class="stat-value">${this.sessionMetricsSummary.totalSessions}</span>
               </div>
               <div class="stat">
-                <span class="stat-label">Total Tokens</span>
-                <span class="stat-value"
-                  >${this.formatTokenCount(
-                    this.sessionMetricsSummary.totalTokensInput +
-                      this.sessionMetricsSummary.totalTokensOutput
-                  )}</span
+                <span class="stat-label" data-testid="project-total-tokens-label"
+                  >${this.usageLedgerEnabled && this.projectUsage
+                    ? formatUsageWindowLabel(this.projectUsage.window)
+                    : 'Total Tokens'}</span
                 >
+                <span class="stat-value" data-testid="project-total-tokens"
+                  >${this.usageLedgerEnabled && this.projectUsage
+                    ? formatCompactUsageToken(
+                        this.projectUsage.tokens.summable_tokens,
+                        summableUnknownEvents(
+                          this.projectUsage.tokens,
+                          this.projectUsage.null_token_events
+                        ) > 0 ||
+                          (this.projectUsage.tokens.summable_tokens !== null &&
+                            (this.projectUsage.tokens.input === null ||
+                              this.projectUsage.tokens.output === null ||
+                              this.projectUsage.tokens.cache_read === null ||
+                              this.projectUsage.tokens.cache_write === null)) ||
+                          isMeasurementPartial({
+                            status: this.projectUsage.measurement_status,
+                            unmeasuredAgents: this.projectUsage.unmeasured_agents,
+                            staleAgents: this.projectUsage.stale_agents,
+                          }),
+                        Boolean(this.projectUsage.tokens.saturated)
+                      )
+                    : this.formatTokenCount(
+                        this.sessionMetricsSummary.totalTokensInput +
+                          this.sessionMetricsSummary.totalTokensOutput
+                      )}</span
+                >
+                ${this.usageLedgerEnabled && this.projectUsage
+                  ? html`<scion-measurement-status-badge
+                      .status=${this.projectUsage.measurement_status}
+                      .unmeasuredAgents=${this.projectUsage.unmeasured_agents}
+                      .staleAgents=${this.projectUsage.stale_agents}
+                      data-testid="project-total-tokens-measurement"
+                    ></scion-measurement-status-badge>`
+                  : nothing}
               </div>
               <div class="stat">
                 <span class="stat-label">Active Agents</span>

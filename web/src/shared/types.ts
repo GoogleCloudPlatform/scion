@@ -2699,6 +2699,7 @@ export interface AgentUsageTokens {
   reasoning: number | null;
   summable_tokens: number | null;
   unknown_events?: AgentUsageBucketUnknownEvents;
+  saturated?: boolean;
 }
 
 /**
@@ -2753,4 +2754,82 @@ export interface AgentUsageResponse {
   measurement_status: UsageMeasurementStatus;
   as_of: string;
   last_receipt_at: string | null;
+}
+
+/**
+ * Scope reference returned by scoped usage summary APIs
+ * (GET /api/v1/projects/{id}/usage, /users/{id}/usage, /me/usage, /usage).
+ */
+export interface UsageScopeRef {
+  kind: string;
+  id?: string;
+}
+
+/**
+ * Track 1 scoped operational token usage summary (P2.1a).
+ * Response from GET /api/v1/projects/{id}/usage (behind tokenomics.usage_ledger).
+ */
+export interface ScopedUsageResponse {
+  scope: UsageScopeRef;
+  window: AgentUsageWindow & { granularity: 'hour' | 'day' };
+  group_by?: string[];
+  calls: number;
+  error_calls: number;
+  events: number;
+  null_token_events: number;
+  tokens: AgentUsageTokens;
+  truncated: boolean;
+  measurement_status: UsageMeasurementStatus;
+  unmeasured_agents: number;
+  stale_agents: number;
+  as_of: string;
+  last_receipt_at: string | null;
+}
+
+/**
+ * Nullable canonical Track 1 token totals returned by HubRollupSource on
+ * dashboard endpoints (summary, tokens, metrics-summary).
+ */
+export interface DashboardTokenUnknownEvents {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cacheWrite1h?: number;
+  reasoning?: number;
+}
+
+export interface DashboardTokenTotals {
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+  cacheWrite1h: number | null;
+  reasoning: number | null;
+  summableTokens: number | null;
+  cacheHitRate: number | null;
+  cacheHitRatePartial?: boolean;
+  unknownEvents?: DashboardTokenUnknownEvents;
+  saturated?: boolean;
+}
+
+/**
+ * Track 1 measurement coverage summary returned by HubRollupSource on
+ * dashboard endpoints.
+ */
+export interface DashboardMeasurement {
+  status: UsageMeasurementStatus;
+  unmeasuredAgents: number;
+  staleAgents: number;
+  lastReceiptAt?: string;
+}
+
+/**
+ * Time-series point whose value may be unknown (JSON null), such as daily
+ * cache hit rate when tokens are unmeasured or the denominator is zero.
+ */
+export interface NullableFloatPoint {
+  timestamp: string;
+  value: number | null;
+  partial?: boolean;
 }

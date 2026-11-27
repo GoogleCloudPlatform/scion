@@ -20,9 +20,9 @@ import {
   computeCacheHitRate,
   formatCacheHitRate,
   formatUsageToken,
-  measurementStatusDisplay,
-  ScionAgentUsagePanel,
-} from './agent-usage-panel.js';
+} from '../../utils/usage-format.js';
+import { measurementStatusDisplay } from './measurement-status-badge.js';
+import { ScionAgentUsagePanel } from './agent-usage-panel.js';
 import './agent-usage-panel.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -241,8 +241,10 @@ describe('scion-agent-usage-panel', () => {
     expect(root.querySelector('[data-testid="usage-calls"]')?.textContent).toContain('1 errors');
 
     const badge = root.querySelector('[data-testid="usage-measurement-status"]');
-    expect(badge?.getAttribute('variant')).toBe('success');
-    expect(badge?.textContent?.trim()).toBe('Measured');
+    expect(badge?.tagName.toLowerCase()).toBe('scion-measurement-status-badge');
+    const pill = badge?.shadowRoot?.querySelector('[data-testid="measurement-status-pill"]');
+    expect(pill?.getAttribute('variant')).toBe('success');
+    expect(pill?.textContent?.trim()).toBe('Measured');
 
     const lastUpdated = root.querySelector('[data-testid="usage-last-updated"]')?.textContent ?? '';
     expect(lastUpdated).toContain('Last updated:');
@@ -306,8 +308,10 @@ describe('scion-agent-usage-panel', () => {
     );
 
     const badge = root.querySelector('[data-testid="usage-measurement-status"]');
-    expect(badge?.getAttribute('variant')).toBe('warning');
-    expect(badge?.textContent?.trim()).toBe('Stale');
+    expect(badge?.tagName.toLowerCase()).toBe('scion-measurement-status-badge');
+    const pill = badge?.shadowRoot?.querySelector('[data-testid="measurement-status-pill"]');
+    expect(pill?.getAttribute('variant')).toBe('warning');
+    expect(pill?.textContent?.trim()).toBe('Stale');
 
     expect(root.querySelector('[data-testid="usage-null-events-notice"]')).not.toBeNull();
   });
@@ -402,5 +406,159 @@ describe('scion-agent-usage-panel', () => {
       '/api/v1/agents/agent-3/usage?since=7d',
       expect.any(Object)
     );
+  });
+
+  it('shows error with Retry button on failed lazy load and retries on re-entry via loadIfNeeded', async () => {
+    const okPayload: AgentUsageResponse = {
+      agent_id: 'agent-retry',
+      project_id: 'proj-1',
+      window: { since: '2026-10-26T00:00:00Z', until: '2026-11-25T23:59:59.999999Z' },
+      calls: 2,
+      error_calls: 0,
+      events: 2,
+      null_token_events: 0,
+      tokens: {
+        input: 100,
+        output: 50,
+        cache_read: 200,
+        cache_write: 50,
+        cache_write_1h: null,
+        reasoning: null,
+        summable_tokens: 400,
+      },
+      by_model: [],
+      measurement_status: 'measured',
+      as_of: '2026-11-25T18:00:00Z',
+      last_receipt_at: '2026-11-25T17:59:00Z',
+    };
+
+    // First call fails with HTTP 500; second call succeeds.
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: { message: 'temporary hub outage' } }, 500))
+      .mockResolvedValueOnce(jsonResponse(okPayload));
+
+    const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
+    el.agentId = 'agent-retry';
+    container.appendChild(el);
+    await el.loadIfNeeded();
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const errBox = el.shadowRoot!.querySelector('[data-testid="usage-error"]');
+    expect(errBox).not.toBeNull();
+    expect(errBox?.textContent).toContain('temporary hub outage');
+
+    // Re-entering the tab calls loadIfNeeded() which must retry after failure.
+    await el.loadIfNeeded();
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(el.shadowRoot!.querySelector('[data-testid="usage-error"]')).toBeNull();
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()
+    ).toBe('400');
+
+    // Once loaded successfully, subsequent loadIfNeeded() is a no-op.
+    await el.loadIfNeeded();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('recovers when clicking the Retry button after a network error', async () => {
+    const okPayload: AgentUsageResponse = {
+      agent_id: 'agent-retry-btn',
+      project_id: 'proj-1',
+      window: { since: '2026-10-26T00:00:00Z', until: '2026-11-25T23:59:59.999999Z' },
+      calls: 1,
+      error_calls: 0,
+      events: 1,
+      null_token_events: 0,
+      tokens: {
+        input: 10,
+        output: 5,
+        cache_read: 0,
+        cache_write: 0,
+        cache_write_1h: null,
+        reasoning: null,
+        summable_tokens: 15,
+      },
+      by_model: [],
+      measurement_status: 'measured',
+      as_of: '2026-11-25T18:00:00Z',
+      last_receipt_at: '2026-11-25T17:59:00Z',
+    };
+
+    fetchMock
+      .mockRejectedValueOnce(new Error('network offline'))
+      .mockResolvedValueOnce(jsonResponse(okPayload));
+
+    const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
+    el.agentId = 'agent-retry-btn';
+    container.appendChild(el);
+    await el.loadIfNeeded();
+    await waitForPanel(el);
+
+    const retryBtn = el.shadowRoot!.querySelector(
+      '[data-testid="usage-error"] sl-button'
+    ) as HTMLElement | null;
+    expect(retryBtn).not.toBeNull();
+    retryBtn!.click();
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(el.shadowRoot!.querySelector('[data-testid="usage-error"]')).toBeNull();
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()
+    ).toBe('15');
+  });
+
+  it('deduplicates concurrent loadIfNeeded calls while a fetch is still in flight', async () => {
+    let resolveFetch!: (res: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
+    el.agentId = 'agent-inflight';
+    container.appendChild(el);
+
+    const first = el.loadIfNeeded();
+    // Re-entering the Usage tab while the first request is still pending must not start a second request.
+    const second = el.loadIfNeeded();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      jsonResponse({
+        agent_id: 'agent-inflight',
+        project_id: 'proj-1',
+        window: { since: '2026-10-29T00:00:00Z', until: '2026-11-27T03:00:00Z' },
+        calls: 1,
+        error_calls: 0,
+        events: 1,
+        null_token_events: 0,
+        tokens: {
+          input: 10,
+          output: 5,
+          cache_read: 0,
+          cache_write: 0,
+          cache_write_1h: null,
+          reasoning: null,
+          summable_tokens: 15,
+        },
+        by_model: [],
+        measurement_status: 'measured',
+        as_of: '2026-11-27T03:00:00Z',
+        last_receipt_at: '2026-11-27T02:59:00Z',
+      })
+    );
+    await Promise.all([first, second]);
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()
+    ).toBe('15');
   });
 });
