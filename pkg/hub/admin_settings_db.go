@@ -1728,7 +1728,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		var candidate opsettings.AgentLimitsSettings
 		if req.AgentLimits != nil {
 			candidate = *req.AgentLimits
-			candidate.MaxDuration = strings.TrimSpace(candidate.MaxDuration)
+			// Normalize blank/whitespace-only to empty (clear), but preserve
+			// non-blank padded strings (e.g. " 2h", "2h ", "2h\t") so
+			// opsettings.Validate / ParseAgentLimitsDoc refuses them.
+			if strings.TrimSpace(candidate.MaxDuration) == "" {
+				candidate.MaxDuration = ""
+			}
 		}
 		if !s.experimentEnabled(experiments.AgentPolicyLimitCeilings) && !candidate.IsEmpty() {
 			stored := ops.AgentLimits()

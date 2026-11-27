@@ -2349,6 +2349,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
@@ -2501,6 +2505,9 @@ func (d *HTTPAgentDispatcher) dispatchProvisionWithWorkspaceSource(ctx context.C
 		return err
 	}
 	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
 		return err
 	}
 
@@ -2763,6 +2770,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
 		return nil, err
 	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreateWithGather", failOnSecretResolutionError)
 	if err != nil {
@@ -2984,6 +2994,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -4241,6 +4254,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
@@ -4664,6 +4681,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.limitCeilingsBrokerPrecheck(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)

@@ -77,11 +77,10 @@ func ParseAgentLimitsDoc(raw json.RawMessage) (AgentLimitsSettings, error) {
 	if doc.MaxModelCalls < 0 {
 		return AgentLimitsSettings{}, fmt.Errorf("agent_limits settings: max_model_calls must be >= 0, got %d", doc.MaxModelCalls)
 	}
-	doc.MaxDuration = strings.TrimSpace(doc.MaxDuration)
-	if doc.MaxDuration != "" {
-		if d := api.ParseDuration(doc.MaxDuration); d <= 0 {
-			return AgentLimitsSettings{}, fmt.Errorf("agent_limits settings: max_duration must be a positive duration (leave empty for no ceiling), got %q", doc.MaxDuration)
-		}
+	if strings.TrimSpace(doc.MaxDuration) == "" {
+		doc.MaxDuration = ""
+	} else if d := api.ParseDuration(doc.MaxDuration); d <= 0 {
+		return AgentLimitsSettings{}, fmt.Errorf("agent_limits settings: max_duration must be a positive duration (leave empty for no ceiling), got %q", doc.MaxDuration)
 	}
 	return doc, nil
 }
@@ -176,16 +175,15 @@ func validateAgentDefaultsAgainstLimits(
 
 	if ceilingStr := strings.TrimSpace(limits.MaxDuration); ceilingStr != "" {
 		if ceilingDur := api.ParseDuration(ceilingStr); ceilingDur > 0 {
-			defStr := strings.TrimSpace(defaults.DefaultMaxDuration)
 			switch {
-			case defStr != "":
-				defDur := api.ParseDuration(defStr)
+			case strings.TrimSpace(defaults.DefaultMaxDuration) != "":
+				defDur := api.ParseDuration(defaults.DefaultMaxDuration)
 				if defDur <= 0 {
 					errs = append(errs, config.ValidationError{
 						Path: "default_max_duration",
 						Message: fmt.Sprintf(
 							"agent_defaults.default_max_duration (%q) must be a positive duration while agent_limits.max_duration ceiling (%s) is set",
-							defStr, ceilingStr,
+							defaults.DefaultMaxDuration, ceilingStr,
 						),
 					})
 				} else if defDur > ceilingDur {
@@ -193,7 +191,7 @@ func validateAgentDefaultsAgainstLimits(
 						Path: "default_max_duration",
 						Message: fmt.Sprintf(
 							"agent_defaults.default_max_duration (%s) exceeds agent_limits.max_duration ceiling (%s)",
-							defStr, ceilingStr,
+							defaults.DefaultMaxDuration, ceilingStr,
 						),
 					})
 				}

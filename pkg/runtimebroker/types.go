@@ -147,6 +147,9 @@ type BrokerCapabilities struct {
 	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
 	// (ptone/scion#5605).
 	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
+	// LimitCeilings indicates this broker enforces Hub-supplied LimitCeilings
+	// on create, start and restart.
+	LimitCeilings bool `json:"limitCeilings,omitempty"`
 	// ClearedResourceSubfields indicates this broker applies the resources
 	// sub-field entries of cleared_fields (api.ResourceSubPaths) at start
 	// (ptone/scion#5676).

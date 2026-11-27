@@ -100,10 +100,13 @@ func ClampLimits(cfg *api.ScionConfig, ceilings *api.LimitCeilings) (clamped []s
 
 	if ceilingStr := strings.TrimSpace(ceilings.MaxDuration); ceilingStr != "" {
 		if ceilingDur := api.ParseDuration(ceilingStr); ceilingDur > 0 {
-			curStr := strings.TrimSpace(cfg.MaxDuration)
-			if curStr == "" {
+			// Treat blank/whitespace-only as unset (fill to ceiling), but parse
+			// non-blank values untrimmed so whitespace-padded durations (e.g.
+			// " 5m", "5m ", "1h\t") that sciontool would parse as 0 (no limit)
+			// are clamped to the ceiling and reported in clamped.
+			if strings.TrimSpace(cfg.MaxDuration) == "" {
 				cfg.MaxDuration = ceilingStr
-			} else if curDur := api.ParseDuration(curStr); curDur <= 0 || curDur > ceilingDur {
+			} else if curDur := api.ParseDuration(cfg.MaxDuration); curDur <= 0 || curDur > ceilingDur {
 				cfg.MaxDuration = ceilingStr
 				clamped = append(clamped, "max_duration")
 			}

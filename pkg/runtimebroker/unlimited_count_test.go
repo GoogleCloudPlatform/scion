@@ -68,3 +68,21 @@ func TestStaticCapabilities_UnlimitedCountLimits(t *testing.T) {
 		t.Fatal("StaticCapabilityNames lacks unlimitedCountLimits")
 	}
 }
+
+// TestStaticCapabilities_LimitCeilings verifies that this broker advertises
+// the limitCeilings capability in both StaticCapabilities and
+// StaticCapabilityNames.
+func TestStaticCapabilities_LimitCeilings(t *testing.T) {
+	if !StaticCapabilities(nil, "").LimitCeilings {
+		t.Fatal("StaticCapabilities: LimitCeilings = false")
+	}
+	found := false
+	for _, n := range StaticCapabilityNames(nil) {
+		if n == "limitCeilings" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("StaticCapabilityNames lacks limitCeilings")
+	}
+}

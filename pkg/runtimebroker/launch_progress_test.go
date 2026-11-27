@@ -732,6 +732,21 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 			t.Fatalf("message %q leaked raw image reference", msg)
 		}
 	})
+	t.Run("limit_ceilings_unsupported classifies cleanly without leaking raw details", func(t *testing.T) {
+		err := &scionrt.LaunchFailure{
+			Code: api.LaunchCodeLimitCeilingsUnsupported,
+			Step: api.LaunchStepLaunching,
+			Err:  errors.New("broker /var/secret/path lacks limitCeilings"),
+		}
+		code, step, msg := classifyStartError(context.Background(), err, "", api.LaunchStepLaunching, store.LaunchKindCreate)
+		wantMsg := launchFailureText[api.LaunchCodeLimitCeilingsUnsupported]
+		if code != api.LaunchCodeLimitCeilingsUnsupported || step != api.LaunchStepLaunching || msg != wantMsg {
+			t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", code, step, msg, api.LaunchCodeLimitCeilingsUnsupported, api.LaunchStepLaunching, wantMsg)
+		}
+		if strings.Contains(msg, "/var/secret/path") {
+			t.Fatalf("message %q leaked raw error details", msg)
+		}
+	})
 }
 
 // TestClassifyStartError_TimeoutInAwaitingCapacity: a launch that runs out

@@ -176,6 +176,27 @@ func TestClampLimits(t *testing.T) {
 			wantDuration: "1h",
 			wantClamped:  []string{"max_turns", "max_duration"},
 		},
+		{
+			name:         "leading-whitespace padded duration clamped to ceiling",
+			cfg:          api.ScionConfig{MaxDuration: " 5m"},
+			ceilings:     &api.LimitCeilings{MaxDuration: "1h"},
+			wantDuration: "1h",
+			wantClamped:  []string{"max_duration"},
+		},
+		{
+			name:         "trailing-whitespace padded duration clamped to ceiling",
+			cfg:          api.ScionConfig{MaxDuration: "5m "},
+			ceilings:     &api.LimitCeilings{MaxDuration: "1h"},
+			wantDuration: "1h",
+			wantClamped:  []string{"max_duration"},
+		},
+		{
+			name:         "tab-padded duration clamped to ceiling",
+			cfg:          api.ScionConfig{MaxDuration: "30m\t"},
+			ceilings:     &api.LimitCeilings{MaxDuration: "1h"},
+			wantDuration: "1h",
+			wantClamped:  []string{"max_duration"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.cfg

@@ -15,11 +15,14 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -70,19 +73,146 @@ func (s *Server) agentLimitCeilings() opsettings.AgentLimitsSettings {
 	return ops.AgentLimits()
 }
 
-// validateCreateMaxTurnsAgainstCeiling checks an agent create request's
-// max_turns against ceilings.MaxTurns. Nil (unset) is allowed and will be
-// resolved/filled by the broker. When a ceiling is set (> 0), explicit 0
-// (unlimited) and values above the ceiling are refused.
-func validateCreateMaxTurnsAgainstCeiling(maxTurns *int, ceilings opsettings.AgentLimitsSettings) error {
-	if ceilings.MaxTurns <= 0 || maxTurns == nil {
+// limitCeilingViolation describes a single run-limit value that violates a Hub
+// agent_limits ceiling.
+type limitCeilingViolation struct {
+	Field     string
+	Ceiling   interface{}
+	Requested interface{}
+	Message   string
+}
+
+// validateLimitsAgainstCeilings checks optional count limits and duration
+// against ceilings. Unset values (nil count, empty/whitespace duration) are
+// allowed and will be resolved/filled by lower tiers or the broker. When a
+// ceiling is configured (> 0), explicit 0 / "0" (unlimited), unparsable or
+// non-positive durations, and values above the ceiling are refused.
+func validateLimitsAgainstCeilings(
+	turnsField string, maxTurns *int,
+	callsField string, maxModelCalls *int,
+	durationField string, maxDuration string,
+	ceilings opsettings.AgentLimitsSettings,
+) *limitCeilingViolation {
+	if ceilings.MaxTurns > 0 && maxTurns != nil {
+		if *maxTurns == 0 {
+			return &limitCeilingViolation{
+				Field:     turnsField,
+				Ceiling:   ceilings.MaxTurns,
+				Requested: *maxTurns,
+				Message:   fmt.Sprintf("%s cannot be 0 (unlimited) while hub ceiling (%d) is set", turnsField, ceilings.MaxTurns),
+			}
+		}
+		if *maxTurns > ceilings.MaxTurns {
+			return &limitCeilingViolation{
+				Field:     turnsField,
+				Ceiling:   ceilings.MaxTurns,
+				Requested: *maxTurns,
+				Message:   fmt.Sprintf("%s (%d) exceeds hub ceiling (%d)", turnsField, *maxTurns, ceilings.MaxTurns),
+			}
+		}
+	}
+	if ceilings.MaxModelCalls > 0 && maxModelCalls != nil {
+		if *maxModelCalls == 0 {
+			return &limitCeilingViolation{
+				Field:     callsField,
+				Ceiling:   ceilings.MaxModelCalls,
+				Requested: *maxModelCalls,
+				Message:   fmt.Sprintf("%s cannot be 0 (unlimited) while hub ceiling (%d) is set", callsField, ceilings.MaxModelCalls),
+			}
+		}
+		if *maxModelCalls > ceilings.MaxModelCalls {
+			return &limitCeilingViolation{
+				Field:     callsField,
+				Ceiling:   ceilings.MaxModelCalls,
+				Requested: *maxModelCalls,
+				Message:   fmt.Sprintf("%s (%d) exceeds hub ceiling (%d)", callsField, *maxModelCalls, ceilings.MaxModelCalls),
+			}
+		}
+	}
+	if ceilingStr := strings.TrimSpace(ceilings.MaxDuration); ceilingStr != "" {
+		if ceilingDur := api.ParseDuration(ceilingStr); ceilingDur > 0 {
+			// Treat as set whenever non-blank, but parse the raw value
+			// untrimmed: sciontool parses SCION_MAX_DURATION with
+			// api.ParseDuration (time.ParseDuration), which returns 0
+			// (no limit) for whitespace-padded strings like " 5m" or "5m ".
+			if strings.TrimSpace(maxDuration) != "" {
+				d := api.ParseDuration(maxDuration)
+				if d <= 0 {
+					return &limitCeilingViolation{
+						Field:     durationField,
+						Ceiling:   ceilingStr,
+						Requested: maxDuration,
+						Message:   fmt.Sprintf("%s (%q) must be a positive duration not exceeding hub ceiling (%s)", durationField, maxDuration, ceilingStr),
+					}
+				}
+				if d > ceilingDur {
+					return &limitCeilingViolation{
+						Field:     durationField,
+						Ceiling:   ceilingStr,
+						Requested: maxDuration,
+						Message:   fmt.Sprintf("%s (%s) exceeds hub ceiling (%s)", durationField, maxDuration, ceilingStr),
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateScionConfigAgainstCeilings checks an inline ScionConfig's run limits
+// (max_turns, max_model_calls, max_duration) against ceilings.
+func validateScionConfigAgainstCeilings(cfg *api.ScionConfig, ceilings opsettings.AgentLimitsSettings) *limitCeilingViolation {
+	if cfg == nil || ceilings.IsEmpty() {
 		return nil
 	}
-	if *maxTurns == 0 {
-		return fmt.Errorf("max_turns cannot be 0 (unlimited) while hub ceiling (%d) is set", ceilings.MaxTurns)
+	return validateLimitsAgainstCeilings(
+		"max_turns", cfg.MaxTurns,
+		"max_model_calls", cfg.MaxModelCalls,
+		"max_duration", cfg.MaxDuration,
+		ceilings,
+	)
+}
+
+// writeLimitCeilingRefusal writes the standard HTTP 400
+// limit_exceeds_hub_ceiling error response for v.
+func writeLimitCeilingRefusal(w http.ResponseWriter, v *limitCeilingViolation) {
+	writeError(w, http.StatusBadRequest, ErrCodeLimitExceedsHubCeiling, v.Message, map[string]interface{}{
+		"field":     v.Field,
+		"ceiling":   v.Ceiling,
+		"requested": v.Requested,
+	})
+}
+
+// limitCeilingsBrokerPrecheck refuses dispatch when Hub agent_limits ceilings
+// are active (experiment enabled and at least one ceiling configured) and the
+// target runtime broker does not advertise Capabilities.LimitCeilings (design
+// §3.4.2, D3).
+func (d *HTTPAgentDispatcher) limitCeilingsBrokerPrecheck(ctx context.Context, agent *store.Agent) error {
+	if d.agentLimitCeilings().IsEmpty() {
+		return nil
 	}
-	if *maxTurns > ceilings.MaxTurns {
-		return fmt.Errorf("max_turns (%d) exceeds hub ceiling (%d)", *maxTurns, ceilings.MaxTurns)
+	if d.store == nil || agent == nil || agent.RuntimeBrokerID == "" {
+		return &RuntimeTargetRefusal{
+			Code:    api.LaunchCodeLimitCeilingsUnsupported,
+			Status:  http.StatusPreconditionFailed,
+			Message: "the runtime broker does not support hub agent limit ceilings; upgrade the runtime broker",
+		}
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("failed to load runtime broker for limit ceilings capability check: %w (%w)", err, errStartRequestNotSent)
+	}
+	if broker == nil || broker.Capabilities == nil || !broker.Capabilities.LimitCeilings {
+		name := agent.RuntimeBrokerID
+		if broker != nil && broker.Name != "" {
+			name = broker.Name
+		}
+		return &RuntimeTargetRefusal{
+			Code:    api.LaunchCodeLimitCeilingsUnsupported,
+			Status:  http.StatusPreconditionFailed,
+			Message: fmt.Sprintf("the runtime broker does not support hub agent limit ceilings (broker %s); upgrade the runtime broker", name),
+			Details: map[string]interface{}{"brokerId": agent.RuntimeBrokerID},
+		}
 	}
 	return nil
 }

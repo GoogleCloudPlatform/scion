@@ -54,6 +54,9 @@ func TestParseAgentLimitsDoc_RefusesInvalid(t *testing.T) {
 		`{"max_duration": "0s"}`,
 		`{"max_duration": "-5m"}`,
 		`{"max_duration": "not-a-duration"}`,
+		`{"max_duration": " 2h"}`,
+		`{"max_duration": "2h "}`,
+		`{"max_duration": "2h\t"}`,
 		`{"max_turns": 10} {"extra": true}`,
 	} {
 		if _, err := ParseAgentLimitsDoc(json.RawMessage(raw)); err == nil {
@@ -99,6 +102,11 @@ func TestValidateAgentDefaultsDocAgainstLimits(t *testing.T) {
 		}
 		if errs := ValidateAgentDefaultsDocAgainstLimits(json.RawMessage(`{"default_max_duration":"2h"}`), limits); len(errs) != 1 {
 			t.Errorf("default_max_duration=2h: want 1 error, got %v", errs)
+		}
+		for _, padded := range []string{`{"default_max_duration":" 5m"}`, `{"default_max_duration":"5m "}`, `{"default_max_duration":"30m\t"}`} {
+			if errs := ValidateAgentDefaultsDocAgainstLimits(json.RawMessage(padded), limits); len(errs) != 1 {
+				t.Errorf("%s: want 1 error, got %v", padded, errs)
+			}
 		}
 	})
 

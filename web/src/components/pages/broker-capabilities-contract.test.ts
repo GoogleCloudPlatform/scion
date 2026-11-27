@@ -52,6 +52,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'ephemeralPersistence',
   'githubTokenInstallationOnly',
   'homeFiles',
+  'limitCeilings',
   'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',
