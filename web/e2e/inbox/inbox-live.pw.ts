@@ -383,13 +383,15 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       );
       expect(storedFilter).toBe('mentions');
 
-      const unreadBtn = rail.locator('.filter-toggle button', { hasText: 'Unread' });
-      const mentionsChip = rail.locator('[data-mentions-chip]');
-      await expect(unreadBtn).toHaveAttribute('aria-pressed', 'true');
-      await expect(mentionsChip).toBeVisible();
-      await expect(mentionsChip).toHaveAttribute('aria-pressed', 'true');
+      const dropdownTrigger = rail.locator('[data-unread-dropdown-trigger]');
+      await expect(dropdownTrigger).toBeVisible();
+      await expect(dropdownTrigger).toContainText('Mentions');
+      await expect(dropdownTrigger).toHaveAttribute('aria-pressed', 'true');
+      await expect(dropdownTrigger).toHaveAttribute('aria-haspopup', 'menu');
+      await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
 
-      // Expand the shown space and confirm only the mentioned thread appears (plain unread thread and Unread DMs hidden).
+      // Expand the shown space and confirm only the mentioned thread appears (plain unread thread and Unread DMs hidden),
+      // matching the Inbox Chat card's "1 with mentions" count.
       const spaceHeader = rail.locator('.space-header').first();
       await expect(spaceHeader).toBeVisible({ timeout: 10_000 });
       await spaceHeader.click();
@@ -399,7 +401,40 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
       await expect(rail.locator('.dm-section')).toHaveCount(0);
 
-      // AC-8 extended: toolbar and individual filter button labels do not overflow or clip across 200-260px rail widths.
+      // Open the dropdown and switch Mentions -> Unread -> Mentions via menu items.
+      await dropdownTrigger.click();
+      await expect(dropdownTrigger).toHaveAttribute('aria-expanded', 'true');
+      const unreadMenuItem = rail.locator('[data-unread-filter-menu] sl-menu-item[value="unread"]');
+      const mentionsMenuItem = rail.locator(
+        '[data-unread-filter-menu] sl-menu-item[value="mentions"]'
+      );
+      await expect(mentionsMenuItem).toHaveAttribute('checked', '');
+      await expect(unreadMenuItem).toBeVisible();
+      await unreadMenuItem.click();
+      await expect(unreadMenuItem).toBeHidden();
+      await expect(dropdownTrigger).toContainText('Unread');
+      await expect(dropdownTrigger).toHaveAttribute('aria-pressed', 'true');
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'mentions-' })).toBeVisible(
+        { timeout: 10_000 }
+      );
+      expect(await page.evaluate(() => localStorage.getItem('scion-chat-space-filter'))).toBe(
+        'unread'
+      );
+
+      // Switch back to Mentions via the dropdown.
+      await dropdownTrigger.click();
+      await expect(unreadMenuItem).toHaveAttribute('checked', '');
+      await expect(mentionsMenuItem).toBeVisible();
+      await mentionsMenuItem.click();
+      await expect(mentionsMenuItem).toBeHidden();
+      await expect(dropdownTrigger).toContainText('Mentions');
+      await expect(rail.locator('.thread-item .thread-name', { hasText: 'plain-' })).toHaveCount(0);
+
+      // AC-8 extended: toolbar and individual filter button labels (including Mentions + caret)
+      // do not overflow or clip across 200-260px rail widths.
       for (const width of [200, 230, 240, 260]) {
         const probe = await page.evaluate((w) => {
           const chatPage = document.querySelector('scion-page-chat');
@@ -411,7 +446,7 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
           }
           const railEl = chatPage?.shadowRoot?.querySelector('scion-chat-space-rail');
           const toolbar = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-toolbar');
-          const subfilter = railEl?.shadowRoot?.querySelector<HTMLElement>('.rail-subfilter');
+          const caret = railEl?.shadowRoot?.querySelector<HTMLElement>('.filter-caret');
           const buttons = Array.from(
             railEl?.shadowRoot?.querySelectorAll<HTMLElement>('.filter-toggle button') ?? []
           );
@@ -425,13 +460,13 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
             width: w,
             railWidth: railEl?.getBoundingClientRect().width ?? 0,
             toolbarOverflow: toolbar ? toolbar.scrollWidth > toolbar.clientWidth + 1 : true,
-            subfilterOverflow: subfilter ? subfilter.scrollWidth > subfilter.clientWidth + 1 : true,
+            caretVisible: caret ? getComputedStyle(caret).display !== 'none' : false,
             buttonOverflows,
           };
         }, width);
         expect(probe.railWidth, `width=${width}`).toBeLessThanOrEqual(width + 1);
         expect(probe.toolbarOverflow, `width=${width}`).toBe(false);
-        expect(probe.subfilterOverflow, `width=${width}`).toBe(false);
+        expect(probe.caretVisible, `width=${width}`).toBe(true);
         expect(probe.buttonOverflows.length, `width=${width}`).toBeGreaterThanOrEqual(3);
         expect(
           probe.buttonOverflows.every((b) => !b.clipped),
@@ -439,7 +474,27 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         ).toBe(true);
       }
 
-      // Hydrate ?filter=starred directly -> Starred active, chip hidden, param stripped.
+      // Browser back returns from the opened space thread to /chat, and a second back returns to /profile/inbox.
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await expect(chatCard).toBeVisible({ timeout: 15_000 });
+      await chatCard.locator('a[data-card-prose-link="chat-unread"]').click();
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => new URL(page.url()).searchParams.has('filter'), { timeout: 5_000 })
+        .toBe(false);
+      await expect(dropdownTrigger).toContainText('Unread');
+      await expect(dropdownTrigger).toHaveAttribute('aria-pressed', 'true');
+
+      // Single-step browser back/forward works cleanly after ?filter=unread hydration.
+      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await expect(chatCard).toBeVisible({ timeout: 15_000 });
+      await page.goForward({ waitUntil: 'domcontentloaded' });
+      await expect(rail).toBeVisible({ timeout: 15_000 });
+      await expect(dropdownTrigger).toContainText('Unread');
+      await expect(dropdownTrigger).toHaveAttribute('aria-pressed', 'true');
+
+      // Hydrate ?filter=starred directly -> Starred active, dropdown resets to Unread (inactive), param stripped.
       await page.goto('/chat?filter=starred', { waitUntil: 'domcontentloaded' });
       await expect(rail).toBeVisible({ timeout: 15_000 });
       await expect
@@ -449,7 +504,8 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
         'aria-pressed',
         'true'
       );
-      await expect(rail.locator('[data-mentions-chip]')).toHaveCount(0);
+      await expect(dropdownTrigger).toContainText('Unread');
+      await expect(dropdownTrigger).toHaveAttribute('aria-pressed', 'false');
 
       expect(pageErrors).toEqual([]);
     } finally {
