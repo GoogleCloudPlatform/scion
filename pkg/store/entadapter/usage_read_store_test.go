@@ -983,3 +983,145 @@ func TestUsageRead_HourlyConsistencyMixedBinary(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, okCleanMulti, "clean multi-day window must pass hourly consistency check")
 }
+
+func TestCountUsageActiveAgents_HourlyDailyAndScope(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projA := createTestProject(t, cs, "active-agents-proj-a")
+	projB := createTestProject(t, cs, "active-agents-proj-b")
+	user1 := createTestUser(t, cs, "active-agents-u1@example.com")
+	user2 := createTestUser(t, cs, "active-agents-u2@example.com")
+
+	ag1 := uuid.NewString()
+	ag2 := uuid.NewString()
+	agOtherProj := uuid.NewString()
+	run1 := "run-" + uuid.NewString()
+	run2 := "run-" + uuid.NewString()
+	runOther := "run-" + uuid.NewString()
+
+	seedRunForIngestTest(t, cs, projA, ag1, run1, &user1)
+	seedRunForIngestTest(t, cs, projA, ag2, run2, &user1)
+	seedRunForIngestTest(t, cs, projB, agOtherProj, runOther, &user2)
+
+	day1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 11, 25, 14, 0, 0, 0, time.UTC)
+
+	// ag1 is active in two hours on day1 and one hour on day2; ag2 is active on day2.
+	_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag1,
+		Events: []*store.UsageEvent{
+			makeStoreUsageEvent("hub-aa", "aa-1", run1, projA, ag1, &user1, 1, day1, 10, 5, 0, 0),
+			makeStoreUsageEvent("hub-aa", "aa-2", run1, projA, ag1, &user1, 2, day1.Add(time.Hour), 20, 5, 0, 0),
+			makeStoreUsageEvent("hub-aa", "aa-3", run1, projA, ag1, &user1, 3, day2, 30, 5, 0, 0),
+		},
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag2,
+		Events: []*store.UsageEvent{
+			makeStoreUsageEvent("hub-aa", "aa-4", run2, projA, ag2, &user1, 1, day2.Add(time.Hour), 15, 5, 0, 0),
+		},
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agOtherProj,
+		Events: []*store.UsageEvent{
+			makeStoreUsageEvent("hub-aa", "aa-5", runOther, projB, agOtherProj, &user2, 1, day2, 50, 10, 0, 0),
+		},
+	})
+	require.NoError(t, err)
+
+	// Daily granularity for projA: TotalUniqueAgents=2 (never 1+2=3), per-day buckets=[1, 2].
+	dailyRes, err := cs.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+		Granularity:    store.UsageGranularityDay,
+		Since:          day1.Add(-time.Hour),
+		Until:          day2.Add(2 * time.Hour),
+		ProjectID:      projA,
+		IncludeBuckets: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, dailyRes.TotalUniqueAgents)
+	require.Len(t, dailyRes.BucketCounts, 2)
+	assert.Equal(t, time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC), dailyRes.BucketCounts[0].BucketStart)
+	assert.Equal(t, int64(1), dailyRes.BucketCounts[0].Count)
+	assert.Equal(t, time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC), dailyRes.BucketCounts[1].BucketStart)
+	assert.Equal(t, int64(2), dailyRes.BucketCounts[1].Count)
+
+	// Hourly granularity for projA: TotalUniqueAgents=2, 4 distinct (hour, agent_id) pairs.
+	hourlyRes, err := cs.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+		Granularity:    store.UsageGranularityHour,
+		Since:          day1,
+		Until:          day2.Add(2 * time.Hour),
+		ProjectID:      projA,
+		IncludeBuckets: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, hourlyRes.TotalUniqueAgents)
+	require.Len(t, hourlyRes.BucketAgents, 4)
+
+	// Global scope includes agOtherProj -> TotalUniqueAgents=3.
+	globalRes, err := cs.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+		Granularity: store.UsageGranularityDay,
+		Since:       day1.Add(-time.Hour),
+		Until:       day2.Add(2 * time.Hour),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, globalRes.TotalUniqueAgents)
+}
+
+func TestCountSessionMetrics_DeduplicatesAcrossSegmentsAndDays(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projA := createTestProject(t, cs, "sess-count-proj-a")
+	projB := createTestProject(t, cs, "sess-count-proj-b")
+	ag1 := uuid.NewString()
+	ag2 := uuid.NewString()
+
+	t1 := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	t3 := time.Date(2026, 11, 25, 15, 0, 0, 0, time.UTC)
+	tOut := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+
+	// Session s1 spans two days (two segments for same agent_id + session_id).
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag1, ProjectID: projA, SessionID: "s1", StartedAt: t1,
+	}))
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag1, ProjectID: projA, SessionID: "s1", StartedAt: t2,
+	}))
+	// Session s2 on day 2 in projA.
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag2, ProjectID: projA, SessionID: "s2", StartedAt: t3,
+	}))
+	// Session outside window in projA.
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag1, ProjectID: projA, SessionID: "s-old", StartedAt: tOut,
+	}))
+	// Session in projB inside window.
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag2, ProjectID: projB, SessionID: "s-other", StartedAt: t2,
+	}))
+
+	resA, err := cs.CountSessionMetrics(ctx, store.SessionMetricsCountQuery{
+		Since:         t1.Add(-time.Hour),
+		Until:         t3.Add(time.Hour),
+		ProjectID:     projA,
+		IncludeEvents: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resA.TotalSessions, "s1 across two days must be counted once in TotalSessions")
+	require.Len(t, resA.Sessions, 3)
+
+	resGlobal, err := cs.CountSessionMetrics(ctx, store.SessionMetricsCountQuery{
+		Since: t1.Add(-time.Hour),
+		Until: t3.Add(time.Hour),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), resGlobal.TotalSessions)
+}

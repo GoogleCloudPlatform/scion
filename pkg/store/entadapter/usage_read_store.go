@@ -39,8 +39,11 @@ import (
 
 const (
 	defaultUsageRollupQueryLimit = 100
-	maxUsageRollupQueryLimit     = 500
-	sqliteSplitRadix             = int64(1_000_000_000)
+	// maxUsageRollupQueryLimit bounds internal callers (e.g. dashboard hourly
+	// time-series re-bucketing across 14d * 24h * labels); the HTTP usage API
+	// enforces its own stricter 500-row cap in parseUsageLimit.
+	maxUsageRollupQueryLimit = 5000
+	sqliteSplitRadix         = int64(1_000_000_000)
 )
 
 var rollupSumColumns = []string{
@@ -785,6 +788,143 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		return nil, mapError(err)
 	}
 	return out, nil
+}
+
+// CountUsageActiveAgents implements store.UsageLedgerStore.CountUsageActiveAgents.
+// Computes exact COUNT(DISTINCT agent_id) across the window (never summing
+// per-bucket counts), and when IncludeBuckets is true returns per-UTC-day
+// distinct counts (daily) or distinct (bucket_start, agent_id) pairs (hourly)
+// so callers can deduplicate agents per local calendar day.
+func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.UsageAgentCountQuery) (*store.UsageAgentCountResult, error) {
+	var (
+		tableName string
+		bucketFn  func(time.Time) time.Time
+		isHourly  bool
+	)
+	switch q.Granularity {
+	case store.UsageGranularityHour:
+		tableName = "usage_rollups_hourly"
+		bucketFn = utcHourStart
+		isHourly = true
+	case store.UsageGranularityDay, "":
+		tableName = "usage_rollups_daily"
+		bucketFn = utcDayStart
+	default:
+		return nil, fmt.Errorf("%w: unsupported granularity %q", store.ErrInvalidInput, q.Granularity)
+	}
+
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	var whereParts []string
+	var whereArgs []any
+	if q.ProjectID != "" {
+		whereParts = append(whereParts, "project_id = ?")
+		whereArgs = append(whereArgs, q.ProjectID)
+	}
+	if q.BillingUserID != "" {
+		whereParts = append(whereParts, "billing_user_id = ?")
+		whereArgs = append(whereArgs, q.BillingUserID)
+	}
+	if !q.Since.IsZero() {
+		whereParts = append(whereParts, "bucket_start >= ?")
+		whereArgs = append(whereArgs, bucketFn(q.Since))
+	}
+	if !q.Until.IsZero() {
+		whereParts = append(whereParts, "bucket_start <= ?")
+		whereArgs = append(whereArgs, bucketFn(q.Until))
+	}
+	whereSQL := ""
+	if len(whereParts) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	totalQuery := usageRebindSQL(dialectName, "SELECT COUNT(DISTINCT agent_id) FROM "+tableName+whereSQL)
+	totalRows := &entsql.Rows{}
+	if err := drv.Query(ctx, totalQuery, whereArgs, totalRows); err != nil {
+		return nil, mapError(err)
+	}
+	var totalUnique int64
+	if totalRows.Next() {
+		if err := totalRows.Scan(&totalUnique); err != nil {
+			_ = totalRows.Close()
+			return nil, mapError(err)
+		}
+	}
+	if err := totalRows.Err(); err != nil {
+		_ = totalRows.Close()
+		return nil, mapError(err)
+	}
+	_ = totalRows.Close()
+
+	res := &store.UsageAgentCountResult{
+		TotalUniqueAgents: int(totalUnique),
+	}
+	if !q.IncludeBuckets {
+		return res, nil
+	}
+
+	if isHourly {
+		pairQuery := usageRebindSQL(dialectName,
+			"SELECT DISTINCT bucket_start, agent_id FROM "+tableName+whereSQL+" ORDER BY bucket_start ASC, agent_id ASC",
+		)
+		pairRows := &entsql.Rows{}
+		if err := drv.Query(ctx, pairQuery, whereArgs, pairRows); err != nil {
+			return nil, mapError(err)
+		}
+		defer func() { _ = pairRows.Close() }()
+		for pairRows.Next() {
+			var rawTime any
+			var agentID string
+			if err := pairRows.Scan(&rawTime, &agentID); err != nil {
+				return nil, mapError(err)
+			}
+			ts, err := parseSQLTimestamp(rawTime)
+			if err != nil {
+				return nil, fmt.Errorf("parse active-agent bucket_start: %w", err)
+			}
+			if ts != nil {
+				res.BucketAgents = append(res.BucketAgents, store.UsageBucketAgentPair{
+					BucketStart: utcHourStart(*ts),
+					AgentID:     agentID,
+				})
+			}
+		}
+		if err := pairRows.Err(); err != nil {
+			return nil, mapError(err)
+		}
+		return res, nil
+	}
+
+	bucketQuery := usageRebindSQL(dialectName,
+		"SELECT bucket_start, COUNT(DISTINCT agent_id) FROM "+tableName+whereSQL+" GROUP BY bucket_start ORDER BY bucket_start ASC",
+	)
+	bucketRows := &entsql.Rows{}
+	if err := drv.Query(ctx, bucketQuery, whereArgs, bucketRows); err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = bucketRows.Close() }()
+	for bucketRows.Next() {
+		var rawTime any
+		var cnt int64
+		if err := bucketRows.Scan(&rawTime, &cnt); err != nil {
+			return nil, mapError(err)
+		}
+		ts, err := parseSQLTimestamp(rawTime)
+		if err != nil {
+			return nil, fmt.Errorf("parse active-agent bucket_start: %w", err)
+		}
+		if ts != nil {
+			res.BucketCounts = append(res.BucketCounts, store.UsageBucketCount{
+				BucketStart: utcDayStart(*ts),
+				Count:       cnt,
+			})
+		}
+	}
+	if err := bucketRows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return res, nil
 }
 
 // HasUsageEventsForRun implements store.UsageLedgerStore.HasUsageEventsForRun.

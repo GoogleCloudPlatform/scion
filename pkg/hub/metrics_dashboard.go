@@ -30,6 +30,7 @@ import (
 
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -180,6 +181,27 @@ func (c gcpMetricsClient) ListTimeSeries(ctx context.Context, req *monitoringpb.
 	return c.MetricClient.ListTimeSeries(ctx, req, opts...)
 }
 
+// Metrics dashboard data source identifiers surfaced in response payloads.
+const (
+	MetricsSourceCloudMonitoring = "cloud_monitoring"
+	MetricsSourceHubRollups      = "hub_rollups"
+)
+
+// MetricsDashboardSource abstracts the backing telemetry data source for the
+// metrics dashboard (CloudMonitoringSource or HubRollupSource).
+type MetricsDashboardSource interface {
+	Name() string
+	QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error)
+	QuerySessions(ctx context.Context, periodDays int, opts ...QueryOption) (*SessionsView, error)
+	QueryModelCalls(ctx context.Context, periodDays int, opts ...QueryOption) (*ModelCallsView, error)
+	QueryTokens(ctx context.Context, periodDays int, opts ...QueryOption) (*TokensView, error)
+	QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error)
+}
+
+// CloudMonitoringSource is an alias for MetricsDashboardService, which queries
+// Google Cloud Monitoring and implements MetricsDashboardSource.
+type CloudMonitoringSource = MetricsDashboardService
+
 // MetricsDashboardService queries Google Cloud Monitoring for Scion telemetry metrics.
 type MetricsDashboardService struct {
 	client    metricsClient
@@ -188,6 +210,11 @@ type MetricsDashboardService struct {
 
 	mu    sync.RWMutex
 	cache map[string]*cacheEntry
+}
+
+// Name returns the data source identifier for Cloud Monitoring.
+func (s *MetricsDashboardService) Name() string {
+	return MetricsSourceCloudMonitoring
 }
 
 type cacheEntry struct {
@@ -244,16 +271,60 @@ func (s *MetricsDashboardService) Close() error {
 	return s.rawClient.Close()
 }
 
+// DashboardTokenTotals holds nullable canonical Track 1 token totals and the
+// derived cache hit rate (cache_read / (input + cache_read + cache_write)).
+// Unknown buckets serialize as JSON null and are never fabricated as 0.
+type DashboardTokenTotals struct {
+	Input          *int64   `json:"input"`
+	Output         *int64   `json:"output"`
+	CacheRead      *int64   `json:"cacheRead"`
+	CacheWrite     *int64   `json:"cacheWrite"`
+	CacheWrite1h   *int64   `json:"cacheWrite1h"`
+	Reasoning      *int64   `json:"reasoning"`
+	SummableTokens *int64   `json:"summableTokens"`
+	CacheHitRate   *float64 `json:"cacheHitRate"`
+	Saturated      bool     `json:"saturated,omitempty"`
+}
+
+// DashboardMeasurement summarizes Track 1 measurement coverage for a dashboard
+// view (derived through the single deriveMeasurementStatus function).
+type DashboardMeasurement struct {
+	Status           string     `json:"status"`
+	UnmeasuredAgents int        `json:"unmeasuredAgents"`
+	StaleAgents      int        `json:"staleAgents"`
+	LastReceiptAt    *time.Time `json:"lastReceiptAt,omitempty"`
+}
+
+// NullableFloatPoint represents a time-series point whose value may be unknown
+// (JSON null), such as daily cache hit rate when tokens are unmeasured or the
+// denominator is zero.
+type NullableFloatPoint struct {
+	Timestamp string   `json:"timestamp"`
+	Value     *float64 `json:"value"`
+}
+
 // DashboardSummary contains aggregate metric counts for a period.
 type DashboardSummary struct {
 	PeriodDays int `json:"periodDays"`
 	// TimeZone is the resolved IANA zone whose local midnight starts the
-	// period window ("UTC" when the request named no valid zone).
-	TimeZone      string `json:"timeZone"`
+	// period window ("UTC" when the request named no valid zone or when
+	// HubRollupSource falls back to daily UTC rollups).
+	TimeZone string `json:"timeZone"`
+	// Source identifies the backing data source ("cloud_monitoring" or "hub_rollups").
+	Source string `json:"source,omitempty"`
+	// Granularity reports the rollup grain used by HubRollupSource ("hour" or "day").
+	Granularity   string `json:"granularity,omitempty"`
 	TotalSessions int64  `json:"totalSessions"`
 	TotalAPICalls int64  `json:"totalApiCalls"`
 	TotalTokens   int64  `json:"totalTokens"`
 	UniqueAgents  int    `json:"uniqueAgents"`
+	// Tokens carries nullable canonical token buckets when served from Hub rollups.
+	Tokens *DashboardTokenTotals `json:"tokens,omitempty"`
+	// CacheHitRate is cache_read / (input + cache_read + cache_write), or nil when
+	// any component is unknown or the denominator is zero.
+	CacheHitRate *float64 `json:"cacheHitRate,omitempty"`
+	// Measurement surfaces Track 1 coverage status and agent counts.
+	Measurement *DashboardMeasurement `json:"measurement,omitempty"`
 	// TelemetryHint surfaces an actionable setup hint when cloud telemetry
 	// cannot export under the current hub/project configuration (for example,
 	// GCP cloud telemetry on in metadata block mode without credentials).
@@ -278,30 +349,47 @@ type LabeledTimeSeries struct {
 type SessionsView struct {
 	PeriodDays int `json:"periodDays"`
 	// TimeZone is the resolved IANA zone the day buckets are calendar days
-	// of ("UTC" when the request named no valid zone).
-	TimeZone     string            `json:"timeZone"`
-	DailyCounts  []TimeSeriesPoint `json:"dailyCounts"`
-	ActiveAgents []TimeSeriesPoint `json:"activeAgents"`
+	// of ("UTC" when the request named no valid zone or when HubRollupSource
+	// falls back to daily UTC rollups).
+	TimeZone     string                `json:"timeZone"`
+	Source       string                `json:"source,omitempty"`
+	Granularity  string                `json:"granularity,omitempty"`
+	DailyCounts  []TimeSeriesPoint     `json:"dailyCounts"`
+	ActiveAgents []TimeSeriesPoint     `json:"activeAgents"`
+	Measurement  *DashboardMeasurement `json:"measurement,omitempty"`
 }
 
-// ModelCallsView contains API call data grouped by model and harness.
+// ModelCallsView contains API call data grouped by model, harness, and
+// (when served from Hub rollups) optionally by user.
 type ModelCallsView struct {
 	PeriodDays int `json:"periodDays"`
 	// TimeZone is the resolved IANA zone the day buckets are calendar days of.
-	TimeZone  string              `json:"timeZone"`
-	ByModel   []LabeledTimeSeries `json:"byModel"`
-	ByHarness []LabeledTimeSeries `json:"byHarness"`
+	TimeZone    string                `json:"timeZone"`
+	Source      string                `json:"source,omitempty"`
+	Granularity string                `json:"granularity,omitempty"`
+	GroupBy     string                `json:"groupBy,omitempty"`
+	ByModel     []LabeledTimeSeries   `json:"byModel"`
+	ByHarness   []LabeledTimeSeries   `json:"byHarness"`
+	ByUser      []LabeledTimeSeries   `json:"byUser,omitempty"`
+	Measurement *DashboardMeasurement `json:"measurement,omitempty"`
 }
 
-// TokensView contains token usage data grouped by model.
+// TokensView contains token usage data grouped by model (or harness/user when
+// requested via groupBy on HubRollupSource).
 type TokensView struct {
 	PeriodDays int `json:"periodDays"`
 	// TimeZone is the resolved IANA zone the day buckets are calendar days of.
-	TimeZone   string              `json:"timeZone"`
-	Input      []LabeledTimeSeries `json:"input"`
-	Output     []LabeledTimeSeries `json:"output"`
-	CacheRead  []LabeledTimeSeries `json:"cacheRead"`
-	CacheWrite []LabeledTimeSeries `json:"cacheWrite"`
+	TimeZone          string                `json:"timeZone"`
+	Source            string                `json:"source,omitempty"`
+	Granularity       string                `json:"granularity,omitempty"`
+	GroupBy           string                `json:"groupBy,omitempty"`
+	Input             []LabeledTimeSeries   `json:"input"`
+	Output            []LabeledTimeSeries   `json:"output"`
+	CacheRead         []LabeledTimeSeries   `json:"cacheRead"`
+	CacheWrite        []LabeledTimeSeries   `json:"cacheWrite"`
+	Totals            *DashboardTokenTotals `json:"totals,omitempty"`
+	DailyCacheHitRate []NullableFloatPoint  `json:"dailyCacheHitRate,omitempty"`
+	Measurement       *DashboardMeasurement `json:"measurement,omitempty"`
 }
 
 func (s *MetricsDashboardService) getCached(key string) (interface{}, bool) {
@@ -369,6 +457,9 @@ type queryConfig struct {
 	// Location is the zone whose calendar days the series are bucketed by.
 	// nil means UTC.
 	Location *time.Location
+	// GroupBy requests a breakdown dimension ("model", "harness", "user") on
+	// grouped views (supported by HubRollupSource; empty means default).
+	GroupBy string
 }
 
 // WithProjectID filters metrics to a specific project.
@@ -381,6 +472,11 @@ func WithProjectID(id string) QueryOption {
 // resolveDashboardTimeZone; nil means UTC.
 func WithTimeZone(loc *time.Location) QueryOption {
 	return func(c *queryConfig) { c.Location = loc }
+}
+
+// WithGroupBy requests a specific grouping dimension ("model", "harness", or "user").
+func WithGroupBy(dim string) QueryOption {
+	return func(c *queryConfig) { c.GroupBy = dim }
 }
 
 // location returns the bucketing zone, UTC when none was set.
@@ -538,7 +634,7 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
-	summary := &DashboardSummary{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
+	summary := &DashboardSummary{PeriodDays: periodDays, TimeZone: cfg.zoneName(), Source: MetricsSourceCloudMonitoring}
 	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
@@ -590,7 +686,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 	window := metricsQueryWindowFor(time.Now(), periodDays, cfg)
 
 	loc := cfg.location()
-	view := &SessionsView{PeriodDays: periodDays, TimeZone: cfg.zoneName()}
+	view := &SessionsView{PeriodDays: periodDays, TimeZone: cfg.zoneName(), Source: MetricsSourceCloudMonitoring}
 	var queryErrors []string
 
 	// DailyCounts is a sum of session-count deltas, so it goes through
@@ -625,7 +721,7 @@ func (s *MetricsDashboardService) QueryModelCalls(ctx context.Context, periodDay
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.model", errorLabel: "by model"},
 		{metricName: telemetrycontract.MetricAPICalls, groupBy: "metric.labels.harness", errorLabel: "by harness"},
 	}, func(series [][]LabeledTimeSeries) *ModelCallsView {
-		return &ModelCallsView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), ByModel: series[0], ByHarness: series[1]}
+		return &ModelCallsView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Source: MetricsSourceCloudMonitoring, ByModel: series[0], ByHarness: series[1]}
 	})
 }
 
@@ -640,7 +736,7 @@ func (s *MetricsDashboardService) QueryTokens(ctx context.Context, periodDays in
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache read tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheRead)}},
 		{metricName: telemetrycontract.MetricUsageTokens, groupBy: "metric.labels.model", errorLabel: "cache write tokens", extraFilter: []string{tokenTypeFilter(telemetrycontract.TokenTypeCacheWrite)}},
 	}, func(series [][]LabeledTimeSeries) *TokensView {
-		return &TokensView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
+		return &TokensView{PeriodDays: periodDays, TimeZone: zoneNameFor(opts), Source: MetricsSourceCloudMonitoring, Input: series[0], Output: series[1], CacheRead: series[2], CacheWrite: series[3]}
 	})
 }
 
@@ -972,11 +1068,16 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 
 // ProjectMetricsSummary contains lightweight scalar metrics for a project's status bar.
 type ProjectMetricsSummary struct {
-	SessionsCount24h int64  `json:"sessionsCount24h"`
-	APICalls24h      int64  `json:"apiCalls24h"`
-	TokenUsage24h    int64  `json:"tokenUsage24h"`
-	ActiveAgents24h  int    `json:"activeAgents24h"`
-	PeriodLabel      string `json:"periodLabel"`
+	Source           string                `json:"source,omitempty"`
+	Granularity      string                `json:"granularity,omitempty"`
+	SessionsCount24h int64                 `json:"sessionsCount24h"`
+	APICalls24h      int64                 `json:"apiCalls24h"`
+	TokenUsage24h    int64                 `json:"tokenUsage24h"`
+	ActiveAgents24h  int                   `json:"activeAgents24h"`
+	PeriodLabel      string                `json:"periodLabel"`
+	Tokens           *DashboardTokenTotals `json:"tokens,omitempty"`
+	CacheHitRate     *float64              `json:"cacheHitRate,omitempty"`
+	Measurement      *DashboardMeasurement `json:"measurement,omitempty"`
 }
 
 // QueryProjectSummary returns lightweight scalar metrics for a project over the last 24 hours.
@@ -992,7 +1093,7 @@ func (s *MetricsDashboardService) QueryProjectSummary(ctx context.Context, proje
 
 	filter := []string{projectFilter(projectID)}
 
-	summary := &ProjectMetricsSummary{PeriodLabel: "Last 24 hours"}
+	summary := &ProjectMetricsSummary{Source: MetricsSourceCloudMonitoring, PeriodLabel: "Last 24 hours"}
 	var queryErrors []string
 
 	sessions, err := s.querySum(ctx, telemetrycontract.MetricSessionCount, start, now, filter)
@@ -1092,6 +1193,71 @@ func (s *Server) applyMetricsDashboardProject(projectID string) bool {
 	return true
 }
 
+// requiresHubRollupBreakdown reports whether a dashboard request asks for a
+// breakdown dimension that Cloud Monitoring cannot provide (per-user on any
+// grouped view, or per-harness on the tokens view).
+func requiresHubRollupBreakdown(view, groupBy string) bool {
+	if groupBy == "" {
+		return false
+	}
+	if groupBy == store.UsageGroupByUser {
+		return true
+	}
+	if view == "tokens" && groupBy == store.UsageGroupByHarness {
+		return true
+	}
+	return false
+}
+
+// validateDashboardGroupBy validates the optional groupBy query parameter on
+// metrics dashboard requests.
+func validateDashboardGroupBy(view, raw string) (string, error) {
+	g := strings.TrimSpace(raw)
+	if g == "" {
+		return "", nil
+	}
+	switch g {
+	case store.UsageGroupByModel, store.UsageGroupByHarness, store.UsageGroupByUser:
+	default:
+		return "", fmt.Errorf("invalid groupBy %q: valid values are model, harness, user", g)
+	}
+	if view != "model-calls" && view != "tokens" {
+		return "", fmt.Errorf("groupBy is only supported on model-calls and tokens views")
+	}
+	return g, nil
+}
+
+// selectMetricsDashboardSource chooses the backing MetricsDashboardSource for
+// the given view and optional breakdown dimension:
+//   - When tokenomics.usage_ledger is OFF: Cloud Monitoring only (nil if
+//     unconfigured; callers preserve pre-existing 503 / unavailable behavior).
+//   - When tokenomics.usage_ledger is ON:
+//     1. Default to HubRollupSource when Cloud Monitoring is unconfigured.
+//     2. Route to HubRollupSource for breakdowns Cloud Monitoring cannot
+//     provide (per-user, or per-harness on tokens), even when Cloud Monitoring
+//     is configured.
+//     3. Otherwise use CloudMonitoringSource.
+func (s *Server) selectMetricsDashboardSource(view, groupBy string) MetricsDashboardSource {
+	cm := s.currentMetricsDashboard()
+	ledgerEnabled := s.experimentEnabled(experiments.TokenomicsUsageLedger)
+	if !ledgerEnabled {
+		if cm == nil {
+			return nil
+		}
+		return cm
+	}
+	if cm == nil || requiresHubRollupBreakdown(view, groupBy) {
+		if s.store != nil {
+			return NewHubRollupSource(s.store)
+		}
+		if cm == nil {
+			return nil
+		}
+		return cm
+	}
+	return cm
+}
+
 // handleProjectMetricsSummary returns lightweight metrics summary for a project.
 func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
@@ -1139,8 +1305,8 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// If metrics service is not configured, return unavailable indicator
-	dashboard := s.currentMetricsDashboard()
+	// If no metrics source is available, return unavailable indicator.
+	dashboard := s.selectMetricsDashboardSource("summary", "")
 	if dashboard == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
 		return
@@ -1153,7 +1319,7 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 				"Failed to query project metrics summary", nil)
 			return
 		}
-		slog.Warn("Partial project metrics summary failure", "projectID", projectID, "error", err)
+		slog.Warn("Partial project metrics summary failure", "projectID", projectID, "source", dashboard.Name(), "error", err)
 	}
 	writeJSON(w, http.StatusOK, data)
 }
@@ -1238,16 +1404,27 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 
-	dashboard := s.currentMetricsDashboard()
+	view := r.URL.Query().Get("view")
+	if view == "" {
+		view = "summary"
+	}
+
+	groupBy, err := validateDashboardGroupBy(view, r.URL.Query().Get("groupBy"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_group_by", err.Error(), nil)
+		return
+	}
+
+	dashboard := s.selectMetricsDashboardSource(view, groupBy)
 	if dashboard == nil {
 		writeError(w, http.StatusServiceUnavailable, "metrics_unavailable",
 			"Metrics dashboard is not configured (no telemetry project ID)", nil)
 		return
 	}
-
-	view := r.URL.Query().Get("view")
-	if view == "" {
-		view = "summary"
+	if requiresHubRollupBreakdown(view, groupBy) && dashboard.Name() != MetricsSourceHubRollups {
+		writeError(w, http.StatusBadRequest, "invalid_group_by",
+			fmt.Sprintf("groupBy=%s requires the Hub usage ledger", groupBy), nil)
+		return
 	}
 
 	periodStr := r.URL.Query().Get("period")
@@ -1264,6 +1441,9 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 	// into the caller's backing array.
 	loc := resolveDashboardTimeZone(r.URL.Query().Get("tz"))
 	opts = append(opts[:len(opts):len(opts)], WithTimeZone(loc))
+	if groupBy != "" {
+		opts = append(opts, WithGroupBy(groupBy))
+	}
 
 	ctx := r.Context()
 
@@ -1276,13 +1456,14 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 					"Failed to query metrics summary", nil)
 				return
 			}
-			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-
+			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
-		if hint := s.metricsTelemetryHint(ctx, applyQueryOptions(opts).ProjectID); hint != "" {
-			cp := *data
-			cp.TelemetryHint = hint
-			data = &cp
+		if dashboard.Name() == MetricsSourceCloudMonitoring {
+			if hint := s.metricsTelemetryHint(ctx, applyQueryOptions(opts).ProjectID); hint != "" {
+				cp := *data
+				cp.TelemetryHint = hint
+				data = &cp
+			}
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -1294,8 +1475,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 					"Failed to query session metrics", nil)
 				return
 			}
-			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-
+			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -1307,8 +1487,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 					"Failed to query model call metrics", nil)
 				return
 			}
-			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-
+			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
 		writeJSON(w, http.StatusOK, data)
 
@@ -1320,8 +1499,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 					"Failed to query token metrics", nil)
 				return
 			}
-			slog.Warn("Partial metrics query failure", "view", view, "error", err)
-
+			slog.Warn("Partial metrics query failure", "view", view, "source", dashboard.Name(), "error", err)
 		}
 		writeJSON(w, http.StatusOK, data)
 

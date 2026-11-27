@@ -495,6 +495,41 @@ type UsageScopeCoverage struct {
 	LastReceiptAt *time.Time
 }
 
+// UsageAgentCountQuery scopes distinct active-agent counts over
+// usage_rollups_hourly or usage_rollups_daily.
+type UsageAgentCountQuery struct {
+	Granularity    string // UsageGranularityHour or UsageGranularityDay
+	Since          time.Time
+	Until          time.Time
+	ProjectID      string
+	BillingUserID  string
+	IncludeBuckets bool
+}
+
+// UsageBucketAgentPair identifies a distinct agent active in a UTC rollup bucket.
+type UsageBucketAgentPair struct {
+	BucketStart time.Time
+	AgentID     string
+}
+
+// UsageBucketCount holds a distinct count for one UTC rollup bucket.
+type UsageBucketCount struct {
+	BucketStart time.Time
+	Count       int64
+}
+
+// UsageAgentCountResult holds exact distinct active-agent counts.
+// TotalUniqueAgents is COUNT(DISTINCT agent_id) over the full window and is
+// never derived by summing per-bucket counts.
+type UsageAgentCountResult struct {
+	TotalUniqueAgents int
+	// BucketCounts is populated when IncludeBuckets is true and Granularity is "day".
+	BucketCounts []UsageBucketCount
+	// BucketAgents is populated when IncludeBuckets is true and Granularity is "hour"
+	// so callers can deduplicate agents across UTC hours within the same local day.
+	BucketAgents []UsageBucketAgentPair
+}
+
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1
 // operational usage ledger tables introduced in P1.1.
 type UsageLedgerStore interface {
@@ -577,6 +612,12 @@ type UsageLedgerStore interface {
 	// (measured/unmeasured/stale counts and latest last_receipt_at) in a single
 	// bounded SQL query for a project, billing user, or global hub scope.
 	GetUsageScopeCoverage(ctx context.Context, filter UsageCoverageFilter) (*UsageScopeCoverage, error)
+
+	// CountUsageActiveAgents computes exact distinct active-agent counts over
+	// usage_rollups_hourly or usage_rollups_daily for a window, optionally
+	// returning per-bucket counts (daily) or (bucket_start, agent_id) pairs
+	// (hourly) for timezone-aware local-day deduplication.
+	CountUsageActiveAgents(ctx context.Context, q UsageAgentCountQuery) (*UsageAgentCountResult, error)
 
 	// HasUsageEventsForRun reports whether at least one usage_events row exists
 	// for (agentID, runID).
