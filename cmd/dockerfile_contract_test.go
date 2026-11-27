@@ -1121,6 +1121,11 @@ func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, cont
 	return errs
 }
 
+// grokBuildCLIContract enforces the pinned CLI policy for harnesses/grok-build/Dockerfile.
+// Antigravity and muse-code intentionally float via their upstream installers
+// (see GoogleCloudPlatform/scion#4820 and TestAntigravityDockerfileUsesInstaller)
+// and rely on runtime version checks as their safety net, so they are
+// deliberately not enrolled in checkPinnedCLIDockerfileContract.
 var grokBuildCLIContract = pinnedCLIContract{
 	dockerfilePath:   "harnesses/grok-build/Dockerfile",
 	argName:          "GROK_VERSION",

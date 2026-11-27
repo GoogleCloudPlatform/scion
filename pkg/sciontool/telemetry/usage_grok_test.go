@@ -6,9 +6,11 @@ package telemetry
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -421,4 +423,160 @@ func TestGrokBuildVerifiedVersionsMatchesFixture(t *testing.T) {
 	if !matched {
 		t.Fatalf("GrokBuildVerifiedVersions %v does not include fixture %q", GrokBuildVerifiedVersions, grokBuildUsageFixturePath)
 	}
+}
+
+type capturedSlogRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+type captureSlogHandler struct {
+	mu      sync.Mutex
+	records []capturedSlogRecord
+}
+
+func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, capturedSlogRecord{level: r.Level, msg: r.Message, attrs: attrs})
+	h.mu.Unlock()
+	return nil
+}
+func (h *captureSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureSlogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *captureSlogHandler) warnings() []capturedSlogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []capturedSlogRecord
+	for _, r := range h.records {
+		if r.level == slog.LevelWarn {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestMatchGrokBuildVerifiedVersion(t *testing.T) {
+	cases := []struct {
+		raw     string
+		wantVer string
+		wantOK  bool
+	}{
+		{"1.0.92", "1.0.92", true},
+		{"1.0.92 (b06756fd6256)", "1.0.92", true},
+		{"v1.0.92\n", "1.0.92", true},
+		{"1.1.0 (abc1234)", "1.1.0", false},
+		{"", "", false},
+		{"dev", "", false},
+		{"unknown", "", false},
+	}
+	for _, tc := range cases {
+		ver, ok := matchGrokBuildVerifiedVersion(tc.raw)
+		if ver != tc.wantVer || ok != tc.wantOK {
+			t.Errorf("matchGrokBuildVerifiedVersion(%q) = (%q, %v), want (%q, %v)", tc.raw, ver, ok, tc.wantVer, tc.wantOK)
+		}
+	}
+}
+
+func TestGrokBuildUnverifiedVersionWarning(t *testing.T) {
+	makeRecord := func(promptID string) *logspb.LogRecord {
+		return grokAPIRequestRecord(
+			&commonpb.KeyValue{Key: "prompt.id", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: promptID}}},
+			grokIntAttr("input_tokens", 100),
+			grokIntAttr("output_tokens", 20),
+			grokIntAttr("cache_read_tokens", 0),
+			grokIntAttr("cache_creation_tokens", 0),
+			grokIntAttr("reasoning_tokens", 0),
+		)
+	}
+	resAttrs := func(ver string) []*commonpb.KeyValue {
+		if ver == "" {
+			return nil
+		}
+		return []*commonpb.KeyValue{
+			{Key: "service.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: ver}}},
+		}
+	}
+
+	t.Run("matching version emits no warning", func(t *testing.T) {
+		cap := &captureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		d := &UsageDeriver{
+			rules: []usageRule{grokBuildUsageRule{}},
+			seen:  newBoundedLRU(usageDedupeCapacity, usageDedupeTTL),
+		}
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs("1.0.92 (b06756fd6256)"), makeRecord("p1")) {
+			t.Fatal("observeRecord returned false, want true")
+		}
+		if got := cap.warnings(); len(got) != 0 {
+			t.Fatalf("warnings = %+v, want 0", got)
+		}
+	})
+
+	t.Run("differing version emits exactly one warning across multiple events", func(t *testing.T) {
+		cap := &captureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		d := &UsageDeriver{
+			rules: []usageRule{grokBuildUsageRule{}},
+			seen:  newBoundedLRU(usageDedupeCapacity, usageDedupeTTL),
+		}
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs("1.1.0 (abc1234)"), makeRecord("p1")) {
+			t.Fatal("first observeRecord returned false, want true")
+		}
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs("1.1.0 (abc1234)"), makeRecord("p2")) {
+			t.Fatal("second observeRecord returned false, want true")
+		}
+		warns := cap.warnings()
+		if len(warns) != 1 {
+			t.Fatalf("warnings count = %d, want 1 (%+v)", len(warns), warns)
+		}
+		w := warns[0]
+		if w.attrs["harness"] != "grok-build" || w.attrs["installed_version"] != "1.1.0" || w.attrs["verified_versions"] != strings.Join(GrokBuildVerifiedVersions, ",") {
+			t.Errorf("warning attrs = %+v, want harness=grok-build installed_version=1.1.0 verified_versions=%s", w.attrs, strings.Join(GrokBuildVerifiedVersions, ","))
+		}
+		if !strings.Contains(w.msg, "usage reporting") || !strings.Contains(w.msg, "harness-cli-version-bump.md") {
+			t.Errorf("warning msg = %q, want usage reporting degradation and bump doc reference", w.msg)
+		}
+	})
+
+	t.Run("missing or unparseable version emits no warning and does not suppress later mismatch", func(t *testing.T) {
+		cap := &captureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		d := &UsageDeriver{
+			rules: []usageRule{grokBuildUsageRule{}},
+			seen:  newBoundedLRU(usageDedupeCapacity, usageDedupeTTL),
+		}
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", nil, makeRecord("p1")) {
+			t.Fatal("missing-version observeRecord returned false, want true")
+		}
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs("dev"), makeRecord("p2")) {
+			t.Fatal("unparseable-version observeRecord returned false, want true")
+		}
+		if got := cap.warnings(); len(got) != 0 {
+			t.Fatalf("warnings for missing/unparseable = %+v, want 0", got)
+		}
+		// A later event carrying a real unverified version still warns once.
+		if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs("1.2.0"), makeRecord("p3")) {
+			t.Fatal("mismatch observeRecord returned false, want true")
+		}
+		if got := cap.warnings(); len(got) != 1 || got[0].attrs["installed_version"] != "1.2.0" {
+			t.Fatalf("warnings after later mismatch = %+v, want 1 warning for 1.2.0", got)
+		}
+	})
 }

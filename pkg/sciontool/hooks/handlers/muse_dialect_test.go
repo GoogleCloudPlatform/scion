@@ -9,12 +9,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
@@ -563,4 +568,178 @@ func TestMuseCodeVerifiedVersionsMatchesFixture(t *testing.T) {
 	if !slices.Contains(MuseCodeVerifiedVersions, "1.4.25") {
 		t.Fatalf("MuseCodeVerifiedVersions %v does not include fixture version 1.4.25", MuseCodeVerifiedVersions)
 	}
+}
+
+type museCapturedSlogRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+type museCaptureSlogHandler struct {
+	mu      sync.Mutex
+	records []museCapturedSlogRecord
+}
+
+func (h *museCaptureSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *museCaptureSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]string)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, museCapturedSlogRecord{level: r.Level, msg: r.Message, attrs: attrs})
+	h.mu.Unlock()
+	return nil
+}
+func (h *museCaptureSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *museCaptureSlogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *museCaptureSlogHandler) warnings() []museCapturedSlogRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []museCapturedSlogRecord
+	for _, r := range h.records {
+		if r.level == slog.LevelWarn {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestNormalizeMuseVersion(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"Muse Code 1.4.25 (1.4.25-R9361.1)\n", "1.4.25"},
+		{"1.4.25-R9361.1", "1.4.25"},
+		{"v1.4.25", "1.4.25"},
+		{"Muse Code 1.5.0 (1.5.0-R9999.1)", "1.5.0"},
+		{"", ""},
+		{"muse dev", ""},
+		{"unknown", ""},
+	}
+	for _, tc := range cases {
+		if got := normalizeMuseVersion(tc.raw); got != tc.want {
+			t.Errorf("normalizeMuseVersion(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestMuseCodeUnverifiedVersionWarning(t *testing.T) {
+	makeEvent := func(dialect, turnID string, inputTokens int64) *hooks.Event {
+		return &hooks.Event{
+			Name:    hooks.EventModelEnd,
+			Dialect: dialect,
+			Data: hooks.EventData{
+				SessionID:   "sess-1",
+				InputTokens: inputTokens,
+				Raw:         map[string]interface{}{"turn_id": turnID},
+			},
+		}
+	}
+
+	t.Run("matching version emits no warning and probes once", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		var probes atomic.Int32
+		h := &TelemetryHandler{
+			museVersionProbe: func(context.Context) string {
+				probes.Add(1)
+				return "Muse Code 1.4.25 (1.4.25-R9361.1)\n"
+			},
+		}
+		ev1 := h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 100))
+		ev2 := h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 250))
+		if ev1.Data.InputTokens != 100 || ev2.Data.InputTokens != 150 {
+			t.Fatalf("deltas = (%d, %d), want (100, 150)", ev1.Data.InputTokens, ev2.Data.InputTokens)
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probe calls = %d, want 1", probes.Load())
+		}
+		if got := cap.warnings(); len(got) != 0 {
+			t.Fatalf("warnings = %+v, want 0", got)
+		}
+	})
+
+	t.Run("differing version emits exactly one warning across multiple events", func(t *testing.T) {
+		cap := &museCaptureSlogHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(cap))
+		defer slog.SetDefault(prev)
+
+		var probes atomic.Int32
+		h := &TelemetryHandler{
+			museVersionProbe: func(context.Context) string {
+				probes.Add(1)
+				return "Muse Code 1.5.0 (1.5.0-R9999.1)"
+			},
+		}
+		ev1 := h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 100))
+		ev2 := h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 300))
+		if ev1.Data.InputTokens != 100 || ev2.Data.InputTokens != 200 {
+			t.Fatalf("deltas = (%d, %d), want (100, 200)", ev1.Data.InputTokens, ev2.Data.InputTokens)
+		}
+		if probes.Load() != 1 {
+			t.Fatalf("probe calls = %d, want 1", probes.Load())
+		}
+		warns := cap.warnings()
+		if len(warns) != 1 {
+			t.Fatalf("warnings count = %d, want 1 (%+v)", len(warns), warns)
+		}
+		w := warns[0]
+		if w.attrs["harness"] != "muse-code" || w.attrs["installed_version"] != "1.5.0" || w.attrs["verified_versions"] != strings.Join(MuseCodeVerifiedVersions, ",") {
+			t.Errorf("warning attrs = %+v, want harness=muse-code installed_version=1.5.0 verified_versions=%s", w.attrs, strings.Join(MuseCodeVerifiedVersions, ","))
+		}
+		if !strings.Contains(w.msg, "usage reporting") || !strings.Contains(w.msg, "harness-cli-version-bump.md") {
+			t.Errorf("warning msg = %q, want usage reporting degradation and bump doc reference", w.msg)
+		}
+	})
+
+	t.Run("missing or unparseable version emits no warning and does not panic", func(t *testing.T) {
+		for _, raw := range []string{"", "muse dev", "error: not found"} {
+			cap := &museCaptureSlogHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(cap))
+			func() {
+				defer slog.SetDefault(prev)
+				var probes atomic.Int32
+				h := &TelemetryHandler{
+					museVersionProbe: func(context.Context) string {
+						probes.Add(1)
+						return raw
+					},
+				}
+				ev := h.normalizeMuseTurnUsage(makeEvent("muse-code", "t1", 100))
+				if ev.Data.InputTokens != 100 {
+					t.Fatalf("raw=%q: InputTokens = %d, want 100", raw, ev.Data.InputTokens)
+				}
+				if probes.Load() != 1 {
+					t.Fatalf("raw=%q: probe calls = %d, want 1", raw, probes.Load())
+				}
+				if got := cap.warnings(); len(got) != 0 {
+					t.Fatalf("raw=%q: warnings = %+v, want 0", raw, got)
+				}
+			}()
+		}
+	})
+
+	t.Run("non-muse dialect does not invoke probe", func(t *testing.T) {
+		var probes atomic.Int32
+		h := &TelemetryHandler{
+			museVersionProbe: func(context.Context) string {
+				probes.Add(1)
+				return "Muse Code 9.9.9"
+			},
+		}
+		h.normalizeMuseTurnUsage(makeEvent("claude", "t1", 100))
+		if probes.Load() != 0 {
+			t.Fatalf("probe calls for non-muse dialect = %d, want 0", probes.Load())
+		}
+	})
 }

@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -635,6 +637,24 @@ var GrokBuildVerifiedVersions = []string{
 	"1.0.92",
 }
 
+var grokSemverRe = regexp.MustCompile(`\b(\d+\.\d+\.\d+)\b`)
+
+// matchGrokBuildVerifiedVersion extracts the canonical X.Y.Z semver from raw
+// (for example "1.0.92 (b06756fd6256)" -> "1.0.92") and reports whether it is
+// listed in GrokBuildVerifiedVersions. Empty or unparseable inputs return
+// ("", false).
+func matchGrokBuildVerifiedVersion(raw string) (string, bool) {
+	s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	if s == "" {
+		return "", false
+	}
+	m := grokSemverRe.FindStringSubmatch(s)
+	if len(m) != 2 {
+		return "", false
+	}
+	return m[1], slices.Contains(GrokBuildVerifiedVersions, m[1])
+}
+
 const (
 	grokBuildAPIRequestEvent = "grok_code.api_request"
 	grokBuildAPIErrorEvent   = "grok_code.api_error"
@@ -751,6 +771,7 @@ type UsageDeriver struct {
 
 	derived, duplicate, malformed atomic.Int64
 	malformedWarnOnce             sync.Once
+	unverifiedVersionWarnOnce     sync.Once
 
 	// WP3 population counters (wp3-design.md section 1.1): raw log
 	// records seen and matched by a log rule; metric batches walked, those
@@ -1088,6 +1109,26 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 	return d.observeRecord(ctx, scopeName, nil, record)
 }
 
+// warnIfUnverifiedGrokVersion logs a one-time operator warning when a
+// recognized grok-build OTLP record reports a parseable CLI version outside
+// GrokBuildVerifiedVersions. Empty or unparseable versions are ignored silently
+// so missing metadata never produces false-positive warnings or burns the
+// sync.Once guard.
+func (d *UsageDeriver) warnIfUnverifiedGrokVersion(rawVersion string) {
+	ver, ok := matchGrokBuildVerifiedVersion(rawVersion)
+	if ver == "" || ok {
+		return
+	}
+	d.unverifiedVersionWarnOnce.Do(func() {
+		slog.Warn(
+			"grok-build CLI version differs from verified usage-decoding versions; usage reporting may silently degrade or miscount tokens — see docs-site/src/content/docs/contributing/harness-cli-version-bump.md",
+			"harness", "grok-build",
+			"installed_version", ver,
+			"verified_versions", strings.Join(GrokBuildVerifiedVersions, ","),
+		)
+	})
+}
+
 // observeRecord is observe with the record's resource attributes, which
 // the analytics event reads the harness version from.
 func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, resourceAttrs []*commonpb.KeyValue, record *logspb.LogRecord) bool {
@@ -1104,6 +1145,9 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		d.logRecognized.Add(1)
 		if v := harnessVersionFromAttrs(record.GetAttributes(), resourceAttrs); v != "" {
 			d.lastHarnessVersion.Store(v)
+			if rule.Harness() == "grok-build" {
+				d.warnIfUnverifiedGrokVersion(v)
+			}
 		}
 		if err != nil {
 			d.malformed.Add(1)

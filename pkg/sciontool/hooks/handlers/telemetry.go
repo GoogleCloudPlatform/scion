@@ -90,6 +90,10 @@ type TelemetryHandler struct {
 	MuseTurnUsageStateRequired bool
 	turnUsageMu                sync.Mutex
 	turnUsageMem               *museTurnUsageState
+	museVersionCheckOnce       sync.Once
+	// museVersionProbe overrides `muse --version` detection in tests.
+	// When nil, detectLocalMuseVersion is used.
+	museVersionProbe func(context.Context) string
 
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)

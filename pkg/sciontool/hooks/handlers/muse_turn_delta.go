@@ -5,14 +5,23 @@ Copyright 2026 The Scion Authors.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"golang.org/x/sys/unix"
 )
 
@@ -113,6 +122,68 @@ var MuseCodeVerifiedVersions = []string{
 	"1.4.25",
 }
 
+const museVersionProbeTimeout = 1 * time.Second
+
+var museSemverRe = regexp.MustCompile(`\b(\d+\.\d+\.\d+)\b`)
+
+// normalizeMuseVersion extracts the canonical X.Y.Z semver from raw
+// `muse --version` output (for example "Muse Code 1.4.25 (1.4.25-R9361.1)" ->
+// "1.4.25"). Returns "" if empty or unparseable.
+func normalizeMuseVersion(raw string) string {
+	s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	if s == "" {
+		return ""
+	}
+	m := museSemverRe.FindStringSubmatch(s)
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// detectLocalMuseVersion probes the installed `muse` binary once with a bounded
+// timeout using rootexec (no shell, hardened env with MUSE_NO_AUTO_UPDATE=1)
+// and procreap. Any resolve, exec, timeout, or parse error returns "" so the
+// hook path never fails or blocks.
+func detectLocalMuseVersion(ctx context.Context) string {
+	museBin, err := rootexec.Resolve("muse")
+	if err != nil {
+		return ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, museVersionProbeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, museBin, "--version")
+	cmd.Env = rootexec.Env("MUSE_NO_AUTO_UPDATE=1")
+	out, err := procreap.OutputManaged(cmd)
+	if err != nil {
+		return ""
+	}
+	return normalizeMuseVersion(string(out))
+}
+
+// checkMuseVersionOnce probes the installed muse CLI version at most once per
+// TelemetryHandler (once per process) and logs a one-time operator warning if
+// the parseable version is outside MuseCodeVerifiedVersions. Missing or
+// unparseable versions return silently so the hook path never fails or panics.
+func (h *TelemetryHandler) checkMuseVersionOnce() {
+	h.museVersionCheckOnce.Do(func() {
+		probe := h.museVersionProbe
+		if probe == nil {
+			probe = detectLocalMuseVersion
+		}
+		ver := normalizeMuseVersion(probe(context.Background()))
+		if ver == "" || slices.Contains(MuseCodeVerifiedVersions, ver) {
+			return
+		}
+		slog.Warn(
+			"muse-code CLI version differs from verified usage-decoding versions; usage reporting (turn-cumulative PostLLMCall delta normalization) may silently degrade or miscount tokens — see docs-site/src/content/docs/contributing/harness-cli-version-bump.md",
+			"harness", "muse-code",
+			"installed_version", ver,
+			"verified_versions", strings.Join(MuseCodeVerifiedVersions, ","),
+		)
+	})
+}
+
 // normalizeMuseTurnUsage converts Muse Code's turn-cumulative PostLLMCall.usage
 // into a per-step canonical increment keyed by (session_id, turn_id).
 //
@@ -143,6 +214,7 @@ func (h *TelemetryHandler) normalizeMuseTurnUsage(event *hooks.Event) *hooks.Eve
 	if event == nil || event.Dialect != "muse-code" || event.Name != hooks.EventModelEnd {
 		return event
 	}
+	h.checkMuseVersionOnce()
 	turnID := rawScalar(event.Data.Raw, "turn_id")
 	if turnID == "" {
 		return event
