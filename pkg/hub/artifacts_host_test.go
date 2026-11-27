@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -419,5 +420,204 @@ func TestArtifactHostNoEdgeAgentDeniedArtifacts(t *testing.T) {
 		assert.NoError(t, err)
 		assert.False(t, allowed, phase)
 		assert.Equal(t, DenyCauseCeilingUnrecorded, cause, phase)
+	}
+}
+
+func TestArtifactHostMessageRoute(t *testing.T) {
+	srv, s := testServer(t)
+	wcs, db := newTestWebChatStoreV2(t)
+	defer db.Close() //nolint:errcheck
+	srv.webChatStore = wcs
+	host := newArtifactHost(srv)
+
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	projID := "11111111-1111-1111-1111-111111111111"
+	topicID := "22222222-2222-2222-2222-222222222222"
+	dmKey := "dm:user:33333333-3333-3333-3333-333333333333:user:44444444-4444-4444-4444-444444444444"
+
+	msgTopicID := "10000000-0000-4000-8000-000000000001"
+	msgDMThreadID := "10000000-0000-4000-8000-000000000002"
+	msgConvDMID := "10000000-0000-4000-8000-000000000003"
+	msgConvThreadRefID := "10000000-0000-4000-8000-000000000004"
+	msgConvBareGroupID := "10000000-0000-4000-8000-000000000005"
+	msgConvSlackID := "10000000-0000-4000-8000-000000000006"
+
+	convDMID := "20000000-0000-4000-8000-000000000001"
+	convThreadRefID := "20000000-0000-4000-8000-000000000002"
+	convBareGroupID := "20000000-0000-4000-8000-000000000003"
+	convSlackID := "20000000-0000-4000-8000-000000000004"
+
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "Alpha",
+		Slug: "alpha",
+	}))
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: projID,
+		Name:      "general",
+		CreatedBy: "u1",
+		CreatedAt: now,
+	}))
+
+	// 1. Topic message (ThreadID -> topic in webChatStore).
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:        msgTopicID,
+		ProjectID: projID,
+		Sender:    "user:u1",
+		Recipient: "project:" + projID,
+		Msg:       "hello topic",
+		Type:      "instruction",
+		ThreadID:  topicID,
+		CreatedAt: now,
+	}))
+
+	// 2. DM thread message (ThreadID starts with "dm:").
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:        msgDMThreadID,
+		ProjectID: projID,
+		Sender:    "user:u1",
+		Recipient: "user:u2",
+		Msg:       "hello dm",
+		Type:      "instruction",
+		ThreadID:  dmKey,
+		CreatedAt: now,
+	}))
+
+	// 3. Direct conversation without ThreadID.
+	convDM := &store.Conversation{
+		ID:          convDMID,
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		CreatedAt:   now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, convDM))
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:             msgConvDMID,
+		ProjectID:      projID,
+		Sender:         "user:u1",
+		Recipient:      "user:u2",
+		Msg:            "hello conv dm",
+		Type:           "instruction",
+		ConversationID: convDM.ID,
+		CreatedAt:      now,
+	}))
+
+	// 4. thread:-ref group conversation without ThreadID.
+	convThreadRef := &store.Conversation{
+		ID:          convThreadRefID,
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "thread:" + projID + ":" + topicID,
+		CreatedAt:   now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, convThreadRef))
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:             msgConvThreadRefID,
+		ProjectID:      projID,
+		Sender:         "user:u1",
+		Recipient:      "project:" + projID,
+		Msg:            "hello thread ref",
+		Type:           "instruction",
+		ConversationID: convThreadRef.ID,
+		CreatedAt:      now,
+	}))
+
+	// 5. Native group conversation with empty ExternalRef (not web-routable -> false).
+	convBareGroup := &store.Conversation{
+		ID:          convBareGroupID,
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "native",
+		ExternalRef: "",
+		CreatedAt:   now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, convBareGroup))
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:             msgConvBareGroupID,
+		ProjectID:      projID,
+		Sender:         "user:u1",
+		Recipient:      "project:" + projID,
+		Msg:            "hello bare group",
+		Type:           "instruction",
+		ConversationID: convBareGroup.ID,
+		CreatedAt:      now,
+	}))
+
+	// 6. Non-native surface (not web-routable -> false).
+	convSlack := &store.Conversation{
+		ID:          convSlackID,
+		ProjectID:   &projID,
+		Kind:        "group",
+		Surface:     "slack",
+		ExternalRef: "thread:" + projID + ":" + topicID,
+		CreatedAt:   now,
+	}
+	require.NoError(t, s.CreateConversation(ctx, convSlack))
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:             msgConvSlackID,
+		ProjectID:      projID,
+		Sender:         "user:u1",
+		Recipient:      "project:" + projID,
+		Msg:            "hello slack",
+		Type:           "instruction",
+		ConversationID: convSlack.ID,
+		CreatedAt:      now,
+	}))
+
+	tests := []struct {
+		name   string
+		msgID  string
+		want   artifacts.SourceMessageRoute
+		wantOK bool
+	}{
+		{
+			name:   "topic message",
+			msgID:  msgTopicID,
+			want:   artifacts.SourceMessageRoute{ConversationKey: topicID, ProjectID: projID},
+			wantOK: true,
+		},
+		{
+			name:   "dm thread message",
+			msgID:  msgDMThreadID,
+			want:   artifacts.SourceMessageRoute{ConversationKey: dmKey},
+			wantOK: true,
+		},
+		{
+			name:   "direct conversation without ThreadID",
+			msgID:  msgConvDMID,
+			want:   artifacts.SourceMessageRoute{ConversationKey: dmKey},
+			wantOK: true,
+		},
+		{
+			name:   "thread-ref group conversation without ThreadID",
+			msgID:  msgConvThreadRefID,
+			want:   artifacts.SourceMessageRoute{ConversationKey: topicID, ProjectID: projID},
+			wantOK: true,
+		},
+		{
+			name:   "native group with empty ExternalRef returns false",
+			msgID:  msgConvBareGroupID,
+			want:   artifacts.SourceMessageRoute{},
+			wantOK: false,
+		},
+		{
+			name:   "non-native surface returns false",
+			msgID:  msgConvSlackID,
+			want:   artifacts.SourceMessageRoute{},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := host.MessageRoute(ctx, tt.msgID)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.want, got)
+		})
 	}
 }

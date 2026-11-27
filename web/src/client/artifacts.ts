@@ -698,6 +698,33 @@ export function defaultProjectChoice(publishable: ProjectChoice[]): string {
   return publishable.length === 1 ? publishable[0].id : '';
 }
 
+/**
+ * Reports whether the caller can publish artifacts in at least one project
+ * (checking `preferredProjectId` first when given, then the global project,
+ * then remaining readable projects via `filterPublishable` with `firstOnly`).
+ * Stops as soon as one publishable project is found.
+ */
+export async function canPublishAnywhere(
+  opts: { preferredProjectId?: string | undefined; signal?: AbortSignal | undefined } = {}
+): Promise<boolean> {
+  const { preferredProjectId, signal } = opts;
+  if (preferredProjectId) {
+    if (await canPublishIn(preferredProjectId, signal)) return true;
+  }
+  const global = await findGlobalProject(signal);
+  if (global && global.id !== preferredProjectId) {
+    if (await canPublishIn(global.id, signal)) return true;
+  }
+  const { projects } = await listReadableProjects({ skip: global?.id, signal });
+  const rest = preferredProjectId ? projects.filter((p) => p.id !== preferredProjectId) : projects;
+  if (rest.length === 0) return false;
+  const found = await filterPublishable(rest, {
+    firstOnly: true,
+    ...(signal ? { signal } : {}),
+  });
+  return found.length > 0;
+}
+
 /** One page of an artifact's ready versions, newest first. */
 export async function listVersions(id: string, before = 0): Promise<VersionListResponse> {
   const query = before > 0 ? `?before=${before}` : '';

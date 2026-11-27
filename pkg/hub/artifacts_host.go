@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -1090,13 +1091,17 @@ func (h *artifactHost) MessageRoute(ctx context.Context, messageID string) (arti
 		return artifacts.SourceMessageRoute{}, false
 	}
 	if conv.ProjectID != nil && *conv.ProjectID != "" {
-		key := conv.ExternalRef
-		if key == "" {
-			key = conv.ID
+		refProjectID, topicID, parseErr := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+		if parseErr != nil || topicID == "" {
+			return artifacts.SourceMessageRoute{}, false
+		}
+		projectID := *conv.ProjectID
+		if refProjectID != "" {
+			projectID = refProjectID
 		}
 		return artifacts.SourceMessageRoute{
-			ConversationKey: key,
-			ProjectID:       *conv.ProjectID,
+			ConversationKey: topicID,
+			ProjectID:       projectID,
 		}, true
 	}
 	return artifacts.SourceMessageRoute{}, false

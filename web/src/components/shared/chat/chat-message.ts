@@ -4670,6 +4670,7 @@ export class ScionChatMessage extends LitElement {
       <scion-chat-file-preview
         .target=${target}
         .currentUserId=${this.currentUserId}
+        ?allowSaveAsArtifact=${true}
         .canPublishArtifacts=${this.canPublishArtifacts}
         @chat-file-preview-close=${() => {
           this.expandedTarget = null;

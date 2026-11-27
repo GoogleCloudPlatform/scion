@@ -96,7 +96,7 @@ import {
   ARTIFACTS_FLAG,
   ARTIFACTS_METADATA_KEY,
   ATTACHMENT_ARTIFACTS_FLAG,
-  canPublishIn,
+  canPublishAnywhere,
   type MessageArtifactRef,
 } from '../../../client/artifacts.js';
 import './attachment-save-dialog.js';
@@ -7198,7 +7198,7 @@ export class ScionChatThread extends LitElement {
     this.filePreview = { kind: 'gcs', messageId, bucket, object, name };
   }
 
-  /** Whether the caller can publish artifacts in the current project scope. */
+  /** Whether the caller can publish artifacts in at least one project. */
   @state() private canPublishArtifacts = true;
 
   /** Attachment currently open in the Save as artifact dialog, or null. */
@@ -7207,27 +7207,28 @@ export class ScionChatThread extends LitElement {
   private publishCheckScope = '';
   private publishCheckGen = 0;
 
-  /** Refresh whether the caller can publish artifacts in this thread's project. */
+  /**
+   * Refresh whether the caller can publish artifacts anywhere (checking the
+   * conversation's project first when set, then global and other readable
+   * projects). Read-only members of a project can still save attachments to
+   * another project they can publish in (ptone/scion#4599).
+   */
   private refreshPublishRights(): void {
     if (!isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG) || !isFeatureEnabled(ARTIFACTS_FLAG)) {
       this.publishCheckScope = '';
       this.canPublishArtifacts = true;
       return;
     }
-    if (this.isDM || !this.projectId) {
-      this.publishCheckScope = '';
-      this.canPublishArtifacts = true;
-      return;
-    }
-    if (this.publishCheckScope === this.projectId) return;
-    this.publishCheckScope = this.projectId;
+    const scopeKey = this.isDM ? '__dm__' : this.projectId || '__group__';
+    if (this.publishCheckScope === scopeKey) return;
+    this.publishCheckScope = scopeKey;
     const gen = ++this.publishCheckGen;
-    void canPublishIn(this.projectId)
+    void canPublishAnywhere({ preferredProjectId: this.isDM ? '' : this.projectId })
       .then((ok) => {
         if (gen === this.publishCheckGen) this.canPublishArtifacts = ok;
       })
       .catch(() => {
-        // Leave current state on transient errors; server enforces on publish.
+        if (gen === this.publishCheckGen) this.publishCheckScope = '';
       });
   }
 
@@ -7275,6 +7276,7 @@ export class ScionChatThread extends LitElement {
             <scion-chat-file-preview
               .target=${this.filePreview}
               .currentUserId=${this.currentUserId}
+              ?allowSaveAsArtifact=${true}
               .canPublishArtifacts=${this.canPublishArtifacts}
               @chat-file-preview-close=${() => this.closeFilePreview()}
               @save-attachment-as-artifact=${this.handleSaveAttachmentAsArtifact}

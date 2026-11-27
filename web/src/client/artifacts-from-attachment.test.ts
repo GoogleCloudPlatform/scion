@@ -17,6 +17,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ATTACHMENT_ARTIFACTS_FLAG,
+  canPublishAnywhere,
   formatAttachmentRef,
   publishFromAttachment,
   ReviewOpenError,
@@ -147,5 +148,64 @@ describe('attachment artifact client helpers (#4599)', () => {
         key: 'weekly-report',
       })
     ).rejects.toBeInstanceOf(ReviewOpenError);
+  });
+
+  it('canPublishAnywhere returns true when preferred project is read-only but another project is publishable', async () => {
+    const json = (body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.startsWith('/api/v1/projects?')) {
+          const params = new URLSearchParams(url.split('?')[1] ?? '');
+          if (params.get('slug') === 'global') return Promise.resolve(json({ projects: [] }));
+          return Promise.resolve(
+            json({
+              projects: [
+                { id: 'proj-p', name: 'P', slug: 'p' },
+                { id: 'proj-q', name: 'Q', slug: 'q' },
+              ],
+            })
+          );
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          const params = new URLSearchParams(url.split('?')[1] ?? '');
+          const scope = params.get('scope');
+          return Promise.resolve(json({ artifacts: [], canCreate: scope === 'proj-q' }));
+        }
+        return Promise.resolve(json({}));
+      })
+    );
+
+    await expect(canPublishAnywhere({ preferredProjectId: 'proj-p' })).resolves.toBe(true);
+  });
+
+  it('canPublishAnywhere returns false when caller cannot publish in any project', async () => {
+    const json = (body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = requestUrl(input);
+        if (url.startsWith('/api/v1/projects?')) {
+          const params = new URLSearchParams(url.split('?')[1] ?? '');
+          if (params.get('slug') === 'global') return Promise.resolve(json({ projects: [] }));
+          return Promise.resolve(json({ projects: [{ id: 'proj-p', name: 'P', slug: 'p' }] }));
+        }
+        if (url.startsWith('/api/v1/artifacts?')) {
+          return Promise.resolve(json({ artifacts: [], canCreate: false }));
+        }
+        return Promise.resolve(json({}));
+      })
+    );
+
+    await expect(canPublishAnywhere({ preferredProjectId: 'proj-p' })).resolves.toBe(false);
   });
 });

@@ -328,6 +328,15 @@ export class ScionChatFilePreview extends LitElement {
   @property()
   currentUserId = '';
 
+  /**
+   * Opt-in flag enabling the "Save as artifact…" footer action for attachment
+   * targets. Defaults to false so standalone previews (e.g. quick-palette
+   * recent files in chat.ts) without a save dialog host never render a dead
+   * button (ptone/scion#4599).
+   */
+  @property({ type: Boolean })
+  allowSaveAsArtifact = false;
+
   /** Whether the caller has publish rights for "Save as artifact…". */
   @property({ type: Boolean })
   canPublishArtifacts = true;
@@ -951,7 +960,7 @@ export class ScionChatFilePreview extends LitElement {
 
   /** Requests the parent to open the Save as artifact dialog for this attachment. */
   private requestSaveAsArtifact(target: AttachmentPreviewTarget): void {
-    if (!this.canPublishArtifacts) return;
+    if (!this.allowSaveAsArtifact || !this.canPublishArtifacts) return;
     this.dispatchEvent(
       new CustomEvent('save-attachment-as-artifact', {
         detail: {
@@ -1171,7 +1180,7 @@ export class ScionChatFilePreview extends LitElement {
             : nothing}
           ${target.kind === 'attachment' && isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
             ? html`
-                ${isFeatureEnabled(ARTIFACTS_FLAG)
+                ${this.allowSaveAsArtifact && isFeatureEnabled(ARTIFACTS_FLAG)
                   ? html`
                       <sl-button
                         class="save-as-artifact-btn"

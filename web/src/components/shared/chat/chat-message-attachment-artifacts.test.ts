@@ -188,12 +188,26 @@ describe('scion-chat-file-preview attachment actions (#4598, #4599)', () => {
     localStorage.clear();
   });
 
-  it('gates Save as artifact… on both flags and publish rights in preview footer', async () => {
+  it('omits Save as artifact… by default when allowSaveAsArtifact is not opted in', async () => {
+    setFeatureFlag(ATTACHMENT_ARTIFACTS_FLAG, true);
+    setFeatureFlag(ARTIFACTS_FLAG, true);
+
+    const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
+    el.target = { kind: 'attachment', ...FILE };
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.copy-attachment-ref-btn')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.save-as-artifact-btn')).toBeNull();
+  });
+
+  it('gates Save as artifact… on allowSaveAsArtifact, both flags, and publish rights in preview footer', async () => {
     setFeatureFlag(ATTACHMENT_ARTIFACTS_FLAG, true);
     setFeatureFlag(ARTIFACTS_FLAG, false);
 
     const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
     el.target = { kind: 'attachment', ...FILE };
+    el.allowSaveAsArtifact = true;
     el.canPublishArtifacts = false;
     document.body.appendChild(el);
     await el.updateComplete;
