@@ -641,7 +641,7 @@ func (s *Server) handleUserUsageBudgetOverride(w http.ResponseWriter, r *http.Re
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(userIdent),
 		Credential: credentialContextForIdentity(userIdent),
-		Resource:   Resource{Type: "quota", ID: "hub"},
+		Resource:   hubScopedResource("quota", "hub"),
 		Action:     ActionUpdate,
 		Permission: "quota.update",
 	})

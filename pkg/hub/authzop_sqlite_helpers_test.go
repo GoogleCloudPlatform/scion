@@ -88,6 +88,8 @@ type idFixtures struct {
 	limitUD                 string
 	entitlement             string
 	entitlementUD           string
+	projectBudgetState      string
+	userBudgetState         string
 	gcpSA                   string
 	gcpSADel                string
 	accessConstraint        string
@@ -877,6 +879,39 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTokenBudgets))
+	srv.reconcileTokenBudgets(ctx)
+	if projDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay); err == nil && projDef != nil {
+		winStart, winEnd := utcDayWindow(time.Now().UTC())
+		if row, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+			LimitDefinitionID: projDef.ID,
+			ScopeKind:         store.UsageScopeKindProject,
+			ScopeID:           f.project,
+			WindowStartUTC:    winStart,
+			WindowEndUTC:      winEnd,
+			State:             store.UsageBudgetStateExhausted,
+			ConsumedAtEval:    1000,
+			CapAtEval:         1000,
+			StateVersion:      1,
+		}); err == nil {
+			f.projectBudgetState = row.ID
+		}
+	}
+	if userDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerUserDay); err == nil && userDef != nil {
+		winStart, winEnd := utcDayWindow(time.Now().UTC())
+		if row, err := s.CreateUsageBudgetState(ctx, &store.UsageBudgetState{
+			LimitDefinitionID: userDef.ID,
+			ScopeKind:         store.UsageScopeKindUser,
+			ScopeID:           f.user,
+			WindowStartUTC:    winStart,
+			WindowEndUTC:      winEnd,
+			State:             store.UsageBudgetStateExhausted,
+			ConsumedAtEval:    1000,
+			CapAtEval:         1000,
+			StateVersion:      1,
+		}); err == nil {
+			f.userBudgetState = row.ID
+		}
+	}
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture))
 	require.True(t, srv.experimentEnabled(experiments.AccessConstraints))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
@@ -1298,7 +1333,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/metrics":                           {"id": f.project},
 		"/api/v1/projects/{id}/usage":                             {"id": f.project},
 		"/api/v1/projects/{id}/usage/budgets":                     {"id": f.project},
-		"/api/v1/projects/{id}/usage/budgets/{budgetId}:override": {"id": f.project, "budgetId": "00000000-0000-0000-0000-000000000001"},
+		"/api/v1/projects/{id}/usage/budgets/{budgetId}:override": {"id": f.project, "budgetId": f.projectBudgetState},
 		"/api/v1/projects/{id}/pre-start-hooks":                   {"id": f.project},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}":          {"id": f.project, "hookId": f.projectPreStartHook},
 		"/api/v1/projects/{id}/pre-start-hooks/{hookId}/activate": {"id": f.project, "hookId": f.projectPreStartHook},
@@ -1335,7 +1370,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}/deletion":                          {"id": f.userDeletion},
 		"/api/v1/users/{id}/usage":                             {"id": f.user},
 		"/api/v1/users/{id}/usage/budgets":                     {"id": f.user},
-		"/api/v1/users/{id}/usage/budgets/{budgetId}:override": {"id": f.user, "budgetId": "00000000-0000-0000-0000-000000000001"},
+		"/api/v1/users/{id}/usage/budgets/{budgetId}:override": {"id": f.user, "budgetId": f.userBudgetState},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
