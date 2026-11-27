@@ -168,7 +168,6 @@ export function railFilterFromSearch(search: string): ChatUrlRailFilter | null {
 
 export interface HydrateRailFilterDeps {
   search: string;
-  starredEnabled: boolean;
   replaceSearch: (params: URLSearchParams) => void;
   persistFilter: (filter: ChatUrlRailFilter) => void;
   applyFilter: (filter: ChatUrlRailFilter) => void;
@@ -177,8 +176,8 @@ export interface HydrateRailFilterDeps {
 /**
  * One-shot hydration of `?filter=unread|mentions|starred` on chat routes
  * (design §7.1, §14.4). Always strips `filter` via `replaceSearch` (preserving
- * other query params). Invalid values, or `starred` while the starred-messages
- * experiment is off, are ignored without persisting or changing the rail.
+ * other query params). Invalid values are ignored without persisting or
+ * changing the rail.
  */
 export function hydrateRailFilterFromSearch(deps: HydrateRailFilterDeps): ChatUrlRailFilter | null {
   const params = new URLSearchParams(deps.search);
@@ -187,7 +186,6 @@ export function hydrateRailFilterFromSearch(deps: HydrateRailFilterDeps): ChatUr
   params.delete(CHAT_RAIL_FILTER_PARAM);
   deps.replaceSearch(params);
   if (!requested) return null;
-  if (requested === 'starred' && !deps.starredEnabled) return null;
   deps.persistFilter(requested);
   deps.applyFilter(requested);
   return requested;

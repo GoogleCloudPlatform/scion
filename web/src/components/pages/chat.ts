@@ -2569,7 +2569,6 @@ export class ScionPageChat extends LitElement {
   private hydrateRailFilterFromUrl(): void {
     hydrateRailFilterFromSearch({
       search: window.location.search,
-      starredEnabled: starredMessagesEnabled(),
       replaceSearch,
       persistFilter: (filter) => {
         try {

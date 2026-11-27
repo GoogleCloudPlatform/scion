@@ -4614,7 +4614,6 @@ export class ScionChatSpaceRail extends LitElement {
    * persisting it to localStorage just like clicking the control (design §7.1, §14.4).
    */
   applyUrlFilter(filter: RailFilter): void {
-    if (filter === 'starred' && !starredMessagesEnabled()) return;
     if (this.spaceFilter === filter) {
       if (filter === 'all') {
         localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);

@@ -31,8 +31,7 @@ import {
   railFilterFromSearch,
   type ChatUrlRailFilter,
 } from '../../../client/chat-routes.js';
-import { CHAT_STARRED_MESSAGES_EXPERIMENT } from '../../../client/chat-stars.js';
-import { resetServerFlagStateForTests, setFeatureFlag } from '../../../utils/feature-flags.js';
+import { resetServerFlagStateForTests } from '../../../utils/feature-flags.js';
 import type { ChatSpace, ChatSpaceThread, RailFilterChangeDetail } from './chat-space-rail.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- `el` is the rail
@@ -151,13 +150,12 @@ describe('railFilterFromSearch', () => {
 });
 
 describe('hydrateRailFilterFromSearch (design §7.1, §14.4)', () => {
-  const runHydrate = (search: string, starredEnabled = true) => {
+  const runHydrate = (search: string) => {
     let replacedParams: URLSearchParams | null = null;
     const persisted: ChatUrlRailFilter[] = [];
     const applied: ChatUrlRailFilter[] = [];
     const result = hydrateRailFilterFromSearch({
       search,
-      starredEnabled,
       replaceSearch: (p) => {
         replacedParams = p;
       },
@@ -183,19 +181,11 @@ describe('hydrateRailFilterFromSearch (design §7.1, §14.4)', () => {
     expect(out.replacedParams?.toString()).toBe('');
   });
 
-  it('hydrates starred when flag is on, persists, and strips filter', () => {
-    const out = runHydrate('?filter=starred', true);
+  it('hydrates starred, persists, and strips filter', () => {
+    const out = runHydrate('?filter=starred');
     expect(out.result).toBe('starred');
     expect(out.persisted).toEqual(['starred']);
     expect(out.applied).toEqual(['starred']);
-    expect(out.replacedParams?.toString()).toBe('');
-  });
-
-  it('strips starred without persisting or applying when flag is off', () => {
-    const out = runHydrate('?filter=starred', false);
-    expect(out.result).toBeNull();
-    expect(out.persisted).toEqual([]);
-    expect(out.applied).toEqual([]);
     expect(out.replacedParams?.toString()).toBe('');
   });
 
@@ -365,15 +355,14 @@ describe('space rail — mentions sub-filter (design §14.4, AC-8)', () => {
     expect(el.shadowRoot.textContent).toContain('No unread mentions');
   });
 
-  it('applyUrlFilter ignores starred when web.chat_starred_messages is off', async () => {
-    setFeatureFlag(CHAT_STARRED_MESSAGES_EXPERIMENT, false);
+  it('applyUrlFilter activates and persists starred', async () => {
     const el = await mountRail([SPACE_WITH_MENTION], new Map());
 
     el.applyUrlFilter('starred');
     await el.updateComplete;
 
-    expect(el.filter).toBe('all');
-    expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBeNull();
+    expect(el.filter).toBe('starred');
+    expect(localStorage.getItem(RAIL_FILTER_STORAGE_KEY)).toBe('starred');
   });
 
   it('derives space mention visibility from loaded threads even when space.hasUnreadMention is false', async () => {

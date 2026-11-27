@@ -425,7 +425,7 @@ describe('<scion-page-profile-inbox>', () => {
       links.map((a) => ({ text: a.textContent?.trim(), href: a.getAttribute('href') }))
     ).toEqual([{ text: '4 starred messages', href: '/chat?filter=starred' }]);
 
-    // AC-13: when web.chat_starred_messages is off, hub omits starredMessages -> no starred link.
+    // When hub omits starredMessages (e.g. starred scan degradation), no starred link is rendered.
     const gateOff = makeSummary({
       chat: makeCat({
         count: 2,

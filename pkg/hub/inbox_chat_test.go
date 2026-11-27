@@ -710,19 +710,17 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 	assert.GreaterOrEqual(t, counts2N.dmLastMessages, int32(1), "DM last messages must be read in batched lookup(s)")
 }
 
-// TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap verifies Phase 3
-// §7.1, §4.3, AC-10, and AC-13:
+// TestUserMeInboxSummary_ChatStarredMessagesProjectsAndCap verifies Phase 3
+// §7.1, §4.3, and AC-10:
 //   - starredMessages sums live stars across authorized threads, agent DMs, and user DMs
 //   - starredMessages never changes chat.count or summary.total (even when unread is 0)
 //   - projects is the union of unread threads, unread agent DMs, and authorized starred conversations
-//   - web.chat_starred_messages off omits starredMessages and excludes starred-only projects
 //   - exceeding the starred scan budget sets breakdown.starredMessagesCapped = 1 while leaving chat.capped and summary.totalCapped false
 //   - project-bounded UAT scopes starredMessages and projects to its boundary project
-func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) {
+func TestUserMeInboxSummary_ChatStarredMessagesProjectsAndCap(t *testing.T) {
 	f := newChatFixture(t)
 	setExperimentOverrides(t, f.srv, map[string]bool{
-		experiments.InboxDashboard:      true,
-		experiments.ChatStarredMessages: true,
+		experiments.InboxDashboard: true,
 	})
 	ctx := context.Background()
 
@@ -886,25 +884,6 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 	assert.Equal(t, 1, capResp.Categories[InboxCategoryChat].Breakdown[InboxBreakdownStarredMessagesCapped])
 	assert.Greater(t, capResp.Categories[InboxCategoryChat].Breakdown[InboxBreakdownStarredMessages], 0)
 	f.srv.inboxChatStarredScanBudgetForTest = 0
-
-	// Case 5: AC-13: web.chat_starred_messages gate off omits starredMessages,
-	// starredMessagesCapped, and excludes projC.
-	setExperimentOverrides(t, f.srv, map[string]bool{
-		experiments.InboxDashboard:      true,
-		experiments.ChatStarredMessages: false,
-	})
-	gateOffResp := h.decodeSummary(doRequestAsUser(t, f.srv, memberUser, http.MethodGet, "/api/v1/users/me/inbox/summary?previews=0", nil))
-	gateOffChat := gateOffResp.Categories[InboxCategoryChat]
-	_, hasStarredKey := gateOffChat.Breakdown[InboxBreakdownStarredMessages]
-	_, hasStarredCapKey := gateOffChat.Breakdown[InboxBreakdownStarredMessagesCapped]
-	assert.False(t, hasStarredKey, "starredMessages must be omitted when web.chat_starred_messages is off")
-	assert.False(t, hasStarredCapKey, "starredMessagesCapped must be omitted when web.chat_starred_messages is off")
-	assert.Equal(t, map[string]int{
-		InboxBreakdownDMs:                 1,
-		InboxBreakdownMentions:            0,
-		InboxBreakdownProjects:            2,
-		InboxBreakdownUnreadConversations: 2,
-	}, gateOffChat.Breakdown)
 }
 
 // TestUserMeInboxSummary_ChatStarredHiddenAgentDMProjectNotDisclosed verifies
@@ -914,8 +893,7 @@ func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) 
 func TestUserMeInboxSummary_ChatStarredHiddenAgentDMProjectNotDisclosed(t *testing.T) {
 	f := newChatFixture(t)
 	setExperimentOverrides(t, f.srv, map[string]bool{
-		experiments.InboxDashboard:      true,
-		experiments.ChatStarredMessages: true,
+		experiments.InboxDashboard: true,
 	})
 	ctx := context.Background()
 
@@ -994,8 +972,7 @@ func (s *inboxChatStarFaultWebChatStore) ListStarredConversationCandidates(ctx c
 func TestUserMeInboxSummary_ChatStarredScanErrorDegradesGracefully(t *testing.T) {
 	srv, s, wcs, proj := setupSharedChatTest(t)
 	setExperimentOverrides(t, srv, map[string]bool{
-		experiments.InboxDashboard:      true,
-		experiments.ChatStarredMessages: true,
+		experiments.InboxDashboard: true,
 	})
 	ctx := context.Background()
 

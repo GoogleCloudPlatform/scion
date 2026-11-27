@@ -22,7 +22,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -114,22 +113,20 @@ func (s *Server) inboxChatCategory(ctx context.Context, v inboxViewer, previews 
 		InboxBreakdownUnreadConversations: detail.counts.Conversations,
 	}
 
-	if s.experimentEnabled(experiments.ChatStarredMessages) {
-		if stars := messageStarStoreFrom(wcs); stars != nil {
-			starredCount, starredProjects, starredCapped, err := s.inboxChatStarredSummary(ctx, v, wcs, stars)
-			if err != nil {
-				slog.Warn("inbox summary: chat starred scan failed; omitting starred breakdown",
-					"error_code", inboxCategoryErrorCode(ctx, err),
-					"error", err)
-			} else {
-				breakdown[InboxBreakdownStarredMessages] = starredCount
-				if starredCapped {
-					breakdown[InboxBreakdownStarredMessagesCapped] = 1
-				}
-				for pid := range starredProjects {
-					if detail.visibleSpaces[pid] != nil {
-						seenProjects[pid] = struct{}{}
-					}
+	if stars := messageStarStoreFrom(wcs); stars != nil {
+		starredCount, starredProjects, starredCapped, err := s.inboxChatStarredSummary(ctx, v, wcs, stars)
+		if err != nil {
+			slog.Warn("inbox summary: chat starred scan failed; omitting starred breakdown",
+				"error_code", inboxCategoryErrorCode(ctx, err),
+				"error", err)
+		} else {
+			breakdown[InboxBreakdownStarredMessages] = starredCount
+			if starredCapped {
+				breakdown[InboxBreakdownStarredMessagesCapped] = 1
+			}
+			for pid := range starredProjects {
+				if detail.visibleSpaces[pid] != nil {
+					seenProjects[pid] = struct{}{}
 				}
 			}
 		}

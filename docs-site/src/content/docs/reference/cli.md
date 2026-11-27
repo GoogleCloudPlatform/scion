@@ -744,7 +744,7 @@ Requires the `web.inbox_dashboard` [experiment](/scion/reference/experiments/) (
 
 - **Flags:**
     - `--previews <n>`: Maximum number of preview items per category (`0` to `10`, default `3`). Pass `0` for counts only.
-    - `--chat <all|dms|mentions>`: Which unread conversations populate chat previews (default `all`). Category counts and breakdown always cover all unread conversations (plus `projects`, `starredMessages` when `web.chat_starred_messages` is on — informational and excluded from the total — and `starredMessagesCapped: 1` when the 500-conversation starred scan budget is hit).
+    - `--chat <all|dms|mentions>`: Which unread conversations populate chat previews (default `all`). Category counts and breakdown always cover all unread conversations (plus `projects`, `starredMessages` — informational and excluded from the total — and `starredMessagesCapped: 1` when the 500-conversation starred scan budget is hit).
     - `--format json` (global flag): Print the Hub API response JSON verbatim.
 
 ```bash
