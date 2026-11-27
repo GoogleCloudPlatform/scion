@@ -64,7 +64,8 @@ interface SummaryData {
   source?: string;
   /** Rollup granularity used by HubRollupSource ("hour" or "day"). */
   granularity?: string;
-  totalSessions: number;
+  /** Session count, or null when the backing session query failed. */
+  totalSessions: number | null;
   totalApiCalls: number;
   totalTokens: number;
   uniqueAgents: number;
@@ -74,6 +75,10 @@ interface SummaryData {
   cacheHitRate?: number | null;
   /** Track 1 measurement coverage status and unmeasured/stale agent counts. */
   measurement?: DashboardMeasurement;
+  /** True when one or more backing sub-queries failed. */
+  partialFailure?: boolean;
+  /** Descriptions of failed backing sub-queries when partialFailure is true. */
+  partialErrors?: string[];
   /** Actionable setup hint when cloud telemetry cannot export under current settings. */
   telemetryHint?: string;
 }
@@ -86,6 +91,9 @@ interface SessionsData {
   granularity?: string;
   dailyCounts: TimeSeriesPoint[];
   activeAgents: TimeSeriesPoint[];
+  truncated?: boolean;
+  partialFailure?: boolean;
+  partialErrors?: string[];
   measurement?: DashboardMeasurement;
 }
 
@@ -99,6 +107,9 @@ interface ModelCallsData {
   byModel: LabeledTimeSeries[];
   byHarness: LabeledTimeSeries[];
   byUser?: LabeledTimeSeries[];
+  truncated?: boolean;
+  partialFailure?: boolean;
+  partialErrors?: string[];
   measurement?: DashboardMeasurement;
 }
 
@@ -115,6 +126,9 @@ interface TokensData {
   cacheWrite?: LabeledTimeSeries[];
   totals?: DashboardTokenTotals;
   dailyCacheHitRate?: NullableFloatPoint[];
+  truncated?: boolean;
+  partialFailure?: boolean;
+  partialErrors?: string[];
   measurement?: DashboardMeasurement;
 }
 
@@ -345,6 +359,11 @@ export class ScionPageMetrics extends LitElement {
       height: 100%;
       color: var(--scion-text-muted);
       font-size: 0.875rem;
+    }
+
+    .stat-value.unavailable {
+      font-size: 1.125rem;
+      color: var(--scion-text-muted);
     }
   `;
 
@@ -896,6 +915,55 @@ export class ScionPageMetrics extends LitElement {
     `;
   }
 
+  private renderViewNotices(
+    view: {
+      truncated?: boolean;
+      granularity?: string;
+      partialFailure?: boolean;
+      partialErrors?: string[];
+    },
+    tabKey: string
+  ) {
+    const showTruncated = this.usageLedgerOn && Boolean(view.truncated);
+    const showPartialFailure = Boolean(view.partialFailure);
+    if (!showTruncated && !showPartialFailure) return nothing;
+    const partialDetail = view.partialErrors?.length
+      ? `Some metrics could not be loaded (${view.partialErrors.join('; ')}). Affected counts are shown as unavailable.`
+      : 'Some metrics could not be loaded. Affected counts are shown as unavailable.';
+    const truncatedDetail =
+      view.granularity === 'day'
+        ? 'Series data reached the query limit (daily granularity); the earliest boundary day was omitted from charts while window totals remain exact.'
+        : 'Series data reached the query limit; the earliest boundary day was omitted from charts while window totals remain exact.';
+    return html`
+      ${showPartialFailure
+        ? html`
+            <sl-alert
+              variant="warning"
+              open
+              class="telemetry-hint"
+              data-testid="metrics-${tabKey}-partial-failure"
+            >
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${partialDetail}
+            </sl-alert>
+          `
+        : nothing}
+      ${showTruncated
+        ? html`
+            <sl-alert
+              variant="warning"
+              open
+              class="telemetry-hint"
+              data-testid="metrics-${tabKey}-truncated"
+            >
+              <sl-icon slot="icon" name="info-circle"></sl-icon>
+              ${truncatedDetail}
+            </sl-alert>
+          `
+        : nothing}
+    `;
+  }
+
   private renderSummaryTab() {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.summary) return this.renderEmptyState();
@@ -915,14 +983,20 @@ export class ScionPageMetrics extends LitElement {
     const showCacheHitRate =
       this.usageLedgerOn && (s.tokens !== undefined || s.cacheHitRate !== undefined);
     const hitRateValue = s.cacheHitRate !== undefined ? s.cacheHitRate : s.tokens?.cacheHitRate;
+    const sessionsUnavailable = s.totalSessions === null || s.totalSessions === undefined;
 
     return html`
+      ${this.renderViewNotices(s, 'summary')}
       ${this.renderMeasurementBar(s.measurement, 'metrics-summary-measurement')}
       <div class="stats-row">
         <div class="stat-card">
           <span class="stat-label">Total Sessions</span>
-          <span class="stat-value" data-testid="metrics-summary-sessions"
-            >${this.formatCompactNumber(s.totalSessions)}</span
+          <span
+            class="stat-value ${sessionsUnavailable ? 'unavailable' : ''}"
+            data-testid="metrics-summary-sessions"
+            >${sessionsUnavailable
+              ? 'Unavailable'
+              : this.formatCompactNumber(s.totalSessions!)}</span
           >
         </div>
         <div class="stat-card">
@@ -959,14 +1033,21 @@ export class ScionPageMetrics extends LitElement {
     if (this.loading) return html`<sl-spinner></sl-spinner>`;
     if (!this.sessions) return this.renderEmptyState();
     const zone = dayBucketZoneLabel(this.sessions.timeZone);
+    const sessionsUnavailable =
+      Boolean(this.sessions.partialFailure) && !this.sessions.dailyCounts?.length;
 
     return html`
+      ${this.renderViewNotices(this.sessions, 'sessions')}
       ${this.renderMeasurementBar(this.sessions.measurement, 'metrics-sessions-measurement')}
       <div class="chart-row">
         <div class="section">
           <h3 class="chart-section-title">Daily Sessions (${zone})</h3>
           <div class="chart-container">
-            <canvas id="chart-sessions"></canvas>
+            ${sessionsUnavailable
+              ? html`<div class="chart-empty" data-testid="metrics-sessions-unavailable">
+                  Session data is currently unavailable.
+                </div>`
+              : html`<canvas id="chart-sessions"></canvas>`}
           </div>
         </div>
         <div class="section">
@@ -985,6 +1066,7 @@ export class ScionPageMetrics extends LitElement {
     const zone = dayBucketZoneLabel(this.modelCalls.timeZone);
 
     return html`
+      ${this.renderViewNotices(this.modelCalls, 'model-calls')}
       ${this.renderMeasurementBar(this.modelCalls.measurement, 'metrics-model-calls-measurement')}
       <div class="chart-row">
         <div class="section">
@@ -1025,6 +1107,7 @@ export class ScionPageMetrics extends LitElement {
         : 'No cache write tokens in this period.';
 
     return html`
+      ${this.renderViewNotices(t, 'tokens')}
       ${this.renderMeasurementBar(t.measurement, 'metrics-tokens-measurement')}
       ${this.usageLedgerOn && t.totals
         ? html`

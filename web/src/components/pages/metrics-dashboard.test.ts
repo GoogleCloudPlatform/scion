@@ -873,4 +873,82 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     expect(inputChart.data.datasets[0].data).toEqual([1000, 2000]);
     expect(inputChart.data.datasets[1].data).toEqual([null, 500]);
   });
+
+  it('renders truncated notices on sessions/model-calls/tokens and shows sessions as Unavailable on partialFailure', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: {
+        ...SUMMARY,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        totalSessions: null,
+        partialFailure: true,
+        partialErrors: ['sessions query failed'],
+      },
+      sessions: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        dailyCounts: [],
+        activeAgents: [{ timestamp: '2026-11-25', value: 2 }],
+        truncated: true,
+        partialFailure: true,
+        partialErrors: ['sessions query failed'],
+      },
+      'model-calls': {
+        ...MODEL_CALLS,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        truncated: true,
+      },
+      tokens: {
+        ...TOKENS,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        truncated: true,
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    // Summary: totalSessions=null renders Unavailable (never 0) + partial-failure alert.
+    expect(
+      root.querySelector('[data-testid="metrics-summary-sessions"]')?.textContent?.trim()
+    ).toBe('Unavailable');
+    const summaryAlert = root.querySelector('[data-testid="metrics-summary-partial-failure"]');
+    expect(summaryAlert).not.toBeNull();
+    expect(summaryAlert?.textContent).toContain('sessions query failed');
+
+    // Sessions: partialFailure with empty dailyCounts shows unavailable placeholder + truncated notice.
+    element.activeTab = 'sessions';
+    await element.loadView('sessions');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-sessions-unavailable"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="metrics-sessions-partial-failure"]')).not.toBeNull();
+    expect(root.querySelector('[data-testid="metrics-sessions-truncated"]')?.textContent).toContain(
+      'earliest boundary day was omitted'
+    );
+
+    // Model calls & Tokens: truncated notice shown.
+    element.activeTab = 'model-calls';
+    await element.loadView('model-calls');
+    await settle(element);
+    expect(
+      root.querySelector('[data-testid="metrics-model-calls-truncated"]')?.textContent
+    ).toContain('daily granularity');
+
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-tokens-truncated"]')?.textContent).toContain(
+      'earliest boundary day was omitted'
+    );
+  });
 });

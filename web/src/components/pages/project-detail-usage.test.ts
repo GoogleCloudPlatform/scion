@@ -323,4 +323,35 @@ describe('project-detail token total fix & measurement badges', () => {
         ?.textContent?.trim()
     ).toBe('2 unmeasured · 1 stale');
   });
+
+  it('renders daily-fallback periodLabel and shows sessions as Unavailable on partialFailure', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    metricsSummaryResponse = {
+      ...metricsSummaryResponse,
+      granularity: 'day',
+      periodLabel: 'Since 2026-11-26 (UTC daily)',
+      sessionsCount24h: null,
+      partialFailure: true,
+      partialErrors: ['sessions store unavailable'],
+    };
+
+    const el = await mountProjectDetail();
+    const root = el.shadowRoot!;
+
+    expect(
+      root.querySelector('[data-testid="project-metrics-period-label"]')?.textContent?.trim()
+    ).toBe('Since 2026-11-26 (UTC daily)');
+    expect(
+      root.querySelector('[data-testid="project-sessions-24h-label"]')?.textContent?.trim()
+    ).toBe('Sessions');
+    expect(
+      root.querySelector('[data-testid="project-tokens-24h-label"]')?.textContent?.trim()
+    ).toBe('Tokens');
+    expect(root.querySelector('[data-testid="project-sessions-24h"]')?.textContent?.trim()).toBe(
+      'Unavailable'
+    );
+    expect(
+      root.querySelector('[data-testid="project-metrics-24h-partial-failure"]')?.textContent
+    ).toContain('sessions store unavailable');
+  });
 });

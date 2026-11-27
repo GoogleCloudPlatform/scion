@@ -238,7 +238,7 @@ function isProjectShaped(value: unknown): value is { id: string; name: string } 
 interface ProjectMetricsSummary {
   source?: string;
   granularity?: string;
-  sessionsCount24h: number;
+  sessionsCount24h: number | null;
   apiCalls24h: number;
   tokenUsage24h: number;
   activeAgents24h: number;
@@ -246,6 +246,8 @@ interface ProjectMetricsSummary {
   tokens?: DashboardTokenTotals;
   cacheHitRate?: number | null;
   measurement?: DashboardMeasurement;
+  partialFailure?: boolean;
+  partialErrors?: string[];
 }
 
 @customElement('scion-page-project-detail')
@@ -3344,51 +3346,85 @@ export class ScionPageProjectDetail extends LitElement {
       </div>
 
       ${this.metricsSummary
-        ? html`
-            <div class="stats-row" style="margin-top: 0.5rem;">
-              <div class="stat">
-                <span class="stat-label">Sessions (24h)</span>
-                <span class="stat-value">${this.metricsSummary.sessionsCount24h}</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">API Calls (24h)</span>
-                <span class="stat-value">${this.metricsSummary.apiCalls24h}</span>
-              </div>
-              <div class="stat">
-                <span class="stat-label">Tokens (24h)</span>
-                <span class="stat-value" data-testid="project-tokens-24h"
-                  >${this.usageLedgerEnabled && this.metricsSummary.tokens
-                    ? formatCompactUsageToken(
-                        this.metricsSummary.tokens.summableTokens,
-                        isMeasurementPartial(this.metricsSummary.measurement) ||
-                          hasPartialDashboardTotals(this.metricsSummary.tokens),
-                        Boolean(this.metricsSummary.tokens.saturated)
-                      )
-                    : this.formatTokenCount(this.metricsSummary.tokenUsage24h)}</span
-                >
-                ${this.usageLedgerEnabled && this.metricsSummary.measurement
-                  ? html`<scion-measurement-status-badge
-                      .status=${this.metricsSummary.measurement.status}
-                      .unmeasuredAgents=${this.metricsSummary.measurement.unmeasuredAgents}
-                      .staleAgents=${this.metricsSummary.measurement.staleAgents}
-                      data-testid="project-metrics-24h-measurement"
-                    ></scion-measurement-status-badge>`
+        ? (() => {
+            const ms = this.metricsSummary;
+            const isDailyFallback =
+              this.usageLedgerEnabled &&
+              Boolean(ms.periodLabel) &&
+              ms.periodLabel !== 'Last 24 hours';
+            const windowSuffix = isDailyFallback ? '' : ' (24h)';
+            const sessionsUnavailable =
+              ms.sessionsCount24h === null || ms.sessionsCount24h === undefined;
+            return html`
+              <div class="stats-row" style="margin-top: 0.5rem;">
+                <div class="stat">
+                  <span class="stat-label" data-testid="project-sessions-24h-label"
+                    >Sessions${windowSuffix}</span
+                  >
+                  <span class="stat-value" data-testid="project-sessions-24h"
+                    >${sessionsUnavailable ? 'Unavailable' : ms.sessionsCount24h}</span
+                  >
+                </div>
+                <div class="stat">
+                  <span class="stat-label">API Calls${windowSuffix}</span>
+                  <span class="stat-value">${ms.apiCalls24h}</span>
+                </div>
+                <div class="stat">
+                  <span class="stat-label" data-testid="project-tokens-24h-label"
+                    >Tokens${windowSuffix}</span
+                  >
+                  <span class="stat-value" data-testid="project-tokens-24h"
+                    >${this.usageLedgerEnabled && ms.tokens
+                      ? formatCompactUsageToken(
+                          ms.tokens.summableTokens,
+                          isMeasurementPartial(ms.measurement) ||
+                            hasPartialDashboardTotals(ms.tokens),
+                          Boolean(ms.tokens.saturated)
+                        )
+                      : this.formatTokenCount(ms.tokenUsage24h)}</span
+                  >
+                  ${this.usageLedgerEnabled && ms.measurement
+                    ? html`<scion-measurement-status-badge
+                        .status=${ms.measurement.status}
+                        .unmeasuredAgents=${ms.measurement.unmeasuredAgents}
+                        .staleAgents=${ms.measurement.staleAgents}
+                        data-testid="project-metrics-24h-measurement"
+                      ></scion-measurement-status-badge>`
+                    : nothing}
+                </div>
+                <div class="stat">
+                  <span class="stat-label">Active Agents${windowSuffix}</span>
+                  <span class="stat-value">${ms.activeAgents24h}</span>
+                </div>
+                ${isDailyFallback
+                  ? html`<div
+                      style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-text-muted);"
+                      data-testid="project-metrics-period-label"
+                    >
+                      ${ms.periodLabel}
+                    </div>`
                   : nothing}
+                ${this.usageLedgerEnabled && ms.partialFailure
+                  ? html`<div
+                      style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-warning-600);"
+                      data-testid="project-metrics-24h-partial-failure"
+                    >
+                      ${ms.partialErrors?.length
+                        ? `Partial data (${ms.partialErrors.join('; ')})`
+                        : 'Partial data unavailable'}
+                    </div>`
+                  : nothing}
+                <div style="display: flex; align-items: center; margin-left: auto;">
+                  <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
+                    <sl-button size="small" variant="text">
+                      <sl-icon slot="prefix" name="graph-up"></sl-icon>
+                      View Details
+                    </sl-button>
+                  </a>
+                </div>
               </div>
-              <div class="stat">
-                <span class="stat-label">Active Agents (24h)</span>
-                <span class="stat-value">${this.metricsSummary.activeAgents24h}</span>
-              </div>
-              <div style="display: flex; align-items: center; margin-left: auto;">
-                <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
-                  <sl-button size="small" variant="text">
-                    <sl-icon slot="prefix" name="graph-up"></sl-icon>
-                    View Details
-                  </sl-button>
-                </a>
-              </div>
-            </div>
-          `
+            `;
+          })()
         : nothing}
       ${this.sessionMetricsSummary
         ? html`
