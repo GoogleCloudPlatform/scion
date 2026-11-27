@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
@@ -36,9 +37,8 @@ import (
 // a credential: its GH_ convention names are GH_ACME_CORP__PRIVATE_TEMPLATES
 // and GH_ACME_CORP.
 const (
-	reimportCredSource     = "https://github.com/acme-corp/private.templates/tree/main/templates"
-	reimportCredAPITarball = "https://api.github.com/repos/acme-corp/private.templates/tarball/" + defaultFakeReimportSHA
-	reimportCredArchive    = "https://github.com/acme-corp/private.templates/archive/" + defaultFakeReimportSHA + ".tar.gz"
+	reimportCredSource    = "https://github.com/acme-corp/private.templates/tree/main/templates"
+	reimportCredRawPrefix = "https://raw.githubusercontent.com/acme-corp/private.templates/" + defaultFakeReimportSHA + "/templates/"
 )
 
 // useReimportCredBackend installs a credential backend on srv that serves
@@ -94,8 +94,14 @@ func TestTemplateReimport_ProjectScopeSendsProjectCredential(t *testing.T) {
 			rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-			assert.Equal(t, []string{reimportCredAPITarball}, fetcher.recordedTarballURLs())
-			assert.Equal(t, []string{"Bearer " + tt.want}, fetcher.recordedTarballAuths())
+			assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+			require.NotEmpty(t, fetcher.recordedRawURLs())
+			for _, u := range fetcher.recordedRawURLs() {
+				assert.True(t, strings.HasPrefix(u, reimportCredRawPrefix), "raw URL = %q", u)
+			}
+			for _, auth := range fetcher.recordedRawAuths() {
+				assert.Equal(t, "Bearer "+tt.want, auth)
+			}
 			assert.Contains(t, logBuf.String(), "secret="+tt.wantLog)
 			assertNoCredentialInLog(t, logBuf.String(), tt.values)
 			assertNoCredentialInLog(t, rec.Body.String(), tt.values)
@@ -121,8 +127,14 @@ func TestTemplateReimport_HubScopeSendsHubCredential(t *testing.T) {
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	assert.Equal(t, []string{reimportCredAPITarball}, fetcher.recordedTarballURLs())
-	assert.Equal(t, []string{"Bearer fake-hub-cred"}, fetcher.recordedTarballAuths())
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	require.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, reimportCredRawPrefix), "raw URL = %q", u)
+	}
+	for _, auth := range fetcher.recordedRawAuths() {
+		assert.Equal(t, "Bearer fake-hub-cred", auth)
+	}
 	assert.Contains(t, logBuf.String(), "secret=GH_ACME_CORP")
 	assertNoCredentialInLog(t, logBuf.String(), values)
 	assertNoCredentialInLog(t, rec.Body.String(), values)
@@ -150,8 +162,14 @@ func TestTemplateReimport_UserScopeSendsOnlyThatUsersCredential(t *testing.T) {
 		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-		assert.Equal(t, []string{reimportCredAPITarball}, fetcher.recordedTarballURLs())
-		assert.Equal(t, []string{"Bearer fake-user-cred"}, fetcher.recordedTarballAuths())
+		assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+		require.NotEmpty(t, fetcher.recordedRawURLs())
+		for _, u := range fetcher.recordedRawURLs() {
+			assert.True(t, strings.HasPrefix(u, reimportCredRawPrefix), "raw URL = %q", u)
+		}
+		for _, auth := range fetcher.recordedRawAuths() {
+			assert.Equal(t, "Bearer fake-user-cred", auth)
+		}
 		assertNoCredentialInLog(t, logBuf.String(), values)
 		assertNoCredentialInLog(t, rec.Body.String(), values)
 	})
@@ -190,8 +208,14 @@ func TestTemplateReimport_NoCredentialFetchesPublicArchive(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, []string{reimportCredArchive}, fetcher.recordedTarballURLs())
-	assert.Equal(t, []string{""}, fetcher.recordedTarballAuths())
+	assert.Empty(t, fetcher.recordedTarballURLs(), "small folder must use raw strategy without tarball")
+	require.NotEmpty(t, fetcher.recordedRawURLs())
+	for _, u := range fetcher.recordedRawURLs() {
+		assert.True(t, strings.HasPrefix(u, reimportCredRawPrefix), "raw URL = %q", u)
+	}
+	for _, auth := range fetcher.recordedRawAuths() {
+		assert.Empty(t, auth, "anonymous raw requests must not send Authorization")
+	}
 }
 
 // TestTemplateReimport_NonGitHubSourceReadsNoCredential: a source reimport

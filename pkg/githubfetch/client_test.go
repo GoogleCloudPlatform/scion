@@ -380,7 +380,9 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		}
 		defer func() { _ = root.Close() }()
 
-		res, err := client.FetchFolder(context.Background(), src, Credential{Kind: CredAnonymous}, root, ImportHostedLimits())
+		lim := ImportHostedLimits()
+		lim.RawMaxFiles = -1 // exercise tarball/archive branch
+		res, err := client.FetchFolder(context.Background(), src, Credential{Kind: CredAnonymous}, root, lim)
 		if err != nil {
 			t.Fatalf("FetchFolder anon: %v", err)
 		}
@@ -461,6 +463,9 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		cred := Credential{Token: secretToken, Scope: "secret:test", Kind: CredSecret}
 		src, _ := ParseURL("https://github.com/acme/private/tree/" + sha + "/templates/my-app")
 
+		tarLim := ImportHostedLimits()
+		tarLim.RawMaxFiles = -1 // exercise api.github.com -> codeload tarball redirect path
+
 		// 1. Redirect api.github.com -> codeload.github.com succeeds and strips Authorization.
 		redirectTarget = "https://codeload.github.com/acme/private/legacy.tar.gz?token=short-lived-codeload-secret"
 		ep := DefaultEndpoint()
@@ -476,7 +481,7 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer func() { _ = root.Close() }()
-		_, err = client.FetchFolder(context.Background(), src, cred, root, ImportHostedLimits())
+		_, err = client.FetchFolder(context.Background(), src, cred, root, tarLim)
 		if err != nil {
 			t.Fatalf("codeload redirect FetchFolder: %v", err)
 		}
@@ -491,7 +496,7 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		redirectTarget = "https://sub.api.github.com/evil/tarball"
 		root2, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = root2.Close() }()
-		_, err = client.FetchFolder(context.Background(), src, cred, root2, ImportHostedLimits())
+		_, err = client.FetchFolder(context.Background(), src, cred, root2, tarLim)
 		var ghe *Error
 		if !errors.As(err, &ghe) || ghe.Kind != KindUnreachable {
 			t.Fatalf("non-allowlisted redirect err = %v, want KindUnreachable", err)
@@ -504,7 +509,7 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		redirectTarget = "http://api.github.com/repos/acme/private/tarball/" + sha
 		root3, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = root3.Close() }()
-		_, err = client.FetchFolder(context.Background(), src, cred, root3, ImportHostedLimits())
+		_, err = client.FetchFolder(context.Background(), src, cred, root3, tarLim)
 		if !errors.As(err, &ghe) || ghe.Kind != KindUnreachable {
 			t.Fatalf("http downgrade redirect err = %v, want KindUnreachable", err)
 		}
@@ -513,7 +518,7 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		redirectTarget = "https://api.github.com/hop1"
 		root4, _ := os.OpenRoot(t.TempDir())
 		defer func() { _ = root4.Close() }()
-		_, err = client.FetchFolder(context.Background(), src, cred, root4, ImportHostedLimits())
+		_, err = client.FetchFolder(context.Background(), src, cred, root4, tarLim)
 		if !errors.As(err, &ghe) || ghe.Kind != KindUnreachable {
 			t.Fatalf(">3 redirects err = %v, want KindUnreachable", err)
 		}
@@ -1134,7 +1139,9 @@ func TestFetchFolder_StreamingDoesNotBufferWholeArchive(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	res, err := client.FetchFolder(context.Background(), src, Credential{}, root, ImportHostedLimits())
+	streamLim := ImportHostedLimits()
+	streamLim.RawMaxFiles = -1 // exercise streaming tarball path
+	res, err := client.FetchFolder(context.Background(), src, Credential{}, root, streamLim)
 	if err != nil {
 		t.Fatalf("streaming FetchFolder: %v", err)
 	}
