@@ -248,7 +248,9 @@ func TestIntegration_SendAndReadMessagesWithRealHub(t *testing.T) {
 	}()
 	defer func() {
 		srvCancel()
-		<-srvDone
+		if err := <-srvDone; err != nil {
+			t.Errorf("mcpSrv.Serve shutdown error: %v", err)
+		}
 	}()
 
 	endpoint := "http://" + ln.Addr().String() + "/mcp"

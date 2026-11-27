@@ -177,7 +177,7 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 	for _, tc := range credCases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := postMCP(tc.headers, initBody)
-			defer r.Body.Close()
+			defer func() { _ = r.Body.Close() }()
 			if r.StatusCode != http.StatusUnauthorized {
 				t.Fatalf("got status %d, want 401", r.StatusCode)
 			}
