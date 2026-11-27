@@ -126,6 +126,12 @@ type ResolvedProjectSetting struct {
 	// the settings UI can display it as a placeholder hint. It is NOT an
 	// effective value and does not account for template or harness-config layers.
 	HubValue any `json:"hubValue"`
+
+	// Ceiling is the active Hub run-limit ceiling for this setting (int for
+	// turn/model-call limits, string for duration) when the
+	// agent_policy.limit_ceilings experiment is enabled and a ceiling is
+	// configured; null otherwise.
+	Ceiling any `json:"ceiling"`
 }
 
 // ResolvedProjectSettings is the GET .../settings/resolved response body.
@@ -408,6 +414,7 @@ func (s *Server) handleProjectSettingsResolved(w http.ResponseWriter, r *http.Re
 // prevent.
 func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjectSettings {
 	agentDefaults, agentDefaultsReadable := s.hubAgentDefaultsDoc()
+	ceilings := s.agentLimitCeilings()
 
 	settings := make(map[string]ResolvedProjectSetting, len(projectSettingKeys))
 	for _, key := range projectSettingKeys {
@@ -432,6 +439,7 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 		}
 
 		entry.HubDefault, entry.HubValue = s.hubDefaultFor(desc, agentDefaults, agentDefaultsReadable)
+		entry.Ceiling = limitCeilingForSetting(key, ceilings)
 		settings[key] = entry
 	}
 
@@ -439,6 +447,24 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 		Project:  projectSettingsFromAnnotations(project),
 		Settings: settings,
 	}
+}
+
+func limitCeilingForSetting(key string, ceilings opsettings.AgentLimitsSettings) any {
+	switch key {
+	case projectSettingDefaultMaxTurns:
+		if ceilings.MaxTurns > 0 {
+			return ceilings.MaxTurns
+		}
+	case projectSettingDefaultMaxModelCalls:
+		if ceilings.MaxModelCalls > 0 {
+			return ceilings.MaxModelCalls
+		}
+	case projectSettingDefaultMaxDuration:
+		if ceilings.MaxDuration != "" {
+			return ceilings.MaxDuration
+		}
+	}
+	return nil
 }
 
 // projectAnnotationInEffect reports whether a stored project annotation is

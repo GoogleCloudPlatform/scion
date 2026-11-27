@@ -102,6 +102,8 @@ import {
 } from '../shared/env-badge-views.js';
 import {
   ADMIN_MANAGED_BROKERS_FLAG,
+  AGENT_LIMIT_CEILINGS_FLAG,
+  agentLimitCeilingsEnabled,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -483,6 +485,8 @@ interface ServerConfigResponse {
 
   broker_policy?: { admin_managed_only?: boolean };
 
+  agent_limits?: { max_turns?: number; max_model_calls?: number; max_duration?: string };
+
   // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
   // True on workstation hubs: Layer-0 and file-only settings are editable and
@@ -721,6 +725,10 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'agent_secrets.user_scope_only': 'Agent Secrets: Profile Scope Only',
   // broker_policy section
   'broker_policy.admin_managed_only': 'Runtime Broker Policy: Admin-Managed Only',
+  // agent_limits section
+  'agent_limits.max_turns': 'Agent Limit Ceilings: Max Turns',
+  'agent_limits.max_model_calls': 'Agent Limit Ceilings: Max Model Calls',
+  'agent_limits.max_duration': 'Agent Limit Ceilings: Max Duration',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -1118,6 +1126,13 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultMaxTurns = 0;
   @state() private defaultMaxModelCalls = 0;
   @state() private defaultMaxDuration = '';
+  // Hub agent limit ceilings (DB-only agent_limits section; 0/empty = no ceiling)
+  @state() private agentLimitMaxTurns = 0;
+  @state() private agentLimitMaxModelCalls = 0;
+  @state() private agentLimitMaxDuration = '';
+  private loadedAgentLimitMaxTurns = 0;
+  private loadedAgentLimitMaxModelCalls = 0;
+  private loadedAgentLimitMaxDuration = '';
   @state() private defaultResCpuReq = '';
   @state() private defaultResMemReq = '';
   @state() private defaultResCpuLim = '';
@@ -2251,6 +2266,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxTurns = data.default_max_turns || 0;
     this.defaultMaxModelCalls = data.default_max_model_calls || 0;
     this.defaultMaxDuration = data.default_max_duration || '';
+    // Hub agent limit ceilings
+    this.agentLimitMaxTurns = data.agent_limits?.max_turns || 0;
+    this.agentLimitMaxModelCalls = data.agent_limits?.max_model_calls || 0;
+    this.agentLimitMaxDuration = data.agent_limits?.max_duration || '';
+    this.loadedAgentLimitMaxTurns = this.agentLimitMaxTurns;
+    this.loadedAgentLimitMaxModelCalls = this.agentLimitMaxModelCalls;
+    this.loadedAgentLimitMaxDuration = this.agentLimitMaxDuration;
     const defRes = data.default_resources;
     this.defaultResCpuReq = defRes?.requests?.cpu || '';
     this.defaultResMemReq = defRes?.requests?.memory || '';
@@ -3141,6 +3163,26 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   }
 
+  private addAgentLimitsToPayload(payload: Record<string, unknown>): void {
+    const duration = this.agentLimitMaxDuration.trim();
+    const changed =
+      this.agentLimitMaxTurns !== this.loadedAgentLimitMaxTurns ||
+      this.agentLimitMaxModelCalls !== this.loadedAgentLimitMaxModelCalls ||
+      duration !== this.loadedAgentLimitMaxDuration.trim();
+    if (!changed) return;
+    const block: Record<string, unknown> = {};
+    if (this.agentLimitMaxTurns > 0) block.max_turns = this.agentLimitMaxTurns;
+    if (this.agentLimitMaxModelCalls > 0) block.max_model_calls = this.agentLimitMaxModelCalls;
+    if (duration) block.max_duration = duration;
+    // Send explicit null for a full clear so it is never dropped as an empty
+    // object, and carry expected_revisions.agent_limits for optimistic CAS.
+    payload.agent_limits = Object.keys(block).length > 0 ? block : null;
+    const expectedRevisions =
+      (payload.expected_revisions as Record<string, number> | undefined) ?? {};
+    expectedRevisions.agent_limits = this.loadedRevisions['agent_limits'] ?? 0;
+    payload.expected_revisions = expectedRevisions;
+  }
+
   /**
    * Adds the hub observability export switches to a hub payload block, each
    * only when it changed: a switch stays unset until an admin sets it, and
@@ -3200,6 +3242,10 @@ export class ScionPageAdminServerConfig extends LitElement {
         payload.expected_revisions = dirty.expectedRevisions;
       }
     }
+    // agent_limits is DB-only with no KoanfPaths, so it is attached after
+    // dirtySectionsPayload (which would otherwise drop an empty clear and omit
+    // its expected_revisions entry).
+    this.addAgentLimitsToPayload(payload);
     if (this.layer0Editable) mergePayload(payload, this.buildLayer0Payload());
     return payload;
   }
@@ -5119,6 +5165,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         </div>
       </div>
 
+      ${this.renderAgentLimitsSection()}
+
       <!-- Card 3: Project Default Settings -->
       ${this.scratchpadApiAvailable
         ? html`
@@ -5199,6 +5247,90 @@ export class ScionPageAdminServerConfig extends LitElement {
       </div>
 
       ${this.renderBrokerPolicySection()}
+    `;
+  }
+
+  private renderAgentLimitsSection() {
+    if (this.settingsTier !== 'db') {
+      return nothing;
+    }
+    const expEnabled = agentLimitCeilingsEnabled();
+    const hasStoredCeilings =
+      this.loadedAgentLimitMaxTurns > 0 ||
+      this.loadedAgentLimitMaxModelCalls > 0 ||
+      this.loadedAgentLimitMaxDuration.trim() !== '';
+    if (!expEnabled) {
+      if (!hasStoredCeilings) {
+        return nothing;
+      }
+      return html`
+        <div class="section" data-section="agent-limits-mismatch">
+          <h3 class="section-title">Agent Limit Ceilings</h3>
+          <sl-alert variant="warning" open data-agent-limits-mismatch>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            <code>agent_limits</code> ceilings are stored, but experiment
+            <code>${AGENT_LIMIT_CEILINGS_FLAG}</code> is off. Run-limit ceilings are not currently
+            enforced. Enable the experiment on
+            <a href="/admin/experiments">Admin &gt; Experiments</a> to activate enforcement.
+          </sl-alert>
+        </div>
+      `;
+    }
+    return html`
+      <!-- Card: Agent Limit Ceilings -->
+      <div class="section" data-section="agent-limits">
+        ${this.renderSectionHeader('Agent Limit Ceilings', 'agent_limits')}
+        ${this.renderSectionMeta('agent_limits')}
+        <p class="hint" style="margin: 0 0 1rem 0;">
+          Upper bounds enforced across all projects and agents. Setting a ceiling disables
+          &ldquo;Unlimited&rdquo; for that limit. Turn and model-call limits are cooperative budget
+          guardrails (tracked by in-container harness hooks), not a security boundary.
+        </p>
+        <div class="form-grid">
+          <div class="form-field">
+            <sl-input
+              label="Max Turns Ceiling"
+              help-text="Maximum conversation turns allowed per run (empty = no ceiling)"
+              type="number"
+              min="0"
+              data-field="agent_limits.max_turns"
+              value=${this.agentLimitMaxTurns ? String(this.agentLimitMaxTurns) : ''}
+              placeholder="No ceiling"
+              @sl-input=${(e: Event) => {
+                const raw = parseInt((e.target as HTMLInputElement).value, 10);
+                this.agentLimitMaxTurns = Number.isFinite(raw) && raw > 0 ? raw : 0;
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field">
+            <sl-input
+              label="Max Model Calls Ceiling"
+              help-text="Maximum LLM API calls allowed per run (empty = no ceiling)"
+              type="number"
+              min="0"
+              data-field="agent_limits.max_model_calls"
+              value=${this.agentLimitMaxModelCalls ? String(this.agentLimitMaxModelCalls) : ''}
+              placeholder="No ceiling"
+              @sl-input=${(e: Event) => {
+                const raw = parseInt((e.target as HTMLInputElement).value, 10);
+                this.agentLimitMaxModelCalls = Number.isFinite(raw) && raw > 0 ? raw : 0;
+              }}
+            ></sl-input>
+          </div>
+          <div class="form-field full-width">
+            <sl-input
+              label="Max Duration Ceiling"
+              help-text="Maximum run duration allowed (Go duration, e.g. 4h, 30m; empty = no ceiling)"
+              data-field="agent_limits.max_duration"
+              value=${this.agentLimitMaxDuration}
+              placeholder="No ceiling (e.g. 4h, 30m)"
+              @sl-input=${(e: Event) => {
+                this.agentLimitMaxDuration = (e.target as HTMLInputElement).value;
+              }}
+            ></sl-input>
+          </div>
+        </div>
+      </div>
     `;
   }
 

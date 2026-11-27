@@ -171,6 +171,7 @@ export function buildFixture() {
       status: 200,
       body: {
         experiments: {
+          'agent_policy.limit_ceilings': false,
           'federation.project_visitors': false,
           'hub.access_constraints': false,
           'hub.admin_managed_brokers': false,

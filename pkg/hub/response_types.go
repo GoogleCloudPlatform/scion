@@ -21,6 +21,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// AgentEffectiveConfigView carries the broker-reported effective run limits
+// from store.AgentEffectiveConfig for the single-agent GET response.
+type AgentEffectiveConfigView struct {
+	MaxTurns        int      `json:"maxTurns,omitempty"`
+	MaxModelCalls   int      `json:"maxModelCalls,omitempty"`
+	MaxDuration     string   `json:"maxDuration,omitempty"`
+	LimitsClampedBy []string `json:"limitsClampedBy,omitempty"`
+}
+
 // AgentWithCapabilities wraps a store.Agent with capability annotations.
 type AgentWithCapabilities struct {
 	store.Agent
@@ -42,6 +51,9 @@ type AgentWithCapabilities struct {
 	// config applied (AppliedConfig ⊕ pendingConfig), set on the
 	// single-agent GET with ?view=edit only.
 	EffectiveNextRun *store.AgentAppliedConfig `json:"effectiveNextRun,omitempty"`
+	// EffectiveConfig carries the broker-reported effective run limits for the
+	// current run, set on the single-agent GET only when recorded.
+	EffectiveConfig *AgentEffectiveConfigView `json:"effectiveConfig,omitempty"`
 	// SSHHostKey is the authorized_keys line of the agent's SSH host key,
 	// set on the single-agent GET only (agentSSHHostKey).
 	SSHHostKey string `json:"sshHostKey,omitempty"`
@@ -74,6 +86,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
+		EffectiveConfig     *AgentEffectiveConfigView        `json:"effectiveConfig,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
@@ -89,6 +102,7 @@ func (a AgentWithCapabilities) MarshalJSON() ([]byte, error) {
 		ModelSize:           a.ModelSize,
 		Editability:         a.Editability,
 		EffectiveNextRun:    a.EffectiveNextRun,
+		EffectiveConfig:     a.EffectiveConfig,
 		SSHHostKey:          a.SSHHostKey,
 		ResolvedTimezone:    a.ResolvedTimezone,
 		TimezoneSource:      a.TimezoneSource,
@@ -111,6 +125,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 		ModelSize           string                           `json:"modelSize,omitempty"`
 		Editability         *AgentEditability                `json:"editability,omitempty"`
 		EffectiveNextRun    *store.AgentAppliedConfig        `json:"effectiveNextRun,omitempty"`
+		EffectiveConfig     *AgentEffectiveConfigView        `json:"effectiveConfig,omitempty"`
 		SSHHostKey          string                           `json:"sshHostKey,omitempty"`
 		ResolvedTimezone    *string                          `json:"resolvedTimezone,omitempty"`
 		TimezoneSource      *string                          `json:"timezoneSource,omitempty"`
@@ -129,6 +144,7 @@ func (a *AgentWithCapabilities) UnmarshalJSON(data []byte) error {
 	a.ModelSize = wrapper.ModelSize
 	a.Editability = wrapper.Editability
 	a.EffectiveNextRun = wrapper.EffectiveNextRun
+	a.EffectiveConfig = wrapper.EffectiveConfig
 	a.SSHHostKey = wrapper.SSHHostKey
 	a.ResolvedTimezone = wrapper.ResolvedTimezone
 	a.TimezoneSource = wrapper.TimezoneSource

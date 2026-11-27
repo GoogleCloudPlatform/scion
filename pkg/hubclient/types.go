@@ -360,6 +360,9 @@ type ResolvedProjectSetting struct {
 	// HubValue is the raw hub-configured value when HubDefault is "present",
 	// null otherwise. Informational only — not an effective value.
 	HubValue any `json:"hubValue"`
+	// Ceiling is the active Hub run-limit ceiling for this setting when
+	// configured and enabled, null otherwise.
+	Ceiling any `json:"ceiling"`
 }
 
 // ResolvedProjectSettings is the GET /api/v1/projects/{id}/settings/resolved

@@ -106,6 +106,10 @@ type ServerConfigDBResponse struct {
 	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
 	// report (counts only). Set by the GET handler only.
 	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
+
+	// AgentLimits holds Hub-level run-limit ceilings (DB-only opsettings
+	// section agent_limits). Omitted when no ceilings are configured.
+	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -143,6 +147,10 @@ type ServerConfigUpdateDBRequest struct {
 	// transaction that also compares the revision of the one the body
 	// leaves out (placementPairForSave).
 	ExpectedRevisions map[string]int64 `json:"expected_revisions,omitempty"`
+
+	// AgentLimits updates the DB-only agent_limits operational settings section
+	// (run-limit ceilings). Omitted = unchanged; empty object or null = clear.
+	AgentLimits *opsettings.AgentLimitsSettings `json:"agent_limits,omitempty"`
 }
 
 // handleGetServerConfigDB handles GET /api/v1/admin/server-config
@@ -235,6 +243,9 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// Overlay Layer-1 fields from the operational settings snapshot.
 	snap := ops.Snapshot()
 	applySnapshotToResponse(&resp.ServerConfigResponse, snap)
+	if al := ops.AgentLimits(); !al.IsEmpty() {
+		resp.AgentLimits = &al
+	}
 	// hub_name: the effective value (DB, else bootstrap), so a client that
 	// echoes this body back sends an unchanged hub_name (ptone/scion#2073).
 	resp.Server.Hub.HubName = effectiveHubName(ops)
@@ -1708,6 +1719,42 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		mergedBaseRevs["agent_defaults"] = rev
 	}
 
+	// agent_limits: DB-only Layer-1 section (no KoanfPaths). When present in
+	// the request body, build its section doc directly; setting or changing
+	// non-empty ceilings is refused while agent_policy.limit_ceilings is off
+	// (412 experiment_disabled), while echoing the stored value or clearing
+	// ceilings passes (matching broker_policy and image_tag).
+	if topFP.has(opsettings.AgentLimitsSectionName) {
+		var candidate opsettings.AgentLimitsSettings
+		if req.AgentLimits != nil {
+			candidate = *req.AgentLimits
+			candidate.MaxDuration = strings.TrimSpace(candidate.MaxDuration)
+		}
+		if !s.experimentEnabled(experiments.AgentPolicyLimitCeilings) && !candidate.IsEmpty() {
+			stored := ops.AgentLimits()
+			if row, err := ops.store.GetHubSetting(r.Context(), opsettings.AgentLimitsSectionName); err == nil && len(bytes.TrimSpace(row.Value)) > 0 {
+				if parsed, parseErr := opsettings.ParseAgentLimitsDoc(row.Value); parseErr == nil {
+					stored = parsed
+				}
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				slog.Error("PUT server-config: failed to read agent_limits section", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+				return
+			}
+			if candidate != stored {
+				writeAgentLimitsExperimentDisabled(w)
+				return
+			}
+		}
+		rawDoc, err := json.Marshal(candidate)
+		if err != nil {
+			slog.Error("PUT server-config: failed to marshal agent_limits document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs[opsettings.AgentLimitsSectionName] = rawDoc
+	}
+
 	// GCP permission-check section: carry an omitted key forward from the
 	// current row, skip the write when the applied values would not
 	// change, and refuse a change the transition rules do not allow.
@@ -2175,7 +2222,24 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		// When both agent_defaults and agent_limits are in the same PUT,
+		// validateAgentLimitsSectionDocs already validated the pair upfront.
+		// Skip the intermediate single-section cross-check on agent_defaults
+		// (which runs alphabetically before agent_limits) so simultaneous
+		// raise/lower updates do not trip against the stale cached ceiling;
+		// agent_limits still validates against the newly cached agent_defaults.
+		//
+		// Note: the section write loop is non-transactional. If agent_defaults
+		// commits with the skip and the subsequent agent_limits write fails
+		// (e.g. a stale expected_revisions.agent_limits CAS conflict -> 409, or
+		// a concurrent agent_defaults writer racing between validation and
+		// write -> 500), the stored defaults may temporarily exceed the stored
+		// ceiling until the next edit; broker-side clamping remains the runtime
+		// backstop and any standalone edit of either section gets 422 until the
+		// pair is brought back into compliance.
+		_, hasAgentLimitsInPut := sectionDocs[opsettings.AgentLimitsSectionName]
+		skipCrossSection := secName == "agent_defaults" && hasAgentLimitsInPut
+		newRev, inEffect, err := ops.updateInternal(r.Context(), secName, doc, updatedBy, expectedRev, "managed", skipCrossSection)
 		if err != nil {
 			endpointAudits.notApplied(err)
 		}

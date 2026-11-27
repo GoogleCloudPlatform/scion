@@ -4820,6 +4820,7 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		HarnessCapabilities: &harnessCaps,
 		HarnessVendor:       harness.Vendor(resolvedHarness),
 		ModelSize:           agentModelSize(agent),
+		EffectiveConfig:     agentEffectiveConfigView(agent.EffectiveConfig),
 		CloudLogging:        s.logQueryService != nil,
 		SSHHostKey:          s.agentSSHHostKey(agent),
 	}

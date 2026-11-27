@@ -75,7 +75,7 @@ import {
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
 import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
-import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import type { AgentLimitCeilings, ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
 
@@ -117,6 +117,8 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private hubSettings: HubPublicDefaults = {};
   /** The selected project's settings, for the project-tier placeholders. */
   @state() private projectSettings: ProjectCreateDefaults | null = null;
+  /** Active Hub run-limit ceilings from resolved project settings, if any. */
+  @state() private limitCeilings: AgentLimitCeilings | null = null;
 
   /**
    * The GCP identity picker's state. Owned here, so submit can validate and
@@ -137,6 +139,8 @@ export class ScionPageAgentCreate extends LitElement {
 
   /** Cached project settings keyed by projectId */
   private projectSettingsCache: Map<string, ProjectCreateDefaults> = new Map();
+  /** Cached hub limit ceilings keyed by projectId */
+  private limitCeilingsCache: Map<string, AgentLimitCeilings | null> = new Map();
 
   /** The currently selected Runtime Broker, if any. */
   private get selectedBroker(): RuntimeBroker | undefined {
@@ -611,9 +615,14 @@ export class ScionPageAgentCreate extends LitElement {
   private async loadProjectSettings(): Promise<void> {
     const isStale = this.projectLoadGuard();
     this.projectSettings = null;
-    const settings = await this.fetchProjectSettings(this.projectId);
+    this.limitCeilings = null;
+    const [settings, ceilings] = await Promise.all([
+      this.fetchProjectSettings(this.projectId),
+      this.fetchProjectLimitCeilings(this.projectId),
+    ]);
     if (isStale()) return;
     this.projectSettings = settings;
+    this.limitCeilings = ceilings;
   }
 
   /**
@@ -813,6 +822,36 @@ export class ScionPageAgentCreate extends LitElement {
         const data = (await res.json()) as ProjectCreateDefaults;
         this.projectSettingsCache.set(projectId, data);
         return data;
+      }
+    } catch {
+      // Non-critical
+    }
+    return null;
+  }
+
+  private async fetchProjectLimitCeilings(projectId: string): Promise<AgentLimitCeilings | null> {
+    if (!projectId) return null;
+    if (this.limitCeilingsCache.has(projectId)) {
+      return this.limitCeilingsCache.get(projectId) ?? null;
+    }
+    try {
+      const res = await apiFetch(`/api/v1/projects/${projectId}/settings/resolved`);
+      if (res.ok) {
+        const data = (await res.json()) as {
+          settings?: Record<string, { ceiling?: number | string | null }>;
+        } | null;
+        const s = data?.settings ?? {};
+        const ceilings: AgentLimitCeilings = {};
+        const turns = s['scion.io/default-max-turns']?.ceiling;
+        if (typeof turns === 'number' && turns > 0) ceilings.max_turns = turns;
+        const calls = s['scion.io/default-max-model-calls']?.ceiling;
+        if (typeof calls === 'number' && calls > 0) ceilings.max_model_calls = calls;
+        const dur = s['scion.io/default-max-duration']?.ceiling;
+        if (typeof dur === 'string' && dur.trim() !== '') ceilings.max_duration = dur.trim();
+        const result =
+          ceilings.max_turns || ceilings.max_model_calls || ceilings.max_duration ? ceilings : null;
+        this.limitCeilingsCache.set(projectId, result);
+        return result;
       }
     } catch {
       // Non-critical
@@ -1121,6 +1160,7 @@ export class ScionPageAgentCreate extends LitElement {
           <scion-agent-config-form
             mode="create"
             .placeholders=${this.placeholders}
+            .limitCeilings=${this.limitCeilings}
             .gcpIdentity=${this.gcp}
             ?branchAvailable=${!!this.selectedProject?.gitRemote &&
             !isSharedWorkspace(this.selectedProject)}

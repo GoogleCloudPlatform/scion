@@ -788,6 +788,17 @@ export interface TelemetryConfig {
 }
 
 /**
+ * Broker-reported effective run limits projected onto single-agent GET
+ * responses from store.AgentEffectiveConfig.
+ */
+export interface AgentEffectiveConfig {
+  maxTurns?: number;
+  maxModelCalls?: number;
+  maxDuration?: string;
+  limitsClampedBy?: string[];
+}
+
+/**
  * The agent's inline config: every key of api.ScionConfig
  * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
  * and accepts it in the agent PATCH body's `config` object.
@@ -1128,6 +1139,7 @@ export interface Agent {
   // appliedConfig; full items carry it as appliedConfig.creatorName.
   creatorName?: string;
   appliedConfig?: AgentAppliedConfig;
+  effectiveConfig?: AgentEffectiveConfig;
 
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
   // parent (user or spawning agent). Drives the lineage graph view.
