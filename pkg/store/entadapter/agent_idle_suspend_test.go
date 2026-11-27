@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -1006,4 +1008,249 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, expUserSuspend, 1)
 	assert.Equal(t, msg.ID, expUserSuspend[0].ID)
+}
+
+func TestAgentStore_ClaimIdleSuspend_PreconditionPredicates(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	now := time.Now().UTC()
+	idleSince := now.Add(-20 * time.Minute).Truncate(time.Microsecond)
+
+	makeEligible := func(slug string) (*store.Agent, store.IdleSuspendCondition) {
+		a := makeAgent(projectID, slug)
+		a.Phase = string(state.PhaseRunning)
+		a.Activity = string(state.ActivityIdle)
+		a.RunID = "run-pred-" + slug
+		a.LastSeen = now.Add(-15 * time.Second)
+		require.NoError(t, s.CreateAgent(ctx, a))
+		_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+			SetRunIntent(string(store.RunIntentRunning)).
+			SetRunIntentAt(now.Add(-30 * time.Minute)).
+			SetActivitySince(idleSince).
+			Save(ctx)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return got, store.IdleSuspendCondition{
+			RunID:                    got.RunID,
+			Activity:                 got.Activity,
+			ActivitySince:            *got.ActivitySince,
+			IdleSuspendAfter:         15 * time.Minute,
+			HeartbeatRecency:         2 * time.Minute,
+			ClaimTTL:                 30 * time.Second,
+			ClaimBackoff:             2 * time.Minute,
+			RequireSuspendPolicyAuto: true,
+		}
+	}
+
+	assertPredicate := func(t *testing.T, err error, wantPredicate string, wantKeys ...string) {
+		t.Helper()
+		require.Error(t, err)
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		assert.ErrorIs(t, err, store.ErrVersionConflict)
+		var preErr *store.IdleSuspendPreconditionError
+		require.True(t, errors.As(err, &preErr), "expected *store.IdleSuspendPreconditionError, got %T: %v", err, err)
+		assert.Equal(t, wantPredicate, preErr.Predicate)
+		assert.Contains(t, preErr.Error(), wantPredicate)
+		require.Zero(t, len(preErr.Attrs)%2, "Attrs must be key/value pairs")
+		keys := make(map[string]any, len(preErr.Attrs)/2)
+		for i := 0; i < len(preErr.Attrs); i += 2 {
+			k, ok := preErr.Attrs[i].(string)
+			require.True(t, ok, "attr key at index %d must be string", i)
+			keys[k] = preErr.Attrs[i+1]
+		}
+		for _, wk := range wantKeys {
+			assert.Contains(t, keys, wk)
+		}
+	}
+
+	t.Run("row_nil", func(t *testing.T) {
+		preErr := checkIdleSuspendRow(nil, store.IdleSuspendCondition{}, now)
+		assertPredicate(t, preErr, "row_nil")
+	})
+
+	cases := []struct {
+		name          string
+		mutate        func(t *testing.T, a *store.Agent, cond *store.IdleSuspendCondition)
+		wantPredicate string
+		wantKeys      []string
+	}{
+		{
+			name: "deleted_or_deleting",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetDeletedAt(now).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "deleted_or_deleting",
+			wantKeys:      []string{"deleted_at", "deletion_state", "deletion_lease_at", "store_now"},
+		},
+		{
+			name: "reincarnation_in_flight",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetReincarnationState(store.ReincarnationStatePending).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "reincarnation_in_flight",
+			wantKeys:      []string{"reincarnation_state"},
+		},
+		{
+			name: "start_claim_held",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "", 30*time.Second)
+				require.NoError(t, err)
+			},
+			wantPredicate: "start_claim_held",
+			wantKeys:      []string{"start_claim_id", "start_claim_kind", "start_claim_state", "start_claim_owner"},
+		},
+		{
+			name: "idle_claim_active",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetIdleSuspendClaimUntil(time.Now().UTC().Add(time.Minute)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "idle_claim_active",
+			wantKeys:      []string{"idle_suspend_claim_until", "store_now"},
+		},
+		{
+			name: "idle_claim_backoff",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetIdleSuspendClaimUntil(time.Now().UTC().Add(-10 * time.Second)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "idle_claim_backoff",
+			wantKeys:      []string{"idle_suspend_claim_until", "claim_backoff", "store_now"},
+		},
+		{
+			name: "phase_not_running",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetPhase(string(state.PhaseStopped)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "phase_not_running",
+			wantKeys:      []string{"phase"},
+		},
+		{
+			name: "suspend_policy_never",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetSuspendPolicy(agent.SuspendPolicyNever).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "suspend_policy_never",
+			wantKeys:      []string{"suspend_policy"},
+		},
+		{
+			name: "run_intent_not_running",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, _, err := s.SwapRunIntent(ctx, a.ID, store.RunIntentStopped)
+				require.NoError(t, err)
+			},
+			wantPredicate: "run_intent_not_running",
+			wantKeys:      []string{"run_intent"},
+		},
+		{
+			name: "run_id_mismatch",
+			mutate: func(t *testing.T, _ *store.Agent, cond *store.IdleSuspendCondition) {
+				cond.RunID = "different-run-id"
+			},
+			wantPredicate: "run_id_mismatch",
+			wantKeys:      []string{"row_run_id", "cond_run_id"},
+		},
+		{
+			name: "activity_changed_or_ineligible",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetActivity(string(state.ActivityThinking)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "activity_changed_or_ineligible",
+			wantKeys:      []string{"row_activity", "cond_activity"},
+		},
+		{
+			name: "activity_since_changed",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetActivitySince(idleSince.Add(time.Minute)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "activity_since_changed",
+			wantKeys:      []string{"row_activity_since", "cond_activity_since"},
+		},
+		{
+			name: "idle_grace_not_elapsed",
+			mutate: func(t *testing.T, a *store.Agent, cond *store.IdleSuspendCondition) {
+				recent := time.Now().UTC().Add(-5 * time.Minute).Truncate(time.Microsecond)
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetActivitySince(recent).
+					Save(ctx)
+				require.NoError(t, err)
+				cond.ActivitySince = recent
+			},
+			wantPredicate: "idle_grace_not_elapsed",
+			wantKeys:      []string{"row_activity_since", "idle_suspend_after", "store_now"},
+		},
+		{
+			name: "last_seen_nil",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					ClearLastSeen().
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "last_seen_nil",
+		},
+		{
+			name: "heartbeat_stale",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetLastSeen(time.Now().UTC().Add(-10 * time.Minute)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "heartbeat_stale",
+			wantKeys:      []string{"last_seen", "heartbeat_recency", "store_now"},
+		},
+		{
+			name: "recent_live_work",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).
+					SetLastLiveProcessAt(time.Now().UTC().Add(-10 * time.Second)).
+					Save(ctx)
+				require.NoError(t, err)
+			},
+			wantPredicate: "recent_live_work",
+			wantKeys:      []string{"last_live_process_at", "live_work_freshness", "store_now"},
+		},
+		{
+			name: "delivery_since_activity",
+			mutate: func(t *testing.T, a *store.Agent, _ *store.IdleSuspendCondition) {
+				_, _, err := s.MarkAgentDelivery(ctx, a.ID)
+				require.NoError(t, err)
+			},
+			wantPredicate: "delivery_since_activity",
+			wantKeys:      []string{"last_delivery_at", "row_activity_since", "store_now"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, cond := makeEligible("pred-" + tc.name)
+			tc.mutate(t, a, &cond)
+			_, _, _, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+			assertPredicate(t, err, tc.wantPredicate, tc.wantKeys...)
+		})
+	}
 }

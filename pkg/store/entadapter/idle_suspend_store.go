@@ -68,59 +68,171 @@ func (s *AgentStore) withIdleSuspendLockedAgent(ctx context.Context, agentID str
 	}
 }
 
+func optTimeAttr(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC()
+}
+
+func optStringAttr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 // checkIdleSuspendRow evaluates cond against a locked ent.Agent row at
 // store-clock now for ClaimIdleSuspend. An already-active
 // idle_suspend_claim_until rejects so two sweeps never double-claim.
-func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now time.Time) bool {
+func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now time.Time) *store.IdleSuspendPreconditionError {
 	if row == nil {
-		return false
+		return &store.IdleSuspendPreconditionError{Predicate: "row_nil"}
 	}
 	if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "deleted_or_deleting",
+			Attrs: []any{
+				"deleted_at", optTimeAttr(row.DeletedAt),
+				"deletion_state", row.DeletionState,
+				"deletion_lease_at", optTimeAttr(row.DeletionLeaseAt),
+				"store_now", now.UTC(),
+			},
+		}
 	}
-	if !claimEligible(row) || heldClaimError(row) != nil {
-		return false
+	if !claimEligible(row) {
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "reincarnation_in_flight",
+			Attrs: []any{
+				"reincarnation_state", row.ReincarnationState,
+			},
+		}
+	}
+	if heldClaimError(row) != nil {
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "start_claim_held",
+			Attrs: []any{
+				"start_claim_id", optStringAttr(row.StartClaimID),
+				"start_claim_kind", row.StartClaimKind,
+				"start_claim_state", row.StartClaimState,
+				"start_claim_owner", row.StartClaimOwner,
+			},
+		}
 	}
 	if row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "idle_claim_active",
+			Attrs: []any{
+				"idle_suspend_claim_until", row.IdleSuspendClaimUntil.UTC(),
+				"store_now", now.UTC(),
+			},
+		}
 	}
 	if row.IdleSuspendClaimUntil != nil && cond.ClaimBackoff > 0 && now.Before(row.IdleSuspendClaimUntil.Add(cond.ClaimBackoff)) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "idle_claim_backoff",
+			Attrs: []any{
+				"idle_suspend_claim_until", row.IdleSuspendClaimUntil.UTC(),
+				"claim_backoff", cond.ClaimBackoff,
+				"store_now", now.UTC(),
+			},
+		}
 	}
 	if row.Phase != string(state.PhaseRunning) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "phase_not_running",
+			Attrs: []any{
+				"phase", row.Phase,
+			},
+		}
 	}
 	if cond.RequireSuspendPolicyAuto && row.SuspendPolicy == agent.SuspendPolicyNever {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "suspend_policy_never",
+			Attrs: []any{
+				"suspend_policy", string(row.SuspendPolicy),
+			},
+		}
 	}
 	if row.RunIntent != nil && *row.RunIntent != string(store.RunIntentRunning) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "run_intent_not_running",
+			Attrs: []any{
+				"run_intent", *row.RunIntent,
+			},
+		}
 	}
 	if row.RunID != cond.RunID {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "run_id_mismatch",
+			Attrs: []any{
+				"row_run_id", row.RunID,
+				"cond_run_id", cond.RunID,
+			},
+		}
 	}
 	if row.Activity != cond.Activity || !state.Activity(row.Activity).IsSuspendEligible() {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "activity_changed_or_ineligible",
+			Attrs: []any{
+				"row_activity", row.Activity,
+				"cond_activity", cond.Activity,
+			},
+		}
 	}
 	if row.ActivitySince == nil || !claimTime(*row.ActivitySince).Equal(claimTime(cond.ActivitySince)) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "activity_since_changed",
+			Attrs: []any{
+				"row_activity_since", optTimeAttr(row.ActivitySince),
+				"cond_activity_since", cond.ActivitySince.UTC(),
+			},
+		}
 	}
 	if cond.IdleSuspendAfter > 0 && !row.ActivitySince.Before(now.Add(-cond.IdleSuspendAfter)) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "idle_grace_not_elapsed",
+			Attrs: []any{
+				"row_activity_since", row.ActivitySince.UTC(),
+				"idle_suspend_after", cond.IdleSuspendAfter,
+				"store_now", now.UTC(),
+			},
+		}
 	}
 	if row.LastSeen == nil {
-		return false
+		return &store.IdleSuspendPreconditionError{Predicate: "last_seen_nil"}
 	}
 	if cond.HeartbeatRecency > 0 && row.LastSeen.Before(now.Add(-cond.HeartbeatRecency)) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "heartbeat_stale",
+			Attrs: []any{
+				"last_seen", row.LastSeen.UTC(),
+				"heartbeat_recency", cond.HeartbeatRecency,
+				"store_now", now.UTC(),
+			},
+		}
 	}
 	if (&store.Agent{LastLiveProcessAt: row.LastLiveProcessAt}).HasRecentLiveWork(now) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "recent_live_work",
+			Attrs: []any{
+				"last_live_process_at", optTimeAttr(row.LastLiveProcessAt),
+				"live_work_freshness", store.LiveWorkFreshness,
+				"store_now", now.UTC(),
+			},
+		}
 	}
 	if row.LastDeliveryAt != nil && !claimTime(*row.LastDeliveryAt).Before(claimTime(*row.ActivitySince)) {
-		return false
+		return &store.IdleSuspendPreconditionError{
+			Predicate: "delivery_since_activity",
+			Attrs: []any{
+				"last_delivery_at", row.LastDeliveryAt.UTC(),
+				"row_activity_since", row.ActivitySince.UTC(),
+				"store_now", now.UTC(),
+			},
+		}
 	}
-	return true
+	return nil
 }
 
 // checkIdleSuspendCommit evaluates AgentStatusUpdate.IfIdleSuspendCommit on the
@@ -237,8 +349,8 @@ func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond 
 		prior = ""
 		at = time.Time{}
 		claimUntil = time.Time{}
-		if !checkIdleSuspendRow(row, cond, now) {
-			return false, store.ErrIdleSuspendPrecondition
+		if preErr := checkIdleSuspendRow(row, cond, now); preErr != nil {
+			return false, preErr
 		}
 		if row.RunIntent != nil {
 			prior = store.RunIntent(*row.RunIntent)
