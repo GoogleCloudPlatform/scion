@@ -311,10 +311,11 @@ func (s *Server) setGroupDefaultAgent(ctx context.Context, conv *store.Conversat
 // agents that were actually dispatched into the conversation, not every
 // agent merely named (e.g. an @-mention denied by authorization, or a
 // human-mention notification target).
-func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID string, agents []*store.Agent) {
+func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID string, agents []*store.Agent) []string {
 	if conversationID == "" {
-		return
+		return nil
 	}
+	var ackIDs []string
 	for _, agent := range agents {
 		if agent == nil || agent.ID == "" {
 			continue
@@ -327,8 +328,11 @@ func (s *Server) ensureGroupParticipants(ctx context.Context, conversationID str
 		}); err != nil {
 			slog.WarnContext(ctx, "ensureGroupParticipants: ensure participant failed",
 				"conversationID", conversationID, "agentID", agent.ID, "error", err)
+		} else {
+			ackIDs = append(ackIDs, agent.ID)
 		}
 	}
+	return ackIDs
 }
 
 // ensureGroupUserParticipant records the human user who posted into a group
@@ -381,16 +385,16 @@ func (s *Server) ensureGroupUserParticipant(ctx context.Context, conversationID,
 // guard in ensureGroupParticipants; it's kept as a fast path so callers
 // that pass "" for a direct conversation skip building the one-element
 // agents slice.
-func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID string, agent *store.Agent) {
+func (s *Server) registerGroupPrimary(ctx context.Context, groupConversationID string, agent *store.Agent) bool {
 	if groupConversationID == "" {
-		return
+		return false
 	}
 	// The sender (the request's identity) must be allowed to add the
 	// agent under its message mode (group_message_mode.go).
 	if ok, reason := s.groupAgentJoinAllowed(ctx, GetIdentityFromContext(ctx), agent); !ok {
 		s.messageLog.Info("primary not registered as group participant: message mode",
 			"conversation_id", groupConversationID, "agent_id", agent.ID, "reason", reason)
-		return
+		return false
 	}
-	s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})
+	return len(s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{agent})) > 0
 }

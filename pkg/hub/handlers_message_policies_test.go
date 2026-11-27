@@ -234,13 +234,13 @@ func TestMessagePolicyHandlers_CRUDCoverageAndCacheInvalidation(t *testing.T) {
 	assert.Equal(t, []string{
 		store.MessagePolicySurfaceAgentToUser,
 		store.MessagePolicySurfaceAgentToConversation,
+		store.MessagePolicySurfaceAgentDM,
+		store.MessagePolicySurfaceMentionDelivery,
 	}, created.Coverage.EnforcedSurfaces)
 	assert.Equal(t, []string{
-		store.MessagePolicySurfaceAgentDM,
 		store.MessagePolicySurfaceGroupPost,
 		store.MessagePolicySurfaceGroupSet,
 		store.MessagePolicySurfaceMentionFanout,
-		store.MessagePolicySurfaceMentionDelivery,
 		"broadcast",
 	}, created.Coverage.UncoveredAgentPaths)
 
@@ -271,7 +271,9 @@ func TestMessagePolicyHandlers_CRUDCoverageAndCacheInvalidation(t *testing.T) {
 	require.Len(t, listed.Policies, 1)
 	assert.Equal(t, created.ID, listed.Policies[0].ID)
 	assert.Equal(t, 1, listed.TotalCount)
-	assert.Contains(t, listed.Coverage.UncoveredAgentPaths, "agent_dm")
+	assert.Contains(t, listed.Coverage.EnforcedSurfaces, "agent_dm")
+	assert.Contains(t, listed.Coverage.EnforcedSurfaces, "mention_delivery")
+	assert.Contains(t, listed.Coverage.UncoveredAgentPaths, "broadcast")
 
 	// Prime the compiled program cache at revision 1 before editing.
 	act := messagepolicy.NewActivation(messagepolicy.Facts{
@@ -452,28 +454,45 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 		assert.Equal(t, messagepolicy.ErrCodeUnsupportedDialect, apiErr.Code)
 	})
 
-	t.Run("uncovered surface or agent recipient selector returns 400 surface_not_covered (target 6)", func(t *testing.T) {
-		for _, surf := range []string{"agent_dm", "group_post", "group_set", "mention_fanout", "mention_delivery", "broadcast"} {
+	t.Run("uncovered surface returns 400 surface_not_covered and covered agent surfaces accept own-project agent_ids", func(t *testing.T) {
+		for _, surf := range []string{"group_post", "group_set", "mention_fanout", "broadcast"} {
 			body := mphValidCreateBody("uncovered-surf")
 			body.Scope.Surfaces = []string{surf}
 			rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, body)
 			require.Equal(t, http.StatusBadRequest, rec.Code, "surface %s: %s", surf, rec.Body.String())
 			apiErr := decodeErr(t, rec)
 			assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, apiErr.Code)
-			assert.ElementsMatch(t, []any{"agent_to_user", "agent_to_conversation"}, apiErr.Details["enforced_surfaces"])
+			assert.ElementsMatch(t, []any{"agent_to_user", "agent_to_conversation", "agent_dm", "mention_delivery"}, apiErr.Details["enforced_surfaces"])
 		}
 
-		agentKind := mphValidCreateBody("uncovered-recip-kind")
+		// Agent recipient kind / agent_ids on non-agent surfaces are unreachable (validation_error).
+		agentKind := mphValidCreateBody("unreachable-recip-kind")
 		agentKind.Scope.Recipient.Kinds = []string{"agent"}
 		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, agentKind)
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, decodeErr(t, rec).Code)
+		assert.Equal(t, ErrCodeValidationError, decodeErr(t, rec).Code)
 
-		agentIDs := mphValidCreateBody("uncovered-recip-ids")
+		agentIDs := mphValidCreateBody("unreachable-recip-ids")
 		agentIDs.Scope.Recipient.AgentIDs = []string{f.projectAgent}
 		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, agentIDs)
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-		assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, decodeErr(t, rec).Code)
+		assert.Equal(t, ErrCodeValidationError, decodeErr(t, rec).Code)
+
+		// Foreign recipient agent_id is refused as validation_error.
+		foreignRecip := mphValidCreateBody("foreign-recip-id")
+		foreignRecip.Scope.Surfaces = []string{store.MessagePolicySurfaceAgentDM}
+		foreignRecip.Scope.Recipient.AgentIDs = []string{f.otherAgent}
+		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, foreignRecip)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeValidationError, decodeErr(t, rec).Code)
+
+		// Own-project recipient agent_id on agent_dm / mention_delivery is accepted.
+		ownRecip := mphValidCreateBody("own-recip-id")
+		ownRecip.Scope.Surfaces = []string{store.MessagePolicySurfaceAgentDM, store.MessagePolicySurfaceMentionDelivery}
+		ownRecip.Scope.Recipient.Kinds = []string{"agent"}
+		ownRecip.Scope.Recipient.AgentIDs = []string{f.projectAgent}
+		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, ownRecip)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
 	t.Run("missing or invalid on_failed returns 400 (target 4)", func(t *testing.T) {

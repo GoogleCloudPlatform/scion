@@ -725,17 +725,17 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 }
 
 // validateMessagePolicyAuthoring validates spec via pkg/messagepolicy and
-// verifies that any sender agent_ids belong to projectID (consumer design
-// §§5.3, 12.5), returning the normalized mode and canonicalized sender agent
-// IDs (ag.ID). On failure it writes a structured 400 response and returns
-// ("", nil, false).
+// verifies that any sender or recipient agent_ids belong to projectID (consumer
+// design §§5.3, 12.5; M3 Slice B), returning the normalized mode, canonicalized
+// sender agent IDs, and canonicalized recipient agent IDs. On failure it writes
+// a structured 400 response and returns ("", nil, nil, false).
 func (s *Server) validateMessagePolicyAuthoring(
 	ctx context.Context,
 	w http.ResponseWriter,
 	projectID string,
 	spec messagepolicy.AuthoringSpec,
 	forbidReservedNames bool,
-) (string, []string, bool) {
+) (string, []string, []string, bool) {
 	ev := s.MessagePolicyEvaluator()
 	if ev == nil {
 		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeUnsupportedDialect,
@@ -745,64 +745,82 @@ func (s *Server) validateMessagePolicyAuthoring(
 				"category": "consumer_not_registered",
 				"reason":   "consumer_not_registered",
 			})
-		return "", nil, false
+		return "", nil, nil, false
 	}
 
 	mode, err := ev.ValidateAuthoring(ctx, spec)
 	if err != nil {
 		writeMessagePolicyValidationError(w, err)
-		return "", nil, false
+		return "", nil, nil, false
 	}
 
 	if _, parseErr := uuid.Parse(spec.Name); parseErr == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			fmt.Sprintf("policy name %q must not be UUID-shaped", spec.Name),
 			map[string]interface{}{"field": "name"})
-		return "", nil, false
+		return "", nil, nil, false
 	}
 
 	if forbidReservedNames && isReservedMessagePolicyName(spec.Name) {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			fmt.Sprintf("policy name %q is reserved", spec.Name),
 			map[string]interface{}{"field": "name"})
-		return "", nil, false
+		return "", nil, nil, false
 	}
 
-	var canonicalSenderIDs []string
-	if len(spec.Scope.Sender.AgentIDs) > 0 {
-		canonicalSenderIDs = make([]string, 0, len(spec.Scope.Sender.AgentIDs))
-		for _, rawAgentID := range spec.Scope.Sender.AgentIDs {
-			agentID := strings.TrimSpace(rawAgentID)
-			if agentID == "" {
+	canonicalSenderIDs, ok := s.validateOwnProjectAgentIDs(ctx, w, projectID, "scope.sender.agent_ids", spec.Scope.Sender.AgentIDs)
+	if !ok {
+		return "", nil, nil, false
+	}
+	canonicalRecipientIDs, ok := s.validateOwnProjectAgentIDs(ctx, w, projectID, "scope.recipient.agent_ids", spec.Scope.Recipient.AgentIDs)
+	if !ok {
+		return "", nil, nil, false
+	}
+
+	return mode, canonicalSenderIDs, canonicalRecipientIDs, true
+}
+
+func (s *Server) validateOwnProjectAgentIDs(
+	ctx context.Context,
+	w http.ResponseWriter,
+	projectID string,
+	field string,
+	rawIDs []string,
+) ([]string, bool) {
+	if len(rawIDs) == 0 {
+		return nil, true
+	}
+	canonical := make([]string, 0, len(rawIDs))
+	for _, rawAgentID := range rawIDs {
+		agentID := strings.TrimSpace(rawAgentID)
+		if agentID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				field+" entries must not be empty",
+				map[string]interface{}{"field": field})
+			return nil, false
+		}
+		ag, err := s.store.GetAgent(ctx, agentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-					"scope.sender.agent_ids entries must not be empty",
-					map[string]interface{}{"field": "scope.sender.agent_ids"})
-				return "", nil, false
+					fmt.Sprintf("%s: agent %q does not belong to this project", field, agentID),
+					map[string]interface{}{"field": field, "agent_id": agentID})
+				return nil, false
 			}
-			ag, err := s.store.GetAgent(ctx, agentID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-						fmt.Sprintf("scope.sender.agent_ids: agent %q does not belong to this project", agentID),
-						map[string]interface{}{"field": "scope.sender.agent_ids", "agent_id": agentID})
-					return "", nil, false
-				}
-				writeErrorFromErr(w, err, "Agent")
-				return "", nil, false
-			}
-			if ag.ProjectID != projectID {
-				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-					fmt.Sprintf("scope.sender.agent_ids: agent %q does not belong to this project", agentID),
-					map[string]interface{}{"field": "scope.sender.agent_ids", "agent_id": agentID})
-				return "", nil, false
-			}
-			if !slices.Contains(canonicalSenderIDs, ag.ID) {
-				canonicalSenderIDs = append(canonicalSenderIDs, ag.ID)
-			}
+			writeErrorFromErr(w, err, "Agent")
+			return nil, false
+		}
+		if ag.ProjectID != projectID {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				fmt.Sprintf("%s: agent %q does not belong to this project", field, agentID),
+				map[string]interface{}{"field": field, "agent_id": agentID})
+			return nil, false
+		}
+		if !slices.Contains(canonical, ag.ID) {
+			canonical = append(canonical, ag.ID)
 		}
 	}
-
-	return mode, canonicalSenderIDs, true
+	return canonical, true
 }
 
 func parseBoundedLimit(raw string, defaultLimit, maxLimit int) (int, bool) {
@@ -906,7 +924,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 	}
 	// Attach project.ID to ctx so System One authoring enforces the P2b
 	// per-project instance allowlist via ValidateCompiled.
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(systemoneruntime.WithEvalProjectID(ctx, project.ID), w, project.ID, spec, true)
+	mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(systemoneruntime.WithEvalProjectID(ctx, project.ID), w, project.ID, spec, true)
 	if !ok {
 		return
 	}
@@ -918,6 +936,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 
 	scope := req.Scope.Clone()
 	scope.Sender.AgentIDs = canonicalSenderIDs
+	scope.Recipient.AgentIDs = canonicalRecipientIDs
 
 	policy := &store.MessagePolicy{
 		ProjectID:         project.ID,
@@ -1068,12 +1087,13 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 	} else {
 		authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
+	mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
 	if !ok {
 		return
 	}
 	candidate.Mode = mode
 	candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
+	candidate.Scope.Recipient.AgentIDs = canonicalRecipientIDs
 	candidate.SystemOneRefs = messagepolicy.ExtractSystemOneRefs(candidate.SystemOneRule)
 
 	if err := s.store.UpdateMessagePolicy(ctx, candidate); err != nil {
@@ -1271,12 +1291,13 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	// ambiguous, or deleted instances, and unbound resolution strictly within
 	// this project's allowlist even when >200 Hub instances exist).
 	evalCtx := systemoneruntime.WithEvalProjectID(ctx, project.ID)
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(evalCtx, w, project.ID, spec, false)
+	mode, canonicalSenderIDs, canonicalRecipientIDs, ok := s.validateMessagePolicyAuthoring(evalCtx, w, project.ID, spec, false)
 	if !ok {
 		return
 	}
 	effective.Mode = mode
 	effective.Scope.Sender.AgentIDs = canonicalSenderIDs
+	effective.Scope.Recipient.AgentIDs = canonicalRecipientIDs
 
 	sample := MessagePolicyTestSample{
 		Surface: req.Surface,
@@ -1331,9 +1352,13 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 
 	defaultRecipKind := "user"
 	defaultConvKind := "direct"
-	if surface == store.MessagePolicySurfaceAgentToConversation {
+	switch surface {
+	case store.MessagePolicySurfaceAgentToConversation:
 		defaultRecipKind = "conversation"
 		defaultConvKind = "group"
+	case store.MessagePolicySurfaceAgentDM, store.MessagePolicySurfaceMentionDelivery:
+		defaultRecipKind = "agent"
+		defaultConvKind = "direct"
 	}
 	recipient := messagepolicy.RecipientFacts{
 		Kind: defaultRecipKind,
@@ -1342,20 +1367,15 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 	if sample.Recipient != nil {
 		recipient = *sample.Recipient
+		recipient.ID = strings.TrimSpace(recipient.ID)
+		if recipient.ID != "" {
+			if parsedID, parseErr := uuid.Parse(recipient.ID); parseErr == nil {
+				recipient.ID = parsedID.String()
+			}
+		}
 		if recipient.Kind == "" {
 			recipient.Kind = defaultRecipKind
 		}
-	}
-	if recipient.Kind == "agent" {
-		cov := messagepolicy.Coverage()
-		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeSurfaceNotCovered,
-			"agent recipients are not covered by this Hub",
-			map[string]interface{}{
-				"field":                 "sample.recipient.kind",
-				"enforced_surfaces":     cov.EnforcedSurfaces,
-				"uncovered_agent_paths": cov.UncoveredAgentPaths,
-			})
-		return
 	}
 
 	conv := messagepolicy.ConversationFacts{
@@ -1374,7 +1394,11 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 
 	_, bodyBytes, bodyTruncated := messagepolicy.TruncateBodyUTF8(sample.Body, messagepolicy.MaxBodyBytes)
-	scopeMatched := effective.Scope.Matches(surface, sender.ID, recipient.Kind, "")
+	recipAgentID := ""
+	if recipient.Kind == "agent" {
+		recipAgentID = recipient.ID
+	}
+	scopeMatched := effective.Scope.Matches(surface, sender.ID, recipient.Kind, recipAgentID)
 	if !scopeMatched {
 		writeJSON(w, http.StatusOK, TestMessagePolicyResponse{
 			PolicyID:       effective.ID,

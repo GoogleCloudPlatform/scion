@@ -80,27 +80,33 @@ type CoverageInfo struct {
 	UncoveredAgentPaths []string `json:"uncovered_agent_paths"`
 }
 
-// Coverage returns the M1 enforcement coverage declaration (H2 only).
+// Coverage returns the active enforcement coverage declaration (H2 + M3 Slice B
+// agent-recipient egress: agent_dm and mention_delivery).
 func Coverage() CoverageInfo {
 	return CoverageInfo{
 		EnforcedSurfaces: []string{
 			SurfaceAgentToUser,
 			SurfaceAgentToConversation,
+			SurfaceAgentDM,
+			SurfaceMentionDelivery,
 		},
 		UncoveredAgentPaths: []string{
-			SurfaceAgentDM,
 			SurfaceGroupPost,
 			SurfaceGroupSet,
 			SurfaceMentionFanout,
-			SurfaceMentionDelivery,
 			"broadcast",
 		},
 	}
 }
 
-// IsCoveredSurface reports whether surface has an active enforcement hook in M1.
+// IsCoveredSurface reports whether surface has an active enforcement hook.
 func IsCoveredSurface(surface string) bool {
-	return surface == SurfaceAgentToUser || surface == SurfaceAgentToConversation
+	switch surface {
+	case SurfaceAgentToUser, SurfaceAgentToConversation, SurfaceAgentDM, SurfaceMentionDelivery:
+		return true
+	default:
+		return false
+	}
 }
 
 func surfaceRecipientKind(surface string) string {
@@ -109,6 +115,8 @@ func surfaceRecipientKind(surface string) string {
 		return "user"
 	case SurfaceAgentToConversation:
 		return "conversation"
+	case SurfaceAgentDM, SurfaceMentionDelivery:
+		return "agent"
 	default:
 		return ""
 	}
@@ -326,31 +334,17 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 			return "", &ValidationError{
 				Code:    ErrCodeSurfaceNotCovered,
 				Field:   "scope.surfaces",
-				Message: fmt.Sprintf("surface %q is not covered in M1 (covered surfaces: %s, %s)", s, SurfaceAgentToUser, SurfaceAgentToConversation),
+				Message: fmt.Sprintf("surface %q is not covered (covered surfaces: %s, %s, %s, %s)", s, SurfaceAgentToUser, SurfaceAgentToConversation, SurfaceAgentDM, SurfaceMentionDelivery),
 			}
 		}
 	}
 
-	if len(spec.Scope.Recipient.AgentIDs) > 0 {
-		return "", &ValidationError{
-			Code:    ErrCodeSurfaceNotCovered,
-			Field:   "scope.recipient.agent_ids",
-			Message: "agent recipient selectors are not covered in M1",
-		}
-	}
 	for _, k := range spec.Scope.Recipient.Kinds {
-		if k == "agent" {
-			return "", &ValidationError{
-				Code:    ErrCodeSurfaceNotCovered,
-				Field:   "scope.recipient.kinds",
-				Message: `recipient kind "agent" is not covered in M1`,
-			}
-		}
-		if k != "user" && k != "conversation" {
+		if k != "user" && k != "conversation" && k != "agent" {
 			return "", &ValidationError{
 				Code:    ErrCodeValidation,
 				Field:   "scope.recipient.kinds",
-				Message: fmt.Sprintf("invalid recipient kind %q (must be \"user\" or \"conversation\")", k),
+				Message: fmt.Sprintf("invalid recipient kind %q (must be \"user\", \"conversation\", or \"agent\")", k),
 			}
 		}
 	}
@@ -369,6 +363,31 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 				Message: fmt.Sprintf("none of scope.recipient.kinds (%s) can match scope.surfaces (%s)",
 					strings.Join(spec.Scope.Recipient.Kinds, ", "),
 					strings.Join(spec.Scope.Surfaces, ", ")),
+			}
+		}
+	}
+	if len(spec.Scope.Recipient.AgentIDs) > 0 {
+		for _, id := range spec.Scope.Recipient.AgentIDs {
+			if strings.TrimSpace(id) == "" {
+				return "", &ValidationError{
+					Code:    ErrCodeValidation,
+					Field:   "scope.recipient.agent_ids",
+					Message: "scope.recipient.agent_ids entries must not be empty",
+				}
+			}
+		}
+		agentSurface := false
+		for _, s := range spec.Scope.Surfaces {
+			if surfaceRecipientKind(s) == "agent" {
+				agentSurface = true
+				break
+			}
+		}
+		if !agentSurface || (len(spec.Scope.Recipient.Kinds) > 0 && !slices.Contains(spec.Scope.Recipient.Kinds, "agent")) {
+			return "", &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   "scope.recipient.agent_ids",
+				Message: "scope.recipient.agent_ids requires an agent-recipient surface and must not exclude recipient kind \"agent\"",
 			}
 		}
 	}

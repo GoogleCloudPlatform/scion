@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -1431,17 +1432,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			WriteAgentDMError(w, dmErr)
 			return
 		}
+		defer dmResult.copyAdmission.Close()
 
 		// Agent-authored @mention fan-out: the DM branch's primary is
-		// freshTarget. Fan-out runs synchronously before the response is
-		// written, so an old CLI's own follow-up mention POST (sent right
-		// after this response) always finds the row this call just created
-		// and is recognized as a duplicate rather than delivered twice.
-		// ParentConv is intentionally omitted (nil): this branch is reached
-		// only when the parent conversation is a direct (agent-to-agent DM)
-		// conversation, which is never reused for a mention regardless of
-		// verification, so there is nothing to pass.
-		mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+		// freshTarget. Fan-out consumes the single pre-resolved plan and
+		// derived admission from ExecuteAgentDM without re-resolving (Contract §6).
+		mentionResults := s.deliverResolvedAgentMentions(ctx, agentMentionFanoutInput{
 			Sender:            agent,
 			SenderIdent:       agentIdent,
 			Primary:           freshTarget,
@@ -1450,7 +1446,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ParentMessageID:   dmResult.MessageID,
 			ParentAttachments: dmResult.BoundAttachments,
 			Channel:           result.Channel,
-		})
+			CopyAdmission:     dmResult.copyAdmission,
+		}, dmResult.copyPlan)
 		WriteAgentDMResult(w, dmResult, mentionResults)
 		return
 	}
@@ -1484,17 +1481,57 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	promptText := messagepolicy.PolicyPromptText(policyDecisions, policySecretRequests, policyCommandRequest)
 
 	outboundMessageID := api.NewUUID()
+
+	// Single pre-effect copy-target resolution for E2-origin @mentions and
+	// group default-agent wake (Contract §6): resolved ONCE before the H2
+	// message policy gate and handed to both the gate and post-persist delivery.
+	var (
+		resolvedMentions    *resolvedMentionPlan
+		resolvedDefaultWake *resolvedDefaultWakePlan
+		h2CopyTargets       []resolvedCopyTarget
+	)
+	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
+	if decisionSend == nil && secretRequestSend == nil && commandRequestSend == nil {
+		resolvedMentions = s.resolveMentionCopyTargets(ctx, agentMentionFanoutInput{
+			Sender:                agent,
+			SenderIdent:           agentIdent,
+			Primary:               nil,
+			Msg:                   req.Msg,
+			Type:                  req.Type,
+			ParentConv:            result.ConvResult,
+			ParentConvVerified:    result.Asserted,
+			Channel:               result.Channel,
+			HasPendingAttachments: len(artifactAttachments) > 0,
+		})
+		if resolvedMentions != nil && len(resolvedMentions.AuthorizedOrdered) > 0 {
+			h2CopyTargets = append(h2CopyTargets, resolvedMentions.AuthorizedOrdered...)
+		}
+		hasMentionResults := resolvedMentions != nil && len(resolvedMentions.Results) > 0
+		if isGroupPost && !hasMentionResults {
+			addressedToHuman := s.isGroupPostAddressedToHuman(ctx, &req, result, nil)
+			resolvedDefaultWake = s.resolveDefaultWakeCopyTarget(ctx, agent, agentIdent, result.ConvResult, req.Msg, req.Type, false, addressedToHuman, nil)
+			if resolvedDefaultWake != nil && resolvedDefaultWake.Target != nil {
+				h2CopyTargets = append(h2CopyTargets, *resolvedDefaultWake.Target)
+			}
+		}
+	}
+
 	h2PolicyRes, h2Allowed := s.evaluateH2MessagePolicies(ctx, w, &h2PolicyInput{
+		sendID:              outboundMessageID,
 		agent:               agent,
+		senderIdent:         agentIdent,
 		req:                 &req,
 		routing:             result,
 		hasChoices:          decisionSend != nil,
 		promptText:          promptText,
 		artifactAttachments: len(artifactAttachments),
+		copyTargets:         h2CopyTargets,
+		copyBody:            req.Msg,
 	})
 	if !h2Allowed {
 		return
 	}
+	defer h2PolicyRes.releaseCopyAdmission()
 
 	// Agent-authored @mention fan-out extracts mentions from the ORIGINAL
 	// body, before translateMentionsInbound rewrites @email tokens to
@@ -1856,7 +1893,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// A decision prompt, secret request, or command request is addressed to humans and fans out to no agent.
 	var mentionResults []messages.MentionResult
 	if decisionSend == nil && secretRequestSend == nil && commandRequestSend == nil {
-		mentionResults = s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+		mentionResults = s.deliverResolvedAgentMentions(ctx, agentMentionFanoutInput{
 			Sender:             agent,
 			SenderIdent:        agentIdent,
 			Primary:            nil,
@@ -1868,16 +1905,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ParentAttachments:  boundAttachments,
 			Channel:            result.Channel,
 			HumanMembers:       humanMembers,
-		})
+			CopyAdmission:      h2PolicyRes.copyAdmission,
+		}, resolvedMentions)
 	}
 
 	// A group post that @mentions no agent and neither addresses nor
 	// @mentions a human goes to the conversation's default agent. The
 	// sender's agentGroupPostDecision already allowed the post in
-	// resolveOutboundRouting; wakeGroupDefaultAgent adds the pairwise
-	// check, the loop guard, and groupAgentJoinAllowed
-	// (group_message_mode.go).
-	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
+	// resolveOutboundRouting; wakeGroupDefaultAgent consumes the
+	// pre-resolved default agent and derived admission without
+	// re-resolving (Contract §6).
 	var defaultAgentResult *messages.MentionResult
 	if isGroupPost && decisionSend == nil && secretRequestSend == nil && commandRequestSend == nil {
 		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
@@ -1892,6 +1929,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ParentMessageID:   storeMsg.ID,
 			ParentAttachments: boundAttachments,
 			Channel:           result.Channel,
+			Resolved:          resolvedDefaultWake,
+			CopyAdmission:     h2PolicyRes.copyAdmission,
 		})
 	}
 
@@ -2731,10 +2770,56 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// with the same refusals, in place of the user checks below. A
 	// delegated request never carries wake.
 	delegatedSender := delegatedAgentIdentityFromContext(ctx) != nil
+	var delegatedPolicyRes h2PolicyOutcome
 	if delegatedSender {
 		if dmErr := s.delegatedDeliveryRefusal(ctx, agent, deferDelivery); dmErr != nil {
 			WriteAgentDMError(w, dmErr)
 			return
+		}
+		// E3c delegated agent DM message policy gate (M3 Slice B, Contract §6):
+		// runs strictly after delegatedDeliveryRefusal and before persistence.
+		if s.experimentEnabled(experiments.MessagePolicies) {
+			delegated := delegatedAgentIdentityFromContext(ctx)
+			var actorAgent *store.Agent
+			if st := delegatedStateFromContext(ctx); st != nil && st.identity == delegated && st.agent != nil && st.agent.ID == delegated.ID() {
+				actorAgent = st.agent
+			}
+			if actorAgent == nil {
+				var actorErr error
+				actorAgent, actorErr = s.store.GetAgent(ctx, delegated.ID())
+				if actorErr != nil {
+					s.messageLog.Error("delegated DM: actor agent lookup failed",
+						"actor_id", delegated.ID(), "error", actorErr)
+					writeErrorFromErr(w, actorErr, "")
+					return
+				}
+			}
+			originSnap := h2FactSnapshot{
+				surface:         messagepolicy.SurfaceAgentDM,
+				projectID:       actorAgent.ProjectID,
+				senderID:        actorAgent.ID,
+				senderSlug:      actorAgent.Slug,
+				recipientKind:   "agent",
+				recipientID:     agent.ID,
+				recipientSlug:   agent.Slug,
+				msgType:         structuredMsg.Type,
+				introBody:       plainMessage,
+				msgBody:         plainMessage,
+				urgent:          structuredMsg.Urgent,
+				attachmentCount: len(structuredMsg.Attachments) + len(attachRefs),
+				convKind:        "direct",
+			}
+			var rej *originPolicyRejection
+			delegatedPolicyRes, rej = s.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+				sender:                 actorAgent,
+				senderIdent:            delegated,
+				requireActorCrossCheck: true,
+				originSnap:             originSnap,
+			})
+			if rej != nil {
+				rej.writeHTTP(w)
+				return
+			}
 		}
 	}
 
@@ -3264,6 +3349,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				return
 			}
 
+			var groupConv *messaging.ConversationResult
+			if convResult != nil && convResult.Kind == "group" {
+				groupConv = convResult
+			}
 			dmResult, dmErr := s.ExecuteAgentDM(ctx, &AgentDMInput{
 				SenderAgent:    senderAgentRec,
 				SenderIdentity: senderAgentIdent,
@@ -3286,13 +3375,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Wake:           req.Wake,
 				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 				// Written once ExecuteAgentDM's admission and phase checks pass.
-				OnAdmitted:   func() { logReceivedForDelivery(storeMsg.ConversationID) },
-				RecordLogged: true,
+				OnAdmitted:                func() { logReceivedForDelivery(storeMsg.ConversationID) },
+				RecordLogged:              true,
+				mentionExplicit:           req.Mentions,
+				mentionParentConv:         groupConv,
+				mentionParentConvVerified: groupConvIsExistingReference,
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)
 				return
 			}
+			defer dmResult.copyAdmission.Close()
 			messaging.RecordStep(ctx, "agent_dm_executed")
 
 			// Review round 2 finding #2 (see registerGroupPrimary): the
@@ -3300,7 +3393,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// ExecuteAgentDM and must be registered on a thread-derived
 			// group — this is the agent-sender path (scion message
 			// --thread-id between agents).
-			s.registerGroupPrimary(ctx, groupConversationID, agent)
+			if s.registerGroupPrimary(ctx, groupConversationID, agent) {
+				dmResult.copyAdmission.RecordAcknowledgedRegistration(agent.ID)
+			}
 
 			// Post-delivery adapter concerns: notification subscription
 			// and mention processing stay outside the core operation.
@@ -3312,19 +3407,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.createNotifySubscription(ctx, agent.ID, agent.ProjectID, notifySubscriberType, notifySubscriberID, createdBy)
 			}
 
-			// Agent-authored @mention fan-out: body mentions plus the
-			// explicit Mentions field, resolved and delivered through
-			// fanOutAgentMentions — not processMentions, which stays for the
-			// human/broker sender branch of this handler. ParentConvVerified
-			// is groupConvIsExistingReference: true only when the caller
-			// referenced this group conversation by an existing,
-			// already-authorized ID, never one minted on demand from
-			// free-text thread_id.
-			var groupConv *messaging.ConversationResult
-			if convResult != nil && convResult.Kind == "group" {
-				groupConv = convResult
-			}
-			mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
+			// Agent-authored @mention fan-out: consumes the single pre-resolved
+			// mention plan and derived admission from ExecuteAgentDM without
+			// re-resolving (Contract §6).
+			mentionResults := s.deliverResolvedAgentMentions(ctx, agentMentionFanoutInput{
 				Sender:             senderAgentRec,
 				SenderIdent:        senderAgentIdent,
 				Primary:            agent,
@@ -3336,7 +3422,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ParentMessageID:    dmResult.MessageID,
 				ParentAttachments:  dmResult.BoundAttachments,
 				Channel:            structuredMsg.Channel,
-			})
+				CopyAdmission:      dmResult.copyAdmission,
+			}, dmResult.copyPlan)
 
 			// Use "dispatched" for accepted, "ambiguous" for ambiguous (#1689),
 			// "deferred" while the recipient is mid-migration (design
@@ -3403,6 +3490,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		} else {
 			persistedMsgID = storeMsg.ID
 			persistedConversationID = storeMsg.ConversationID
+			if delegatedSender {
+				s.recordAdmittedH2PolicyDecisions(ctx, &delegatedPolicyRes, persistedMsgID)
+			}
 			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 			// Attachments stored as artifacts the user named are bound to the
 			// stored message and delivered into the agent's home

@@ -181,8 +181,8 @@ func TestMessagePolicyCLI_CreateListGetDelete_TextAndJSON(t *testing.T) {
 	assert.Contains(t, out, `Created message policy "no-prose-choices"`)
 	assert.Contains(t, out, "Coverage (this Hub):")
 	assert.NotContains(t, out, "M1")
-	assert.Contains(t, out, "enforced_surfaces:     agent_to_user, agent_to_conversation")
-	assert.Contains(t, out, "uncovered_agent_paths: agent_dm, group_post, group_set, mention_fanout, mention_delivery, broadcast")
+	assert.Contains(t, out, "enforced_surfaces:     agent_to_user, agent_to_conversation, agent_dm, mention_delivery")
+	assert.Contains(t, out, "uncovered_agent_paths: group_post, group_set, mention_fanout, broadcast")
 
 	// 2. Create from YAML file with --format json
 	specPath := filepath.Join(t.TempDir(), "policy.yaml")
@@ -206,8 +206,8 @@ on_failed: reject
 	listOut, err := runMessagePolicyCLI(t, "list", "--mode", "enforce", "--enabled", "true")
 	require.NoError(t, err)
 	assert.Contains(t, listOut, "no-prose-choices")
-	assert.Contains(t, listOut, "enforced_surfaces:     agent_to_user, agent_to_conversation")
-	assert.Contains(t, listOut, "uncovered_agent_paths:")
+	assert.Contains(t, listOut, "enforced_surfaces:     agent_to_user, agent_to_conversation, agent_dm, mention_delivery")
+	assert.Contains(t, listOut, "uncovered_agent_paths: group_post, group_set, mention_fanout, broadcast")
 
 	listJSON, err := runMessagePolicyCLI(t, "--format", "json", "list")
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ on_failed: reject
 	require.NoError(t, err)
 	assert.Contains(t, getOut, "Name:               no-prose-choices")
 	assert.Contains(t, getOut, "Violation Rule:     !message.has_choices")
-	assert.Contains(t, getOut, "enforced_surfaces:     agent_to_user, agent_to_conversation")
+	assert.Contains(t, getOut, "enforced_surfaces:     agent_to_user, agent_to_conversation, agent_dm, mention_delivery")
 
 	getJSON, err := runMessagePolicyCLI(t, "get", "no-prose-choices", "--json")
 	require.NoError(t, err)

@@ -232,6 +232,10 @@ type messagePolicyShadowJob struct {
 	unmentionedUnavailable bool
 	droppedCount           int
 	messageID              string
+	// Multi-unit shadow job fields (M3 Slice B).
+	multiUnits    []policyEvalUnit
+	shadowMatches []matchedPolicyUnits
+	projectID     string
 }
 
 func policyUsesUnmentionedAgentSlugs(pol *store.MessagePolicy) bool {
@@ -268,12 +272,16 @@ type h2FactSnapshot struct {
 }
 
 type h2PolicyInput struct {
+	sendID              string
 	agent               *store.Agent
+	senderIdent         Identity
 	req                 *OutboundMessageRequest
 	routing             *routingResult
 	hasChoices          bool
 	promptText          string
 	artifactAttachments int
+	copyTargets         []resolvedCopyTarget
+	copyBody            string
 }
 
 type h2PolicyOutcome struct {
@@ -281,6 +289,13 @@ type h2PolicyOutcome struct {
 	humanMembersLoaded bool
 	admittedDecisions  []*store.MessagePolicyDecision
 	shadowJob          *messagePolicyShadowJob
+	copyAdmission      *derivedAdmission
+}
+
+func (o *h2PolicyOutcome) releaseCopyAdmission() {
+	if o != nil && o.copyAdmission != nil {
+		o.copyAdmission.Close()
+	}
 }
 
 // initMessagePolicyGate binds the gate to the Server's shared ruleengine.Engine.
@@ -362,6 +377,10 @@ func (s *Server) runMessagePolicyShadowWorker(ctx context.Context, ch <-chan mes
 
 func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messagePolicyShadowJob) {
 	if ctx.Err() != nil {
+		return
+	}
+	if len(job.shadowMatches) > 0 {
+		s.processMultiUnitShadowJob(ctx, job)
 		return
 	}
 	bodyTruncated := len(job.snapshot.msgBody) > messagepolicy.MaxBodyBytes
@@ -531,277 +550,25 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	}
 
 	snap := deriveH2FactSnapshot(in)
-	if snap.uncoveredPath != "" {
-		s.recordMessagePolicyUncovered(snap)
-		return h2PolicyOutcome{}, true
+	copyBody := in.copyBody
+	if copyBody == "" {
+		copyBody = in.req.Msg
 	}
-	if snap.surface == "" {
-		return h2PolicyOutcome{}, true
-	}
-
-	enabledTrue := true
-	polList, err := s.store.ListMessagePolicies(ctx, store.MessagePolicyFilter{
-		ProjectID: in.agent.ProjectID,
-		Enabled:   &enabledTrue,
-	}, store.ListOptions{
-		Limit:          store.MaxMessagePoliciesPerProject,
-		SkipTotalCount: true,
+	out, rej := s.evaluateOriginMessagePolicies(ctx, originPolicyEvalInput{
+		sendID:              in.sendID,
+		sender:              in.agent,
+		senderIdent:         in.senderIdent,
+		originSnap:          snap,
+		copyTargets:         in.copyTargets,
+		copyBody:            copyBody,
+		copyAttachmentCount: in.artifactAttachments,
+		copyUrgent:          false,
 	})
-	if err != nil {
-		s.messageLog.Error("message policy gate: failed to load project policies (fail-closed)",
-			"project_id", in.agent.ProjectID,
-			"agent_id", in.agent.ID,
-			"error", err,
-		)
-		writeErrorFromErr(w, err, "")
+	if rej != nil {
+		rej.writeHTTP(w)
 		return h2PolicyOutcome{}, false
 	}
-	if ctx.Err() != nil {
-		writeError(w, 499, "request_canceled", "request context done", nil)
-		return h2PolicyOutcome{}, false
-	}
-
-	var enforcePols []store.MessagePolicy
-	var shadowPols []store.MessagePolicy
-	droppedShadow := 0
-	for i := range polList.Items {
-		p := &polList.Items[i]
-		if !p.Matches(snap.surface, snap.senderID, snap.recipientKind, "") {
-			continue
-		}
-		if p.Mode == store.MessagePolicyModeEnforce {
-			enforcePols = append(enforcePols, *p)
-		} else if len(shadowPols) < store.MaxActiveMatchingMessagePolicies {
-			shadowPols = append(shadowPols, *p)
-		} else {
-			droppedShadow++
-		}
-	}
-
-	if len(enforcePols) == 0 && len(shadowPols) == 0 {
-		return h2PolicyOutcome{}, true
-	}
-
-	// Fast path: only shadow policies matched. Defer enqueueing until the
-	// message is persisted so shadow decision rows never reference an unstored
-	// message UUID, and avoid running participant/mention lookups on the hot path.
-	if len(enforcePols) == 0 {
-		return h2PolicyOutcome{
-			shadowJob: &messagePolicyShadowJob{
-				policies:     shadowPols,
-				snapshot:     snap,
-				droppedCount: droppedShadow,
-			},
-		}, true
-	}
-
-	bodyTruncated := len(snap.msgBody) > messagepolicy.MaxBodyBytes
-	hasSystemOneEnforce := false
-	for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
-		if strings.TrimSpace(enforcePols[i].SystemOneRule) != "" {
-			hasSystemOneEnforce = true
-			break
-		}
-	}
-	needUnmentionedEnforce := anyPolicyUsesUnmentionedAgentSlugs(enforcePols)
-	var (
-		facts              messagepolicy.Facts
-		humanMembers       []chatMemberEntry
-		humanMembersLoaded bool
-		factsErr           error
-		unmentionedErr     error
-		act                messagepolicy.Activation
-	)
-	if !bodyTruncated || hasSystemOneEnforce {
-		facts, humanMembers, humanMembersLoaded, factsErr, unmentionedErr = s.buildH2MessagePolicyFacts(ctx, snap, nil, false, needUnmentionedEnforce)
-		if factsErr == nil {
-			act = messagepolicy.NewActivation(facts)
-		}
-	}
-	budget := s.messagePolicyGate.makeSendBudget()
-	soBudget := s.messagePolicyGate.systemOneSendBudget()
-
-	results := make([]policyEvalResult, len(enforcePols))
-	if hasSystemOneEnforce && factsErr == nil {
-		// Plan eligible enforce System One policies into immutable evaluation
-		// groups and evaluate each group once concurrently under the shared
-		// synchronous System One send deadline (M3 Slice A2).
-		soCtx, soCancel := context.WithTimeout(ctx, soBudget)
-		s.evalPlannedSystemOnePolicies(soCtx, enforcePols, store.MaxActiveMatchingMessagePolicies, snap.projectID, facts, act, budget, soBudget, unmentionedErr != nil, results)
-		soCancel()
-	}
-
-	var firstReject *policyEvalResult
-
-	for i := range enforcePols {
-		pol := &enforcePols[i]
-		polHasS1 := strings.TrimSpace(pol.SystemOneRule) != ""
-		var classification messagepolicy.Classification
-		var elapsed time.Duration
-		switch {
-		case i >= store.MaxActiveMatchingMessagePolicies:
-			classification = messagepolicy.Classification{
-				Class:  messagepolicy.ClassFailed,
-				Reason: messagepolicy.ReasonPolicyCapExceeded,
-			}
-		case !polHasS1 && bodyTruncated:
-			classification = messagepolicy.Classification{
-				Class:  messagepolicy.ClassFailed,
-				Reason: messagepolicy.ReasonBodyTruncated,
-			}
-		case factsErr != nil || (unmentionedErr != nil && policyUsesUnmentionedAgentSlugs(pol)):
-			classification = messagepolicy.Classification{
-				Class:  messagepolicy.ClassFailed,
-				Reason: messagepolicy.ReasonFactsUnavailable,
-			}
-		case polHasS1 && results[i].policy != nil:
-			classification = results[i].classification
-			elapsed = results[i].elapsed
-		default:
-			start := time.Now()
-			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, snap.projectID, facts, act, budget, soBudget)
-			elapsed = time.Since(start)
-		}
-
-		s.recordMessagePolicyEvalMetric(classification.Class, store.MessagePolicyModeEnforce, snap.surface, elapsed)
-		if classification.AdmissionError {
-			s.recordMessagePolicyAdmissionError(snap.projectID, pol.ID, pol.Name, classification.Reason)
-		}
-
-		outcome := messagepolicy.ResolveOutcome(
-			classification.Class,
-			classification.Reason,
-			pol.OnUncertain,
-			pol.OnFailed,
-			pol.OnFailedReasons,
-		)
-		results[i] = policyEvalResult{
-			policy:         pol,
-			classification: classification,
-			outcome:        outcome,
-			elapsed:        elapsed,
-		}
-		if outcome == messagepolicy.OutcomeReject && firstReject == nil {
-			firstReject = &results[i]
-		}
-	}
-
-	if ctx.Err() != nil {
-		writeError(w, 499, "request_canceled", "request context done", nil)
-		return h2PolicyOutcome{}, false
-	}
-
-	tplData := messagepolicy.TemplateData{
-		Recipient: snap.recipientSlug,
-	}
-
-	if firstReject != nil {
-		for i := range results {
-			r := &results[i]
-			tplData.Policy = r.policy.Name
-			tplData.JudgmentFlags = r.classification.Judgments.Flags
-			tplData.JudgmentLabels = r.classification.Judgments.Labels
-			action := store.MessagePolicyActionAdmitted
-			if r.outcome == messagepolicy.OutcomeReject {
-				action = store.MessagePolicyActionRejected
-			}
-			dec := buildMessagePolicyDecisionRecord(
-				r.policy,
-				snap,
-				"",
-				r.classification,
-				action,
-				r.outcome,
-				tplData,
-				r.elapsed,
-			)
-			s.persistMessagePolicyDecision(ctx, dec)
-		}
-		if len(shadowPols) > 0 {
-			s.recordMessagePolicyShadowCapDrop(snap.projectID, droppedShadow)
-			shadowCanReuseFacts := (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil && (needUnmentionedEnforce || !anyPolicyUsesUnmentionedAgentSlugs(shadowPols))
-			s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
-				policies:               shadowPols,
-				snapshot:               snap,
-				facts:                  facts,
-				hasFacts:               shadowCanReuseFacts,
-				activation:             act,
-				factsUnavailable:       factsErr != nil,
-				unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
-				messageID:              "",
-			})
-		}
-
-		pol := firstReject.policy
-		tplData.Policy = pol.Name
-		tplData.JudgmentFlags = firstReject.classification.Judgments.Flags
-		tplData.JudgmentLabels = firstReject.classification.Judgments.Labels
-		reason := renderPolicyRejectReason(pol, tplData)
-		remediation := messagepolicy.RenderTemplate(pol.RejectRemediation, tplData)
-
-		s.messageLog.Info("outbound message rejected by message policy",
-			"code", string(MessageDenialPolicyRejected),
-			"policy", pol.Name,
-			"policy_revision", pol.Revision,
-			"class", firstReject.classification.Class,
-			"surface", snap.surface,
-			"project_id", snap.projectID,
-			"sender_id", snap.senderID,
-			"recipient_kind", snap.recipientKind,
-			"recipient_id", snap.recipientID,
-		)
-
-		details := map[string]interface{}{
-			"policy":          pol.Name,
-			"policy_revision": pol.Revision,
-			"class":           firstReject.classification.Class,
-		}
-		if remediation != "" {
-			details["remediation"] = remediation
-		}
-		writeError(w, http.StatusUnprocessableEntity, string(MessageDenialPolicyRejected), reason, details)
-		return h2PolicyOutcome{}, false
-	}
-
-	admittedDecisions := make([]*store.MessagePolicyDecision, 0, len(results))
-	for i := range results {
-		r := &results[i]
-		tplData.Policy = r.policy.Name
-		tplData.JudgmentFlags = r.classification.Judgments.Flags
-		tplData.JudgmentLabels = r.classification.Judgments.Labels
-		admittedDecisions = append(admittedDecisions, buildMessagePolicyDecisionRecord(
-			r.policy,
-			snap,
-			"",
-			r.classification,
-			store.MessagePolicyActionAdmitted,
-			r.outcome,
-			tplData,
-			r.elapsed,
-		))
-	}
-
-	var shadowJob *messagePolicyShadowJob
-	if len(shadowPols) > 0 {
-		shadowCanReuseFacts := (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil && (needUnmentionedEnforce || !anyPolicyUsesUnmentionedAgentSlugs(shadowPols))
-		shadowJob = &messagePolicyShadowJob{
-			policies:               shadowPols,
-			snapshot:               snap,
-			facts:                  facts,
-			hasFacts:               shadowCanReuseFacts,
-			activation:             act,
-			factsUnavailable:       factsErr != nil,
-			unmentionedUnavailable: needUnmentionedEnforce && unmentionedErr != nil,
-			droppedCount:           droppedShadow,
-		}
-	}
-
-	return h2PolicyOutcome{
-		humanMembers:       humanMembers,
-		humanMembersLoaded: humanMembersLoaded,
-		admittedDecisions:  admittedDecisions,
-		shadowJob:          shadowJob,
-	}, true
+	return out, true
 }
 
 // recordAdmittedH2PolicyDecisions persists admitted enforce decisions and
@@ -814,6 +581,9 @@ func (s *Server) recordAdmittedH2PolicyDecisions(ctx context.Context, out *h2Pol
 	if out == nil {
 		return
 	}
+	if out.copyAdmission != nil {
+		out.copyAdmission.AttachMessageID(persistedMessageID)
+	}
 	for _, dec := range out.admittedDecisions {
 		dec.MessageID = persistedMessageID
 		s.persistMessagePolicyDecision(ctx, dec)
@@ -823,7 +593,11 @@ func (s *Server) recordAdmittedH2PolicyDecisions(ctx context.Context, out *h2Pol
 		job := *out.shadowJob
 		job.messageID = persistedMessageID
 		out.shadowJob = nil
-		s.recordMessagePolicyShadowCapDrop(job.snapshot.projectID, job.droppedCount)
+		projID := job.projectID
+		if projID == "" {
+			projID = job.snapshot.projectID
+		}
+		s.recordMessagePolicyShadowCapDrop(projID, job.droppedCount)
 		s.enqueueMessagePolicyShadow(job)
 	}
 }
