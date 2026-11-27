@@ -1018,17 +1018,75 @@ export class ScionProjectMembersEditor extends LitElement {
       }
 
       @media (max-width: 768px) {
-        .hide-mobile {
-          display: none;
-        }
-
         .section {
           padding: 1rem;
         }
 
-        th,
-        td {
-          padding: 0.5rem 0.75rem;
+        .section-header {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.75rem;
+        }
+
+        .section-header-actions {
+          flex-wrap: wrap;
+        }
+
+        thead {
+          display: none;
+        }
+
+        table,
+        tbody {
+          display: block;
+          width: 100%;
+        }
+
+        tbody tr {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.5rem 0.75rem;
+          padding: 0.75rem;
+          border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        }
+
+        tbody tr:last-child {
+          border-bottom: none;
+        }
+
+        tbody tr:hover {
+          background: var(--scion-bg-subtle, #f1f5f9);
+        }
+
+        tbody td {
+          display: block;
+          padding: 0;
+          border-bottom: none;
+        }
+
+        tbody tr:hover td {
+          background: transparent;
+        }
+
+        tbody td:first-child {
+          flex: 1 1 100%;
+          min-width: 0;
+        }
+
+        .actions-cell {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 0.25rem;
+          margin-left: auto;
+          white-space: normal;
+          text-align: left;
+        }
+
+        .hide-mobile {
+          display: none;
         }
       }
     `,

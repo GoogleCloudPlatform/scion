@@ -181,6 +181,7 @@ jobs:
           - chat-palette
           - dialog-nested-popup
           - project-files-tabs
+          - project-members-mobile
           - secret-request
           - terminal-coordinator
           - terminal-entrypoints

@@ -26,6 +26,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+import { elementStyleRules } from '../pages/__fixtures__/css-rules.js';
 import { apiFetch } from '../../client/api.js';
 import type {
   AssignableProjectRole,
@@ -2292,5 +2293,30 @@ describe('invited principals', () => {
     expect(alert?.textContent).toContain(
       'Invited owners do not count towards the last-owner rule until they sign in. Keep at least one signed-in owner.'
     );
+  });
+});
+
+describe('mobile responsive layout style contract (ptone/scion#9571)', () => {
+  const MOBILE = '@media (max-width: 768px)';
+
+  it('stacks the section header and wraps header actions on mobile without altering desktop', () => {
+    const rules = elementStyleRules('scion-project-members-editor');
+
+    // Desktop stays a horizontal row with non-wrapping actions.
+    expect(rules.get('.section-header')).toContain('display: flex');
+    expect(rules.get('.section-header')).not.toContain('flex-direction: column');
+    expect(rules.get('.actions-cell')).toContain('white-space: nowrap');
+
+    // Mobile stacks the header and wraps actions.
+    expect(rules.get(`${MOBILE} .section-header`)).toContain('flex-direction: column');
+    expect(rules.get(`${MOBILE} .section-header-actions`)).toContain('flex-wrap: wrap');
+
+    // Mobile wraps table rows so member identity gets full width and actions stay visible.
+    expect(rules.get(`${MOBILE} thead`)).toContain('display: none');
+    expect(rules.get(`${MOBILE} tbody tr`)).toContain('display: flex');
+    expect(rules.get(`${MOBILE} tbody tr`)).toContain('flex-wrap: wrap');
+    expect(rules.get(`${MOBILE} tbody td:first-child`)).toContain('flex: 1 1 100%');
+    expect(rules.get(`${MOBILE} .actions-cell`)).toContain('flex-wrap: wrap');
+    expect(rules.get(`${MOBILE} .actions-cell`)).toContain('white-space: normal');
   });
 });
