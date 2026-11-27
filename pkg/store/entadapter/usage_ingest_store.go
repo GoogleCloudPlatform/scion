@@ -1248,15 +1248,12 @@ func advanceIngestSeqState(
 	rejNorm := normalizeSeqRanges(existingRejected)
 	var newlyRejected int64
 	if len(rejectedSeqs) > 0 {
-		// While uncoalesced, every integer in rejNorm is an actual rejected seq
-		// so seqRangesSpan(rejNorm) == existingRejectedCount and we deduplicate
-		// strictly against rejNorm (idempotent retries). Once capSeqRanges has
-		// coalesced adjacent ranges across non-rejected gaps, seqRangesSpan >
-		// existingRejectedCount; in that coalesced state we count distinct
-		// positive seqs in this batch directly so newly rejected seqs falling
-		// inside a coalesced gap are never silently undercounted.
-		alreadyCoalesced := seqRangesSpan(rejNorm) > existingRejectedCount
-		rejNorm, newlyRejected = mergeSeqsIntoRanges(rejNorm, rejectedSeqs, alreadyCoalesced)
+		// Always deduplicate against the stored rejected_ranges so retries are
+		// strictly idempotent (+0 on replay). While uncoalesced, rejected_count
+		// is exact; once capSeqRanges coalesces adjacent ranges across gaps
+		// (span(rejected_ranges) > rejected_count, see
+		// MeterHealth.RejectedRangesCoalesced), rejected_count is a lower bound.
+		rejNorm, newlyRejected = mergeSeqsIntoRanges(rejNorm, rejectedSeqs)
 		rejNorm, rejectedCoalesced = capSeqRanges(rejNorm, maxMeterHealthMissingRanges)
 	}
 	nextRejectedCount = saturatingAddInt64(existingRejectedCount, newlyRejected)
@@ -1270,28 +1267,11 @@ func advanceIngestSeqState(
 	return nextContig, nextMax, cur, nextRejectedCount, rejNorm, missingCoalesced, rejectedCoalesced
 }
 
-// seqRangesSpan returns the total number of integers covered by sorted,
-// disjoint ranges (saturating at math.MaxInt64).
-func seqRangesSpan(ranges []store.SeqRange) int64 {
-	var total int64
-	for _, r := range ranges {
-		if r.End < r.Start {
-			continue
-		}
-		span := r.End - r.Start
-		total = saturatingAddInt64(total, span)
-		total = saturatingAddInt64(total, 1)
-	}
-	return total
-}
-
 // mergeSeqsIntoRanges adds positive seqs into sorted, disjoint ranges and
-// returns the merged normalized ranges plus the count of newly rejected
-// distinct seqs. When existingCoalesced is false, seqs already covered by
-// existing are excluded from the count (idempotent on retries); when
-// existingCoalesced is true, existing over-approximates the rejected set so
-// every distinct positive seq in seqs is counted.
-func mergeSeqsIntoRanges(existing []store.SeqRange, seqs []int64, existingCoalesced bool) ([]store.SeqRange, int64) {
+// returns the merged normalized ranges plus the count of distinct seqs that
+// were not already covered by existing (idempotent across retries; exact while
+// uncoalesced and a lower bound once existing has coalesced at the cap).
+func mergeSeqsIntoRanges(existing []store.SeqRange, seqs []int64) ([]store.SeqRange, int64) {
 	sorted := make([]int64, 0, len(seqs))
 	for _, s := range seqs {
 		if s > 0 {
@@ -1308,7 +1288,6 @@ func mergeSeqsIntoRanges(existing []store.SeqRange, seqs []int64, existingCoales
 	newRanges = append(newRanges, existing...)
 	ri := 0
 	var prev int64
-	rangeChanged := false
 	for _, s := range sorted {
 		if s == prev {
 			continue
@@ -1317,17 +1296,14 @@ func mergeSeqsIntoRanges(existing []store.SeqRange, seqs []int64, existingCoales
 		for ri < len(existing) && existing[ri].End < s {
 			ri++
 		}
-		inExisting := ri < len(existing) && existing[ri].Start <= s && s <= existing[ri].End
-		if !inExisting {
-			newRanges = append(newRanges, store.SeqRange{Start: s, End: s})
-			rangeChanged = true
-			newlyAdded++
-		} else if existingCoalesced {
-			newlyAdded++
+		if ri < len(existing) && existing[ri].Start <= s && s <= existing[ri].End {
+			continue
 		}
+		newlyAdded++
+		newRanges = append(newRanges, store.SeqRange{Start: s, End: s})
 	}
-	if !rangeChanged {
-		return existing, newlyAdded
+	if newlyAdded == 0 {
+		return existing, 0
 	}
 	return normalizeSeqRanges(newRanges), newlyAdded
 }

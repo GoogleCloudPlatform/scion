@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"math"
 	"strings"
 	"time"
 )
@@ -286,14 +287,18 @@ type UsageScopeCounterDaily struct {
 // MeterHealth tracks per-run producer liveness, sequence continuity, and
 // drift/anomaly counters in meter_health.
 type MeterHealth struct {
-	ID                   string     `json:"id,omitempty"`
-	AgentID              string     `json:"agentId"`
-	RunID                string     `json:"runId"`
-	ProducerEpoch        string     `json:"producerEpoch"`
-	LastReceiptAt        time.Time  `json:"lastReceiptAt"`
-	LastContiguousSeq    int64      `json:"lastContiguousSeq"`
-	MaxSeqSeen           int64      `json:"maxSeqSeen"`
-	MissingRanges        []SeqRange `json:"missingRanges,omitempty"`
+	ID                string     `json:"id,omitempty"`
+	AgentID           string     `json:"agentId"`
+	RunID             string     `json:"runId"`
+	ProducerEpoch     string     `json:"producerEpoch"`
+	LastReceiptAt     time.Time  `json:"lastReceiptAt"`
+	LastContiguousSeq int64      `json:"lastContiguousSeq"`
+	MaxSeqSeen        int64      `json:"maxSeqSeen"`
+	MissingRanges     []SeqRange `json:"missingRanges,omitempty"`
+	// RejectedCount is the idempotent count of distinct Hub-rejected producer
+	// seqs. It is exact while RejectedRanges has not exceeded its cap and
+	// coalesced; once coalesced (RejectedRangesCoalesced() == true, i.e.,
+	// sum(r.End-r.Start+1) > RejectedCount), RejectedCount is a lower bound.
 	RejectedCount        int64      `json:"rejectedCount"`
 	RejectedRanges       []SeqRange `json:"rejectedRanges,omitempty"`
 	LastSourceActivityAt *time.Time `json:"lastSourceActivityAt,omitempty"`
@@ -302,6 +307,35 @@ type MeterHealth struct {
 	SchemaDriftDetected  bool       `json:"schemaDriftDetected"`
 	FinalState           string     `json:"finalState"`
 	UpdatedAt            time.Time  `json:"updatedAt"`
+}
+
+// RejectedRangesCoalesced reports whether RejectedRanges has been coalesced at
+// its storage cap (i.e. the total span covered by RejectedRanges exceeds
+// RejectedCount). When false, RejectedCount is exact; when true, RejectedCount
+// is a lower bound while remaining idempotent across retries.
+func (m *MeterHealth) RejectedRangesCoalesced() bool {
+	if m == nil || len(m.RejectedRanges) == 0 {
+		return false
+	}
+	var span int64
+	for _, r := range m.RejectedRanges {
+		if r.End < r.Start {
+			continue
+		}
+		d := r.End - r.Start
+		if span > math.MaxInt64-d {
+			return true
+		}
+		span += d
+		if span == math.MaxInt64 {
+			return span > m.RejectedCount
+		}
+		span++
+		if span > m.RejectedCount {
+			return true
+		}
+	}
+	return span > m.RejectedCount
 }
 
 // RunAttributionConfig configures atomic run_attribution writes on the store

@@ -1289,10 +1289,12 @@ func TestUsageIngest_RejectedSeqsVsLostGaps(t *testing.T) {
 	assert.Empty(t, mhs[0].MissingRanges)
 	assert.Equal(t, int64(2), mhs[0].RejectedCount)
 	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}, {Start: 6, End: 6}}, mhs[0].RejectedRanges)
+	assert.False(t, mhs[0].RejectedRangesCoalesced(), "uncoalesced rejected_ranges must report exact (not coalesced)")
 
-	// 5. Verify rejected_ranges cap (maxMeterHealthMissingRanges = 1024) AND
-	//    that rejected_count still increments when a later batch rejects a seq
-	//    falling inside a coalesced gap.
+	// 5. Verify rejected_ranges cap (maxMeterHealthMissingRanges = 1024):
+	//    once coalesced, RejectedRangesCoalesced() is true (rejected_count is
+	//    a lower bound), and replaying the same batch in the coalesced state
+	//    remains strictly idempotent (+0).
 	manyRejected := make([]int64, maxMeterHealthMissingRanges+50)
 	for i := range manyRejected {
 		manyRejected[i] = int64((i + 1) * 2) // 2, 4, 6, ... (odd seqs are gaps)
@@ -1301,17 +1303,13 @@ func TestUsageIngest_RejectedSeqsVsLostGaps(t *testing.T) {
 	assert.True(t, rejCoalesced)
 	assert.LessOrEqual(t, len(rejRanges), maxMeterHealthMissingRanges)
 	assert.Equal(t, int64(len(manyRejected)), rejCount)
-	// Find an odd seq that was absorbed into a coalesced range (start < end).
-	var gapSeq int64
-	for _, r := range rejRanges {
-		if r.End > r.Start {
-			gapSeq = r.Start + 1 // odd seq between two even rejected seqs
-			break
-		}
-	}
-	require.NotZero(t, gapSeq, "expected at least one coalesced range spanning a gap")
-	_, _, _, rejCountAfter, _, _, _ := advanceIngestSeqState(contigCap, maxCap, missCap, rejCount, rejRanges, maxCap, nil, []int64{gapSeq})
-	assert.Equal(t, rejCount+1, rejCountAfter, "newly rejected seq inside a coalesced gap must still increment rejected_count")
+	mhCoalesced := &store.MeterHealth{RejectedCount: rejCount, RejectedRanges: rejRanges}
+	assert.True(t, mhCoalesced.RejectedRangesCoalesced(), "coalesced rejected_ranges must be detectable via span > rejected_count")
+
+	// Lost-ack replay of the same batch in the coalesced state must add +0.
+	_, _, _, rejCountReplay, rejRangesReplay, _, _ := advanceIngestSeqState(contigCap, maxCap, missCap, rejCount, rejRanges, maxCap, nil, manyRejected)
+	assert.Equal(t, rejCount, rejCountReplay, "replay in coalesced state must be idempotent (+0)")
+	assert.Equal(t, rejRanges, rejRangesReplay)
 }
 
 func TestUsageIngest_MultiRowBatchFallbackAndDuplicates(t *testing.T) {
