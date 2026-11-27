@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -25,13 +26,14 @@ import (
 
 // Default-agent delivery for agent posts into group conversations.
 //
-// An agent post into a group conversation that @mentions no agent is
-// delivered to the conversation's default agent, as a human post is. The
-// post itself has already passed agentGroupPostDecision. The default
-// agent is then reached through deliverAgentMentionCopy, which reserves a
-// slot in the per-pair loop/storm cap, runs the pairwise
-// authorizeAgentMessage check, and registers the default agent as a
-// participant only through groupAgentJoinAllowed.
+// An agent post into a group conversation that @mentions no agent and
+// neither addresses nor @mentions a human is delivered to the
+// conversation's default agent, as a human post is. The post itself has
+// already passed agentGroupPostDecision. The default agent is then
+// reached through deliverAgentMentionCopy, which reserves a slot in the
+// per-pair loop/storm cap, runs the pairwise authorizeAgentMessage
+// check, and registers the default agent as a participant only through
+// groupAgentJoinAllowed.
 //
 // Loop guard: an agent's own post never reaches itself; the delivered
 // copy is a TypeMention row, which never triggers a further delivery; and
@@ -62,6 +64,12 @@ type groupDefaultWakeInput struct {
 	// MentionResults is the post's mention fan-out result. Any entry means
 	// the post @mentioned an agent, and the default agent is left alone.
 	MentionResults []messages.MentionResult
+	// AddressedToHuman is true when the request explicitly addressed a human
+	// recipient (e.g. a user: recipient or resolved user recipient_id).
+	AddressedToHuman bool
+	// HumanMembers is the project's human-member list when already resolved
+	// by the caller; nil means wakeGroupDefaultAgent resolves it if needed.
+	HumanMembers []chatMemberEntry
 	// ParentMessageID is the persisted post's ID.
 	ParentMessageID string
 	// ParentAttachments are the attachments stored as artifacts bound to
@@ -72,16 +80,20 @@ type groupDefaultWakeInput struct {
 }
 
 // wakeGroupDefaultAgent delivers an agent's group post to the
-// conversation's default agent when the post @mentions no agent. It
-// returns nil when no default agent applies (not a group post, an
-// excluded type, an agent mention present, or no default set); otherwise
-// the result of the attempt. A refused delivery is reported in the result
-// and never fails the post.
+// conversation's default agent when the post @mentions no agent and
+// neither addresses nor @mentions a human. It returns nil when no
+// default agent applies (not a group post, an excluded type, an agent
+// mention present, addressed to or mentioning a human, or no default
+// set); otherwise the result of the attempt. A refused delivery is
+// reported in the result and never fails the post.
 func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeInput) *messages.MentionResult {
 	if in.Sender == nil || in.SenderIdent == nil || in.Conv == nil || in.Conv.Kind != "group" {
 		return nil
 	}
 	if !mentionFanoutTypes[in.Type] || len(in.MentionResults) > 0 {
+		return nil
+	}
+	if in.AddressedToHuman || s.groupPostMentionsHuman(ctx, in.Sender.ProjectID, in.Msg, in.HumanMembers) {
 		return nil
 	}
 
@@ -246,4 +258,72 @@ func wokenAgentSlugs(mentionResults []messages.MentionResult, def *messages.Ment
 		out = append(out, def.Slug)
 	}
 	return out
+}
+
+// isGroupPostAddressedToHuman reports whether an outbound group-post request
+// explicitly addressed a human recipient — via a user-resolved S1 recipient,
+// a "user:" recipient prefix, a raw email recipient, or a recipient_id that
+// resolves to a user. Posts addressed to a human are excluded from
+// default-agent fan-out (ptone/scion#9446).
+func (s *Server) isGroupPostAddressedToHuman(ctx context.Context, req *OutboundMessageRequest, result *routingResult, humanMembers []chatMemberEntry) bool {
+	if result != nil {
+		if result.ExplicitUserRecipient {
+			return true
+		}
+		if strings.HasPrefix(strings.ToLower(result.Recipient), "user:") {
+			return true
+		}
+	}
+	if req == nil {
+		return false
+	}
+	lowerRecip := strings.ToLower(req.Recipient)
+	if strings.HasPrefix(lowerRecip, "user:") {
+		return true
+	}
+	if req.Recipient != "" &&
+		!strings.HasPrefix(lowerRecip, "agent:") &&
+		!strings.HasPrefix(lowerRecip, "conv:") &&
+		!strings.HasPrefix(lowerRecip, "thread:") &&
+		strings.Contains(req.Recipient, "@") {
+		return true
+	}
+	if req.RecipientID != "" && !strings.HasPrefix(lowerRecip, "agent:") {
+		for _, m := range humanMembers {
+			if m.Kind == "user" && m.ID == req.RecipientID {
+				return true
+			}
+		}
+		if u, err := s.store.GetUser(ctx, req.RecipientID); err == nil && u != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// groupPostMentionsHuman reports whether msg contains a prose @mention
+// targeting a human: a raw email (@name@domain), a @user: prefixed token, or
+// any mention matching a project human member (by display name, hyphenated
+// display-name slug, email, or email local part). Non-prose spans (fenced
+// code blocks, inline code, and '>' blockquotes) are ignored, matching
+// agent mention extraction.
+func (s *Server) groupPostMentionsHuman(ctx context.Context, projectID, msg string, preResolvedHumans []chatMemberEntry) bool {
+	opts := s.mentionOptions()
+	names := messages.DedupMentionNames(
+		messages.ExtractProseMentionsWithOptions(msg, opts),
+		messages.ExtractProseWrappedMentionsWithOptions(msg, opts),
+	)
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if strings.Contains(name, "@") || strings.HasPrefix(strings.ToLower(name), "user:") {
+			return true
+		}
+	}
+	humans := preResolvedHumans
+	if humans == nil && projectID != "" {
+		humans = s.resolveProjectHumanMembers(ctx, projectID)
+	}
+	return len(mentionedHumanIDs(humans, names, "")) > 0
 }
