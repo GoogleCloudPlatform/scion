@@ -993,5 +993,91 @@ func TestCopyAdmission_CopiedOrUnregisteredValueRefused(t *testing.T) {
 	assert.Empty(t, msgs.Items)
 }
 
+// TestSliceB_HumanTargetedGroupPostSkipsDefaultWake_PoliciesOn (Consider-1)
+// verifies that with hub.message_policies enabled and a reject-all enforce
+// policy on mention_delivery, human-targeted group posts skip default-agent
+// wake at BOTH the pre-effect plan and post-persist delivery (returning 200,
+// zero default-agent dispatch, and nil default_agent_result), while an
+// untargeted group post plans the default-agent copy and is rejected 422.
+func TestSliceB_HumanTargetedGroupPostSkipsDefaultWake_PoliciesOn(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "reject-all-mention-delivery",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceMentionDelivery}},
+		ViolationRule: `true`,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	}))
+
+	humanCases := []struct {
+		name string
+		req  OutboundMessageRequest
+	}{
+		{
+			name: "mention_human_raw_email",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.groupConv.ID,
+				Msg:             "FYI @" + f.alice.Email + " please review",
+			},
+		},
+		{
+			name: "mention_human_member_slug",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.groupConv.ID,
+				Msg:             "FYI @alice-example please review",
+			},
+		},
+		{
+			name: "recipient_user_prefix",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.groupConv.ID,
+				Recipient:       "user:" + f.alice.Email,
+				Msg:             "status update for human recipient",
+			},
+		},
+		{
+			name: "recipient_id_user",
+			req: OutboundMessageRequest{
+				ConversationRef: "conv:" + f.groupConv.ID,
+				RecipientID:     f.alice.ID,
+				Msg:             "status update by human recipient id",
+			},
+		},
+	}
+
+	for _, tc := range humanCases {
+		t.Run(tc.name, func(t *testing.T) {
+			sliceBResetDispatcher(f.dispatcher)
+			rr := f.sendOutbound(t, tc.req)
+			require.Equal(t, http.StatusOK, rr.Code, "human-targeted group post must not evaluate mention_delivery for suppressed default wake; body: %s", rr.Body.String())
+
+			for _, call := range f.dispatcher.getCalls() {
+				if call.Agent != nil {
+					assert.NotEqual(t, f.defaultAgent.ID, call.Agent.ID, "default agent must not receive a dispatch")
+				}
+			}
+
+			var resp struct {
+				DefaultAgentResult *messages.MentionResult `json:"default_agent_result"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			assert.Nil(t, resp.DefaultAgentResult, "human-targeted group post must report no default_agent_result")
+		})
+	}
+
+	t.Run("control_untargeted_group_post_rejected_422", func(t *testing.T) {
+		sliceBResetDispatcher(f.dispatcher)
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			ConversationRef: "conv:" + f.groupConv.ID,
+			Msg:             "untargeted group status update",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "untargeted group post must plan default-agent copy and hit reject-all mention_delivery policy; body: %s", rr.Body.String())
+		assert.Empty(t, f.dispatcher.getCalls(), "rejected untargeted group post must not dispatch")
+	})
+}
+
 // Keep unused time import check happy.
 var _ = time.Second
