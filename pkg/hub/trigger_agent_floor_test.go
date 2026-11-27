@@ -559,8 +559,10 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, refusal, "full agent trigger should be authorized at fire time")
 
-	// 7. Ceiling downgrade: keep role at baseline, tighten active delegation
-	// edge to a bounded ceiling that omits agent.notify -> refused at fire time.
+	// 7. Bounded delegation ceiling vs revoked edge: agent.notify is in
+	// selfOperationSet, so a bounded project.read ceiling still admits a
+	// baseline agent (UAT-created baseline agents keep the floor), whereas
+	// revoking the active delegation edge denies resolveRecordedAuthority.
 	ag.AppliedConfig.AgentRole = string(AgentRoleBaseline)
 	require.NoError(t, f.store.UpdateAgent(ctx, ag))
 	now := time.Now().UTC()
@@ -570,8 +572,9 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 		OpID:  api.NewUUID(),
 	})
 	require.NoError(t, err)
+	boundedEdgeID := api.NewUUID()
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
-		ID:            api.NewUUID(),
+		ID:            boundedEdgeID,
 		DelegatorType: store.DelegationPrincipalUser,
 		DelegatorID:   f.owner.ID,
 		DelegateType:  store.DelegationPrincipalAgent,
@@ -591,8 +594,16 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	}))
 	refusal, err = runAuthorize(hubfire.DefinitionKindTrigger)
 	require.NoError(t, err)
-	require.NotNil(t, refusal, "ceiling-downgraded baseline agent trigger must be refused at fire time")
-	assert.Equal(t, errScheduledMessageRefused.Error(), refusal.Reason)
+	assert.Nil(t, refusal, "baseline agent under bounded project.read ceiling retains self-op agent.notify")
+
+	_, err = f.store.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, ag.ID, boundedEdgeID, store.Deactivation{
+		Cause: store.EdgeDeactivationReincarnateReplaced,
+		At:    &now,
+		OpID:  api.NewUUID(),
+	})
+	require.NoError(t, err)
+	_, err = runAuthorize(hubfire.DefinitionKindTrigger)
+	require.ErrorIs(t, err, errScheduledAuthorityDenied, "revoked delegation edge must deny fire")
 }
 
 // TestTriggerAgentFloor_ReadonlyDisableMixedBodies verifies that every
