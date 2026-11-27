@@ -229,8 +229,8 @@ func TestPolicyRefusalAndRebaseline(t *testing.T) {
 	}
 	wantEOF := int64(len(line1) + len(line2))
 	entry := st.Artifacts[rel]
-	if entry.RawCommittedOffset != wantEOF || entry.ParsedOffset != wantEOF || entry.BaselineOffset != wantEOF || entry.Pending != nil {
-		t.Fatalf("rebaselined entry offsets/pending inconsistent: %+v (wantEOF=%d)", entry, wantEOF)
+	if entry.RawCommittedOffset != wantEOF || entry.ParsedOffset != wantEOF || entry.BaselineOffset != int64(len(line1)) || entry.Pending != nil {
+		t.Fatalf("rebaselined entry offsets/pending inconsistent: %+v (wantEOF=%d, wantBase=%d)", entry, wantEOF, len(line1))
 	}
 
 	// Re-enable capture and append line3: only line3 must ship (no backlog from line2).
@@ -374,23 +374,27 @@ func TestRebaselineAfterCommitBumpsGenerationAndAlignsToLineBoundary(t *testing.
 		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
 	}
 	entry := st.Artifacts[rel]
-	wantRebasedOffset := int64(len(initLine) + len(lineA) + len(offComplete))
+	wantEOF := int64(len(initLine) + len(lineA) + len(offComplete) + len(offPartial))
 	if entry.Generation != 1 || entry.LastGenerationReason != GenReasonRebaseline {
 		t.Fatalf("expected Generation=1 reason=%q, got gen=%d reason=%q",
 			GenReasonRebaseline, entry.Generation, entry.LastGenerationReason)
 	}
-	if entry.RawCommittedOffset != wantRebasedOffset || entry.BaselineOffset != wantRebasedOffset || entry.ParsedOffset != wantRebasedOffset {
-		t.Fatalf("expected line-aligned offset %d, got raw=%d base=%d parsed=%d",
-			wantRebasedOffset, entry.RawCommittedOffset, entry.BaselineOffset, entry.ParsedOffset)
+	if entry.RawCommittedOffset != wantEOF || entry.ParsedOffset != wantEOF || !entry.SkipToNextNewline {
+		t.Fatalf("expected EOF=%d with SkipToNextNewline=true, got raw=%d parsed=%d skip=%v",
+			wantEOF, entry.RawCommittedOffset, entry.ParsedOffset, entry.SkipToNextNewline)
+	}
+	if entry.BaselineOffset != int64(len(initLine)) {
+		t.Fatalf("expected original BaselineOffset=%d preserved, got %d", len(initLine), entry.BaselineOffset)
 	}
 
 	// Finish the partial line and append a new line, then ship.
-	finishAndB := "\":1}\n{\"seq\":2}\n"
+	finishPartial := "\":1}\n"
+	lineB := "{\"seq\":2}\n"
 	f3, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatalf("append finish+B: %v", err)
 	}
-	_, _ = f3.WriteString(finishAndB)
+	_, _ = f3.WriteString(finishPartial + lineB)
 	_ = f3.Close()
 
 	res2, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
@@ -403,8 +407,10 @@ func TestRebaselineAfterCommitBumpsGenerationAndAlignsToLineBoundary(t *testing.
 	if shipped[0].Generation != 0 || shipped[1].Generation != 1 {
 		t.Fatalf("expected gen 0 then gen 1, got %d then %d", shipped[0].Generation, shipped[1].Generation)
 	}
-	if shipped[1].ByteStart != wantRebasedOffset {
-		t.Fatalf("expected gen 1 segment to start at line boundary %d, got %d", wantRebasedOffset, shipped[1].ByteStart)
+	wantLineBStart := wantEOF + int64(len(finishPartial))
+	if shipped[1].ByteStart != wantLineBStart || shipped[1].ByteEnd != wantLineBStart+int64(len(lineB)) {
+		t.Fatalf("expected gen 1 segment [%d,%d) starting at line boundary after skipped partial, got [%d,%d)",
+			wantLineBStart, wantLineBStart+int64(len(lineB)), shipped[1].ByteStart, shipped[1].ByteEnd)
 	}
 }
 
@@ -651,6 +657,9 @@ func TestProbeConflictClearsRefusalFlagAndAllowsNextRoundToShip(t *testing.T) {
 	if err != nil || res.SegmentsShipped != 1 || len(shipped) != 1 || shipped[0].RawSize != int64(len(nextLine)) {
 		t.Fatalf("expected next round to ship %d bytes, got res=%+v shipped=%d err=%v", len(nextLine), res, len(shipped), err)
 	}
+	if shipped[0].Generation != 1 {
+		t.Fatalf("expected probe 409 conflict to bump generation to 1, got %d", shipped[0].Generation)
+	}
 }
 
 func TestFindLastNewlineOffset_CapAndContextCancellation(t *testing.T) {
@@ -690,15 +699,21 @@ func TestFindLastNewlineOffset_CapAndContextCancellation(t *testing.T) {
 		t.Fatalf("expected capped scan without newline to rebaseline to EOF=1024, got %d", got)
 	}
 
-	// Cancelled context stops findLastNewlineOffset immediately.
+	// Beyond the scan cap (256 bytes), findNextNewlineOffset advances by maxScanBytes.
 	f, err := os.Open(artPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	defer func() { _ = f.Close() }()
+	nextOff, done, err := findNextNewlineOffset(context.Background(), f, 0, 1024, 256)
+	if err != nil || !done || nextOff != 256 {
+		t.Fatalf("expected capped forward scan to return (256, true, nil), got (%d, %v, %v)", nextOff, done, err)
+	}
+
+	// Cancelled context stops findNextNewlineOffset immediately.
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := findLastNewlineOffset(cancelCtx, f, 1024, 256); !errors.Is(err, context.Canceled) {
+	if _, _, err := findNextNewlineOffset(cancelCtx, f, 0, 1024, 256); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
 }
@@ -878,4 +893,193 @@ func TestRebaselinePreservesArtifactExtraFields(t *testing.T) {
 	if gotExtra != `"cursor-42"` {
 		t.Fatalf("expected ArtifactState.Extra to survive Rebaseline, got %q", gotExtra)
 	}
+}
+
+func TestIdleSiblingAndRefusedFinalTailRebaselineContiguity(t *testing.T) {
+	t.Run("idle sibling across refusal and probe-accept", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, ".claude", "projects", "-workspace")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		relA := ".claude/projects/-workspace/a.jsonl"
+		relB := ".claude/projects/-workspace/b.jsonl"
+		pA := filepath.Join(home, filepath.FromSlash(relA))
+		pB := filepath.Join(home, filepath.FromSlash(relB))
+		if err := os.WriteFile(pA, []byte("{\"a0\":0}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(pB, []byte("{\"b0\":0}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		on := true
+		type segKey struct {
+			p string
+			g int
+		}
+		committed := map[segKey][][2]int64{}
+		up := &probeAndShipUploader{
+			probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+				if !on {
+					return ShipResult{Outcome: OutcomeCaptureUnavailable}, nil
+				}
+				return ShipResult{Outcome: OutcomeCommitted}, nil
+			},
+			shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+				if !on {
+					return ShipResult{Outcome: OutcomeCaptureUnavailable}, nil
+				}
+				k := segKey{seg.NativeRelativePath, seg.Generation}
+				committed[k] = append(committed[k], [2]int64{seg.ByteStart, seg.ByteEnd})
+				return ShipResult{Outcome: OutcomeCommitted}, nil
+			},
+		}
+
+		s, err := New(Config{HomeDir: home, RunID: "r", Uploader: up})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if _, err := s.Baseline(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		appendStr := func(path, data string) {
+			f, oerr := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+			if oerr != nil {
+				t.Fatal(oerr)
+			}
+			_, _ = f.WriteString(data)
+			_ = f.Close()
+		}
+
+		// Both A and B commit in gen 0.
+		appendStr(pA, "{\"a1\":1}\n")
+		appendStr(pB, "{\"b1\":1}\n")
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 2 {
+			t.Fatalf("round1: %+v %v", r, err)
+		}
+
+		// Capture goes off; A grows while B stays idle -> 404 -> Rebaseline.
+		on = false
+		appendStr(pA, "{\"a2\":2}\n")
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || !r.CaptureUnavailable {
+			t.Fatalf("round2: %+v %v", r, err)
+		}
+		if _, err := s.Rebaseline(ctx, "capture_unavailable"); err != nil {
+			t.Fatal(err)
+		}
+
+		// During backoff B grows; capture comes back -> probe-accept rebaseline.
+		appendStr(pB, "{\"b_backoff\":1}\n")
+		on = true
+		if _, err := s.RunRound(ctx, RoundOptions{Reason: ReasonResumeCatchup}); err != nil {
+			t.Fatal(err)
+		}
+
+		// B grows again after acceptance and ships.
+		appendStr(pB, "{\"b_after\":1}\n")
+		if _, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil {
+			t.Fatal(err)
+		}
+
+		for k, rs := range committed {
+			for i := 1; i < len(rs); i++ {
+				if rs[i][0] != rs[i-1][1] {
+					t.Fatalf("hole in %s gen %d: %v", k.p, k.g, rs)
+				}
+			}
+		}
+		if len(committed[segKey{relB, 0}]) != 1 || len(committed[segKey{relB, 1}]) != 1 {
+			t.Fatalf("expected B to have 1 segment in gen 0 and 1 in gen 1, got %v", committed)
+		}
+	})
+
+	t.Run("refused Final partial tail", func(t *testing.T) {
+		home := t.TempDir()
+		dir := filepath.Join(home, ".claude", "projects", "-workspace")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rel := ".claude/projects/-workspace/tail.jsonl"
+		p := filepath.Join(home, filepath.FromSlash(rel))
+		if err := os.WriteFile(p, []byte("{\"t0\":0}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		on := true
+		committed := map[int][][2]int64{}
+		up := &probeAndShipUploader{
+			probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+				if !on {
+					return ShipResult{Outcome: OutcomeCaptureUnavailable}, nil
+				}
+				return ShipResult{Outcome: OutcomeCommitted}, nil
+			},
+			shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+				if !on {
+					return ShipResult{Outcome: OutcomeCaptureUnavailable}, nil
+				}
+				committed[seg.Generation] = append(committed[seg.Generation], [2]int64{seg.ByteStart, seg.ByteEnd})
+				return ShipResult{Outcome: OutcomeCommitted}, nil
+			},
+		}
+
+		s, err := New(Config{HomeDir: home, RunID: "r", Uploader: up})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if _, err := s.Baseline(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		appendStr := func(data string) {
+			f, oerr := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0)
+			if oerr != nil {
+				t.Fatal(oerr)
+			}
+			_, _ = f.WriteString(data)
+			_ = f.Close()
+		}
+
+		// Commit line 1 in gen 0.
+		appendStr("{\"t1\":1}\n")
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 1 {
+			t.Fatalf("round1: %+v %v", r, err)
+		}
+
+		// Append partial tail (no newline) and refuse on Final=true round -> Pending != nil -> Rebaseline MUST bump.
+		on = false
+		appendStr("{\"partial")
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPreStop, Final: true}); err != nil || !r.CaptureUnavailable {
+			t.Fatalf("final round: %+v %v", r, err)
+		}
+		if _, err := s.Rebaseline(ctx, "capture_unavailable"); err != nil {
+			t.Fatal(err)
+		}
+
+		// Finish partial line + backoff line, turn on -> probe-accept -> append post line -> ship.
+		appendStr("\":1}\n{\"backoff\":1}\n")
+		on = true
+		if _, err := s.RunRound(ctx, RoundOptions{Reason: ReasonResumeCatchup}); err != nil {
+			t.Fatal(err)
+		}
+		appendStr("{\"after\":2}\n")
+		if r, err := s.RunRound(ctx, RoundOptions{Reason: ReasonPeriodic}); err != nil || r.SegmentsShipped != 1 {
+			t.Fatalf("round after: %+v %v", r, err)
+		}
+
+		for g, rs := range committed {
+			for i := 1; i < len(rs); i++ {
+				if rs[i][0] != rs[i-1][1] {
+					t.Fatalf("hole in gen %d: %v", g, rs)
+				}
+			}
+		}
+		if len(committed[0]) != 1 || len(committed[1]) != 1 {
+			t.Fatalf("expected 1 segment in gen 0 and 1 in gen 1, got %v", committed)
+		}
+	})
 }

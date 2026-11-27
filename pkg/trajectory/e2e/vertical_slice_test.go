@@ -176,6 +176,11 @@ func reassembleGeneration(t *testing.T, ctx context.Context, stor storage.Storag
 	sort.Slice(genRows, func(i, j int) bool {
 		return genRows[i].ByteStart < genRows[j].ByteStart
 	})
+	for i := 1; i < len(genRows); i++ {
+		require.Equal(t, genRows[i-1].ByteEnd, genRows[i].ByteStart,
+			"non-contiguous segments in generation %d: prev=[%d,%d) cur=[%d,%d)",
+			gen, genRows[i-1].ByteStart, genRows[i-1].ByteEnd, genRows[i].ByteStart, genRows[i].ByteEnd)
+	}
 
 	var out bytes.Buffer
 	for _, r := range genRows {
@@ -501,16 +506,18 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 
 	require.Equal(t, int32(1), hubCalls.Load(), "expected exactly 1 prepare probe (404) followed by backoff")
 
-	// State file must remain valid JSON, bump generation to 1, align to byte
-	// after offComplete (not mid-line), and persist RefusedPendingRebaseline=true.
+	// State file must remain valid JSON, bump generation to 1, advance to EOF
+	// with SkipToNextNewline=true (so the refused partial line never ships),
+	// and persist RefusedPendingRebaseline=true.
 	st, ok, err := shipper.LoadState(env.homeDir)
 	require.NoError(t, err)
 	require.True(t, ok)
-	wantRebasedOffset := int64(len(initLine) + len(preOffLine) + len(offComplete))
+	wantRebasedEOF := int64(len(initLine) + len(preOffLine) + len(offComplete) + len(offPartial))
 	require.Equal(t, 1, st.Artifacts[rel].Generation)
 	require.Equal(t, shipper.GenReasonRebaseline, st.Artifacts[rel].LastGenerationReason)
-	require.Equal(t, wantRebasedOffset, st.Artifacts[rel].RawCommittedOffset)
-	require.Equal(t, wantRebasedOffset, st.Artifacts[rel].ParsedOffset)
+	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].RawCommittedOffset)
+	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].ParsedOffset)
+	require.True(t, st.Artifacts[rel].SkipToNextNewline)
 	require.Equal(t, "capture_unavailable", st.LastRebaselineReason)
 	require.True(t, st.RefusedPendingRebaseline)
 
@@ -665,6 +672,99 @@ func TestVerticalSlice_RebaselineAfterTruncateBelowBaselineBumpsGeneration(t *te
 	require.NoError(t, err)
 	require.Equal(t, gen1Line, string(reassembleGeneration(t, ctx, env.storage, rows, 1)))
 	require.Equal(t, gen2Line, string(reassembleGeneration(t, ctx, env.storage, rows, 2)))
+}
+
+func TestVerticalSlice_MultiArtifactIdleSiblingRefusalPreservesContiguity(t *testing.T) {
+	env := setupE2E(t, false)
+	ctx := context.Background()
+
+	relA := ".claude/projects/-workspace/sess-a.jsonl"
+	relB := ".claude/projects/-workspace/sess-b.jsonl"
+	pathA := filepath.Join(env.homeDir, filepath.FromSlash(relA))
+	pathB := filepath.Join(env.homeDir, filepath.FromSlash(relB))
+	require.NoError(t, os.MkdirAll(filepath.Dir(pathA), 0o755))
+	require.NoError(t, os.WriteFile(pathA, []byte("{\"a\":0}\n"), 0o644))
+	require.NoError(t, os.WriteFile(pathB, []byte("{\"b\":0}\n"), 0o644))
+
+	cur := experiments.Default()
+	var enabledExps []experiments.Experiment
+	for _, e := range cur.All() {
+		if e.Name == experiments.TokenomicsTrajectoryCapture {
+			e.Default = true
+		}
+		enabledExps = append(enabledExps, e)
+	}
+	enabledReg, err := experiments.NewRegistry(enabledExps, cur.Retired())
+	require.NoError(t, err)
+	srvEnabled, err := hub.New(hub.ServerConfig{
+		DevAuthToken:        "e2e-dev-token",
+		SharedSigningSecret: "test-e2e-trajectory-signing-secret-32b",
+		Experiments:         enabledReg,
+	}, env.store)
+	require.NoError(t, err)
+	srvEnabled.SetStorage(env.storage)
+
+	var experimentOn atomic.Bool
+	experimentOn.Store(true)
+	switchingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if experimentOn.Load() {
+			srvEnabled.Handler().ServeHTTP(w, r)
+			return
+		}
+		env.srv.Handler().ServeHTTP(w, r)
+	}))
+	defer switchingSrv.Close()
+
+	client := scionhub.NewClientWithConfig(switchingSrv.URL, env.token, env.agent.ID)
+	uploader := scionhub.NewTrajectoryUploader(client)
+
+	s, err := shipper.New(shipper.Config{HomeDir: env.homeDir, RunID: env.runID, Uploader: uploader})
+	require.NoError(t, err)
+	_, err = s.Baseline(ctx)
+	require.NoError(t, err)
+
+	// 1. Both A and B commit bytes in gen 0.
+	a1 := "{\"a\":1}\n"
+	b1 := "{\"b\":1}\n"
+	appendFile(t, pathA, a1)
+	appendFile(t, pathB, b1)
+	r1, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 2, r1.SegmentsShipped)
+
+	// 2. Capture turns off; A grows while B stays idle. Round gets 404 -> Rebaseline.
+	experimentOn.Store(false)
+	appendFile(t, pathA, "{\"a_off\":true}\n")
+	rOff, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.True(t, rOff.CaptureUnavailable)
+	_, err = s.Rebaseline(ctx, "capture_unavailable")
+	require.NoError(t, err)
+
+	// 3. During backoff, idle sibling B grows; capture turns back on -> probe-accept rebaseline.
+	appendFile(t, pathB, "{\"b_backoff\":true}\n")
+	experimentOn.Store(true)
+	rProbe, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup})
+	require.NoError(t, err)
+	require.Equal(t, 0, rProbe.SegmentsShipped)
+
+	// 4. B grows again after acceptance and ships: MUST land in gen 1 (no hole in gen 0).
+	bAfter := "{\"b_after\":2}\n"
+	appendFile(t, pathB, bAfter)
+	r2, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 1, r2.SegmentsShipped)
+
+	rows, err := env.entClient.TrajectorySegment.Query().All(ctx)
+	require.NoError(t, err)
+	var rowsB []*ent.TrajectorySegment
+	for _, r := range rows {
+		if r.NativeRelativePath == relB {
+			rowsB = append(rowsB, r)
+		}
+	}
+	require.Equal(t, b1, string(reassembleGeneration(t, ctx, env.storage, rowsB, 0)))
+	require.Equal(t, bAfter, string(reassembleGeneration(t, ctx, env.storage, rowsB, 1)))
 }
 
 func TestVerticalSlice_WrongAgentTokenRefused(t *testing.T) {

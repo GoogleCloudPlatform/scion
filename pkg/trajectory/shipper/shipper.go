@@ -363,17 +363,23 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 			continue
 		}
 
-		// Rebaseline to the byte immediately after the last '\n' at or before
-		// EOF (bounded by MaxSegmentBytes; falls back to EOF beyond the cap)
-		// so post-rebaseline segments begin on a line boundary.
-		offset, nlErr := findLastNewlineOffset(ctx, f, fi.Size(), s.cfg.MaxSegmentBytes)
-		if nlErr != nil {
-			_ = f.Close()
-			if errors.Is(nlErr, context.Canceled) || errors.Is(nlErr, context.DeadlineExceeded) {
-				return nil, nlErr
+		// Rebaseline to current EOF and, if EOF is mid-line (last byte != '\n'),
+		// set SkipToNextNewline so the rest of that partial line is skipped
+		// once completed and the next segment starts on a clean line boundary
+		// without shipping any bytes from the refused partial line.
+		offset := fi.Size()
+		skipToNextNL := false
+		if offset > 0 {
+			var last [1]byte
+			n, rerr := f.ReadAt(last[:], offset-1)
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
+				_ = f.Close()
+				markRebaselineSkipped(st, art, existing, rerr, now, &skipped)
+				continue
 			}
-			markRebaselineSkipped(st, art, existing, nlErr, now, &skipped)
-			continue
+			if n == 1 && last[0] != '\n' {
+				skipToNextNL = true
+			}
 		}
 
 		var guardHash string
@@ -392,25 +398,40 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 		gen := 0
 		originHubID := st.OriginHubID
 		lastGenReason := ""
+		genStart := offset
 		if existing != nil {
 			gen = existing.Generation
 			lastGenReason = existing.LastGenerationReason
 			if existing.OriginHubID != "" {
 				originHubID = existing.OriginHubID
 			}
+			hasWork := generationHasCommittedOrPending(existing)
 			shrankOrRotated := existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode))
-			createsHole := generationHasCommittedOrPending(existing) && offset != existing.RawCommittedOffset
+			// Bump if the file shrank/rotated, if an in-flight Pending segment
+			// existed (it may already be committed on the Hub), or if advancing
+			// offset within a generation that already has committed bytes would
+			// create a byte hole.
+			createsHole := existing.Pending != nil || (hasWork && offset != existing.RawCommittedOffset)
 			if shrankOrRotated || createsHole {
 				gen++
 				lastGenReason = GenReasonRebaseline
+			} else if hasWork && existing.GenerationStartOffset != nil {
+				// Generation stayed the same and already has committed bytes
+				// (idle artifact with offset == RawCommittedOffset): preserve
+				// GenerationStartOffset so a subsequent Rebaseline knows this
+				// generation still holds committed bytes.
+				genStart = *existing.GenerationStartOffset
 			}
 		}
 
 		// Mutate existing entry in place when present so unknown JSON fields
-		// (Extra, preserved for P7 normalizers) survive Rebaseline. Explicitly
-		// reset transient failure/rejection state since the artifact is being
-		// freshly baselined.
+		// (Extra, preserved for P7 normalizers) survive Rebaseline. Preserve
+		// the original run BaselineOffset/BaselineGuard* when already baselined
+		// so a later truncation above the initial baseline still protects
+		// pre-baseline history. Explicitly reset transient failure/rejection
+		// state since the artifact is being freshly rebaselined.
 		entry := existing
+		preserveOrigBaseline := entry != nil && entry.Baseline && !entry.NeedsBaseline && entry.BaselineOffset > 0
 		if entry == nil {
 			entry = &ArtifactState{}
 			st.Artifacts[art.NativeRelativePath] = entry
@@ -421,17 +442,23 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 		entry.Device = fid.Dev
 		entry.FileID = fid.String()
 		entry.Generation = gen
-		entry.GenerationStartOffset = int64Ptr(offset)
+		entry.GenerationStartOffset = int64Ptr(genStart)
 		entry.RawCommittedOffset = offset
 		entry.ParsedOffset = offset
 		entry.GuardHash = guardHash
 		entry.GuardLen = guardLen
 		entry.Pending = nil
 		entry.Baseline = true
-		entry.BaselineOffset = offset
-		entry.BaselineGuardHash = guardHash
-		entry.BaselineGuardLen = guardLen
+		if !preserveOrigBaseline {
+			entry.BaselineOffset = offset
+			entry.BaselineGuardHash = guardHash
+			entry.BaselineGuardLen = guardLen
+		}
+		entry.RebaselineOffset = offset
+		entry.RebaselineGuardHash = guardHash
+		entry.RebaselineGuardLen = guardLen
 		entry.NeedsBaseline = false
+		entry.SkipToNextNewline = skipToNextNL
 		entry.OriginHubID = originHubID
 		entry.ConsecutiveFailures = 0
 		entry.LastError = ""
@@ -462,48 +489,50 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 	}, nil
 }
 
-// findLastNewlineOffset scans backwards from fileSize in bounded chunks up to
-// maxScanBytes and returns the byte offset immediately after the last '\n' at
-// or before fileSize. If no '\n' exists within the entire file, it returns 0.
-// If the backward scan reaches maxScanBytes without encountering '\n', it
-// stops and returns fileSize (EOF) so newline-free files cannot cause
-// unbounded root reads.
-func findLastNewlineOffset(ctx context.Context, r io.ReaderAt, fileSize, maxScanBytes int64) (int64, error) {
-	if fileSize <= 0 {
-		return 0, nil
+// findNextNewlineOffset scans forward from startOffset up to fileSize (bounded
+// by maxScanBytes) for the first '\n'. If found, it returns (pos+1, true, nil).
+// If the scan hits maxScanBytes without finding '\n', it returns
+// (startOffset+maxScanBytes, true, nil) to avoid unbounded waiting. Otherwise
+// it returns (startOffset, false, nil).
+func findNextNewlineOffset(ctx context.Context, r io.ReaderAt, startOffset, fileSize, maxScanBytes int64) (int64, bool, error) {
+	if fileSize <= startOffset {
+		return startOffset, false, nil
 	}
 	const chunkSize int64 = 64 * 1024
-	limit := fileSize
+	avail := fileSize - startOffset
+	limit := avail
 	capped := false
-	if maxScanBytes > 0 && maxScanBytes < fileSize {
+	if maxScanBytes > 0 && maxScanBytes < avail {
 		limit = maxScanBytes
 		capped = true
 	}
-	stopAt := fileSize - limit
+	endAt := startOffset + limit
 	buf := make([]byte, min(limit, chunkSize))
-	pos := fileSize
-	for pos > stopAt {
+	pos := startOffset
+	for pos < endAt {
 		if err := ctx.Err(); err != nil {
-			return 0, err
+			return startOffset, false, err
 		}
-		readLen := min(pos-stopAt, int64(len(buf)))
-		start := pos - readLen
-		n, err := r.ReadAt(buf[:readLen], start)
+		readLen := min(endAt-pos, int64(len(buf)))
+		n, err := r.ReadAt(buf[:readLen], pos)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return 0, err
+			return startOffset, false, err
+		}
+		if n == 0 {
+			break
 		}
 		chunk := buf[:n]
-		for i := len(chunk) - 1; i >= 0; i-- {
+		for i := 0; i < len(chunk); i++ {
 			if chunk[i] == '\n' {
-				return start + int64(i) + 1, nil
+				return pos + int64(i) + 1, true, nil
 			}
 		}
-		pos = start
+		pos += int64(n)
 	}
 	if capped {
-		return fileSize, nil
+		return endAt, true, nil
 	}
-	return 0, nil
+	return startOffset, false, nil
 }
 
 func generationHasCommittedOrPending(entry *ArtifactState) bool {
@@ -1034,9 +1063,19 @@ func (s *Shipper) shipArtifactLocked(
 		var offset int64
 		var guardHash string
 		var guardLen int
+		skipToNextNL := false
 		if !st.BackfillExisting && !s.cfg.BackfillExisting {
 			offset = fileSize
 			if offset > 0 {
+				var last [1]byte
+				n, rerr := f.ReadAt(last[:], offset-1)
+				if rerr != nil && !errors.Is(rerr, io.EOF) {
+					res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("lazy baseline tail read: %w", rerr)
+					return false, nil
+				}
+				if n == 1 && last[0] != '\n' {
+					skipToNextNL = true
+				}
 				guardHash, guardLen, err = ComputeGuardHash(f, offset)
 				if err != nil {
 					res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("lazy baseline guard hash: %w", err)
@@ -1050,12 +1089,18 @@ func (s *Shipper) shipArtifactLocked(
 		entry.GenerationStartOffset = int64Ptr(offset)
 		entry.RawCommittedOffset = offset
 		entry.ParsedOffset = offset
-		entry.BaselineOffset = offset
-		entry.BaselineGuardHash = guardHash
-		entry.BaselineGuardLen = guardLen
+		if entry.BaselineOffset == 0 {
+			entry.BaselineOffset = offset
+			entry.BaselineGuardHash = guardHash
+			entry.BaselineGuardLen = guardLen
+		}
+		entry.RebaselineOffset = offset
+		entry.RebaselineGuardHash = guardHash
+		entry.RebaselineGuardLen = guardLen
 		entry.GuardHash = guardHash
 		entry.GuardLen = guardLen
 		entry.NeedsBaseline = false
+		entry.SkipToNextNewline = skipToNextNL
 		entry.LastError = ""
 		entry.UpdatedAt = &now
 		if err := SaveState(s.cfg.HomeDir, st); err != nil {
@@ -1087,6 +1132,41 @@ func (s *Shipper) shipArtifactLocked(
 	// If still parked after run-change and generation-bump checks, skip shipping.
 	if entry.Rejected {
 		return false, nil
+	}
+
+	// If a prior rebaseline or lazy baseline landed mid-line, advance past the
+	// remainder of that partial line to the next '\n' (without shipping any
+	// bytes of the partial line) so the first segment of this generation starts
+	// cleanly on a line boundary.
+	if entry.SkipToNextNewline {
+		nextOff, found, serr := findNextNewlineOffset(ctx, f, entry.RawCommittedOffset, fileSize, s.cfg.MaxSegmentBytes)
+		if serr != nil {
+			if errors.Is(serr, context.Canceled) || errors.Is(serr, context.DeadlineExceeded) {
+				return true, serr
+			}
+			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("skip partial line: %w", serr)
+			return false, nil
+		}
+		if !found {
+			// Partial line still not terminated; hold back even on Final=true.
+			return false, nil
+		}
+		gh, gl, gerr := ComputeGuardHash(f, nextOff)
+		if gerr != nil {
+			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("compute guard after partial line skip: %w", gerr)
+			return false, nil
+		}
+		now := s.now().UTC()
+		entry.RawCommittedOffset = nextOff
+		entry.ParsedOffset = nextOff
+		entry.GenerationStartOffset = int64Ptr(nextOff)
+		entry.GuardHash = gh
+		entry.GuardLen = gl
+		entry.SkipToNextNewline = false
+		entry.UpdatedAt = &now
+		if err := SaveState(s.cfg.HomeDir, st); err != nil {
+			return true, err
+		}
 	}
 
 	for *remainingBudget > 0 {
@@ -1222,12 +1302,30 @@ func (s *Shipper) shipArtifactLocked(
 						res.ArtifactErrors[art.NativeRelativePath] = probeErr
 					}
 					return true, nil
+				case OutcomeConflict:
+					// 409 on probe means the Hub passed experiment/policy gates
+					// AND already holds committed content at (gen, byte_start).
+					// Bump generation first so rebaselineLocked cannot leave a
+					// hole or overlap in the conflicted generation.
+					msg := probeRes.Message
+					if msg == "" && probeErr != nil {
+						msg = probeErr.Error()
+					}
+					if msg == "" {
+						msg = GenReasonConflict
+					}
+					if berr := s.bumpGenerationLocked(f, st, entry, fid, fileSize, GenReasonConflict, msg, true, res); berr != nil {
+						return true, berr
+					}
+					if _, rerr := s.rebaselineLocked(ctx, st, "capture_accepted", false); rerr != nil {
+						return true, rerr
+					}
+					return true, nil
 				default:
-					// OutcomeCommitted, OutcomeConflict, OutcomeRejected, or
-					// OutcomeRunCapExceeded: the Hub passed the experiment and
-					// policy gates, so capture is accepted. Rebaseline past
-					// everything written during the refusal/backoff window and
-					// clear RefusedPendingRebaseline.
+					// OutcomeCommitted, OutcomeRejected, or OutcomeRunCapExceeded:
+					// the Hub passed the experiment and policy gates, so capture
+					// is accepted. Rebaseline past everything written during the
+					// refusal/backoff window and clear RefusedPendingRebaseline.
 					if _, rerr := s.rebaselineLocked(ctx, st, "capture_accepted", false); rerr != nil {
 						return true, rerr
 					}
@@ -1406,37 +1504,55 @@ func (s *Shipper) bumpGenerationLocked(
 ) error {
 	now := s.now().UTC()
 
-	// Preserve pre-baseline privacy: if the artifact was baselined with
-	// BaselineOffset > 0 and the file still has intact pre-baseline bytes
-	// (size >= BaselineOffset and matching BaselineGuardHash), start the new
-	// generation at BaselineOffset rather than 0.
+	// Preserve both refusal-window privacy and pre-baseline privacy:
+	// 1. If the artifact was rebaselined past a refusal window and the file
+	//    still has intact bytes up to RebaselineOffset, start the new
+	//    generation at RebaselineOffset so refused-window bytes cannot leak
+	//    on a 409 conflict or inode rotation.
+	// 2. Otherwise, if the file still has intact pre-baseline bytes up to
+	//    BaselineOffset, start at BaselineOffset so pre-baseline bytes cannot
+	//    leak after a truncation above the original baseline.
+	// 3. Otherwise, restart at offset 0.
 	var restartOffset int64
 	var restartGuardHash string
 	var restartGuardLen int
-	if entry.Baseline && entry.BaselineOffset > 0 && fileSize >= entry.BaselineOffset {
-		hash, gl, err := ComputeGuardHash(f, entry.BaselineOffset)
-		if err == nil {
-			preserve := false
-			switch reason {
-			case GenReasonConflict:
-				if (entry.Inode == 0 || fid.Ino == entry.Inode) &&
-					(entry.BaselineGuardLen == 0 || hash == entry.BaselineGuardHash) {
-					preserve = true
-				}
-			default:
-				// For inode_changed, guard_mismatch, or partial truncation
-				// above BaselineOffset: preserve baseline if the recorded
-				// baseline guard still matches.
-				if entry.BaselineGuardLen > 0 && hash == entry.BaselineGuardHash {
-					preserve = true
-				}
-			}
-			if preserve {
-				restartOffset = entry.BaselineOffset
+	var skipToNextNL bool
+
+	tryPreserve := func(off int64, wantHash string, wantLen int) bool {
+		if off <= 0 || fileSize < off {
+			return false
+		}
+		hash, gl, err := ComputeGuardHash(f, off)
+		if err != nil {
+			return false
+		}
+		switch reason {
+		case GenReasonConflict:
+			if (entry.Inode == 0 || fid.Ino == entry.Inode) &&
+				(wantLen == 0 || hash == wantHash) {
+				restartOffset = off
 				restartGuardHash = hash
 				restartGuardLen = gl
+				return true
+			}
+		default:
+			if wantLen > 0 && hash == wantHash {
+				restartOffset = off
+				restartGuardHash = hash
+				restartGuardLen = gl
+				return true
 			}
 		}
+		return false
+	}
+
+	if tryPreserve(entry.RebaselineOffset, entry.RebaselineGuardHash, entry.RebaselineGuardLen) {
+		var last [1]byte
+		if n, rerr := f.ReadAt(last[:], restartOffset-1); rerr == nil && n == 1 && last[0] != '\n' {
+			skipToNextNL = true
+		}
+	} else if entry.Baseline {
+		tryPreserve(entry.BaselineOffset, entry.BaselineGuardHash, entry.BaselineGuardLen)
 	}
 
 	entry.Generation++
@@ -1446,6 +1562,7 @@ func (s *Shipper) bumpGenerationLocked(
 	entry.GuardHash = restartGuardHash
 	entry.GuardLen = restartGuardLen
 	entry.Pending = nil
+	entry.SkipToNextNewline = skipToNextNL
 	entry.Rejected = false
 	entry.RejectedReason = ""
 	entry.RejectedRunID = ""

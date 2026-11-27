@@ -338,6 +338,9 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 		if !errors.Is(err, unix.EPERM) {
 			t.Fatalf("expected underlying EPERM to remain wrapped, got %v", err)
 		}
+		if _, statErr := os.Lstat(filepath.Join(home, ".scion")); !os.IsNotExist(statErr) {
+			t.Fatalf("expected just-created .scion dir to be removed on root-squash fchown failure, got statErr=%v", statErr)
+		}
 	})
 
 	t.Run("root-squashed filesystem mkdirat EACCES returns ErrRootSquashChownRefused", func(t *testing.T) {

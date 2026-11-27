@@ -147,11 +147,15 @@
 //
 // When the Hub refuses capture (404 or 403 capture_disabled /
 // capture_metadata_only), callers should invoke [Shipper.Rebaseline] to move
-// every discovered artifact's baseline, raw_committed_offset, and parsed_offset
-// to the byte after the last newline at or before EOF (clearing any pending
-// segments, bumping generation if the current generation already had committed
-// or pending bytes past its start, and persisting RefusedPendingRebaseline=true)
-// under the lock, then back off.
+// every discovered artifact's raw_committed_offset and parsed_offset to EOF
+// (preserving the original baseline_offset / baseline_guard_hash for
+// pre-baseline privacy, clearing any pending segments, bumping generation if
+// the current generation already had committed or pending bytes past its start,
+// and persisting RefusedPendingRebaseline=true) under the lock, then back off.
+// If EOF falls mid-line (the preceding byte is not '\n'), skip_to_next_newline
+// is set on the artifact (and likewise on lazy baseline completion) so the next
+// shipping round skips forward past the remainder of that partial line without
+// shipping it (bounded by MaxSegmentBytes) before emitting new complete lines.
 //
 // When RefusedPendingRebaseline is true and the Uploader implements [Prober],
 // the next round probes segments:prepare without uploading payload bytes or

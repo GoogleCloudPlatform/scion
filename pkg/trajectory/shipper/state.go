@@ -140,7 +140,11 @@ type ArtifactState struct {
 	BaselineOffset        int64           `json:"baseline_offset,omitempty"`
 	BaselineGuardHash     string          `json:"baseline_guard_hash,omitempty"`
 	BaselineGuardLen      int             `json:"baseline_guard_len,omitempty"`
+	RebaselineOffset      int64           `json:"rebaseline_offset,omitempty"`
+	RebaselineGuardHash   string          `json:"rebaseline_guard_hash,omitempty"`
+	RebaselineGuardLen    int             `json:"rebaseline_guard_len,omitempty"`
 	NeedsBaseline         bool            `json:"needs_baseline,omitempty"`
+	SkipToNextNewline     bool            `json:"skip_to_next_newline,omitempty"`
 	OriginHubID           string          `json:"origin_hub_id,omitempty"`
 	ConsecutiveFailures   int             `json:"consecutive_failures"`
 	LastError             string          `json:"last_error,omitempty"`
@@ -252,7 +256,11 @@ var knownArtifactStateFields = map[string]struct{}{
 	"baseline_offset":         {},
 	"baseline_guard_hash":     {},
 	"baseline_guard_len":      {},
+	"rebaseline_offset":       {},
+	"rebaseline_guard_hash":   {},
+	"rebaseline_guard_len":    {},
 	"needs_baseline":          {},
+	"skip_to_next_newline":    {},
 	"origin_hub_id":           {},
 	"consecutive_failures":    {},
 	"last_error":              {},
