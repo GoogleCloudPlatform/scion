@@ -126,6 +126,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/uploadsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagegrouprollupdaily"
@@ -266,6 +267,7 @@ const (
 	TypeTriggerEvent                  = "TriggerEvent"
 	TypeTriggerFire                   = "TriggerFire"
 	TypeTriggerSubjectClaim           = "TriggerSubjectClaim"
+	TypeUploadSession                 = "UploadSession"
 	TypeUsageBudgetState              = "UsageBudgetState"
 	TypeUsageEvent                    = "UsageEvent"
 	TypeUsageGroupRollupDaily         = "UsageGroupRollupDaily"
@@ -138927,6 +138929,2017 @@ func (m *TriggerSubjectClaimMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *TriggerSubjectClaimMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown TriggerSubjectClaim edge %s", name)
+}
+
+// UploadSessionMutation represents an operation that mutates the UploadSession nodes in the graph.
+type UploadSessionMutation struct {
+	config
+	op               Op
+	typ              string
+	id               *string
+	hub_id           *string
+	owner_kind       *string
+	owner_id         *string
+	target_kind      *uploadsession.TargetKind
+	scope_project_id *string
+	scope_shared_dir *string
+	dest_path        *string
+	overwrite        *bool
+	file_name        *string
+	media_type       *string
+	declared_size    *int64
+	adddeclared_size *int64
+	received         *int64
+	addreceived      *int64
+	hash_state       *[]byte
+	head             *[]byte
+	parts            *[]string
+	appendparts      []string
+	staging_ref      *string
+	state            *uploadsession.State
+	lease_token      *string
+	lease_until      *time.Time
+	takeovers        *int
+	addtakeovers     *int
+	result           *json.RawMessage
+	appendresult     json.RawMessage
+	artifact_id      *string
+	idle_expires_at  *time.Time
+	hard_expires_at  *time.Time
+	created_at       *time.Time
+	updated_at       *time.Time
+	clearedFields    map[string]struct{}
+	done             bool
+	oldValue         func(context.Context) (*UploadSession, error)
+	predicates       []predicate.UploadSession
+}
+
+var _ ent.Mutation = (*UploadSessionMutation)(nil)
+
+// uploadsessionOption allows management of the mutation configuration using functional options.
+type uploadsessionOption func(*UploadSessionMutation)
+
+// newUploadSessionMutation creates new mutation for the UploadSession entity.
+func newUploadSessionMutation(c config, op Op, opts ...uploadsessionOption) *UploadSessionMutation {
+	m := &UploadSessionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUploadSession,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUploadSessionID sets the ID field of the mutation.
+func withUploadSessionID(id string) uploadsessionOption {
+	return func(m *UploadSessionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UploadSession
+		)
+		m.oldValue = func(ctx context.Context) (*UploadSession, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UploadSession.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUploadSession sets the old UploadSession of the mutation.
+func withUploadSession(node *UploadSession) uploadsessionOption {
+	return func(m *UploadSessionMutation) {
+		m.oldValue = func(context.Context) (*UploadSession, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UploadSessionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UploadSessionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of UploadSession entities.
+func (m *UploadSessionMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UploadSessionMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UploadSessionMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UploadSession.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *UploadSessionMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *UploadSessionMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *UploadSessionMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetOwnerKind sets the "owner_kind" field.
+func (m *UploadSessionMutation) SetOwnerKind(s string) {
+	m.owner_kind = &s
+}
+
+// OwnerKind returns the value of the "owner_kind" field in the mutation.
+func (m *UploadSessionMutation) OwnerKind() (r string, exists bool) {
+	v := m.owner_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerKind returns the old "owner_kind" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldOwnerKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerKind: %w", err)
+	}
+	return oldValue.OwnerKind, nil
+}
+
+// ResetOwnerKind resets all changes to the "owner_kind" field.
+func (m *UploadSessionMutation) ResetOwnerKind() {
+	m.owner_kind = nil
+}
+
+// SetOwnerID sets the "owner_id" field.
+func (m *UploadSessionMutation) SetOwnerID(s string) {
+	m.owner_id = &s
+}
+
+// OwnerID returns the value of the "owner_id" field in the mutation.
+func (m *UploadSessionMutation) OwnerID() (r string, exists bool) {
+	v := m.owner_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOwnerID returns the old "owner_id" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldOwnerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOwnerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOwnerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOwnerID: %w", err)
+	}
+	return oldValue.OwnerID, nil
+}
+
+// ResetOwnerID resets all changes to the "owner_id" field.
+func (m *UploadSessionMutation) ResetOwnerID() {
+	m.owner_id = nil
+}
+
+// SetTargetKind sets the "target_kind" field.
+func (m *UploadSessionMutation) SetTargetKind(uk uploadsession.TargetKind) {
+	m.target_kind = &uk
+}
+
+// TargetKind returns the value of the "target_kind" field in the mutation.
+func (m *UploadSessionMutation) TargetKind() (r uploadsession.TargetKind, exists bool) {
+	v := m.target_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetKind returns the old "target_kind" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldTargetKind(ctx context.Context) (v uploadsession.TargetKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetKind: %w", err)
+	}
+	return oldValue.TargetKind, nil
+}
+
+// ResetTargetKind resets all changes to the "target_kind" field.
+func (m *UploadSessionMutation) ResetTargetKind() {
+	m.target_kind = nil
+}
+
+// SetScopeProjectID sets the "scope_project_id" field.
+func (m *UploadSessionMutation) SetScopeProjectID(s string) {
+	m.scope_project_id = &s
+}
+
+// ScopeProjectID returns the value of the "scope_project_id" field in the mutation.
+func (m *UploadSessionMutation) ScopeProjectID() (r string, exists bool) {
+	v := m.scope_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeProjectID returns the old "scope_project_id" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldScopeProjectID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeProjectID: %w", err)
+	}
+	return oldValue.ScopeProjectID, nil
+}
+
+// ClearScopeProjectID clears the value of the "scope_project_id" field.
+func (m *UploadSessionMutation) ClearScopeProjectID() {
+	m.scope_project_id = nil
+	m.clearedFields[uploadsession.FieldScopeProjectID] = struct{}{}
+}
+
+// ScopeProjectIDCleared returns if the "scope_project_id" field was cleared in this mutation.
+func (m *UploadSessionMutation) ScopeProjectIDCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldScopeProjectID]
+	return ok
+}
+
+// ResetScopeProjectID resets all changes to the "scope_project_id" field.
+func (m *UploadSessionMutation) ResetScopeProjectID() {
+	m.scope_project_id = nil
+	delete(m.clearedFields, uploadsession.FieldScopeProjectID)
+}
+
+// SetScopeSharedDir sets the "scope_shared_dir" field.
+func (m *UploadSessionMutation) SetScopeSharedDir(s string) {
+	m.scope_shared_dir = &s
+}
+
+// ScopeSharedDir returns the value of the "scope_shared_dir" field in the mutation.
+func (m *UploadSessionMutation) ScopeSharedDir() (r string, exists bool) {
+	v := m.scope_shared_dir
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeSharedDir returns the old "scope_shared_dir" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldScopeSharedDir(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeSharedDir is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeSharedDir requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeSharedDir: %w", err)
+	}
+	return oldValue.ScopeSharedDir, nil
+}
+
+// ClearScopeSharedDir clears the value of the "scope_shared_dir" field.
+func (m *UploadSessionMutation) ClearScopeSharedDir() {
+	m.scope_shared_dir = nil
+	m.clearedFields[uploadsession.FieldScopeSharedDir] = struct{}{}
+}
+
+// ScopeSharedDirCleared returns if the "scope_shared_dir" field was cleared in this mutation.
+func (m *UploadSessionMutation) ScopeSharedDirCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldScopeSharedDir]
+	return ok
+}
+
+// ResetScopeSharedDir resets all changes to the "scope_shared_dir" field.
+func (m *UploadSessionMutation) ResetScopeSharedDir() {
+	m.scope_shared_dir = nil
+	delete(m.clearedFields, uploadsession.FieldScopeSharedDir)
+}
+
+// SetDestPath sets the "dest_path" field.
+func (m *UploadSessionMutation) SetDestPath(s string) {
+	m.dest_path = &s
+}
+
+// DestPath returns the value of the "dest_path" field in the mutation.
+func (m *UploadSessionMutation) DestPath() (r string, exists bool) {
+	v := m.dest_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDestPath returns the old "dest_path" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldDestPath(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDestPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDestPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDestPath: %w", err)
+	}
+	return oldValue.DestPath, nil
+}
+
+// ClearDestPath clears the value of the "dest_path" field.
+func (m *UploadSessionMutation) ClearDestPath() {
+	m.dest_path = nil
+	m.clearedFields[uploadsession.FieldDestPath] = struct{}{}
+}
+
+// DestPathCleared returns if the "dest_path" field was cleared in this mutation.
+func (m *UploadSessionMutation) DestPathCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldDestPath]
+	return ok
+}
+
+// ResetDestPath resets all changes to the "dest_path" field.
+func (m *UploadSessionMutation) ResetDestPath() {
+	m.dest_path = nil
+	delete(m.clearedFields, uploadsession.FieldDestPath)
+}
+
+// SetOverwrite sets the "overwrite" field.
+func (m *UploadSessionMutation) SetOverwrite(b bool) {
+	m.overwrite = &b
+}
+
+// Overwrite returns the value of the "overwrite" field in the mutation.
+func (m *UploadSessionMutation) Overwrite() (r bool, exists bool) {
+	v := m.overwrite
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOverwrite returns the old "overwrite" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldOverwrite(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOverwrite is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOverwrite requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOverwrite: %w", err)
+	}
+	return oldValue.Overwrite, nil
+}
+
+// ResetOverwrite resets all changes to the "overwrite" field.
+func (m *UploadSessionMutation) ResetOverwrite() {
+	m.overwrite = nil
+}
+
+// SetFileName sets the "file_name" field.
+func (m *UploadSessionMutation) SetFileName(s string) {
+	m.file_name = &s
+}
+
+// FileName returns the value of the "file_name" field in the mutation.
+func (m *UploadSessionMutation) FileName() (r string, exists bool) {
+	v := m.file_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFileName returns the old "file_name" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldFileName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFileName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFileName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFileName: %w", err)
+	}
+	return oldValue.FileName, nil
+}
+
+// ResetFileName resets all changes to the "file_name" field.
+func (m *UploadSessionMutation) ResetFileName() {
+	m.file_name = nil
+}
+
+// SetMediaType sets the "media_type" field.
+func (m *UploadSessionMutation) SetMediaType(s string) {
+	m.media_type = &s
+}
+
+// MediaType returns the value of the "media_type" field in the mutation.
+func (m *UploadSessionMutation) MediaType() (r string, exists bool) {
+	v := m.media_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMediaType returns the old "media_type" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldMediaType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMediaType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMediaType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMediaType: %w", err)
+	}
+	return oldValue.MediaType, nil
+}
+
+// ResetMediaType resets all changes to the "media_type" field.
+func (m *UploadSessionMutation) ResetMediaType() {
+	m.media_type = nil
+}
+
+// SetDeclaredSize sets the "declared_size" field.
+func (m *UploadSessionMutation) SetDeclaredSize(i int64) {
+	m.declared_size = &i
+	m.adddeclared_size = nil
+}
+
+// DeclaredSize returns the value of the "declared_size" field in the mutation.
+func (m *UploadSessionMutation) DeclaredSize() (r int64, exists bool) {
+	v := m.declared_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeclaredSize returns the old "declared_size" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldDeclaredSize(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeclaredSize is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeclaredSize requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeclaredSize: %w", err)
+	}
+	return oldValue.DeclaredSize, nil
+}
+
+// AddDeclaredSize adds i to the "declared_size" field.
+func (m *UploadSessionMutation) AddDeclaredSize(i int64) {
+	if m.adddeclared_size != nil {
+		*m.adddeclared_size += i
+	} else {
+		m.adddeclared_size = &i
+	}
+}
+
+// AddedDeclaredSize returns the value that was added to the "declared_size" field in this mutation.
+func (m *UploadSessionMutation) AddedDeclaredSize() (r int64, exists bool) {
+	v := m.adddeclared_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDeclaredSize resets all changes to the "declared_size" field.
+func (m *UploadSessionMutation) ResetDeclaredSize() {
+	m.declared_size = nil
+	m.adddeclared_size = nil
+}
+
+// SetReceived sets the "received" field.
+func (m *UploadSessionMutation) SetReceived(i int64) {
+	m.received = &i
+	m.addreceived = nil
+}
+
+// Received returns the value of the "received" field in the mutation.
+func (m *UploadSessionMutation) Received() (r int64, exists bool) {
+	v := m.received
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReceived returns the old "received" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldReceived(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReceived is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReceived requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReceived: %w", err)
+	}
+	return oldValue.Received, nil
+}
+
+// AddReceived adds i to the "received" field.
+func (m *UploadSessionMutation) AddReceived(i int64) {
+	if m.addreceived != nil {
+		*m.addreceived += i
+	} else {
+		m.addreceived = &i
+	}
+}
+
+// AddedReceived returns the value that was added to the "received" field in this mutation.
+func (m *UploadSessionMutation) AddedReceived() (r int64, exists bool) {
+	v := m.addreceived
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetReceived resets all changes to the "received" field.
+func (m *UploadSessionMutation) ResetReceived() {
+	m.received = nil
+	m.addreceived = nil
+}
+
+// SetHashState sets the "hash_state" field.
+func (m *UploadSessionMutation) SetHashState(b []byte) {
+	m.hash_state = &b
+}
+
+// HashState returns the value of the "hash_state" field in the mutation.
+func (m *UploadSessionMutation) HashState() (r []byte, exists bool) {
+	v := m.hash_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHashState returns the old "hash_state" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldHashState(ctx context.Context) (v []byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHashState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHashState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHashState: %w", err)
+	}
+	return oldValue.HashState, nil
+}
+
+// ClearHashState clears the value of the "hash_state" field.
+func (m *UploadSessionMutation) ClearHashState() {
+	m.hash_state = nil
+	m.clearedFields[uploadsession.FieldHashState] = struct{}{}
+}
+
+// HashStateCleared returns if the "hash_state" field was cleared in this mutation.
+func (m *UploadSessionMutation) HashStateCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldHashState]
+	return ok
+}
+
+// ResetHashState resets all changes to the "hash_state" field.
+func (m *UploadSessionMutation) ResetHashState() {
+	m.hash_state = nil
+	delete(m.clearedFields, uploadsession.FieldHashState)
+}
+
+// SetHead sets the "head" field.
+func (m *UploadSessionMutation) SetHead(b []byte) {
+	m.head = &b
+}
+
+// Head returns the value of the "head" field in the mutation.
+func (m *UploadSessionMutation) Head() (r []byte, exists bool) {
+	v := m.head
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHead returns the old "head" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldHead(ctx context.Context) (v *[]byte, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHead is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHead requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHead: %w", err)
+	}
+	return oldValue.Head, nil
+}
+
+// ClearHead clears the value of the "head" field.
+func (m *UploadSessionMutation) ClearHead() {
+	m.head = nil
+	m.clearedFields[uploadsession.FieldHead] = struct{}{}
+}
+
+// HeadCleared returns if the "head" field was cleared in this mutation.
+func (m *UploadSessionMutation) HeadCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldHead]
+	return ok
+}
+
+// ResetHead resets all changes to the "head" field.
+func (m *UploadSessionMutation) ResetHead() {
+	m.head = nil
+	delete(m.clearedFields, uploadsession.FieldHead)
+}
+
+// SetParts sets the "parts" field.
+func (m *UploadSessionMutation) SetParts(s []string) {
+	m.parts = &s
+	m.appendparts = nil
+}
+
+// Parts returns the value of the "parts" field in the mutation.
+func (m *UploadSessionMutation) Parts() (r []string, exists bool) {
+	v := m.parts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldParts returns the old "parts" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldParts(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldParts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldParts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldParts: %w", err)
+	}
+	return oldValue.Parts, nil
+}
+
+// AppendParts adds s to the "parts" field.
+func (m *UploadSessionMutation) AppendParts(s []string) {
+	m.appendparts = append(m.appendparts, s...)
+}
+
+// AppendedParts returns the list of values that were appended to the "parts" field in this mutation.
+func (m *UploadSessionMutation) AppendedParts() ([]string, bool) {
+	if len(m.appendparts) == 0 {
+		return nil, false
+	}
+	return m.appendparts, true
+}
+
+// ClearParts clears the value of the "parts" field.
+func (m *UploadSessionMutation) ClearParts() {
+	m.parts = nil
+	m.appendparts = nil
+	m.clearedFields[uploadsession.FieldParts] = struct{}{}
+}
+
+// PartsCleared returns if the "parts" field was cleared in this mutation.
+func (m *UploadSessionMutation) PartsCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldParts]
+	return ok
+}
+
+// ResetParts resets all changes to the "parts" field.
+func (m *UploadSessionMutation) ResetParts() {
+	m.parts = nil
+	m.appendparts = nil
+	delete(m.clearedFields, uploadsession.FieldParts)
+}
+
+// SetStagingRef sets the "staging_ref" field.
+func (m *UploadSessionMutation) SetStagingRef(s string) {
+	m.staging_ref = &s
+}
+
+// StagingRef returns the value of the "staging_ref" field in the mutation.
+func (m *UploadSessionMutation) StagingRef() (r string, exists bool) {
+	v := m.staging_ref
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStagingRef returns the old "staging_ref" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldStagingRef(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStagingRef is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStagingRef requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStagingRef: %w", err)
+	}
+	return oldValue.StagingRef, nil
+}
+
+// ResetStagingRef resets all changes to the "staging_ref" field.
+func (m *UploadSessionMutation) ResetStagingRef() {
+	m.staging_ref = nil
+}
+
+// SetState sets the "state" field.
+func (m *UploadSessionMutation) SetState(u uploadsession.State) {
+	m.state = &u
+}
+
+// State returns the value of the "state" field in the mutation.
+func (m *UploadSessionMutation) State() (r uploadsession.State, exists bool) {
+	v := m.state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldState returns the old "state" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldState(ctx context.Context) (v uploadsession.State, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldState: %w", err)
+	}
+	return oldValue.State, nil
+}
+
+// ResetState resets all changes to the "state" field.
+func (m *UploadSessionMutation) ResetState() {
+	m.state = nil
+}
+
+// SetLeaseToken sets the "lease_token" field.
+func (m *UploadSessionMutation) SetLeaseToken(s string) {
+	m.lease_token = &s
+}
+
+// LeaseToken returns the value of the "lease_token" field in the mutation.
+func (m *UploadSessionMutation) LeaseToken() (r string, exists bool) {
+	v := m.lease_token
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseToken returns the old "lease_token" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldLeaseToken(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseToken is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseToken requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseToken: %w", err)
+	}
+	return oldValue.LeaseToken, nil
+}
+
+// ClearLeaseToken clears the value of the "lease_token" field.
+func (m *UploadSessionMutation) ClearLeaseToken() {
+	m.lease_token = nil
+	m.clearedFields[uploadsession.FieldLeaseToken] = struct{}{}
+}
+
+// LeaseTokenCleared returns if the "lease_token" field was cleared in this mutation.
+func (m *UploadSessionMutation) LeaseTokenCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldLeaseToken]
+	return ok
+}
+
+// ResetLeaseToken resets all changes to the "lease_token" field.
+func (m *UploadSessionMutation) ResetLeaseToken() {
+	m.lease_token = nil
+	delete(m.clearedFields, uploadsession.FieldLeaseToken)
+}
+
+// SetLeaseUntil sets the "lease_until" field.
+func (m *UploadSessionMutation) SetLeaseUntil(t time.Time) {
+	m.lease_until = &t
+}
+
+// LeaseUntil returns the value of the "lease_until" field in the mutation.
+func (m *UploadSessionMutation) LeaseUntil() (r time.Time, exists bool) {
+	v := m.lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseUntil returns the old "lease_until" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldLeaseUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseUntil: %w", err)
+	}
+	return oldValue.LeaseUntil, nil
+}
+
+// ClearLeaseUntil clears the value of the "lease_until" field.
+func (m *UploadSessionMutation) ClearLeaseUntil() {
+	m.lease_until = nil
+	m.clearedFields[uploadsession.FieldLeaseUntil] = struct{}{}
+}
+
+// LeaseUntilCleared returns if the "lease_until" field was cleared in this mutation.
+func (m *UploadSessionMutation) LeaseUntilCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldLeaseUntil]
+	return ok
+}
+
+// ResetLeaseUntil resets all changes to the "lease_until" field.
+func (m *UploadSessionMutation) ResetLeaseUntil() {
+	m.lease_until = nil
+	delete(m.clearedFields, uploadsession.FieldLeaseUntil)
+}
+
+// SetTakeovers sets the "takeovers" field.
+func (m *UploadSessionMutation) SetTakeovers(i int) {
+	m.takeovers = &i
+	m.addtakeovers = nil
+}
+
+// Takeovers returns the value of the "takeovers" field in the mutation.
+func (m *UploadSessionMutation) Takeovers() (r int, exists bool) {
+	v := m.takeovers
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTakeovers returns the old "takeovers" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldTakeovers(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTakeovers is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTakeovers requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTakeovers: %w", err)
+	}
+	return oldValue.Takeovers, nil
+}
+
+// AddTakeovers adds i to the "takeovers" field.
+func (m *UploadSessionMutation) AddTakeovers(i int) {
+	if m.addtakeovers != nil {
+		*m.addtakeovers += i
+	} else {
+		m.addtakeovers = &i
+	}
+}
+
+// AddedTakeovers returns the value that was added to the "takeovers" field in this mutation.
+func (m *UploadSessionMutation) AddedTakeovers() (r int, exists bool) {
+	v := m.addtakeovers
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTakeovers resets all changes to the "takeovers" field.
+func (m *UploadSessionMutation) ResetTakeovers() {
+	m.takeovers = nil
+	m.addtakeovers = nil
+}
+
+// SetResult sets the "result" field.
+func (m *UploadSessionMutation) SetResult(jm json.RawMessage) {
+	m.result = &jm
+	m.appendresult = nil
+}
+
+// Result returns the value of the "result" field in the mutation.
+func (m *UploadSessionMutation) Result() (r json.RawMessage, exists bool) {
+	v := m.result
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldResult returns the old "result" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldResult(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldResult is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldResult requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldResult: %w", err)
+	}
+	return oldValue.Result, nil
+}
+
+// AppendResult adds jm to the "result" field.
+func (m *UploadSessionMutation) AppendResult(jm json.RawMessage) {
+	m.appendresult = append(m.appendresult, jm...)
+}
+
+// AppendedResult returns the list of values that were appended to the "result" field in this mutation.
+func (m *UploadSessionMutation) AppendedResult() (json.RawMessage, bool) {
+	if len(m.appendresult) == 0 {
+		return nil, false
+	}
+	return m.appendresult, true
+}
+
+// ClearResult clears the value of the "result" field.
+func (m *UploadSessionMutation) ClearResult() {
+	m.result = nil
+	m.appendresult = nil
+	m.clearedFields[uploadsession.FieldResult] = struct{}{}
+}
+
+// ResultCleared returns if the "result" field was cleared in this mutation.
+func (m *UploadSessionMutation) ResultCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldResult]
+	return ok
+}
+
+// ResetResult resets all changes to the "result" field.
+func (m *UploadSessionMutation) ResetResult() {
+	m.result = nil
+	m.appendresult = nil
+	delete(m.clearedFields, uploadsession.FieldResult)
+}
+
+// SetArtifactID sets the "artifact_id" field.
+func (m *UploadSessionMutation) SetArtifactID(s string) {
+	m.artifact_id = &s
+}
+
+// ArtifactID returns the value of the "artifact_id" field in the mutation.
+func (m *UploadSessionMutation) ArtifactID() (r string, exists bool) {
+	v := m.artifact_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArtifactID returns the old "artifact_id" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldArtifactID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArtifactID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArtifactID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArtifactID: %w", err)
+	}
+	return oldValue.ArtifactID, nil
+}
+
+// ClearArtifactID clears the value of the "artifact_id" field.
+func (m *UploadSessionMutation) ClearArtifactID() {
+	m.artifact_id = nil
+	m.clearedFields[uploadsession.FieldArtifactID] = struct{}{}
+}
+
+// ArtifactIDCleared returns if the "artifact_id" field was cleared in this mutation.
+func (m *UploadSessionMutation) ArtifactIDCleared() bool {
+	_, ok := m.clearedFields[uploadsession.FieldArtifactID]
+	return ok
+}
+
+// ResetArtifactID resets all changes to the "artifact_id" field.
+func (m *UploadSessionMutation) ResetArtifactID() {
+	m.artifact_id = nil
+	delete(m.clearedFields, uploadsession.FieldArtifactID)
+}
+
+// SetIdleExpiresAt sets the "idle_expires_at" field.
+func (m *UploadSessionMutation) SetIdleExpiresAt(t time.Time) {
+	m.idle_expires_at = &t
+}
+
+// IdleExpiresAt returns the value of the "idle_expires_at" field in the mutation.
+func (m *UploadSessionMutation) IdleExpiresAt() (r time.Time, exists bool) {
+	v := m.idle_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIdleExpiresAt returns the old "idle_expires_at" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldIdleExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIdleExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIdleExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIdleExpiresAt: %w", err)
+	}
+	return oldValue.IdleExpiresAt, nil
+}
+
+// ResetIdleExpiresAt resets all changes to the "idle_expires_at" field.
+func (m *UploadSessionMutation) ResetIdleExpiresAt() {
+	m.idle_expires_at = nil
+}
+
+// SetHardExpiresAt sets the "hard_expires_at" field.
+func (m *UploadSessionMutation) SetHardExpiresAt(t time.Time) {
+	m.hard_expires_at = &t
+}
+
+// HardExpiresAt returns the value of the "hard_expires_at" field in the mutation.
+func (m *UploadSessionMutation) HardExpiresAt() (r time.Time, exists bool) {
+	v := m.hard_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHardExpiresAt returns the old "hard_expires_at" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldHardExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHardExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHardExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHardExpiresAt: %w", err)
+	}
+	return oldValue.HardExpiresAt, nil
+}
+
+// ResetHardExpiresAt resets all changes to the "hard_expires_at" field.
+func (m *UploadSessionMutation) ResetHardExpiresAt() {
+	m.hard_expires_at = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *UploadSessionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *UploadSessionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *UploadSessionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *UploadSessionMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *UploadSessionMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the UploadSession entity.
+// If the UploadSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UploadSessionMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *UploadSessionMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the UploadSessionMutation builder.
+func (m *UploadSessionMutation) Where(ps ...predicate.UploadSession) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UploadSessionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UploadSessionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UploadSession, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UploadSessionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UploadSessionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UploadSession).
+func (m *UploadSessionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UploadSessionMutation) Fields() []string {
+	fields := make([]string, 0, 26)
+	if m.hub_id != nil {
+		fields = append(fields, uploadsession.FieldHubID)
+	}
+	if m.owner_kind != nil {
+		fields = append(fields, uploadsession.FieldOwnerKind)
+	}
+	if m.owner_id != nil {
+		fields = append(fields, uploadsession.FieldOwnerID)
+	}
+	if m.target_kind != nil {
+		fields = append(fields, uploadsession.FieldTargetKind)
+	}
+	if m.scope_project_id != nil {
+		fields = append(fields, uploadsession.FieldScopeProjectID)
+	}
+	if m.scope_shared_dir != nil {
+		fields = append(fields, uploadsession.FieldScopeSharedDir)
+	}
+	if m.dest_path != nil {
+		fields = append(fields, uploadsession.FieldDestPath)
+	}
+	if m.overwrite != nil {
+		fields = append(fields, uploadsession.FieldOverwrite)
+	}
+	if m.file_name != nil {
+		fields = append(fields, uploadsession.FieldFileName)
+	}
+	if m.media_type != nil {
+		fields = append(fields, uploadsession.FieldMediaType)
+	}
+	if m.declared_size != nil {
+		fields = append(fields, uploadsession.FieldDeclaredSize)
+	}
+	if m.received != nil {
+		fields = append(fields, uploadsession.FieldReceived)
+	}
+	if m.hash_state != nil {
+		fields = append(fields, uploadsession.FieldHashState)
+	}
+	if m.head != nil {
+		fields = append(fields, uploadsession.FieldHead)
+	}
+	if m.parts != nil {
+		fields = append(fields, uploadsession.FieldParts)
+	}
+	if m.staging_ref != nil {
+		fields = append(fields, uploadsession.FieldStagingRef)
+	}
+	if m.state != nil {
+		fields = append(fields, uploadsession.FieldState)
+	}
+	if m.lease_token != nil {
+		fields = append(fields, uploadsession.FieldLeaseToken)
+	}
+	if m.lease_until != nil {
+		fields = append(fields, uploadsession.FieldLeaseUntil)
+	}
+	if m.takeovers != nil {
+		fields = append(fields, uploadsession.FieldTakeovers)
+	}
+	if m.result != nil {
+		fields = append(fields, uploadsession.FieldResult)
+	}
+	if m.artifact_id != nil {
+		fields = append(fields, uploadsession.FieldArtifactID)
+	}
+	if m.idle_expires_at != nil {
+		fields = append(fields, uploadsession.FieldIdleExpiresAt)
+	}
+	if m.hard_expires_at != nil {
+		fields = append(fields, uploadsession.FieldHardExpiresAt)
+	}
+	if m.created_at != nil {
+		fields = append(fields, uploadsession.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, uploadsession.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UploadSessionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case uploadsession.FieldHubID:
+		return m.HubID()
+	case uploadsession.FieldOwnerKind:
+		return m.OwnerKind()
+	case uploadsession.FieldOwnerID:
+		return m.OwnerID()
+	case uploadsession.FieldTargetKind:
+		return m.TargetKind()
+	case uploadsession.FieldScopeProjectID:
+		return m.ScopeProjectID()
+	case uploadsession.FieldScopeSharedDir:
+		return m.ScopeSharedDir()
+	case uploadsession.FieldDestPath:
+		return m.DestPath()
+	case uploadsession.FieldOverwrite:
+		return m.Overwrite()
+	case uploadsession.FieldFileName:
+		return m.FileName()
+	case uploadsession.FieldMediaType:
+		return m.MediaType()
+	case uploadsession.FieldDeclaredSize:
+		return m.DeclaredSize()
+	case uploadsession.FieldReceived:
+		return m.Received()
+	case uploadsession.FieldHashState:
+		return m.HashState()
+	case uploadsession.FieldHead:
+		return m.Head()
+	case uploadsession.FieldParts:
+		return m.Parts()
+	case uploadsession.FieldStagingRef:
+		return m.StagingRef()
+	case uploadsession.FieldState:
+		return m.State()
+	case uploadsession.FieldLeaseToken:
+		return m.LeaseToken()
+	case uploadsession.FieldLeaseUntil:
+		return m.LeaseUntil()
+	case uploadsession.FieldTakeovers:
+		return m.Takeovers()
+	case uploadsession.FieldResult:
+		return m.Result()
+	case uploadsession.FieldArtifactID:
+		return m.ArtifactID()
+	case uploadsession.FieldIdleExpiresAt:
+		return m.IdleExpiresAt()
+	case uploadsession.FieldHardExpiresAt:
+		return m.HardExpiresAt()
+	case uploadsession.FieldCreatedAt:
+		return m.CreatedAt()
+	case uploadsession.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UploadSessionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case uploadsession.FieldHubID:
+		return m.OldHubID(ctx)
+	case uploadsession.FieldOwnerKind:
+		return m.OldOwnerKind(ctx)
+	case uploadsession.FieldOwnerID:
+		return m.OldOwnerID(ctx)
+	case uploadsession.FieldTargetKind:
+		return m.OldTargetKind(ctx)
+	case uploadsession.FieldScopeProjectID:
+		return m.OldScopeProjectID(ctx)
+	case uploadsession.FieldScopeSharedDir:
+		return m.OldScopeSharedDir(ctx)
+	case uploadsession.FieldDestPath:
+		return m.OldDestPath(ctx)
+	case uploadsession.FieldOverwrite:
+		return m.OldOverwrite(ctx)
+	case uploadsession.FieldFileName:
+		return m.OldFileName(ctx)
+	case uploadsession.FieldMediaType:
+		return m.OldMediaType(ctx)
+	case uploadsession.FieldDeclaredSize:
+		return m.OldDeclaredSize(ctx)
+	case uploadsession.FieldReceived:
+		return m.OldReceived(ctx)
+	case uploadsession.FieldHashState:
+		return m.OldHashState(ctx)
+	case uploadsession.FieldHead:
+		return m.OldHead(ctx)
+	case uploadsession.FieldParts:
+		return m.OldParts(ctx)
+	case uploadsession.FieldStagingRef:
+		return m.OldStagingRef(ctx)
+	case uploadsession.FieldState:
+		return m.OldState(ctx)
+	case uploadsession.FieldLeaseToken:
+		return m.OldLeaseToken(ctx)
+	case uploadsession.FieldLeaseUntil:
+		return m.OldLeaseUntil(ctx)
+	case uploadsession.FieldTakeovers:
+		return m.OldTakeovers(ctx)
+	case uploadsession.FieldResult:
+		return m.OldResult(ctx)
+	case uploadsession.FieldArtifactID:
+		return m.OldArtifactID(ctx)
+	case uploadsession.FieldIdleExpiresAt:
+		return m.OldIdleExpiresAt(ctx)
+	case uploadsession.FieldHardExpiresAt:
+		return m.OldHardExpiresAt(ctx)
+	case uploadsession.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case uploadsession.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown UploadSession field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UploadSessionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case uploadsession.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case uploadsession.FieldOwnerKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerKind(v)
+		return nil
+	case uploadsession.FieldOwnerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOwnerID(v)
+		return nil
+	case uploadsession.FieldTargetKind:
+		v, ok := value.(uploadsession.TargetKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetKind(v)
+		return nil
+	case uploadsession.FieldScopeProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeProjectID(v)
+		return nil
+	case uploadsession.FieldScopeSharedDir:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeSharedDir(v)
+		return nil
+	case uploadsession.FieldDestPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDestPath(v)
+		return nil
+	case uploadsession.FieldOverwrite:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOverwrite(v)
+		return nil
+	case uploadsession.FieldFileName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFileName(v)
+		return nil
+	case uploadsession.FieldMediaType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMediaType(v)
+		return nil
+	case uploadsession.FieldDeclaredSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeclaredSize(v)
+		return nil
+	case uploadsession.FieldReceived:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReceived(v)
+		return nil
+	case uploadsession.FieldHashState:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHashState(v)
+		return nil
+	case uploadsession.FieldHead:
+		v, ok := value.([]byte)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHead(v)
+		return nil
+	case uploadsession.FieldParts:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetParts(v)
+		return nil
+	case uploadsession.FieldStagingRef:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStagingRef(v)
+		return nil
+	case uploadsession.FieldState:
+		v, ok := value.(uploadsession.State)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetState(v)
+		return nil
+	case uploadsession.FieldLeaseToken:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseToken(v)
+		return nil
+	case uploadsession.FieldLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseUntil(v)
+		return nil
+	case uploadsession.FieldTakeovers:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTakeovers(v)
+		return nil
+	case uploadsession.FieldResult:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetResult(v)
+		return nil
+	case uploadsession.FieldArtifactID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArtifactID(v)
+		return nil
+	case uploadsession.FieldIdleExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIdleExpiresAt(v)
+		return nil
+	case uploadsession.FieldHardExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHardExpiresAt(v)
+		return nil
+	case uploadsession.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case uploadsession.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UploadSession field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UploadSessionMutation) AddedFields() []string {
+	var fields []string
+	if m.adddeclared_size != nil {
+		fields = append(fields, uploadsession.FieldDeclaredSize)
+	}
+	if m.addreceived != nil {
+		fields = append(fields, uploadsession.FieldReceived)
+	}
+	if m.addtakeovers != nil {
+		fields = append(fields, uploadsession.FieldTakeovers)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UploadSessionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case uploadsession.FieldDeclaredSize:
+		return m.AddedDeclaredSize()
+	case uploadsession.FieldReceived:
+		return m.AddedReceived()
+	case uploadsession.FieldTakeovers:
+		return m.AddedTakeovers()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UploadSessionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case uploadsession.FieldDeclaredSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDeclaredSize(v)
+		return nil
+	case uploadsession.FieldReceived:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReceived(v)
+		return nil
+	case uploadsession.FieldTakeovers:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTakeovers(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UploadSession numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UploadSessionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(uploadsession.FieldScopeProjectID) {
+		fields = append(fields, uploadsession.FieldScopeProjectID)
+	}
+	if m.FieldCleared(uploadsession.FieldScopeSharedDir) {
+		fields = append(fields, uploadsession.FieldScopeSharedDir)
+	}
+	if m.FieldCleared(uploadsession.FieldDestPath) {
+		fields = append(fields, uploadsession.FieldDestPath)
+	}
+	if m.FieldCleared(uploadsession.FieldHashState) {
+		fields = append(fields, uploadsession.FieldHashState)
+	}
+	if m.FieldCleared(uploadsession.FieldHead) {
+		fields = append(fields, uploadsession.FieldHead)
+	}
+	if m.FieldCleared(uploadsession.FieldParts) {
+		fields = append(fields, uploadsession.FieldParts)
+	}
+	if m.FieldCleared(uploadsession.FieldLeaseToken) {
+		fields = append(fields, uploadsession.FieldLeaseToken)
+	}
+	if m.FieldCleared(uploadsession.FieldLeaseUntil) {
+		fields = append(fields, uploadsession.FieldLeaseUntil)
+	}
+	if m.FieldCleared(uploadsession.FieldResult) {
+		fields = append(fields, uploadsession.FieldResult)
+	}
+	if m.FieldCleared(uploadsession.FieldArtifactID) {
+		fields = append(fields, uploadsession.FieldArtifactID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UploadSessionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UploadSessionMutation) ClearField(name string) error {
+	switch name {
+	case uploadsession.FieldScopeProjectID:
+		m.ClearScopeProjectID()
+		return nil
+	case uploadsession.FieldScopeSharedDir:
+		m.ClearScopeSharedDir()
+		return nil
+	case uploadsession.FieldDestPath:
+		m.ClearDestPath()
+		return nil
+	case uploadsession.FieldHashState:
+		m.ClearHashState()
+		return nil
+	case uploadsession.FieldHead:
+		m.ClearHead()
+		return nil
+	case uploadsession.FieldParts:
+		m.ClearParts()
+		return nil
+	case uploadsession.FieldLeaseToken:
+		m.ClearLeaseToken()
+		return nil
+	case uploadsession.FieldLeaseUntil:
+		m.ClearLeaseUntil()
+		return nil
+	case uploadsession.FieldResult:
+		m.ClearResult()
+		return nil
+	case uploadsession.FieldArtifactID:
+		m.ClearArtifactID()
+		return nil
+	}
+	return fmt.Errorf("unknown UploadSession nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UploadSessionMutation) ResetField(name string) error {
+	switch name {
+	case uploadsession.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case uploadsession.FieldOwnerKind:
+		m.ResetOwnerKind()
+		return nil
+	case uploadsession.FieldOwnerID:
+		m.ResetOwnerID()
+		return nil
+	case uploadsession.FieldTargetKind:
+		m.ResetTargetKind()
+		return nil
+	case uploadsession.FieldScopeProjectID:
+		m.ResetScopeProjectID()
+		return nil
+	case uploadsession.FieldScopeSharedDir:
+		m.ResetScopeSharedDir()
+		return nil
+	case uploadsession.FieldDestPath:
+		m.ResetDestPath()
+		return nil
+	case uploadsession.FieldOverwrite:
+		m.ResetOverwrite()
+		return nil
+	case uploadsession.FieldFileName:
+		m.ResetFileName()
+		return nil
+	case uploadsession.FieldMediaType:
+		m.ResetMediaType()
+		return nil
+	case uploadsession.FieldDeclaredSize:
+		m.ResetDeclaredSize()
+		return nil
+	case uploadsession.FieldReceived:
+		m.ResetReceived()
+		return nil
+	case uploadsession.FieldHashState:
+		m.ResetHashState()
+		return nil
+	case uploadsession.FieldHead:
+		m.ResetHead()
+		return nil
+	case uploadsession.FieldParts:
+		m.ResetParts()
+		return nil
+	case uploadsession.FieldStagingRef:
+		m.ResetStagingRef()
+		return nil
+	case uploadsession.FieldState:
+		m.ResetState()
+		return nil
+	case uploadsession.FieldLeaseToken:
+		m.ResetLeaseToken()
+		return nil
+	case uploadsession.FieldLeaseUntil:
+		m.ResetLeaseUntil()
+		return nil
+	case uploadsession.FieldTakeovers:
+		m.ResetTakeovers()
+		return nil
+	case uploadsession.FieldResult:
+		m.ResetResult()
+		return nil
+	case uploadsession.FieldArtifactID:
+		m.ResetArtifactID()
+		return nil
+	case uploadsession.FieldIdleExpiresAt:
+		m.ResetIdleExpiresAt()
+		return nil
+	case uploadsession.FieldHardExpiresAt:
+		m.ResetHardExpiresAt()
+		return nil
+	case uploadsession.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case uploadsession.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UploadSession field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UploadSessionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UploadSessionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UploadSessionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UploadSessionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UploadSessionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UploadSessionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UploadSessionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UploadSession unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UploadSessionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UploadSession edge %s", name)
 }
 
 // UsageBudgetStateMutation represents an operation that mutates the UsageBudgetState nodes in the graph.
