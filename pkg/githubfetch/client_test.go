@@ -720,13 +720,13 @@ func TestErrorClassificationAndNoTokenLeak(t *testing.T) {
 	secretCred := Credential{Token: secretToken, Kind: CredSecret, Scope: "secret:1234", Hint: "app token mint failed; fell back to GITHUB_TOKEN"}
 
 	cases := []struct {
-		name      string
-		status    int
-		headers   map[string]string
-		body      string
-		cred      Credential
-		wantKind  Kind
-		wantSub   string
+		name     string
+		status   int
+		headers  map[string]string
+		body     string
+		cred     Credential
+		wantKind Kind
+		wantSub  string
 	}{
 		{"404 anon", 404, nil, "", anonCred, KindNotFound, "no credential is configured"},
 		{"404 cred", 404, nil, "", secretCred, KindNotFound, "configured credential cannot read it"},

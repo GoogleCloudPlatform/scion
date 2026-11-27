@@ -25,6 +25,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // SkipCounts records non-fatal entries skipped during extraction.
@@ -166,9 +168,11 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 		}
 
 		if hdr.Typeflag == tar.TypeDir {
-			if err := mkdirAllRoot(dst, rel); err != nil {
+			d, err := rootopen.MkdirAll(dst, rel, 0o755)
+			if err != nil {
 				return 0, 0, skipped, err
 			}
+			_ = d.Close()
 			continue
 		}
 
@@ -181,13 +185,15 @@ func extractTarGz(r io.Reader, repo, subPath, expectedSHA string, tree *Tree, ds
 		}
 
 		if dir := path.Dir(rel); dir != "." && dir != "" {
-			if err := mkdirAllRoot(dst, dir); err != nil {
+			d, err := rootopen.MkdirAll(dst, dir, 0o755)
+			if err != nil {
 				return 0, 0, skipped, err
 			}
+			_ = d.Close()
 		}
 
 		mode := normalizeArchiveMode(hdr.Mode)
-		f, err := dst.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+		f, err := rootopen.OpenFileForWrite(dst, rel, uint32(mode), false)
 		if err != nil {
 			return 0, 0, skipped, fmt.Errorf("create extracted file %q: %w", rel, err)
 		}
@@ -298,24 +304,4 @@ func normalizeArchiveMode(archiveMode int64) os.FileMode {
 		return 0o755
 	}
 	return 0o644
-}
-
-func mkdirAllRoot(dst *os.Root, rel string) error {
-	if rel == "" || rel == "." {
-		return nil
-	}
-	parts := strings.Split(rel, "/")
-	cur := ""
-	for _, p := range parts {
-		if cur == "" {
-			cur = p
-		} else {
-			cur = cur + "/" + p
-		}
-		err := dst.Mkdir(cur, 0o755)
-		if err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-	}
-	return nil
 }
