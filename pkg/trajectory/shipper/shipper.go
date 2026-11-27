@@ -315,45 +315,14 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 
 		f, fi, oerr := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
 		if oerr != nil {
-			skipped = append(skipped, RefusedPath{
-				NativeRelativePath: art.NativeRelativePath,
-				Reason:             oerr.Error(),
-			})
-			if existing == nil {
-				st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-					NativeRelativePath: art.NativeRelativePath,
-					ArtifactKind:       art.Kind,
-					Generation:         0,
-					Baseline:           true,
-					NeedsBaseline:      true,
-					OriginHubID:        st.OriginHubID,
-					LastError:          oerr.Error(),
-					UpdatedAt:          &now,
-				}
-			} else {
-				existing.Pending = nil
-				existing.Baseline = true
-				existing.NeedsBaseline = true
-				existing.LastError = oerr.Error()
-				existing.UpdatedAt = &now
-			}
+			markRebaselineSkipped(st, art, existing, oerr, now, &skipped)
 			continue
 		}
 
 		fid, fidErr := fileIdentityFn(fi)
 		if fidErr != nil {
 			_ = f.Close()
-			skipped = append(skipped, RefusedPath{
-				NativeRelativePath: art.NativeRelativePath,
-				Reason:             fidErr.Error(),
-			})
-			if existing != nil {
-				existing.Pending = nil
-				existing.Baseline = true
-				existing.NeedsBaseline = true
-				existing.LastError = fidErr.Error()
-				existing.UpdatedAt = &now
-			}
+			markRebaselineSkipped(st, art, existing, fidErr, now, &skipped)
 			continue
 		}
 
@@ -365,17 +334,7 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 			guardHash, guardLen, gerr = ComputeGuardHash(f, offset)
 			if gerr != nil {
 				_ = f.Close()
-				skipped = append(skipped, RefusedPath{
-					NativeRelativePath: art.NativeRelativePath,
-					Reason:             gerr.Error(),
-				})
-				if existing != nil {
-					existing.Pending = nil
-					existing.Baseline = true
-					existing.NeedsBaseline = true
-					existing.LastError = gerr.Error()
-					existing.UpdatedAt = &now
-				}
+				markRebaselineSkipped(st, art, existing, gerr, now, &skipped)
 				continue
 			}
 		}
@@ -436,6 +395,38 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 		RefusedPaths:     disc.Refused,
 		SkippedPaths:     skipped,
 	}, nil
+}
+
+func markRebaselineSkipped(
+	st *State,
+	art DiscoveredArtifact,
+	existing *ArtifactState,
+	err error,
+	now time.Time,
+	skipped *[]RefusedPath,
+) {
+	*skipped = append(*skipped, RefusedPath{
+		NativeRelativePath: art.NativeRelativePath,
+		Reason:             err.Error(),
+	})
+	if existing == nil {
+		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
+			NativeRelativePath: art.NativeRelativePath,
+			ArtifactKind:       art.Kind,
+			Generation:         0,
+			Baseline:           true,
+			NeedsBaseline:      true,
+			OriginHubID:        st.OriginHubID,
+			LastError:          err.Error(),
+			UpdatedAt:          &now,
+		}
+		return
+	}
+	existing.Pending = nil
+	existing.Baseline = true
+	existing.NeedsBaseline = true
+	existing.LastError = err.Error()
+	existing.UpdatedAt = &now
 }
 
 // ResetForRun clears run-scoped truncation and per-artifact rejection parks

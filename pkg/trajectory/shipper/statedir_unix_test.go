@@ -65,8 +65,11 @@ func installSimulatedUIDFS(t *testing.T, homeDir string, homeUID uint32, initial
 		if uid, ok := sim.owners[path]; ok {
 			return uid, uid
 		}
-		// Newly created paths before chown inherit the creating euid.
-		return uint32(sim.euid), uint32(sim.euid)
+		// Record the creating euid on first observation so later euid switches
+		// cannot rewrite ownership of an un-chowned path.
+		uid := uint32(sim.euid)
+		sim.owners[path] = uid
+		return uid, uid
 	}
 	fchownFD = func(_ int, uid, _ int, displayPath string) error {
 		sim.mu.Lock()
@@ -293,6 +296,13 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 		// Baseline acquires state.lock once (creating it) and does not reopen it.
 		if _, err := sRoot.Baseline(context.Background()); err != nil {
 			t.Fatalf("Baseline as root: %v", err)
+		}
+		if got, ok := sim.chownedPaths[LockPath(home)]; !ok || got != homeUID {
+			t.Fatalf("expected newly created lock %s to be chowned to %d right after root Baseline, got ok=%v uid=%d",
+				LockPath(home), homeUID, ok, got)
+		}
+		if got := sim.owners[LockPath(home)]; got != homeUID {
+			t.Fatalf("expected simulated owner of %s to be %d, got %d", LockPath(home), homeUID, got)
 		}
 
 		// Immediately switch to home owner with no second root lock open:
