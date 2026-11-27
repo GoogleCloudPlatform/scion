@@ -101,7 +101,7 @@ func TestTriggerNotify_TwoServersRace_Postgres(t *testing.T) {
 		InitiatorAttribution: store.InitiatorAttribution{
 			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
 			InitiatorPrincipalID:    owner.ID,
-			InitiatorCredentialKind: store.InitiatorCredentialKindUserSession,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
 			AttributionVersion:      1,
 			AuthorizationRevision:   1,
 		},
