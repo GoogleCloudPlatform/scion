@@ -481,5 +481,27 @@ describe('InboxSummaryStore', () => {
       await vi.advanceTimersByTimeAsync(pollInterval * 2 + 50);
       expect(fetchMock).toHaveBeenCalledTimes(3);
     });
+
+    it('refreshes on chat-stars-updated SSE event (design §6.5, AC-8)', async () => {
+      setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(makeSummary(1)), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      );
+
+      store.ensureStarted('user-1');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      stateManager.dispatchEvent(
+        new CustomEvent('chat-stars-updated', { detail: { action: 'changed' } })
+      );
+      await vi.advanceTimersByTimeAsync(INBOX_DEBOUNCE_MS + 20);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -26,10 +26,12 @@ import (
 )
 
 const (
-	// inboxChatHref is the "View all" drill-in for the chat category.
-	// The chat space rail filter is currently stored only in localStorage
-	// (not hydrated from URL query parameters), so link to /chat.
+	// inboxChatHref is the default drill-in for the chat category.
 	inboxChatHref = "/chat"
+
+	// inboxChatStarredScanBudget bounds the number of starred conversation
+	// candidates scanned when computing the chat inbox summary (design §7.1).
+	inboxChatStarredScanBudget = 500
 
 	// InboxChatKind* are the valid kind values for InboxChatPreview.
 	InboxChatKindDM      = "dm"
@@ -88,17 +90,48 @@ func (s *Server) inboxChatCategory(ctx context.Context, v inboxViewer, previews 
 	}
 
 	mentionsCount := 0
+	seenProjects := make(map[string]struct{})
 	for _, ut := range detail.unreadThreads {
 		if mentionKeys[ut.topic.ID] {
 			mentionsCount++
 		}
+		if ut.topic.ProjectID != "" {
+			seenProjects[ut.topic.ProjectID] = struct{}{}
+		}
+	}
+	for _, ud := range detail.unreadDMs {
+		if ud.dm.PeerKind == "agent" && ud.peerAgent != nil && ud.peerAgent.ProjectID != "" {
+			if detail.visibleSpaces[ud.peerAgent.ProjectID] != nil {
+				seenProjects[ud.peerAgent.ProjectID] = struct{}{}
+			}
+		}
 	}
 
 	breakdown := map[string]int{
-		"dms":                 detail.counts.DMs,
-		"mentions":            mentionsCount,
-		"unreadConversations": detail.counts.Conversations,
+		InboxBreakdownDMs:                 detail.counts.DMs,
+		InboxBreakdownMentions:            mentionsCount,
+		InboxBreakdownUnreadConversations: detail.counts.Conversations,
 	}
+
+	if stars := messageStarStoreFrom(wcs); stars != nil {
+		starredCount, starredProjects, starredCapped, err := s.inboxChatStarredSummary(ctx, v, wcs, stars)
+		if err != nil {
+			slog.Warn("inbox summary: chat starred scan failed; omitting starred breakdown",
+				"error_code", inboxCategoryErrorCode(ctx, err),
+				"error", err)
+		} else {
+			breakdown[InboxBreakdownStarredMessages] = starredCount
+			if starredCapped {
+				breakdown[InboxBreakdownStarredMessagesCapped] = 1
+			}
+			for pid := range starredProjects {
+				if detail.visibleSpaces[pid] != nil {
+					seenProjects[pid] = struct{}{}
+				}
+			}
+		}
+	}
+	breakdown[InboxBreakdownProjects] = len(seenProjects)
 
 	items := make([]any, 0)
 	if previews > 0 {
@@ -113,6 +146,69 @@ func (s *Server) inboxChatCategory(ctx context.Context, v inboxViewer, previews 
 		Href:              inboxChatHref,
 		Previews:          items,
 		Breakdown:         breakdown,
+	}
+}
+
+func (s *Server) chatStarredScanBudget() int {
+	if s.inboxChatStarredScanBudgetForTest > 0 {
+		return s.inboxChatStarredScanBudgetForTest
+	}
+	return inboxChatStarredScanBudget
+}
+
+func (s *Server) inboxChatStarredSummary(
+	ctx context.Context,
+	v inboxViewer,
+	wcs WebChatStore,
+	stars MessageStarStore,
+) (count int, projects map[string]struct{}, capped bool, err error) {
+	budget := s.chatStarredScanBudget()
+	call := starCall{
+		user:  v.user,
+		token: v.token,
+		wcs:   wcs,
+		stars: stars,
+	}
+	auth := s.newStarredConversationAuthorizer(ctx, call)
+	filter := StarredConversationFilter{
+		UserID:  v.userID,
+		Channel: chatHistoryChannel(v.user),
+		Sort:    StarredConversationsByActivity,
+	}
+	projects = make(map[string]struct{})
+	var pos *StarredConversationPosition
+	scanned := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, nil, false, err
+		}
+		filter.After = pos
+		filter.Limit = min(starredConversationsScanBatch, budget-scanned)
+		page, err := stars.ListStarredConversationCandidates(ctx, filter)
+		if err != nil {
+			return 0, nil, false, err
+		}
+		rows, err := auth.decide(ctx, page.Items, "")
+		if err != nil {
+			return 0, nil, false, err
+		}
+		for i, c := range page.Items {
+			scanned++
+			p := c.Position
+			pos = &p
+			if rows[i] != nil {
+				count += c.StarCount
+				if rows[i].ProjectID != "" {
+					projects[rows[i].ProjectID] = struct{}{}
+				}
+			}
+		}
+		if page.Next == nil {
+			return count, projects, false, nil
+		}
+		if scanned >= budget {
+			return count, projects, true, nil
+		}
 	}
 }
 

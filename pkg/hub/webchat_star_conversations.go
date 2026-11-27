@@ -101,6 +101,8 @@ type StarredConversationCandidate struct {
 	// LastActivityAt is the conversation's last activity; zero when it has
 	// none recorded.
 	LastActivityAt time.Time
+	// StarCount is the number of live stars the user has in this conversation.
+	StarCount int
 	// Position is the candidate's place in the requested order.
 	Position StarredConversationPosition
 }
@@ -229,14 +231,17 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
 	// (driven by the user's star index); the outer one joins the current
 	// topic or DM row for the name, activity and project.
 	return `
-SELECT c.ckey, c.is_dm, c.project_id, c.topic_name, c.activity_raw, c.sort_value FROM (
+SELECT c.ckey, c.is_dm, c.project_id, c.topic_name, c.activity_raw, c.star_count, c.sort_value FROM (
 SELECT el.ckey AS ckey,
        (CASE WHEN ` + isDM + ` THEN 1 ELSE 0 END) AS is_dm,
        (CASE WHEN ` + isDM + ` THEN el.star_project ELSE t.project_id END) AS project_id,
        COALESCE(t.name, '') AS topic_name,
        COALESCE(` + activity + `, '') AS activity_raw,
+       el.star_count AS star_count,
        ` + sortValue + ` AS sort_value
-  FROM (SELECT st.conversation_key AS ckey, MAX(COALESCE(st.project_id, '')) AS star_project
+  FROM (SELECT st.conversation_key AS ckey,
+               MAX(COALESCE(st.project_id, '')) AS star_project,
+               COUNT(*) AS star_count
           FROM webchat_message_star st
           JOIN messages m ON m.id = st.message_id
          WHERE st.user_id = ?
@@ -267,7 +272,7 @@ func (s *sqliteWebChatStore) ListStarredConversationCandidates(ctx context.Conte
 		var c StarredConversationCandidate
 		var isDMInt int
 		var activityRaw string
-		if err := rows.Scan(&c.ConversationKey, &isDMInt, &c.ProjectID, &c.TopicName, &activityRaw, &c.Position.Value); err != nil {
+		if err := rows.Scan(&c.ConversationKey, &isDMInt, &c.ProjectID, &c.TopicName, &activityRaw, &c.StarCount, &c.Position.Value); err != nil {
 			return StarredConversationPage{}, fmt.Errorf("webchat store: list starred conversations: %w", err)
 		}
 		c.IsDM = isDMInt != 0

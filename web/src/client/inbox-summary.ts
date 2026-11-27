@@ -64,7 +64,9 @@ export type InboxBreakdownKey =
   | 'requested'
   | 'unreadConversations'
   | 'dms'
-  | 'mentions';
+  | 'mentions'
+  | 'starredMessages'
+  | 'starredMessagesCapped';
 
 export interface InboxCategory<TPreview = unknown> {
   state: InboxCategoryState;
@@ -254,6 +256,7 @@ export class InboxSummaryStore {
     stateManager.addEventListener('decision-updated', this.boundOnTriggerEvent);
     stateManager.addEventListener('chat-message-received', this.boundOnTriggerEvent);
     stateManager.addEventListener('chat-read-state-updated', this.boundOnTriggerEvent);
+    stateManager.addEventListener('chat-stars-updated', this.boundOnTriggerEvent);
     stateManager.addEventListener('connected', this.boundOnTriggerEvent);
 
     if (typeof window !== 'undefined') {
@@ -287,6 +290,7 @@ export class InboxSummaryStore {
     stateManager.removeEventListener('decision-updated', this.boundOnTriggerEvent);
     stateManager.removeEventListener('chat-message-received', this.boundOnTriggerEvent);
     stateManager.removeEventListener('chat-read-state-updated', this.boundOnTriggerEvent);
+    stateManager.removeEventListener('chat-stars-updated', this.boundOnTriggerEvent);
     stateManager.removeEventListener('connected', this.boundOnTriggerEvent);
 
     if (typeof window !== 'undefined') {

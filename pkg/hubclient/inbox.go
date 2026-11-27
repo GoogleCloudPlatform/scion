@@ -44,14 +44,16 @@ const (
 	InboxCategoryChat           = "chat"
 
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
-	InboxBreakdownAgents              = "agents"
-	InboxBreakdownProjects            = "projects"
-	InboxBreakdownSecretsProjects     = "secretsProjects"
-	InboxBreakdownToAddress           = "toAddress"
-	InboxBreakdownRequested           = "requested"
-	InboxBreakdownUnreadConversations = "unreadConversations"
-	InboxBreakdownDMs                 = "dms"
-	InboxBreakdownMentions            = "mentions"
+	InboxBreakdownAgents                = "agents"
+	InboxBreakdownProjects              = "projects"
+	InboxBreakdownSecretsProjects       = "secretsProjects"
+	InboxBreakdownToAddress             = "toAddress"
+	InboxBreakdownRequested             = "requested"
+	InboxBreakdownUnreadConversations   = "unreadConversations"
+	InboxBreakdownDMs                   = "dms"
+	InboxBreakdownMentions              = "mentions"
+	InboxBreakdownStarredMessages       = "starredMessages"
+	InboxBreakdownStarredMessagesCapped = "starredMessagesCapped"
 
 	// InboxState* are the valid values for InboxCategory.State.
 	InboxStateOK          = "ok"

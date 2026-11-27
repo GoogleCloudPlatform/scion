@@ -177,9 +177,13 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 			rows[c.ConversationKey] = c
 		}
 		assert.Equal(t, StarredConversationCandidate{
-			ConversationKey: beta, ProjectID: projA, TopicName: "beta", LastActivityAt: base.Add(50 * time.Minute),
+			ConversationKey: beta, ProjectID: projA, TopicName: "beta", LastActivityAt: base.Add(50 * time.Minute), StarCount: 1,
 			Position: StarredConversationPosition{Value: base.Add(50 * time.Minute).Format(starActivityKeyLayout), Key: beta},
 		}, rows[beta])
+		assert.Equal(t, 2, rows[alpha].StarCount, "alpha has two live stars")
+		assert.Equal(t, 1, rows[alphaTwo].StarCount)
+		assert.Equal(t, 1, rows[agentDM].StarCount)
+		assert.Equal(t, 1, rows[humanDM].StarCount)
 		assert.True(t, rows[agentDM].IsDM)
 		assert.Equal(t, projB, rows[agentDM].ProjectID, "an agent DM carries its stars' project")
 		assert.Empty(t, rows[humanDM].ProjectID, "a DM between users has no project")

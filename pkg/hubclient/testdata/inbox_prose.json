@@ -283,7 +283,7 @@
       "breakdown": { "unreadConversations": 1, "dms": 1, "mentions": 0 },
       "expected": "1 unread conversation",
       "segments": [
-        { "text": "1 unread conversation", "link": "primary" }
+        { "text": "1 unread conversation", "link": "chat-unread" }
       ]
     },
     {
@@ -294,8 +294,9 @@
       "breakdown": { "unreadConversations": 5, "dms": 1, "mentions": 2 },
       "expected": "5 unread conversations, 2 with mentions",
       "segments": [
-        { "text": "5 unread conversations", "link": "primary" },
-        { "text": ", 2 with mentions" }
+        { "text": "5 unread conversations", "link": "chat-unread" },
+        { "text": ", " },
+        { "text": "2 with mentions", "link": "chat-mentions" }
       ]
     },
     {
@@ -306,8 +307,12 @@
       "breakdown": { "unreadConversations": 5, "mentions": 3, "starredMessages": 4, "projects": 2 },
       "expected": "5 unread conversations, 3 with mentions, 4 starred messages across 2 projects",
       "segments": [
-        { "text": "5 unread conversations", "link": "primary" },
-        { "text": ", 3 with mentions, 4 starred messages across 2 projects" }
+        { "text": "5 unread conversations", "link": "chat-unread" },
+        { "text": ", " },
+        { "text": "3 with mentions", "link": "chat-mentions" },
+        { "text": ", " },
+        { "text": "4 starred messages", "link": "chat-starred" },
+        { "text": " across 2 projects" }
       ]
     },
     {
@@ -318,7 +323,36 @@
       "breakdown": { "unreadConversations": 0, "mentions": 0, "starredMessages": 1, "projects": 1 },
       "expected": "1 starred message across 1 project",
       "segments": [
-        { "text": "1 starred message across 1 project" }
+        { "text": "1 starred message", "link": "chat-starred" },
+        { "text": " across 1 project" }
+      ]
+    },
+    {
+      "name": "chat unread with starred and no mentions",
+      "category": "chat",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "unreadConversations": 2, "mentions": 0, "starredMessages": 3, "projects": 2 },
+      "expected": "2 unread conversations, 3 starred messages across 2 projects",
+      "segments": [
+        { "text": "2 unread conversations", "link": "chat-unread" },
+        { "text": ", " },
+        { "text": "3 starred messages", "link": "chat-starred" },
+        { "text": " across 2 projects" }
+      ]
+    },
+    {
+      "name": "chat unread with capped starred messages across projects",
+      "category": "chat",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "unreadConversations": 2, "mentions": 0, "starredMessages": 4, "starredMessagesCapped": 1, "projects": 2 },
+      "expected": "2 unread conversations, 4+ starred messages across 2 projects",
+      "segments": [
+        { "text": "2 unread conversations", "link": "chat-unread" },
+        { "text": ", " },
+        { "text": "4+ starred messages", "link": "chat-starred" },
+        { "text": " across 2 projects" }
       ]
     },
     {
@@ -329,7 +363,7 @@
       "breakdown": { "unreadConversations": 2, "mentions": 0, "projects": 0 },
       "expected": "2 unread conversations",
       "segments": [
-        { "text": "2 unread conversations", "link": "primary" }
+        { "text": "2 unread conversations", "link": "chat-unread" }
       ]
     },
     {
@@ -339,7 +373,7 @@
       "capped": true,
       "expected": "3+ unread conversations",
       "segments": [
-        { "text": "3+ unread conversations", "link": "primary" }
+        { "text": "3+ unread conversations", "link": "chat-unread" }
       ]
     },
     {

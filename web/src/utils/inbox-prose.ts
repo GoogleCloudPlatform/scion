@@ -142,6 +142,7 @@ export function formatInboxProseSegments(
           : count;
       const mentions = breakdown?.mentions ?? 0;
       const starred = breakdown?.starredMessages ?? 0;
+      const starredCapped = (breakdown?.starredMessagesCapped ?? 0) > 0;
 
       const segments: ProseSegment[] = [];
       let hasClause = false;
@@ -149,19 +150,28 @@ export function formatInboxProseSegments(
       if (unread > 0) {
         segments.push({
           text: formatCountNoun(unread, capped, 'unread conversation', 'unread conversations'),
-          link: 'primary',
+          link: 'chat-unread',
         });
         hasClause = true;
       }
       if (mentions > 0) {
-        appendUnlinked(segments, `${hasClause ? ', ' : ''}${mentions} with mentions`);
+        if (hasClause) {
+          appendUnlinked(segments, ', ');
+        }
+        segments.push({
+          text: `${mentions} with mentions`,
+          link: 'chat-mentions',
+        });
         hasClause = true;
       }
       if (starred > 0) {
-        appendUnlinked(
-          segments,
-          `${hasClause ? ', ' : ''}${pluralize(starred, 'starred message', 'starred messages')}`
-        );
+        if (hasClause) {
+          appendUnlinked(segments, ', ');
+        }
+        segments.push({
+          text: formatCountNoun(starred, starredCapped, 'starred message', 'starred messages'),
+          link: 'chat-starred',
+        });
         hasClause = true;
       }
       if (!hasClause) {

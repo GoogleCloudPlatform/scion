@@ -48,14 +48,16 @@ const (
 	InboxCategoryChat           = "chat"
 
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
-	InboxBreakdownAgents              = "agents"
-	InboxBreakdownProjects            = "projects"
-	InboxBreakdownSecretsProjects     = "secretsProjects"
-	InboxBreakdownToAddress           = "toAddress"
-	InboxBreakdownRequested           = "requested"
-	InboxBreakdownUnreadConversations = "unreadConversations"
-	InboxBreakdownDMs                 = "dms"
-	InboxBreakdownMentions            = "mentions"
+	InboxBreakdownAgents                = "agents"
+	InboxBreakdownProjects              = "projects"
+	InboxBreakdownSecretsProjects       = "secretsProjects"
+	InboxBreakdownToAddress             = "toAddress"
+	InboxBreakdownRequested             = "requested"
+	InboxBreakdownUnreadConversations   = "unreadConversations"
+	InboxBreakdownDMs                   = "dms"
+	InboxBreakdownMentions              = "mentions"
+	InboxBreakdownStarredMessages       = "starredMessages"
+	InboxBreakdownStarredMessagesCapped = "starredMessagesCapped"
 
 	// InboxCategoryNotifications is the SSE hint category emitted when a user
 	// acknowledges one or all bell notifications (design §5.2).
