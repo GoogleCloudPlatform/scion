@@ -33,6 +33,16 @@ of defaulting to `latest`, and runs a build-time smoke check that parses the
 `command:` flags from `config.yaml` and verifies `copilot <flags> --version`
 exits 0 before the image is published.
 
+The CLI is installed from npm as
+[`@github/copilot`](https://www.npmjs.com/package/@github/copilot), the same
+way the claude harness installs Claude Code. npm verifies the package against
+the registry's integrity hash. To build behind a network that blocks
+`registry.npmjs.org`, build core-base with `--build-arg NPM_REGISTRY=<mirror>`.
+The harness images inherit it as `NPM_CONFIG_REGISTRY`, which takes precedence
+over a `registry=` line in `.npmrc`. If the mirror needs credentials, pass an
+`.npmrc` holding only the auth lines as a build secret:
+`--secret id=npmrc,src=<path to .npmrc>`.
+
 To bump the bundled CLI version:
 
 1. Update `ARG COPILOT_CLI_VERSION` in `harnesses/copilot/Dockerfile` to the
