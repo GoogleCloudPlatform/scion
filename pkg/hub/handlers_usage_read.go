@@ -323,6 +323,14 @@ func parseUsageTimeParam(raw string, ref time.Time, endOfDay bool) (time.Time, e
 	return time.Time{}, fmt.Errorf("expected RFC 3339 timestamp, YYYY-MM-DD date, or positive duration (e.g. 7d, 24h), got %q", raw)
 }
 
+func saturatingAddInt64(a, b int64) (int64, bool) {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64, true
+	}
+	sum := a + b
+	return sum, sum == math.MaxInt64
+}
+
 type usageBucketPresence struct {
 	trackedEvents     int64
 	inputCount        int64
@@ -333,14 +341,23 @@ type usageBucketPresence struct {
 	reasoningCount    int64
 }
 
-func (p *usageBucketPresence) addRollup(r *store.UsageRollupDaily) {
-	p.trackedEvents += r.PresenceTrackedEvents
-	p.inputCount += r.InputKnownEvents
-	p.outputCount += r.OutputKnownEvents
-	p.cacheReadCount += r.CacheReadKnownEvents
-	p.cacheWriteCount += r.CacheWriteKnownEvents
-	p.cacheWrite1hCount += r.CacheWrite1hKnownEvents
-	p.reasoningCount += r.ReasoningKnownEvents
+func (p *usageBucketPresence) addRollup(r *store.UsageRollupDaily) bool {
+	var sat, s bool
+	p.trackedEvents, s = saturatingAddInt64(p.trackedEvents, r.PresenceTrackedEvents)
+	sat = sat || s
+	p.inputCount, s = saturatingAddInt64(p.inputCount, r.InputKnownEvents)
+	sat = sat || s
+	p.outputCount, s = saturatingAddInt64(p.outputCount, r.OutputKnownEvents)
+	sat = sat || s
+	p.cacheReadCount, s = saturatingAddInt64(p.cacheReadCount, r.CacheReadKnownEvents)
+	sat = sat || s
+	p.cacheWriteCount, s = saturatingAddInt64(p.cacheWriteCount, r.CacheWriteKnownEvents)
+	sat = sat || s
+	p.cacheWrite1hCount, s = saturatingAddInt64(p.cacheWrite1hCount, r.CacheWrite1hKnownEvents)
+	sat = sat || s
+	p.reasoningCount, s = saturatingAddInt64(p.reasoningCount, r.ReasoningKnownEvents)
+	sat = sat || s
+	return sat
 }
 
 func presenceFromTotals(t store.UsageRollupTotals) usageBucketPresence {
@@ -370,6 +387,7 @@ type modelRollupAgg struct {
 	events          int64
 	nullTokenEvents int64
 	presence        usageBucketPresence
+	saturated       bool
 }
 
 func buildAgentUsageResponse(
@@ -400,23 +418,34 @@ func buildAgentUsageResponse(
 		totalCacheWrite      int64
 		totalCacheWrite1h    int64
 		totalReasoning       int64
+		totalSaturated       bool
 	)
+
+	addSat := func(dst *int64, delta int64, satFlag *bool) {
+		v, s := saturatingAddInt64(*dst, delta)
+		*dst = v
+		if s {
+			*satFlag = true
+		}
+	}
 
 	for _, r := range rollups {
 		if r == nil {
 			continue
 		}
-		totalCalls += r.Calls
-		totalErrorCalls += r.ErrorCalls
-		totalEvents += r.Events
-		totalNullTokenEvents += r.NullTokenEvents
-		totalInput += r.Input
-		totalOutput += r.Output
-		totalCacheRead += r.CacheRead
-		totalCacheWrite += r.CacheWrite
-		totalCacheWrite1h += r.CacheWrite1h
-		totalReasoning += r.Reasoning
-		totalPresence.addRollup(r)
+		addSat(&totalCalls, r.Calls, &totalSaturated)
+		addSat(&totalErrorCalls, r.ErrorCalls, &totalSaturated)
+		addSat(&totalEvents, r.Events, &totalSaturated)
+		addSat(&totalNullTokenEvents, r.NullTokenEvents, &totalSaturated)
+		addSat(&totalInput, r.Input, &totalSaturated)
+		addSat(&totalOutput, r.Output, &totalSaturated)
+		addSat(&totalCacheRead, r.CacheRead, &totalSaturated)
+		addSat(&totalCacheWrite, r.CacheWrite, &totalSaturated)
+		addSat(&totalCacheWrite1h, r.CacheWrite1h, &totalSaturated)
+		addSat(&totalReasoning, r.Reasoning, &totalSaturated)
+		if totalPresence.addRollup(r) {
+			totalSaturated = true
+		}
 
 		k := modelKey{model: r.Model, harness: r.Harness, usageSource: r.UsageSource}
 		agg, ok := byModelMap[k]
@@ -428,17 +457,19 @@ func buildAgentUsageResponse(
 			}
 			byModelMap[k] = agg
 		}
-		agg.calls += r.Calls
-		agg.errorCalls += r.ErrorCalls
-		agg.input += r.Input
-		agg.output += r.Output
-		agg.cacheRead += r.CacheRead
-		agg.cacheWrite += r.CacheWrite
-		agg.cacheWrite1h += r.CacheWrite1h
-		agg.reasoning += r.Reasoning
-		agg.events += r.Events
-		agg.nullTokenEvents += r.NullTokenEvents
-		agg.presence.addRollup(r)
+		addSat(&agg.calls, r.Calls, &agg.saturated)
+		addSat(&agg.errorCalls, r.ErrorCalls, &agg.saturated)
+		addSat(&agg.input, r.Input, &agg.saturated)
+		addSat(&agg.output, r.Output, &agg.saturated)
+		addSat(&agg.cacheRead, r.CacheRead, &agg.saturated)
+		addSat(&agg.cacheWrite, r.CacheWrite, &agg.saturated)
+		addSat(&agg.cacheWrite1h, r.CacheWrite1h, &agg.saturated)
+		addSat(&agg.reasoning, r.Reasoning, &agg.saturated)
+		addSat(&agg.events, r.Events, &agg.saturated)
+		addSat(&agg.nullTokenEvents, r.NullTokenEvents, &agg.saturated)
+		if agg.presence.addRollup(r) {
+			agg.saturated = true
+		}
 	}
 
 	byModel := make([]AgentUsageModelBreakdown, 0, len(byModelMap))
@@ -448,6 +479,9 @@ func buildAgentUsageResponse(
 			agg.input, agg.output, agg.cacheRead, agg.cacheWrite, agg.cacheWrite1h, agg.reasoning,
 			agg.presence,
 		)
+		if agg.saturated {
+			tokens.Saturated = true
+		}
 		byModel = append(byModel, AgentUsageModelBreakdown{
 			Model:           agg.model,
 			Harness:         agg.harness,
@@ -488,6 +522,9 @@ func buildAgentUsageResponse(
 		totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCacheWrite1h, totalReasoning,
 		totalPresence,
 	)
+	if totalSaturated {
+		totalTokens.Saturated = true
+	}
 
 	runSummaries := make([]AgentUsageRunSummary, 0, len(runs))
 	for _, ra := range runs {
@@ -558,6 +595,16 @@ func buildAgentUsageResponse(
 // presence counters (no usage_events scan required). A bucket with zero
 // non-null contributions — including pre-migration legacy daily rows where
 // presence_tracked_events == 0 — surfaces as nil (JSON null), never 0.
+//
+// Mixed legacy + tracked bucket caveat: pre-migration daily rollup rows have
+// presence_tracked_events == 0 and *_known_events == 0 (no backfill). Because
+// unknown_events for a bucket is computed as presence_tracked_events - known
+// only when presence_tracked_events > 0 && known > 0 && known < presence_tracked_events:
+//   - legacy rows never contribute to unknown_events;
+//   - if a bucket mixes legacy rows (which supply sum > 0 with known == 0) and
+//     tracked rows where that bucket was NULL (presence_tracked_events > 0,
+//     known == 0), unknown_events reports 0 for that bucket rather than the
+//     tracked unknown count. The token sum itself remains exact.
 func resolveNullableTokens(
 	events, nullTokenEvents int64,
 	input, output, cacheRead, cacheWrite, cacheWrite1h, reasoning int64,

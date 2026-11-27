@@ -139,6 +139,85 @@ func (s *UsageLedgerStore) GetUsageHourlyCoverageStart(ctx context.Context) (tim
 	return utcHourStart(ts), true, nil
 }
 
+// CheckUsageHourlyConsistency implements store.UsageLedgerStore.CheckUsageHourlyConsistency.
+// It compares SUM(events) between usage_rollups_hourly and usage_rollups_daily
+// over the inclusive whole UTC days [utcDayStart(q.Since), utcDayStart(q.Until)]
+// using the same scope/dimension filters, in a single snapshot-consistent SQL
+// statement (two indexed aggregate subqueries).
+func (s *UsageLedgerStore) CheckUsageHourlyConsistency(ctx context.Context, q store.UsageRollupQuery) (bool, error) {
+	if q.Since.IsZero() || q.Until.IsZero() {
+		return true, nil
+	}
+	sinceDay := utcDayStart(q.Since)
+	untilDay := utcDayStart(q.Until)
+	if sinceDay.After(untilDay) {
+		return true, nil
+	}
+
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	buildWhere := func(sinceBound, untilBound time.Time) (string, []any) {
+		var parts []string
+		var args []any
+		if q.ProjectID != "" {
+			parts = append(parts, "project_id = ?")
+			args = append(args, q.ProjectID)
+		}
+		if q.BillingUserID != "" {
+			parts = append(parts, "billing_user_id = ?")
+			args = append(args, q.BillingUserID)
+		}
+		if q.AgentID != "" {
+			parts = append(parts, "agent_id = ?")
+			args = append(args, q.AgentID)
+		}
+		parts = append(parts, "bucket_start >= ?", "bucket_start <= ?")
+		args = append(args, sinceBound, untilBound)
+		if q.Harness != "" {
+			parts = append(parts, "harness = ?")
+			args = append(args, q.Harness)
+		}
+		if q.Model != "" {
+			parts = append(parts, "model = ?")
+			args = append(args, q.Model)
+		}
+		if q.UsageSource != "" {
+			parts = append(parts, "usage_source = ?")
+			args = append(args, q.UsageSource)
+		}
+		return strings.Join(parts, " AND "), args
+	}
+
+	hourlyWhere, hourlyArgs := buildWhere(sinceDay, untilDay.Add(23*time.Hour))
+	dailyWhere, dailyArgs := buildWhere(sinceDay, untilDay)
+
+	query := fmt.Sprintf(
+		"SELECT CASE WHEN (SELECT COALESCE(SUM(events), 0) FROM usage_rollups_hourly WHERE %s) = (SELECT COALESCE(SUM(events), 0) FROM usage_rollups_daily WHERE %s) THEN 1 ELSE 0 END",
+		hourlyWhere,
+		dailyWhere,
+	)
+	args := append(hourlyArgs, dailyArgs...)
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), args, rows); err != nil {
+		return false, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, mapError(err)
+		}
+		return false, nil
+	}
+	var match int
+	if err := rows.Scan(&match); err != nil {
+		return false, mapError(err)
+	}
+	return match == 1, nil
+}
+
 // QueryUsageRollups implements store.UsageLedgerStore.QueryUsageRollups.
 // It pushes overflow-safe saturating aggregation into SQL against
 // usage_rollups_hourly or usage_rollups_daily using the composite indexes and
@@ -453,6 +532,7 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	sinceDay := utcDayStart(since)
 	untilDay := utcDayStart(until)
 	staleCutoff := dbNow.UTC().Add(-filter.StaleAfter).Truncate(time.Microsecond)
+	windowIncludesNow := !until.Before(staleCutoff)
 	runningPhase := string(state.PhaseRunning)
 
 	var scopeWhere []string
@@ -476,9 +556,10 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 		args = append(args, agentUUID)
 	}
 
-	// Window relevance (O1a): agent must have a run_attribution created <= until
+	// Window relevance: agent must have a run_attribution created <= until
 	// (matching billing_user_id when scoped to a user) AND overlap [since, until]
-	// via run creation, active running phase, receipt timestamp, or daily rollup.
+	// via run creation, receipt timestamp, daily rollup, or (only when the window
+	// includes now, i.e. until >= dbNow - staleAfter) active running phase.
 	raCond := "ra.agent_id = CAST(a.id AS TEXT) AND ra.created_at <= ?"
 	args = append(args, until)
 	if filter.BillingUserID != "" {
@@ -487,20 +568,37 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	}
 	scopeWhere = append(scopeWhere, fmt.Sprintf("EXISTS (SELECT 1 FROM run_attribution ra WHERE %s)", raCond))
 
-	overlapCond := `(
-		EXISTS (SELECT 1 FROM run_attribution ra2 WHERE ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?)
-		OR a.phase = ?
-		OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
-		OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?)
-	)`
-	scopeWhere = append(scopeWhere, overlapCond)
-	args = append(args, since, until, runningPhase, since, until, sinceDay, untilDay)
+	if windowIncludesNow {
+		overlapCond := `(
+			EXISTS (SELECT 1 FROM run_attribution ra2 WHERE ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?)
+			OR a.phase = ?
+			OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
+			OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?)
+		)`
+		scopeWhere = append(scopeWhere, overlapCond)
+		args = append(args, since, until, runningPhase, since, until, sinceDay, untilDay)
+	} else {
+		overlapCond := `(
+			EXISTS (SELECT 1 FROM run_attribution ra2 WHERE ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?)
+			OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
+			OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?)
+		)`
+		scopeWhere = append(scopeWhere, overlapCond)
+		args = append(args, since, until, since, until, sinceDay, untilDay)
+	}
 
 	// Parameters for agent_flags projection:
-	// 1. runningPhase for is_running
-	// 2. staleCutoff for is_receipt_stale
-	// 3. sinceDay, untilDay for non-running rollup existence fallback
-	args = append(args, runningPhase, staleCutoff, sinceDay, untilDay)
+	// Running-phase and stale classification apply only when the window includes
+	// now (until >= dbNow - staleAfter), so historical windows are not marked
+	// stale by a currently running agent's open meter.
+	isRunningExpr := "0"
+	isStaleExpr := "0"
+	if windowIncludesNow {
+		isRunningExpr = "CASE WHEN am.phase = ? THEN 1 ELSE 0 END"
+		isStaleExpr = "CASE WHEN am.latest_receipt_at IS NOT NULL AND am.latest_receipt_at < ? THEN 1 ELSE 0 END"
+		args = append(args, runningPhase, staleCutoff)
+	}
+	args = append(args, sinceDay, untilDay)
 
 	query := fmt.Sprintf(`
 WITH scoped_agents AS (
@@ -532,10 +630,10 @@ agent_mh AS (
 ),
 agent_flags AS (
 	SELECT
-		CASE WHEN am.phase = ? THEN 1 ELSE 0 END AS is_running,
+		%s AS is_running,
 		CASE WHEN am.latest_receipt_at IS NOT NULL THEN 1 ELSE 0 END AS has_meter_health,
 		am.latest_final_state AS latest_final_state,
-		CASE WHEN am.latest_receipt_at IS NOT NULL AND am.latest_receipt_at < ? THEN 1 ELSE 0 END AS is_receipt_stale,
+		%s AS is_receipt_stale,
 		CASE
 			WHEN am.run_id <> '' AND EXISTS (
 				SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id
@@ -557,7 +655,7 @@ SELECT
 	CAST(COUNT(*) AS BIGINT) AS agent_count,
 	MAX(latest_receipt_at) AS max_last_receipt_at
 FROM agent_flags
-GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data`, strings.Join(scopeWhere, " AND "))
+GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data`, strings.Join(scopeWhere, " AND "), isRunningExpr, isStaleExpr)
 
 	rows := &entsql.Rows{}
 	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), args, rows); err != nil {

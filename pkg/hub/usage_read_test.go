@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -759,4 +760,49 @@ func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *t
 	assert.Nil(t, legacyResp.Tokens.CacheRead, "legacy row with sum=0 and presence_tracked_events=0 must read as null, never 0")
 	assert.Nil(t, legacyResp.Tokens.CacheWrite)
 	assert.Nil(t, legacyResp.Tokens.UnknownEvents, "pure legacy row must not fabricate unknown_events counts")
+}
+
+func TestAgentUsageRead_SaturatesOnOverflow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ag := &store.Agent{ID: "ag-sat", ProjectID: "proj-sat", RunID: "run-sat", Phase: string(state.PhaseRunning)}
+	rollups := []*store.UsageRollupDaily{
+		{
+			Model:                 "claude-sonnet-4-6",
+			Harness:               "claude",
+			UsageSource:           store.UsageSourceNative,
+			Calls:                 1,
+			Input:                 math.MaxInt64 - 10,
+			Output:                50,
+			Events:                1,
+			InputKnownEvents:      1,
+			OutputKnownEvents:     1,
+			PresenceTrackedEvents: 1,
+		},
+		{
+			Model:                 "claude-sonnet-4-6",
+			Harness:               "claude",
+			UsageSource:           store.UsageSourceNative,
+			Calls:                 1,
+			Input:                 100,
+			Output:                25,
+			Events:                1,
+			InputKnownEvents:      1,
+			OutputKnownEvents:     1,
+			PresenceTrackedEvents: 1,
+		},
+	}
+
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, true)
+	require.NotNil(t, resp.Tokens.Input)
+	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.Input)
+	require.NotNil(t, resp.Tokens.Output)
+	assert.Equal(t, int64(75), *resp.Tokens.Output)
+	require.NotNil(t, resp.Tokens.SummableTokens)
+	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.SummableTokens)
+	assert.True(t, resp.Tokens.Saturated)
+
+	require.Len(t, resp.ByModel, 1)
+	require.NotNil(t, resp.ByModel[0].Tokens.Input)
+	assert.Equal(t, int64(math.MaxInt64), *resp.ByModel[0].Tokens.Input)
+	assert.True(t, resp.ByModel[0].Tokens.Saturated)
 }

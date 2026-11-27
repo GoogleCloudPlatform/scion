@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerolluphourly"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagescopecounterdaily"
@@ -58,10 +59,31 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 	userID := createTestUser(t, cs, "pg-concurrent-user@example.com")
 	agentID := uuid.NewString()
 	runID := "run-" + uuid.NewString()
-	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
-
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentID,
+		Slug:      "pg-conc-agent",
+		Name:      "pg-conc-agent",
+		ProjectID: projectID,
+		OwnerID:   userID,
+		CreatedBy: userID,
+		Phase:     string(state.PhaseRunning),
+	}))
+	_, err := cs.SetAgentRunID(ctx, agentID, runID, nil)
+	require.NoError(t, err)
 	ts := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
 	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		Generation:    1,
+		HubID:         "hub-pg",
+		ProjectID:     projectID,
+		AgentID:       agentID,
+		BillingUserID: &userID,
+		Harness:       "claude",
+		CreatedAt:     ts.Add(-time.Minute),
+	})
+	require.NoError(t, err)
 
 	const totalEvents = 30
 	allEvents := make([]*store.UsageEvent, totalEvents)
@@ -238,7 +260,16 @@ func TestUsageIngest_ConcurrentOverlappingBatches_Postgres(t *testing.T) {
 		DBNow:      ts.Add(2 * time.Minute),
 	})
 	require.NoError(t, err)
-	assert.NotNil(t, cov)
+	require.NotNil(t, cov)
+	require.Len(t, cov.Buckets, 1, "Postgres coverage query must match the running agent via CAST(a.id AS TEXT)")
+	assert.Equal(t, 1, cov.Buckets[0].AgentCount)
+	assert.True(t, cov.Buckets[0].IsRunning)
+	assert.True(t, cov.Buckets[0].HasMeterHealth)
+	assert.Equal(t, store.MeterHealthFinalStateOpen, cov.Buckets[0].LatestFinalState)
+	assert.False(t, cov.Buckets[0].IsReceiptStale)
+	assert.True(t, cov.Buckets[0].HasUsageData)
+	require.NotNil(t, cov.LastReceiptAt)
+	assert.Equal(t, ts.Add(time.Minute), *cov.LastReceiptAt)
 }
 
 func TestMeterHealth_FirstInsertRace_Postgres(t *testing.T) {

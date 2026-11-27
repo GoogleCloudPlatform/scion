@@ -811,4 +811,142 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 		totalSingle += b.AgentCount
 	}
 	assert.Equal(t, 1, totalSingle)
+
+	// Historical window (until < dbNow - staleAfter):
+	// 1. A running, stale agent with NO runs, receipts, or rollups in the past
+	//    window must NOT be counted for that window.
+	// 2. A running, stale agent that DID have a rollup in the past window is
+	//    counted as measured (IsRunning=false, IsReceiptStale=false), not stale.
+	histSince := base.AddDate(0, 0, -10)
+	histUntil := base.AddDate(0, 0, -5)
+	covHistEmpty, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projA,
+		Since:      histSince,
+		Until:      histUntil,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      dbNow,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, covHistEmpty.Buckets, "running stale agents with no activity in a past window must not be counted")
+
+	// Seed an older run attribution + historical daily rollup for agStale
+	// (which is currently running with a stale open meter at base+10m).
+	histRunID := "run-hist-" + uuid.NewString()
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         histRunID,
+		Generation:    0,
+		HubID:         "hub-q",
+		ProjectID:     projA,
+		AgentID:       agStale.ID,
+		BillingUserID: &user1,
+		Harness:       "claude",
+		CreatedAt:     histSince.Add(time.Hour),
+	})
+	require.NoError(t, err)
+	evHist := makeStoreUsageEvent("hub-q", "q-hist-1", histRunID, projA, agStale.ID, &user1, 1, histSince.Add(2*time.Hour), 50, 25, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agStale.ID,
+		Events:  []*store.UsageEvent{evHist},
+	})
+	require.NoError(t, err)
+
+	covHistActive, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:  projA,
+		Since:      histSince,
+		Until:      histUntil,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      dbNow,
+	})
+	require.NoError(t, err)
+	require.Len(t, covHistActive.Buckets, 1)
+	assert.Equal(t, 1, covHistActive.Buckets[0].AgentCount)
+	assert.False(t, covHistActive.Buckets[0].IsRunning, "historical window must not set IsRunning")
+	assert.False(t, covHistActive.Buckets[0].IsReceiptStale, "historical window must not mark a running agent's current stale meter as stale")
+	assert.True(t, covHistActive.Buckets[0].HasUsageData)
+}
+
+// TestUsageRead_HourlyConsistencyMixedBinary verifies on both SQLite and
+// Postgres that CheckUsageHourlyConsistency detects an old-binary write
+// (a usage_events row plus a usage_rollups_daily increment with no hourly row)
+// occurring after the hourly coverage marker was set.
+func TestUsageRead_HourlyConsistencyMixedBinary(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs1 := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs1.Close() })
+
+	projID := createTestProject(t, cs1, "mixed-binary-consistency")
+	userID := createTestUser(t, cs1, "mixed-binary@example.com")
+	agentID := uuid.NewString()
+	runID := "run-mixed-" + uuid.NewString()
+	seedRunForIngestTest(t, cs1, projID, agentID, runID, &userID)
+
+	// 1. New binary ingests an initial event, setting the write-once coverage marker M.
+	dbNow, err := cs1.DBNow(ctx)
+	require.NoError(t, err)
+	evInit := makeStoreUsageEvent("hub-mix", "evt-mix-init", runID, projID, agentID, &userID, 1, dbNow, 10, 5, 0, 0)
+	_, err = cs1.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evInit},
+	})
+	require.NoError(t, err)
+
+	covStart, hasCov, err := cs1.GetUsageHourlyCoverageStart(ctx)
+	require.NoError(t, err)
+	require.True(t, hasCov)
+
+	// Pick two whole covered UTC days >= covStart:
+	//   - dayBad: receives a new-binary event AND a simulated old-binary event (daily only, no hourly).
+	//   - dayClean: receives only a new-binary event.
+	dayBad := utcDayStart(covStart).AddDate(0, 0, 1)
+	dayClean := dayBad.AddDate(0, 0, 1)
+
+	// 2. Simulate an old-binary write on dayBad (usage_events + usage_rollups_daily, no hourly row):
+	// ingest via cs1 and then delete the corresponding hourly row to replicate a pre-P2 binary write.
+	evOldBinary := makeStoreUsageEvent("hub-mix", "evt-mix-oldbin", runID, projID, agentID, &userID, 2, dayBad.Add(2*time.Hour+5*time.Minute), 100, 40, 0, 0)
+	_, err = cs1.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evOldBinary},
+	})
+	require.NoError(t, err)
+	_, err = client.UsageRollupHourly.Delete().
+		Where(usagerolluphourly.BucketStartEQ(dayBad.Add(2 * time.Hour))).
+		Exec(ctx)
+	require.NoError(t, err)
+
+	// 3. Fresh post-upgrade store ingests additional events on dayBad and dayClean.
+	cs2 := NewCompositeStore(client)
+	evNewBadDay := makeStoreUsageEvent("hub-mix", "evt-mix-new1", runID, projID, agentID, &userID, 3, dayBad.Add(5*time.Hour), 20, 10, 0, 0)
+	evNewCleanDay := makeStoreUsageEvent("hub-mix", "evt-mix-new2", runID, projID, agentID, &userID, 4, dayClean.Add(3*time.Hour), 30, 15, 0, 0)
+	_, err = cs2.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evNewBadDay, evNewCleanDay},
+	})
+	require.NoError(t, err)
+
+	// 4. Cross-check must detect the mismatch on dayBad (and any range covering dayBad),
+	// and pass on dayClean.
+	okBad, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     dayBad,
+		Until:     dayBad,
+		ProjectID: projID,
+	})
+	require.NoError(t, err)
+	assert.False(t, okBad, "old-binary write on dayBad must fail hourly consistency check")
+
+	okSpan, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     dayBad,
+		Until:     dayClean,
+		ProjectID: projID,
+	})
+	require.NoError(t, err)
+	assert.False(t, okSpan, "range including dayBad must fail hourly consistency check")
+
+	okClean, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     dayClean,
+		Until:     dayClean,
+		ProjectID: projID,
+	})
+	require.NoError(t, err)
+	assert.True(t, okClean, "clean covered day must pass hourly consistency check")
 }

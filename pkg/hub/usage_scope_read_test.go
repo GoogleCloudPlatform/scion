@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
@@ -491,4 +492,73 @@ func TestScopedUsageRead_SaturatedTotalsAndStoppedNotStale(t *testing.T) {
 	assert.Equal(t, MeasurementStatusMeasured, resp.MeasurementStatus)
 	assert.Equal(t, 0, resp.StaleAgents)
 	assert.Equal(t, 0, resp.UnmeasuredAgents)
+}
+
+func TestScopedUsageRead_MixedBinaryFallsBackToDailyAndRejectsExplicitHourly(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-scope-mixbin")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	admin := &store.User{ID: uuid.NewString(), Email: "mixbin-admin@example.com", DisplayName: "Admin", Role: "admin", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	proj := &store.Project{ID: tid("mixbin-proj"), Name: "mixbin", Slug: "mixbin"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, admin.ID, proj.ID, "project-owner")
+	ag := &store.Agent{ID: tid("mixbin-ag"), Slug: "mixbin-ag", Name: "mixbin-ag", ProjectID: proj.ID, OwnerID: admin.ID, CreatedBy: admin.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-mixbin", nil)
+	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	day := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	// Seed hourly coverage marker strictly before day so day is a whole covered UTC day.
+	covVal, err := json.Marshal(map[string]string{"started_at": day.Add(-24 * time.Hour).UTC().Format(time.RFC3339)})
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, store.UsageRollupHourlyCoverageSection, covVal, "", -1, "seeded")
+	require.NoError(t, err)
+
+	// Ingest two events on `day`: evt-1 (simulating old-binary write) and evt-2 (new-binary write).
+	ev1 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-1", 1, day.Add(1*time.Hour+5*time.Minute), 100, 50)
+	ev2 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-2", 2, day.Add(3*time.Hour+10*time.Minute), 25, 10)
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{ev1, ev2},
+		RunID:         "run-mixbin",
+		ProducerEpoch: "ep-1",
+		ProducerSeq:   2,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Simulate an old-binary write by removing the hourly row for ev1 while keeping usage_events and usage_rollups_daily intact.
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok)
+	res, err := cs.DB().ExecContext(ctx, "DELETE FROM usage_rollups_hourly WHERE agent_id = ? AND input = 100", ag.ID)
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected)
+
+	sinceStr := day.UTC().Format(time.RFC3339)
+	untilStr := day.Add(23*time.Hour + 59*time.Minute).UTC().Format(time.RFC3339)
+
+	// Auto-granularity must detect the hourly/daily mismatch, fall back to daily,
+	// and return the complete totals (125 input, 60 output, 2 events) without omitting ev1.
+	autoRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+sinceStr+"&until="+untilStr, admin)
+	require.Equal(t, http.StatusOK, autoRec.Code, autoRec.Body.String())
+	var autoResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(autoRec.Body.Bytes(), &autoResp))
+	assert.Equal(t, store.UsageGranularityDay, autoResp.Window.Granularity, "must fall back to daily when hourly rollups are incomplete")
+	assert.Equal(t, int64(2), autoResp.Events)
+	require.NotNil(t, autoResp.Tokens.Input)
+	assert.Equal(t, int64(125), *autoResp.Tokens.Input)
+	require.NotNil(t, autoResp.Tokens.Output)
+	assert.Equal(t, int64(60), *autoResp.Tokens.Output)
+
+	// Explicit groupBy=hour must return 400 with a clear error message.
+	hourRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+sinceStr+"&until="+untilStr+"&groupBy=hour", admin)
+	assert.Equal(t, http.StatusBadRequest, hourRec.Code, hourRec.Body.String())
+	assert.Contains(t, hourRec.Body.String(), "incomplete")
 }

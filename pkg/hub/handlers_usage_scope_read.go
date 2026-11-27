@@ -315,6 +315,51 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
+	// Read-time cross-check before serving hourly granularity: compare
+	// SUM(events) between usage_rollups_hourly and usage_rollups_daily over all
+	// whole covered UTC days inside the window (same scope/dimension filters).
+	// If an older binary wrote to daily without writing hourly (for example
+	// during a multi-replica rolling upgrade or after a rollback), fall back to
+	// daily granularity, or reject an explicit groupBy=hour with 400.
+	// Note: a partial upgrade edge day (where utcDayStart(since) < hourlyCoverageStart)
+	// cannot be cross-checked against daily because pre-marker hours on that day
+	// legitimately lack hourly rows.
+	if win.Granularity == store.UsageGranularityHour {
+		sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
+		untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
+		checkFirstDay := sinceDay
+		if sinceDay.Before(hourlyCoverageStart) {
+			checkFirstDay = sinceDay.AddDate(0, 0, 1)
+		}
+		if !checkFirstDay.After(untilDay) {
+			consistent, err := s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+				Since:         checkFirstDay,
+				Until:         untilDay,
+				ProjectID:     filterProjectID,
+				BillingUserID: filterUserID,
+				AgentID:       filterAgentID,
+				Harness:       filterHarness,
+				Model:         filterModel,
+				UsageSource:   filterUsageSource,
+			})
+			if err != nil {
+				writeErrorFromErr(w, err, "")
+				return
+			}
+			if !consistent {
+				if hasHourGroup {
+					ValidationError(w, "groupBy=hour is unavailable for this window: hourly rollups are incomplete compared to daily rollups", nil)
+					return
+				}
+				win = UsageWindow{
+					Since:       sinceDay,
+					Until:       untilDay.Add(24*time.Hour - time.Microsecond),
+					Granularity: store.UsageGranularityDay,
+				}
+			}
+		}
+	}
+
 	rollupRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity:   win.Granularity,
 		Since:         win.Since,

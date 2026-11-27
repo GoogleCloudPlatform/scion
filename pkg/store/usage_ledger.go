@@ -503,6 +503,14 @@ type UsageLedgerStore interface {
 	// not yet received any writes.
 	GetUsageHourlyCoverageStart(ctx context.Context) (startedAt time.Time, ok bool, err error)
 
+	// CheckUsageHourlyConsistency compares SUM(events) between
+	// usage_rollups_hourly and usage_rollups_daily over the inclusive whole UTC
+	// days [utcDayStart(q.Since), utcDayStart(q.Until)] with the same scope and
+	// dimension filters. Returns true when both sums match (or when the day
+	// range is empty), and false when hourly rollups are incomplete relative to
+	// daily rollups (for example after a rolling upgrade or rollback).
+	CheckUsageHourlyConsistency(ctx context.Context, q UsageRollupQuery) (bool, error)
+
 	// QueryUsageRollups aggregates usage_rollups_hourly or usage_rollups_daily
 	// in SQL for the requested window, filters, and optional groupBy dimensions,
 	// bounding returned groups to q.Limit.

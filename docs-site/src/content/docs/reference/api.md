@@ -600,6 +600,24 @@ To change the hub-wide value, `PUT /limits/:id` on the `max_agents_per_broker` l
 
 The Quota System API enforces fail-closed limits. Route guards strictly separate read and write permissions, preventing arbitrary modification of system limits.
 
+### Token Usage Read APIs (`tokenomics.usage_ledger`)
+
+Experimental: all endpoints below return `404` while the `tokenomics.usage_ledger` [experiment](/scion/reference/experiments/) is off.
+
+- `GET /agents/:id/usage`: Agent-scoped token usage summary from `usage_rollups_daily` (`since`, `until`, default 30d). Authorized for callers with `agent.read` or the agent itself.
+- `GET /projects/:id/usage`: Project-scoped token usage summary (`project.usage.read` — project members with `project.read` and agent tokens belonging to that project).
+- `GET /users/:id/usage`: User-scoped token usage summary by `billing_user_id` (`hub.user.usage.read` — self or hub `hub.metrics.read`; agents receive `403`).
+- `GET /me/usage`: Caller's own token usage summary (`user.usage.self.read` — human users; agents receive `403`). Distinct from `GET /usage/me`, which returns quota usage.
+- `GET /usage`: Hub-wide token usage summary (`hub.usage.read` — hub `hub.metrics.read`). Registered as an exact path so it does not shadow `GET /usage/me`.
+
+**Query parameters (scoped endpoints):** `since`, `until` (RFC 3339, `YYYY-MM-DD`, or relative duration such as `7d` / `24h`), `groupBy` (comma-separated or repeated: `hour`, `day`, `project`, `user`, `agent`, `harness`, `model`), `limit` (max `500`; default `336` when `groupBy` includes `hour`, otherwise `100`), and optional filters `project_id`, `user_id`, `agent_id`, `harness`, `model`, `usage_source`. When a time-series `groupBy` (`hour` or `day`) is truncated by `limit`, the most recent buckets are kept and returned in ascending chronological order.
+
+**Hourly granularity & cross-check:** Auto-granularity selects `hour` only when the window starts within the 14-day hourly retention horizon, starts at or after the write-once hourly coverage marker (`ceil_hour(DB now)` at first hourly ingest), and passes a read-time cross-check comparing `SUM(events)` in `usage_rollups_hourly` vs `usage_rollups_daily` over all whole covered UTC days in the window (with the same scope/dimension filters). If the cross-check detects missing hourly rows (for example from an older binary during a rolling upgrade or rollback), auto-granularity falls back to `day` and explicit `groupBy=hour` returns `400`. Partial edge days where the coverage marker falls mid-day cannot be cross-checked against daily rollups; see [Hub Upgrade and Binary Rollback](/scion/reference/hub-upgrade-rollback/#tokenomicsusage_ledger-hourly-rollups-during-rolling-upgrade-or-rollback).
+
+**Coverage & saturation:** `coverage` (`measurement_status`, `unmeasured_agents`, `stale_agents`) counts non-deleted agents with a `run_attribution` created at or before `until` overlapping `[since, until]`. Running-phase liveness and stale-meter classification apply only when the window includes now (`until >= dbNow - staleAfter`); historical windows are not marked stale by a currently running agent. `agent_id` narrows coverage; `harness` and `model` filters narrow token totals/groups only. Counter sums saturate at `math.MaxInt64` and set `tokens.saturated: true`.
+
+**Mixed legacy and tracked buckets (`unknown_events`):** Pre-migration daily rollup rows have `presence_tracked_events = 0` and `*_known_events = 0` (no backfill). Legacy days with a zero token sum read as `null` rather than `0`. For each bucket, `unknown_events` is computed as `presence_tracked_events - <bucket>_known_events` only when `presence_tracked_events > 0`, `<bucket>_known_events > 0`, and `<bucket>_known_events < presence_tracked_events`. Consequently, legacy rows never contribute to `unknown_events`, and in a mixed bucket whose positive sum came solely from legacy rows (`<bucket>_known_events = 0`), tracked unknown events are reported as `0` in `unknown_events` while the token sum itself remains exact.
+
 ## Runtime Broker API
 
 The Runtime Broker exposes a local API (usually on port 9800) for agent execution and management. Requests signed with Runtime Broker HMAC (`X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, `X-Scion-Signature`) must declare their body length (`Content-Length`; `401` on chunked or unknown-length bodies) and must not exceed 2 MiB (`413 payload_too_large` before signature verification); see [Runtime Broker Authentication (HMAC)](/scion/reference/security/#14-runtime-broker-authentication-hmac).
