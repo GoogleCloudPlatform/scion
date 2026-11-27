@@ -47,10 +47,10 @@
 // lock without locking each other out.
 //
 // Root-squashed filesystems (for example NFS exports with root_squash): when
-// euid == 0 and fchown is refused with EPERM/EACCES, the shipper fails closed
-// with [ErrRootSquashChownRefused] rather than leaving nobody-owned state
-// behind. On root-squashed homes, callers must run the shipper as the home
-// directory's owner instead of root.
+// euid == 0 and fchown, mkdirat, or openat is refused with EPERM/EACCES, the
+// shipper best-effort removes any directory it just created and fails closed
+// with [ErrRootSquashChownRefused]. On root-squashed homes, callers must run
+// the shipper as the home directory's owner instead of root.
 //
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:

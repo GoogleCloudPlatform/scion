@@ -398,48 +398,48 @@ func (s *Shipper) rebaselineLocked(ctx context.Context, st *State, reason string
 			if existing.OriginHubID != "" {
 				originHubID = existing.OriginHubID
 			}
-			hasCommittedOrPending := existing.Pending != nil
-			if !hasCommittedOrPending {
-				if existing.GenerationStartOffset != nil {
-					hasCommittedOrPending = existing.RawCommittedOffset > *existing.GenerationStartOffset
-				} else if existing.Generation == 0 {
-					// Legacy state.json without generation_start_offset: gen 0 started at BaselineOffset.
-					hasCommittedOrPending = existing.RawCommittedOffset > existing.BaselineOffset
-				} else {
-					// Legacy state.json for gen > 0 without generation_start_offset: bump conservatively.
-					hasCommittedOrPending = true
-				}
-			}
 			shrankOrRotated := existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode))
-			createsHole := hasCommittedOrPending && offset != existing.RawCommittedOffset
+			createsHole := generationHasCommittedOrPending(existing) && offset != existing.RawCommittedOffset
 			if shrankOrRotated || createsHole {
 				gen++
 				lastGenReason = GenReasonRebaseline
 			}
 		}
 
-		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-			NativeRelativePath:    art.NativeRelativePath,
-			ArtifactKind:          art.Kind,
-			Inode:                 fid.Ino,
-			Device:                fid.Dev,
-			FileID:                fid.String(),
-			Generation:            gen,
-			GenerationStartOffset: int64Ptr(offset),
-			RawCommittedOffset:    offset,
-			ParsedOffset:          offset,
-			GuardHash:             guardHash,
-			GuardLen:              guardLen,
-			Pending:               nil,
-			Baseline:              true,
-			BaselineOffset:        offset,
-			BaselineGuardHash:     guardHash,
-			BaselineGuardLen:      guardLen,
-			NeedsBaseline:         false,
-			OriginHubID:           originHubID,
-			LastGenerationReason:  lastGenReason,
-			UpdatedAt:             &now,
+		// Mutate existing entry in place when present so unknown JSON fields
+		// (Extra, preserved for P7 normalizers) survive Rebaseline. Explicitly
+		// reset transient failure/rejection state since the artifact is being
+		// freshly baselined.
+		entry := existing
+		if entry == nil {
+			entry = &ArtifactState{}
+			st.Artifacts[art.NativeRelativePath] = entry
 		}
+		entry.NativeRelativePath = art.NativeRelativePath
+		entry.ArtifactKind = art.Kind
+		entry.Inode = fid.Ino
+		entry.Device = fid.Dev
+		entry.FileID = fid.String()
+		entry.Generation = gen
+		entry.GenerationStartOffset = int64Ptr(offset)
+		entry.RawCommittedOffset = offset
+		entry.ParsedOffset = offset
+		entry.GuardHash = guardHash
+		entry.GuardLen = guardLen
+		entry.Pending = nil
+		entry.Baseline = true
+		entry.BaselineOffset = offset
+		entry.BaselineGuardHash = guardHash
+		entry.BaselineGuardLen = guardLen
+		entry.NeedsBaseline = false
+		entry.OriginHubID = originHubID
+		entry.ConsecutiveFailures = 0
+		entry.LastError = ""
+		entry.LastGenerationReason = lastGenReason
+		entry.Rejected = false
+		entry.RejectedReason = ""
+		entry.RejectedRunID = ""
+		entry.UpdatedAt = &now
 		rebased++
 	}
 
@@ -506,6 +506,24 @@ func findLastNewlineOffset(ctx context.Context, r io.ReaderAt, fileSize, maxScan
 	return 0, nil
 }
 
+func generationHasCommittedOrPending(entry *ArtifactState) bool {
+	if entry == nil {
+		return false
+	}
+	if entry.Pending != nil {
+		return true
+	}
+	if entry.GenerationStartOffset != nil {
+		return entry.RawCommittedOffset > *entry.GenerationStartOffset
+	}
+	if entry.Generation == 0 {
+		// Legacy state.json without generation_start_offset: gen 0 started at BaselineOffset.
+		return entry.RawCommittedOffset > entry.BaselineOffset
+	}
+	// Legacy state.json for gen > 0 without generation_start_offset: bump conservatively.
+	return true
+}
+
 func markRebaselineSkipped(
 	st *State,
 	art DiscoveredArtifact,
@@ -520,16 +538,29 @@ func markRebaselineSkipped(
 	})
 	if existing == nil {
 		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-			NativeRelativePath: art.NativeRelativePath,
-			ArtifactKind:       art.Kind,
-			Generation:         0,
-			Baseline:           true,
-			NeedsBaseline:      true,
-			OriginHubID:        st.OriginHubID,
-			LastError:          err.Error(),
-			UpdatedAt:          &now,
+			NativeRelativePath:    art.NativeRelativePath,
+			ArtifactKind:          art.Kind,
+			Generation:            0,
+			GenerationStartOffset: int64Ptr(0),
+			Baseline:              true,
+			NeedsBaseline:         true,
+			OriginHubID:           st.OriginHubID,
+			LastError:             err.Error(),
+			UpdatedAt:             &now,
 		}
 		return
+	}
+	// If the current generation already holds committed or pending bytes, bump
+	// Generation now so the later lazy baseline starts a fresh generation
+	// rather than jumping to EOF inside the old generation and leaving a hole.
+	if generationHasCommittedOrPending(existing) {
+		existing.Generation++
+		existing.LastGenerationReason = GenReasonRebaseline
+		existing.GenerationStartOffset = int64Ptr(0)
+		existing.RawCommittedOffset = 0
+		existing.ParsedOffset = 0
+		existing.GuardHash = ""
+		existing.GuardLen = 0
 	}
 	existing.Pending = nil
 	existing.Baseline = true

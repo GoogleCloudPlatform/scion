@@ -18,6 +18,7 @@ package shipper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -699,5 +700,182 @@ func TestFindLastNewlineOffset_CapAndContextCancellation(t *testing.T) {
 	cancel()
 	if _, err := findLastNewlineOffset(cancelCtx, f, 1024, 256); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestSkippedRebaselineFollowedByLazyBaselineBumpsGeneration(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 does not block root reads")
+	}
+
+	for _, mode := range []string{"plain_uploader", "prober_uploader", "delete_and_recreate"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+			if err := os.MkdirAll(projDir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			rel := ".claude/projects/-workspace/sess-skip.jsonl"
+			artPath := filepath.Join(home, filepath.FromSlash(rel))
+			if err := os.WriteFile(artPath, nil, 0o644); err != nil {
+				t.Fatalf("write empty: %v", err)
+			}
+
+			var shipped []Segment
+			var up Uploader
+			if mode == "prober_uploader" {
+				up = &probeAndShipUploader{
+					probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+						return ShipResult{Outcome: OutcomeCommitted, SegmentID: "probe-ok"}, nil
+					},
+					shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+						shipped = append(shipped, seg)
+						return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+					},
+				}
+			} else {
+				up = uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+					shipped = append(shipped, seg)
+					return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+				})
+			}
+
+			s, err := New(Config{HomeDir: home, RunID: "run-skip", Uploader: up})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := s.Baseline(context.Background()); err != nil {
+				t.Fatalf("Baseline: %v", err)
+			}
+
+			// 1. Commit [0, 12) in generation 0.
+			line0 := "{\"gen0\":1}\n"
+			if err := os.WriteFile(artPath, []byte(line0), 0o644); err != nil {
+				t.Fatalf("write line0: %v", err)
+			}
+			r1, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+			if err != nil || r1.SegmentsShipped != 1 {
+				t.Fatalf("RunRound 1: res=%+v err=%v", r1, err)
+			}
+
+			// 2. Make file unreadable during Rebaseline so markRebaselineSkipped runs.
+			if err := os.Chmod(artPath, 0o000); err != nil {
+				t.Fatalf("chmod 000: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(artPath, 0o644) })
+
+			rebRes, err := s.Rebaseline(context.Background(), "capture_disabled")
+			if err != nil {
+				t.Fatalf("Rebaseline: %v", err)
+			}
+			if len(rebRes.SkippedPaths) != 1 {
+				t.Fatalf("expected 1 skipped path during Rebaseline, got %+v", rebRes.SkippedPaths)
+			}
+
+			// 3. Restore file (or delete & recreate it), append bytes written while off, then ship.
+			if err := os.Chmod(artPath, 0o644); err != nil {
+				t.Fatalf("chmod 0644: %v", err)
+			}
+			if mode == "delete_and_recreate" {
+				if err := os.Remove(artPath); err != nil {
+					t.Fatalf("remove: %v", err)
+				}
+				if err := os.WriteFile(artPath, []byte("{\"recreated_while_off\":true}\n"), 0o644); err != nil {
+					t.Fatalf("recreate: %v", err)
+				}
+			} else {
+				f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatalf("append off: %v", err)
+				}
+				_, _ = f.WriteString("{\"while_off\":true}\n")
+				_ = f.Close()
+			}
+
+			// First round after restore completes lazy baseline (and for Prober,
+			// clears RefusedPendingRebaseline once new bytes appear).
+			if _, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic}); err != nil {
+				t.Fatalf("RunRound after restore: %v", err)
+			}
+
+			if mode == "prober_uploader" {
+				// Trigger probe-accept on a line written during backoff.
+				fB, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatalf("append backoff: %v", err)
+				}
+				_, _ = fB.WriteString("{\"backoff\":true}\n")
+				_ = fB.Close()
+				if _, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonResumeCatchup}); err != nil {
+					t.Fatalf("RunRound probe-accept: %v", err)
+				}
+			}
+
+			// Append new post-recovery line and ship: MUST land in generation 1 (not gen 0).
+			postLine := "{\"post_recovery\":2}\n"
+			f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatalf("append postLine: %v", err)
+			}
+			_, _ = f2.WriteString(postLine)
+			_ = f2.Close()
+
+			rFinal, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+			if err != nil || rFinal.SegmentsShipped != 1 {
+				t.Fatalf("RunRound final: res=%+v err=%v", rFinal, err)
+			}
+			if len(shipped) != 2 {
+				t.Fatalf("expected 2 shipped segments, got %d", len(shipped))
+			}
+			if shipped[0].Generation != 0 || shipped[1].Generation != 1 {
+				t.Fatalf("expected gen 0 then gen 1 (no hole in gen 0), got gen %d then gen %d",
+					shipped[0].Generation, shipped[1].Generation)
+			}
+		})
+	}
+}
+
+func TestRebaselinePreservesArtifactExtraFields(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-extra.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+	if err := os.WriteFile(artPath, []byte("{\"seq\":1}\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	s, err := New(Config{HomeDir: home, RunID: "run-extra"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Attach a P7 normalizer unknown field in Extra via WithLockedState.
+	err = WithLockedState(context.Background(), home, 0, func(st *State) (bool, error) {
+		st.Artifacts[rel].Extra = map[string]json.RawMessage{
+			"p7_normalizer_cursor": json.RawMessage(`"cursor-42"`),
+		}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("WithLockedState: %v", err)
+	}
+
+	if _, err := s.Rebaseline(context.Background(), "capture_disabled"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	gotExtra := string(st.Artifacts[rel].Extra["p7_normalizer_cursor"])
+	if gotExtra != `"cursor-42"` {
+		t.Fatalf("expected ArtifactState.Extra to survive Rebaseline, got %q", gotExtra)
 	}
 }

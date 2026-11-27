@@ -165,6 +165,7 @@ func openOrCreateDirNoFollow(parentFD int, name, displayPath string, homeUID, ho
 	if created && geteuidFn() == 0 && ownerUID != homeUID {
 		if cerr := fchownFD(fd, int(homeUID), int(homeGID), displayPath); cerr != nil {
 			_ = unix.Close(fd)
+			_ = unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 			return -1, wrapRootChownErr("fchown "+displayPath, cerr)
 		}
 	}
