@@ -314,6 +314,66 @@ describe('Project agents list column picker (scion-page-project-detail)', () => 
     );
   });
 
+  it('keeps the failed-deletion banner visible when the Status column is hidden', async () => {
+    setFeatureFlag(AGENTS_COLUMN_PICKER_FLAG, true);
+    const failedAgent = makeAgent({
+      deletion: {
+        state: 'failed',
+        code: 'broker_error',
+        error: 'container busy',
+        soft: false,
+        startedAt: '2026-11-27T21:00:00Z',
+        expiresAt: '2099-01-01T00:00:00Z',
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const url = requestUrl(input);
+        if (url.includes('/api/v1/projects/proj-1/agents')) {
+          return Promise.resolve(
+            jsonResponse({
+              agents: [failedAgent],
+              totalCount: 1,
+              complete: true,
+              stats: { total: 1, running: 1 },
+            })
+          );
+        }
+        if (url.endsWith('/api/v1/projects/proj-1')) {
+          return Promise.resolve(
+            jsonResponse({
+              id: 'proj-1',
+              name: 'Alpha',
+              slug: 'alpha',
+              status: 'active',
+              _capabilities: { actions: ['read', 'update'] },
+            })
+          );
+        }
+        return Promise.resolve(jsonResponse({}));
+      })
+    );
+    const el = await mountProjectDetail();
+
+    expect(el.shadowRoot!.querySelectorAll('scion-deletion-banner').length).toBe(1);
+
+    const menu = el.shadowRoot!.querySelector('.columns-picker sl-menu')!;
+    menu.dispatchEvent(
+      new CustomEvent('sl-select', {
+        detail: { item: { value: 'status' } },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    expect(headerLabels(el)).not.toContain('Status');
+    const banners = el.shadowRoot!.querySelectorAll('scion-deletion-banner');
+    expect(banners.length).toBe(1);
+    expect(banners[0].closest('td')?.querySelector('.name-cell')).not.toBeNull();
+  });
+
   it('does not render the picker in grid view', async () => {
     setFeatureFlag(AGENTS_COLUMN_PICKER_FLAG, true);
     localStorage.setItem('scion-view-project-agents', 'grid');

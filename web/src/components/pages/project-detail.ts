@@ -4373,6 +4373,7 @@ export class ScionPageProjectDetail extends LitElement {
             ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
             <a href="/agents/${agent.id}">${agent.name}</a>
           </span>
+          ${visibleColumns.has('status') ? nothing : this.renderDeletionBanner(agent, true)}
         </td>
         ${visibleColumns.has('template')
           ? html`<td class="hide-mobile">${agent.template}</td>`

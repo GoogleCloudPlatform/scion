@@ -2535,9 +2535,12 @@ export class ScionPageAgents extends LitElement {
     neverSuspendOn: boolean,
     activeColumns: readonly AgentColumnDef[]
   ): TemplateResult {
+    const statusVisible = activeColumns.some((col) => col.id === 'status');
     return html`
       <tr>
-        ${activeColumns.map((col) => this.renderAgentRowCell(col, agent, badgesOn, neverSuspendOn))}
+        ${activeColumns.map((col) =>
+          this.renderAgentRowCell(col, agent, badgesOn, neverSuspendOn, statusVisible)
+        )}
       </tr>
     `;
   }
@@ -2546,7 +2549,8 @@ export class ScionPageAgents extends LitElement {
     col: AgentColumnDef,
     agent: Agent,
     badgesOn: boolean,
-    neverSuspendOn: boolean
+    neverSuspendOn: boolean,
+    statusVisible: boolean
   ): TemplateResult {
     switch (col.id) {
       case 'name':
@@ -2556,6 +2560,7 @@ export class ScionPageAgents extends LitElement {
               ${badgesOn ? agentBadges(agent) : html`<sl-icon name="cpu"></sl-icon>`}
               <a href="/agents/${agent.id}">${agent.name}</a>
             </span>
+            ${statusVisible ? nothing : this.renderDeletionBanner(agent, true)}
           </td>
         `;
       case 'project':
