@@ -68,6 +68,7 @@ type TrajectorySegment struct {
 	ByteEnd            int64      `json:"byteEnd"`
 	RawSHA256          string     `json:"rawSha256"`
 	CompressedSize     int64      `json:"compressedSize"`
+	ChargedBytes       int64      `json:"chargedBytes"`
 	CompressedSHA256   string     `json:"compressedSha256"`
 	IncompleteTail     bool       `json:"incompleteTail"`
 	SessionID          string     `json:"sessionId,omitempty"`
@@ -112,14 +113,14 @@ type TrajectorySegmentStore interface {
 	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect TrajectorySegmentCommitExpectation) (*TrajectorySegment, error)
 
 	// SumTrajectoryRunRawBytes returns the total charged bytes —
-	// MAX(byte_end - byte_start, compressed_size) per row — across all committed
-	// and pending segments (regardless of prepare_expires_at) for
-	// (agentID, runID), excluding excludeID if non-empty. Counting both raw and
-	// stored compressed bytes on expired pending rows bounds orphaned
-	// uncommitted object storage per run (no retention sweep exists in P5, so
-	// pending charges persist for the lifetime of the run). Re-preparing the
-	// same identity reuses the existing row and passes its ID as excludeID so
-	// retries and probes do not double-count.
+	// MAX(charged_bytes, byte_end - byte_start, compressed_size) per row —
+	// across all committed and pending segments (regardless of prepare_expires_at)
+	// for (agentID, runID), excluding excludeID if non-empty. Each row's
+	// charged_bytes is a monotonic high-water mark that never decreases on
+	// pending refresh, bounding orphaned uncommitted object storage per run (no
+	// retention sweep exists in P5, so pending charges persist for the lifetime
+	// of the run). Re-preparing the same identity reuses the existing row and
+	// passes its ID as excludeID so retries and probes do not double-count.
 	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error)
 
 	// CountTrajectoryRunSegments returns the number of trajectory_segments rows

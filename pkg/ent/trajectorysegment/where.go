@@ -129,6 +129,11 @@ func CompressedSize(v int64) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldEQ(FieldCompressedSize, v))
 }
 
+// ChargedBytes applies equality check predicate on the "charged_bytes" field. It's identical to ChargedBytesEQ.
+func ChargedBytes(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldEQ(FieldChargedBytes, v))
+}
+
 // CompressedSha256 applies equality check predicate on the "compressed_sha256" field. It's identical to CompressedSha256EQ.
 func CompressedSha256(v string) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldEQ(FieldCompressedSha256, v))
@@ -932,6 +937,46 @@ func CompressedSizeLT(v int64) predicate.TrajectorySegment {
 // CompressedSizeLTE applies the LTE predicate on the "compressed_size" field.
 func CompressedSizeLTE(v int64) predicate.TrajectorySegment {
 	return predicate.TrajectorySegment(sql.FieldLTE(FieldCompressedSize, v))
+}
+
+// ChargedBytesEQ applies the EQ predicate on the "charged_bytes" field.
+func ChargedBytesEQ(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldEQ(FieldChargedBytes, v))
+}
+
+// ChargedBytesNEQ applies the NEQ predicate on the "charged_bytes" field.
+func ChargedBytesNEQ(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldNEQ(FieldChargedBytes, v))
+}
+
+// ChargedBytesIn applies the In predicate on the "charged_bytes" field.
+func ChargedBytesIn(vs ...int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldIn(FieldChargedBytes, vs...))
+}
+
+// ChargedBytesNotIn applies the NotIn predicate on the "charged_bytes" field.
+func ChargedBytesNotIn(vs ...int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldNotIn(FieldChargedBytes, vs...))
+}
+
+// ChargedBytesGT applies the GT predicate on the "charged_bytes" field.
+func ChargedBytesGT(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldGT(FieldChargedBytes, v))
+}
+
+// ChargedBytesGTE applies the GTE predicate on the "charged_bytes" field.
+func ChargedBytesGTE(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldGTE(FieldChargedBytes, v))
+}
+
+// ChargedBytesLT applies the LT predicate on the "charged_bytes" field.
+func ChargedBytesLT(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldLT(FieldChargedBytes, v))
+}
+
+// ChargedBytesLTE applies the LTE predicate on the "charged_bytes" field.
+func ChargedBytesLTE(v int64) predicate.TrajectorySegment {
+	return predicate.TrajectorySegment(sql.FieldLTE(FieldChargedBytes, v))
 }
 
 // CompressedSha256EQ applies the EQ predicate on the "compressed_sha256" field.

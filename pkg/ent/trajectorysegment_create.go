@@ -109,6 +109,20 @@ func (_c *TrajectorySegmentCreate) SetCompressedSize(v int64) *TrajectorySegment
 	return _c
 }
 
+// SetChargedBytes sets the "charged_bytes" field.
+func (_c *TrajectorySegmentCreate) SetChargedBytes(v int64) *TrajectorySegmentCreate {
+	_c.mutation.SetChargedBytes(v)
+	return _c
+}
+
+// SetNillableChargedBytes sets the "charged_bytes" field if the given value is not nil.
+func (_c *TrajectorySegmentCreate) SetNillableChargedBytes(v *int64) *TrajectorySegmentCreate {
+	if v != nil {
+		_c.SetChargedBytes(*v)
+	}
+	return _c
+}
+
 // SetCompressedSha256 sets the "compressed_sha256" field.
 func (_c *TrajectorySegmentCreate) SetCompressedSha256(v string) *TrajectorySegmentCreate {
 	_c.mutation.SetCompressedSha256(v)
@@ -270,6 +284,10 @@ func (_c *TrajectorySegmentCreate) defaults() {
 		v := trajectorysegment.DefaultOriginHubID
 		_c.mutation.SetOriginHubID(v)
 	}
+	if _, ok := _c.mutation.ChargedBytes(); !ok {
+		v := trajectorysegment.DefaultChargedBytes
+		_c.mutation.SetChargedBytes(v)
+	}
 	if _, ok := _c.mutation.IncompleteTail(); !ok {
 		v := trajectorysegment.DefaultIncompleteTail
 		_c.mutation.SetIncompleteTail(v)
@@ -392,6 +410,14 @@ func (_c *TrajectorySegmentCreate) check() error {
 	if v, ok := _c.mutation.CompressedSize(); ok {
 		if err := trajectorysegment.CompressedSizeValidator(v); err != nil {
 			return &ValidationError{Name: "compressed_size", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.compressed_size": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.ChargedBytes(); !ok {
+		return &ValidationError{Name: "charged_bytes", err: errors.New(`ent: missing required field "TrajectorySegment.charged_bytes"`)}
+	}
+	if v, ok := _c.mutation.ChargedBytes(); ok {
+		if err := trajectorysegment.ChargedBytesValidator(v); err != nil {
+			return &ValidationError{Name: "charged_bytes", err: fmt.Errorf(`ent: validator failed for field "TrajectorySegment.charged_bytes": %w`, err)}
 		}
 	}
 	if _, ok := _c.mutation.CompressedSha256(); !ok {
@@ -527,6 +553,10 @@ func (_c *TrajectorySegmentCreate) createSpec() (*TrajectorySegment, *sqlgraph.C
 	if value, ok := _c.mutation.CompressedSize(); ok {
 		_spec.SetField(trajectorysegment.FieldCompressedSize, field.TypeInt64, value)
 		_node.CompressedSize = value
+	}
+	if value, ok := _c.mutation.ChargedBytes(); ok {
+		_spec.SetField(trajectorysegment.FieldChargedBytes, field.TypeInt64, value)
+		_node.ChargedBytes = value
 	}
 	if value, ok := _c.mutation.CompressedSha256(); ok {
 		_spec.SetField(trajectorysegment.FieldCompressedSha256, field.TypeString, value)
@@ -683,6 +713,24 @@ func (u *TrajectorySegmentUpsert) UpdateCompressedSize() *TrajectorySegmentUpser
 // AddCompressedSize adds v to the "compressed_size" field.
 func (u *TrajectorySegmentUpsert) AddCompressedSize(v int64) *TrajectorySegmentUpsert {
 	u.Add(trajectorysegment.FieldCompressedSize, v)
+	return u
+}
+
+// SetChargedBytes sets the "charged_bytes" field.
+func (u *TrajectorySegmentUpsert) SetChargedBytes(v int64) *TrajectorySegmentUpsert {
+	u.Set(trajectorysegment.FieldChargedBytes, v)
+	return u
+}
+
+// UpdateChargedBytes sets the "charged_bytes" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsert) UpdateChargedBytes() *TrajectorySegmentUpsert {
+	u.SetExcluded(trajectorysegment.FieldChargedBytes)
+	return u
+}
+
+// AddChargedBytes adds v to the "charged_bytes" field.
+func (u *TrajectorySegmentUpsert) AddChargedBytes(v int64) *TrajectorySegmentUpsert {
+	u.Add(trajectorysegment.FieldChargedBytes, v)
 	return u
 }
 
@@ -955,6 +1003,27 @@ func (u *TrajectorySegmentUpsertOne) AddCompressedSize(v int64) *TrajectorySegme
 func (u *TrajectorySegmentUpsertOne) UpdateCompressedSize() *TrajectorySegmentUpsertOne {
 	return u.Update(func(s *TrajectorySegmentUpsert) {
 		s.UpdateCompressedSize()
+	})
+}
+
+// SetChargedBytes sets the "charged_bytes" field.
+func (u *TrajectorySegmentUpsertOne) SetChargedBytes(v int64) *TrajectorySegmentUpsertOne {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.SetChargedBytes(v)
+	})
+}
+
+// AddChargedBytes adds v to the "charged_bytes" field.
+func (u *TrajectorySegmentUpsertOne) AddChargedBytes(v int64) *TrajectorySegmentUpsertOne {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.AddChargedBytes(v)
+	})
+}
+
+// UpdateChargedBytes sets the "charged_bytes" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsertOne) UpdateChargedBytes() *TrajectorySegmentUpsertOne {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.UpdateChargedBytes()
 	})
 }
 
@@ -1413,6 +1482,27 @@ func (u *TrajectorySegmentUpsertBulk) AddCompressedSize(v int64) *TrajectorySegm
 func (u *TrajectorySegmentUpsertBulk) UpdateCompressedSize() *TrajectorySegmentUpsertBulk {
 	return u.Update(func(s *TrajectorySegmentUpsert) {
 		s.UpdateCompressedSize()
+	})
+}
+
+// SetChargedBytes sets the "charged_bytes" field.
+func (u *TrajectorySegmentUpsertBulk) SetChargedBytes(v int64) *TrajectorySegmentUpsertBulk {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.SetChargedBytes(v)
+	})
+}
+
+// AddChargedBytes adds v to the "charged_bytes" field.
+func (u *TrajectorySegmentUpsertBulk) AddChargedBytes(v int64) *TrajectorySegmentUpsertBulk {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.AddChargedBytes(v)
+	})
+}
+
+// UpdateChargedBytes sets the "charged_bytes" field to the value that was provided on create.
+func (u *TrajectorySegmentUpsertBulk) UpdateChargedBytes() *TrajectorySegmentUpsertBulk {
+	return u.Update(func(s *TrajectorySegmentUpsert) {
+		s.UpdateChargedBytes()
 	})
 }
 

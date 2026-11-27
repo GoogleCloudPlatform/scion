@@ -415,15 +415,49 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		return
 	}
 
+	// If a pending row already exists and the re-prepare changes content
+	// (hashes, compressed_size, byte_end, or incomplete_tail), verify no object
+	// has been uploaded at the immutable ObjectPath yet. Once an object exists
+	// at ObjectPath, it can never be overwritten or committed with different
+	// content, and refreshing the pending row to smaller values would shrink its
+	// apparent size while leaving the uploaded object behind. Same-content
+	// re-prepares (e.g. lost-ACK replays) remain idempotent, and probes that
+	// prepared without uploading can still refresh freely.
+	if existing != nil && existing.Status == telemetrycontract.TrajectorySegmentStatusPending {
+		contentChanged := existing.RawSHA256 != req.RawSHA256 ||
+			existing.CompressedSHA256 != req.CompressedSHA256 ||
+			existing.CompressedSize != req.CompressedSize ||
+			existing.ByteEnd != req.ByteEnd ||
+			existing.IncompleteTail != req.IncompleteTail
+		if contentChanged {
+			exists, existsErr := stor.Exists(ctx, existing.ObjectPath)
+			if existsErr != nil {
+				slog.ErrorContext(ctx, "trajectory segment prepare: failed to check existing object",
+					"agent_id", id, "segment_id", existing.ID, "error", existsErr)
+				RuntimeError(w, "Failed to verify existing trajectory segment object")
+				return
+			}
+			if exists {
+				writeError(w, http.StatusConflict, telemetrycontract.TrajectoryErrSegmentConflict,
+					"segment object already exists; cannot change content of pending segment", nil)
+				return
+			}
+		}
+	}
+
 	excludeID := ""
+	chargedBytes := max(rawSize, req.CompressedSize)
 	if existing != nil {
 		excludeID = existing.ID
+		// Maintain monotonic per-row high-water charge across pending refreshes.
+		chargedBytes = max(chargedBytes, existing.ChargedBytes, existing.ByteEnd-existing.ByteStart, existing.CompressedSize)
 	}
 	// Enforce per-run byte and segment-row caps across all committed and pending
-	// rows (including expired pending rows). Each row is charged
-	// MAX(byte_end - byte_start, compressed_size) so orphaned uncommitted objects
-	// cannot bypass the storage bound by declaring a tiny raw range with a larger
-	// compressed payload, and the per-run row cap prevents tiny segments from
+	// rows (including expired pending rows). Each row is charged its monotonic
+	// high-water MAX(charged_bytes, byte_end - byte_start, compressed_size) so
+	// orphaned uncommitted objects cannot bypass the storage bound by declaring
+	// a tiny raw range with a larger compressed payload or by re-preparing to a
+	// smaller size, and the per-run row cap prevents tiny segments from
 	// inflating the database. No retention sweep exists in P5, so pending charges
 	// persist for the lifetime of the run. Re-prepares of the same identity
 	// (retries or repeated capture probes) reuse the existing row and exclude it
@@ -432,7 +466,6 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	// Note: this check-then-insert accounting is not serialized per run in
 	// wave 1, so concurrent prepares for the same run can overshoot
 	// maxTrajectoryRunRawBytes by up to concurrency * maxSegmentRawBytes.
-	chargedBytes := max(rawSize, req.CompressedSize)
 	usedRunBytes, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -473,6 +506,7 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 		ByteEnd:            req.ByteEnd,
 		RawSHA256:          req.RawSHA256,
 		CompressedSize:     req.CompressedSize,
+		ChargedBytes:       chargedBytes,
 		CompressedSHA256:   req.CompressedSHA256,
 		IncompleteTail:     req.IncompleteTail,
 		SessionID:          req.SessionID,
@@ -642,15 +676,23 @@ func (s *Server) buildTrajectoryUploadInstruction(
 
 // trajectoryProxyBaseURL returns the base URL for Hub-proxied trajectory
 // segment PUTs so the upload URL's scheme and host match the Hub URL the agent
-// actually called. Starting from the incoming request's Host, it checks the
-// Hub's configured candidate endpoints (AgentEndpoint, HubEndpointForAgents,
-// Public, Operator, InternalURL): if the request Host matches a candidate's
-// host:port, it returns that candidate's scheme://host (fixing TLS-terminating
-// proxies without server.trusted_proxies). Otherwise it falls back to
-// s.requestBaseURL(r), preserving broker-rewritten internal/container-bridge
-// endpoints.
+// actually called. Starting from s.requestBaseURL(r) (which honours
+// X-Forwarded-Host and X-Forwarded-Proto only when the immediate peer is in
+// server.trusted_proxies), it checks the Hub's configured candidate endpoints
+// (AgentEndpoint, HubEndpointForAgents, Public, Operator, InternalURL): if the
+// effective request host matches a candidate's host:port (normalising default
+// ports :443/:80), it returns that candidate's scheme with the exact request
+// host string (fixing TLS-terminating proxies without server.trusted_proxies
+// while matching the client's exact-Host origin check). Otherwise it returns
+// s.requestBaseURL(r), preserving broker-rewritten internal and
+// container-bridge endpoints.
 func (s *Server) trajectoryProxyBaseURL(r *http.Request) string {
-	reqHost := strings.TrimSpace(r.Host)
+	base := s.requestBaseURL(r)
+	baseU, err := url.Parse(base)
+	reqHost := ""
+	if err == nil {
+		reqHost = strings.TrimSpace(baseU.Host)
+	}
 	if reqHost != "" {
 		endpoints := s.HubEndpoints()
 		candidates := []string{
@@ -665,16 +707,16 @@ func (s *Server) trajectoryProxyBaseURL(r *http.Request) string {
 			if ep == "" {
 				continue
 			}
-			u, err := url.Parse(ep)
-			if err != nil || u.Scheme == "" || u.Host == "" {
+			u, parseErr := url.Parse(ep)
+			if parseErr != nil || u.Scheme == "" || u.Host == "" {
 				continue
 			}
 			if trajectoryHostPortMatches(reqHost, u.Host, u.Scheme) {
-				return u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/")
+				return u.Scheme + "://" + reqHost + strings.TrimRight(u.Path, "/")
 			}
 		}
 	}
-	return s.requestBaseURL(r)
+	return base
 }
 
 func trajectoryHostPortMatches(reqHost, candHost, candScheme string) bool {

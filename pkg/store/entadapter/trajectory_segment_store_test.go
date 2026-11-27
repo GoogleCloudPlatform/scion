@@ -255,4 +255,34 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, stillPendingGen2.Status)
 	assert.True(t, stillPendingGen2.IncompleteTail)
 	assert.Equal(t, "sess-after", stillPendingGen2.SessionID)
+
+	// R1 monotonic charged_bytes high-water mark: refreshing a pending row to
+	// smaller byte_end / compressed_size never decreases charged_bytes or the
+	// sum reported by SumTrajectoryRunRawBytes.
+	gen3 := *base
+	gen3.Generation = 3
+	gen3.ByteStart = 0
+	gen3.ByteEnd = 8192
+	gen3.CompressedSize = 4096
+	gen3.ObjectPath = "hub-1/trajectories/v1/raw/project=proj-1/agent=agent-1/run=run-1/claude/.claude/projects/-workspace/sess-1.jsonl/g3-0000000000000000.seg.gz"
+	preparedGen3, err := cs.PrepareTrajectorySegment(ctx, &gen3)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8192), preparedGen3.ChargedBytes)
+
+	sumBeforeShrink, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "")
+	require.NoError(t, err)
+
+	gen3Shrink := gen3
+	gen3Shrink.ID = ""
+	gen3Shrink.ByteEnd = 1
+	gen3Shrink.CompressedSize = 25
+	gen3Shrink.ChargedBytes = 0
+	refreshedGen3, err := cs.PrepareTrajectorySegment(ctx, &gen3Shrink)
+	require.NoError(t, err)
+	assert.Equal(t, preparedGen3.ID, refreshedGen3.ID)
+	assert.Equal(t, int64(8192), refreshedGen3.ChargedBytes, "charged_bytes must be monotonic and never decrease")
+
+	sumAfterShrink, err := cs.SumTrajectoryRunRawBytes(ctx, "agent-1", "run-1", "")
+	require.NoError(t, err)
+	assert.Equal(t, sumBeforeShrink, sumAfterShrink, "SumTrajectoryRunRawBytes must not decrease after shrinking a pending row")
 }

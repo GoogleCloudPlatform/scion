@@ -128708,6 +128708,8 @@ type TrajectorySegmentMutation struct {
 	raw_sha256           *string
 	compressed_size      *int64
 	addcompressed_size   *int64
+	charged_bytes        *int64
+	addcharged_bytes     *int64
 	compressed_sha256    *string
 	incomplete_tail      *bool
 	session_id           *string
@@ -129389,6 +129391,62 @@ func (m *TrajectorySegmentMutation) ResetCompressedSize() {
 	m.addcompressed_size = nil
 }
 
+// SetChargedBytes sets the "charged_bytes" field.
+func (m *TrajectorySegmentMutation) SetChargedBytes(i int64) {
+	m.charged_bytes = &i
+	m.addcharged_bytes = nil
+}
+
+// ChargedBytes returns the value of the "charged_bytes" field in the mutation.
+func (m *TrajectorySegmentMutation) ChargedBytes() (r int64, exists bool) {
+	v := m.charged_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldChargedBytes returns the old "charged_bytes" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldChargedBytes(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldChargedBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldChargedBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldChargedBytes: %w", err)
+	}
+	return oldValue.ChargedBytes, nil
+}
+
+// AddChargedBytes adds i to the "charged_bytes" field.
+func (m *TrajectorySegmentMutation) AddChargedBytes(i int64) {
+	if m.addcharged_bytes != nil {
+		*m.addcharged_bytes += i
+	} else {
+		m.addcharged_bytes = &i
+	}
+}
+
+// AddedChargedBytes returns the value that was added to the "charged_bytes" field in this mutation.
+func (m *TrajectorySegmentMutation) AddedChargedBytes() (r int64, exists bool) {
+	v := m.addcharged_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetChargedBytes resets all changes to the "charged_bytes" field.
+func (m *TrajectorySegmentMutation) ResetChargedBytes() {
+	m.charged_bytes = nil
+	m.addcharged_bytes = nil
+}
+
 // SetCompressedSha256 sets the "compressed_sha256" field.
 func (m *TrajectorySegmentMutation) SetCompressedSha256(s string) {
 	m.compressed_sha256 = &s
@@ -129822,7 +129880,7 @@ func (m *TrajectorySegmentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TrajectorySegmentMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.hub_id != nil {
 		fields = append(fields, trajectorysegment.FieldHubID)
 	}
@@ -129861,6 +129919,9 @@ func (m *TrajectorySegmentMutation) Fields() []string {
 	}
 	if m.compressed_size != nil {
 		fields = append(fields, trajectorysegment.FieldCompressedSize)
+	}
+	if m.charged_bytes != nil {
+		fields = append(fields, trajectorysegment.FieldChargedBytes)
 	}
 	if m.compressed_sha256 != nil {
 		fields = append(fields, trajectorysegment.FieldCompressedSha256)
@@ -129926,6 +129987,8 @@ func (m *TrajectorySegmentMutation) Field(name string) (ent.Value, bool) {
 		return m.RawSha256()
 	case trajectorysegment.FieldCompressedSize:
 		return m.CompressedSize()
+	case trajectorysegment.FieldChargedBytes:
+		return m.ChargedBytes()
 	case trajectorysegment.FieldCompressedSha256:
 		return m.CompressedSha256()
 	case trajectorysegment.FieldIncompleteTail:
@@ -129981,6 +130044,8 @@ func (m *TrajectorySegmentMutation) OldField(ctx context.Context, name string) (
 		return m.OldRawSha256(ctx)
 	case trajectorysegment.FieldCompressedSize:
 		return m.OldCompressedSize(ctx)
+	case trajectorysegment.FieldChargedBytes:
+		return m.OldChargedBytes(ctx)
 	case trajectorysegment.FieldCompressedSha256:
 		return m.OldCompressedSha256(ctx)
 	case trajectorysegment.FieldIncompleteTail:
@@ -130101,6 +130166,13 @@ func (m *TrajectorySegmentMutation) SetField(name string, value ent.Value) error
 		}
 		m.SetCompressedSize(v)
 		return nil
+	case trajectorysegment.FieldChargedBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetChargedBytes(v)
+		return nil
 	case trajectorysegment.FieldCompressedSha256:
 		v, ok := value.(string)
 		if !ok {
@@ -130191,6 +130263,9 @@ func (m *TrajectorySegmentMutation) AddedFields() []string {
 	if m.addcompressed_size != nil {
 		fields = append(fields, trajectorysegment.FieldCompressedSize)
 	}
+	if m.addcharged_bytes != nil {
+		fields = append(fields, trajectorysegment.FieldChargedBytes)
+	}
 	return fields
 }
 
@@ -130207,6 +130282,8 @@ func (m *TrajectorySegmentMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedByteEnd()
 	case trajectorysegment.FieldCompressedSize:
 		return m.AddedCompressedSize()
+	case trajectorysegment.FieldChargedBytes:
+		return m.AddedChargedBytes()
 	}
 	return nil, false
 }
@@ -130243,6 +130320,13 @@ func (m *TrajectorySegmentMutation) AddField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddCompressedSize(v)
+		return nil
+	case trajectorysegment.FieldChargedBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddChargedBytes(v)
 		return nil
 	}
 	return fmt.Errorf("unknown TrajectorySegment numeric field %s", name)
@@ -130336,6 +130420,9 @@ func (m *TrajectorySegmentMutation) ResetField(name string) error {
 		return nil
 	case trajectorysegment.FieldCompressedSize:
 		m.ResetCompressedSize()
+		return nil
+	case trajectorysegment.FieldChargedBytes:
+		m.ResetChargedBytes()
 		return nil
 	case trajectorysegment.FieldCompressedSha256:
 		m.ResetCompressedSha256()

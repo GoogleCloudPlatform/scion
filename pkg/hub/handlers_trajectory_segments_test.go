@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -584,16 +585,19 @@ func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepRespA.SegmentID})
 	require.Equal(t, http.StatusNotFound, crossCommit.Code, crossCommit.Body.String())
 
-	// Interleave prepare(B) right after verifyStoredTrajectorySegment in commit(A).
-	srv.trajectoryCommitAfterVerifyHook = func(context.Context, *store.TrajectorySegment) {
-		prepB := prepA
-		prepB.ByteEnd = int64(len(rawB))
-		prepB.RawSHA256 = rawSHAB
-		prepB.CompressedSize = int64(len(compB))
-		prepB.CompressedSHA256 = compSHAB
-		r := doTrajectoryAgentJSON(t, srv, http.MethodPost,
-			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, prepB)
-		require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	// Interleave a concurrent pending refresh to B right after
+	// verifyStoredTrajectorySegment in commit(A) (via store directly, simulating
+	// a race before the PUT completed) so the handler's CommitTrajectorySegment
+	// expectation guard is exercised.
+	srv.trajectoryCommitAfterVerifyHook = func(hookCtx context.Context, seg *store.TrajectorySegment) {
+		refreshed := *seg
+		refreshed.ID = ""
+		refreshed.ByteEnd = int64(len(rawB))
+		refreshed.RawSHA256 = rawSHAB
+		refreshed.CompressedSize = int64(len(compB))
+		refreshed.CompressedSHA256 = compSHAB
+		_, hookErr := s.PrepareTrajectorySegment(hookCtx, &refreshed)
+		require.NoError(t, hookErr)
 	}
 	commitA := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
@@ -900,14 +904,15 @@ func TestTrajectorySegments_CommitExpectationMetadataTOCTOU(t *testing.T) {
 	putRec := doTrajectoryAgentPut(t, srv, prep.Upload.URL, tok, comp, prep.Upload.Headers)
 	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
 
-	// Flipping only incomplete_tail between verify and commit UPDATE must be
-	// refused with 422 and leave the row pending.
-	srv.trajectoryCommitAfterVerifyHook = func(context.Context, *store.TrajectorySegment) {
-		flip := n1Req
+	// Flipping only incomplete_tail between verify and commit UPDATE (via store
+	// directly, simulating a race before PUT completed) must be refused with 422
+	// and leave the row pending.
+	srv.trajectoryCommitAfterVerifyHook = func(hookCtx context.Context, seg *store.TrajectorySegment) {
+		flip := *seg
+		flip.ID = ""
 		flip.IncompleteTail = true
-		r := doTrajectoryAgentJSON(t, srv, http.MethodPost,
-			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, flip)
-		require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+		_, hookErr := s.PrepareTrajectorySegment(hookCtx, &flip)
+		require.NoError(t, hookErr)
 	}
 	commitRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
@@ -1083,6 +1088,114 @@ func TestTrajectorySegments_OrphanStorageAndRowCaps(t *testing.T) {
 		require.Equal(t, http.StatusRequestEntityTooLarge, third.Code, third.Body.String())
 		assert.Equal(t, telemetrycontract.TrajectoryErrRunCapExceeded, decodeTrajectoryErrorCode(t, third))
 	})
+
+	t.Run("shrink-after-upload re-prepare refused with 409 and run cap is not undercounted", func(t *testing.T) {
+		srv, _, _, _, agent, tok := setupTrajectorySegmentFixture(t)
+
+		bigRaw := bytes.Repeat([]byte("A"), 16*1024)
+		bigComp, bigRawSHA, bigCompSHA := gzipAndHash(t, bigRaw)
+		bigCharged := max(int64(len(bigRaw)), int64(len(bigComp)))
+
+		// Cap allows 1 big segment, not 2.
+		srv.trajectoryMaxRunRawBytes = bigCharged + bigCharged/2
+
+		bigReq := telemetrycontract.TrajectorySegmentPrepareRequest{
+			Harness:            "claude",
+			NativeRelativePath: ".claude/projects/-workspace/shrink.jsonl",
+			ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+			Generation:         0,
+			ByteStart:          0,
+			ByteEnd:            int64(len(bigRaw)),
+			RawSHA256:          bigRawSHA,
+			CompressedSize:     int64(len(bigComp)),
+			CompressedSHA256:   bigCompSHA,
+			ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
+		}
+		prep1 := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, bigReq)
+		require.Equal(t, http.StatusOK, prep1.Code, prep1.Body.String())
+		var prep1Resp telemetrycontract.TrajectorySegmentPrepareResponse
+		require.NoError(t, json.Unmarshal(prep1.Body.Bytes(), &prep1Resp))
+
+		// Upload the big object (200), leaving it uncommitted.
+		put1 := doTrajectoryAgentPut(t, srv, prep1Resp.Upload.URL, tok, bigComp, prep1Resp.Upload.Headers)
+		require.Equal(t, http.StatusOK, put1.Code, put1.Body.String())
+
+		// Attempt to re-prepare the SAME pending identity with tiny values to
+		// shrink its cap charge while the big object stays on disk -> 409 segment_conflict.
+		tinyRaw := []byte("x")
+		tinyComp, tinyRawSHA, tinyCompSHA := gzipAndHash(t, tinyRaw)
+		shrinkReq := bigReq
+		shrinkReq.ByteEnd = int64(len(tinyRaw))
+		shrinkReq.RawSHA256 = tinyRawSHA
+		shrinkReq.CompressedSize = int64(len(tinyComp))
+		shrinkReq.CompressedSHA256 = tinyCompSHA
+		shrinkRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, shrinkReq)
+		require.Equal(t, http.StatusConflict, shrinkRec.Code, shrinkRec.Body.String())
+		assert.Equal(t, telemetrycontract.TrajectoryErrSegmentConflict, decodeTrajectoryErrorCode(t, shrinkRec))
+
+		// A new big identity must still get 413 run_cap_exceeded (no undercounting).
+		gen1Req := bigReq
+		gen1Req.Generation = 1
+		overCap := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, gen1Req)
+		require.Equal(t, http.StatusRequestEntityTooLarge, overCap.Code, overCap.Body.String())
+		assert.Equal(t, telemetrycontract.TrajectoryErrRunCapExceeded, decodeTrajectoryErrorCode(t, overCap))
+	})
+
+	t.Run("capture probe without upload allows content-changing re-prepare and lost-ACK identical replay stays idempotent", func(t *testing.T) {
+		srv, _, _, _, agent, tok := setupTrajectorySegmentFixture(t)
+
+		probeRaw := []byte("{\"probe\":1}\n")
+		probeComp, probeRawSHA, probeCompSHA := gzipAndHash(t, probeRaw)
+		probeReq := telemetrycontract.TrajectorySegmentPrepareRequest{
+			Harness:            "claude",
+			NativeRelativePath: ".claude/projects/-workspace/probe-and-replay.jsonl",
+			ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+			Generation:         0,
+			ByteStart:          0,
+			ByteEnd:            int64(len(probeRaw)),
+			RawSHA256:          probeRawSHA,
+			CompressedSize:     int64(len(probeComp)),
+			CompressedSHA256:   probeCompSHA,
+			ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
+		}
+		// 1. Capture probe prepares without uploading.
+		rec1 := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, probeReq)
+		require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
+		var resp1 telemetrycontract.TrajectorySegmentPrepareResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+
+		// 2. Later, shipper prepares real content at the same identity (no object
+		// was uploaded yet) -> 200 OK, reuses row.
+		realRaw := []byte("{\"probe\":1}\n{\"real\":\"line 2\"}\n")
+		realComp, realRawSHA, realCompSHA := gzipAndHash(t, realRaw)
+		realReq := probeReq
+		realReq.ByteEnd = int64(len(realRaw))
+		realReq.RawSHA256 = realRawSHA
+		realReq.CompressedSize = int64(len(realComp))
+		realReq.CompressedSHA256 = realCompSHA
+		rec2 := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, realReq)
+		require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+		var resp2 telemetrycontract.TrajectorySegmentPrepareResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Equal(t, resp1.SegmentID, resp2.SegmentID)
+
+		// 3. Shipper uploads the object, then loses ACK and re-prepares IDENTICAL
+		// content -> 200 OK idempotently even though the object exists.
+		putRec := doTrajectoryAgentPut(t, srv, resp2.Upload.URL, tok, realComp, resp2.Upload.Headers)
+		require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+		replayRec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, realReq)
+		require.Equal(t, http.StatusOK, replayRec.Code, replayRec.Body.String())
+		var replayResp telemetrycontract.TrajectorySegmentPrepareResponse
+		require.NoError(t, json.Unmarshal(replayRec.Body.Bytes(), &replayResp))
+		assert.Equal(t, resp2.SegmentID, replayResp.SegmentID)
+	})
 }
 
 func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
@@ -1103,7 +1216,7 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 		ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
 	}
 
-	doPrepareWithHost := func(t *testing.T, host string, gen int) string {
+	doPrepareWithReq := func(t *testing.T, host, remoteAddr, xfh, xfp string, gen int) string {
 		t.Helper()
 		reqBody := baseReq
 		reqBody.Generation = gen
@@ -1112,9 +1225,17 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodPost,
 			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), bytes.NewReader(b))
 		httpReq.Host = host
+		if remoteAddr != "" {
+			httpReq.RemoteAddr = remoteAddr
+		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("X-Scion-Agent-Token", tok)
-		httpReq.Header.Set("X-Forwarded-Proto", "https") // untrusted without server.trusted_proxies
+		if xfh != "" {
+			httpReq.Header.Set("X-Forwarded-Host", xfh)
+		}
+		if xfp != "" {
+			httpReq.Header.Set("X-Forwarded-Proto", xfp)
+		}
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httpReq)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -1124,17 +1245,26 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 		return resp.Upload.URL
 	}
 
+	_, trustedNet, err := net.ParseCIDR("10.0.0.0/8")
+	require.NoError(t, err)
+
 	cases := []struct {
 		name          string
 		hubEndpoint   string
 		agentEndpoint string
+		internalURL   string
+		trustedNets   []*net.IPNet
+		remoteAddr    string
 		requestHost   string
+		xfh           string
+		xfp           string
 		wantPrefix    string
 	}{
 		{
 			name:        "hosted HTTPS behind TLS proxy without trusted_proxies",
 			hubEndpoint: "https://hub.example.com",
 			requestHost: "hub.example.com",
+			xfp:         "https", // untrusted without server.trusted_proxies
 			wantPrefix:  "https://hub.example.com/api/v1/agents/",
 		},
 		{
@@ -1142,12 +1272,14 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 			hubEndpoint:   "https://hub.example.com",
 			agentEndpoint: "https://agents.example.com",
 			requestHost:   "agents.example.com",
+			xfp:           "https",
 			wantPrefix:    "https://agents.example.com/api/v1/agents/",
 		},
 		{
 			name:        "broker-rewritten internal host against public HTTPS endpoint preserves request host",
 			hubEndpoint: "https://hub.example.com",
 			requestHost: "hub-internal:8080",
+			xfp:         "https",
 			wantPrefix:  "http://hub-internal:8080/api/v1/agents/",
 		},
 		{
@@ -1162,6 +1294,45 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 			requestHost: "localhost:8080",
 			wantPrefix:  "http://localhost:8080/api/v1/agents/",
 		},
+		{
+			name:        "O-a trusted X-Forwarded-Host overrides rewritten Host even when InternalURL matches raw Host",
+			hubEndpoint: "https://hub.example.com",
+			internalURL: "http://scion-hub:8080",
+			trustedNets: []*net.IPNet{trustedNet},
+			remoteAddr:  "10.0.0.5:12345",
+			requestHost: "scion-hub:8080",
+			xfh:         "hub.example.com",
+			xfp:         "https",
+			wantPrefix:  "https://hub.example.com/api/v1/agents/",
+		},
+		{
+			name:        "O-a untrusted X-Forwarded-Host is ignored",
+			hubEndpoint: "https://hub.example.com",
+			trustedNets: []*net.IPNet{trustedNet},
+			remoteAddr:  "192.0.2.10:12345",
+			requestHost: "hub-internal:8080",
+			xfh:         "hub.example.com",
+			xfp:         "https",
+			wantPrefix:  "http://hub-internal:8080/api/v1/agents/",
+		},
+		{
+			name:        "O-b candidate with explicit :443 matches request Host without port and emits request Host",
+			hubEndpoint: "https://hub.example.com:443",
+			requestHost: "hub.example.com",
+			wantPrefix:  "https://hub.example.com/api/v1/agents/",
+		},
+		{
+			name:        "O-b candidate without :443 matches request Host with :443 and emits request Host",
+			hubEndpoint: "https://hub.example.com",
+			requestHost: "hub.example.com:443",
+			wantPrefix:  "https://hub.example.com:443/api/v1/agents/",
+		},
+		{
+			name:        "O-b candidate with explicit :80 matches request Host without port and emits request Host",
+			hubEndpoint: "http://hub.internal:80",
+			requestHost: "hub.internal",
+			wantPrefix:  "http://hub.internal/api/v1/agents/",
+		},
 	}
 
 	for i, tc := range cases {
@@ -1169,7 +1340,9 @@ func TestTrajectorySegments_TLSProxyAndBrokerRewrittenUploadURL(t *testing.T) {
 			srv.config.HubEndpoint = tc.hubEndpoint
 			srv.config.HubEndpoints = nil
 			srv.config.AgentEndpoint = tc.agentEndpoint
-			gotURL := doPrepareWithHost(t, tc.requestHost, i)
+			srv.config.InternalURL = tc.internalURL
+			srv.transportTrustedNets = tc.trustedNets
+			gotURL := doPrepareWithReq(t, tc.requestHost, tc.remoteAddr, tc.xfh, tc.xfp, i)
 			assert.True(t, strings.HasPrefix(gotURL, tc.wantPrefix), "got %q, want prefix %q", gotURL, tc.wantPrefix)
 		})
 	}

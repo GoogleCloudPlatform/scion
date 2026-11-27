@@ -4374,6 +4374,7 @@ var (
 		{Name: "byte_end", Type: field.TypeInt64},
 		{Name: "raw_sha256", Type: field.TypeString},
 		{Name: "compressed_size", Type: field.TypeInt64},
+		{Name: "charged_bytes", Type: field.TypeInt64, Default: 0},
 		{Name: "compressed_sha256", Type: field.TypeString},
 		{Name: "incomplete_tail", Type: field.TypeBool, Default: false},
 		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
@@ -4404,7 +4405,7 @@ var (
 			{
 				Name:    "trajectorysegment_agent_id_created_at",
 				Unique:  false,
-				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[21]},
+				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[22]},
 			},
 		},
 	}

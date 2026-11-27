@@ -43,6 +43,8 @@ type TrajectorySegment struct {
 	RawSha256 string `json:"raw_sha256,omitempty"`
 	// CompressedSize holds the value of the "compressed_size" field.
 	CompressedSize int64 `json:"compressed_size,omitempty"`
+	// ChargedBytes holds the value of the "charged_bytes" field.
+	ChargedBytes int64 `json:"charged_bytes,omitempty"`
 	// CompressedSha256 holds the value of the "compressed_sha256" field.
 	CompressedSha256 string `json:"compressed_sha256,omitempty"`
 	// IncompleteTail holds the value of the "incomplete_tail" field.
@@ -73,7 +75,7 @@ func (*TrajectorySegment) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case trajectorysegment.FieldIncompleteTail:
 			values[i] = new(sql.NullBool)
-		case trajectorysegment.FieldGeneration, trajectorysegment.FieldByteStart, trajectorysegment.FieldByteEnd, trajectorysegment.FieldCompressedSize:
+		case trajectorysegment.FieldGeneration, trajectorysegment.FieldByteStart, trajectorysegment.FieldByteEnd, trajectorysegment.FieldCompressedSize, trajectorysegment.FieldChargedBytes:
 			values[i] = new(sql.NullInt64)
 		case trajectorysegment.FieldID, trajectorysegment.FieldHubID, trajectorysegment.FieldOriginHubID, trajectorysegment.FieldProjectID, trajectorysegment.FieldAgentID, trajectorysegment.FieldRunID, trajectorysegment.FieldHarness, trajectorysegment.FieldNativeRelativePath, trajectorysegment.FieldArtifactKind, trajectorysegment.FieldRawSha256, trajectorysegment.FieldCompressedSha256, trajectorysegment.FieldSessionID, trajectorysegment.FieldObjectPath, trajectorysegment.FieldManifestPath, trajectorysegment.FieldStatus, trajectorysegment.FieldNormalizeStatus:
 			values[i] = new(sql.NullString)
@@ -177,6 +179,12 @@ func (_m *TrajectorySegment) assignValues(columns []string, values []any) error 
 				return fmt.Errorf("unexpected type %T for field compressed_size", values[i])
 			} else if value.Valid {
 				_m.CompressedSize = value.Int64
+			}
+		case trajectorysegment.FieldChargedBytes:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field charged_bytes", values[i])
+			} else if value.Valid {
+				_m.ChargedBytes = value.Int64
 			}
 		case trajectorysegment.FieldCompressedSha256:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -313,6 +321,9 @@ func (_m *TrajectorySegment) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("compressed_size=")
 	builder.WriteString(fmt.Sprintf("%v", _m.CompressedSize))
+	builder.WriteString(", ")
+	builder.WriteString("charged_bytes=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ChargedBytes))
 	builder.WriteString(", ")
 	builder.WriteString("compressed_sha256=")
 	builder.WriteString(_m.CompressedSha256)
