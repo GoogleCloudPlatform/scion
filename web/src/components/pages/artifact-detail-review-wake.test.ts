@@ -215,7 +215,10 @@ function dismissWakeDialog(
 }
 
 async function mountAndEnterReview(): Promise<ScionPageArtifactDetail> {
-  window.__SCION_FEATURES__ = { 'hub.artifacts': true };
+  window.__SCION_FEATURES__ = {
+    'hub.artifacts': true,
+    'web.artifact_review_editor': false,
+  };
   const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
   el.pageData = {
     path: `/projects/${PROJECT_ID}/artifacts/${ARTIFACT_ID}`,

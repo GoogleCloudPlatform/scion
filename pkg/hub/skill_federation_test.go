@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -107,6 +108,8 @@ func TestFederateResolve_PinnedHappyPath(t *testing.T) {
 	})
 
 	srv, s := newFederationTestServer(t, mock)
+	// Keep exercising the legacy v1 pin path (no per-file hashes in resolve response).
+	setServerExperimentDefault(t, srv, experiments.SkillContentHashV2, false)
 
 	registry := &store.SkillRegistry{
 		Name:        "ext-registry",

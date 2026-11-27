@@ -100,9 +100,7 @@ func TestAdmitMessageArtifacts(t *testing.T) {
 	assert.Equal(t, []artifacts.RefView{{Ref: artifacts.FormatRef(own, 0), ID: own}}, views)
 
 	// Feature off: nothing admitted, and the warning says the feature is off.
-	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
-	require.NoError(t, err)
-	srv.experiments = reg
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	require.False(t, srv.experimentEnabled(experiments.Artifacts))
 	out, admitted, warning = srv.admitMessageArtifacts(ctx, map[string]string{artifacts.MessageMetadataKey: refsValue(artifacts.MessageRef{ArtifactID: own})}, artifactRecipient{})
 	assert.Empty(t, admitted)
@@ -292,9 +290,7 @@ func TestMessageArtifacts_ViewsAreReadCheckedPerViewer(t *testing.T) {
 	}
 
 	// Feature off: no views at all.
-	reg, err := experiments.NewRegistry(experiments.Default().All(), nil)
-	require.NoError(t, err)
-	srv.experiments = reg
+	setServerExperimentDefault(t, srv, experiments.Artifacts, false)
 	views, unavailable = srv.messageArtifactViews(ownerCtx, []string{"msg-1"})
 	assert.Nil(t, views)
 	assert.False(t, unavailable)

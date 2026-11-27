@@ -34,7 +34,7 @@ import (
 
 func TestK8sWorkloadIdentitySetupExperiment_Dispatched(t *testing.T) {
 	on := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_workload_identity_setup":true}}`)
-	assert.Equal(t, []string{experiments.K8sWorkloadIdentitySetup}, on.dispatchExperiments())
+	assert.True(t, slices.Contains(on.dispatchExperiments(), experiments.K8sWorkloadIdentitySetup))
 
 	off := dispatchExperimentsServer(t, "")
 	assert.False(t, slices.Contains(off.dispatchExperiments(), experiments.K8sWorkloadIdentitySetup))

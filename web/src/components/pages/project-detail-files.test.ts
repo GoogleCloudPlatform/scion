@@ -384,6 +384,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
   }, 60_000);
 
   beforeEach(() => {
+    window.__SCION_FEATURES__ = { 'hub.artifacts': false };
     vi.stubGlobal('EventSource', FakeEventSource);
     // No IntersectionObserver in this environment => the Files section
     // reveals immediately rather than waiting for a real viewport signal.
@@ -395,6 +396,7 @@ describe('scion-page-project-detail — lazy file tabs', () => {
   afterEach(() => {
     element?.remove();
     element = null;
+    delete window.__SCION_FEATURES__;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -1019,6 +1021,7 @@ describe('scion-page-project-detail — empty directory per agent (#2703)', () =
   }, 60_000);
 
   beforeEach(() => {
+    window.__SCION_FEATURES__ = { 'hub.artifacts': false };
     vi.stubGlobal('EventSource', FakeEventSource);
     resetHubProjectCapabilitiesCache();
   });
@@ -1026,6 +1029,7 @@ describe('scion-page-project-detail — empty directory per agent (#2703)', () =
   afterEach(() => {
     element?.remove();
     element = null;
+    delete window.__SCION_FEATURES__;
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });

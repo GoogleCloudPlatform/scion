@@ -123,9 +123,14 @@ beforeEach(() => {
     configurable: true,
     get: () => visibility,
   });
+  // Disable hidden-tab close by default in this suite so reconnect/staleness
+  // tests that advance timers while hidden exercise the open-stream path;
+  // the hidden-tab close describe block tests the experiment explicitly.
+  window.__SCION_FEATURES__ = { 'web.sse_hidden_tab_close': false };
 });
 
 afterEach(() => {
+  delete window.__SCION_FEATURES__;
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -1040,16 +1045,12 @@ describe('SSEClient hidden-tab close (ptone/scion#5235)', () => {
   });
 
   it('follows the web.sse_hidden_tab_close experiment by default', () => {
-    window.__SCION_FEATURES__ = { 'web.sse_hidden_tab_close': true };
-    try {
-      const client = connectAndOpen();
-      setVisibility('hidden');
-      vi.advanceTimersByTime(60_000);
-      expect(latest().closed).toBe(true);
-      client.disconnect();
-    } finally {
-      delete window.__SCION_FEATURES__;
-    }
+    delete window.__SCION_FEATURES__;
+    const client = connectAndOpen();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(60_000);
+    expect(latest().closed).toBe(true);
+    client.disconnect();
   });
 
   it('a disconnect cancels the countdown, and a later connect starts clean', () => {

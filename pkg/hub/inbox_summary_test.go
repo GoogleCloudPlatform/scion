@@ -79,6 +79,7 @@ func TestUserMeInboxSummary_FlagOffAndMethodCheck(t *testing.T) {
 func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	f := newChatFixture(t)
 	setInboxDashboardExperiment(t, f.srv, true)
+	setServerExperimentDefault(t, f.srv, experiments.Artifacts, false)
 	ctx := context.Background()
 
 	memberUser, err := f.s.GetUser(ctx, f.member)

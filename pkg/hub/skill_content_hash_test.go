@@ -85,13 +85,13 @@ func legacySkillFiles() []store.TemplateFile {
 	}
 }
 
-func TestSkillContentHashV2Experiment_RegisteredDefaultOff(t *testing.T) {
+func TestSkillContentHashV2Experiment_RegisteredDefaultOn(t *testing.T) {
 	e, ok := experiments.Default().Lookup(experiments.SkillContentHashV2)
 	require.True(t, ok, "experiment %q not registered", experiments.SkillContentHashV2)
-	assert.False(t, e.Default)
+	assert.True(t, e.Default)
 	assert.True(t, e.HasLayer(experiments.LayerServer))
 	assert.Equal(t, "ptone/scion#5935", e.Issue)
-	assert.False(t, (&Server{}).skillContentHashV2Enabled())
+	assert.True(t, (&Server{}).skillContentHashV2Enabled())
 }
 
 // A rename and a chmod-only change change v2 but not v1; a content change
@@ -186,6 +186,7 @@ func TestWithSkillContentHashV2(t *testing.T) {
 		}
 	}
 
+	setSkillContentHashV2Experiment(t, srv, false)
 	assert.Empty(t, srv.withSkillContentHashV2(published()).ContentHashV2, "off: never sent")
 
 	setSkillContentHashV2Experiment(t, srv, true)
@@ -267,6 +268,7 @@ func TestSkillContentHashV2_ResolveAndVersionJSON(t *testing.T) {
 	}
 
 	// Off.
+	setSkillContentHashV2Experiment(t, srv, false)
 	resp := resolve("1.0.0")
 	require.NotNil(t, resp)
 	require.Len(t, resp.Resolved, 1)
@@ -479,6 +481,7 @@ func TestSkillsResolve_GitHubContentHashV2(t *testing.T) {
 		return resp.Resolved[0], raw.Resolved[0]
 	}
 
+	setSkillContentHashV2Experiment(t, srv, false)
 	got, raw := resolveRaw()
 	assert.Equal(t, goldenGHModesTreeV1, got.ContentHash)
 	_, present := raw["contentHashV2"]

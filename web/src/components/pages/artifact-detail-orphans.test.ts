@@ -113,7 +113,10 @@ async function settle(el: ScionPageArtifactDetail): Promise<void> {
 }
 
 async function mount(): Promise<ScionPageArtifactDetail> {
-  window.__SCION_FEATURES__ = { 'hub.artifacts': true };
+  window.__SCION_FEATURES__ = {
+    'hub.artifacts': true,
+    'web.artifact_manage_access': false,
+  };
   const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
   el.pageData = { path: `/projects/p-1/artifacts/${ID}` } as ScionPageArtifactDetail['pageData'];
   document.body.appendChild(el);

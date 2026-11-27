@@ -29,8 +29,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/relaydb"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/knadh/koanf/v2"
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -201,13 +203,58 @@ func TestLoadServerKeyring_BrokerOnlyNeverOpensFile(t *testing.T) {
 	assert.Nil(t, serverKeyringFromFile())
 }
 
+type staticHubSettingStore struct {
+	rows map[string]store.HubSetting
+}
+
+func (s staticHubSettingStore) GetHubSetting(_ context.Context, section string) (*store.HubSetting, error) {
+	row, ok := s.rows[section]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	cp := row
+	return &cp, nil
+}
+
+func (s staticHubSettingStore) ListHubSettings(_ context.Context) ([]store.HubSetting, error) {
+	out := make([]store.HubSetting, 0, len(s.rows))
+	for _, row := range s.rows {
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func (staticHubSettingStore) UpsertHubSetting(context.Context, string, json.RawMessage, string, int64, string) (*store.HubSetting, error) {
+	return nil, errors.New("unused")
+}
+
+func (staticHubSettingStore) DeleteHubSetting(context.Context, string) error {
+	return errors.New("unused")
+}
+
+func (staticHubSettingStore) BackfillOrigin(context.Context) error { return nil }
+
 func TestVerifyKeyringExperiment(t *testing.T) {
 	isolateKeyring(t)
 	// Legacy mode: no gate.
 	require.NoError(t, verifyKeyringExperiment(&hub.Server{}))
 	require.NoError(t, loadServerKeyring(&config.GlobalConfig{KeyringFile: writeCmdKeyring(t, nil)}))
-	// A hub without operational settings resolves the default (off).
-	err := verifyKeyringExperiment(&hub.Server{})
+	// A hub without operational settings resolves the default (on).
+	require.NoError(t, verifyKeyringExperiment(&hub.Server{}))
+	// Explicit override disabling server.secret_rotation must still refuse startup.
+	ops := hub.NewOperationalSettings(staticHubSettingStore{
+		rows: map[string]store.HubSetting{
+			"experiments": {
+				Section: "experiments",
+				Value:   json.RawMessage(`{"overrides":{"server.secret_rotation":false}}`),
+			},
+		},
+	}, koanf.New("."), koanf.New("."))
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srvOff := &hub.Server{}
+	srvOff.SetOperationalSettings(ops)
+	err = verifyKeyringExperiment(srvOff)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, errKeyringExperimentOff))
 	assert.Contains(t, err.Error(), "server.secret_rotation")

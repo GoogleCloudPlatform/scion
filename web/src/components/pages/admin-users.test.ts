@@ -1470,6 +1470,7 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
   });
 
   it('offers no force delete while the experiment is off', async () => {
+    setForceFlag(false);
     element = (await createComponent([makeUser()])) as PageEl;
     vi.stubGlobal('fetch', vi.fn(handler([makeUser()], () => new Response(null, { status: 204 }))));
     const dialog = await openDeleteDialog(element);

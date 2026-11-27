@@ -74,8 +74,8 @@ describe('sidebar Artifacts item', () => {
     expect(managementLinks(el)).toContain('/skills');
   });
 
-  it('is absent by default (experiment unset)', async () => {
+  it('is present by default (experiment unset)', async () => {
     const el = await mount(undefined);
-    expect(managementLinks(el)).not.toContain('/artifacts');
+    expect(managementLinks(el)).toContain('/artifacts');
   });
 });
