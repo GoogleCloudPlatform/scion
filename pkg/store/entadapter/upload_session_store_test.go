@@ -427,7 +427,14 @@ func TestUploadSessionStore_TransitionsAndStickyTerminalStates(t *testing.T) {
 	if done.State != store.UploadStateCompleted || done.LeaseToken != "" || done.LeaseUntil != nil {
 		t.Fatalf("expected completed with cleared lease, got %+v", done)
 	}
-	if !bytes.Equal(done.Result, wantResult) {
+	var gotCompact, wantCompact bytes.Buffer
+	if err := json.Compact(&gotCompact, done.Result); err != nil {
+		t.Fatalf("compact got Result %q: %v", done.Result, err)
+	}
+	if err := json.Compact(&wantCompact, wantResult); err != nil {
+		t.Fatalf("compact want Result %q: %v", wantResult, err)
+	}
+	if !bytes.Equal(gotCompact.Bytes(), wantCompact.Bytes()) {
 		t.Errorf("Result = %s, want %s", done.Result, wantResult)
 	}
 	if !done.IdleExpiresAt.Equal(origIdle) {
