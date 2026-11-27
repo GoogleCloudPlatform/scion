@@ -348,7 +348,7 @@ export class ScionPageAgents extends LitElement {
         display: flex;
         align-items: flex-start;
         justify-content: space-between;
-        margin-bottom: 0.75rem;
+        margin-bottom: 0.5rem;
         gap: 0.5rem;
         /* Cards are minmax(320px, 1fr), so the header has ~270px to work with
            and the badges claim most of it. Wrapping lets them drop to their own
@@ -434,7 +434,7 @@ export class ScionPageAgents extends LitElement {
       .agent-meta {
         font-size: 0.813rem;
         color: var(--scion-text-muted, #64748b);
-        margin-top: 0.25rem;
+        margin-top: 0;
         display: flex;
         flex-direction: column;
         gap: 0.125rem;
@@ -2320,27 +2320,6 @@ export class ScionPageAgents extends LitElement {
                 ${agent.name}
               </a>
             </h3>
-            <div class="agent-meta">
-              ${agent.project
-                ? html`<div>
-                    <sl-icon name="folder"></sl-icon>
-                    <a
-                      href="/projects/${agent.projectId}"
-                      @click=${(e: MouseEvent) => e.stopPropagation()}
-                      >${agent.project}</a
-                    >
-                  </div>`
-                : ''}
-              <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
-              ${agent.runtimeBrokerId
-                ? html`<div>
-                    <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
-                      <sl-icon name="hdd-rack"></sl-icon>
-                      ${agent.runtimeBrokerName || agent.runtimeBrokerId}
-                    </a>
-                  </div>`
-                : ''}
-            </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
           ${neverSuspendBadge(agent, { compact: true })}
@@ -2361,6 +2340,28 @@ export class ScionPageAgents extends LitElement {
                 ></scion-messageability-indicator>
               `
             : nothing}
+        </div>
+
+        <div class="agent-meta">
+          ${agent.project
+            ? html`<div>
+                <sl-icon name="folder"></sl-icon>
+                <a
+                  href="/projects/${agent.projectId}"
+                  @click=${(e: MouseEvent) => e.stopPropagation()}
+                  >${agent.project}</a
+                >
+              </div>`
+            : ''}
+          <div><sl-icon name="code-square"></sl-icon> ${agent.template}</div>
+          ${agent.runtimeBrokerId
+            ? html`<div>
+                <a href="/brokers/${agent.runtimeBrokerId}" class="broker-link">
+                  <sl-icon name="hdd-rack"></sl-icon>
+                  ${agent.runtimeBrokerName || agent.runtimeBrokerId}
+                </a>
+              </div>`
+            : ''}
         </div>
 
         ${this.renderDeletionBanner(agent, false)}

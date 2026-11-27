@@ -189,4 +189,20 @@ describe('scion-page-project-detail agent badges', () => {
       expect(container!.querySelector('sl-icon[name="cpu"]')).not.toBeNull();
     });
   }
+
+  it('grid: the status badge row sits between the name and the metadata (miller79/scion#112)', async () => {
+    localStorage.setItem('scion-view-project-agents', 'grid');
+    element = await createComponent();
+
+    const card = element.shadowRoot!.querySelector('.agent-card')!;
+    expect(card).not.toBeNull();
+    const name = card.querySelector('h3')!;
+    const status = card.querySelector('.agent-header > scion-status-badge')!;
+    const meta = card.querySelector('.agent-meta')!;
+    expect(status).not.toBeNull();
+    expect(meta).not.toBeNull();
+    expect(name.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(status.compareDocumentPosition(meta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(meta.closest('.agent-header')).toBeNull();
+  });
 });
