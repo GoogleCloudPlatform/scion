@@ -351,6 +351,11 @@ const (
 	// counters, meter_health, and run_attribution at a time.
 	LockUsageRetention AdvisoryLockKey = 0x5C100037
 
+	// LockUploadQuota serializes CreateUploadSession quota checks and inserts
+	// (ptone/scion#8654 §3.8) via a transaction-scoped pg_advisory_xact_lock
+	// on PostgreSQL, not taken through AdvisoryLocker.
+	LockUploadQuota AdvisoryLockKey = 0x5C100038
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
