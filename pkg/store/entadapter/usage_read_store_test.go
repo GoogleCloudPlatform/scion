@@ -1964,3 +1964,269 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 	assert.False(t, rollupT1Only.HasLegacyRollups)
 	assert.True(t, rollupT1Only.HasNonLegacyRollups)
 }
+
+func TestGetUsageScopeCoverage_CollapsesDistinctRunAttributionHarness(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	proj := createTestProject(t, cs, "cov-collapse-harness")
+	user1 := createTestUser(t, cs, "cov-collapse@example.com")
+
+	seed := func(slug, runID, harness string) {
+		ag := &store.Agent{
+			ID:        uuid.NewString(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: proj,
+			OwnerID:   user1,
+			Phase:     string(state.PhaseRunning),
+		}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		_, err := cs.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+		_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+			RunID:         runID,
+			ProjectID:     proj,
+			AgentID:       ag.ID,
+			BillingUserID: &user1,
+			Harness:       harness,
+			HarnessConfig: "shared-cfg",
+			CreatedAt:     now.Add(-5 * time.Minute),
+		})
+		require.NoError(t, err)
+	}
+
+	// Two agents with identical harness_config and flags but distinct
+	// run_attribution.harness values must collapse into a single bucket.
+	seed("ag-harness-a", "run-harness-a", "claude")
+	seed("ag-harness-b", "run-harness-b", "gemini")
+
+	cov, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    proj,
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, cov.Buckets, 1, "distinct run_attribution.harness values must not split coverage buckets")
+	assert.Equal(t, "shared-cfg", cov.Buckets[0].HarnessConfig)
+	assert.Equal(t, 2, cov.Buckets[0].AgentCount)
+}
+
+func TestGetUsageScopeCoverage_UserAndGlobalScopesAndHarnessConfigFallback(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	projGlobal := createTestProject(t, cs, "cov-ug-global")
+	projOverride := createTestProject(t, cs, "cov-ug-override")
+	user1 := createTestUser(t, cs, "cov-ug-u1@example.com")
+	user2 := createTestUser(t, cs, "cov-ug-u2@example.com")
+
+	// Project-scoped harness config on projOverride for the fallback slug "cfg-override".
+	require.NoError(t, cs.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "cfg-override",
+		Slug:    "cfg-override",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: projOverride,
+		Status:  store.HarnessConfigStatusActive,
+	}))
+
+	seedAgent := func(projID, ownerID, slug, runID, agentHarnessCfg string, phase state.Phase) *store.Agent {
+		ag := &store.Agent{
+			ID:        uuid.NewString(),
+			Slug:      slug,
+			Name:      slug,
+			ProjectID: projID,
+			OwnerID:   ownerID,
+			Phase:     string(phase),
+		}
+		if agentHarnessCfg != "" {
+			ag.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: agentHarnessCfg}
+		}
+		require.NoError(t, cs.CreateAgent(ctx, ag))
+		if runID != "" {
+			_, err := cs.SetAgentRunID(ctx, ag.ID, runID, nil)
+			require.NoError(t, err)
+			ag.RunID = runID
+		}
+		return ag
+	}
+
+	// 1. user1 on projOverride: running past grace, empty ra.HarnessConfig falls back to
+	// agents.harness_config ("cfg-override") and resolves CapabilityProjectID=projOverride.
+	agUser1Fallback := seedAgent(projOverride, user1, "ag-u1-fallback", "run-u1-fallback", "cfg-override", state.PhaseRunning)
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agUser1Fallback.RunID,
+		ProjectID:     projOverride,
+		AgentID:       agUser1Fallback.ID,
+		BillingUserID: &user1,
+		Harness:       "claude",
+		HarnessConfig: "", // exercises COALESCE(NULLIF(ra_cur.harness_config, ''), sa.agent_harness_config)
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// 2. user1 on projGlobal: running with fresh meter_health and schema_drift_detected=true;
+	// non-empty ra.HarnessConfig ("ra-precedence") takes precedence over agents.harness_config.
+	agUser1Drift := seedAgent(projGlobal, user1, "ag-u1-drift", "run-u1-drift", "agent-ignored", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agUser1Drift.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agUser1Drift.ID,
+		BillingUserID: &user1,
+		Harness:       "antigravity",
+		HarnessConfig: "ra-precedence",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agUser1Drift.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agUser1Drift.ID,
+			RunID:               agUser1Drift.RunID,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       now.Add(-15 * time.Second),
+			ProducerSeq:         1,
+			SchemaDriftDetected: true,
+			FinalState:          store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 3. user1 on projGlobal: stopped agent with legacy-only usage events -> HasLegacyOnly=true.
+	agUser1Legacy := seedAgent(projGlobal, user1, "ag-u1-legacy", "run-u1-legacy", "legacy-cfg", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agUser1Legacy.RunID,
+		ProjectID:     projGlobal,
+		AgentID:       agUser1Legacy.ID,
+		BillingUserID: &user1,
+		Harness:       "claude",
+		HarnessConfig: "legacy-cfg",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evU1Legacy := makeStoreUsageEvent("hub-cov-ug", "ev-u1-leg-1", agUser1Legacy.RunID, projGlobal, agUser1Legacy.ID, &user1, 1, now.Add(-5*time.Minute), 100, 50, 0, 0)
+	evU1Legacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agUser1Legacy.ID,
+		Events:  []*store.UsageEvent{evU1Legacy},
+	})
+	require.NoError(t, err)
+
+	// 4. user2 on projOverride: running past grace with legacy-only events and fallback
+	// agents.harness_config ("other-user-cfg", no project override) -> isolated from user1,
+	// visible in global and projOverride scopes.
+	agUser2 := seedAgent(projOverride, user2, "ag-u2-legacy", "run-u2-legacy", "other-user-cfg", state.PhaseRunning)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         agUser2.RunID,
+		ProjectID:     projOverride,
+		AgentID:       agUser2.ID,
+		BillingUserID: &user2,
+		Harness:       "gemini",
+		HarnessConfig: "",
+		CreatedAt:     now.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	evU2Legacy := makeStoreUsageEvent("hub-cov-ug", "ev-u2-leg-1", agUser2.RunID, projOverride, agUser2.ID, &user2, 1, now.Add(-4*time.Minute), 60, 30, 0, 0)
+	evU2Legacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agUser2.ID,
+		Events:  []*store.UsageEvent{evU2Legacy},
+	})
+	require.NoError(t, err)
+
+	wantU1Fallback := store.UsageCoverageBucket{
+		HarnessConfig:       "cfg-override",
+		CapabilityProjectID: projOverride,
+		IsRunning:           true,
+		IsPastGrace:         true,
+		AgentCount:          1,
+	}
+	wantU1Drift := store.UsageCoverageBucket{
+		HarnessConfig:    "ra-precedence",
+		IsRunning:        true,
+		HasMeterHealth:   true,
+		LatestFinalState: store.MeterHealthFinalStateOpen,
+		IsPastGrace:      true,
+		HasSchemaDrift:   true,
+		AgentCount:       1,
+	}
+	wantU1Legacy := store.UsageCoverageBucket{
+		HarnessConfig: "legacy-cfg",
+		IsPastGrace:   true,
+		HasUsageData:  true,
+		HasLegacyOnly: true,
+		AgentCount:    1,
+	}
+	wantU2Legacy := store.UsageCoverageBucket{
+		HarnessConfig: "other-user-cfg",
+		IsRunning:     true,
+		IsPastGrace:   true,
+		HasUsageData:  true,
+		HasLegacyOnly: true,
+		AgentCount:    1,
+	}
+
+	// (a) User-scoped (BillingUserID != "") scoped_agents CTE: must return all P2
+	// coverage columns accurately for user1 and completely isolate user2's agent.
+	covUser1, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		BillingUserID: user1,
+		Since:         now.Add(-1 * time.Hour),
+		Until:         now,
+		StaleAfter:    3 * time.Minute,
+		StartupGrace:  60 * time.Second,
+		DBNow:         now,
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []store.UsageCoverageBucket{wantU1Fallback, wantU1Drift, wantU1Legacy}, covUser1.Buckets,
+		"user-scoped coverage must expose fallback HarnessConfig, CapabilityProjectID, IsPastGrace, HasSchemaDrift, HasLegacyOnly and isolate other users")
+
+	// (b) Global-scoped (ProjectID == "" && BillingUserID == "" && AgentID == "")
+	// scoped_agents CTE: assert full P2 bucket structs including HasLegacyOnly and fallback.
+	covGlobal, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []store.UsageCoverageBucket{wantU1Fallback, wantU1Drift, wantU1Legacy, wantU2Legacy}, covGlobal.Buckets,
+		"global-scoped coverage must return full P2 buckets including HasLegacyOnly and harness_config fallback")
+
+	// (c) Project-scoped (ProjectID != "") default scoped_agents CTE: verify
+	// harness_config fallback + CapabilityProjectID on projOverride and precedence on projGlobal.
+	covProjOverride, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projOverride,
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []store.UsageCoverageBucket{wantU1Fallback, wantU2Legacy}, covProjOverride.Buckets,
+		"project-scoped coverage must apply harness_config fallback and resolve CapabilityProjectID using the fallback slug")
+
+	covProjGlobal, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		Since:        now.Add(-1 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []store.UsageCoverageBucket{wantU1Drift, wantU1Legacy}, covProjGlobal.Buckets,
+		"project-scoped coverage must prefer non-empty run_attribution.harness_config over agents.harness_config")
+}
