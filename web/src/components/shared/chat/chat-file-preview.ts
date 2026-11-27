@@ -54,11 +54,14 @@ import {
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
 import {
+  ARTIFACTS_FLAG,
+  ATTACHMENT_ARTIFACTS_FLAG,
   artifactDownloadUrl,
   artifactFileUrl,
   artifactPagePath,
   baseName,
   formatArtifactRef,
+  formatAttachmentRef,
   isInlineType,
   isRemoteFile,
   rendererFor,
@@ -66,6 +69,7 @@ import {
   type ArtifactResponse,
   type ViewResponse,
 } from '../../../client/artifacts.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
@@ -323,6 +327,19 @@ export class ScionChatFilePreview extends LitElement {
   /** The signed-in user's id; an artifact they own shows "You" as owner. */
   @property()
   currentUserId = '';
+
+  /**
+   * Opt-in flag enabling the "Save as artifact…" footer action for attachment
+   * targets. Defaults to false so standalone previews (e.g. quick-palette
+   * recent files in chat.ts) without a save dialog host never render a dead
+   * button (ptone/scion#4599).
+   */
+  @property({ type: Boolean })
+  allowSaveAsArtifact = false;
+
+  /** Whether the caller has publish rights for "Save as artifact…". */
+  @property({ type: Boolean })
+  canPublishArtifacts = true;
 
   /** Display names of the open artifact's owner and home project, once looked up. */
   @state() private artifactNames = { owner: '', project: '' };
@@ -936,6 +953,31 @@ export class ScionChatFilePreview extends LitElement {
     await this.copyText(formatArtifactRef(target.id, target.seq));
   }
 
+  /** Copies the attachment's reference (scion://attachment/<id>). */
+  private async copyAttachmentRef(target: AttachmentPreviewTarget): Promise<void> {
+    await this.copyText(formatAttachmentRef(target.id));
+  }
+
+  /** Requests the parent to open the Save as artifact dialog for this attachment. */
+  private requestSaveAsArtifact(target: AttachmentPreviewTarget): void {
+    if (!this.allowSaveAsArtifact || !this.canPublishArtifacts) return;
+    this.dispatchEvent(
+      new CustomEvent('save-attachment-as-artifact', {
+        detail: {
+          attachment: {
+            id: target.id,
+            name: target.name,
+            mime: target.mime,
+            size: target.size,
+          },
+        },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    this.close();
+  }
+
   private retry(): void {
     void this.load();
   }
@@ -1133,6 +1175,34 @@ export class ScionChatFilePreview extends LitElement {
                 <sl-button size="small" @click=${() => this.copyContent()}>
                   <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
                   ${this.copied ? 'Copied!' : 'Copy'}
+                </sl-button>
+              `
+            : nothing}
+          ${target.kind === 'attachment' && isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
+            ? html`
+                ${this.allowSaveAsArtifact && isFeatureEnabled(ARTIFACTS_FLAG)
+                  ? html`
+                      <sl-button
+                        class="save-as-artifact-btn"
+                        size="small"
+                        ?disabled=${!this.canPublishArtifacts}
+                        title=${this.canPublishArtifacts
+                          ? 'Save as artifact'
+                          : "You don't have permission to publish artifacts"}
+                        @click=${() => this.requestSaveAsArtifact(target)}
+                      >
+                        <sl-icon slot="prefix" name="file-earmark-plus"></sl-icon>
+                        Save as artifact…
+                      </sl-button>
+                    `
+                  : nothing}
+                <sl-button
+                  class="copy-attachment-ref-btn"
+                  size="small"
+                  @click=${() => void this.copyAttachmentRef(target)}
+                >
+                  <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
+                  ${this.copied ? 'Copied!' : 'Copy reference'}
                 </sl-button>
               `
             : nothing}

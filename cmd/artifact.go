@@ -69,6 +69,7 @@ Artifacts require a hub and the hub.artifacts experiment.
 
 Commands:
   scion artifact publish <file|dir> [--title] [--key] [--note] [--entry] [--expires-in]
+  scion artifact publish scion://attachment/<id> [--title] [--project] [--key] [--note] [--expires-in]
   scion artifact publish <file|dir> --version-of <ref> [--note]
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
@@ -97,13 +98,17 @@ Commands:
 }
 
 var artifactPublishCmd = &cobra.Command{
-	Use:   "publish <file|dir>",
-	Short: "Publish a file or folder as an artifact",
-	Long: `Publish a file or a folder as an artifact and print its reference.
+	Use:   "publish <file|dir|scion://attachment/<id>>",
+	Short: "Publish a file, folder, or attachment as an artifact",
+	Long: `Publish a file, a folder, or a message attachment as an artifact and print its reference.
 
 The artifact is owned by you (or by this agent) and is readable by the
 members of the current project. The hub stores the bytes, so readers do not
 need access to your filesystem.
+
+When given a message attachment reference (scion://attachment/<id>), the hub
+creates an artifact version pointing at the attachment's stored bytes without
+uploading or copying anything. The attachment stays on its message unchanged.
 
 A folder is published as a bundle of its regular files (hidden files and
 folders, whose names start with ".", are left out; symbolic links inside
@@ -146,7 +151,8 @@ Examples:
   scion artifact publish design.md --key design --note "round 2"
   scion artifact publish ./site --entry index.html --title "Q3 site"
   scion artifact publish plan.md --version-of scion://artifact/5f1c2d3e-...
-  scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...`,
+  scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...
+  scion artifact publish scion://attachment/5f1c2d3e-... --title "Screenshot" --key shot`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		settings, client, endpoint, err := requireArtifactHubClient()
@@ -191,6 +197,20 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 		Title: artifactPublishTitle, Key: artifactPublishKey, Note: artifactPublishNote,
 		Entry: artifactPublishEntry, Scope: artifactPublishScope(settings),
 		ExpiresIn: artifactPublishExpiresIn,
+	}
+	if artifacts.IsAttachmentRef(file) {
+		if artifactPublishReview != "" || artifactPublishOf != "" {
+			return errors.New("--review and --version-of cannot be used with an attachment reference")
+		}
+		if opts.Entry != "" {
+			return errors.New("--entry does not apply when publishing an attachment reference")
+		}
+		if opts.ExpiresIn != "" {
+			if _, _, err := artifacts.ParseExpiresIn(opts.ExpiresIn); err != nil {
+				return fmt.Errorf("--expires-in: %w", err)
+			}
+		}
+		return publishFromAttachment(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts)
 	}
 	info, err := os.Stat(file)
 	if err != nil {
@@ -373,6 +393,39 @@ func publishArtifactWith(ctx context.Context, svc hubclient.ArtifactService, out
 		Size:      info.Size(),
 		SHA256:    hex.EncodeToString(h.Sum(nil)),
 		ExpiresIn: expiresIn,
+	})
+	if err != nil {
+		return fmt.Errorf("publish failed: %w%s", err, artifactErrorHint(err, true))
+	}
+	a := resp.Artifact
+	seq := a.CurrentSeq
+	if resp.Version != nil {
+		seq = resp.Version.Seq
+	}
+	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(a.ID, 0), seq)
+	if page := artifactPageURL(hubEndpoint, a.ScopeRef, a.ID); page != "" {
+		_, _ = fmt.Fprintln(out, page)
+	}
+	for _, w := range resp.Warnings {
+		_, _ = fmt.Fprintf(warn, "warning: %s\n", w)
+	}
+	return nil
+}
+
+// publishFromAttachment publishes a message attachment as an artifact by
+// reference (no bytes uploaded) and prints the reference and web page.
+func publishFromAttachment(ctx context.Context, svc hubclient.ArtifactService, out, warn io.Writer, hubEndpoint, ref string, opts bundlePublishOptions) error {
+	attID, err := artifacts.ParseAttachmentRef(ref)
+	if err != nil {
+		return err
+	}
+	resp, err := svc.PublishFromAttachment(ctx, &hubclient.PublishFromAttachmentRequest{
+		FromAttachment: attID,
+		Title:          opts.Title,
+		ScopeRef:       opts.Scope,
+		Key:            opts.Key,
+		Note:           opts.Note,
+		ExpiresIn:      opts.ExpiresIn,
 	})
 	if err != nil {
 		return fmt.Errorf("publish failed: %w%s", err, artifactErrorHint(err, true))

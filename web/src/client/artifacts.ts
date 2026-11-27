@@ -24,7 +24,7 @@ import { apiFetch, extractApiError } from './api.js';
 import { wakeOfferFromErrorBody } from './wake-offer.js';
 import type { WakeOffer } from './wake-offer.js';
 
-export { ARTIFACTS_FLAG } from './artifacts-flag.js';
+export { ARTIFACTS_FLAG, ATTACHMENT_ARTIFACTS_FLAG } from './artifacts-flag.js';
 
 export interface ArtifactFile {
   path: string;
@@ -52,6 +52,26 @@ export interface ArtifactVersion {
   createdAt: string;
   state: string;
   files: ArtifactFile[];
+  /**
+   * Attachment id this version was published from by reference, omitted for
+   * ordinary publishes (ptone/scion#4599).
+   */
+  sourceAttachmentId?: string;
+  /**
+   * Message id the source attachment was sent in, populated only when the
+   * viewer may read that message.
+   */
+  sourceMessageId?: string;
+  /**
+   * Chat conversation key (topic/thread id or `dm:...`) of the source message,
+   * populated only under the same viewer gate as `sourceMessageId`.
+   */
+  sourceConversationKey?: string;
+  /**
+   * Owning project id of a project-thread source message (absent for DMs),
+   * populated only under the same viewer gate as `sourceMessageId`.
+   */
+  sourceProjectId?: string;
 }
 
 export interface Artifact {
@@ -676,6 +696,33 @@ export function defaultProjectChoice(publishable: ProjectChoice[]): string {
   const global = publishable.find((p) => p.slug === GLOBAL_PROJECT_SLUG);
   if (global) return global.id;
   return publishable.length === 1 ? publishable[0].id : '';
+}
+
+/**
+ * Reports whether the caller can publish artifacts in at least one project
+ * (checking `preferredProjectId` first when given, then the global project,
+ * then remaining readable projects via `filterPublishable` with `firstOnly`).
+ * Stops as soon as one publishable project is found.
+ */
+export async function canPublishAnywhere(
+  opts: { preferredProjectId?: string | undefined; signal?: AbortSignal | undefined } = {}
+): Promise<boolean> {
+  const { preferredProjectId, signal } = opts;
+  if (preferredProjectId) {
+    if (await canPublishIn(preferredProjectId, signal)) return true;
+  }
+  const global = await findGlobalProject(signal);
+  if (global && global.id !== preferredProjectId) {
+    if (await canPublishIn(global.id, signal)) return true;
+  }
+  const { projects } = await listReadableProjects({ skip: global?.id, signal });
+  const rest = preferredProjectId ? projects.filter((p) => p.id !== preferredProjectId) : projects;
+  if (rest.length === 0) return false;
+  const found = await filterPublishable(rest, {
+    firstOnly: true,
+    ...(signal ? { signal } : {}),
+  });
+  return found.length > 0;
 }
 
 /** One page of an artifact's ready versions, newest first. */
@@ -1927,6 +1974,50 @@ export interface MessageArtifactRef {
 /** Canonical reference string of an artifact, pinned to seq when seq > 0. */
 export function formatArtifactRef(id: string, seq?: number): string {
   return seq && seq > 0 ? `scion://artifact/${id}@${seq}` : `scion://artifact/${id}`;
+}
+
+/** Canonical reference string of a chat attachment (ptone/scion#4599). */
+export function formatAttachmentRef(id: string): string {
+  return `scion://attachment/${id}`;
+}
+
+/** Request body for POST /api/v1/artifacts with fromAttachment (ptone/scion#4599). */
+export interface PublishFromAttachmentRequest {
+  /** Attachment ID or canonical scion://attachment/<id> reference. */
+  fromAttachment: string;
+  /** Target home project ID. */
+  scopeRef: string;
+  /** Optional artifact title; defaults to the attachment file name on the hub. */
+  title?: string;
+  /** Optional stable key; appends a new version when an artifact with that key exists. */
+  key?: string;
+  /** Optional version note. */
+  note?: string;
+}
+
+/**
+ * Publishes an existing chat attachment as an artifact (or appends a new
+ * version to an existing keyed artifact) by reference, copying no blob bytes.
+ */
+export async function publishFromAttachment(
+  req: PublishFromAttachmentRequest
+): Promise<ArtifactResponse> {
+  const body: Record<string, string> = {
+    fromAttachment: req.fromAttachment,
+    scopeRef: req.scopeRef,
+  };
+  if (req.title?.trim()) body.title = req.title.trim();
+  if (req.key?.trim()) body.key = req.key.trim();
+  if (req.note?.trim()) body.note = req.note.trim();
+
+  const res = await apiFetch('/api/v1/artifacts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const refused = await reviewOpenError(res);
+  if (refused) throw refused;
+  return okJSON<ArtifactResponse>(res);
 }
 
 /**

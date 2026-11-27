@@ -64,9 +64,12 @@ import {
 } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
+  ATTACHMENT_ARTIFACTS_FLAG,
+  formatAttachmentRef,
   orderArtifactRefs,
   type MessageArtifactRef,
 } from '../../../client/artifacts.js';
+import { showToast } from '../../../utils/toast.js';
 import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
@@ -1505,6 +1508,13 @@ export class ScionChatMessage extends LitElement {
   @property({ type: Array })
   artifactRefs: MessageArtifactRef[] = [];
 
+  /**
+   * Whether the caller has publish rights to save an attachment as an artifact
+   * (ptone/scion#4598, #4599). When false, "Save as artifact…" is disabled.
+   */
+  @property({ type: Boolean })
+  canPublishArtifacts = true;
+
   /** Reply preview data: the message this one is replying to. */
   @property({ type: Object })
   replyPreview: ReplyPreviewInfo | null = null;
@@ -2271,6 +2281,18 @@ export class ScionChatMessage extends LitElement {
     .download-chip .file-size {
       color: var(--scion-text-muted, #64748b);
       font-size: var(--chat-fs-sm);
+    }
+
+    .download-chip-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.125rem;
+    }
+
+    .attachment-menu-trigger::part(base) {
+      padding: 0.25rem;
+      font-size: var(--chat-fs-base);
+      color: var(--scion-text-muted);
     }
 
     /* Inline code/text previews for non-image attachments */
@@ -4370,6 +4392,7 @@ export class ScionChatMessage extends LitElement {
                         href=${attachmentURL(img.id)}
                         download=${img.name}
                       ></sl-icon-button>
+                      ${this.renderAttachmentMenu(img)}
                     </div>
                   </div>
                 `
@@ -4383,22 +4406,112 @@ export class ScionChatMessage extends LitElement {
             <div class="attachments">
               ${files.map(
                 (file) => html`
-                  <a
-                    class="download-chip"
-                    href="/api/v1/chat/attachments/${file.id}"
-                    download=${file.name}
-                    title="Download ${file.name}"
-                  >
-                    <sl-icon name="file-earmark-arrow-down"></sl-icon>
-                    <span class="file-name">${file.name}</span>
-                    <span class="file-size">${formatFileSize(file.size)}</span>
-                  </a>
+                  <span class="download-chip-wrap">
+                    <a
+                      class="download-chip"
+                      href="/api/v1/chat/attachments/${file.id}"
+                      download=${file.name}
+                      title="Download ${file.name}"
+                    >
+                      <sl-icon name="file-earmark-arrow-down"></sl-icon>
+                      <span class="file-name">${file.name}</span>
+                      <span class="file-size">${formatFileSize(file.size)}</span>
+                    </a>
+                    ${this.renderAttachmentMenu(file)}
+                  </span>
                 `
               )}
             </div>
           `
         : nothing}
     `;
+  }
+
+  /**
+   * Overflow menu on an attachment chip/preview when `hub.attachment_artifacts`
+   * is enabled: Save as artifact… (also gated on `hub.artifacts` and publish
+   * rights), Copy reference (`scion://attachment/<id>`), and Download.
+   */
+  private renderAttachmentMenu(file: AttachmentRefInfo) {
+    if (!isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)) return nothing;
+    const showSaveAsArtifact = isFeatureEnabled(ARTIFACTS_FLAG);
+    return html`
+      <sl-dropdown class="attachment-menu" placement="bottom-end" hoist>
+        <sl-icon-button
+          slot="trigger"
+          class="attachment-menu-trigger"
+          name="three-dots-vertical"
+          label="Attachment actions for ${file.name}"
+        ></sl-icon-button>
+        <sl-menu
+          @sl-select=${(e: CustomEvent<{ item?: { value?: string } }>) =>
+            void this.handleAttachmentMenuSelect(file, e)}
+        >
+          ${showSaveAsArtifact
+            ? html`
+                <sl-menu-item
+                  class="attachment-save-artifact-item"
+                  value="save-as-artifact"
+                  ?disabled=${!this.canPublishArtifacts}
+                  title=${this.canPublishArtifacts
+                    ? ''
+                    : "You don't have permission to publish artifacts"}
+                >
+                  <sl-icon slot="prefix" name="file-earmark-plus"></sl-icon>
+                  Save as artifact…
+                </sl-menu-item>
+              `
+            : nothing}
+          <sl-menu-item class="attachment-copy-ref-item" value="copy-ref">
+            <sl-icon slot="prefix" name="clipboard"></sl-icon>
+            Copy reference
+          </sl-menu-item>
+          <sl-menu-item class="attachment-download-item" value="download">
+            <sl-icon slot="prefix" name="download"></sl-icon>
+            Download
+          </sl-menu-item>
+        </sl-menu>
+      </sl-dropdown>
+    `;
+  }
+
+  private async handleAttachmentMenuSelect(
+    file: AttachmentRefInfo,
+    e: CustomEvent<{ item?: { value?: string } }>
+  ): Promise<void> {
+    const action = e.detail?.item?.value;
+    if (action === 'save-as-artifact') {
+      if (!this.canPublishArtifacts) return;
+      this.dispatchEvent(
+        new CustomEvent('save-attachment-as-artifact', {
+          detail: { attachment: file },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return;
+    }
+    if (action === 'copy-ref') {
+      const ok = await copyToClipboard(formatAttachmentRef(file.id));
+      if (ok) {
+        showToast('Attachment reference copied', 'success');
+      } else {
+        showCopyFailedToast();
+      }
+      return;
+    }
+    if (action === 'download') {
+      const a = document.createElement('a');
+      a.href = attachmentURL(file.id);
+      a.download = file.name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      try {
+        a.click();
+      } finally {
+        a.remove();
+      }
+    }
   }
 
   /** A short read-only slice of a text attachment, with expand + download. */
@@ -4459,6 +4572,7 @@ export class ScionChatMessage extends LitElement {
               href=${attachmentURL(ref.id)}
               download=${ref.name}
             ></sl-icon-button>
+            ${this.renderAttachmentMenu(ref)}
           </div>
         </div>
         ${isMd && !showSource
@@ -4556,6 +4670,8 @@ export class ScionChatMessage extends LitElement {
       <scion-chat-file-preview
         .target=${target}
         .currentUserId=${this.currentUserId}
+        ?allowSaveAsArtifact=${true}
+        .canPublishArtifacts=${this.canPublishArtifacts}
         @chat-file-preview-close=${() => {
           this.expandedTarget = null;
         }}

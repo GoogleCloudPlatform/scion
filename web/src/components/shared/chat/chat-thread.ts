@@ -95,8 +95,15 @@ import {
 import {
   ARTIFACTS_FLAG,
   ARTIFACTS_METADATA_KEY,
+  ATTACHMENT_ARTIFACTS_FLAG,
+  canPublishAnywhere,
   type MessageArtifactRef,
 } from '../../../client/artifacts.js';
+import './attachment-save-dialog.js';
+import type {
+  AttachmentArtifactPostDetail,
+  SaveAttachmentTarget,
+} from './attachment-save-dialog.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
 import {
@@ -708,6 +715,10 @@ export class ScionChatThread extends LitElement {
   /** The project ID this conversation belongs to (for v2 mode). */
   @property()
   projectId = '';
+
+  /** Project display name for composer attachment visibility wording (v2 mode). */
+  @property()
+  projectName = '';
 
   /** Thread name for display (v2 mode). */
   @property()
@@ -1931,6 +1942,9 @@ export class ScionChatThread extends LitElement {
    */
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('messages')) this.lookupDecisionAskers();
+    if (changedProperties.has('projectId') || changedProperties.has('isDM')) {
+      this.refreshPublishRights();
+    }
     this.syncStarReconcilers();
     this.syncActionsTabStop();
     this.measureSendErrorTruncation();
@@ -7184,20 +7198,105 @@ export class ScionChatThread extends LitElement {
     this.filePreview = { kind: 'gcs', messageId, bucket, object, name };
   }
 
+  /** Whether the caller can publish artifacts in at least one project. */
+  @state() private canPublishArtifacts = true;
+
+  /** Attachment currently open in the Save as artifact dialog, or null. */
+  @state() private saveAttachmentTarget: SaveAttachmentTarget | null = null;
+
+  private publishCheckScope = '';
+  private publishCheckGen = 0;
+
+  /**
+   * Refresh whether the caller can publish artifacts anywhere (checking the
+   * conversation's project first when set, then global and other readable
+   * projects). Read-only members of a project can still save attachments to
+   * another project they can publish in (ptone/scion#4599).
+   */
+  private refreshPublishRights(): void {
+    if (!isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG) || !isFeatureEnabled(ARTIFACTS_FLAG)) {
+      this.publishCheckScope = '';
+      this.canPublishArtifacts = true;
+      return;
+    }
+    const scopeKey = this.isDM ? '__dm__' : this.projectId || '__group__';
+    if (this.publishCheckScope === scopeKey) return;
+    this.publishCheckScope = scopeKey;
+    const gen = ++this.publishCheckGen;
+    void canPublishAnywhere({ preferredProjectId: this.isDM ? '' : this.projectId })
+      .then((ok) => {
+        if (gen === this.publishCheckGen) this.canPublishArtifacts = ok;
+      })
+      .catch(() => {
+        if (gen === this.publishCheckGen) this.publishCheckScope = '';
+      });
+  }
+
+  /** Open the Save as artifact dialog for an attachment. */
+  private handleSaveAttachmentAsArtifact = (
+    e: CustomEvent<{ attachment: SaveAttachmentTarget }>
+  ): void => {
+    const attachment = e.detail?.attachment;
+    if (!attachment) return;
+    this.saveAttachmentTarget = attachment;
+  };
+
+  /** Post the newly saved artifact chip into the current conversation thread. */
+  private handleAttachmentArtifactPost = (e: CustomEvent<AttachmentArtifactPostDetail>): void => {
+    const ref = e.detail?.ref;
+    if (!ref) return;
+    void this.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: '',
+          plain: false,
+          interrupt: false,
+          mentions: [],
+          attachmentIds: [],
+          artifactRefs: [ref],
+          onSuccess: () => {},
+          onError: (msg) => {
+            showToast(msg || 'Could not post artifact', 'danger');
+          },
+        },
+      })
+    );
+  };
+
   /** Close the file preview dialog. */
   private closeFilePreview(): void {
     this.filePreview = null;
   }
 
-  /** Render the file preview overlay dialog. */
+  /** Render the file preview overlay dialog and Save as artifact dialog. */
   private renderFilePreview() {
-    if (!this.filePreview) return nothing;
     return html`
-      <scion-chat-file-preview
-        .target=${this.filePreview}
-        .currentUserId=${this.currentUserId}
-        @chat-file-preview-close=${() => this.closeFilePreview()}
-      ></scion-chat-file-preview>
+      ${this.filePreview
+        ? html`
+            <scion-chat-file-preview
+              .target=${this.filePreview}
+              .currentUserId=${this.currentUserId}
+              ?allowSaveAsArtifact=${true}
+              .canPublishArtifacts=${this.canPublishArtifacts}
+              @chat-file-preview-close=${() => this.closeFilePreview()}
+              @save-attachment-as-artifact=${this.handleSaveAttachmentAsArtifact}
+            ></scion-chat-file-preview>
+          `
+        : nothing}
+      ${this.saveAttachmentTarget
+        ? html`
+            <scion-attachment-save-dialog
+              .open=${this.saveAttachmentTarget !== null}
+              .attachment=${this.saveAttachmentTarget}
+              .defaultProjectId=${this.isDM ? '' : this.projectId}
+              .canPostToThread=${this.isDM || this.canPost}
+              @attachment-artifact-post=${this.handleAttachmentArtifactPost}
+              @attachment-save-closed=${() => {
+                this.saveAttachmentTarget = null;
+              }}
+            ></scion-attachment-save-dialog>
+          `
+        : nothing}
     `;
   }
 
@@ -7486,6 +7585,7 @@ export class ScionChatThread extends LitElement {
         .conversationMode=${this.isDM ? 'dm' : 'thread'}
         .peerName=${this.peerName}
         .projectId=${this.projectId}
+        .projectName=${this.projectName}
         .currentUserId=${this.currentUserId}
         .conversationKey=${this.conversationKey}
         .replyTo=${this.composerReplyTo}
@@ -7913,6 +8013,7 @@ export class ScionChatThread extends LitElement {
             .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
+            .canPublishArtifacts=${this.canPublishArtifacts}
             .currentUserId=${this.currentUserId}
             .knownUsersByEmail=${this._knownUsersByEmail}
             .knownMentionSlugs=${this._knownMentionSlugs}
@@ -7933,6 +8034,7 @@ export class ScionChatThread extends LitElement {
             @gcs-link-click=${(
               e: CustomEvent<{ bucket: string; object: string; name: string; messageId: string }>
             ) => this.handleGcsLinkClick(e)}
+            @save-attachment-as-artifact=${this.handleSaveAttachmentAsArtifact}
           ></scion-chat-message>
         `,
       });

@@ -41,15 +41,38 @@ type messageHost struct {
 	*fakeHost
 	mmu           sync.Mutex
 	readers       map[string]map[string]bool
+	routes        map[string]SourceMessageRoute
 	noMessageRead map[string]bool
 	noUploadRead  map[string]bool
 	asked         []string
 }
 
-var _ MessageScopeHost = (*messageHost)(nil)
+var (
+	_ MessageScopeHost = (*messageHost)(nil)
+	_ MessageRouteHost = (*messageHost)(nil)
+)
 
 func newMessageHost() *messageHost {
-	return &messageHost{fakeHost: newFakeHost(), readers: map[string]map[string]bool{}, noMessageRead: map[string]bool{}, noUploadRead: map[string]bool{}}
+	return &messageHost{
+		fakeHost:      newFakeHost(),
+		readers:       map[string]map[string]bool{},
+		routes:        map[string]SourceMessageRoute{},
+		noMessageRead: map[string]bool{},
+		noUploadRead:  map[string]bool{},
+	}
+}
+
+func (h *messageHost) setMessageRoute(messageID string, route SourceMessageRoute) {
+	h.mmu.Lock()
+	defer h.mmu.Unlock()
+	h.routes[messageID] = route
+}
+
+func (h *messageHost) MessageRoute(_ context.Context, messageID string) (SourceMessageRoute, bool) {
+	h.mmu.Lock()
+	defer h.mmu.Unlock()
+	r, ok := h.routes[messageID]
+	return r, ok
 }
 
 func (h *messageHost) allowMessage(p principal, messageID string) {

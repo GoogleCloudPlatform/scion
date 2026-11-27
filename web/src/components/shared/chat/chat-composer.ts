@@ -48,7 +48,11 @@ import './chat-schedule-dialog.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 import { saveDraftForConversation } from './chat-wake.js';
-import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
+import {
+  ARTIFACTS_FLAG,
+  ATTACHMENT_ARTIFACTS_FLAG,
+  MAX_MESSAGE_ARTIFACTS,
+} from '../../../client/artifacts.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
 import './artifact-picker.js';
@@ -246,6 +250,10 @@ export class ScionChatComposer extends LitElement {
   /** Project ID for upload authz scope (v2 mode). */
   @property()
   projectId = '';
+
+  /** Project display name for the attachment visibility line (v2 mode). */
+  @property()
+  projectName = '';
 
   /** The signed-in user's id; the artifact picker shows their artifacts as "You". */
   @property()
@@ -860,6 +868,15 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-danger-600, #dc2626);
     }
 
+    .attachment-visibility {
+      flex: 1 0 100%;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: var(--chat-fs-xs);
+      color: var(--scion-text-muted);
+    }
+
     .upload-failures {
       display: flex;
       flex-direction: column;
@@ -1085,6 +1102,11 @@ export class ScionChatComposer extends LitElement {
 
       .pending-file {
         flex: none;
+      }
+
+      .attachment-visibility {
+        flex: 0 0 auto;
+        white-space: nowrap;
       }
 
       /* A reply or edit bar's cancel button is a 44px square target with
@@ -1866,6 +1888,20 @@ export class ScionChatComposer extends LitElement {
     `;
   }
 
+  /** Visibility notice shown under pending attachment chips (ptone/scion#4598, #4599). */
+  private attachmentVisibilityText(): string {
+    if (this.isDirectMessage()) {
+      return this.peerName
+        ? `Visible to you and ${this.peerName}`
+        : 'Visible to you and the other participant';
+    }
+    const project = this.projectName || this.projectId;
+    if (project) {
+      return `Visible to everyone in ${project}`;
+    }
+    return 'Visible to members of this conversation';
+  }
+
   /** Render the pending uploaded files as previews/chips. */
   private renderPendingFiles() {
     return html`
@@ -1883,6 +1919,9 @@ export class ScionChatComposer extends LitElement {
             </div>
           `
         )}
+        ${isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
+          ? html`<div class="attachment-visibility">${this.attachmentVisibilityText()}</div>`
+          : nothing}
       </div>
     `;
   }

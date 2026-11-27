@@ -179,6 +179,23 @@ type MessageScopeHost interface {
 	PermitsUploadRead(ctx context.Context) bool
 }
 
+// SourceMessageRoute identifies the web chat route for a message an artifact
+// version was published from (ptone/scion#4599).
+type SourceMessageRoute struct {
+	// ConversationKey is the chat conversation key: a topic/thread id for a
+	// project thread, or "dm:<kind>:<id>:<kind>:<id>" for a direct message.
+	ConversationKey string
+	// ProjectID is the owning project id for a project thread; empty for a DM.
+	ProjectID string
+}
+
+// MessageRouteHost is an optional extension of Host (ptone/scion#4599) that
+// resolves a source message to its chat conversation route. The service only
+// calls it after confirming the viewer may read the message.
+type MessageRouteHost interface {
+	MessageRoute(ctx context.Context, messageID string) (SourceMessageRoute, bool)
+}
+
 // ScopeExplainer is an optional extension of Host. When a credential
 // lacks a scope that publishing needs, the service asks it which one, so
 // the caller gets a 403 naming the scope instead of an answer that looks

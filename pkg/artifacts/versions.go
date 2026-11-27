@@ -70,6 +70,14 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if req.FromAttachment != "" {
+		s.handlePublishFromAttachment(w, r, req)
+		return
+	}
+	if req.ScopeRef != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "scopeRef applies only with fromAttachment; use scope")
+		return
+	}
 	kind, ref, home, ok := s.host.Principal(ctx)
 	if !ok {
 		if s.writeMissingScope(w, r) {
@@ -200,6 +208,10 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id string) {
 	req, ok := decodeManifest(w, r)
 	if !ok {
+		return
+	}
+	if req.FromAttachment != "" || req.ScopeRef != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "fromAttachment and scopeRef apply only on POST /api/v1/artifacts")
 		return
 	}
 	if req.Title != "" || req.Key != "" || req.Scope != "" {
@@ -1088,7 +1100,7 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 			resp.Discarded = append(resp.Discarded, discardedVersionInfo(&versions[i]))
 			continue
 		}
-		vi := versionInfo(&versions[i], nil)
+		vi := s.versionInfoForViewer(r.Context(), b, &versions[i], nil)
 		vi.Files = nil
 		resp.Versions = append(resp.Versions, *vi)
 	}
@@ -1125,7 +1137,7 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: s.versionInfoForViewer(r.Context(), b, v, files), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}

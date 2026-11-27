@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -1035,6 +1036,75 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string, mes
 	default:
 		return false
 	}
+}
+
+var _ artifacts.MessageRouteHost = (*artifactHost)(nil)
+
+// MessageRoute implements artifacts.MessageRouteHost: resolves a live message
+// to its web chat conversation route (conversation key and, for project
+// threads, project ID). The artifacts service calls this only after
+// MayReadMessage succeeds for the viewer.
+func (h *artifactHost) MessageRoute(ctx context.Context, messageID string) (artifacts.SourceMessageRoute, bool) {
+	if h.server == nil || messageID == "" {
+		return artifacts.SourceMessageRoute{}, false
+	}
+	s := h.server
+	msg, ok := s.liveMessageForAttachments(ctx, messageID)
+	if !ok {
+		return artifacts.SourceMessageRoute{}, false
+	}
+	if msg.ThreadID != "" {
+		if strings.HasPrefix(msg.ThreadID, "dm:") {
+			return artifacts.SourceMessageRoute{ConversationKey: msg.ThreadID}, true
+		}
+		projectID := msg.ProjectID
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs != nil {
+			if topic, err := wcs.GetTopic(ctx, msg.ThreadID); err == nil && topic != nil && topic.ProjectID != "" {
+				projectID = topic.ProjectID
+			}
+		}
+		if projectID == "" {
+			return artifacts.SourceMessageRoute{}, false
+		}
+		return artifacts.SourceMessageRoute{
+			ConversationKey: msg.ThreadID,
+			ProjectID:       projectID,
+		}, true
+	}
+	if msg.ConversationID == "" {
+		return artifacts.SourceMessageRoute{}, false
+	}
+	conv, err := s.store.GetConversation(ctx, msg.ConversationID)
+	if err != nil || conv == nil {
+		return artifacts.SourceMessageRoute{}, false
+	}
+	if conv.Surface != "" && conv.Surface != "native" {
+		return artifacts.SourceMessageRoute{}, false
+	}
+	if conv.Kind == "direct" {
+		if strings.HasPrefix(conv.ExternalRef, "dm:") {
+			return artifacts.SourceMessageRoute{ConversationKey: conv.ExternalRef}, true
+		}
+		return artifacts.SourceMessageRoute{}, false
+	}
+	if conv.ProjectID != nil && *conv.ProjectID != "" {
+		refProjectID, topicID, parseErr := messaging.ParseThreadConversationExternalRef(conv.ExternalRef)
+		if parseErr != nil || topicID == "" {
+			return artifacts.SourceMessageRoute{}, false
+		}
+		projectID := *conv.ProjectID
+		if refProjectID != "" {
+			projectID = refProjectID
+		}
+		return artifacts.SourceMessageRoute{
+			ConversationKey: topicID,
+			ProjectID:       projectID,
+		}, true
+	}
+	return artifacts.SourceMessageRoute{}, false
 }
 
 // liveMessageForAttachments returns message messageID when it exists and

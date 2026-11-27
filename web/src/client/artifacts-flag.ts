@@ -22,3 +22,10 @@
  * the client loads with the artifact pages that use it.
  */
 export const ARTIFACTS_FLAG = 'hub.artifacts';
+
+/**
+ * Feature flag for attachments stored via the artifact backend, including
+ * attachment references (`scion://attachment/<id>`) and saving attachments
+ * as artifacts (ptone/scion#4595, ptone/scion#4599).
+ */
+export const ATTACHMENT_ARTIFACTS_FLAG = 'hub.attachment_artifacts';

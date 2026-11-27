@@ -124,6 +124,7 @@ import type {
 } from '../../client/artifacts.js';
 import type { WakeOffer } from '../../client/wake-offer.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
+import { chatConversationPath } from '../../client/chat-routes.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import type { ScionCodeEditor } from '../shared/code-editor.js';
 import type { CriticView } from '../shared/artifact-markdown-frame.js';
@@ -746,6 +747,15 @@ export class ScionPageArtifactDetail extends LitElement {
         gap: 0.5rem 1.25rem;
         font-size: 0.8125rem;
         color: var(--sl-color-neutral-600);
+      }
+      .attachment-provenance {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+      .attachment-provenance .provenance-link {
+        color: var(--scion-primary);
+        text-decoration: underline;
       }
       .meta code,
       .ref code {
@@ -3258,6 +3268,35 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
+   * Provenance line for a version published from a chat attachment by
+   * reference (ptone/scion#4598, #4599). The link to the conversation is
+   * shown only when `sourceMessageId` and a routable `sourceConversationKey`
+   * are present (already viewer-scoped by the backend).
+   */
+  private renderAttachmentProvenance(v: ArtifactVersion): TemplateResult | typeof nothing {
+    if (!v.sourceAttachmentId) return nothing;
+    const convPath =
+      v.sourceMessageId && v.sourceConversationKey
+        ? chatConversationPath({
+            conversationKey: v.sourceConversationKey,
+            ...(v.sourceProjectId ? { projectId: v.sourceProjectId } : {}),
+          })
+        : null;
+    if (convPath && v.sourceMessageId) {
+      const href = `${convPath}#msg-${encodeURIComponent(v.sourceMessageId)}`;
+      return html`<span class="attachment-provenance">
+        <sl-icon name="paperclip"></sl-icon>
+        Published from an attachment in
+        <a class="provenance-link" href=${href}>a conversation</a>
+      </span>`;
+    }
+    return html`<span class="attachment-provenance">
+      <sl-icon name="paperclip"></sl-icon>
+      Published from an attachment in a conversation
+    </span>`;
+  }
+
+  /**
    * The shown version's facts in the header (ptone/scion#6852): its number,
    * whether it is the current version, its kind and author, and its date.
    */
@@ -3385,6 +3424,7 @@ export class ScionPageArtifactDetail extends LitElement {
               </span>`
             : nothing}
           ${v ? this.renderVersionInfo(v) : nothing}
+          ${v?.sourceAttachmentId ? this.renderAttachmentProvenance(v) : nothing}
           ${a.key ? html`<span>Key: <code>${a.key}</code></span>` : nothing}
           <span>Updated: ${formatInstant(a.updatedAt)}</span>
           <span class="expires"
