@@ -320,6 +320,13 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusBadRequest, "bad_request", "notify is for a user")
 		return
 	}
+	if req.Notify && req.Permission == GrantReview && s.featureEnabled(r.Context(), FeatureReviewRequests) {
+		// Design §4.4 [D: grants-notify]: while hub.artifacts_review_requests
+		// is enabled, "Ask for review" has one entry point (POST /review-requests).
+		writeError(w, http.StatusBadRequest, CodeUseReviewRequests,
+			"use the review-requests endpoint to ask for a review")
+		return
+	}
 	if req.SubjectKind == SubjectScope && !home && !s.crossScopeAllowed(r.Context()) {
 		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",

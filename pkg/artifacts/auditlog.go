@@ -121,9 +121,10 @@ const logActionReviewEnded = "review_session_ended"
 // pass. logActionDraftAccessReapPass is the count-only summary of a
 // lost-access and deleted-principal review-draft reap pass (ptone/scion#8475).
 const (
-	logActionReviewDraftDeleted  = "review_draft_deleted"
-	logActionDraftReapPass       = "review_draft_reap"
-	logActionDraftAccessReapPass = "review_draft_access_reap"
+	logActionReviewDraftDeleted    = "review_draft_deleted"
+	logActionDraftReapPass         = "review_draft_reap"
+	logActionDraftAccessReapPass   = "review_draft_access_reap"
+	logActionReviewRequestReapPass = "review_request_reap"
 )
 
 // Log reasons: why a refusal or a failure happened. Never free text.

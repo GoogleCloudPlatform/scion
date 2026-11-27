@@ -176,6 +176,7 @@ var agentAllowed = map[string]bool{
 	"artifact.list":                 true,
 	"artifact.view":                 true,
 	"artifact.comments":             true,
+	"artifact.review-requests":      true,
 	// artifact share, artifact grants, artifact transfer and artifact delete
 	// are human-only and deliberately absent (ptone/scion#4529, ptone/scion#4579,
 	// ptone/scion#9337): agents may not share, transfer or delete artifacts, or

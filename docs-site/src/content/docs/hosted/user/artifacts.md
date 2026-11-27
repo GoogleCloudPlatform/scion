@@ -196,13 +196,19 @@ scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...
 
 As with `--version-of`, a reference with `@<n>` must name the current version. The [reference](/scion/reference/artifacts/#reviews) lists every mark and the rules for code.
 
-### Request and dismiss a review (experimental)
+### Request, list, withdraw, and dismiss a review (experimental)
 
-When the `hub.artifacts_review_requests` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (alpha, off by default; requires `hub.artifacts`), a publisher can ask specific users who already have review access to review an artifact, and requested reviewers can list or dismiss their requests with an optional note:
+When the `hub.artifacts_review_requests` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (alpha, off by default; requires `hub.artifacts`), a publisher can ask specific users to review an artifact (raising their grant to `review` automatically when the requester can administer the artifact), list or withdraw requests, and requested reviewers can list, fulfil (by submitting a review), or dismiss their requests with an optional note. Publishing a new version carries open requests forward:
 
 ```bash
 # Request a review from one or more users (ID, user:<id>, or email)
 scion artifact request-review scion://artifact/5f1c2d3e-... --user alice@example.com --note "Please check section 3"
+
+# List review requests on an artifact (publishers see all; others see their own)
+scion artifact review-requests scion://artifact/5f1c2d3e-...
+
+# Withdraw an open review request
+scion artifact request-review scion://artifact/5f1c2d3e-... --withdraw --user alice@example.com
 
 # List artifacts where your review has been requested
 scion artifact list --requested

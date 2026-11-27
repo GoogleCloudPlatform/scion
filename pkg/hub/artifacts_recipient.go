@@ -25,26 +25,35 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// Send-time recipient warning (ptone/scion#4575), open-review access filter
-// (ptone/scion#7650), lost-access review-draft reaper (ptone/scion#8475), and
-// review-request existing-access check (ptone/scion#9296): the hub side of
-// artifacts.RecipientAuthority.
+// Non-access-granting named-principal checks — the hub side of
+// artifacts.RecipientAuthority. Allowed callers (pinned in
+// pkg/hub/message_artifacts_recipient_test.go):
+//   - RecipientMayNotRead (ptone/scion#4575): send-time warning when a message
+//     recipient may not be able to read an attached artifact.
+//   - readableOpenReviews (ptone/scion#7650): filters open review sessions to
+//     reviewers who can still read the artifact.
+//   - ReapLostAccessReviewDrafts (ptone/scion#8475): deletes saved review
+//     drafts whose author no longer has review access (definitive deny only).
+//   - classifyReviewer (ptone/scion#9296): classifies a requested reviewer as
+//     unavailable, can-review, or needs-raise; never grants access itself (any
+//     raised grant is written separately under the requester's own
+//     adminAuthorityWith).
+//   - ReapReviewRequests (ptone/scion#9296): expires open review requests on a
+//     definitive deny (lookup errors leave the request open).
+//   - handleListReviewRequests (ptone/scion#9296): computes advisory
+//     reviewerCanReview on the publisher's review-requests list.
 //
-// These methods answer for a NAMED principal (the direct recipient of a
-// message, a reviewer with a recorded review session, a reviewer with a
-// saved review draft, or a candidate reviewer named in a review request), not
-// for the caller of ctx. They are NON-ACCESS-GRANTING:
-// nothing here ever grants access, serves content, or is consulted by any read
-// route; besides advisory warnings and filtering, a recipient check may only
-// withhold or remove the principal's own data on a definitive deny, or refuse
-// a caller-initiated request on the principal's behalf. The
-// identity ResolveRecipient builds (recipientIdentity) is used only as the
-// subject of policy reads (CheckAccess, the delegation chain walk and the
-// agent scope check, all run under maskAllAuthzMemo) and never enters a
-// context, so it can never be taken for the caller: the artifact service
-// learns its caller only from ctx (artifactHost.Principal), which still
-// refuses every in-process identity. TestRecipientIdentityNeverEntersAContext
-// pins that.
+// These methods answer for a NAMED principal, not for the caller of ctx. They
+// are NON-ACCESS-GRANTING: nothing here ever grants access, serves content, or
+// is consulted by any read route; besides advisory warnings, status badges, and
+// filtering, a recipient check may also withhold or remove the principal's own
+// data on a definitive deny. The identity ResolveRecipient builds
+// (recipientIdentity) is used only as the subject of policy reads (CheckAccess,
+// the delegation chain walk and the agent scope check, all run under
+// maskAllAuthzMemo) and never enters a context, so it can never be taken for
+// the caller: the artifact service learns its caller only from ctx
+// (artifactHost.Principal), which still refuses every in-process identity.
+// TestRecipientIdentityNeverEntersAContext pins that.
 
 var _ artifacts.RecipientAuthority = (*artifactHost)(nil)
 

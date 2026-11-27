@@ -635,11 +635,20 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleTransferTargets(w, r, id)
 	case len(segs) == 2 && segs[1] == reviewRequestsSegment:
+		switch {
+		case isRead(r.Method):
+			s.handleListReviewRequests(w, r, id)
+		case r.Method == http.MethodPost:
+			s.handleCreateReviewRequests(w, r, id)
+		default:
+			writeMethodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	case len(segs) == 4 && segs[1] == reviewRequestsSegment && segs[3] == "withdraw":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)
 			return
 		}
-		s.handleCreateReviewRequests(w, r, id)
+		s.handleWithdrawReviewRequest(w, r, id, segs[2])
 	case len(segs) == 3 && segs[1] == reviewRequestSegment && segs[2] == "dismiss":
 		if r.Method != http.MethodPost {
 			writeMethodNotAllowed(w, http.MethodPost)

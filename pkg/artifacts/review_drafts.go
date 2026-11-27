@@ -54,6 +54,12 @@ const (
 	// DraftTTL is how long an untouched review draft is kept after its last
 	// save (updated_at) before the maintenance reaper removes it.
 	DraftTTL = 30 * 24 * time.Hour
+	// ReviewRequestTTL is how long an open review request stays open after
+	// max(created_at, reminded_at) before the maintenance reaper expires it.
+	ReviewRequestTTL = 30 * 24 * time.Hour
+	// ReviewRequestClosedRetention is how long closed review request rows are
+	// kept after resolved_at before the maintenance reaper deletes them.
+	ReviewRequestClosedRetention = 90 * 24 * time.Hour
 
 	// maxReviewDraftRequestBytes caps the raw HTTP request body of PUT
 	// review-draft before JSON decoding (body + carried.body + JSON envelope).
@@ -390,6 +396,240 @@ func ReapLostAccessReviewDrafts(ctx context.Context, st Store, auth RecipientAut
 			slog.Int(logKeyCount, res.Deleted),
 		)
 		log.LogAttrs(ctx, level, "artifacts: "+logActionDraftAccessReapPass, attrs...)
+	}
+	return res, firstErr
+}
+
+// ReviewRequestReapResult reports one review-request maintenance pass
+// (ptone/scion#9296, design §4.6 writer 7).
+type ReviewRequestReapResult struct {
+	// Checked is the number of open review requests inspected.
+	Checked int
+	// Expired is the number of open review requests transitioned to expired
+	// (either because 30 days elapsed since max(created_at, reminded_at) or
+	// because the reviewer can no longer review the artifact).
+	Expired int
+	// Purged is the number of closed review request rows deleted after the
+	// 90-day retention window past resolved_at.
+	Purged int
+	// Errors is the number of transient store, principal-resolution, or
+	// authorization errors encountered. Any request whose lookup errored is
+	// left open (fail safe).
+	Errors int
+}
+
+// ReapReviewRequests runs one review-request maintenance pass (design §4.6
+// writer 7):
+//  1. Walks open requests in (artifact_id, id) order. Any request open for at
+//     least ReviewRequestTTL (30 days) since max(created_at, reminded_at) is
+//     CAS-expired. Otherwise, when host implements RecipientAuthority,
+//     principalCanReview is evaluated and requests whose reviewer can no
+//     longer review (or whose artifact is gone) are CAS-expired. Lookup errors
+//     never close a request (fail safe).
+//  2. For each newly expired request, best-effort acknowledges the reviewer's
+//     unacked request notifications (ReviewRequestNotifier.RequestClosed) and
+//     emits an inbox invalidation hint (InboxNotifier.InboxChanged).
+//  3. Deletes up to pageSize closed rows whose resolved_at is at least
+//     ReviewRequestClosedRetention (90 days) in the past.
+//
+// It runs whether or not FeatureReviewRequests is enabled.
+func ReapReviewRequests(ctx context.Context, st Store, host Host, now time.Time, pageSize int, log *slog.Logger) (ReviewRequestReapResult, error) {
+	var res ReviewRequestReapResult
+	if st == nil {
+		return res, nil
+	}
+	if pageSize <= 0 {
+		pageSize = defaultDraftAccessReapPageSize
+	}
+	if log == nil {
+		log = discardLogger
+	}
+	var firstErr error
+	recordErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	auth, _ := host.(RecipientAuthority)
+	notifier, _ := host.(ReviewRequestNotifier)
+	inbox, _ := host.(InboxNotifier)
+	inboxActive := inbox != nil && inbox.InboxHintsActive(ctx)
+
+	type resolvedPrincipal struct {
+		subject RecipientSubject
+		err     error
+	}
+	principals := make(map[string]resolvedPrincipal)
+
+	var (
+		after        *ReviewRequestKey
+		curArtID     string
+		curArt       *Artifact
+		curArtGone   bool
+		curArtErr    error
+		grantsLoaded bool
+		grants       []Grant
+		grantsErr    error
+	)
+	loadCurGrants := func() ([]Grant, error) {
+		if !grantsLoaded {
+			grants, grantsErr = st.ListGrants(ctx, curArtID)
+			grantsLoaded = true
+		}
+		return grants, grantsErr
+	}
+
+	ttlCutoff := now.UTC().Add(-ReviewRequestTTL)
+
+	expireOne := func(rr ReviewRequest, reason string) {
+		expired, err := st.ExpireReviewRequest(ctx, rr.ArtifactID, rr.ID, rr.UpdatedAt, reason, now, &reconcilerActor)
+		if err != nil {
+			res.Errors++
+			recordErr(err)
+			return
+		}
+		if !expired {
+			return
+		}
+		res.Expired++
+		if rr.ReviewerKind == PrincipalKindUser && rr.ReviewerRef != "" {
+			if notifier != nil {
+				notifier.RequestClosed(ctx, rr.ArtifactID, rr.ReviewerRef)
+			}
+			if inboxActive {
+				inbox.InboxChanged(ctx, rr.ReviewerRef)
+			}
+		}
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			recordErr(err)
+			break
+		}
+		page, err := st.ListOpenReviewRequests(ctx, after, pageSize)
+		if err != nil {
+			recordErr(err)
+			break
+		}
+		if len(page) == 0 {
+			break
+		}
+		for _, rr := range page {
+			if err := ctx.Err(); err != nil {
+				recordErr(err)
+				break
+			}
+			res.Checked++
+
+			lastActivity := rr.CreatedAt
+			if rr.RemindedAt != nil && rr.RemindedAt.After(lastActivity) {
+				lastActivity = *rr.RemindedAt
+			}
+			if !lastActivity.After(ttlCutoff) {
+				expireOne(rr, "ttl")
+				continue
+			}
+
+			if auth == nil {
+				continue
+			}
+
+			if rr.ArtifactID != curArtID {
+				curArtID = rr.ArtifactID
+				curArt = nil
+				curArtGone = false
+				curArtErr = nil
+				grantsLoaded = false
+				grants = nil
+				grantsErr = nil
+				a, aerr := st.GetArtifact(ctx, rr.ArtifactID)
+				switch {
+				case errors.Is(aerr, ErrNotFound):
+					curArtGone = true
+				case aerr != nil:
+					curArtErr = aerr
+				default:
+					curArt = a
+				}
+			}
+			if curArtErr != nil {
+				res.Errors++
+				recordErr(curArtErr)
+				continue
+			}
+			if curArtGone {
+				expireOne(rr, "artifact_deleted")
+				continue
+			}
+
+			var subject RecipientSubject
+			if rr.ReviewerKind != "" && rr.ReviewerRef != "" {
+				pref := PrincipalRef(rr.ReviewerKind, rr.ReviewerRef)
+				rp, cached := principals[pref]
+				if !cached {
+					sub, rerr := auth.ResolveRecipient(ctx, rr.ReviewerKind, rr.ReviewerRef)
+					rp = resolvedPrincipal{subject: sub, err: rerr}
+					if len(principals) >= maxDraftAccessPrincipalCache {
+						clear(principals)
+					}
+					principals[pref] = rp
+				}
+				if rp.err != nil {
+					res.Errors++
+					recordErr(rp.err)
+					continue
+				}
+				subject = rp.subject
+			}
+
+			canReview, rerr := principalCanReview(ctx, subject, curArt, rr.ReviewerKind, rr.ReviewerRef, now, loadCurGrants)
+			if rerr != nil {
+				res.Errors++
+				recordErr(rerr)
+				continue
+			}
+			if !canReview {
+				expireOne(rr, "lost_access")
+			}
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if len(page) < pageSize {
+			break
+		}
+		last := page[len(page)-1]
+		after = &ReviewRequestKey{ArtifactID: last.ArtifactID, ID: last.ID}
+	}
+
+	if ctx.Err() == nil {
+		purged, err := st.PurgeClosedReviewRequests(ctx, now.UTC().Add(-ReviewRequestClosedRetention), pageSize)
+		if err != nil {
+			res.Errors++
+			recordErr(err)
+		} else {
+			res.Purged = purged
+		}
+	}
+
+	if res.Expired > 0 || res.Purged > 0 || firstErr != nil {
+		outcome, level := logOutcomeAllowed, slog.LevelInfo
+		attrs := make([]slog.Attr, 0, 7)
+		if firstErr != nil {
+			outcome, level = logOutcomeError, slog.LevelWarn
+			attrs = append(attrs, slog.String(logKeyReason, logReasonStoreError))
+		}
+		attrs = append(attrs,
+			slog.String(logKeyAction, logActionReviewRequestReapPass),
+			slog.String(logKeyOutcome, outcome),
+			slog.String(logKeyPrincipalKind, reconcilerActor.Kind),
+			slog.String(logKeyPrincipalID, reconcilerActor.Ref),
+			slog.String(logKeyAuthority, reconcilerActor.Authority),
+			slog.Int(logKeyCount, res.Expired+res.Purged),
+		)
+		log.LogAttrs(ctx, level, "artifacts: "+logActionReviewRequestReapPass, attrs...)
 	}
 	return res, firstErr
 }

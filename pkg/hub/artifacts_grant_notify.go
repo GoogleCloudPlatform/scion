@@ -125,8 +125,9 @@ var grantNoticeLevel = map[string]string{
 }
 
 // reviewRequestMessagePhrase is the fixed phrase used in review-request grant
-// notifications (shared with reviewRequestedByFromMessage in inbox_reviews.go).
-const reviewRequestMessagePhrase = " asked you to review an artifact"
+// notifications (built on reviewRequestAskedPhrase, shared with
+// reviewRequestedByFromMessage in inbox_reviews.go).
+const reviewRequestMessagePhrase = reviewRequestAskedPhrase + "an artifact"
 
 // grantNoticeMessage is the fixed message of a grant notice: the label, the
 // level and the artifact's reference, and nothing else (K14/K19).

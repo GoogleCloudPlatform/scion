@@ -183,6 +183,9 @@ export interface ReviewRequestPrincipal {
   displayName?: string;
 }
 
+/** Lifecycle state of an artifact review request (pkg/artifacts/store_review_requests.go). */
+export type ReviewRequestState = 'open' | 'fulfilled' | 'dismissed' | 'withdrawn' | 'expired';
+
 /** One artifact review request (pkg/artifacts/api.go). */
 export interface ReviewRequestInfo {
   id: string;
@@ -191,13 +194,30 @@ export interface ReviewRequestInfo {
   requestedSeq: number;
   note?: string;
   access: string;
-  state: string;
+  state: ReviewRequestState;
   responseNote?: string;
   resolvedSeq?: number;
   createdAt: string;
   remindedAt?: string;
   resolvedAt?: string;
+  /** Publisher view only (open requests): whether the reviewer can still review. */
+  reviewerCanReview?: boolean;
+  /** Publisher view only (open requests, drafts gate on): reviewer holds a saved draft. */
+  inDraft?: boolean;
 }
+
+/** Response of GET /api/v1/artifacts/{id}/review-requests. */
+export interface ListReviewRequestsResponse {
+  requests: ReviewRequestInfo[];
+}
+
+/** Response of POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw. */
+export interface WithdrawReviewRequestResponse {
+  request: ReviewRequestInfo;
+}
+
+/** Hub error code when POST /grants with notify+review is refused while requests are enabled. */
+export const CODE_USE_REVIEW_REQUESTS = 'use_review_requests';
 
 /** Per-reviewer outcome returned by POST /api/v1/artifacts/{id}/review-requests. */
 export type ReviewRequestOutcome = 'created' | 'reminded' | 'unchanged' | 'refused';
@@ -255,8 +275,14 @@ export function reviewRequestRefusalText(code?: string): string {
       return 'Reviewer unavailable';
     case 'request_closed':
       return 'Request already closed';
+    case 'too_many_grants':
+      return 'Artifact has reached the maximum number of grants';
+    case 'unavailable':
+      return 'Temporarily unavailable — try again';
     case 'agent_cannot_request_review':
       return 'Only users can request reviews';
+    case CODE_USE_REVIEW_REQUESTS:
+      return 'Use Request review instead of Share with notify';
     default:
       return code ? `Refused (${code})` : 'Refused';
   }
@@ -1816,6 +1842,56 @@ export async function deleteGrant(id: string, grantId: string): Promise<void> {
     method: 'DELETE',
   });
   if (!res.ok) throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+}
+
+/** Lists review requests on an artifact (GET /api/v1/artifacts/{id}/review-requests). */
+export async function listReviewRequests(id: string): Promise<ListReviewRequestsResponse> {
+  const res = await okJSON<ListReviewRequestsResponse>(
+    await apiFetch(`${artifactPath(id)}/review-requests`)
+  );
+  return { requests: res.requests ?? [] };
+}
+
+/** A failed review-request withdraw, carrying HTTP status and hub error code. */
+export class WithdrawReviewRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string
+  ) {
+    super(message);
+    this.name = 'WithdrawReviewRequestError';
+  }
+}
+
+/** Withdraws an open review request on an artifact (POST /api/v1/artifacts/{id}/review-requests/{rid}/withdraw). */
+export async function withdrawReviewRequest(
+  id: string,
+  requestId: string
+): Promise<WithdrawReviewRequestResponse> {
+  const res = await apiFetch(
+    `${artifactPath(id)}/review-requests/${encodeURIComponent(requestId)}/withdraw`,
+    { method: 'POST' }
+  );
+  if (!res.ok) {
+    let code = '';
+    try {
+      const body = (await res.clone().json()) as {
+        code?: string;
+        error?: { code?: string };
+      };
+      if (typeof body?.error?.code === 'string') code = body.error.code;
+      else if (typeof body?.code === 'string') code = body.code;
+    } catch {
+      // non-JSON error body
+    }
+    throw new WithdrawReviewRequestError(
+      await extractApiError(res, `HTTP ${res.status}`),
+      res.status,
+      code
+    );
+  }
+  return (await res.json()) as WithdrawReviewRequestResponse;
 }
 
 /** Requests review of an artifact from one or more user principals (ptone/scion#9306). */

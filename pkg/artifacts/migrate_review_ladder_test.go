@@ -229,8 +229,8 @@ func TestMigrationLedgerOrder(t *testing.T) {
 // is out of this test's scope.
 func TestGrantWritesAllowlist(t *testing.T) {
 	want := map[string]int{
-		"store_grants.go:putGrant":                     1, // a level change; grant_changed
-		"store_grants.go:insertGrant":                  1, // putGrant's create (grant_created) and moveArtifact's home scope grant
+		"store_grants.go:putGrantTx":                   1, // a level change; grant_changed
+		"store_grants.go:insertGrant":                  1, // putGrantTx's create (grant_created) and moveArtifact's home scope grant
 		"store_links.go:CreateLink":                    1, // a link row; link_created
 		"store_sql.go:createArtifact":                  1, // the home scope grant, and the automatic review grant with its grant_created
 		"migrate_review_ladder.go:convertReviewLadder": 1, // the review ladder step; grant_changed

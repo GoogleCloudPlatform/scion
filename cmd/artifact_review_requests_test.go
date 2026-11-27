@@ -21,19 +21,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
 type stubReviewRequestArtifactService struct {
 	hubclient.ArtifactService
-	lastID       string
-	lastReq      *hubclient.ArtifactReviewRequestsInput
-	lastDismiss  string
-	lastListOpts *hubclient.ListArtifactsOptions
-	reqResp      *hubclient.ArtifactReviewRequestsResponse
-	dismissResp  *hubclient.ArtifactDismissReviewRequestResponse
-	listResp     *hubclient.ArtifactListResponse
+	lastID         string
+	lastReq        *hubclient.ArtifactReviewRequestsInput
+	lastDismiss    string
+	lastWithdrawID string
+	lastListOpts   *hubclient.ListArtifactsOptions
+	reqResp        *hubclient.ArtifactReviewRequestsResponse
+	listReqResp    *hubclient.ArtifactListReviewRequestsResponse
+	withdrawResp   *hubclient.ArtifactWithdrawReviewRequestResponse
+	dismissResp    *hubclient.ArtifactDismissReviewRequestResponse
+	listResp       *hubclient.ArtifactListResponse
+	putGrantErr    error
 }
 
 func (s *stubReviewRequestArtifactService) RequestReview(_ context.Context, id string, req *hubclient.ArtifactReviewRequestsInput) (*hubclient.ArtifactReviewRequestsResponse, error) {
@@ -42,10 +47,26 @@ func (s *stubReviewRequestArtifactService) RequestReview(_ context.Context, id s
 	return s.reqResp, nil
 }
 
+func (s *stubReviewRequestArtifactService) ListReviewRequests(_ context.Context, id string) (*hubclient.ArtifactListReviewRequestsResponse, error) {
+	s.lastID = id
+	return s.listReqResp, nil
+}
+
+func (s *stubReviewRequestArtifactService) WithdrawReviewRequest(_ context.Context, id, requestID string) (*hubclient.ArtifactWithdrawReviewRequestResponse, error) {
+	s.lastID = id
+	s.lastWithdrawID = requestID
+	return s.withdrawResp, nil
+}
+
 func (s *stubReviewRequestArtifactService) DismissReviewRequest(_ context.Context, id, note string) (*hubclient.ArtifactDismissReviewRequestResponse, error) {
 	s.lastID = id
 	s.lastDismiss = note
 	return s.dismissResp, nil
+}
+
+func (s *stubReviewRequestArtifactService) PutGrant(_ context.Context, id string, _ *hubclient.ArtifactGrantRequest) (*hubclient.ArtifactGrantResult, error) {
+	s.lastID = id
+	return nil, s.putGrantErr
 }
 
 func (s *stubReviewRequestArtifactService) List(_ context.Context, opts *hubclient.ListArtifactsOptions) (*hubclient.ArtifactListResponse, error) {
@@ -162,15 +183,146 @@ func TestListArtifactsRequestedFlag(t *testing.T) {
 
 func TestArtifactReviewRequestModeAndWindowsGates(t *testing.T) {
 	if agentAllowed["artifact.request-review"] {
-		t.Error("artifact.request-review must NOT be in agentAllowed in Phase 1")
+		t.Error("artifact.request-review must NOT be in agentAllowed in Phase 2a")
 	}
 	if agentAllowed["artifact.dismiss-review"] {
 		t.Error("artifact.dismiss-review must NOT be in agentAllowed")
+	}
+	if !agentAllowed["artifact.review-requests"] {
+		t.Error("artifact.review-requests must be in agentAllowed")
 	}
 	if !windowsAllowed["artifact.request-review"] {
 		t.Error("artifact.request-review must be in windowsAllowed")
 	}
 	if !windowsAllowed["artifact.dismiss-review"] {
 		t.Error("artifact.dismiss-review must be in windowsAllowed")
+	}
+	if !windowsAllowed["artifact.review-requests"] {
+		t.Error("artifact.review-requests must be in windowsAllowed")
+	}
+}
+
+func TestListArtifactReviewRequestsCLI(t *testing.T) {
+	const artID = "5f1c2d3e-1111-2222-3333-444455556666"
+	canReviewFalse := false
+	resolvedSeq := 3
+	svc := &stubReviewRequestArtifactService{
+		listReqResp: &hubclient.ArtifactListReviewRequestsResponse{
+			Requests: []hubclient.ArtifactReviewRequest{
+				{
+					ID:           "req-1",
+					Reviewer:     hubclient.ArtifactReviewRequestPrincipal{Ref: "u-bob", DisplayName: "Bob"},
+					Requester:    hubclient.ArtifactReviewRequestPrincipal{Kind: "user", Ref: "u-alice", DisplayName: "Alice"},
+					RequestedSeq: 1,
+					Note:         "Please check section 2",
+					State:        artifacts.ReviewRequestStateOpen,
+					InDraft:      true,
+				},
+				{
+					ID:                "req-2",
+					Reviewer:          hubclient.ArtifactReviewRequestPrincipal{Ref: "u-carol"},
+					Requester:         hubclient.ArtifactReviewRequestPrincipal{Kind: "user", Ref: "u-alice", DisplayName: "Alice"},
+					RequestedSeq:      1,
+					State:             artifacts.ReviewRequestStateOpen,
+					ReviewerCanReview: &canReviewFalse,
+				},
+				{
+					ID:           "req-3",
+					Reviewer:     hubclient.ArtifactReviewRequestPrincipal{Ref: "u-dave", DisplayName: "Dave"},
+					Requester:    hubclient.ArtifactReviewRequestPrincipal{Kind: "user", Ref: "u-alice", DisplayName: "Alice"},
+					RequestedSeq: 1,
+					ResolvedSeq:  &resolvedSeq,
+					ResponseNote: "Looks good",
+					State:        artifacts.ReviewRequestStateFulfilled,
+				},
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := listArtifactReviewRequests(context.Background(), svc, &out, "scion://artifact/"+artID, false); err != nil {
+		t.Fatalf("listArtifactReviewRequests: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"REVIEWER", "STATE", "REQUESTED", "BY", "NOTE/RESPONSE",
+		"Bob", "open, in draft", "v1", "Alice", "Please check section 2",
+		"user:u-carol", "open, no access",
+		"Dave", "fulfilled", "v1 (v3)", "Looks good",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestWithdrawArtifactReviewRequestCLI(t *testing.T) {
+	const artID = "5f1c2d3e-1111-2222-3333-444455556666"
+	svc := &stubReviewRequestArtifactService{
+		listReqResp: &hubclient.ArtifactListReviewRequestsResponse{
+			Requests: []hubclient.ArtifactReviewRequest{
+				{
+					ID:       "req-open-bob",
+					Reviewer: hubclient.ArtifactReviewRequestPrincipal{Ref: "u-bob"},
+					State:    artifacts.ReviewRequestStateOpen,
+				},
+			},
+		},
+		withdrawResp: &hubclient.ArtifactWithdrawReviewRequestResponse{
+			Request: hubclient.ArtifactReviewRequest{
+				ID:       "req-open-bob",
+				Reviewer: hubclient.ArtifactReviewRequestPrincipal{Ref: "u-bob"},
+				State:    artifacts.ReviewRequestStateWithdrawn,
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	err := requestArtifactReview(context.Background(), svc, nil, &out, "scion://artifact/"+artID, requestReviewOptions{
+		Users:    []string{"user:u-bob"},
+		Withdraw: true,
+	})
+	if err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	if svc.lastWithdrawID != "req-open-bob" {
+		t.Errorf("lastWithdrawID = %q, want req-open-bob", svc.lastWithdrawID)
+	}
+	if !strings.Contains(out.String(), "user:u-bob: withdrawn") {
+		t.Errorf("unexpected output: %q", out.String())
+	}
+
+	// Rejects --note with --withdraw.
+	err = requestArtifactReview(context.Background(), svc, nil, &out, "scion://artifact/"+artID, requestReviewOptions{
+		Users:    []string{"user:u-bob"},
+		Note:     "nope",
+		Withdraw: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--note") {
+		t.Errorf("expected --note error with --withdraw, got %v", err)
+	}
+}
+
+func TestArtifactGrantsUseReviewRequestsHint(t *testing.T) {
+	const artID = "5f1c2d3e-1111-2222-3333-444455556666"
+	svc := &stubReviewRequestArtifactService{
+		putGrantErr: &apiclient.APIError{
+			StatusCode: 400,
+			Code:       artifacts.CodeUseReviewRequests,
+			Message:    "use the review-requests endpoint to ask for a review",
+		},
+	}
+	var out bytes.Buffer
+	err := artifactGrants(context.Background(), svc, &out, "scion://artifact/"+artID, grantsOptions{
+		Add:        "user:u-bob",
+		Permission: "review",
+		Notify:     true,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	wantHint := "use: scion artifact request-review scion://artifact/" + artID + " --user u-bob"
+	if !strings.Contains(err.Error(), wantHint) {
+		t.Errorf("error = %q, want hint %q", err.Error(), wantHint)
 	}
 }

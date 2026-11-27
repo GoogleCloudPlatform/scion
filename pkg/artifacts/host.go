@@ -314,6 +314,11 @@ type InboxNotifier interface {
 // review requests (ptone/scion#9296). A host without it sends no notifications
 // and reports notifySkipped "unavailable" (fail closed).
 type ReviewRequestNotifier interface {
+	// IsInteractiveSession reports whether the caller in ctx holds an
+	// interactive, unscoped user session. Used at the route level before
+	// charging rate limits or entering the per-reviewer loop.
+	IsInteractiveSession(ctx context.Context) bool
+
 	// MayNotifyReviewer checks whether the calling user may see and notify
 	// reviewerUserID (anti-spam user visibility). ok=false, err=nil means the
 	// reviewer is unavailable/not visible; err != nil means a lookup fault.
@@ -327,6 +332,11 @@ type ReviewRequestNotifier interface {
 	// to the requester (and artifact owner if different) after a request is
 	// dismissed. Best effort.
 	NotifyRequestDismissed(ctx context.Context, n ReviewRequestDismissNotice) error
+
+	// RequestClosed best-effort acknowledges the reviewer's unacknowledged
+	// ARTIFACT_REVIEW_REQUESTED notifications for artifactID when a request
+	// is closed (withdrawn, expired, or fulfilled).
+	RequestClosed(ctx context.Context, artifactID, reviewerUserID string)
 }
 
 // ReviewRequestNotice describes a committed review request or reminder.

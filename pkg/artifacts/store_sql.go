@@ -514,58 +514,65 @@ func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType 
 
 // FinalizeVersion implements Store.
 func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error) {
+	a, _, err := s.FinalizeVersionWithEffects(ctx, artifactID, seq, claim, extra, base)
+	return a, err
+}
+
+// FinalizeVersionWithEffects implements Store.
+func (s *sqlStore) FinalizeVersionWithEffects(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, FinalizeEffects, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("artifacts: begin finalize: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: begin finalize: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	// Lock the artifact row first, as CreateVersion does.
 	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ? AND deleted_at IS NULL`),
 		s.timeArg(now), artifactID)
 	if err != nil {
-		return nil, fmt.Errorf("artifacts: lock artifact: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: lock artifact: %w", err)
 	}
 	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return nil, ErrNotFound
+		return nil, FinalizeEffects{}, ErrNotFound
 	}
-	var versionID, state string
+	var versionID, state, kind string
+	var createdByKind, createdByRef sql.NullString
 	var claimedAt dbTime
-	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, state, claimed_at FROM artifact_version WHERE artifact_id = ? AND seq = ?`),
-		artifactID, seq).Scan(&versionID, &state, &claimedAt)
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id, state, kind, created_by_kind, created_by_ref, claimed_at FROM artifact_version WHERE artifact_id = ? AND seq = ?`),
+		artifactID, seq).Scan(&versionID, &state, &kind, &createdByKind, &createdByRef, &claimedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, FinalizeEffects{}, ErrNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: finalize version: %w", err)
 	}
 	if state != VersionStateFinalizing || !claimedAt.Valid || !claimedAt.Time.Equal(claimToken(claim)) {
-		return nil, ErrConflict
+		return nil, FinalizeEffects{}, ErrConflict
 	}
 	if base > 0 {
 		if base >= seq {
-			return nil, ErrStaleBase
+			return nil, FinalizeEffects{}, ErrStaleBase
 		}
 		var current sql.NullInt64
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT current_seq FROM artifact WHERE id = ?`), artifactID).Scan(&current); err != nil {
-			return nil, fmt.Errorf("artifacts: read current version: %w", err)
+			return nil, FinalizeEffects{}, fmt.Errorf("artifacts: read current version: %w", err)
 		}
 		if !current.Valid || int(current.Int64) != base {
-			return nil, ErrStaleBase
+			return nil, FinalizeEffects{}, ErrStaleBase
 		}
 		var between int
 		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_version
 			WHERE artifact_id = ? AND seq > ? AND seq < ? AND kind = ? AND state IN (?, ?)`),
 			artifactID, base, seq, VersionKindPublish, VersionStatePending, VersionStateFinalizing).Scan(&between); err != nil {
-			return nil, fmt.Errorf("artifacts: read pending versions: %w", err)
+			return nil, FinalizeEffects{}, fmt.Errorf("artifacts: read pending versions: %w", err)
 		}
 		if between > 0 {
-			return nil, ErrPendingNewer
+			return nil, FinalizeEffects{}, ErrPendingNewer
 		}
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
-		return nil, err
+		return nil, FinalizeEffects{}, err
 	}
 	var addBytes int64
 	for _, f := range extra {
@@ -574,16 +581,73 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version
 		SET state = ?, total_bytes = total_bytes + ?, file_count = file_count + ? WHERE id = ?`),
 		VersionStateReady, addBytes, len(extra), versionID); err != nil {
-		return nil, fmt.Errorf("artifacts: finalize version: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: finalize version: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET current_seq = ?
 		WHERE id = ? AND (current_seq IS NULL OR current_seq < ?)`), seq, artifactID, seq); err != nil {
-		return nil, fmt.Errorf("artifacts: advance current version: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: advance current version: %w", err)
 	}
+
+	var effects FinalizeEffects
+	// Design §4.6 writer 4 and G4 (ungated): finalizing a kind: review version
+	// atomically fulfils the finalizing reviewer's open review request (if any)
+	// and deletes that reviewer's saved draft (if any) in the same transaction.
+	// Publishing (kind: publish) writes nothing to artifact_review_request
+	// (carry-forward, writer 5).
+	if kind == VersionKindReview && createdByKind.String != "" && createdByRef.String != "" {
+		cbKind, cbRef := createdByKind.String, createdByRef.String
+		var openReqID string
+		qerr := tx.QueryRowContext(ctx, s.rebind(`SELECT id FROM artifact_review_request
+			WHERE artifact_id = ? AND reviewer_kind = ? AND reviewer_ref = ? AND state = ?`),
+			artifactID, cbKind, cbRef, ReviewRequestStateOpen).Scan(&openReqID)
+		if qerr != nil && !errors.Is(qerr, sql.ErrNoRows) {
+			return nil, FinalizeEffects{}, fmt.Errorf("artifacts: query open review request on finalize: %w", qerr)
+		}
+		if qerr == nil && openReqID != "" {
+			fres, ferr := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_review_request
+				SET state = ?, resolved_seq = ?, resolved_by_kind = ?, resolved_by_ref = ?,
+				    resolved_at = ?, updated_at = ?
+				WHERE id = ? AND state = ?`),
+				ReviewRequestStateFulfilled, seq, cbKind, cbRef,
+				s.timeArg(now), s.timeArg(now), openReqID, ReviewRequestStateOpen)
+			if ferr != nil {
+				return nil, FinalizeEffects{}, fmt.Errorf("artifacts: fulfil review request on finalize: %w", ferr)
+			}
+			if fn, ferr := fres.RowsAffected(); ferr != nil {
+				return nil, FinalizeEffects{}, fmt.Errorf("artifacts: fulfil review request on finalize: %w", ferr)
+			} else if fn == 1 {
+				effects.FulfilledRequestID = openReqID
+				revActor := &Actor{Kind: cbKind, Ref: cbRef, Authority: AuthorityReviewer}
+				detail := map[string]any{
+					"requestId":    openReqID,
+					"reviewerKind": cbKind,
+					"reviewerRef":  cbRef,
+					"resolvedSeq":  seq,
+				}
+				if err := s.insertEvent(ctx, tx, artifactID, EventReviewRequestFulfilled, revActor, now, detail); err != nil {
+					return nil, FinalizeEffects{}, err
+				}
+			}
+		}
+
+		dres, derr := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_draft
+			WHERE artifact_id = ? AND principal_kind = ? AND principal_ref = ?`),
+			artifactID, cbKind, cbRef)
+		if derr != nil {
+			return nil, FinalizeEffects{}, fmt.Errorf("artifacts: delete review draft on finalize: %w", derr)
+		}
+		if dn, derr := dres.RowsAffected(); derr != nil {
+			return nil, FinalizeEffects{}, fmt.Errorf("artifacts: delete review draft on finalize: %w", derr)
+		} else if dn > 0 {
+			effects.DraftDeleted = true
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("artifacts: commit finalize: %w", err)
+		return nil, FinalizeEffects{}, fmt.Errorf("artifacts: commit finalize: %w", err)
 	}
-	return s.GetArtifact(ctx, artifactID)
+	a, err := s.GetArtifact(ctx, artifactID)
+	return a, effects, err
 }
 
 // ClaimFinalize implements Store. One conditional update claims the

@@ -574,8 +574,16 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "same as the PUT /api/v1/artifacts/{id}/review-draft entry above: the generic refusal probes get 404 for a caller that cannot read the artifact where the matrix expects 403, and the admitting super-admin lacks artifact:read and holds no grant on the fixture artifact; TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded and TestArtifactsReviewDraftsAgentCreatorAndScopedTokenIsolation drive DELETE with user access tokens",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "artifact.review.request.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and answers 404 for callers that cannot read the artifact; TestArtifactsReviewRequestsOnRoutes exercises publisher and self-only views with session and scoped UAT callers",
+		Pin:    "TestArtifactsReviewRequestsOnRoutes",
+	},
 	{OperationID: "artifact.review.request.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests"}: {
-		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and requires an interactive user session in MayNotifyReviewer (refusing every reviewer for scoped UATs); TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> every reviewer refused reviewer_unavailable with no notifications) and agent callers",
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off), answers 404 for callers that cannot read the artifact, and refuses non-interactive credentials at the route level with 403 interactive_session_required before charging the limiter; TestArtifactsReviewRequestsOnRoutes exercises interactive/dev session, scoped UAT (ceiling lacking artifact:request_review -> 403, boundary excluding project -> 404, admitting UAT -> 403 interactive_session_required) and agent callers",
+		Pin:    "TestArtifactsReviewRequestsOnRoutes",
+	},
+	{OperationID: "artifact.review.request.withdraw", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-requests/{rid}/withdraw"}: {
+		Reason: "the route is gated by default-off hub.artifacts_review_requests (404 while off) and answers 404 for callers that cannot read the artifact or when the request id does not exist; TestArtifactsReviewRequestsOnRoutes exercises withdraw authorization and lifecycle",
 		Pin:    "TestArtifactsReviewRequestsOnRoutes",
 	},
 	{OperationID: "artifact.review.request.dismiss", Method: "POST", Pattern: "/api/v1/artifacts/{id}/review-request/dismiss"}: {

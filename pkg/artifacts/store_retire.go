@@ -48,6 +48,9 @@ const (
 	EventReviewRequestCreated   = "review_request.created"
 	EventReviewRequestReminded  = "review_request.reminded"
 	EventReviewRequestDismissed = "review_request.dismissed"
+	EventReviewRequestWithdrawn = "review_request.withdrawn"
+	EventReviewRequestFulfilled = "review_request.fulfilled"
+	EventReviewRequestExpired   = "review_request.expired"
 )
 
 // Event actor kinds: the principal kinds, and system for the hub's own
@@ -220,9 +223,11 @@ type DeleteOptions struct {
 
 // DeleteResult reports what DeleteArtifact removed with the artifact.
 type DeleteResult struct {
-	Grants int
-	Links  int
-	Drafts int
+	Grants               int
+	Links                int
+	Drafts               int
+	ReviewRequests       int
+	OpenRequestReviewers []string
 }
 
 // insertEvent writes one artifact_event row inside tx.
@@ -341,8 +346,41 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 		return DeleteResult{}, fmt.Errorf("artifacts: drop review drafts: %w", err)
 	}
 	res.Drafts = int(draftsRemoved)
+	openRows, err := tx.QueryContext(ctx, s.rebind(`SELECT DISTINCT reviewer_ref FROM artifact_review_request
+		WHERE artifact_id = ? AND state = ? AND reviewer_kind = ? ORDER BY reviewer_ref`),
+		artifactID, ReviewRequestStateOpen, PrincipalKindUser)
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: list open review request reviewers: %w", err)
+	}
+	for openRows.Next() {
+		var uid string
+		if err := openRows.Scan(&uid); err != nil {
+			_ = openRows.Close()
+			return DeleteResult{}, fmt.Errorf("artifacts: scan open review request reviewer: %w", err)
+		}
+		res.OpenRequestReviewers = append(res.OpenRequestReviewers, uid)
+	}
+	if err := openRows.Err(); err != nil {
+		_ = openRows.Close()
+		return DeleteResult{}, fmt.Errorf("artifacts: list open review request reviewers: %w", err)
+	}
+	_ = openRows.Close()
+	rr, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_request WHERE artifact_id = ?`), artifactID)
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: drop review requests: %w", err)
+	}
+	requestsRemoved, err := rr.RowsAffected()
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: drop review requests: %w", err)
+	}
+	res.ReviewRequests = int(requestsRemoved)
 	if err := s.insertEvent(ctx, tx, artifactID, EventDeleted, opts.Actor, now,
-		map[string]any{"grantsRemoved": res.Grants, "linksRevoked": res.Links, "draftsRemoved": res.Drafts}); err != nil {
+		map[string]any{
+			"grantsRemoved":         res.Grants,
+			"linksRevoked":          res.Links,
+			"draftsRemoved":         res.Drafts,
+			"reviewRequestsRemoved": res.ReviewRequests,
+		}); err != nil {
 		return DeleteResult{}, err
 	}
 	return res, nil

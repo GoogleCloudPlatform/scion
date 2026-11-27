@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -162,6 +163,12 @@ func artifactGrants(ctx context.Context, svc hubclient.ArtifactService, out io.W
 		}
 		res, err := svc.PutGrant(ctx, id, &hubclient.ArtifactGrantRequest{SubjectKind: kind, SubjectRef: subject, Permission: perm, Notify: opts.Notify})
 		if err != nil {
+			var apiErr *apiclient.APIError
+			if errors.As(err, &apiErr) && apiErr.Code == artifacts.CodeUseReviewRequests {
+				userArg := strings.TrimPrefix(subject, "user:")
+				return fmt.Errorf("add grant: %w\nuse: scion artifact request-review %s --user %s",
+					err, artifacts.FormatRef(id, 0), safeText(userArg))
+			}
 			return fmt.Errorf("add grant: %w%s", err, grantsErrorHint(err))
 		}
 		g := &res.Grant

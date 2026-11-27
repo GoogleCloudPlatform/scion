@@ -31,16 +31,19 @@ import (
 
 // RecipientAuthority is an optional extension of Host for non-access-granting
 // read and review-access checks about a named principal (kind, ref) rather
-// than the caller of ctx: the send-time recipient warning (RecipientMayNotRead,
-// ptone/scion#4575), the open-review access filter (readableOpenReviews,
-// ptone/scion#7650), the lost-access review-draft reaper
-// (ReapLostAccessReviewDrafts, ptone/scion#8475), and the review-request
-// existing-access check (handleCreateReviewRequests, ptone/scion#9296), where
-// none of those principals has a credential in a caller's request. It may only
-// feed advisory warnings, filter open reviews, withhold or remove the
-// principal's own data on a definitive deny, or refuse a caller-initiated
-// request on the principal's behalf; nothing built from it ever grants access
-// or serves content.
+// than the caller of ctx:
+//   - RecipientMayNotRead (ptone/scion#4575): send-time recipient warning;
+//   - readableOpenReviews (ptone/scion#7650): open-review access filter;
+//   - ReapLostAccessReviewDrafts (ptone/scion#8475): lost-access draft reaper;
+//   - classifyReviewer (ptone/scion#9296): reviewer eligibility classification
+//     for POST /review-requests (subject never escapes; any grant raise is
+//     gated separately by the caller's own adminAuthorityWith);
+//   - ReapReviewRequests (ptone/scion#9296): lost-access review-request reaper;
+//   - handleListReviewRequests (ptone/scion#9296): advisory reviewerCanReview
+//     on the publisher's review-requests list.
+//
+// None of those principals has a credential in a caller's request. Nothing
+// built from RecipientAuthority ever grants access or serves content.
 type RecipientAuthority interface {
 	// ResolveRecipient looks the principal up once, for every question
 	// one check asks about it. It returns a nil subject and no error for
