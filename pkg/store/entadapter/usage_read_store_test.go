@@ -863,12 +863,30 @@ func TestUsageRead_QueryUsageRollupsAndScopeCoverage(t *testing.T) {
 	assert.False(t, covHistActive.Buckets[0].IsRunning, "historical window must not set IsRunning")
 	assert.False(t, covHistActive.Buckets[0].IsReceiptStale, "historical window must not mark a running agent's current stale meter as stale")
 	assert.True(t, covHistActive.Buckets[0].HasUsageData)
+
+	// User-scoped coverage (driven from run_attribution(billing_user_id, created_at)
+	// with ra2/rd_w/rd narrowed by billing_user_id): exercises user_agents CTE
+	// on both SQLite and Postgres.
+	covUser, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		BillingUserID: user1,
+		Since:         base,
+		Until:         dbNow,
+		StaleAfter:    3 * time.Minute,
+		DBNow:         dbNow,
+	})
+	require.NoError(t, err)
+	totalUser := 0
+	for _, b := range covUser.Buckets {
+		totalUser += b.AgentCount
+	}
+	assert.Equal(t, 3, totalUser, "user1 owns the 3 started agents in projA")
 }
 
 // TestUsageRead_HourlyConsistencyMixedBinary verifies on both SQLite and
 // Postgres that CheckUsageHourlyConsistency detects an old-binary write
 // (a usage_events row plus a usage_rollups_daily increment with no hourly row)
-// occurring after the hourly coverage marker was set.
+// on the coverage-marker day itself (M+5m) and on later days, while passing
+// for clean multi-day windows.
 func TestUsageRead_HourlyConsistencyMixedBinary(t *testing.T) {
 	ctx := context.Background()
 	client := enttest.NewClient(t)
@@ -895,15 +913,32 @@ func TestUsageRead_HourlyConsistencyMixedBinary(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, hasCov)
 
-	// Pick two whole covered UTC days >= covStart:
-	//   - dayBad: receives a new-binary event AND a simulated old-binary event (daily only, no hourly).
-	//   - dayClean: receives only a new-binary event.
-	dayBad := utcDayStart(covStart).AddDate(0, 0, 1)
-	dayClean := dayBad.AddDate(0, 0, 1)
+	// (a) Same-day M+5m probe on the coverage-marker day itself.
+	evSameDayOld := makeStoreUsageEvent("hub-mix", "evt-mix-m5", runID, projID, agentID, &userID, 2, covStart.Add(5*time.Minute), 80, 20, 0, 0)
+	_, err = cs1.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evSameDayOld},
+	})
+	require.NoError(t, err)
+	_, err = client.UsageRollupHourly.Delete().
+		Where(usagerolluphourly.BucketStartEQ(covStart)).
+		Exec(ctx)
+	require.NoError(t, err)
 
-	// 2. Simulate an old-binary write on dayBad (usage_events + usage_rollups_daily, no hourly row):
-	// ingest via cs1 and then delete the corresponding hourly row to replicate a pre-P2 binary write.
-	evOldBinary := makeStoreUsageEvent("hub-mix", "evt-mix-oldbin", runID, projID, agentID, &userID, 2, dayBad.Add(2*time.Hour+5*time.Minute), 100, 40, 0, 0)
+	okSameDay, err := cs1.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     covStart,
+		Until:     covStart.Add(2 * time.Hour),
+		ProjectID: projID,
+	})
+	require.NoError(t, err)
+	assert.False(t, okSameDay, "old-binary write at M+5m on the coverage day must fail hourly consistency check")
+
+	// (b) Later-day old-binary write + clean multi-day window.
+	dayBad := utcDayStart(covStart).AddDate(0, 0, 1)
+	dayClean1 := dayBad.AddDate(0, 0, 1)
+	dayClean2 := dayClean1.AddDate(0, 0, 1)
+
+	evOldBinary := makeStoreUsageEvent("hub-mix", "evt-mix-oldbin", runID, projID, agentID, &userID, 3, dayBad.Add(2*time.Hour+5*time.Minute), 100, 40, 0, 0)
 	_, err = cs1.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID: agentID,
 		Events:  []*store.UsageEvent{evOldBinary},
@@ -914,39 +949,37 @@ func TestUsageRead_HourlyConsistencyMixedBinary(t *testing.T) {
 		Exec(ctx)
 	require.NoError(t, err)
 
-	// 3. Fresh post-upgrade store ingests additional events on dayBad and dayClean.
 	cs2 := NewCompositeStore(client)
-	evNewBadDay := makeStoreUsageEvent("hub-mix", "evt-mix-new1", runID, projID, agentID, &userID, 3, dayBad.Add(5*time.Hour), 20, 10, 0, 0)
-	evNewCleanDay := makeStoreUsageEvent("hub-mix", "evt-mix-new2", runID, projID, agentID, &userID, 4, dayClean.Add(3*time.Hour), 30, 15, 0, 0)
+	evNewBadDay := makeStoreUsageEvent("hub-mix", "evt-mix-new1", runID, projID, agentID, &userID, 4, dayBad.Add(5*time.Hour), 20, 10, 0, 0)
+	evNewClean1 := makeStoreUsageEvent("hub-mix", "evt-mix-new2", runID, projID, agentID, &userID, 5, dayClean1.Add(3*time.Hour), 30, 15, 0, 0)
+	evNewClean2 := makeStoreUsageEvent("hub-mix", "evt-mix-new3", runID, projID, agentID, &userID, 6, dayClean2.Add(9*time.Hour), 45, 25, 0, 0)
 	_, err = cs2.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID: agentID,
-		Events:  []*store.UsageEvent{evNewBadDay, evNewCleanDay},
+		Events:  []*store.UsageEvent{evNewBadDay, evNewClean1, evNewClean2},
 	})
 	require.NoError(t, err)
 
-	// 4. Cross-check must detect the mismatch on dayBad (and any range covering dayBad),
-	// and pass on dayClean.
 	okBad, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
-		Since:     dayBad,
-		Until:     dayBad,
+		Since:     dayBad.Add(4 * time.Hour),
+		Until:     dayBad.Add(6 * time.Hour),
 		ProjectID: projID,
 	})
 	require.NoError(t, err)
-	assert.False(t, okBad, "old-binary write on dayBad must fail hourly consistency check")
+	assert.False(t, okBad, "partial later-day window overlapping dayBad must fail hourly consistency check")
 
 	okSpan, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
 		Since:     dayBad,
-		Until:     dayClean,
+		Until:     dayClean1,
 		ProjectID: projID,
 	})
 	require.NoError(t, err)
 	assert.False(t, okSpan, "range including dayBad must fail hourly consistency check")
 
-	okClean, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
-		Since:     dayClean,
-		Until:     dayClean,
+	okCleanMulti, err := cs2.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+		Since:     dayClean1.Add(2 * time.Hour),
+		Until:     dayClean2.Add(12 * time.Hour),
 		ProjectID: projID,
 	})
 	require.NoError(t, err)
-	assert.True(t, okClean, "clean covered day must pass hourly consistency check")
+	assert.True(t, okCleanMulti, "clean multi-day window must pass hourly consistency check")
 }

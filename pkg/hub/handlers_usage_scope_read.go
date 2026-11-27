@@ -30,8 +30,9 @@ const (
 	defaultHourlyRollupRetentionDays = 14
 	defaultUsageGroupsLimit          = 100
 	// defaultHourlyUsageGroupsLimit covers a full 14-day hourly time series
-	// (14 * 24 = 336 buckets) without truncation when limit is omitted (O3).
-	defaultHourlyUsageGroupsLimit = defaultHourlyRollupRetentionDays * 24
+	// plus the current partial hour (14 * 24 + 1 = 337 buckets) without
+	// truncation when limit is omitted.
+	defaultHourlyUsageGroupsLimit = defaultHourlyRollupRetentionDays*24 + 1
 	maxUsageGroupsLimit           = 500
 )
 
@@ -142,14 +143,15 @@ func (s *Server) handleProjectUsage(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
-	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindProject, ID: project.ID}, project.ID, "")
+	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindProject, ID: project.ID}, project.ID, "", "")
 }
 
 // handleMeUsage serves GET /api/v1/me/usage (caller's own Track 1 token usage,
 // distinct from GET /api/v1/usage/me which serves quota usage).
 // Gated behind tokenomics.usage_ledger (404 when off).
 // Authorized for any authenticated UserIdentity (session JWT or scoped UAT);
-// agents receive 403.
+// agents receive 403. A project-boundary UAT is restricted to its boundary
+// project.
 func (s *Server) handleMeUsage(w http.ResponseWriter, r *http.Request) {
 	if !s.experimentEnabled(experiments.TokenomicsUsageLedger) {
 		NotFound(w, "route")
@@ -171,14 +173,24 @@ func (s *Server) handleMeUsage(w http.ResponseWriter, r *http.Request) {
 		Forbidden(w)
 		return
 	}
+	token, admitted := selfReadCredential(ctx, userIdent, "hub.usage.self.read")
+	if !admitted {
+		refuseSelfReadCredential(w, r, userIdent, "usage")
+		return
+	}
+	boundaryProjectID := ""
+	if token != nil {
+		boundaryProjectID = tokenBoundaryProject(token)
+	}
 
-	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindUser, ID: userIdent.ID()}, "", userIdent.ID())
+	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindUser, ID: userIdent.ID()}, "", userIdent.ID(), boundaryProjectID)
 }
 
 // handleUserUsage serves GET /api/v1/users/{id}/usage (billing_user_id = id).
 // Gated behind tokenomics.usage_ledger (404 when off).
-// Authorized for the user themselves (session JWT or scoped UAT) or a hub admin
-// with hub.metrics.read; unrelated users and agents receive 403.
+// Authorized for the user themselves (session JWT or scoped UAT; project-
+// boundary UATs are restricted to their boundary project) or a hub admin with
+// hub.metrics.read; unrelated users and agents receive 403.
 func (s *Server) handleUserUsage(w http.ResponseWriter, r *http.Request, targetUserID string) {
 	if !s.experimentEnabled(experiments.TokenomicsUsageLedger) {
 		NotFound(w, "route")
@@ -201,7 +213,17 @@ func (s *Server) handleUserUsage(w http.ResponseWriter, r *http.Request, targetU
 		return
 	}
 
-	if userIdent.ID() != targetUserID {
+	boundaryProjectID := ""
+	if userIdent.ID() == targetUserID {
+		token, admitted := selfReadCredential(ctx, userIdent, "user.usage.self.read")
+		if !admitted {
+			refuseSelfReadCredential(w, r, userIdent, "usage")
+			return
+		}
+		if token != nil {
+			boundaryProjectID = tokenBoundaryProject(token)
+		}
+	} else {
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(userIdent),
 			Credential: credentialContextForIdentity(userIdent),
@@ -225,7 +247,7 @@ func (s *Server) handleUserUsage(w http.ResponseWriter, r *http.Request, targetU
 		return
 	}
 
-	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindUser, ID: u.ID}, "", u.ID)
+	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindUser, ID: u.ID}, "", u.ID, boundaryProjectID)
 }
 
 // handleGlobalUsage serves GET /api/v1/usage (hub-wide Track 1 token usage).
@@ -247,10 +269,10 @@ func (s *Server) handleGlobalUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindGlobal}, "", "")
+	s.serveScopedUsage(w, r, UsageScopeRef{Kind: store.UsageScopeKindGlobal}, "", "", "")
 }
 
-func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope UsageScopeRef, fixedProjectID, fixedUserID string) {
+func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope UsageScopeRef, fixedProjectID, fixedUserID, boundaryProjectID string) {
 	ctx := r.Context()
 	qParams := r.URL.Query()
 
@@ -266,7 +288,8 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	// Optional filters; reject conflicting scope filters.
+	// Optional filters; reject conflicting scope filters and enforce any UAT
+	// project boundary.
 	filterProjectID := strings.TrimSpace(qParams.Get("project_id"))
 	if fixedProjectID != "" {
 		if filterProjectID != "" && filterProjectID != fixedProjectID {
@@ -274,6 +297,13 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 			return
 		}
 		filterProjectID = fixedProjectID
+	}
+	if boundaryProjectID != "" {
+		if filterProjectID != "" && filterProjectID != boundaryProjectID {
+			Forbidden(w)
+			return
+		}
+		filterProjectID = boundaryProjectID
 	}
 
 	filterUserID := strings.TrimSpace(qParams.Get("user_id"))
@@ -315,47 +345,39 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	// Read-time cross-check before serving hourly granularity: compare
-	// SUM(events) between usage_rollups_hourly and usage_rollups_daily over all
-	// whole covered UTC days inside the window (same scope/dimension filters).
-	// If an older binary wrote to daily without writing hourly (for example
-	// during a multi-replica rolling upgrade or after a rollback), fall back to
-	// daily granularity, or reject an explicit groupBy=hour with 400.
-	// Note: a partial upgrade edge day (where utcDayStart(since) < hourlyCoverageStart)
-	// cannot be cross-checked against daily because pre-marker hours on that day
-	// legitimately lack hourly rows.
+	// Read-time cross-check before serving hourly granularity: compare full-day
+	// SUM(events) between usage_rollups_hourly and usage_rollups_daily across
+	// EVERY UTC day the window overlaps (including partial edge days and the
+	// coverage-marker day), using the same scope/dimension filters.
+	// On any mismatch (for example, pre-marker events on the coverage day or
+	// old-binary writes during a multi-replica rolling upgrade or rollback),
+	// fall back to daily granularity, or reject an explicit groupBy=hour with 400.
 	if win.Granularity == store.UsageGranularityHour {
 		sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
 		untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
-		checkFirstDay := sinceDay
-		if sinceDay.Before(hourlyCoverageStart) {
-			checkFirstDay = sinceDay.AddDate(0, 0, 1)
+		consistent, err := s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
+			Since:         sinceDay,
+			Until:         untilDay,
+			ProjectID:     filterProjectID,
+			BillingUserID: filterUserID,
+			AgentID:       filterAgentID,
+			Harness:       filterHarness,
+			Model:         filterModel,
+			UsageSource:   filterUsageSource,
+		})
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
 		}
-		if !checkFirstDay.After(untilDay) {
-			consistent, err := s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
-				Since:         checkFirstDay,
-				Until:         untilDay,
-				ProjectID:     filterProjectID,
-				BillingUserID: filterUserID,
-				AgentID:       filterAgentID,
-				Harness:       filterHarness,
-				Model:         filterModel,
-				UsageSource:   filterUsageSource,
-			})
-			if err != nil {
-				writeErrorFromErr(w, err, "")
+		if !consistent {
+			if hasHourGroup {
+				ValidationError(w, "groupBy=hour is unavailable for this window: hourly rollups are incomplete compared to daily rollups", nil)
 				return
 			}
-			if !consistent {
-				if hasHourGroup {
-					ValidationError(w, "groupBy=hour is unavailable for this window: hourly rollups are incomplete compared to daily rollups", nil)
-					return
-				}
-				win = UsageWindow{
-					Since:       sinceDay,
-					Until:       untilDay.Add(24*time.Hour - time.Microsecond),
-					Granularity: store.UsageGranularityDay,
-				}
+			win = UsageWindow{
+				Since:       sinceDay,
+				Until:       untilDay.Add(24*time.Hour - time.Microsecond),
+				Granularity: store.UsageGranularityDay,
 			}
 		}
 	}
@@ -656,6 +678,8 @@ func deriveScopeCoverageSummary(cov *store.UsageScopeCoverage, totalEvents int64
 			}
 			var mhRows []*store.MeterHealth
 			if b.HasMeterHealth {
+				// Synthetic timestamp encodes only the SQL is_receipt_stale flag so
+				// status derivation stays inside the single deriveMeasurementStatus function.
 				receiptAt := dbNow
 				if b.IsReceiptStale {
 					receiptAt = dbNow.Add(-(staleAfter + time.Second))

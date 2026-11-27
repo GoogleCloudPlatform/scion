@@ -200,13 +200,83 @@ func TestMeUsageRead_SelfTokenReadsOwn(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, member))
 	bindSystemRoleForUsageReadTest(t, s, member.ID, store.SystemRoleHubMember)
 
-	rawUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
+	projA := &store.Project{ID: tid("me-uat-proj-a"), Name: "me-a", Slug: "me-a"}
+	projB := &store.Project{ID: tid("me-uat-proj-b"), Name: "me-b", Slug: "me-b"}
+	require.NoError(t, s.CreateProject(ctx, projA))
+	require.NoError(t, s.CreateProject(ctx, projB))
+	bindProjectRoleForUsageReadTest(t, s, member.ID, projA.ID, store.ProjectRoleOwner)
+	bindProjectRoleForUsageReadTest(t, s, member.ID, projB.ID, store.ProjectRoleOwner)
 
-	rec := doUATUsageGET(t, srv, "/api/v1/me/usage", rawUAT)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	var resp UsageSummaryResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, member.ID, resp.Scope.ID)
+	agA := &store.Agent{ID: tid("me-uat-ag-a"), Slug: "me-ag-a", Name: "me-ag-a", ProjectID: projA.ID, OwnerID: member.ID, CreatedBy: member.ID, Phase: string(state.PhaseRunning)}
+	agB := &store.Agent{ID: tid("me-uat-ag-b"), Slug: "me-ag-b", Name: "me-ag-b", ProjectID: projB.ID, OwnerID: member.ID, CreatedBy: member.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agA))
+	require.NoError(t, s.CreateAgent(ctx, agB))
+	_, err := s.SetAgentRunID(ctx, agA.ID, "run-me-a", nil)
+	require.NoError(t, err)
+	_, err = s.SetAgentRunID(ctx, agB.ID, "run-me-b", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-me-a", Generation: 1, HubID: "hub-me-uat", ProjectID: projA.ID, AgentID: agA.ID, BillingUserID: &member.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-me-b", Generation: 1, HubID: "hub-me-uat", ProjectID: projB.ID, AgentID: agB.ID, BillingUserID: &member.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agA.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-me-uat", EventID: "me-evt-a", RunID: "run-me-a", ProjectID: projA.ID, AgentID: agA.ID,
+			BillingUserID: &member.ID, Harness: "claude", Model: "claude-sonnet-4-6",
+			ModelSource: telemetrycontract.ModelSourceEvent, UsageSource: store.UsageSourceNative,
+			Status: telemetrycontract.StatusSuccess, Calls: 1, Input: usageInt64p(10), Output: usageInt64p(5),
+			TokenStatus: telemetrycontract.TokenStatusReported, EventTS: dbNow, ReceivedAt: dbNow,
+			ProducerEpoch: "ep-a", ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agB.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-me-uat", EventID: "me-evt-b", RunID: "run-me-b", ProjectID: projB.ID, AgentID: agB.ID,
+			BillingUserID: &member.ID, Harness: "claude", Model: "claude-sonnet-4-6",
+			ModelSource: telemetrycontract.ModelSourceEvent, UsageSource: store.UsageSourceNative,
+			Status: telemetrycontract.StatusSuccess, Calls: 1, Input: usageInt64p(200), Output: usageInt64p(50),
+			TokenStatus: telemetrycontract.TokenStatusReported, EventTS: dbNow, ReceivedAt: dbNow,
+			ProducerEpoch: "ep-b", ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+
+	// Hub-bounded UAT sees both projects A and B.
+	hubUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
+	recHub := doUATUsageGET(t, srv, "/api/v1/me/usage?groupBy=project", hubUAT)
+	require.Equal(t, http.StatusOK, recHub.Code, recHub.Body.String())
+	var hubResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recHub.Body.Bytes(), &hubResp))
+	assert.Equal(t, member.ID, hubResp.Scope.ID)
+	require.NotNil(t, hubResp.Tokens.Input)
+	assert.Equal(t, int64(210), *hubResp.Tokens.Input)
+	assert.Len(t, hubResp.Groups, 2)
+
+	// Project-A-bounded UAT sees ONLY project A (never project B's totals or project ID).
+	projAUAT := mintHubConfigToken(t, srv, member.ID, projectBoundary(projA.ID), "project:read")
+	recA := doUATUsageGET(t, srv, "/api/v1/me/usage?groupBy=project", projAUAT)
+	require.Equal(t, http.StatusOK, recA.Code, recA.Body.String())
+	var respA UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recA.Body.Bytes(), &respA))
+	require.NotNil(t, respA.Tokens.Input)
+	assert.Equal(t, int64(10), *respA.Tokens.Input)
+	require.Len(t, respA.Groups, 1)
+	require.NotNil(t, respA.Groups[0].ProjectID)
+	assert.Equal(t, projA.ID, *respA.Groups[0].ProjectID)
+
+	// Explicitly requesting project B with a project-A-bounded UAT returns 403.
+	recCross := doUATUsageGET(t, srv, "/api/v1/me/usage?project_id="+projB.ID, projAUAT)
+	assert.Equal(t, http.StatusForbidden, recCross.Code)
 }
 
 func TestUserUsageRead_SelfTokenReadsOwn(t *testing.T) {
@@ -221,10 +291,59 @@ func TestUserUsageRead_SelfTokenReadsOwn(t *testing.T) {
 	bindSystemRoleForUsageReadTest(t, s, member.ID, store.SystemRoleHubMember)
 	require.NoError(t, s.CreateUser(ctx, other))
 
+	projA := &store.Project{ID: tid("user-uat-proj-a"), Name: "ua", Slug: "ua"}
+	projB := &store.Project{ID: tid("user-uat-proj-b"), Name: "ub", Slug: "ub"}
+	require.NoError(t, s.CreateProject(ctx, projA))
+	require.NoError(t, s.CreateProject(ctx, projB))
+	bindProjectRoleForUsageReadTest(t, s, member.ID, projA.ID, store.ProjectRoleOwner)
+	bindProjectRoleForUsageReadTest(t, s, member.ID, projB.ID, store.ProjectRoleOwner)
+
+	agB := &store.Agent{ID: tid("user-uat-ag-b"), Slug: "u-ag-b", Name: "u-ag-b", ProjectID: projB.ID, OwnerID: member.ID, CreatedBy: member.ID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agB))
+	_, err := s.SetAgentRunID(ctx, agB.ID, "run-u-b", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID: "run-u-b", Generation: 1, HubID: "hub-user-uat", ProjectID: projB.ID, AgentID: agB.ID, BillingUserID: &member.ID, Harness: "claude",
+	})
+	require.NoError(t, err)
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agB.ID,
+		Events: []*store.UsageEvent{{
+			HubID: "hub-user-uat", EventID: "u-evt-b", RunID: "run-u-b", ProjectID: projB.ID, AgentID: agB.ID,
+			BillingUserID: &member.ID, Harness: "claude", Model: "claude-sonnet-4-6",
+			ModelSource: telemetrycontract.ModelSourceEvent, UsageSource: store.UsageSourceNative,
+			Status: telemetrycontract.StatusSuccess, Calls: 1, Input: usageInt64p(300), Output: usageInt64p(75),
+			TokenStatus: telemetrycontract.TokenStatusReported, EventTS: dbNow, ReceivedAt: dbNow,
+			ProducerEpoch: "ep-ub", ProducerSeq: 1,
+		}},
+	})
+	require.NoError(t, err)
+
 	rawUAT := mintHubConfigToken(t, srv, member.ID, hubBoundary(), "user:read")
 
-	recSelf := doUATUsageGET(t, srv, "/api/v1/users/"+member.ID+"/usage", rawUAT)
+	recSelf := doUATUsageGET(t, srv, "/api/v1/users/"+member.ID+"/usage?groupBy=project", rawUAT)
 	require.Equal(t, http.StatusOK, recSelf.Code, recSelf.Body.String())
+	var hubResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recSelf.Body.Bytes(), &hubResp))
+	require.NotNil(t, hubResp.Tokens.Input)
+	assert.Equal(t, int64(300), *hubResp.Tokens.Input)
+	require.Len(t, hubResp.Groups, 1)
+
+	// Project-A-bounded UAT must NOT see project B's usage on /api/v1/users/{self}/usage.
+	projAUAT := mintHubConfigToken(t, srv, member.ID, projectBoundary(projA.ID), "project:read")
+	recBounded := doUATUsageGET(t, srv, "/api/v1/users/"+member.ID+"/usage?groupBy=project", projAUAT)
+	require.Equal(t, http.StatusOK, recBounded.Code, recBounded.Body.String())
+	var boundedResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(recBounded.Body.Bytes(), &boundedResp))
+	assert.Equal(t, int64(0), boundedResp.Events)
+	assert.Nil(t, boundedResp.Tokens.Input)
+	assert.Empty(t, boundedResp.Groups)
+
+	// Conflicting project_id filter outside token boundary returns 403.
+	recCross := doUATUsageGET(t, srv, "/api/v1/users/"+member.ID+"/usage?project_id="+projB.ID, projAUAT)
+	assert.Equal(t, http.StatusForbidden, recCross.Code)
 
 	recOther := doUATUsageGET(t, srv, "/api/v1/users/"+other.ID+"/usage", rawUAT)
 	assert.Equal(t, http.StatusForbidden, recOther.Code)
@@ -514,51 +633,93 @@ func TestScopedUsageRead_MixedBinaryFallsBackToDailyAndRejectsExplicitHourly(t *
 
 	dbNow, err := s.DBNow(ctx)
 	require.NoError(t, err)
-	day := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
-	// Seed hourly coverage marker strictly before day so day is a whole covered UTC day.
-	covVal, err := json.Marshal(map[string]string{"started_at": day.Add(-24 * time.Hour).UTC().Format(time.RFC3339)})
+	today := time.Date(dbNow.Year(), dbNow.Month(), dbNow.Day(), 0, 0, 0, 0, time.UTC)
+	covDay := today.AddDate(0, 0, -4)
+	laterBadDay := today.AddDate(0, 0, -3)
+	cleanDay1 := today.AddDate(0, 0, -2)
+	cleanDay2 := today.AddDate(0, 0, -1)
+
+	// Seed hourly coverage marker mid-day on covDay (10:00Z).
+	marker := covDay.Add(10 * time.Hour)
+	covVal, err := json.Marshal(map[string]string{"started_at": marker.UTC().Format(time.RFC3339)})
 	require.NoError(t, err)
 	_, err = s.UpsertHubSetting(ctx, store.UsageRollupHourlyCoverageSection, covVal, "", -1, "seeded")
 	require.NoError(t, err)
 
-	// Ingest two events on `day`: evt-1 (simulating old-binary write) and evt-2 (new-binary write).
-	ev1 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-1", 1, day.Add(1*time.Hour+5*time.Minute), 100, 50)
-	ev2 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-2", 2, day.Add(3*time.Hour+10*time.Minute), 25, 10)
+	// Scenario 1 (same-day M+5m probe): marker at covDay 10:00Z; two events at
+	// covDay 11:05Z (simulated old-binary write: hourly row deleted) and covDay 13:10Z.
+	evCovOld := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-cov-1", 1, covDay.Add(11*time.Hour+5*time.Minute), 100, 50)
+	evCovNew := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-cov-2", 2, covDay.Add(13*time.Hour+10*time.Minute), 25, 10)
+	// Scenario 2 (later-day partial window with an old-binary write): old-binary write at 09:05Z, new-binary write at 13:05Z.
+	evLaterOld := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-lat-1", 3, laterBadDay.Add(9*time.Hour+5*time.Minute), 70, 20)
+	evLaterNew := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-lat-2", 4, laterBadDay.Add(13*time.Hour+5*time.Minute), 30, 10)
+	// Scenario 3 (clean multi-day window): all events written by new binary on cleanDay1 and cleanDay2.
+	evClean1 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-cln-1", 5, cleanDay1.Add(8*time.Hour), 40, 15)
+	evClean2 := makeWireUsageEvent("hub-scope-mixbin", ag.ID, proj.ID, "run-mixbin", "evt-mb-cln-2", 6, cleanDay2.Add(14*time.Hour), 60, 25)
+
 	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
-		Events:        []telemetrycontract.UsageEvent{ev1, ev2},
+		Events:        []telemetrycontract.UsageEvent{evCovOld, evCovNew, evLaterOld, evLaterNew, evClean1, evClean2},
 		RunID:         "run-mixbin",
 		ProducerEpoch: "ep-1",
-		ProducerSeq:   2,
+		ProducerSeq:   6,
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// Simulate an old-binary write by removing the hourly row for ev1 while keeping usage_events and usage_rollups_daily intact.
+	// Delete the hourly rows for evCovOld (input=100) and evLaterOld (input=70)
+	// while keeping usage_events and usage_rollups_daily intact.
 	cs, ok := s.(*entadapter.CompositeStore)
 	require.True(t, ok)
-	res, err := cs.DB().ExecContext(ctx, "DELETE FROM usage_rollups_hourly WHERE agent_id = ? AND input = 100", ag.ID)
+	res, err := cs.DB().ExecContext(ctx, "DELETE FROM usage_rollups_hourly WHERE agent_id = ? AND input IN (100, 70)", ag.ID)
 	require.NoError(t, err)
 	affected, err := res.RowsAffected()
 	require.NoError(t, err)
-	require.Equal(t, int64(1), affected)
+	require.Equal(t, int64(2), affected)
 
-	sinceStr := day.UTC().Format(time.RFC3339)
-	untilStr := day.Add(23*time.Hour + 59*time.Minute).UTC().Format(time.RFC3339)
+	// (1) Same-day coverage-marker probe: since=covDay 10:00Z, until=covDay 23:59Z.
+	// Must fall back to daily with both events (input=125) and reject explicit groupBy=hour with 400.
+	covSince := marker.UTC().Format(time.RFC3339)
+	covUntil := covDay.Add(23*time.Hour + 59*time.Minute).UTC().Format(time.RFC3339)
+	autoCovRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+covSince+"&until="+covUntil, admin)
+	require.Equal(t, http.StatusOK, autoCovRec.Code, autoCovRec.Body.String())
+	var autoCovResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(autoCovRec.Body.Bytes(), &autoCovResp))
+	assert.Equal(t, store.UsageGranularityDay, autoCovResp.Window.Granularity, "same-day coverage-marker mismatch must fall back to daily")
+	assert.Equal(t, int64(2), autoCovResp.Events)
+	require.NotNil(t, autoCovResp.Tokens.Input)
+	assert.Equal(t, int64(125), *autoCovResp.Tokens.Input)
+	require.NotNil(t, autoCovResp.Tokens.Output)
+	assert.Equal(t, int64(60), *autoCovResp.Tokens.Output)
 
-	// Auto-granularity must detect the hourly/daily mismatch, fall back to daily,
-	// and return the complete totals (125 input, 60 output, 2 events) without omitting ev1.
-	autoRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+sinceStr+"&until="+untilStr, admin)
-	require.Equal(t, http.StatusOK, autoRec.Code, autoRec.Body.String())
-	var autoResp UsageSummaryResponse
-	require.NoError(t, json.Unmarshal(autoRec.Body.Bytes(), &autoResp))
-	assert.Equal(t, store.UsageGranularityDay, autoResp.Window.Granularity, "must fall back to daily when hourly rollups are incomplete")
-	assert.Equal(t, int64(2), autoResp.Events)
-	require.NotNil(t, autoResp.Tokens.Input)
-	assert.Equal(t, int64(125), *autoResp.Tokens.Input)
-	require.NotNil(t, autoResp.Tokens.Output)
-	assert.Equal(t, int64(60), *autoResp.Tokens.Output)
+	hourCovRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+covSince+"&until="+covUntil+"&groupBy=hour", admin)
+	assert.Equal(t, http.StatusBadRequest, hourCovRec.Code, hourCovRec.Body.String())
+	assert.Contains(t, hourCovRec.Body.String(), "incomplete")
 
-	// Explicit groupBy=hour must return 400 with a clear error message.
-	hourRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+sinceStr+"&until="+untilStr+"&groupBy=hour", admin)
-	assert.Equal(t, http.StatusBadRequest, hourRec.Code, hourRec.Body.String())
-	assert.Contains(t, hourRec.Body.String(), "incomplete")
+	// (2) Later-day partial window (12:00Z..15:00Z) on laterBadDay where an old-binary write occurred at 09:05Z.
+	// Full-day cross-check catches it: auto falls back to daily, explicit groupBy=hour returns 400.
+	latSince := laterBadDay.Add(12 * time.Hour).UTC().Format(time.RFC3339)
+	latUntil := laterBadDay.Add(15 * time.Hour).UTC().Format(time.RFC3339)
+	autoLatRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+latSince+"&until="+latUntil, admin)
+	require.Equal(t, http.StatusOK, autoLatRec.Code, autoLatRec.Body.String())
+	var autoLatResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(autoLatRec.Body.Bytes(), &autoLatResp))
+	assert.Equal(t, store.UsageGranularityDay, autoLatResp.Window.Granularity, "partial later-day window with old-binary event must fall back to daily")
+	assert.Equal(t, int64(2), autoLatResp.Events)
+	require.NotNil(t, autoLatResp.Tokens.Input)
+	assert.Equal(t, int64(100), *autoLatResp.Tokens.Input)
+
+	hourLatRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+latSince+"&until="+latUntil+"&groupBy=hour", admin)
+	assert.Equal(t, http.StatusBadRequest, hourLatRec.Code, hourLatRec.Body.String())
+
+	// (3) Clean multi-day window (cleanDay1 06:00Z .. cleanDay2 18:00Z): stays hourly!
+	clnSince := cleanDay1.Add(6 * time.Hour).UTC().Format(time.RFC3339)
+	clnUntil := cleanDay2.Add(18 * time.Hour).UTC().Format(time.RFC3339)
+	cleanRec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since="+clnSince+"&until="+clnUntil+"&groupBy=hour", admin)
+	require.Equal(t, http.StatusOK, cleanRec.Code, cleanRec.Body.String())
+	var cleanResp UsageSummaryResponse
+	require.NoError(t, json.Unmarshal(cleanRec.Body.Bytes(), &cleanResp))
+	assert.Equal(t, store.UsageGranularityHour, cleanResp.Window.Granularity, "clean multi-day window must stay hourly")
+	assert.Equal(t, int64(2), cleanResp.Events)
+	require.NotNil(t, cleanResp.Tokens.Input)
+	assert.Equal(t, int64(100), *cleanResp.Tokens.Input)
+	assert.Len(t, cleanResp.Groups, 2)
 }

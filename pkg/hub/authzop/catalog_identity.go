@@ -999,7 +999,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.usage.self.read",
 		Domain:      "user",
-		Description: "Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger)",
+		Description: "Read the caller's own Track 1 token usage summary through GET /api/v1/users/{id}/usage naming the caller's own user ID (behind tokenomics.usage_ledger). A project-boundary user access token is restricted to its boundary project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/usage", Method: "GET", Variant: "self"},
 		},
@@ -1019,7 +1019,7 @@ var identityOperations = []OperationSpec{
 			Scope:  "caller's own Track 1 token usage only",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
-		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestUserUsageRead_SelfTokenReadsOwn"},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestUserUsageRead_SelfTokenReadsOwn"},
 	},
 
 	// =====================================================================

@@ -991,7 +991,7 @@ var hubOperations = []OperationSpec{
 	{
 		ID:          "hub.usage.self.read",
 		Domain:      "hub",
-		Description: "Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage)",
+		Description: "Read the caller's own Track 1 token usage summary by billing_user_id (behind tokenomics.usage_ledger; distinct from GET /api/v1/usage/me, which returns quota usage). A project-boundary user access token is restricted to its boundary project",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/me/usage", Method: "GET"},
 		},
@@ -1011,7 +1011,7 @@ var hubOperations = []OperationSpec{
 			Scope:  "caller's own Track 1 token usage only",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},
-		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestMeUsageRead_SelfTokenReadsOwn"},
+		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterBoundaryProject, Pin: "TestMeUsageRead_SelfTokenReadsOwn"},
 	},
 	{
 		ID:          "hub.experiments.read",
