@@ -118,10 +118,34 @@ export async function getMarkdownRenderer(): Promise<MarkdownRenderer> {
       // Escape raw HTML tokens so angle-bracket text like <template> is
       // rendered as visible text instead of being interpreted as real HTML
       // elements (which can truncate content — see miller79/scion#10).
+      // Also preserve the `no-execute` info-string token on fenced code blocks
+      // as `data-no-execute="true"` (design §4.14).
+      const escapeHtmlAttr = (s: string): string =>
+        s
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
       marked.use({
         renderer: {
           html({ text }: { text: string }): string {
             return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          },
+          code({ text, lang }: { text: string; lang?: string }): string {
+            const tokens = (lang ?? '').trim().split(/\s+/).filter(Boolean);
+            const firstWord = tokens[0] ?? '';
+            const hasNoExecute = tokens.slice(1).some((t) => t.toLowerCase() === 'no-execute');
+            const escapedCode = escapeHtmlAttr(text) + (text.endsWith('\n') ? '' : '\n');
+            const attrs: string[] = [];
+            if (firstWord) {
+              attrs.push(`class="language-${escapeHtmlAttr(firstWord)}"`);
+            }
+            if (hasNoExecute) {
+              attrs.push('data-no-execute="true"');
+            }
+            const attrStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
+            return `<pre><code${attrStr}>${escapedCode}</code></pre>\n`;
           },
         },
       });

@@ -15,6 +15,8 @@
 package messages
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -321,5 +323,34 @@ func TestRenderCommandRequestFallback_NonASCIINote(t *testing.T) {
 	fenceIdx := strings.Index(nonASCII, "```sh")
 	if noteIdx < 0 || fenceIdx < 0 || noteIdx > fenceIdx {
 		t.Errorf("expected non-ASCII note before ```sh fence, got: %s", nonASCII)
+	}
+}
+
+func TestCommandRequestCanonicalHash_SharedVectors(t *testing.T) {
+	raw, err := os.ReadFile("testdata/command_request_hash_vectors.json")
+	if err != nil {
+		t.Fatalf("read shared hash vectors: %v", err)
+	}
+	var doc struct {
+		Version int `json:"version"`
+		Vectors []struct {
+			Name     string `json:"name"`
+			Script   string `json:"script"`
+			Workdir  string `json:"workdir"`
+			TimeoutS int    `json:"timeout_s"`
+			SHA256   string `json:"sha256"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal shared hash vectors: %v", err)
+	}
+	if len(doc.Vectors) == 0 {
+		t.Fatal("expected at least one shared hash vector")
+	}
+	for _, v := range doc.Vectors {
+		got := CommandRequestCanonicalHash(v.Script, v.Workdir, v.TimeoutS)
+		if got != v.SHA256 {
+			t.Errorf("%s: CommandRequestCanonicalHash = %q, want %q", v.Name, got, v.SHA256)
+		}
 	}
 }

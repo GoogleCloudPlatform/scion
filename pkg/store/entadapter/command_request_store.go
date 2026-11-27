@@ -554,6 +554,233 @@ func classifyApproveConflict(row *ent.CommandRequest, submittedHash string, now 
 	return msgaction.ConflictAlreadyResolved
 }
 
+// CreateAndApproveMarkdownCommandRequest implements store.CommandRequestStore (§4.14 step 5).
+func (c *CompositeStore) CreateAndApproveMarkdownCommandRequest(ctx context.Context, in *store.CreateMarkdownCommandRequestInput) (*store.ApproveCommandRequestResult, error) {
+	if in == nil || in.ProjectID == "" || in.AgentID == "" || in.MessageID == "" || in.UserID == "" || in.ExecAgentID == "" || in.ExecProjectID == "" {
+		return nil, fmt.Errorf("%w: projectID, agentID, messageID, userID, execAgentID, and execProjectID are required", store.ErrInvalidInput)
+	}
+	projectUID, err := parseUUID(in.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	agentUID, err := parseUUID(in.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	msgUID, err := parseUUID(in.MessageID)
+	if err != nil {
+		return nil, err
+	}
+	execAgentUID, err := parseUUID(in.ExecAgentID)
+	if err != nil {
+		return nil, err
+	}
+	execProjectUID, err := parseUUID(in.ExecProjectID)
+	if err != nil {
+		return nil, err
+	}
+	var convUID *uuid.UUID
+	if strings.TrimSpace(in.ConversationID) != "" {
+		u, uerr := parseUUID(in.ConversationID)
+		if uerr != nil {
+			return nil, uerr
+		}
+		convUID = &u
+	}
+	if err := messages.ValidateCommandRequestScript(in.Script); err != nil {
+		return nil, fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+	}
+	expectedHash := messages.CommandRequestCanonicalHash(in.Script, "", messages.DefaultCommandRequestTimeoutS)
+	hashHex := strings.ToLower(strings.TrimSpace(in.CommandSHA256))
+	if hashHex == "" {
+		hashHex = expectedHash
+	} else if hashHex != expectedHash {
+		return nil, fmt.Errorf("%w: command_sha256 does not match canonical hash", store.ErrInvalidInput)
+	}
+
+	now := in.Now.UTC().Truncate(time.Microsecond)
+	if now.IsZero() {
+		now = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	ttl := in.TTL
+	if ttl <= 0 {
+		ttl = msgaction.CommandRequestTTL
+	}
+	expiresAt := now.Add(ttl)
+	leaseUntil := in.LeaseUntil.UTC().Truncate(time.Microsecond)
+	if leaseUntil.IsZero() {
+		leaseUntil = now.Add(6 * time.Minute)
+	}
+
+	key := messages.MarkdownCommandRequestKey(in.MessageID, hashHex)
+	keyNorm := messages.CommandRequestKeyNorm(key)
+	chatKey := strings.TrimSpace(in.ChatKey)
+
+	lookupExisting := func(client *ent.Client) (*store.ApproveCommandRequestResult, error) {
+		existing, qerr := client.CommandRequest.Query().
+			Where(
+				commandrequest.AgentIDEQ(agentUID),
+				commandrequest.KeyNormEQ(keyNorm),
+				commandrequest.VersionEQ(1),
+			).
+			Only(ctx)
+		if qerr != nil {
+			return nil, mapError(qerr)
+		}
+		var existingRun *store.CommandRun
+		if runEnt, rerr := client.CommandRun.Query().
+			Where(commandrun.RequestIDEQ(existing.ID)).
+			Only(ctx); rerr == nil && runEnt != nil {
+			existingRun = entCommandRunToStore(runEnt)
+		}
+		if in.IdempotencyKey != "" &&
+			existing.Status == commandrequest.StatusApproved &&
+			existing.IdempotencyKey != nil && *existing.IdempotencyKey == in.IdempotencyKey &&
+			existing.ResolvedByUserID != nil && *existing.ResolvedByUserID == in.UserID &&
+			existingRun != nil {
+			return &store.ApproveCommandRequestResult{
+				Request:  entCommandRequestToStore(existing),
+				Run:      existingRun,
+				Replayed: true,
+			}, nil
+		}
+		return &store.ApproveCommandRequestResult{
+			Conflict:     entCommandRequestToStore(existing),
+			ConflictRun:  existingRun,
+			ConflictCode: msgaction.ConflictAlreadyResolved,
+		}, nil
+	}
+
+	var res *store.ApproveCommandRequestResult
+	err = runInEntTx(ctx, c.client, c.inTx, func(client *ent.Client) error {
+		q := client.CommandRequest.Query().
+			Where(
+				commandrequest.AgentIDEQ(agentUID),
+				commandrequest.KeyNormEQ(keyNorm),
+				commandrequest.VersionEQ(1),
+			)
+		if c.isPostgres() {
+			q = q.ForUpdate()
+		}
+		existing, qerr := q.Only(ctx)
+		if qerr == nil && existing != nil {
+			var existingRun *store.CommandRun
+			if runEnt, rerr := client.CommandRun.Query().
+				Where(commandrun.RequestIDEQ(existing.ID)).
+				Only(ctx); rerr == nil && runEnt != nil {
+				existingRun = entCommandRunToStore(runEnt)
+			}
+			if in.IdempotencyKey != "" &&
+				existing.Status == commandrequest.StatusApproved &&
+				existing.IdempotencyKey != nil && *existing.IdempotencyKey == in.IdempotencyKey &&
+				existing.ResolvedByUserID != nil && *existing.ResolvedByUserID == in.UserID &&
+				existingRun != nil {
+				res = &store.ApproveCommandRequestResult{
+					Request:  entCommandRequestToStore(existing),
+					Run:      existingRun,
+					Replayed: true,
+				}
+				return nil
+			}
+			res = &store.ApproveCommandRequestResult{
+				Conflict:     entCommandRequestToStore(existing),
+				ConflictRun:  existingRun,
+				ConflictCode: msgaction.ConflictAlreadyResolved,
+			}
+			return nil
+		}
+		if qerr != nil && !ent.IsNotFound(qerr) {
+			return mapError(qerr)
+		}
+
+		rowID := uuid.New()
+		reqBuilder := client.CommandRequest.Create().
+			SetID(rowID).
+			SetProjectID(projectUID).
+			SetAgentID(agentUID).
+			SetAgentName(in.AgentName).
+			SetKey(key).
+			SetKeyNorm(keyNorm).
+			SetVersion(1).
+			SetDescription("").
+			SetScript(in.Script).
+			SetWorkdir("").
+			SetTimeoutS(messages.DefaultCommandRequestTimeoutS).
+			SetShareOutputRequested(false).
+			SetCommandSha256(hashHex).
+			SetApproverUserID(in.UserID).
+			SetMessageID(msgUID).
+			SetStatus(commandrequest.StatusApproved).
+			SetResolvedByUserID(in.UserID).
+			SetResolvedAt(now).
+			SetSurface(commandrequest.Surface(msgaction.CommandRequestSurfaceMarkdownBlock)).
+			SetCreatedAt(now).
+			SetExpiresAt(expiresAt)
+		if in.UserName != "" {
+			reqBuilder.SetResolvedByName(in.UserName)
+		}
+		if in.UserEmail != "" {
+			reqBuilder.SetResolvedByEmail(in.UserEmail)
+		}
+		if in.IdempotencyKey != "" {
+			reqBuilder.SetIdempotencyKey(in.IdempotencyKey)
+		}
+		if convUID != nil {
+			reqBuilder.SetConversationID(*convUID)
+		}
+		if chatKey != "" {
+			reqBuilder.SetChatKey(chatKey)
+		}
+		insertedReq, ierr := reqBuilder.Save(ctx)
+		if ierr != nil {
+			return ierr
+		}
+
+		runID := uuid.New()
+		runEnt, rerr := client.CommandRun.Create().
+			SetID(runID).
+			SetRequestID(rowID).
+			SetCommandSha256(hashHex).
+			SetScriptLen(len(in.Script)).
+			SetApproverUserID(in.UserID).
+			SetExecAgentID(execAgentUID).
+			SetExecProjectID(execProjectUID).
+			SetStatus(commandrun.StatusQueued).
+			SetWake(commandrun.WakeNone).
+			SetShareOutput(in.ShareOutput).
+			SetTimeoutS(messages.DefaultCommandRequestTimeoutS).
+			SetCaptureMode("tail").
+			SetWorkdir("").
+			SetLeaseUntil(leaseUntil).
+			SetCreatedAt(now).
+			Save(ctx)
+		if rerr != nil {
+			return mapError(rerr)
+		}
+
+		res = &store.ApproveCommandRequestResult{
+			Request: entCommandRequestToStore(insertedReq),
+			Run:     entCommandRunToStore(runEnt),
+		}
+		return nil
+	})
+	if err != nil {
+		if ent.IsConstraintError(err) || isSQLiteUniqueConstraint(err) {
+			return lookupExisting(c.client)
+		}
+		return nil, mapError(err)
+	}
+	return res, nil
+}
+
+func isSQLiteUniqueConstraint(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "duplicate key value")
+}
+
 // ExpireCommandRequests implements store.CommandRequestStore.
 func (c *CompositeStore) ExpireCommandRequests(ctx context.Context, now time.Time, limit int) ([]*store.CommandRequest, error) {
 	now = now.UTC().Truncate(time.Microsecond)

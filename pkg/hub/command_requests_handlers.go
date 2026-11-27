@@ -71,6 +71,7 @@ func (s *Server) enqueueCommandRun(req *store.CommandRequest, run *store.Command
 // handleCommandRequestRoutes serves the responder command-request endpoints,
 // 404 while hub.command_requests is off:
 //
+//	POST /api/v1/command-requests/from-message
 //	GET  /api/v1/command-requests/{id}
 //	POST /api/v1/command-requests/{id}/approve
 //	GET  /api/v1/command-requests/{id}/output
@@ -80,6 +81,18 @@ func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Reque
 		reqID, sub, hasSlash := strings.Cut(rest, "/")
 		if reqID == "" {
 			NotFound(w, "Command request")
+			return
+		}
+		if reqID == "from-message" {
+			if hasSlash && sub != "" {
+				NotFound(w, "Command request")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleCommandRequestFromMessage(w, r)
 			return
 		}
 		if !hasSlash || sub == "" {
@@ -429,68 +442,8 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Step 4: resolve caller's execution container.
-	execRes, err := s.resolveExecContainerForIdentity(ctx, user)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	switch execRes.State {
-	case ExecContainerStateUnconfigured:
-		emitRefused(msgaction.ConflictCmdExecUnconfigured, map[string]string{
-			"command_sha256":   row.CommandSHA256,
-			"approver_user_id": user.ID(),
-		})
-		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnconfigured,
-			"no execution container is configured; configure one in your profile first", nil)
-		return
-	case ExecContainerStateUnavailable:
-		emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
-			"command_sha256":   row.CommandSHA256,
-			"approver_user_id": user.ID(),
-		})
-		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
-			"your execution container is unavailable", nil)
-		return
-	case ExecContainerStateStopped:
-		emitRefused(msgaction.ConflictCmdExecStopped, map[string]string{
-			"command_sha256":   row.CommandSHA256,
-			"approver_user_id": user.ID(),
-			"exec_agent_id":    execRes.Agent.ID,
-			"exec_project_id":  execRes.Agent.ProjectID,
-		})
-		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecStopped,
-			"Start your execution container, then approve", nil)
-		return
-	case ExecContainerStateReady, ExecContainerStateStarting, ExecContainerStateSuspended:
-		if execRes.Agent == nil {
-			emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
-				"command_sha256":   row.CommandSHA256,
-				"approver_user_id": user.ID(),
-			})
-			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
-				"your execution container is unavailable", nil)
-			return
-		}
-		if execRes.State == ExecContainerStateSuspended && !s.agentLifecycleAllowed(ctx, user, execRes.Agent) {
-			emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
-				"command_sha256":     row.CommandSHA256,
-				"approver_user_id":   user.ID(),
-				"exec_agent_id":      execRes.Agent.ID,
-				"exec_project_id":    execRes.Agent.ProjectID,
-				"not_started_reason": "wake_not_permitted",
-			})
-			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
-				"your execution container is suspended and you do not have permission to resume it",
-				map[string]interface{}{"detail": "wake_not_permitted"})
-			return
-		}
-	default:
-		emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
-			"command_sha256":   row.CommandSHA256,
-			"approver_user_id": user.ID(),
-		})
-		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
-			"your execution container is unavailable", nil)
+	execRes, ok := s.resolveExecContainerForApproval(ctx, w, user, row.CommandSHA256, emitRefused)
+	if !ok {
 		return
 	}
 
@@ -576,6 +529,438 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 		Request: reqView,
 		Run:     runView,
 	})
+}
+
+func (s *Server) resolveExecContainerForApproval(
+	ctx context.Context,
+	w http.ResponseWriter,
+	user UserIdentity,
+	commandSHA256 string,
+	emitRefused func(reason string, details map[string]string),
+) (ExecContainerResolution, bool) {
+	execRes, err := s.resolveExecContainerForIdentity(ctx, user)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return ExecContainerResolution{}, false
+	}
+	switch execRes.State {
+	case ExecContainerStateUnconfigured:
+		emitRefused(msgaction.ConflictCmdExecUnconfigured, map[string]string{
+			"command_sha256":   commandSHA256,
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnconfigured,
+			"no execution container is configured; configure one in your profile first", nil)
+		return ExecContainerResolution{}, false
+	case ExecContainerStateUnavailable:
+		emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
+			"command_sha256":   commandSHA256,
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
+			"your execution container is unavailable", nil)
+		return ExecContainerResolution{}, false
+	case ExecContainerStateStopped:
+		details := map[string]string{
+			"command_sha256":   commandSHA256,
+			"approver_user_id": user.ID(),
+		}
+		if execRes.Agent != nil {
+			details["exec_agent_id"] = execRes.Agent.ID
+			details["exec_project_id"] = execRes.Agent.ProjectID
+		}
+		emitRefused(msgaction.ConflictCmdExecStopped, details)
+		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecStopped,
+			"Start your execution container, then approve", nil)
+		return ExecContainerResolution{}, false
+	case ExecContainerStateReady, ExecContainerStateStarting, ExecContainerStateSuspended:
+		if execRes.Agent == nil {
+			emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
+				"command_sha256":   commandSHA256,
+				"approver_user_id": user.ID(),
+			})
+			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
+				"your execution container is unavailable", nil)
+			return ExecContainerResolution{}, false
+		}
+		if execRes.State == ExecContainerStateSuspended && !s.agentLifecycleAllowed(ctx, user, execRes.Agent) {
+			emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
+				"command_sha256":     commandSHA256,
+				"approver_user_id":   user.ID(),
+				"exec_agent_id":      execRes.Agent.ID,
+				"exec_project_id":    execRes.Agent.ProjectID,
+				"not_started_reason": "wake_not_permitted",
+			})
+			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
+				"your execution container is suspended and you do not have permission to resume it",
+				map[string]interface{}{"detail": "wake_not_permitted"})
+			return ExecContainerResolution{}, false
+		}
+		return execRes, true
+	default:
+		emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
+			"command_sha256":   commandSHA256,
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
+			"your execution container is unavailable", nil)
+		return ExecContainerResolution{}, false
+	}
+}
+
+// handleCommandRequestFromMessage serves POST /api/v1/command-requests/from-message
+// (§4.14 steps 1-6): create-and-resolve a version-1 command request from a
+// verbatim fenced shell block in an agent-authored chat message.
+func (s *Server) handleCommandRequestFromMessage(w http.ResponseWriter, r *http.Request) {
+	if pendingSecretBrowserRequestRefused(w, r) {
+		return
+	}
+	// Step 1: interactive human session caller only.
+	user := s.messageActionHumanSessionCaller(w, r, msgaction.KindCommandRequest, "", "")
+	if user == nil {
+		return
+	}
+	ctx := r.Context()
+
+	r.Body = http.MaxBytesReader(w, r.Body, msgaction.MaxRequestBodyBytes)
+	var body messages.CreateCommandRequestFromMessageBody
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	msgID := strings.TrimSpace(body.MessageID)
+	if msgID == "" {
+		ValidationError(w, "message_id is required", map[string]interface{}{"field": "message_id"})
+		return
+	}
+	hashHex := strings.ToLower(strings.TrimSpace(body.CommandSHA256))
+	if len(hashHex) != 64 {
+		ValidationError(w, "command_sha256 must be a 64-character lowercase hex SHA-256 digest", map[string]interface{}{"field": "command_sha256"})
+		return
+	}
+	if _, err := hex.DecodeString(hashHex); err != nil {
+		ValidationError(w, "command_sha256 must be valid hex", map[string]interface{}{"field": "command_sha256"})
+		return
+	}
+	if len(body.IdempotencyKey) > msgaction.MaxIdempotencyKeyLen {
+		ValidationError(w, "idempotency_key exceeds maximum length", map[string]interface{}{"field": "idempotency_key"})
+		return
+	}
+
+	// Step 2: load message and verify recipient + sender + age + non-card.
+	msg, err := s.store.GetMessage(ctx, msgID)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Message")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	chatKey := strings.TrimSpace(msg.ThreadID)
+	if chatKey == "" && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID != "" &&
+		strings.HasPrefix(msg.Recipient, "user:") && msg.RecipientID != "" {
+		if dmKey, dmErr := messages.DMConversationKey("agent", msg.SenderID, "user", msg.RecipientID); dmErr == nil {
+			chatKey = dmKey
+		}
+	}
+
+	agentName := strings.TrimPrefix(msg.Sender, "agent:")
+	emitRefused := func(reason string, details map[string]string) {
+		s.emitCommandRequestRefused(ctx, &MessageActionEvent{
+			MessageID: msg.ID,
+			ProjectID: msg.ProjectID,
+			AgentID:   msg.SenderID,
+			AgentName: agentName,
+			ActorKind: MessageActionActorUser,
+			ActorID:   user.ID(),
+			Reason:    reason,
+			Details:   details,
+		})
+	}
+
+	// Caller must be a recipient of the message's DM or conversation first.
+	if !s.isMessageActionRecipient(ctx, user, chatKey, msg, true) {
+		emitRefused(msgaction.ConflictCmdNotApprover, map[string]string{
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusForbidden, msgaction.ConflictCmdNotApprover,
+			"you are not a recipient of this message", nil)
+		return
+	}
+
+	// Message sender must be an agent, and not a structured command-request card.
+	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" || msg.Type == messages.TypeCommandRequest {
+		emitRefused(msgaction.ConflictCmdMarkdownBlock, map[string]string{
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusUnprocessableEntity, msgaction.ConflictCmdMarkdownBlock,
+			"Ask the agent to send this as a command request", nil)
+		return
+	}
+
+	// Caller must be the DM user or the single addressed human in a group/thread (D6).
+	if !s.isSingleAddressedHumanForMarkdownExecute(ctx, user, msg, chatKey) {
+		emitRefused(msgaction.ConflictCmdNotApprover, map[string]string{
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusForbidden, msgaction.ConflictCmdNotApprover,
+			"this message is not addressed to you alone; ask the agent to send a command request", nil)
+		return
+	}
+
+	// Message must be younger than 24 h (D4).
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if !msg.CreatedAt.Add(msgaction.CommandRequestTTL).After(now) {
+		emitRefused(msgaction.ConflictExpired, map[string]string{
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, msgaction.ConflictExpired,
+			"this message is older than 24 hours and can no longer be executed", nil)
+		return
+	}
+
+	// Step 3: send-time script validation, verbatim-fence check, and canonical hash check.
+	if err := messages.ValidateCommandRequestScript(body.Script); err != nil {
+		ValidationError(w, err.Error(), map[string]interface{}{"field": "script"})
+		return
+	}
+	if !messages.HasVerbatimExecutableShellFence(msg.Msg, body.Script) {
+		emitRefused(msgaction.ConflictCmdMarkdownBlock, map[string]string{
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusUnprocessableEntity, msgaction.ConflictCmdMarkdownBlock,
+			"Ask the agent to send this as a command request", nil)
+		return
+	}
+	serverHash := messages.CommandRequestCanonicalHash(body.Script, "", messages.DefaultCommandRequestTimeoutS)
+	if hashHex != serverHash {
+		emitRefused(msgaction.ConflictCmdHashMismatch, map[string]string{
+			"command_sha256":   serverHash,
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, msgaction.ConflictCmdHashMismatch,
+			"command_sha256 does not match the canonical hash of the submitted script", nil)
+		return
+	}
+
+	// Step 4: resolve caller's execution container (§4.7 step 4).
+	execRes, ok := s.resolveExecContainerForApproval(ctx, w, user, serverHash, emitRefused)
+	if !ok {
+		return
+	}
+
+	// Resolve sender agent name if available.
+	if senderAgent, aerr := s.store.GetAgent(ctx, msg.SenderID); aerr == nil && senderAgent != nil {
+		if senderAgent.Slug != "" {
+			agentName = senderAgent.Slug
+		} else if senderAgent.Name != "" {
+			agentName = senderAgent.Name
+		}
+	}
+
+	// Step 5: one transaction — insert v1 approved + command_runs (insert-only).
+	// Share-output opt-in is P4; until P4 merges, record ShareOutput=false.
+	appRes, err := s.store.CreateAndApproveMarkdownCommandRequest(ctx, &store.CreateMarkdownCommandRequestInput{
+		ProjectID:      msg.ProjectID,
+		AgentID:        msg.SenderID,
+		AgentName:      agentName,
+		MessageID:      msg.ID,
+		ConversationID: msg.ConversationID,
+		ChatKey:        chatKey,
+		Script:         body.Script,
+		CommandSHA256:  serverHash,
+		UserID:         user.ID(),
+		UserName:       user.DisplayName(),
+		UserEmail:      user.Email(),
+		IdempotencyKey: body.IdempotencyKey,
+		ExecAgentID:    execRes.Agent.ID,
+		ExecProjectID:  execRes.Agent.ProjectID,
+		ShareOutput:    false,
+		LeaseUntil:     now.Add(commandRunWakeBudget + commandRunApprovalLeaseGrace),
+		Now:            now,
+		TTL:            msgaction.CommandRequestTTL,
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if appRes.Conflict != nil {
+		emitRefused(appRes.ConflictCode, map[string]string{
+			"command_sha256":   serverHash,
+			"approver_user_id": user.ID(),
+		})
+		details := map[string]interface{}{
+			"status":  appRes.Conflict.Status,
+			"rowId":   appRes.Conflict.ID,
+			"request": commandRequestView(appRes.Conflict, nil, appRes.ConflictRun),
+		}
+		if appRes.ConflictRun != nil {
+			details["run"] = commandRunView(appRes.ConflictRun)
+		}
+		writeError(w, http.StatusConflict, appRes.ConflictCode,
+			"this command block has already been executed", details)
+		return
+	}
+
+	reqView := commandRequestView(appRes.Request, nil, appRes.Run)
+	runView := *commandRunView(appRes.Run)
+
+	if appRes.Replayed {
+		writeJSON(w, http.StatusOK, messages.ApproveCommandRequestResponse{
+			Request:  reqView,
+			Run:      runView,
+			Replayed: true,
+		})
+		return
+	}
+
+	// Step 6: post-commit SSE update, audit event, and handoff to executor.
+	if chatKey != "" {
+		s.publishActionUpdated(msgaction.KindCommandRequest, appRes.Request.ProjectID, appRes.Request.MessageID, chatKey, commandRequestSSEView(appRes.Request, nil, appRes.Run))
+	}
+	s.emitMessageActionEvent(ctx, &MessageActionEvent{
+		Kind:      msgaction.KindCommandRequest,
+		EventType: msgaction.CommandRequestResolvedStatus,
+		RowID:     appRes.Request.ID,
+		MessageID: appRes.Request.MessageID,
+		ProjectID: appRes.Request.ProjectID,
+		AgentID:   appRes.Request.AgentID,
+		AgentName: appRes.Request.AgentName,
+		Key:       appRes.Request.Key,
+		Version:   appRes.Request.Version,
+		ActorKind: MessageActionActorUser,
+		ActorID:   user.ID(),
+		Details: map[string]string{
+			"command_sha256":   appRes.Request.CommandSHA256,
+			"exec_agent_id":    appRes.Run.ExecAgentID,
+			"exec_project_id":  appRes.Run.ExecProjectID,
+			"run_id":           appRes.Run.ID,
+			"approver_user_id": user.ID(),
+			"workdir_kind":     messages.CommandWorkdirKind(appRes.Request.Workdir),
+			"share_output":     strconv.FormatBool(appRes.Run.ShareOutput),
+		},
+		Timestamp: now,
+	})
+	s.enqueueCommandRun(appRes.Request, appRes.Run)
+
+	writeJSON(w, http.StatusAccepted, messages.ApproveCommandRequestResponse{
+		Request: reqView,
+		Run:     runView,
+	})
+}
+
+// isSingleAddressedHumanForMarkdownExecute enforces the §4.14 / D6 recipient
+// rule: in a DM, the DM user must be caller; in a group conversation or thread,
+// the message must be addressed to exactly one human (via `to` / Recipient or a
+// single human @-mention in prose) and that human must be caller.
+func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, user UserIdentity, msg *store.Message, chatKey string) bool {
+	if user == nil || msg == nil {
+		return false
+	}
+
+	// 1. Direct message key ("dm:...").
+	if strings.HasPrefix(chatKey, "dm:") {
+		kindA, idA, kindB, idB, err := messages.ParseDMKey(chatKey)
+		if err != nil {
+			return false
+		}
+		var humans []string
+		if kindA == "user" && idA != "" {
+			humans = append(humans, idA)
+		}
+		if kindB == "user" && idB != "" && (kindA != "user" || idB != idA) {
+			humans = append(humans, idB)
+		}
+		return len(humans) == 1 && humans[0] == user.ID()
+	}
+
+	// 2. Direct conversation record (when ThreadID is not a dm: key).
+	if msg.ConversationID != "" {
+		if conv, err := s.store.GetConversation(ctx, msg.ConversationID); err == nil && conv != nil && conv.Kind == "direct" {
+			parts, perr := s.store.ListParticipants(ctx, msg.ConversationID)
+			if perr != nil {
+				return false
+			}
+			var humans []string
+			for _, p := range parts {
+				if p.PrincipalKind == "user" && p.PrincipalID != "" {
+					humans = append(humans, p.PrincipalID)
+				}
+			}
+			return len(humans) == 1 && humans[0] == user.ID()
+		}
+	}
+
+	// 3. Legacy DM without ConversationID or ThreadID.
+	if chatKey == "" && msg.ConversationID == "" && strings.HasPrefix(msg.Recipient, "user:") {
+		return msg.RecipientID == user.ID()
+	}
+
+	// 4. Group conversation or project thread: addressed to exactly one human
+	// via `to` (Recipient) or a single human @-mention in prose.
+	addressedHumans := make(map[string]struct{})
+	if strings.HasPrefix(msg.Recipient, "user:") && msg.RecipientID != "" {
+		addressedHumans[msg.RecipientID] = struct{}{}
+	}
+
+	// Build mention-name -> userID map for human participants / project members.
+	humanByMention := make(map[string]string)
+	registerHuman := func(id, email, displayName string) {
+		if id == "" {
+			return
+		}
+		if email != "" {
+			humanByMention[strings.ToLower(strings.TrimSpace(email))] = id
+		}
+		if displayName != "" {
+			if slug := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(displayName), " ", "-")); slug != "" {
+				humanByMention[slug] = id
+			}
+		}
+	}
+	registerHuman(user.ID(), user.Email(), user.DisplayName())
+	if msg.ConversationID != "" {
+		if parts, err := s.store.ListParticipants(ctx, msg.ConversationID); err == nil {
+			for _, p := range parts {
+				if p.PrincipalKind != "user" || p.PrincipalID == "" {
+					continue
+				}
+				if u, uerr := s.store.GetUser(ctx, p.PrincipalID); uerr == nil && u != nil {
+					registerHuman(u.ID, u.Email, u.DisplayName)
+				}
+			}
+		}
+	}
+	if msg.ProjectID != "" {
+		for _, m := range s.resolveProjectHumanMembers(ctx, msg.ProjectID) {
+			if m.Kind == "user" {
+				registerHuman(m.ID, m.Email, m.DisplayName)
+			}
+		}
+	}
+
+	mentions := messages.ExtractProseMentionsWithOptions(msg.Msg, s.mentionOptions())
+	for _, raw := range mentions {
+		lower := strings.ToLower(strings.TrimSpace(raw))
+		if lower == "" {
+			continue
+		}
+		if uid, ok := humanByMention[lower]; ok {
+			addressedHumans[uid] = struct{}{}
+		} else if strings.Contains(lower, "@") {
+			// Fail closed on an unrecognized email mention (another human).
+			addressedHumans["unknown:"+lower] = struct{}{}
+		}
+	}
+
+	if len(addressedHumans) != 1 {
+		return false
+	}
+	_, ok := addressedHumans[user.ID()]
+	return ok
 }
 
 func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Request, agentIdent AgentIdentity) {

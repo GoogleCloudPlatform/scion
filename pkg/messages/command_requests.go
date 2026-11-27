@@ -451,6 +451,16 @@ type CommandRequestOutputResponse struct {
 	Output       string `json:"output,omitempty"`
 }
 
+// CreateCommandRequestFromMessageBody is the request body of
+// POST /api/v1/command-requests/from-message (§4.14).
+type CreateCommandRequestFromMessageBody struct {
+	MessageID      string `json:"message_id"`
+	Script         string `json:"script"`
+	CommandSHA256  string `json:"command_sha256"`
+	ShareOutput    *bool  `json:"share_output,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
 // ApproveCommandRequestResponse is the 202 (or 200 on idempotent replay) response
 // of POST /api/v1/command-requests/{id}/approve.
 type ApproveCommandRequestResponse struct {

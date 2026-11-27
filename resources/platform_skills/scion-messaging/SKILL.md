@@ -156,6 +156,28 @@ user-facing format. Agent-only messages do not require it.
   anyway, do not echo or store it — tell them to rotate it and send a secret
   request for a replacement instead. See `references/secret-requests.md`.
 <!-- scion:end-experiment -->
+<!-- scion:experiment hub.command_requests -->
+- **Proposing commands to run (`--command-request` vs Markdown shell blocks).**
+  When a user needs to run a command with their own credentials in their execution
+  container, you have two surfaces:
+  - **Structured command card (`scion message --command-request <key> --command '...'` or `--command-file <path>`):**
+    use this when you want versioned tracking (`--update`, `scion command request list`),
+    a custom `--workdir` or `--timeout`, `--share-output`, or an explicit `--approver`
+    in a group conversation.
+  - **Markdown fenced shell blocks (`bash`, `sh`, `shell`, or `console` at line start):**
+    in a DM, or in a group conversation addressed to a single human via `@`-mention,
+    the web chat shows **Copy** and **Execute** on top-level shell blocks for 24 h
+    (running in `$HOME` with a 10-minute timeout and output sharing off by default).
+    For illustrative examples, destructive samples, or snippets the user should
+    **not** execute directly, add the `no-execute` info-string token — for example:
+
+    ````markdown
+    ```sh no-execute
+    # Illustrative example only
+    gcloud run deploy my-service --region us-central1
+    ```
+    ````
+<!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to
   bare URLs; link supporting evidence instead of pasting a technical inventory.
@@ -362,6 +384,12 @@ on `ask_user` status notifications to deliver the request.
   never in chat); `--update` replaces a pending key. `scion secret request list`
   and `scion secret request withdraw` inspect or retire your requests. See
   `references/secret-requests.md`.
+<!-- scion:end-experiment -->
+<!-- scion:experiment hub.command_requests -->
+- `--command-request <key>` (with `--command` or `--command-file`, optional
+  `--description`, `--workdir`, `--timeout`, `--share-output`, `--update`) sends a
+  structured command-request card; `scion command request list` inspects your requests.
+  Use ```` ```sh no-execute ```` on illustrative shell blocks so they show Copy only.
 <!-- scion:end-experiment -->
 - `scion schedule create` schedules messages; see `scion-scheduler`.
 - `scion notifications subscribe` subscribes to agent state changes.

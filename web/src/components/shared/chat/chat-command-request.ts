@@ -41,9 +41,9 @@ import {
 import {
   approveCommandRequest,
   dismissCommandRequest,
+  fetchCommandRequestDetail,
   fetchCommandRequestOutput,
   formatCommandDurationMs,
-  formatCommandInlineForDisplay,
   formatCommandScriptForDisplay,
   formatCommandTimeout,
   generateCommandRequestIdempotencyKey,
@@ -60,6 +60,16 @@ import {
   type CommandRequestView,
   type FormattedCommandScript,
 } from '../../../client/command-requests.js';
+import {
+  commandConfirmDialogStyles,
+  execContainerAllowsRun,
+  renderCommandConfirmDialog,
+  renderCommandScriptBlock,
+  renderCommandWorkdirWarning,
+  renderEscapedInlineValue,
+  renderExecContainerLine,
+  verifyCommandRequestHashBeforeSubmit,
+} from './command-confirm-dialog.js';
 import {
   MAX_ACTION_DISMISS_REASON_RUNES,
   MessageActionStateController,
@@ -178,6 +188,10 @@ export class ScionChatCommandRequest extends LitElement {
   @state()
   private localRequest: CommandRequestView | null = null;
 
+  /** Live detail re-fetched via GET when an SSE update arrives for the approver. */
+  @state()
+  private liveDetail: CommandRequestDetailResponse | null = null;
+
   /** Whether the confirm dialog (§4.7) is open. */
   @state()
   private confirmDialogOpen = false;
@@ -215,6 +229,7 @@ export class ScionChatCommandRequest extends LitElement {
   private pendingDismissIdempotencyKey = '';
   private initializedShareOutputRowId = '';
   private outputAbort: AbortController | null = null;
+  private detailRefreshAbort: AbortController | null = null;
 
   private readonly onFlagsChanged = (): void => {
     this.requestUpdate();
@@ -223,6 +238,7 @@ export class ScionChatCommandRequest extends LitElement {
   static override styles = css`
     ${dismissDialogStyles}
     ${messageActionBannerStyles}
+    ${commandConfirmDialogStyles}
 
     :host {
       display: block;
@@ -691,6 +707,8 @@ export class ScionChatCommandRequest extends LitElement {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     this.outputAbort?.abort();
     this.outputAbort = null;
+    this.detailRefreshAbort?.abort();
+    this.detailRefreshAbort = null;
   }
 
   protected override willUpdate(changed: PropertyValues): void {
@@ -700,6 +718,9 @@ export class ScionChatCommandRequest extends LitElement {
         this.initializedShareOutputRowId = nextRowId;
         this.shareOutputChecked = Boolean(this.detail?.request?.shareOutputRequested);
         this.localRequest = null;
+        this.liveDetail = null;
+        this.detailRefreshAbort?.abort();
+        this.detailRefreshAbort = null;
         this.errorMessage = '';
         this.deniedReason = '';
         this.confirmDialogOpen = false;
@@ -715,56 +736,57 @@ export class ScionChatCommandRequest extends LitElement {
     }
   }
 
+  private get effectiveDetail(): CommandRequestDetailResponse | null {
+    return this.liveDetail ?? this.detail;
+  }
+
   private get threadId(): string {
-    return this.detail?.threadId ?? '';
+    return this.effectiveDetail?.threadId ?? '';
   }
 
   private get effectiveRequest(): CommandRequestView | null {
-    const base = this.detail?.request ?? null;
+    const base = this.effectiveDetail?.request ?? null;
     if (!base) return this.localRequest;
-    const baseWithRun = !base.run && this.detail?.run ? { ...base, run: this.detail.run } : base;
+    const baseWithRun =
+      !base.run && this.effectiveDetail?.run ? { ...base, run: this.effectiveDetail.run } : base;
     return this.localRequest
       ? newerCommandRequestView(baseWithRun, this.localRequest)
       : baseWithRun;
   }
 
   private get effectiveRun(): CommandRequestRunView | null {
-    return this.effectiveRequest?.run ?? this.detail?.run ?? null;
+    return this.effectiveRequest?.run ?? this.effectiveDetail?.run ?? null;
   }
 
   private get execContainer(): CommandRequestExecContainerView | null {
-    return this.detail?.exec_container ?? null;
+    return this.effectiveDetail?.exec_container ?? null;
   }
 
   private get previousVersionUnknown(): CommandRequestPreviousUnknown | null {
-    return this.detail?.previousVersionUnknown ?? null;
+    return this.effectiveDetail?.previousVersionUnknown ?? null;
   }
 
   private get isApprover(): boolean {
     const req = this.effectiveRequest;
     if (!req) return false;
     if (this.currentUserId) return this.currentUserId === req.approverUserId;
-    return Boolean(this.detail?.canApprove || this.detail?.exec_container);
+    return Boolean(this.effectiveDetail?.canApprove || this.effectiveDetail?.exec_container);
   }
 
   private get canApproveNow(): boolean {
     const req = this.effectiveRequest;
     if (!req || req.status !== 'pending') return false;
-    return Boolean(this.detail?.canApprove) && !this.deniedReason;
+    return Boolean(this.effectiveDetail?.canApprove) && !this.deniedReason;
   }
 
   private get canDismissNow(): boolean {
     const req = this.effectiveRequest;
     if (!req || req.status !== 'pending') return false;
-    return Boolean(this.detail?.canDismiss) && this.canApproveNow;
+    return Boolean(this.effectiveDetail?.canDismiss) && this.canApproveNow;
   }
 
   private get execContainerAllowsApprove(): boolean {
-    const ec = this.execContainer;
-    if (!ec) return true;
-    if (ec.state === 'ready' || ec.state === 'starting') return true;
-    if (ec.state === 'suspended') return Boolean(ec.canWake);
-    return false;
+    return execContainerAllowsRun(this.execContainer);
   }
 
   private get approveDisabledHint(): string {
@@ -796,7 +818,8 @@ export class ScionChatCommandRequest extends LitElement {
     if (!view || !view.rowId) return;
     const current = this.effectiveRequest;
     if (current && view.rowId !== current.rowId) return;
-    if (this.applyRequestUpdate(view)) {
+    const updated = this.applyRequestUpdate(view);
+    if (updated) {
       this.dispatchEvent(
         new CustomEvent<CommandRequestUpdatedDetail>('command-request-updated', {
           detail: {
@@ -808,6 +831,29 @@ export class ScionChatCommandRequest extends LitElement {
         })
       );
     }
+    // Carry-forward (b): SSE views strip approver-only details (exec IDs,
+    // reason/wake). Re-fetch full detail via GET for the approver so live
+    // reason/wake and outputAvailable appear immediately.
+    if (this.isApprover) {
+      void this.refreshDetailLive(view.rowId);
+    }
+  }
+
+  private async refreshDetailLive(rowId: string): Promise<void> {
+    this.detailRefreshAbort?.abort();
+    const controller = new AbortController();
+    this.detailRefreshAbort = controller;
+    const res = await fetchCommandRequestDetail(rowId, { signal: controller.signal });
+    if (controller.signal.aborted || !this.isConnected) return;
+    if (!res.ok) return;
+    const current = this.effectiveRequest;
+    if (current && res.detail.request.rowId !== current.rowId) return;
+    this.liveDetail = res.detail;
+    const freshReq: CommandRequestView =
+      !res.detail.request.run && res.detail.run
+        ? { ...res.detail.request, run: res.detail.run }
+        : res.detail.request;
+    this.applyRequestUpdate(freshReq);
   }
 
   private openConfirmDialog(): void {
@@ -832,16 +878,30 @@ export class ScionChatCommandRequest extends LitElement {
     const req = this.effectiveRequest;
     if (!req || !this.canApproveNow || !this.execContainerAllowsApprove || this.approving) return;
 
+    this.approving = true;
+    this.errorMessage = '';
+
+    // Carry-forward (a): recompute the canonical SHA-256 in the browser via
+    // WebCrypto before POSTing and refuse if it disagrees with the displayed hash.
+    const verified = await verifyCommandRequestHashBeforeSubmit(
+      req.script,
+      req.workdir ?? '',
+      req.timeoutS,
+      req.commandSha256
+    );
+    if (!verified.ok) {
+      this.approving = false;
+      this.errorMessage = verified.error;
+      return;
+    }
+
     if (!this.pendingApproveIdempotencyKey) {
       this.pendingApproveIdempotencyKey = generateCommandRequestIdempotencyKey();
     }
 
-    this.approving = true;
-    this.errorMessage = '';
-
     const result = await approveCommandRequest(req.rowId, {
       row_id: req.rowId,
-      command_sha256: req.commandSha256,
+      command_sha256: verified.sha256,
       share_output: this.shareOutputChecked,
       surface: this.surface,
       idempotency_key: this.pendingApproveIdempotencyKey,
@@ -979,168 +1039,22 @@ export class ScionChatCommandRequest extends LitElement {
   }
 
   private renderEscapedInline(value: string): TemplateResult {
-    const formatted = formatCommandInlineForDisplay(value);
-    return html`${formatted.tokens.map((tok) => {
-      if (tok.kind === 'ascii') return tok.text;
-      return html`<span
-        class="escape-token"
-        data-testid="escape-token"
-        title=${`U+${(tok.codePoint ?? 0).toString(16).toUpperCase().padStart(4, '0')}`}
-        >${tok.text}</span
-      >`;
-    })}`;
+    return renderEscapedInlineValue(value);
   }
 
   private renderScriptBlock(formatted: FormattedCommandScript): TemplateResult {
-    return html`
-      <div class="script-wrap" data-testid="command-script-block">
-        ${formatted.nonAsciiCount > 0
-          ? html`
-              <div class="script-nonascii-note" role="status" data-testid="non-ascii-warning">
-                <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-                <span>
-                  Script contains ${formatted.nonAsciiCount} non-ASCII
-                  ${formatted.nonAsciiCount === 1 ? 'character' : 'characters'}, shown as
-                  <code>\\u{XXXX}</code>.
-                </span>
-              </div>
-            `
-          : nothing}
-        <div class="script-scroll">
-          ${formatted.lines.map(
-            (line) => html`
-              <div class="script-line">
-                <span class="script-lineno" aria-hidden="true">${line.lineNumber}</span>
-                <span class="script-code"
-                  >${line.tokens.map((tok) => {
-                    if (tok.kind === 'ascii') return tok.text;
-                    if (tok.kind === 'tab') {
-                      return html`<span class="ws-token tab" title="Tab (U+0009)"
-                        >${tok.text}</span
-                      >`;
-                    }
-                    if (tok.kind === 'trailing-space') {
-                      return html`<span
-                        class="ws-token trailing-space"
-                        title="Trailing space (U+0020)"
-                        >${tok.text}</span
-                      >`;
-                    }
-                    return html`<span
-                      class="escape-token"
-                      data-testid="escape-token"
-                      title=${`U+${(tok.codePoint ?? 0).toString(16).toUpperCase().padStart(4, '0')}`}
-                      >${tok.text}</span
-                    >`;
-                  })}</span
-                >
-              </div>
-            `
-          )}
-        </div>
-        <div class="script-foot">
-          <span
-            >${formatted.lineCount} ${formatted.lineCount === 1 ? 'line' : 'lines'} ·
-            ${formatted.byteLength} ${formatted.byteLength === 1 ? 'byte' : 'bytes'}</span
-          >
-          <span>/bin/bash --login</span>
-        </div>
-      </div>
-    `;
+    return renderCommandScriptBlock(formatted);
   }
 
   private renderWorkdirWarning(
     request: CommandRequestView,
     formatted: FormattedCommandScript
   ): TemplateResult | typeof nothing {
-    const kind = resolveCommandWorkdirKind(request);
-    if (kind === 'workspace') {
-      return html`
-        <div class="banner warning" role="status" data-testid="workdir-warning">
-          <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-          <span>Working directory is under <code>/workspace</code> (agent-writable).</span>
-        </div>
-      `;
-    }
-    if (kind === 'shared_dir') {
-      return html`
-        <div class="banner warning" role="status" data-testid="workdir-warning">
-          <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-          <span>Working directory is a shared directory (agent-writable).</span>
-        </div>
-      `;
-    }
-    if (formatted.mentionsAgentWritablePaths) {
-      return html`
-        <div class="banner warning" role="status" data-testid="script-path-warning">
-          <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
-          <span
-            >Script references <code>/workspace</code> or a shared directory (agent-writable).</span
-          >
-        </div>
-      `;
-    }
-    return nothing;
+    return renderCommandWorkdirWarning(resolveCommandWorkdirKind(request), formatted);
   }
 
   private renderExecContainerLine(ec: CommandRequestExecContainerView): TemplateResult {
-    if (ec.state === 'unconfigured') {
-      return html`
-        <div class="exec-container-line" data-testid="exec-container-line">
-          <sl-icon name="terminal" aria-hidden="true"></sl-icon>
-          <span>No execution container configured.</span>
-          <a class="exec-container-link" href="/profile/settings" data-testid="exec-setup-link">
-            Set up an execution container
-          </a>
-        </div>
-      `;
-    }
-
-    const name = ec.agentName || ec.agentId || 'Execution container';
-    const projectSuffix = ec.projectName ? ` (${ec.projectName})` : '';
-    const stateClass =
-      ec.state === 'ready'
-        ? 'ready'
-        : ec.state === 'stopped'
-          ? 'stopped'
-          : ec.state === 'unavailable'
-            ? 'unavailable'
-            : '';
-
-    return html`
-      <div class="exec-container-line" data-testid="exec-container-line">
-        <sl-icon name="terminal" aria-hidden="true"></sl-icon>
-        <span class="exec-container-name">${name}${projectSuffix}</span>
-        <span class="exec-state-chip ${stateClass}" data-testid="exec-container-state"
-          >${ec.state}</span
-        >
-        ${ec.state === 'suspended' && ec.canWake
-          ? html`<span class="exec-container-note" data-testid="exec-suspended-wake-note"
-              >Will be resumed when you approve.</span
-            >`
-          : nothing}
-        ${ec.state === 'suspended' && !ec.canWake
-          ? html`<span class="exec-container-note" data-testid="exec-suspended-no-wake-note"
-              >Resume your execution container to approve.</span
-            >`
-          : nothing}
-        ${ec.state === 'stopped'
-          ? html`<span class="exec-container-note" data-testid="exec-stopped-note">
-              Start your execution container to approve.
-            </span>`
-          : nothing}
-        ${ec.state === 'unavailable'
-          ? html`<span class="exec-container-note">
-              Execution container is currently unavailable.
-            </span>`
-          : nothing}
-        ${ec.homePersistent === false
-          ? html`<span class="exec-container-note" data-testid="exec-home-nonpersistent">
-              Home directory is not persistent.
-            </span>`
-          : nothing}
-      </div>
-    `;
+    return renderExecContainerLine(ec);
   }
 
   private renderRunStatus(req: CommandRequestView, run: CommandRequestRunView): TemplateResult {
@@ -1264,95 +1178,24 @@ ${this.outputText || '(no output)'}</pre
     req: CommandRequestView,
     formatted: FormattedCommandScript
   ): TemplateResult {
-    const ec = this.execContainer;
-    const workdirLabel = req.workdir || '$HOME';
-    const workdirKind = resolveCommandWorkdirKind(req);
-
-    return html`
-      <sl-dialog
-        class="confirm-dialog"
-        label="Approve & run command"
-        ?open=${this.confirmDialogOpen}
-        @sl-request-close=${(e: CustomEvent): void => {
-          if (e.target !== e.currentTarget) return;
-          if (this.approving) {
-            e.preventDefault();
-            return;
-          }
-          this.closeConfirmDialog();
-        }}
-        @sl-after-hide=${(e: Event): void => {
-          if (e.target !== e.currentTarget) return;
-          this.confirmDialogOpen = false;
-        }}
-      >
-        <div class="confirm-dialog-body" data-testid="confirm-dialog-body">
-          ${this.renderScriptBlock(formatted)}
-
-          <div class="meta-grid">
-            <span class="meta-item">
-              <sl-icon name="folder" aria-hidden="true"></sl-icon>
-              <span>Workdir:</span>
-              <span
-                class="workdir-badge${workdirKind === 'workspace' || workdirKind === 'shared_dir'
-                  ? ' warn'
-                  : ''}"
-                data-testid="confirm-workdir"
-                >${this.renderEscapedInline(workdirLabel)}</span
-              >
-            </span>
-            <span class="meta-item">
-              <sl-icon name="clock" aria-hidden="true"></sl-icon>
-              <span>Timeout: ${formatCommandTimeout(req.timeoutS)}</span>
-            </span>
-          </div>
-
-          ${this.renderWorkdirWarning(req, formatted)}
-          ${ec ? this.renderExecContainerLine(ec) : nothing}
-
-          <div class="share-output-row">
-            <sl-checkbox
-              ?checked=${this.shareOutputChecked}
-              ?disabled=${this.approving}
-              @sl-change=${(e: Event): void => this.onShareOutputChange(e)}
-            >
-              Share redacted output tail with agent (up to 4 KiB)
-            </sl-checkbox>
-          </div>
-
-          <div class="confirm-sha">SHA-256: ${req.commandSha256}</div>
-
-          ${this.errorMessage
-            ? html`
-                <div class="banner error" role="alert">
-                  <sl-icon name="exclamation-circle" aria-hidden="true"></sl-icon>
-                  <span>${this.errorMessage}</span>
-                </div>
-              `
-            : nothing}
-        </div>
-
-        <div slot="footer" class="confirm-dialog-footer">
-          <sl-button
-            variant="default"
-            ?disabled=${this.approving}
-            @click=${(): void => this.closeConfirmDialog()}
-          >
-            Cancel
-          </sl-button>
-          <sl-button
-            variant="primary"
-            class="confirm-approve-btn"
-            data-testid="confirm-approve-btn"
-            ?loading=${this.approving}
-            ?disabled=${this.approving || !this.execContainerAllowsApprove}
-            @click=${(): void => void this.handleConfirmApprove()}
-          >
-            Approve &amp; run
-          </sl-button>
-        </div>
-      </sl-dialog>
-    `;
+    return renderCommandConfirmDialog({
+      open: this.confirmDialogOpen,
+      label: 'Approve & run command',
+      confirmLabel: 'Approve & run',
+      formatted,
+      workdir: req.workdir ?? '',
+      workdirKind: resolveCommandWorkdirKind(req),
+      timeoutS: req.timeoutS,
+      sha256: req.commandSha256,
+      execContainer: this.execContainer,
+      execContainerAllowed: this.execContainerAllowsApprove,
+      shareOutputChecked: this.shareOutputChecked,
+      submitting: this.approving,
+      errorMessage: this.errorMessage,
+      onClose: () => this.closeConfirmDialog(),
+      onShareOutputChange: (e) => this.onShareOutputChange(e),
+      onConfirm: () => void this.handleConfirmApprove(),
+    });
   }
 
   private renderDismissDialog(req: CommandRequestView): TemplateResult | typeof nothing {

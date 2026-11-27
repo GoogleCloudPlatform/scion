@@ -1032,6 +1032,9 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 			meta["command_request_id"] = req.ID
 			meta["command_request_key"] = req.Key
 			meta["command_request_version"] = strconv.Itoa(req.Version)
+			if req.MessageID != "" {
+				meta["command_request_message_id"] = req.MessageID
+			}
 			meta["command_run_id"] = run.ID
 			meta["command_run_status"] = run.Status
 			if run.ExitCode != nil {
