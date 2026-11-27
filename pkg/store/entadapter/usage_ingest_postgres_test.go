@@ -378,7 +378,9 @@ func TestUsageIngest_PerRowDBRejection_Postgres(t *testing.T) {
 	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
 	require.Len(t, mhs, 1)
-	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].LastContiguousSeq)
 	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
-	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
+	assert.Empty(t, mhs[0].MissingRanges)
+	assert.Equal(t, int64(1), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
 }
