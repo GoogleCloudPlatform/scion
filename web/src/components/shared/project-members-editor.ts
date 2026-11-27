@@ -654,6 +654,14 @@ export class ScionProjectMembersEditor extends LitElement {
         display: block;
       }
 
+      /* Query container for the narrow stacked layout: wraps the header and
+         table (not the sibling <sl-dialog> modals, which need viewport-fixed
+         positioning) so the editor adapts to its own width rather than the
+         viewport (e.g. just above 768px when the 280px sidebar is visible). */
+      .members-layout {
+        container-type: inline-size;
+      }
+
       .section {
         background: var(--scion-surface, #ffffff);
         border: 1px solid var(--scion-border, #e2e8f0);
@@ -703,6 +711,7 @@ export class ScionProjectMembersEditor extends LitElement {
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius-lg, 0.75rem);
         overflow: hidden;
+        container: members-table / inline-size;
       }
 
       .compact .table-container {
@@ -748,6 +757,7 @@ export class ScionProjectMembersEditor extends LitElement {
         display: flex;
         align-items: center;
         gap: 0.75rem;
+        min-width: 0;
       }
 
       .member-icon {
@@ -1017,7 +1027,7 @@ export class ScionProjectMembersEditor extends LitElement {
         margin-top: 0.375rem;
       }
 
-      @media (max-width: 768px) {
+      @container (max-width: 600px) {
         .section {
           padding: 1rem;
         }
@@ -1031,18 +1041,25 @@ export class ScionProjectMembersEditor extends LitElement {
         .section-header-actions {
           flex-wrap: wrap;
         }
+      }
 
-        thead {
+      /* Stack table rows whenever .table-container is narrower than the width
+         where the auto-layout table fits long names + roles + actions without
+         clipping (660px for 3-column tables, 780px for 4-column tables with a
+         Source column). Above these thresholds, the base desktop table layout
+         is completely untouched. */
+      @container members-table (max-width: 660px) {
+        table:not(.has-source) thead {
           display: none;
         }
 
-        table,
-        tbody {
+        table:not(.has-source),
+        table:not(.has-source) tbody {
           display: block;
           width: 100%;
         }
 
-        tbody tr {
+        table:not(.has-source) tbody tr {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
@@ -1052,30 +1069,30 @@ export class ScionProjectMembersEditor extends LitElement {
           border-bottom: 1px solid var(--scion-border, #e2e8f0);
         }
 
-        tbody tr:last-child {
+        table:not(.has-source) tbody tr:last-child {
           border-bottom: none;
         }
 
-        tbody tr:hover {
+        table:not(.has-source) tbody tr:hover {
           background: var(--scion-bg-subtle, #f1f5f9);
         }
 
-        tbody td {
+        table:not(.has-source) tbody td {
           display: block;
           padding: 0;
           border-bottom: none;
         }
 
-        tbody tr:hover td {
+        table:not(.has-source) tbody tr:hover td {
           background: transparent;
         }
 
-        tbody td:first-child {
+        table:not(.has-source) tbody td:first-child {
           flex: 1 1 100%;
           min-width: 0;
         }
 
-        .actions-cell {
+        table:not(.has-source) .actions-cell {
           display: flex;
           align-items: center;
           flex-wrap: wrap;
@@ -1085,7 +1102,66 @@ export class ScionProjectMembersEditor extends LitElement {
           text-align: left;
         }
 
-        .hide-mobile {
+        table:not(.has-source) .hide-mobile {
+          display: none;
+        }
+      }
+
+      @container members-table (max-width: 780px) {
+        table.has-source thead {
+          display: none;
+        }
+
+        table.has-source,
+        table.has-source tbody {
+          display: block;
+          width: 100%;
+        }
+
+        table.has-source tbody tr {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.5rem 0.75rem;
+          padding: 0.75rem;
+          border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        }
+
+        table.has-source tbody tr:last-child {
+          border-bottom: none;
+        }
+
+        table.has-source tbody tr:hover {
+          background: var(--scion-bg-subtle, #f1f5f9);
+        }
+
+        table.has-source tbody td {
+          display: block;
+          padding: 0;
+          border-bottom: none;
+        }
+
+        table.has-source tbody tr:hover td {
+          background: transparent;
+        }
+
+        table.has-source tbody td:first-child {
+          flex: 1 1 100%;
+          min-width: 0;
+        }
+
+        table.has-source .actions-cell {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 0.25rem;
+          margin-left: auto;
+          white-space: normal;
+          text-align: left;
+        }
+
+        table.has-source .hide-mobile {
           display: none;
         }
       }
@@ -1870,47 +1946,7 @@ export class ScionProjectMembersEditor extends LitElement {
 
   private renderStandalone() {
     return html`
-      ${this.renderFeedback()}
-      <div class="section-header">
-        <div class="section-header-info">
-          <h2>
-            ${this.sectionTitle}
-            <span class="member-count">(${this.groups.length})</span>
-          </h2>
-          ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
-        </div>
-        <div class="section-header-actions">
-          ${this.capabilities?.canTransfer
-            ? html`
-                <sl-button
-                  variant="warning"
-                  size="small"
-                  outline
-                  @click=${() => this.openTransferDialog()}
-                >
-                  <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
-                  Transfer Ownership
-                </sl-button>
-              `
-            : nothing}
-          ${!this.effectiveReadOnly
-            ? html`
-                <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
-                  <sl-icon slot="prefix" name="person-plus"></sl-icon>
-                  Add Member
-                </sl-button>
-              `
-            : nothing}
-        </div>
-      </div>
-      ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
-      ${this.renderLeaveDialog()}
-    `;
-  }
-
-  private renderCompact() {
-    return html`
-      <div class="section compact">
+      <div class="members-layout">
         ${this.renderFeedback()}
         <div class="section-header">
           <div class="section-header-info">
@@ -1936,7 +1972,7 @@ export class ScionProjectMembersEditor extends LitElement {
               : nothing}
             ${!this.effectiveReadOnly
               ? html`
-                  <sl-button size="small" variant="default" @click=${() => this.openAddDialog()}>
+                  <sl-button variant="primary" size="small" @click=${() => this.openAddDialog()}>
                     <sl-icon slot="prefix" name="person-plus"></sl-icon>
                     Add Member
                   </sl-button>
@@ -1944,9 +1980,53 @@ export class ScionProjectMembersEditor extends LitElement {
               : nothing}
           </div>
         </div>
-        ${this.renderBody()} ${this.renderMemberDialog()} ${this.renderTransferDialog()}
-        ${this.renderLeaveDialog()}
+        ${this.renderBody()}
       </div>
+      ${this.renderMemberDialog()} ${this.renderTransferDialog()} ${this.renderLeaveDialog()}
+    `;
+  }
+
+  private renderCompact() {
+    return html`
+      <div class="members-layout">
+        <div class="section compact">
+          ${this.renderFeedback()}
+          <div class="section-header">
+            <div class="section-header-info">
+              <h2>
+                ${this.sectionTitle}
+                <span class="member-count">(${this.groups.length})</span>
+              </h2>
+              ${this.sectionDescription ? html`<p>${this.sectionDescription}</p>` : nothing}
+            </div>
+            <div class="section-header-actions">
+              ${this.capabilities?.canTransfer
+                ? html`
+                    <sl-button
+                      variant="warning"
+                      size="small"
+                      outline
+                      @click=${() => this.openTransferDialog()}
+                    >
+                      <sl-icon slot="prefix" name="arrow-left-right"></sl-icon>
+                      Transfer Ownership
+                    </sl-button>
+                  `
+                : nothing}
+              ${!this.effectiveReadOnly
+                ? html`
+                    <sl-button size="small" variant="default" @click=${() => this.openAddDialog()}>
+                      <sl-icon slot="prefix" name="person-plus"></sl-icon>
+                      Add Member
+                    </sl-button>
+                  `
+                : nothing}
+            </div>
+          </div>
+          ${this.renderBody()}
+        </div>
+      </div>
+      ${this.renderMemberDialog()} ${this.renderTransferDialog()} ${this.renderLeaveDialog()}
     `;
   }
 
@@ -2013,7 +2093,7 @@ export class ScionProjectMembersEditor extends LitElement {
     const showSource = hasNonDirectSource(this.groups);
     return html`
       <div class="table-container">
-        <table>
+        <table class=${showSource ? 'has-source' : ''}>
           <thead>
             <tr>
               <th>Member</th>
@@ -2066,7 +2146,9 @@ export class ScionProjectMembersEditor extends LitElement {
             </div>
             <div class="member-info">
               <div class="member-name-row">
-                <span class="member-name">${principalLabel(group)}</span>
+                <span class="member-name" title=${principalLabel(group)}
+                  >${principalLabel(group)}</span
+                >
                 ${isInvited
                   ? html`<sl-tooltip content=${invitedTip}>
                       <span class="status-badge invited">Invited</span>
