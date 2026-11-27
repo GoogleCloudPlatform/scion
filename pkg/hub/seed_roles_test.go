@@ -1190,8 +1190,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   18,
-		store.ProjectRoleAdmin:   16,
+		store.ProjectRoleOwner:   19,
+		store.ProjectRoleAdmin:   17,
 		store.ProjectRoleMember:  11,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  2,
@@ -1217,8 +1217,8 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 18, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 16, projectAdminPermissionIDs},
+		{store.ProjectRoleOwner, 19, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 17, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 11, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 2, projectViewerPermissionIDs},
