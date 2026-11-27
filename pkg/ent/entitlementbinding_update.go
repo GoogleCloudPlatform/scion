@@ -121,6 +121,26 @@ func (_u *EntitlementBindingUpdate) AddValue(v int64) *EntitlementBindingUpdate 
 	return _u
 }
 
+// SetTokenAction sets the "token_action" field.
+func (_u *EntitlementBindingUpdate) SetTokenAction(v string) *EntitlementBindingUpdate {
+	_u.mutation.SetTokenAction(v)
+	return _u
+}
+
+// SetNillableTokenAction sets the "token_action" field if the given value is not nil.
+func (_u *EntitlementBindingUpdate) SetNillableTokenAction(v *string) *EntitlementBindingUpdate {
+	if v != nil {
+		_u.SetTokenAction(*v)
+	}
+	return _u
+}
+
+// ClearTokenAction clears the value of the "token_action" field.
+func (_u *EntitlementBindingUpdate) ClearTokenAction() *EntitlementBindingUpdate {
+	_u.mutation.ClearTokenAction()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *EntitlementBindingUpdate) SetUpdatedAt(v time.Time) *EntitlementBindingUpdate {
 	_u.mutation.SetUpdatedAt(v)
@@ -226,6 +246,12 @@ func (_u *EntitlementBindingUpdate) sqlSave(ctx context.Context) (_node int, err
 	}
 	if value, ok := _u.mutation.AddedValue(); ok {
 		_spec.AddField(entitlementbinding.FieldValue, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.TokenAction(); ok {
+		_spec.SetField(entitlementbinding.FieldTokenAction, field.TypeString, value)
+	}
+	if _u.mutation.TokenActionCleared() {
+		_spec.ClearField(entitlementbinding.FieldTokenAction, field.TypeString)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(entitlementbinding.FieldCreatedBy, field.TypeString)
@@ -373,6 +399,26 @@ func (_u *EntitlementBindingUpdateOne) AddValue(v int64) *EntitlementBindingUpda
 	return _u
 }
 
+// SetTokenAction sets the "token_action" field.
+func (_u *EntitlementBindingUpdateOne) SetTokenAction(v string) *EntitlementBindingUpdateOne {
+	_u.mutation.SetTokenAction(v)
+	return _u
+}
+
+// SetNillableTokenAction sets the "token_action" field if the given value is not nil.
+func (_u *EntitlementBindingUpdateOne) SetNillableTokenAction(v *string) *EntitlementBindingUpdateOne {
+	if v != nil {
+		_u.SetTokenAction(*v)
+	}
+	return _u
+}
+
+// ClearTokenAction clears the value of the "token_action" field.
+func (_u *EntitlementBindingUpdateOne) ClearTokenAction() *EntitlementBindingUpdateOne {
+	_u.mutation.ClearTokenAction()
+	return _u
+}
+
 // SetUpdatedAt sets the "updated_at" field.
 func (_u *EntitlementBindingUpdateOne) SetUpdatedAt(v time.Time) *EntitlementBindingUpdateOne {
 	_u.mutation.SetUpdatedAt(v)
@@ -508,6 +554,12 @@ func (_u *EntitlementBindingUpdateOne) sqlSave(ctx context.Context) (_node *Enti
 	}
 	if value, ok := _u.mutation.AddedValue(); ok {
 		_spec.AddField(entitlementbinding.FieldValue, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.TokenAction(); ok {
+		_spec.SetField(entitlementbinding.FieldTokenAction, field.TypeString, value)
+	}
+	if _u.mutation.TokenActionCleared() {
+		_spec.ClearField(entitlementbinding.FieldTokenAction, field.TypeString)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(entitlementbinding.FieldCreatedBy, field.TypeString)

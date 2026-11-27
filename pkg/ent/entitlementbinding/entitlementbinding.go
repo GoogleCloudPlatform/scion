@@ -28,6 +28,8 @@ const (
 	FieldScopeID = "scope_id"
 	// FieldValue holds the string denoting the value field in the database.
 	FieldValue = "value"
+	// FieldTokenAction holds the string denoting the token_action field in the database.
+	FieldTokenAction = "token_action"
 	// FieldCreatedBy holds the string denoting the created_by field in the database.
 	FieldCreatedBy = "created_by"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
@@ -56,6 +58,7 @@ var Columns = []string{
 	FieldScopeType,
 	FieldScopeID,
 	FieldValue,
+	FieldTokenAction,
 	FieldCreatedBy,
 	FieldCreatedAt,
 	FieldUpdatedAt,
@@ -172,6 +175,11 @@ func ByScopeID(opts ...sql.OrderTermOption) OrderOption {
 // ByValue orders the results by the value field.
 func ByValue(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldValue, opts...).ToFunc()
+}
+
+// ByTokenAction orders the results by the token_action field.
+func ByTokenAction(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTokenAction, opts...).ToFunc()
 }
 
 // ByCreatedBy orders the results by the created_by field.

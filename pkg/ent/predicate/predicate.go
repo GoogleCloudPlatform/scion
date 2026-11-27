@@ -342,6 +342,9 @@ type TriggerFire func(*sql.Selector)
 // TriggerSubjectClaim is the predicate function for triggersubjectclaim builders.
 type TriggerSubjectClaim func(*sql.Selector)
 
+// UsageBudgetState is the predicate function for usagebudgetstate builders.
+type UsageBudgetState func(*sql.Selector)
+
 // UsageEvent is the predicate function for usageevent builders.
 type UsageEvent func(*sql.Selector)
 

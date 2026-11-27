@@ -3366,6 +3366,10 @@ type Server struct {
 	// usage tables (usage_retention.go).
 	usageRetention *UsageRetentionSweeper
 
+	// tokenBudgetEvaluator evaluates raw-token budget consumption after usage
+	// ingest commits (token_budget_evaluator.go).
+	tokenBudgetEvaluator *TokenBudgetEvaluator
+
 	// triggers holds the shared trigger.event durablequeue handle and
 	// background drainer state (trigger_dispatch.go).
 	triggers triggerRuntime
@@ -8046,6 +8050,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Reconcile Tokenomics usage ledger attribution hook and idempotent active-run backfill.
 	s.reconcileUsageLedger(ctx)
+
+	// Reconcile Tokenomics raw-token budget limit definitions when enabled (P3.1, D5).
+	s.reconcileTokenBudgets(ctx)
 
 	// Start the trigger.event queue drainer when hub.triggers is enabled.
 	s.startTriggerDrainer(ctx)

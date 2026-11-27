@@ -2187,6 +2187,29 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 	}
 }
 
+// seedTokenBudgetLimitDefinitions idempotently seeds the six non-group
+// raw-token budget limit definitions (Tokenomics P3.1, §4.4). All default to
+// 0 (unlimited). Invoked when tokenomics.token_budgets is enabled (at startup
+// and on live OFF->ON toggle via ApplySnapshot) so Hubs with the experiment
+// off see no schema/list changes (D5).
+func seedTokenBudgetLimitDefinitions(ctx context.Context, s store.Store) {
+	tokenLimits := []struct {
+		name        string
+		description string
+	}{
+		{store.LimitLLMTokensPerProjectDay, "Maximum LLM tokens per project per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerProjectMonth, "Maximum LLM tokens per project per UTC calendar month (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserDay, "Maximum LLM tokens per user per UTC day across all projects (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserMonth, "Maximum LLM tokens per user per UTC calendar month across all projects (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserProjectDay, "Maximum LLM tokens per user within a project per UTC day (0 = unlimited)"},
+		{store.LimitLLMTokensPerUserProjectMonth, "Maximum LLM tokens per user within a project per UTC calendar month (0 = unlimited)"},
+	}
+
+	for _, lim := range tokenLimits {
+		seedLimitDefinition(ctx, s, lim.name, store.LimitResourceTypeLLMTokens, store.LimitUnitTokens, lim.description, 0)
+	}
+}
+
 // seedLimitDefinition creates a single system limit definition if it doesn't
 // already exist.
 func seedLimitDefinition(ctx context.Context, s store.Store, name, resourceType, unit, description string, defaultValue int64) {

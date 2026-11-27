@@ -63,6 +63,11 @@ func entLimitDefinitionToStore(ld *ent.LimitDefinition) *store.LimitDefinition {
 }
 
 func entEntitlementBindingToStore(eb *ent.EntitlementBinding) *store.EntitlementBinding {
+	var tokenAction *string
+	if eb.TokenAction != nil {
+		v := *eb.TokenAction
+		tokenAction = &v
+	}
 	return &store.EntitlementBinding{
 		ID:                eb.ID.String(),
 		LimitDefinitionID: eb.LimitDefinitionID.String(),
@@ -71,6 +76,7 @@ func entEntitlementBindingToStore(eb *ent.EntitlementBinding) *store.Entitlement
 		ScopeType:         string(eb.ScopeType),
 		ScopeID:           eb.ScopeID,
 		Value:             eb.Value,
+		TokenAction:       tokenAction,
 		CreatedBy:         eb.CreatedBy,
 		CreatedAt:         eb.CreatedAt,
 		UpdatedAt:         eb.UpdatedAt,
@@ -206,6 +212,7 @@ func (q *QuotaStore) CreateEntitlementBinding(ctx context.Context, binding *stor
 		SetScopeType(entitlementbinding.ScopeType(binding.ScopeType)).
 		SetScopeID(binding.ScopeID).
 		SetValue(binding.Value).
+		SetNillableTokenAction(binding.TokenAction).
 		SetCreatedBy(binding.CreatedBy)
 
 	if binding.ID != "" {
@@ -281,9 +288,14 @@ func (q *QuotaStore) UpdateEntitlementBinding(ctx context.Context, binding *stor
 	if err != nil {
 		return nil, err
 	}
-	updated, err := q.client.EntitlementBinding.UpdateOneID(uid).
-		SetValue(binding.Value).
-		Save(ctx)
+	upd := q.client.EntitlementBinding.UpdateOneID(uid).
+		SetValue(binding.Value)
+	if binding.TokenAction != nil && *binding.TokenAction != "" {
+		upd.SetTokenAction(*binding.TokenAction)
+	} else {
+		upd.ClearTokenAction()
+	}
+	updated, err := upd.Save(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

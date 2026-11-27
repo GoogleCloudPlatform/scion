@@ -657,6 +657,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.retention.hourly_rollups_days":          testAdminPolicyDeny,
 	"telemetry.retention.daily_rollups_days":           testAdminPolicyDeny,
 	"telemetry.retention.scope_counters_days":          testAdminPolicyDeny,
+	"telemetry.retention.budget_state_days":            testAdminPolicyDeny,
 	"telemetry.retention.meter_health_days":            testAdminPolicyDeny,
 	"telemetry.retention.sweep_interval":               testAdminPolicyDeny,
 	"telemetry.retention.batch_size":                   testAdminPolicyDeny,

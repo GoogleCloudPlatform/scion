@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -51,20 +52,22 @@ type updateLimitDefinitionRequest struct {
 
 // createEntitlementBindingRequest is the payload for POST /api/v1/admin/limits/:id/entitlements.
 type createEntitlementBindingRequest struct {
-	SubjectType string `json:"subjectType"`
-	SubjectID   string `json:"subjectId"`
-	ScopeType   string `json:"scopeType"`
-	ScopeID     string `json:"scopeId"`
-	Value       int64  `json:"value"`
+	SubjectType string  `json:"subjectType"`
+	SubjectID   string  `json:"subjectId"`
+	ScopeType   string  `json:"scopeType"`
+	ScopeID     string  `json:"scopeId"`
+	Value       int64   `json:"value"`
+	TokenAction *string `json:"tokenAction,omitempty"`
 }
 
 // updateEntitlementBindingRequest is the payload for PUT /api/v1/admin/entitlements/:id.
 type updateEntitlementBindingRequest struct {
-	SubjectType string `json:"subjectType"`
-	SubjectID   string `json:"subjectId"`
-	ScopeType   string `json:"scopeType"`
-	ScopeID     string `json:"scopeId"`
-	Value       int64  `json:"value"`
+	SubjectType string  `json:"subjectType"`
+	SubjectID   string  `json:"subjectId"`
+	ScopeType   string  `json:"scopeType"`
+	ScopeID     string  `json:"scopeId"`
+	Value       int64   `json:"value"`
+	TokenAction *string `json:"tokenAction,omitempty"`
 }
 
 // listLimitDefinitionsResponse wraps the list result for the API.
@@ -395,6 +398,16 @@ func (s *Server) listLimitDefinitions(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if !s.experimentEnabled(experiments.TokenomicsTokenBudgets) {
+		filtered := make([]*store.LimitDefinition, 0, len(defs))
+		for _, def := range defs {
+			if def.ResourceType == store.LimitResourceTypeLLMTokens {
+				continue
+			}
+			filtered = append(filtered, def)
+		}
+		defs = filtered
+	}
 	if defs == nil {
 		defs = []*store.LimitDefinition{}
 	}
@@ -527,7 +540,7 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		BadRequest(w, "subject_type is required")
 		return
 	}
-	if req.SubjectID == "" {
+	if req.SubjectID == "" && req.SubjectType != store.EntitlementSubjectSystemDefault {
 		BadRequest(w, "subject_id is required")
 		return
 	}
@@ -545,6 +558,12 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	tokenAction, err := normalizeAndValidateTokenAction(req.TokenAction, limitDef.ResourceType)
+	if err != nil {
+		BadRequest(w, err.Error())
 		return
 	}
 
@@ -566,6 +585,7 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		ScopeType:         req.ScopeType,
 		ScopeID:           req.ScopeID,
 		Value:             req.Value,
+		TokenAction:       tokenAction,
 		CreatedBy:         user.Email(),
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -626,7 +646,7 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		BadRequest(w, "subject_type is required")
 		return
 	}
-	if req.SubjectID == "" {
+	if req.SubjectID == "" && req.SubjectType != store.EntitlementSubjectSystemDefault {
 		BadRequest(w, "subject_id is required")
 		return
 	}
@@ -664,11 +684,18 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	tokenAction, err := normalizeAndValidateTokenAction(req.TokenAction, limitDef.ResourceType)
+	if err != nil {
+		BadRequest(w, err.Error())
+		return
+	}
+
 	existing.SubjectType = req.SubjectType
 	existing.SubjectID = req.SubjectID
 	existing.ScopeType = req.ScopeType
 	existing.ScopeID = req.ScopeID
 	existing.Value = req.Value
+	existing.TokenAction = tokenAction
 	existing.UpdatedAt = time.Now()
 
 	updated, err := s.store.UpdateEntitlementBinding(r.Context(), existing)
@@ -716,8 +743,12 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tokenBudgetsOn := s.experimentEnabled(experiments.TokenomicsTokenBudgets)
 	entries := make([]usageSummaryEntry, 0, len(defs))
 	for _, def := range defs {
+		if def.ResourceType == store.LimitResourceTypeLLMTokens && !tokenBudgetsOn {
+			continue
+		}
 		// max_agents_per_broker reservations are stored at
 		// store.QuotaScopeBroker scoped to each individual broker
 		// (broker_quota.go), never at store.QuotaScopeSystem, so the
@@ -1036,7 +1067,7 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 		// admin view), the correct fix here is to omit the row from a user's
 		// own usage entirely rather than reporting a broker-wide count under
 		// "my usage". ptone/scion#2313.
-		if def.Name == store.LimitMaxAgentsPerBroker {
+		if def.Name == store.LimitMaxAgentsPerBroker || def.ResourceType == store.LimitResourceTypeLLMTokens {
 			continue
 		}
 
@@ -1113,4 +1144,27 @@ func (s *Server) requireWritePermissionForQuota(w http.ResponseWriter, r *http.R
 		return nil, false
 	}
 	return user, true
+}
+
+// normalizeAndValidateTokenAction trims and validates an optional token_action
+// field on entitlement binding create/update requests (Tokenomics D4).
+// Empty or nil returns (nil, nil) which defaults to pause_new at evaluation time.
+// Non-empty values are accepted only for resource_type == "llm_tokens" and must
+// be one of pause_new, suspend_and_pause, or notify_only.
+func normalizeAndValidateTokenAction(raw *string, resourceType string) (*string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	v := strings.TrimSpace(*raw)
+	if v == "" {
+		return nil, nil
+	}
+	if resourceType != store.LimitResourceTypeLLMTokens {
+		return nil, fmt.Errorf("token_action is only valid for %s limits", store.LimitResourceTypeLLMTokens)
+	}
+	if !store.ValidTokenAction(v) {
+		return nil, fmt.Errorf("invalid token_action %q: must be %s, %s, or %s",
+			v, store.TokenActionPauseNew, store.TokenActionSuspendAndPause, store.TokenActionNotifyOnly)
+	}
+	return &v, nil
 }

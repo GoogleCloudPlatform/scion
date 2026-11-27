@@ -236,6 +236,8 @@ type Tx struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UsageBudgetState is the client for interacting with the UsageBudgetState builders.
+	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
@@ -503,6 +505,7 @@ func (tx *Tx) init() {
 	tx.TriggerEvent = NewTriggerEventClient(tx.config)
 	tx.TriggerFire = NewTriggerFireClient(tx.config)
 	tx.TriggerSubjectClaim = NewTriggerSubjectClaimClient(tx.config)
+	tx.UsageBudgetState = NewUsageBudgetStateClient(tx.config)
 	tx.UsageEvent = NewUsageEventClient(tx.config)
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.UsageRollupDaily = NewUsageRollupDailyClient(tx.config)

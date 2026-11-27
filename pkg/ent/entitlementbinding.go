@@ -31,6 +31,8 @@ type EntitlementBinding struct {
 	ScopeID string `json:"scope_id,omitempty"`
 	// Value holds the value of the "value" field.
 	Value int64 `json:"value,omitempty"`
+	// TokenAction holds the value of the "token_action" field.
+	TokenAction *string `json:"token_action,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
@@ -70,7 +72,7 @@ func (*EntitlementBinding) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case entitlementbinding.FieldValue:
 			values[i] = new(sql.NullInt64)
-		case entitlementbinding.FieldSubjectType, entitlementbinding.FieldSubjectID, entitlementbinding.FieldScopeType, entitlementbinding.FieldScopeID, entitlementbinding.FieldCreatedBy:
+		case entitlementbinding.FieldSubjectType, entitlementbinding.FieldSubjectID, entitlementbinding.FieldScopeType, entitlementbinding.FieldScopeID, entitlementbinding.FieldTokenAction, entitlementbinding.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case entitlementbinding.FieldCreatedAt, entitlementbinding.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -132,6 +134,13 @@ func (_m *EntitlementBinding) assignValues(columns []string, values []any) error
 				return fmt.Errorf("unexpected type %T for field value", values[i])
 			} else if value.Valid {
 				_m.Value = value.Int64
+			}
+		case entitlementbinding.FieldTokenAction:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field token_action", values[i])
+			} else if value.Valid {
+				_m.TokenAction = new(string)
+				*_m.TokenAction = value.String
 			}
 		case entitlementbinding.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -209,6 +218,11 @@ func (_m *EntitlementBinding) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("value=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Value))
+	builder.WriteString(", ")
+	if v := _m.TokenAction; v != nil {
+		builder.WriteString("token_action=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)

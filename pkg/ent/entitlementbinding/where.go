@@ -76,6 +76,11 @@ func Value(v int64) predicate.EntitlementBinding {
 	return predicate.EntitlementBinding(sql.FieldEQ(FieldValue, v))
 }
 
+// TokenAction applies equality check predicate on the "token_action" field. It's identical to TokenActionEQ.
+func TokenAction(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldEQ(FieldTokenAction, v))
+}
+
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
 func CreatedBy(v string) predicate.EntitlementBinding {
 	return predicate.EntitlementBinding(sql.FieldEQ(FieldCreatedBy, v))
@@ -319,6 +324,81 @@ func ValueLT(v int64) predicate.EntitlementBinding {
 // ValueLTE applies the LTE predicate on the "value" field.
 func ValueLTE(v int64) predicate.EntitlementBinding {
 	return predicate.EntitlementBinding(sql.FieldLTE(FieldValue, v))
+}
+
+// TokenActionEQ applies the EQ predicate on the "token_action" field.
+func TokenActionEQ(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldEQ(FieldTokenAction, v))
+}
+
+// TokenActionNEQ applies the NEQ predicate on the "token_action" field.
+func TokenActionNEQ(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldNEQ(FieldTokenAction, v))
+}
+
+// TokenActionIn applies the In predicate on the "token_action" field.
+func TokenActionIn(vs ...string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldIn(FieldTokenAction, vs...))
+}
+
+// TokenActionNotIn applies the NotIn predicate on the "token_action" field.
+func TokenActionNotIn(vs ...string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldNotIn(FieldTokenAction, vs...))
+}
+
+// TokenActionGT applies the GT predicate on the "token_action" field.
+func TokenActionGT(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldGT(FieldTokenAction, v))
+}
+
+// TokenActionGTE applies the GTE predicate on the "token_action" field.
+func TokenActionGTE(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldGTE(FieldTokenAction, v))
+}
+
+// TokenActionLT applies the LT predicate on the "token_action" field.
+func TokenActionLT(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldLT(FieldTokenAction, v))
+}
+
+// TokenActionLTE applies the LTE predicate on the "token_action" field.
+func TokenActionLTE(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldLTE(FieldTokenAction, v))
+}
+
+// TokenActionContains applies the Contains predicate on the "token_action" field.
+func TokenActionContains(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldContains(FieldTokenAction, v))
+}
+
+// TokenActionHasPrefix applies the HasPrefix predicate on the "token_action" field.
+func TokenActionHasPrefix(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldHasPrefix(FieldTokenAction, v))
+}
+
+// TokenActionHasSuffix applies the HasSuffix predicate on the "token_action" field.
+func TokenActionHasSuffix(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldHasSuffix(FieldTokenAction, v))
+}
+
+// TokenActionIsNil applies the IsNil predicate on the "token_action" field.
+func TokenActionIsNil() predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldIsNull(FieldTokenAction))
+}
+
+// TokenActionNotNil applies the NotNil predicate on the "token_action" field.
+func TokenActionNotNil() predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldNotNull(FieldTokenAction))
+}
+
+// TokenActionEqualFold applies the EqualFold predicate on the "token_action" field.
+func TokenActionEqualFold(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldEqualFold(FieldTokenAction, v))
+}
+
+// TokenActionContainsFold applies the ContainsFold predicate on the "token_action" field.
+func TokenActionContainsFold(v string) predicate.EntitlementBinding {
+	return predicate.EntitlementBinding(sql.FieldContainsFold(FieldTokenAction, v))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.

@@ -726,6 +726,122 @@ func (qs *QuotaService) resolveEffectiveLimitWithSource(ctx context.Context, lim
 	return maxValue, true, nil
 }
 
+// ResolveEffectiveTokenLimit resolves the effective raw-token cap and breach
+// action for (limitDefID, subjectID, scopeType, scopeID) using the same
+// most-generous binding merge rule as ResolveEffectiveLimit:
+//   - If subjectID is non-empty, user bindings and direct group bindings are
+//     collected alongside system_default bindings; if subjectID is empty (e.g.
+//     project-pooled llm_tokens_per_project_* limits), only system_default
+//     bindings are collected.
+//   - If no matching binding exists, falls back to LimitDefinition.DefaultValue
+//     with action = pause_new (0 or negative means unlimited).
+//   - If ANY matching binding has Value <= 0, the effective limit is unlimited
+//     (0, pause_new).
+//   - Otherwise the maximum positive Value wins. A unique winning binding's
+//     token_action wins (NULL = pause_new). When multiple bindings tie for the
+//     same maximum positive Value, the most permissive token_action wins:
+//     notify_only > pause_new > suspend_and_pause.
+func (qs *QuotaService) ResolveEffectiveTokenLimit(ctx context.Context, limitDefID, subjectID, scopeType, scopeID string) (cap int64, action string, err error) {
+	var matchingBindings []*store.EntitlementBinding
+
+	if subjectID != "" {
+		userBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
+		if err != nil {
+			return 0, store.TokenActionPauseNew, fmt.Errorf("list user bindings: %w", err)
+		}
+		for _, b := range userBindings {
+			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+				matchingBindings = append(matchingBindings, b)
+			}
+		}
+
+		groupMemberships, err := qs.store.GetUserGroups(ctx, subjectID)
+		if err != nil {
+			if qs.logger != nil {
+				qs.logger.Debug("failed to get user groups for token budget resolution",
+					"subject_id", subjectID, "error", err)
+			}
+		} else {
+			for _, gm := range groupMemberships {
+				groupBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, gm.GroupID)
+				if err != nil {
+					if qs.logger != nil {
+						qs.logger.Debug("failed to list group bindings for token budget resolution",
+							"group_id", gm.GroupID, "error", err)
+					}
+					continue
+				}
+				for _, b := range groupBindings {
+					if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+						matchingBindings = append(matchingBindings, b)
+					}
+				}
+			}
+		}
+	}
+
+	sysBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectSystemDefault, "")
+	if err != nil {
+		if qs.logger != nil {
+			qs.logger.Debug("failed to list system default bindings for token budget resolution", "error", err)
+		}
+	} else {
+		for _, b := range sysBindings {
+			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+				matchingBindings = append(matchingBindings, b)
+			}
+		}
+	}
+
+	if len(matchingBindings) == 0 {
+		limitDef, err := qs.store.GetLimitDefinition(ctx, limitDefID)
+		if err != nil {
+			return 0, store.TokenActionPauseNew, fmt.Errorf("get limit definition: %w", err)
+		}
+		if limitDef.DefaultValue <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		return limitDef.DefaultValue, store.TokenActionPauseNew, nil
+	}
+
+	var maxValue int64
+	bestAction := ""
+	for _, b := range matchingBindings {
+		if b.Value <= 0 {
+			return 0, store.TokenActionPauseNew, nil
+		}
+		act := store.EffectiveTokenAction(b.TokenAction)
+		if b.Value > maxValue {
+			maxValue = b.Value
+			bestAction = act
+		} else if b.Value == maxValue {
+			if tokenActionPermissivenessRank(act) > tokenActionPermissivenessRank(bestAction) {
+				bestAction = act
+			}
+		}
+	}
+	if bestAction == "" {
+		bestAction = store.TokenActionPauseNew
+	}
+	return maxValue, bestAction, nil
+}
+
+// tokenActionPermissivenessRank orders breach actions from strictest (0) to
+// most permissive (2) for deterministic tie-breaking when multiple bindings
+// tie for the maximum positive cap: notify_only > pause_new > suspend_and_pause.
+func tokenActionPermissivenessRank(action string) int {
+	switch action {
+	case store.TokenActionNotifyOnly:
+		return 2
+	case store.TokenActionPauseNew:
+		return 1
+	case store.TokenActionSuspendAndPause:
+		return 0
+	default:
+		return 1
+	}
+}
+
 // Release marks resourceID's active reservation for limitName as released
 // (best-effort). It touches only that limit: a resource can hold
 // reservations under several limits (an agent holds both

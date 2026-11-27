@@ -128,6 +128,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagebudgetstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usageevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagerollupdaily"
@@ -371,6 +372,8 @@ type Client struct {
 	TriggerFire *TriggerFireClient
 	// TriggerSubjectClaim is the client for interacting with the TriggerSubjectClaim builders.
 	TriggerSubjectClaim *TriggerSubjectClaimClient
+	// UsageBudgetState is the client for interacting with the UsageBudgetState builders.
+	UsageBudgetState *UsageBudgetStateClient
 	// UsageEvent is the client for interacting with the UsageEvent builders.
 	UsageEvent *UsageEventClient
 	// UsageReservation is the client for interacting with the UsageReservation builders.
@@ -518,6 +521,7 @@ func (c *Client) init() {
 	c.TriggerEvent = NewTriggerEventClient(c.config)
 	c.TriggerFire = NewTriggerFireClient(c.config)
 	c.TriggerSubjectClaim = NewTriggerSubjectClaimClient(c.config)
+	c.UsageBudgetState = NewUsageBudgetStateClient(c.config)
 	c.UsageEvent = NewUsageEventClient(c.config)
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.UsageRollupDaily = NewUsageRollupDailyClient(c.config)
@@ -734,6 +738,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
@@ -877,6 +882,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		TriggerEvent:                  NewTriggerEventClient(cfg),
 		TriggerFire:                   NewTriggerFireClient(cfg),
 		TriggerSubjectClaim:           NewTriggerSubjectClaimClient(cfg),
+		UsageBudgetState:              NewUsageBudgetStateClient(cfg),
 		UsageEvent:                    NewUsageEventClient(cfg),
 		UsageReservation:              NewUsageReservationClient(cfg),
 		UsageRollupDaily:              NewUsageRollupDailyClient(cfg),
@@ -947,11 +953,11 @@ func (c *Client) Use(hooks ...Hook) {
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
+		c.UsageBudgetState, c.UsageEvent, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -990,11 +996,11 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
 		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
 		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.TrajectorySegment,
-		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim, c.UsageEvent,
-		c.UsageReservation, c.UsageRollupDaily, c.UsageRollupHourly,
-		c.UsageScopeCounterDaily, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserExecContainer, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.Trigger, c.TriggerEvent, c.TriggerFire, c.TriggerSubjectClaim,
+		c.UsageBudgetState, c.UsageEvent, c.UsageReservation, c.UsageRollupDaily,
+		c.UsageRollupHourly, c.UsageScopeCounterDaily, c.User, c.UserAccessToken,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1227,6 +1233,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.TriggerFire.mutate(ctx, m)
 	case *TriggerSubjectClaimMutation:
 		return c.TriggerSubjectClaim.mutate(ctx, m)
+	case *UsageBudgetStateMutation:
+		return c.UsageBudgetState.mutate(ctx, m)
 	case *UsageEventMutation:
 		return c.UsageEvent.mutate(ctx, m)
 	case *UsageReservationMutation:
@@ -16776,6 +16784,139 @@ func (c *TriggerSubjectClaimClient) mutate(ctx context.Context, m *TriggerSubjec
 	}
 }
 
+// UsageBudgetStateClient is a client for the UsageBudgetState schema.
+type UsageBudgetStateClient struct {
+	config
+}
+
+// NewUsageBudgetStateClient returns a client for the UsageBudgetState from the given config.
+func NewUsageBudgetStateClient(c config) *UsageBudgetStateClient {
+	return &UsageBudgetStateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `usagebudgetstate.Hooks(f(g(h())))`.
+func (c *UsageBudgetStateClient) Use(hooks ...Hook) {
+	c.hooks.UsageBudgetState = append(c.hooks.UsageBudgetState, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `usagebudgetstate.Intercept(f(g(h())))`.
+func (c *UsageBudgetStateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UsageBudgetState = append(c.inters.UsageBudgetState, interceptors...)
+}
+
+// Create returns a builder for creating a UsageBudgetState entity.
+func (c *UsageBudgetStateClient) Create() *UsageBudgetStateCreate {
+	mutation := newUsageBudgetStateMutation(c.config, OpCreate)
+	return &UsageBudgetStateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UsageBudgetState entities.
+func (c *UsageBudgetStateClient) CreateBulk(builders ...*UsageBudgetStateCreate) *UsageBudgetStateCreateBulk {
+	return &UsageBudgetStateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UsageBudgetStateClient) MapCreateBulk(slice any, setFunc func(*UsageBudgetStateCreate, int)) *UsageBudgetStateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UsageBudgetStateCreateBulk{err: fmt.Errorf("calling to UsageBudgetStateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UsageBudgetStateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UsageBudgetStateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Update() *UsageBudgetStateUpdate {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdate)
+	return &UsageBudgetStateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UsageBudgetStateClient) UpdateOne(_m *UsageBudgetState) *UsageBudgetStateUpdateOne {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdateOne, withUsageBudgetState(_m))
+	return &UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UsageBudgetStateClient) UpdateOneID(id uuid.UUID) *UsageBudgetStateUpdateOne {
+	mutation := newUsageBudgetStateMutation(c.config, OpUpdateOne, withUsageBudgetStateID(id))
+	return &UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Delete() *UsageBudgetStateDelete {
+	mutation := newUsageBudgetStateMutation(c.config, OpDelete)
+	return &UsageBudgetStateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UsageBudgetStateClient) DeleteOne(_m *UsageBudgetState) *UsageBudgetStateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UsageBudgetStateClient) DeleteOneID(id uuid.UUID) *UsageBudgetStateDeleteOne {
+	builder := c.Delete().Where(usagebudgetstate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UsageBudgetStateDeleteOne{builder}
+}
+
+// Query returns a query builder for UsageBudgetState.
+func (c *UsageBudgetStateClient) Query() *UsageBudgetStateQuery {
+	return &UsageBudgetStateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUsageBudgetState},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UsageBudgetState entity by its id.
+func (c *UsageBudgetStateClient) Get(ctx context.Context, id uuid.UUID) (*UsageBudgetState, error) {
+	return c.Query().Where(usagebudgetstate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UsageBudgetStateClient) GetX(ctx context.Context, id uuid.UUID) *UsageBudgetState {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UsageBudgetStateClient) Hooks() []Hook {
+	return c.hooks.UsageBudgetState
+}
+
+// Interceptors returns the client interceptors.
+func (c *UsageBudgetStateClient) Interceptors() []Interceptor {
+	return c.inters.UsageBudgetState
+}
+
+func (c *UsageBudgetStateClient) mutate(ctx context.Context, m *UsageBudgetStateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UsageBudgetStateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UsageBudgetStateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UsageBudgetStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UsageBudgetStateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UsageBudgetState mutation op: %q", m.Op())
+	}
+}
+
 // UsageEventClient is a client for the UsageEvent schema.
 type UsageEventClient struct {
 	config
@@ -18609,9 +18750,10 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
+		UsageBudgetState, UsageEvent, UsageReservation, UsageRollupDaily,
+		UsageRollupHourly, UsageScopeCounterDaily, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -18640,8 +18782,9 @@ type (
 		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
 		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
 		TrajectorySegment, Trigger, TriggerEvent, TriggerFire, TriggerSubjectClaim,
-		UsageEvent, UsageReservation, UsageRollupDaily, UsageRollupHourly,
-		UsageScopeCounterDaily, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserExecContainer, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
+		UsageBudgetState, UsageEvent, UsageReservation, UsageRollupDaily,
+		UsageRollupHourly, UsageScopeCounterDaily, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
+		WebhookEndpoint []ent.Interceptor
 	}
 )
