@@ -1049,7 +1049,7 @@ func TestUserMeInboxSummary_ReviewsStateSummaryAndGates(t *testing.T) {
 	require.Len(t, previews, 2)
 	assert.Equal(t, InboxReviewKindRequested, previews[0].Kind)
 	assert.Equal(t, reqArt, previews[0].ArtifactID)
-	assert.True(t, previews[0].CreatedAt.Equal(base.Add(2*time.Minute)), "requested preview CreatedAt should match artifact UpdatedAt")
+	assert.True(t, previews[0].CreatedAt.Equal(base.Add(3*time.Minute)), "requested preview CreatedAt should match request CreatedAt")
 	assert.Equal(t, "Author Alice", previews[0].RequestedBy)
 	assert.Empty(t, previews[0].NotificationID, "request-sourced preview must not carry NotificationID")
 	assert.Equal(t, InboxReviewKindToAddress, previews[1].Kind)

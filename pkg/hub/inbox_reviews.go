@@ -138,10 +138,14 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 			requestedPreviews = make([]InboxReviewPreview, 0, len(summary.Requested.Items))
 			for _, it := range summary.Requested.Items {
 				previewID := it.ID
+				createdAt := it.UpdatedAt
 				requestedBy := ""
 				if it.Request != nil {
 					if it.Request.ID != "" {
 						previewID = it.Request.ID
+					}
+					if !it.Request.CreatedAt.IsZero() {
+						createdAt = it.Request.CreatedAt
 					}
 					requestedBy = it.Request.Requester.DisplayName
 					if requestedBy == "" {
@@ -152,7 +156,7 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 					ID:          previewID,
 					Kind:        InboxReviewKindRequested,
 					ProjectID:   it.ScopeRef,
-					CreatedAt:   it.UpdatedAt,
+					CreatedAt:   createdAt,
 					Href:        artifactPagePath(it.ScopeRef, it.ID),
 					ArtifactID:  it.ID,
 					Title:       it.Title,
