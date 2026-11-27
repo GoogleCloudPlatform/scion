@@ -108,7 +108,7 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       | undefined;
     const data = raw?.data ?? raw;
     if (data?.kind !== this.config.kind) return;
-    if (this.tab === 'resolved' && this.pagesLoaded > 1) {
+    if (this.pagesLoaded > 1) {
       if (!this.hasNewActivity) {
         this.hasNewActivity = true;
         this.host.requestUpdate();
@@ -321,6 +321,23 @@ export class ActionInboxPageController<TCard> implements ReactiveController {
       this.liveRefreshTimer = null;
     }
     void this.load({ background: this.cards.length > 0 });
+  }
+
+  /**
+   * Called after the user resolves a card in place. On page 1, refreshes the
+   * list immediately; when multiple pages are loaded, preserves the mounted
+   * pages and surfaces the refresh affordance so in-progress inputs on other
+   * cards are not discarded.
+   */
+  notifyCardResolved(): void {
+    if (this.pagesLoaded > 1) {
+      if (!this.hasNewActivity) {
+        this.hasNewActivity = true;
+        this.host.requestUpdate();
+      }
+      return;
+    }
+    this.refresh();
   }
 
   async load(opts?: { background?: boolean }): Promise<void> {

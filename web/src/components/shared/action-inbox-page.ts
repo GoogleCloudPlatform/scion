@@ -374,7 +374,7 @@ export class ScionActionInboxPage<TCard = unknown> extends LitElement {
       return html`<scion-page-404></scion-page-404>`;
     }
 
-    const onResolved = (): void => this.ctrl.refresh();
+    const onResolved = (): void => this.ctrl.notifyCardResolved();
 
     return html`
       <div class="page-header">

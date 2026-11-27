@@ -662,4 +662,130 @@ describe('<scion-page-profile-agent-secrets>', () => {
     const searchInput = inner.shadowRoot!.querySelector<HTMLInputElement>('[data-filter-search]')!;
     expect(searchInput.placeholder).toBe('Filter by key, description, or agent…');
   });
+
+  it('refreshes on page 1 when a rendered card dispatches secret-request-fulfilled or secret-request-dismissed', async () => {
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        jsonResp({
+          counts: { answerable: 1, open: 1 },
+          cards: [makeCard({ messageId: 'msg-wire-1', canRespond: true })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      )
+    );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await flush();
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const cardEl = inner.shadowRoot!.querySelector<ScionChatSecretRequest>(
+      'scion-chat-secret-request'
+    )!;
+    expect(cardEl).not.toBeNull();
+
+    cardEl.dispatchEvent(
+      new CustomEvent('secret-request-fulfilled', {
+        detail: { messageId: 'msg-wire-1', rows: [], responseMessageId: 'r1', replayed: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    cardEl.dispatchEvent(
+      new CustomEvent('secret-request-dismissed', {
+        detail: { messageId: 'msg-wire-1', rows: [], responseMessageId: 'r2', replayed: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await flush();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves multi-page Open tab on SSE update and page-2 fulfill, showing the Refresh affordance', async () => {
+    vi.useFakeTimers();
+    setFeatureFlag(AGENT_SECRETS_FLAG, true);
+
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'open-p1', canRespond: true })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+          nextCursor: 'open-cur-2',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResp({
+          counts: { answerable: 2, open: 2 },
+          cards: [makeCard({ messageId: 'open-p2', canRespond: true })],
+          facets: { agents: [], projects: [] },
+          truncatedProjects: false,
+          capped: false,
+        })
+      );
+
+    const page = document.createElement(
+      'scion-page-profile-agent-secrets'
+    ) as ScionPageProfileAgentSecrets;
+    document.body.appendChild(page);
+    await vi.advanceTimersByTimeAsync(20);
+
+    const inner = page.shadowRoot!.querySelector<ScionActionInboxPage>('scion-action-inbox-page')!;
+    await inner.updateComplete;
+
+    // Load page 2 on the Open tab.
+    await inner.ctrl.loadMore();
+    await inner.updateComplete;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(inner.shadowRoot!.querySelector('[data-secret-request-card="open-p2"]')).not.toBeNull();
+
+    // 1. SSE event arrives while 2 pages are loaded: page-2 card stays mounted and affordance shows.
+    stateManager.dispatchEvent(
+      new CustomEvent('message-action-updated', { detail: { data: { kind: 'secret_request' } } })
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    await inner.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(inner.shadowRoot!.querySelector('[data-secret-request-card="open-p2"]')).not.toBeNull();
+    expect(inner.shadowRoot!.querySelector('[data-action-new-activity]')).not.toBeNull();
+
+    // Clear affordance state directly to verify page-2 Fulfill also triggers it without unmounting.
+    inner.ctrl.hasNewActivity = false;
+    inner.requestUpdate();
+    await inner.updateComplete;
+    expect(inner.shadowRoot!.querySelector('[data-action-new-activity]')).toBeNull();
+
+    // 2. Fulfill on page-2 card: page-2 card stays mounted, no auto-fetch, and affordance shows.
+    const page2CardEl = inner.shadowRoot!.querySelector<ScionChatSecretRequest>(
+      '[data-secret-request-card="open-p2"] scion-chat-secret-request'
+    )!;
+    page2CardEl.dispatchEvent(
+      new CustomEvent('secret-request-fulfilled', {
+        detail: { messageId: 'open-p2', rows: [], responseMessageId: 'r-p2', replayed: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await vi.advanceTimersByTimeAsync(20);
+    await inner.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(inner.shadowRoot!.querySelector('[data-secret-request-card="open-p2"]')).not.toBeNull();
+    expect(inner.shadowRoot!.querySelector('[data-action-new-activity]')).not.toBeNull();
+  });
 });
