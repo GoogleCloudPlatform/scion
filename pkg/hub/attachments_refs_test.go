@@ -352,6 +352,7 @@ var renderNeverCarries = map[string]string{
 	"notifications.go:dispatchToAgent":                          "notifications carry no attachments",
 	"action_message.go:deliverMessageAction":                    "event notices carry no attachments",
 	"artifacts_review.go:deliverArtifactReview":                 "artifact review notices carry no attachments",
+	"artifacts_review.go:dispatchReviewRequestDismissNotice":    "artifact review-request dismiss notices carry no attachments",
 	"artifacts_transfer.go:dispatchTransferNotice":              "artifact ownership transfer notices carry no attachments",
 	"message_hold_redrive.go:processClaimedHeldRow":             "held message re-drive excludes attachments (ptone/scion#7939)",
 }
