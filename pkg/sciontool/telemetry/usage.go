@@ -625,7 +625,11 @@ func copilotPointModel(pointAttrs, resourceAttrs []*commonpb.KeyValue) string {
 //   - cache_read = cache_read_tokens
 //   - cache_write = cache_creation_tokens
 //   - reasoning = reasoning_tokens (informational subset of output)
-//
+const (
+	grokBuildAPIRequestEvent = "grok_code.api_request"
+	grokBuildAPIErrorEvent   = "grok_code.api_error"
+)
+
 // GrokBuildVerifiedVersions lists the Grok Build (`grok`) CLI versions whose
 // native OTLP log schema and token semantics have been verified against live
 // captures and pinned by testdata/usage/grok-build-*.pb.json fixtures.
@@ -637,28 +641,31 @@ var GrokBuildVerifiedVersions = []string{
 	"1.0.92",
 }
 
-var grokSemverRe = regexp.MustCompile(`\b(\d+\.\d+\.\d+)\b`)
+// grokVersionTokenRe extracts a complete version token (optional leading "v",
+// X.Y.Z, plus any extra numeric segments, prerelease "-...", or build metadata
+// "+...") bounded by whitespace or parentheses/commas. Capturing the full token
+// ensures prereleases ("1.0.92-rc.1"), extra segments ("1.0.92.1"), and build
+// metadata ("1.0.92+build.1") are preserved verbatim and never silently
+// normalized to a verified "1.0.92".
+var grokVersionTokenRe = regexp.MustCompile(`(?:^|[\s(])v?(\d+\.\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?:$|[\s),])`)
 
-// matchGrokBuildVerifiedVersion extracts the canonical X.Y.Z semver from raw
-// (for example "1.0.92 (b06756fd6256)" -> "1.0.92") and reports whether it is
-// listed in GrokBuildVerifiedVersions. Empty or unparseable inputs return
-// ("", false).
+// matchGrokBuildVerifiedVersion extracts the version token from raw (for
+// example "1.0.92 (b06756fd6256)" -> "1.0.92", "v1.0.92\n" -> "1.0.92",
+// "grok v1.0.93" -> "1.0.93") and reports whether it matches an entry in
+// GrokBuildVerifiedVersions exactly. Prereleases, extra version segments, and
+// build metadata are not stripped and do not match a release entry. Empty or
+// unparseable inputs return ("", false).
 func matchGrokBuildVerifiedVersion(raw string) (string, bool) {
-	s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	s := strings.TrimSpace(raw)
 	if s == "" {
 		return "", false
 	}
-	m := grokSemverRe.FindStringSubmatch(s)
+	m := grokVersionTokenRe.FindStringSubmatch(s)
 	if len(m) != 2 {
 		return "", false
 	}
 	return m[1], slices.Contains(GrokBuildVerifiedVersions, m[1])
 }
-
-const (
-	grokBuildAPIRequestEvent = "grok_code.api_request"
-	grokBuildAPIErrorEvent   = "grok_code.api_error"
-)
 
 type grokBuildUsageRule struct{}
 

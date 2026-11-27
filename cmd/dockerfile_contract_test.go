@@ -1027,15 +1027,15 @@ type pinnedCLIContract struct {
 	dockerfilePath   string
 	argName          string
 	installerURL     string
+	installerScript  string
 	binaryName       string
 	verifiedVersions []string
 }
 
 // checkPinnedCLIDockerfileContract verifies that a harness Dockerfile:
 //   - declares `ARG <argName>=<version>` with a non-empty, non-"latest" default
-//   - pins a version listed in verifiedVersions (matching either exact entry or
-//     a `<entry>-<suffix>` build tag such as "1.4.25-R9361.1")
-//   - references ${<argName>} or $<argName> in a RUN step (so the ARG is wired)
+//   - pins a version matching an entry in verifiedVersions exactly
+//   - passes ${<argName>} or $<argName> directly to the installer invocation
 //   - downloads its installer to a file instead of piping curl to bash/sh
 //   - runs `<binaryName> --version` (without `|| true`) to log and verify install
 func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, content string) []string {
@@ -1073,13 +1073,8 @@ func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, cont
 		errs = append(errs, fmt.Sprintf("%s must declare ARG %s=<verified-version>", spec.dockerfilePath, spec.argName))
 	} else if argValue == "" || strings.EqualFold(argValue, "latest") {
 		errs = append(errs, fmt.Sprintf("%s must pin ARG %s to a verified version (got %q, must not be empty or latest)", spec.dockerfilePath, spec.argName, argValue))
-	} else {
-		matched := slices.ContainsFunc(spec.verifiedVersions, func(v string) bool {
-			return argValue == v || strings.HasPrefix(argValue, v+"-")
-		})
-		if !matched {
-			errs = append(errs, fmt.Sprintf("%s pins ARG %s=%s, which is not in verified versions %v", spec.dockerfilePath, spec.argName, argValue, spec.verifiedVersions))
-		}
+	} else if !slices.Contains(spec.verifiedVersions, argValue) {
+		errs = append(errs, fmt.Sprintf("%s pins ARG %s=%s, which is not in verified versions %v", spec.dockerfilePath, spec.argName, argValue, spec.verifiedVersions))
 	}
 
 	var runs []string
@@ -1092,14 +1087,16 @@ func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, cont
 	}
 	allRuns := strings.Join(runs, "\n")
 
-	if !strings.Contains(allRuns, "${"+spec.argName+"}") && !strings.Contains(allRuns, "$"+spec.argName) {
-		errs = append(errs, fmt.Sprintf("%s must reference ${%s} in a RUN instruction", spec.dockerfilePath, spec.argName))
+	argBraced := "${" + spec.argName + "}"
+	argBare := "$" + spec.argName
+	if !strings.Contains(allRuns, argBraced) && !strings.Contains(allRuns, argBare) {
+		errs = append(errs, fmt.Sprintf("%s must reference %s in a RUN instruction", spec.dockerfilePath, argBraced))
 	}
 	if spec.installerURL != "" && !strings.Contains(allRuns, spec.installerURL) {
 		errs = append(errs, fmt.Sprintf("%s must fetch %s", spec.dockerfilePath, spec.installerURL))
 	}
 
-	var hasVersionCheck bool
+	var hasInstallerArgPass, hasVersionCheck bool
 	wantBin := spec.binaryName + " --version"
 	wantUsrBin := "/usr/local/bin/" + spec.binaryName + " --version"
 	for _, run := range runs {
@@ -1109,11 +1106,20 @@ func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, cont
 				if (strings.Contains(c, "curl ") || (spec.installerURL != "" && strings.Contains(c, spec.installerURL))) && hasShellPipe(c) {
 					errs = append(errs, fmt.Sprintf("%s must download installer to a file rather than piping curl into bash/sh (Docker /bin/sh lacks pipefail)", spec.dockerfilePath))
 				}
+				if spec.installerScript != "" && !hasShellPipe(c) &&
+					(strings.Contains(c, "bash ") || strings.Contains(c, "sh ")) &&
+					strings.Contains(c, spec.installerScript) &&
+					(strings.Contains(c, argBraced) || strings.Contains(c, argBare)) {
+					hasInstallerArgPass = true
+				}
 				if c == wantBin || c == wantUsrBin {
 					hasVersionCheck = true
 				}
 			}
 		}
+	}
+	if spec.installerScript != "" && !hasInstallerArgPass {
+		errs = append(errs, fmt.Sprintf("%s must pass %s directly to the %s installer invocation", spec.dockerfilePath, argBraced, spec.installerScript))
 	}
 	if !hasVersionCheck {
 		errs = append(errs, fmt.Sprintf("%s must run `%s --version` (without `|| true`) to log the installed version and fail on a broken install", spec.dockerfilePath, spec.binaryName))
@@ -1130,6 +1136,7 @@ var grokBuildCLIContract = pinnedCLIContract{
 	dockerfilePath:   "harnesses/grok-build/Dockerfile",
 	argName:          "GROK_VERSION",
 	installerURL:     "https://x.ai/cli/install.sh",
+	installerScript:  "grok-install.sh",
 	binaryName:       "grok",
 	verifiedVersions: telemetry.GrokBuildVerifiedVersions,
 }
@@ -1145,7 +1152,11 @@ func TestGrokBuildDockerfileContractDetectsViolations(t *testing.T) {
 		"ARG GROK_VERSION=1.0.92\n" +
 		"USER root\n" +
 		"RUN curl -fsSL -o /tmp/grok-install.sh https://x.ai/cli/install.sh \\\n" +
-		"    && bash /tmp/grok-install.sh \"${GROK_VERSION}\" \\\n" +
+		"    && if [ -z \"${GROK_VERSION}\" ] || [ \"${GROK_VERSION}\" = \"latest\" ]; then \\\n" +
+		"         bash /tmp/grok-install.sh; \\\n" +
+		"       else \\\n" +
+		"         bash /tmp/grok-install.sh \"${GROK_VERSION}\"; \\\n" +
+		"       fi \\\n" +
 		"    && rm -f /tmp/grok-install.sh \\\n" +
 		"    && /usr/local/bin/grok --version\n"
 
@@ -1157,9 +1168,12 @@ func TestGrokBuildDockerfileContractDetectsViolations(t *testing.T) {
 		{"latest pin", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=latest"), "must not be empty or latest"},
 		{"empty pin", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION="), "must not be empty or latest"},
 		{"unverified version", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=9.9.9"), "is not in verified versions"},
+		{"prerelease pin rejected", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=1.0.92-rc.1"), "is not in verified versions"},
+		{"extra segment pin rejected", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=1.0.92.1"), "is not in verified versions"},
 		{"missing ARG", mustReplace(t, good, "ARG GROK_VERSION=1.0.92\n", ""), "must declare ARG GROK_VERSION"},
-		{"unused ARG", mustReplace(t, good, `bash /tmp/grok-install.sh "${GROK_VERSION}"`, "bash /tmp/grok-install.sh"), "must reference ${GROK_VERSION}"},
-		{"curl piped to bash", mustReplace(t, good, "curl -fsSL -o /tmp/grok-install.sh https://x.ai/cli/install.sh \\\n    && bash /tmp/grok-install.sh \"${GROK_VERSION}\"", "curl -fsSL https://x.ai/cli/install.sh | bash -s \"${GROK_VERSION}\""), "rather than piping curl"},
+		{"dropped arg from installer call in if/else", mustReplace(t, good, `bash /tmp/grok-install.sh "${GROK_VERSION}";`, "bash /tmp/grok-install.sh;"), "must pass ${GROK_VERSION} directly to the grok-install.sh installer invocation"},
+		{"unused ARG", "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG GROK_VERSION=1.0.92\nRUN curl -fsSL -o /tmp/grok-install.sh https://x.ai/cli/install.sh && bash /tmp/grok-install.sh && /usr/local/bin/grok --version\n", "must reference ${GROK_VERSION}"},
+		{"curl piped to bash", "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG GROK_VERSION=1.0.92\nRUN curl -fsSL https://x.ai/cli/install.sh | bash -s \"${GROK_VERSION}\" && /usr/local/bin/grok --version\n", "rather than piping curl"},
 		{"missing grok --version", mustReplace(t, good, " \\\n    && /usr/local/bin/grok --version\n", "\n"), "must run `grok --version`"},
 		{"grok --version masked with || true", mustReplace(t, good, "/usr/local/bin/grok --version", "/usr/local/bin/grok --version || true"), "must run `grok --version`"},
 	}

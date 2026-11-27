@@ -16,12 +16,14 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -122,65 +124,195 @@ var MuseCodeVerifiedVersions = []string{
 	"1.4.25",
 }
 
-const museVersionProbeTimeout = 1 * time.Second
+const (
+	museVersionProbeTimeout   = 1 * time.Second
+	museVersionProbeWaitDelay = 500 * time.Millisecond
+	museVersionMarkerFileName = "muse-version-check.json"
+	museVersionMarkerMaxBytes = 64 << 10
+)
 
-var museSemverRe = regexp.MustCompile(`\b(\d+\.\d+\.\d+)\b`)
+// museVersionTokenRe extracts a complete version token (optional leading "v",
+// X.Y.Z, plus any extra numeric segments, prerelease "-...", or build metadata
+// "+...") bounded by whitespace or parentheses/commas. Capturing the full token
+// prevents prereleases ("1.4.25-rc.1"), extra segments ("1.4.25.1"), and build
+// metadata ("1.4.25+build.1") from being silently normalized to "1.4.25".
+var (
+	museVersionTokenRe  = regexp.MustCompile(`(?:^|[\s(])v?(\d+\.\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?:$|[\s),])`)
+	museReleaseSuffixRe = regexp.MustCompile(`^(\d+\.\d+\.\d+)-R\d+(?:\.\d+)*$`)
+)
 
-// normalizeMuseVersion extracts the canonical X.Y.Z semver from raw
-// `muse --version` output (for example "Muse Code 1.4.25 (1.4.25-R9361.1)" ->
-// "1.4.25"). Returns "" if empty or unparseable.
+// normalizeMuseVersion extracts the version token from raw `muse --version`
+// output (for example "Muse Code 1.4.25 (1.4.25-R9361.1)" -> "1.4.25",
+// "1.4.25-R9361.1" -> "1.4.25", "v1.4.25" -> "1.4.25"). Muse's upstream
+// `-R<digits>` release tag suffix is normalized to X.Y.Z, while prereleases
+// ("1.4.25-rc.1"), extra numeric segments ("1.4.25.1"), and build metadata
+// ("1.4.25+build.1") are preserved verbatim so they never count as verified.
+// Returns "" if empty or unparseable.
 func normalizeMuseVersion(raw string) string {
-	s := strings.TrimPrefix(strings.TrimSpace(raw), "v")
+	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""
 	}
-	m := museSemverRe.FindStringSubmatch(s)
+	m := museVersionTokenRe.FindStringSubmatch(s)
 	if len(m) != 2 {
 		return ""
 	}
-	return m[1]
+	ver := m[1]
+	if rm := museReleaseSuffixRe.FindStringSubmatch(ver); len(rm) == 2 {
+		return rm[1]
+	}
+	return ver
 }
 
-// detectLocalMuseVersion probes the installed `muse` binary once with a bounded
-// timeout using rootexec (no shell, hardened env with MUSE_NO_AUTO_UPDATE=1)
-// and procreap. Any resolve, exec, timeout, or parse error returns "" so the
-// hook path never fails or blocks.
-func detectLocalMuseVersion(ctx context.Context) string {
+type museVersionCheckMarker struct {
+	CheckedVersion   string   `json:"checked_version"`
+	Verified         bool     `json:"verified"`
+	VerifiedVersions []string `json:"verified_versions,omitempty"`
+	BinaryPath       string   `json:"binary_path,omitempty"`
+	BinaryModTimeNS  int64    `json:"binary_mtime_ns,omitempty"`
+	BinarySize       int64    `json:"binary_size,omitempty"`
+}
+
+func (h *TelemetryHandler) museVersionCheckPath() string {
+	if h.MuseVersionCheckStatePath != "" {
+		return h.MuseVersionCheckStatePath
+	}
+	if h.MuseTurnUsageStatePath != "" {
+		return filepath.Join(filepath.Dir(h.MuseTurnUsageStatePath), museVersionMarkerFileName)
+	}
+	return ""
+}
+
+func readMuseVersionCheckMarker(path string) (museVersionCheckMarker, bool) {
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{})
+	if err != nil {
+		return museVersionCheckMarker{}, false
+	}
+	defer func() { _ = tree.Close() }()
+	raw, err := tree.ReadPrivate(filepath.Base(path), museVersionMarkerMaxBytes)
+	if err != nil || len(raw) == 0 {
+		return museVersionCheckMarker{}, false
+	}
+	var m museVersionCheckMarker
+	if err := json.Unmarshal(raw, &m); err != nil || m.CheckedVersion == "" {
+		return museVersionCheckMarker{}, false
+	}
+	return m, true
+}
+
+func writeMuseVersionCheckMarker(path string, m museVersionCheckMarker) error {
+	encoded, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tree.Close() }()
+	return tree.WriteFile(filepath.Base(path), encoded, privatefs.Private)
+}
+
+func museBinaryMatchesMarker(m museVersionCheckMarker) bool {
+	if m.BinaryPath == "" {
+		return true
+	}
+	info, err := os.Stat(m.BinaryPath)
+	if err != nil {
+		return false
+	}
+	return info.ModTime().UnixNano() == m.BinaryModTimeNS && info.Size() == m.BinarySize
+}
+
+// configureMuseProbeCmd hardens a muse version-probe command with a minimal
+// environment, its own process group so cancel kills any descendant holding
+// stdout open, and WaitDelay so Wait() never blocks past the bound even if a
+// descendant inherits the stdout pipe.
+func configureMuseProbeCmd(cmd *exec.Cmd) {
+	cmd.Env = rootexec.Env("MUSE_NO_AUTO_UPDATE=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = museVersionProbeWaitDelay
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+// detectLocalMuseVersion probes the installed `muse` binary with a bounded
+// timeout + WaitDelay using rootexec (no shell, hardened env with
+// MUSE_NO_AUTO_UPDATE=1) and procreap, returning the normalized version along
+// with the resolved binary's path/mtime/size for cross-process marker
+// invalidation. Any resolve, exec, timeout, or parse error returns "" so the
+// hook path never fails or blocks past the timeout + WaitDelay bound.
+func detectLocalMuseVersion(ctx context.Context) (ver, binPath string, mtimeNS, size int64) {
 	museBin, err := rootexec.Resolve("muse")
 	if err != nil {
-		return ""
+		return "", "", 0, 0
+	}
+	if info, statErr := os.Stat(museBin); statErr == nil {
+		binPath = museBin
+		mtimeNS = info.ModTime().UnixNano()
+		size = info.Size()
 	}
 	cctx, cancel := context.WithTimeout(ctx, museVersionProbeTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, museBin, "--version")
-	cmd.Env = rootexec.Env("MUSE_NO_AUTO_UPDATE=1")
+	configureMuseProbeCmd(cmd)
 	out, err := procreap.OutputManaged(cmd)
 	if err != nil {
-		return ""
+		return "", "", 0, 0
 	}
-	return normalizeMuseVersion(string(out))
+	return normalizeMuseVersion(string(out)), binPath, mtimeNS, size
 }
 
-// checkMuseVersionOnce probes the installed muse CLI version at most once per
-// TelemetryHandler (once per process) and logs a one-time operator warning if
-// the parseable version is outside MuseCodeVerifiedVersions. Missing or
-// unparseable versions return silently so the hook path never fails or panics.
+// checkMuseVersionOnce probes the installed muse CLI version once per
+// installed version across short-lived hook processes (persisted in a private
+// marker file alongside MuseTurnUsageStatePath, or once per handler when no
+// state path is configured) and logs a one-time operator warning if the
+// parseable version is outside MuseCodeVerifiedVersions. Missing, corrupt, or
+// unwritable markers and probe errors never fail or panic the hook path.
 func (h *TelemetryHandler) checkMuseVersionOnce() {
 	h.museVersionCheckOnce.Do(func() {
-		probe := h.museVersionProbe
-		if probe == nil {
-			probe = detectLocalMuseVersion
+		markerPath := h.museVersionCheckPath()
+		if markerPath != "" {
+			if m, ok := readMuseVersionCheckMarker(markerPath); ok &&
+				slices.Equal(m.VerifiedVersions, MuseCodeVerifiedVersions) &&
+				museBinaryMatchesMarker(m) {
+				return
+			}
 		}
-		ver := normalizeMuseVersion(probe(context.Background()))
-		if ver == "" || slices.Contains(MuseCodeVerifiedVersions, ver) {
+
+		var ver, binPath string
+		var mtimeNS, size int64
+		if h.museVersionProbe != nil {
+			ver = normalizeMuseVersion(h.museVersionProbe(context.Background()))
+		} else {
+			ver, binPath, mtimeNS, size = detectLocalMuseVersion(context.Background())
+		}
+		if ver == "" {
 			return
 		}
-		slog.Warn(
-			"muse-code CLI version differs from verified usage-decoding versions; usage reporting (turn-cumulative PostLLMCall delta normalization) may silently degrade or miscount tokens — see docs-site/src/content/docs/contributing/harness-cli-version-bump.md",
-			"harness", "muse-code",
-			"installed_version", ver,
-			"verified_versions", strings.Join(MuseCodeVerifiedVersions, ","),
-		)
+		verified := slices.Contains(MuseCodeVerifiedVersions, ver)
+		if !verified {
+			slog.Warn(
+				"muse-code CLI version differs from verified usage-decoding versions; usage reporting (turn-cumulative PostLLMCall delta normalization) may silently degrade or miscount tokens — see docs-site/src/content/docs/contributing/harness-cli-version-bump.md",
+				"harness", "muse-code",
+				"installed_version", ver,
+				"verified_versions", strings.Join(MuseCodeVerifiedVersions, ","),
+			)
+		}
+		if markerPath != "" {
+			_ = writeMuseVersionCheckMarker(markerPath, museVersionCheckMarker{
+				CheckedVersion:   ver,
+				Verified:         verified,
+				VerifiedVersions: slices.Clone(MuseCodeVerifiedVersions),
+				BinaryPath:       binPath,
+				BinaryModTimeNS:  mtimeNS,
+				BinarySize:       size,
+			})
+		}
 	})
 }
 

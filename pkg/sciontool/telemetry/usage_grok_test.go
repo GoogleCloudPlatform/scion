@@ -472,8 +472,18 @@ func TestMatchGrokBuildVerifiedVersion(t *testing.T) {
 		{"1.0.92", "1.0.92", true},
 		{"1.0.92 (b06756fd6256)", "1.0.92", true},
 		{"v1.0.92\n", "1.0.92", true},
+		{"  v1.0.92  \t\n", "1.0.92", true},
+		{"grok v1.0.92", "1.0.92", true},
+		{"grok v1.0.93", "1.0.93", false},
 		{"1.1.0 (abc1234)", "1.1.0", false},
+		{"1.0.92-rc", "1.0.92-rc", false},
+		{"1.0.92-rc.1", "1.0.92-rc.1", false},
+		{"1.0.92-rc.1 (abc1234)", "1.0.92-rc.1", false},
+		{"1.0.92.1", "1.0.92.1", false},
+		{"1.0.92+build.1", "1.0.92+build.1", false},
+		{"v1.0.92-beta.1+exp.sha", "1.0.92-beta.1+exp.sha", false},
 		{"", "", false},
+		{"   ", "", false},
 		{"dev", "", false},
 		{"unknown", "", false},
 	}
@@ -577,6 +587,36 @@ func TestGrokBuildUnverifiedVersionWarning(t *testing.T) {
 		}
 		if got := cap.warnings(); len(got) != 1 || got[0].attrs["installed_version"] != "1.2.0" {
 			t.Fatalf("warnings after later mismatch = %+v, want 1 warning for 1.2.0", got)
+		}
+	})
+
+	t.Run("prerelease and extra segment versions warn as unverified", func(t *testing.T) {
+		for _, tc := range []struct {
+			raw  string
+			want string
+		}{
+			{"1.0.92-rc.1 (abc1234)", "1.0.92-rc.1"},
+			{"1.0.92.1", "1.0.92.1"},
+			{"1.0.92+build.1", "1.0.92+build.1"},
+			{"grok v1.0.93", "1.0.93"},
+		} {
+			cap := &captureSlogHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(cap))
+			func() {
+				defer slog.SetDefault(prev)
+				d := &UsageDeriver{
+					rules: []usageRule{grokBuildUsageRule{}},
+					seen:  newBoundedLRU(usageDedupeCapacity, usageDedupeTTL),
+				}
+				if !d.observeRecord(context.Background(), "ai.xai.grok_code", resAttrs(tc.raw), makeRecord("p1")) {
+					t.Fatalf("raw=%q: observeRecord returned false", tc.raw)
+				}
+				warns := cap.warnings()
+				if len(warns) != 1 || warns[0].attrs["installed_version"] != tc.want {
+					t.Errorf("raw=%q: warnings = %+v, want 1 warning with installed_version=%q", tc.raw, warns, tc.want)
+				}
+			}()
 		}
 	})
 }

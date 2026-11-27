@@ -10,7 +10,7 @@ Three harness CLIs — **Antigravity (`agy`)**, **Grok Build (`grok`)**, and **M
 - **Grok Build (`grok`) is pinned** in `harnesses/grok-build/Dockerfile` (`ARG GROK_VERSION=1.0.92`, overridable with `--build-arg GROK_VERSION=latest` for ad-hoc testing). `TestGrokBuildDockerfilePinsVerifiedVersion` in `cmd/dockerfile_contract_test.go` fails CI if `GROK_VERSION` is left unpinned, set to `latest`, unused, or out of sync with `GrokBuildVerifiedVersions`. As a runtime safety net when overridden, `UsageDeriver` logs a one-time warning if the OTLP `HarnessVersion` differs from `GrokBuildVerifiedVersions`.
 - **Antigravity (`agy`) and Muse Code (`muse`) intentionally float** via their upstream installers (`https://antigravity.google/cli/install.sh` and `https://dev.meta.ai/install.sh`, per `GoogleCloudPlatform/scion#4820` and `TestAntigravityDockerfileUsesInstaller`). Both rely on runtime version checks as their safety net:
   - **`agy`:** `agydecode.IsVerifiedVersion` marks any version outside `agydecode.VerifiedVersions` as `StatusUnverified`, degrading usage reporting to `calls_only` instead of trusting unverified protobuf fields.
-  - **`muse`:** `TelemetryHandler` probes `muse --version` once per process (bounded timeout, no shell, via `rootexec` + `procreap` with `MUSE_NO_AUTO_UPDATE=1`) and logs a one-time warning when the installed version differs from `MuseCodeVerifiedVersions`.
+  - **`muse`:** `TelemetryHandler` probes `muse --version` once per installed version across short-lived hook processes (bounded by timeout + `WaitDelay`, no shell, via `rootexec` + `procreap` with `MUSE_NO_AUTO_UPDATE=1`), records the result in `~/.scion/muse-version-check.json` alongside `~/.scion/muse-turn-usage.json`, and logs a one-time warning when the installed version differs from `MuseCodeVerifiedVersions`.
 
 ## Verified Versions and Source-of-Truth Records
 
@@ -26,7 +26,7 @@ Each harness fails differently when a newer CLI diverges from the verified versi
 
 - **Antigravity (`agy`):** `agydecode.DecodeFile` checks the detected `agy --version` against `agydecode.VerifiedVersions`. Any unlisted version is marked `StatusUnverified`, which suppresses token attribution and degrades Hub usage reporting for those agents to `calls_only` (only `PreInvocation`/`PostInvocation` hook call counts remain). If the SQLite schema (`gen_metadata`, `steps`, `trajectory_metadata_blob`) or protobuf field tags change, decoding may also report `StatusMalformed`.
 - **Grok Build (`grok`):** `grokBuildUsageRule` expects `grok_code.api_request` / `grok_code.api_error` OTLP log events where `input_tokens` is inclusive of `cache_read_tokens` (and assumed inclusive of `cache_creation_tokens`, unverified live on `1.0.92`) and `output_tokens` is exclusive of `reasoning_tokens`. If a newer `grok` release renames event names, changes attribute keys, or flips inclusivity (for example making `output_tokens` inclusive of `reasoning_tokens` or `input_tokens` exclusive of `cache_read_tokens`), token counts silently double-count, under-count, or drop to zero. When `GROK_VERSION` is overridden to an unverified release, `UsageDeriver` logs a one-time warning per process.
-- **Muse Code (`muse`):** `normalizeMuseTurnUsage` subtracts a monotonic per-`(session_id, turn_id)` high-water mark because `muse 1.4.25` emits turn-cumulative totals in `PostLLMCall.usage`. If a newer `muse` release switches `PostLLMCall.usage` to per-step counts, high-water subtraction silently under-counts steps after step 0 (dropping any step whose token counts do not exceed the prior step). When the floating image picks up a newer `muse` release, `TelemetryHandler` logs a one-time warning per process.
+- **Muse Code (`muse`):** `normalizeMuseTurnUsage` subtracts a monotonic per-`(session_id, turn_id)` high-water mark because `muse 1.4.25` emits turn-cumulative totals in `PostLLMCall.usage`. If a newer `muse` release switches `PostLLMCall.usage` to per-step counts, high-water subtraction silently under-counts steps after step 0 (dropping any step whose token counts do not exceed the prior step). When the floating image picks up a newer `muse` release, `TelemetryHandler` probes `muse --version` once per installed version across hook processes (recording the result in `~/.scion/muse-version-check.json`) and logs a one-time warning.
 
 ## Bump Process
 
@@ -55,8 +55,9 @@ Capture live outputs against a local mock or test endpoint (scrubbing host paths
    - `pkg/trajectory/agydecode/version.go` (`VerifiedVersions`)
    - `pkg/sciontool/telemetry/usage.go` (`GrokBuildVerifiedVersions`)
    - `pkg/sciontool/hooks/handlers/muse_turn_delta.go` (`MuseCodeVerifiedVersions`)
-2. For **Grok Build**, update `ARG GROK_VERSION` in `harnesses/grok-build/Dockerfile` to match `GrokBuildVerifiedVersions`.
-3. Update any version notes in `harnesses/<name>/usage.yaml` and `harnesses/<name>/README.md`.
+2. For **Grok Build**, update `ARG GROK_VERSION` in `harnesses/grok-build/Dockerfile` to match `GrokBuildVerifiedVersions` exactly.
+3. For **Muse Code**, updating `MuseCodeVerifiedVersions` (or rebuilding the image with a new `/usr/local/bin/muse` binary) automatically invalidates `~/.scion/muse-version-check.json` on the next `PostLLMCall` hook; to force a fresh local probe without changing either, delete `~/.scion/muse-version-check.json`.
+4. Update any version notes in `harnesses/<name>/usage.yaml` and (where present) `harnesses/<name>/README.md`.
 
 ### 4. Re-Verify Tests and Contract Guards
 

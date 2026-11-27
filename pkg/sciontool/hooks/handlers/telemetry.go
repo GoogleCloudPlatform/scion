@@ -88,9 +88,14 @@ type TelemetryHandler struct {
 	// closed to not_reported instead of falling back to an empty in-memory map.
 	MuseTurnUsageStatePath     string
 	MuseTurnUsageStateRequired bool
-	turnUsageMu                sync.Mutex
-	turnUsageMem               *museTurnUsageState
-	museVersionCheckOnce       sync.Once
+	// MuseVersionCheckStatePath, if set, overrides the cross-process marker
+	// file path for the Muse CLI version probe. When empty and
+	// MuseTurnUsageStatePath is set, the marker defaults to
+	// `muse-version-check.json` alongside MuseTurnUsageStatePath.
+	MuseVersionCheckStatePath string
+	turnUsageMu               sync.Mutex
+	turnUsageMem              *museTurnUsageState
+	museVersionCheckOnce      sync.Once
 	// museVersionProbe overrides `muse --version` detection in tests.
 	// When nil, detectLocalMuseVersion is used.
 	museVersionProbe func(context.Context) string
