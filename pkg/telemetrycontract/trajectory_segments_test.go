@@ -70,6 +70,8 @@ func TestValidateTrajectoryRelativePath(t *testing.T) {
 		{"wrong prefix", "claude", ".codex/sessions/a.jsonl"},
 		{"wrong suffix", "claude", ".claude/projects/-workspace/a.json"},
 		{"bare suffix", "claude", ".claude/projects/.jsonl"},
+		{"seg.gz element", "claude", ".claude/projects/a.jsonl/g0-0000000000000000.seg.gz/x.jsonl"},
+		{"manifest.json element", "claude", ".claude/projects/a.jsonl/g0-0000000000000000.seg.gz.manifest.json/x.jsonl"},
 		{"unsupported harness", "codex", ".claude/projects/-workspace/a.jsonl"},
 	}
 	for _, tc := range invalid {

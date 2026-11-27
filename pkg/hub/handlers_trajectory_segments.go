@@ -382,6 +382,9 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	if existing != nil {
 		excludeID = existing.ID
 	}
+	// Enforce per-run raw byte cap. Note: this check-then-insert accounting is
+	// not serialized per run in wave 1, so concurrent prepares for the same run
+	// can overshoot maxTrajectoryRunRawBytes by up to concurrency * maxSegmentRawBytes.
 	usedRunRaw, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID, now)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -622,6 +625,15 @@ func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *h
 			fmt.Sprintf("uploaded size %d does not match expected compressed_size %d", len(payload), seg.CompressedSize), nil)
 		return
 	}
+	// Verify compressed_sha256 against the HMAC-bound value before attempting
+	// the create-only write so corrupt same-length bytes never occupy the
+	// immutable object path and block a valid retry.
+	payloadSum := sha256.Sum256(payload)
+	if hex.EncodeToString(payloadSum[:]) != seg.CompressedSHA256 {
+		writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
+			"uploaded compressed_sha256 does not match prepared segment", nil)
+		return
+	}
 
 	zero := int64(0)
 	_, err = stor.Upload(ctx, seg.ObjectPath, bytes.NewReader(payload), storage.UploadOptions{
@@ -759,6 +771,10 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 		return
 	}
 
+	if s.trajectoryCommitAfterVerifyHook != nil {
+		s.trajectoryCommitAfterVerifyHook(ctx, seg)
+	}
+
 	// Resolve run_attribution to stamp the immutable Hub-authored manifest.
 	agent, err := s.store.GetAgent(ctx, id)
 	if err != nil {
@@ -778,23 +794,49 @@ func (s *Server) handleAgentTrajectorySegmentsCommit(w http.ResponseWriter, r *h
 		return
 	}
 
+	commitTimestamp := now
 	zero := int64(0)
 	_, err = stor.Upload(ctx, manifestPath, bytes.NewReader(manifestBytes), storage.UploadOptions{
 		ContentType:       "application/json",
 		IfGenerationMatch: &zero,
 	})
-	if err != nil && !errors.Is(err, storage.ErrPreconditionFailed) {
+	if errors.Is(err, storage.ErrPreconditionFailed) {
+		// An object already exists at manifestPath (e.g., a retry after a prior
+		// commit wrote the manifest but failed before updating the DB row).
+		// Read and verify the existing manifest matches this segment's identity
+		// and hashes before accepting it, and reuse its committed_at timestamp
+		// so the DB row agrees with the immutable manifest.
+		existingCommittedAt, verr := verifyExistingTrajectoryManifest(ctx, stor, manifestPath, seg, attr)
+		if verr != nil {
+			writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
+				"existing trajectory manifest mismatch: "+verr.Error(), nil)
+			return
+		}
+		if !existingCommittedAt.IsZero() {
+			commitTimestamp = existingCommittedAt
+		}
+	} else if err != nil {
 		slog.ErrorContext(ctx, "trajectory segment commit: failed to write manifest",
 			"agent_id", id, "segment_id", seg.ID, "error", err)
 		RuntimeError(w, "Failed to write trajectory segment manifest")
 		return
 	}
 
-	committed, err := s.store.CommitTrajectorySegment(ctx, seg.ID, manifestPath, now)
+	committed, err := s.store.CommitTrajectorySegment(ctx, seg.ID, manifestPath, commitTimestamp, store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          seg.ByteEnd,
+		RawSHA256:        seg.RawSHA256,
+		CompressedSize:   seg.CompressedSize,
+		CompressedSHA256: seg.CompressedSHA256,
+	})
 	if err != nil {
 		if errors.Is(err, store.ErrTrajectorySegmentConflict) {
 			writeError(w, http.StatusConflict, telemetrycontract.TrajectoryErrSegmentConflict,
 				"segment identity is already committed with different content", nil)
+			return
+		}
+		if errors.Is(err, store.ErrTrajectorySegmentModified) {
+			writeError(w, http.StatusUnprocessableEntity, telemetrycontract.TrajectoryErrVerificationFailed,
+				"prepared segment was modified concurrently before commit; re-verify and retry", nil)
 			return
 		}
 		writeErrorFromErr(w, err, "")
@@ -865,11 +907,12 @@ func (s *Server) verifyStoredTrajectorySegment(ctx context.Context, stor storage
 	return nil
 }
 
+// buildTrajectorySegmentManifestJSON serializes the Hub-authored manifest for
+// seg and stamps manifest_digest as the lowercase hex SHA-256 of the JSON
+// encoding with "manifest_digest":"" present (verifiers must blank the field,
+// not omit it). Both the object path and the manifest use seg.Harness as the
+// single canonical harness source.
 func buildTrajectorySegmentManifestJSON(seg *store.TrajectorySegment, attr *store.RunAttribution, committedAt time.Time) ([]byte, error) {
-	harness := seg.Harness
-	if attr.Harness != "" {
-		harness = attr.Harness
-	}
 	m := telemetrycontract.TrajectorySegmentManifest{
 		SchemaVersion:      telemetrycontract.TrajectoryManifestSchemaVersion,
 		HubID:              seg.HubID,
@@ -877,7 +920,7 @@ func buildTrajectorySegmentManifestJSON(seg *store.TrajectorySegment, attr *stor
 		ProjectID:          attr.ProjectID,
 		AgentID:            attr.AgentID,
 		RunID:              attr.RunID,
-		Harness:            harness,
+		Harness:            seg.Harness,
 		HarnessConfig:      attr.HarnessConfig,
 		Template:           attr.Template,
 		BillingUserID:      copyUsageStringPtr(attr.BillingUserID),
@@ -902,4 +945,44 @@ func buildTrajectorySegmentManifestJSON(seg *store.TrajectorySegment, attr *stor
 	digest := sha256.Sum256(canonical)
 	m.ManifestDigest = hex.EncodeToString(digest[:])
 	return json.Marshal(m)
+}
+
+func verifyExistingTrajectoryManifest(ctx context.Context, stor storage.Storage, manifestPath string, seg *store.TrajectorySegment, attr *store.RunAttribution) (time.Time, error) {
+	rc, _, err := stor.Download(ctx, manifestPath)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("download existing manifest: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(rc, trajectorySegmentRequestMaxBody+1))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read existing manifest: %w", err)
+	}
+	if len(data) > trajectorySegmentRequestMaxBody {
+		return time.Time{}, fmt.Errorf("existing manifest exceeds maximum size")
+	}
+	var m telemetrycontract.TrajectorySegmentManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return time.Time{}, fmt.Errorf("parse existing manifest: %w", err)
+	}
+	if m.ProjectID != attr.ProjectID ||
+		m.AgentID != attr.AgentID ||
+		m.RunID != attr.RunID ||
+		m.Harness != seg.Harness ||
+		m.NativeRelativePath != seg.NativeRelativePath ||
+		m.Generation != seg.Generation ||
+		m.ByteStart != seg.ByteStart ||
+		m.ByteEnd != seg.ByteEnd ||
+		m.RawSHA256 != seg.RawSHA256 ||
+		m.CompressedSize != seg.CompressedSize ||
+		m.CompressedSHA256 != seg.CompressedSHA256 ||
+		m.ObjectPath != seg.ObjectPath {
+		return time.Time{}, fmt.Errorf("existing manifest identity or hashes do not match segment")
+	}
+	if m.CommittedAt != "" {
+		if ts, err := time.Parse(time.RFC3339, m.CommittedAt); err == nil {
+			return ts.UTC().Truncate(time.Microsecond), nil
+		}
+	}
+	return time.Time{}, nil
 }

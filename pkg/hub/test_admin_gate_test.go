@@ -914,6 +914,8 @@ var tiaKeyMaterialSites = map[string]string{
 	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
 	"internal/portview/capability.go:macKeyed:crypto/hmac.New":                                      "port_view_url",
 	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
+	"handlers_trajectory_segments.go:computeTrajectoryUploadHMAC:crypto/hmac.New":                   "download_url",
+	"handlers_trajectory_segments.go:computeTrajectoryUploadHMACv2:crypto/hmac.New":                 "download_url",
 	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",
 	"authorized_list.go:listCursorAEAD:crypto/aes.NewCipher":                                        "list_cursor",

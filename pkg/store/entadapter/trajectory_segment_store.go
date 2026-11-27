@@ -292,7 +292,7 @@ func (s *TrajectorySegmentStore) GetTrajectorySegmentByIdentity(ctx context.Cont
 }
 
 // CommitTrajectorySegment implements store.TrajectorySegmentStore.
-func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time) (*store.TrajectorySegment, error) {
+func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect store.TrajectorySegmentCommitExpectation) (*store.TrajectorySegment, error) {
 	if segmentID == "" {
 		return nil, store.ErrNotFound
 	}
@@ -305,6 +305,10 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 		Where(
 			trajectorysegment.IDEQ(segmentID),
 			trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusPending),
+			trajectorysegment.ByteEndEQ(expect.ByteEnd),
+			trajectorysegment.RawSha256EQ(expect.RawSHA256),
+			trajectorysegment.CompressedSizeEQ(expect.CompressedSize),
+			trajectorysegment.CompressedSha256EQ(expect.CompressedSHA256),
 		).
 		SetStatus(telemetrycontract.TrajectorySegmentStatusCommitted).
 		SetManifestPath(manifestPath).
@@ -318,45 +322,70 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 	if err != nil {
 		return nil, err
 	}
-	if n == 0 && row.Status != telemetrycontract.TrajectorySegmentStatusCommitted {
+	if n == 0 {
+		if row.Status == telemetrycontract.TrajectorySegmentStatusCommitted {
+			if row.ByteEnd == expect.ByteEnd &&
+				row.RawSHA256 == expect.RawSHA256 &&
+				row.CompressedSize == expect.CompressedSize &&
+				row.CompressedSHA256 == expect.CompressedSHA256 {
+				return row, nil
+			}
+			return nil, store.ErrTrajectorySegmentConflict
+		}
+		if row.Status == telemetrycontract.TrajectorySegmentStatusPending {
+			return nil, store.ErrTrajectorySegmentModified
+		}
 		return nil, fmt.Errorf("unexpected trajectory segment status %q", row.Status)
 	}
 	return row, nil
 }
 
-// SumTrajectoryRunRawBytes implements store.TrajectorySegmentStore.
+// SumTrajectoryRunRawBytes implements store.TrajectorySegmentStore using a
+// single SQL SUM(byte_end - byte_start) aggregate over committed and unexpired
+// pending segments.
 func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string, now time.Time) (int64, error) {
 	if agentID == "" || runID == "" {
 		return 0, nil
 	}
-	now = now.UTC()
-	q := s.client.TrajectorySegment.Query().
-		Where(
-			trajectorysegment.AgentIDEQ(agentID),
-			trajectorysegment.RunIDEQ(runID),
-			trajectorysegment.Or(
-				trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusCommitted),
-				trajectorysegment.And(
-					trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusPending),
-					trajectorysegment.PrepareExpiresAtGTE(now),
+	now = now.UTC().Truncate(time.Microsecond)
+
+	drv := s.client.Driver()
+	sb := entsql.Dialect(drv.Dialect()).
+		Select("COALESCE(SUM(" + trajectorysegment.FieldByteEnd + " - " + trajectorysegment.FieldByteStart + "), 0)").
+		From(entsql.Table(trajectorysegment.Table)).
+		Where(entsql.And(
+			entsql.EQ(trajectorysegment.FieldAgentID, agentID),
+			entsql.EQ(trajectorysegment.FieldRunID, runID),
+			entsql.Or(
+				entsql.EQ(trajectorysegment.FieldStatus, telemetrycontract.TrajectorySegmentStatusCommitted),
+				entsql.And(
+					entsql.EQ(trajectorysegment.FieldStatus, telemetrycontract.TrajectorySegmentStatusPending),
+					entsql.GTE(trajectorysegment.FieldPrepareExpiresAt, now),
 				),
 			),
-		)
+		))
 	if excludeID != "" {
-		q = q.Where(trajectorysegment.IDNEQ(excludeID))
+		sb.Where(entsql.NEQ(trajectorysegment.FieldID, excludeID))
 	}
-	rows, err := q.Select(trajectorysegment.FieldByteStart, trajectorysegment.FieldByteEnd).All(ctx)
-	if err != nil {
+	query, args := sb.Query()
+
+	var rows entsql.Rows
+	if err := drv.Query(ctx, query, args, &rows); err != nil {
 		if errors.Is(mapError(err), store.ErrNotFound) {
 			return 0, nil
 		}
 		return 0, mapError(err)
 	}
+	defer func() { _ = rows.Close() }()
+
 	var total int64
-	for _, r := range rows {
-		if r.ByteEnd > r.ByteStart {
-			total += r.ByteEnd - r.ByteStart
+	if rows.Next() {
+		if err := rows.Scan(&total); err != nil {
+			return 0, mapError(err)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, mapError(err)
 	}
 	return total, nil
 }

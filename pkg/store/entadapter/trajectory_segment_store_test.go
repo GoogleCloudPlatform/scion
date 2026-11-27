@@ -97,18 +97,30 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	// Commit transitions pending -> committed with manifest_path and committed_at.
 	manifestPath := base.ObjectPath + ".manifest.json"
 	commitTime := now.Add(2 * time.Minute)
-	committed, err := cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime)
+	expectA := store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          base.ByteEnd,
+		RawSHA256:        base.RawSHA256,
+		CompressedSize:   base.CompressedSize,
+		CompressedSHA256: base.CompressedSHA256,
+	}
+	committed, err := cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime, expectA)
 	require.NoError(t, err)
 	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusCommitted, committed.Status)
 	assert.Equal(t, manifestPath, committed.ManifestPath)
 	require.NotNil(t, committed.CommittedAt)
 	assert.Equal(t, commitTime, *committed.CommittedAt)
 
-	// Repeating commit is idempotent.
-	committedAgain, err := cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime.Add(time.Minute))
+	// Repeating commit with matching expectation is idempotent.
+	committedAgain, err := cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime.Add(time.Minute), expectA)
 	require.NoError(t, err)
 	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusCommitted, committedAgain.Status)
 	assert.Equal(t, prepared.ID, committedAgain.ID)
+
+	// Repeating commit with different expectation returns ErrTrajectorySegmentConflict.
+	expectWrong := expectA
+	expectWrong.RawSHA256 = rawHashB
+	_, err = cs.CommitTrajectorySegment(ctx, prepared.ID, manifestPath, commitTime.Add(time.Minute), expectWrong)
+	require.ErrorIs(t, err, store.ErrTrajectorySegmentConflict)
 
 	// Re-prepare of committed identity with the same raw_sha256 returns committed (idempotent replay).
 	replay, err := cs.PrepareTrajectorySegment(ctx, base)
@@ -135,4 +147,30 @@ func TestTrajectorySegmentStore_PrepareCommitAndIdentityUniqueness(t *testing.T)
 	preparedGen1, err := cs.PrepareTrajectorySegment(ctx, &gen1)
 	require.NoError(t, err)
 	assert.NotEqual(t, prepared.ID, preparedGen1.ID)
+
+	// R2 TOCTOU guard: Prepare A -> Prepare B (refresh same pending identity) ->
+	// Commit with A's expectation must fail with ErrTrajectorySegmentModified
+	// and leave the row pending (never committed with B's unverified hashes).
+	gen1Refresh := gen1
+	gen1Refresh.ID = ""
+	gen1Refresh.ByteEnd = 2048
+	gen1Refresh.RawSHA256 = strings.Repeat("d", 64)
+	gen1Refresh.CompressedSize = 512
+	gen1Refresh.CompressedSHA256 = strings.Repeat("e", 64)
+	refreshedGen1, err := cs.PrepareTrajectorySegment(ctx, &gen1Refresh)
+	require.NoError(t, err)
+	assert.Equal(t, preparedGen1.ID, refreshedGen1.ID)
+
+	_, err = cs.CommitTrajectorySegment(ctx, preparedGen1.ID, gen1.ObjectPath+".manifest.json", now.Add(3*time.Minute), store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          gen1.ByteEnd,
+		RawSHA256:        gen1.RawSHA256,
+		CompressedSize:   gen1.CompressedSize,
+		CompressedSHA256: gen1.CompressedSHA256,
+	})
+	require.ErrorIs(t, err, store.ErrTrajectorySegmentModified)
+
+	stillPending, err := cs.GetTrajectorySegment(ctx, preparedGen1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, stillPending.Status)
+	assert.Equal(t, gen1Refresh.RawSHA256, stillPending.RawSHA256)
 }

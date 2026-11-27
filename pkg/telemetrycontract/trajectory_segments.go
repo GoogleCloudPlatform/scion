@@ -148,6 +148,9 @@ func ValidateTrajectoryRelativePath(harness, relPath string) error {
 		if elem == "" || elem == "." || elem == ".." {
 			return fmt.Errorf("native_relative_path contains invalid path element %q", elem)
 		}
+		if strings.HasSuffix(elem, ".seg.gz") || strings.HasSuffix(elem, ".manifest.json") {
+			return fmt.Errorf("native_relative_path element %q must not end with .seg.gz or .manifest.json", elem)
+		}
 	}
 
 	switch harness {
@@ -246,5 +249,8 @@ type TrajectorySegmentManifest struct {
 	SessionID          string  `json:"session_id,omitempty"`
 	ObjectPath         string  `json:"object_path"`
 	CommittedAt        string  `json:"committed_at"`
-	ManifestDigest     string  `json:"manifest_digest"`
+	// ManifestDigest is the lowercase hex SHA-256 of the JSON encoding of this
+	// struct with ManifestDigest set to "" (so "manifest_digest":"" is present).
+	// Verifiers must blank the field rather than omitting it.
+	ManifestDigest string `json:"manifest_digest"`
 }

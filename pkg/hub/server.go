@@ -2330,6 +2330,7 @@ type Server struct {
 	trajectoryMaxRunRawBytes        int64
 	trajectoryPrepareTTL            time.Duration
 	trajectoryUploadURLExpiry       time.Duration
+	trajectoryCommitAfterVerifyHook func(context.Context, *store.TrajectorySegment)
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).

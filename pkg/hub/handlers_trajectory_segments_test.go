@@ -29,6 +29,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -214,18 +215,21 @@ func TestTrajectorySegments_EndToEndLocalHappyPathAndReplay(t *testing.T) {
 	assert.Contains(t, prepResp.Upload.URL, "sig=")
 	assert.Contains(t, prepResp.Upload.URL, "exp=")
 
-	// 2. Upload via Hub-proxied PUT
+	// 2. O1: Uploading same-length wrong bytes BEFORE object exists returns 422
+	// and does NOT occupy the immutable path, so the valid upload still succeeds.
+	diffComp := append([]byte(nil), comp...)
+	diffComp[len(diffComp)-1] ^= 0xff
+	putBadHash := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL, tok, diffComp, prepResp.Upload.Headers)
+	require.Equal(t, http.StatusUnprocessableEntity, putBadHash.Code, putBadHash.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, putBadHash))
+
+	// 2a. Upload valid bytes via Hub-proxied PUT -> 200.
 	putRec := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL, tok, comp, prepResp.Upload.Headers)
 	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
 
-	// 2b. No-overwrite: identical bytes -> 200; different bytes -> 412.
+	// 2b. No-overwrite: repeating identical bytes -> 200.
 	putIdentical := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL, tok, comp, prepResp.Upload.Headers)
 	require.Equal(t, http.StatusOK, putIdentical.Code, putIdentical.Body.String())
-
-	diffComp := append([]byte(nil), comp...)
-	diffComp[len(diffComp)-1] ^= 0xff
-	putDiff := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL, tok, diffComp, prepResp.Upload.Headers)
-	require.Equal(t, http.StatusPreconditionFailed, putDiff.Code, putDiff.Body.String())
 
 	// 2c. Tampered signature -> 403.
 	putBadSig := doTrajectoryAgentPut(t, srv, prepResp.Upload.URL+"tamper", tok, comp, prepResp.Upload.Headers)
@@ -515,4 +519,185 @@ func TestTrajectorySegments_GCSWithoutSignBlobFallsBackToHubProxy(t *testing.T) 
 		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
 		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepResp.SegmentID})
 	require.Equal(t, http.StatusOK, commitRec.Code, commitRec.Body.String())
+}
+
+func TestTrajectorySegments_CommitTOCTOUAndIntegrityEdgeCases(t *testing.T) {
+	srv, s, loc, proj, agent, tok := setupTrajectorySegmentFixture(t)
+	ctx := context.Background()
+
+	// Create a second agent to test cross-agent segment IDs -> 404.
+	otherAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "other-edge-agent",
+		Name:      "other-edge-agent",
+		ProjectID: proj.ID,
+		RunID:     "run-" + api.NewUUID(),
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, otherAgent))
+	otherTok, otherCred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   otherAgent.ID,
+		ProjectID: proj.ID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+	}, otherAgent.RunID)
+	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, otherCred))
+
+	rawA := []byte("{\"msg\":\"segment-A\"}\n")
+	compA, rawSHAA, compSHAA := gzipAndHash(t, rawA)
+	rawB := []byte("{\"msg\":\"segment-B-different\"}\n")
+	compB, rawSHAB, compSHAB := gzipAndHash(t, rawB)
+
+	// R2 handler-level TOCTOU interleave:
+	// prepare(A) -> PUT A -> commit(A) [hook prepares B on same identity after verify] -> 422 refused, row stays pending.
+	prepA := telemetrycontract.TrajectorySegmentPrepareRequest{
+		Harness:            "claude",
+		NativeRelativePath: ".claude/projects/-workspace/toctou.jsonl",
+		ArtifactKind:       telemetrycontract.TrajectoryArtifactKindJSONLAppend,
+		Generation:         0,
+		ByteStart:          0,
+		ByteEnd:            int64(len(rawA)),
+		RawSHA256:          rawSHAA,
+		CompressedSize:     int64(len(compA)),
+		CompressedSHA256:   compSHAA,
+		ContentEncoding:    telemetrycontract.TrajectoryContentEncodingGzip,
+	}
+	rec := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, prepA)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var prepRespA telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &prepRespA))
+
+	putA := doTrajectoryAgentPut(t, srv, prepRespA.Upload.URL, tok, compA, prepRespA.Upload.Headers)
+	require.Equal(t, http.StatusOK, putA.Code, putA.Body.String())
+
+	// Cross-agent segment ID on content PUT and commit -> 404.
+	crossPut := doTrajectoryAgentPut(t, srv,
+		telemetrycontract.TrajectorySegmentContentAgentPath(otherAgent.ID, prepRespA.SegmentID)+"?exp=9999999999&sig=abc",
+		otherTok, compA, prepRespA.Upload.Headers)
+	require.Equal(t, http.StatusNotFound, crossPut.Code, crossPut.Body.String())
+
+	crossCommit := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(otherAgent.ID), otherTok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepRespA.SegmentID})
+	require.Equal(t, http.StatusNotFound, crossCommit.Code, crossCommit.Body.String())
+
+	// Interleave prepare(B) right after verifyStoredTrajectorySegment in commit(A).
+	srv.trajectoryCommitAfterVerifyHook = func(context.Context, *store.TrajectorySegment) {
+		prepB := prepA
+		prepB.ByteEnd = int64(len(rawB))
+		prepB.RawSHA256 = rawSHAB
+		prepB.CompressedSize = int64(len(compB))
+		prepB.CompressedSHA256 = compSHAB
+		r := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+			telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, prepB)
+		require.Equal(t, http.StatusOK, r.Code, r.Body.String())
+	}
+	commitA := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: prepRespA.SegmentID})
+	srv.trajectoryCommitAfterVerifyHook = nil
+	require.Equal(t, http.StatusUnprocessableEntity, commitA.Code, commitA.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitA))
+
+	rowAfterTOCTOU, err := s.GetTrajectorySegment(ctx, prepRespA.SegmentID)
+	require.NoError(t, err)
+	assert.Equal(t, telemetrycontract.TrajectorySegmentStatusPending, rowAfterTOCTOU.Status)
+
+	// Re-uploading B's bytes to the path already occupied by A's bytes returns 412.
+	prepBReq := prepA
+	prepBReq.ByteEnd = int64(len(rawB))
+	prepBReq.RawSHA256 = rawSHAB
+	prepBReq.CompressedSize = int64(len(compB))
+	prepBReq.CompressedSHA256 = compSHAB
+	recB := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, prepBReq)
+	require.Equal(t, http.StatusOK, recB.Code)
+	var prepRespB telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(recB.Body.Bytes(), &prepRespB))
+	putBOnA := doTrajectoryAgentPut(t, srv, prepRespB.Upload.URL, tok, compB, prepRespB.Upload.Headers)
+	require.Equal(t, http.StatusPreconditionFailed, putBOnA.Code, putBOnA.Body.String())
+
+	// O5: compressed_sha256 matches, but raw_sha256 is wrong -> 422.
+	badRawHashReq := prepA
+	badRawHashReq.Generation = 1
+	badRawHashReq.RawSHA256 = strings.Repeat("9", 64)
+	recBadRaw := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, badRawHashReq)
+	require.Equal(t, http.StatusOK, recBadRaw.Code)
+	var badRawResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(recBadRaw.Body.Bytes(), &badRawResp))
+	putBadRaw := doTrajectoryAgentPut(t, srv, badRawResp.Upload.URL, tok, compA, badRawResp.Upload.Headers)
+	require.Equal(t, http.StatusOK, putBadRaw.Code)
+	commitBadRaw := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badRawResp.SegmentID})
+	require.Equal(t, http.StatusUnprocessableEntity, commitBadRaw.Code, commitBadRaw.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadRaw))
+
+	// O5: compressed_sha256 matches, but declared decompressed length (byte_end - byte_start) is wrong -> 422.
+	badRawLenReq := prepA
+	badRawLenReq.Generation = 2
+	badRawLenReq.ByteEnd = int64(len(rawA) - 1)
+	recBadLen := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, badRawLenReq)
+	require.Equal(t, http.StatusOK, recBadLen.Code)
+	var badLenResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(recBadLen.Body.Bytes(), &badLenResp))
+	putBadLen := doTrajectoryAgentPut(t, srv, badLenResp.Upload.URL, tok, compA, badLenResp.Upload.Headers)
+	require.Equal(t, http.StatusOK, putBadLen.Code)
+	commitBadLen := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badLenResp.SegmentID})
+	require.Equal(t, http.StatusUnprocessableEntity, commitBadLen.Code, commitBadLen.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadLen))
+
+	// O2: mismatched pre-existing manifest on disk -> 422.
+	badManReq := prepA
+	badManReq.Generation = 3
+	recBadMan := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, badManReq)
+	require.Equal(t, http.StatusOK, recBadMan.Code)
+	var badManResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(recBadMan.Body.Bytes(), &badManResp))
+	putBadMan := doTrajectoryAgentPut(t, srv, badManResp.Upload.URL, tok, compA, badManResp.Upload.Headers)
+	require.Equal(t, http.StatusOK, putBadMan.Code)
+	_, err = loc.Upload(ctx, telemetrycontract.TrajectoryRawManifestPath(badManResp.ObjectPath),
+		strings.NewReader(`{"raw_sha256":"mismatch"}`), storage.UploadOptions{ContentType: "application/json"})
+	require.NoError(t, err)
+	commitBadMan := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsCommitAgentPath(agent.ID), tok,
+		telemetrycontract.TrajectorySegmentCommitRequest{SegmentID: badManResp.SegmentID})
+	require.Equal(t, http.StatusUnprocessableEntity, commitBadMan.Code, commitBadMan.Body.String())
+	assert.Equal(t, telemetrycontract.TrajectoryErrVerificationFailed, decodeTrajectoryErrorCode(t, commitBadMan))
+
+	// O5: expired HMAC signature on proxied PUT -> 403.
+	expiredSig, err := srv.signTrajectoryUploadURL(agent.ID, badManResp.SegmentID, int64(len(compA)), compSHAA, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	expiredURL := telemetrycontract.TrajectorySegmentContentAgentPath(agent.ID, badManResp.SegmentID) + "?" + expiredSig
+	putExpired := doTrajectoryAgentPut(t, srv, expiredURL, tok, compA, badManResp.Upload.Headers)
+	require.Equal(t, http.StatusForbidden, putExpired.Code, putExpired.Body.String())
+
+	// O5: two concurrent local PUTs with identical bytes both succeed (one creates, one sees identical -> 200).
+	concReq := prepA
+	concReq.Generation = 4
+	recConc := doTrajectoryAgentJSON(t, srv, http.MethodPost,
+		telemetrycontract.TrajectorySegmentsPrepareAgentPath(agent.ID), tok, concReq)
+	require.Equal(t, http.StatusOK, recConc.Code)
+	var concResp telemetrycontract.TrajectorySegmentPrepareResponse
+	require.NoError(t, json.Unmarshal(recConc.Body.Bytes(), &concResp))
+
+	var wg sync.WaitGroup
+	codes := make([]int, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			r := doTrajectoryAgentPut(t, srv, concResp.Upload.URL, tok, compA, concResp.Upload.Headers)
+			codes[idx] = r.Code
+		}(i)
+	}
+	wg.Wait()
+	assert.Equal(t, []int{http.StatusOK, http.StatusOK}, codes)
 }

@@ -24,6 +24,21 @@ import (
 // committed with a different raw_sha256 or byte_end.
 var ErrTrajectorySegmentConflict = errors.New("trajectory segment conflict")
 
+// ErrTrajectorySegmentModified is returned by CommitTrajectorySegment when a
+// pending segment was concurrently modified by a newer prepare between
+// verification and commit.
+var ErrTrajectorySegmentModified = errors.New("trajectory segment modified before commit")
+
+// TrajectorySegmentCommitExpectation binds CommitTrajectorySegment to the
+// exact verified snapshot so a concurrent pending refresh cannot cause a row
+// to be committed with unverified hashes or byte range.
+type TrajectorySegmentCommitExpectation struct {
+	ByteEnd          int64
+	RawSHA256        string
+	CompressedSize   int64
+	CompressedSHA256 string
+}
+
 // TrajectorySegmentIdentity is the unique natural key of a raw trajectory
 // segment.
 type TrajectorySegmentIdentity struct {
@@ -86,11 +101,13 @@ type TrajectorySegmentStore interface {
 	GetTrajectorySegmentByIdentity(ctx context.Context, id TrajectorySegmentIdentity) (*TrajectorySegment, error)
 
 	// CommitTrajectorySegment marks a pending segment as committed with the
-	// Hub-authored manifest path and commit timestamp. Idempotent when the
-	// segment is already committed with the same raw_sha256. Returns
-	// ErrNotFound if segmentID does not exist, or ErrTrajectorySegmentConflict
-	// if committed with a different hash.
-	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time) (*TrajectorySegment, error)
+	// Hub-authored manifest path and commit timestamp, conditionally matching
+	// the verified snapshot in expect. Idempotent when the segment is already
+	// committed with matching expect values. Returns ErrNotFound if segmentID
+	// does not exist, ErrTrajectorySegmentConflict if already committed with
+	// different content, or ErrTrajectorySegmentModified if still pending but
+	// modified concurrently after verification.
+	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect TrajectorySegmentCommitExpectation) (*TrajectorySegment, error)
 
 	// SumTrajectoryRunRawBytes returns the total raw bytes (byte_end - byte_start)
 	// across committed segments (and non-expired pending segments at now) for
