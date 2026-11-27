@@ -90,6 +90,10 @@ type conduitHANode struct {
 	internalStreamHops atomic.Int64
 	internalSelfProbes atomic.Int64
 
+	internalHookMu       sync.Mutex
+	internalStaleReasons []string
+	onInternalRPC        func(sessionID string, status int, staleReason string)
+
 	stopOnce sync.Once
 }
 
@@ -105,6 +109,33 @@ func (n *conduitHANode) InternalRPCHops() int64 {
 // peer listener.
 func (n *conduitHANode) InternalStreamHops() int64 {
 	return n.internalStreamHops.Load()
+}
+
+// InternalStaleReasons returns a copy of every X-Conduit-Stale-Reason header
+// emitted by this node's internal peer listener on RPC hop responses.
+func (n *conduitHANode) InternalStaleReasons() []string {
+	n.internalHookMu.Lock()
+	defer n.internalHookMu.Unlock()
+	return append([]string(nil), n.internalStaleReasons...)
+}
+
+// SetOnInternalRPC installs an optional hook invoked immediately after this
+// node's internal peer listener writes a response to an RPC hop
+// (/internal/v1/conduit/sessions/{id}/rpc), before the HTTP handler returns to
+// the caller. Pass nil to clear it.
+func (n *conduitHANode) SetOnInternalRPC(fn func(sessionID string, status int, staleReason string)) {
+	n.internalHookMu.Lock()
+	n.onInternalRPC = fn
+	n.internalHookMu.Unlock()
+}
+
+// EnableBrokerRouting wires the production HybridBrokerClient (with conduit
+// routing enabled via SetConduitRouting) onto this hub node and returns it.
+func (n *conduitHANode) EnableBrokerRouting(t *testing.T) *HybridBrokerClient {
+	t.Helper()
+	n.Server.SetDispatcher(n.Server.CreateAuthenticatedDispatcher())
+	require.NotNil(t, n.Server.brokerClient, "CreateAuthenticatedDispatcher must install HybridBrokerClient on %s", n.InstanceID)
+	return n.Server.brokerClient
 }
 
 // Relay returns this node's in-process relay, or nil before StartConduitRelay
@@ -298,15 +329,33 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	// RequireHA's registry.SelfCheck probe succeeds against it.
 	internalHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
+		var rpcSessionID string
+		var capW *conduitHAStatusCaptureWriter
+		rw := w
 		switch {
 		case p == relay.InternalPathPrefix+"self":
 			node.internalSelfProbes.Add(1)
 		case strings.HasPrefix(p, relay.InternalPathPrefix+"sessions/") && strings.HasSuffix(p, "/rpc"):
 			node.internalRPCHops.Add(1)
+			rpcSessionID = strings.TrimSuffix(strings.TrimPrefix(p, relay.InternalPathPrefix+"sessions/"), "/rpc")
+			capW = &conduitHAStatusCaptureWriter{ResponseWriter: w, status: http.StatusOK}
+			rw = capW
 		case strings.HasPrefix(p, relay.InternalPathPrefix+"sessions/") && strings.HasSuffix(p, "/stream"):
 			node.internalStreamHops.Add(1)
 		}
-		srv.ConduitInternalHandler().ServeHTTP(w, r)
+		srv.ConduitInternalHandler().ServeHTTP(rw, r)
+		if capW != nil {
+			staleReason := capW.Header().Get(relay.HeaderStaleReason)
+			node.internalHookMu.Lock()
+			if staleReason != "" {
+				node.internalStaleReasons = append(node.internalStaleReasons, staleReason)
+			}
+			hook := node.onInternalRPC
+			node.internalHookMu.Unlock()
+			if hook != nil {
+				hook(rpcSessionID, capW.status, staleReason)
+			}
+		}
 	})
 	node.Internal = httptest.NewServer(internalHandler)
 
@@ -1001,6 +1050,18 @@ func (b *conduitHABroker) SilentDrop() { b.ws.SilentDrop() }
 func (b *conduitHABroker) Restore() { b.ws.Restore() }
 
 // --- Helpers ---
+
+// conduitHAStatusCaptureWriter records the HTTP status code written by the
+// internal relay handler while delegating directly to the underlying writer.
+type conduitHAStatusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *conduitHAStatusCaptureWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
 
 // conduitHADSNParam mirrors withDSNParam (conduit_authz_postgres_test.go)
 // locally so hubshard does not couple conduit_ha_harness_test.go with
