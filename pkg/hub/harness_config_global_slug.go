@@ -164,6 +164,41 @@ func (s *Server) harnessConfigLookupScopes(projectID string) []harnessConfigScop
 	return []harnessConfigScope{global, project}
 }
 
+// resolveHarnessConfigBySlugWith walks harnessConfigLookupScopes(projectID) in
+// order (project then global on a workstation hub, global then project on a
+// hosted hub), invoking lookup for each scope and returning the first non-nil
+// config found. It returns (nil, nil) when s is nil, name is empty, or no
+// scope has a matching config. A store failure other than store.ErrNotFound is
+// logged; on a hosted hub a failed global lookup returns immediately without
+// consulting the project scope, while on a workstation hub the remaining scope
+// is still tried and the failure is returned with a nil config if none matches.
+func (s *Server) resolveHarnessConfigBySlugWith(
+	projectID, name string,
+	lookup func(slug, scope, scopeID string) (*store.HarnessConfig, error),
+) (*store.HarnessConfig, error) {
+	if s == nil || name == "" {
+		return nil, nil
+	}
+	var lookupErr error
+	for _, sc := range s.harnessConfigLookupScopes(projectID) {
+		hc, err := lookup(name, sc.scope, sc.scopeID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			if s.agentLifecycleLog != nil {
+				s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
+					"slug", name, "scope_id", sc.scopeID, "error", err)
+			}
+			if !s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
+				return nil, err
+			}
+			lookupErr = err
+		}
+	}
+	return nil, lookupErr
+}
+
 // settingsHarnessConfigSlugTaken reports whether the global settings
 // harness_configs has an entry whose name, or its slug form, is slug.
 func (s *Server) settingsHarnessConfigSlugTaken(slug string) bool {
