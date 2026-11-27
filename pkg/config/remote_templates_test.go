@@ -680,6 +680,7 @@ func TestFetchGitHubTarball(t *testing.T) {
 		token     string
 		status    int
 		root      string
+		wantHost  string
 		wantPath  string
 		alsoTried []string
 		wantAuth  string
@@ -691,6 +692,7 @@ func TestFetchGitHubTarball(t *testing.T) {
 			parts:     GitHubURLParts{Owner: "acme", Repo: "repo"},
 			status:    http.StatusOK,
 			root:      "repo-main",
+			wantHost:  "github.com",
 			wantPath:  "/acme/repo/archive/refs/heads/main.tar.gz",
 			wantFiles: files,
 		},
@@ -700,7 +702,8 @@ func TestFetchGitHubTarball(t *testing.T) {
 			token:    "ghs_test_token_123",
 			status:   http.StatusOK,
 			root:     "repo-dev",
-			wantPath: "/acme/repo/archive/refs/heads/dev.tar.gz",
+			wantHost: "api.github.com",
+			wantPath: "/repos/acme/repo/tarball/dev",
 			wantAuth: "Bearer ghs_test_token_123",
 			wantFiles: map[string]string{
 				"scion-agent.yaml": "schema_version: \"1\"\n",
@@ -708,22 +711,43 @@ func TestFetchGitHubTarball(t *testing.T) {
 			},
 		},
 		{
-			name:     "non-200 response is an error",
+			name:      "anonymous 404 tries branch, tag and commit archives",
+			parts:     GitHubURLParts{Owner: "acme", Repo: "public", Branch: "main"},
+			status:    http.StatusNotFound,
+			root:      "public-main",
+			wantHost:  "github.com",
+			wantPath:  "/acme/public/archive/refs/heads/main.tar.gz",
+			alsoTried: []string{"/acme/public/archive/refs/tags/main.tar.gz", "/acme/public/archive/main.tar.gz"},
+			wantErr:   `GitHub branch, tag or commit "main" was not found in acme/public: tarball download failed: HTTP 404`,
+		},
+		{
+			name:     "credentialed 404 uses REST tarball once without leaking token",
 			parts:    GitHubURLParts{Owner: "acme", Repo: "private", Branch: "main"},
 			token:    "ghs_test_token_123",
 			status:   http.StatusNotFound,
 			root:     "private-main",
-			wantPath: "/acme/private/archive/refs/heads/main.tar.gz",
-			// The ref may be a tag or a commit: those archives are tried next.
-			alsoTried: []string{"/acme/private/archive/refs/tags/main.tar.gz", "/acme/private/archive/main.tar.gz"},
-			wantAuth:  "Bearer ghs_test_token_123",
-			wantErr:   `GitHub branch, tag or commit "main" was not found in acme/private: tarball download failed: HTTP 404`,
+			wantHost: "api.github.com",
+			wantPath: "/repos/acme/private/tarball/main",
+			wantAuth: "Bearer ghs_test_token_123",
+			wantErr:  `GitHub branch, tag or commit "main" was not found in acme/private: tarball download failed: HTTP 404`,
+		},
+		{
+			name:     "credentialed 401 returns auth error without leaking token",
+			parts:    GitHubURLParts{Owner: "acme", Repo: "private", Branch: "main"},
+			token:    "ghs_test_token_401",
+			status:   http.StatusUnauthorized,
+			root:     "private-main",
+			wantHost: "api.github.com",
+			wantPath: "/repos/acme/private/tarball/main",
+			wantAuth: "Bearer ghs_test_token_401",
+			wantErr:  `GitHub authentication failed for acme/private: tarball download failed: HTTP 401`,
 		},
 		{
 			name:     "missing sub-path is an error",
 			parts:    GitHubURLParts{Owner: "acme", Repo: "repo", Branch: "main", Path: "templates/missing"},
 			status:   http.StatusOK,
 			root:     "repo-main",
+			wantHost: "github.com",
 			wantPath: "/acme/repo/archive/refs/heads/main.tar.gz",
 			wantErr:  "path templates/missing not found in repository",
 		},
@@ -754,7 +778,7 @@ func TestFetchGitHubTarball(t *testing.T) {
 				assert.Equal(t, seenRequest{
 					method: http.MethodGet,
 					scheme: "https",
-					host:   "github.com",
+					host:   tt.wantHost,
 					path:   path,
 					auth:   tt.wantAuth,
 				}, gotSeen[i])
@@ -762,6 +786,9 @@ func TestFetchGitHubTarball(t *testing.T) {
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
+				if tt.token != "" {
+					assert.NotContains(t, err.Error(), tt.token, "error must never leak the token")
+				}
 				assert.Empty(t, readTree(t, dest), "nothing is extracted on error")
 				return
 			}
@@ -769,6 +796,201 @@ func TestFetchGitHubTarball(t *testing.T) {
 			assert.Equal(t, tt.wantFiles, readTree(t, dest))
 		})
 	}
+}
+
+// TestFetchGitHubTarball_CredentialedRedirectStripsAuth verifies that when a
+// credentialed tarball fetch hits api.github.com and is redirected to
+// codeload.github.com (or any other host, subdomain, or plain HTTP), the
+// Authorization header is sent ONLY to https://api.github.com and is never
+// forwarded to the redirect target.
+func TestFetchGitHubTarball_CredentialedRedirectStripsAuth(t *testing.T) {
+	const secretToken = "ghs_super_secret_private_repo_token"
+
+	files := map[string]string{
+		"templates/foo/scion-agent.yaml": "schema_version: \"1\"\n",
+	}
+	tarball := githubTarballFixture(t, "acme-private-abc1234", files)
+
+	cases := []struct {
+		name           string
+		redirectTarget string
+		wantHost       string
+		wantScheme     string
+	}{
+		{
+			name:           "redirect to codeload.github.com",
+			redirectTarget: "https://codeload.github.com/acme/private/legacy.tar.gz/refs/heads/main?token=short-lived",
+			wantHost:       "codeload.github.com",
+			wantScheme:     "https",
+		},
+		{
+			name:           "redirect to subdomain of api.github.com",
+			redirectTarget: "https://sub.api.github.com/acme/private/tarball/main",
+			wantHost:       "sub.api.github.com",
+			wantScheme:     "https",
+		},
+		{
+			name:           "redirect downgrading to plain http on api.github.com",
+			redirectTarget: "http://api.github.com/repos/acme/private/tarball/main",
+			wantHost:       "api.github.com",
+			wantScheme:     "http",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var (
+				mu           sync.Mutex
+				apiAuth      string
+				apiHits      int
+				targetAuth   string
+				targetHost   string
+				targetScheme string
+				targetHits   int
+			)
+
+			apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				apiHits++
+				apiAuth = r.Header.Get("Authorization")
+				mu.Unlock()
+				http.Redirect(w, r, tc.redirectTarget, http.StatusFound)
+			}))
+			t.Cleanup(apiSrv.Close)
+			apiURL, err := url.Parse(apiSrv.URL)
+			require.NoError(t, err)
+
+			targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				targetHits++
+				targetAuth = r.Header.Get("Authorization")
+				targetHost = r.Host
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(tarball)
+			}))
+			t.Cleanup(targetSrv.Close)
+			targetURL, err := url.Parse(targetSrv.URL)
+			require.NoError(t, err)
+
+			oldTransport := http.DefaultClient.Transport
+			t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+			http.DefaultClient.Transport = remoteTemplatesRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				out := r.Clone(r.Context())
+				if out.Host == "" {
+					out.Host = r.URL.Host
+				}
+				if r.URL.Scheme == "https" && r.URL.Hostname() == "api.github.com" {
+					out.URL.Scheme = apiURL.Scheme
+					out.URL.Host = apiURL.Host
+					return apiSrv.Client().Transport.RoundTrip(out)
+				}
+				mu.Lock()
+				targetScheme = r.URL.Scheme
+				mu.Unlock()
+				out.URL.Scheme = targetURL.Scheme
+				out.URL.Host = targetURL.Host
+				return targetSrv.Client().Transport.RoundTrip(out)
+			})
+
+			dest := t.TempDir()
+			parts := GitHubURLParts{Owner: "acme", Repo: "private", Branch: "main", Path: "templates/foo"}
+			err = fetchGitHubTarball(context.Background(), &parts, dest, secretToken)
+			require.NoError(t, err)
+
+			mu.Lock()
+			gotAPIHits, gotAPIAuth := apiHits, apiAuth
+			gotTargetHits, gotTargetAuth, gotTargetHost, gotTargetScheme := targetHits, targetAuth, targetHost, targetScheme
+			mu.Unlock()
+
+			assert.Equal(t, 1, gotAPIHits, "api.github.com must be contacted once")
+			assert.Equal(t, "Bearer "+secretToken, gotAPIAuth, "api.github.com must receive Authorization")
+			assert.Equal(t, 1, gotTargetHits, "redirect target must be contacted once")
+			assert.Equal(t, tc.wantHost, gotTargetHost)
+			assert.Equal(t, tc.wantScheme, gotTargetScheme)
+			assert.Empty(t, gotTargetAuth, "Authorization must NEVER be forwarded to redirect target")
+			assert.Equal(t, map[string]string{
+				"scion-agent.yaml": "schema_version: \"1\"\n",
+			}, readTree(t, dest))
+		})
+	}
+}
+
+func TestGitHubAPITarballURL(t *testing.T) {
+	tests := []struct {
+		owner, repo, ref, want string
+	}{
+		{"acme", "repo", "main", "https://api.github.com/repos/acme/repo/tarball/main"},
+		{"acme-corp", "private.templates", "refs/heads/main", "https://api.github.com/repos/acme-corp/private.templates/tarball/refs/heads/main"},
+		{"acme", "repo", "v1.2.3", "https://api.github.com/repos/acme/repo/tarball/v1.2.3"},
+		{"acme", "repo", "0123456789abcdef0123456789abcdef01234567", "https://api.github.com/repos/acme/repo/tarball/0123456789abcdef0123456789abcdef01234567"},
+		{"acme", "repo", "feature/sub-branch", "https://api.github.com/repos/acme/repo/tarball/feature/sub-branch"},
+		{"acme", "repo", "release/v1#rc1", "https://api.github.com/repos/acme/repo/tarball/release/v1%23rc1"},
+	}
+	for _, tc := range tests {
+		assert.Equal(t, tc.want, GitHubAPITarballURL(tc.owner, tc.repo, tc.ref))
+	}
+}
+
+// TestFetchRemoteTemplateWithOptions_DownloadHookCredentialedVsAnonymous pins
+// the hosted-Hub FetchOptions.Download path: credentialed fetches call the
+// hook once with the api.github.com REST tarball URL and Bearer Authorization,
+// while anonymous fetches call it with github.com archive URLs and no auth.
+func TestFetchRemoteTemplateWithOptions_DownloadHookCredentialedVsAnonymous(t *testing.T) {
+	restoreLs := SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
+		return nil, errors.New("no git")
+	})
+	t.Cleanup(restoreLs)
+
+	files := map[string]string{
+		"templates/foo/scion-agent.yaml": "schema_version: \"1\"\n",
+	}
+	archive := githubTarballFixture(t, "acme-private-abc1234", files)
+
+	t.Run("credentialed uses REST tarball URL once", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		var gotURLs, gotAuths []string
+		download := func(_ context.Context, rawURL, authorization string) ([]byte, error) {
+			gotURLs = append(gotURLs, rawURL)
+			gotAuths = append(gotAuths, authorization)
+			return archive, nil
+		}
+		path, err := FetchRemoteTemplateWithOptions(context.Background(),
+			"https://github.com/acme/private/tree/main/templates/foo",
+			FetchOptions{
+				AuthToken:       "ghs_hosted_secret",
+				Download:        download,
+				MaxFiles:        100,
+				PrivateCacheDir: true,
+			})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(path) })
+		assert.Equal(t, []string{"https://api.github.com/repos/acme/private/tarball/main"}, gotURLs)
+		assert.Equal(t, []string{"Bearer ghs_hosted_secret"}, gotAuths)
+		assert.FileExists(t, filepath.Join(path, "scion-agent.yaml"))
+	})
+
+	t.Run("anonymous uses archive URL with no auth", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		var gotURLs, gotAuths []string
+		download := func(_ context.Context, rawURL, authorization string) ([]byte, error) {
+			gotURLs = append(gotURLs, rawURL)
+			gotAuths = append(gotAuths, authorization)
+			return archive, nil
+		}
+		path, err := FetchRemoteTemplateWithOptions(context.Background(),
+			"https://github.com/acme/public/tree/main/templates/foo",
+			FetchOptions{
+				Download:        download,
+				MaxFiles:        100,
+				PrivateCacheDir: true,
+			})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = os.RemoveAll(path) })
+		assert.Equal(t, []string{"https://github.com/acme/public/archive/refs/heads/main.tar.gz"}, gotURLs)
+		assert.Equal(t, []string{""}, gotAuths)
+		assert.FileExists(t, filepath.Join(path, "scion-agent.yaml"))
+	})
 }
 
 // installFakeGit puts a fake `git` first (and only) on PATH for the rest of
