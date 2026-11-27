@@ -864,12 +864,20 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 		return res, nil
 	}
 
+	limit := q.Limit
+	if limit <= 0 || limit > maxUsageRollupQueryLimit {
+		limit = maxUsageRollupQueryLimit
+	}
+	bucketArgs := append(append([]any(nil), whereArgs...), limit+1)
+
 	if isHourly {
+		// Order newest-first so LIMIT keeps the most recent hours on truncation;
+		// re-sorted ascending below.
 		pairQuery := usageRebindSQL(dialectName,
-			"SELECT DISTINCT bucket_start, agent_id FROM "+tableName+whereSQL+" ORDER BY bucket_start ASC, agent_id ASC",
+			"SELECT DISTINCT bucket_start, agent_id FROM "+tableName+whereSQL+" ORDER BY bucket_start DESC, agent_id ASC LIMIT ?",
 		)
 		pairRows := &entsql.Rows{}
-		if err := drv.Query(ctx, pairQuery, whereArgs, pairRows); err != nil {
+		if err := drv.Query(ctx, pairQuery, bucketArgs, pairRows); err != nil {
 			return nil, mapError(err)
 		}
 		defer func() { _ = pairRows.Close() }()
@@ -884,6 +892,10 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 				return nil, fmt.Errorf("parse active-agent bucket_start: %w", err)
 			}
 			if ts != nil {
+				if len(res.BucketAgents) == limit {
+					res.Truncated = true
+					break
+				}
 				res.BucketAgents = append(res.BucketAgents, store.UsageBucketAgentPair{
 					BucketStart: utcHourStart(*ts),
 					AgentID:     agentID,
@@ -893,14 +905,20 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 		if err := pairRows.Err(); err != nil {
 			return nil, mapError(err)
 		}
+		sort.SliceStable(res.BucketAgents, func(i, j int) bool {
+			if !res.BucketAgents[i].BucketStart.Equal(res.BucketAgents[j].BucketStart) {
+				return res.BucketAgents[i].BucketStart.Before(res.BucketAgents[j].BucketStart)
+			}
+			return res.BucketAgents[i].AgentID < res.BucketAgents[j].AgentID
+		})
 		return res, nil
 	}
 
 	bucketQuery := usageRebindSQL(dialectName,
-		"SELECT bucket_start, COUNT(DISTINCT agent_id) FROM "+tableName+whereSQL+" GROUP BY bucket_start ORDER BY bucket_start ASC",
+		"SELECT bucket_start, COUNT(DISTINCT agent_id) FROM "+tableName+whereSQL+" GROUP BY bucket_start ORDER BY bucket_start DESC LIMIT ?",
 	)
 	bucketRows := &entsql.Rows{}
-	if err := drv.Query(ctx, bucketQuery, whereArgs, bucketRows); err != nil {
+	if err := drv.Query(ctx, bucketQuery, bucketArgs, bucketRows); err != nil {
 		return nil, mapError(err)
 	}
 	defer func() { _ = bucketRows.Close() }()
@@ -915,6 +933,10 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 			return nil, fmt.Errorf("parse active-agent bucket_start: %w", err)
 		}
 		if ts != nil {
+			if len(res.BucketCounts) == limit {
+				res.Truncated = true
+				break
+			}
 			res.BucketCounts = append(res.BucketCounts, store.UsageBucketCount{
 				BucketStart: utcDayStart(*ts),
 				Count:       cnt,
@@ -924,6 +946,9 @@ func (s *UsageLedgerStore) CountUsageActiveAgents(ctx context.Context, q store.U
 	if err := bucketRows.Err(); err != nil {
 		return nil, mapError(err)
 	}
+	sort.SliceStable(res.BucketCounts, func(i, j int) bool {
+		return res.BucketCounts[i].BucketStart.Before(res.BucketCounts[j].BucketStart)
+	})
 	return res, nil
 }
 

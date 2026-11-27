@@ -4632,6 +4632,9 @@ type SessionMetricsCountQuery struct {
 	Until         time.Time
 	ProjectID     string
 	IncludeEvents bool
+	// Limit bounds the number of session start rows returned when IncludeEvents
+	// is true (0 uses the store default). TotalSessions is always exact.
+	Limit int
 }
 
 // SessionStartRef identifies one session segment start timestamp for
@@ -4648,6 +4651,8 @@ type SessionStartRef struct {
 type SessionMetricsCountResult struct {
 	TotalSessions int64
 	Sessions      []SessionStartRef
+	// Truncated is true when session start rows exceeded Limit (newest retained).
+	Truncated bool
 }
 
 // =============================================================================

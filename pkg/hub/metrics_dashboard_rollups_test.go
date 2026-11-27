@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -570,7 +571,7 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recProjSum.Body.Bytes(), &avail))
 	assert.Equal(t, false, avail["available"])
 
-	// Case 2: experiment OFF + CM configured -> cloud_monitoring; groupBy=user -> 400.
+	// Case 2: experiment OFF + CM configured -> cloud_monitoring; groupBy is ignored (no new 400s, O5).
 	srv.mu.Lock()
 	srv.metricsDashboard = cmSvc
 	srv.mu.Unlock()
@@ -581,8 +582,13 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sumCM))
 	assert.Equal(t, MetricsSourceCloudMonitoring, sumCM.Source)
 
-	rec = doGET("/api/v1/metrics/?view=tokens&period=7&groupBy=user")
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	for _, rawGroup := range []string{"user", "bogus"} {
+		rec = doGET("/api/v1/metrics/?view=tokens&period=7&groupBy=" + rawGroup)
+		require.Equal(t, http.StatusOK, rec.Code, "experiment off must ignore groupBy=%s (no new 400s)", rawGroup)
+		var tokCM TokensView
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tokCM))
+		assert.Equal(t, MetricsSourceCloudMonitoring, tokCM.Source)
+	}
 
 	// Case 3: experiment ON + CM unconfigured -> hub_rollups for all views & project summary.
 	setUsageLedgerExperimentForTest(t, srv, true)
@@ -635,4 +641,268 @@ func TestMetricsDashboard_SourceSelectionMatrix(t *testing.T) {
 	// Case 5: invalid groupBy or groupBy on unsupported view -> 400.
 	assert.Equal(t, http.StatusBadRequest, doGET("/api/v1/metrics/?view=tokens&groupBy=bogus").Code)
 	assert.Equal(t, http.StatusBadRequest, doGET("/api/v1/metrics/?view=summary&groupBy=user").Code)
+}
+
+type sessionFailStore struct {
+	store.Store
+	err error
+}
+
+func (s *sessionFailStore) CountSessionMetrics(_ context.Context, _ store.SessionMetricsCountQuery) (*store.SessionMetricsCountResult, error) {
+	return nil, s.err
+}
+
+// TestHubRollupSource_TruncationDegradesAndDropsBoundaryDay pins R1 and O1:
+// when hourly grouped queries hit the internal limit, HubRollupSource degrades
+// to daily granularity (timeZone="UTC"); when daily still truncates, it sets
+// Truncated=true and drops the earliest boundary day so no day ever appears
+// with partial values.
+func TestHubRollupSource_TruncationDegradesAndDropsBoundaryDay(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	day2 := time.Date(dbNow.UTC().Year(), dbNow.UTC().Month(), dbNow.UTC().Day(), 10, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	day1 := day2.AddDate(0, 0, -1)
+
+	u1 := &store.User{ID: uuid.NewString(), Email: "trunc@example.com", DisplayName: "U1", Role: "member", Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+	proj := &store.Project{ID: uuid.NewString(), Name: "dash-trunc", Slug: "dash-trunc-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	ag1, run1 := seedDashboardAgentAndRun(t, cs, proj.ID, u1.ID, "ag-trunc-1", "claude", string(state.PhaseRunning), day1.Add(-time.Hour))
+	ag2, run2 := seedDashboardAgentAndRun(t, cs, proj.ID, u1.ID, "ag-trunc-2", "gemini-cli", string(state.PhaseRunning), day1.Add(-time.Hour))
+
+	// Seed 2 days x 2 hours x 2 models = 8 hourly (hour, model) groups and 4 daily (day, model) groups.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag1,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("tr-1", run1, proj.ID, ag1, &u1.ID, "claude", "model-a", 1, day1, 2, i64ptr(100), i64ptr(50), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-2", run1, proj.ID, ag1, &u1.ID, "claude", "model-a", 2, day1.Add(time.Hour), 3, i64ptr(100), i64ptr(50), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-3", run1, proj.ID, ag1, &u1.ID, "claude", "model-a", 3, day2, 4, i64ptr(200), i64ptr(50), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-4", run1, proj.ID, ag1, &u1.ID, "claude", "model-a", 4, day2.Add(time.Hour), 5, i64ptr(200), i64ptr(50), i64ptr(0), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag2,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("tr-5", run2, proj.ID, ag2, &u1.ID, "gemini-cli", "model-b", 1, day1, 1, i64ptr(10), i64ptr(5), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-6", run2, proj.ID, ag2, &u1.ID, "gemini-cli", "model-b", 2, day1.Add(time.Hour), 1, i64ptr(10), i64ptr(5), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-7", run2, proj.ID, ag2, &u1.ID, "gemini-cli", "model-b", 3, day2, 1, i64ptr(10), i64ptr(5), i64ptr(0), i64ptr(0)),
+			makeDashUsageEvent("tr-8", run2, proj.ID, ag2, &u1.ID, "gemini-cli", "model-b", 4, day2.Add(time.Hour), 1, i64ptr(10), i64ptr(5), i64ptr(0), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Seed 4 session segments (2 on day1, 2 on day2) to exercise O1 session truncation too.
+	for i, ts := range []time.Time{day1, day1.Add(time.Hour), day2, day2.Add(time.Hour)} {
+		require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+			AgentID: ag1, ProjectID: proj.ID, SessionID: "s-" + string(rune('a'+i)), StartedAt: ts,
+		}))
+	}
+
+	setHourlyCoverageStartForTest(t, client, dbNow.AddDate(0, 0, -10))
+	chicago, err := time.LoadLocation("America/Chicago")
+	require.NoError(t, err)
+
+	// 1. groupLimit=5: hourly (8 rows) truncates -> degrades to daily (4 rows <= 5), NOT truncated, complete series!
+	srcDegrade := NewHubRollupSource(cs)
+	srcDegrade.groupLimit = 5
+
+	tokDegrade, err := srcDegrade.QueryTokens(ctx, 7, WithProjectID(proj.ID), WithTimeZone(chicago))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, tokDegrade.Granularity)
+	assert.Equal(t, "UTC", tokDegrade.TimeZone)
+	assert.False(t, tokDegrade.Truncated)
+	assert.Len(t, tokDegrade.DailyCacheHitRate, 2, "both days must be complete after daily degradation")
+
+	mcDegrade, err := srcDegrade.QueryModelCalls(ctx, 7, WithProjectID(proj.ID), WithTimeZone(chicago))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, mcDegrade.Granularity)
+	assert.Equal(t, "UTC", mcDegrade.TimeZone)
+	assert.False(t, mcDegrade.Truncated)
+	require.Len(t, mcDegrade.ByModel, 2)
+	assert.Len(t, mcDegrade.ByModel[0].Points, 2)
+	assert.Len(t, mcDegrade.ByModel[1].Points, 2)
+
+	// 2. groupLimit=3: daily (4 rows) STILL truncates -> Truncated=true, boundary day1 dropped so no partial day appears!
+	srcTrunc := NewHubRollupSource(cs)
+	srcTrunc.groupLimit = 3
+	day1Key := dayKey(day1, time.UTC)
+	day2Key := dayKey(day2, time.UTC)
+
+	tokTrunc, err := srcTrunc.QueryTokens(ctx, 7, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	assert.True(t, tokTrunc.Truncated)
+	assert.Equal(t, int64(640), *tokTrunc.Totals.Input, "window Totals stay exact even when series are truncated")
+	for _, s := range tokTrunc.Input {
+		for _, pt := range s.Points {
+			assert.NotEqual(t, day1Key, pt.Timestamp, "partial boundary day1 must be dropped from token series")
+			assert.Equal(t, day2Key, pt.Timestamp)
+		}
+	}
+	require.Len(t, tokTrunc.DailyCacheHitRate, 1)
+	assert.Equal(t, day2Key, tokTrunc.DailyCacheHitRate[0].Timestamp)
+
+	mcTrunc, err := srcTrunc.QueryModelCalls(ctx, 7, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	assert.True(t, mcTrunc.Truncated)
+	for _, s := range mcTrunc.ByModel {
+		for _, pt := range s.Points {
+			assert.NotEqual(t, day1Key, pt.Timestamp, "partial boundary day1 must be dropped from model-calls series")
+		}
+	}
+
+	// 3. O1: QuerySessions with groupLimit=3: hourly active-agents (8 pairs) degrades to daily (2 buckets, complete),
+	// while sessions (4 segments > 3) truncates and drops partial boundary day1.
+	sessTrunc, err := srcTrunc.QuerySessions(ctx, 7, WithProjectID(proj.ID), WithTimeZone(chicago))
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, sessTrunc.Granularity)
+	assert.Equal(t, "UTC", sessTrunc.TimeZone)
+	assert.True(t, sessTrunc.Truncated)
+	require.Len(t, sessTrunc.DailyCounts, 1)
+	assert.Equal(t, day2Key, sessTrunc.DailyCounts[0].Timestamp)
+	assert.Equal(t, int64(2), sessTrunc.DailyCounts[0].Value)
+}
+
+// TestHubRollupSource_ProjectSummary24hDailyFallbackWindowAndLabel pins O2:
+// when hourly coverage is absent, QueryProjectSummary falls back to UTC daily,
+// labels PeriodLabel accordingly, and evaluates rollups and sessions on the
+// exact same UTC daily window.
+func TestHubRollupSource_ProjectSummary24hDailyFallbackWindowAndLabel(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	// Place a session and rollup at 00:05 UTC yesterday (inside yesterday's UTC
+	// day, even if > 24h before dbNow).
+	yesterdayStart := time.Date(dbNow.UTC().Year(), dbNow.UTC().Month(), dbNow.UTC().Day(), 0, 5, 0, 0, time.UTC).AddDate(0, 0, -1)
+
+	u1 := &store.User{ID: uuid.NewString(), Email: "o2@example.com", DisplayName: "U1", Role: "member", Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+	proj := &store.Project{ID: uuid.NewString(), Name: "dash-o2", Slug: "dash-o2-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+	ag, runID := seedDashboardAgentAndRun(t, cs, proj.ID, u1.ID, "ag-o2", "claude", string(state.PhaseRunning), yesterdayStart.Add(-time.Hour))
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("o2-1", runID, proj.ID, ag, &u1.ID, "claude", "claude-sonnet-4-6", 1, yesterdayStart, 2, i64ptr(100), i64ptr(50), i64ptr(0), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		AgentID: ag, ProjectID: proj.ID, SessionID: "s-o2", StartedAt: yesterdayStart,
+	}))
+	// Remove hourly coverage marker so resolve24hWindow falls back to daily.
+	_, err = client.HubSetting.Delete().Where(hubsetting.SectionEQ(store.UsageRollupHourlyCoverageSection)).Exec(ctx)
+	require.NoError(t, err)
+
+	src := NewHubRollupSource(cs)
+	ps, err := src.QueryProjectSummary(ctx, proj.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageGranularityDay, ps.Granularity)
+	wantSince := time.Date(dbNow.UTC().Add(-24*time.Hour).Year(), dbNow.UTC().Add(-24*time.Hour).Month(), dbNow.UTC().Add(-24*time.Hour).Day(), 0, 0, 0, 0, time.UTC)
+	assert.Equal(t, "Since "+wantSince.Format(dayKeyLayout)+" (UTC daily)", ps.PeriodLabel)
+	assert.Equal(t, int64(2), ps.APICalls24h)
+	assert.Equal(t, int64(1), ps.SessionsCount24h, "sessions must use the same UTC daily window as rollups")
+}
+
+// TestHubRollupSource_SessionQueryFailureEmitsNullAndPartialFailure pins O3:
+// on a failed CountSessionMetrics call, HubRollupSource emits JSON null for
+// totalSessions / sessionsCount24h (never a fabricated 0) with partialFailure=true.
+func TestHubRollupSource_SessionQueryFailureEmitsNullAndPartialFailure(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "dash-o3", Slug: "dash-o3-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	faulty := &sessionFailStore{Store: cs, err: errors.New("session db down")}
+	src := NewHubRollupSource(faulty)
+
+	sum, err := src.QuerySummary(ctx, 7, WithProjectID(proj.ID))
+	require.Error(t, err)
+	require.NotNil(t, sum)
+	assert.True(t, sum.PartialFailure)
+	assert.NotEmpty(t, sum.PartialErrors)
+
+	raw, mErr := json.Marshal(sum)
+	require.NoError(t, mErr)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	val, exists := decoded["totalSessions"]
+	assert.True(t, exists)
+	assert.Nil(t, val, "failed session query must serialize totalSessions as JSON null, never 0")
+	assert.Equal(t, true, decoded["partialFailure"])
+
+	ps, err := src.QueryProjectSummary(ctx, proj.ID)
+	require.Error(t, err)
+	require.NotNil(t, ps)
+	assert.True(t, ps.PartialFailure)
+	rawPS, mErr := json.Marshal(ps)
+	require.NoError(t, mErr)
+	var decodedPS map[string]any
+	require.NoError(t, json.Unmarshal(rawPS, &decodedPS))
+	valPS, existsPS := decodedPS["sessionsCount24h"]
+	assert.True(t, existsPS)
+	assert.Nil(t, valPS, "failed session query must serialize sessionsCount24h as JSON null, never 0")
+	assert.Equal(t, true, decodedPS["partialFailure"])
+}
+
+// TestHubRollupSource_SessionsMeasurementMatchesSummary pins O4: when rollup
+// events exist without active agent coverage rows (e.g. historical/deleted agent),
+// QuerySessions passes the rollup event total so summary and sessions agree on
+// measurement.status = "measured".
+func TestHubRollupSource_SessionsMeasurementMatchesSummary(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	todayDay := time.Date(dbNow.UTC().Year(), dbNow.UTC().Month(), dbNow.UTC().Day(), 0, 0, 0, 0, time.UTC)
+
+	proj := &store.Project{ID: uuid.NewString(), Name: "dash-o4", Slug: "dash-o4-" + uuid.NewString()[:8]}
+	require.NoError(t, cs.CreateProject(ctx, proj))
+
+	// Seed a daily rollup row with no matching non-deleted agent row.
+	_, err = client.UsageRollupDaily.Create().
+		SetBucketStart(todayDay).
+		SetProjectID(proj.ID).
+		SetBillingUserID("").
+		SetAgentID(uuid.NewString()).
+		SetHarness("claude").
+		SetModel("claude-sonnet-4-6").
+		SetUsageSource(store.UsageSourceNative).
+		SetCalls(1).
+		SetInput(10).
+		SetOutput(5).
+		SetEvents(1).
+		SetInputKnownEvents(1).
+		SetOutputKnownEvents(1).
+		SetPresenceTrackedEvents(1).
+		SetFirstEventTs(dbNow.Add(-time.Hour)).
+		SetLastEventTs(dbNow.Add(-time.Hour)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	src := NewHubRollupSource(cs)
+	sum, err := src.QuerySummary(ctx, 7, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	sess, err := src.QuerySessions(ctx, 7, WithProjectID(proj.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sum.Measurement)
+	require.NotNil(t, sess.Measurement)
+	assert.Equal(t, MeasurementStatusMeasured, sum.Measurement.Status)
+	assert.Equal(t, sum.Measurement.Status, sess.Measurement.Status, "sessions and summary must agree on measurement.status")
 }

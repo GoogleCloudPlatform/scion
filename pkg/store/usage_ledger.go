@@ -504,6 +504,9 @@ type UsageAgentCountQuery struct {
 	ProjectID      string
 	BillingUserID  string
 	IncludeBuckets bool
+	// Limit bounds the number of per-bucket rows returned when IncludeBuckets
+	// is true (0 uses the store default). TotalUniqueAgents is always exact.
+	Limit int
 }
 
 // UsageBucketAgentPair identifies a distinct agent active in a UTC rollup bucket.
@@ -528,6 +531,8 @@ type UsageAgentCountResult struct {
 	// BucketAgents is populated when IncludeBuckets is true and Granularity is "hour"
 	// so callers can deduplicate agents across UTC hours within the same local day.
 	BucketAgents []UsageBucketAgentPair
+	// Truncated is true when per-bucket rows exceeded Limit (newest buckets retained).
+	Truncated bool
 }
 
 // UsageLedgerStore defines persistence operations for the Tokenomics Track 1

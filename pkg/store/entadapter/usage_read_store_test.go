@@ -1060,7 +1060,24 @@ func TestCountUsageActiveAgents_HourlyDailyAndScope(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 2, hourlyRes.TotalUniqueAgents)
+	assert.False(t, hourlyRes.Truncated)
 	require.Len(t, hourlyRes.BucketAgents, 4)
+
+	// Hourly granularity with Limit=2 -> Truncated=true, keeps the 2 newest pairs (day2), TotalUniqueAgents stays exact.
+	hourlyTrunc, err := cs.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+		Granularity:    store.UsageGranularityHour,
+		Since:          day1,
+		Until:          day2.Add(2 * time.Hour),
+		ProjectID:      projA,
+		IncludeBuckets: true,
+		Limit:          2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, hourlyTrunc.TotalUniqueAgents)
+	assert.True(t, hourlyTrunc.Truncated)
+	require.Len(t, hourlyTrunc.BucketAgents, 2)
+	assert.Equal(t, day2, hourlyTrunc.BucketAgents[0].BucketStart)
+	assert.Equal(t, day2.Add(time.Hour), hourlyTrunc.BucketAgents[1].BucketStart)
 
 	// Global scope includes agOtherProj -> TotalUniqueAgents=3.
 	globalRes, err := cs.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
@@ -1116,7 +1133,23 @@ func TestCountSessionMetrics_DeduplicatesAcrossSegmentsAndDays(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), resA.TotalSessions, "s1 across two days must be counted once in TotalSessions")
+	assert.False(t, resA.Truncated)
 	require.Len(t, resA.Sessions, 3)
+
+	// Limit=2 -> Truncated=true, keeps the 2 newest segments (t2, t3), TotalSessions stays exact.
+	resATrunc, err := cs.CountSessionMetrics(ctx, store.SessionMetricsCountQuery{
+		Since:         t1.Add(-time.Hour),
+		Until:         t3.Add(time.Hour),
+		ProjectID:     projA,
+		IncludeEvents: true,
+		Limit:         2,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), resATrunc.TotalSessions)
+	assert.True(t, resATrunc.Truncated)
+	require.Len(t, resATrunc.Sessions, 2)
+	assert.Equal(t, t2, resATrunc.Sessions[0].StartedAt)
+	assert.Equal(t, t3, resATrunc.Sessions[1].StartedAt)
 
 	resGlobal, err := cs.CountSessionMetrics(ctx, store.SessionMetricsCountQuery{
 		Since: t1.Add(-time.Hour),

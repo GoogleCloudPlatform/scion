@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -320,8 +321,15 @@ func (s *AgentSessionMetricsStore) CountSessionMetrics(ctx context.Context, q st
 		return res, nil
 	}
 
+	limit := q.Limit
+	if limit <= 0 || limit > maxUsageRollupQueryLimit {
+		limit = maxUsageRollupQueryLimit
+	}
+
+	// Order newest-first so LIMIT keeps the most recent session segments on
+	// truncation; re-sorted ascending below.
 	evSQL := fmt.Sprintf(
-		"SELECT DISTINCT %s, %s, %s FROM %s%s ORDER BY %s ASC",
+		"SELECT DISTINCT %s, %s, %s FROM %s%s ORDER BY %s DESC LIMIT ?",
 		entasm.FieldAgentID,
 		entasm.FieldSessionID,
 		entasm.FieldStartedAt,
@@ -329,8 +337,9 @@ func (s *AgentSessionMetricsStore) CountSessionMetrics(ctx context.Context, q st
 		whereSQL,
 		entasm.FieldStartedAt,
 	)
+	evArgs := append(append([]any(nil), whereArgs...), limit+1)
 	evRows := &entsql.Rows{}
-	if err := drv.Query(ctx, usageRebindSQL(dialectName, evSQL), whereArgs, evRows); err != nil {
+	if err := drv.Query(ctx, usageRebindSQL(dialectName, evSQL), evArgs, evRows); err != nil {
 		return nil, mapError(err)
 	}
 	defer func() { _ = evRows.Close() }()
@@ -346,6 +355,10 @@ func (s *AgentSessionMetricsStore) CountSessionMetrics(ctx context.Context, q st
 			return nil, fmt.Errorf("parse session started_at: %w", err)
 		}
 		if ts != nil {
+			if len(res.Sessions) == limit {
+				res.Truncated = true
+				break
+			}
 			res.Sessions = append(res.Sessions, store.SessionStartRef{
 				AgentID:   agentID,
 				SessionID: sessionID,
@@ -356,5 +369,8 @@ func (s *AgentSessionMetricsStore) CountSessionMetrics(ctx context.Context, q st
 	if err := evRows.Err(); err != nil {
 		return nil, mapError(err)
 	}
+	sort.SliceStable(res.Sessions, func(i, j int) bool {
+		return res.Sessions[i].StartedAt.Before(res.Sessions[j].StartedAt)
+	})
 	return res, nil
 }

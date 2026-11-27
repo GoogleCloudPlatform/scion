@@ -32,11 +32,21 @@ const dashboardRollupGroupLimit = 5000
 // Pipeline C session metadata (agent_session_metrics).
 type HubRollupSource struct {
 	store store.Store
+	// groupLimit optionally overrides dashboardRollupGroupLimit in tests to
+	// exercise truncation and daily degradation deterministically.
+	groupLimit int
 }
 
 // NewHubRollupSource constructs a HubRollupSource backed by s.
 func NewHubRollupSource(s store.Store) *HubRollupSource {
 	return &HubRollupSource{store: s}
+}
+
+func (s *HubRollupSource) effectiveGroupLimit() int {
+	if s.groupLimit > 0 {
+		return s.groupLimit
+	}
+	return dashboardRollupGroupLimit
 }
 
 // Name returns the data source identifier for Hub rollups.
@@ -55,10 +65,25 @@ type resolvedRollupWindow struct {
 	startDayKey string // earliest local day key in reportLoc
 }
 
+func dailyFallbackWindow(dbNow time.Time, periodDays int, projectID string) resolvedRollupWindow {
+	utcWindow := metricsQueryWindowFor(dbNow, periodDays, &queryConfig{ProjectID: projectID})
+	sinceDay := time.Date(utcWindow.start.Year(), utcWindow.start.Month(), utcWindow.start.Day(), 0, 0, 0, 0, time.UTC)
+	untilDay := time.Date(utcWindow.end.Year(), utcWindow.end.Month(), utcWindow.end.Day(), 0, 0, 0, 0, time.UTC)
+	return resolvedRollupWindow{
+		dbNow:       dbNow,
+		since:       sinceDay,
+		until:       untilDay.Add(24*time.Hour - time.Microsecond),
+		granularity: store.UsageGranularityDay,
+		reportLoc:   time.UTC,
+		startDayKey: dayKey(utcWindow.start, time.UTC),
+	}
+}
+
 // checkHourlyConsistency applies P2.1a's CheckUsageHourlyConsistency read-time
 // cross-check over all whole covered UTC days inside win. Returns true when
 // hourly rollups are safe to serve, false when the caller must fall back to
 // daily rollups.
+// NOTE: will be replaced by P2.1a's shared D7b helper upon restack (R2).
 func (s *HubRollupSource) checkHourlyConsistency(ctx context.Context, win UsageWindow, hourlyCoverageStart time.Time, projectID string) (bool, error) {
 	sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
 	untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
@@ -125,21 +150,14 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 
 	// Daily fallback: usage_rollups_daily is keyed by UTC calendar day, so
 	// report timeZone="UTC" and compute the periodDays window in UTC.
-	utcWindow := metricsQueryWindowFor(dbNow, periodDays, &queryConfig{ProjectID: cfg.ProjectID})
-	sinceDay := time.Date(utcWindow.start.Year(), utcWindow.start.Month(), utcWindow.start.Day(), 0, 0, 0, 0, time.UTC)
-	untilDay := time.Date(utcWindow.end.Year(), utcWindow.end.Month(), utcWindow.end.Day(), 0, 0, 0, 0, time.UTC)
-	return resolvedRollupWindow{
-		dbNow:       dbNow,
-		since:       sinceDay,
-		until:       untilDay.Add(24*time.Hour - time.Microsecond),
-		granularity: store.UsageGranularityDay,
-		reportLoc:   time.UTC,
-		startDayKey: dayKey(utcWindow.start, time.UTC),
-	}, nil
+	return dailyFallbackWindow(dbNow, periodDays, cfg.ProjectID), nil
 }
 
 // resolve24hWindow resolves the rolling 24-hour window for QueryProjectSummary
 // through P2.1a's shared granularity helper and CheckUsageHourlyConsistency.
+// When falling back to daily rollups, since/until are snapped to full UTC day
+// boundaries so rollups, sessions, active agents, and coverage all evaluate the
+// exact same window.
 func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string) (resolvedRollupWindow, error) {
 	dbNow, err := s.store.DBNow(ctx)
 	if err != nil {
@@ -303,6 +321,7 @@ func (s *HubRollupSource) QuerySummary(ctx context.Context, periodDays int, opts
 		IncludeEvents: false,
 	})
 	if err != nil {
+		summary.totalSessionsFailed = true
 		queryErrors = append(queryErrors, fmt.Sprintf("sessions: %v", err))
 	} else {
 		summary.TotalSessions = sessionsRes.TotalSessions
@@ -316,6 +335,8 @@ func (s *HubRollupSource) QuerySummary(ctx context.Context, periodDays int, opts
 	}
 
 	if len(queryErrors) > 0 {
+		summary.PartialFailure = true
+		summary.PartialErrors = queryErrors
 		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 	return summary, nil
@@ -331,6 +352,31 @@ func (s *HubRollupSource) QuerySessions(ctx context.Context, periodDays int, opt
 		return nil, err
 	}
 
+	limit := s.effectiveGroupLimit()
+
+	// Query active agents first so if hourly (hour, agent) pairs truncate we can
+	// degrade cleanly to daily granularity before querying sessions/measurement
+	// on the exact same window and timezone.
+	agentsRes, agentsErr := s.store.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+		Granularity:    w.granularity,
+		Since:          w.since,
+		Until:          w.until,
+		ProjectID:      cfg.ProjectID,
+		IncludeBuckets: true,
+		Limit:          limit,
+	})
+	if agentsErr == nil && agentsRes.Truncated && w.granularity == store.UsageGranularityHour {
+		w = dailyFallbackWindow(w.dbNow, periodDays, cfg.ProjectID)
+		agentsRes, agentsErr = s.store.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
+			Granularity:    w.granularity,
+			Since:          w.since,
+			Until:          w.until,
+			ProjectID:      cfg.ProjectID,
+			IncludeBuckets: true,
+			Limit:          limit,
+		})
+	}
+
 	view := &SessionsView{
 		PeriodDays:   periodDays,
 		TimeZone:     w.reportLoc.String(),
@@ -342,11 +388,52 @@ func (s *HubRollupSource) QuerySessions(ctx context.Context, periodDays int, opt
 
 	var queryErrors []string
 
+	if agentsErr != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", agentsErr))
+	} else {
+		if agentsRes.Truncated {
+			view.Truncated = true
+		}
+		if w.granularity == store.UsageGranularityHour {
+			dayAgents := make(map[string]map[string]struct{})
+			for _, pair := range agentsRes.BucketAgents {
+				dk := dayKey(pair.BucketStart, w.reportLoc)
+				if dk < w.startDayKey {
+					continue
+				}
+				if dayAgents[dk] == nil {
+					dayAgents[dk] = make(map[string]struct{})
+				}
+				dayAgents[dk][pair.AgentID] = struct{}{}
+			}
+			pts := mapCountToPoints(dayAgents)
+			if agentsRes.Truncated && len(pts) > 0 {
+				pts = pts[1:]
+			}
+			view.ActiveAgents = pts
+		} else {
+			pts := make([]TimeSeriesPoint, 0, len(agentsRes.BucketCounts))
+			for _, bc := range agentsRes.BucketCounts {
+				dk := dayKey(bc.BucketStart, time.UTC)
+				if dk < w.startDayKey {
+					continue
+				}
+				pts = append(pts, TimeSeriesPoint{Timestamp: dk, Value: bc.Count})
+			}
+			sort.Slice(pts, func(i, j int) bool { return pts[i].Timestamp < pts[j].Timestamp })
+			if agentsRes.Truncated && len(pts) > 0 {
+				pts = pts[1:]
+			}
+			view.ActiveAgents = pts
+		}
+	}
+
 	sessionsRes, err := s.store.CountSessionMetrics(ctx, store.SessionMetricsCountQuery{
 		Since:         w.since,
 		Until:         w.until,
 		ProjectID:     cfg.ProjectID,
 		IncludeEvents: true,
+		Limit:         limit,
 	})
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
@@ -367,127 +454,27 @@ func (s *HubRollupSource) QuerySessions(ctx context.Context, periodDays int, opt
 			}
 			daySessions[dk][sessionKey{agentID: ref.AgentID, sessionID: ref.SessionID}] = struct{}{}
 		}
-		view.DailyCounts = mapCountToPoints(daySessions)
-	}
-
-	agentsRes, err := s.store.CountUsageActiveAgents(ctx, store.UsageAgentCountQuery{
-		Granularity:    w.granularity,
-		Since:          w.since,
-		Until:          w.until,
-		ProjectID:      cfg.ProjectID,
-		IncludeBuckets: true,
-	})
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
-	} else if w.granularity == store.UsageGranularityHour {
-		dayAgents := make(map[string]map[string]struct{})
-		for _, pair := range agentsRes.BucketAgents {
-			dk := dayKey(pair.BucketStart, w.reportLoc)
-			if dk < w.startDayKey {
-				continue
+		pts := mapCountToPoints(daySessions)
+		if sessionsRes.Truncated {
+			view.Truncated = true
+			// Drop the earliest boundary day so no day appears with a partial count.
+			if len(pts) > 0 {
+				pts = pts[1:]
 			}
-			if dayAgents[dk] == nil {
-				dayAgents[dk] = make(map[string]struct{})
-			}
-			dayAgents[dk][pair.AgentID] = struct{}{}
 		}
-		view.ActiveAgents = mapCountToPoints(dayAgents)
-	} else {
-		pts := make([]TimeSeriesPoint, 0, len(agentsRes.BucketCounts))
-		for _, bc := range agentsRes.BucketCounts {
-			dk := dayKey(bc.BucketStart, time.UTC)
-			if dk < w.startDayKey {
-				continue
-			}
-			pts = append(pts, TimeSeriesPoint{Timestamp: dk, Value: bc.Count})
-		}
-		sort.Slice(pts, func(i, j int) bool { return pts[i].Timestamp < pts[j].Timestamp })
-		view.ActiveAgents = pts
+		view.DailyCounts = pts
 	}
 
-	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, 0)
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
-	} else {
-		view.Measurement = measurement
-	}
-
-	if len(queryErrors) > 0 {
-		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
-	}
-	return view, nil
-}
-
-// QueryModelCalls returns API call time series grouped by model, harness, and
-// (when groupBy=user) by billing user.
-func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, opts ...QueryOption) (*ModelCallsView, error) {
-	cfg := applyQueryOptions(opts)
-	w, err := s.resolveWindow(ctx, periodDays, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	timeDim := timeGroupDim(w.granularity)
-	view := &ModelCallsView{
-		PeriodDays:  periodDays,
-		TimeZone:    w.reportLoc.String(),
-		Source:      MetricsSourceHubRollups,
-		Granularity: w.granularity,
-		GroupBy:     cfg.GroupBy,
-	}
-
-	var queryErrors []string
 	var totalEvents int64
-
-	byModelRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
+	if rollupRes, rErr := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: w.granularity,
 		Since:       w.since,
 		Until:       w.until,
 		ProjectID:   cfg.ProjectID,
-		GroupBy:     []string{timeDim, store.UsageGroupByModel},
-		Limit:       dashboardRollupGroupLimit,
-	})
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("by model: %v", err))
+	}); rErr != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("rollup totals: %v", rErr))
 	} else {
-		totalEvents = byModelRes.Totals.Events
-		view.ByModel = buildCallsSeries(byModelRes.Groups, w, func(g *store.UsageRollupGroup) string {
-			return g.Model
-		})
-	}
-
-	byHarnessRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
-		Granularity: w.granularity,
-		Since:       w.since,
-		Until:       w.until,
-		ProjectID:   cfg.ProjectID,
-		GroupBy:     []string{timeDim, store.UsageGroupByHarness},
-		Limit:       dashboardRollupGroupLimit,
-	})
-	if err != nil {
-		queryErrors = append(queryErrors, fmt.Sprintf("by harness: %v", err))
-	} else {
-		view.ByHarness = buildCallsSeries(byHarnessRes.Groups, w, func(g *store.UsageRollupGroup) string {
-			return g.Harness
-		})
-	}
-
-	if cfg.GroupBy == store.UsageGroupByUser {
-		byUserRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
-			Granularity: w.granularity,
-			Since:       w.since,
-			Until:       w.until,
-			ProjectID:   cfg.ProjectID,
-			GroupBy:     []string{timeDim, store.UsageGroupByUser},
-			Limit:       dashboardRollupGroupLimit,
-		})
-		if err != nil {
-			queryErrors = append(queryErrors, fmt.Sprintf("by user: %v", err))
-		} else {
-			view.ByUser = buildCallsSeries(byUserRes.Groups, w, func(g *store.UsageRollupGroup) string {
-				return g.BillingUserID
-			})
-		}
+		totalEvents = rollupRes.Totals.Events
 	}
 
 	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents)
@@ -498,6 +485,136 @@ func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, o
 	}
 
 	if len(queryErrors) > 0 {
+		view.PartialFailure = true
+		view.PartialErrors = queryErrors
+		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
+	}
+	return view, nil
+}
+
+type modelCallsQuerySet struct {
+	byModel   *store.UsageRollupQueryResult
+	byHarness *store.UsageRollupQueryResult
+	byUser    *store.UsageRollupQueryResult
+	errors    []string
+}
+
+func (s *HubRollupSource) fetchModelCalls(ctx context.Context, w resolvedRollupWindow, cfg *queryConfig, limit int) modelCallsQuerySet {
+	timeDim := timeGroupDim(w.granularity)
+	var out modelCallsQuerySet
+
+	res, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: w.granularity,
+		Since:       w.since,
+		Until:       w.until,
+		ProjectID:   cfg.ProjectID,
+		GroupBy:     []string{timeDim, store.UsageGroupByModel},
+		Limit:       limit,
+	})
+	if err != nil {
+		out.errors = append(out.errors, fmt.Sprintf("by model: %v", err))
+	} else {
+		out.byModel = res
+	}
+
+	res, err = s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: w.granularity,
+		Since:       w.since,
+		Until:       w.until,
+		ProjectID:   cfg.ProjectID,
+		GroupBy:     []string{timeDim, store.UsageGroupByHarness},
+		Limit:       limit,
+	})
+	if err != nil {
+		out.errors = append(out.errors, fmt.Sprintf("by harness: %v", err))
+	} else {
+		out.byHarness = res
+	}
+
+	if cfg.GroupBy == store.UsageGroupByUser {
+		res, err = s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
+			Granularity: w.granularity,
+			Since:       w.since,
+			Until:       w.until,
+			ProjectID:   cfg.ProjectID,
+			GroupBy:     []string{timeDim, store.UsageGroupByUser},
+			Limit:       limit,
+		})
+		if err != nil {
+			out.errors = append(out.errors, fmt.Sprintf("by user: %v", err))
+		} else {
+			out.byUser = res
+		}
+	}
+	return out
+}
+
+func (q modelCallsQuerySet) anyTruncated() bool {
+	return (q.byModel != nil && q.byModel.Truncated) ||
+		(q.byHarness != nil && q.byHarness.Truncated) ||
+		(q.byUser != nil && q.byUser.Truncated)
+}
+
+// QueryModelCalls returns API call time series grouped by model, harness, and
+// (when groupBy=user) by billing user. If an hourly grouped query hits the
+// internal row limit, it degrades cleanly to daily granularity (timeZone="UTC");
+// if daily still truncates, Truncated is set and the boundary day is dropped so
+// no day ever appears with partial totals.
+func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, opts ...QueryOption) (*ModelCallsView, error) {
+	cfg := applyQueryOptions(opts)
+	w, err := s.resolveWindow(ctx, periodDays, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := s.effectiveGroupLimit()
+	qs := s.fetchModelCalls(ctx, w, cfg, limit)
+	if w.granularity == store.UsageGranularityHour && qs.anyTruncated() {
+		w = dailyFallbackWindow(w.dbNow, periodDays, cfg.ProjectID)
+		qs = s.fetchModelCalls(ctx, w, cfg, limit)
+	}
+
+	view := &ModelCallsView{
+		PeriodDays:  periodDays,
+		TimeZone:    w.reportLoc.String(),
+		Source:      MetricsSourceHubRollups,
+		Granularity: w.granularity,
+		GroupBy:     cfg.GroupBy,
+		Truncated:   qs.anyTruncated(),
+	}
+
+	var totalEvents int64
+	if qs.byModel != nil {
+		totalEvents = qs.byModel.Totals.Events
+		view.ByModel = buildCallsSeries(qs.byModel.Groups, w, qs.byModel.Truncated, func(g *store.UsageRollupGroup) string {
+			return g.Model
+		})
+	}
+	if qs.byHarness != nil {
+		if totalEvents == 0 {
+			totalEvents = qs.byHarness.Totals.Events
+		}
+		view.ByHarness = buildCallsSeries(qs.byHarness.Groups, w, qs.byHarness.Truncated, func(g *store.UsageRollupGroup) string {
+			return g.Harness
+		})
+	}
+	if qs.byUser != nil {
+		view.ByUser = buildCallsSeries(qs.byUser.Groups, w, qs.byUser.Truncated, func(g *store.UsageRollupGroup) string {
+			return g.BillingUserID
+		})
+	}
+
+	queryErrors := qs.errors
+	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents)
+	if err != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
+	} else {
+		view.Measurement = measurement
+	}
+
+	if len(queryErrors) > 0 {
+		view.PartialFailure = true
+		view.PartialErrors = queryErrors
 		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 	return view, nil
@@ -506,7 +623,10 @@ func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, o
 // QueryTokens returns token usage series (input, output, cacheRead, cacheWrite)
 // grouped by model (or harness/user when requested via WithGroupBy), plus
 // nullable totals and daily cache hit rate. Unknown buckets are never
-// fabricated as 0.
+// fabricated as 0. If an hourly grouped query hits the internal row limit, it
+// degrades cleanly to daily granularity (timeZone="UTC"); if daily still
+// truncates, Truncated is set and the boundary day is dropped so no day ever
+// appears with partial totals.
 func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts ...QueryOption) (*TokensView, error) {
 	cfg := applyQueryOptions(opts)
 	w, err := s.resolveWindow(ctx, periodDays, cfg)
@@ -518,18 +638,32 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 	if dim == "" {
 		dim = store.UsageGroupByModel
 	}
-	timeDim := timeGroupDim(w.granularity)
+	limit := s.effectiveGroupLimit()
 
 	rollupRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: w.granularity,
 		Since:       w.since,
 		Until:       w.until,
 		ProjectID:   cfg.ProjectID,
-		GroupBy:     []string{timeDim, dim},
-		Limit:       dashboardRollupGroupLimit,
+		GroupBy:     []string{timeGroupDim(w.granularity), dim},
+		Limit:       limit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("query token rollups: %w", err)
+	}
+	if w.granularity == store.UsageGranularityHour && rollupRes.Truncated {
+		w = dailyFallbackWindow(w.dbNow, periodDays, cfg.ProjectID)
+		rollupRes, err = s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
+			Granularity: w.granularity,
+			Since:       w.since,
+			Until:       w.until,
+			ProjectID:   cfg.ProjectID,
+			GroupBy:     []string{timeGroupDim(w.granularity), dim},
+			Limit:       limit,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("query daily token rollups after truncation: %w", err)
+		}
 	}
 
 	// Accumulate raw UsageRollupTotals per (label, localDay) and per localDay
@@ -538,12 +672,17 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 	labelDayTotals := make(map[string]map[string]*store.UsageRollupTotals)
 	dayTotals := make(map[string]*store.UsageRollupTotals)
 
+	dropDay := ""
+	if rollupRes.Truncated {
+		dropDay = earliestDayKeyInGroups(rollupRes.Groups, w)
+	}
+
 	for _, g := range rollupRes.Groups {
 		if g == nil || g.BucketStart == nil {
 			continue
 		}
 		dk := dayKey(*g.BucketStart, w.reportLoc)
-		if dk < w.startDayKey {
+		if dk < w.startDayKey || (dropDay != "" && dk == dropDay) {
 			continue
 		}
 		label := normalizeDashboardLabel(labelForDim(g, dim))
@@ -621,10 +760,13 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 		CacheWrite:        sortedLabeledSeries(cacheWriteMap),
 		Totals:            dashboardTokenTotalsFromRollup(rollupRes.Totals),
 		DailyCacheHitRate: dailyHitRate,
+		Truncated:         rollupRes.Truncated,
 	}
 
 	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, rollupRes.Totals.Events)
 	if err != nil {
+		view.PartialFailure = true
+		view.PartialErrors = []string{fmt.Sprintf("measurement: %v", err)}
 		return view, fmt.Errorf("partial query failures: measurement: %v", err)
 	}
 	view.Measurement = measurement
@@ -632,7 +774,9 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 }
 
 // QueryProjectSummary returns lightweight scalar metrics for a project over
-// the last 24 hours from Hub rollups and Pipeline C session metadata.
+// the last 24 hours from Hub rollups and Pipeline C session metadata. When
+// falling back to daily rollups, all fields evaluate the same UTC daily window
+// and PeriodLabel states the UTC daily start date.
 func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error) {
 	w, err := s.resolve24hWindow(ctx, projectID)
 	if err != nil {
@@ -649,13 +793,18 @@ func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID str
 		return nil, fmt.Errorf("query project 24h usage rollups: %w", err)
 	}
 
+	periodLabel := "Last 24 hours"
+	if w.granularity == store.UsageGranularityDay {
+		periodLabel = fmt.Sprintf("Since %s (UTC daily)", w.since.UTC().Format(dayKeyLayout))
+	}
+
 	tokens := dashboardTokenTotalsFromRollup(rollupRes.Totals)
 	summary := &ProjectMetricsSummary{
 		Source:        MetricsSourceHubRollups,
 		Granularity:   w.granularity,
 		APICalls24h:   rollupRes.Totals.Calls,
 		TokenUsage24h: knownSummableTotal(tokens),
-		PeriodLabel:   "Last 24 hours",
+		PeriodLabel:   periodLabel,
 		Tokens:        tokens,
 		CacheHitRate:  tokens.CacheHitRate,
 	}
@@ -682,6 +831,7 @@ func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID str
 		IncludeEvents: false,
 	})
 	if err != nil {
+		summary.sessionsFailed = true
 		queryErrors = append(queryErrors, fmt.Sprintf("sessions: %v", err))
 	} else {
 		summary.SessionsCount24h = sessionsRes.TotalSessions
@@ -695,6 +845,8 @@ func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID str
 	}
 
 	if len(queryErrors) > 0 {
+		summary.PartialFailure = true
+		summary.PartialErrors = queryErrors
 		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 	return summary, nil
@@ -725,14 +877,38 @@ func labelForDim(g *store.UsageRollupGroup, dim string) string {
 	}
 }
 
-func buildCallsSeries(groups []*store.UsageRollupGroup, w resolvedRollupWindow, labelFn func(*store.UsageRollupGroup) string) []LabeledTimeSeries {
-	byLabel := make(map[string]map[string]int64)
+// earliestDayKeyInGroups returns the lexicographically smallest dayKey among
+// groups inside w. Since QueryUsageRollups orders newest-first before LIMIT,
+// only this earliest boundary day can have partially returned labels.
+func earliestDayKeyInGroups(groups []*store.UsageRollupGroup, w resolvedRollupWindow) string {
+	earliest := ""
 	for _, g := range groups {
 		if g == nil || g.BucketStart == nil {
 			continue
 		}
 		dk := dayKey(*g.BucketStart, w.reportLoc)
 		if dk < w.startDayKey {
+			continue
+		}
+		if earliest == "" || dk < earliest {
+			earliest = dk
+		}
+	}
+	return earliest
+}
+
+func buildCallsSeries(groups []*store.UsageRollupGroup, w resolvedRollupWindow, truncated bool, labelFn func(*store.UsageRollupGroup) string) []LabeledTimeSeries {
+	dropDay := ""
+	if truncated {
+		dropDay = earliestDayKeyInGroups(groups, w)
+	}
+	byLabel := make(map[string]map[string]int64)
+	for _, g := range groups {
+		if g == nil || g.BucketStart == nil {
+			continue
+		}
+		dk := dayKey(*g.BucketStart, w.reportLoc)
+		if dk < w.startDayKey || (dropDay != "" && dk == dropDay) {
 			continue
 		}
 		label := normalizeDashboardLabel(labelFn(g))
