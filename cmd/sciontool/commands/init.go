@@ -813,6 +813,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// no-op.
 	runWireSessionUsage(telemetryPipeline, agentHome)
 
+	// Start Track 2 raw trajectory shipper (self-gating against the Hub: backs
+	// off cleanly on 404 when tokenomics.trajectory_capture is off).
+	trajectoryCtx, trajectoryCancel := context.WithCancel(context.Background())
+	trajectoryRunner := startTrajectoryRunner(trajectoryCtx, agentHome, targetUID, targetGID, hub.NewClient)
+	defer func() {
+		if trajectoryRunner != nil {
+			trajectoryRunner.PreStop(context.Background())
+		}
+		trajectoryCancel()
+	}()
+
 	// Initialize lifecycle hooks manager. newLifecycleManager also reports
 	// the value this run wants hub.EnforceTokenFileOwnerChecks called with —
 	// both come from the identical requirePrivilegeDrop input, bundled into
@@ -836,6 +847,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 	for _, eventName := range []string{hooks.EventPreStart, hooks.EventPostStart, hooks.EventPreStop, hooks.EventSessionEnd} {
 		lifecycleManager.RegisterHandler(eventName, statusHandler.Handle)
 		lifecycleManager.RegisterHandler(eventName, loggingHandler.Handle)
+	}
+	if trajectoryRunner != nil {
+		lifecycleManager.RegisterHandler(hooks.EventPreStop, func(_ *hooks.Event) error {
+			trajectoryRunner.PreStop(context.Background())
+			return nil
+		})
 	}
 
 	// Create telemetry handler for lifecycle-event spans and metrics.
