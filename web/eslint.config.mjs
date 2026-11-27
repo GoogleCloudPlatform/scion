@@ -170,6 +170,7 @@ export default defineConfig([
       'e2e/chat-palette/*.ts',
       'e2e/dialog-nested-popup/*.ts',
       'e2e/project-files-tabs/*.ts',
+      'e2e/project-members-mobile/*.ts',
       'e2e/secret-request/*.ts',
       'e2e/terminal-entrypoints/*.ts',
       'e2e/terminal-hidden/*.ts',
