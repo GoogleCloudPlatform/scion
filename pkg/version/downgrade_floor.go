@@ -52,7 +52,7 @@ package version
 //     reject the new enum values in Ent MessageModeValidator and deny unknown
 //     modes in message authorization.
 //
-// Current floor (nightly-20261127):
+// Current floor (nightly-20261128):
 //   - Ordered actions[] per trigger (Stage 2 P9, ptone/scion#9065): loosens
 //     trigger_fires uniqueness from (event_id, trigger_id) to
 //     (event_id, trigger_id, action_index) and trigger_subject_claims
@@ -61,4 +61,4 @@ package version
 //     re-tighten those unique indexes on AutoMigrate (failing once multi-action
 //     rows exist) and cannot read triggers stored in triggers.actions with empty
 //     legacy action_type.
-const DowngradeFloor = "nightly-20261127"
+const DowngradeFloor = "nightly-20261128"

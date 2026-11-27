@@ -1831,6 +1831,13 @@ func (s *TriggerStore) FlushTriggerEventCounters(ctx context.Context, triggerID,
 		return err
 	}
 	return s.withClientTx(ctx, func(c *ent.Client) error {
+		// R4-1: acquire the triggers row lock before reading trigger_fires so
+		// concurrent flushes for the same (trigger_id, event_id) on Postgres
+		// serialize under READ COMMITTED and never double-count fire_count or
+		// error_count.
+		if lErr := c.Trigger.UpdateOneID(tid).SetUpdated(time.Now().UTC()).Exec(ctx); lErr != nil {
+			return mapError(lErr)
+		}
 		rows, qErr := c.TriggerFire.Query().
 			Where(
 				triggerfire.TriggerIDEQ(tid),

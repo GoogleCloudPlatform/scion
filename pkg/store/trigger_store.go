@@ -564,6 +564,9 @@ type TriggerStore interface {
 	// When any sibling row for (trigger_id, event_id) already has an explicit
 	// rate_decision marker ("admitted" or "limited"), returns 0 or
 	// MaxTriggerFiresPerMinute respectively without inspecting status or error text.
+	// A decision is visible to siblings and later passes only once the caller
+	// persists it with RecordTriggerFireRateDecision in the same LockTriggerQuota
+	// transaction.
 	CountRecentTriggerFires(ctx context.Context, triggerID string, since time.Time, excludeFireID string) (int, error)
 	// RecordTriggerFireRateDecision persists the per-(trigger, event) rate-limit
 	// decision ("admitted" or "limited") on fireID if not already set. Must be

@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -693,4 +694,70 @@ func TestTriggerActionsStore_FlushTriggerEventCounters_DurableMarker(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, 3, got.FireCount, "deferred siblings must never double-count fire_count")
 	assert.Equal(t, 1, got.ErrorCount, "first deferred error counts once; second deferred error does not double-count")
+}
+
+// TestTriggerActionsStore_FlushTriggerEventCounters_ConcurrentOnce lifts review 4's
+// R4-1 probe on real Postgres: two concurrent FlushTriggerEventCounters calls for one
+// (trigger, event) serialize on the triggers row lock so fire_count == 1 (and
+// error_count <= 1 for an error outcome).
+func TestTriggerActionsStore_FlushTriggerEventCounters_ConcurrentOnce(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	dialect := cs.client.Driver().Dialect()
+	t.Logf("dialect=%s", dialect)
+	if dialect != "postgres" {
+		t.Skip("needs concurrent writers (Postgres)")
+	}
+
+	projID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tr := &store.Trigger{
+		ID:          uuid.NewString(),
+		ProjectID:   projID,
+		Name:        "p9r4-flush-concurrent",
+		SourceKind:  store.TriggerSourceKindWebhook,
+		SourceID:    uuid.NewString(),
+		MatchTypes:  []string{"webhook.received"},
+		Actions:     []store.TriggerAction{{Type: store.TriggerActionMessage, Payload: `{"agentId":"a0","message":"m0"}`}},
+		SubjectMode: store.TriggerSubjectModeNew,
+		Status:      store.TriggerStatusActive,
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	evE := uuid.NewString()
+	a0 := &store.TriggerFire{
+		ID: uuid.NewString(), ProjectID: projID, TriggerID: tr.ID, EventID: evE,
+		Subject: "pr-1", ActionType: store.TriggerActionMessage, ActionIndex: 0,
+		Status: store.TriggerFireStatusFiring, LeaseUntil: now.Add(10 * time.Minute),
+		StartedAt: now, CreatedAt: now,
+	}
+	ok, _, err := cs.ClaimTriggerFire(ctx, a0)
+	require.NoError(t, err)
+	require.True(t, ok)
+	_, err = cs.FinishTriggerFire(ctx, a0.ID, store.TriggerFireStatusFired, "", "", "", now)
+	require.NoError(t, err)
+
+	holder, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	require.NoError(t, holder.Trigger.UpdateOneID(uuid.MustParse(tr.ID)).SetUpdated(time.Now().UTC()).Exec(ctx))
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			errs[idx] = cs.FlushTriggerEventCounters(ctx, tr.ID, evE, now, store.TriggerFireStatusFired, "")
+		}(i)
+	}
+	time.Sleep(500 * time.Millisecond)
+	require.NoError(t, holder.Commit())
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+
+	got, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, got.FireCount, "one matched event must count once even when two passes flush concurrently")
+	require.Equal(t, 0, got.ErrorCount)
 }
