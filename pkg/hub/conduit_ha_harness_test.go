@@ -24,9 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -38,16 +36,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/internal/conduittest"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
@@ -55,10 +54,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
-	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -66,9 +61,15 @@ import (
 )
 
 // conduitHAOptions tunes newConduitHAEnvWith for tests that need custom
-// intervals (such as a short AuthzRecheckInterval for C16b).
+// intervals or clocks (such as a short AuthzRecheckInterval for C16b or a
+// short LifetimeCap for C4).
 type conduitHAOptions struct {
 	AuthzRecheckInterval time.Duration
+	UserStreamAuthzMax   time.Duration
+	LifetimeCap          time.Duration
+	SessionWriteWait     time.Duration
+	Clock                clock.Clock
+	AuthzClock           clock.Clock
 }
 
 // conduitHANode is one hub replica in a 2-node Postgres Conduit HA test
@@ -277,6 +278,9 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	cfg.HubID = "conduit-ha-hub"
 	cfg.SharedSigningSecret = e.sharedSecret
 	cfg.BrokerAuthConfig = DefaultBrokerAuthConfig()
+	if opts.UserStreamAuthzMax > 0 {
+		cfg.ConduitUserStreamAuthzMax = opts.UserStreamAuthzMax
+	}
 
 	srv, _ := testServerWithStoreConfig(t, cs, cfg)
 	srv.SetIntegrationHA("postgres", client, nodeDSN)
@@ -377,6 +381,10 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 		Store:                regStore,
 		Registry:             registry.New(regStore, registry.Config{}),
 		AuthzRecheckInterval: opts.AuthzRecheckInterval,
+		LifetimeCap:          opts.LifetimeCap,
+		sessionWriteWait:     opts.SessionWriteWait,
+		Clock:                opts.Clock,
+		AuthzClock:           opts.AuthzClock,
 	})
 	require.NoError(t, err, "StartConduitRelay(%s) with RequireHA=true", instanceID)
 	require.True(t, srv.conduitServing(), "%s must serve conduit", instanceID)
@@ -530,439 +538,72 @@ func (e *conduitHAEnv) BlockLISTEN(t *testing.T, node *conduitHANode) (unblock f
 	return unblock
 }
 
-// --- Fault-injectable WebSocket dialer ---
+// --- Fake Agent and Fake Broker wrappers (backed by internal/conduittest) ---
 
-// faultConn wraps a net.Conn so a test can abruptly close it or simulate a
-// transient silent TCP partition: while dropped, both Read and Write block
-// until Restore, Close, or their respective deadlines expire, without sending
-// a TCP FIN/RST or WebSocket close frame. On Restore, pending writes proceed
-// and buffered inbound data is read, so pending frames are delayed rather than
-// discarded (subject to any active read/write deadlines).
-type faultConn struct {
-	net.Conn
-	mu            sync.Mutex
-	dropped       bool
-	unblock       chan struct{}
-	deadlineCh    chan struct{}
-	closed        chan struct{}
-	closeOnce     sync.Once
-	readDeadline  time.Time
-	writeDeadline time.Time
-}
-
-func newFaultConn(c net.Conn) *faultConn {
-	return &faultConn{
-		Conn:       c,
-		unblock:    make(chan struct{}),
-		deadlineCh: make(chan struct{}),
-		closed:     make(chan struct{}),
-	}
-}
-
-func (c *faultConn) setDropped(drop bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dropped == drop {
-		return
-	}
-	c.dropped = drop
-	if !drop {
-		close(c.unblock)
-		c.unblock = make(chan struct{})
-	}
-}
-
-func (c *faultConn) waitIfDropped(isWrite bool) error {
-	for {
-		c.mu.Lock()
-		dropped := c.dropped
-		unblock := c.unblock
-		deadlineCh := c.deadlineCh
-		deadline := c.readDeadline
-		if isWrite {
-			deadline = c.writeDeadline
-		}
-		c.mu.Unlock()
-		if !dropped {
-			return nil
-		}
-		var timer <-chan time.Time
-		var t *time.Timer
-		if !deadline.IsZero() {
-			d := time.Until(deadline)
-			if d <= 0 {
-				return osTimeoutErr{}
-			}
-			t = time.NewTimer(d)
-			timer = t.C
-		}
-		select {
-		case <-c.closed:
-			if t != nil {
-				t.Stop()
-			}
-			return net.ErrClosed
-		case <-unblock:
-			if t != nil {
-				t.Stop()
-			}
-		case <-deadlineCh:
-			if t != nil {
-				t.Stop()
-			}
-		case <-timer:
-			return osTimeoutErr{}
-		}
-	}
-}
-
-func (c *faultConn) Read(b []byte) (int, error) {
-	if err := c.waitIfDropped(false); err != nil {
-		return 0, err
-	}
-	n, err := c.Conn.Read(b)
-	c.mu.Lock()
-	dropped := c.dropped
-	c.mu.Unlock()
-	if dropped {
-		if werr := c.waitIfDropped(false); werr != nil {
-			return 0, werr
-		}
-	}
-	return n, err
-}
-
-func (c *faultConn) Write(b []byte) (int, error) {
-	if err := c.waitIfDropped(true); err != nil {
-		return 0, err
-	}
-	return c.Conn.Write(b)
-}
-
-func (c *faultConn) notifyDeadlineChange() {
-	close(c.deadlineCh)
-	c.deadlineCh = make(chan struct{})
-}
-
-func (c *faultConn) SetReadDeadline(t time.Time) error {
-	c.mu.Lock()
-	c.readDeadline = t
-	c.notifyDeadlineChange()
-	c.mu.Unlock()
-	return c.Conn.SetReadDeadline(t)
-}
-
-func (c *faultConn) SetWriteDeadline(t time.Time) error {
-	c.mu.Lock()
-	c.writeDeadline = t
-	c.notifyDeadlineChange()
-	c.mu.Unlock()
-	return c.Conn.SetWriteDeadline(t)
-}
-
-func (c *faultConn) SetDeadline(t time.Time) error {
-	c.mu.Lock()
-	c.readDeadline = t
-	c.writeDeadline = t
-	c.notifyDeadlineChange()
-	c.mu.Unlock()
-	return c.Conn.SetDeadline(t)
-}
-
-func (c *faultConn) Close() error {
-	c.closeOnce.Do(func() { close(c.closed) })
-	return c.Conn.Close()
-}
-
-type osTimeoutErr struct{}
-
-func (osTimeoutErr) Error() string   { return "i/o timeout" }
-func (osTimeoutErr) Timeout() bool   { return true }
-func (osTimeoutErr) Temporary() bool { return true }
-
-// faultWSDialer tracks the latest dialed faultConn so tests can close or
-// silently pause the active WebSocket transport.
-type faultWSDialer struct {
-	mu      sync.Mutex
-	current *faultConn
-	dialer  *websocket.Dialer
-}
-
-func newFaultWSDialer() *faultWSDialer {
-	f := &faultWSDialer{}
-	base := &net.Dialer{Timeout: 10 * time.Second}
-	f.dialer = &websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
-		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			raw, err := base.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			fc := newFaultConn(raw)
-			f.mu.Lock()
-			f.current = fc
-			f.mu.Unlock()
-			return fc, nil
-		},
-	}
-	return f
-}
-
-func (f *faultWSDialer) CloseCurrent() {
-	f.mu.Lock()
-	c := f.current
-	f.mu.Unlock()
-	if c != nil {
-		_ = c.Close()
-	}
-}
-
-func (f *faultWSDialer) SilentDrop() {
-	f.mu.Lock()
-	c := f.current
-	f.mu.Unlock()
-	if c != nil {
-		c.setDropped(true)
-	}
-}
-
-func (f *faultWSDialer) Restore() {
-	f.mu.Lock()
-	c := f.current
-	f.mu.Unlock()
-	if c != nil {
-		c.setDropped(false)
-	}
-}
-
-// --- Fake Agent (real pkg/sciontool/conduit + real control.Handler + fake tmuxdeliver.Runner) ---
-
-// recordingTmuxRunner implements tmuxdeliver.Runner and records every argv
-// and stdin payload it executes.
-type recordingTmuxRunner struct {
-	mu        sync.Mutex
-	calls     [][]string
-	stdins    []string
-	flushes   int
-	beforeRun func([]string)
-}
-
-// SetBeforeRun installs an optional hook invoked before each Run call (nil clears it).
-func (r *recordingTmuxRunner) SetBeforeRun(fn func([]string)) {
-	r.mu.Lock()
-	r.beforeRun = fn
-	r.mu.Unlock()
-}
-
-func (r *recordingTmuxRunner) Run(_ context.Context, argv []string, stdin io.Reader) (string, error) {
-	cp := append([]string(nil), argv...)
-	r.mu.Lock()
-	hook := r.beforeRun
-	r.mu.Unlock()
-	if hook != nil {
-		hook(cp)
-	}
-	var stdinStr string
-	if stdin != nil {
-		b, _ := io.ReadAll(stdin)
-		stdinStr = string(b)
-	}
-	r.mu.Lock()
-	r.calls = append(r.calls, cp)
-	r.stdins = append(r.stdins, stdinStr)
-	if len(cp) >= 2 && cp[0] == "tmux" && cp[1] == "paste-buffer" {
-		r.flushes++
-	}
-	r.mu.Unlock()
-	return "", nil
-}
-
-func (r *recordingTmuxRunner) Calls() [][]string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([][]string, len(r.calls))
-	for i, c := range r.calls {
-		out[i] = append([]string(nil), c...)
-	}
-	return out
-}
-
-// Stdins returns a copy of the stdin payload recorded for each Run call,
-// aligned by index with Calls().
-func (r *recordingTmuxRunner) Stdins() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.stdins...)
-}
-
-func (r *recordingTmuxRunner) Flushes() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.flushes
-}
-
-// conduitHAAgent is a fake agent wired with the real pkg/sciontool/conduit
-// session client, the real control.Handler (with deliver-message enabled), and
-// a fake tmuxdeliver.Runner recording argv and stdin.
+// conduitHAAgent wraps *conduittest.Agent with testing.T convenience methods
+// for the pkg/hub HA harness tests.
 type conduitHAAgent struct {
-	Runner   *recordingTmuxRunner
-	ws       *faultWSDialer
-	admitted chan *conduitv1.Welcome
-
-	mu        sync.Mutex
-	lastWel   *conduitv1.Welcome
-	rpcPaths  []string
-	rpcCount  atomic.Int64
-	kickCount atomic.Int64
-
-	stopOnce sync.Once
-	stopFn   func()
+	*conduittest.Agent
 }
 
 // StartAgent starts a fake agent dialing node's public conduit endpoint and
 // waits until its first session is admitted.
 func (e *conduitHAEnv) StartAgent(t *testing.T, node *conduitHANode) *conduitHAAgent {
 	t.Helper()
+	return e.StartAgentFor(t, node, e.Agent, conduittest.AgentOptions{})
+}
+
+// StartAgentFor starts a fake agent for the given store.Agent dialing node's
+// public conduit endpoint and waits until its first session is admitted. Any
+// non-zero fields in opts override the defaults (e.g. EnablePTY, DialLocal).
+func (e *conduitHAEnv) StartAgentFor(t *testing.T, node *conduitHANode, agent *store.Agent, opts conduittest.AgentOptions) *conduitHAAgent {
+	t.Helper()
 	guardSciontoolLog()
 
-	tok, err := node.Server.GenerateAgentToken(e.Agent.ID, e.Agent.ProjectID, nil, AgentRoleFull, nil)
-	require.NoError(t, err)
-
-	runner := &recordingTmuxRunner{}
-	wsDialer := newFaultWSDialer()
-	fa := &conduitHAAgent{
-		Runner:   runner,
-		ws:       wsDialer,
-		admitted: make(chan *conduitv1.Welcome, 8),
+	if opts.Token == nil {
+		tok, err := node.Server.GenerateAgentToken(agent.ID, agent.ProjectID, nil, AgentRoleFull, nil)
+		require.NoError(t, err)
+		opts.Token = func() string { return tok }
+	}
+	if opts.HubURL == "" {
+		opts.HubURL = node.Public.URL
+	}
+	if opts.AgentID == "" {
+		opts.AgentID = agent.ID
+	}
+	if opts.ProjectID == "" {
+		opts.ProjectID = agent.ProjectID
+	}
+	if opts.LaunchID == "" {
+		opts.LaunchID = agent.RunID
 	}
 
-	ctl := control.New(control.Options{
-		KickTokenRefresh: func() { fa.kickCount.Add(1) },
-		Deliver: &control.DeliverOptions{
-			Runner:            runner,
-			ReadyPollInterval: 10 * time.Millisecond,
-		},
-	})
-	baseRPC := control.RPCHandler(ctl)
-	countedRPC := conduit.RPCHandlerFunc(func(ctx context.Context, req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
-		fa.rpcCount.Add(1)
-		fa.mu.Lock()
-		fa.rpcPaths = append(fa.rpcPaths, req.GetPath())
-		fa.mu.Unlock()
-		return baseRPC.HandleRPC(ctx, req)
-	})
-
-	a, err := sconduit.New(sconduit.Options{
-		HubURL:    node.Public.URL,
-		AgentID:   e.Agent.ID,
-		ProjectID: e.Agent.ProjectID,
-		LaunchID:  e.Agent.RunID,
-		Token:     func() string { return tok },
-		WS:        wsDialer.dialer,
-		OnSession: func(w *conduitv1.Welcome) {
-			fa.mu.Lock()
-			fa.lastWel = w
-			fa.mu.Unlock()
-			select {
-			case fa.admitted <- w:
-			default:
-			}
-		},
-		Backoff:   &conduit.Backoff{Base: 50 * time.Millisecond, Max: 500 * time.Millisecond, Rand: func(int64) int64 { return 0 }},
-		NoPTY:     true,
-		Session:   conduit.Config{RPCHandler: countedRPC},
-		RPCRoutes: ctl.Routes(),
-		Features:  ctl.Features(),
-	})
+	fa, err := conduittest.StartAgent(opts)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := fa.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
-	runCtx, cancel := context.WithCancel(context.Background())
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		_ = a.Run(runCtx)
-	}()
-
-	fa.stopFn = func() {
-		fa.stopOnce.Do(func() {
-			wsDialer.Restore()
-			cancel()
-			wsDialer.CloseCurrent()
-			select {
-			case <-exited:
-			case <-time.After(10 * time.Second):
-				t.Error("conduit HA fake agent did not stop")
-			}
-		})
-	}
-	t.Cleanup(fa.stopFn)
-
-	fa.WaitAdmitted(t, 10*time.Second)
-	return fa
+	wrapped := &conduitHAAgent{Agent: fa}
+	wrapped.WaitAdmitted(t, 10*time.Second)
+	return wrapped
 }
 
 // WaitAdmitted waits for the next Welcome from the relay.
 func (a *conduitHAAgent) WaitAdmitted(t *testing.T, timeout time.Duration) *conduitv1.Welcome {
 	t.Helper()
-	select {
-	case w := <-a.admitted:
-		return w
-	case <-time.After(timeout):
-		t.Fatalf("fake agent session not admitted within %s", timeout)
-		return nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	w, err := a.Agent.WaitAdmitted(ctx)
+	require.NoError(t, err)
+	return w
 }
 
-// SessionID returns the session ID from the latest Welcome.
-func (a *conduitHAAgent) SessionID() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.lastWel.GetSessionId()
-}
-
-// RelayInstanceID returns the relay instance ID from the latest Welcome.
-func (a *conduitHAAgent) RelayInstanceID() string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.lastWel.GetRelayInstanceId()
-}
-
-// RPCCount returns the total number of control RPCs received by the agent.
-func (a *conduitHAAgent) RPCCount() int64 { return a.rpcCount.Load() }
-
-// RPCPaths returns a copy of all control RPC paths received by the agent.
-func (a *conduitHAAgent) RPCPaths() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return append([]string(nil), a.rpcPaths...)
-}
-
-// Close stops the fake agent cleanly.
-func (a *conduitHAAgent) Close() { a.stopFn() }
-
-// CloseSession abruptly closes the agent's current WebSocket TCP connection.
-func (a *conduitHAAgent) CloseSession() { a.ws.CloseCurrent() }
-
-// SilentDrop stalls reads and writes on the agent's WebSocket TCP conn without
-// sending a close frame. Call Restore to resume and deliver pending frames.
-func (a *conduitHAAgent) SilentDrop() { a.ws.SilentDrop() }
-
-// Restore resumes reads and writes on the agent's WebSocket TCP conn.
-func (a *conduitHAAgent) Restore() { a.ws.Restore() }
-
-// --- Fake Broker (real runtimebroker.ConduitDialer + real hubclient DeliverMessage) ---
-
-// conduitHABroker is a fake broker wired with the real
-// runtimebroker.ConduitDialer and a real HMAC-authenticated hubclient.Client
-// (the same HTTP client path hubConduitDeliverer calls).
+// conduitHABroker wraps *conduittest.Broker for the pkg/hub HA harness tests.
 type conduitHABroker struct {
-	BrokerID  string
-	Dialer    *runtimebroker.ConduitDialer
-	HubClient hubclient.Client
-	ws        *faultWSDialer
-
-	stopOnce sync.Once
-	stopFn   func()
+	*conduittest.Broker
 }
 
 // StartBroker starts a fake broker dialing node's public conduit endpoint and
@@ -971,52 +612,22 @@ type conduitHABroker struct {
 func (e *conduitHAEnv) StartBroker(t *testing.T, node *conduitHANode, rpcHandler conduit.RPCHandler) *conduitHABroker {
 	t.Helper()
 
-	wsDialer := newFaultWSDialer()
-	d, err := runtimebroker.NewConduitDialer(runtimebroker.ConduitDialConfig{
-		HubEndpoint: node.Public.URL,
-		BrokerID:    e.BrokerID,
-		SecretKey:   e.BrokerSecret,
-		Version:     "test",
-		Incarnation: "broker-inc-" + uuid.NewString()[:8],
-		RPCHandler:  rpcHandler,
-		WS:          wsDialer.dialer,
-		Rand:        func(int64) int64 { return 0 },
+	fb, err := conduittest.StartBroker(conduittest.BrokerOptions{
+		HubURL:       node.Public.URL,
+		BrokerID:     e.BrokerID,
+		BrokerSecret: e.BrokerSecret,
+		RPCHandler:   rpcHandler,
 	})
 	require.NoError(t, err)
-
-	hc, err := hubclient.New(node.Public.URL, hubclient.WithHMACAuth(e.BrokerID, e.BrokerSecret))
-	require.NoError(t, err)
-
-	runCtx, cancel := context.WithCancel(context.Background())
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		_ = d.Run(runCtx)
-	}()
-
-	fb := &conduitHABroker{
-		BrokerID:  e.BrokerID,
-		Dialer:    d,
-		HubClient: hc,
-		ws:        wsDialer,
-	}
-	fb.stopFn = func() {
-		fb.stopOnce.Do(func() {
-			wsDialer.Restore()
-			cancel()
-			wsDialer.CloseCurrent()
-			select {
-			case <-exited:
-			case <-time.After(10 * time.Second):
-				t.Error("conduit HA fake broker did not stop")
-			}
-		})
-	}
-	t.Cleanup(fb.stopFn)
+	t.Cleanup(func() {
+		if err := fb.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	require.NoError(t, pollUntil(10*time.Second, func() error {
-		if d.CommandPathState() != api.BrokerHealthHealthy {
-			return fmt.Errorf("broker conduit command path state = %q, want %q", d.CommandPathState(), api.BrokerHealthHealthy)
+		if fb.Dialer.CommandPathState() != api.BrokerHealthHealthy {
+			return fmt.Errorf("broker conduit command path state = %q, want %q", fb.Dialer.CommandPathState(), api.BrokerHealthHealthy)
 		}
 		ps, err := node.RegStore.ListPrincipalSessions(context.Background(), registry.PrincipalBroker, e.BrokerID)
 		if err != nil {
@@ -1027,27 +638,8 @@ func (e *conduitHAEnv) StartBroker(t *testing.T, node *conduitHANode, rpcHandler
 		}
 		return nil
 	}))
-	return fb
+	return &conduitHABroker{Broker: fb}
 }
-
-// DeliverMessage sends a deliver-message flush over the real broker->hub HTTP
-// endpoint (POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/deliver).
-func (b *conduitHABroker) DeliverMessage(ctx context.Context, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error) {
-	return b.HubClient.RuntimeBrokers().DeliverMessage(ctx, b.BrokerID, agentID, req)
-}
-
-// Close stops the fake broker cleanly.
-func (b *conduitHABroker) Close() { b.stopFn() }
-
-// CloseSession abruptly closes the broker's current WebSocket TCP connection.
-func (b *conduitHABroker) CloseSession() { b.ws.CloseCurrent() }
-
-// SilentDrop stalls reads and writes on the broker's WebSocket TCP conn without
-// sending a close frame. Call Restore to resume and deliver pending frames.
-func (b *conduitHABroker) SilentDrop() { b.ws.SilentDrop() }
-
-// Restore resumes reads and writes on the broker's WebSocket TCP conn.
-func (b *conduitHABroker) Restore() { b.ws.Restore() }
 
 // --- Helpers ---
 
