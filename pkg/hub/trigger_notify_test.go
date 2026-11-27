@@ -255,9 +255,10 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 	assert.NotEmpty(t, env.Event.Attributes["reason"])
 	assert.NotContains(t, env.Event.Attributes["reason"], payloadSentinel)
 
-	// Verify notify fire rows are recorded in trigger_fires for both sinks
-	// (action_index=-1 for agent_message, action_index=-2 for user_notice)
-	// with deterministic fixed-window cooldown event_ids.
+	// Verify agent-message notify fire row is recorded in trigger_fires with
+	// action_type="notify" and action_index=-1 and deterministic fixed-window
+	// cooldown event_id, while internal user-notice cooldown claim rows (-2)
+	// stay hidden from ListTriggerFires.
 	fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
 		ProjectID: f.projectID,
 		TriggerID: trResp.ID,
@@ -278,9 +279,7 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusFired, agentNotifyRows[0].Status)
 	win := fireNotifyCooldownWindow(now, DefaultFireNotifyCooldown)
 	assert.Equal(t, TriggerNotifyCooldownEventID(trResp.ID, FireNotifySinkAgent, "failed", env.Event.Attributes["reason"], win), agentNotifyRows[0].EventID)
-	require.Len(t, userNotifyRows, 1)
-	assert.Equal(t, store.TriggerFireStatusFired, userNotifyRows[0].Status)
-	assert.Equal(t, TriggerNotifyCooldownEventID(trResp.ID, FireNotifySinkUser, "failed", env.Event.Attributes["reason"], win), userNotifyRows[0].EventID)
+	assert.Empty(t, userNotifyRows, "internal user-notice cooldown claim rows must not pollute ListTriggerFires")
 
 	// Event 2 fails 10 minutes later (within 1h cooldown) -> suppressed for BOTH sinks.
 	clockMu.Lock()

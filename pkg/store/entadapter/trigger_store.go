@@ -3588,7 +3588,11 @@ func (s *TriggerStore) GetTriggerFire(ctx context.Context, id string) (*store.Tr
 }
 
 func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.TriggerFireFilter, opts store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
-	query := s.client.TriggerFire.Query()
+	// Exclude internal user-notice durable cooldown claim rows (action_index=-2)
+	// from user-facing fire history; user notices live in the notifications table,
+	// while agent-message notify rows (action_index=-1) remain visible in history.
+	query := s.client.TriggerFire.Query().
+		Where(triggerfire.ActionIndexNEQ(store.TriggerFireActionIndexNotifyUser))
 	var (
 		pid    uuid.UUID
 		hasPID bool

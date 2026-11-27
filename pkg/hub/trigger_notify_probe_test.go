@@ -179,17 +179,6 @@ func TestTriggerNotify_UserNoticeSkippedForRemovedProjectMember(t *testing.T) {
 	notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.admin.ID, false)
 	require.NoError(t, err)
 	assert.Empty(t, notifs, "removed project member must not receive trigger failure user notices")
-
-	fires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.projectID, TriggerID: tr.ID}, store.ListOptions{Limit: 20})
-	require.NoError(t, err)
-	foundSkipped := false
-	for _, fr := range fires.Items {
-		if fr.ActionType == store.TriggerActionNotify && fr.ActionIndex == store.TriggerFireActionIndexNotifyUser {
-			assert.Equal(t, store.TriggerFireStatusSkipped, fr.Status)
-			foundSkipped = true
-		}
-	}
-	assert.True(t, foundSkipped, "expected user-notice notify row recorded as skipped")
 }
 
 // N3: sanitizeFireNotifyReason must truncate on a UTF-8 rune boundary.
