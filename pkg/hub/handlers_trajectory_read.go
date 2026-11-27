@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
@@ -198,43 +199,34 @@ func isSignedTrajectoryContentRequest(r *http.Request) bool {
 	return q.Get(skillFileSigParam) != "" && q.Get(skillFileExpParam) != ""
 }
 
-// requireUserTrajectoryReadAuth rejects unauthenticated callers (401) and
-// agent-token callers (403). Agents must never read their own raw audit trail
-// through the user-facing trajectory read API.
-func requireUserTrajectoryReadAuth(w http.ResponseWriter, r *http.Request) bool {
+// requireUserTrajectoryReadAuth rejects agent-token callers (403),
+// unauthenticated callers (401), and scoped UATs (403 session_required /
+// GOV_PENDING). Agents must never read their own raw audit trail through the
+// user-facing trajectory read API, and UAT delegation is deferred to P7.
+func (s *Server) requireUserTrajectoryReadAuth(w http.ResponseWriter, r *http.Request) bool {
 	ctx := r.Context()
 	if GetAgentIdentityFromContext(ctx) != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Agent tokens cannot access trajectory read endpoints", nil)
 		return false
 	}
-	if GetIdentityFromContext(ctx) == nil {
-		Unauthorized(w)
-		return false
-	}
-	return true
+	_, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	return ok
 }
 
 // authorizeAgentTrajectoryRead checks that the authenticated user principal
 // holds project.trajectory.read on agent's project. Never bundled into
 // agent.read; cross-project callers are refused with 403.
 func (s *Server) authorizeAgentTrajectoryRead(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
-	ctx := r.Context()
 	if agent == nil || agent.ProjectID == "" {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Access denied: project.trajectory.read is required", nil)
 		return false
 	}
-	decision := s.authzService.DecideFromContext(ctx, Resource{
+	return s.authorize(w, r, Resource{
 		Type: "project",
 		ID:   agent.ProjectID,
 	}, ActionTrajectoryRead)
-	if !decision.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Access denied: project.trajectory.read is required", nil)
-		return false
-	}
-	return true
 }
 
 func encodeTrajectoryListCursor(offset int) string {
@@ -273,7 +265,7 @@ func (s *Server) handleAgentTrajectorySegmentsList(w http.ResponseWriter, r *htt
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if !requireUserTrajectoryReadAuth(w, r) {
+	if !s.requireUserTrajectoryReadAuth(w, r) {
 		return
 	}
 
@@ -397,7 +389,7 @@ func (s *Server) handleAgentTrajectorySegmentDownload(w http.ResponseWriter, r *
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	if !requireUserTrajectoryReadAuth(w, r) {
+	if !s.requireUserTrajectoryReadAuth(w, r) {
 		return
 	}
 
