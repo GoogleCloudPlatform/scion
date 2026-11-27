@@ -654,3 +654,88 @@ func TestConversationMessageAttachment_PublishedAs(t *testing.T) {
 	require.Len(t, listedDisabled[0].Attachments, 1)
 	assert.Empty(t, listedDisabled[0].Attachments[0].PublishedAs)
 }
+
+// TestConversationMessageAttachment_MayReadAttachmentsRefused pins the
+// MayReadAttachments check inside artifacts.Service.ServeMessageAttachment
+// (ptone/scion#9579): when authorizeConversationMessageRead admits a caller
+// (here, a DM party agent) but MayReadAttachments refuses (the agent is held
+// and therefore not in good standing), the download route must refuse with the
+// same uniform 404 Attachment body as an unknown attachment ID.
+func TestConversationMessageAttachment_MayReadAttachmentsRefused(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+
+	dm := seedDirectConversation(t, f.st, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	msg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      f.projA.ID,
+		Sender:         "user:alice",
+		SenderID:       f.ua.ID,
+		Recipient:      "agent:aa",
+		RecipientID:    f.aa.ID,
+		Msg:            "standing-gated attachment",
+		Type:           "instruction",
+		Channel:        "web",
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      time.Now().UTC(),
+	}
+	require.NoError(t, f.st.CreateMessage(ctx, msg))
+
+	const payload = "standing-gated attachment bytes"
+	attID := f.uploadAs(t, f.ua, f.projA.ID, "secret.txt", payload)
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, attID, artifacts.PrincipalKindUser, f.ua.ID, msg.ID, f.projA.ID))
+
+	doDownload := func(att string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+dm.ID+"/messages/"+msg.ID+"/attachments/"+att, nil)
+		req = req.WithContext(storedAgentContext(f.aa))
+		rec := httptest.NewRecorder()
+		f.srv.handleConversationRoutes(rec, req)
+		return rec
+	}
+
+	// Precondition: agent in good standing can download the attachment.
+	require.NoError(t, f.srv.agentStanding(ctx, f.aa.ID), "precondition: aa is in standing")
+	recOK := doDownload(attID)
+	require.Equal(t, http.StatusOK, recOK.Code, recOK.Body.String())
+	assert.Equal(t, payload, recOK.Body.String())
+
+	// Reference 404 body for an unknown attachment ID.
+	recUnknown := doDownload(uuid.NewString())
+	require.Equal(t, http.StatusNotFound, recUnknown.Code)
+
+	// Place an active hold on agent aa so agentStanding fails while
+	// authorizeConversationMessageRead still admits the DM party.
+	_, err := f.st.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID:           f.aa.ID,
+		ProjectID:         f.projA.ID,
+		Cause:             store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser,
+		RootPrincipalID:   f.ua.ID,
+		Trigger:           store.MembershipLossTriggerMemberRemove,
+		ActorKind:         "system",
+		ActorID:           "hub",
+		CorrelationID:     "test-may-read-attachments",
+	}})
+	require.NoError(t, err)
+	require.Error(t, f.srv.agentStanding(ctx, f.aa.ID), "held agent must fail agentStanding")
+
+	// Confirm authorizeConversationMessageRead still admits the message read
+	// (200 OK with attachments omitted by noteMessageAttachments), isolating
+	// MayReadAttachments in ServeMessageAttachment as the download gate.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+dm.ID+"/messages/"+msg.ID, nil)
+	getReq = getReq.WithContext(storedAgentContext(f.aa))
+	getRec := httptest.NewRecorder()
+	f.srv.handleConversationRoutes(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var gotMsg store.Message
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotMsg))
+	assert.Empty(t, gotMsg.Attachments)
+
+	// Download must be refused by MayReadAttachments with the uniform 404 body.
+	recRefused := doDownload(attID)
+	require.Equal(t, http.StatusNotFound, recRefused.Code, "held agent download must return 404")
+	assert.Equal(t, recUnknown.Body.String(), recRefused.Body.String(), "MayReadAttachments refusal must return identical 404 body")
+}
