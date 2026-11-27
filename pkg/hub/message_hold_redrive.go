@@ -903,6 +903,21 @@ func (s *Server) processClaimedHeldRow(
 			s.failClaimedHeldMessage(ctx, target, row, decisionFailReason)
 			return claimedRowFailed
 		}
+	} else if row.Type == messages.TypeCommandResponse {
+		// Group-conversation command-response rows store status + exit code only
+		// so other participants never see run reason or shared output tails;
+		// reconstruct the full asking-agent outcome and command_* metadata on
+		// re-drive (design §4.9, §15, R2).
+		if cmdTransientErr := s.enrichHeldCommandResponse(ctx, row, sm); cmdTransientErr != nil || ctx.Err() != nil {
+			errToLog := cmdTransientErr
+			if errToLog == nil {
+				errToLog = ctx.Err()
+			}
+			slog.Warn("message-hold: transient error enriching command-response; re-holding row",
+				"agent_id", agentID, "message_id", row.ID, "error", errToLog)
+			s.reholdOrFailClaimedRow(ctx, agentID, row)
+			return claimedRowReheldTransient
+		}
 	} else if shouldTranslateHeldWebMentions(row) {
 		if mentionTransientErr := s.enrichHeldWebMentions(ctx, row, sm, webMentionCache); mentionTransientErr != nil || ctx.Err() != nil {
 			errToLog := mentionTransientErr
@@ -1470,6 +1485,16 @@ func (s *Server) revalidateHeldMessageSender(ctx context.Context, row *store.Mes
 		return s.revalidateScheduledHeldMessage(ctx, row, target)
 	}
 
+	// 1b. Hub-emitted command-response outcome: selected ONLY from hub-recorded
+	// immutable provenance (system:hub sender tuple + TypeCommandResponse +
+	// command_runs.outcome_message_id == row.ID + asking agent == target.ID).
+	if row.Sender == "system:hub" && row.Type == messages.TypeCommandResponse {
+		if row.SenderID != "system:hub" || row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
+			return false, nil
+		}
+		return s.revalidateCommandResponseHeldMessage(ctx, row, target)
+	}
+
 	// 2. Delegated agent sender (AuthorizingUserID / DelegationGrantID set).
 	if row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
 		return s.revalidateDelegatedHeldMessage(ctx, row, target)
@@ -1499,6 +1524,36 @@ func (s *Server) revalidateHeldMessageSender(ctx context.Context, row *store.Mes
 	}
 
 	return false, nil
+}
+
+func (s *Server) revalidateCommandResponseHeldMessage(ctx context.Context, row *store.Message, target *store.Agent) (bool, error) {
+	if row == nil || row.ID == "" || target == nil || target.ID == "" || !target.DeletedAt.IsZero() {
+		return false, nil
+	}
+	run, err := s.store.GetCommandRunByOutcomeMessageID(ctx, row.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return false, nil
+		}
+		return false, fmt.Errorf("command run lookup by outcome message: %w", err)
+	}
+	if run == nil || run.OutcomeMessageID != row.ID {
+		return false, nil
+	}
+	req, err := s.store.GetCommandRequest(ctx, run.RequestID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("command request lookup: %w", err)
+	}
+	if req == nil || req.AgentID != target.ID {
+		return false, nil
+	}
+	if row.RecipientID != "" && row.RecipientID != target.ID {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Server) revalidateScheduledHeldMessage(ctx context.Context, row *store.Message, target *store.Agent) (bool, error) {

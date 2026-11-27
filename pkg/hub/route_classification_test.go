@@ -271,6 +271,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/agent/secret-requests":                         "agent-token:agent-secret-requests",
 	"/api/v1/agent/secret-requests/":                        "agent-token:agent-secret-requests",
 	"/api/v1/agent/command-requests":                        "agent-token:agent-command-requests",
+	"/api/v1/agent/command-requests/":                       "agent-token:agent-command-requests",
 	"/api/v1/conduit":                                       "agent-token:conduit",
 	"/api/v1/system/fs/list":                                "workstation:filesystem",
 	"/api/v1/system/fs/mkdir":                               "workstation:filesystem",

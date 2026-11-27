@@ -42,6 +42,7 @@ const hostedUserGuide = {
 		{ label: 'Agent Plugins (Experimental)', slug: 'local/agent-plugins' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'Approved Commands', slug: 'hosted/user/approved-commands' },
 		{ label: 'Using Artifacts', slug: 'hosted/user/artifacts' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'Scheduled Chat Messages', slug: 'hosted/user/scheduled-send' },

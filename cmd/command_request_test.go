@@ -61,13 +61,21 @@ func TestValidateCommandRequestFlags(t *testing.T) {
 		assert.Contains(t, err.Error(), "mutually exclusive")
 	})
 
-	t.Run("refuses conversation target in P1", func(t *testing.T) {
+	t.Run("conversation target requires --approver", func(t *testing.T) {
 		resetCommandRequestFlags()
 		msgCommandRequestKey = "deploy"
 		msgCommandInline = "echo hi"
 		err := validateCommandRequestFlags(false, false, true)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "direct message to a user")
+		assert.Contains(t, err.Error(), "--approver")
+
+		msgCommandApprover = "@alice@example.com"
+		require.NoError(t, validateCommandRequestFlags(false, false, true))
+		raw, err := loadCommandRequestPayload()
+		require.NoError(t, err)
+		var decoded messages.CommandRequestInput
+		require.NoError(t, json.Unmarshal(raw, &decoded))
+		assert.Equal(t, "@alice@example.com", decoded.Approver)
 	})
 
 	t.Run("valid DM command request loads payload", func(t *testing.T) {
@@ -196,13 +204,17 @@ func TestCommandRequestCLI_ListAndApprove(t *testing.T) {
 		assert.Contains(t, err.Error(), "human users")
 	})
 
-	t.Run("agentAllowed excludes command.request.approve and windowsAllowed excludes command", func(t *testing.T) {
+	t.Run("agentAllowed includes list/withdraw, excludes approve/dismiss, windowsAllowed excludes command", func(t *testing.T) {
 		assert.True(t, agentAllowed["command"])
 		assert.True(t, agentAllowed["command.request"])
 		assert.True(t, agentAllowed["command.request.list"])
+		assert.True(t, agentAllowed["command.request.withdraw"])
 		assert.False(t, agentAllowed["command.request.approve"])
+		assert.False(t, agentAllowed["command.request.dismiss"])
 		assert.False(t, windowsAllowed["command"])
 		assert.False(t, windowsAllowed["command.request.approve"])
+		assert.False(t, windowsAllowed["command.request.dismiss"])
+		assert.False(t, windowsAllowed["command.request.withdraw"])
 	})
 
 	t.Run("non-TTY approve requires matching --confirm-sha256", func(t *testing.T) {
@@ -573,4 +585,107 @@ func TestValidateCommandRequestFlags_ShareOutput(t *testing.T) {
 	var decoded messages.CommandRequestInput
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 	assert.True(t, decoded.ShareOutputRequested)
+}
+
+func TestCommandRequestCLI_DismissAndWithdraw(t *testing.T) {
+	var gotDismiss messages.DismissCommandRequestBody
+	var gotWithdraw messages.WithdrawCommandRequestBody
+	dismissCount := 0
+	withdrawCount := 0
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/command-requests/req-d1/dismiss":
+			dismissCount++
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotDismiss))
+			_ = json.NewEncoder(w).Encode(messages.DismissCommandRequestResponse{
+				Request: messages.CommandRequestView{
+					RowID:   "req-d1",
+					Key:     "deploy",
+					Version: 1,
+					Status:  "dismissed",
+				},
+				AlreadyDismissed: dismissCount > 1,
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agent/command-requests/withdraw":
+			withdrawCount++
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotWithdraw))
+			_ = json.NewEncoder(w).Encode(messages.WithdrawCommandRequestResponse{
+				Request: messages.CommandRequestView{
+					RowID:   "req-w1",
+					Key:     "deploy",
+					Version: 1,
+					Status:  "withdrawn",
+				},
+				AlreadyWithdrawn: withdrawCount > 1,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	prevFactory := commandRequestsClientFactory
+	commandRequestsClientFactory = func() (hubclient.Client, error) {
+		return hubclient.New(ts.URL)
+	}
+	t.Cleanup(func() { commandRequestsClientFactory = prevFactory })
+
+	t.Run("dismiss refused in agent mode", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "agent")
+		cmd := newCommandRequestDismissCmd()
+		err := runCommandRequestDismiss(cmd, []string{"req-d1"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "human users")
+	})
+
+	t.Run("dismiss works in human mode and is idempotent", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "human")
+		cmd := newCommandRequestDismissCmd()
+		require.NoError(t, cmd.Flags().Set("reason", "not now"))
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		require.NoError(t, runCommandRequestDismiss(cmd, []string{"req-d1"}))
+		assert.Equal(t, "not now", gotDismiss.Reason)
+		assert.Equal(t, "cli", gotDismiss.Surface)
+		assert.Contains(t, out.String(), "Dismissed deploy v1")
+
+		out.Reset()
+		require.NoError(t, runCommandRequestDismiss(cmd, []string{"req-d1"}))
+		assert.Contains(t, out.String(), "already dismissed")
+	})
+
+	t.Run("dismiss rejects reason > 500 runes", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "human")
+		cmd := newCommandRequestDismissCmd()
+		require.NoError(t, cmd.Flags().Set("reason", strings.Repeat("a", 501)))
+		err := runCommandRequestDismiss(cmd, []string{"req-d1"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "500")
+	})
+
+	t.Run("withdraw refused in human mode", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "human")
+		cmd := newCommandRequestWithdrawCmd()
+		err := runCommandRequestWithdraw(cmd, []string{"deploy"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "agent mode")
+	})
+
+	t.Run("withdraw works in agent mode and is idempotent", func(t *testing.T) {
+		t.Setenv("SCION_CLI_MODE", "agent")
+		cmd := newCommandRequestWithdrawCmd()
+		require.NoError(t, cmd.Flags().Set("reason", "obsolete"))
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		require.NoError(t, runCommandRequestWithdraw(cmd, []string{"deploy"}))
+		assert.Equal(t, "deploy", gotWithdraw.Key)
+		assert.Equal(t, "obsolete", gotWithdraw.Reason)
+		assert.Contains(t, out.String(), "deploy v1 withdrawn")
+
+		out.Reset()
+		require.NoError(t, runCommandRequestWithdraw(cmd, []string{"deploy"}))
+		assert.Contains(t, out.String(), "already withdrawn")
+	})
 }

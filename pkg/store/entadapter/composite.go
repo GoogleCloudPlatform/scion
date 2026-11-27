@@ -913,6 +913,9 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 				if _, err := txStore.WithdrawAgentSecretRequestsOnDelete(ctx, id, now); err != nil {
 					return 0, err
 				}
+				if _, err := txStore.WithdrawAgentCommandRequestsOnDelete(ctx, id, now); err != nil {
+					return 0, err
+				}
 			}
 			for _, id := range removedIDs {
 				if row := lifecycleBefore[id]; row != nil {

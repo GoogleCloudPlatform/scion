@@ -254,14 +254,19 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 	}
 	collector := &agentSecretCleanupCollector{}
 	var withdrawn []*store.SecretRequest
+	var withdrawnCmds []*store.CommandRequest
 	txCtx := withAgentSecretCleanupCollector(ctx, collector)
 	txCtx = store.WithWithdrawnSecretRequestsCollector(txCtx, &withdrawn)
+	txCtx = store.WithWithdrawnCommandRequestsCollector(txCtx, &withdrawnCmds)
 	n, err := fn(txCtx)
 	if err == nil && n > 0 {
 		keys := append(preKeys, collector.snapshot()...)
 		s.removeAgentScopedSecrets(ctx, agentID, keys)
 		if len(withdrawn) > 0 {
 			s.emitPostCommitDeletedAgentSecretRequests(ctx, withdrawn)
+		}
+		if len(withdrawnCmds) > 0 {
+			s.emitPostCommitDeletedAgentCommandRequests(ctx, withdrawnCmds)
 		}
 		return n, err
 	}
@@ -326,6 +331,56 @@ func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, r
 			ActorKind: MessageActionActorHub,
 			Reason:    "agent deleted",
 			Details:   details,
+			Timestamp: ts,
+		})
+	}
+}
+
+func (s *Server) emitPostCommitDeletedAgentCommandRequests(ctx context.Context, rows []*store.CommandRequest) {
+	if len(rows) == 0 {
+		return
+	}
+	order := make([]string, 0, len(rows))
+	byID := make(map[string]*store.CommandRequest, len(rows))
+	for _, cr := range rows {
+		if cr == nil || cr.ID == "" {
+			continue
+		}
+		if _, seen := byID[cr.ID]; !seen {
+			order = append(order, cr.ID)
+		}
+		byID[cr.ID] = cr
+	}
+	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
+	defer cancel()
+	for _, id := range order {
+		cr := byID[id]
+		if cr.Status != store.CommandRequestStatusWithdrawn ||
+			cr.WithdrawnBy != store.CommandRequestWithdrawnBySystem ||
+			cr.WithdrawnReason != "agent deleted" {
+			continue
+		}
+		s.publishCommandRequestUpdated(postCtx, cr, nil)
+		ts := time.Now().UTC()
+		if cr.ResolvedAt != nil {
+			ts = *cr.ResolvedAt
+		}
+		s.emitMessageActionEvent(postCtx, &MessageActionEvent{
+			Kind:      msgaction.KindCommandRequest,
+			EventType: MessageActionEventWithdrawn,
+			RowID:     cr.ID,
+			MessageID: cr.MessageID,
+			ProjectID: cr.ProjectID,
+			AgentID:   cr.AgentID,
+			AgentName: cr.AgentName,
+			Key:       cr.Key,
+			Version:   cr.Version,
+			ActorKind: MessageActionActorHub,
+			Reason:    "agent deleted",
+			Details: map[string]string{
+				"command_sha256":   cr.CommandSHA256,
+				"approver_user_id": cr.ApproverUserID,
+			},
 			Timestamp: ts,
 		})
 	}

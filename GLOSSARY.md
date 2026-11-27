@@ -457,6 +457,21 @@ A structured agent-to-human message (`secret-request`) asking a human to supply 
 _Avoid_: secret prompt, credential ask, secret form message
 _See also_: Agent Scope, Secret, Decision prompt
 
+**Command request**:
+An agent's proposal, sent as a versioned message-action row (kind `command_request`), asking a named human **Approver** to run one shell script in that human's **Execution container**. Pending requests expire after 24 hours, are capped at 10 per agent, and can be updated (`--update`), withdrawn by the asking agent (`scion command request withdraw`), or approved/dismissed by the approver (`scion command request approve|dismiss`). Gated by the `hub.command_requests` experiment.
+_Avoid_: exec request, command prompt, run request
+_See also_: Command run, Approver, Execution container
+
+**Command run**:
+The single execution attempt of an approved **Command request** version (`command_runs` table). Its Conduit `run_id` equals its row ID, enforced at most once per approved version via `UNIQUE(request_id)`, and terminates as `succeeded`, `failed`, `not_started`, or `unknown`.
+_Avoid_: command execution, exec job
+_See also_: Command request, Approver, Execution container
+
+**Approver**:
+The single named human allowed to approve or dismiss a given **Command request** (the DM recipient in a direct message, or the human conversation participant named by `--approver` in a conversation or thread). The approved command runs in this person's **Execution container** under their interactive session authority.
+_Avoid_: responder (when specifically naming the single authorized approver of a command request), executor
+_See also_: Command request, Command run, Execution container
+
 ## Identity & State
 
 **Project ID**:

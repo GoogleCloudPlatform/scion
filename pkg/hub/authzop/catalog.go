@@ -355,6 +355,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/agent/secret-requests", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped secret-request list (agent_id = caller), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated behind hub.agent_secrets", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/agent/secret-requests/", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped secret-request withdrawal (agent_id = caller), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated behind hub.agent_secrets", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/agent/command-requests", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped command-request list (agent_id = caller), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated behind hub.command_requests", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/agent/command-requests/", Kind: ExemptionInternalOnly, Reason: "Agent self-scoped command-request withdrawal (agent_id = caller), agent-JWT auth; refuses non-agent callers with 403 agents_only; experiment-gated behind hub.command_requests", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit", Kind: ExemptionInternalOnly, Reason: "Conduit session, agent-JWT auth (own agent row only) or runtime broker HMAC auth (shared connect verifier; carries broker RPCs), experiment-gated", Owner: "route_metadata.go"},
 
 	// Webhook endpoints — signature verification

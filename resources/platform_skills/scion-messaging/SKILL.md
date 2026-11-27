@@ -161,8 +161,11 @@ user-facing format. Agent-only messages do not require it.
   When a user needs to run a command with their own credentials in their execution
   container, you have two surfaces:
   - **Structured command card (`scion message --command-request <key> --command '...'` or `--command-file <path>`):**
-    use this when you want versioned tracking (`--update`, `scion command request list`),
-    a custom `--workdir` or `--timeout`, or `--share-output`.
+    use this when you want versioned tracking (`--update`, `scion command request list`,
+    `scion command request withdraw`), a custom `--workdir` or `--timeout`, or
+    `--share-output`. In a group conversation or thread, pass
+    `--approver <email-or-user-id>` naming one human participant by email or user ID
+    (display names are not accepted; only that approver can approve or dismiss).
   - **Markdown fenced shell blocks (`bash`, `sh`, `shell`, or `console` at line start):**
     in a DM, or in a group conversation addressed to a single human via `@`-mention,
     the web chat shows **Copy** and **Execute** on top-level shell blocks for 24 h
@@ -386,8 +389,11 @@ on `ask_user` status notifications to deliver the request.
 <!-- scion:end-experiment -->
 <!-- scion:experiment hub.command_requests -->
 - `--command-request <key>` (with `--command` or `--command-file`, optional
-  `--description`, `--workdir`, `--timeout`, `--share-output`, `--update`) sends a
-  structured command-request card; `scion command request list` inspects your requests.
+  `--description`, `--workdir`, `--timeout`, `--share-output`, `--update`, and
+  `--approver <email-or-user-id>` required in group conversations/threads — email
+  or user ID only) sends a structured command-request card;
+  `scion command request list` and `scion command request withdraw` inspect or
+  retire your requests.
   Use ```` ```sh no-execute ```` on illustrative shell blocks so they show Copy only.
 <!-- scion:end-experiment -->
 - `scion schedule create` schedules messages; see `scion-scheduler`.

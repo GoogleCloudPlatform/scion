@@ -84,7 +84,8 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		"notifications.go:createInboxMessage": "Phase 5 dual-write: agent→user inbox notification DM conversation",
 
 		// deliverCommandRunOutcome: approved command-run outcome response to asking agent.
-		"command_run_exec.go:deliverCommandRunOutcome": "Approved command-run outcome response stamped with request ConversationID (ptone/scion#9281)",
+		"command_run_exec.go:deliverCommandRunOutcome":               "Approved command-run outcome response stamped with request ConversationID (ptone/scion#9281)",
+		"command_requests_handlers.go:notifyCommandRequestDismissed": "Dismissed command-request notification stamped with request ConversationID (ptone/scion#9285)",
 	}
 
 	// -------------------------------------------------------------------

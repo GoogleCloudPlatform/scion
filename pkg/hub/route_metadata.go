@@ -1676,7 +1676,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/agent/command-requests", RouteID: "agent.commandRequests",
 		Classification:      RouteAgentToken,
 		AgentStanding:       AgentStandingExempt,
-		AgentStandingReason: "lists the calling agent's own command request metadata and run status; never executes commands or issues credentials",
+		AgentStandingReason: "lists and withdraws the calling agent's own command request metadata and run status; never executes commands or issues credentials",
+	},
+	"/api/v1/agent/command-requests/": {
+		Pattern: "/api/v1/agent/command-requests/", RouteID: "agent.commandRequestsAction",
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "lists and withdraws the calling agent's own command request metadata and run status; never executes commands or issues credentials",
 	},
 
 	// -------------------------------------------------------------------------

@@ -809,6 +809,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		}
 		applyDecisionsToOutbound(outMsg)
 		applySecretRequestsToOutbound(outMsg)
+		applyCommandRequestToOutbound(outMsg)
 
 		// DEF-51 principle: the validated probe must match the sent envelope
 		// by construction. Fields the outbound path does not send (Channel,
@@ -824,9 +825,10 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		if ref.Kind == messaging.RefEmail {
 			probe.Recipient = outMsg.Recipient
 		}
-		// A decision or secret-request prompt's type and body are the hub's to
-		// set (the body may be empty), so only an ordinary message is probed.
-		if msgDecisionsPayload == nil && msgSecretRequestsPayload == nil {
+		// A decision, secret-request, or command-request prompt's type and body
+		// are the hub's to set (the body may be empty), so only an ordinary
+		// message is probed.
+		if msgDecisionsPayload == nil && msgSecretRequestsPayload == nil && msgCommandReqPayload == nil {
 			if err := messaging.ValidateLegacyMessage(probe); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
@@ -840,7 +842,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		outMsg.AttachmentIDs = ids
 		result, err := agentSvc.SendOutboundMessage(sendCtx, senderAgent, outMsg)
 		if err != nil {
-			return formatSecretRequestSendError(ref.Raw, err)
+			return formatCommandRequestSendError(ref.Raw, err)
 		}
 		// The hub stored the prompt: mark the agent waiting for input.
 		defer afterDecisionsSent()
@@ -2004,13 +2006,14 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; defaults to type on_demand; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
 	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}; type defaults to on_demand — use environment only when a tool must find it in env at next restart, or file with target) from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().StringVar(&msgCommandRequestKey, "command-request", "", "Propose a command to run in the recipient's execution container (DM to user only; agents only; needs the hub.command_requests experiment)")
+	messageCmd.Flags().StringVar(&msgCommandRequestKey, "command-request", "", "Propose a command to run in the approver's execution container (user DM or conversation with --approver; agents only; needs the hub.command_requests experiment)")
 	messageCmd.Flags().StringVar(&msgCommandInline, "command", "", "With --command-request: inline shell command/script to propose")
 	messageCmd.Flags().StringVar(&msgCommandFile, "command-file", "", "With --command-request: read the proposed shell script from a file ('-' reads stdin, which then excludes --body-file -)")
 	messageCmd.Flags().StringVar(&msgCommandDescription, "description", "", "With --command-request: plain-text description of what the command does")
 	messageCmd.Flags().StringVar(&msgCommandWorkdir, "workdir", "", "With --command-request: absolute working directory inside the execution container (defaults to $HOME)")
 	messageCmd.Flags().StringVar(&msgCommandTimeout, "timeout", "", "With --command-request: execution timeout duration (e.g. 15m, 90s; default 10m, max 60m)")
 	messageCmd.Flags().BoolVar(&msgCommandShareOutput, "share-output", false, "With --command-request: ask the approver to share a redacted <= 4 KiB output tail back on completion")
+	messageCmd.Flags().StringVar(&msgCommandApprover, "approver", "", "With --command-request: named human approver (e.g. @alice@example.com); required when targeting a conversation or thread")
 	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
 
 	// Removed flags — kept (hidden) only so their use gets actionable

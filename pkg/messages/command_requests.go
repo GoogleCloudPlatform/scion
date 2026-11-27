@@ -61,6 +61,7 @@ const (
 	MinCommandRequestTimeoutS         = 1
 	DefaultCommandRequestTimeoutS     = 600
 	MaxCommandRequestTimeoutS         = 3600
+	MaxPendingCommandRequestsPerAgent = 10
 
 	CommandRequestInterpreterBashLogin = "bash-login"
 	CommandRequestHashPrefix           = "scion.command_request.v1\n"
@@ -216,6 +217,7 @@ type CommandRequestInput struct {
 	Workdir              string `json:"workdir,omitempty"`
 	TimeoutS             int    `json:"timeout_s,omitempty"`
 	ShareOutputRequested bool   `json:"share_output_requested,omitempty"`
+	Approver             string `json:"approver,omitempty"`
 }
 
 // CommandRequest is a validated, normalized command request ready for persistence.
@@ -341,6 +343,23 @@ type CommandRequestApproved struct {
 	Surface  string    `json:"surface"`
 }
 
+// CommandRequestDismissed describes who dismissed a request and why.
+type CommandRequestDismissed struct {
+	At       time.Time `json:"at"`
+	ByUserID string    `json:"byUserId,omitempty"`
+	ByName   string    `json:"byName"`
+	ByEmail  string    `json:"byEmail,omitempty"`
+	Reason   string    `json:"reason,omitempty"`
+	Surface  string    `json:"surface,omitempty"`
+}
+
+// CommandRequestWithdrawn describes when and why a request was withdrawn.
+type CommandRequestWithdrawn struct {
+	At     time.Time `json:"at"`
+	By     string    `json:"by,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+}
+
 // CommandRequestRunView is the client-visible view of a command run (no output).
 type CommandRequestRunView struct {
 	RunID         string     `json:"runId"`
@@ -411,6 +430,8 @@ type CommandRequestView struct {
 	ResolvedAt           *time.Time                `json:"resolvedAt,omitempty"`
 	ReplacedBy           *CommandRequestReplacedBy `json:"replacedBy,omitempty"`
 	Approved             *CommandRequestApproved   `json:"approved,omitempty"`
+	Dismissed            *CommandRequestDismissed  `json:"dismissed,omitempty"`
+	Withdrawn            *CommandRequestWithdrawn  `json:"withdrawn,omitempty"`
 	Run                  *CommandRequestRunView    `json:"run,omitempty"`
 }
 
@@ -426,7 +447,7 @@ type CommandRequestDetailResponse struct {
 	ApproverEmail          string                           `json:"approverEmail,omitempty"`
 	PreviousVersionUnknown *CommandRequestPreviousUnknown   `json:"previousVersionUnknown,omitempty"`
 	CanApprove             bool                             `json:"canApprove"`
-	// CanDismiss is a P5 feature-detect hook; false until the dismiss API lands in P5.
+	// CanDismiss is true for the named approver while the request is pending and unexpired.
 	CanDismiss bool `json:"canDismiss,omitempty"`
 	// OutputAvailable is true for the approver when the run has finished and
 	// an action_run output row exists in exec_run_outputs.
@@ -469,6 +490,32 @@ type ApproveCommandRequestResponse struct {
 	Request  CommandRequestView    `json:"request"`
 	Run      CommandRequestRunView `json:"run"`
 	Replayed bool                  `json:"replayed,omitempty"`
+}
+
+// DismissCommandRequestBody is the request body of POST /api/v1/command-requests/{id}/dismiss.
+type DismissCommandRequestBody struct {
+	Reason         string `json:"reason,omitempty"`
+	Surface        string `json:"surface,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+}
+
+// DismissCommandRequestResponse is the 200 response of POST /api/v1/command-requests/{id}/dismiss.
+type DismissCommandRequestResponse struct {
+	Request          CommandRequestView `json:"request"`
+	AlreadyDismissed bool               `json:"already_dismissed,omitempty"`
+	Replayed         bool               `json:"replayed,omitempty"`
+}
+
+// WithdrawCommandRequestBody is the request body of POST /api/v1/agent/command-requests/withdraw.
+type WithdrawCommandRequestBody struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// WithdrawCommandRequestResponse is the 200 response of POST /api/v1/agent/command-requests/withdraw.
+type WithdrawCommandRequestResponse struct {
+	Request          CommandRequestView `json:"request"`
+	AlreadyWithdrawn bool               `json:"already_withdrawn,omitempty"`
 }
 
 // AgentCommandRequestListResponse is the 200 response of GET /api/v1/agent/command-requests.
