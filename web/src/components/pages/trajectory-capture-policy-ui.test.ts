@@ -94,13 +94,12 @@ describe('Trajectory capture policy UI (P5.2b)', () => {
       const saveBtn = el.shadowRoot!.querySelector(
         'sl-button[variant="primary"]'
       ) as HTMLElement | null;
-      if (saveBtn) {
-        saveBtn.click();
-        await vi.waitFor(() => {
-          expect(putBodies.length).toBeGreaterThan(0);
-        });
-        expect(putBodies[0]).not.toHaveProperty('trajectoryCapture');
-      }
+      expect(saveBtn).not.toBeNull();
+      saveBtn!.click();
+      await vi.waitFor(() => {
+        expect(putBodies.length).toBeGreaterThan(0);
+      });
+      expect(putBodies[0]).not.toHaveProperty('trajectoryCapture');
     });
 
     it('renders editable select when experiment is on and unlocked, and sends trajectoryCapture on PUT', async () => {
@@ -115,7 +114,6 @@ describe('Trajectory capture policy UI (P5.2b)', () => {
             jsonResponse({
               project: { trajectoryCapture: 'metadata_only', defaultTemplate: 'claude' },
               settings: {},
-              trajectory_capture: { policy: 'metadata_only', enforced_by_hub: false },
             })
           );
         }
@@ -199,7 +197,6 @@ describe('Trajectory capture policy UI (P5.2b)', () => {
                   storedValue: 'off',
                 },
               },
-              trajectory_capture: { policy: 'full', enforced_by_hub: true },
             })
           );
         }
@@ -250,13 +247,12 @@ describe('Trajectory capture policy UI (P5.2b)', () => {
       const saveBtn = el.shadowRoot!.querySelector(
         'sl-button[variant="primary"]'
       ) as HTMLElement | null;
-      if (saveBtn) {
-        saveBtn.click();
-        await vi.waitFor(() => {
-          expect(putBodies.length).toBeGreaterThan(0);
-        });
-        expect(putBodies[0]).not.toHaveProperty('trajectoryCapture');
-      }
+      expect(saveBtn).not.toBeNull();
+      saveBtn!.click();
+      await vi.waitFor(() => {
+        expect(putBodies.length).toBeGreaterThan(0);
+      });
+      expect(putBodies[0]).not.toHaveProperty('trajectoryCapture');
     });
   });
 

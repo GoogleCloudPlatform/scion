@@ -341,8 +341,10 @@ func (s *Server) handleProjectSettings(w http.ResponseWriter, r *http.Request, p
 				BadRequest(w, "trajectoryCapture must be one of full, metadata_only, off")
 				return
 			}
+			alreadyStoredSame := stored != nil && stored.TrajectoryCapture == merged.TrajectoryCapture
 			if (merged.TrajectoryCapture == telemetrycontract.TrajectoryCapturePolicyMetadataOnly ||
 				merged.TrajectoryCapture == telemetrycontract.TrajectoryCapturePolicyOff) &&
+				!alreadyStoredSame &&
 				!s.trajectoryAllowProjectOptOut() {
 				writeError(w, http.StatusForbidden, telemetrycontract.TrajectoryErrCaptureOptOutDisallowed,
 					"trajectory capture opt-out is disallowed by Hub policy",

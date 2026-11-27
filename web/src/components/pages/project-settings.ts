@@ -192,7 +192,6 @@ interface ResolvedHubSetting {
 interface ResolvedProjectSettings {
   project: ProjectSettings;
   settings: Record<string, ResolvedHubSetting>;
-  trajectory_capture?: TrajectoryCapturePolicyStatus | undefined;
 }
 
 interface HarnessConfigEntry {
@@ -1535,8 +1534,7 @@ export class ScionPageProjectSettings extends LitElement {
         // as GET /settings, so the PUT path is unchanged.
         this.settings = resolved.project || {};
         this.resolvedSettings = resolved.settings || {};
-        this.trajectoryCaptureStatus =
-          resolved.trajectory_capture ?? this.settings.trajectory_capture ?? null;
+        this.trajectoryCaptureStatus = this.settings.trajectory_capture ?? null;
 
         // Extract telemetry hub default from the resolved response, replacing
         // the separate /api/v1/settings/public fetch.

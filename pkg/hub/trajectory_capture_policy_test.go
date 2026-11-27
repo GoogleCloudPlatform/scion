@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,7 +226,7 @@ func TestTrajectoryCapturePolicy_ProjectSettingsAndAgentReadSurface(t *testing.T
 
 	code, resolvedResp = getResolvedRaw()
 	require.Equal(t, http.StatusOK, code)
-	assert.Equal(t, map[string]any{"policy": "full", "enforced_by_hub": false}, resolvedResp["trajectory_capture"])
+	assert.NotContains(t, resolvedResp, "trajectory_capture")
 
 	code, agentResp = getAgentRaw()
 	require.Equal(t, http.StatusOK, code)
@@ -253,7 +254,8 @@ func TestTrajectoryCapturePolicy_ProjectSettingsAndAgentReadSurface(t *testing.T
 
 	// 5. Hub flips allow_project_opt_out to false:
 	//    - stored opt-out ("off") becomes effective "full" with enforced_by_hub=true everywhere;
-	//    - new opt-out writes get 403 capture_opt_out_disallowed;
+	//    - echoing the already-stored opt-out ("off") with an unrelated field passes (O1);
+	//    - a different or new opt-out write gets 403 capture_opt_out_disallowed;
 	//    - unrelated project settings PUT still succeeds;
 	//    - setting "full" or "" still succeeds.
 	putAdminLock(false)
@@ -264,7 +266,7 @@ func TestTrajectoryCapturePolicy_ProjectSettingsAndAgentReadSurface(t *testing.T
 
 	code, resolvedResp = getResolvedRaw()
 	require.Equal(t, http.StatusOK, code)
-	assert.Equal(t, map[string]any{"policy": "full", "enforced_by_hub": true}, resolvedResp["trajectory_capture"])
+	assert.NotContains(t, resolvedResp, "trajectory_capture")
 	resolvedMap := resolvedResp["settings"].(map[string]any)
 	trajEntry := resolvedMap[projectSettingTrajectoryCapture].(map[string]any)
 	assert.Equal(t, "hub", trajEntry["lockedBy"])
@@ -275,28 +277,54 @@ func TestTrajectoryCapturePolicy_ProjectSettingsAndAgentReadSurface(t *testing.T
 	require.Equal(t, http.StatusOK, code)
 	assert.Equal(t, map[string]any{"policy": "full", "enforced_by_hub": true}, agentResp["trajectory_capture"])
 
-	for _, optOut := range []string{"off", "metadata_only"} {
-		rr = putProjectSettings(`{"trajectoryCapture":"` + optOut + `"}`)
-		require.Equal(t, http.StatusForbidden, rr.Code, "optOut=%s body=%s", optOut, rr.Body.String())
-		var errResp ErrorResponse
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
-		assert.Equal(t, telemetrycontract.TrajectoryErrCaptureOptOutDisallowed, errResp.Error.Code)
-	}
+	// Echoing the already-stored "off" value alongside another field passes (O1),
+	// while the effective policy remains "full" (enforced_by_hub=true).
+	rr = putProjectSettings(`{"trajectoryCapture":"off","defaultTemplate":"x"}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var echoResp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &echoResp))
+	assert.Equal(t, "x", echoResp["defaultTemplate"])
+	assert.Equal(t, map[string]any{"policy": "full", "enforced_by_hub": true}, echoResp["trajectory_capture"])
+
+	// Changing to a different opt-out while locked returns 403 capture_opt_out_disallowed.
+	rr = putProjectSettings(`{"trajectoryCapture":"metadata_only"}`)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	assert.Equal(t, telemetrycontract.TrajectoryErrCaptureOptOutDisallowed, errResp.Error.Code)
 
 	// Unrelated partial PUT passes while locked.
 	rr = putProjectSettings(`{"defaultTemplate":"developer"}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	// Explicit "full" passes while locked.
+	// Explicit "full" passes while locked, and a subsequent new opt-out (full -> off/metadata_only) gets 403.
 	rr = putProjectSettings(`{"trajectoryCapture":"full"}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
-	// 6. Experiment turned back OFF: stored annotation is hidden and trajectory_capture omitted.
+	for _, optOut := range []string{"off", "metadata_only"} {
+		rr = putProjectSettings(`{"trajectoryCapture":"` + optOut + `"}`)
+		require.Equal(t, http.StatusForbidden, rr.Code, "optOut=%s body=%s", optOut, rr.Body.String())
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+		assert.Equal(t, telemetrycontract.TrajectoryErrCaptureOptOutDisallowed, errResp.Error.Code)
+	}
+
+	// 6. Experiment turned back OFF: stored annotation is hidden in both /settings and /settings/resolved (O2).
 	setTrajectoryCaptureExperiment(t, srv, s, false)
 	code, settingsResp = getProjectSettingsRaw()
 	require.Equal(t, http.StatusOK, code)
 	assert.NotContains(t, settingsResp, "trajectory_capture")
 	assert.NotContains(t, settingsResp, "trajectoryCapture")
+
+	code, resolvedResp = getResolvedRaw()
+	require.Equal(t, http.StatusOK, code)
+	assert.NotContains(t, resolvedResp, "trajectory_capture")
+	resolvedProject := resolvedResp["project"].(map[string]any)
+	assert.NotContains(t, resolvedProject, "trajectoryCapture")
+	resolvedMap = resolvedResp["settings"].(map[string]any)
+	trajEntry = resolvedMap[projectSettingTrajectoryCapture].(map[string]any)
+	assert.Equal(t, false, trajEntry["projectSet"])
+	assert.Nil(t, trajEntry["projectValue"])
+	assert.Nil(t, trajEntry["lockedBy"])
 }
 
 func TestTrajectoryCapturePolicy_PrepareEnforcement(t *testing.T) {
@@ -431,4 +459,59 @@ func TestTrajectoryCapturePolicy_PrepareEnforcement(t *testing.T) {
 	setAdminLock(false)
 	rr = doPrepare(300)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+type failingGetProjectStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (f *failingGetProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if f.fault.Active() {
+		return nil, errors.New("injected GetProject failure")
+	}
+	return f.Store.GetProject(ctx, id)
+}
+
+func TestTrajectoryCapturePolicy_AgentGetOmitsOnGetProjectError(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failingGetProjectStore {
+		return &failingGetProjectStore{Store: inner, fault: f}
+	})
+	setTrajectoryCaptureExperiment(t, srv, s, true)
+	ctx := t.Context()
+
+	proj := &store.Project{
+		ID:      api.NewUUID(),
+		Name:    "traj-fault-proj",
+		Slug:    "traj-fault-proj",
+		OwnerID: DevUserID,
+		Annotations: map[string]string{
+			projectSettingTrajectoryCapture: telemetrycontract.TrajectoryCapturePolicyOff,
+		},
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+
+	agent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "traj-fault-agent",
+		Name:      "traj-fault-agent",
+		ProjectID: proj.ID,
+		RunID:     "run-" + api.NewUUID(),
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+		Template:  "developer",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Arm fault so GetProject fails on single-agent GET: trajectory_capture must be omitted.
+	fault.Arm()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var agentResp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &agentResp))
+	assert.NotContains(t, agentResp, "trajectory_capture")
 }

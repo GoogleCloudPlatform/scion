@@ -170,11 +170,6 @@ type ResolvedProjectSettings struct {
 	// Settings is keyed by annotation key. Its key set is exactly
 	// projectSettingKeys — enforced by TestResolvedSettings_RegistryNoDrift.
 	Settings map[string]ResolvedProjectSetting `json:"settings"`
-
-	// TrajectoryCapture reports the effective Track 2 trajectory capture policy
-	// and Hub opt-out lock status when experiment tokenomics.trajectory_capture
-	// is enabled.
-	TrajectoryCapture *telemetrycontract.TrajectoryCapturePolicyStatus `json:"trajectory_capture,omitempty"`
 }
 
 // hubDefaultSource identifies which hub-side configuration source is consulted
@@ -443,13 +438,14 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 	agentDefaults, agentDefaultsReadable := s.hubAgentDefaultsDoc()
 	ceilings := s.agentLimitCeilings()
 
+	trajCaptureOn := s.experimentEnabled(experiments.TokenomicsTrajectoryCapture)
 	settings := make(map[string]ResolvedProjectSetting, len(projectSettingKeys))
 	for _, key := range projectSettingKeys {
 		entry := ResolvedProjectSetting{
 			HubDefault: ResolvedHubDefaultUnknown,
 		}
 
-		if project.Annotations != nil {
+		if project.Annotations != nil && (key != projectSettingTrajectoryCapture || trajCaptureOn) {
 			if val, ok := project.Annotations[key]; ok && projectAnnotationInEffect(key, val) {
 				v := val
 				entry.ProjectSet = true
@@ -475,7 +471,7 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 				entry.StoredValue = false
 			}
 		}
-		if key == projectSettingTrajectoryCapture && s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
+		if key == projectSettingTrajectoryCapture && trajCaptureOn {
 			status := s.resolveTrajectoryCapturePolicy(context.Background(), project)
 			if status.EnforcedByHub {
 				lockedBy := "hub"
@@ -492,17 +488,13 @@ func (s *Server) resolvedProjectSettings(project *store.Project) *ResolvedProjec
 	}
 
 	projSettings := projectSettingsFromAnnotations(project)
-	resp := &ResolvedProjectSettings{
+	if !trajCaptureOn {
+		projSettings.TrajectoryCapture = ""
+	}
+	return &ResolvedProjectSettings{
 		Project:  projSettings,
 		Settings: settings,
 	}
-	if s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
-		status := s.resolveTrajectoryCapturePolicy(context.Background(), project)
-		resp.TrajectoryCapture = &status
-	} else {
-		projSettings.TrajectoryCapture = ""
-	}
-	return resp
 }
 
 func limitCeilingForSetting(key string, ceilings opsettings.AgentLimitsSettings) any {
