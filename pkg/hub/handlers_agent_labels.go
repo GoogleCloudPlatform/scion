@@ -64,13 +64,26 @@ func patchBodyHasLabelsField(body []byte) bool {
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
+// isAgentDerivedCaller reports whether ctx carries any agent-derived principal
+// kind — local agent JWT, federated agent, or delegated agent — using the same
+// concrete-type classification as the authz kernel (principalContextForIdentity)
+// rather than Identity.Type() string matching.
+func isAgentDerivedCaller(ctx context.Context) bool {
+	id := GetIdentityFromContext(ctx)
+	if id == nil {
+		return false
+	}
+	kind := principalContextForIdentity(id).Kind
+	return isAgentPrincipal(kind) || kind == PrincipalKindAgentDelegated
+}
+
 // handleAgentLabels handles PATCH /api/v1/agents/{id}/labels.
 func (s *Server) handleAgentLabels(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPatch {
 		MethodNotAllowed(w, http.MethodPatch)
 		return
 	}
-	if isAgentCaller(r.Context()) {
+	if isAgentDerivedCaller(r.Context()) {
 		writeForbidden(w, errMsgAgentsCannotEditLabels)
 		return
 	}
@@ -88,7 +101,7 @@ func (s *Server) handleProjectAgentLabels(w http.ResponseWriter, r *http.Request
 		MethodNotAllowed(w, http.MethodPatch)
 		return
 	}
-	if isAgentCaller(r.Context()) {
+	if isAgentDerivedCaller(r.Context()) {
 		writeForbidden(w, errMsgAgentsCannotEditLabels)
 		return
 	}
@@ -103,7 +116,7 @@ func (s *Server) handleProjectAgentLabels(w http.ResponseWriter, r *http.Request
 func (s *Server) applyAgentLabelsMerge(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
-	if isAgentCaller(ctx) {
+	if isAgentDerivedCaller(ctx) {
 		writeForbidden(w, errMsgAgentsCannotEditLabels)
 		return
 	}

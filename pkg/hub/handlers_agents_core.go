@@ -4998,7 +4998,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 	// the request includes a labels field, without altering non-label behavior.
 	var preReadBody []byte
 	var bodyPreRead bool
-	if isAgentCaller(ctx) && r.Body != nil {
+	if isAgentDerivedCaller(ctx) && r.Body != nil {
 		var err error
 		preReadBody, err = io.ReadAll(r.Body)
 		if err != nil {

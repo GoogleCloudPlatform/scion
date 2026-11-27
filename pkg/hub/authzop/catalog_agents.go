@@ -378,6 +378,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector"},
 			{Package: "pkg/hub", Function: "TestPatchAgent_ImageEditRequiresAttach"},
 			{Package: "pkg/hub", Function: "TestPendingReauth_ImageEditRequiresAttach"},
+			{Package: "pkg/hub", Function: "TestPatchAgentLabels_PatchMultiFieldAuditAndRollback"},
 		},
 		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

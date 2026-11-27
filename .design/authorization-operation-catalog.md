@@ -984,6 +984,7 @@
 - `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
 - `pkg/hub:TestPatchAgent_ImageEditRequiresAttach`
 - `pkg/hub:TestPendingReauth_ImageEditRequiresAttach`
+- `pkg/hub:TestPatchAgentLabels_PatchMultiFieldAuditAndRollback`
 
 ---
 

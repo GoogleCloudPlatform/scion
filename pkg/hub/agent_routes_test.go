@@ -151,6 +151,8 @@ func agentRouteCases() []agentRouteCase {
 		proj(post, "/reincarnate", ProjectAgentRouteActionReincarnate, opAgentReincarnate),
 		proj(post, "/reset-auth", ProjectAgentRouteActionResetAuth, opAgentResetAuth),
 		proj(post, "/keys", ProjectAgentRouteActionKeys, opAgentKeys),
+		proj(http.MethodPatch, "/labels", ProjectAgentRouteLabels, opAgentLabelsUpdate),
+		proj(get, "/labels", ProjectAgentRouteLabels, ""),
 	}
 }
 
@@ -411,7 +413,7 @@ func TestAgentSubRoute_CatalogDrift(t *testing.T) {
 		opAgentUsageRead, opAgentUsageIngest, opAgentUsageCapabilities,
 		opAgentStatusUpdate, opAgentLogsRead, opAgentScreenRead, opAgentMessagesRead, opAgentMetricsRead,
 		opAgentKeys, opAgentActionMessage, opAgentPortList, opAgentPortRegister,
-		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard,
+		opAgentPortTunnel, opAgentStopAllProject, opAgentPendingDiscard, opAgentLabelsUpdate,
 	} {
 		assert.NotEmpty(t, discovered[op], "operation %s has no resolver entry point", op)
 	}

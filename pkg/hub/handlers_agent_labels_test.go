@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -172,7 +176,8 @@ func (f *labelTestFixture) labelAudits(t *testing.T, agentID string) []*store.Mu
 
 type labelUpdateFaultStore struct {
 	store.Store
-	onUpdate func(ctx context.Context, a *store.Agent, next func(context.Context, *store.Agent) error) error
+	onUpdate           func(ctx context.Context, a *store.Agent, next func(context.Context, *store.Agent) error) error
+	onSetSuspendPolicy func(ctx context.Context, agentID, policy string, next func(context.Context, string, string) (bool, error)) (bool, error)
 }
 
 func (w *labelUpdateFaultStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
@@ -182,9 +187,20 @@ func (w *labelUpdateFaultStore) UpdateAgent(ctx context.Context, a *store.Agent)
 	return w.Store.UpdateAgent(ctx, a)
 }
 
+func (w *labelUpdateFaultStore) SetAgentSuspendPolicy(ctx context.Context, agentID, policy string) (bool, error) {
+	if w.onSetSuspendPolicy != nil {
+		return w.onSetSuspendPolicy(ctx, agentID, policy, w.Store.SetAgentSuspendPolicy)
+	}
+	return w.Store.SetAgentSuspendPolicy(ctx, agentID, policy)
+}
+
 func (w *labelUpdateFaultStore) WithTx(ctx context.Context, fn func(store.Store) error) error {
 	return w.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&labelUpdateFaultStore{Store: tx, onUpdate: w.onUpdate})
+		return fn(&labelUpdateFaultStore{
+			Store:              tx,
+			onUpdate:           w.onUpdate,
+			onSetSuspendPolicy: w.onSetSuspendPolicy,
+		})
 	})
 }
 
@@ -428,6 +444,269 @@ func TestPatchAgentLabels_Authorization(t *testing.T) {
 		}, selfToken)
 		assert.Equal(t, http.StatusForbidden, recNonLabel.Code, recNonLabel.Body.String())
 		assert.NotContains(t, recNonLabel.Body.String(), errMsgAgentsCannotEditLabels)
+	})
+
+	t.Run("federated and delegated agent callers are refused explicitly on merge and PATCH routes", func(t *testing.T) {
+		ctx := context.Background()
+		fedIdent := NewFederatedAgentIdentity("https://peer.example", tid("lbl-fed-agent"), f.project.ID, "fed-agent", f.owner.ID, []string{f.owner.ID}, nil)
+		delegatedIdent := &DelegatedAgentIdentity{agentID: tid("lbl-delegated-agent")}
+
+		identities := []struct {
+			name string
+			id   Identity
+		}{
+			{"federated_agent", fedIdent},
+			{"delegated_agent", delegatedIdent},
+		}
+
+		for _, ic := range identities {
+			t.Run(ic.name, func(t *testing.T) {
+				beforeAgent, err := f.s.GetAgent(ctx, f.agent.ID)
+				require.NoError(t, err)
+
+				// 1. PATCH /api/v1/agents/{id}/labels
+				bodyMerge, err := json.Marshal(PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}})
+				require.NoError(t, err)
+				req1 := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID+"/labels", bytes.NewReader(bodyMerge))
+				req1 = req1.WithContext(contextWithIdentity(req1.Context(), ic.id))
+				rec1 := httptest.NewRecorder()
+				f.srv.handleAgentLabels(rec1, req1, f.agent.ID)
+				assert.Equal(t, http.StatusForbidden, rec1.Code, rec1.Body.String())
+				assert.Contains(t, rec1.Body.String(), errMsgAgentsCannotEditLabels)
+
+				// 2. PATCH /api/v1/projects/{projectId}/agents/{id}/labels
+				req2 := httptest.NewRequest(http.MethodPatch, "/api/v1/projects/"+f.project.ID+"/agents/"+f.agent.Slug+"/labels", bytes.NewReader(bodyMerge))
+				req2 = req2.WithContext(contextWithIdentity(req2.Context(), ic.id))
+				rec2 := httptest.NewRecorder()
+				f.srv.handleProjectAgentLabels(rec2, req2, f.project.ID, f.agent.Slug)
+				assert.Equal(t, http.StatusForbidden, rec2.Code, rec2.Body.String())
+				assert.Contains(t, rec2.Body.String(), errMsgAgentsCannotEditLabels)
+
+				// 3. PATCH /api/v1/agents/{id} with labels
+				bodyPatch, err := json.Marshal(map[string]any{"labels": map[string]string{"x": "1"}})
+				require.NoError(t, err)
+				req3 := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, bytes.NewReader(bodyPatch))
+				req3 = req3.WithContext(contextWithIdentity(req3.Context(), ic.id))
+				rec3 := httptest.NewRecorder()
+				f.srv.applyAgentUpdate(rec3, req3, beforeAgent)
+				assert.Equal(t, http.StatusForbidden, rec3.Code, rec3.Body.String())
+				assert.Contains(t, rec3.Body.String(), errMsgAgentsCannotEditLabels)
+
+				afterAgent, err := f.s.GetAgent(ctx, f.agent.ID)
+				require.NoError(t, err)
+				assert.Equal(t, beforeAgent.Labels, afterAgent.Labels)
+			})
+		}
+	})
+}
+
+func TestPatchAgentLabels_AgentGuardDefenceInDepth(t *testing.T) {
+	// Proves the explicit agent-caller guard is load-bearing even if agent.update
+	// were ever granted an agent JWT scope in the permission registry: non-label
+	// PATCH succeeds through the kernel, while every label-mutation surface is
+	// still refused with 403 and leaves labels and audit records untouched.
+	idx := -1
+	for i := range permissions.Registry {
+		if permissions.Registry[i].ID == "agent.update" {
+			idx = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, idx, "agent.update must exist in permissions.Registry")
+	origScopes := append([]string(nil), permissions.Registry[idx].AgentScopes...)
+	permissions.Registry[idx].AgentScopes = []string{string(ScopeAgentLifecycle)}
+	t.Cleanup(func() {
+		permissions.Registry[idx].AgentScopes = origScopes
+	})
+
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+	beforeAudits := len(f.labelAudits(t, f.agent.ID))
+
+	agentToken := f.srv.generateRecordedAgentToken(t, f.agent.ID, f.project.ID, []AgentTokenScope{
+		ScopeAgentStatusUpdate, ScopeAgentLifecycle,
+	}, nil)
+
+	// Confirm the kernel now admits agent.update for a non-label PATCH.
+	recNonLabel := doRequestWithAgentToken(t, f.srv, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
+		"taskSummary": "allowed-under-simulated-agent-scope",
+	}, agentToken)
+	require.Equal(t, http.StatusOK, recNonLabel.Code, "simulated agent.update scope must allow non-label PATCH: %s", recNonLabel.Body.String())
+
+	// Every label-mutation surface must still be refused by the explicit guard.
+	cases := []struct {
+		name string
+		path string
+		body any
+	}{
+		{"merge by-id", "/api/v1/agents/" + f.agent.ID + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
+		{"merge project", "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug + "/labels", PatchAgentLabelsRequest{Set: map[string]string{"x": "1"}}},
+		{"PATCH labels by-id", "/api/v1/agents/" + f.agent.ID, map[string]any{"labels": map[string]string{"x": "1"}}},
+		{"PATCH labels project", "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug, map[string]any{"labels": map[string]string{"x": "1"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestWithAgentToken(t, f.srv, http.MethodPatch, tc.path, tc.body, agentToken)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), errMsgAgentsCannotEditLabels)
+		})
+	}
+
+	got, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+	assert.Equal(t, beforeAudits, len(f.labelAudits(t, f.agent.ID)))
+}
+
+func TestPatchAgentLabels_PatchMultiFieldAuditAndRollback(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+	setExperimentOverrides(t, f.srv, map[string]bool{
+		experiments.NeverSuspend: true,
+	})
+
+	newCreatedAgent := func(t *testing.T, suffix string) *store.Agent {
+		t.Helper()
+		ag := &store.Agent{
+			ID:            tid("lbl-mf-" + suffix),
+			Slug:          "lbl-mf-" + suffix,
+			Name:          "lbl-mf-" + suffix,
+			ProjectID:     f.project.ID,
+			Phase:         string(state.PhaseCreated),
+			SuspendPolicy: store.SuspendPolicyAuto,
+			OwnerID:       f.owner.ID,
+			CreatedBy:     f.owner.ID,
+			Labels:        map[string]string{"env": "dev"},
+			StateVersion:  1,
+		}
+		require.NoError(t, f.s.CreateAgent(ctx, ag))
+		return ag
+	}
+
+	cases := []struct {
+		name   string
+		suffix string
+		extra  map[string]any
+		labels map[string]string
+	}{
+		{
+			name:   "labels only",
+			suffix: "only",
+			labels: map[string]string{"env": "prod", "branch": "only"},
+		},
+		{
+			name:   "labels + taskSummary",
+			suffix: "task",
+			extra:  map[string]any{"taskSummary": "updated summary"},
+			labels: map[string]string{"env": "prod", "branch": "task"},
+		},
+		{
+			name:   "labels + name",
+			suffix: "name",
+			extra:  map[string]any{"name": "lbl-mf-renamed"},
+			labels: map[string]string{"env": "prod", "branch": "name"},
+		},
+		{
+			name:   "labels + suspendPolicy",
+			suffix: "susp",
+			extra:  map[string]any{"suspendPolicy": store.SuspendPolicyNever},
+			labels: map[string]string{"env": "prod", "branch": "susp"},
+		},
+		{
+			name:   "labels + gcp_identity",
+			suffix: "gcp",
+			extra:  map[string]any{"gcp_identity": map[string]any{"metadata_mode": store.GCPMetadataModeBlock}},
+			labels: map[string]string{"env": "prod", "branch": "gcp"},
+		},
+		{
+			name:   "labels + name + suspendPolicy + gcp_identity",
+			suffix: "all",
+			extra: map[string]any{
+				"name":          "lbl-mf-all-renamed",
+				"suspendPolicy": store.SuspendPolicyNever,
+				"gcp_identity":  map[string]any{"metadata_mode": store.GCPMetadataModeBlock},
+			},
+			labels: map[string]string{"env": "prod", "branch": "all"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ag := newCreatedAgent(t, tc.suffix)
+			body := map[string]any{"labels": tc.labels}
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+ag.ID, body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			got, err := f.s.GetAgent(ctx, ag.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.labels, got.Labels)
+
+			audits := f.labelAudits(t, ag.ID)
+			require.Len(t, audits, 1, "expected exactly one agent.labels.update audit record")
+			a := audits[0]
+			assert.Equal(t, mutationTypeAgentLabelsUpdate, a.MutationType)
+			assert.Equal(t, "agent", a.TargetType)
+			assert.Equal(t, ag.ID, a.TargetID)
+			assert.Equal(t, "user", a.ActorPrincipalKind)
+			assert.Equal(t, f.owner.ID, a.ActorPrincipalID)
+
+			var beforeDiff, afterDiff map[string]string
+			require.NoError(t, json.Unmarshal([]byte(a.BeforeSummary), &beforeDiff))
+			require.NoError(t, json.Unmarshal([]byte(a.AfterSummary), &afterDiff))
+			assert.Equal(t, map[string]string{"env": "dev"}, beforeDiff)
+			assert.Equal(t, tc.labels, afterDiff)
+		})
+	}
+
+	t.Run("labels + suspendPolicy rollback leaves no label change and no audit record", func(t *testing.T) {
+		ag := newCreatedAgent(t, "rb-susp")
+		installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *labelUpdateFaultStore {
+			return &labelUpdateFaultStore{
+				Store: inner,
+				onSetSuspendPolicy: func(context.Context, string, string, func(context.Context, string, string) (bool, error)) (bool, error) {
+					return false, fmt.Errorf("injected suspend policy failure")
+				},
+			}
+		})
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+ag.ID, map[string]any{
+			"suspendPolicy": store.SuspendPolicyNever,
+			"labels":        map[string]string{"env": "rolledback"},
+		})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "dev"}, got.Labels, "rolled-back transaction must not persist label changes")
+		assert.Equal(t, store.SuspendPolicyAuto, got.SuspendPolicy)
+		assert.Empty(t, f.labelAudits(t, ag.ID), "rolled-back runPatchTx must leave zero label audit records")
+	})
+
+	t.Run("labels + name rollback leaves no label change and no audit record", func(t *testing.T) {
+		ag := newCreatedAgent(t, "rb-name")
+		installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *labelUpdateFaultStore {
+			return &labelUpdateFaultStore{
+				Store: inner,
+				onUpdate: func(context.Context, *store.Agent, func(context.Context, *store.Agent) error) error {
+					return fmt.Errorf("injected update failure")
+				},
+			}
+		})
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+ag.ID, map[string]any{
+			"name":   "lbl-mf-rb-name-new",
+			"labels": map[string]string{"env": "rolledback"},
+		})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, ag.ID)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"env": "dev"}, got.Labels)
+		assert.Empty(t, f.labelAudits(t, ag.ID), "rolled-back PATCH must leave zero label audit records")
 	})
 }
 
