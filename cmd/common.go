@@ -1685,10 +1685,6 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	// statusRead is false when the wait never read the agent, so only the
 	// create answer is known.
 	statusRead := true
-	// agentFetchedByGet tracks whether finalAgent came from a GET /agents/{id}
-	// response (which carries trajectory_capture when the experiment is on),
-	// rather than solely from the CreateAgentResponse (which omits it).
-	agentFetchedByGet := false
 	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
 		var progress io.Writer
@@ -1735,12 +1731,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		switch {
 		case err == nil:
 			finalAgent = waited
-			agentFetchedByGet = waited != nil
 		case ok && accepted && !attach:
 			notFollowed = note
 			if waited != nil {
 				finalAgent = waited
-				agentFetchedByGet = true
 			} else {
 				statusRead = false
 				launchReportable = !workspaceFinalized
@@ -1785,7 +1779,6 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 			if last != nil {
 				finalAgent = last
 				statusRead = true
-				agentFetchedByGet = true
 			}
 		}
 	}
@@ -1801,7 +1794,6 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 		getCancel()
 		if getErr == nil && current != nil {
 			finalAgent = current
-			agentFetchedByGet = true
 		} else {
 			phaseKnown = false
 		}
@@ -1888,16 +1880,8 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, res
 	}
 	if finalAgent != nil && finalAgent.TrajectoryCapture != nil {
 		printTrajectoryCaptureNotice(finalAgent.TrajectoryCapture)
-	} else if !agentFetchedByGet && !isJSONOutput() && hubCtx != nil && hubCtx.Client != nil {
-		// CreateAgentResponse omits trajectory_capture; for --no-wait and
-		// synchronous creates that did not already GET the agent, do a short
-		// bounded GET so the notice is still displayed without ever failing start.
-		noticeCtx, noticeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-		got, getErr := hubCtx.Client.ProjectAgents(projectID).Get(noticeCtx, agentName)
-		noticeCancel()
-		if getErr == nil && got != nil {
-			printTrajectoryCaptureNotice(got.TrajectoryCapture)
-		}
+	} else if resp != nil && resp.TrajectoryCapture != nil {
+		printTrajectoryCaptureNotice(resp.TrajectoryCapture)
 	}
 	printPendingSecretHint(context.Background(), os.Stderr, hubCtx.Client)
 	if startWaitReady {

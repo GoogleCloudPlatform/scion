@@ -257,7 +257,7 @@ func TestFinishHubStart_PrintsTrajectoryCaptureNotice(t *testing.T) {
 		"notice must be written to stderr before attachToAgentFn runs")
 }
 
-func TestFinishHubStart_NoWaitAndSyncBoundedGetFallback(t *testing.T) {
+func TestFinishHubStart_NoWaitAndSyncPrintsNoticeFromCreateResponse(t *testing.T) {
 	origAttach := attach
 	origNoWait := startNoWait
 	origWaitReady := startWaitReady
@@ -279,23 +279,14 @@ func TestFinishHubStart_NoWaitAndSyncBoundedGetFallback(t *testing.T) {
 	}
 	wantNotice := telemetrycontract.TrajectoryCaptureNotice(*status)
 
-	t.Run("no-wait fetches trajectory_capture via bounded GET and prints notice", func(t *testing.T) {
+	t.Run("no-wait prints notice from CreateAgentResponse without extra GET", func(t *testing.T) {
 		startNoWait = true
 		getCalls := 0
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Path == "/api/v1/projects/proj-1/agents/a1" {
 				getCalls++
-				_ = json.NewEncoder(w).Encode(hubclient.Agent{
-					ID:                "agent-id-1",
-					Name:              "a1",
-					Slug:              "a1",
-					Phase:             "provisioning",
-					TrajectoryCapture: status,
-				})
-				return
 			}
-			w.WriteHeader(http.StatusNotFound)
+			w.WriteHeader(http.StatusInternalServerError)
 		}))
 		defer srv.Close()
 
@@ -312,16 +303,53 @@ func TestFinishHubStart_NoWaitAndSyncBoundedGetFallback(t *testing.T) {
 					Slug:  "a1",
 					Phase: "provisioning",
 				},
+				TrajectoryCapture: status,
 			}, nil, false)
 		})
 		require.NoError(t, runErr)
-		assert.Equal(t, 1, getCalls)
+		assert.Equal(t, 0, getCalls, "--no-wait must not issue a follow-up GET")
 		assert.Contains(t, stderr, "Notice: "+wantNotice)
 	})
 
-	t.Run("sync start never fails when bounded GET returns error", func(t *testing.T) {
+	t.Run("sync start prints notice from CreateAgentResponse without extra GET", func(t *testing.T) {
 		startNoWait = false
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		getCalls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/projects/proj-1/agents/a1" {
+				getCalls++
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		defer srv.Close()
+
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+
+		var runErr error
+		stderr := captureNoticeStderr(t, func(_ func() string) {
+			runErr = finishHubStart(hubCtx, "proj-1", "a1", false, false, &hubclient.CreateAgentResponse{
+				Agent: &hubclient.Agent{
+					ID:    "agent-id-1",
+					Name:  "a1",
+					Slug:  "a1",
+					Phase: "running",
+				},
+				TrajectoryCapture: status,
+			}, nil, false)
+		})
+		require.NoError(t, runErr)
+		assert.Equal(t, 0, getCalls, "sync start must not issue a follow-up GET")
+		assert.Contains(t, stderr, "Notice: "+wantNotice)
+	})
+
+	t.Run("sync start omits notice when CreateAgentResponse has no trajectory_capture", func(t *testing.T) {
+		startNoWait = false
+		getCalls := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/projects/proj-1/agents/a1" {
+				getCalls++
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 		}))
 		defer srv.Close()
@@ -342,6 +370,7 @@ func TestFinishHubStart_NoWaitAndSyncBoundedGetFallback(t *testing.T) {
 			}, nil, false)
 		})
 		require.NoError(t, runErr)
+		assert.Equal(t, 0, getCalls)
 		assert.NotContains(t, stderr, "Notice:")
 	})
 }
