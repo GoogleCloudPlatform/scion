@@ -78,10 +78,11 @@ type Pipeline struct {
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
 	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
-	agyActiveAtStop    atomic.Bool    // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
-	driftLatched       atomic.Bool    // preserved across Pipeline.Stop after agyTailer is swapped nil
-	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
-	health             healthEmitter  // telemetry.health events (health.go)
+	agyDetectVersion   func(context.Context) (string, error) // optional override for tests; nil uses detectAgyVersionManaged
+	agyActiveAtStop    atomic.Bool                           // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
+	driftLatched       atomic.Bool                           // preserved across Pipeline.Stop after agyTailer is swapped nil
+	analytics          analyticsState                        // agent.usage outbox + drainer (analytics_drainer.go)
+	health             healthEmitter                         // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
 	// suppressDirectOTel is true when the Hub usage sink is active and the Hub
 	// advertised suppress_direct_otel=true (Tokenomics P2.2 D3). When true,
@@ -348,6 +349,19 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	return UsageActivated, nil
 }
 
+// SetAgyVersionDetector overrides the agy binary version detector used when
+// this pipeline starts its Antigravity SQLite tailer. Intended for tests that
+// run without a system-installed agy binary; nil restores the default managed
+// detector (detectAgyVersionManaged).
+func (p *Pipeline) SetAgyVersionDetector(fn func(context.Context) (string, error)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.agyDetectVersion = fn
+	p.mu.Unlock()
+}
+
 // startAgySQLiteTailerLocked starts the Antigravity local SQLite usage tailer
 // whenever an analytics sink (Hub usage outbox and/or GCP analytics) is active.
 // Neither nativeMeteringOnly nor cloudInitDegraded blocks it:
@@ -374,6 +388,7 @@ func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
 		WakeOwner:      p.analytics.owner,
 		Analytics:      p.analytics.sqliteNative,
 		LoopbackConfig: p.loopbackConfig.Load(),
+		DetectVersion:  p.agyDetectVersion,
 		OTelExportActive: func() bool {
 			return hasCloudExporter && !p.SuppressDirectOTel()
 		},

@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -381,15 +382,6 @@ func TestAntigravitySQLiteNative_ShutdownFlushReachesBackstopReport(t *testing.T
 		t.Fatalf("write dialect.yaml: %v", err)
 	}
 
-	// Put a stub agy binary on PATH reporting a verified version (1.5.18) so
-	// AntigravitySQLiteTailer decodes gen_metadata rows without latching drift.
-	binDir := t.TempDir()
-	agyStub := filepath.Join(binDir, "agy")
-	if err := os.WriteFile(agyStub, []byte("#!/bin/sh\necho 1.5.18\n"), 0o755); err != nil {
-		t.Fatalf("write agy stub: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	hookDialect = "antigravity"
 	t.Setenv("SCION_HARNESS", "antigravity")
 	t.Setenv("SCION_USAGE_SOURCE", "sqlite_native")
@@ -400,6 +392,13 @@ func TestAntigravitySQLiteNative_ShutdownFlushReachesBackstopReport(t *testing.T
 	pipeline := telemetry.NewWithConfig(&telemetry.Config{
 		Enabled:  true,
 		GRPCPort: 0, // ephemeral loopback port
+	})
+	var detectCalls atomic.Int32
+	// Inject a verified agy version directly so the test never depends on a
+	// system-installed agy binary in rootexec's trusted directories (e.g. CI).
+	pipeline.SetAgyVersionDetector(func(context.Context) (string, error) {
+		detectCalls.Add(1)
+		return "1.5.18", nil
 	})
 	pipeline.SetAnalyticsOutbox(home, -1, -1)
 	pipeline.SetHubUsageSink(telemetry.HubUsageSinkConfig{
@@ -478,6 +477,9 @@ func TestAntigravitySQLiteNative_ShutdownFlushReachesBackstopReport(t *testing.T
 	// RunInit's shutdown sequence: flush SQLite tailer BEFORE the backstop
 	// finalizes and tombstones the open session.
 	flushSQLiteUsageBeforeBackstop(pipeline)
+	if detectCalls.Load() == 0 {
+		t.Fatal("expected injected agy version detector to be called during flush")
+	}
 
 	// Confirm the state file holds both hook-counted APICallCount=2 and the
 	// flushed SQLite tokens before the backstop sends and removes it.
