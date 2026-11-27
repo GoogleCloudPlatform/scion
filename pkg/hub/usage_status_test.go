@@ -24,8 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func boolPtr(v bool) *bool { return &v }
-
 func makeUsageCap(source api.UsageLiveSource, tokenTypes, naTypes []string, countsFailed bool) *api.HarnessUsageCapabilities {
 	return &api.HarnessUsageCapabilities{
 		SchemaVersion: 1,
