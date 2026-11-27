@@ -33,7 +33,9 @@ import (
 )
 
 func TestUsageReadAPI_UsageYAMLMeasurementStatus_PerAgentAndScoped(t *testing.T) {
-	srv, s := setupUsageReadTestServer(t, true)
+	srv, s := testServer(t)
+	srv.SetHubID("hub-usage-cap")
+	setUsageLedgerExperimentForTest(t, srv, true)
 	ctx := context.Background()
 
 	admin := &store.User{
@@ -44,7 +46,7 @@ func TestUsageReadAPI_UsageYAMLMeasurementStatus_PerAgentAndScoped(t *testing.T)
 		Status:      "active",
 	}
 	require.NoError(t, s.CreateUser(ctx, admin))
-	bindSystemRoleForUsageReadTest(t, s, admin.ID, "hub-admin")
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
 
 	proj := &store.Project{
 		ID:      uuid.NewString(),
