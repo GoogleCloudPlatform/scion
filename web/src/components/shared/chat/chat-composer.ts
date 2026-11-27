@@ -48,7 +48,11 @@ import './chat-schedule-dialog.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 import { saveDraftForConversation } from './chat-wake.js';
-import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
+import {
+  ARTIFACTS_FLAG,
+  ATTACHMENT_ARTIFACTS_FLAG,
+  MAX_MESSAGE_ARTIFACTS,
+} from '../../../client/artifacts.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
 import './artifact-picker.js';
@@ -1911,7 +1915,9 @@ export class ScionChatComposer extends LitElement {
           `
         )}
       </div>
-      <div class="attachment-visibility">${this.attachmentVisibilityText()}</div>
+      ${isFeatureEnabled(ATTACHMENT_ARTIFACTS_FLAG)
+        ? html`<div class="attachment-visibility">${this.attachmentVisibilityText()}</div>`
+        : nothing}
     `;
   }
 

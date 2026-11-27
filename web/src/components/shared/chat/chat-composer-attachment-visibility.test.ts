@@ -20,7 +20,9 @@
  * thread, DM, group without a project).
  */
 
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { ATTACHMENT_ARTIFACTS_FLAG } from '../../../client/artifacts.js';
+import { resetServerFlagStateForTests, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type { ScionChatComposer, UploadedAttachment } from './chat-composer.js';
 
 const PENDING_FILE: UploadedAttachment = {
@@ -61,9 +63,27 @@ describe('scion-chat-composer attachment visibility line (#4598, #4599)', () => 
     await import('./chat-composer.js');
   });
 
+  beforeEach(() => {
+    resetServerFlagStateForTests();
+    localStorage.clear();
+    setFeatureFlag(ATTACHMENT_ARTIFACTS_FLAG, true);
+  });
+
   afterEach(() => {
     document.body.innerHTML = '';
+    resetServerFlagStateForTests();
     localStorage.clear();
+  });
+
+  it('does not render when hub.attachment_artifacts is off', async () => {
+    setFeatureFlag(ATTACHMENT_ARTIFACTS_FLAG, false);
+    const el = await mountComposer({
+      conversationMode: 'thread',
+      projectId: 'p-1',
+      projectName: 'Project X',
+      pendingFiles: [PENDING_FILE],
+    });
+    expect(el.shadowRoot?.querySelector('.attachment-visibility')).toBeNull();
   });
 
   it('does not render when there are no pending attachment chips', async () => {
