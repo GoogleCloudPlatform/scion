@@ -437,6 +437,135 @@ func TestTokenBudgetEvaluator_MonotonicityAndConcurrentConvergence(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageBudgetStateExhausted, stAfter.State, "evaluator must never lower state within a window")
 	assert.Equal(t, int64(1300), stAfter.ConsumedAtEval)
+
+	// O1: consumed-only CAS while already exhausted must NOT fire another crossing.
+	hookMu.Lock()
+	assert.Len(t, crossings, 1, "consumed-only CAS on exhausted row must not fire another threshold crossing")
+	hookMu.Unlock()
+}
+
+func TestTokenBudgetEvaluator_ConsumedOnlyCASFiresNoHook(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	s, _, eval := setupBudgetEvalTest(t, now)
+
+	projID := "proj-warn-stay"
+	projDayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: projDayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           projID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	var crossings []BudgetThresholdCrossing
+	eval.SetThresholdHook(func(_ context.Context, c BudgetThresholdCrossing) {
+		crossings = append(crossings, c)
+	})
+
+	// First ingest: 600/1000 -> warn (1 crossing: "" -> warn).
+	ev1 := ingestTestTokens(t, s, projID, nil, now, 600, false)
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev1})
+	require.Len(t, crossings, 1)
+	assert.Equal(t, store.UsageBudgetStateWarn, crossings[0].NewState)
+
+	// Second ingest: +200 -> 800/1000 (warn stays warn; CAS bumps consumed_at_eval & state_version).
+	ev2 := ingestTestTokens(t, s, projID, nil, now, 200, false)
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{ev2})
+
+	st, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: projDayDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           projID,
+		WindowStartUTC:    time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateWarn, st.State)
+	assert.Equal(t, int64(800), st.ConsumedAtEval)
+	assert.Equal(t, int64(2), st.StateVersion)
+	assert.Len(t, crossings, 1, "warn-stays-warn consumed-only CAS must not fire a new crossing")
+}
+
+type countingBudgetStore struct {
+	store.Store
+	listDefs       int
+	getDefByName   int
+	getDefByID     int
+	listForSubject int
+	getUserGroups  int
+}
+
+func (c *countingBudgetStore) ListLimitDefinitions(ctx context.Context) ([]*store.LimitDefinition, error) {
+	c.listDefs++
+	return c.Store.ListLimitDefinitions(ctx)
+}
+
+func (c *countingBudgetStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	c.getDefByName++
+	return c.Store.GetLimitDefinitionByName(ctx, name)
+}
+
+func (c *countingBudgetStore) GetLimitDefinition(ctx context.Context, id string) (*store.LimitDefinition, error) {
+	c.getDefByID++
+	return c.Store.GetLimitDefinition(ctx, id)
+}
+
+func (c *countingBudgetStore) ListEntitlementBindingsForSubject(ctx context.Context, subjectType, subjectID string) ([]*store.EntitlementBinding, error) {
+	c.listForSubject++
+	return c.Store.ListEntitlementBindingsForSubject(ctx, subjectType, subjectID)
+}
+
+func (c *countingBudgetStore) GetUserGroups(ctx context.Context, userID string) ([]store.GroupMember, error) {
+	c.getUserGroups++
+	return c.Store.GetUserGroups(ctx, userID)
+}
+
+func TestTokenBudgetEvaluator_QueryCountBatchLoaded(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 27, 15, 0, 0, 0, time.UTC)
+	baseStore, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	seedTokenBudgetLimitDefinitions(ctx, baseStore)
+
+	u := &store.User{ID: uuid.NewString(), Email: "qc@example.com", DisplayName: "QC", Role: "member", Status: "active"}
+	require.NoError(t, baseStore.CreateUser(ctx, u))
+	for _, slug := range []string{"qc-g1", "qc-g2"} {
+		g := &store.Group{ID: uuid.NewString(), Name: slug, Slug: slug, GroupType: store.GroupTypeExplicit}
+		require.NoError(t, baseStore.CreateGroup(ctx, g))
+		require.NoError(t, baseStore.AddGroupMember(ctx, &store.GroupMember{
+			GroupID: g.ID, MemberType: store.GroupMemberTypeUser, MemberID: u.ID, Role: store.GroupMemberRoleMember,
+		}))
+	}
+
+	evWithUser := ingestTestTokens(t, baseStore, "proj-qc", &u.ID, now, 100, false)
+	evAnon := ingestTestTokens(t, baseStore, "proj-qc", nil, now, 100, false)
+
+	cs := &countingBudgetStore{Store: baseStore}
+	qs := &QuotaService{store: cs}
+	eval := NewTokenBudgetEvaluator(cs, qs, nil, func() bool { return true })
+	eval.nowFn = func() time.Time { return now }
+
+	// All caps = 0, billing user in G=2 groups:
+	// 1 ListLimitDefinitions + 1 system_default + 1 user + 1 GetUserGroups + 2 group = 6 queries (was 26 + 4*2 = 34).
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{evWithUser})
+	assert.Equal(t, 1, cs.listDefs)
+	assert.Equal(t, 0, cs.getDefByName)
+	assert.Equal(t, 0, cs.getDefByID)
+	assert.Equal(t, 4, cs.listForSubject, "1 system_default + 1 user + 2 groups")
+	assert.Equal(t, 1, cs.getUserGroups)
+
+	// All caps = 0, NULL billing user:
+	// 1 ListLimitDefinitions + 1 system_default = 2 queries.
+	cs.listDefs, cs.getDefByName, cs.getDefByID, cs.listForSubject, cs.getUserGroups = 0, 0, 0, 0, 0
+	eval.EvaluateIngestedEvents(ctx, []*store.UsageEvent{evAnon})
+	assert.Equal(t, 1, cs.listDefs)
+	assert.Equal(t, 0, cs.getDefByName)
+	assert.Equal(t, 0, cs.getDefByID)
+	assert.Equal(t, 1, cs.listForSubject, "only system_default")
+	assert.Equal(t, 0, cs.getUserGroups)
 }
 
 func TestTokenBudgetEvaluator_IsScopeExhaustedForAction(t *testing.T) {
@@ -521,6 +650,19 @@ func TestTokenBudgetEvaluator_IsScopeExhaustedForAction(t *testing.T) {
 	stOverridden, err := eval.IsScopeExhaustedForAction(ctx, projID, userID, now, store.TokenActionPauseNew, store.TokenActionSuspendAndPause)
 	require.NoError(t, err)
 	assert.False(t, stOverridden.Exhausted, "active override_until must suppress exhaustion")
+
+	// N7: passing a past timestamp (closed month/day) is clamped to evaluator
+	// clock and must never create closed-window state rows.
+	pastTime := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	_, err = eval.IsScopeExhaustedForAction(ctx, projID, userID, pastTime, store.TokenActionPauseNew, store.TokenActionSuspendAndPause)
+	require.NoError(t, err)
+	_, err = s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: projDayDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           projID,
+		WindowStartUTC:    time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC),
+	})
+	require.ErrorIs(t, err, store.ErrNotFound, "past now passed to IsScopeExhaustedForAction must not create closed-window rows")
 
 	// When disabled, returns Exhausted=false.
 	eval.enabledFn = func() bool { return false }

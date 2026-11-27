@@ -215,6 +215,16 @@ func TestTokenBudget_EndToEnd_IngestToBudgetState(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, badSubjRec.Code, "empty subjectId must be rejected for %s", st)
 	}
 
+	// 3b. O6: Reject non-empty subjectId when subjectType is system_default (POST).
+	badSysDefRec := doAdminJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+projDayDef.ID+"/entitlements", map[string]any{
+		"subjectType": store.EntitlementSubjectSystemDefault,
+		"subjectId":   "stray-id",
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     proj.ID,
+		"value":       1000,
+	})
+	assert.Equal(t, http.StatusBadRequest, badSysDefRec.Code, "non-empty subjectId must be rejected for system_default")
+
 	// 4. Create valid system_default project day binding (cap = 1000, tokenAction = pause_new) via HTTP API.
 	createProjBindRec := doAdminJSONRequest(t, srv, http.MethodPost, "/api/v1/admin/limits/"+projDayDef.ID+"/entitlements", map[string]any{
 		"subjectType": store.EntitlementSubjectSystemDefault,
@@ -229,6 +239,17 @@ func TestTokenBudget_EndToEnd_IngestToBudgetState(t *testing.T) {
 	require.NoError(t, json.Unmarshal(createProjBindRec.Body.Bytes(), &createdBind))
 	require.NotNil(t, createdBind.TokenAction)
 	assert.Equal(t, store.TokenActionPauseNew, *createdBind.TokenAction)
+
+	// 4b. O6: Reject non-empty subjectId when subjectType is system_default (PUT).
+	badSysDefPutRec := doAdminJSONRequest(t, srv, http.MethodPut, "/api/v1/admin/entitlements/"+createdBind.ID, map[string]any{
+		"subjectType": store.EntitlementSubjectSystemDefault,
+		"subjectId":   "stray-id",
+		"scopeType":   store.QuotaScopeProject,
+		"scopeId":     proj.ID,
+		"value":       1000,
+		"tokenAction": store.TokenActionPauseNew,
+	})
+	assert.Equal(t, http.StatusBadRequest, badSysDefPutRec.Code, "PUT with non-empty subjectId for system_default must be rejected")
 
 	// Install threshold crossing hook to observe ok -> warn -> exhausted.
 	var hookMu sync.Mutex
@@ -321,6 +342,67 @@ func TestTokenBudget_EndToEnd_IngestToBudgetState(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ex.Exhausted)
 	assert.Equal(t, store.LimitLLMTokensPerProjectDay, ex.LimitName)
+}
+
+func TestTokenBudget_PanickingHookRecoveredInIngest(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-budget-panic")
+	setTokenomicsExperimentsForTest(t, srv, true, true)
+	srv.reconcileUsageLedger(ctx)
+	srv.reconcileTokenBudgets(ctx)
+
+	proj := &store.Project{ID: tid("budget-panic-proj"), Name: "budget-panic", Slug: "budget-panic"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:        tid("budget-panic-agent"),
+		Slug:      "budget-panic-agent",
+		Name:      "budget-panic-agent",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-budget-panic", nil)
+	require.NoError(t, err)
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	projDayDef, err := s.GetLimitDefinitionByName(ctx, store.LimitLLMTokensPerProjectDay)
+	require.NoError(t, err)
+	_, err = s.CreateEntitlementBinding(ctx, &store.EntitlementBinding{
+		LimitDefinitionID: projDayDef.ID,
+		SubjectType:       store.EntitlementSubjectSystemDefault,
+		ScopeType:         store.QuotaScopeProject,
+		ScopeID:           proj.ID,
+		Value:             1000,
+	})
+	require.NoError(t, err)
+
+	// Install a panicking hook; ingest must still return 200 and state must be persisted.
+	srv.SetBudgetThresholdHook(func(_ context.Context, _ BudgetThresholdCrossing) {
+		panic("boom from test threshold hook")
+	})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	ev := e2eMakeWireUsageEvent("hub-budget-panic", ag.ID, proj.ID, "run-budget-panic", "ev-panic-1", 1, now, 600, 0)
+	rec := e2eDoAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		RunID: "run-budget-panic", ProducerEpoch: "ep-1", ProducerSeq: 1, Events: []telemetrycontract.UsageEvent{ev},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp telemetrycontract.UsageIngestResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.Accepted)
+
+	st, err := s.GetUsageBudgetState(ctx, store.UsageBudgetStateKey{
+		LimitDefinitionID: projDayDef.ID,
+		ScopeKind:         store.UsageScopeKindProject,
+		ScopeID:           proj.ID,
+		WindowStartUTC:    dayStart,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageBudgetStateWarn, st.State)
+	assert.Equal(t, int64(600), st.ConsumedAtEval)
+	assert.Equal(t, int64(1), srv.TokenBudgetEvaluator().HookPanics())
 }
 
 func TestTokenBudget_ExperimentOff_UnchangedAndNoStateRows(t *testing.T) {

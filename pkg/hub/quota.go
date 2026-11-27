@@ -742,66 +742,147 @@ func (qs *QuotaService) resolveEffectiveLimitWithSource(ctx context.Context, lim
 //     same maximum positive Value, the most permissive token_action wins:
 //     notify_only > pause_new > suspend_and_pause.
 func (qs *QuotaService) ResolveEffectiveTokenLimit(ctx context.Context, limitDefID, subjectID, scopeType, scopeID string) (cap int64, action string, err error) {
+	cache := newTokenLimitEvalCache(qs)
+	return cache.resolveByID(ctx, limitDefID, subjectID, scopeType, scopeID)
+}
+
+// tokenLimitEvalCache caches system_default bindings and per-subject
+// user+group bindings within a single EvaluateIngestedEvents or
+// IsScopeExhaustedForAction call so evaluating all 6 raw-token limits for a
+// user/project does not repeat identical store queries.
+type tokenLimitEvalCache struct {
+	qs *QuotaService
+
+	defsLoaded bool
+	defsByName map[string]*store.LimitDefinition
+
+	sysLoaded   bool
+	sysBindings []*store.EntitlementBinding
+
+	subjectLoaded   map[string]bool
+	subjectBindings map[string][]*store.EntitlementBinding
+}
+
+func newTokenLimitEvalCache(qs *QuotaService) *tokenLimitEvalCache {
+	return &tokenLimitEvalCache{
+		qs:              qs,
+		subjectLoaded:   make(map[string]bool),
+		subjectBindings: make(map[string][]*store.EntitlementBinding),
+	}
+}
+
+func (c *tokenLimitEvalCache) lookupLimitDef(ctx context.Context, name string) (*store.LimitDefinition, error) {
+	if !c.defsLoaded {
+		defs, err := c.qs.store.ListLimitDefinitions(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list limit definitions: %w", err)
+		}
+		c.defsByName = make(map[string]*store.LimitDefinition, len(defs))
+		for _, d := range defs {
+			c.defsByName[d.Name] = d
+		}
+		c.defsLoaded = true
+	}
+	return c.defsByName[name], nil
+}
+
+func (c *tokenLimitEvalCache) loadSystemBindings(ctx context.Context) []*store.EntitlementBinding {
+	if c.sysLoaded {
+		return c.sysBindings
+	}
+	sysBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectSystemDefault, "")
+	if err != nil {
+		if c.qs.logger != nil {
+			c.qs.logger.Debug("failed to list system default bindings for token budget resolution", "error", err)
+		}
+	} else {
+		c.sysBindings = sysBindings
+	}
+	c.sysLoaded = true
+	return c.sysBindings
+}
+
+func (c *tokenLimitEvalCache) loadSubjectBindings(ctx context.Context, subjectID string) ([]*store.EntitlementBinding, error) {
+	if subjectID == "" {
+		return nil, nil
+	}
+	if c.subjectLoaded[subjectID] {
+		return c.subjectBindings[subjectID], nil
+	}
+
+	userBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("list user bindings: %w", err)
+	}
+	combined := make([]*store.EntitlementBinding, 0, len(userBindings))
+	combined = append(combined, userBindings...)
+
+	groupMemberships, err := c.qs.store.GetUserGroups(ctx, subjectID)
+	if err != nil {
+		if c.qs.logger != nil {
+			c.qs.logger.Debug("failed to get user groups for token budget resolution",
+				"subject_id", subjectID, "error", err)
+		}
+	} else {
+		for _, gm := range groupMemberships {
+			groupBindings, err := c.qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, gm.GroupID)
+			if err != nil {
+				if c.qs.logger != nil {
+					c.qs.logger.Debug("failed to list group bindings for token budget resolution",
+						"group_id", gm.GroupID, "error", err)
+				}
+				continue
+			}
+			combined = append(combined, groupBindings...)
+		}
+	}
+
+	c.subjectBindings[subjectID] = combined
+	c.subjectLoaded[subjectID] = true
+	return combined, nil
+}
+
+func (c *tokenLimitEvalCache) resolveByID(ctx context.Context, limitDefID, subjectID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolve(ctx, limitDefID, nil, subjectID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolveForDef(ctx context.Context, def *store.LimitDefinition, subjectID, scopeType, scopeID string) (int64, string, error) {
+	return c.resolve(ctx, def.ID, def, subjectID, scopeType, scopeID)
+}
+
+func (c *tokenLimitEvalCache) resolve(ctx context.Context, limitDefID string, def *store.LimitDefinition, subjectID, scopeType, scopeID string) (int64, string, error) {
 	var matchingBindings []*store.EntitlementBinding
 
 	if subjectID != "" {
-		userBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectUser, subjectID)
+		subjBindings, err := c.loadSubjectBindings(ctx, subjectID)
 		if err != nil {
-			return 0, store.TokenActionPauseNew, fmt.Errorf("list user bindings: %w", err)
+			return 0, store.TokenActionPauseNew, err
 		}
-		for _, b := range userBindings {
+		for _, b := range subjBindings {
 			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
 				matchingBindings = append(matchingBindings, b)
-			}
-		}
-
-		groupMemberships, err := qs.store.GetUserGroups(ctx, subjectID)
-		if err != nil {
-			if qs.logger != nil {
-				qs.logger.Debug("failed to get user groups for token budget resolution",
-					"subject_id", subjectID, "error", err)
-			}
-		} else {
-			for _, gm := range groupMemberships {
-				groupBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectGroup, gm.GroupID)
-				if err != nil {
-					if qs.logger != nil {
-						qs.logger.Debug("failed to list group bindings for token budget resolution",
-							"group_id", gm.GroupID, "error", err)
-					}
-					continue
-				}
-				for _, b := range groupBindings {
-					if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
-						matchingBindings = append(matchingBindings, b)
-					}
-				}
 			}
 		}
 	}
 
-	sysBindings, err := qs.store.ListEntitlementBindingsForSubject(ctx, store.EntitlementSubjectSystemDefault, "")
-	if err != nil {
-		if qs.logger != nil {
-			qs.logger.Debug("failed to list system default bindings for token budget resolution", "error", err)
-		}
-	} else {
-		for _, b := range sysBindings {
-			if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
-				matchingBindings = append(matchingBindings, b)
-			}
+	for _, b := range c.loadSystemBindings(ctx) {
+		if b.LimitDefinitionID == limitDefID && matchesScope(b, scopeType, scopeID) {
+			matchingBindings = append(matchingBindings, b)
 		}
 	}
 
 	if len(matchingBindings) == 0 {
-		limitDef, err := qs.store.GetLimitDefinition(ctx, limitDefID)
-		if err != nil {
-			return 0, store.TokenActionPauseNew, fmt.Errorf("get limit definition: %w", err)
+		if def == nil {
+			var err error
+			def, err = c.qs.store.GetLimitDefinition(ctx, limitDefID)
+			if err != nil {
+				return 0, store.TokenActionPauseNew, fmt.Errorf("get limit definition: %w", err)
+			}
 		}
-		if limitDef.DefaultValue <= 0 {
+		if def.DefaultValue <= 0 {
 			return 0, store.TokenActionPauseNew, nil
 		}
-		return limitDef.DefaultValue, store.TokenActionPauseNew, nil
+		return def.DefaultValue, store.TokenActionPauseNew, nil
 	}
 
 	var maxValue int64

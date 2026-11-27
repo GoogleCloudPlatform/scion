@@ -566,6 +566,12 @@ func (s *Server) createEntitlement(w http.ResponseWriter, r *http.Request, limit
 		BadRequest(w, err.Error())
 		return
 	}
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens &&
+		req.SubjectType == store.EntitlementSubjectSystemDefault &&
+		req.SubjectID != "" {
+		BadRequest(w, "subject_id must be empty when subject_type is system_default")
+		return
+	}
 
 	// ptone/scion#2061 P2-D4 / ptone/scion#2063 item 2: per-broker
 	// max_agents_per_broker caps are set via the broker settings API, not
@@ -687,6 +693,12 @@ func (s *Server) updateEntitlement(w http.ResponseWriter, r *http.Request, id st
 	tokenAction, err := normalizeAndValidateTokenAction(req.TokenAction, limitDef.ResourceType)
 	if err != nil {
 		BadRequest(w, err.Error())
+		return
+	}
+	if limitDef.ResourceType == store.LimitResourceTypeLLMTokens &&
+		req.SubjectType == store.EntitlementSubjectSystemDefault &&
+		req.SubjectID != "" {
+		BadRequest(w, "subject_id must be empty when subject_type is system_default")
 		return
 	}
 

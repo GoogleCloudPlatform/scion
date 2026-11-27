@@ -94,6 +94,7 @@ type TokenBudgetEvaluator struct {
 	thresholdHook BudgetThresholdHook
 
 	evalErrors atomic.Int64
+	hookPanics atomic.Int64
 }
 
 // NewTokenBudgetEvaluator constructs a TokenBudgetEvaluator.
@@ -124,6 +125,12 @@ func (e *TokenBudgetEvaluator) EvalErrors() int64 {
 	return e.evalErrors.Load()
 }
 
+// HookPanics returns the cumulative count of recovered panics from
+// BudgetThresholdHook invocations.
+func (e *TokenBudgetEvaluator) HookPanics() int64 {
+	return e.hookPanics.Load()
+}
+
 func (e *TokenBudgetEvaluator) enabled() bool {
 	if e == nil || e.store == nil || e.quota == nil {
 		return false
@@ -145,9 +152,22 @@ func (e *TokenBudgetEvaluator) fireThresholdHook(ctx context.Context, crossing B
 	e.hookMu.RLock()
 	hook := e.thresholdHook
 	e.hookMu.RUnlock()
-	if hook != nil {
-		hook(ctx, crossing)
+	if hook == nil {
+		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			e.hookPanics.Add(1)
+			e.logger.Error("token budget threshold hook panicked; recovered",
+				"limit", crossing.LimitName,
+				"scope_kind", crossing.ScopeKind,
+				"scope_id", crossing.ScopeID,
+				"project_scope_id", crossing.ProjectScopeID,
+				"new_state", crossing.NewState,
+				"panic", r)
+		}
+	}()
+	hook(ctx, crossing)
 }
 
 // utcDayWindow returns the half-open UTC day window [00:00, next 00:00) containing ts.
@@ -357,9 +377,9 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 		}
 	}
 
-	limitDefCache := make(map[string]*store.LimitDefinition, 6)
+	evalCache := newTokenLimitEvalCache(e.quota)
 	for _, spec := range specs {
-		if _, _, err := e.evaluateSpec(ctx, spec, limitDefCache); err != nil {
+		if _, _, err := e.evaluateSpec(ctx, spec, evalCache); err != nil {
 			e.evalErrors.Add(1)
 			e.logger.Warn("token budget evaluation failed",
 				"limit", spec.limitName,
@@ -377,9 +397,11 @@ func (e *TokenBudgetEvaluator) EvaluateIngestedEvents(ctx context.Context, inser
 // at `now` is exhausted (respecting override_until > now) with an effective
 // token_action matching `actions` (if actions is empty, any action matches).
 //
-// Re-evaluates on demand from usage_scope_counters_daily (≤31 rows per window)
-// so a missed post-commit evaluation self-heals (D4). Returns Exhausted=false
-// when either tokenomics.token_budgets or tokenomics.usage_ledger is disabled.
+// `now` is clamped to at least the evaluator's clock so closed windows are
+// never evaluated or created. Re-evaluates on demand from
+// usage_scope_counters_daily (≤31 rows per window) so a missed post-commit
+// evaluation self-heals (D4). Returns Exhausted=false when either
+// tokenomics.token_budgets or tokenomics.usage_ledger is disabled.
 func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 	ctx context.Context,
 	projectID string,
@@ -390,8 +412,9 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 	if !e.enabled() || projectID == "" {
 		return &BudgetExhaustionStatus{Exhausted: false}, nil
 	}
-	if now.IsZero() {
-		now = e.now()
+	evalNow := e.now()
+	if now.IsZero() || now.Before(evalNow) {
+		now = evalNow
 	} else {
 		now = now.UTC()
 	}
@@ -487,9 +510,9 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 		)
 	}
 
-	limitDefCache := make(map[string]*store.LimitDefinition, len(specs))
+	evalCache := newTokenLimitEvalCache(e.quota)
 	for _, spec := range specs {
-		st, action, err := e.evaluateSpec(ctx, spec, limitDefCache)
+		st, action, err := e.evaluateSpec(ctx, spec, evalCache)
 		if err != nil {
 			return nil, err
 		}
@@ -519,31 +542,15 @@ func (e *TokenBudgetEvaluator) IsScopeExhaustedForAction(
 	return &BudgetExhaustionStatus{Exhausted: false}, nil
 }
 
-func (e *TokenBudgetEvaluator) lookupLimitDef(ctx context.Context, name string, cache map[string]*store.LimitDefinition) (*store.LimitDefinition, error) {
-	if def, ok := cache[name]; ok {
-		return def, nil
-	}
-	def, err := e.store.GetLimitDefinitionByName(ctx, name)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			cache[name] = nil
-			return nil, nil
-		}
-		return nil, fmt.Errorf("lookup limit definition %q: %w", name, err)
-	}
-	cache[name] = def
-	return def, nil
-}
-
 // evaluateSpec evaluates a single (limit, scope, window) tuple and persists
 // any monotonic state transition via optimistic CAS. Returns (nil, action, nil)
 // when the limit is not defined or is unlimited (cap <= 0).
 func (e *TokenBudgetEvaluator) evaluateSpec(
 	ctx context.Context,
 	spec budgetEvalSpec,
-	limitDefCache map[string]*store.LimitDefinition,
+	evalCache *tokenLimitEvalCache,
 ) (*store.UsageBudgetState, string, error) {
-	def, err := e.lookupLimitDef(ctx, spec.limitName, limitDefCache)
+	def, err := evalCache.lookupLimitDef(ctx, spec.limitName)
 	if err != nil {
 		return nil, "", err
 	}
@@ -551,8 +558,8 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 		return nil, "", nil
 	}
 
-	capVal, action, err := e.quota.ResolveEffectiveTokenLimit(
-		ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+	capVal, action, err := evalCache.resolveForDef(
+		ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
@@ -677,10 +684,17 @@ func (e *TokenBudgetEvaluator) evaluateSpec(
 }
 
 // TokenBudgetEvaluator returns (lazily constructing on first call) the Hub's
-// raw-token budget evaluator.
+// raw-token budget evaluator. Uses an RLock fast path so hot-path ingest
+// requests never contend on the global write lock after initialization.
 func (s *Server) TokenBudgetEvaluator() *TokenBudgetEvaluator {
 	if s == nil {
 		return nil
+	}
+	s.mu.RLock()
+	eval := s.tokenBudgetEvaluator
+	s.mu.RUnlock()
+	if eval != nil {
+		return eval
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
