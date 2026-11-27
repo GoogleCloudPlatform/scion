@@ -57,6 +57,7 @@ type decisionRetentionPreviewResult struct {
 	Pages           int
 	EligibleMsgs    int
 	SkippedMsgs     int
+	MaxDedupEntries int
 	ReachedCutoff   bool
 	BudgetExhausted bool
 }
@@ -65,7 +66,10 @@ type decisionRetentionPreviewResult struct {
 // rules as the sweep under p, starting from the beginning and deleting nothing.
 // It deduplicates message IDs across pages so a multi-decision prompt straddling
 // a page boundary is counted at most once, matching a manual run on an unchanged
-// database.
+// database. Because candidates are ordered by (created_at, id) and every
+// decision row of a prompt message shares the same created_at timestamp, dedup
+// state only needs to track message IDs at the current created_at timestamp,
+// keeping memory bounded regardless of walk length (ptone/scion#9439).
 func (sw *decisionRetentionSweeper) Preview(
 	ctx context.Context,
 	p decisionRetentionPolicy,
@@ -85,7 +89,8 @@ func (sw *decisionRetentionSweeper) Preview(
 	}
 	globalCutoff := p.GlobalCutoff.UTC()
 	var pos store.DecisionRetentionPosition
-	seenMsg := make(map[string]bool)
+	var seenAt time.Time
+	seenAtMsgs := make(map[string]struct{})
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -111,12 +116,23 @@ func (sw *decisionRetentionSweeper) Preview(
 		msgIDs := make([]string, 0, len(cands))
 		cutoffByProject := make(map[string]time.Time)
 		for _, c := range cands {
+			if !c.CreatedAt.Equal(seenAt) {
+				seenAt = c.CreatedAt
+				if len(seenAtMsgs) > pageSize {
+					seenAtMsgs = make(map[string]struct{})
+				} else {
+					clear(seenAtMsgs)
+				}
+			}
 			cutoff, ok := p.CutoffForProject(c.ProjectID)
 			if !ok || !c.CreatedAt.Before(cutoff) {
 				continue
 			}
-			if !seenMsg[c.MessageID] {
-				seenMsg[c.MessageID] = true
+			if _, seen := seenAtMsgs[c.MessageID]; !seen {
+				seenAtMsgs[c.MessageID] = struct{}{}
+				if len(seenAtMsgs) > res.MaxDedupEntries {
+					res.MaxDedupEntries = len(seenAtMsgs)
+				}
 				msgIDs = append(msgIDs, c.MessageID)
 			}
 			cutoffByProject[c.ProjectID] = cutoff
