@@ -16,7 +16,11 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 
+	entsql "entgo.io/ent/dialect/sql"
 	entasm "github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 
@@ -256,4 +260,117 @@ func (s *AgentSessionMetricsStore) CountDistinctAgentsByProject(ctx context.Cont
 		return 0, mapError(err)
 	}
 	return len(groups), nil
+}
+
+// CountSessionMetrics implements store.AgentSessionMetricsStore.CountSessionMetrics.
+// Computes exact COUNT(DISTINCT (agent_id, session_id)) over [Since, Until]
+// without summing per-bucket counts, and when IncludeEvents is true returns
+// distinct (agent_id, session_id, started_at) tuples for timezone-aware daily
+// deduplication. Works identically on SQLite and Postgres.
+func (s *AgentSessionMetricsStore) CountSessionMetrics(ctx context.Context, q store.SessionMetricsCountQuery) (*store.SessionMetricsCountResult, error) {
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	var whereParts []string
+	var whereArgs []any
+	if q.ProjectID != "" {
+		whereParts = append(whereParts, entasm.FieldProjectID+" = ?")
+		whereArgs = append(whereArgs, q.ProjectID)
+	}
+	if !q.Since.IsZero() {
+		whereParts = append(whereParts, entasm.FieldStartedAt+" >= ?")
+		whereArgs = append(whereArgs, q.Since.UTC())
+	}
+	if !q.Until.IsZero() {
+		whereParts = append(whereParts, entasm.FieldStartedAt+" <= ?")
+		whereArgs = append(whereArgs, q.Until.UTC())
+	}
+	whereSQL := ""
+	if len(whereParts) > 0 {
+		whereSQL = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	totalSQL := fmt.Sprintf(
+		"SELECT COUNT(*) FROM (SELECT DISTINCT %s, %s FROM %s%s) AS distinct_sessions",
+		entasm.FieldAgentID,
+		entasm.FieldSessionID,
+		entasm.Table,
+		whereSQL,
+	)
+	totalRows := &entsql.Rows{}
+	if err := drv.Query(ctx, usageRebindSQL(dialectName, totalSQL), whereArgs, totalRows); err != nil {
+		return nil, mapError(err)
+	}
+	var total int64
+	if totalRows.Next() {
+		if err := totalRows.Scan(&total); err != nil {
+			_ = totalRows.Close()
+			return nil, mapError(err)
+		}
+	}
+	if err := totalRows.Err(); err != nil {
+		_ = totalRows.Close()
+		return nil, mapError(err)
+	}
+	_ = totalRows.Close()
+
+	res := &store.SessionMetricsCountResult{
+		TotalSessions: total,
+	}
+	if !q.IncludeEvents {
+		return res, nil
+	}
+
+	limit := q.Limit
+	if limit <= 0 || limit > maxUsageRollupQueryLimit {
+		limit = maxUsageRollupQueryLimit
+	}
+
+	// Order newest-first so LIMIT keeps the most recent session segments on
+	// truncation; re-sorted ascending below.
+	evSQL := fmt.Sprintf(
+		"SELECT DISTINCT %s, %s, %s FROM %s%s ORDER BY %s DESC LIMIT ?",
+		entasm.FieldAgentID,
+		entasm.FieldSessionID,
+		entasm.FieldStartedAt,
+		entasm.Table,
+		whereSQL,
+		entasm.FieldStartedAt,
+	)
+	evArgs := append(append([]any(nil), whereArgs...), limit+1)
+	evRows := &entsql.Rows{}
+	if err := drv.Query(ctx, usageRebindSQL(dialectName, evSQL), evArgs, evRows); err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = evRows.Close() }()
+
+	for evRows.Next() {
+		var agentID, sessionID string
+		var rawTime any
+		if err := evRows.Scan(&agentID, &sessionID, &rawTime); err != nil {
+			return nil, mapError(err)
+		}
+		ts, err := parseSQLTimestamp(rawTime)
+		if err != nil {
+			return nil, fmt.Errorf("parse session started_at: %w", err)
+		}
+		if ts != nil {
+			if len(res.Sessions) == limit {
+				res.Truncated = true
+				break
+			}
+			res.Sessions = append(res.Sessions, store.SessionStartRef{
+				AgentID:   agentID,
+				SessionID: sessionID,
+				StartedAt: *ts,
+			})
+		}
+	}
+	if err := evRows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	sort.SliceStable(res.Sessions, func(i, j int) bool {
+		return res.Sessions[i].StartedAt.Before(res.Sessions[j].StartedAt)
+	})
+	return res, nil
 }
