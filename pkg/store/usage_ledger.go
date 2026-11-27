@@ -91,10 +91,15 @@ const (
 	UsageScopeKindGlobal      = "global"
 )
 
-// UsageRollupHourlyCoverageSection is the internal hub_settings section that
+// UsageRollupHourlyCoverageSection is the system hub_settings section that
 // records the UTC hour-aligned timestamp when usage_rollups_hourly coverage
 // began (set idempotently on first hourly rollup write).
-const UsageRollupHourlyCoverageSection = "internal.usage_rollups_hourly_coverage"
+// LegacyUsageRollupHourlyCoverageSection is the earlier internal.* key accepted
+// on read for any rows already written before the rename.
+const (
+	UsageRollupHourlyCoverageSection       = "system.usage_rollups_hourly_coverage"
+	LegacyUsageRollupHourlyCoverageSection = "internal.usage_rollups_hourly_coverage"
+)
 
 // Usage rollup granularities and supported groupBy dimensions.
 const (

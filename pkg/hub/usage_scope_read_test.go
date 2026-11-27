@@ -161,6 +161,7 @@ func TestScopedUsageRead_AuthzMatrix(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, agB))
 
 	tokA := srv.generateRecordedAgentToken(t, agA.ID, projA.ID, []AgentTokenScope{ScopeProjectRead}, nil)
+	tokANoRead := srv.generateRecordedAgentToken(t, agA.ID, projA.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
 	tokB := srv.generateRecordedAgentToken(t, agB.ID, projB.ID, []AgentTokenScope{ScopeProjectRead}, nil)
 
 	// 1. GET /api/v1/projects/{id}/usage
@@ -168,7 +169,8 @@ func TestScopedUsageRead_AuthzMatrix(t *testing.T) {
 	assert.Equal(t, http.StatusOK, doUserUsageReadRequest(t, srv, "/api/v1/projects/"+projA.ID+"/usage", member).Code)
 	assert.Equal(t, http.StatusOK, doUserUsageReadRequest(t, srv, "/api/v1/projects/"+projA.ID+"/usage", admin).Code)
 	assert.Equal(t, http.StatusForbidden, doUserUsageReadRequest(t, srv, "/api/v1/projects/"+projA.ID+"/usage", outsider).Code)
-	assert.Equal(t, http.StatusOK, doAgentUsageGET(t, srv, "/api/v1/projects/"+projA.ID+"/usage", tokA).Code, "agent may read its own project usage")
+	assert.Equal(t, http.StatusOK, doAgentUsageGET(t, srv, "/api/v1/projects/"+projA.ID+"/usage", tokA).Code, "agent with project:read may read its own project usage")
+	assert.Equal(t, http.StatusForbidden, doAgentUsageGET(t, srv, "/api/v1/projects/"+projA.ID+"/usage", tokANoRead).Code, "same-project agent without project:read must get 403")
 	assert.Equal(t, http.StatusForbidden, doAgentUsageGET(t, srv, "/api/v1/projects/"+projA.ID+"/usage", tokB).Code, "agent from another project must get 403")
 
 	// 2. GET /api/v1/me/usage

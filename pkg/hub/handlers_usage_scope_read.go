@@ -105,6 +105,10 @@ func (s *Server) handleProjectUsage(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	if !checkAgentReadScope(w, r) {
+		return
+	}
+
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {

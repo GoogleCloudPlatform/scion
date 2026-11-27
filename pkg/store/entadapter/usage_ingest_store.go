@@ -722,7 +722,7 @@ func ensureHourlyCoverageMarkerTx(ctx context.Context, drv dialect.Driver, diale
 	}
 	q := usageRebindSQL(dialectName, fmt.Sprintf(`
 INSERT INTO hub_settings (id, section, value, revision, updated_by, origin, create_time, update_time)
-VALUES (?, ?, %s, 1, 'system', 'seeded', ?, ?)
+VALUES (?, ?, %s, 1, 'seed', 'seeded', ?, ?)
 ON CONFLICT (section) DO NOTHING`, valParam))
 	var res sql.Result
 	if err := drv.Exec(ctx, q, []any{uuid.New(), store.UsageRollupHourlyCoverageSection, string(payload), now, now}, &res); err != nil {

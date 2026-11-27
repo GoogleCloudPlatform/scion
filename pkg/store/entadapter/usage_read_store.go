@@ -120,10 +120,18 @@ func (s *UsageLedgerStore) GetUsageHourlyCoverageStart(ctx context.Context) (tim
 		Where(hubsetting.SectionEQ(store.UsageRollupHourlyCoverageSection)).
 		Only(ctx)
 	if err != nil {
-		if ent.IsNotFound(err) {
-			return time.Time{}, false, nil
+		if !ent.IsNotFound(err) {
+			return time.Time{}, false, mapError(err)
 		}
-		return time.Time{}, false, mapError(err)
+		row, err = s.client.HubSetting.Query().
+			Where(hubsetting.SectionEQ(store.LegacyUsageRollupHourlyCoverageSection)).
+			Only(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				return time.Time{}, false, nil
+			}
+			return time.Time{}, false, mapError(err)
+		}
 	}
 	var marker hourlyCoverageMarker
 	if err := json.Unmarshal(row.Value, &marker); err != nil {
