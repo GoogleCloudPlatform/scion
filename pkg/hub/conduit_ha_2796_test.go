@@ -398,21 +398,21 @@ func TestConduitHA_2796_C10_CapabilityTruthCrossNode(t *testing.T) {
 
 // TestConduitHA_2796_C16b_ActiveAuthzCrossNode validates ptone/scion#2796
 // checkbox "C16b (T2 active authorization)" across two Postgres hub nodes with
-// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (1s):
+// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (2s):
 //   - Renewal: streams whose permission still holds stay open past their
-//     authorization interval (1s) and keep echoing.
+//     authorization interval (2s) and keep echoing.
 //   - Fast-path NOTIFY revocation: revoking u1's attach role binding through
 //     Hub B closes u1's cross-node PTY on Hub A with 4401 authz_expired within
 //     one recheck interval + grace, while u2's stream stays open.
 //   - Missed-notification sweep: with Hub A's Postgres LISTEN blocked via
 //     BlockLISTEN, revoking u2's attach role binding through Hub B still closes
-//     u2's PTY on Hub A with 4401 authz_expired within one recheck interval +
-//     grace via the periodic sweep.
+//     u2's PTY on Hub A with 4401 authz_expired within 1s (strictly before u2's
+//     next 2s interval deadline), proving the 200ms periodic sweep caught it.
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
-		authzMax        = 1 * time.Second
-		closeBound      = recheckInterval + 2*time.Second
+		authzMax        = 2 * time.Second
+		closeBound      = 1 * time.Second
 	)
 	env := newConduitHAEnvWith(t, conduitHAOptions{
 		AuthzRecheckInterval: recheckInterval,
