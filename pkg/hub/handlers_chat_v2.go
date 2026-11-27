@@ -6769,7 +6769,9 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// (the per-file limit times MaxAttachmentsPerMessage, plus room for the
 	// form fields) applies to the whole multipart body. Parts above
 	// uploadFormMemory are spooled to temporary files, not held in memory.
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
+	bodyCap := formLimit + 1024*1024
+	artifacts.ExtendUploadDeadlines(ctx, w, artifacts.ExpectedUploadBytes(r.ContentLength, bodyCap))
+	r.Body = http.MaxBytesReader(w, r.Body, bodyCap)
 	// The form is removed on every return: ParseMultipartForm can spool
 	// parts and still answer an error (from the query string).
 	cleanup, err := parseMultipartUpload(r, uploadFormMemory)
