@@ -17,17 +17,12 @@ package hub
 import (
 	"container/list"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
@@ -35,22 +30,23 @@ import (
 )
 
 const (
-	templateDriftMaxBytes     int64 = 4 << 20 // 4 MiB cap for GitHub API JSON responses
-	templateDriftBudget             = 2 * time.Second
-	templateDriftBranchTTL          = 60 * time.Second
-	templateDriftRateLimitTTL       = 5 * time.Minute
-	templateDriftCommitMax          = 1024
-	templateDriftBranchMax          = 512
+	templateDriftMaxBytes  int64 = 4 << 20 // 4 MiB cap for GitHub API JSON responses
+	templateDriftBudget          = 2 * time.Second
+	templateDriftBranchTTL       = 60 * time.Second
+	templateDriftCommitMax       = 1024
+	templateDriftBranchMax       = 512
 )
 
-var templateDriftHosts = []string{"api.github.com"}
-
-// templateDriftKey identifies a folder tree SHA at a specific git ref.
+// templateDriftKey identifies a cached drift lookup scoped to a GitHub
+// principal (Credential.EffectiveScope()) so cached metadata never crosses
+// principals.
 type templateDriftKey struct {
-	owner string // lowercased
-	repo  string // lowercased
-	ref   string // 40-char commit SHA or branch name
-	path  string // "" for repo root, else slash-separated relative folder path
+	owner     string // lowercased
+	repo      string // lowercased
+	ref       string // 40-char commit SHA, ref name, or "" for repo default branch
+	path      string // "" for repo root, else slash-separated relative folder path
+	ambiguous bool   // true for multi-segment /tree/<rest> branch-cache keys
+	scope     string // githubfetch.Credential.EffectiveScope()
 }
 
 type templateDriftCommitEntry struct {
@@ -59,92 +55,51 @@ type templateDriftCommitEntry struct {
 }
 
 type templateDriftBranchEntry struct {
-	treeSHA   string
-	expiresAt time.Time
+	resolvedRef  string
+	resolvedPath string
+	commitSHA    string
+	treeSHA      string
+	expiresAt    time.Time
 }
 
-// templateDriftChecker caches GitHub tree-SHA lookups and per-repo rate-limit
-// backoffs for the Hub-side template drift check at agent creation. Its zero
-// value is ready for use.
+// templateDriftChecker caches GitHub ref and folder tree-SHA lookups for the
+// Hub-side template drift check at agent creation. Its zero value is ready for
+// use. Rate-limit cooldowns use the Hub's shared githubfetch.Cooldown
+// (s.githubCooldown()).
 type templateDriftChecker struct {
 	mu sync.Mutex
 
-	// Immutable commit tree-SHA LRU cache (no TTL).
+	// Immutable commit folder tree-SHA LRU cache (no TTL).
 	commitOrder *list.List
 	commitItems map[templateDriftKey]*list.Element
 
-	// Branch tree-SHA TTL cache (60s TTL).
+	// Ref resolution + folder tree-SHA TTL cache (60s TTL).
 	branchItems map[templateDriftKey]templateDriftBranchEntry
 
-	// Per-repo 403/429 negative cache (5m TTL), keyed by lowercased "owner/repo".
-	rateLimitUntil map[string]time.Time
-
 	// Optional test seams; nil/zero select production defaults.
-	fetcher templateSourceFetcher
-	now     func() time.Time
-	budget  time.Duration
+	client *githubfetch.Client
+	now    func() time.Time
+	budget time.Duration
 }
 
 func (c *templateDriftChecker) clock() time.Time {
-	if c.now != nil {
-		return c.now()
+	c.mu.Lock()
+	nowFn := c.now
+	c.mu.Unlock()
+	if nowFn != nil {
+		return nowFn()
 	}
 	return time.Now()
 }
 
 func (c *templateDriftChecker) effectiveBudget() time.Duration {
-	if c.budget > 0 {
-		return c.budget
+	c.mu.Lock()
+	b := c.budget
+	c.mu.Unlock()
+	if b > 0 {
+		return b
 	}
 	return templateDriftBudget
-}
-
-func (c *templateDriftChecker) getFetcher(logger *slog.Logger) templateSourceFetcher {
-	c.mu.Lock()
-	f := c.fetcher
-	c.mu.Unlock()
-	if f != nil {
-		return f
-	}
-	return newTemplateDriftFetcher(logger)
-}
-
-func newTemplateDriftFetcher(logger *slog.Logger) *remotefetch.Fetcher {
-	return remotefetch.New(remotefetch.Config{
-		MaxBytes:     templateDriftMaxBytes,
-		Timeout:      templateDriftBudget,
-		MaxRedirects: 2,
-		AllowedHosts: templateDriftHosts,
-		Logger:       logger,
-	})
-}
-
-func (c *templateDriftChecker) isRateLimited(repoKey string, now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	until, ok := c.rateLimitUntil[repoKey]
-	if !ok {
-		return false
-	}
-	if !now.Before(until) {
-		delete(c.rateLimitUntil, repoKey)
-		return false
-	}
-	return true
-}
-
-func (c *templateDriftChecker) recordRateLimit(repoKey string, now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.rateLimitUntil == nil {
-		c.rateLimitUntil = make(map[string]time.Time)
-	}
-	for k, until := range c.rateLimitUntil {
-		if !now.Before(until) {
-			delete(c.rateLimitUntil, k)
-		}
-	}
-	c.rateLimitUntil[repoKey] = now.Add(templateDriftRateLimitTTL)
 }
 
 func (c *templateDriftChecker) getCommitTree(key templateDriftKey) (string, bool) {
@@ -186,21 +141,21 @@ func (c *templateDriftChecker) putCommitTree(key templateDriftKey, treeSHA strin
 	}
 }
 
-func (c *templateDriftChecker) getBranchTree(key templateDriftKey, now time.Time) (string, bool) {
+func (c *templateDriftChecker) getBranchTree(key templateDriftKey, now time.Time) (templateDriftBranchEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.branchItems[key]
 	if !ok {
-		return "", false
+		return templateDriftBranchEntry{}, false
 	}
 	if !now.Before(entry.expiresAt) {
 		delete(c.branchItems, key)
-		return "", false
+		return templateDriftBranchEntry{}, false
 	}
-	return entry.treeSHA, true
+	return entry, true
 }
 
-func (c *templateDriftChecker) putBranchTree(key templateDriftKey, treeSHA string, now time.Time) {
+func (c *templateDriftChecker) putBranchTree(key templateDriftKey, entry templateDriftBranchEntry, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.branchItems == nil {
@@ -228,37 +183,49 @@ func (c *templateDriftChecker) putBranchTree(key templateDriftKey, treeSHA strin
 			}
 		}
 	}
-	c.branchItems[key] = templateDriftBranchEntry{
-		treeSHA:   treeSHA,
-		expiresAt: now.Add(templateDriftBranchTTL),
+	entry.expiresAt = now.Add(templateDriftBranchTTL)
+	c.branchItems[key] = entry
+}
+
+func (s *Server) templateDriftLimits() githubfetch.Limits {
+	budget := s.templateDrift.effectiveBudget()
+	return githubfetch.Limits{
+		MaxDownload:    templateDriftMaxBytes,
+		RequestTimeout: budget,
+		Timeout:        budget,
+		OnSubmodule:    githubfetch.PolicySkip,
+		OnSymlink:      githubfetch.PolicySkip,
 	}
 }
 
-// templateSourceFetcher downloads one body, without or with an Authorization
-// header. Retained for template_drift.go until Phase 6 migrates drift onto
-// pkg/githubfetch.
-type templateSourceFetcher interface {
-	FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error)
-	FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*remotefetch.Result, error)
-}
-
-// templateGitHubSource is the parsed GitHub folder source used by
-// template_drift.go until Phase 6 migrates drift onto pkg/githubfetch.
-type templateGitHubSource struct {
-	Owner  string
-	Repo   string
-	Branch string
-	Path   string
+func (s *Server) getTemplateDriftClient() *githubfetch.Client {
+	s.templateDrift.mu.Lock()
+	c := s.templateDrift.client
+	nowFn := s.templateDrift.now
+	s.templateDrift.mu.Unlock()
+	if c != nil {
+		return c
+	}
+	ep := githubfetch.DefaultEndpoint()
+	doer := s.newTemplateGitHubDoer(ep, s.templateDriftLimits())
+	return githubfetch.New(githubfetch.Options{
+		Endpoint:   ep,
+		Doer:       doer,
+		Cooldown:   s.githubCooldown(),
+		Clock:      nowFn,
+		MaxRetries: 0,
+	})
 }
 
 type templateDriftTarget struct {
-	src          *templateGitHubSource
+	src          githubfetch.Source
 	sourceCommit string
 }
 
 // resolveTemplateDriftTarget returns the validated GitHub source and commit
 // when all preconditions for a drift check hold, or nil if the check should be
-// skipped.
+// skipped. Source URLs pinned to a full 40-hex commit SHA are immutable and
+// never drift.
 func (s *Server) resolveTemplateDriftTarget(project *store.Project, tmpl *store.Template) *templateDriftTarget {
 	if !s.experimentEnabled(experiments.TemplateDriftWarning) {
 		return nil
@@ -274,15 +241,8 @@ func (s *Server) resolveTemplateDriftTarget(project *store.Project, tmpl *store.
 	if err != nil {
 		return nil
 	}
-	branch := parsed.Ref
-	if branch == "" {
-		branch = "main"
-	}
-	src := &templateGitHubSource{
-		Owner:  parsed.Owner,
-		Repo:   parsed.Repo,
-		Branch: branch,
-		Path:   parsed.Path,
+	if len(parsed.RefAmbiguous) == 0 && githubfetch.IsFullCommitSHA(parsed.Ref) {
+		return nil
 	}
 	remote := strings.TrimSpace(project.GitRemote)
 	if remote == "" && project.Labels != nil {
@@ -295,10 +255,10 @@ func (s *Server) resolveTemplateDriftTarget(project *store.Project, tmpl *store.
 	if !ok {
 		return nil
 	}
-	if !strings.EqualFold(projOwner, src.Owner) || !strings.EqualFold(projRepo, src.Repo) {
+	if !strings.EqualFold(projOwner, parsed.Owner) || !strings.EqualFold(projRepo, parsed.Repo) {
 		return nil
 	}
-	return &templateDriftTarget{src: src, sourceCommit: commit}
+	return &templateDriftTarget{src: parsed, sourceCommit: commit}
 }
 
 // startTemplateDriftCheck launches the fail-open template drift check
@@ -329,44 +289,138 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 	src := target.src
 	ownerLower := strings.ToLower(src.Owner)
 	repoLower := strings.ToLower(src.Repo)
-	repoKey := ownerLower + "/" + repoLower
 
+	cred := s.githubCredential(ctx, ghCredRequest{
+		Scope:   store.TemplateScopeProject,
+		ScopeID: project.ID,
+		Owner:   src.Owner,
+		Repo:    src.Repo,
+	})
+	scope := cred.EffectiveScope()
 	now := s.templateDrift.clock()
-	if s.templateDrift.isRateLimited(repoKey, now) {
-		s.agentLifecycleLog.Debug("template drift check skipped (rate-limit backoff)",
-			"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
-			"owner", src.Owner, "repo", src.Repo)
-		return ""
+
+	branchKey := templateDriftKey{
+		owner:     ownerLower,
+		repo:      repoLower,
+		ref:       src.Ref,
+		path:      src.Path,
+		ambiguous: len(src.RefAmbiguous) > 0,
+		scope:     scope,
 	}
 
-	commitKey := templateDriftKey{owner: ownerLower, repo: repoLower, ref: target.sourceCommit, path: src.Path}
-	branchKey := templateDriftKey{owner: ownerLower, repo: repoLower, ref: src.Branch, path: src.Path}
+	var (
+		resolvedRef  string
+		resolvedPath string
+		headCommit   string
+		branchTree   string
+		commitTree   string
+		hasCommit    bool
+	)
 
-	commitTree, hasCommit := s.templateDrift.getCommitTree(commitKey)
-	branchTree, hasBranch := s.templateDrift.getBranchTree(branchKey, now)
+	branchEntry, hasBranch := s.templateDrift.getBranchTree(branchKey, now)
+	if hasBranch {
+		resolvedRef = branchEntry.resolvedRef
+		resolvedPath = branchEntry.resolvedPath
+		headCommit = branchEntry.commitSHA
+		branchTree = branchEntry.treeSHA
+		if headCommit == target.sourceCommit {
+			return ""
+		}
+		commitKey := templateDriftKey{
+			owner: ownerLower,
+			repo:  repoLower,
+			ref:   target.sourceCommit,
+			path:  resolvedPath,
+			scope: scope,
+		}
+		commitTree, hasCommit = s.templateDrift.getCommitTree(commitKey)
+	}
 
-	if !hasCommit || !hasBranch {
-		fetcher := s.templateDrift.getFetcher(s.resourceLog)
-		cred := s.importCredential(ctx, store.TemplateScopeProject, project.ID, tmpl.SourceURL)
+	if !hasBranch || !hasCommit {
+		if _, cooling := s.githubCooldown().Active(scope); cooling {
+			s.agentLifecycleLog.Debug("template drift check skipped (rate-limit cooldown)",
+				"template_id", tmpl.ID, "project_id", project.ID, "agent_id", agentID,
+				"owner", src.Owner, "repo", src.Repo)
+			return ""
+		}
 
-		if !hasCommit {
-			var err error
-			commitTree, err = fetchGitHubFolderTreeSHA(ctx, fetcher, cred, src, target.sourceCommit)
-			if err != nil {
-				s.handleTemplateDriftError(project, tmpl, target, agentID, repoKey, err)
-				return ""
-			}
-			s.templateDrift.putCommitTree(commitKey, commitTree)
+		client := s.getTemplateDriftClient()
+		lim := s.templateDriftLimits()
+		resolvedSrc := githubfetch.Source{
+			Owner: src.Owner,
+			Repo:  src.Repo,
+			Ref:   resolvedRef,
+			Path:  resolvedPath,
 		}
 
 		if !hasBranch {
-			var err error
-			branchTree, err = fetchGitHubFolderTreeSHA(ctx, fetcher, cred, src, src.Branch)
+			resolved, rSrc, err := client.ResolveRef(ctx, src, cred)
 			if err != nil {
-				s.handleTemplateDriftError(project, tmpl, target, agentID, repoKey, err)
+				s.handleTemplateDriftError(project, tmpl, target, agentID, err)
 				return ""
 			}
-			s.templateDrift.putBranchTree(branchKey, branchTree, s.templateDrift.clock())
+			resolvedRef = resolved.Ref
+			resolvedPath = rSrc.Path
+			headCommit = resolved.CommitSHA
+			resolvedSrc = rSrc
+
+			if resolved.Kind == githubfetch.RefSHA || headCommit == target.sourceCommit {
+				s.templateDrift.putBranchTree(branchKey, templateDriftBranchEntry{
+					resolvedRef:  resolvedRef,
+					resolvedPath: resolvedPath,
+					commitSHA:    headCommit,
+				}, s.templateDrift.clock())
+				return ""
+			}
+
+			headTreeKey := templateDriftKey{
+				owner: ownerLower,
+				repo:  repoLower,
+				ref:   headCommit,
+				path:  resolvedPath,
+				scope: scope,
+			}
+			var hasHeadTree bool
+			branchTree, hasHeadTree = s.templateDrift.getCommitTree(headTreeKey)
+			if !hasHeadTree {
+				tree, err := client.ListTreeShallow(ctx, resolvedSrc, headCommit, cred, lim)
+				if err != nil {
+					s.handleTemplateDriftError(project, tmpl, target, agentID, err)
+					return ""
+				}
+				if tree.TreeSHA == "" {
+					return ""
+				}
+				branchTree = tree.TreeSHA
+				s.templateDrift.putCommitTree(headTreeKey, branchTree)
+			}
+			s.templateDrift.putBranchTree(branchKey, templateDriftBranchEntry{
+				resolvedRef:  resolvedRef,
+				resolvedPath: resolvedPath,
+				commitSHA:    headCommit,
+				treeSHA:      branchTree,
+			}, s.templateDrift.clock())
+		}
+
+		commitKey := templateDriftKey{
+			owner: ownerLower,
+			repo:  repoLower,
+			ref:   target.sourceCommit,
+			path:  resolvedPath,
+			scope: scope,
+		}
+		commitTree, hasCommit = s.templateDrift.getCommitTree(commitKey)
+		if !hasCommit {
+			tree, err := client.ListTreeShallow(ctx, resolvedSrc, target.sourceCommit, cred, lim)
+			if err != nil {
+				s.handleTemplateDriftError(project, tmpl, target, agentID, err)
+				return ""
+			}
+			if tree.TreeSHA == "" {
+				return ""
+			}
+			commitTree = tree.TreeSHA
+			s.templateDrift.putCommitTree(commitKey, commitTree)
 		}
 	}
 
@@ -379,8 +433,8 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		tmplName = tmpl.Name
 	}
 	sourceLoc := fmt.Sprintf("github.com/%s/%s", src.Owner, src.Repo)
-	if src.Path != "" {
-		sourceLoc = fmt.Sprintf("github.com/%s/%s/%s", src.Owner, src.Repo, src.Path)
+	if resolvedPath != "" {
+		sourceLoc = fmt.Sprintf("github.com/%s/%s/%s", src.Owner, src.Repo, resolvedPath)
 	}
 	shortSHA := target.sourceCommit[:7]
 
@@ -390,21 +444,23 @@ func (s *Server) checkTemplateDrift(ctx context.Context, project *store.Project,
 		"project_id", project.ID,
 		"agent_id", agentID,
 		"source_commit", target.sourceCommit,
-		"branch", src.Branch,
+		"ref", resolvedRef,
 		"owner", src.Owner,
 		"repo", src.Repo,
-		"path", src.Path,
+		"path", resolvedPath,
 	)
 
 	return fmt.Sprintf(
 		"template %q may be out of date: it was imported from %s at %s, and that folder has changed on %q since. Run \"scion templates update %s\" (or Refresh from Source) to update.",
-		tmplName, sourceLoc, shortSHA, src.Branch, tmplName,
+		tmplName, sourceLoc, shortSHA, resolvedRef, tmplName,
 	)
 }
 
-func (s *Server) handleTemplateDriftError(project *store.Project, tmpl *store.Template, target *templateDriftTarget, agentID, repoKey string, err error) {
-	if isTemplateDriftRateLimited(err) {
-		s.templateDrift.recordRateLimit(repoKey, s.templateDrift.clock())
+func (s *Server) handleTemplateDriftError(project *store.Project, tmpl *store.Template, target *templateDriftTarget, agentID string, err error) {
+	var kind githubfetch.Kind
+	var ghe *githubfetch.Error
+	if errors.As(err, &ghe) {
+		kind = ghe.Kind
 	}
 	s.agentLifecycleLog.Debug("template drift check failed (fail-open)",
 		"template_id", tmpl.ID,
@@ -412,87 +468,9 @@ func (s *Server) handleTemplateDriftError(project *store.Project, tmpl *store.Te
 		"agent_id", agentID,
 		"owner", target.src.Owner,
 		"repo", target.src.Repo,
-		"branch", target.src.Branch,
+		"ref", target.src.Ref,
 		"path", target.src.Path,
+		"kind", kind,
 		"error", err,
 	)
-}
-
-func isTemplateDriftRateLimited(err error) bool {
-	var fe *remotefetch.Error
-	if !errors.As(err, &fe) || fe.Reason != remotefetch.ReasonStatus {
-		return false
-	}
-	return fe.Detail == "status 403" || fe.Detail == "status 429"
-}
-
-// fetchGitHubFolderTreeSHA fetches the git tree SHA of src.Path at ref using
-// the GitHub REST API. For a repo-root template (src.Path == ""), it queries
-// /commits/{ref} and returns .commit.tree.sha; for a subfolder, it queries
-// /contents/{parent}?ref={ref} and returns the .sha of the directory entry
-// matching the folder's basename.
-func fetchGitHubFolderTreeSHA(ctx context.Context, fetcher templateSourceFetcher, cred string, src *templateGitHubSource, ref string) (string, error) {
-	apiURL := templateDriftAPIURL(src, ref)
-	var (
-		res *remotefetch.Result
-		err error
-	)
-	if cred != "" {
-		res, err = fetcher.FetchBytesAuthorized(ctx, apiURL, "Bearer "+cred)
-	} else {
-		res, err = fetcher.FetchBytes(ctx, apiURL)
-	}
-	if err != nil {
-		return "", err
-	}
-
-	if src.Path == "" {
-		var commitResp struct {
-			Commit struct {
-				Tree struct {
-					SHA string `json:"sha"`
-				} `json:"tree"`
-			} `json:"commit"`
-		}
-		if err := json.Unmarshal(res.Body, &commitResp); err != nil {
-			return "", fmt.Errorf("parse commit response: %w", err)
-		}
-		if commitResp.Commit.Tree.SHA == "" {
-			return "", errors.New("commit response missing tree sha")
-		}
-		return commitResp.Commit.Tree.SHA, nil
-	}
-
-	base := path.Base(src.Path)
-	var entries []struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
-		SHA  string `json:"sha"`
-	}
-	if err := json.Unmarshal(res.Body, &entries); err != nil {
-		return "", fmt.Errorf("parse contents response: %w", err)
-	}
-	for _, e := range entries {
-		if e.Name == base && e.Type == "dir" && e.SHA != "" {
-			return e.SHA, nil
-		}
-	}
-	return "", fmt.Errorf("folder %q not found in directory listing", base)
-}
-
-func templateDriftAPIURL(src *templateGitHubSource, ref string) string {
-	if src.Path == "" {
-		return "https://api.github.com/repos/" + src.Owner + "/" + src.Repo + "/commits/" + url.PathEscape(ref)
-	}
-	parent := path.Dir(src.Path)
-	contentsPath := ""
-	if parent != "." && parent != "" {
-		segs := strings.Split(parent, "/")
-		escaped := make([]string, len(segs))
-		for i, seg := range segs {
-			escaped[i] = url.PathEscape(seg)
-		}
-		contentsPath = "/" + strings.Join(escaped, "/")
-	}
-	return "https://api.github.com/repos/" + src.Owner + "/" + src.Repo + "/contents" + contentsPath + "?ref=" + url.QueryEscape(ref)
 }
