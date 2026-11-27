@@ -113,7 +113,7 @@ func (s *Server) attachmentWriterKind(ctx context.Context) string {
 // otherwise.
 func (s *Server) attachmentMaxBytes(ctx context.Context, toArtifacts bool) int64 {
 	if !toArtifacts {
-		return s.config.Uploads.EffectiveMaxAttachmentSize()
+		return s.ResolvedUploads().EffectiveMaxAttachmentSize()
 	}
 	if n := s.artifactLimits(ctx).MaxFileBytes; n > 0 {
 		return n

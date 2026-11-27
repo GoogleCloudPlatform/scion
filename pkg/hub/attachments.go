@@ -299,10 +299,13 @@ func SanitizeFilename(name string) (string, error) {
 // shared-nothing replication.
 type LocalDiskAttachmentStore struct {
 	baseDir string
-	// maxSize is the explicit configured per-file cap in bytes. Zero or
-	// negative means MaxAttachmentSize. Save enforces this cap directly and
-	// never trusts the caller-supplied size argument to raise it.
+	// maxSize is the explicit configured per-file cap in bytes when maxSizeFn
+	// is nil. Zero or negative means MaxAttachmentSize.
 	maxSize int64
+	// maxSizeFn, when non-nil, returns the current live configured per-file
+	// cap in bytes (e.g. from Layer-1 operational settings). Save enforces
+	// this cap directly and never trusts caller-supplied size to raise it.
+	maxSizeFn func() int64
 }
 
 // NewLocalDiskAttachmentStore creates a new local-disk attachment store with
@@ -322,7 +325,22 @@ func NewLocalDiskAttachmentStoreWithMaxSize(baseDir string, maxSize int64) (*Loc
 	return &LocalDiskAttachmentStore{baseDir: baseDir, maxSize: maxSize}, nil
 }
 
+// NewLocalDiskAttachmentStoreWithLimit creates a new local-disk attachment
+// store whose per-file cap is resolved live via limitFn on each Save (falling
+// back to MaxAttachmentSize when limitFn is nil or returns <= 0).
+func NewLocalDiskAttachmentStoreWithLimit(baseDir string, limitFn func() int64) (*LocalDiskAttachmentStore, error) {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return nil, fmt.Errorf("attachment store: create base dir: %w", err)
+	}
+	return &LocalDiskAttachmentStore{baseDir: baseDir, maxSizeFn: limitFn}, nil
+}
+
 func (s *LocalDiskAttachmentStore) effectiveMaxSize() int64 {
+	if s.maxSizeFn != nil {
+		if n := s.maxSizeFn(); n > 0 {
+			return n
+		}
+	}
 	if s.maxSize > 0 {
 		return s.maxSize
 	}

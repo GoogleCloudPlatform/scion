@@ -940,7 +940,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
 				} else {
 					attachDir := filepath.Join(globalDir, "attachments")
-					attachStore, err := hub.NewLocalDiskAttachmentStoreWithMaxSize(attachDir, cfg.Hub.Uploads.EffectiveMaxAttachmentSize())
+					attachStore, err := hub.NewLocalDiskAttachmentStoreWithLimit(attachDir, func() int64 {
+						return hubSrv.ResolvedUploads().EffectiveMaxAttachmentSize()
+					})
 					if err != nil {
 						log.Printf("Warning: failed to initialize attachment store: %v", err)
 					} else {

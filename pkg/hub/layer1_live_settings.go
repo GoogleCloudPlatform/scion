@@ -51,6 +51,8 @@ type startupLayer1Values struct {
 	AuthorizedDomains []string
 	// Branding is the Hub-wide UI branding from startup config.
 	Branding *config.BrandingConfig
+	// Uploads holds the web upload limits from startup config.
+	Uploads config.HubUploadsConfig
 }
 
 // githubAppPublicConfig is the part of GitHubAppServerConfig that the
@@ -120,7 +122,18 @@ func (s *Server) recordStartupLayer1Values() {
 		GitHubApp:              githubAppPublicFrom(s.config.GitHubAppConfig),
 		AuthorizedDomains:      slices.Clone(s.config.AuthorizedDomains),
 		Branding:               s.config.Branding.Clone(),
+		Uploads:                s.config.Uploads,
 	}
+}
+
+// ResolvedUploads returns the current effective web upload limits (from live
+// Layer-1 operational settings section "uploads", falling back to startup
+// config). Safe for concurrent request handlers.
+func (s *Server) ResolvedUploads() config.HubUploadsConfig {
+	s.mu.RLock()
+	u := s.config.Uploads
+	s.mu.RUnlock()
+	return u
 }
 
 // telemetryGCPProjectFromAPI returns the explicit telemetry.cloud.gcp_project_id

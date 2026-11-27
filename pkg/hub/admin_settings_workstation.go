@@ -729,7 +729,6 @@ var startupCheckedFileBlocks = []struct {
 		return config.ValidatePlatformRequestTimeout(gc.Hub.PlatformRequestTimeout)
 	}},
 	{[]string{"server", "hub", "chat"}, func(gc *config.GlobalConfig) error { return gc.Hub.Chat.Search.Validate() }},
-	{[]string{"server", "hub", "uploads"}, func(gc *config.GlobalConfig) error { return gc.Hub.Uploads.Validate() }},
 	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 	{[]string{"server", "broker", "conduit_deliver_runtimes"}, func(gc *config.GlobalConfig) error {
 		_, err := config.NormalizeConduitDeliverRuntimes(gc.RuntimeBroker.ConduitDeliverRuntimes)

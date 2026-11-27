@@ -230,7 +230,7 @@ Bounds on web chat search, so one search cannot stall the hub. Each search runs 
 
 #### Uploads (`server.hub.uploads`)
 
-Per-file limits for files users upload from the web UI: chat attachments (legacy attachment store), and project workspace and shared directory files (the **Files** tab and terminal drag and drop). The web UI reads them from `GET /api/v1/settings/public` (`uploads`) and refuses a file over the limit before sending it. Single-request workspace and shared-directory uploads are also bounded by the 100 MiB total request body cap. Read at startup; restart required to change. All sizes are in bytes; `0` means the default.
+Per-file limits for files users upload from the web UI: chat attachments (legacy attachment store), and project workspace and shared directory files (the **Files** tab and terminal drag and drop). Both are Layer-1 operational settings in the `uploads` section, applied live across replicas without a restart: you can set them through `PUT /api/v1/admin/server-config` as a Hub admin, in `settings.yaml`, or with the environment variables below. The web UI reads them from `GET /api/v1/settings/public` (`uploads`) and refuses a file over the limit before sending it. Single-request workspace and shared-directory uploads are also bounded by the 100 MiB total request body cap. All sizes are in bytes; `0` means the default.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |

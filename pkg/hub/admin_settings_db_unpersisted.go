@@ -83,8 +83,6 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "schedules"},
 	// Default message mode of new agents: Layer 0, read at startup.
 	{"server", "hub", "default_message_mode"},
-	// Web upload limits: Layer 0, read at startup.
-	{"server", "hub", "uploads"},
 	// Hub-wide egress firewall policy: Layer 0, read at startup.
 	{"server", "hub", "init_firewall"},
 	{"server", "hub", "disable_legacy_storage_fallback"},

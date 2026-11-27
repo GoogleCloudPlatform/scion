@@ -730,7 +730,7 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 
 	// Validate every file (the field name is its relative path) before
 	// writing any, so a refused file leaves the workspace unchanged.
-	maxFile := s.config.Uploads.EffectiveMaxWorkspaceFileSize()
+	maxFile := s.ResolvedUploads().EffectiveMaxWorkspaceFileSize()
 	for relPath, fileHeaders := range r.MultipartForm.File {
 		if err := validateWorkspaceWritePath(relPath); err != nil {
 			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", relPath, err.Error()))

@@ -399,6 +399,14 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(_ *Server, o *OperationalSettings) any {
 				return o.AgentLimits()
 			}},
+		"server.hub.uploads.max_attachment_size": {section: opsettings.UploadsSectionName, doc: `{"max_attachment_size":20971520}`,
+			observe: func(s *Server, _ *OperationalSettings) any {
+				return s.ResolvedUploads().MaxAttachmentSize
+			}},
+		"server.hub.uploads.max_workspace_file_size": {section: opsettings.UploadsSectionName, doc: `{"max_workspace_file_size":83886080}`,
+			observe: func(s *Server, _ *OperationalSettings) any {
+				return s.ResolvedUploads().MaxWorkspaceFileSize
+			}},
 	}
 	for path, doc := range telemetryProbeDocs {
 		p[path] = layer1LiveProbe{section: "telemetry", doc: doc, observe: observeTelemetry}

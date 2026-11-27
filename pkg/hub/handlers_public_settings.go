@@ -104,7 +104,7 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		Branding:                  s.ResolvedBranding().Public(),
 		Uploads: PublicUploadLimits{
 			MaxAttachmentSize:    s.webAttachmentMaxBytes(r.Context()),
-			MaxWorkspaceFileSize: s.config.Uploads.EffectiveMaxWorkspaceFileSize(),
+			MaxWorkspaceFileSize: s.ResolvedUploads().EffectiveMaxWorkspaceFileSize(),
 		},
 	})
 }

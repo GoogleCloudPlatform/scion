@@ -634,6 +634,19 @@ func TestLocalDiskAttachmentStore_OversizedFile(t *testing.T) {
 	meta, err := customStore.Save(ctx, "proj-1", "exact.bin", bytes.NewReader(exact), customCap, "application/octet-stream")
 	require.NoError(t, err)
 	assert.Equal(t, customCap, meta.Size)
+
+	// A store backed by a live limit callback enforces the current cap on each
+	// Save and never trusts a larger caller-supplied size.
+	liveLimit := int64(2048)
+	liveStore, err := NewLocalDiskAttachmentStoreWithLimit(t.TempDir(), func() int64 { return liveLimit })
+	require.NoError(t, err)
+	_, err = liveStore.Save(ctx, "proj-1", "too-big.bin", bytes.NewReader(make([]byte, 2049)), 4096, "application/octet-stream")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum size")
+	liveLimit = 4096
+	meta, err = liveStore.Save(ctx, "proj-1", "now-ok.bin", bytes.NewReader(make([]byte, 3000)), 3000, "application/octet-stream")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3000), meta.Size)
 }
 
 func TestLocalDiskAttachmentStore_FilePath(t *testing.T) {

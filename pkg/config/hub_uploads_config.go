@@ -16,8 +16,15 @@ package config
 
 import "fmt"
 
-// Upload limit defaults and bounds (settings server.hub.uploads).
+// Upload limit defaults, bounds, and koanf keys (settings server.hub.uploads).
 const (
+	// HubUploadsMaxAttachmentSizeKey is the koanf path of
+	// server.hub.uploads.max_attachment_size.
+	HubUploadsMaxAttachmentSizeKey = "server.hub.uploads.max_attachment_size"
+	// HubUploadsMaxWorkspaceFileSizeKey is the koanf path of
+	// server.hub.uploads.max_workspace_file_size.
+	HubUploadsMaxWorkspaceFileSizeKey = "server.hub.uploads.max_workspace_file_size"
+
 	// DefaultUploadMaxAttachmentSize is the per-file limit of a chat
 	// attachment (stored outside the artifact service) when
 	// server.hub.uploads.max_attachment_size is unset.

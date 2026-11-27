@@ -133,8 +133,6 @@ var layer0Prefixes = []string{
 	"server.hub.schedules",
 	// Default message mode of new agents — read into ServerConfig at startup.
 	"server.hub.default_message_mode",
-	// Web upload limits (per-file maximums) — read into ServerConfig at startup.
-	"server.hub.uploads",
 	// Hub-wide egress firewall policy — read into ServerConfig at startup.
 	"server.hub.init_firewall",
 	// Separate relay process settings (scion server --role relay) — read
@@ -206,6 +204,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"hub_observability": {
 		config.HubMetricsEnabledKey: "metrics_enabled",
 		config.HubTracingEnabledKey: "tracing_enabled",
+	},
+	UploadsSectionName: {
+		config.HubUploadsMaxAttachmentSizeKey:    "max_attachment_size",
+		config.HubUploadsMaxWorkspaceFileSizeKey: "max_workspace_file_size",
 	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
@@ -279,6 +281,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"hub_observability": {
 		"metrics_enabled": config.HubMetricsEnabledKey,
 		"tracing_enabled": config.HubTracingEnabledKey,
+	},
+	UploadsSectionName: {
+		"max_attachment_size":     config.HubUploadsMaxAttachmentSizeKey,
+		"max_workspace_file_size": config.HubUploadsMaxWorkspaceFileSizeKey,
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",

@@ -844,7 +844,7 @@ func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
 var bodyMergedSections = []string{
 	"access", "endpoints", "lifecycle", "notifications", "federation",
 	"auto_expose_ports", "quotas", "agent_secrets", "broker_policy", hubObservabilitySection,
-	opsettings.BrandingSectionName,
+	opsettings.BrandingSectionName, opsettings.UploadsSectionName,
 }
 
 // bodyPathForKoanf returns the JSON path in a server-config PUT body

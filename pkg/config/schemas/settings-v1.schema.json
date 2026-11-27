@@ -1583,7 +1583,7 @@
         },
         "uploads": {
           "type": "object",
-          "description": "Web upload limits, in bytes; 0 or unset means the default. Read at startup; restart required to change.",
+          "description": "Web upload limits, in bytes; 0 or unset means the default. Layer-1 operational setting (section: uploads), applied live across replicas without a restart.",
           "additionalProperties": false,
           "properties": {
             "max_attachment_size": {
