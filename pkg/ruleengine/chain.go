@@ -322,12 +322,12 @@ func isValidIdentifier(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
 		if i == 0 {
-			if !((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || b == '_') {
+			if (b < 'a' || b > 'z') && (b < 'A' || b > 'Z') && b != '_' {
 				return false
 			}
 			continue
 		}
-		if !((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_') {
+		if (b < 'a' || b > 'z') && (b < 'A' || b > 'Z') && (b < '0' || b > '9') && b != '_' {
 			return false
 		}
 	}
@@ -1873,7 +1873,7 @@ func deepCopyReflect(rv reflect.Value) reflect.Value {
 		return rv
 	}
 	switch rv.Kind() {
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if rv.IsNil() {
 			return reflect.Zero(rv.Type())
 		}

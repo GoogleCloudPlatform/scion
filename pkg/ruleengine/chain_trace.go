@@ -293,7 +293,7 @@ func isValidTraceID(s string) bool {
 func isLowerHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		b := s[i]
-		if !((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')) {
+		if (b < '0' || b > '9') && (b < 'a' || b > 'f') {
 			return false
 		}
 	}
