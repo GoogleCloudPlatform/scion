@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -51,11 +52,20 @@ const (
 // not import the registry).
 const experimentConduitDeliver = "hub.conduit_deliver"
 
-// conduitDeliverRuntimes are the runtimes whose agents may deliver over
-// conduit in Phase A: Cloud Run, where it removes the IAP exec dependency.
-// Docker and Kubernetes keep exec (design v2.22 §7; opt-in per broker is
-// later work). A variable so tests can add a runtime.
-var conduitDeliverRuntimes = map[string]bool{"cloudrun": true}
+func defaultConduitDeliverRuntimesMap() map[string]bool {
+	defaults := config.DefaultConduitDeliverRuntimes()
+	m := make(map[string]bool, len(defaults))
+	for _, rt := range defaults {
+		m[rt] = true
+	}
+	return m
+}
+
+// conduitDeliverRuntimes is the default set of runtimes whose agents may
+// deliver over conduit when a manager has not been configured with
+// SetConduitDeliverRuntimes, seeded from config.DefaultConduitDeliverRuntimes.
+// Kept as a package variable only as a test seam.
+var conduitDeliverRuntimes = defaultConduitDeliverRuntimesMap()
 
 // conduitNotReachedAttempts and conduitRetryBackoff bound the retries of a
 // conduit delivery that provably did not reach the agent (design v2.22
@@ -121,12 +131,42 @@ func (m *AgentManager) conduitDeliverer() ConduitDeliverer {
 	return m.conduit
 }
 
+// SetConduitDeliverRuntimes sets the runtime names whose agents may deliver
+// over conduit on this manager. A nil slice restores the default set
+// (conduitDeliverRuntimes); a non-nil empty slice disables conduit delivery
+// on all runtimes. The Runtime Broker sets it at startup from
+// server.broker.conduit_deliver_runtimes.
+func (m *AgentManager) SetConduitDeliverRuntimes(runtimes []string) {
+	m.conduitMu.Lock()
+	defer m.conduitMu.Unlock()
+	if runtimes == nil {
+		m.conduitRuntimes = nil
+		return
+	}
+	set := make(map[string]bool, len(runtimes))
+	for _, rt := range runtimes {
+		set[rt] = true
+	}
+	m.conduitRuntimes = set
+}
+
+func (m *AgentManager) conduitRuntimeAllowed(name string) bool {
+	m.conduitMu.Lock()
+	runtimes := m.conduitRuntimes
+	m.conduitMu.Unlock()
+	if runtimes != nil {
+		return runtimes[name]
+	}
+	return conduitDeliverRuntimes[name]
+}
+
 // usesConduitTransport reports whether deliveries to target are tried over
-// conduit: a deliverer is set, the runtime is one conduitDeliverRuntimes
-// lists, and the agent was launched with the flag. The hub decides the
-// rest (experiment on, route advertised) per call.
+// conduit: a deliverer is set, the runtime is in the manager's configured
+// runtime set (or default conduitDeliverRuntimes), and the agent was launched
+// with the flag. The hub decides the rest (experiment on, route advertised)
+// per call.
 func (m *AgentManager) usesConduitTransport(target *api.AgentInfo) bool {
-	if m.conduitDeliverer() == nil || m.Runtime == nil || !conduitDeliverRuntimes[m.Runtime.Name()] {
+	if m.conduitDeliverer() == nil || m.Runtime == nil || !m.conduitRuntimeAllowed(m.Runtime.Name()) {
 		return false
 	}
 	return target.ID != "" && agentLaunchedWithConduitDeliver(target)

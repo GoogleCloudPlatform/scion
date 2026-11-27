@@ -175,7 +175,7 @@ func TestConduitDelivery_ExistingPathUnlessRouted(t *testing.T) {
 			m := newConduitTestManager(t, false, shippedSpec, &execs)
 			return m, &fakeDeliverer{}, &execs, deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}}
 		},
-		"docker runtime": func(t *testing.T) (*AgentManager, *fakeDeliverer, *[]string, deliveryRequest) {
+		"runtime not in conduit deliver set": func(t *testing.T) (*AgentManager, *fakeDeliverer, *[]string, deliveryRequest) {
 			var execs []string
 			m := newConduitTestManager(t, true, shippedSpec, &execs)
 			conduitDeliverRuntimes = map[string]bool{"cloudrun": true}
@@ -1648,4 +1648,133 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 			t.Fatalf("conduit calls = %d, want 2 (sub-flush 0 fallback + sub-flush 1 fallback)", d.calls())
 		}
 	})
+}
+
+// namedMockRuntime wraps runtime.MockRuntime with a configurable Name() for
+// testing per-runtime conduit delivery gating.
+type namedMockRuntime struct {
+	*runtime.MockRuntime
+	name string
+}
+
+func (r *namedMockRuntime) Name() string { return r.name }
+
+func newNamedConduitTestManager(t *testing.T, rtName string, labelled bool, execs *[]string) *AgentManager {
+	t.Helper()
+	origBackoff := conduitRetryBackoff
+	conduitRetryBackoff = time.Millisecond
+	t.Cleanup(func() { conduitRetryBackoff = origBackoff })
+	labels := map[string]string{"scion.name": "test-agent"}
+	if labelled {
+		labels[LabelConduitDeliver] = "true"
+	}
+	var mu sync.Mutex
+	base := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{{ID: "hub-agent-1", ContainerID: "c-1", Name: "test-agent", Labels: labels}}, nil
+		},
+		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			*execs = append(*execs, strings.Join(cmd, " "))
+			return "", nil
+		},
+		ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, _ io.Reader) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			*execs = append(*execs, strings.Join(cmd, " "))
+			return "", nil
+		},
+	}
+	return &AgentManager{
+		Runtime:    &namedMockRuntime{MockRuntime: base, name: rtName},
+		newHarness: func(string) api.Harness { return &deliveryTestHarness{spec: shippedSpec} },
+	}
+}
+
+// TestConduitDelivery_RuntimeGating verifies server.broker.conduit_deliver_runtimes
+// routing on AgentManager: default {cloudrun, kubernetes, docker}, explicit
+// overrides ([cloudrun], [podman]), and explicit empty ([]).
+func TestConduitDelivery_RuntimeGating(t *testing.T) {
+	cases := []struct {
+		name        string
+		configured  []string // nil = unset (default)
+		runtimeName string
+		wantConduit bool
+	}{
+		{"unset/cloudrun", nil, "cloudrun", true},
+		{"unset/kubernetes", nil, "kubernetes", true},
+		{"unset/docker", nil, "docker", true},
+		{"unset/podman", nil, "podman", false},
+		{"unset/container (apple)", nil, "container", false},
+		{"cloudrun-only/cloudrun", []string{"cloudrun"}, "cloudrun", true},
+		{"cloudrun-only/kubernetes", []string{"cloudrun"}, "kubernetes", false},
+		{"cloudrun-only/docker", []string{"cloudrun"}, "docker", false},
+		{"podman-only/podman", []string{"podman"}, "podman", true},
+		{"podman-only/docker", []string{"podman"}, "docker", false},
+		{"podman-only/kubernetes", []string{"podman"}, "kubernetes", false},
+		{"empty/cloudrun", []string{}, "cloudrun", false},
+		{"empty/kubernetes", []string{}, "kubernetes", false},
+		{"empty/docker", []string{}, "docker", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var execs []string
+			m := newNamedConduitTestManager(t, tc.runtimeName, true, &execs)
+			if tc.configured != nil {
+				m.SetConduitDeliverRuntimes(tc.configured)
+			}
+			d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+			m.SetConduitDeliverer(d)
+
+			err := m.deliver(context.Background(), deliveryRequest{
+				agentID:    "test-agent",
+				message:    "hello",
+				messageIDs: []string{"m-1"},
+			})
+			if err != nil {
+				t.Fatalf("deliver: %v", err)
+			}
+			if tc.wantConduit {
+				if d.calls() != 1 || len(execs) != 0 {
+					t.Fatalf("want conduit delivery (1 call, 0 execs); got calls=%d execs=%v", d.calls(), execs)
+				}
+			} else {
+				if d.calls() != 0 || !execDelivered(execs) {
+					t.Fatalf("want exec delivery (0 calls, load-buffer exec); got calls=%d execs=%v", d.calls(), execs)
+				}
+			}
+		})
+	}
+}
+
+// TestConduitDelivery_DockerSessionNotUpFallsBackToExec verifies that a
+// labelled Docker agent whose conduit session is not up (hub returns 503
+// not_reached / no_session) retries and falls back to exec before paste.
+func TestConduitDelivery_DockerSessionNotUpFallsBackToExec(t *testing.T) {
+	var execs []string
+	m := newNamedConduitTestManager(t, "docker", true, &execs)
+	d := &fakeDeliverer{answers: []fakeAnswer{{
+		status: http.StatusServiceUnavailable,
+		resp: agentcontrol.DeliverResponse{
+			Outcome: "not_reached",
+			Reason:  agentcontrol.ReasonNoSession,
+		},
+	}}}
+	m.SetConduitDeliverer(d)
+
+	err := m.deliver(context.Background(), deliveryRequest{
+		agentID:    "test-agent",
+		message:    "hello docker",
+		messageIDs: []string{"m-docker-1"},
+	})
+	if err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if d.calls() != conduitNotReachedAttempts {
+		t.Fatalf("conduit calls = %d, want %d retries before exec fallback", d.calls(), conduitNotReachedAttempts)
+	}
+	if !execDelivered(execs) {
+		t.Fatalf("expected exec fallback (load-buffer), got execs=%v", execs)
+	}
 }

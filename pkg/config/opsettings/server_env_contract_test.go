@@ -302,6 +302,7 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"server.broker.broker_name":                      envNameRuntimeBroker,
 	"server.broker.broker_nickname":                  envNameRuntimeBroker,
 	"server.broker.broker_token":                     envNameRuntimeBroker,
+	"server.broker.conduit_deliver_runtimes":         envNameRuntimeBroker,
 	"server.broker.container_hub_endpoint":           envNameRuntimeBroker,
 	"server.broker.cors.allowed_headers":             envNameRuntimeBroker,
 	"server.broker.cors.allowed_methods":             envNameRuntimeBroker,

@@ -356,3 +356,59 @@ server:
 		t.Errorf("conduit = %v, want cleared", got)
 	}
 }
+
+func TestFileMode_PutServerConfig_ConduitDeliverRuntimes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"apple alias", `{"server":{"broker":{"conduit_deliver_runtimes":["apple"]}}}`},
+		{"wrong case Docker", `{"server":{"broker":{"conduit_deliver_runtimes":["Docker"]}}}`},
+		{"empty entry", `{"server":{"broker":{"conduit_deliver_runtimes":[""]}}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr, settingsPath := putFileModeStartupBlock(t, fileModeStartupBlockSettingsYAML, tc.body)
+			if rr.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			}
+			b := decodeFileModeStartupBlockError(t, rr)
+			if b.Error.Code != ErrCodeValidationError {
+				t.Errorf("code = %q, want %q", b.Error.Code, ErrCodeValidationError)
+			}
+			if b.Error.Details["field"] != "server.broker.conduit_deliver_runtimes" {
+				t.Errorf("details.field = %v, want server.broker.conduit_deliver_runtimes", b.Error.Details["field"])
+			}
+			if after := readFileModeString(t, settingsPath); after != fileModeStartupBlockSettingsYAML {
+				t.Errorf("settings.yaml changed after rejected PUT:\n%s", after)
+			}
+		})
+	}
+
+	t.Run("valid list saved", func(t *testing.T) {
+		rr, _ := putFileModeStartupBlock(t, fileModeStartupBlockSettingsYAML, `{"server":{"broker":{"conduit_deliver_runtimes":["cloudrun","podman"]}}}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		gc, err := config.LoadGlobalConfig("")
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig after valid PUT failed: %v", err)
+		}
+		if !reflect.DeepEqual(gc.RuntimeBroker.ConduitDeliverRuntimes, []string{"cloudrun", "podman"}) {
+			t.Errorf("loaded ConduitDeliverRuntimes = %#v, want [cloudrun podman]", gc.RuntimeBroker.ConduitDeliverRuntimes)
+		}
+	})
+
+	t.Run("explicit empty list saved", func(t *testing.T) {
+		rr, _ := putFileModeStartupBlock(t, fileModeStartupBlockSettingsYAML, `{"server":{"broker":{"conduit_deliver_runtimes":[]}}}`)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+		}
+		gc, err := config.LoadGlobalConfig("")
+		if err != nil {
+			t.Fatalf("LoadGlobalConfig after empty PUT failed: %v", err)
+		}
+		if gc.RuntimeBroker.ConduitDeliverRuntimes == nil || len(gc.RuntimeBroker.ConduitDeliverRuntimes) != 0 {
+			t.Errorf("loaded ConduitDeliverRuntimes = %#v, want non-nil empty slice", gc.RuntimeBroker.ConduitDeliverRuntimes)
+		}
+	})
+}

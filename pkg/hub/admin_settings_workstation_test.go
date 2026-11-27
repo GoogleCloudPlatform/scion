@@ -798,6 +798,59 @@ func TestWorkstation_PutServerConfig_InvalidInitFirewallRejected(t *testing.T) {
 	}
 }
 
+// The PUT never writes an invalid server.broker.conduit_deliver_runtimes that
+// would cause LoadGlobalConfig to fail on the next server start.
+func TestWorkstation_PutServerConfig_InvalidConduitDeliverRuntimesRejected(t *testing.T) {
+	settingsPath := workstationHome(t)
+	srv, _, _ := newSQLiteHubInMode(t, true, nil)
+	before := readFileString(t, settingsPath)
+
+	invalidBodies := []struct {
+		name string
+		body string
+	}{
+		{"apple alias", `{"server":{"broker":{"conduit_deliver_runtimes":["apple"]}}}`},
+		{"wrong case Docker", `{"server":{"broker":{"conduit_deliver_runtimes":["Docker"]}}}`},
+		{"empty entry", `{"server":{"broker":{"conduit_deliver_runtimes":[""]}}}`},
+	}
+
+	for _, tc := range invalidBodies {
+		rr := putServerConfig(t, srv, tc.body)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: expected 422, got %d: %s", tc.name, rr.Code, rr.Body.String())
+		} else if e := settingsErrorEntries(t, rr); len(e) == 0 || e[0].Field != "server.broker.conduit_deliver_runtimes" {
+			t.Errorf("%s: entries = %+v, want field server.broker.conduit_deliver_runtimes", tc.name, e)
+		}
+	}
+	if after := readFileString(t, settingsPath); after != before {
+		t.Errorf("settings.yaml changed after rejected PUTs:\n%s", after)
+	}
+
+	rr := putServerConfig(t, srv, `{"server":{"broker":{"conduit_deliver_runtimes":["cloudrun","podman"]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid conduit_deliver_runtimes: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	gc, err := config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig after valid PUT failed: %v", err)
+	}
+	if !reflect.DeepEqual(gc.RuntimeBroker.ConduitDeliverRuntimes, []string{"cloudrun", "podman"}) {
+		t.Errorf("loaded ConduitDeliverRuntimes = %#v, want [cloudrun podman]", gc.RuntimeBroker.ConduitDeliverRuntimes)
+	}
+
+	rr = putServerConfig(t, srv, `{"server":{"broker":{"conduit_deliver_runtimes":[]}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("explicit empty conduit_deliver_runtimes: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	gc, err = config.LoadGlobalConfig("")
+	if err != nil {
+		t.Fatalf("LoadGlobalConfig after empty PUT failed: %v", err)
+	}
+	if gc.RuntimeBroker.ConduitDeliverRuntimes == nil || len(gc.RuntimeBroker.ConduitDeliverRuntimes) != 0 {
+		t.Errorf("loaded ConduitDeliverRuntimes = %#v, want non-nil empty slice", gc.RuntimeBroker.ConduitDeliverRuntimes)
+	}
+}
+
 // The PUT never writes an invalid server.hub.init_firewall that would cause
 // LoadGlobalConfig to fail on the next server start.
 func TestWorkstation_PutServerConfig_InvalidHubInitFirewallRejected(t *testing.T) {

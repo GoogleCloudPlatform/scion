@@ -75,10 +75,30 @@ type conduitDeliverSetter interface {
 	SetConduitDeliverer(agent.ConduitDeliverer)
 }
 
-// enableConduitDelivery gives mgr the broker's conduit deliverer. The
-// manager uses it only for agents launched with hub.conduit_deliver on a
-// runtime that delivers over conduit (agent.usesConduitTransport).
+// conduitDeliverRuntimesSetter is the agent manager's hook for the broker's
+// configured conduit delivery runtime set.
+type conduitDeliverRuntimesSetter interface {
+	SetConduitDeliverRuntimes([]string)
+}
+
+// applyConduitDeliverRuntimes configures mgr with the broker's
+// ConduitDeliverRuntimes when set. Nil leaves mgr on its default set.
+func (s *Server) applyConduitDeliverRuntimes(mgr agent.Manager) {
+	if s.config.ConduitDeliverRuntimes == nil {
+		return
+	}
+	if cr, ok := mgr.(conduitDeliverRuntimesSetter); ok {
+		cr.SetConduitDeliverRuntimes(s.config.ConduitDeliverRuntimes)
+	}
+}
+
+// enableConduitDelivery gives mgr the broker's conduit deliverer and
+// configured runtime set. The manager uses it only for agents launched with
+// hub.conduit_deliver on a runtime in that set (agent.usesConduitTransport).
+// Brokers connected to several hubs report agent.ErrConduitUnavailable, so
+// delivery falls back to exec immediately without retries.
 func (s *Server) enableConduitDelivery(mgr agent.Manager) {
+	s.applyConduitDeliverRuntimes(mgr)
 	if cd, ok := mgr.(conduitDeliverSetter); ok {
 		cd.SetConduitDeliverer(hubConduitDeliverer{s: s})
 	}

@@ -213,6 +213,14 @@ type ServerConfig struct {
 	// SCION_INIT_FIREWALL on a runtime-managed netns-setup path.
 	InitFirewall firewallpolicy.Policy
 
+	// ConduitDeliverRuntimes lists the runtime names whose agents may deliver
+	// messages over Conduit when the hub enables hub.conduit_deliver
+	// (server.broker.conduit_deliver_runtimes). Nil uses the default set
+	// (cloudrun, kubernetes, docker); an explicit non-nil empty slice disables
+	// Conduit delivery on all runtimes. Brokers connected to several hubs
+	// always use exec regardless of this setting.
+	ConduitDeliverRuntimes []string
+
 	// NFSConfig holds NFS workspace storage settings for this broker. The
 	// server command sets it from server.workspace_storage when the backend
 	// is "nfs" (see brokerNFSConfig in cmd). When non-nil with shares

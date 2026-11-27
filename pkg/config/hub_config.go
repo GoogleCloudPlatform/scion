@@ -854,6 +854,14 @@ type RuntimeBrokerConfig struct {
 	// SCION_INIT_FIREWALL.
 	InitFirewall *InitFirewallConfig `json:"initFirewall,omitempty" yaml:"initFirewall,omitempty" koanf:"initFirewall"`
 
+	// ConduitDeliverRuntimes lists the runtime names whose agents may deliver
+	// messages over Conduit when the hub enables hub.conduit_deliver
+	// (server.broker.conduit_deliver_runtimes). When nil (unset), defaults to
+	// cloudrun, kubernetes, and docker; an explicit empty slice disables
+	// Conduit delivery on all runtimes. Brokers connected to several hubs
+	// always use exec regardless of this setting.
+	ConduitDeliverRuntimes []string `json:"conduitDeliverRuntimes,omitempty" yaml:"conduitDeliverRuntimes,omitempty" koanf:"conduitDeliverRuntimes"`
+
 	// Instances mirrors settings server.broker.instances (flat Runtime Broker
 	// instances). Only settings.yaml may set it; a legacy server.yaml that
 	// does is rejected by LoadGlobalConfig.
@@ -1860,6 +1868,9 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 		if err := validateInitFirewallConfigs(gc); err != nil {
 			return nil, err
 		}
+		if err := validateConduitDeliverRuntimesConfig(gc); err != nil {
+			return nil, err
+		}
 		markTrustedProxiesSet(gc, nil)
 		return gc, nil
 	}
@@ -1875,8 +1886,23 @@ func LoadGlobalConfig(configPath string) (*GlobalConfig, error) {
 	if err := validateInitFirewallConfigs(gc); err != nil {
 		return nil, err
 	}
+	if err := validateConduitDeliverRuntimesConfig(gc); err != nil {
+		return nil, err
+	}
 	markTrustedProxiesSet(gc, nil)
 	return gc, nil
+}
+
+func validateConduitDeliverRuntimesConfig(gc *GlobalConfig) error {
+	if gc == nil || gc.RuntimeBroker.ConduitDeliverRuntimes == nil {
+		return nil
+	}
+	normalized, err := NormalizeConduitDeliverRuntimes(gc.RuntimeBroker.ConduitDeliverRuntimes)
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.conduit_deliver_runtimes: %w", err)
+	}
+	gc.RuntimeBroker.ConduitDeliverRuntimes = normalized
+	return nil
 }
 
 func validateInitFirewallConfigs(gc *GlobalConfig) error {
@@ -2826,6 +2852,7 @@ var envListConfigKeys = []string{
 	"hub.conduit.denyPorts",
 	"hub.initFirewall.allowDomains",
 	"runtimeBroker.initFirewall.allowDomains",
+	"runtimeBroker.conduitDeliverRuntimes",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices

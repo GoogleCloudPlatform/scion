@@ -730,6 +730,10 @@ var startupCheckedFileBlocks = []struct {
 	}},
 	{[]string{"server", "hub", "chat"}, func(gc *config.GlobalConfig) error { return gc.Hub.Chat.Search.Validate() }},
 	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
+	{[]string{"server", "broker", "conduit_deliver_runtimes"}, func(gc *config.GlobalConfig) error {
+		_, err := config.NormalizeConduitDeliverRuntimes(gc.RuntimeBroker.ConduitDeliverRuntimes)
+		return err
+	}},
 }
 
 // filterStartupFileBlockKeys returns the subset of keys (preserving order)

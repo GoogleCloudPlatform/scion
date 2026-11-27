@@ -343,6 +343,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if _, err := cfg.RuntimeBroker.InitFirewall.Normalize(); err != nil {
 		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
 	}
+	if _, err := config.ResolveConduitDeliverRuntimes(cfg.RuntimeBroker.ConduitDeliverRuntimes); err != nil {
+		return fmt.Errorf("invalid server.broker.conduit_deliver_runtimes: %w", err)
+	}
 	if _, err := cfg.Hub.InitFirewall.Normalize(); err != nil {
 		return fmt.Errorf("invalid server.hub.init_firewall: %w", err)
 	}
@@ -4968,6 +4971,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	if err != nil {
 		return fmt.Errorf("invalid server.broker.init_firewall: %w", err)
 	}
+	conduitDeliverRuntimes, err := config.ResolveConduitDeliverRuntimes(cfg.RuntimeBroker.ConduitDeliverRuntimes)
+	if err != nil {
+		return fmt.Errorf("invalid server.broker.conduit_deliver_runtimes: %w", err)
+	}
 
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
@@ -4985,6 +4992,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		InitFirewall:                  brokerInitFirewall,
+		ConduitDeliverRuntimes:        conduitDeliverRuntimes,
 		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
 		StorageOverridesCheck:         brokerStorageOverridesCheck,
