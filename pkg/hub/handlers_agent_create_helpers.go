@@ -1062,6 +1062,14 @@ func explicitEnvOf(ac *store.AgentAppliedConfig) map[string]string {
 // agent.AppliedConfig.InlineConfig.Skills. Fetches are best-effort: errors are
 // logged and that scope's skills are omitted for this provisioning.
 func (s *Server) mergeInjectedSkills(ctx context.Context, agent *store.Agent, project *store.Project) {
+	if isShellAgent(agent) {
+		// Shell execution containers have no LLM harness and do not consume
+		// skills; skip hub/user/project skill injection and clear any refs.
+		if agent.AppliedConfig != nil && agent.AppliedConfig.InlineConfig != nil {
+			agent.AppliedConfig.InlineConfig.Skills = nil
+		}
+		return
+	}
 	if agent.AppliedConfig.InlineConfig == nil {
 		agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
 	}

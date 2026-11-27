@@ -41,6 +41,7 @@ func TestSkillsDirForEntry(t *testing.T) {
 		buildable bool
 	}{
 		{"zero entry", config.HarnessConfigEntry{}, GenericSkillsDir, true},
+		{"shell harness", config.HarnessConfigEntry{Harness: config.ShellHarnessConfigName}, "", true},
 		{"harness name only", config.HarnessConfigEntry{Harness: "claude"}, GenericSkillsDir, true},
 		{"declarative with skills_dir", config.HarnessConfigEntry{Harness: "gemini", SkillsDir: ".decl/skills"}, ".decl/skills", true},
 		{"declarative command without skills_dir", config.HarnessConfigEntry{Harness: "gemini", Command: &config.HarnessCommandConfig{Base: []string{"run"}}}, GenericSkillsDir, true},
@@ -63,6 +64,8 @@ func TestSkillsDirForEntry(t *testing.T) {
 			// Build the harness the way Resolve's paths do.
 			var built interface{ SkillsDir() string }
 			switch {
+			case tt.entry.Harness == config.ShellHarnessConfigName:
+				built = &Shell{}
 			case tt.entry.Provisioner != nil:
 				h, err := NewContainerScriptHarness(t.TempDir(), tt.entry)
 				if err != nil {

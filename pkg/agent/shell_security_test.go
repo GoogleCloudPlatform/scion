@@ -230,3 +230,84 @@ func TestShellAgent_ResolveAuthEnvOverlay_IgnoresSettingsHarnessConfigEnv(t *tes
 	assert.Equal(t, "allowed-for-llm", llmOpts.Env["CLAUDE_SETTINGS_ENV"])
 	assert.Equal(t, "allowed-for-llm", llmOverlay["CLAUDE_SETTINGS_ENV"])
 }
+
+type shellTestSkillResolver struct {
+	calls int
+}
+
+func (r *shellTestSkillResolver) Resolve(_ context.Context, _ []api.SkillReference, _ ResolveOpts) (*ResolveResult, error) {
+	r.calls++
+	return &ResolveResult{
+		Resolved: []ResolvedSkill{
+			{
+				URI:  "gh://org/repo/skills/example",
+				Name: "example",
+			},
+		},
+	}, nil
+}
+
+// TestProvisionAgent_ShellSkipsSkillsResolutionAndInstallation verifies that
+// provisioning a shell execution container succeeds without fetching or
+// installing skills when project/default template skills, platform skills, or
+// inline skill references are present.
+func TestProvisionAgent_ShellSkipsSkillsResolutionAndInstallation(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+
+	// Populate project-local "default" template with a skill directory.
+	tplSkillDir := filepath.Join(scionDir, "templates", "default", "skills", "tpl-skill")
+	require.NoError(t, os.MkdirAll(tplSkillDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte("# tpl-skill\n"), 0644))
+
+	resolver := &shellTestSkillResolver{}
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	ctx := api.ContextWithGitClone(context.Background(), gc)
+	ctx = ContextWithSkillResolver(ctx, resolver)
+
+	inlineCfg := &api.ScionConfig{
+		Skills: []api.SkillReference{
+			{URI: "gh://org/repo/skills/example", Scope: "project"},
+			{URI: "scion-platform://git-operations", Optional: true, Scope: "hub"},
+		},
+	}
+
+	agentName := "shell-skips-skills"
+	_, _, _, err := ProvisionAgent(ctx, agentName, "", "", config.ShellHarnessConfigName, scionDir, "", "created", "", "", inlineCfg)
+	require.NoError(t, err)
+	assert.Equal(t, 0, resolver.calls, "skill resolver must not be called for shell harness")
+
+	agentHome := config.GetAgentHomePath(scionDir, agentName)
+	_, err = os.Stat(filepath.Join(agentHome, ".scion", resolvedSkillsInputName))
+	assert.True(t, os.IsNotExist(err), "resolved-skills.json must not be written for shell harness")
+	_, err = os.Stat(filepath.Join(agentHome, ".scion", "skills"))
+	assert.True(t, os.IsNotExist(err), "no skills directory should be created for shell harness")
+}
+
+// TestInstallSkillsIntoHome_EmptySkillsDirSkipsResolution verifies that any
+// harness without a configured skills directory (such as a container-script
+// harness omitting skills_dir) skips skill resolution cleanly without calling
+// the resolver or failing.
+func TestInstallSkillsIntoHome_EmptySkillsDirSkipsResolution(t *testing.T) {
+	hcDir := t.TempDir()
+	h, err := harness.NewContainerScriptHarness(hcDir, config.HarnessConfigEntry{
+		Harness: "custom-no-skills",
+		Provisioner: &config.HarnessProvisionerConfig{
+			Type:             "container-script",
+			InterfaceVersion: 1,
+			Command:          []string{"python3", "/home/scion/.scion/harness/provision.py"},
+		},
+	})
+	require.NoError(t, err)
+	require.Empty(t, h.SkillsDir())
+
+	resolver := &shellTestSkillResolver{}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	agentHome := t.TempDir()
+
+	rec, err := installSkillsIntoHome(ctx, "no-skills-agent", "", h, agentHome, []api.SkillReference{
+		{URI: "gh://org/repo/skills/example", Scope: "project"},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, rec)
+	assert.Equal(t, 0, resolver.calls, "skill resolver must not be called when harness has no skills_dir")
+}

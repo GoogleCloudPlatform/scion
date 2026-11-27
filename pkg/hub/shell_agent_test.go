@@ -1788,3 +1788,71 @@ func TestShellAgentBrokerReports_CannotOverwriteShellMarker(t *testing.T) {
 		assert.Equal(t, "docker", got.Runtime)
 	})
 }
+
+func TestShellAgent_SkipsInjectedSkillsAndDispatchSkillRefs(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	owner := seedShellTestUser(t, s, "skills-shell@test.com", "Skills Shell")
+
+	// Seed hub, user, and project injected skills.
+	hubSettingJSON, err := json.Marshal(api.HubSkillInjectionSetting{
+		UserDefined: []api.SkillReference{{URI: "gh://org/repo/skills/hub-skill"}},
+	})
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "injected_skills", hubSettingJSON, owner.ID, -1, "managed")
+	require.NoError(t, err)
+	require.NoError(t, s.SetSkillInjections(ctx, store.SkillInjectionScopeUser, owner.ID, []store.SkillInjection{
+		{SkillURI: "gh://org/repo/skills/user-skill"},
+	}, owner.ID))
+	require.NoError(t, s.SetSkillInjections(ctx, store.SkillInjectionScopeProject, project.ID, []store.SkillInjection{
+		{SkillURI: "gh://org/repo/skills/project-skill"},
+	}, owner.ID))
+
+	shellAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "shell-no-skills",
+		Name:            "shell-no-skills",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		HarnessConfig:   config.ShellHarnessConfigName,
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: config.ShellHarnessConfigName,
+			InlineConfig: &api.ScionConfig{
+				Skills: []api.SkillReference{{URI: "gh://org/repo/skills/preexisting"}},
+			},
+		},
+	}
+
+	srv.mergeInjectedSkills(ctx, shellAgent, project)
+	assert.Empty(t, shellAgent.AppliedConfig.InlineConfig.Skills, "shell agent must not inherit injected skills")
+
+	// Even if a pre-existing shell agent row still carries InlineConfig.Skills,
+	// dispatchSkillRefs must return nil so pre-resolution and gh credential
+	// derivation do not run for shell agents.
+	shellAgent.AppliedConfig.InlineConfig.Skills = []api.SkillReference{
+		{URI: "gh://org/repo/skills/legacy-persisted?token=SKILLS_TOKEN"},
+	}
+	assert.Nil(t, srv.dispatchSkillRefs(ctx, shellAgent), "dispatchSkillRefs must return nil for shell agents")
+
+	// Control: a non-shell agent receives the injected skills and exposes them to dispatch.
+	llmAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "llm-gets-skills",
+		Name:            "llm-gets-skills",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		HarnessConfig:   "claude",
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+		},
+	}
+	srv.mergeInjectedSkills(ctx, llmAgent, project)
+	require.NotNil(t, llmAgent.AppliedConfig.InlineConfig)
+	assert.Len(t, llmAgent.AppliedConfig.InlineConfig.Skills, 3, "non-shell agent should inherit hub, user, and project injected skills")
+	assert.Len(t, srv.dispatchSkillRefs(ctx, llmAgent), 3, "dispatchSkillRefs should return injected skills for non-shell agent")
+}

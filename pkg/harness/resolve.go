@@ -174,6 +174,7 @@ const GenericSkillsDir = ".scion/skills"
 // that only hold an entry (such as pkg/agent's harness-config switch) do not
 // re-implement it:
 //
+//   - the reserved built-in "shell" harness has no skills directory ("");
 //   - a provisioner block selects the container-script harness, which uses
 //     entry.SkillsDir as is (possibly empty);
 //   - otherwise a non-empty entry.SkillsDir selects the declarative generic
@@ -183,6 +184,9 @@ const GenericSkillsDir = ".scion/skills"
 // It does not check that the provisioner is usable: an entry whose
 // provisioner Resolve would reject still yields entry.SkillsDir.
 func SkillsDirForEntry(entry config.HarnessConfigEntry) string {
+	if entry.Harness == config.ShellHarnessConfigName {
+		return ""
+	}
 	if entry.Provisioner != nil || entry.SkillsDir != "" {
 		return entry.SkillsDir
 	}
