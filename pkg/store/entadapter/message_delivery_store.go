@@ -59,6 +59,11 @@ func parseDeliveryUUIDs(ids []string) ([]uuid.UUID, error) {
 // this call reads and decides.
 var bindBeforeTxHook func()
 
+// bindAfterLockHook, when set by a test, runs inside bindOnce's transaction
+// right after SELECT ... FOR UPDATE acquires the row locks and before the
+// bind decision, update, and commit.
+var bindAfterLockHook func()
+
 // bindAttempts bounds BindMessageDelivery's transactions when its
 // conditional update loses to a concurrent writer (which the row lock
 // should prevent; kept as a safety net).
@@ -106,6 +111,9 @@ func (s *BrokerDispatchStore) bindOnce(ctx context.Context, recipientID, deliver
 	rows, err := q.Select(message.FieldRecipientID, message.FieldDispatchState, message.FieldDeliveryID, message.FieldDeliveryOutcome).All(ctx)
 	if err != nil {
 		return store.DeliveryBind{}, false, mapError(err)
+	}
+	if bindAfterLockHook != nil {
+		bindAfterLockHook()
 	}
 	if len(rows) != len(uids) {
 		return store.DeliveryBind{}, false, store.ErrNotFound
