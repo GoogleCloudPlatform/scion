@@ -479,11 +479,13 @@ func (t *AntigravitySQLiteTailer) canAdvanceWithoutAnalytics() bool {
 func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool) error {
 
 	// Do not consume rows or advance persisted cursors when no active token
-	// sink (Analytics or direct OTel export) is available (O2).
+	// sink (Analytics or direct OTel export) is available (O2). When schema
+	// drift is already latched, still enter the loop so the drift-latched
+	// BaselineFile path advances cursors without emitting events.
 	if t.cfg.Analytics == nil || t.cfg.ConversationsDir == "" {
 		return nil
 	}
-	if t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
+	if !t.driftLatched.Load() && t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
 		return nil
 	}
 	entries, err := os.ReadDir(t.cfg.ConversationsDir)

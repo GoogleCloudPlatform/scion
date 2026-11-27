@@ -2613,4 +2613,92 @@ func TestAntigravitySQLiteTailer_RevocationCursorCommit(t *testing.T) {
 			t.Fatalf("expected 0 SessionUsage calls on AppendDisabled, got %d", sessionCalls)
 		}
 	})
+
+	// Optional 1: when schema drift is already latched and Hub-only revocation
+	// detaches Analytics, PollOnce must still run the drift-latched BaselineFile
+	// path so rows written during a drifted+revoked run advance the cursor and
+	// are not retroactively billed by a later run, while emitting no events.
+	t.Run("drift_latched_hub_only_revocation_still_rebaselines", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		hubOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "hub-ob"))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+		var sessionCalls int
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			// Unverified agy version triggers schema drift on the first decoded row.
+			DetectVersion: func(context.Context) (string, error) { return "99.0.0-unverified", nil },
+			SessionUsage: func(SessionUsage) {
+				sessionCalls++
+			},
+		})
+		ctx := context.Background()
+		if err := tailer.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = tailer.Stop(ctx) }()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-drift-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 0 latches schema drift (emits 1 drift sentinel event).
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730900, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "drift-rev-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 0: %v", err)
+		}
+		if !tailer.SchemaDriftDetected() {
+			t.Fatal("expected schema drift to be latched after unverified version")
+		}
+		tailer.mu.Lock()
+		cursorAfterDrift := tailer.state.Files["conv-drift-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterDrift.GenMetadataRowID == nil {
+			t.Fatalf("expected cursor after drift latch, got %+v", cursorAfterDrift)
+		}
+		eventsBeforeRevoke := len(stagedEvents(t, hubOutbox))
+
+		// Detach Analytics (pure Hub-only 404 revocation; no OTel exporter).
+		analytics.detach()
+
+		// Row 1 written during the drifted+revoked run must advance the cursor
+		// via BaselineFile without emitting any analytics event or session usage.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730905, testAgyUsage{
+			modelID: 1466, input: 200, output: 40, id11: "drift-rev-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1 after drift+revocation: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRow1 := tailer.state.Files["conv-drift-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterRow1.GenMetadataRowID == nil || *cursorAfterRow1.GenMetadataRowID <= *cursorAfterDrift.GenMetadataRowID {
+			t.Fatalf("expected drift-latched re-baseline to advance cursor after Hub-only revocation: got %+v, want > %d",
+				cursorAfterRow1, *cursorAfterDrift.GenMetadataRowID)
+		}
+		if got := len(stagedEvents(t, hubOutbox)); got != eventsBeforeRevoke {
+			t.Fatalf("outbox events changed after drift+revocation: got %d, want %d", got, eventsBeforeRevoke)
+		}
+		if sessionCalls != 0 {
+			t.Fatalf("expected 0 SessionUsage calls after drift+revocation, got %d", sessionCalls)
+		}
+	})
 }
