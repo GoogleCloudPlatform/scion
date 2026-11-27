@@ -499,11 +499,16 @@ func (h *TelemetryHandler) checkMuseVersionOnce() {
 //
 // Failure mode: when cross-process state persistence is configured or required
 // (MuseTurnUsageStatePath != "" or MuseTurnUsageStateRequired == true) and the
-// state file cannot be used (empty path, mkdir/open/flock/read/write/rename
-// failure), this fails closed on token counts: it logs a warning, zeroes all
-// token fields on the copied event so turn-cumulative totals are never
-// published as a step delta, and keeps the model-end call (token_status =
-// not_reported).
+// state file cannot be used (empty path, symlink/non-regular file, lock busy
+// past the bounded wait, or mkdir/open/flock/read/write/rename failure), this
+// skips the state update without modifying the file, fails closed on token
+// counts (zeroing all token fields on the copied event so turn-cumulative
+// totals are never published as a step delta, keeping the model-end call with
+// token_status = not_reported), and logs a warning at most once per process
+// until a later update succeeds. Because Muse reports cumulative turn totals,
+// a skipped intermediate step is automatically recovered on the next step of
+// the same turn once the lock clears; only a skipped final step's increment
+// is lost (under-counted, never double-counted).
 //
 // Returns event unchanged for non-muse-code events, non-model-end events, or
 // payloads without a turn_id. Otherwise returns a shallow copy of event with
@@ -536,11 +541,13 @@ func (h *TelemetryHandler) normalizeMuseTurnUsage(event *hooks.Event) *hooks.Eve
 		var err error
 		delta, err = applyMuseTurnUsageFile(h.MuseTurnUsageStatePath, key, cur)
 		if err != nil {
-			log.Warn("Muse turn usage delta state file %q failed (%v); dropping tokens for untrackable turn %s", h.MuseTurnUsageStatePath, err, key)
+			warnMuseTurnUsageOnce(h.MuseTurnUsageStatePath, key, err)
 			failedClosed = true
+		} else {
+			resetMuseTurnUsageWarned(h.MuseTurnUsageStatePath)
 		}
 	case h.MuseTurnUsageStateRequired:
-		log.Warn("Muse turn usage state path is unavailable (empty home); dropping tokens for untrackable turn %s", key)
+		warnMuseTurnUsageOnce("", key, errors.New("state path unavailable (empty home)"))
 		failedClosed = true
 	default:
 		delta = h.applyMuseTurnUsageMem(key, cur)
@@ -583,28 +590,156 @@ func (h *TelemetryHandler) applyMuseTurnUsageMem(key string, cur museTurnUsageTo
 	return h.turnUsageMem.apply(key, cur)
 }
 
+const (
+	museTurnUsageLockTimeoutDefault = 1500 * time.Millisecond
+	museTurnUsageLockInitialPoll    = 5 * time.Millisecond
+	museTurnUsageLockMaxPoll        = 50 * time.Millisecond
+	museTurnUsageLockMaxRetries     = 256
+	museTurnUsageMaxBytes           = 1 << 20
+	museTurnUsageWarnedMax          = 64
+)
+
+// museTurnUsageLockWait and museTurnUsageLockRetryCap bound the non-blocking
+// flock retry loop on the synchronous PostLLMCall hook path. Tests may shorten
+// them to exercise timeout and retry-cap paths without sleeping the full
+// default window.
+var (
+	museTurnUsageLockWait     = museTurnUsageLockTimeoutDefault
+	museTurnUsageLockRetryCap = museTurnUsageLockMaxRetries
+)
+
+var errMuseTurnUsageLocked = errors.New("muse turn usage state lock busy")
+
+var (
+	museTurnUsageWarnMu sync.Mutex
+	museTurnUsageWarned = make(map[string]struct{})
+)
+
+func warnMuseTurnUsageOnce(statePath, key string, err error) {
+	museTurnUsageWarnMu.Lock()
+	if _, already := museTurnUsageWarned[statePath]; already {
+		museTurnUsageWarnMu.Unlock()
+		return
+	}
+	if len(museTurnUsageWarned) >= museTurnUsageWarnedMax {
+		clear(museTurnUsageWarned)
+	}
+	museTurnUsageWarned[statePath] = struct{}{}
+	museTurnUsageWarnMu.Unlock()
+
+	slog.Warn(
+		"muse turn usage state unavailable; skipping update and dropping tokens for untrackable turn",
+		"harness", "muse-code",
+		"state_path", statePath,
+		"turn_key", key,
+		"error", err,
+	)
+}
+
+func resetMuseTurnUsageWarned(statePath string) {
+	museTurnUsageWarnMu.Lock()
+	delete(museTurnUsageWarned, statePath)
+	museTurnUsageWarnMu.Unlock()
+}
+
+// acquireMuseTurnUsageLock takes an exclusive non-blocking flock on lockFile,
+// retrying with exponential backoff up to wait and maxRetries. It never takes
+// a blocking flock, so a frozen lock holder cannot hang the hook path.
+func acquireMuseTurnUsageLock(lockFile *os.File, wait time.Duration, maxRetries int) (func(), error) {
+	if wait < 0 {
+		wait = 0
+	}
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
+	deadline := time.Now().Add(wait)
+	poll := museTurnUsageLockInitialPoll
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN)
+			}, nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EINTR) {
+			return nil, fmt.Errorf("flock %s: %w", lockFile.Name(), err)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || attempt+1 >= maxRetries {
+			return nil, fmt.Errorf("%w after %s (%d attempts): %s", errMuseTurnUsageLocked, wait, attempt+1, lockFile.Name())
+		}
+		sleep := poll
+		if sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		if poll < museTurnUsageLockMaxPoll {
+			poll = min(poll*2, museTurnUsageLockMaxPoll)
+		}
+	}
+	return nil, fmt.Errorf("%w after %s: %s", errMuseTurnUsageLocked, wait, lockFile.Name())
+}
+
+func checkSingleLinkRegularFile(f *os.File, path string) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing non-regular file %s (%s)", path, info.Mode().Type())
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Nlink != 1 {
+		return fmt.Errorf("refusing %s: %w", path, privatefs.ErrHardLinked)
+	}
+	return nil
+}
+
 func applyMuseTurnUsageFile(path, key string, cur museTurnUsageTotals) (museTurnUsageTotals, error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return museTurnUsageTotals{}, err
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", path, privatefs.ErrReparsePoint)
+	}
+	lockPath := path + ".lock"
+	if fi, err := os.Lstat(lockPath); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", lockPath, privatefs.ErrReparsePoint)
 	}
 
-	lockPath := path + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW, 0o600)
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {
 		return museTurnUsageTotals{}, err
 	}
-	defer func() { _ = lockFile.Close() }()
+	defer func() { _ = tree.Close() }()
 
-	if err := unix.Flock(int(lockFile.Fd()), unix.LOCK_EX); err != nil {
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0o600)
+	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", lockPath, privatefs.ErrReparsePoint)
+		}
 		return museTurnUsageTotals{}, err
 	}
-	defer func() { _ = unix.Flock(int(lockFile.Fd()), unix.LOCK_UN) }()
+	defer func() { _ = lockFile.Close() }()
+	if err := checkSingleLinkRegularFile(lockFile, lockPath); err != nil {
+		return museTurnUsageTotals{}, err
+	}
+
+	unlock, err := acquireMuseTurnUsageLock(lockFile, museTurnUsageLockWait, museTurnUsageLockRetryCap)
+	if err != nil {
+		return museTurnUsageTotals{}, err
+	}
+	defer unlock()
+
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", path, privatefs.ErrReparsePoint)
+	}
 
 	var st museTurnUsageState
-	dataFile, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	dataFile, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err == nil {
-		raw, readErr := io.ReadAll(io.LimitReader(dataFile, 1<<20))
+		statErr := checkSingleLinkRegularFile(dataFile, path)
+		if statErr != nil {
+			_ = dataFile.Close()
+			return museTurnUsageTotals{}, statErr
+		}
+		raw, readErr := io.ReadAll(io.LimitReader(dataFile, museTurnUsageMaxBytes))
 		_ = dataFile.Close()
 		if readErr != nil {
 			return museTurnUsageTotals{}, readErr
@@ -616,6 +751,8 @@ func applyMuseTurnUsageFile(path, key string, cur museTurnUsageTotals) (museTurn
 				st = museTurnUsageState{}
 			}
 		}
+	} else if errors.Is(err, unix.ELOOP) {
+		return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", path, privatefs.ErrReparsePoint)
 	} else if !os.IsNotExist(err) {
 		return museTurnUsageTotals{}, err
 	}
@@ -627,23 +764,33 @@ func applyMuseTurnUsageFile(path, key string, cur museTurnUsageTotals) (museTurn
 		return museTurnUsageTotals{}, err
 	}
 
-	tmp, err := os.CreateTemp(dir, ".muse-turn-usage-*.tmp")
+	tmp, tmpRel, err := tree.CreateTemp("", ".muse-turn-usage-*.tmp", privatefs.Private)
 	if err != nil {
 		return museTurnUsageTotals{}, err
 	}
-	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			if tmp != nil {
+				_ = tmp.Close()
+			}
+			_ = tree.Remove(tmpRel)
+		}
+	}()
 	if _, err := tmp.Write(encoded); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
 		return museTurnUsageTotals{}, err
 	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
+	closeErr := tmp.Close()
+	tmp = nil
+	if closeErr != nil {
+		return museTurnUsageTotals{}, closeErr
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return museTurnUsageTotals{}, fmt.Errorf("refusing %s: %w", path, privatefs.ErrReparsePoint)
+	}
+	if err := tree.Rename(tmpRel, filepath.Base(path)); err != nil {
 		return museTurnUsageTotals{}, err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return museTurnUsageTotals{}, err
-	}
+	ok = true
 	return delta, nil
 }
