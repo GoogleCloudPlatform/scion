@@ -281,6 +281,7 @@ type AgentResponse struct {
 	MaxTurns        int      `json:"maxTurns,omitempty"`
 	MaxModelCalls   int      `json:"maxModelCalls,omitempty"`
 	MaxDuration     string   `json:"maxDuration,omitempty"`
+	RunDeadline     string   `json:"runDeadline,omitempty"`
 	LimitsClampedBy []string `json:"limitsClampedBy,omitempty"`
 }
 
@@ -876,6 +877,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		MaxTurns:              info.EffectiveMaxTurns,
 		MaxModelCalls:         info.EffectiveMaxModelCalls,
 		MaxDuration:           info.EffectiveMaxDuration,
+		RunDeadline:           info.EffectiveRunDeadline,
 		LimitsClampedBy:       append([]string(nil), info.LimitsClampedBy...),
 		Image:                 info.Image,
 		RuntimeType:           info.Runtime,

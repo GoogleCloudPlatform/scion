@@ -200,11 +200,17 @@ func (r *DockerRuntime) Delete(ctx context.Context, ref RunRef) error {
 }
 
 type dockerListOutput struct {
-	ID     string `json:"ID"`
-	Names  string `json:"Names"`
-	Status string `json:"Status"`
-	Image  string `json:"Image"`
-	Labels string `json:"Labels"`
+	ID          string  `json:"ID"`
+	Names       string  `json:"Names"`
+	Status      string  `json:"Status"`
+	Image       string  `json:"Image"`
+	Labels      string  `json:"Labels"`
+	RunDeadline *string `json:"RunDeadline,omitempty"`
+	ScionAgent  *string `json:"ScionAgent,omitempty"`
+	RunID       *string `json:"RunID,omitempty"`
+	ScionName   *string `json:"ScionName,omitempty"`
+	AgentID     *string `json:"AgentID,omitempty"`
+	ProjectID   *string `json:"ProjectID,omitempty"`
 }
 
 // dockerListFormat renders exactly the fields in dockerListOutput as JSON.
@@ -215,7 +221,11 @@ type dockerListOutput struct {
 // filesystem (snapshotter.Usage) and fails the whole `docker ps` call when a
 // file disappears mid-walk, which is routine for agent containers with busy
 // /tmp directories. See ptone/scion#1867.
-const dockerListFormat = `{"ID":{{json .ID}},"Names":{{json .Names}},"Status":{{json .Status}},"Image":{{json .Image}},"Labels":{{json .Labels}}}`
+//
+// Broker identity and enforcement labels are additionally extracted via
+// Docker's `.Label "<key>"` template method, which reads directly from the
+// container's label map and is immune to comma-splitting ambiguity in `.Labels`.
+const dockerListFormat = `{"ID":{{json .ID}},"Names":{{json .Names}},"Status":{{json .Status}},"Image":{{json .Image}},"Labels":{{json .Labels}},"RunDeadline":{{json (.Label "scion.dev/run-deadline")}},"ScionAgent":{{json (.Label "scion.agent")}},"RunID":{{json (.Label "scion.run_id")}},"ScionName":{{json (.Label "scion.name")}},"AgentID":{{json (.Label "agent_id")}},"ProjectID":{{json (.Label "scion.project_id")}}}`
 
 // Bounded retry/backoff for `docker ps`. Even with the size-free format
 // (dockerListFormat, see #1867/#1888) `docker ps` can still fail
@@ -274,13 +284,8 @@ func (r *DockerRuntime) List(ctx context.Context, labelFilter map[string]string)
 			continue
 		}
 
-		labels := make(map[string]string)
-		for _, pair := range strings.Split(d.Labels, ",") {
-			parts := strings.SplitN(pair, "=", 2)
-			if len(parts) == 2 {
-				labels[parts[0]] = parts[1]
-			}
-		}
+		labels := parseDockerListLabels(d.Labels)
+		d.applyAuthoritativeLabels(labels)
 
 		// Filter by labels if requested
 		match := LabelsMatchFilter(labels, labelFilter)
@@ -552,4 +557,73 @@ func (r *DockerRuntime) GetWorkspacePath(ctx context.Context, id string) (string
 	}
 
 	return "", fmt.Errorf("no /workspace mount found for container %s", id)
+}
+
+// applyAuthoritativeLabels overlays the direct `.Label "<key>"` extractions
+// from dockerListFormat onto the comma-split label map. When present (non-nil),
+// each field reflects Docker's container label map directly and overrides (or
+// removes, when empty) any spoofed entry injected via commas inside another
+// label's value.
+func (d dockerListOutput) applyAuthoritativeLabels(labels map[string]string) {
+	applyAuthoritativeDockerLabel(labels, api.LabelRunDeadline, d.RunDeadline)
+	applyAuthoritativeDockerLabel(labels, "scion.agent", d.ScionAgent)
+	applyAuthoritativeDockerLabel(labels, api.LabelRunID, d.RunID)
+	applyAuthoritativeDockerLabel(labels, "scion.name", d.ScionName)
+	applyAuthoritativeDockerLabel(labels, "agent_id", d.AgentID)
+	applyAuthoritativeDockerLabel(labels, projectkeys.LabelProjectID, d.ProjectID)
+}
+
+func applyAuthoritativeDockerLabel(labels map[string]string, key string, val *string) {
+	if val == nil {
+		return
+	}
+	if *val == "" {
+		delete(labels, key)
+		return
+	}
+	labels[key] = *val
+}
+
+// parseDockerListLabels parses Docker's comma-separated `k=v,k=v` label
+// string from `docker ps --format {{json .Labels}}`. Because Docker formats
+// labels from an unordered map and a comma inside another label's value can
+// inject a duplicate `scion.dev/run-deadline` entry, duplicate run-deadline
+// keys fail closed: keep the earliest parseable RFC3339 timestamp, and treat
+// any unparsable duplicate as immediately expired.
+func parseDockerListLabels(raw string) map[string]string {
+	labels := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		k, v := parts[0], parts[1]
+		if k == api.LabelRunDeadline {
+			if prev, exists := labels[k]; exists {
+				labels[k] = mergeDockerRunDeadline(prev, v)
+				continue
+			}
+		}
+		if k == "scion.agent" {
+			if prev, exists := labels[k]; exists && (prev == "true" || v == "true") {
+				labels[k] = "true"
+				continue
+			}
+		}
+		labels[k] = v
+	}
+	return labels
+}
+
+func mergeDockerRunDeadline(prev, next string) string {
+	const expiredSentinel = "1970-01-01T00:00:00Z"
+	tPrev, errPrev := time.Parse(time.RFC3339, strings.TrimSpace(prev))
+	tNext, errNext := time.Parse(time.RFC3339, strings.TrimSpace(next))
+	if errPrev != nil || errNext != nil {
+		return expiredSentinel
+	}
+	if tNext.Before(tPrev) {
+		return tNext.UTC().Format(time.RFC3339)
+	}
+	return tPrev.UTC().Format(time.RFC3339)
 }

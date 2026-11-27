@@ -524,6 +524,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			MaxTurns:              sr.info.EffectiveMaxTurns,
 			MaxModelCalls:         sr.info.EffectiveMaxModelCalls,
 			MaxDuration:           sr.info.EffectiveMaxDuration,
+			RunDeadline:           sr.info.EffectiveRunDeadline,
 			LimitsClampedBy:       append([]string(nil), sr.info.LimitsClampedBy...),
 		}
 	}

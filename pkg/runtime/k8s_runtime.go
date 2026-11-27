@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"os"
 	"os/exec"
 	"path"
@@ -2761,15 +2762,34 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		podLabels[k8sMetadataModeLabel] = mode
 	}
 
+	podAnnotations := withScionAnnotation(
+		withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome),
+		k8sWorkspaceAgentsAnnotation, "true", agentsExcluded,
+	)
+	var activeDeadlineSeconds *int64
+	if !config.RunDeadline.IsZero() {
+		podAnnotations = withScionAnnotation(podAnnotations, api.LabelRunDeadline, config.RunDeadline.UTC().Format(time.RFC3339), true)
+		dur := config.RunDeadlineDuration
+		if dur <= 0 {
+			dur = time.Until(config.RunDeadline)
+		}
+		secs := int64(math.Ceil(dur.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		activeDeadlineSeconds = &secs
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      podLabels,
-			Annotations: withScionAnnotation(withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome), k8sWorkspaceAgentsAnnotation, "true", agentsExcluded),
+			Annotations: podAnnotations,
 		},
 		Spec: corev1.PodSpec{
-			SecurityContext: podSecurityContext,
+			ActiveDeadlineSeconds: activeDeadlineSeconds,
+			SecurityContext:       podSecurityContext,
 			Containers: []corev1.Container{
 				{
 					Name:            agentContainerName,
@@ -4136,13 +4156,22 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 
 		status := string(p.Status.Phase)
 		agentStatus := ""
+		agentActivity := ""
+		detailMessage := ""
 		var exitCode *int
 		var exitReason string
 		switch p.Status.Phase {
 		case corev1.PodSucceeded:
 			agentStatus = string(state.PhaseStopped)
 		case corev1.PodFailed:
-			agentStatus = string(state.PhaseError)
+			if p.Status.Reason == "DeadlineExceeded" {
+				agentStatus = string(state.PhaseStopped)
+				agentActivity = string(state.ActivityLimitsExceeded)
+				exitReason = string(state.ExitReasonLimitsExceeded)
+				detailMessage = api.ReasonMaxDurationBackstop
+			} else {
+				agentStatus = string(state.PhaseError)
+			}
 		case corev1.PodPending, corev1.PodRunning, corev1.PodUnknown:
 			// Non-terminal pod phases are represented via ContainerStatus and
 			// local agent-info state until the agent exits; a Pending pod
@@ -4156,17 +4185,19 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Waiting.Reason)
 				} else if cs.State.Terminated != nil {
 					status = fmt.Sprintf("%s (%s)", p.Status.Phase, cs.State.Terminated.Reason)
-					ec := int(cs.State.Terminated.ExitCode)
-					exitCode = &ec
-					if ec != 0 {
-						exitReason = string(state.ExitReasonCrashed)
-					}
-					// The kubelet records OOMKilled when the container was
-					// killed for exceeding its memory limit; report it as
-					// its own reason (a crash, not a disruption). A
-					// DisruptionTarget or Evicted signal below still wins.
-					if cs.State.Terminated.Reason == k8sTerminatedReasonOOMKilled {
-						exitReason = string(state.ExitReasonOOMKilled)
+					if p.Status.Reason != "DeadlineExceeded" {
+						ec := int(cs.State.Terminated.ExitCode)
+						exitCode = &ec
+						if ec != 0 {
+							exitReason = string(state.ExitReasonCrashed)
+						}
+						// The kubelet records OOMKilled when the container was
+						// killed for exceeding its memory limit; report it as
+						// its own reason (a crash, not a disruption). A
+						// DisruptionTarget or Evicted signal below still wins.
+						if cs.State.Terminated.Reason == k8sTerminatedReasonOOMKilled {
+							exitReason = string(state.ExitReasonOOMKilled)
+						}
 					}
 					if agentStatus == "" {
 						if cs.State.Terminated.ExitCode == 0 {
@@ -4229,6 +4260,12 @@ func (r *KubernetesRuntime) List(ctx context.Context, labelFilter map[string]str
 		info := k8sPodBaseAgentInfo(&p)
 		info.ContainerStatus = status
 		info.Phase = agentStatus
+		if agentActivity != "" {
+			info.Activity = agentActivity
+		}
+		if detailMessage != "" {
+			info.Detail = &api.AgentDetail{Message: detailMessage}
+		}
 		info.ExitCode = exitCode
 		info.ExitReason = exitReason
 		info.Runtime = r.Name()

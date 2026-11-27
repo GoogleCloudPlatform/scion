@@ -17,6 +17,37 @@ package api
 import (
 	"fmt"
 	"strconv"
+	"time"
+)
+
+// Duration backstop constants (ptone/scion#9372).
+const (
+	// LabelRunDeadline is the container label (Docker/Podman/Apple/Cloud Run
+	// Sandbox) or resource annotation (Kubernetes/Cloud Run Instances) storing
+	// an agent run's absolute UTC RFC3339 deadline for the broker backstop.
+	LabelRunDeadline = "scion.dev/run-deadline"
+
+	// DurationBackstopGrace is the cooperative shutdown grace added on top of
+	// effective max_duration, matching limitsExceededStopGrace so sciontool's
+	// clean exit-10 path normally wins before the broker hard stop fires.
+	DurationBackstopGrace = 2 * time.Minute
+
+	// DurationBackstopStartupAllowance covers image pull, container/pod/instance
+	// creation, in-container git clone, and pre-start hooks that execute before
+	// sciontool arms its own max_duration timer, so slow startups do not cause
+	// the broker backstop (or Kubernetes activeDeadlineSeconds) to fire ahead
+	// of sciontool.
+	DurationBackstopStartupAllowance = 10 * time.Minute
+
+	// DurationBackstopTotalGrace is the total grace added to effective
+	// max_duration (2m cooperative grace + 10m startup allowance = 12m) when
+	// stamping scion.dev/run-deadline and Kubernetes spec.activeDeadlineSeconds.
+	DurationBackstopTotalGrace = DurationBackstopGrace + DurationBackstopStartupAllowance
+
+	// ReasonMaxDurationBackstop is the status message / reason reported when
+	// the broker backstop (or Kubernetes activeDeadlineSeconds) terminates an
+	// expired run.
+	ReasonMaxDurationBackstop = "max_duration_backstop"
 )
 
 // Count limits (ScionConfig.MaxTurns and MaxModelCalls) are optional typed

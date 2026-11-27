@@ -839,6 +839,7 @@ type AgentInfo struct {
 	EffectiveMaxTurns      int      `json:"effectiveMaxTurns,omitempty"`
 	EffectiveMaxModelCalls int      `json:"effectiveMaxModelCalls,omitempty"`
 	EffectiveMaxDuration   string   `json:"effectiveMaxDuration,omitempty"`
+	EffectiveRunDeadline   string   `json:"effectiveRunDeadline,omitempty"`
 	LimitsClampedBy        []string `json:"limitsClampedBy,omitempty"`
 	// StartNotice is a fact about this start for the agent's status
 	// message, for example the repository git config keys left out of the

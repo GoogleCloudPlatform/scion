@@ -1093,19 +1093,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// LabelBindSources is the broker's own record of the binds: no other
-	// label source may set it.
+	// LabelBindSources and LabelRunDeadline are broker-owned runtime metadata:
+	// no caller label/annotation source may set or spoof them.
 	for k, v := range config.Labels {
-		if k == LabelBindSources {
+		if k == LabelBindSources || k == api.LabelRunDeadline {
 			continue
 		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
 	for k, v := range config.Annotations {
-		if k == LabelBindSources {
+		if k == LabelBindSources || k == api.LabelRunDeadline {
 			continue
 		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
+	}
+	if !config.RunDeadline.IsZero() {
+		addArg("--label", api.LabelRunDeadline+"="+config.RunDeadline.UTC().Format(time.RFC3339))
 	}
 
 	// Phase 5: Standard project labels
