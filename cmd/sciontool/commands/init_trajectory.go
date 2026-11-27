@@ -49,9 +49,11 @@ func startTrajectoryRunner(
 
 	harnessName := strings.TrimSpace(os.Getenv("SCION_HARNESS"))
 	if harnessName == "" {
-		harnessName = "claude"
+		log.Debug("Trajectory shipper disabled: SCION_HARNESS is unset")
+		return nil
 	}
 	if _, ok := shipper.HarnessSpecFor(harnessName); !ok {
+		log.Debug("Trajectory shipper disabled: unsupported harness %q", harnessName)
 		return nil
 	}
 

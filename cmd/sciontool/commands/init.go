@@ -848,12 +848,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 		lifecycleManager.RegisterHandler(eventName, statusHandler.Handle)
 		lifecycleManager.RegisterHandler(eventName, loggingHandler.Handle)
 	}
-	if trajectoryRunner != nil {
-		lifecycleManager.RegisterHandler(hooks.EventPreStop, func(_ *hooks.Event) error {
-			trajectoryRunner.PreStop(context.Background())
-			return nil
-		})
-	}
 
 	// Create telemetry handler for lifecycle-event spans and metrics.
 	// Harness hook events are handled by separate `sciontool hook`
@@ -1938,6 +1932,14 @@ waitLoop:
 	// runs ahead of the stopping and final status reports.
 	stopHeldReportSender()
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
+
+	// Run the bounded Final=true trajectory flush AFTER the harness has exited
+	// so shutdown bytes and any late SessionEnd wake are captured without
+	// delaying SIGTERM delivery or exceeding the stop budget. The deferred
+	// PreStop remains as an idempotent fallback for early-exit paths.
+	if trajectoryRunner != nil {
+		trajectoryRunner.PreStop(context.Background())
+	}
 
 	// Clean up the GitHub token file on exit
 	if hub.IsGitHubAppEnabled() {

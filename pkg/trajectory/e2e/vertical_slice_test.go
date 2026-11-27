@@ -417,24 +417,52 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 	rel := ".claude/projects/-workspace/sess-off.jsonl"
 	artPath := filepath.Join(env.homeDir, filepath.FromSlash(rel))
 	require.NoError(t, os.MkdirAll(filepath.Dir(artPath), 0o755))
-	require.NoError(t, os.WriteFile(artPath, []byte("{\"baseline\":1}\n"), 0o644))
+	initLine := "{\"baseline\":1}\n"
+	require.NoError(t, os.WriteFile(artPath, []byte(initLine), 0o644))
 
+	// Build a second Hub server sharing the same SQLite store & local storage
+	// with the experiment enabled, so we can flip experiment OFF -> ON cleanly.
+	cur := experiments.Default()
+	var enabledExps []experiments.Experiment
+	for _, e := range cur.All() {
+		if e.Name == experiments.TokenomicsTrajectoryCapture {
+			e.Default = true
+		}
+		enabledExps = append(enabledExps, e)
+	}
+	enabledReg, err := experiments.NewRegistry(enabledExps, cur.Retired())
+	require.NoError(t, err)
+	srvEnabled, err := hub.New(hub.ServerConfig{
+		DevAuthToken:        "e2e-dev-token",
+		SharedSigningSecret: "test-e2e-trajectory-signing-secret-32b",
+		Experiments:         enabledReg,
+	}, env.store)
+	require.NoError(t, err)
+	srvEnabled.SetStorage(env.storage)
+
+	var experimentOn atomic.Bool
 	var hubCalls atomic.Int32
-	countingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	switchingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hubCalls.Add(1)
+		if experimentOn.Load() {
+			srvEnabled.Handler().ServeHTTP(w, r)
+			return
+		}
 		env.srv.Handler().ServeHTTP(w, r)
 	}))
-	defer countingSrv.Close()
+	defer switchingSrv.Close()
 
-	client := scionhub.NewClientWithConfig(countingSrv.URL, env.token, env.agent.ID)
+	client := scionhub.NewClientWithConfig(switchingSrv.URL, env.token, env.agent.ID)
 	uploader := scionhub.NewTrajectoryUploader(client)
 
-	// Baseline first, then append new bytes so the runner attempts prepare and gets 404.
+	// Baseline first, then append lineA while experiment is OFF so the runner
+	// probes prepare, receives 404, rebaselines past lineA, and backs off.
 	s, err := shipper.New(shipper.Config{HomeDir: env.homeDir, RunID: env.runID, Uploader: uploader})
 	require.NoError(t, err)
 	_, err = s.Baseline(ctx)
 	require.NoError(t, err)
-	appendFile(t, artPath, "{\"new\":2}\n")
+	lineA := "{\"written_while_off\":\"A\"}\n"
+	appendFile(t, artPath, lineA)
 
 	runner, err := trajectory.NewRunner(trajectory.Config{
 		HomeDir:            env.homeDir,
@@ -447,21 +475,60 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 	require.NoError(t, err)
 	require.NoError(t, runner.Start(ctx))
 
-	// Wait for initial resume_catchup 404 + a few ticker intervals to prove backoff stops retries.
+	// Poll until the initial resume_catchup probe reaches the Hub (avoiding sleep flakiness).
+	require.Eventually(t, func() bool {
+		return hubCalls.Load() >= 1
+	}, 5*time.Second, 10*time.Millisecond, "expected initial prepare probe to reach Hub")
+
+	// Wait a few ticker intervals to prove backoff suppresses further probes.
 	time.Sleep(100 * time.Millisecond)
 	runner.PreStop(ctx)
 
 	require.Equal(t, int32(1), hubCalls.Load(), "expected exactly 1 prepare probe (404) followed by backoff")
 
-	// State file must remain valid JSON and watermark must not have advanced.
+	// State file must remain valid JSON and be rebaselined past lineA with reason "capture_unavailable".
 	st, ok, err := shipper.LoadState(env.homeDir)
 	require.NoError(t, err)
 	require.True(t, ok)
-	require.Equal(t, int64(len("{\"baseline\":1}\n")), st.Artifacts[rel].RawCommittedOffset)
+	wantRebasedEOF := int64(len(initLine) + len(lineA))
+	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].RawCommittedOffset)
+	require.Equal(t, wantRebasedEOF, st.Artifacts[rel].ParsedOffset)
+	require.Equal(t, "capture_unavailable", st.LastRebaselineReason)
 
 	rows, err := env.entClient.TrajectorySegment.Query().All(ctx)
 	require.NoError(t, err)
 	require.Empty(t, rows)
+
+	// Now flip the experiment ON, append lineB, and simulate a container restart
+	// (fresh Runner on the same home running resume_catchup): ONLY lineB ships;
+	// lineA written while the experiment was off NEVER ships.
+	experimentOn.Store(true)
+	lineB := "{\"written_while_on\":\"B\"}\n"
+	appendFile(t, artPath, lineB)
+
+	runnerRestart, err := trajectory.NewRunner(trajectory.Config{
+		HomeDir:            env.homeDir,
+		RunID:              env.runID,
+		Uploader:           uploader,
+		PeriodicInterval:   time.Hour,
+		UnavailableBackoff: time.Hour,
+		PreStopTimeout:     2 * time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, runnerRestart.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		curRows, qerr := env.entClient.TrajectorySegment.Query().All(ctx)
+		return qerr == nil && len(curRows) == 1 && curRows[0].Status == telemetrycontract.TrajectorySegmentStatusCommitted
+	}, 5*time.Second, 10*time.Millisecond, "expected lineB to commit via resume_catchup after restart")
+	runnerRestart.PreStop(ctx)
+
+	rows, err = env.entClient.TrajectorySegment.Query().All(ctx)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	gotReassembled := string(reassembleGeneration(t, ctx, env.storage, rows, 0))
+	require.Equal(t, lineB, gotReassembled, "only bytes written after experiment enable must ship")
+	require.NotContains(t, gotReassembled, "written_while_off", "bytes written while experiment off must never ship")
 }
 
 func TestVerticalSlice_WrongAgentTokenRefused(t *testing.T) {
