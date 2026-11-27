@@ -97,7 +97,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"project.register": {}, "project.set_messaging_policy": {}, "project.clone": {},
 	"project.manage_message_policies": {}, "project.read_message_policies": {},
 	"project.manage_system_one_instances": {},
-	"project.manage_visitors":             {}, "project.manage_pre_start_hooks": {}, "project.chat_post": {}, "project.list": {TargetClassKindHubResource},
+	"project.manage_visitors":             {}, "project.manage_pre_start_hooks": {}, "project.chat_post": {}, "project.trajectory.read": {}, "project.list": {TargetClassKindHubResource},
 
 	// artifact.* — create is CapabilityScope (publish into a project);
 	// read is also collection-level, because the artifact list route

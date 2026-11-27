@@ -42,6 +42,9 @@
 - [agent.trajectory.segments.prepare](#agenttrajectorysegmentsprepare) — Prepare a Track 2 raw trajectory segment upload and issue a short-lived no-overwrite upload URL for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.commit](#agenttrajectorysegmentscommit) — Verify and commit a prepared Track 2 raw trajectory segment and write its Hub-authored manifest for the calling agent (behind tokenomics.trajectory_capture)
 - [agent.trajectory.segments.content](#agenttrajectorysegmentscontent) — Upload raw trajectory segment bytes via Hub-proxied no-overwrite PUT with HMAC capability URL and agent JWT (behind tokenomics.trajectory_capture)
+- [project.trajectory.segments.list](#projecttrajectorysegmentslist) — List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+- [project.trajectory.segments.download](#projecttrajectorysegmentsdownload) — Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+- [agent.trajectory.segments.content.read](#agenttrajectorysegmentscontentread) — Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
 - [agent.secrets.access](#agentsecretsaccess) — List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)
 - [agent.stopall](#agentstopall) — Stop all running agents on the hub
 - [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
@@ -1862,6 +1865,98 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT and a Hub-issued HMAC capability URL for its own trajectory segment upload; no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## project.trajectory.segments.list
+
+**Domain:** project
+
+**Description:** List committed Track 2 raw trajectory segment metadata for an agent (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.trajectory.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.trajectory.segments.download
+
+**Domain:** project
+
+**Description:** Issue a short-lived signed GET URL for a committed Track 2 raw trajectory segment (and optional manifest) after synchronously writing a mandatory read-audit row (behind tokenomics.trajectory_capture; requires project.trajectory.read on the agent's project)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments/{segmentId}/download` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.trajectory.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.trajectory.segments.content.read
+
+**Domain:** agent
+
+**Description:** Download committed Track 2 raw trajectory segment or manifest bytes via a Hub-issued short-lived HMAC capability URL issued by the audit-logged download endpoint (behind tokenomics.trajectory_capture)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/trajectory/segments/{segmentId}/content` |
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+### Tests
+
+- `pkg/hub:TestTrajectoryRead_LocalHMACDownloadEndToEnd`
+
+### Exemptions
+
+- **public_endpoint:** Capability URL: the short-lived HMAC signature issued by the audit-logged trajectory segment download endpoint authorizes reading one segment or manifest object, with no principal (scope: signed trajectory segment content download) — waives: `principals`, `credentials`, `base_permission`, `denial_codes`
 
 ---
 

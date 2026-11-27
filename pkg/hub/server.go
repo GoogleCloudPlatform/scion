@@ -2346,6 +2346,8 @@ type Server struct {
 	trajectoryMaxRunSegments        int64
 	trajectoryPrepareTTL            time.Duration
 	trajectoryUploadURLExpiry       time.Duration
+	trajectoryDownloadURLExpiry     time.Duration
+	trajectoryClock                 func() time.Time
 	trajectoryCommitAfterVerifyHook func(context.Context, *store.TrajectorySegment)
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the

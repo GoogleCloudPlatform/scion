@@ -223,7 +223,8 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 20, admin.Revision)
+	assert.Equal(t, 21, admin.Revision)
+	assert.Contains(t, admin.Permissions, "project.trajectory.read")
 	assert.Contains(t, admin.Permissions, "project.manage_system_one_instances")
 	assert.Contains(t, admin.Permissions, "broker.manage")
 	assert.NotContains(t, admin.Permissions, "broker.update")
@@ -1106,7 +1107,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_message_policies", "project.manage_system_one_instances", "project.manage_visitors",
-				"project.read", "project.read_message_policies", "project.secret_read", "project.set_messaging_policy", "project.update",
+				"project.read", "project.read_message_policies", "project.secret_read", "project.set_messaging_policy", "project.trajectory.read", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
 				"skill.create", "skill.delete", "skill.list", "skill.read",
@@ -1135,7 +1136,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.chat_post", "project.list", "project.manage", "project.manage_message_policies", "project.manage_system_one_instances", "project.manage_visitors",
-				"project.read", "project.read_message_policies", "project.secret_read", "project.update",
+				"project.read", "project.read_message_policies", "project.secret_read", "project.trajectory.read", "project.update",
 				"scheduled_event.create",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
 				"skill.create", "skill.list", "skill.read",

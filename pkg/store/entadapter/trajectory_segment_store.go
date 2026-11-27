@@ -462,3 +462,60 @@ func (s *TrajectorySegmentStore) CountTrajectoryRunSegments(ctx context.Context,
 	}
 	return count, nil
 }
+
+// ListCommittedTrajectorySegments implements store.TrajectorySegmentStore.
+func (s *TrajectorySegmentStore) ListCommittedTrajectorySegments(ctx context.Context, filter store.TrajectorySegmentListFilter) ([]*store.TrajectorySegment, bool, error) {
+	if filter.AgentID == "" {
+		return nil, false, fmt.Errorf("%w: agent_id is required", store.ErrInvalidInput)
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	q := s.client.TrajectorySegment.Query().
+		Where(
+			trajectorysegment.AgentIDEQ(filter.AgentID),
+			trajectorysegment.StatusEQ(telemetrycontract.TrajectorySegmentStatusCommitted),
+		)
+	if filter.RunID != "" {
+		q = q.Where(trajectorysegment.RunIDEQ(filter.RunID))
+	}
+	if filter.Generation != nil {
+		q = q.Where(trajectorysegment.GenerationEQ(*filter.Generation))
+	}
+	if filter.NativeRelativePath != "" {
+		q = q.Where(trajectorysegment.NativeRelativePathEQ(filter.NativeRelativePath))
+	}
+
+	rows, err := q.
+		Order(
+			ent.Asc(trajectorysegment.FieldRunID),
+			ent.Asc(trajectorysegment.FieldNativeRelativePath),
+			ent.Asc(trajectorysegment.FieldGeneration),
+			ent.Asc(trajectorysegment.FieldByteStart),
+			ent.Asc(trajectorysegment.FieldID),
+		).
+		Offset(offset).
+		Limit(limit + 1).
+		All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+
+	hasMore := false
+	if len(rows) > limit {
+		hasMore = true
+		rows = rows[:limit]
+	}
+
+	out := make([]*store.TrajectorySegment, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, entTrajectorySegmentToStore(row))
+	}
+	return out, hasMore, nil
+}

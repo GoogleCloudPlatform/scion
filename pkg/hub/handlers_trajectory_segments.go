@@ -800,12 +800,16 @@ func trajectorySplitHostPort(hostport, defaultScheme string) (host, port string)
 //   - object already exists with identical bytes -> returns 200
 //   - object already exists with different bytes -> returns 412 Precondition Failed
 func (s *Server) handleAgentTrajectorySegmentContent(w http.ResponseWriter, r *http.Request, id, segmentID string) {
+	if r.Method == http.MethodGet {
+		s.handleAgentTrajectorySegmentContentRead(w, r, id, segmentID)
+		return
+	}
 	if !s.experimentEnabled(experiments.TokenomicsTrajectoryCapture) {
 		NotFound(w, "route")
 		return
 	}
 	if r.Method != http.MethodPut {
-		MethodNotAllowed(w, http.MethodPut)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
 

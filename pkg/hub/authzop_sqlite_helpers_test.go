@@ -166,6 +166,8 @@ type idFixtures struct {
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
 	delegation liveInventoryDelegation
+	// trajectorySegment is a committed Track 2 raw trajectory segment for agent.
+	trajectorySegment string
 	// testIdentity is a live hub test identity (handlers_test_identities.go).
 	testIdentity string
 	// testIdentityDel is a disposable live test identity for the delete
@@ -898,6 +900,38 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
+	// Seed one committed Track 2 raw trajectory segment for f.agent so the
+	// signed-download entry point reaches 200 for admitting bearer tokens.
+	trajObjPath := "li-hub/trajectories/v1/raw/project=" + f.project + "/agent=" + f.agent + "/run=li-run/claude/.claude/projects/-workspace/sess.jsonl/g0-0000000000000000.seg.gz"
+	trajSeg, err := s.PrepareTrajectorySegment(ctx, &store.TrajectorySegment{
+		HubID:              "li-hub",
+		OriginHubID:        "li-hub",
+		ProjectID:          f.project,
+		AgentID:            f.agent,
+		RunID:              "li-run",
+		Harness:            "claude",
+		NativeRelativePath: ".claude/projects/-workspace/sess.jsonl",
+		ArtifactKind:       "jsonl_append",
+		Generation:         0,
+		ByteStart:          0,
+		ByteEnd:            16,
+		RawSHA256:          strings.Repeat("a", 64),
+		CompressedSize:     32,
+		CompressedSHA256:   strings.Repeat("b", 64),
+		ObjectPath:         trajObjPath,
+		CreatedAt:          now,
+		PrepareExpiresAt:   now.Add(15 * time.Minute),
+	})
+	require.NoError(t, err)
+	trajCommitted, err := s.CommitTrajectorySegment(ctx, trajSeg.ID, trajObjPath+".manifest.json", now, store.TrajectorySegmentCommitExpectation{
+		ByteEnd:          16,
+		RawSHA256:        strings.Repeat("a", 64),
+		CompressedSize:   32,
+		CompressedSHA256: strings.Repeat("b", 64),
+	})
+	require.NoError(t, err)
+	f.trajectorySegment = trajCommitted.ID
+
 	// Hub test identities: turn the feature on (--test-mode=member)
 	// and seed one live identity. Its issuer is the bearer matrix's
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
@@ -1186,16 +1220,18 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
-		"/api/v1/agents/{id}/token/refresh":                           {"id": f.agent},
-		"/api/v1/agents/{id}/refresh-token":                           {"id": f.agent},
-		"/api/v1/agents/{id}/outbound-message":                        {"id": f.agent},
-		"/api/v1/agents/{id}/metrics":                                 {"id": f.agent},
-		"/api/v1/agents/{id}/usage/events":                            {"id": f.agent},
-		"/api/v1/agents/{id}/usage/capabilities":                      {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments:prepare":             {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments:commit":              {"id": f.agent},
-		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/content": {"id": f.agent, "segmentId": "seg-1"},
-		"/api/v1/projects/{projectId}/agents/{id}/outbound-message":   {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/token/refresh":                            {"id": f.agent},
+		"/api/v1/agents/{id}/refresh-token":                            {"id": f.agent},
+		"/api/v1/agents/{id}/outbound-message":                         {"id": f.agent},
+		"/api/v1/agents/{id}/metrics":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/usage/events":                             {"id": f.agent},
+		"/api/v1/agents/{id}/usage/capabilities":                       {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:prepare":              {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:commit":               {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments":                      {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/download": {"id": f.agent, "segmentId": f.trajectorySegment},
+		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/content":  {"id": f.agent, "segmentId": f.trajectorySegment},
+		"/api/v1/projects/{projectId}/agents/{id}/outbound-message":    {"projectId": f.project, "id": f.agent},
 
 		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},

@@ -41,6 +41,10 @@ const (
 	// Hub-proxied PUT upload URLs returned by segments:prepare.
 	DefaultTrajectoryUploadURLExpiry = 10 * time.Minute
 
+	// DefaultTrajectoryDownloadURLExpiry is the validity duration of short-lived
+	// signed GET download URLs returned by segments/{segment_id}/download.
+	DefaultTrajectoryDownloadURLExpiry = 5 * time.Minute
+
 	// DefaultTrajectoryPrepareTTL is how long a pending prepared segment
 	// remains commit-eligible before segments:commit returns 410 segment_expired.
 	DefaultTrajectoryPrepareTTL = 15 * time.Minute
@@ -124,11 +128,24 @@ func TrajectorySegmentsCommitAgentPath(agentID string) string {
 	return fmt.Sprintf("/api/v1/agents/%s/trajectory/segments:commit", url.PathEscape(agentID))
 }
 
-// TrajectorySegmentContentAgentPath returns the Hub-proxied upload path for
-// local storage (and non-signBlob fallback):
-// PUT /api/v1/agents/{id}/trajectory/segments/{segment_id}/content.
+// TrajectorySegmentContentAgentPath returns the Hub-proxied upload/download
+// content path for local storage (and non-signBlob fallback):
+// PUT/GET /api/v1/agents/{id}/trajectory/segments/{segment_id}/content.
 func TrajectorySegmentContentAgentPath(agentID, segmentID string) string {
 	return fmt.Sprintf("/api/v1/agents/%s/trajectory/segments/%s/content",
+		url.PathEscape(agentID), url.PathEscape(segmentID))
+}
+
+// TrajectorySegmentsListAgentPath returns the user-facing list path:
+// GET /api/v1/agents/{id}/trajectory/segments.
+func TrajectorySegmentsListAgentPath(agentID string) string {
+	return fmt.Sprintf("/api/v1/agents/%s/trajectory/segments", url.PathEscape(agentID))
+}
+
+// TrajectorySegmentDownloadAgentPath returns the user-facing signed download
+// path: GET /api/v1/agents/{id}/trajectory/segments/{segment_id}/download.
+func TrajectorySegmentDownloadAgentPath(agentID, segmentID string) string {
+	return fmt.Sprintf("/api/v1/agents/%s/trajectory/segments/%s/download",
 		url.PathEscape(agentID), url.PathEscape(segmentID))
 }
 
@@ -281,4 +298,58 @@ type TrajectorySegmentManifest struct {
 	// struct with ManifestDigest set to "" (so "manifest_digest":"" is present).
 	// Verifiers must blank the field rather than omitting it.
 	ManifestDigest string `json:"manifest_digest"`
+}
+
+// TrajectorySegmentSummary is the metadata-only representation of a committed
+// raw trajectory segment returned by GET /api/v1/agents/{id}/trajectory/segments.
+type TrajectorySegmentSummary struct {
+	SegmentID          string `json:"segment_id"`
+	RunID              string `json:"run_id"`
+	Harness            string `json:"harness"`
+	NativeRelativePath string `json:"native_relative_path"`
+	ArtifactKind       string `json:"artifact_kind"`
+	Generation         int    `json:"generation"`
+	ByteStart          int64  `json:"byte_start"`
+	ByteEnd            int64  `json:"byte_end"`
+	RawSize            int64  `json:"raw_size"`
+	CompressedSize     int64  `json:"compressed_size"`
+	RawSHA256          string `json:"raw_sha256"`
+	CompressedSHA256   string `json:"compressed_sha256"`
+	IncompleteTail     bool   `json:"incomplete_tail"`
+	SessionID          string `json:"session_id,omitempty"`
+	CommittedAt        string `json:"committed_at,omitempty"`
+}
+
+// TrajectorySegmentsListResponse is returned by
+// GET /api/v1/agents/{id}/trajectory/segments.
+type TrajectorySegmentsListResponse struct {
+	AgentID    string                     `json:"agent_id"`
+	ProjectID  string                     `json:"project_id"`
+	Segments   []TrajectorySegmentSummary `json:"segments"`
+	NextCursor string                     `json:"next_cursor,omitempty"`
+}
+
+// TrajectorySegmentDownloadLink describes a short-lived signed GET URL for a
+// trajectory object (segment or manifest).
+type TrajectorySegmentDownloadLink struct {
+	ObjectPath  string `json:"object_path"`
+	URL         string `json:"url"`
+	Method      string `json:"method"`
+	ExpiresAt   string `json:"expires_at"`
+	ContentType string `json:"content_type"`
+}
+
+// TrajectorySegmentDownloadResponse is returned by
+// GET /api/v1/agents/{id}/trajectory/segments/{segment_id}/download.
+type TrajectorySegmentDownloadResponse struct {
+	SegmentID        string                         `json:"segment_id"`
+	ObjectPath       string                         `json:"object_path"`
+	URL              string                         `json:"url"`
+	Method           string                         `json:"method"`
+	ExpiresAt        string                         `json:"expires_at"`
+	ContentType      string                         `json:"content_type"`
+	CompressedSize   int64                          `json:"compressed_size"`
+	RawSHA256        string                         `json:"raw_sha256"`
+	CompressedSHA256 string                         `json:"compressed_sha256"`
+	Manifest         *TrajectorySegmentDownloadLink `json:"manifest,omitempty"`
 }

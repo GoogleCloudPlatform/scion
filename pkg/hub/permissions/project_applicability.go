@@ -63,6 +63,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.manage_visitors":             true, "project.manage_pre_start_hooks": true,
 	// project.chat_post targets an existing project's chat threads.
 	"project.chat_post": true,
+	// project.trajectory.read targets an existing project's raw trajectory segments.
+	"project.trajectory.read": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; *_global and register are explicitly hub-catalog actions.
@@ -257,7 +259,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"project.manage_system_one_instances": {BoundaryKindProject, BoundaryKindHub},
 	// project.chat_post's selector targets an existing project, like
 	// project.set_messaging_policy.
-	"project.chat_post": {BoundaryKindProject, BoundaryKindHub},
+	"project.chat_post":       {BoundaryKindProject, BoundaryKindHub},
+	"project.trajectory.read": {BoundaryKindProject, BoundaryKindHub},
 	// project.list's selector lists projects on either boundary; a project
 	// token lists only its boundary project.
 	"project.list": {BoundaryKindProject, BoundaryKindHub},
@@ -455,7 +458,8 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"project.manage_message_policies": {TargetClassKindProjectScoped}, "project.read_message_policies": {TargetClassKindProjectScoped},
 	"project.manage_system_one_instances": {TargetClassKindProjectScoped},
 	// project.chat_post targets an existing project's chat threads.
-	"project.chat_post": {TargetClassKindProjectScoped},
+	"project.chat_post":       {TargetClassKindProjectScoped},
+	"project.trajectory.read": {TargetClassKindProjectScoped},
 	// project.list is a hub-level collection action (false in
 	// ProjectTargetApplicability), so hub-boundary mint needs a system grant.
 	"project.list": {TargetClassKindHubResource},

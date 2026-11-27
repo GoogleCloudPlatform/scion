@@ -127,4 +127,20 @@ type TrajectorySegmentStore interface {
 	// (committed and pending, regardless of prepare_expires_at) for
 	// (agentID, runID), excluding excludeID if non-empty.
 	CountTrajectoryRunSegments(ctx context.Context, agentID, runID, excludeID string) (int64, error)
+
+	// ListCommittedTrajectorySegments returns committed segments for an agent
+	// matching filter in deterministic (run_id, native_relative_path, generation,
+	// byte_start, id) order, along with hasMore indicating whether additional
+	// rows exist beyond filter.Offset+len(result).
+	ListCommittedTrajectorySegments(ctx context.Context, filter TrajectorySegmentListFilter) ([]*TrajectorySegment, bool, error)
+}
+
+// TrajectorySegmentListFilter scopes committed trajectory segment listing for an agent.
+type TrajectorySegmentListFilter struct {
+	AgentID            string
+	RunID              string
+	Generation         *int
+	NativeRelativePath string
+	Limit              int
+	Offset             int
 }

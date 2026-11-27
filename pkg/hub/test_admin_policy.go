@@ -132,6 +132,11 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	// Posting into a project's chat threads, held by the built-in
 	// project roles.
 	"project.chat_post": testAdminPolicyAllow,
+	// Reading unredacted Track 2 raw trajectory segments (ptone/scion#9250):
+	// deny, consistent with tokenomics.trajectory_capture. Still grantable at
+	// project scope (testAdminGrantableAtProjectScope) so built-in
+	// project-owner and project-admin roles remain assignable by test admins.
+	"project.trajectory.read": testAdminPolicyDeny,
 	// Visitor access for federated accounts (ptone/scion#4603): deny. A
 	// test hub is not federated (A0 gate), like federation.project_visitors.
 	// Still grantable at project scope (testAdminGrantableAtProjectScope):
@@ -355,6 +360,7 @@ var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.read":               true,
 	"project.manage_visitors":             true,
 	"project.manage_system_one_instances": true,
+	"project.trajectory.read":             true,
 	"github_trigger.configure":            true,
 }
 
