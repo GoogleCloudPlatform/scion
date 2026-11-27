@@ -393,6 +393,119 @@
       "segments": [
         { "text": "2 items waiting", "link": "primary" }
       ]
+    },
+    {
+      "name": "merged secrets empty",
+      "category": "secrets",
+      "count": 0,
+      "capped": false,
+      "breakdown": { "secretRequests": 0, "agents": 0, "pendingSecrets": 0, "projects": 0 },
+      "expected": "Nothing Waiting",
+      "segments": null
+    },
+    {
+      "name": "merged secrets both plural with agents and projects",
+      "category": "secrets",
+      "count": 8,
+      "capped": false,
+      "breakdown": { "secretRequests": 5, "agents": 2, "pendingSecrets": 3, "projects": 2 },
+      "expected": "5 secret requests from 2 agents, 3 pending secrets to approve, across 2 projects",
+      "segments": [
+        { "text": "5 secret requests", "link": "secrets-requests" },
+        { "text": " from 2 agents, " },
+        { "text": "3 pending secrets", "link": "secrets-pending" },
+        { "text": " to approve, across 2 projects" }
+      ]
+    },
+    {
+      "name": "merged secrets both singular",
+      "category": "secrets",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "secretRequests": 1, "agents": 1, "pendingSecrets": 1, "projects": 1 },
+      "expected": "1 secret request from 1 agent, 1 pending secret to approve, across 1 project",
+      "segments": [
+        { "text": "1 secret request", "link": "secrets-requests" },
+        { "text": " from 1 agent, " },
+        { "text": "1 pending secret", "link": "secrets-pending" },
+        { "text": " to approve, across 1 project" }
+      ]
+    },
+    {
+      "name": "merged secrets requests only with agents and projects",
+      "category": "secrets",
+      "count": 3,
+      "capped": false,
+      "breakdown": { "secretRequests": 3, "agents": 2, "pendingSecrets": 0, "projects": 2 },
+      "expected": "3 secret requests from 2 agents, across 2 projects",
+      "segments": [
+        { "text": "3 secret requests", "link": "secrets-requests" },
+        { "text": " from 2 agents, across 2 projects" }
+      ]
+    },
+    {
+      "name": "merged secrets pending only with projects",
+      "category": "secrets",
+      "count": 1,
+      "capped": false,
+      "breakdown": { "secretRequests": 0, "agents": 0, "pendingSecrets": 1, "projects": 1 },
+      "expected": "1 pending secret to approve, across 1 project",
+      "segments": [
+        { "text": "1 pending secret", "link": "secrets-pending" },
+        { "text": " to approve, across 1 project" }
+      ]
+    },
+    {
+      "name": "merged secrets drops zero agents and zero projects",
+      "category": "secrets",
+      "count": 4,
+      "capped": false,
+      "breakdown": { "secretRequests": 2, "agents": 0, "pendingSecrets": 2, "projects": 0 },
+      "expected": "2 secret requests, 2 pending secrets to approve",
+      "segments": [
+        { "text": "2 secret requests", "link": "secrets-requests" },
+        { "text": ", " },
+        { "text": "2 pending secrets", "link": "secrets-pending" },
+        { "text": " to approve" }
+      ]
+    },
+    {
+      "name": "merged secrets capped independently",
+      "category": "secrets",
+      "count": 100,
+      "capped": true,
+      "breakdown": {
+        "secretRequests": 50,
+        "secretRequestsCapped": 1,
+        "agents": 4,
+        "pendingSecrets": 50,
+        "pendingSecretsCapped": 1,
+        "projects": 3
+      },
+      "expected": "50+ secret requests from 4 agents, 50+ pending secrets to approve, across 3 projects",
+      "segments": [
+        { "text": "50+ secret requests", "link": "secrets-requests" },
+        { "text": " from 4 agents, " },
+        { "text": "50+ pending secrets", "link": "secrets-pending" },
+        { "text": " to approve, across 3 projects" }
+      ]
+    },
+    {
+      "name": "merged secrets only pending capped",
+      "category": "secrets",
+      "count": 50,
+      "capped": true,
+      "breakdown": {
+        "secretRequests": 0,
+        "pendingSecrets": 50,
+        "pendingSecretsCapped": 1,
+        "projects": 2
+      },
+      "expected": "50+ pending secrets to approve, across 2 projects",
+      "segments": [
+        { "text": "50+ pending secrets", "link": "secrets-pending" },
+        { "text": " to approve, across 2 projects" }
+      ]
     }
   ]
 }

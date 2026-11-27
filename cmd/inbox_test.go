@@ -327,13 +327,13 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		assert.Contains(t, out, "Decisions           3   scion decisions list")
 		assert.Contains(t, out, "  3 decisions from 2 agents in 1 project")
 		assert.Contains(t, out, `• core-api · "Pick migration strategy?" · deploy-bot · 2h ago`)
+		assert.Contains(t, out, "Secrets            2+")
+		assert.Contains(t, out, "  2+ pending secrets to approve, across 1 project")
+		assert.Contains(t, out, "/profile/secrets")
+		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · core-api · expires in 2h")
 		assert.Contains(t, out, "Agents Waiting      1   scion look <agent>")
 		assert.Contains(t, out, "  1 agent waiting in 1 project")
 		assert.Contains(t, out, `• web / fe-dev · "Need staging creds?" · 14m ago`)
-		assert.Contains(t, out, "Pending Secrets    2+")
-		assert.Contains(t, out, "  2+ pending secrets from 1 agent in 1 project")
-		assert.Contains(t, out, "/profile/secrets")
-		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · core-api · expires in 2h")
 		assert.Contains(t, out, "Reviews             2   scion notifications")
 		assert.Contains(t, out, "  2 pending reviews")
 		assert.Contains(t, out, "/artifacts?review_on_latest=1&owner=me")
@@ -343,13 +343,75 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		assert.Contains(t, out, "  14 unread conversations, 1 with mentions")
 		assert.Contains(t, out, "• [DM] bob · core-api · 7m ago")
 
-		// Verify canonical order: Decisions -> Agents Waiting -> Pending Secrets -> Reviews -> Chat.
+		// Verify canonical order: Decisions -> Secrets -> Agents Waiting -> Reviews -> Chat.
 		idxDec := strings.Index(out, "Decisions")
+		idxSec := strings.Index(out, "Secrets")
 		idxWait := strings.Index(out, "Agents Waiting")
-		idxPending := strings.Index(out, "Pending Secrets")
 		idxRev := strings.Index(out, "Reviews")
 		idxChat := strings.Index(out, "Chat")
-		assert.True(t, idxDec < idxWait && idxWait < idxPending && idxPending < idxRev && idxRev < idxChat, "unexpected category order:\n%s", out)
+		assert.True(t, idxDec < idxSec && idxSec < idxWait && idxWait < idxRev && idxRev < idxChat, "unexpected category order:\n%s", out)
+	})
+
+	t.Run("merged Secrets line combines agent_secrets and pending_secrets with union projects and previews", func(t *testing.T) {
+		fixture := `{
+  "generatedAt": "2026-11-24T18:02:00Z",
+  "total": 7,
+  "totalCapped": false,
+  "categories": {
+    "agent_secrets": {
+      "state": "ok",
+      "count": 5,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/profile/agent-secrets",
+      "breakdown": {"agents": 2, "projects": 1, "secretsProjects": 2},
+      "previews": [
+        {
+          "id": "sr1",
+          "projectName": "core-api",
+          "key": "GITHUB_TOKEN",
+          "createdAt": "2026-11-24T17:42:00Z"
+        }
+      ]
+    },
+    "pending_secrets": {
+      "state": "ok",
+      "count": 2,
+      "capped": false,
+      "countsTowardTotal": true,
+      "href": "/profile/secrets",
+      "breakdown": {"agents": 1, "projects": 1},
+      "previews": [
+        {
+          "id": "ps1",
+          "kind": "pending_secret",
+          "projectId": "p2",
+          "projectName": "web",
+          "createdAt": "2026-11-24T17:30:00Z",
+          "href": "/profile/secrets",
+          "key": "STRIPE_API_KEY",
+          "agentSlug": "billing-dev",
+          "expiresAt": "2026-11-24T20:02:00Z"
+        }
+      ]
+    }
+  }
+}`
+		withInboxFakeHub(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(fixture))
+		})
+
+		out, err := runInboxCmdForTest(t, "")
+		require.NoError(t, err)
+		assert.Contains(t, out, "Secrets             7")
+		assert.Contains(t, out, "  5 secret requests from 2 agents, 2 pending secrets to approve, across 2 projects")
+		assert.Contains(t, out, "/profile/agent-secrets")
+		assert.Contains(t, out, "/profile/secrets")
+		assert.Contains(t, out, "• core-api · GITHUB_TOKEN · 20m ago")
+		assert.Contains(t, out, "• STRIPE_API_KEY · billing-dev · web · expires in 2h")
+		assert.NotContains(t, out, "Agent Secrets")
+		assert.NotContains(t, out, "Pending Secrets")
 	})
 
 	t.Run("token-like view with unavailable pending_secrets, disabled omitted, and error category exits 0", func(t *testing.T) {
@@ -411,7 +473,7 @@ func TestInboxCmd_HumanOutput_AllStatesAndCategories(t *testing.T) {
 		out, err := runInboxCmdForTest(t, "")
 		require.NoError(t, err, "category-level errors must still exit 0")
 		assert.Contains(t, out, "INBOX  4 waiting on you")
-		assert.Contains(t, out, "Pending Secrets     –   unavailable with token auth (open ")
+		assert.Contains(t, out, "Secrets             –   unavailable with token auth (open ")
 		assert.Contains(t, out, "/profile/secrets in the browser)")
 		assert.NotContains(t, out, "Reviews", "disabled category must be omitted")
 		assert.Contains(t, out, "Chat                !   error (timeout)")

@@ -1151,6 +1151,7 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
   async function mountInboxNav(options: {
     inboxEnabled: boolean;
     decisionsEnabled?: boolean;
+    agentSecretsEnabled?: boolean;
     currentPath?: string;
     waitingOnYou?: number;
   }): Promise<HTMLElement & { updateComplete: Promise<boolean>; currentPath: string }> {
@@ -1167,6 +1168,9 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     }
     if (options.decisionsEnabled ?? true) {
       flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
+    }
+    if (options.agentSecretsEnabled) {
+      flags.setFeatureFlag(flags.AGENT_SECRETS_FLAG, true);
     }
 
     vi.stubGlobal(
@@ -1246,6 +1250,10 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     await nav.updateComplete;
     expect(inboxLink()?.classList.contains('active')).toBe(true);
 
+    nav.currentPath = '/profile/agent-secrets';
+    await nav.updateComplete;
+    expect(inboxLink()?.classList.contains('active')).toBe(true);
+
     nav.currentPath = '/profile/secrets';
     await nav.updateComplete;
     expect(inboxLink()?.classList.contains('active')).toBe(false);
@@ -1273,5 +1281,23 @@ describe('scion-profile-nav — Inbox navigation & child routes (ptone/scion#929
     expect(nav.shadowRoot?.querySelector('[data-decisions-nav-badge]')?.textContent?.trim()).toBe(
       '5'
     );
+  });
+
+  it('shows standalone Agent Secrets nav item when Inbox is off and hub.agent_secrets is on', async () => {
+    const nav = await mountInboxNav({
+      inboxEnabled: false,
+      decisionsEnabled: false,
+      agentSecretsEnabled: true,
+      currentPath: '/profile/agent-secrets',
+    });
+    element = nav;
+
+    expect(nav.shadowRoot?.querySelector('[data-inbox-nav-section]')).toBeNull();
+    const agentSecretsLink = nav.shadowRoot?.querySelector<HTMLAnchorElement>(
+      '[data-agent-secrets-nav-link]'
+    );
+    expect(agentSecretsLink).not.toBeNull();
+    expect(agentSecretsLink?.getAttribute('href')).toBe('/profile/agent-secrets');
+    expect(agentSecretsLink?.classList.contains('active')).toBe(true);
   });
 });

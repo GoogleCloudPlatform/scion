@@ -116,6 +116,15 @@ export class ScionChatSecretRequest extends LitElement {
     jumpEventName: 'secret-request-jump',
   });
 
+  /**
+   * Optional pre-loaded card payload (e.g. from `GET /api/v1/users/me/secret-requests`).
+   * When set, populates `messageId`, `rows`, `agentName`, `projectName`, `threadId`,
+   * `canRespond`, and `reason` directly without requiring a per-card fetch.
+   * When unset, the individual properties and existing fetch path are unchanged.
+   */
+  @property({ attribute: false })
+  card: SecretRequestCardResponse | null = null;
+
   /** The secret-request prompt message id. */
   @property({ type: String })
   messageId = '';
@@ -455,7 +464,25 @@ export class ScionChatSecretRequest extends LitElement {
   }
 
   protected override willUpdate(changed: PropertyValues): void {
-    if (changed.has('messageId')) {
+    let messageIdChanged = changed.has('messageId');
+    let rowsChanged = changed.has('rows');
+
+    if (changed.has('card') && this.card) {
+      const prevMessageId = this.messageId;
+      this.messageId = this.card.messageId;
+      this.rows = this.card.rows;
+      this.agentName = this.card.agentName;
+      this.projectName = this.card.projectName ?? '';
+      this.threadId = this.card.threadId ?? '';
+      this.canRespond = this.card.canRespond;
+      this.reason = this.card.reason ?? '';
+      if (this.card.messageId !== prevMessageId) {
+        messageIdChanged = true;
+      }
+      rowsChanged = true;
+    }
+
+    if (messageIdChanged) {
       this.refetchAbort?.abort();
       this.refetchAbort = null;
       this.clearFormValues();
@@ -468,7 +495,7 @@ export class ScionChatSecretRequest extends LitElement {
       this.pendingDismissAttemptSignature = '';
       this.actionState.closeDismissDialogState();
     }
-    if (changed.has('rows')) {
+    if (rowsChanged) {
       this.pruneNonPendingFormValues();
       this.actionState.reconcileOpenDismissDialog();
     }

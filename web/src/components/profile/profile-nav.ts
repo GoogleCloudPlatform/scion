@@ -45,6 +45,7 @@ import type { AdminStatus } from '../../lib/admin-permissions.js';
 import {
   FEATURE_FLAGS_CHANGED_EVENT,
   VIEW_AS_MEMBER_FLAG,
+  agentSecretsEnabled,
   decisionsEnabled,
   isFeatureEnabled,
   isInboxDashboardEnabled,
@@ -146,6 +147,10 @@ export class ScionProfileNav extends LitElement {
   @state()
   private decisionsEnabled = false;
 
+  /** Whether `hub.agent_secrets` is enabled. */
+  @state()
+  private agentSecretsFlagEnabled = false;
+
   /** Whether `web.inbox_dashboard` is enabled. */
   @state()
   private inboxEnabled = false;
@@ -209,6 +214,10 @@ export class ScionProfileNav extends LitElement {
         this.decisionsWaitingCount = 0;
         this.decisionsNavVisibility = 'unknown';
       }
+    }
+    const nextAgentSecrets = agentSecretsEnabled();
+    if (nextAgentSecrets !== this.agentSecretsFlagEnabled) {
+      this.agentSecretsFlagEnabled = nextAgentSecrets;
     }
     const nextInbox = isInboxDashboardEnabled();
     if (nextInbox !== this.inboxEnabled) {
@@ -740,6 +749,7 @@ export class ScionProfileNav extends LitElement {
       void this.loadAdminStatusForUser();
     }
     this.decisionsEnabled = decisionsEnabled();
+    this.agentSecretsFlagEnabled = agentSecretsEnabled();
     this.inboxEnabled = isInboxDashboardEnabled();
     if (this.decisionsEnabled || this.inboxEnabled) {
       this.ensureProfileStateScope();
@@ -965,21 +975,44 @@ export class ScionProfileNav extends LitElement {
                 </ul>
               </div>
             `
-          : this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+          : (this.decisionsEnabled && this.decisionsNavVisibility === 'visible') ||
+              this.agentSecretsFlagEnabled
             ? html`
                 <div class="nav-section nav-section-decisions">
                   <ul class="nav-list">
-                    <li class="nav-item">
-                      <a
-                        href="/profile/decisions"
-                        data-decisions-nav-link
-                        class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
-                      >
-                        <sl-icon name="signpost-split"></sl-icon>
-                        <span class="nav-link-text">Decisions</span>
-                        ${this.renderDecisionsBadge()}
-                      </a>
-                    </li>
+                    ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+                      ? html`
+                          <li class="nav-item">
+                            <a
+                              href="/profile/decisions"
+                              data-decisions-nav-link
+                              class="nav-link ${this.isActive('/profile/decisions')
+                                ? 'active'
+                                : ''}"
+                            >
+                              <sl-icon name="signpost-split"></sl-icon>
+                              <span class="nav-link-text">Decisions</span>
+                              ${this.renderDecisionsBadge()}
+                            </a>
+                          </li>
+                        `
+                      : nothing}
+                    ${this.agentSecretsFlagEnabled
+                      ? html`
+                          <li class="nav-item">
+                            <a
+                              href="/profile/agent-secrets"
+                              data-agent-secrets-nav-link
+                              class="nav-link ${this.isActive('/profile/agent-secrets')
+                                ? 'active'
+                                : ''}"
+                            >
+                              <sl-icon name="shield-lock"></sl-icon>
+                              <span class="nav-link-text">Agent Secrets</span>
+                            </a>
+                          </li>
+                        `
+                      : nothing}
                   </ul>
                 </div>
               `

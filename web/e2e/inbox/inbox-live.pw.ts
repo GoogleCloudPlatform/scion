@@ -131,21 +131,21 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
     page2.on('pageerror', (err) => pageErrors.push(`page2: ${err.message}`));
 
     try {
-      // Page 1: /profile/inbox starts with Pending Secrets empty ("Nothing Waiting",
+      // Page 1: /profile/inbox starts with Secrets empty ("Nothing Waiting",
       // count badge hidden, no inline links or footer actions).
       await page1.goto('/profile/inbox', { waitUntil: 'domcontentloaded' });
-      const pendingSecretsCard = page1.locator('[data-inbox-card="pending_secrets"]');
+      const secretsCard = page1.locator('[data-inbox-card="secrets"]');
       const profileNavBadge = page1
         .locator('scion-profile-nav')
         .first()
         .locator('[data-inbox-nav-badge]');
-      await expect(pendingSecretsCard).toBeVisible({ timeout: 15_000 });
-      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveCount(0);
-      await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+      await expect(secretsCard).toBeVisible({ timeout: 15_000 });
+      await expect(secretsCard.locator('[data-card-count]')).toHaveCount(0);
+      await expect(secretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
         timeout: 10_000,
       });
-      await expect(pendingSecretsCard.locator('a.card-prose-link')).toHaveCount(0);
-      await expect(pendingSecretsCard.locator('.card-actions')).toHaveCount(0);
+      await expect(secretsCard.locator('a.card-prose-link')).toHaveCount(0);
+      await expect(secretsCard.locator('.card-actions')).toHaveCount(0);
       await expect(profileNavBadge).toHaveCount(0);
 
       // Page 2: main app shell on `/` mounts the sidebar Inbox link and bell tray.
@@ -185,19 +185,19 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
 
       // Within ~5 s and without reloading, Page 1's summary card prose, count badge,
       // inline key-noun link, and profile nav badge update.
-      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveText('1', {
+      await expect(secretsCard.locator('[data-card-count]')).toHaveText('1', {
         timeout: 7_000,
       });
-      await expect(pendingSecretsCard.locator('[data-card-prose]')).toHaveText(
-        '1 pending secret from 1 agent in 1 project',
+      await expect(secretsCard.locator('[data-card-prose]')).toHaveText(
+        '1 pending secret to approve, across 1 project',
         { timeout: 7_000 }
       );
-      const inlineLink = pendingSecretsCard.locator('[data-card-prose] a.card-prose-link');
+      const inlineLink = secretsCard.locator('[data-card-prose] a.card-prose-link');
       await expect(inlineLink).toHaveCount(1);
       await expect(inlineLink).toHaveText('1 pending secret');
       await expect(inlineLink).toHaveAttribute('href', '/profile/secrets');
       await expect(inlineLink).toHaveCSS('text-decoration-line', 'underline');
-      await expect(pendingSecretsCard.locator('.card-actions')).toHaveCount(0);
+      await expect(secretsCard.locator('.card-actions')).toHaveCount(0);
       await expect(profileNavBadge).toHaveText('1', { timeout: 7_000 });
 
       // Page 2 (second tab in the same context) converges without reload:
@@ -222,13 +222,13 @@ test.describe('Inbox Dashboard live updates on real hub (ptone/scion#8962 AC10)'
       expect(rejectRes.body.state).toBe('rejected');
 
       // Page 1 hides the count badge & inline link, restores "Nothing Waiting", and clears profile nav badge.
-      await expect(pendingSecretsCard.locator('[data-card-count]')).toHaveCount(0, {
+      await expect(secretsCard.locator('[data-card-count]')).toHaveCount(0, {
         timeout: 7_000,
       });
-      await expect(pendingSecretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
+      await expect(secretsCard.locator('[data-card-empty]')).toHaveText('Nothing Waiting', {
         timeout: 7_000,
       });
-      await expect(pendingSecretsCard.locator('a.card-prose-link')).toHaveCount(0, {
+      await expect(secretsCard.locator('a.card-prose-link')).toHaveCount(0, {
         timeout: 7_000,
       });
       await expect(profileNavBadge).toHaveCount(0, { timeout: 7_000 });
