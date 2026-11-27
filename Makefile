@@ -717,7 +717,11 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestWebhookIngress_ConcurrentPendingCap_Postgres \
 	TestNeverSuspend_QuotaConcurrencyAndIsolation_Postgres \
 	TestConduitHA_DeliverCrossNode \
-	TestConduitHA_FaultHooks
+	TestConduitHA_FaultHooks \
+	TestConduitHA_2801_C2_BrokerPathCrossNode \
+	TestConduitHA_2801_C20_AmbiguousAndRetrySemantics \
+	TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode \
+	TestConduitHA_2801_C17_BrokerIncarnation
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
