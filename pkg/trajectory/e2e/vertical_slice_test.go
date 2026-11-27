@@ -578,6 +578,95 @@ func TestVerticalSlice_ExperimentOffBacksOffWithoutStateCorruption(t *testing.T)
 	require.NotContains(t, gotGen1, "written_during_backoff")
 }
 
+func TestVerticalSlice_RebaselineAfterTruncateBelowBaselineBumpsGeneration(t *testing.T) {
+	env := setupE2E(t, false)
+	ctx := context.Background()
+
+	rel := ".claude/projects/-workspace/sess-trunc-rebaseline.jsonl"
+	artPath := filepath.Join(env.homeDir, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(artPath), 0o755))
+
+	// Baseline with substantial pre-existing history (64 bytes).
+	history := "{\"pre_baseline\":\"0123456789abcdef0123456789abcdef0123456789\"}\n"
+	require.NoError(t, os.WriteFile(artPath, []byte(history), 0o644))
+
+	cur := experiments.Default()
+	var enabledExps []experiments.Experiment
+	for _, e := range cur.All() {
+		if e.Name == experiments.TokenomicsTrajectoryCapture {
+			e.Default = true
+		}
+		enabledExps = append(enabledExps, e)
+	}
+	enabledReg, err := experiments.NewRegistry(enabledExps, cur.Retired())
+	require.NoError(t, err)
+	srvEnabled, err := hub.New(hub.ServerConfig{
+		DevAuthToken:        "e2e-dev-token",
+		SharedSigningSecret: "test-e2e-trajectory-signing-secret-32b",
+		Experiments:         enabledReg,
+	}, env.store)
+	require.NoError(t, err)
+	srvEnabled.SetStorage(env.storage)
+
+	var experimentOn atomic.Bool
+	experimentOn.Store(true)
+	switchingSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if experimentOn.Load() {
+			srvEnabled.Handler().ServeHTTP(w, r)
+			return
+		}
+		env.srv.Handler().ServeHTTP(w, r)
+	}))
+	defer switchingSrv.Close()
+
+	client := scionhub.NewClientWithConfig(switchingSrv.URL, env.token, env.agent.ID)
+	uploader := scionhub.NewTrajectoryUploader(client)
+
+	s, err := shipper.New(shipper.Config{HomeDir: env.homeDir, RunID: env.runID, Uploader: uploader})
+	require.NoError(t, err)
+	_, err = s.Baseline(ctx)
+	require.NoError(t, err)
+
+	// Truncate below baseline and rewrite shorter line -> gen 1 starts at 0 and commits [0, X).
+	gen1Line := "{\"gen1\":1}\n"
+	require.NoError(t, os.WriteFile(artPath, []byte(gen1Line), 0o644))
+	r1, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 1, r1.GenerationBumps)
+	require.Equal(t, 1, r1.SegmentsShipped)
+
+	// Append while experiment is OFF -> 404 -> Rebaseline MUST bump to gen 2.
+	experimentOn.Store(false)
+	offLine := "{\"off\":true}\n"
+	appendFile(t, artPath, offLine)
+
+	rOff, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.True(t, rOff.CaptureUnavailable)
+	_, err = s.Rebaseline(ctx, "capture_unavailable")
+	require.NoError(t, err)
+
+	// Flip experiment ON, append backoff line -> probe-accept rebaselines past it (still gen 2).
+	experimentOn.Store(true)
+	backoffLine := "{\"backoff\":true}\n"
+	appendFile(t, artPath, backoffLine)
+	rProbe, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonResumeCatchup})
+	require.NoError(t, err)
+	require.Equal(t, 0, rProbe.SegmentsShipped)
+
+	// Append post-acceptance line -> ships in gen 2!
+	gen2Line := "{\"gen2\":2}\n"
+	appendFile(t, artPath, gen2Line)
+	r2, err := s.RunRound(ctx, shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	require.NoError(t, err)
+	require.Equal(t, 1, r2.SegmentsShipped)
+
+	rows, err := env.entClient.TrajectorySegment.Query().All(ctx)
+	require.NoError(t, err)
+	require.Equal(t, gen1Line, string(reassembleGeneration(t, ctx, env.storage, rows, 1)))
+	require.Equal(t, gen2Line, string(reassembleGeneration(t, ctx, env.storage, rows, 2)))
+}
+
 func TestVerticalSlice_WrongAgentTokenRefused(t *testing.T) {
 	env := setupE2E(t, true)
 	ctx := context.Background()

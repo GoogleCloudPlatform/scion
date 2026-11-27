@@ -423,3 +423,64 @@ func TestNewRunner_RejectsEmptyHarness(t *testing.T) {
 		t.Fatalf("expected NewRunner to reject empty Harness")
 	}
 }
+
+func TestRunner_PeriodicTickerTriggersRound(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	artPath := filepath.Join(projDir, "sess-periodic.jsonl")
+	if err := os.WriteFile(artPath, []byte("{\"baseline\":0}\n"), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+
+	up := &recordingUploader{
+		outcome: shipper.OutcomeCommitted,
+		ch:      make(chan shipper.Segment, 8),
+	}
+	r, err := NewRunner(Config{
+		HomeDir:          home,
+		RunID:            "run-periodic",
+		Harness:          "claude",
+		Uploader:         up,
+		PeriodicInterval: 30 * time.Millisecond,
+		PreStopTimeout:   time.Second,
+	})
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := r.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer r.PreStop(context.Background())
+
+	// Wait for initial resume_catchup baseline to complete.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok, _ := shipper.LoadState(home); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Append a line with NO wake notification; the periodic ticker must ship it.
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	_, _ = f.WriteString("{\"periodic\":1}\n")
+	_ = f.Close()
+
+	select {
+	case seg := <-up.ch:
+		if seg.RawSize != int64(len("{\"periodic\":1}\n")) {
+			t.Fatalf("unexpected periodic segment size %d", seg.RawSize)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for periodic ticker to trigger a round")
+	}
+}
