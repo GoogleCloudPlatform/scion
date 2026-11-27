@@ -947,7 +947,7 @@ func TestTriggersExperimentRegistered(t *testing.T) {
 }
 
 // TestMessagePoliciesExperimentRegistered pins hub.message_policies
-// (ptone/scion#8047): server-layer only and ships off by default.
+// (ptone/scion#8047): server+web layers and ships off by default.
 func TestMessagePoliciesExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(MessagePolicies)
 	if !ok {
@@ -959,8 +959,8 @@ func TestMessagePoliciesExperimentRegistered(t *testing.T) {
 	if e.Default {
 		t.Fatal("hub.message_policies must default to off")
 	}
-	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
-		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#8047" || e.Stage != StageAlpha || e.Owner != "system-one" {
 		t.Fatalf("unexpected registration: %+v", e)

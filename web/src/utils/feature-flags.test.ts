@@ -533,3 +533,17 @@ describe('idleSuspendEnabled (lifecycle.idle_suspend)', () => {
     expect(idleSuspendEnabled()).toBe(false);
   });
 });
+
+describe('messagePoliciesEnabled (hub.message_policies)', () => {
+  it('defaults to false and follows server/explicit flags', async () => {
+    const { MESSAGE_POLICIES_FLAG, messagePoliciesEnabled } = await import('./feature-flags.js');
+    expect(MESSAGE_POLICIES_FLAG).toBe('hub.message_policies');
+    expect(messagePoliciesEnabled()).toBe(false);
+
+    setServerFlags({ 'hub.message_policies': true });
+    expect(messagePoliciesEnabled()).toBe(true);
+
+    setFeatureFlag('hub.message_policies', false);
+    expect(messagePoliciesEnabled()).toBe(false);
+  });
+});
