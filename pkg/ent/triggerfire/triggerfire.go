@@ -39,8 +39,14 @@ const (
 	FieldSubject = "subject"
 	// FieldActionType holds the string denoting the action_type field in the database.
 	FieldActionType = "action_type"
+	// FieldActionIndex holds the string denoting the action_index field in the database.
+	FieldActionIndex = "action_index"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldRateDecision holds the string denoting the rate_decision field in the database.
+	FieldRateDecision = "rate_decision"
+	// FieldCounterFlushed holds the string denoting the counter_flushed field in the database.
+	FieldCounterFlushed = "counter_flushed"
 	// FieldError holds the string denoting the error field in the database.
 	FieldError = "error"
 	// FieldResultRef holds the string denoting the result_ref field in the database.
@@ -101,7 +107,10 @@ var Columns = []string{
 	FieldEventID,
 	FieldSubject,
 	FieldActionType,
+	FieldActionIndex,
 	FieldStatus,
+	FieldRateDecision,
+	FieldCounterFlushed,
 	FieldError,
 	FieldResultRef,
 	FieldMatchedThrough,
@@ -135,8 +144,16 @@ var (
 	SubjectValidator func(string) error
 	// ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
 	ActionTypeValidator func(string) error
+	// DefaultActionIndex holds the default value on creation for the "action_index" field.
+	DefaultActionIndex int
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// DefaultRateDecision holds the default value on creation for the "rate_decision" field.
+	DefaultRateDecision string
+	// RateDecisionValidator is a validator for the "rate_decision" field. It is called by the builders before save.
+	RateDecisionValidator func(string) error
+	// DefaultCounterFlushed holds the default value on creation for the "counter_flushed" field.
+	DefaultCounterFlushed bool
 	// MatchedThroughValidator is a validator for the "matched_through" field. It is called by the builders before save.
 	MatchedThroughValidator func(string) error
 	// DecidedDialectValidator is a validator for the "decided_dialect" field. It is called by the builders before save.
@@ -223,9 +240,24 @@ func ByActionType(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActionType, opts...).ToFunc()
 }
 
+// ByActionIndex orders the results by the action_index field.
+func ByActionIndex(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActionIndex, opts...).ToFunc()
+}
+
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByRateDecision orders the results by the rate_decision field.
+func ByRateDecision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRateDecision, opts...).ToFunc()
+}
+
+// ByCounterFlushed orders the results by the counter_flushed field.
+func ByCounterFlushed(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCounterFlushed, opts...).ToFunc()
 }
 
 // ByError orders the results by the error field.

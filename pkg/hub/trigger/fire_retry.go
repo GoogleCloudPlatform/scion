@@ -278,6 +278,15 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 		return durablequeue.Result{Done: true}
 	}
 
+	actions, actErr := Actions(*tr)
+	if actErr != nil || fire.ActionIndex < 0 || fire.ActionIndex >= len(actions) || actions[fire.ActionIndex].Type != fire.ActionType {
+		if fErr := d.finishWaitingFire(ctx, fire, store.TriggerFireStatusSkipped, "", fire.TargetAgentID, ErrFireTriggerChanged, now, fire.Attempts, nil); fErr != nil {
+			return durablequeue.Result{Err: errors.New("trigger: skip waiting fire failed")}
+		}
+		return durablequeue.Result{Done: true}
+	}
+	act := actions[fire.ActionIndex]
+
 	if checker, ok := d.core.(RetryTargetChecker); ok && fire.TargetAgentID != "" {
 		targetState, tErr := checker.CheckRetryTarget(ctx, fire.TargetAgentID)
 		if tErr != nil {
@@ -354,8 +363,8 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 			DefinitionID:   tr.ID,
 			FireID:         fire.ID,
 		},
-		ActionType: tr.ActionType,
-		Payload:    tr.ActionPayload,
+		ActionType: act.Type,
+		Payload:    act.Payload,
 		Event: &hubfire.FireEvent{
 			ID:         ev.ID,
 			ProjectID:  ev.ProjectID,
@@ -371,6 +380,7 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 			Trigger: &hubfire.FireTriggerRef{
 				ID:          tr.ID,
 				Name:        tr.Name,
+				ActionIndex: fire.ActionIndex,
 				SubjectMode: tr.SubjectMode,
 				FireSubject: fire.Subject,
 			},
@@ -530,6 +540,7 @@ func (d *Dispatcher) recordWaitingFireTerminal(
 			TriggerID:      fire.TriggerID,
 			EventID:        fire.EventID,
 			FireID:         fire.ID,
+			ActionIndex:    fire.ActionIndex,
 			ActionType:     fire.ActionType,
 			Status:         status,
 			MatchedThrough: fire.MatchedThrough,
@@ -544,6 +555,7 @@ func (d *Dispatcher) parkWaitingFire(
 	tr *store.Trigger,
 	ev *store.TriggerEvent,
 	fire *store.TriggerFire,
+	act store.TriggerAction,
 	out hubfire.FireOutcome,
 	finishedAt time.Time,
 ) error {
@@ -560,7 +572,7 @@ func (d *Dispatcher) parkWaitingFire(
 			return finishErr
 		}
 		if finished {
-			d.recordFireMetric(tr.ActionType, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
+			d.recordFireMetric(act.Type, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
 			_ = d.store.RecordTriggerFire(ctx, tr.ID, finishedAt, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
 			if d.fireAudit != nil {
 				d.fireAudit.RecordFire(ctx, FireAuditRecord{
@@ -568,7 +580,8 @@ func (d *Dispatcher) parkWaitingFire(
 					TriggerID:      tr.ID,
 					EventID:        ev.ID,
 					FireID:         fire.ID,
-					ActionType:     tr.ActionType,
+					ActionIndex:    fire.ActionIndex,
+					ActionType:     act.Type,
 					Status:         store.TriggerFireStatusSkipped,
 					MatchedThrough: fire.MatchedThrough,
 					DecidedDialect: fire.DecidedDialect,
@@ -579,7 +592,7 @@ func (d *Dispatcher) parkWaitingFire(
 		return nil
 	}
 
-	ttl := extractMessageQueueTTL(tr.ActionPayload)
+	ttl := extractMessageQueueTTL(act.Payload)
 	waitUntil := ev.ReceivedAt.UTC().Add(time.Duration(ttl) * time.Second)
 	notBefore := finishedAt.Add(FireRetryInitialBackoff)
 	if notBefore.After(waitUntil) {
@@ -647,7 +660,7 @@ func (d *Dispatcher) parkWaitingFire(
 			return fErr
 		}
 		if finished {
-			d.recordFireMetric(tr.ActionType, store.TriggerFireStatusSkipped, ErrFireOfflineQueueFull)
+			d.recordFireMetric(act.Type, store.TriggerFireStatusSkipped, ErrFireOfflineQueueFull)
 			if rErr := d.store.RecordTriggerFire(ctx, tr.ID, finishedAt, store.TriggerFireStatusSkipped, ErrFireOfflineQueueFull); rErr != nil {
 				d.logger.Warn("trigger: failed to update trigger fire counters on offline queue cap",
 					"triggerID", tr.ID, "fireID", fire.ID, "error", rErr)
@@ -658,7 +671,8 @@ func (d *Dispatcher) parkWaitingFire(
 					TriggerID:      tr.ID,
 					EventID:        ev.ID,
 					FireID:         fire.ID,
-					ActionType:     tr.ActionType,
+					ActionIndex:    fire.ActionIndex,
+					ActionType:     act.Type,
 					Status:         store.TriggerFireStatusSkipped,
 					MatchedThrough: fire.MatchedThrough,
 					DecidedDialect: fire.DecidedDialect,
@@ -679,7 +693,8 @@ func (d *Dispatcher) parkWaitingFire(
 				TriggerID:      tr.ID,
 				EventID:        ev.ID,
 				FireID:         fire.ID,
-				ActionType:     tr.ActionType,
+				ActionIndex:    fire.ActionIndex,
+				ActionType:     act.Type,
 				Status:         store.TriggerFireStatusWaiting,
 				MatchedThrough: fire.MatchedThrough,
 				DecidedDialect: fire.DecidedDialect,

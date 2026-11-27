@@ -1192,18 +1192,22 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			// Unreachable from the dispatcher (which sets FireSubject from deriveFireSubject); kept for non-dispatcher callers.
 			claimSubject = ev.Subject
 		}
-		claim, existing, cErr := claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
+		actionIndex := 0
+		if ev.Trigger != nil {
+			actionIndex = ev.Trigger.ActionIndex
+		}
+		claim, existing, cErr := claims.Claim(ctx, triggerID, actionIndex, claimSubject, ev.ID, req.Authority.FireID)
 		if cErr != nil {
 			return hubfire.FireOutcome{}, fmt.Errorf("claim trigger subject: %w", cErr)
 		}
 		if existing != nil {
 			if existing.AgentID != "" {
-				live, lErr := claims.Live(ctx, triggerID, claimSubject)
+				live, lErr := claims.Live(ctx, triggerID, actionIndex, claimSubject)
 				if lErr != nil {
 					return hubfire.FireOutcome{}, fmt.Errorf("check live trigger subject claim: %w", lErr)
 				}
 				if live == nil {
-					claim, existing, cErr = claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
+					claim, existing, cErr = claims.Claim(ctx, triggerID, actionIndex, claimSubject, ev.ID, req.Authority.FireID)
 					if cErr != nil {
 						return hubfire.FireOutcome{}, fmt.Errorf("re-claim trigger subject: %w", cErr)
 					}

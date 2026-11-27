@@ -44,11 +44,11 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 	t0 := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 	// Subject > 256 bytes rejected.
-	_, _, err := cs.ClaimTriggerSubject(ctx, trigID, strings.Repeat("a", 257), ev1, fire1, t0, t0.Add(-5*time.Minute))
+	_, _, err := cs.ClaimTriggerSubject(ctx, trigID, 0, strings.Repeat("a", 257), ev1, fire1, t0, t0.Add(-5*time.Minute))
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 
 	// 1. Fresh claim succeeds.
-	c1, existing, err := cs.ClaimTriggerSubject(ctx, trigID, "pr-1", ev1, fire1, t0, t0.Add(-5*time.Minute))
+	c1, existing, err := cs.ClaimTriggerSubject(ctx, trigID, 0, "pr-1", ev1, fire1, t0, t0.Add(-5*time.Minute))
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NotNil(t, c1)
@@ -60,7 +60,7 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 
 	// 2. Competing claim while younger than 5m (4m59s) is rejected and returns existing.
 	tYoung := t0.Add(4*time.Minute + 59*time.Second)
-	c2, existing, err := cs.ClaimTriggerSubject(ctx, trigID, "pr-1", ev2, fire2, tYoung, tYoung.Add(-5*time.Minute))
+	c2, existing, err := cs.ClaimTriggerSubject(ctx, trigID, 0, "pr-1", ev2, fire2, tYoung, tYoung.Add(-5*time.Minute))
 	require.NoError(t, err)
 	assert.Nil(t, c2)
 	require.NotNil(t, existing)
@@ -69,7 +69,7 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 
 	// 3. After 5m01s with agent_id IS NULL, abandoned claim is taken over, reusing the row.
 	tOld := t0.Add(5*time.Minute + time.Second)
-	c2, existing, err = cs.ClaimTriggerSubject(ctx, trigID, "pr-1", ev2, fire2, tOld, tOld.Add(-5*time.Minute))
+	c2, existing, err = cs.ClaimTriggerSubject(ctx, trigID, 0, "pr-1", ev2, fire2, tOld, tOld.Add(-5*time.Minute))
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NotNil(t, c2)
@@ -93,7 +93,7 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, bound)
 
-	got, err := cs.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-1")
+	got, err := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "pr-1")
 	require.NoError(t, err)
 	assert.Equal(t, agent1, got.AgentID)
 	require.NotNil(t, got.BoundAt)
@@ -101,7 +101,7 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 
 	// 6. Bound claim is NOT taken over as abandoned even hours later.
 	tLater := tBind.Add(2 * time.Hour)
-	c3, existing, err := cs.ClaimTriggerSubject(ctx, trigID, "pr-1", ev3, fire3, tLater, tLater.Add(-5*time.Minute))
+	c3, existing, err := cs.ClaimTriggerSubject(ctx, trigID, 0, "pr-1", ev3, fire3, tLater, tLater.Add(-5*time.Minute))
 	require.NoError(t, err)
 	assert.Nil(t, c3)
 	require.NotNil(t, existing)
@@ -113,7 +113,7 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, released, "explicit Release must not release a bound claim (agent_id IS NOT NULL)")
 
-	stillActive, err := cs.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-1")
+	stillActive, err := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "pr-1")
 	require.NoError(t, err)
 	assert.Equal(t, agent1, stillActive.AgentID)
 
@@ -122,10 +122,10 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, nReleased)
 
-	_, err = cs.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-1")
+	_, err = cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "pr-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)
 
-	c3, existing, err = cs.ClaimTriggerSubject(ctx, trigID, "pr-1", ev3, fire3, tLater.Add(time.Second), tLater.Add(time.Second-5*time.Minute))
+	c3, existing, err = cs.ClaimTriggerSubject(ctx, trigID, 0, "pr-1", ev3, fire3, tLater.Add(time.Second), tLater.Add(time.Second-5*time.Minute))
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NotNil(t, c3)
@@ -157,7 +157,7 @@ func TestTriggerSubjectClaimStore_Concurrency(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				<-start
-				c, ex, err := cs.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), now, now.Add(-5*time.Minute))
+				c, ex, err := cs.ClaimTriggerSubject(ctx, trigID, 0, subject, uuid.NewString(), uuid.NewString(), now, now.Add(-5*time.Minute))
 				require.NoError(t, err)
 				if c != nil {
 					wins.Add(1)
@@ -237,7 +237,7 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	t0 := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
 	seedBound := func(subject, agentID string, at time.Time) *store.TriggerSubjectClaim {
-		c, ex, err := cs.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), at, at.Add(-5*time.Minute))
+		c, ex, err := cs.ClaimTriggerSubject(ctx, trigID, 0, subject, uuid.NewString(), uuid.NewString(), at, at.Add(-5*time.Minute))
 		require.NoError(t, err)
 		require.Nil(t, ex)
 		if agentID != "" {
@@ -280,11 +280,11 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	assert.Equal(t, 6, released)
 
 	for _, keep := range []string{"s-running", "s-suspended", "s-fresh-missing", "s-fresh-stopped", "s-fresh-unbound"} {
-		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, keep)
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, keep)
 		assert.NoError(t, gErr, "expected %s to remain active", keep)
 	}
 	for _, gone := range []string{"s-stopped", "s-error", "s-halted", "s-softdel", "s-missing", "s-unbound"} {
-		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, gone)
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, gone)
 		assert.ErrorIs(t, gErr, store.ErrNotFound, "expected %s to be released", gone)
 	}
 
@@ -295,10 +295,10 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, releasedAfterGrace)
 	for _, gone := range []string{"s-fresh-missing", "s-fresh-stopped"} {
-		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, gone)
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, gone)
 		assert.ErrorIs(t, gErr, store.ErrNotFound, "expected %s to be released after grace window", gone)
 	}
-	_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, "s-fresh-unbound")
+	_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "s-fresh-unbound")
 	assert.NoError(t, gErr, "unbound claim younger than 5m TTL must remain active")
 
 	// Once past the 5m abandoned TTL (4m after tMaint -> 6m old), s-fresh-unbound is released too.
@@ -306,7 +306,7 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	releasedAbandoned, err := cs.ReleaseTerminalTriggerSubjectClaims(ctx, tAfterAbandoned)
 	require.NoError(t, err)
 	assert.Equal(t, 1, releasedAbandoned)
-	_, gErr = cs.GetActiveTriggerSubjectClaim(ctx, trigID, "s-fresh-unbound")
+	_, gErr = cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, "s-fresh-unbound")
 	assert.ErrorIs(t, gErr, store.ErrNotFound, "abandoned unbound claim past 5m TTL must be released")
 
 	// 3. PurgeOldTriggerSubjectClaims deletes only released rows older than cutoff.
@@ -321,7 +321,7 @@ func TestTriggerSubjectClaimStore_ReleaseForAgentAndMaintenance(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 9, purged2)
 	for _, keep := range []string{"s-running", "s-suspended"} {
-		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, keep)
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, trigID, 0, keep)
 		assert.NoError(t, gErr, "active claim %s must never be purged", keep)
 	}
 }
@@ -367,7 +367,7 @@ func TestTriggerSubjectClaimStore_ReleaseForProjectBySourceKind(t *testing.T) {
 	t0 := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	seedClaim := func(trigID, subject string) *store.TriggerSubjectClaim {
 		t.Helper()
-		c, existing, err := cs.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), t0, t0.Add(-5*time.Minute))
+		c, existing, err := cs.ClaimTriggerSubject(ctx, trigID, 0, subject, uuid.NewString(), uuid.NewString(), t0, t0.Add(-5*time.Minute))
 		require.NoError(t, err)
 		require.Nil(t, existing)
 		require.NotNil(t, c)
@@ -402,7 +402,7 @@ func TestTriggerSubjectClaimStore_ReleaseForProjectBySourceKind(t *testing.T) {
 		{trigAGH1, cAGH1},
 		{trigAGH2, cAGH2},
 	} {
-		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, tc.trigID, tc.claim.Subject)
+		_, gErr := cs.GetActiveTriggerSubjectClaim(ctx, tc.trigID, 0, tc.claim.Subject)
 		assert.ErrorIs(t, gErr, store.ErrNotFound)
 
 		row, qErr := cs.TriggerStore.client.TriggerSubjectClaim.Get(ctx, uuid.MustParse(tc.claim.ID))
@@ -413,16 +413,16 @@ func TestTriggerSubjectClaimStore_ReleaseForProjectBySourceKind(t *testing.T) {
 	}
 
 	// Non-GitHub claim in projA and GitHub claim in projB remain active.
-	gotAWH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigAWH, cAWH.Subject)
+	gotAWH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigAWH, 0, cAWH.Subject)
 	require.NoError(t, err)
 	assert.Equal(t, cAWH.ID, gotAWH.ID)
 
-	gotBGH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigBGH, cBGH.Subject)
+	gotBGH, err := cs.GetActiveTriggerSubjectClaim(ctx, trigBGH, 0, cBGH.Subject)
 	require.NoError(t, err)
 	assert.Equal(t, cBGH.ID, gotBGH.ID)
 
 	// Re-claiming a released row clears release_reason.
-	reclaimed, existing, err := cs.ClaimTriggerSubject(ctx, trigAGH1, cAGH1.Subject, uuid.NewString(), uuid.NewString(), tRelease.Add(2*time.Minute), tRelease)
+	reclaimed, existing, err := cs.ClaimTriggerSubject(ctx, trigAGH1, 0, cAGH1.Subject, uuid.NewString(), uuid.NewString(), tRelease.Add(2*time.Minute), tRelease)
 	require.NoError(t, err)
 	require.Nil(t, existing)
 	require.NotNil(t, reclaimed)

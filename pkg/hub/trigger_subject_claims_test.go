@@ -200,7 +200,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_TwoReplicasConcurrency(t *testing.
 	require.NotEmpty(t, createdAgentID)
 
 	// Active claim is bound to the created agent.
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID+"/pr-42")
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, "webhook:"+ep.ID+"/pr-42")
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerSubjectClaimStateActive, claim.State)
 	assert.Equal(t, createdAgentID, claim.AgentID)
@@ -241,7 +241,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReclaimOnTerminalAndAgentDeletion(
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-1", "pr_sync", "pr-99", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
 
-	claim1, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim1, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentA1ID := claim1.AgentID
 	require.NotEmpty(t, agentA1ID)
@@ -268,7 +268,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReclaimOnTerminalAndAgentDeletion(
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-3", "pr_sync", "pr-99", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
 
-	claim2, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim2, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentA2ID := claim2.AgentID
 	require.NotEmpty(t, agentA2ID)
@@ -280,7 +280,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReclaimOnTerminalAndAgentDeletion(
 
 	// Claim is released by the deletion tail step without needing another event.
 	require.Eventually(t, func() bool {
-		_, gErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+		_, gErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 		return errors.Is(gErr, store.ErrNotFound)
 	}, 5*time.Second, 25*time.Millisecond, "agent deletion must release active subject claim")
 
@@ -288,7 +288,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReclaimOnTerminalAndAgentDeletion(
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-4", "pr_sync", "pr-99", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
 
-	claim3, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim3, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	assert.NotEmpty(t, claim3.AgentID)
 	assert.NotEqual(t, agentA2ID, claim3.AgentID)
@@ -322,7 +322,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReleaseOnCreateFailureAndRenderRef
 	// 1. Pre-commit failure (template render refusal after Claim) releases the claim immediately.
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-refuse", "build_run", "sub-fail", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
-	_, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
+	_, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, failSubjectKey)
 	assert.ErrorIs(t, err, store.ErrNotFound, "claim must be released immediately after pre-commit render refusal")
 
 	// 2. Post-commit failure (broker dispatch error after commitAgentCreate bound the claim)
@@ -336,7 +336,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReleaseOnCreateFailureAndRenderRef
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-fail", "build_run", "sub-fail", []byte(`{"job":"ci"}`)).Code)
 	f.drainOneTriggerEvent(t)
-	boundAfterFail, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
+	boundAfterFail, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, failSubjectKey)
 	require.NoError(t, err, "post-commit failure must keep the bound claim for Live/maintenance/deletion")
 	assert.NotEmpty(t, boundAfterFail.AgentID)
 	assert.NotNil(t, boundAfterFail.BoundAt)
@@ -347,7 +347,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_ReleaseOnCreateFailureAndRenderRef
 	f.client.mu.Unlock()
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-ok", "build_run", "sub-fail", []byte(`{"job":"ci"}`)).Code)
 	f.drainOneTriggerEvent(t)
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, failSubjectKey)
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, failSubjectKey)
 	require.NoError(t, err)
 	assert.NotEmpty(t, claim.AgentID)
 	assert.NotEqual(t, boundAfterFail.AgentID, claim.AgentID)
@@ -390,7 +390,7 @@ func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(
 	assert.Equal(t, store.TriggerFireStatusFired, fires.Items[0].Status)
 	assert.Equal(t, store.TriggerFireStatusFired, fires.Items[1].Status)
 
-	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigNew.ID, "webhook:"+ep.ID+"/same-sub")
+	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigNew.ID, 0, "webhook:"+ep.ID+"/same-sub")
 	assert.ErrorIs(t, err, store.ErrNotFound, "mode new must never create claim rows")
 
 	// 2. Message trigger with mode "skip" (Stage 1 PR 4) is accepted at authoring,
@@ -426,7 +426,7 @@ func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "msg-skip-1", "msg_skip_test", "msg-sub", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
-	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigMsg.ID, "webhook:"+ep.ID+"/msg-sub")
+	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigMsg.ID, 0, "webhook:"+ep.ID+"/msg-sub")
 	assert.ErrorIs(t, err, store.ErrNotFound, "message skip must not create trigger_subject_claims rows")
 }
 
@@ -500,12 +500,12 @@ func TestDispatchAgentTrigger_SubjectModeSkip_UsesDerivedSubjectRule(t *testing.
 	// Claim rows are keyed by the derived fire subject (matching trigger_fires.subject),
 	// never by the shared raw event subject "webhook:<ep.ID>".
 	for _, sub := range []string{"pr:101", "pr:202"} {
-		claim, gErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, sub)
+		claim, gErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, sub)
 		require.NoError(t, gErr, "expected active claim for derived subject %q", sub)
 		assert.Equal(t, sub, claim.Subject)
 		assert.Equal(t, firedBySubject[sub], claim.AgentID)
 	}
-	_, rawErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID)
+	_, rawErr := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, "webhook:"+ep.ID)
 	assert.ErrorIs(t, rawErr, store.ErrNotFound, "raw event subject must not have a claim row")
 }
 
@@ -523,16 +523,18 @@ type stealAbandonedClaimStore struct {
 
 func (s *stealAbandonedClaimStore) ClaimTriggerSubject(
 	ctx context.Context,
-	triggerID, subject, eventID, fireID string,
+	triggerID string,
+	actionIndex int,
+	subject, eventID, fireID string,
 	now, abandonedBefore time.Time,
 ) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
 	if s.stolen.CompareAndSwap(false, true) {
 		aged := now.Add(-trigger.AbandonedClaimTTL - time.Minute)
-		c1, ex1, err := s.Store.ClaimTriggerSubject(ctx, triggerID, subject, eventID, fireID, aged, aged.Add(-trigger.AbandonedClaimTTL))
+		c1, ex1, err := s.Store.ClaimTriggerSubject(ctx, triggerID, actionIndex, subject, eventID, fireID, aged, aged.Add(-trigger.AbandonedClaimTTL))
 		if err != nil || c1 == nil {
 			return c1, ex1, err
 		}
-		c2, ex2, err2 := s.Store.ClaimTriggerSubject(ctx, triggerID, subject, s.secondEventID, s.secondFireID, now, abandonedBefore)
+		c2, ex2, err2 := s.Store.ClaimTriggerSubject(ctx, triggerID, actionIndex, subject, s.secondEventID, s.secondFireID, now, abandonedBefore)
 		if err2 != nil {
 			s.stealErr = err2
 		} else if c2 == nil {
@@ -540,7 +542,7 @@ func (s *stealAbandonedClaimStore) ClaimTriggerSubject(
 		}
 		return c1, nil, nil
 	}
-	return s.Store.ClaimTriggerSubject(ctx, triggerID, subject, eventID, fireID, now, abandonedBefore)
+	return s.Store.ClaimTriggerSubject(ctx, triggerID, actionIndex, subject, eventID, fireID, now, abandonedBefore)
 }
 
 func TestDispatchAgentTrigger_SubjectModeSkip_LostClaimRollsBackCreate(t *testing.T) {
@@ -611,7 +613,7 @@ func TestDispatchAgentTrigger_SubjectModeSkip_LostClaimRollsBackCreate(t *testin
 	assert.Empty(t, audits, "agent create audit must be rolled back when Bind fails")
 
 	// 4. Active claim remains held by the second fire (first fire's deferred Release was fenced out).
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, "webhook:"+ep.ID+"/pr-lost")
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, "webhook:"+ep.ID+"/pr-lost")
 	require.NoError(t, err)
 	assert.Equal(t, secondFireID, claim.FireID)
 	assert.Equal(t, secondEventID, claim.EventID)

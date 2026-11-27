@@ -86,12 +86,111 @@ func runTriggerGet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printTriggerDetail(tr *hubclient.Trigger) {
-	agentLabel := tr.Action.AgentName
-	if agentLabel == "" {
-		agentLabel = tr.Action.AgentID
+func printTriggerActionDetail(act hubclient.TriggerActionSpec, prefix string) {
+	switch act.Type {
+	case "dispatch_agent":
+		fmt.Printf("%sTemplate:    %s\n", prefix, triggerTerminalText(act.Template, false))
+		if act.AgentName != "" {
+			fmt.Printf("%sAgent Name:  %s\n", prefix, triggerTerminalText(act.AgentName, false))
+		}
+		if act.NameConflict != "" {
+			fmt.Printf("%sOn Conflict: %s\n", prefix, triggerTerminalText(act.NameConflict, false))
+		}
+		if act.Branch != "" {
+			fmt.Printf("%sBranch:      %s\n", prefix, triggerTerminalText(act.Branch, false))
+		}
+		if len(act.Labels) > 0 {
+			keys := make([]string, 0, len(act.Labels))
+			for k := range act.Labels {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			pairs := make([]string, len(keys))
+			for i, k := range keys {
+				pairs[i] = triggerTerminalText(k, false) + "=" + triggerTerminalText(act.Labels[k], false)
+			}
+			fmt.Printf("%sLabels:      %s\n", prefix, strings.Join(pairs, ", "))
+		}
+		if act.Ephemeral {
+			fmt.Printf("%sEphemeral:   true\n", prefix)
+		}
+		if act.GithubToken != "" {
+			fmt.Printf("%sGH Token:    %s\n", prefix, triggerTerminalText(act.GithubToken, false))
+		}
+		if act.AgentRole != "" {
+			fmt.Printf("%sAgent Role:  %s\n", prefix, triggerTerminalText(act.AgentRole, false))
+		}
+		if act.ReuseMessage != "" {
+			fmt.Printf("%sReuse Msg:   %s\n", prefix, triggerTerminalText(act.ReuseMessage, true))
+		}
+		if act.AckComment != nil && act.AckComment.Body != "" {
+			fmt.Printf("%sAck Comment: %s\n", prefix, triggerTerminalText(act.AckComment.Body, true))
+		}
+		if len(act.UntrustedVars) > 0 {
+			safeVars := make([]string, len(act.UntrustedVars))
+			for i, v := range act.UntrustedVars {
+				safeVars[i] = triggerTerminalText(v, false)
+			}
+			fmt.Printf("%sAllowed:     %s\n", prefix, strings.Join(safeVars, ", "))
+		}
+		if act.Task != "" {
+			fmt.Printf("%sTask:        %s\n", prefix, triggerTerminalText(act.Task, true))
+		}
+	case "exec":
+		agentLabel := act.AgentName
+		if agentLabel == "" {
+			agentLabel = act.AgentID
+		}
+		fmt.Printf("%sAgent:       %s\n", prefix, triggerTerminalText(agentLabel, false))
+		if act.CommandRedacted {
+			fmt.Printf("%sCommand:     <redacted> (argc: %d, sha256: %s)\n", prefix, act.Argc, triggerTerminalText(act.CommandSHA256, false))
+		} else if len(act.Command) > 0 {
+			fmt.Printf("%sCommand:     %s\n", prefix, triggerTerminalText(strings.Join(act.Command, " "), false))
+		}
+		if act.TimeoutSeconds > 0 {
+			fmt.Printf("%sTimeout:     %ds\n", prefix, act.TimeoutSeconds)
+		}
+	case "github.comment":
+		if act.Target != "" {
+			fmt.Printf("%sTarget:      %s\n", prefix, triggerTerminalText(act.Target, false))
+		}
+		if act.ReplyInThread {
+			fmt.Printf("%sIn Thread:   true\n", prefix)
+		}
+		if len(act.UntrustedVars) > 0 {
+			safeVars := make([]string, len(act.UntrustedVars))
+			for i, v := range act.UntrustedVars {
+				safeVars[i] = triggerTerminalText(v, false)
+			}
+			fmt.Printf("%sAllowed:     %s\n", prefix, strings.Join(safeVars, ", "))
+		}
+		if act.Body != "" {
+			fmt.Printf("%sComment:     %s\n", prefix, triggerTerminalText(act.Body, true))
+		}
+	default:
+		agentLabel := act.AgentName
+		if agentLabel == "" {
+			agentLabel = act.AgentID
+		}
+		fmt.Printf("%sAgent:       %s\n", prefix, triggerTerminalText(agentLabel, false))
+		fmt.Printf("%sMessage:     %s\n", prefix, triggerTerminalText(act.Message, true))
+		if act.Offline != "" {
+			fmt.Printf("%sOffline:     %s\n", prefix, triggerTerminalText(act.Offline, false))
+		}
+		if act.QueueTTLSeconds > 0 {
+			fmt.Printf("%sQueue TTL:   %ds\n", prefix, act.QueueTTLSeconds)
+		}
+		if len(act.UntrustedVars) > 0 {
+			safeVars := make([]string, len(act.UntrustedVars))
+			for i, v := range act.UntrustedVars {
+				safeVars[i] = triggerTerminalText(v, false)
+			}
+			fmt.Printf("%sAllowed:     %s\n", prefix, strings.Join(safeVars, ", "))
+		}
 	}
+}
 
+func printTriggerDetail(tr *hubclient.Trigger) {
 	fmt.Printf("Trigger: %s\n", triggerTerminalText(tr.ID, false))
 	fmt.Printf("  Name:        %s\n", triggerTerminalText(tr.Name, false))
 	if tr.Description != "" {
@@ -138,88 +237,14 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		fmt.Printf("  Subject:     %s\n", line)
 	}
 
-	if tr.Action.Type == "dispatch_agent" {
-		fmt.Printf("  Action:      dispatch_agent\n")
-		fmt.Printf("  Template:    %s\n", triggerTerminalText(tr.Action.Template, false))
-		if tr.Action.AgentName != "" {
-			fmt.Printf("  Agent Name:  %s\n", triggerTerminalText(tr.Action.AgentName, false))
-		}
-		if tr.Action.NameConflict != "" {
-			fmt.Printf("  On Conflict: %s\n", triggerTerminalText(tr.Action.NameConflict, false))
-		}
-		if tr.Action.Branch != "" {
-			fmt.Printf("  Branch:      %s\n", triggerTerminalText(tr.Action.Branch, false))
-		}
-		if len(tr.Action.Labels) > 0 {
-			keys := make([]string, 0, len(tr.Action.Labels))
-			for k := range tr.Action.Labels {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			pairs := make([]string, len(keys))
-			for i, k := range keys {
-				pairs[i] = triggerTerminalText(k, false) + "=" + triggerTerminalText(tr.Action.Labels[k], false)
-			}
-			fmt.Printf("  Labels:      %s\n", strings.Join(pairs, ", "))
-		}
-		if tr.Action.Ephemeral {
-			fmt.Printf("  Ephemeral:   true\n")
-		}
-		if tr.Action.GithubToken != "" {
-			fmt.Printf("  GH Token:    %s\n", triggerTerminalText(tr.Action.GithubToken, false))
-		}
-		if tr.Action.AgentRole != "" {
-			fmt.Printf("  Agent Role:  %s\n", triggerTerminalText(tr.Action.AgentRole, false))
-		}
-		if tr.Action.ReuseMessage != "" {
-			fmt.Printf("  Reuse Msg:   %s\n", triggerTerminalText(tr.Action.ReuseMessage, true))
-		}
-		if tr.Action.AckComment != nil && tr.Action.AckComment.Body != "" {
-			fmt.Printf("  Ack Comment: %s\n", triggerTerminalText(tr.Action.AckComment.Body, true))
-		}
-		if len(tr.Action.UntrustedVars) > 0 {
-			safeVars := make([]string, len(tr.Action.UntrustedVars))
-			for i, v := range tr.Action.UntrustedVars {
-				safeVars[i] = triggerTerminalText(v, false)
-			}
-			fmt.Printf("  Allowed:     %s\n", strings.Join(safeVars, ", "))
-		}
-		if tr.Action.Task != "" {
-			fmt.Printf("  Task:        %s\n", triggerTerminalText(tr.Action.Task, true))
-		}
-	} else if tr.Action.Type == "github.comment" {
-		fmt.Printf("  Action:      github.comment\n")
-		if tr.Action.Target != "" {
-			fmt.Printf("  Target:      %s\n", triggerTerminalText(tr.Action.Target, false))
-		}
-		if tr.Action.ReplyInThread {
-			fmt.Printf("  In Thread:   true\n")
-		}
-		if len(tr.Action.UntrustedVars) > 0 {
-			safeVars := make([]string, len(tr.Action.UntrustedVars))
-			for i, v := range tr.Action.UntrustedVars {
-				safeVars[i] = triggerTerminalText(v, false)
-			}
-			fmt.Printf("  Allowed:     %s\n", strings.Join(safeVars, ", "))
-		}
-		if tr.Action.Body != "" {
-			fmt.Printf("  Comment:     %s\n", triggerTerminalText(tr.Action.Body, true))
-		}
-	} else {
-		fmt.Printf("  Agent:       %s\n", triggerTerminalText(agentLabel, false))
-		fmt.Printf("  Message:     %s\n", triggerTerminalText(tr.Action.Message, true))
-		if tr.Action.Offline != "" {
-			fmt.Printf("  Offline:     %s\n", triggerTerminalText(tr.Action.Offline, false))
-		}
-		if tr.Action.QueueTTLSeconds > 0 {
-			fmt.Printf("  Queue TTL:   %ds\n", tr.Action.QueueTTLSeconds)
-		}
-		if len(tr.Action.UntrustedVars) > 0 {
-			safeVars := make([]string, len(tr.Action.UntrustedVars))
-			for i, v := range tr.Action.UntrustedVars {
-				safeVars[i] = triggerTerminalText(v, false)
-			}
-			fmt.Printf("  Allowed:     %s\n", strings.Join(safeVars, ", "))
+	actions := effectiveTriggerActions(tr)
+	if tr.ActionsBroken {
+		fmt.Printf("  Actions:     broken (stored actions cannot be parsed)\n")
+	} else if len(actions) > 0 {
+		fmt.Printf("  Actions:     %d\n", len(actions))
+		for i, act := range actions {
+			fmt.Printf("    %d/%d [%s]\n", i+1, len(actions), triggerTerminalText(act.Type, false))
+			printTriggerActionDetail(act, "      ")
 		}
 	}
 	fmt.Printf("  Fires:       %d (errors: %d)\n", tr.FireCount, tr.ErrorCount)

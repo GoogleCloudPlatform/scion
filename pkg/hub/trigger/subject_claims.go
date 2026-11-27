@@ -37,16 +37,16 @@ var ErrClaimNotHeld = errors.New("trigger: subject claim is not held")
 // Claim is a per-(trigger, subject) live-subject claim record (Stage 2 §5.6).
 type Claim = store.TriggerSubjectClaim
 
-// SubjectClaims manages atomic per-(trigger, subject) live-subject claims for
-// dispatch_agent mode "skip" (Stage 2 §5.6) and Stage 3 "reuse".
+// SubjectClaims manages atomic per-(trigger, action_index, subject) live-subject
+// claims for dispatch_agent mode "skip" (Stage 2 §5.6) and Stage 3 "reuse".
 type SubjectClaims interface {
-	// Claim atomically takes (trigger, subject): INSERT, or UPDATE … WHERE state='released'
-	// or (state='active' AND agent_id IS NULL AND claimed_at < now-5m) [abandoned claim].
-	// Returns the existing active claim (with its agent) when it cannot take it.
-	Claim(ctx context.Context, triggerID, subject, eventID, fireID string) (c Claim, existing *Claim, err error)
+	// Claim atomically takes (trigger, actionIndex, subject): INSERT, or UPDATE …
+	// WHERE state='released' or (state='active' AND agent_id IS NULL AND claimed_at < now-5m)
+	// [abandoned claim]. Returns the existing active claim (with its agent) when it cannot take it.
+	Claim(ctx context.Context, triggerID string, actionIndex int, subject, eventID, fireID string) (c Claim, existing *Claim, err error)
 	Bind(ctx context.Context, c Claim, agentID string) error // state stays active; agent_id set
 	Release(ctx context.Context, c Claim) error              // state=released (create failed, agent deleted/terminal)
-	Live(ctx context.Context, triggerID, subject string) (*Claim, error)
+	Live(ctx context.Context, triggerID string, actionIndex int, subject string) (*Claim, error)
 }
 
 // AgentLookup is the narrow read-only interface SubjectClaims uses to check
@@ -77,13 +77,13 @@ func NewSubjectClaims(triggers store.TriggerStore, agents AgentLookup, now func(
 	}
 }
 
-// Claim atomically acquires (triggerID, subject) or returns the existing active claim.
-func (s *StoreSubjectClaims) Claim(ctx context.Context, triggerID, subject, eventID, fireID string) (Claim, *Claim, error) {
+// Claim atomically acquires (triggerID, actionIndex, subject) or returns the existing active claim.
+func (s *StoreSubjectClaims) Claim(ctx context.Context, triggerID string, actionIndex int, subject, eventID, fireID string) (Claim, *Claim, error) {
 	if s == nil || s.triggers == nil {
 		return Claim{}, nil, fmt.Errorf("%w: subject claims store is nil", store.ErrInvalidInput)
 	}
 	now := s.now().UTC()
-	claimed, existing, err := s.triggers.ClaimTriggerSubject(ctx, triggerID, subject, eventID, fireID, now, now.Add(-AbandonedClaimTTL))
+	claimed, existing, err := s.triggers.ClaimTriggerSubject(ctx, triggerID, actionIndex, subject, eventID, fireID, now, now.Add(-AbandonedClaimTTL))
 	if err != nil {
 		return Claim{}, nil, err
 	}
@@ -120,17 +120,17 @@ func (s *StoreSubjectClaims) Release(ctx context.Context, c Claim) error {
 	return err
 }
 
-// Live returns the active claim for (triggerID, subject) whose bound agent
-// exists, has deleted_at IS NULL, and is not in a terminal phase
+// Live returns the active claim for (triggerID, actionIndex, subject) whose bound
+// agent exists, has deleted_at IS NULL, and is not in a terminal phase
 // ({stopped, error, halted}). If the active claim's agent is missing,
 // soft-deleted, or terminal, Live lazily releases the claim and returns (nil, nil).
 // An active unbound claim (agent_id IS NULL) has no live agent yet and returns (nil, nil)
 // without releasing it.
-func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string) (*Claim, error) {
+func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID string, actionIndex int, subject string) (*Claim, error) {
 	if s == nil || s.triggers == nil || s.agents == nil {
 		return nil, fmt.Errorf("%w: subject claims store is nil", store.ErrInvalidInput)
 	}
-	claim, err := s.triggers.GetActiveTriggerSubjectClaim(ctx, triggerID, subject)
+	claim, err := s.triggers.GetActiveTriggerSubjectClaim(ctx, triggerID, actionIndex, subject)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil

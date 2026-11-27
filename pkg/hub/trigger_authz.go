@@ -816,44 +816,86 @@ var (
 	errTriggerExecTargetCapExceeded  = errors.New("target agent active exec trigger limit exceeded")
 )
 
-// checkTriggerExecCapsInTx enforces P8's own per-trigger-exec authoring caps
+// checkTriggerExecCapsInTx enforces P8's per-trigger-exec authoring caps
 // inside WithTx under LockTriggerQuota, independent of exec-schedule quotas.
+// Caps count per exec action row across active triggers (action-arrays §4);
+// excludeTriggerID omits the trigger currently being updated or resumed so its
+// previous actions are not double-counted.
 func checkTriggerExecCapsInTx(
 	ctx context.Context,
 	tx store.Store,
 	projectID string,
-	targetAgentID string,
-	alreadyCountedInProject bool,
-	alreadyCountedOnTarget bool,
+	newActions []store.TriggerAction,
+	excludeTriggerID string,
 ) error {
-	projExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
-		ProjectID:   projectID,
-		ActionTypes: []string{store.TriggerActionExec},
-		Status:      store.TriggerStatusActive,
-	})
-	if err != nil {
-		return err
+	newProjExecs := 0
+	newTargetExecs := make(map[string]int)
+	for _, act := range newActions {
+		if act.Type != store.TriggerActionExec {
+			continue
+		}
+		newProjExecs++
+		if tid := execPayloadTarget(act.Payload); tid != "" {
+			newTargetExecs[tid]++
+		}
 	}
-	if alreadyCountedInProject && projExecCount > 0 {
-		projExecCount--
+	if newProjExecs == 0 {
+		return nil
 	}
-	if projExecCount >= triggerExecMaxActivePerProject {
-		return errTriggerExecProjectCapExceeded
-	}
-	if targetAgentID != "" {
-		targetExecCount, err := tx.CountTriggers(ctx, store.TriggerFilter{
-			ProjectID:     projectID,
-			ActionTypes:   []string{store.TriggerActionExec},
-			TargetAgentID: targetAgentID,
-			Status:        store.TriggerStatusActive,
+
+	existingProjExecs := 0
+	existingTargetExecs := make(map[string]int)
+	cursor := ""
+	for {
+		page, err := tx.ListTriggers(ctx, store.TriggerFilter{
+			ProjectID:   projectID,
+			ActionTypes: []string{store.TriggerActionExec},
+			Status:      store.TriggerStatusActive,
+		}, store.ListOptions{
+			Limit:          store.MaxTriggersPerProject,
+			Cursor:         cursor,
+			SkipTotalCount: true,
 		})
 		if err != nil {
 			return err
 		}
-		if alreadyCountedOnTarget && targetExecCount > 0 {
-			targetExecCount--
+		for _, tr := range page.Items {
+			if excludeTriggerID != "" && tr.ID == excludeTriggerID {
+				continue
+			}
+			acts, aErr := triggerActions(tr)
+			if aErr != nil {
+				// O3 / O-d: count a corrupt active row as a floor of one exec when
+				// its scalar action_type or raw actions column matched the exec
+				// filter (a corrupt list could have held up to MaxTriggerActions).
+				if tr.ActionType == store.TriggerActionExec || tr.ActionsCorrupt {
+					existingProjExecs++
+					if tid := execPayloadTarget(tr.ActionPayload); tid != "" {
+						existingTargetExecs[tid]++
+					}
+				}
+				continue
+			}
+			for _, act := range acts {
+				if act.Type != store.TriggerActionExec {
+					continue
+				}
+				existingProjExecs++
+				if tid := execPayloadTarget(act.Payload); tid != "" {
+					existingTargetExecs[tid]++
+				}
+			}
 		}
-		if targetExecCount >= triggerExecMaxActivePerTarget {
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if existingProjExecs+newProjExecs > triggerExecMaxActivePerProject {
+		return errTriggerExecProjectCapExceeded
+	}
+	for tid, add := range newTargetExecs {
+		if existingTargetExecs[tid]+add > triggerExecMaxActivePerTarget {
 			return errTriggerExecTargetCapExceeded
 		}
 	}

@@ -43,8 +43,14 @@ type TriggerFire struct {
 	Subject string `json:"subject,omitempty"`
 	// ActionType holds the value of the "action_type" field.
 	ActionType string `json:"action_type,omitempty"`
+	// ActionIndex holds the value of the "action_index" field.
+	ActionIndex int `json:"action_index,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
+	// RateDecision holds the value of the "rate_decision" field.
+	RateDecision string `json:"rate_decision,omitempty"`
+	// CounterFlushed holds the value of the "counter_flushed" field.
+	CounterFlushed bool `json:"counter_flushed,omitempty"`
 	// Error holds the value of the "error" field.
 	Error string `json:"error,omitempty"`
 	// ResultRef holds the value of the "result_ref" field.
@@ -110,9 +116,11 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerfire.FieldTargetAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision, triggerfire.FieldAttempts:
+		case triggerfire.FieldCounterFlushed:
+			values[i] = new(sql.NullBool)
+		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision, triggerfire.FieldActionIndex, triggerfire.FieldAttempts:
 			values[i] = new(sql.NullInt64)
-		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
+		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldRateDecision, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
 			values[i] = new(sql.NullString)
 		case triggerfire.FieldWaitUntil, triggerfire.FieldLeaseUntil, triggerfire.FieldNotBefore, triggerfire.FieldDeferredAt, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -218,11 +226,29 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ActionType = value.String
 			}
+		case triggerfire.FieldActionIndex:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field action_index", values[i])
+			} else if value.Valid {
+				_m.ActionIndex = int(value.Int64)
+			}
 		case triggerfire.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
 			} else if value.Valid {
 				_m.Status = value.String
+			}
+		case triggerfire.FieldRateDecision:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field rate_decision", values[i])
+			} else if value.Valid {
+				_m.RateDecision = value.String
+			}
+		case triggerfire.FieldCounterFlushed:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field counter_flushed", values[i])
+			} else if value.Valid {
+				_m.CounterFlushed = value.Bool
 			}
 		case triggerfire.FieldError:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -416,8 +442,17 @@ func (_m *TriggerFire) String() string {
 	builder.WriteString("action_type=")
 	builder.WriteString(_m.ActionType)
 	builder.WriteString(", ")
+	builder.WriteString("action_index=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ActionIndex))
+	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)
+	builder.WriteString(", ")
+	builder.WriteString("rate_decision=")
+	builder.WriteString(_m.RateDecision)
+	builder.WriteString(", ")
+	builder.WriteString("counter_flushed=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CounterFlushed))
 	builder.WriteString(", ")
 	builder.WriteString("error=")
 	builder.WriteString(_m.Error)

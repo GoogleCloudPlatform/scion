@@ -16,6 +16,7 @@ package trigger_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -45,12 +46,12 @@ type stubClaimStore struct {
 	released []string
 }
 
-func (s *stubClaimStore) key(triggerID, subject string) string {
-	return triggerID + "\x00" + subject
+func (s *stubClaimStore) key(triggerID string, actionIndex int, subject string) string {
+	return fmt.Sprintf("%s\x00%d\x00%s", triggerID, actionIndex, subject)
 }
 
-func (s *stubClaimStore) ClaimTriggerSubject(_ context.Context, triggerID, subject, eventID, fireID string, now, abandonedBefore time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
-	k := s.key(triggerID, subject)
+func (s *stubClaimStore) ClaimTriggerSubject(_ context.Context, triggerID string, actionIndex int, subject, eventID, fireID string, now, abandonedBefore time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+	k := s.key(triggerID, actionIndex, subject)
 	if cur, ok := s.active[k]; ok {
 		if cur.State == store.TriggerSubjectClaimStateActive &&
 			(cur.AgentID != "" || !cur.ClaimedAt.Before(abandonedBefore)) {
@@ -68,13 +69,14 @@ func (s *stubClaimStore) ClaimTriggerSubject(_ context.Context, triggerID, subje
 		return &cp, nil, nil
 	}
 	c := &store.TriggerSubjectClaim{
-		ID:        uuid.NewString(),
-		TriggerID: triggerID,
-		Subject:   subject,
-		State:     store.TriggerSubjectClaimStateActive,
-		EventID:   eventID,
-		FireID:    fireID,
-		ClaimedAt: now,
+		ID:          uuid.NewString(),
+		TriggerID:   triggerID,
+		ActionIndex: actionIndex,
+		Subject:     subject,
+		State:       store.TriggerSubjectClaimStateActive,
+		EventID:     eventID,
+		FireID:      fireID,
+		ClaimedAt:   now,
 	}
 	s.active[k] = c
 	cp := *c
@@ -120,8 +122,8 @@ func (s *stubClaimStore) ReleaseTriggerSubjectClaimsForAgent(_ context.Context, 
 	return n, nil
 }
 
-func (s *stubClaimStore) GetActiveTriggerSubjectClaim(_ context.Context, triggerID, subject string) (*store.TriggerSubjectClaim, error) {
-	if c, ok := s.active[s.key(triggerID, subject)]; ok && c.State == store.TriggerSubjectClaimStateActive {
+func (s *stubClaimStore) GetActiveTriggerSubjectClaim(_ context.Context, triggerID string, actionIndex int, subject string) (*store.TriggerSubjectClaim, error) {
+	if c, ok := s.active[s.key(triggerID, actionIndex, subject)]; ok && c.State == store.TriggerSubjectClaimStateActive {
 		cp := *c
 		return &cp, nil
 	}
@@ -138,10 +140,10 @@ func TestSubjectClaims_LiveLazilyReleasesTerminalOrDeletedAndKeepsSuspended(t *t
 	trigID := uuid.NewString()
 
 	// Unbound active claim: Live returns nil without releasing.
-	cUnbound, ex, err := claims.Claim(ctx, trigID, "sub-unbound", uuid.NewString(), uuid.NewString())
+	cUnbound, ex, err := claims.Claim(ctx, trigID, 0, "sub-unbound", uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
-	live, err := claims.Live(ctx, trigID, "sub-unbound")
+	live, err := claims.Live(ctx, trigID, 0, "sub-unbound")
 	require.NoError(t, err)
 	assert.Nil(t, live)
 	assert.Empty(t, ts.released, "unbound in-flight claim must not be released by Live")
@@ -151,11 +153,11 @@ func TestSubjectClaims_LiveLazilyReleasesTerminalOrDeletedAndKeepsSuspended(t *t
 		agID := uuid.NewString()
 		agents.agents[agID] = &store.Agent{ID: agID, Phase: string(ph)}
 		sub := "sub-" + string(ph)
-		c, ex, err := claims.Claim(ctx, trigID, sub, uuid.NewString(), uuid.NewString())
+		c, ex, err := claims.Claim(ctx, trigID, 0, sub, uuid.NewString(), uuid.NewString())
 		require.NoError(t, err)
 		require.Nil(t, ex)
 		require.NoError(t, claims.Bind(ctx, c, agID))
-		live, err := claims.Live(ctx, trigID, sub)
+		live, err := claims.Live(ctx, trigID, 0, sub)
 		require.NoError(t, err)
 		require.NotNil(t, live, "phase %s must be live", ph)
 		assert.Equal(t, agID, live.AgentID)
@@ -180,17 +182,17 @@ func TestSubjectClaims_LiveLazilyReleasesTerminalOrDeletedAndKeepsSuspended(t *t
 				agents.agents[agID] = tc.ag
 			}
 			sub := "sub-" + tc.name
-			c, ex, err := claims.Claim(ctx, trigID, sub, uuid.NewString(), uuid.NewString())
+			c, ex, err := claims.Claim(ctx, trigID, 0, sub, uuid.NewString(), uuid.NewString())
 			require.NoError(t, err)
 			require.Nil(t, ex)
 			require.NoError(t, claims.Bind(ctx, c, agID))
 
-			live, err := claims.Live(ctx, trigID, sub)
+			live, err := claims.Live(ctx, trigID, 0, sub)
 			require.NoError(t, err)
 			assert.Nil(t, live, "%s agent must not be live", tc.name)
 
 			// Re-claiming immediately succeeds because Live released the stale claim.
-			c2, ex2, err := claims.Claim(ctx, trigID, sub, uuid.NewString(), uuid.NewString())
+			c2, ex2, err := claims.Claim(ctx, trigID, 0, sub, uuid.NewString(), uuid.NewString())
 			require.NoError(t, err)
 			assert.Nil(t, ex2)
 			assert.Equal(t, c.ID, c2.ID)
@@ -199,7 +201,7 @@ func TestSubjectClaims_LiveLazilyReleasesTerminalOrDeletedAndKeepsSuspended(t *t
 
 	// Abandoned unbound claim is taken over after 5 minutes and Bind by old holder returns ErrClaimNotHeld.
 	now = now.Add(trigger.AbandonedClaimTTL + time.Second)
-	cTaken, ex, err := claims.Claim(ctx, trigID, "sub-unbound", uuid.NewString(), uuid.NewString())
+	cTaken, ex, err := claims.Claim(ctx, trigID, 0, "sub-unbound", uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, ex)
 	assert.Equal(t, cUnbound.ID, cTaken.ID)

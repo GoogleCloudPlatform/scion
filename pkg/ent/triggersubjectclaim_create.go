@@ -30,6 +30,20 @@ func (_c *TriggerSubjectClaimCreate) SetTriggerID(v uuid.UUID) *TriggerSubjectCl
 	return _c
 }
 
+// SetActionIndex sets the "action_index" field.
+func (_c *TriggerSubjectClaimCreate) SetActionIndex(v int) *TriggerSubjectClaimCreate {
+	_c.mutation.SetActionIndex(v)
+	return _c
+}
+
+// SetNillableActionIndex sets the "action_index" field if the given value is not nil.
+func (_c *TriggerSubjectClaimCreate) SetNillableActionIndex(v *int) *TriggerSubjectClaimCreate {
+	if v != nil {
+		_c.SetActionIndex(*v)
+	}
+	return _c
+}
+
 // SetSubject sets the "subject" field.
 func (_c *TriggerSubjectClaimCreate) SetSubject(v string) *TriggerSubjectClaimCreate {
 	_c.mutation.SetSubject(v)
@@ -181,6 +195,10 @@ func (_c *TriggerSubjectClaimCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *TriggerSubjectClaimCreate) defaults() {
+	if _, ok := _c.mutation.ActionIndex(); !ok {
+		v := triggersubjectclaim.DefaultActionIndex
+		_c.mutation.SetActionIndex(v)
+	}
 	if _, ok := _c.mutation.State(); !ok {
 		v := triggersubjectclaim.DefaultState
 		_c.mutation.SetState(v)
@@ -199,6 +217,9 @@ func (_c *TriggerSubjectClaimCreate) defaults() {
 func (_c *TriggerSubjectClaimCreate) check() error {
 	if _, ok := _c.mutation.TriggerID(); !ok {
 		return &ValidationError{Name: "trigger_id", err: errors.New(`ent: missing required field "TriggerSubjectClaim.trigger_id"`)}
+	}
+	if _, ok := _c.mutation.ActionIndex(); !ok {
+		return &ValidationError{Name: "action_index", err: errors.New(`ent: missing required field "TriggerSubjectClaim.action_index"`)}
 	}
 	if _, ok := _c.mutation.Subject(); !ok {
 		return &ValidationError{Name: "subject", err: errors.New(`ent: missing required field "TriggerSubjectClaim.subject"`)}
@@ -259,6 +280,10 @@ func (_c *TriggerSubjectClaimCreate) createSpec() (*TriggerSubjectClaim, *sqlgra
 	if value, ok := _c.mutation.TriggerID(); ok {
 		_spec.SetField(triggersubjectclaim.FieldTriggerID, field.TypeUUID, value)
 		_node.TriggerID = value
+	}
+	if value, ok := _c.mutation.ActionIndex(); ok {
+		_spec.SetField(triggersubjectclaim.FieldActionIndex, field.TypeInt, value)
+		_node.ActionIndex = value
 	}
 	if value, ok := _c.mutation.Subject(); ok {
 		_spec.SetField(triggersubjectclaim.FieldSubject, field.TypeString, value)
@@ -487,6 +512,9 @@ func (u *TriggerSubjectClaimUpsertOne) UpdateNewValues() *TriggerSubjectClaimUps
 		}
 		if _, exists := u.create.mutation.TriggerID(); exists {
 			s.SetIgnore(triggersubjectclaim.FieldTriggerID)
+		}
+		if _, exists := u.create.mutation.ActionIndex(); exists {
+			s.SetIgnore(triggersubjectclaim.FieldActionIndex)
 		}
 		if _, exists := u.create.mutation.Subject(); exists {
 			s.SetIgnore(triggersubjectclaim.FieldSubject)
@@ -847,6 +875,9 @@ func (u *TriggerSubjectClaimUpsertBulk) UpdateNewValues() *TriggerSubjectClaimUp
 			}
 			if _, exists := b.mutation.TriggerID(); exists {
 				s.SetIgnore(triggersubjectclaim.FieldTriggerID)
+			}
+			if _, exists := b.mutation.ActionIndex(); exists {
+				s.SetIgnore(triggersubjectclaim.FieldActionIndex)
 			}
 			if _, exists := b.mutation.Subject(); exists {
 				s.SetIgnore(triggersubjectclaim.FieldSubject)

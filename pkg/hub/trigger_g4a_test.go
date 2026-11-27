@@ -279,7 +279,7 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	assert.Equal(t, store.TriggerFireStatusFired, firesA.Items[0].Status)
 
 	subjectKey := "webhook:" + ep.ID + "/pr-42"
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentID := claim.AgentID
 	require.NotEmpty(t, agentID)
@@ -383,16 +383,16 @@ func TestTriggerG4a_Reuse_TerminalSoftDeletedAndCreateFailure(t *testing.T) {
 	f.drainOneTriggerEvent(t)
 
 	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, nil)
-	liveAfterFail, err := claims.Live(ctx, trigResp.ID, subjectKey)
+	liveAfterFail, err := claims.Live(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	assert.Nil(t, liveAfterFail, "failed create must leave no live claim")
-	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	assert.ErrorIs(t, err, store.ErrNotFound, "claim must be released after create failure")
 
 	// 2. Next event succeeds and binds agent A1.
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-ok-2", "pr_sync", "pr-77", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
-	claim1, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim1, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentA1 := claim1.AgentID
 	require.NotEmpty(t, agentA1)
@@ -405,7 +405,7 @@ func TestTriggerG4a_Reuse_TerminalSoftDeletedAndCreateFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-term-3", "pr_sync", "pr-77", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
-	claim2, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim2, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentA2 := claim2.AgentID
 	require.NotEmpty(t, agentA2)
@@ -419,7 +419,7 @@ func TestTriggerG4a_Reuse_TerminalSoftDeletedAndCreateFailure(t *testing.T) {
 
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-softdel-4", "pr_sync", "pr-77", []byte(`{}`)).Code)
 	f.drainOneTriggerEvent(t)
-	claim3, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim3, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	agentA3 := claim3.AgentID
 	require.NotEmpty(t, agentA3)
@@ -944,7 +944,7 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 	assert.Equal(t, int32(1), createCalls.Load())
 
 	subjectKey := "webhook:" + ep.ID + "/pr-99"
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	require.NotEmpty(t, claim.AgentID)
 
@@ -1060,7 +1060,7 @@ func TestTriggerG4a_Reuse_PatchedToMessageRunsOwnAction(t *testing.T) {
 	require.Equal(t, int32(1), createCalls.Load())
 
 	subjectKey := "webhook:" + ep.ID + "/sub-42"
-	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, 0, subjectKey)
 	require.NoError(t, err)
 	require.NotEmpty(t, claim.AgentID)
 

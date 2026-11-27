@@ -180,27 +180,29 @@ type TriggerSubjectSpec struct {
 
 // TriggerResponse is the API representation of a trigger definition.
 type TriggerResponse struct {
-	ID                      string             `json:"id"`
-	ProjectID               string             `json:"projectId"`
-	Name                    string             `json:"name"`
-	Description             string             `json:"description,omitempty"`
-	Source                  TriggerSourceSpec  `json:"source"`
-	Match                   TriggerMatchSpec   `json:"match"`
-	Action                  TriggerActionSpec  `json:"action"`
-	Subject                 TriggerSubjectSpec `json:"subject"`
-	MaxFiresPerMinute       int                `json:"maxFiresPerMinute,omitempty"`
-	MaxConcurrentDispatches int                `json:"maxConcurrentDispatches,omitempty"`
-	Status                  string             `json:"status"`
-	StatusReason            string             `json:"statusReason,omitempty"`
-	AuthorizationRevision   int                `json:"authorizationRevision"`
-	LastFireAt              *time.Time         `json:"lastFireAt,omitempty"`
-	LastFireStatus          string             `json:"lastFireStatus,omitempty"`
-	LastFireError           string             `json:"lastFireError,omitempty"`
-	FireCount               int                `json:"fireCount"`
-	ErrorCount              int                `json:"errorCount"`
-	CreatedBy               string             `json:"createdBy,omitempty"`
-	CreatedAt               time.Time          `json:"createdAt"`
-	UpdatedAt               time.Time          `json:"updatedAt"`
+	ID                      string              `json:"id"`
+	ProjectID               string              `json:"projectId"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   TriggerMatchSpec    `json:"match"`
+	Action                  TriggerActionSpec   `json:"action,omitzero"`
+	Actions                 []TriggerActionSpec `json:"actions"`
+	ActionsBroken           bool                `json:"actionsBroken,omitempty"`
+	Subject                 TriggerSubjectSpec  `json:"subject"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Status                  string              `json:"status"`
+	StatusReason            string              `json:"statusReason,omitempty"`
+	AuthorizationRevision   int                 `json:"authorizationRevision"`
+	LastFireAt              *time.Time          `json:"lastFireAt,omitempty"`
+	LastFireStatus          string              `json:"lastFireStatus,omitempty"`
+	LastFireError           string              `json:"lastFireError,omitempty"`
+	FireCount               int                 `json:"fireCount"`
+	ErrorCount              int                 `json:"errorCount"`
+	CreatedBy               string              `json:"createdBy,omitempty"`
+	CreatedAt               time.Time           `json:"createdAt"`
+	UpdatedAt               time.Time           `json:"updatedAt"`
 }
 
 // ListTriggersResponse is the paginated response of GET /triggers.
@@ -238,6 +240,7 @@ type TriggerFireResponse struct {
 	TriggerID      string            `json:"triggerId"`
 	EventID        string            `json:"eventId"`
 	ProjectID      string            `json:"projectId"`
+	ActionIndex    int               `json:"actionIndex"`
 	Subject        string            `json:"subject,omitempty"`
 	ActionType     string            `json:"actionType,omitempty"`
 	Status         string            `json:"status"`
@@ -536,6 +539,20 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 		matchSpec.Dialect = respRules[0].Dialect
 		matchSpec.Expr = respRules[0].Expr
 	}
+	normActions, actionsErr := triggerActions(tr)
+	respActions := make([]TriggerActionSpec, len(normActions))
+	for i, a := range normActions {
+		respActions[i] = buildTriggerActionSpec(rev, a.Type, a.Payload)
+	}
+	var mirroredAction TriggerActionSpec
+	if actionsErr == nil && len(respActions) == 1 {
+		mirroredAction = respActions[0]
+	} else if actionsErr != nil && (tr.ActionType == store.TriggerActionExec || payloadHasExecContent(tr.ActionPayload)) {
+		mirroredAction = TriggerActionSpec{
+			Type:            tr.ActionType,
+			CommandRedacted: true,
+		}
+	}
 	var coalesceWindow string
 	if tr.CoalesceWindowSeconds > 0 {
 		coalesceWindow = (time.Duration(tr.CoalesceWindowSeconds) * time.Second).String()
@@ -549,8 +566,10 @@ func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 			Kind: tr.SourceKind,
 			ID:   tr.SourceID,
 		},
-		Match:  matchSpec,
-		Action: buildTriggerActionSpec(rev, tr.ActionType, tr.ActionPayload),
+		Match:         matchSpec,
+		Action:        mirroredAction,
+		Actions:       respActions,
+		ActionsBroken: actionsErr != nil,
 		Subject: TriggerSubjectSpec{
 			Dialect:        tr.SubjectDialect,
 			Expr:           tr.SubjectRule,
@@ -612,6 +631,7 @@ func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledE
 		TriggerID:      tf.TriggerID,
 		EventID:        tf.EventID,
 		ProjectID:      tf.ProjectID,
+		ActionIndex:    tf.ActionIndex,
 		Subject:        tf.Subject,
 		ActionType:     tf.ActionType,
 		Status:         tf.Status,

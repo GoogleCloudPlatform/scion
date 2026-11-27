@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
@@ -219,7 +220,7 @@ func (m *memTriggerStore) RecordTriggerFire(_ context.Context, id string, firedA
 	for _, tr := range m.triggers {
 		if tr.ID == id {
 			tr.FireCount++
-			if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused {
+			if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused || status == store.TriggerFireStatusExpired {
 				tr.ErrorCount++
 			}
 			t := firedAt
@@ -228,6 +229,108 @@ func (m *memTriggerStore) RecordTriggerFire(_ context.Context, id string, firedA
 			tr.LastFireError = errMsg
 			return nil
 		}
+	}
+	return store.ErrNotFound
+}
+func (m *memTriggerStore) FlushTriggerEventCounters(_ context.Context, triggerID, eventID string, firedAt time.Time, status, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	isErr := func(s string) bool {
+		return s == store.TriggerFireStatusFailed || s == store.TriggerFireStatusRefused || s == store.TriggerFireStatusExpired
+	}
+	isTerm := func(s string) bool {
+		return s == store.TriggerFireStatusFired || s == store.TriggerFireStatusFailed || s == store.TriggerFireStatusRefused || s == store.TriggerFireStatusSkipped || s == store.TriggerFireStatusExpired
+	}
+	var (
+		alreadyCounted       bool
+		priorFlushedError    bool
+		unflushedErrStatus   string
+		unflushedErrMsg      string
+		unflushedErrAt       time.Time
+		firstUnflushedStatus string
+		firstUnflushedErr    string
+		firstUnflushedAt     time.Time
+		terminalUnflushed    []*store.TriggerFire
+	)
+	for _, f := range m.byFireID {
+		if f.TriggerID != triggerID || f.EventID != eventID {
+			continue
+		}
+		if f.CounterFlushed {
+			alreadyCounted = true
+			if isErr(f.Status) {
+				priorFlushedError = true
+			}
+			continue
+		}
+		if !isTerm(f.Status) {
+			continue
+		}
+		terminalUnflushed = append(terminalUnflushed, f)
+		var fAt time.Time
+		if f.FinishedAt != nil {
+			fAt = f.FinishedAt.UTC()
+		}
+		if firstUnflushedStatus == "" {
+			firstUnflushedStatus = f.Status
+			firstUnflushedErr = f.Error
+			firstUnflushedAt = fAt
+		}
+		if isErr(f.Status) && unflushedErrStatus == "" {
+			unflushedErrStatus = f.Status
+			unflushedErrMsg = f.Error
+			unflushedErrAt = fAt
+		}
+	}
+	if len(terminalUnflushed) == 0 && status == "" {
+		return nil
+	}
+	effStatus, effErr, effAt := status, errMsg, firedAt.UTC()
+	if !isErr(effStatus) && unflushedErrStatus != "" {
+		effStatus = unflushedErrStatus
+		effErr = unflushedErrMsg
+		if effAt.IsZero() {
+			effAt = unflushedErrAt
+		}
+	}
+	if effStatus == "" {
+		effStatus = firstUnflushedStatus
+		effErr = firstUnflushedErr
+		if effAt.IsZero() {
+			effAt = firstUnflushedAt
+		}
+	}
+	if effAt.IsZero() {
+		effAt = time.Now().UTC()
+	}
+	for _, tr := range m.triggers {
+		if tr.ID != triggerID {
+			continue
+		}
+		if !alreadyCounted {
+			tr.FireCount++
+			if isErr(effStatus) {
+				tr.ErrorCount++
+			}
+			if tr.LastFireAt == nil || effAt.After(*tr.LastFireAt) {
+				t := effAt
+				tr.LastFireAt = &t
+				tr.LastFireStatus = effStatus
+				tr.LastFireError = effErr
+			}
+		} else if isErr(effStatus) && !priorFlushedError {
+			tr.ErrorCount++
+			if tr.LastFireAt == nil || !effAt.Before(*tr.LastFireAt) {
+				t := effAt
+				tr.LastFireAt = &t
+				tr.LastFireStatus = effStatus
+				tr.LastFireError = effErr
+			}
+		}
+		for _, f := range terminalUnflushed {
+			f.CounterFlushed = true
+		}
+		return nil
 	}
 	return store.ErrNotFound
 }
@@ -327,7 +430,7 @@ func (m *memTriggerStore) ReconcileOrphanedPendingTriggerEvents(context.Context,
 func (m *memTriggerStore) ClaimTriggerFire(_ context.Context, fire *store.TriggerFire) (bool, *store.TriggerFire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := fire.EventID + "|" + fire.TriggerID
+	key := fmt.Sprintf("%s|%s|%d", fire.EventID, fire.TriggerID, fire.ActionIndex)
 	if ex, exists := m.fires[key]; exists {
 		cp := *ex
 		return false, &cp, nil
@@ -345,7 +448,7 @@ func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *s
 	m.claimSubjectSkipCalls.Add(1)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := fire.EventID + "|" + fire.TriggerID
+	key := fmt.Sprintf("%s|%s|%d", fire.EventID, fire.TriggerID, fire.ActionIndex)
 	if ex, exists := m.fires[key]; exists {
 		cp := *ex
 		return false, false, &cp, nil
@@ -353,6 +456,7 @@ func (m *memTriggerStore) ClaimTriggerFireSubjectSkip(_ context.Context, fire *s
 	busy := false
 	for _, f := range m.byFireID {
 		if f.TriggerID == fire.TriggerID &&
+			f.ActionIndex == fire.ActionIndex &&
 			f.Subject == fire.Subject &&
 			f.Status == store.TriggerFireStatusFiring &&
 			f.LeaseUntil.After(now.UTC()) {
@@ -383,7 +487,7 @@ func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *st
 	if leaseHorizon <= 0 {
 		leaseHorizon = trigger.FireLeaseHorizon
 	}
-	key := fire.EventID + "|" + fire.TriggerID
+	key := fmt.Sprintf("%s|%s|%d", fire.EventID, fire.TriggerID, fire.ActionIndex)
 	if ex, exists := m.fires[key]; exists {
 		if ex.Status == store.TriggerFireStatusCoalescing || ex.Status == store.TriggerFireStatusDeferred {
 			if ex.NotBefore != nil && ex.NotBefore.UTC().After(now) {
@@ -414,7 +518,7 @@ func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *st
 		isPendingOrReaped := f.Status == store.TriggerFireStatusCoalescing ||
 			f.Status == store.TriggerFireStatusDeferred ||
 			(f.Status == store.TriggerFireStatusFailed && (f.Error == trigger.ErrFireReapedDuringCoalesce || f.Error == trigger.ErrFireReapedDuringDefer))
-		if f.TriggerID == fire.TriggerID && f.Subject == fire.Subject && isPendingOrReaped {
+		if f.TriggerID == fire.TriggerID && f.ActionIndex == fire.ActionIndex && f.Subject == fire.Subject && isPendingOrReaped {
 			f.Status = store.TriggerFireStatusSkipped
 			f.Error = coalesceError
 			fin := now
@@ -619,13 +723,24 @@ func (m *memTriggerStore) ListTriggerFires(_ context.Context, filter store.Trigg
 func (m *memTriggerStore) CountTriggerFiresSince(context.Context, string, time.Time, ...string) (int, error) {
 	return 0, nil
 }
+func (m *memTriggerStore) CountTriggerActionFiresSince(context.Context, string, string, string, time.Time, ...string) (int, error) {
+	return 0, nil
+}
 func (m *memTriggerStore) CountRecentTriggerFires(context.Context, string, time.Time, string) (int, error) {
 	return 0, nil
 }
-func (m *memTriggerStore) HasLiveTriggerFireForSubject(_ context.Context, triggerID, subject string, now time.Time) (bool, error) {
-	return m.HasLiveTriggerFireForSubjectExcluding(context.Background(), triggerID, subject, "", true, now)
+func (m *memTriggerStore) RecordTriggerFireRateDecision(_ context.Context, fireID, decision string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if f, ok := m.byFireID[fireID]; ok && f.RateDecision == "" {
+		f.RateDecision = decision
+	}
+	return nil
 }
-func (m *memTriggerStore) HasLiveTriggerFireForSubjectExcluding(_ context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error) {
+func (m *memTriggerStore) HasLiveTriggerFireForSubject(_ context.Context, triggerID string, actionIndex int, subject string, now time.Time) (bool, error) {
+	return m.HasLiveTriggerFireForSubjectExcluding(context.Background(), triggerID, actionIndex, subject, "", true, now)
+}
+func (m *memTriggerStore) HasLiveTriggerFireForSubjectExcluding(_ context.Context, triggerID string, actionIndex int, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, f := range m.byFireID {
@@ -636,6 +751,7 @@ func (m *memTriggerStore) HasLiveTriggerFireForSubjectExcluding(_ context.Contex
 			f.Status == store.TriggerFireStatusDeferred ||
 			(includeFiring && f.Status == store.TriggerFireStatusFiring)
 		if f.TriggerID == triggerID &&
+			f.ActionIndex == actionIndex &&
 			f.Subject == subject &&
 			statusMatch &&
 			f.LeaseUntil.After(now.UTC()) {
@@ -717,7 +833,7 @@ func (m *memTriggerStore) ExistingTriggerEventPayloadRefs(_ context.Context, pro
 	}
 	return out, nil
 }
-func (m *memTriggerStore) ClaimTriggerSubject(context.Context, string, string, string, string, time.Time, time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+func (m *memTriggerStore) ClaimTriggerSubject(context.Context, string, int, string, string, string, time.Time, time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
 	return nil, nil, nil
 }
 func (m *memTriggerStore) BindTriggerSubjectClaim(context.Context, string, string, string, time.Time) (bool, error) {
@@ -726,7 +842,7 @@ func (m *memTriggerStore) BindTriggerSubjectClaim(context.Context, string, strin
 func (m *memTriggerStore) ReleaseTriggerSubjectClaim(context.Context, string, string, time.Time) (bool, error) {
 	return false, nil
 }
-func (m *memTriggerStore) GetActiveTriggerSubjectClaim(context.Context, string, string) (*store.TriggerSubjectClaim, error) {
+func (m *memTriggerStore) GetActiveTriggerSubjectClaim(context.Context, string, int, string) (*store.TriggerSubjectClaim, error) {
 	return nil, store.ErrNotFound
 }
 func (m *memTriggerStore) ReleaseTriggerSubjectClaimsForAgent(context.Context, string, time.Time) (int, error) {

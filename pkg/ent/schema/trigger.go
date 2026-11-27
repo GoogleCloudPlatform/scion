@@ -67,9 +67,11 @@ func (Trigger) Fields() []ent.Field {
 		field.Text("match_form").
 			Optional(),
 		field.String("action_type").
-			NotEmpty(),
+			Default(""),
 		field.Text("action_payload").
 			Default("{}"),
+		field.Text("actions").
+			Default("[]"),
 		field.String("subject_dialect").
 			Default("cel"),
 		field.Text("subject_rule").

@@ -344,7 +344,7 @@ func TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress(t *testing
 
 	// Seed a fresh unbound active claim (another replica mid-create, < 5 min old).
 	const subject = "github:octo/repo#55"
-	_, existing, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	_, existing, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.Nil(t, existing)
 
@@ -533,7 +533,7 @@ func TestDispatcher_CoalesceWindow_MidWindowPauseOrRuleMismatchCancels(t *testin
 		assert.Equal(t, store.TriggerFireStatusSkipped, fires.Items[0].Status)
 		assert.Equal(t, trigger.ErrFireCoalesceCancelled, fires.Items[0].Error)
 
-		live, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, tid, "github:octo/repo#82", "", true, now)
+		live, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, tid, 0, "github:octo/repo#82", "", true, now)
 		require.NoError(t, err)
 		assert.False(t, live, "cancelled coalescing row must not stay live for subject")
 	}
@@ -664,7 +664,7 @@ func TestDispatcher_Reuse_DeferInFlightThenDeliver(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#91"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -708,7 +708,7 @@ func TestDispatcher_Reuse_DeferInFlightThenDeliver(t *testing.T) {
 	origFireID := fires1.Items[0].ID
 
 	// Deferred fire counts as live for subjectLive / skip.
-	live, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, tr.ID, subject, "", false, now)
+	live, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, tr.ID, 0, subject, "", false, now)
 	require.NoError(t, err)
 	assert.True(t, live, "deferred fire row must be treated as live for subject")
 
@@ -765,7 +765,7 @@ func TestDispatcher_Reuse_DeferInFlightThenClaimReleasedDispatchesNew(t *testing
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#92"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -836,7 +836,7 @@ func TestDispatcher_Reuse_DeferInFlightBoundedTimeout(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#93"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -909,7 +909,7 @@ func TestDispatcher_Reuse_DeferCombinedWithCoalesce(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#94"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -1069,7 +1069,7 @@ func TestDispatcher_Reuse_DeferAfterMaxCoalesceWindowAndBoundFromFirstDeferral(t
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#96"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -1198,7 +1198,7 @@ func TestDispatcher_Reuse_DeferReapAndRetryNeverDuplicated(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, ag))
 
 	const subject = "github:octo/repo#97"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -1303,7 +1303,7 @@ func TestDispatcher_Reuse_DeferPausedUsesTruthfulReasonAndIncompleteCreateDefers
 	require.True(t, gotAg.IsIncompleteCreate())
 
 	const subject = "github:octo/repo#98"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, ag.ID))
 
@@ -1388,7 +1388,7 @@ func TestDispatcher_Reuse_NonDispatchActionRunsOwnActionDespiteLiveClaim(t *test
 	require.NoError(t, cs.CreateAgent(ctx, targetAg))
 
 	const subject = "github:octo/repo#99"
-	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	c, _, err := claims.Claim(ctx, tr.ID, 0, subject, uuid.NewString(), uuid.NewString())
 	require.NoError(t, err)
 	require.NoError(t, claims.Bind(ctx, c, oldAg.ID))
 

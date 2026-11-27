@@ -576,15 +576,17 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 			return
 		}
 		defaultTr = &store.Trigger{
-			ID:                   api.NewUUID(),
-			ProjectID:            projectID,
-			Name:                 name,
-			SourceKind:           store.TriggerSourceKindWebhook,
-			SourceID:             ep.ID,
-			MatchTypes:           matchTypes,
-			MatchRules:           matchRules,
-			ActionType:           store.TriggerActionMessage,
-			ActionPayload:        actionPayload,
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			Name:       name,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			MatchTypes: matchTypes,
+			MatchRules: matchRules,
+			Actions: []store.TriggerAction{{
+				Type:    store.TriggerActionMessage,
+				Payload: actionPayload,
+			}},
 			SubjectDialect:       subjectDialect,
 			SubjectRule:          subjectRule,
 			SubjectMode:          subjectMode,
