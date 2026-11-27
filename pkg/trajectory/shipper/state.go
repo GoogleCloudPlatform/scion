@@ -118,6 +118,8 @@ type ArtifactState struct {
 	Pending              *PendingSegment `json:"pending,omitempty"`
 	Baseline             bool            `json:"baseline"`
 	BaselineOffset       int64           `json:"baseline_offset,omitempty"`
+	BaselineGuardHash    string          `json:"baseline_guard_hash,omitempty"`
+	BaselineGuardLen     int             `json:"baseline_guard_len,omitempty"`
 	NeedsBaseline        bool            `json:"needs_baseline,omitempty"`
 	OriginHubID          string          `json:"origin_hub_id,omitempty"`
 	ConsecutiveFailures  int             `json:"consecutive_failures"`
@@ -221,6 +223,8 @@ var knownArtifactStateFields = map[string]struct{}{
 	"pending":                {},
 	"baseline":               {},
 	"baseline_offset":        {},
+	"baseline_guard_hash":    {},
+	"baseline_guard_len":     {},
 	"needs_baseline":         {},
 	"origin_hub_id":          {},
 	"consecutive_failures":   {},

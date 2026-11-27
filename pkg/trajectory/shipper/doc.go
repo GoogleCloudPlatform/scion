@@ -33,6 +33,13 @@
 // with owner-only permissions (0600 on Unix, owner-only DACL on Windows) inside
 // a private directory (0700 on Unix).
 //
+// Anchor symlink note for P6 broker reuse: state.json and state.lock are
+// opened through pkg/util/privatefs.OpenTree, whose Unix anchor follows
+// symlinks at <home>/.scion and <home>/.scion/trajectory-shipper (while
+// enforcing O_NOFOLLOW on leaves). Before P6 broker harvest reuses this state
+// directory against untrusted host-readable agent homes, it must add an
+// openat-based no-follow anchor for the state directory.
+//
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:
 //   - inode / device (and human-readable file_id "dev:ino"): stored separately.
@@ -47,8 +54,9 @@
 //     within a generation: at baseline parsed_offset is initialized to
 //     baseline_offset (so pre-enablement history is never normalized), on
 //     normal commits parsed_offset is preserved untouched (advanced only by
-//     the normalizer), and on any generation bump parsed_offset resets to 0
-//     alongside raw_committed_offset.
+//     the normalizer), and on any generation bump parsed_offset resets to the
+//     new generation's starting offset (baseline_offset when pre-baseline bytes
+//     are preserved, or 0 otherwise).
 //   - guard_hash / guard_len: hex-encoded 64-bit FNV-1a hash of the up to 64
 //     bytes immediately preceding raw_committed_offset, computed from the
 //     committed byte buffer (plus up to 64 preceding bytes).
@@ -57,10 +65,14 @@
 //     If a commit ACK is lost or the process crashes before committing state,
 //     and the file continues to grow, the next round replays the exact pending
 //     range [raw_committed_offset, pending.byte_end) so the Hub resolves it
-//     via idempotent replay rather than 409 segment_conflict.
-//   - baseline / baseline_offset / needs_baseline: whether the artifact existed
-//     at initial baseline, its recorded starting offset, and whether an initial
-//     open/stat failure deferred baselining to the first successful open.
+//     via idempotent replay rather than 409 segment_conflict. Pending replays
+//     strictly respect the round's MaxBytes budget: if a pending segment
+//     exceeds the remaining budget, it is skipped with BudgetExhausted=true.
+//   - baseline / baseline_offset / baseline_guard_hash / baseline_guard_len /
+//     needs_baseline: whether the artifact existed at initial baseline, its
+//     recorded starting offset and 64-byte FNV-1a guard at that offset, and
+//     whether an initial open/stat failure deferred baselining to the first
+//     successful open.
 //   - origin_hub_id: Hub identifier recorded for relocation continuity.
 //   - consecutive_failures / last_error / last_generation_reason: fault and
 //     generation-rotation diagnostics.
@@ -92,12 +104,14 @@
 //
 // Discovery requires every artifact and any symlink target to remain inside the
 // matched harness rule root (for example .claude/projects/), not merely inside
-// the agent home. Opening walks components relative to the resolved rule root
-// with openat(2) and O_NOFOLLOW (O_DIRECTORY on intermediate directories,
-// O_NONBLOCK on the leaf) and verifies the opened descriptor is a regular file,
-// preventing TOCTOU symlink swaps.
+// the agent home. Opening opens the trusted resolved home directory once with
+// O_DIRECTORY and walks every component below it (rule-root ancestors,
+// intermediate directories, and leaf) with openat(2) and O_NOFOLLOW
+// (O_DIRECTORY on directories, O_NONBLOCK on the leaf), then verifies the
+// opened descriptor is a regular file via fstat. This prevents TOCTOU symlink
+// swaps at any component between the home directory and the leaf.
 //
-// # Generation Bumps
+// # Generation Bumps and Pre-Baseline Privacy
 //
 // Before planning a segment for an artifact with raw_committed_offset > 0, the
 // shipper verifies:
@@ -107,15 +121,17 @@
 //     matches stored guard_hash (else reason "guard_mismatch").
 //
 // Any mismatch—or an OutcomeConflict response from Uploader.Ship—increments
-// generation, resets raw_committed_offset and parsed_offset to 0, clears any
-// pending segment and guard hash, and records the reason. Existing committed
-// segments in prior generations are never overwritten.
+// generation, clears any pending segment, and records the reason. Existing
+// committed segments in prior generations are never overwritten.
 //
-// Note on pre-baseline bytes: the pending-segment record prevents ordinary
-// lost-ACK + file-growth retries from causing a generation bump. However, a
-// genuine truncation, inode replacement, guard-hash mismatch (in-place rewrite
-// before the committed offset), or Hub 409 conflict on a baselined file
-// intentionally restarts the new generation at offset 0 so the generation is
-// self-contained; in those fault cases, bytes before the original baseline
-// offset can be included in the new generation.
+// For a baselined artifact (baseline_offset > 0), pre-baseline privacy takes
+// precedence over restarting at offset 0: if the current file is at least
+// baseline_offset bytes long and its 64-byte FNV-1a guard at baseline_offset
+// still matches baseline_guard_hash (e.g. a Hub 409 conflict or a
+// write-temp+rename rotation that kept pre-baseline history), the new
+// generation starts at baseline_offset (both raw_committed_offset and
+// parsed_offset set to baseline_offset, with guard_hash recomputed there).
+// Only when the file is shorter than baseline_offset or its pre-baseline bytes
+// genuinely changed (baseline guard mismatch) does the new generation restart
+// at offset 0.
 package shipper

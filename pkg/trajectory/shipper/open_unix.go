@@ -28,27 +28,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// openArtifactNoFollow opens relWithinRuleRoot relative to resolvedRuleRoot
-// without following symlinks at any intermediate directory or at the leaf,
+// openArtifactNoFollow opens nativeRelativePath relative to the trusted
+// resolvedHome directory without following symlinks at any component below
+// resolvedHome (rule-root ancestors, intermediate directories, or leaf),
 // preventing TOCTOU symlink swaps between discovery and open.
 //
-// Every component is opened via openat(2) with O_NOFOLLOW (and O_DIRECTORY for
-// intermediate components, O_NONBLOCK for the leaf so FIFOs cannot block).
-// The returned handle is verified to be a regular file via fstat.
-func openArtifactNoFollow(resolvedRuleRoot, relWithinRuleRoot string) (*os.File, os.FileInfo, error) {
-	if resolvedRuleRoot == "" || relWithinRuleRoot == "" {
-		return nil, nil, errors.New("rule root and relative artifact path are required")
+// Every component below resolvedHome is opened via openat(2) with O_NOFOLLOW
+// (and O_DIRECTORY for directory components, O_NONBLOCK for the leaf so FIFOs
+// cannot block). The returned handle is verified to be a regular file via fstat.
+func openArtifactNoFollow(resolvedHome, nativeRelativePath string) (*os.File, os.FileInfo, error) {
+	if resolvedHome == "" || nativeRelativePath == "" {
+		return nil, nil, errors.New("home directory and relative artifact path are required")
 	}
-	parts := strings.Split(relWithinRuleRoot, "/")
+	parts := strings.Split(nativeRelativePath, "/")
 	for _, p := range parts {
 		if err := pathcanon.ValidName(p); err != nil {
 			return nil, nil, fmt.Errorf("invalid artifact path component %q: %w", p, err)
 		}
 	}
 
-	dirFD, err := unix.Open(resolvedRuleRoot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	dirFD, err := unix.Open(resolvedHome, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open rule root %s: %w", resolvedRuleRoot, err)
+		return nil, nil, fmt.Errorf("open home %s: %w", resolvedHome, err)
 	}
 
 	for _, dirComp := range parts[:len(parts)-1] {
@@ -56,7 +57,7 @@ func openArtifactNoFollow(resolvedRuleRoot, relWithinRuleRoot string) (*os.File,
 		_ = unix.Close(dirFD)
 		if err != nil {
 			if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
-				return nil, nil, fmt.Errorf("refusing intermediate component %q: %w", dirComp, privatefs.ErrReparsePoint)
+				return nil, nil, fmt.Errorf("refusing directory component %q: %w", dirComp, privatefs.ErrReparsePoint)
 			}
 			return nil, nil, fmt.Errorf("open dir component %q: %w", dirComp, err)
 		}
@@ -73,7 +74,7 @@ func openArtifactNoFollow(resolvedRuleRoot, relWithinRuleRoot string) (*os.File,
 		return nil, nil, fmt.Errorf("open artifact leaf %q: %w", leaf, err)
 	}
 
-	f := os.NewFile(uintptr(leafFD), resolvedRuleRoot+"/"+relWithinRuleRoot)
+	f := os.NewFile(uintptr(leafFD), resolvedHome+"/"+nativeRelativePath)
 	if f == nil {
 		_ = unix.Close(leafFD)
 		return nil, nil, errors.New("failed to wrap artifact file descriptor")
@@ -86,7 +87,7 @@ func openArtifactNoFollow(resolvedRuleRoot, relWithinRuleRoot string) (*os.File,
 	}
 	if !fi.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, nil, fmt.Errorf("refusing %s: not a regular file", relWithinRuleRoot)
+		return nil, nil, fmt.Errorf("refusing %s: not a regular file", nativeRelativePath)
 	}
 	return f, fi, nil
 }

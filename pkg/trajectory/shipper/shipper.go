@@ -22,7 +22,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
 // Round trigger reasons passed in RoundOptions.Reason.
@@ -128,9 +131,10 @@ type Config struct {
 // uploads them through an Uploader, and maintains durable watermarks under an
 // exclusive inter-process lock.
 type Shipper struct {
-	cfg  Config
-	spec HarnessSpec
-	now  func() time.Time
+	cfg       Config
+	spec      HarnessSpec
+	now       func() time.Time
+	nextStart atomic.Int64
 }
 
 // New constructs a validated Shipper.
@@ -262,7 +266,11 @@ func clearRunTruncation(st *State) {
 }
 
 func (s *Shipper) initBaselineLocked(existing *State) (*State, []RefusedPath, []RefusedPath, error) {
-	disc, err := Discover(s.cfg.HomeDir, s.spec)
+	resolvedHome, err := pathcanon.Resolve(s.cfg.HomeDir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve home directory %s: %w", s.cfg.HomeDir, err)
+	}
+	disc, err := Discover(resolvedHome, s.spec)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -294,7 +302,7 @@ func (s *Shipper) initBaselineLocked(existing *State) (*State, []RefusedPath, []
 		if _, tracked := st.Artifacts[art.NativeRelativePath]; tracked {
 			continue
 		}
-		entry, err := s.baselineArtifact(art, st.OriginHubID, now)
+		entry, err := s.baselineArtifact(resolvedHome, art, st.OriginHubID, now)
 		if err != nil {
 			// Record a lazy-baseline entry so a transient open/stat error at
 			// baseline time never causes pre-baseline history to ship from 0.
@@ -323,8 +331,8 @@ func (s *Shipper) initBaselineLocked(existing *State) (*State, []RefusedPath, []
 	return st, disc.Refused, skipped, nil
 }
 
-func (s *Shipper) baselineArtifact(art DiscoveredArtifact, originHubID string, now time.Time) (*ArtifactState, error) {
-	f, fi, err := openArtifactNoFollow(art.RuleRootAbs, art.RelWithinRuleRoot)
+func (s *Shipper) baselineArtifact(resolvedHome string, art DiscoveredArtifact, originHubID string, now time.Time) (*ArtifactState, error) {
+	f, fi, err := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
 	if err != nil {
 		return nil, err
 	}
@@ -361,6 +369,8 @@ func (s *Shipper) baselineArtifact(art DiscoveredArtifact, originHubID string, n
 		GuardLen:           guardLen,
 		Baseline:           true,
 		BaselineOffset:     offset,
+		BaselineGuardHash:  guardHash,
+		BaselineGuardLen:   guardLen,
 		OriginHubID:        originHubID,
 		UpdatedAt:          &now,
 	}, nil
@@ -454,7 +464,12 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 		}
 	}
 
-	disc, err := Discover(s.cfg.HomeDir, s.spec)
+	resolvedHome, err := pathcanon.Resolve(s.cfg.HomeDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve home directory %s: %w", s.cfg.HomeDir, err)
+	}
+
+	disc, err := Discover(resolvedHome, s.spec)
 	if err != nil {
 		return nil, err
 	}
@@ -468,21 +483,46 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 	effectiveMaxSeg := min(s.cfg.MaxSegmentBytes, roundMaxBytes)
 	remainingBudget := roundMaxBytes
 
-	for _, art := range disc.Artifacts {
-		if err := ctx.Err(); err != nil {
-			return res, err
+	n := len(disc.Artifacts)
+	if n > 0 {
+		start := int(s.nextStart.Load()) % n
+		if start < 0 {
+			start = 0
 		}
-		if remainingBudget <= 0 {
-			res.BudgetExhausted = true
-			break
-		}
+		lastIdx := start
+		for i := 0; i < n; i++ {
+			idx := (start + i) % n
+			lastIdx = idx
+			art := disc.Artifacts[idx]
+			if err := ctx.Err(); err != nil {
+				s.nextStart.Store(int64((lastIdx + 1) % n))
+				return res, err
+			}
+			if remainingBudget <= 0 {
+				res.BudgetExhausted = true
+				s.nextStart.Store(int64(idx))
+				break
+			}
 
-		stopRound, err := s.shipArtifactLocked(ctx, st, art, effectiveMaxSeg, opts.Final, &remainingBudget, res)
-		if err != nil {
-			return res, err
+			stopRound, err := s.shipArtifactLocked(ctx, resolvedHome, st, art, effectiveMaxSeg, opts.Final, &remainingBudget, res)
+			if err != nil {
+				s.nextStart.Store(int64((lastIdx + 1) % n))
+				return res, err
+			}
+			if stopRound {
+				s.nextStart.Store(int64((lastIdx + 1) % n))
+				break
+			}
+			if remainingBudget <= 0 {
+				s.nextStart.Store(int64((idx + 1) % n))
+				if i+1 < n {
+					res.BudgetExhausted = true
+				}
+				break
+			}
 		}
-		if stopRound {
-			break
+		if remainingBudget > 0 && !res.BudgetExhausted {
+			s.nextStart.Store(int64((lastIdx + 1) % n))
 		}
 	}
 
@@ -495,6 +535,7 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 // cancellation) are returned to the caller.
 func (s *Shipper) shipArtifactLocked(
 	ctx context.Context,
+	resolvedHome string,
 	st *State,
 	art DiscoveredArtifact,
 	effectiveMaxSeg int64,
@@ -506,7 +547,7 @@ func (s *Shipper) shipArtifactLocked(
 		return false, nil
 	}
 
-	f, fi, err := openArtifactNoFollow(art.RuleRootAbs, art.RelWithinRuleRoot)
+	f, fi, err := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
 	if err != nil {
 		res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("open artifact: %w", err)
 		return false, nil
@@ -571,6 +612,8 @@ func (s *Shipper) shipArtifactLocked(
 		entry.RawCommittedOffset = offset
 		entry.ParsedOffset = offset
 		entry.BaselineOffset = offset
+		entry.BaselineGuardHash = guardHash
+		entry.BaselineGuardLen = guardLen
 		entry.GuardHash = guardHash
 		entry.GuardLen = guardLen
 		entry.NeedsBaseline = false
@@ -586,7 +629,7 @@ func (s *Shipper) shipArtifactLocked(
 		res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("verify guard: %w", err)
 		return false, nil
 	} else if bumpReason != "" {
-		if err := s.bumpGenerationLocked(st, entry, fid, bumpReason, "", false, res); err != nil {
+		if err := s.bumpGenerationLocked(f, st, entry, fid, fileSize, bumpReason, "", false, res); err != nil {
 			return true, err
 		}
 	} else {
@@ -616,13 +659,13 @@ func (s *Shipper) shipArtifactLocked(
 			if entry.Pending.ByteEnd <= entry.RawCommittedOffset {
 				entry.Pending = nil
 			} else if fileSize < entry.Pending.ByteEnd {
-				if err := s.bumpGenerationLocked(st, entry, fid, GenReasonTruncated, "", false, res); err != nil {
+				if err := s.bumpGenerationLocked(f, st, entry, fid, fileSize, GenReasonTruncated, "", false, res); err != nil {
 					return true, err
 				}
 				continue
 			} else {
 				pendingLen := entry.Pending.ByteEnd - entry.RawCommittedOffset
-				if pendingLen > *remainingBudget && res.BytesShipped > 0 {
+				if pendingLen > *remainingBudget {
 					res.BudgetExhausted = true
 					return false, nil
 				}
@@ -633,14 +676,14 @@ func (s *Shipper) shipArtifactLocked(
 					return false, nil
 				}
 				if int64(n) != pendingLen {
-					if err := s.bumpGenerationLocked(st, entry, fid, GenReasonTruncated, "", false, res); err != nil {
+					if err := s.bumpGenerationLocked(f, st, entry, fid, fileSize, GenReasonTruncated, "", false, res); err != nil {
 						return true, err
 					}
 					continue
 				}
 				sum := sha256.Sum256(buf)
 				if hex.EncodeToString(sum[:]) != entry.Pending.RawSHA256 {
-					if err := s.bumpGenerationLocked(st, entry, fid, GenReasonGuardMismatch, "", false, res); err != nil {
+					if err := s.bumpGenerationLocked(f, st, entry, fid, fileSize, GenReasonGuardMismatch, "", false, res); err != nil {
 						return true, err
 					}
 					continue
@@ -756,7 +799,7 @@ func (s *Shipper) shipArtifactLocked(
 			if msg == "" {
 				msg = GenReasonConflict
 			}
-			if err := s.bumpGenerationLocked(st, entry, fid, GenReasonConflict, msg, true, res); err != nil {
+			if err := s.bumpGenerationLocked(f, st, entry, fid, fileSize, GenReasonConflict, msg, true, res); err != nil {
 				return true, err
 			}
 			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("segment conflict: %s", msg)
@@ -835,20 +878,56 @@ func (s *Shipper) shipArtifactLocked(
 }
 
 func (s *Shipper) bumpGenerationLocked(
+	f *os.File,
 	st *State,
 	entry *ArtifactState,
 	fid fileID,
+	fileSize int64,
 	reason string,
 	errMsg string,
 	countFailure bool,
 	res *RoundResult,
 ) error {
 	now := s.now().UTC()
+
+	// Preserve pre-baseline privacy: if the artifact was baselined with
+	// BaselineOffset > 0 and the file still has intact pre-baseline bytes
+	// (size >= BaselineOffset and matching BaselineGuardHash), start the new
+	// generation at BaselineOffset rather than 0.
+	var restartOffset int64
+	var restartGuardHash string
+	var restartGuardLen int
+	if entry.Baseline && entry.BaselineOffset > 0 && fileSize >= entry.BaselineOffset {
+		hash, gl, err := ComputeGuardHash(f, entry.BaselineOffset)
+		if err == nil {
+			preserve := false
+			switch reason {
+			case GenReasonConflict:
+				if (entry.Inode == 0 || fid.Ino == entry.Inode) &&
+					(entry.BaselineGuardLen == 0 || hash == entry.BaselineGuardHash) {
+					preserve = true
+				}
+			default:
+				// For inode_changed, guard_mismatch, or partial truncation
+				// above BaselineOffset: preserve baseline if the recorded
+				// baseline guard still matches.
+				if entry.BaselineGuardLen > 0 && hash == entry.BaselineGuardHash {
+					preserve = true
+				}
+			}
+			if preserve {
+				restartOffset = entry.BaselineOffset
+				restartGuardHash = hash
+				restartGuardLen = gl
+			}
+		}
+	}
+
 	entry.Generation++
-	entry.RawCommittedOffset = 0
-	entry.ParsedOffset = 0
-	entry.GuardHash = ""
-	entry.GuardLen = 0
+	entry.RawCommittedOffset = restartOffset
+	entry.ParsedOffset = restartOffset
+	entry.GuardHash = restartGuardHash
+	entry.GuardLen = restartGuardLen
 	entry.Pending = nil
 	entry.Inode = fid.Ino
 	entry.Device = fid.Dev

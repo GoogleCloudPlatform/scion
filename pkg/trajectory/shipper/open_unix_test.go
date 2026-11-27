@@ -22,63 +22,127 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
-func TestOpenArtifactNoFollowRefusesLeafAndIntermediateSwaps(t *testing.T) {
-	home := t.TempDir()
-	outside := t.TempDir()
-
-	secret := filepath.Join(outside, "secret.jsonl")
-	if err := os.WriteFile(secret, []byte("{\"secret\":true}\n"), 0o600); err != nil {
-		t.Fatalf("write secret: %v", err)
+func TestOpenArtifactNoFollowRefusesAllAncestorAndLeafSwaps(t *testing.T) {
+	tests := []struct {
+		name string
+		swap func(t *testing.T, home, outside string)
+	}{
+		{
+			name: "swap .claude ancestor for symlink",
+			swap: func(t *testing.T, home, outside string) {
+				target := filepath.Join(outside, "projects", "-workspace", "ok.jsonl")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatalf("mkdir outside target: %v", err)
+				}
+				if err := os.WriteFile(target, []byte("{\"secret\":true}\n"), 0o600); err != nil {
+					t.Fatalf("write outside target: %v", err)
+				}
+				claudeDir := filepath.Join(home, ".claude")
+				if err := os.RemoveAll(claudeDir); err != nil {
+					t.Fatalf("remove .claude: %v", err)
+				}
+				if err := os.Symlink(outside, claudeDir); err != nil {
+					t.Fatalf("symlink .claude: %v", err)
+				}
+			},
+		},
+		{
+			name: "swap projects ancestor for symlink",
+			swap: func(t *testing.T, home, outside string) {
+				target := filepath.Join(outside, "-workspace", "ok.jsonl")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatalf("mkdir outside target: %v", err)
+				}
+				if err := os.WriteFile(target, []byte("{\"secret\":true}\n"), 0o600); err != nil {
+					t.Fatalf("write outside target: %v", err)
+				}
+				projDir := filepath.Join(home, ".claude", "projects")
+				if err := os.RemoveAll(projDir); err != nil {
+					t.Fatalf("remove projects: %v", err)
+				}
+				if err := os.Symlink(outside, projDir); err != nil {
+					t.Fatalf("symlink projects: %v", err)
+				}
+			},
+		},
+		{
+			name: "swap intermediate directory for symlink",
+			swap: func(t *testing.T, home, outside string) {
+				target := filepath.Join(outside, "ok.jsonl")
+				if err := os.WriteFile(target, []byte("{\"secret\":true}\n"), 0o600); err != nil {
+					t.Fatalf("write outside target: %v", err)
+				}
+				workDir := filepath.Join(home, ".claude", "projects", "-workspace")
+				if err := os.RemoveAll(workDir); err != nil {
+					t.Fatalf("remove workDir: %v", err)
+				}
+				if err := os.Symlink(outside, workDir); err != nil {
+					t.Fatalf("symlink workDir: %v", err)
+				}
+			},
+		},
+		{
+			name: "swap leaf file for symlink",
+			swap: func(t *testing.T, home, outside string) {
+				secret := filepath.Join(outside, "secret.jsonl")
+				if err := os.WriteFile(secret, []byte("{\"secret\":true}\n"), 0o600); err != nil {
+					t.Fatalf("write secret: %v", err)
+				}
+				okFile := filepath.Join(home, ".claude", "projects", "-workspace", "ok.jsonl")
+				if err := os.Remove(okFile); err != nil {
+					t.Fatalf("remove okFile: %v", err)
+				}
+				if err := os.Symlink(secret, okFile); err != nil {
+					t.Fatalf("symlink leaf: %v", err)
+				}
+			},
+		},
 	}
 
-	ruleRoot := filepath.Join(home, ".claude", "projects")
-	workDir := filepath.Join(ruleRoot, "-workspace")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatalf("mkdir workDir: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			outside := t.TempDir()
 
-	// Normal file opens cleanly.
-	okFile := filepath.Join(workDir, "ok.jsonl")
-	if err := os.WriteFile(okFile, []byte("{\"ok\":1}\n"), 0o644); err != nil {
-		t.Fatalf("write okFile: %v", err)
-	}
-	f, fi, err := openArtifactNoFollow(ruleRoot, "-workspace/ok.jsonl")
-	if err != nil {
-		t.Fatalf("openArtifactNoFollow(ok): %v", err)
-	}
-	_ = f.Close()
-	if !fi.Mode().IsRegular() {
-		t.Fatalf("expected regular file")
-	}
+			okFile := filepath.Join(home, ".claude", "projects", "-workspace", "ok.jsonl")
+			if err := os.MkdirAll(filepath.Dir(okFile), 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(okFile, []byte("{\"ok\":1}\n"), 0o644); err != nil {
+				t.Fatalf("write okFile: %v", err)
+			}
 
-	// Leaf swap: replace ok.jsonl with a symlink to outside secret.
-	if err := os.Remove(okFile); err != nil {
-		t.Fatalf("remove okFile: %v", err)
-	}
-	if err := os.Symlink(secret, okFile); err != nil {
-		t.Fatalf("symlink leaf: %v", err)
-	}
-	if f, _, err := openArtifactNoFollow(ruleRoot, "-workspace/ok.jsonl"); err == nil {
-		_ = f.Close()
-		t.Fatalf("expected leaf symlink swap to be refused")
-	} else if !errors.Is(err, privatefs.ErrReparsePoint) {
-		t.Fatalf("expected ErrReparsePoint on leaf swap, got %v", err)
-	}
+			// First verify Discover succeeds and openArtifactNoFollow works before swap.
+			disc, err := Discover(home, ClaudeHarnessSpec())
+			if err != nil || len(disc.Artifacts) != 1 {
+				t.Fatalf("Discover: err=%v artifacts=%+v", err, disc)
+			}
+			resolvedHome, err := pathcanon.Resolve(home)
+			if err != nil {
+				t.Fatalf("Resolve home: %v", err)
+			}
+			rel := disc.Artifacts[0].NativeRelativePath
+			f, fi, err := openArtifactNoFollow(resolvedHome, rel)
+			if err != nil {
+				t.Fatalf("openArtifactNoFollow before swap: %v", err)
+			}
+			_ = f.Close()
+			if !fi.Mode().IsRegular() {
+				t.Fatalf("expected regular file")
+			}
 
-	// Intermediate-directory swap: replace -workspace with a symlink to outside.
-	if err := os.RemoveAll(workDir); err != nil {
-		t.Fatalf("remove workDir: %v", err)
-	}
-	if err := os.Symlink(outside, workDir); err != nil {
-		t.Fatalf("symlink intermediate dir: %v", err)
-	}
-	if f, _, err := openArtifactNoFollow(ruleRoot, "-workspace/secret.jsonl"); err == nil {
-		_ = f.Close()
-		t.Fatalf("expected intermediate dir symlink swap to be refused")
-	} else if !errors.Is(err, privatefs.ErrReparsePoint) {
-		t.Fatalf("expected ErrReparsePoint on intermediate dir swap, got %v", err)
+			// Now perform the post-discovery swap and verify openArtifactNoFollow refuses it.
+			tc.swap(t, home, outside)
+			if f, _, err := openArtifactNoFollow(resolvedHome, rel); err == nil {
+				_ = f.Close()
+				t.Fatalf("expected swap to be refused")
+			} else if !errors.Is(err, privatefs.ErrReparsePoint) {
+				t.Fatalf("expected ErrReparsePoint, got %v", err)
+			}
+		})
 	}
 }

@@ -1434,3 +1434,256 @@ func TestLazyBaselineEntryBaselinesAtFirstOpen(t *testing.T) {
 		t.Fatalf("unexpected post-lazy-baseline ship: r2=%+v", r2)
 	}
 }
+
+func TestConflictOnBaselinedArtifactPreservesPreBaselinePrivacy(t *testing.T) {
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-conflict-base.jsonl"
+	pre := "{\"PRE_BASELINE_SECRET\":1}\n"
+	abs := writeArtifact(t, home, rel, pre)
+
+	up := newFakeUploader()
+	up.onShip = func(_ context.Context, seg shipper.Segment, _ int) (shipper.ShipResult, error, bool) {
+		if seg.Generation == 0 {
+			return shipper.ShipResult{Outcome: shipper.OutcomeConflict, Message: "409 segment_conflict"}, nil, true
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	post := "{\"post\":1}\n"
+	appendArtifact(t, abs, post)
+
+	// Round 1 hits 409 conflict on gen 0 -> bumps to gen 1 starting at BaselineOffset.
+	r1, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if r1.GenerationBumps != 1 {
+		t.Fatalf("GenerationBumps=%d, want 1", r1.GenerationBumps)
+	}
+
+	st1, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState 1: %v", err)
+	}
+	e1 := st1.Artifacts[rel]
+	if e1.Generation != 1 || e1.RawCommittedOffset != int64(len(pre)) || e1.ParsedOffset != int64(len(pre)) {
+		t.Fatalf("after conflict on baselined file: gen=%d raw=%d parsed=%d, want 1/%d/%d",
+			e1.Generation, e1.RawCommittedOffset, e1.ParsedOffset, len(pre), len(pre))
+	}
+
+	// Round 2 ships gen 1 starting at BaselineOffset; no segment may contain pre-baseline bytes.
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.SegmentsShipped != 1 {
+		t.Fatalf("round 2 SegmentsShipped=%d, want 1", r2.SegmentsShipped)
+	}
+	for _, seg := range up.attempts {
+		if seg.ByteStart < int64(len(pre)) {
+			t.Fatalf("shipped segment starts at %d < baseline %d", seg.ByteStart, len(pre))
+		}
+		raw, err := gunzip(seg.Compressed)
+		if err != nil {
+			t.Fatalf("gunzip: %v", err)
+		}
+		if strings.Contains(string(raw), "PRE_BASELINE_SECRET") {
+			t.Fatalf("pre-baseline bytes leaked in segment: %q", string(raw))
+		}
+	}
+	if got := string(up.reassemble(t, rel, 1)); got != post {
+		t.Fatalf("gen 1 reassembled=%q, want %q", got, post)
+	}
+}
+
+func TestBaselinedRotationGuardBranches(t *testing.T) {
+	t.Run("atomic rewrite keeping pre-baseline history starts gen 1 at baseline", func(t *testing.T) {
+		home := t.TempDir()
+		rel := ".claude/projects/-workspace/sess-rot-keep.jsonl"
+		pre := "{\"PRE_BASELINE_HISTORY\":\"keep-private-0123456789\"}\n"
+		abs := writeArtifact(t, home, rel, pre)
+
+		up := newFakeUploader()
+		s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, err := s.Baseline(context.Background()); err != nil {
+			t.Fatalf("Baseline: %v", err)
+		}
+
+		// Write-temp + rename preserving the exact pre-baseline prefix plus new post-baseline line.
+		post := "{\"post\":1}\n"
+		tmp := abs + ".tmp"
+		if err := os.WriteFile(tmp, []byte(pre+post), 0o644); err != nil {
+			t.Fatalf("write tmp: %v", err)
+		}
+		if err := os.Rename(tmp, abs); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+
+		r, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+		if err != nil {
+			t.Fatalf("RunRound: %v", err)
+		}
+		if r.GenerationBumps != 1 || r.SegmentsShipped != 1 {
+			t.Fatalf("expected 1 bump and 1 segment, got %+v", r)
+		}
+		if got := string(up.reassemble(t, rel, 1)); got != post {
+			t.Fatalf("gen 1 reassembled=%q, want %q (pre-baseline must not ship)", got, post)
+		}
+		st, _, err := shipper.LoadState(home)
+		if err != nil {
+			t.Fatalf("LoadState: %v", err)
+		}
+		if st.Artifacts[rel].ParsedOffset != int64(len(pre)) {
+			t.Fatalf("ParsedOffset=%d, want baseline %d", st.Artifacts[rel].ParsedOffset, len(pre))
+		}
+	})
+
+	t.Run("atomic rewrite with genuinely different content restarts gen 1 at 0", func(t *testing.T) {
+		home := t.TempDir()
+		rel := ".claude/projects/-workspace/sess-rot-diff.jsonl"
+		pre := "{\"PRE_BASELINE_HISTORY\":\"old-content-0123456789\"}\n"
+		abs := writeArtifact(t, home, rel, pre)
+
+		up := newFakeUploader()
+		s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		if _, err := s.Baseline(context.Background()); err != nil {
+			t.Fatalf("Baseline: %v", err)
+		}
+
+		// Replace with genuinely different content (longer than baseline, different bytes before baseline).
+		brandNew := "{\"BRAND_NEW_FILE\":\"completely-different-content-0123456789\"}\n{\"line\":2}\n"
+		tmp := abs + ".tmp"
+		if err := os.WriteFile(tmp, []byte(brandNew), 0o644); err != nil {
+			t.Fatalf("write tmp: %v", err)
+		}
+		if err := os.Rename(tmp, abs); err != nil {
+			t.Fatalf("rename: %v", err)
+		}
+
+		r, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+		if err != nil {
+			t.Fatalf("RunRound: %v", err)
+		}
+		if r.GenerationBumps != 1 || r.SegmentsShipped != 1 {
+			t.Fatalf("expected 1 bump and 1 segment, got %+v", r)
+		}
+		if got := string(up.reassemble(t, rel, 1)); got != brandNew {
+			t.Fatalf("gen 1 reassembled=%q, want %q", got, brandNew)
+		}
+		st, _, err := shipper.LoadState(home)
+		if err != nil {
+			t.Fatalf("LoadState: %v", err)
+		}
+		if st.Artifacts[rel].ParsedOffset != 0 {
+			t.Fatalf("ParsedOffset=%d, want 0", st.Artifacts[rel].ParsedOffset)
+		}
+	})
+}
+
+func TestPendingReplayRespectsRoundMaxBytes(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+
+	// Round 1 fails retryably, leaving a ~42,000-byte pending segment.
+	up.onShip = func(_ context.Context, _ shipper.Segment, attempt int) (shipper.ShipResult, error, bool) {
+		if attempt == 1 {
+			return shipper.ShipResult{Outcome: shipper.OutcomeRetryable}, errors.New("temp error"), true
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	s, err := shipper.New(shipper.Config{HomeDir: home, RunID: "run-1", Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	rel := ".claude/projects/-workspace/sess-big-pending.jsonl"
+	bigLine := fmt.Sprintf("{\"pad\":%q}\n", strings.Repeat("a", 42000))
+	writeArtifact(t, home, rel, bigLine)
+
+	if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+
+	// Budgeted pre_stop round (MaxBytes=1024) must NOT ship the 42,000-byte pending segment.
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{
+		Final:    true,
+		Reason:   shipper.ReasonPreStop,
+		MaxBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.BytesShipped != 0 || r2.SegmentsShipped != 0 || !r2.BudgetExhausted {
+		t.Fatalf("pending replay exceeded MaxBytes: %+v", r2)
+	}
+
+	// A subsequent round with sufficient budget replays and commits the pending segment.
+	r3, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 3: %v", err)
+	}
+	if r3.SegmentsShipped != 1 || r3.BytesShipped != int64(len(bigLine)) {
+		t.Fatalf("round 3 expected full pending replay, got %+v", r3)
+	}
+}
+
+func TestRoundFairnessRotatesStartIndex(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{
+		HomeDir:         home,
+		RunID:           "run-1",
+		MaxSegmentBytes: 16,
+		MaxRoundBytes:   16, // 1 line per round
+		Uploader:        up,
+		Now:             fixedClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// sess-a sorts first and has a 3-round backlog; sess-b sorts second.
+	relA := ".claude/projects/-workspace/sess-a.jsonl"
+	relB := ".claude/projects/-workspace/sess-b.jsonl"
+	writeArtifact(t, home, relA, "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n")
+	writeArtifact(t, home, relB, "{\"b\":1}\n")
+
+	// Round 1 ships from sess-a (budget exhausted).
+	r1, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if r1.SegmentsShipped != 1 || up.attempts[0].NativeRelativePath != relA {
+		t.Fatalf("round 1 expected relA, got %+v (%v)", r1, up.attempts)
+	}
+
+	// Round 2 rotates start index to sess-b so sess-a's backlog cannot starve sess-b.
+	r2, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.SegmentsShipped < 1 || up.attempts[1].NativeRelativePath != relB {
+		t.Fatalf("round 2 expected relB first due to rotation, got %q", up.attempts[1].NativeRelativePath)
+	}
+}
