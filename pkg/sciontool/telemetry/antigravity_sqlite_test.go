@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	otelmetricnoop "go.opentelemetry.io/otel/metric/noop"
 	"google.golang.org/protobuf/encoding/protowire"
 	_ "modernc.org/sqlite"
 )
@@ -3221,5 +3222,105 @@ func TestAntigravitySQLiteTailer_PartialAppendFailurePreservesSessionDelta(t *te
 	if sessionTotal.TokensInput != 1000 || sessionTotal.TokensOutput != 200 ||
 		sessionTotal.TokensCached != 300 || sessionTotal.TokensReasoning != 30 {
 		t.Fatalf("sessionTotal = %+v, want input=1000 output=200 cached=300 reasoning=30 (no loss and no double-count)", sessionTotal)
+	}
+}
+
+func TestAntigravitySQLiteTailer_PartialAppendFailureDisabledAdvanceNoDoubleCount(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	seedEmptyAgyState(t, home)
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-partial-disabled.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795743100, testAgyUsage{
+		modelID: 1466, input: 300, output: 50, cacheRead: 100, reasoning: 10, id11: "partial-dis-0",
+	})
+	gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795743105, testAgyUsage{
+		modelID: 1466, input: 700, output: 150, cacheRead: 200, reasoning: 20, id11: "partial-dis-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?), (1, ?, ?)`, gen0, len(gen0), gen1, len(gen1)); err != nil {
+		t.Fatalf("insert gen_metadata: %v", err)
+	}
+
+	hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open hub outbox: %v", err)
+	}
+	hubOutbox.maxPending = 128
+
+	// Start as Hub-only with no active outbox yet (record 0 returns AppendDisabled
+	// while direct OTel export is active), then attach the overflowing Hub outbox
+	// before record 1 so the poll fails mid-file.
+	analytics := NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+	analytics.outbox = nil
+	analytics.hubOnly = true
+	analytics.hubOutbox = nil
+	callNum := 0
+	analytics.setRunAndActivity("run-agy-test", func(time.Time) {
+		callNum++
+		if callNum == 2 {
+			analytics.metaMu.Lock()
+			analytics.hubOutbox = hubOutbox
+			analytics.metaMu.Unlock()
+		}
+	})
+
+	noopCounter, err := otelmetricnoop.NewMeterProvider().Meter("test").Int64Counter(telemetrycontract.MetricUsageTokens)
+	if err != nil {
+		t.Fatalf("noop counter: %v", err)
+	}
+
+	var sessionTotal SessionUsage
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics,
+		OTelExportActive:  func() bool { return true },
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		SessionUsage: func(u SessionUsage) {
+			sessionTotal.TokensInput += u.TokensInput
+			sessionTotal.TokensOutput += u.TokensOutput
+			sessionTotal.TokensCached += u.TokensCached
+			sessionTotal.TokensReasoning += u.TokensReasoning
+		},
+	})
+	tailer.tokens = noopCounter
+
+	// Poll 1: record 0 returns AppendDisabled (not durable), record 1 overflows.
+	// Neither record should be flushed to SessionUsage on this failed poll.
+	if err := tailer.PollOnce(context.Background()); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+		t.Fatalf("poll 1 err = %v, want ErrAnalyticsOutboxOverflow", err)
+	}
+	if !sessionTotal.IsZero() {
+		t.Fatalf("after poll 1 with only non-durable AppendDisabled before overflow, sessionTotal = %+v, want zero", sessionTotal)
+	}
+
+	// Poll 2: Hub outbox has space; both record 0 and record 1 are durably written
+	// and counted exactly once (1000/200/300/30, not 1300/250/400/40).
+	hubOutbox.maxPending = analyticsOutboxMaxPending
+	analytics.setRunAndActivity("run-agy-test", nil)
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll 2 err = %v, want nil", err)
+	}
+	if sessionTotal.TokensInput != 1000 || sessionTotal.TokensOutput != 200 ||
+		sessionTotal.TokensCached != 300 || sessionTotal.TokensReasoning != 30 {
+		t.Fatalf("sessionTotal = %+v, want input=1000 output=200 cached=300 reasoning=30 (no double-count)", sessionTotal)
+	}
+
+	// Poll 3: when Analytics is detached while direct OTel export remains active,
+	// a clean poll commits the cursor and forwards advanceDelta to SessionUsage.
+	analytics.detach()
+	gen2 := encodeTestGenMeta(1466, "gemini-4-neon", 1795743110, testAgyUsage{
+		modelID: 1466, input: 111, output: 22, id11: "partial-dis-2",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (2, ?, ?)`, gen2, len(gen2)); err != nil {
+		t.Fatalf("insert gen2: %v", err)
+	}
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll 3 (detached with OTel active) err = %v, want nil", err)
+	}
+	if sessionTotal.TokensInput != 1111 || sessionTotal.TokensOutput != 222 {
+		t.Fatalf("after detached OTel-active commit, sessionTotal = %+v, want input=1111 output=222", sessionTotal)
 	}
 }

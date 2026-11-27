@@ -753,7 +753,8 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		// Verified decode & no drift: emit canonical token increments (calls=0)
 		// to the Track 1 outbox. Commit candDedupe and cursor ONLY after every
 		// record appends cleanly.
-		var sessionDelta SessionUsage
+		var writtenDelta SessionUsage
+		var advanceDelta SessionUsage
 		appendFailed := false
 		retryableOutboxErr := false
 		for _, rec := range res.Records {
@@ -782,7 +783,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			switch outcome {
 			case AppendWritten:
 				t.resetOutboxBackoffLocked()
-				accumulateSessionUsage(&sessionDelta, rec.Tokens)
+				accumulateSessionUsage(&writtenDelta, rec.Tokens)
 				if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
 					*otelRecorded = true
 				}
@@ -792,7 +793,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				if !t.canAdvanceWithoutAnalytics() {
 					appendFailed = true
 				} else {
-					accumulateSessionUsage(&sessionDelta, rec.Tokens)
+					accumulateSessionUsage(&advanceDelta, rec.Tokens)
 					if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
 						*otelRecorded = true
 					}
@@ -802,12 +803,14 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				break
 			}
 		}
-		// Forward any tokens already durably appended (AppendWritten) even if a
+		// Forward tokens already durably appended (AppendWritten) even if a
 		// later record in the same poll failed: on the next poll those records
 		// replay as AppendCertainDuplicate and would otherwise be dropped from
-		// local session metrics.
-		if t.cfg.SessionUsage != nil && !sessionDelta.IsZero() {
-			t.cfg.SessionUsage(sessionDelta)
+		// local session metrics. Non-durable AppendDisabled+canAdvance tokens
+		// are held in advanceDelta and flushed only on cursor commit so a
+		// failed poll does not double-count them on replay.
+		if t.cfg.SessionUsage != nil && !writtenDelta.IsZero() {
+			t.cfg.SessionUsage(writtenDelta)
 		}
 		if appendFailed {
 			// Do not advance cursor or commit candDedupe; next poll will
@@ -824,6 +827,10 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			Cursor:      res.Cursor,
 		}
 		dirty = true
+
+		if t.cfg.SessionUsage != nil && !advanceDelta.IsZero() {
+			t.cfg.SessionUsage(advanceDelta)
+		}
 	}
 
 	if dirty {
