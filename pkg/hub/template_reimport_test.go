@@ -892,3 +892,32 @@ func TestTemplateReimport_TagsSHAsAndSlashedBranches(t *testing.T) {
 		})
 	}
 }
+
+func TestTemplateReimport_BarePathSourceURL(t *testing.T) {
+	const sha = "fedcba9876543210fedcba9876543210fedcba98"
+	const bareURL = "https://github.com/acme/repo/templates/my-template"
+
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+	admin := newReimportAdmin(t, s)
+	tmpl := createReimportTemplate(t, s, "tmpl-bare-path", "my-template", store.TemplateScopeGlobal, "", bareURL)
+
+	fetcher := &fakeReimportGitHub{
+		commitSHA: sha,
+		body: buildTarGz(t, []tarEntry{
+			{name: "pax_global_header", typeflag: tar.TypeXGlobalHeader, body: sha},
+			{name: "repo-main/templates/my-template/scion-agent.yaml", body: "schema_version: \"1\"\nharness: claude\n"},
+			{name: "repo-main/templates/my-template/README.md", body: "bare-path-ok"},
+		}),
+	}
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, fetcher)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/templates/"+tmpl.ID+"/reimport", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, bareURL, got.SourceURL)
+	assert.Equal(t, sha, got.SourceCommit)
+	assert.Len(t, got.Files, 2)
+}

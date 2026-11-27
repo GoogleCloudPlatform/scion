@@ -429,6 +429,8 @@ var legacyEntryConsumers = map[string]legacyEntryConsumer{
 		"behind keyringManaged()"},
 	"ensureSigningKey@pkg/hub/attachment_delivery.go:(*Server).initAttachmentDeliveryKey": {1, consumerLegacyOnly,
 		"behind keyringManaged(); attachment delivery is integrated (ring mode: managedCapabilityKeys)"},
+	"ensureSigningKey@pkg/hub/github_credential.go:(*Server).initGitHubScopeKey": {1, consumerLegacyOnly,
+		"behind keyringManaged(); GitHub credential scope HMAC key (ring mode: managedCapabilityKeys)"},
 	"SharedSigningSecret@pkg/hub/server.go:(*Server).ensureSigningKeyWithSource": {2, consumerLegacyOnly,
 		"reached only through ensureSigningKey (legacy mode)"},
 	"deriveSharedSigningKey@pkg/hub/server.go:(*Server).ensureSigningKeyWithSource": {1, consumerLegacyOnly,

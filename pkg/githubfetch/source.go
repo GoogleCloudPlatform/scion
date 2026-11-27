@@ -134,9 +134,18 @@ func ParseURL(raw string) (Source, error) {
 	case "archive", "blob", "releases":
 		return Source{}, &Error{Kind: KindInvalidSource, Hint: "unsupported GitHub source URL"}
 	default:
-		// Bare path segments without /tree/ (e.g., https://github.com/o/r/sub)
-		// are not valid GitHub folder URLs.
-		return Source{}, &Error{Kind: KindInvalidSource, Hint: "unsupported GitHub source URL"}
+		// Bare GitHub folder URL without /tree/ (e.g.
+		// https://github.com/<owner>/<repo>/<path...>). Match the legacy
+		// parseTemplateGitHubSource and pkg/config parseGitHubURL behaviour:
+		// treat the remaining segments as a folder path on branch "main".
+		for _, seg := range rest {
+			if !validSourceSegment(seg) {
+				return Source{}, &Error{Kind: KindInvalidSource, Hint: "unsupported GitHub source URL"}
+			}
+		}
+		src.Ref = "main"
+		src.Path = strings.Join(rest, "/")
+		return src, nil
 	}
 }
 

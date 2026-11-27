@@ -2322,6 +2322,8 @@ type Server struct {
 	// signing-ring purpose of its own in keyring mode, one fixed key of its
 	// own otherwise; separate from every other key.
 	portViewKeys capabilityKeys
+	// githubScopeKeys HMAC-keys GitHub credential scopes (github_credential.go).
+	githubScopeKeys capabilityKeys
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
@@ -3707,6 +3709,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Initialize the dedicated authorized-list cursor sealing key
 	// (ptone/scion#2124).
 	if err := srv.initListCursorSealer(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the dedicated GitHub credential scope HMAC key.
+	if err := srv.initGitHubScopeKey(ctx); err != nil {
 		return nil, err
 	}
 

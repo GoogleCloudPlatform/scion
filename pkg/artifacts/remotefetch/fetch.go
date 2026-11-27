@@ -686,6 +686,8 @@ func (f *Fetcher) getSystem(ctx context.Context, u *url.URL, mode fetchMode, aut
 		transport.TLSClientConfig.RootCAs = f.rootCAs
 	}
 	transport.TLSHandshakeTimeout = f.cfg.ConnectTimeout
+	transport.DisableKeepAlives = true
+	transport.DisableCompression = true
 	transport.MaxResponseHeaderBytes = 64 << 10
 	return f.sendRequest(ctx, transport, u, u.Host, mode, authorization, reqHeader)
 }

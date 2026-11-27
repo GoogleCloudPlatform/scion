@@ -35,9 +35,8 @@ func TestGitHubCredential_ScopeHMACAndPrecedence(t *testing.T) {
 	const tokA = "ghp_secret_token_alpha"
 	const tokB = "ghp_secret_token_beta"
 
-	// Ensure the server has a signing key so HMAC scope derivation is exercised.
-	require.NotNil(t, srv.userTokenService)
-	require.NotEmpty(t, srv.userTokenService.config.SigningKey)
+	// Ensure the server initialized its dedicated GitHub scope HMAC purpose key.
+	require.True(t, srv.githubScopeCapabilityKeys().configured(), "dedicated github scope HMAC key must be configured")
 
 	t.Run("project precedence GH_REPO > GH_OWNER > GITHUB_TOKEN > anon", func(t *testing.T) {
 		useReimportCredBackend(srv, secret.ScopeProject, project.ID, map[string]string{
@@ -56,6 +55,8 @@ func TestGitHubCredential_ScopeHMACAndPrecedence(t *testing.T) {
 		assert.True(t, strings.HasPrefix(cred.Scope, "secret:"))
 		assert.Len(t, strings.TrimPrefix(cred.Scope, "secret:"), 32)
 		assert.NotContains(t, cred.Scope, tokA)
+		assert.NotEqual(t, "secret:"+githubfetch.TokenFingerprint(tokA)[:32], cred.Scope,
+			"with a purpose key present, scope must be keyed HMAC rather than unkeyed SHA-256")
 
 		// Same token produces identical scope; different token produces different scope.
 		cred2 := srv.githubCredential(ctx, ghCredRequest{

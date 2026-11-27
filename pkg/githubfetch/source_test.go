@@ -84,6 +84,14 @@ func TestParseURL(t *testing.T) {
 			wantRepo:  "repo",
 			wantRef:   "v1.2.3",
 		},
+		{
+			name:      "bare path without /tree/ defaults to main",
+			raw:       "https://github.com/acme/repo/templates/my-template",
+			wantOwner: "acme",
+			wantRepo:  "repo",
+			wantRef:   "main",
+			wantPath:  "templates/my-template",
+		},
 	}
 
 	for _, tc := range valid {
@@ -123,7 +131,7 @@ func TestParseURL(t *testing.T) {
 		"https://github.com/acme/repo/tree/main/../../etc/passwd",
 		"https://github.com/acme/repo/tree",
 		"https://github.com/acme",
-		"https://github.com/acme/repo/not-tree/main",
+		"https://github.com/acme/repo/templates/../escape",
 	}
 
 	for _, raw := range invalid {
@@ -175,5 +183,17 @@ func TestEndpointAndCacheKeys(t *testing.T) {
 	tk := TreeCacheKey("API.GITHUB.COM", "Acme", "Repo", sha, "Templates/App", "")
 	if tk != "tree:api.github.com/acme/repo@"+sha+":Templates/App#anon" {
 		t.Errorf("TreeCacheKey = %q", tk)
+	}
+}
+
+func TestCredential_IsAnonymous(t *testing.T) {
+	if (Credential{Token: "ghp_tok"}).IsAnonymous() {
+		t.Fatal("Credential with non-empty Token and zero Kind must not be anonymous")
+	}
+	if !(Credential{Kind: CredSecret}).IsAnonymous() {
+		t.Fatal("Credential with empty Token must be anonymous")
+	}
+	if !(Credential{}).IsAnonymous() {
+		t.Fatal("zero Credential must be anonymous")
 	}
 }

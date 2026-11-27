@@ -19,6 +19,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"log/slog"
 	"strconv"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
@@ -26,6 +28,52 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// SecretKeyGitHubScopeKey is the dedicated hub purpose key name used to
+// HMAC-key GitHub credential scope identifiers ("secret:<hmac16(token)>") so
+// DB/cache rows cannot be used to confirm a guessed PAT offline.
+const SecretKeyGitHubScopeKey = "github_scope_hmac_key"
+
+// initGitHubScopeKey loads or creates the dedicated GitHub credential scope
+// HMAC key through the Hub's purpose-key mechanism (signing ring in keyring
+// mode; ensureSigningKey in legacy mode). If the key cannot be loaded on a
+// non-strict deployment, the server logs a warning and falls back to truncated
+// SHA-256 scopes rather than failing startup.
+func (s *Server) initGitHubScopeKey(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyGitHubScopeKey)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.githubScopeKeys = keys
+		s.mu.Unlock()
+		return nil
+	}
+	key, err := s.ensureSigningKey(ctx, SecretKeyGitHubScopeKey, nil)
+	if err == nil && len(key) == 0 {
+		err = fmt.Errorf("github scope HMAC key resolved to an empty value")
+	}
+	if err != nil {
+		_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
+		if isGCPBackend || s.config.RequireStableSigningKey {
+			return fmt.Errorf("github scope HMAC key: %w", err)
+		}
+		slog.Warn("GitHub scope HMAC key could not be loaded or persisted; falling back to SHA-256 credential scopes",
+			"error", err)
+		return nil
+	}
+	s.mu.Lock()
+	s.githubScopeKeys = fixedCapabilityKeys(key)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Server) githubScopeCapabilityKeys() capabilityKeys {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.githubScopeKeys
+}
 
 // ghCredRequest identifies the resource scope, GitHub repository, and caller
 // for unified Hub GitHub credential resolution.
@@ -139,25 +187,22 @@ func (s *Server) scopedGitHubCredential(ctx context.Context, credScope, scopeID,
 }
 
 // secretCredentialScope returns "secret:<16-byte-hex>" keyed via HMAC-SHA256
-// from the Hub's stable user token signing key (derived with domain label
-// "githubfetch-scope"). When no signing key is initialized (e.g. a minimal
-// unit-test Server), it falls back to a truncated SHA-256 digest of token.
+// from the Hub's dedicated SecretKeyGitHubScopeKey purpose key. If the key is
+// unavailable (e.g. minimal unit-test Server or failed key derivation), it logs
+// without secret material and falls back to truncated SHA-256.
 func (s *Server) secretCredentialScope(token string) string {
-	key := s.githubScopeHMACKey()
-	if len(key) > 0 {
-		mac := hmac.New(sha256.New, key)
-		_, _ = mac.Write([]byte(token))
-		sum := mac.Sum(nil)
-		return "secret:" + hex.EncodeToString(sum[:16])
+	keys := s.githubScopeCapabilityKeys()
+	if keys.configured() {
+		if k, _, err := keys.issue(); err == nil {
+			if mat := k.Bytes(); len(mat) > 0 {
+				mac := hmac.New(sha256.New, mat)
+				_, _ = mac.Write([]byte(token))
+				sum := mac.Sum(nil)
+				return "secret:" + hex.EncodeToString(sum[:16])
+			}
+		} else {
+			s.resourceLog.Warn("github scope HMAC key issuance unavailable; falling back to SHA-256 scope", "error", err)
+		}
 	}
 	return "secret:" + githubfetch.TokenFingerprint(token)[:32]
-}
-
-func (s *Server) githubScopeHMACKey() []byte {
-	if s.userTokenService != nil && len(s.userTokenService.config.SigningKey) > 0 {
-		mac := hmac.New(sha256.New, s.userTokenService.config.SigningKey)
-		_, _ = mac.Write([]byte("githubfetch-scope"))
-		return mac.Sum(nil)
-	}
-	return nil
 }

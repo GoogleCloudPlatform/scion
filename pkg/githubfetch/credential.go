@@ -50,7 +50,7 @@ type Credential struct {
 
 // IsAnonymous reports whether c carries no token.
 func (c Credential) IsAnonymous() bool {
-	return c.Token == "" || c.Kind == CredAnonymous
+	return c.Token == ""
 }
 
 // EffectiveScope returns c.Scope, falling back to AnonScope when empty.

@@ -17,8 +17,10 @@ package remotefetch
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -294,4 +296,75 @@ func TestOpen_NetworkSystem(t *testing.T) {
 	if got := reasonOf(t, err); got != ReasonHostNotAllowed {
 		t.Fatalf("disallowed host reason = %s, want %s", got, ReasonHostNotAllowed)
 	}
+
+	// Cross-host redirect in NetworkSystem strips hop-0 Authorization and
+	// enforces MaxRedirects.
+	t.Run("cross-host redirect strips auth and enforces redirect cap", func(t *testing.T) {
+		var hop0Auth, hop1Auth string
+		var targetURL string
+
+		targetLn, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("IPv6 loopback unavailable: %v", err)
+		}
+		targetSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hop1Auth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("redirected-ok"))
+		}))
+		targetSrv.Listener = targetLn
+		targetSrv.StartTLS()
+		t.Cleanup(targetSrv.Close)
+		targetURL = targetSrv.URL + "/final"
+
+		startSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/start":
+				hop0Auth = r.Header.Get("Authorization")
+				http.Redirect(w, r, targetURL, http.StatusFound)
+			case "/loop":
+				http.Redirect(w, r, "/loop", http.StatusFound)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(startSrv.Close)
+
+		pool := x509.NewCertPool()
+		pool.AddCert(startSrv.Certificate())
+		pool.AddCert(targetSrv.Certificate())
+
+		sf := New(Config{
+			Network:      NetworkSystem,
+			MaxBytes:     1024,
+			MaxRedirects: 2,
+			AllowedHosts: []string{"127.0.0.1", "::1"},
+		})
+		sf.rootCAs = pool
+
+		resp, err := sf.Open(context.Background(), Request{
+			URL:           startSrv.URL + "/start",
+			Authorization: "Bearer sys-secret-token",
+		})
+		if err != nil {
+			t.Fatalf("NetworkSystem cross-host redirect Open: %v", err)
+		}
+		gotBody, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if string(gotBody) != "redirected-ok" {
+			t.Fatalf("body = %q, want redirected-ok", string(gotBody))
+		}
+		if hop0Auth != "Bearer sys-secret-token" {
+			t.Errorf("hop 0 auth = %q, want Bearer sys-secret-token", hop0Auth)
+		}
+		if hop1Auth != "" {
+			t.Errorf("hop 1 auth leaked across host redirect: %q", hop1Auth)
+		}
+
+		// Exceeding MaxRedirects fails with ReasonRedirects.
+		_, err = sf.Open(context.Background(), Request{URL: startSrv.URL + "/loop"})
+		if got := reasonOf(t, err); got != ReasonRedirects {
+			t.Fatalf("redirect loop reason = %s, want %s", got, ReasonRedirects)
+		}
+	})
 }

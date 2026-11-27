@@ -413,9 +413,9 @@ func TestFetchFolder_AnonVsCredAndRedirectAuthStripping(t *testing.T) {
 		}
 	})
 
-	// Ported from PR #9548: credentialed redirect to codeload, subdomain, and
-	// http:// downgrade must NEVER forward Authorization, non-allowlisted
-	// redirect fails as unreachable, and >3 redirects fail.
+	// Exercises Client's redirect and error handling through the httpDoer test
+	// double (production remotefetch redirect auth-stripping and hop caps are
+	// tested directly in pkg/artifacts/remotefetch/open_test.go).
 	t.Run("credentialed redirect strips auth and enforces allowlist and hop cap", func(t *testing.T) {
 		var codeloadAuth string
 		codeloadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -645,6 +645,17 @@ func TestExtractTarGz_SecurityAndIntegrity(t *testing.T) {
 		_, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, validTree, root, ImportHostedLimits())
 		assertErrorKind(t, err, KindUpstream)
 	})
+
+	t.Run("extra file absent from tree rejected", func(t *testing.T) {
+		tarData := buildTestTarGz(t, sha, []tarTestEntry{
+			{name: "repo-sha/t/a.txt", body: content},
+			{name: "repo-sha/t/extra.txt", body: []byte("unlisted")},
+		})
+		root, _ := os.OpenRoot(t.TempDir())
+		defer func() { _ = root.Close() }()
+		_, _, _, err := extractTarGz(bytes.NewReader(tarData), "acme/repo", "t", sha, validTree, root, ImportHostedLimits())
+		assertErrorKind(t, err, KindUpstream)
+	})
 }
 
 func TestListTree_TruncatedAndOversizedFailBeforeDownload(t *testing.T) {
@@ -814,58 +825,126 @@ func TestCooldown_ScopeIsolation(t *testing.T) {
 	}
 }
 
-// TestExtractTarGz_StreamingDoesNotBufferWholeArchive verifies that streaming a
-// 48 MiB tarball through extractTarGz keeps peak live heap well below the
-// tarball's size (entries outside subPath are discarded on the fly).
-func TestExtractTarGz_StreamingDoesNotBufferWholeArchive(t *testing.T) {
+type funcDoer func(ctx context.Context, r Request) (*Response, error)
+
+func (f funcDoer) Open(ctx context.Context, r Request) (*Response, error) { return f(ctx, r) }
+
+// TestCooldown_RemoteFetchErrorPath verifies the production path where
+// remotefetch.Open returns *remotefetch.Error{Reason: ReasonStatus, Status: 429}
+// and Client records the cooldown for that credential scope only.
+func TestCooldown_RemoteFetchErrorPath(t *testing.T) {
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	cd := NewCooldown(clock)
+
+	hits := 0
+	doer := funcDoer(func(_ context.Context, r Request) (*Response, error) {
+		hits++
+		if r.Authorization == "Bearer tok-a" {
+			return nil, &remotefetch.Error{
+				Reason: remotefetch.ReasonStatus,
+				Status: http.StatusTooManyRequests,
+				Header: http.Header{"Retry-After": {"90"}},
+				Detail: "status 429",
+			}
+		}
+		return &Response{
+			Status: http.StatusOK,
+			Header: make(http.Header),
+			Body:   io.NopCloser(strings.NewReader("1111111111111111111111111111111111111111\n")),
+		}, nil
+	})
+
+	client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: cd, Clock: clock})
+	credA := Credential{Token: "tok-a", Scope: "secret:aaa", Kind: CredSecret}
+	credB := Credential{Token: "tok-b", Scope: "secret:bbb", Kind: CredSecret}
+	src := Source{Owner: "acme", Repo: "repo", Ref: "main"}
+
+	_, _, err := client.ResolveRef(context.Background(), src, credA)
+	assertErrorKind(t, err, KindRateLimited)
+	if hits != 1 {
+		t.Fatalf("hits = %d, want 1", hits)
+	}
+
+	// Second same-scope call must be blocked locally with zero requests.
+	_, _, err = client.ResolveRef(context.Background(), src, credA)
+	assertErrorKind(t, err, KindRateLimited)
+	if hits != 1 {
+		t.Fatalf("hits = %d, want 1 (cooldown must block before Doer.Open)", hits)
+	}
+
+	// Another scope is unaffected.
+	res, _, err := client.ResolveRef(context.Background(), src, credB)
+	if err != nil {
+		t.Fatalf("scope B should succeed: %v", err)
+	}
+	if res.CommitSHA != "1111111111111111111111111111111111111111" || hits != 2 {
+		t.Fatalf("unexpected res=%+v hits=%d", res, hits)
+	}
+}
+
+// TestFetchFolder_StreamingDoesNotBufferWholeArchive verifies that streaming a
+// 48 MiB tarball end-to-end through Client.FetchFolder does not buffer the
+// archive in RAM (TotalAlloc delta stays far below the archive size).
+func TestFetchFolder_StreamingDoesNotBufferWholeArchive(t *testing.T) {
 	const sha = "9999999999999999999999999999999999999999"
 	const payloadSize = 48 << 20 // 48 MiB streamed outside subPath
+	small := []byte("schema_version: \"1\"\n")
+	treeJSON, _ := json.Marshal(map[string]any{
+		"sha":       "8888888888888888888888888888888888888888",
+		"truncated": false,
+		"tree": []map[string]any{
+			{"path": "scion-agent.yaml", "mode": "100644", "type": "blob", "sha": gitBlobSHA(small), "size": len(small)},
+		},
+	})
 
-	pr, pw := io.Pipe()
-	go func() {
-		gzw, _ := gzip.NewWriterLevel(pw, gzip.BestSpeed)
-		tw := tar.NewWriter(gzw)
-		_ = tw.WriteHeader(&tar.Header{
-			Name:       "pax_global_header",
-			Typeflag:   tar.TypeXGlobalHeader,
-			PAXRecords: map[string]string{"comment": sha},
-		})
-		// Stream a 48 MiB file outside the target subPath in 32 KiB chunks.
-		_ = tw.WriteHeader(&tar.Header{
-			Name:     "repo-sha/other/huge.bin",
-			Typeflag: tar.TypeReg,
-			Mode:     0o644,
-			Size:     payloadSize,
-		})
-		chunk := make([]byte, 32*1024)
-		for rem := payloadSize; rem > 0; {
-			n := len(chunk)
-			if rem < n {
-				n = rem
-			}
-			if _, err := tw.Write(chunk[:n]); err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
-			rem -= n
+	doer := funcDoer(func(_ context.Context, r Request) (*Response, error) {
+		if strings.Contains(r.URL, "/git/trees/") {
+			return &Response{Status: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(treeJSON))}, nil
 		}
-		// One small file inside the target subPath.
-		small := []byte("schema_version: \"1\"\n")
-		_ = tw.WriteHeader(&tar.Header{
-			Name:     "repo-sha/templates/app/scion-agent.yaml",
-			Typeflag: tar.TypeReg,
-			Mode:     0o644,
-			Size:     int64(len(small)),
-		})
-		_, _ = tw.Write(small)
-		_ = tw.Close()
-		_ = gzw.Close()
-		_ = pw.Close()
-	}()
+		pr, pw := io.Pipe()
+		go func() {
+			gzw, _ := gzip.NewWriterLevel(pw, gzip.BestSpeed)
+			tw := tar.NewWriter(gzw)
+			_ = tw.WriteHeader(&tar.Header{
+				Name:       "pax_global_header",
+				Typeflag:   tar.TypeXGlobalHeader,
+				PAXRecords: map[string]string{"comment": sha},
+			})
+			_ = tw.WriteHeader(&tar.Header{
+				Name:     "repo-sha/other/huge.bin",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+				Size:     payloadSize,
+			})
+			chunk := make([]byte, 32*1024)
+			for rem := payloadSize; rem > 0; {
+				n := len(chunk)
+				if rem < n {
+					n = rem
+				}
+				if _, err := tw.Write(chunk[:n]); err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+				rem -= n
+			}
+			_ = tw.WriteHeader(&tar.Header{
+				Name:     "repo-sha/templates/app/scion-agent.yaml",
+				Typeflag: tar.TypeReg,
+				Mode:     0o644,
+				Size:     int64(len(small)),
+			})
+			_, _ = tw.Write(small)
+			_ = tw.Close()
+			_ = gzw.Close()
+			_ = pw.Close()
+		}()
+		return &Response{Status: http.StatusOK, Header: make(http.Header), Body: pr}, nil
+	})
 
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
+	client := New(Options{Endpoint: DefaultEndpoint(), Doer: doer, Cooldown: NewCooldown(nil)})
+	src := Source{Owner: "acme", Repo: "repo", Ref: sha, Path: "templates/app"}
 
 	root, err := os.OpenRoot(t.TempDir())
 	if err != nil {
@@ -873,23 +952,25 @@ func TestExtractTarGz_StreamingDoesNotBufferWholeArchive(t *testing.T) {
 	}
 	defer func() { _ = root.Close() }()
 
-	files, written, _, err := extractTarGz(pr, "acme/repo", "templates/app", sha, nil, root, ImportHostedLimits())
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	res, err := client.FetchFolder(context.Background(), src, Credential{}, root, ImportHostedLimits())
 	if err != nil {
-		t.Fatalf("streaming extractTarGz: %v", err)
+		t.Fatalf("streaming FetchFolder: %v", err)
 	}
-	if files != 1 || written != 20 {
-		t.Fatalf("got files=%d written=%d", files, written)
+	if res.Files != 1 || res.Bytes != int64(len(small)) {
+		t.Fatalf("got res=%+v", res)
 	}
 
-	runtime.GC()
 	runtime.ReadMemStats(&after)
-	// Peak retained heap growth must be nowhere near the 48 MiB streamed archive.
-	var growth uint64
-	if after.HeapAlloc > before.HeapAlloc {
-		growth = after.HeapAlloc - before.HeapAlloc
-	}
-	if growth > 16<<20 {
-		t.Fatalf("heap grew by %d bytes for a %d-byte streamed archive; expected streaming without buffering", growth, payloadSize)
+	allocDelta := after.TotalAlloc - before.TotalAlloc
+	// Total allocations across the entire 48 MiB streamed fetch must stay far
+	// below the 48 MiB archive size (if any layer buffered the stream,
+	// TotalAlloc would exceed 48 MiB).
+	if allocDelta > 24<<20 {
+		t.Fatalf("TotalAlloc grew by %d bytes for a %d-byte streamed archive; expected streaming without buffering", allocDelta, payloadSize)
 	}
 }
 
