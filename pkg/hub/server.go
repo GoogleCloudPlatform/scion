@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -3061,9 +3062,9 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// templateSourceFetcher downloads template sources for reimport. nil
-	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
-	templateSourceFetcher templateSourceFetcher
+	// templateGitHubClient fetches GitHub template sources for reimport. nil
+	// selects the default client (newTemplateGitHubClient); tests replace it.
+	templateGitHubClient *githubfetch.Client
 
 	// templateDrift holds the caches and optional test seams for the Hub-side
 	// template drift check at agent creation (template_drift.go).
