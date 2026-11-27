@@ -3408,3 +3408,516 @@ func TestPipelineFlushSQLiteUsage_BeforeStopIsIdempotent(t *testing.T) {
 		t.Fatalf("SessionUsage calls after second flush + Stop = %d, want 1", afterStop)
 	}
 }
+
+func readPersistedAgyState(t *testing.T, home string) agySQLitePersistedState {
+	t.Helper()
+	data, err := os.ReadFile(AgySQLiteStatePath(home))
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	var st agySQLitePersistedState
+	if err := json.Unmarshal(data, &st); err != nil {
+		t.Fatalf("unmarshal state file: %v", err)
+	}
+	return st
+}
+
+func TestAntigravitySQLiteTailer_StateSaveCoalescing(t *testing.T) {
+	t.Run("default_interval_is_30s", func(t *testing.T) {
+		if defaultAgySQLiteStateSaveInterval != 30*time.Second {
+			t.Fatalf("defaultAgySQLiteStateSaveInterval = %s, want 30s", defaultAgySQLiteStateSaveInterval)
+		}
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         t.TempDir(),
+			DisableWakeSocket: true,
+		})
+		if tailer.cfg.StateSaveInterval != defaultAgySQLiteStateSaveInterval {
+			t.Fatalf("cfg.StateSaveInterval = %s, want %s", tailer.cfg.StateSaveInterval, defaultAgySQLiteStateSaveInterval)
+		}
+	})
+
+	t.Run("coalesces_rapid_dirty_polls_and_flushes_after_interval", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-coalesce.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		// Pre-existing row 0 for initial baseline.
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795750000, testAgyUsage{
+			modelID: 1466, input: 10, output: 5, id11: "coal-base-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 0, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			StateSaveInterval: 30 * time.Second,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:               func() time.Time { return now },
+		})
+
+		// First poll baselines existing DB and must persist immediately.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("baseline poll: %v", err)
+		}
+		st := readPersistedAgyState(t, home)
+		if st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID == nil || *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("baseline cursor = %v, want 0", st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID)
+		}
+
+		// Rapid dirty polls at t+5s and t+15s (within 30s interval) must emit to
+		// outbox immediately but NOT rewrite agy-sqlite-state.json yet.
+		now = now.Add(5 * time.Second)
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795750005, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "coal-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll at t+5s: %v", err)
+		}
+		st = readPersistedAgyState(t, home)
+		if *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("state file was rewritten at t+5s (cursor=%d, want 0 — should be coalesced)", *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID)
+		}
+
+		now = now.Add(10 * time.Second) // t+15s
+		gen2 := encodeTestGenMeta(1466, "gemini-4-neon", 1795750015, testAgyUsage{
+			modelID: 1466, input: 200, output: 40, id11: "coal-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (2, ?, ?)`, gen2, len(gen2)); err != nil {
+			t.Fatalf("insert gen2: %v", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll at t+15s: %v", err)
+		}
+		st = readPersistedAgyState(t, home)
+		if *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("state file was rewritten at t+15s (cursor=%d, want 0 — should be coalesced)", *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID)
+		}
+
+		// Clean poll at t+30s (interval elapsed, no new rows) must persist dirty state.
+		now = now.Add(15 * time.Second) // t+30s
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll at t+30s: %v", err)
+		}
+		st = readPersistedAgyState(t, home)
+		if *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID != 2 {
+			t.Fatalf("after 30s interval cursor = %d, want 2", *st.Files["conv-coalesce.db"].Cursor.GenMetadataRowID)
+		}
+
+		// Subsequent clean poll at t+65s must leave stateDirty=false and not update lastStateSave.
+		lastSave := tailer.lastStateSave
+		now = now.Add(35 * time.Second)
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("clean poll at t+65s: %v", err)
+		}
+		if !tailer.lastStateSave.Equal(lastSave) {
+			t.Fatalf("clean poll rewrote state file: lastStateSave changed from %v to %v", lastSave, tailer.lastStateSave)
+		}
+
+		events := drainOutboxEvents(t, outbox)
+		if len(events) != 2 {
+			t.Fatalf("got %d outbox events, want 2 (coal-1 and coal-2)", len(events))
+		}
+	})
+
+	t.Run("drift_latch_persists_immediately_within_interval", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-drift-imm.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 10, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			StateSaveInterval: 5 * time.Minute,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:               func() time.Time { return now },
+		})
+
+		// Baseline at t0.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("baseline poll: %v", err)
+		}
+
+		// Corrupt protobuf row at t+2s (well within 5m StateSaveInterval) must persist drift immediately.
+		now = now.Add(2 * time.Second)
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, 3)`, []byte{0xff, 0xff, 0xff}); err != nil {
+			t.Fatalf("insert corrupt gen0: %v", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("drift poll: %v", err)
+		}
+		st := readPersistedAgyState(t, home)
+		if !st.SchemaDriftDetected {
+			t.Fatal("expected schema_drift_detected=true persisted immediately on drift latch")
+		}
+	})
+
+	t.Run("version_detect_drift_latch_persists_immediately_within_interval", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-vdrift-imm.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 20, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:               home,
+			DisableWakeSocket:       true,
+			Analytics:               analytics,
+			StateSaveInterval:       10 * time.Minute,
+			MaxVersionFailures:      2,
+			MinVersionFailureWindow: 1 * time.Minute,
+			DetectVersion:           func(context.Context) (string, error) { return "", context.DeadlineExceeded },
+			Now:                     func() time.Time { return now },
+		})
+
+		// Baseline at t0.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("baseline poll: %v", err)
+		}
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795751000, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "vdrift-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		// Failure 1 at t+5s.
+		now = now.Add(5 * time.Second)
+		if err := tailer.PollOnce(context.Background()); err == nil {
+			t.Fatal("poll 1: expected version detection error")
+		}
+		// Failure 2 at t+2m (still well within 10m StateSaveInterval) -> latches drift & persists immediately.
+		now = now.Add(2 * time.Minute)
+		if err := tailer.PollOnce(context.Background()); err == nil {
+			t.Fatal("poll 2: expected version detection error")
+		}
+		st := readPersistedAgyState(t, home)
+		if !st.SchemaDriftDetected {
+			t.Fatal("expected schema_drift_detected=true persisted immediately on version-detect drift latch")
+		}
+	})
+
+	t.Run("stop_flushes_dirty_state_with_no_new_rows", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-stop-flush.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795752000, testAgyUsage{
+			modelID: 1466, input: 10, output: 5, id11: "stop-base-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 30, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			StateSaveInterval: 5 * time.Minute,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:               func() time.Time { return now },
+		})
+
+		// Baseline at t0.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("baseline poll: %v", err)
+		}
+
+		// Dirty poll at t+5s (coalesced, not written yet).
+		now = now.Add(5 * time.Second)
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795752005, testAgyUsage{
+			modelID: 1466, input: 150, output: 30, id11: "stop-row-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("dirty poll: %v", err)
+		}
+		st := readPersistedAgyState(t, home)
+		if *st.Files["conv-stop-flush.db"].Cursor.GenMetadataRowID != 0 {
+			t.Fatalf("expected coalesced cursor=0 before Stop, got %d", *st.Files["conv-stop-flush.db"].Cursor.GenMetadataRowID)
+		}
+
+		// Stop at t+6s with NO new rows must flush dirty state to disk.
+		now = now.Add(1 * time.Second)
+		if err := tailer.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		st = readPersistedAgyState(t, home)
+		if *st.Files["conv-stop-flush.db"].Cursor.GenMetadataRowID != 1 {
+			t.Fatalf("after Stop cursor = %d, want 1", *st.Files["conv-stop-flush.db"].Cursor.GenMetadataRowID)
+		}
+	})
+
+	t.Run("stop_flushes_dirty_state_even_when_final_poll_times_out", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-stop-timeout.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795753000, testAgyUsage{
+			modelID: 1466, input: 10, output: 5, id11: "stoptimeout-base-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open outbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		now := time.Date(2026, 11, 27, 18, 40, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:           home,
+			DisableWakeSocket:   true,
+			Analytics:           analytics,
+			StateSaveInterval:   5 * time.Minute,
+			ShutdownPollTimeout: 50 * time.Millisecond,
+			DetectVersion:       func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:                 func() time.Time { return now },
+		})
+
+		// Baseline at t0.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("baseline poll: %v", err)
+		}
+
+		// Dirty poll at t+5s (coalesced).
+		now = now.Add(5 * time.Second)
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795753005, testAgyUsage{
+			modelID: 1466, input: 150, output: 30, id11: "stoptimeout-row-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("dirty poll: %v", err)
+		}
+
+		// Stop with an already-canceled context so final PollOnce returns early on
+		// ctx.Err(); previously committed dirty state must still be flushed.
+		canceledCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_ = tailer.Stop(canceledCtx)
+
+		st := readPersistedAgyState(t, home)
+		if *st.Files["conv-stop-timeout.db"].Cursor.GenMetadataRowID != 1 {
+			t.Fatalf("after timed-out Stop cursor = %d, want 1", *st.Files["conv-stop-timeout.db"].Cursor.GenMetadataRowID)
+		}
+	})
+}
+
+func TestAntigravitySQLiteTailer_CrashReplayWithinCoalescingWindowZeroDoubleCount(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	dbPath := filepath.Join(AgyConversationsDir(home), "conv-crash-30s.db")
+	db := createTestAgyDB(t, dbPath)
+	defer func() { _ = db.Close() }()
+
+	// Historical row 0 present before tailer1 starts (baselined, never emitted).
+	genBase := encodeTestGenMeta(1466, "gemini-4-neon", 1795760000, testAgyUsage{
+		modelID: 1466, input: 999, output: 99, id11: "crash30-hist-0",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, genBase, len(genBase)); err != nil {
+		t.Fatalf("insert genBase: %v", err)
+	}
+
+	outboxDir := HubAnalyticsOutboxDirFor(home)
+	outbox1, err := OpenAnalyticsOutbox(outboxDir)
+	if err != nil {
+		t.Fatalf("open outbox1: %v", err)
+	}
+	analytics1 := NewUsageAnalytics(outbox1, telemetrycontract.UsageSourceSQLiteNative)
+
+	now := time.Date(2026, 11, 27, 19, 0, 0, 0, time.UTC)
+	var session1 SessionUsage
+	tailer1 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics1,
+		StateSaveInterval: 30 * time.Second,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		Now:               func() time.Time { return now },
+		SessionUsage: func(u SessionUsage) {
+			session1.TokensInput += u.TokensInput
+			session1.TokensOutput += u.TokensOutput
+			session1.TokensCached += u.TokensCached
+			session1.TokensReasoning += u.TokensReasoning
+		},
+	})
+
+	// Baseline at t0: persists cursor=0 immediately.
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("baseline poll: %v", err)
+	}
+
+	// Simulate 25s of active polling within the 30s coalescing window:
+	// 1) t+5s: partial steps row for call-1.
+	now = now.Add(5 * time.Second)
+	step1 := encodeTestStepMeta(1466, "gemini-4-neon", 1795760005, testAgyUsage{
+		modelID: 1466, input: 100, output: 20, id11: "crash30-call-1",
+	})
+	if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 15, ?)`, step1); err != nil {
+		t.Fatalf("insert step1: %v", err)
+	}
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll t+5s: %v", err)
+	}
+
+	// 2) t+12s: fuller gen_metadata row for call-1 (delta) + request_id call-2.
+	now = now.Add(7 * time.Second)
+	gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795760012, testAgyUsage{
+		modelID: 1466, input: 100, output: 50, cacheRead: 300, reasoning: 15, id11: "crash30-call-1",
+	})
+	gen2 := encodeTestGenMeta(1466, "gemini-4-neon", 1795760012, testAgyUsage{
+		modelID: 1466, input: 200, output: 60, id11: "crash30-call-2",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?), (2, ?, ?)`, gen1, len(gen1), gen2, len(gen2)); err != nil {
+		t.Fatalf("insert gen1/gen2: %v", err)
+	}
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll t+12s: %v", err)
+	}
+
+	// 3) t+25s: keyless composite row (nil timestamp).
+	now = now.Add(13 * time.Second)
+	gen3 := encodeTestGenMeta(1466, "gemini-4-neon", 0, testAgyUsage{
+		modelID: 1466, input: 150, output: 40,
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (3, ?, ?)`, gen3, len(gen3)); err != nil {
+		t.Fatalf("insert gen3: %v", err)
+	}
+	if err := tailer1.PollOnce(context.Background()); err != nil {
+		t.Fatalf("poll t+25s: %v", err)
+	}
+
+	// Confirm state file on disk STILL holds the stale t0 baseline cursor (unclean crash before flush).
+	st := readPersistedAgyState(t, home)
+	if *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID != 0 {
+		t.Fatalf("expected stale on-disk cursor=0 before crash, got %d", *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID)
+	}
+	if session1.TokensInput != 450 || session1.TokensOutput != 150 || session1.TokensCached != 300 || session1.TokensReasoning != 15 {
+		t.Fatalf("pre-crash session1 = %+v, want in=450 out=150 cr=300 reas=15", session1)
+	}
+
+	// Simulate unclean crash (no tailer1.Stop) and process restart at t+28s with
+	// a freshly opened outbox and fresh tailer loading the stale t0 state file,
+	// plus one new post-crash row (call-4).
+	now = now.Add(3 * time.Second)
+	gen4 := encodeTestGenMeta(1466, "gemini-4-neon", 1795760028, testAgyUsage{
+		modelID: 1466, input: 75, output: 15, id11: "crash30-call-4",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (4, ?, ?)`, gen4, len(gen4)); err != nil {
+		t.Fatalf("insert gen4: %v", err)
+	}
+
+	outbox2, err := OpenAnalyticsOutbox(outboxDir)
+	if err != nil {
+		t.Fatalf("reopen outbox2: %v", err)
+	}
+	analytics2 := NewUsageAnalytics(outbox2, telemetrycontract.UsageSourceSQLiteNative)
+	var session2 SessionUsage
+	tailer2 := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics2,
+		StateSaveInterval: 30 * time.Second,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		Now:               func() time.Time { return now },
+		SessionUsage: func(u SessionUsage) {
+			session2.TokensInput += u.TokensInput
+			session2.TokensOutput += u.TokensOutput
+			session2.TokensCached += u.TokensCached
+			session2.TokensReasoning += u.TokensReasoning
+		},
+	})
+	if err := tailer2.PollOnce(context.Background()); err != nil {
+		t.Fatalf("tailer2 replay poll: %v", err)
+	}
+	if err := tailer2.Stop(context.Background()); err != nil {
+		t.Fatalf("tailer2 Stop: %v", err)
+	}
+
+	// Replayed rows must NOT double-count into session2; only post-crash call-4 is new.
+	if session2.TokensInput != 75 || session2.TokensOutput != 15 || session2.TokensCached != 0 || session2.TokensReasoning != 0 {
+		t.Fatalf("post-crash session2 = %+v, want only new row (in=75 out=15 cr=0 reas=0)", session2)
+	}
+
+	// Outbox must contain exact totals with ZERO double-counting:
+	// call-1 (in=100, out=50, cr=300, reas=15) + call-2 (in=200, out=60) +
+	// composite gen3 (in=150, out=40) + call-4 (in=75, out=15).
+	events := drainOutboxEvents(t, outbox2)
+	if len(events) != 5 {
+		t.Fatalf("got %d outbox events, want 5 (call-1 initial, call-1 delta, call-2, composite gen3, call-4)", len(events))
+	}
+	var totIn, totOut, totCR, totReas int64
+	for _, ev := range events {
+		if ev.Input != nil {
+			totIn += *ev.Input
+		}
+		if ev.Output != nil {
+			totOut += *ev.Output
+		}
+		if ev.CacheRead != nil {
+			totCR += *ev.CacheRead
+		}
+		if ev.Reasoning != nil {
+			totReas += *ev.Reasoning
+		}
+	}
+	if totIn != 525 || totOut != 165 || totCR != 300 || totReas != 15 {
+		t.Fatalf("outbox totals after 30s crash replay = (in=%d out=%d cr=%d reas=%d), want (525, 165, 300, 15)",
+			totIn, totOut, totCR, totReas)
+	}
+
+	// After tailer2.Stop(), on-disk state file must reflect the latest cursor (4).
+	st = readPersistedAgyState(t, home)
+	if *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID != 4 {
+		t.Fatalf("after tailer2 Stop cursor = %d, want 4", *st.Files["conv-crash-30s.db"].Cursor.GenMetadataRowID)
+	}
+}

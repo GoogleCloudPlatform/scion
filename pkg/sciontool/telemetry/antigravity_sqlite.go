@@ -49,14 +49,15 @@ const (
 	// wake the live tailer in `sciontool init` immediately on PostInvocation.
 	AgySQLiteWakeSocketName = "agy-sqlite-wake.sock"
 
-	defaultAgySQLiteDebounce        = 500 * time.Millisecond
-	defaultAgySQLitePollInterval    = 15 * time.Second
-	defaultAgyOutboxRetryMinBackoff = 5 * time.Second
-	defaultAgyOutboxRetryMaxBackoff = 5 * time.Minute
-	agySQLiteStateSchemaVersion     = 1
-	agyVersionDetectTimeout         = 2 * time.Second
-	defaultAgyVersionMaxFailures    = 3
-	defaultAgyVersionFailureWindow  = 5 * time.Minute
+	defaultAgySQLiteDebounce          = 500 * time.Millisecond
+	defaultAgySQLitePollInterval      = 15 * time.Second
+	defaultAgySQLiteStateSaveInterval = 30 * time.Second
+	defaultAgyOutboxRetryMinBackoff   = 5 * time.Second
+	defaultAgyOutboxRetryMaxBackoff   = 5 * time.Minute
+	agySQLiteStateSchemaVersion       = 1
+	agyVersionDetectTimeout           = 2 * time.Second
+	defaultAgyVersionMaxFailures      = 3
+	defaultAgyVersionFailureWindow    = 5 * time.Minute
 )
 
 // AgySQLiteStatePath returns <agentHome>/.scion/agy-sqlite-state.json, or ""
@@ -134,6 +135,10 @@ type AntigravitySQLiteConfig struct {
 	Debounce time.Duration
 	// PollInterval is the fallback periodic poll interval (default 15s).
 	PollInterval time.Duration
+	// StateSaveInterval coalesces periodic agy-sqlite-state.json writes during
+	// steady-state polling (default 30s). Initial baseline, schema-drift
+	// latching, and Stop() always persist immediately.
+	StateSaveInterval time.Duration
 	// ShutdownPollTimeout bounds the final synchronous PollOnce executed by
 	// Stop so a slow or blocked SQLite read cannot consume the caller's entire
 	// shutdown deadline (default usageDeriverFlushTimeout = 5s).
@@ -202,6 +207,8 @@ type AntigravitySQLiteTailer struct {
 	mu                    sync.Mutex
 	state                 agySQLitePersistedState
 	stateInitialized      bool
+	stateDirty            bool
+	lastStateSave         time.Time
 	versionResolved       bool
 	versionFailures       int
 	versionFirstFailureAt time.Time
@@ -240,6 +247,9 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = defaultAgySQLitePollInterval
+	}
+	if cfg.StateSaveInterval <= 0 {
+		cfg.StateSaveInterval = defaultAgySQLiteStateSaveInterval
 	}
 	if cfg.ShutdownPollTimeout <= 0 {
 		cfg.ShutdownPollTimeout = usageDeriverFlushTimeout
@@ -398,10 +408,25 @@ func (t *AntigravitySQLiteTailer) Stop(ctx context.Context) error {
 		pollTimeout = usageDeriverFlushTimeout
 	}
 	pollCtx, pollCancel := context.WithTimeout(ctx, pollTimeout)
-	pollErr := t.PollOnce(pollCtx)
+	pollErr := t.pollOnceWithOptions(pollCtx, false, true)
 	pollCancel()
+	if flushErr := t.flushStateIfDirty(); flushErr != nil && pollErr == nil {
+		pollErr = flushErr
+	}
 	t.shutdownProviders(ctx)
 	return pollErr
+}
+
+func (t *AntigravitySQLiteTailer) flushStateIfDirty() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.stateDirty {
+		return nil
+	}
+	if t.state.Dedupe != nil {
+		t.state.Dedupe.Prune(t.cfg.MaxDedupeRoots)
+	}
+	return t.saveStateLocked()
 }
 
 func (t *AntigravitySQLiteTailer) shutdownProviders(ctx context.Context) {
@@ -475,13 +500,17 @@ func (t *AntigravitySQLiteTailer) loop(ctx context.Context) {
 // PollOnce performs a single synchronous scan of ConversationsDir, skipping
 // unchanged files by (db_mtime, db_size, wal_mtime, wal_size) fingerprint,
 // decoding modified files against a cloned DedupeState, appending canonical
-// usage increments to Analytics, and atomically persisting state only after
-// appends succeed.
+// usage increments to Analytics, and coalescing state-file persistence at
+// StateSaveInterval (with immediate writes on baseline, drift latch, and Stop).
 func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
-	return t.pollOnce(ctx, false)
+	return t.pollOnceWithOptions(ctx, false, false)
 }
 
 func (t *AntigravitySQLiteTailer) pollOnce(ctx context.Context, respectBackoff bool) error {
+	return t.pollOnceWithOptions(ctx, respectBackoff, false)
+}
+
+func (t *AntigravitySQLiteTailer) pollOnceWithOptions(ctx context.Context, respectBackoff, forceSave bool) error {
 	if t == nil {
 		return nil
 	}
@@ -490,7 +519,7 @@ func (t *AntigravitySQLiteTailer) pollOnce(ctx context.Context, respectBackoff b
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		var recorded bool
-		err := t.pollOnceLocked(ctx, &recorded, respectBackoff)
+		err := t.pollOnceLocked(ctx, &recorded, respectBackoff, forceSave)
 		if recorded {
 			flushProviders = t.providers
 		}
@@ -504,6 +533,13 @@ func (t *AntigravitySQLiteTailer) pollOnce(ctx context.Context, respectBackoff b
 		cancel()
 	}
 	return err
+}
+
+func (t *AntigravitySQLiteTailer) shouldSaveStateLocked() bool {
+	if t.lastStateSave.IsZero() {
+		return true
+	}
+	return t.cfg.Now().Sub(t.lastStateSave) >= t.cfg.StateSaveInterval
 }
 
 func isRetryableOutboxError(err error) bool {
@@ -536,7 +572,7 @@ func (t *AntigravitySQLiteTailer) canAdvanceWithoutAnalytics() bool {
 	return t.tokens != nil && t.cfg.OTelExportActive != nil && t.cfg.OTelExportActive()
 }
 
-func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool, respectBackoff bool) error {
+func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool, respectBackoff, forceSave bool) error {
 
 	// Do not consume rows or advance persisted cursors when no active token
 	// sink (Analytics or direct OTel export) is available (O2). When schema
@@ -549,6 +585,14 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		return nil
 	}
 	if !t.driftLatched.Load() && t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
+		if t.stateDirty {
+			if t.state.Dedupe != nil {
+				t.state.Dedupe.Prune(t.cfg.MaxDedupeRoots)
+			}
+			if err := t.saveStateLocked(); err != nil {
+				log.Debug("Antigravity SQLite tailer state persist failed: %v", err)
+			}
+		}
 		return nil
 	}
 	var firstErr error
@@ -599,6 +643,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 	}
 
 	dirty := false
+	immediateSave := forceSave
 	// Prune file entries for DBs removed from disk.
 	for name := range t.state.Files {
 		if !present[name] {
@@ -612,6 +657,10 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 	var pollVerErr error
 	for _, name := range dbNames {
 		if err := ctx.Err(); err != nil {
+			if dirty {
+				t.state.Dedupe.Prune(t.cfg.MaxDedupeRoots)
+				t.stateDirty = true
+			}
 			return err
 		}
 		dbPath := filepath.Join(t.cfg.ConversationsDir, name)
@@ -641,6 +690,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				Cursor:      baseCursor,
 			}
 			dirty = true
+			immediateSave = true
 			continue
 		}
 		if hasPrev && prevFile.Fingerprint.Equal(fp) {
@@ -689,6 +739,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 						firstErr = derr
 					}
 					dirty = true
+					immediateSave = true
 					if firstErr == nil {
 						firstErr = pollVerErr
 					}
@@ -734,6 +785,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		if res.Status != agydecode.StatusVerified {
 			if err := t.handleDriftLocked(res); err != nil {
 				dirty = true
+				immediateSave = true
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -747,6 +799,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				Cursor:      res.Cursor,
 			}
 			dirty = true
+			immediateSave = true
 			continue
 		}
 
@@ -835,6 +888,9 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 
 	if dirty {
 		t.state.Dedupe.Prune(t.cfg.MaxDedupeRoots)
+		t.stateDirty = true
+	}
+	if t.stateDirty && (immediateSave || t.shouldSaveStateLocked()) {
 		if err := t.saveStateLocked(); err != nil {
 			log.Debug("Antigravity SQLite tailer state persist failed: %v", err)
 			if firstErr == nil {
@@ -1259,6 +1315,7 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 		}
 	}
 	t.stateInitialized = true
+	t.stateDirty = true
 	if err := t.saveStateLocked(); err != nil {
 		return err
 	}
@@ -1267,6 +1324,8 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 
 func (t *AntigravitySQLiteTailer) saveStateLocked() error {
 	if t.cfg.StatePath == "" {
+		t.stateDirty = false
+		t.lastStateSave = t.cfg.Now()
 		return nil
 	}
 	t.state.Version = agySQLiteStateSchemaVersion
@@ -1318,5 +1377,7 @@ func (t *AntigravitySQLiteTailer) saveStateLocked() error {
 	if err := syncDir(dir); err != nil {
 		return fmt.Errorf("sync antigravity sqlite state dir: %w", err)
 	}
+	t.stateDirty = false
+	t.lastStateSave = t.cfg.Now()
 	return nil
 }
