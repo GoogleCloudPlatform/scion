@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +30,9 @@ import (
 func parseNonTestHubFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through readGuardScanDirs; guards derivedAdmission construction, copyIntent assignment, and single-resolution delivery paths across pkg/hub and subpackages.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	files := make(map[string]*ast.File)
 	for _, entry := range entries {
@@ -39,7 +40,7 @@ func parseNonTestHubFiles(t *testing.T) (*token.FileSet, map[string]*ast.File) {
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		f, err := parser.ParseFile(fset, filepath.Join(".", filepath.FromSlash(name)), nil, 0)
 		require.NoError(t, err, "parse %s", name)
 		files[name] = f
 	}
