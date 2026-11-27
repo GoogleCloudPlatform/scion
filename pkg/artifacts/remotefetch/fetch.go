@@ -96,12 +96,35 @@ const (
 	ReasonAuthorization  Reason = "authorization_not_allowed"
 )
 
+// NetworkMode selects how a Fetcher connects to remote hosts.
+type NetworkMode int
+
+const (
+	// NetworkVetted is the default mode: DNS is resolved and vetted against
+	// the private/special-range IP denylist, the connection is pinned to the
+	// first vetted address on port 443, and no HTTP proxy is used.
+	NetworkVetted NetworkMode = iota
+	// NetworkSystem uses a clone of http.DefaultTransport (honouring
+	// HTTPS_PROXY and without the IP denylist). HTTPS-only, no userinfo,
+	// AllowedHosts on every hop, redirect cap and hop-0-only Authorization
+	// are still enforced.
+	NetworkSystem
+)
+
 // Error is a failed fetch.
 type Error struct {
 	Reason Reason
 	// Detail is free text for logs; it may name hosts and addresses, except
 	// for a URL urlredact.HostAndPath rejects (see hiddenDetail).
 	Detail string
+	// Status is the HTTP status code when Reason is ReasonStatus.
+	Status int
+	// Header holds allowlisted response headers when Reason is ReasonStatus.
+	Header http.Header
+	// Body holds a bounded prefix (up to 4 KiB) of the response body when
+	// Reason is ReasonStatus from Open. It is never logged or included in
+	// Error().
+	Body []byte
 }
 
 func (e *Error) Error() string {
@@ -130,6 +153,29 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 }
 
+// Request describes one streaming request to Fetcher.Open.
+type Request struct {
+	URL string
+	// Authorization, when non-empty, is sent as the Authorization header on
+	// hop 0 (and any redirect back to hop 0's host) only. Requires
+	// Config.AllowedHosts to be non-empty.
+	Authorization string
+	// Header carries optional request headers. Only allowlisted headers
+	// (Accept, If-None-Match) are forwarded.
+	Header http.Header
+	// MaxBytes optionally overrides Config.MaxBytes for this request when > 0.
+	MaxBytes int64
+}
+
+// Response is an open streaming 2xx response from Fetcher.Open. The caller
+// must close Body.
+type Response struct {
+	Status int
+	// Header holds allowlisted response headers.
+	Header http.Header
+	Body   io.ReadCloser
+}
+
 // Config tunes a Fetcher. Zero fields take the defaults above.
 type Config struct {
 	MaxBytes       int64
@@ -139,7 +185,9 @@ type Config struct {
 	// DisableRedirects refuses every HTTP redirect (0 hops allowed),
 	// overriding MaxRedirects.
 	DisableRedirects bool
-	Logger           *slog.Logger
+	// Network selects the network mode (default NetworkVetted).
+	Network NetworkMode
+	Logger  *slog.Logger
 	// AllowedHosts, when non-empty, is the complete set of host names the
 	// fetcher may contact, checked on the first request and on every
 	// redirect hop. Names are compared case-insensitively and exactly (no
@@ -221,25 +269,153 @@ func (f *Fetcher) FetchBytesAuthorized(ctx context.Context, rawURL, authorizatio
 	return f.run(ctx, rawURL, modeBytes, authorization)
 }
 
+// Open opens a streaming 2xx response for req under the Fetcher's URL, network,
+// redirect, AllowedHosts, Authorization and timeout rules. The returned Body
+// enforces MaxBytes mid-stream (returning a *Error with ReasonTooLarge once
+// exceeded) and cancels the per-request timeout when closed.
+//
+// Non-2xx responses are closed and returned as a *Error with ReasonStatus,
+// Status, allowlisted Header, and up to 4 KiB of Body.
+func (f *Fetcher) Open(ctx context.Context, req Request) (*Response, error) {
+	if req.Authorization != "" && len(f.cfg.AllowedHosts) == 0 {
+		return nil, fail(ReasonAuthorization, "authorization requires AllowedHosts")
+	}
+	maxBytes := f.cfg.MaxBytes
+	if req.MaxBytes > 0 {
+		maxBytes = req.MaxBytes
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, f.cfg.Timeout)
+	resp, current, err := f.doFollow(reqCtx, req.URL, modeBytes, req.Authorization, req.Header)
+	if err != nil {
+		fe := f.normalizeError(reqCtx, err, req.URL, modeBytes)
+		cancel()
+		return nil, fe
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		fe := &Error{
+			Reason: ReasonStatus,
+			Detail: fmt.Sprintf("status %d", resp.StatusCode),
+			Status: resp.StatusCode,
+			Header: filterResponseHeaders(resp.Header),
+			Body:   snippet,
+		}
+		fe = f.normalizeError(reqCtx, hideDetail(fe, current), req.URL, modeBytes)
+		cancel()
+		return nil, fe
+	}
+	if resp.ContentLength > maxBytes {
+		_ = resp.Body.Close()
+		fe := fail(ReasonTooLarge, "content-length %d over %d", resp.ContentLength, maxBytes)
+		fe = f.normalizeError(reqCtx, hideDetail(fe, current), req.URL, modeBytes)
+		cancel()
+		return nil, fe
+	}
+	return &Response{
+		Status: resp.StatusCode,
+		Header: filterResponseHeaders(resp.Header),
+		Body: &limitedStreamBody{
+			rc:       resp.Body,
+			cancel:   cancel,
+			ctx:      reqCtx,
+			maxBytes: maxBytes,
+		},
+	}, nil
+}
+
+// limitedStreamBody enforces a mid-stream byte cap and cancels the request
+// timeout context on Close.
+type limitedStreamBody struct {
+	rc       io.ReadCloser
+	cancel   context.CancelFunc
+	ctx      context.Context
+	maxBytes int64
+	read     int64
+}
+
+func (b *limitedStreamBody) Read(p []byte) (int, error) {
+	if b.read > b.maxBytes {
+		return 0, fail(ReasonTooLarge, "body over %d bytes", b.maxBytes)
+	}
+	rem := b.maxBytes - b.read + 1
+	if int64(len(p)) > rem {
+		p = p[:rem]
+	}
+	n, err := b.rc.Read(p)
+	b.read += int64(n)
+	if b.read > b.maxBytes {
+		return n, fail(ReasonTooLarge, "body over %d bytes", b.maxBytes)
+	}
+	if err != nil && err != io.EOF {
+		if expired(b.ctx) {
+			return n, fail(ReasonTimeout, "read body: %v", innerError(err))
+		}
+		return n, fail(ReasonConnect, "read body: %v", innerError(err))
+	}
+	return n, err
+}
+
+func (b *limitedStreamBody) Close() error {
+	err := b.rc.Close()
+	b.cancel()
+	return err
+}
+
+var allowlistedResponseHeaders = []string{
+	"ETag",
+	"Retry-After",
+	"X-RateLimit-Limit",
+	"X-RateLimit-Remaining",
+	"X-RateLimit-Reset",
+	"X-RateLimit-Used",
+	"X-RateLimit-Resource",
+	"X-GitHub-SSO",
+	"Content-Type",
+	"Content-Length",
+}
+
+func filterResponseHeaders(src http.Header) http.Header {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(http.Header)
+	for _, k := range allowlistedResponseHeaders {
+		if vals := src.Values(k); len(vals) > 0 {
+			cp := make([]string, len(vals))
+			copy(cp, vals)
+			out[http.CanonicalHeaderKey(k)] = cp
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (f *Fetcher) normalizeError(ctx context.Context, err error, rawURL string, mode fetchMode) *Error {
+	var fe *Error
+	if !errors.As(err, &fe) {
+		fe = fail(ReasonConnect, "%v", innerError(err))
+	}
+	if expired(ctx) && fe.Reason != ReasonDeniedAddress {
+		fe = fail(ReasonTimeout, "%s", fe.Detail)
+	}
+	msg := "artifacts: remote image not fetched"
+	if mode == modeBytes {
+		msg = "remotefetch: remote content not fetched"
+	}
+	f.cfg.Logger.WarnContext(ctx, msg,
+		"reason", string(fe.Reason), "detail", fe.Detail, "url", redactURL(rawURL))
+	return fe
+}
+
 func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode, authorization string) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.cfg.Timeout)
 	defer cancel()
 	res, err := f.fetch(ctx, rawURL, mode, authorization)
 	if err != nil {
-		var fe *Error
-		if !errors.As(err, &fe) {
-			fe = fail(ReasonConnect, "%v", innerError(err))
-		}
-		if expired(ctx) && fe.Reason != ReasonDeniedAddress {
-			fe = fail(ReasonTimeout, "%s", fe.Detail)
-		}
-		msg := "artifacts: remote image not fetched"
-		if mode == modeBytes {
-			msg = "remotefetch: remote content not fetched"
-		}
-		f.cfg.Logger.WarnContext(ctx, msg,
-			"reason", string(fe.Reason), "detail", fe.Detail, "url", redactURL(rawURL))
-		return nil, fe
+		return nil, f.normalizeError(ctx, err, rawURL, mode)
 	}
 	return res, nil
 }
@@ -258,59 +434,74 @@ func expired(ctx context.Context) bool {
 // fetch follows redirects under the per-hop rules. authorization, when set, is
 // sent on each hop whose host is the first request's host, and on no other.
 func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, authorization string) (*Result, error) {
+	resp, current, err := f.doFollow(ctx, rawURL, mode, authorization, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var res *Result
+	if mode == modeBytes {
+		res, err = f.readBytes(resp)
+	} else {
+		res, err = f.readImage(resp)
+	}
+	if err != nil {
+		return nil, hideDetail(err, current)
+	}
+	return res, nil
+}
+
+// doFollow executes the per-hop request and redirect loop, returning the final
+// non-redirect *http.Response and its URL string.
+func (f *Fetcher) doFollow(ctx context.Context, rawURL string, mode fetchMode, authorization string, reqHeader http.Header) (*http.Response, string, error) {
 	current := rawURL
 	authHost := ""
 	for hop := 0; ; hop++ {
 		u, err := f.checkURL(current)
 		if err != nil {
-			return nil, hideDetail(err, current)
+			return nil, current, hideDetail(err, current)
 		}
 		if hop == 0 {
 			authHost = u.Hostname()
-		}
-		shownHost := u.Hostname()
-		if _, ok := urlredact.HostAndPath(current); !ok {
-			shownHost = hiddenHost
-		}
-		addr, err := f.vet(ctx, u.Hostname(), shownHost)
-		if err != nil {
-			return nil, hideDetail(err, current)
 		}
 		hopAuth := ""
 		if strings.EqualFold(u.Hostname(), authHost) {
 			hopAuth = authorization
 		}
-		resp, err := f.get(ctx, u, addr, mode, hopAuth)
+		var resp *http.Response
+		if f.cfg.Network == NetworkSystem {
+			resp, err = f.getSystem(ctx, u, mode, hopAuth, reqHeader)
+		} else {
+			shownHost := u.Hostname()
+			if _, ok := urlredact.HostAndPath(current); !ok {
+				shownHost = hiddenHost
+			}
+			addr, vetErr := f.vet(ctx, u.Hostname(), shownHost)
+			if vetErr != nil {
+				return nil, current, hideDetail(vetErr, current)
+			}
+			resp, err = f.get(ctx, u, addr, mode, hopAuth, reqHeader)
+		}
 		if err != nil {
-			return nil, hideDetail(err, current)
+			return nil, current, hideDetail(err, current)
 		}
 		if isRedirect(resp.StatusCode) {
 			loc := resp.Header.Get("Location")
 			_ = resp.Body.Close()
 			if f.cfg.DisableRedirects {
-				return nil, fail(ReasonRedirects, "redirects are not allowed")
+				return nil, current, fail(ReasonRedirects, "redirects are not allowed")
 			}
 			if hop >= f.cfg.MaxRedirects {
-				return nil, fail(ReasonRedirects, "more than %d redirects", f.cfg.MaxRedirects)
+				return nil, current, fail(ReasonRedirects, "more than %d redirects", f.cfg.MaxRedirects)
 			}
 			next, err := u.Parse(loc)
 			if err != nil || loc == "" {
-				return nil, fail(ReasonBadURL, "unusable redirect location")
+				return nil, current, fail(ReasonBadURL, "unusable redirect location")
 			}
 			current = next.String()
 			continue
 		}
-		defer func() { _ = resp.Body.Close() }()
-		var res *Result
-		if mode == modeBytes {
-			res, err = f.readBytes(resp)
-		} else {
-			res, err = f.readImage(resp)
-		}
-		if err != nil {
-			return nil, hideDetail(err, current)
-		}
-		return res, nil
+		return resp, current, nil
 	}
 }
 
@@ -334,7 +525,7 @@ func hideDetail(err error, rawURL string) error {
 	}
 	var fe *Error
 	if errors.As(err, &fe) {
-		return &Error{Reason: fe.Reason, Detail: hiddenDetail}
+		return &Error{Reason: fe.Reason, Detail: hiddenDetail, Status: fe.Status, Header: fe.Header, Body: fe.Body}
 	}
 	return &Error{Reason: ReasonConnect, Detail: hiddenDetail}
 }
@@ -352,8 +543,10 @@ func (f *Fetcher) checkURL(raw string) (*url.URL, error) {
 	if u.User != nil {
 		return nil, fail(ReasonUserinfo, "userinfo in URL")
 	}
-	if p := u.Port(); p != "" && p != f.port {
-		return nil, fail(ReasonPort, "port %q", p)
+	if f.cfg.Network == NetworkVetted {
+		if p := u.Port(); p != "" && p != f.port {
+			return nil, fail(ReasonPort, "port %q", p)
+		}
 	}
 	host := u.Hostname()
 	if host == "" {
@@ -446,7 +639,7 @@ func (f *Fetcher) vet(ctx context.Context, host, shownHost string) (netip.Addr, 
 // get sends one request to addr, the vetted address of u's host. The
 // transport dials that address only and verifies TLS against u's host.
 // authorization, when non-empty, is sent as the Authorization header.
-func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fetchMode, authorization string) (*http.Response, error) {
+func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fetchMode, authorization string, reqHeader http.Header) (*http.Response, error) {
 	target := net.JoinHostPort(addr.String(), f.port)
 	dialer := &net.Dialer{Timeout: f.cfg.ConnectTimeout}
 	transport := &http.Transport{
@@ -467,6 +660,39 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 		MaxResponseHeaderBytes: 64 << 10,
 		ForceAttemptHTTP2:      false,
 	}
+	return f.sendRequest(ctx, transport, u, target, mode, authorization, reqHeader)
+}
+
+// getSystem sends one request using a clone of http.DefaultTransport (honouring
+// HTTPS_PROXY and without the IP denylist).
+func (f *Fetcher) getSystem(ctx context.Context, u *url.URL, mode fetchMode, authorization string, reqHeader http.Header) (*http.Response, error) {
+	var transport *http.Transport
+	if dt, ok := http.DefaultTransport.(*http.Transport); ok && dt != nil {
+		transport = dt.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+		}
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		if transport.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+			transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	if f.rootCAs != nil {
+		transport.TLSClientConfig.RootCAs = f.rootCAs
+	}
+	transport.TLSHandshakeTimeout = f.cfg.ConnectTimeout
+	transport.DisableKeepAlives = true
+	transport.DisableCompression = true
+	transport.MaxResponseHeaderBytes = 64 << 10
+	return f.sendRequest(ctx, transport, u, u.Host, mode, authorization, reqHeader)
+}
+
+func (f *Fetcher) sendRequest(ctx context.Context, transport *http.Transport, u *url.URL, target string, mode fetchMode, authorization string, reqHeader http.Header) (*http.Response, error) {
 	client := &http.Client{
 		Transport: transport,
 		Jar:       nil,
@@ -483,6 +709,14 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 		req.Header.Set("Accept", "*/*")
 	} else {
 		req.Header.Set("Accept", "image/png, image/jpeg, image/gif, image/webp")
+	}
+	if reqHeader != nil {
+		if accept := reqHeader.Get("Accept"); accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if inm := reqHeader.Get("If-None-Match"); inm != "" {
+			req.Header.Set("If-None-Match", inm)
+		}
 	}
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
@@ -520,7 +754,12 @@ func (f *Fetcher) readImage(resp *http.Response) (*Result, error) {
 // readBytes reads a 200 response under the size cap.
 func (f *Fetcher) readBytes(resp *http.Response) (*Result, error) {
 	if resp.StatusCode != http.StatusOK {
-		return nil, fail(ReasonStatus, "status %d", resp.StatusCode)
+		return nil, &Error{
+			Reason: ReasonStatus,
+			Detail: fmt.Sprintf("status %d", resp.StatusCode),
+			Status: resp.StatusCode,
+			Header: filterResponseHeaders(resp.Header),
+		}
 	}
 	if resp.ContentLength > f.cfg.MaxBytes {
 		return nil, fail(ReasonTooLarge, "content-length %d over %d", resp.ContentLength, f.cfg.MaxBytes)

@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -70,18 +69,6 @@ func bindTemplateHubAdmin(t *testing.T, s store.Store, userID string) *store.Rol
 	created, err := s.CreateRoleBinding(ctx, rb)
 	require.NoError(t, err)
 	return created
-}
-
-type globalTemplateStubSourceFetcher struct {
-	body []byte
-}
-
-func (f *globalTemplateStubSourceFetcher) FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error) {
-	return f.FetchBytesAuthorized(ctx, rawURL, "")
-}
-
-func (f *globalTemplateStubSourceFetcher) FetchBytesAuthorized(_ context.Context, _, _ string) (*remotefetch.Result, error) {
-	return &remotefetch.Result{Body: f.body}, nil
 }
 
 func buildGlobalTemplateArchive(t *testing.T, slug, readme string) []byte {
@@ -338,9 +325,9 @@ func TestTemplateAuthz_GlobalCRUD_CatalogAuthorAllowed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cloned))
 
 	// Reimport global template as Bob.
-	srv.templateSourceFetcher = &globalTemplateStubSourceFetcher{
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{
 		body: buildGlobalTemplateArchive(t, "gca-global-template", "reimported v2"),
-	}
+	})
 	rec = doRequestAsUser(t, srv, bob, http.MethodPost, byID+"/reimport", map[string]string{
 		"sourceUrl": "https://github.com/acme/repo/tree/main/templates",
 	})
@@ -532,9 +519,9 @@ func TestGlobalTemplateCreate_StampsCreatedByNotOwner(t *testing.T) {
 	// 3. Resource pipeline templatePersistence.Create with authenticated user in context.
 	userIdent := NewAuthenticatedUser(author.ID, author.Email, author.DisplayName, author.Role, "api")
 	importCtx := contextWithIdentity(ctx, userIdent)
-	srv.templateSourceFetcher = &globalTemplateStubSourceFetcher{
+	srv.templateGitHubClient = newFakeReimportGitHubClient(t, &fakeReimportGitHub{
 		body: buildGlobalTemplateArchive(t, "prov-imported-global", "# Imported\n"),
-	}
+	})
 	importedDir := writeTemplateDir(t, t.TempDir(), "prov-imported-global", map[string]string{
 		"scion-agent.yaml": "default_harness_config: claude\n",
 		"README.md":        "# Imported\n",

@@ -382,7 +382,7 @@ func TestSkillRefLog_GitHubStaleServeWarning(t *testing.T) {
 		IsBranchRef: true,
 	}
 	r.resolutionCache.mu.Unlock()
-	r.cooldown.record(GitHubCooldownIdentity(token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(token), clock.Now().Add(time.Minute))
 
 	stderr := refLogCaptureStderr(t, func() {
 		res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})
@@ -434,7 +434,7 @@ func TestSkillRefLog_GitHubModelessFallbackWarning(t *testing.T) {
 		IsBranchRef: true,
 	}
 	r.resolutionCache.mu.Unlock()
-	r.cooldown.record(GitHubCooldownIdentity(token), clock.Now().Add(time.Minute))
+	r.cooldown.RecordUntil(GitHubCooldownIdentity(token), clock.Now().Add(time.Minute))
 
 	stderr := refLogCaptureStderr(t, func() {
 		res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{})

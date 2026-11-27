@@ -17,10 +17,14 @@ package hub
 import (
 	"errors"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -40,14 +44,14 @@ type reimportSourceError struct {
 }
 
 // resolveTemplateReimportSource picks the URL a template reimport fetches
-// from and validates it with parseTemplateGitHubSource: an https URL for a
-// folder on github.com, with no username or password. The stored URL is
-// validated on every reimport, and an override is validated the same way
-// before it is used or stored; an override may omit the scheme (it is
-// normalized the same way import normalizes user input). Built-in templates
-// (builtin://...) and templates with no stored source are refused. Error
-// messages are fixed text and never echo the URL.
-func resolveTemplateReimportSource(stored, override string) (*templateGitHubSource, string, *reimportSourceError) {
+// from and validates it with githubfetch.ParseURL: an https URL for a folder
+// on github.com, with no username or password. The stored URL is validated on
+// every reimport, and an override is validated the same way before it is used
+// or stored; an override may omit the scheme (it is normalized the same way
+// import normalizes user input). Built-in templates (builtin://...) and
+// templates with no stored source are refused. Error messages are fixed text
+// and never echo the URL.
+func resolveTemplateReimportSource(stored, override string) (githubfetch.Source, string, *reimportSourceError) {
 	raw := strings.TrimSpace(override)
 	if raw != "" {
 		// Refuse an explicit non-https scheme before normalization, which
@@ -55,21 +59,26 @@ func resolveTemplateReimportSource(stored, override string) (*templateGitHubSour
 		if i := strings.Index(raw, "://"); i > 0 {
 			scheme := strings.ToLower(raw[:i])
 			if scheme != "https" && scheme != "git+https" {
-				return nil, "", &reimportSourceError{"unsupported_source", "Source URL must use https"}
+				return githubfetch.Source{}, "", &reimportSourceError{"unsupported_source", "Source URL must use https"}
 			}
 		}
 		raw = config.NormalizeTemplateSourceURL(raw)
 	} else {
 		raw = strings.TrimSpace(stored)
 		if raw == "" {
-			return nil, "", &reimportSourceError{"no_source_url",
+			return githubfetch.Source{}, "", &reimportSourceError{"no_source_url",
 				"This template has no source URL to refresh from. Use the sourceUrl field to specify one."}
 		}
 	}
 
-	src, err := parseTemplateGitHubSource(raw)
+	src, err := githubfetch.ParseURL(raw)
 	if err != nil {
-		return nil, "", &reimportSourceError{"unsupported_source", err.Error()}
+		msg := errTemplateSourceUnsupported.Error()
+		var ghe *githubfetch.Error
+		if errors.As(err, &ghe) && ghe.Hint == "source URL must not include a username or password" {
+			msg = ghe.Hint
+		}
+		return githubfetch.Source{}, "", &reimportSourceError{"unsupported_source", msg}
 	}
 	return src, raw, nil
 }
@@ -183,6 +192,16 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		var rfe *reimportFetchError
+		if errors.As(err, &rfe) && rfe.Kind == githubfetch.KindRateLimited {
+			secs := int64(math.Ceil(rfe.RetryAfter.Seconds()))
+			if secs < 1 {
+				secs = int64(githubfetch.CooldownDefault / time.Second)
+			}
+			w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
+			writeError(w, http.StatusTooManyRequests, "rate_limited", rfe.Message, nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
 		return
 	}

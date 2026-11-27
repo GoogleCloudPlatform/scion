@@ -29,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
-	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -339,60 +338,12 @@ func (s *Server) importCredential(ctx context.Context, scope, scopeID, sourceURL
 	// scope is a template or a harness-config scope: harness-config reimport
 	// passes store.HarnessConfigScope*, whose values equal the TemplateScope*
 	// ones matched here (pinned by TestImportCredential_ScopeConstantsAgree).
-	switch scope {
-	case store.TemplateScopeProject:
-		if scopeID == "" {
-			return ""
-		}
-		return s.projectImportCredential(ctx, scopeID, owner, repo)
-	case store.TemplateScopeGlobal:
-		return s.scopedImportCredential(ctx, secret.ScopeHub, s.HubID(), owner, repo)
-	case store.TemplateScopeUser:
-		user := GetUserIdentityFromContext(ctx)
-		if scopeID == "" || user == nil || user.ID() != scopeID {
-			return ""
-		}
-		return s.scopedImportCredential(ctx, secret.ScopeUser, scopeID, owner, repo)
-	}
-	return ""
-}
-
-// projectImportCredential is the project-scope cascade of importCredential.
-func (s *Server) projectImportCredential(ctx context.Context, projectID, owner, repo string) string {
-	if val, key := s.ghConventionCredential(ctx, secret.ScopeProject, projectID, owner, repo); val != "" {
-		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
-		return val
-	}
-
-	// Prefer a GitHub App installation token if the project has one.
-	project, err := s.store.GetProject(ctx, projectID)
-	if err == nil && project != nil && project.GitHubInstallationID != nil {
-		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
-			return token
-		}
-	}
-
-	// Fall back to the project GITHUB_TOKEN credential if no App token was minted.
-	if val := s.credentialForImport(ctx, secret.ScopeProject, projectID, ghauth.DefaultKey); val != "" {
-		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
-		return val
-	}
-	return ""
-}
-
-// scopedImportCredential is the hub- and user-scope cascade of
-// importCredential: GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN, all
-// read from credScope/scopeID.
-func (s *Server) scopedImportCredential(ctx context.Context, credScope, scopeID, owner, repo string) string {
-	val, key := s.ghConventionCredential(ctx, credScope, scopeID, owner, repo)
-	if val == "" {
-		val, key = s.credentialForImport(ctx, credScope, scopeID, ghauth.DefaultKey), ghauth.DefaultKey
-	}
-	if val == "" {
-		return ""
-	}
-	s.resourceLog.Info("using credential for resource import", "scope", credScope, "scopeID", scopeID, "secret", key)
-	return val
+	return s.githubCredential(ctx, ghCredRequest{
+		Scope:   scope,
+		ScopeID: scopeID,
+		Owner:   owner,
+		Repo:    repo,
+	}).Token
 }
 
 // ghConventionCredential returns the first GH_ convention credential set for

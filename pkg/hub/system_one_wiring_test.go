@@ -949,6 +949,7 @@ func TestSystemOneNamedSecret_FallbackMatrixTypeChecksAndScopeIsolation(t *testi
 			SecretKeyAttachmentDeliveryKey,
 			SecretKeyPortViewKey,
 			SecretKeyListCursorKey,
+			SecretKeyGitHubScopeKey,
 			"oidc_signing_key",
 			"oidc_signing_keyset",
 			conduitGrantKeySecretName,

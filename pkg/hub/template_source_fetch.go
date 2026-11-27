@@ -15,116 +15,58 @@
 package hub
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
-	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Template reimport downloads a template source with its own fetcher rather
-// than the general import path. The source must be a folder in a GitHub
-// repository; the hub builds the archive URL itself, and every request
-// (including GitHub's redirect to its download host) is limited to the hosts
-// below, vetted for public addresses, bounded in redirects, size and time.
-// The archive is then extracted with its own size and file-count limits.
-//
-// When the template's own scope has a repository credential (resolved by
-// importCredential, the same lookup order as template import), the archive
-// is requested from the GitHub API tarball endpoint with that credential as
-// the Authorization header, sent to api.github.com only; GitHub's redirect
-// to codeload carries its own short-lived access and gets no header. With no
-// credential the public archive URL is fetched without one.
-
-// templateSourceHosts is the complete set of hosts a template reimport may
-// contact. github.com serves the public archive URL and api.github.com the
-// credentialed tarball; both redirect to codeload.
+// templateSourceHosts is retained for import_source_guard.go until Phase 2
+// migrates general GitHub imports onto pkg/githubfetch.
 var templateSourceHosts = []string{"github.com", "api.github.com", "codeload.github.com"}
 
-// templateSourceLimits bounds one template source download and extraction.
-type templateSourceLimits struct {
-	// MaxDownload caps the compressed archive size.
-	MaxDownload int64
-	// MaxUnpacked caps the total uncompressed archive stream read, including
-	// entries outside the requested folder.
-	MaxUnpacked int64
-	// MaxExtract caps the total size of files written for the requested folder.
-	MaxExtract int64
-	// MaxFiles caps the number of files and directories written.
-	MaxFiles int
-	// Timeout bounds the download.
-	Timeout time.Duration
-	// MaxRedirects bounds redirect hops.
-	MaxRedirects int
+// errTemplateSourceTooLarge, cappedReader and extractFileMode are retained for
+// welcome_stage.go until Phase 7 migrates welcome archive extraction.
+var errTemplateSourceTooLarge = errors.New("template source exceeds the size limit")
+
+type cappedReader struct {
+	r         io.Reader
+	remaining int64
 }
 
-var defaultTemplateSourceLimits = templateSourceLimits{
-	MaxDownload:  64 << 20,
-	MaxUnpacked:  512 << 20,
-	MaxExtract:   32 << 20,
-	MaxFiles:     2000,
-	Timeout:      2 * time.Minute,
-	MaxRedirects: 3,
-}
-
-// templateSourceFetcher downloads one body, without or with an Authorization
-// header. *remotefetch.Fetcher satisfies it.
-type templateSourceFetcher interface {
-	FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error)
-	FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*remotefetch.Result, error)
-}
-
-// newTemplateSourceFetcher returns the fetcher template reimport uses: https
-// only, limited to templateSourceHosts on every hop, public addresses only,
-// with the download size, timeout and redirect limits applied.
-func newTemplateSourceFetcher(lim templateSourceLimits, logger *slog.Logger) *remotefetch.Fetcher {
-	return remotefetch.New(remotefetch.Config{
-		MaxBytes:     lim.MaxDownload,
-		Timeout:      lim.Timeout,
-		MaxRedirects: lim.MaxRedirects,
-		AllowedHosts: templateSourceHosts,
-		Logger:       logger,
-	})
-}
-
-func (s *Server) getTemplateSourceFetcher() templateSourceFetcher {
-	if s.templateSourceFetcher != nil {
-		return s.templateSourceFetcher
+func (c *cappedReader) Read(p []byte) (int, error) {
+	if c.remaining < 0 {
+		return 0, errTemplateSourceTooLarge
 	}
-	return newTemplateSourceFetcher(defaultTemplateSourceLimits, s.resourceLog)
+	if int64(len(p)) > c.remaining+1 {
+		p = p[:c.remaining+1]
+	}
+	n, err := c.r.Read(p)
+	c.remaining -= int64(n)
+	if c.remaining < 0 {
+		return n, errTemplateSourceTooLarge
+	}
+	return n, err
 }
 
-// templateGitHubSource is a validated GitHub folder URL.
-type templateGitHubSource struct {
-	Owner  string
-	Repo   string
-	Branch string
-	// Path is the folder within the repository, "" for the repository root.
-	Path string
+func extractFileMode(archiveMode int64) os.FileMode {
+	if archiveMode&0o111 != 0 {
+		return 0o755
+	}
+	return 0o644
 }
 
-var (
-	githubOwnerRe  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
-	githubRepoRe   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
-	githubBranchRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,200}$`)
-	githubPathRe   = regexp.MustCompile(`^[A-Za-z0-9._ @+-]{1,255}$`)
-	sourceCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
-)
+var sourceCommitRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // validateSourceCommit returns raw trimmed if it is a valid 40-character
 // lowercase hex git commit SHA; otherwise it returns "" and logs at debug
@@ -146,255 +88,117 @@ func validateSourceCommit(raw string) string {
 var errTemplateSourceUnsupported = errors.New(
 	"refreshing from source is only supported for templates imported from a GitHub folder URL (https://github.com/<owner>/<repo>/tree/<branch>/<path>)")
 
-// parseTemplateGitHubSource validates raw as an https://github.com folder URL
-// with no username, password, port other than 443, query or fragment, and
-// returns its parts.
-func parseTemplateGitHubSource(raw string) (*templateGitHubSource, error) {
-	u, err := url.Parse(raw)
-	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Opaque != "" {
-		return nil, errTemplateSourceUnsupported
-	}
-	if u.User != nil {
-		return nil, errors.New("source URL must not include a username or password")
-	}
-	if !strings.EqualFold(u.Hostname(), "github.com") || (u.Port() != "" && u.Port() != "443") {
-		return nil, errTemplateSourceUnsupported
-	}
-	if u.RawQuery != "" || u.Fragment != "" {
-		return nil, errTemplateSourceUnsupported
-	}
-
-	var parts []string
-	for _, p := range strings.Split(u.Path, "/") {
-		if p != "" {
-			parts = append(parts, p)
-		}
-	}
-	if len(parts) < 2 {
-		return nil, errTemplateSourceUnsupported
-	}
-	src := &templateGitHubSource{Owner: parts[0], Repo: strings.TrimSuffix(parts[1], ".git"), Branch: "main"}
-	rest := parts[2:]
-	if len(rest) > 0 && rest[0] == "tree" {
-		if len(rest) < 2 {
-			return nil, errTemplateSourceUnsupported
-		}
-		src.Branch = rest[1]
-		rest = rest[2:]
-	} else if len(rest) > 0 && (rest[0] == "archive" || rest[0] == "blob" || rest[0] == "releases") {
-		return nil, errTemplateSourceUnsupported
-	}
-
-	if !githubOwnerRe.MatchString(src.Owner) || !githubRepoRe.MatchString(src.Repo) ||
-		src.Repo == "." || src.Repo == ".." || !githubBranchRe.MatchString(src.Branch) ||
-		strings.Contains(src.Branch, "..") {
-		return nil, errTemplateSourceUnsupported
-	}
-	for _, p := range rest {
-		if p == "." || p == ".." || !githubPathRe.MatchString(p) {
-			return nil, errTemplateSourceUnsupported
-		}
-	}
-	src.Path = strings.Join(rest, "/")
-	return src, nil
+// reimportFetchError carries a classified githubfetch failure with a
+// caller-safe fixed message and optional Retry-After duration for 429s.
+type reimportFetchError struct {
+	Kind       githubfetch.Kind
+	RetryAfter time.Duration
+	Message    string
 }
 
-// archiveURL is the GitHub archive URL for the source's branch.
-func (g *templateGitHubSource) archiveURL() string {
-	return "https://github.com/" + g.Owner + "/" + g.Repo + "/archive/refs/heads/" + url.PathEscape(g.Branch) + ".tar.gz"
+func (e *reimportFetchError) Error() string { return e.Message }
+
+// mapTemplateReimportError maps a githubfetch error into a caller-safe fixed
+// message. Raw error details, tokens, and redirect URLs stay in server logs.
+func mapTemplateReimportError(err error) error {
+	var ghe *githubfetch.Error
+	if !errors.As(err, &ghe) {
+		return &reimportFetchError{
+			Kind:    githubfetch.KindUnreachable,
+			Message: "could not download the template source",
+		}
+	}
+	switch ghe.Kind {
+	case githubfetch.KindNotFound:
+		msg := "GitHub repository, ref, or folder was not found, or is private and no repository credential is configured"
+		if ghe.CredKind != githubfetch.CredAnonymous {
+			msg = "GitHub repository, ref, or folder was not found, or the template scope's repository credential cannot read it"
+		}
+		if ghe.Hint != "" {
+			msg += " (" + ghe.Hint + ")"
+		}
+		return &reimportFetchError{Kind: ghe.Kind, Message: msg}
+	case githubfetch.KindAuthRejected:
+		msg := "GitHub rejected the template scope's repository credential (it may be invalid or expired)"
+		if ghe.Hint != "" {
+			msg += " (" + ghe.Hint + ")"
+		}
+		return &reimportFetchError{Kind: ghe.Kind, Message: msg}
+	case githubfetch.KindForbidden:
+		msg := "GitHub denied access to the template repository"
+		if ghe.Hint != "" {
+			msg += " (" + ghe.Hint + ")"
+		}
+		return &reimportFetchError{Kind: ghe.Kind, Message: msg}
+	case githubfetch.KindRateLimited:
+		return &reimportFetchError{
+			Kind:       ghe.Kind,
+			RetryAfter: ghe.RetryAfter,
+			Message:    "GitHub rate limit exceeded; retry later",
+		}
+	case githubfetch.KindTooLarge:
+		return &reimportFetchError{
+			Kind:    ghe.Kind,
+			Message: "template source exceeds the size or file count limit",
+		}
+	case githubfetch.KindTimeout:
+		return &reimportFetchError{
+			Kind:    ghe.Kind,
+			Message: "timed out downloading the template source",
+		}
+	case githubfetch.KindUnsupportedContent:
+		return &reimportFetchError{
+			Kind:    ghe.Kind,
+			Message: "template source contains unsupported content",
+		}
+	case githubfetch.KindUpstream:
+		return &reimportFetchError{
+			Kind:    ghe.Kind,
+			Message: "GitHub returned an invalid or inconsistent archive",
+		}
+	default:
+		return &reimportFetchError{
+			Kind:    ghe.Kind,
+			Message: "could not download the template source",
+		}
+	}
 }
 
-// apiTarballURL is the GitHub API tarball URL for the source's branch, used
-// when a credential is sent. It serves the same single-top-directory gzip
-// tarball as archiveURL.
-func (g *templateGitHubSource) apiTarballURL() string {
-	return config.GitHubAPITarballURL(g.Owner, g.Repo, "refs/heads/"+g.Branch)
+func (s *Server) templateReimportLimits() githubfetch.Limits {
+	if s.workstation {
+		return githubfetch.ImportLocalLimits()
+	}
+	return githubfetch.ImportHostedLimits()
 }
 
-// errTemplateSourceTooLarge reports that a source exceeded an extraction limit.
-var errTemplateSourceTooLarge = errors.New("template source exceeds the size limit")
-
-// cappedReader returns errTemplateSourceTooLarge once more than remaining
-// bytes have been read.
-type cappedReader struct {
-	r         io.Reader
-	remaining int64
+func (s *Server) templateReimportNetworkMode() remotefetch.NetworkMode {
+	if s.workstation {
+		return remotefetch.NetworkSystem
+	}
+	return remotefetch.NetworkVetted
 }
 
-func (c *cappedReader) Read(p []byte) (int, error) {
-	if c.remaining < 0 {
-		return 0, errTemplateSourceTooLarge
+func (s *Server) getTemplateGitHubClient(lim githubfetch.Limits) *githubfetch.Client {
+	if s.templateGitHubClient != nil {
+		return s.templateGitHubClient
 	}
-	if int64(len(p)) > c.remaining+1 {
-		p = p[:c.remaining+1]
-	}
-	n, err := c.r.Read(p)
-	c.remaining -= int64(n)
-	if c.remaining < 0 {
-		return n, errTemplateSourceTooLarge
-	}
-	return n, err
+	ep := githubfetch.DefaultEndpoint()
+	doer := s.newTemplateGitHubDoer(ep, lim)
+	return githubfetch.New(githubfetch.Options{
+		Endpoint:   ep,
+		Doer:       doer,
+		Cooldown:   s.githubCooldown(),
+		MaxRetries: 1,
+	})
 }
 
-// extractTemplateSource extracts the files under subPath from a GitHub
-// archive (a gzip tarball with one top-level directory) into dest, returning
-// the validated 40-char commit SHA from the archive's PAX global header
-// (comment record) when present. Only regular files and directories are
-// written, files with mode 0755 or 0644 (see extractFileMode); links and other
-// entry types are skipped, as are entries whose names would leave dest. It
-// fails when the archive exceeds the unpacked, extracted-size or file-count
-// limits, or when nothing exists at subPath.
-func extractTemplateSource(archive []byte, subPath, dest string, lim templateSourceLimits) (string, error) {
-	gzr, err := gzip.NewReader(bytes.NewReader(archive))
-	if err != nil {
-		return "", fmt.Errorf("template source is not a valid archive: %w", err)
+func (s *Server) newTemplateGitHubDoer(ep githubfetch.Endpoint, lim githubfetch.Limits) githubfetch.Doer {
+	network := s.templateReimportNetworkMode()
+	reqTimeout := lim.RequestTimeout
+	if reqTimeout <= 0 {
+		reqTimeout = lim.Timeout
 	}
-	defer func() { _ = gzr.Close() }()
-	tr := tar.NewReader(&cappedReader{r: gzr, remaining: lim.MaxUnpacked})
-
-	subPath = strings.Trim(subPath, "/")
-	var written int64
-	var sourceCommit string
-	files := 0
-	found := false
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			if errors.Is(err, errTemplateSourceTooLarge) {
-				return "", errTemplateSourceTooLarge
-			}
-			return "", fmt.Errorf("template source is not a valid archive: %w", err)
-		}
-		if hdr.Typeflag == tar.TypeXGlobalHeader {
-			if sourceCommit == "" {
-				sourceCommit = validateSourceCommit(hdr.PAXRecords["comment"])
-			}
-			continue
-		}
-		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
-			continue
-		}
-
-		// Drop the archive's single top-level directory.
-		name := path.Clean("/" + hdr.Name)
-		_, rel, ok := strings.Cut(strings.TrimPrefix(name, "/"), "/")
-		if !ok || rel == "" {
-			continue
-		}
-		if subPath != "" {
-			if rel == subPath {
-				rel = ""
-			} else if strings.HasPrefix(rel, subPath+"/") {
-				rel = strings.TrimPrefix(rel, subPath+"/")
-			} else {
-				continue
-			}
-		}
-		found = true
-		if rel == "" {
-			continue
-		}
-		target, ok := extractTarget(dest, rel)
-		if !ok {
-			continue
-		}
-
-		// Directories count toward the entry limit as well as files.
-		files++
-		if files > lim.MaxFiles {
-			return "", errTemplateSourceTooLarge
-		}
-
-		if hdr.Typeflag == tar.TypeDir {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return "", err
-			}
-			continue
-		}
-
-		if hdr.Size < 0 || written+hdr.Size > lim.MaxExtract {
-			return "", errTemplateSourceTooLarge
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return "", err
-		}
-		mode := extractFileMode(hdr.Mode)
-		f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-		if err != nil {
-			return "", err
-		}
-		// Apply the mode exactly, independent of the process umask.
-		if err := f.Chmod(mode); err != nil {
-			_ = f.Close()
-			return "", err
-		}
-		n, copyErr := io.Copy(f, io.LimitReader(tr, lim.MaxExtract-written+1))
-		closeErr := f.Close()
-		written += n
-		if copyErr != nil {
-			if errors.Is(copyErr, errTemplateSourceTooLarge) {
-				return "", errTemplateSourceTooLarge
-			}
-			return "", fmt.Errorf("template source is not a valid archive: %w", copyErr)
-		}
-		if written > lim.MaxExtract {
-			return "", errTemplateSourceTooLarge
-		}
-		if closeErr != nil {
-			return "", closeErr
-		}
-	}
-	if !found {
-		return "", errors.New("the source folder was not found in the repository")
-	}
-	return sourceCommit, nil
-}
-
-// extractFileMode returns the mode a regular file from the archive is written
-// with: 0755 when the entry has any execute bit, otherwise 0644. Other bits
-// (group/world write, setuid, setgid, sticky) are never applied.
-func extractFileMode(archiveMode int64) os.FileMode {
-	if archiveMode&0o111 != 0 {
-		return 0o755
-	}
-	return 0o644
-}
-
-// extractTarget joins the archive-relative name rel onto dest and reports
-// whether the result stays inside dest. Names that are absolute, empty, or
-// that would resolve outside dest are refused. Extraction already cleans
-// names before calling it; this check is kept as a second, independent guard.
-func extractTarget(dest, rel string) (string, bool) {
-	if rel == "" || path.IsAbs(rel) || filepath.IsAbs(rel) || strings.Contains(rel, "\x00") {
-		return "", false
-	}
-	target := filepath.Join(dest, filepath.FromSlash(rel))
-	r, err := filepath.Rel(dest, target)
-	if err != nil || r == "." || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) || filepath.IsAbs(r) {
-		return "", false
-	}
-	return target, true
-}
-
-// templateSourceFetchError turns a download failure into a message that is
-// safe to return to the caller. Details stay in the server log.
-func templateSourceFetchError(err error) error {
-	var fe *remotefetch.Error
-	if errors.As(err, &fe) {
-		switch fe.Reason {
-		case remotefetch.ReasonStatus:
-			return errors.New("GitHub did not return the source archive; the repository or branch may not exist, or the template scope's repository credential (if any) cannot read it")
-		case remotefetch.ReasonTooLarge:
-			return errTemplateSourceTooLarge
-		case remotefetch.ReasonTimeout:
-			return errors.New("timed out downloading the template source")
-		}
-	}
-	return errors.New("could not download the template source")
+	return githubfetch.NewDoer(ep, network, lim.MaxDownload, reqTimeout, s.resourceLog)
 }
 
 // targetTemplatePersistence is the template persistence used by reimport. It
@@ -428,8 +232,7 @@ func (p *targetTemplatePersistence) Create(context.Context, *ResourceRecord, *co
 // created or updated.
 func (p *targetTemplatePersistence) PostFinalize(context.Context, *ResourceRecord, *collectedDir) {}
 
-// OnHashMatch does nothing for the same reason. (Reimport always forces a
-// sync, so this path is not reached today.)
+// OnHashMatch does nothing for the same reason.
 func (p *targetTemplatePersistence) OnHashMatch(context.Context, *ResourceRecord, *collectedDir) (bool, error) {
 	return false, nil
 }
@@ -464,43 +267,71 @@ func selectTemplateSourceDir(dirs []resourceDir, tmpl *store.Template) (resource
 	}
 }
 
-// fetchTemplateSourceArchive downloads src's branch archive. The credential is
-// the one template import would use for tmpl's own scope and scope ID
-// (importCredential: a project's GH_ credentials, App token or GITHUB_TOKEN;
-// the hub's or the calling user's GH_ credentials or GITHUB_TOKEN, a user's
-// only when the caller is that user). With a credential the API tarball is
-// fetched with it as a Bearer Authorization header; without one, the public
-// archive URL is fetched with no header. Only the credential name is logged
-// (by importCredential), never its value.
-func (s *Server) fetchTemplateSourceArchive(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template) (*remotefetch.Result, error) {
-	fetcher := s.getTemplateSourceFetcher()
-	if cred := s.importCredential(ctx, tmpl.Scope, tmpl.ScopeID, sourceURL); cred != "" {
-		return fetcher.FetchBytesAuthorized(ctx, src.apiTarballURL(), "Bearer "+cred)
-	}
-	return fetcher.FetchBytes(ctx, src.archiveURL())
+// reimportTemplateSource resolves src, checks whether the upstream folder tree
+// SHA is unchanged (skipping download and storage write when it is), and
+// otherwise streams and extracts the folder via pkg/githubfetch and refreshes
+// tmpl. sourceURL preserves the original ref (branch, tag, SHA, or slashed
+// branch); source_commit records the resolved 40-hex commit SHA.
+func (s *Server) reimportTemplateSource(ctx context.Context, src githubfetch.Source, sourceURL string, tmpl *store.Template, progress importProgressFunc) ([]string, error) {
+	return s.reimportTemplateSourceWithLimits(ctx, src, sourceURL, tmpl, progress, s.templateReimportLimits())
 }
 
-// reimportTemplateSource downloads src, extracts it and refreshes tmpl from
-// the matching folder. sourceURL is the validated source URL recorded on the
-// template. Only tmpl is written; no other template is created or changed.
-func (s *Server) reimportTemplateSource(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template, progress importProgressFunc) ([]string, error) {
-	return s.reimportTemplateSourceWithLimits(ctx, src, sourceURL, tmpl, progress, defaultTemplateSourceLimits)
-}
-
-func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *templateGitHubSource, sourceURL string, tmpl *store.Template, progress importProgressFunc, lim templateSourceLimits) ([]string, error) {
+func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src githubfetch.Source, sourceURL string, tmpl *store.Template, progress importProgressFunc, lim githubfetch.Limits) ([]string, error) {
 	kind := s.templateImportKind()
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	res, err := s.fetchTemplateSourceArchive(ctx, src, sourceURL, tmpl)
+	cred := s.githubCredential(ctx, ghCredRequest{
+		Scope:   tmpl.Scope,
+		ScopeID: tmpl.ScopeID,
+		Owner:   src.Owner,
+		Repo:    src.Repo,
+	})
+	client := s.getTemplateGitHubClient(lim)
+
+	resolved, resolvedSrc, err := client.ResolveRef(ctx, src, cred)
 	if err != nil {
-		s.resourceLog.Warn("template reimport: source download failed",
+		s.resourceLog.Warn("template reimport: ref resolution failed",
 			"owner", src.Owner, "repo", src.Repo, "error", err)
-		return nil, templateSourceFetchError(err)
+		return nil, mapTemplateReimportError(err)
 	}
-	if int64(len(res.Body)) > lim.MaxDownload {
-		return nil, errTemplateSourceTooLarge
+
+	tree, err := client.ListTree(ctx, resolvedSrc, resolved.CommitSHA, cred, lim)
+	if err != nil {
+		s.resourceLog.Warn("template reimport: tree listing failed",
+			"owner", src.Owner, "repo", src.Repo, "commit", resolved.CommitSHA, "error", err)
+		return nil, mapTemplateReimportError(err)
+	}
+
+	// Skip tarball download and storage write when the template already has
+	// stored content for this exact sourceURL and the upstream folder tree SHA
+	// is unchanged (same commit, or a newer commit with an identical tree SHA).
+	prevCommit := validateSourceCommit(tmpl.SourceCommit)
+	if prevCommit != "" && tmpl.SourceURL == sourceURL && tmpl.ContentHash != "" {
+		unchanged := resolved.CommitSHA == prevCommit
+		if !unchanged && tree.TreeSHA != "" {
+			if prevTree, prevErr := client.ListTree(ctx, resolvedSrc, prevCommit, cred, lim); prevErr == nil && prevTree.TreeSHA != "" && prevTree.TreeSHA == tree.TreeSHA {
+				unchanged = true
+			}
+		}
+		if unchanged {
+			if resolved.CommitSHA != prevCommit {
+				precond := store.TemplateContentPrecondition{
+					ContentHash: tmpl.ContentHash,
+					Layout:      tmpl.Layout,
+				}
+				tmpl.SourceCommit = resolved.CommitSHA
+				if err := s.store.UpdateTemplateContent(ctx, tmpl, precond); err != nil {
+					return nil, err
+				}
+			}
+			emit(progress, ResourceImportEvent{Type: ImportEventDiscovered, Total: 1, Names: []string{tmpl.Name}})
+			emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: tmpl.Name})
+			emit(progress, ResourceImportEvent{Type: ImportEventCompleted, Name: tmpl.Name, Completed: 1, Total: 1})
+			emit(progress, ResourceImportEvent{Type: ImportEventDone, Imported: []string{tmpl.Name}})
+			return []string{tmpl.Name}, nil
+		}
 	}
 
 	dir, err := os.MkdirTemp("", "scion-template-reimport-*")
@@ -509,9 +340,16 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	sourceCommit, err := extractTemplateSource(res.Body, src.Path, dir, lim)
+	root, err := os.OpenRoot(dir)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open working directory root: %w", err)
+	}
+	res, fetchErr := client.FetchFolderResolved(ctx, resolvedSrc, resolved.CommitSHA, &tree, cred, root, lim)
+	_ = root.Close()
+	if fetchErr != nil {
+		s.resourceLog.Warn("template reimport: source download failed",
+			"owner", src.Owner, "repo", src.Repo, "commit", resolved.CommitSHA, "error", fetchErr)
+		return nil, mapTemplateReimportError(fetchErr)
 	}
 
 	dirs, _, err := discoverResourceDirs(dir, sourceURL, kind)
@@ -528,7 +366,7 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 	// Report and write under the target's own name; the store resolves the
 	// record by tmpl.ID regardless of the folder name.
 	selected.name = tmpl.Name
-	selected.sourceCommit = sourceCommit
+	selected.sourceCommit = res.CommitSHA
 	kind.newStore = func(string) (*ResourceStore, error) { return s.targetTemplateStore(tmpl.ID), nil }
 	return s.importResourceDirs(ctx, []resourceDir{selected}, nil, tmpl.Scope, tmpl.ScopeID, kind, progress), nil
 }

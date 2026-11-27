@@ -520,6 +520,7 @@ func isHubInfrastructureSecretKey(key string) bool {
 		SecretKeyAttachmentDeliveryKey,
 		SecretKeyPortViewKey,
 		SecretKeyListCursorKey,
+		SecretKeyGitHubScopeKey,
 		oidckeys.SecretKeyOIDCSigningKey,
 		oidckeys.SecretKeyOIDCKeyset,
 		conduitGrantKeySecretName:

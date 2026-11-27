@@ -239,10 +239,7 @@ func TestGitHubCooldown_ClearsOnSuccessAfterT(t *testing.T) {
 	if got := srv.calls.Load(); got != 2 {
 		t.Fatalf("server saw %d requests, want 2", got)
 	}
-	c.mu.Lock()
-	_, present := c.until["id"]
-	c.mu.Unlock()
-	if present {
+	if c.HasEntry("id") {
 		t.Error("expected the cooldown entry to be cleared by the first success after T")
 	}
 }
@@ -280,8 +277,8 @@ func TestGitHubCooldown_IdentitiesAreIndependent(t *testing.T) {
 func TestGitHubCooldown_LaterResponseNeverShortens(t *testing.T) {
 	clock := newFakeClock()
 	c := NewGitHubCooldown(clock.Now)
-	long := c.record("id", clock.Now().Add(4*time.Minute))
-	got := c.record("id", clock.Now().Add(time.Minute))
+	long := c.RecordUntil("id", clock.Now().Add(4*time.Minute))
+	got := c.RecordUntil("id", clock.Now().Add(time.Minute))
 	if !got.Equal(long) {
 		t.Errorf("cooldown shortened to %v, want %v", got, long)
 	}

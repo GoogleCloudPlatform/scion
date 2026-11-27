@@ -733,7 +733,7 @@ func withRateLimitRef(err error, ref string) error {
 // cooldown tracker's clock, as a whole number of seconds (rounded up, at
 // least 1), the form ResolveError.RetryAfter carries.
 func (r *GitHubSkillResolver) cooldownRetryAfter(rl *GitHubRateLimitError) string {
-	secs := int64(math.Ceil(rl.RetryAt.Sub(r.cooldownTracker().now()).Seconds()))
+	secs := int64(math.Ceil(rl.RetryAt.Sub(r.cooldownTracker().Now()).Seconds()))
 	if secs < 1 {
 		secs = 1
 	}

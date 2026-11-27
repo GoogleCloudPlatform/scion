@@ -487,3 +487,21 @@ func TestTemplateDriftWarning_AdminPolicyClassifiedDeny(t *testing.T) {
 	require.True(t, ok, "hub.template_drift_warning must be classified in testAdminExperimentPolicy")
 	assert.Equal(t, testAdminPolicyDeny, pol)
 }
+
+func TestTemplateDrift_BarePathSourceURL(t *testing.T) {
+	const commitSHA = "1111111111111111111111111111111111111111"
+	srv, _, project, _ := setupWorkspaceProject(t, "drift-bare-path")
+	setExperimentOverrides(t, srv, map[string]bool{experiments.TemplateDriftWarning: true})
+	project.GitRemote = "https://github.com/acme/repo.git"
+	tmpl := &store.Template{
+		SourceURL:    "https://github.com/acme/repo/templates/my-template",
+		SourceCommit: commitSHA,
+	}
+	target := srv.resolveTemplateDriftTarget(project, tmpl)
+	require.NotNil(t, target, "bare-path GitHub source URL must resolve for drift")
+	assert.Equal(t, "acme", target.src.Owner)
+	assert.Equal(t, "repo", target.src.Repo)
+	assert.Equal(t, "main", target.src.Branch)
+	assert.Equal(t, "templates/my-template", target.src.Path)
+	assert.Equal(t, commitSHA, target.sourceCommit)
+}

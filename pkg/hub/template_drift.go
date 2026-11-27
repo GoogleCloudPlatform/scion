@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -233,6 +234,23 @@ func (c *templateDriftChecker) putBranchTree(key templateDriftKey, treeSHA strin
 	}
 }
 
+// templateSourceFetcher downloads one body, without or with an Authorization
+// header. Retained for template_drift.go until Phase 6 migrates drift onto
+// pkg/githubfetch.
+type templateSourceFetcher interface {
+	FetchBytes(ctx context.Context, rawURL string) (*remotefetch.Result, error)
+	FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*remotefetch.Result, error)
+}
+
+// templateGitHubSource is the parsed GitHub folder source used by
+// template_drift.go until Phase 6 migrates drift onto pkg/githubfetch.
+type templateGitHubSource struct {
+	Owner  string
+	Repo   string
+	Branch string
+	Path   string
+}
+
 type templateDriftTarget struct {
 	src          *templateGitHubSource
 	sourceCommit string
@@ -252,9 +270,19 @@ func (s *Server) resolveTemplateDriftTarget(project *store.Project, tmpl *store.
 	if commit == "" {
 		return nil
 	}
-	src, err := parseTemplateGitHubSource(tmpl.SourceURL)
+	parsed, err := githubfetch.ParseURL(tmpl.SourceURL)
 	if err != nil {
 		return nil
+	}
+	branch := parsed.Ref
+	if branch == "" {
+		branch = "main"
+	}
+	src := &templateGitHubSource{
+		Owner:  parsed.Owner,
+		Repo:   parsed.Repo,
+		Branch: branch,
+		Path:   parsed.Path,
 	}
 	remote := strings.TrimSpace(project.GitRemote)
 	if remote == "" && project.Labels != nil {

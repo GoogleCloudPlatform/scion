@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -2328,6 +2329,8 @@ type Server struct {
 	// signing-ring purpose of its own in keyring mode, one fixed key of its
 	// own otherwise; separate from every other key.
 	portViewKeys capabilityKeys
+	// githubScopeKeys HMAC-keys GitHub credential scopes (github_credential.go).
+	githubScopeKeys capabilityKeys
 	// portViewClock replaces time.Now on the page view route (tests only).
 	portViewClock func() time.Time
 
@@ -3085,9 +3088,9 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// templateSourceFetcher downloads template sources for reimport. nil
-	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
-	templateSourceFetcher templateSourceFetcher
+	// templateGitHubClient fetches GitHub template sources for reimport. nil
+	// selects the default client (newTemplateGitHubClient); tests replace it.
+	templateGitHubClient *githubfetch.Client
 
 	// templateDrift holds the caches and optional test seams for the Hub-side
 	// template drift check at agent creation (template_drift.go).
@@ -3733,6 +3736,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Initialize the dedicated authorized-list cursor sealing key
 	// (ptone/scion#2124).
 	if err := srv.initListCursorSealer(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the dedicated GitHub credential scope HMAC key.
+	if err := srv.initGitHubScopeKey(ctx); err != nil {
 		return nil, err
 	}
 
