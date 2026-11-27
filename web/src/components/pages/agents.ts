@@ -1588,16 +1588,17 @@ export class ScionPageAgents extends LitElement {
     return this.sortField === field ? (this.sortDir === 'asc' ? '▲' : '▼') : '▲';
   }
 
-  private ensureVisibleColumnsLoaded(): Set<AgentColumnId> {
-    if (!this.visibleColumnsLoaded) {
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (agentsColumnPickerEnabled() && !this.visibleColumnsLoaded) {
       this.visibleColumnsLoaded = true;
       this.visibleColumns = loadVisibleAgentColumns();
     }
-    return this.visibleColumns;
   }
 
   private onToggleColumn(id: AgentColumnId): void {
-    this.visibleColumns = toggleAgentColumn(this.ensureVisibleColumnsLoaded(), id);
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = toggleAgentColumn(this.visibleColumns, id);
     saveVisibleAgentColumns(this.visibleColumns);
   }
 
@@ -1610,7 +1611,7 @@ export class ScionPageAgents extends LitElement {
   private renderColumnPicker(): TemplateResult {
     return renderColumnPicker({
       columns: AGENT_COLUMNS,
-      visible: this.ensureVisibleColumnsLoaded(),
+      visible: this.visibleColumns,
       onToggle: (id) => this.onToggleColumn(id),
       onReset: () => this.resetVisibleColumns(),
     });
@@ -2400,9 +2401,8 @@ export class ScionPageAgents extends LitElement {
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const neverSuspendOn = neverSuspendEnabled();
     const columnPickerOn = agentsColumnPickerEnabled();
-    const visibleColumns = columnPickerOn ? this.ensureVisibleColumnsLoaded() : null;
-    const activeColumns = visibleColumns
-      ? AGENT_COLUMNS.filter((col) => visibleColumns.has(col.id))
+    const activeColumns = columnPickerOn
+      ? AGENT_COLUMNS.filter((col) => this.visibleColumns.has(col.id))
       : AGENT_COLUMNS;
     return html`
       <div class="resource-table-container">

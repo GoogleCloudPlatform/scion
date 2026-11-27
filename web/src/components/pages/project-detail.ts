@@ -231,6 +231,10 @@ function listViewOf(mode: ViewMode): AgentListView {
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
+const ALL_PROJECT_AGENT_COLUMN_IDS: ReadonlySet<ProjectAgentColumnId> = new Set(
+  PROJECT_AGENT_COLUMNS.map((col) => col.id)
+);
+
 /**
  * The server-prefetched project in `pageData.data`, when it is the project
  * this page shows; otherwise null and the page fetches it. The router only
@@ -1572,6 +1576,10 @@ export class ScionPageProjectDetail extends LitElement {
     if (changed.has('project') || changed.has('editingFilePath')) {
       this.normalizeActiveFileTab();
     }
+    if (agentsColumnPickerEnabled() && !this.visibleColumnsLoaded) {
+      this.visibleColumnsLoaded = true;
+      this.visibleColumns = loadVisibleProjectAgentColumns();
+    }
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -2891,16 +2899,9 @@ export class ScionPageProjectDetail extends LitElement {
     return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
   }
 
-  private ensureVisibleColumnsLoaded(): Set<ProjectAgentColumnId> {
-    if (!this.visibleColumnsLoaded) {
-      this.visibleColumnsLoaded = true;
-      this.visibleColumns = loadVisibleProjectAgentColumns();
-    }
-    return this.visibleColumns;
-  }
-
   private onToggleColumn(id: ProjectAgentColumnId): void {
-    this.visibleColumns = toggleProjectAgentColumn(this.ensureVisibleColumnsLoaded(), id);
+    this.visibleColumnsLoaded = true;
+    this.visibleColumns = toggleProjectAgentColumn(this.visibleColumns, id);
     saveVisibleProjectAgentColumns(this.visibleColumns);
   }
 
@@ -2913,7 +2914,7 @@ export class ScionPageProjectDetail extends LitElement {
   private renderColumnPicker(): TemplateResult {
     return renderColumnPicker({
       columns: PROJECT_AGENT_COLUMNS,
-      visible: this.ensureVisibleColumnsLoaded(),
+      visible: this.visibleColumns,
       onToggle: (id) => this.onToggleColumn(id),
       onReset: () => this.resetVisibleColumns(),
     });
@@ -4283,11 +4284,10 @@ export class ScionPageProjectDetail extends LitElement {
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
     const columnPickerOn = agentsColumnPickerEnabled();
-    const visibleColumns = columnPickerOn ? this.ensureVisibleColumnsLoaded() : null;
-    const activeColumns = visibleColumns
+    const visibleColumns = columnPickerOn ? this.visibleColumns : ALL_PROJECT_AGENT_COLUMN_IDS;
+    const activeColumns = columnPickerOn
       ? PROJECT_AGENT_COLUMNS.filter((col) => visibleColumns.has(col.id))
       : PROJECT_AGENT_COLUMNS;
-    const activeColumnIds = new Set(activeColumns.map((col) => col.id));
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         ${items.length === 0
@@ -4296,7 +4296,7 @@ export class ScionPageProjectDetail extends LitElement {
               <table>
                 ${this.renderAgentTableHead(activeColumns)}
                 <tbody>
-                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn, activeColumnIds))}
+                  ${items.map((agent) => this.renderAgentRow(agent, badgesOn, visibleColumns))}
                 </tbody>
               </table>
             `}
