@@ -2338,6 +2338,7 @@ type Server struct {
 	trajectoryCapturePolicyOverride func(context.Context, *store.Project) string
 	trajectoryMaxSegmentRawBytes    int64
 	trajectoryMaxRunRawBytes        int64
+	trajectoryMaxRunSegments        int64
 	trajectoryPrepareTTL            time.Duration
 	trajectoryUploadURLExpiry       time.Duration
 	trajectoryCommitAfterVerifyHook func(context.Context, *store.TrajectorySegment)

@@ -345,18 +345,24 @@ func (s *TrajectorySegmentStore) CommitTrajectorySegment(ctx context.Context, se
 }
 
 // SumTrajectoryRunRawBytes implements store.TrajectorySegmentStore using a
-// single SQL SUM(byte_end - byte_start) aggregate over all committed and
-// pending segments (including expired pending rows) so orphaned uncommitted
-// uploads cannot bypass the per-run storage cap. Re-prepares of the same
-// identity reuse the existing row and exclude it via excludeID.
+// single SQL aggregate of MAX(byte_end - byte_start, compressed_size) over all
+// committed and pending segments (including expired pending rows) so orphaned
+// uncommitted uploads cannot bypass the per-run storage cap by declaring a tiny
+// raw range with a large compressed_size. Uses ANSI CASE WHEN for SQLite and
+// Postgres parity. Re-prepares of the same identity reuse the existing row and
+// exclude it via excludeID.
 func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error) {
 	if agentID == "" || runID == "" {
 		return 0, nil
 	}
 
+	rawExpr := "(" + trajectorysegment.FieldByteEnd + " - " + trajectorysegment.FieldByteStart + ")"
+	chargedExpr := "CASE WHEN " + rawExpr + " >= " + trajectorysegment.FieldCompressedSize +
+		" THEN " + rawExpr + " ELSE " + trajectorysegment.FieldCompressedSize + " END"
+
 	drv := s.client.Driver()
 	sb := entsql.Dialect(drv.Dialect()).
-		Select("COALESCE(SUM(" + trajectorysegment.FieldByteEnd + " - " + trajectorysegment.FieldByteStart + "), 0)").
+		Select("COALESCE(SUM(" + chargedExpr + "), 0)").
 		From(entsql.Table(trajectorysegment.Table)).
 		Where(entsql.And(
 			entsql.EQ(trajectorysegment.FieldAgentID, agentID),
@@ -390,4 +396,50 @@ func (s *TrajectorySegmentStore) SumTrajectoryRunRawBytes(ctx context.Context, a
 		return 0, mapError(err)
 	}
 	return total, nil
+}
+
+// CountTrajectoryRunSegments implements store.TrajectorySegmentStore using a
+// single SQL COUNT(*) over all committed and pending segments (including
+// expired pending rows) for (agentID, runID), excluding excludeID if non-empty.
+func (s *TrajectorySegmentStore) CountTrajectoryRunSegments(ctx context.Context, agentID, runID, excludeID string) (int64, error) {
+	if agentID == "" || runID == "" {
+		return 0, nil
+	}
+
+	drv := s.client.Driver()
+	sb := entsql.Dialect(drv.Dialect()).
+		Select("COUNT(*)").
+		From(entsql.Table(trajectorysegment.Table)).
+		Where(entsql.And(
+			entsql.EQ(trajectorysegment.FieldAgentID, agentID),
+			entsql.EQ(trajectorysegment.FieldRunID, runID),
+			entsql.In(trajectorysegment.FieldStatus,
+				telemetrycontract.TrajectorySegmentStatusCommitted,
+				telemetrycontract.TrajectorySegmentStatusPending,
+			),
+		))
+	if excludeID != "" {
+		sb.Where(entsql.NEQ(trajectorysegment.FieldID, excludeID))
+	}
+	query, args := sb.Query()
+
+	var rows entsql.Rows
+	if err := drv.Query(ctx, query, args, &rows); err != nil {
+		if errors.Is(mapError(err), store.ErrNotFound) {
+			return 0, nil
+		}
+		return 0, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int64
+	if rows.Next() {
+		if err := rows.Scan(&count); err != nil {
+			return 0, mapError(err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, mapError(err)
+	}
+	return count, nil
 }

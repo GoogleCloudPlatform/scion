@@ -111,12 +111,19 @@ type TrajectorySegmentStore interface {
 	// modified concurrently after verification.
 	CommitTrajectorySegment(ctx context.Context, segmentID, manifestPath string, committedAt time.Time, expect TrajectorySegmentCommitExpectation) (*TrajectorySegment, error)
 
-	// SumTrajectoryRunRawBytes returns the total raw bytes (byte_end - byte_start)
-	// across all committed and pending segments (regardless of prepare_expires_at)
-	// for (agentID, runID), excluding excludeID if non-empty. Counting expired
-	// pending rows bounds orphaned uncommitted object storage per run until a
-	// retention sweep reclaims them; re-preparing the same identity reuses the
-	// existing row and passes its ID as excludeID so retries and probes do not
-	// double-count.
+	// SumTrajectoryRunRawBytes returns the total charged bytes —
+	// MAX(byte_end - byte_start, compressed_size) per row — across all committed
+	// and pending segments (regardless of prepare_expires_at) for
+	// (agentID, runID), excluding excludeID if non-empty. Counting both raw and
+	// stored compressed bytes on expired pending rows bounds orphaned
+	// uncommitted object storage per run (no retention sweep exists in P5, so
+	// pending charges persist for the lifetime of the run). Re-preparing the
+	// same identity reuses the existing row and passes its ID as excludeID so
+	// retries and probes do not double-count.
 	SumTrajectoryRunRawBytes(ctx context.Context, agentID, runID, excludeID string) (int64, error)
+
+	// CountTrajectoryRunSegments returns the number of trajectory_segments rows
+	// (committed and pending, regardless of prepare_expires_at) for
+	// (agentID, runID), excluding excludeID if non-empty.
+	CountTrajectoryRunSegments(ctx context.Context, agentID, runID, excludeID string) (int64, error)
 }

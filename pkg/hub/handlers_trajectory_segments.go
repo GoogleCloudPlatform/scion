@@ -82,6 +82,23 @@ func (s *Server) maxTrajectoryRunRawBytes() int64 {
 	return telemetrycontract.DefaultTrajectoryMaxRunRawBytes
 }
 
+func (s *Server) maxTrajectoryRunSegments() int64 {
+	if s.trajectoryMaxRunSegments > 0 {
+		return s.trajectoryMaxRunSegments
+	}
+	return telemetrycontract.DefaultTrajectoryMaxRunSegments
+}
+
+// maxTrajectoryCompressedSizeForRaw returns a generous deflate/gzip worst-case
+// upper bound for compressed_size given rawSize. RFC 1951 stored blocks add 5
+// bytes per 65,535 bytes (~0.008%) plus 18 bytes of RFC 1952 gzip framing;
+// rawSize + rawSize/1000 + 1024 leaves comfortable headroom for standard gzip
+// output at every size while rejecting padded or arbitrary multi-MiB blobs
+// attached to tiny raw ranges.
+func maxTrajectoryCompressedSizeForRaw(rawSize int64) int64 {
+	return rawSize + rawSize/1000 + 1024
+}
+
 func (s *Server) trajectoryPrepareTTLDuration() time.Duration {
 	if s.trajectoryPrepareTTL > 0 {
 		return s.trajectoryPrepareTTL
@@ -402,22 +419,38 @@ func (s *Server) handleAgentTrajectorySegmentsPrepare(w http.ResponseWriter, r *
 	if existing != nil {
 		excludeID = existing.ID
 	}
-	// Enforce per-run raw byte cap across all committed and pending rows
-	// (including expired pending rows) to bound orphaned uncommitted object
-	// storage per run until a retention sweep reclaims them. Re-prepares of
-	// the same identity (e.g. retries or shipper capture probes) reuse the
-	// existing row and pass its ID as excludeID so they do not double-count.
+	// Enforce per-run byte and segment-row caps across all committed and pending
+	// rows (including expired pending rows). Each row is charged
+	// MAX(byte_end - byte_start, compressed_size) so orphaned uncommitted objects
+	// cannot bypass the storage bound by declaring a tiny raw range with a larger
+	// compressed payload, and the per-run row cap prevents tiny segments from
+	// inflating the database. No retention sweep exists in P5, so pending charges
+	// persist for the lifetime of the run. Re-prepares of the same identity
+	// (retries or repeated capture probes) reuse the existing row and exclude it
+	// via excludeID; a successful capture probe followed by a client rebaseline
+	// past that range leaves one uncommitted row per refusal->accept cycle.
 	// Note: this check-then-insert accounting is not serialized per run in
 	// wave 1, so concurrent prepares for the same run can overshoot
 	// maxTrajectoryRunRawBytes by up to concurrency * maxSegmentRawBytes.
-	usedRunRaw, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID)
+	chargedBytes := max(rawSize, req.CompressedSize)
+	usedRunBytes, err := s.store.SumTrajectoryRunRawBytes(ctx, attr.AgentID, attr.RunID, excludeID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if usedRunRaw+rawSize > s.maxTrajectoryRunRawBytes() {
+	if usedRunBytes+chargedBytes > s.maxTrajectoryRunRawBytes() {
 		writeError(w, http.StatusRequestEntityTooLarge, telemetrycontract.TrajectoryErrRunCapExceeded,
-			fmt.Sprintf("run raw trajectory cap of %d bytes exceeded", s.maxTrajectoryRunRawBytes()), nil)
+			fmt.Sprintf("run trajectory cap of %d bytes exceeded", s.maxTrajectoryRunRawBytes()), nil)
+		return
+	}
+	usedRunSegments, err := s.store.CountTrajectoryRunSegments(ctx, attr.AgentID, attr.RunID, excludeID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if usedRunSegments+1 > s.maxTrajectoryRunSegments() {
+		writeError(w, http.StatusRequestEntityTooLarge, telemetrycontract.TrajectoryErrRunCapExceeded,
+			fmt.Sprintf("run trajectory segment count cap of %d exceeded", s.maxTrajectoryRunSegments()), nil)
 		return
 	}
 
@@ -505,6 +538,11 @@ func validateTrajectoryPrepareRequest(req *telemetrycontract.TrajectorySegmentPr
 	}
 	if req.CompressedSize <= 0 {
 		return fmt.Errorf("compressed_size must be positive")
+	}
+	rawSize := req.ByteEnd - req.ByteStart
+	if maxCompForRaw := maxTrajectoryCompressedSizeForRaw(rawSize); req.CompressedSize > maxCompForRaw {
+		return fmt.Errorf("compressed_size %d exceeds deflate worst-case bound %d for raw size %d",
+			req.CompressedSize, maxCompForRaw, rawSize)
 	}
 	if !isValidHexSHA256(req.RawSHA256) {
 		return fmt.Errorf("raw_sha256 must be a 64-character lowercase hex digest")
@@ -603,44 +641,64 @@ func (s *Server) buildTrajectoryUploadInstruction(
 }
 
 // trajectoryProxyBaseURL returns the base URL for Hub-proxied trajectory
-// segment PUTs so the upload URL's scheme and host match the agent's
-// configured SCION_HUB_ENDPOINT even behind a TLS-terminating proxy without
-// server.trusted_proxies. Precedence matches agent dispatch:
-//  1. server.hub.agent_endpoint (s.config.AgentEndpoint), if configured.
-//  2. HubEndpointFor(HubEndpointForAgents), unless it is a loopback URL and
-//     the request arrived on a non-loopback host (e.g. Docker container-bridge
-//     rewrite to host.docker.internal), in which case s.requestBaseURL(r) is
-//     used so the container's origin still matches.
-//  3. s.requestBaseURL(r) fallback (e.g. unconfigured test servers).
+// segment PUTs so the upload URL's scheme and host match the Hub URL the agent
+// actually called. Starting from the incoming request's Host, it checks the
+// Hub's configured candidate endpoints (AgentEndpoint, HubEndpointForAgents,
+// Public, Operator, InternalURL): if the request Host matches a candidate's
+// host:port, it returns that candidate's scheme://host (fixing TLS-terminating
+// proxies without server.trusted_proxies). Otherwise it falls back to
+// s.requestBaseURL(r), preserving broker-rewritten internal/container-bridge
+// endpoints.
 func (s *Server) trajectoryProxyBaseURL(r *http.Request) string {
-	if ep := strings.TrimRight(strings.TrimSpace(s.config.AgentEndpoint), "/"); ep != "" {
-		return ep
-	}
-	if ep := strings.TrimRight(strings.TrimSpace(s.HubEndpointFor(HubEndpointForAgents)), "/"); ep != "" {
-		if u, err := url.Parse(ep); err == nil && u.Scheme != "" && u.Host != "" {
-			if !isLoopbackTrajectoryHost(u.Hostname()) || r.Host == "" || isLoopbackTrajectoryHost(trajectoryRequestHostOnly(r.Host)) {
-				return ep
+	reqHost := strings.TrimSpace(r.Host)
+	if reqHost != "" {
+		endpoints := s.HubEndpoints()
+		candidates := []string{
+			s.config.AgentEndpoint,
+			s.HubEndpointFor(HubEndpointForAgents),
+			endpoints.Public,
+			endpoints.Operator,
+			s.config.InternalURL,
+		}
+		for _, raw := range candidates {
+			ep := strings.TrimRight(strings.TrimSpace(raw), "/")
+			if ep == "" {
+				continue
+			}
+			u, err := url.Parse(ep)
+			if err != nil || u.Scheme == "" || u.Host == "" {
+				continue
+			}
+			if trajectoryHostPortMatches(reqHost, u.Host, u.Scheme) {
+				return u.Scheme + "://" + u.Host + strings.TrimRight(u.Path, "/")
 			}
 		}
 	}
 	return s.requestBaseURL(r)
 }
 
-func trajectoryRequestHostOnly(hostport string) string {
-	if h, _, err := net.SplitHostPort(hostport); err == nil {
-		return h
-	}
-	return strings.Trim(hostport, "[]")
-}
-
-func isLoopbackTrajectoryHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+func trajectoryHostPortMatches(reqHost, candHost, candScheme string) bool {
+	if strings.EqualFold(reqHost, candHost) {
 		return true
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
+	cHost, cPort := trajectorySplitHostPort(candHost, candScheme)
+	reqH, reqP := trajectorySplitHostPort(reqHost, candScheme)
+	return cHost != "" && strings.EqualFold(reqH, cHost) && reqP == cPort
+}
+
+func trajectorySplitHostPort(hostport, defaultScheme string) (host, port string) {
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		return h, p
 	}
-	return false
+	host = strings.Trim(hostport, "[]")
+	switch strings.ToLower(defaultScheme) {
+	case "https":
+		return host, "443"
+	case "http":
+		return host, "80"
+	default:
+		return host, ""
+	}
 }
 
 // handleAgentTrajectorySegmentContent serves
