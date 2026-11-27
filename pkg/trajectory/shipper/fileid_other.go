@@ -22,7 +22,16 @@ import (
 	"os"
 )
 
+type fileID struct {
+	Dev uint64
+	Ino uint64
+}
+
+func (f fileID) String() string {
+	return fmt.Sprintf("%d:%d", f.Dev, f.Ino)
+}
+
 // fileIdentity fails closed on platforms where inode identity is not supported.
-func fileIdentity(_ os.FileInfo) (string, error) {
-	return "", fmt.Errorf("file identity: %w on this platform", errors.ErrUnsupported)
+func fileIdentity(_ os.FileInfo) (fileID, error) {
+	return fileID{}, fmt.Errorf("file identity: %w on this platform", errors.ErrUnsupported)
 }

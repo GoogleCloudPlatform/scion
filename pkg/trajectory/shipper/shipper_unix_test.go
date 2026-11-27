@@ -61,3 +61,48 @@ func TestStateAndLockPrivatePermissionsUnix(t *testing.T) {
 		t.Fatalf("state.lock mode = %04o, want no group/other access", perm)
 	}
 }
+
+func TestBaselineReportsSkippedUnreadableArtifactUnix(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 0000 does not block root reads")
+	}
+	home := t.TempDir()
+	rel := ".claude/projects/-workspace/sess-unreadable.jsonl"
+	abs := writeArtifact(t, home, rel, "{\"pre\":1}\n")
+	if err := os.Chmod(abs, 0o000); err != nil {
+		t.Fatalf("chmod 0000: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(abs, 0o644) })
+
+	up := newFakeUploader()
+	s, err := shipper.New(shipper.Config{HomeDir: home, Uploader: up, Now: fixedClock()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	bres, err := s.Baseline(context.Background())
+	if err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+	if len(bres.SkippedPaths) != 1 || bres.SkippedPaths[0].NativeRelativePath != rel {
+		t.Fatalf("expected 1 skipped path %s, got %+v", rel, bres.SkippedPaths)
+	}
+	st, _, err := shipper.LoadState(home)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if !st.Artifacts[rel].NeedsBaseline {
+		t.Fatalf("expected NeedsBaseline=true on skipped artifact")
+	}
+
+	// Restore permissions: first RunRound lazily baselines without shipping pre-existing bytes.
+	if err := os.Chmod(abs, 0o644); err != nil {
+		t.Fatalf("chmod 0644: %v", err)
+	}
+	r, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if r.SegmentsShipped != 0 {
+		t.Fatalf("expected 0 segments shipped after lazy baseline, got %+v", r)
+	}
+}

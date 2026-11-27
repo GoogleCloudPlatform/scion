@@ -22,12 +22,26 @@ import (
 	"syscall"
 )
 
-// fileIdentity returns a stable platform file identifier ("dev:ino" on Unix)
-// used to detect file replacement or rotation at the same path.
-func fileIdentity(fi os.FileInfo) (string, error) {
+type fileID struct {
+	Dev uint64
+	Ino uint64
+}
+
+func (f fileID) String() string {
+	return fmt.Sprintf("%d:%d", f.Dev, f.Ino)
+}
+
+// fileIdentity returns the Unix device and inode numbers for fi.
+// Rotation checks compare Ino only because a Runtime Broker reading the same
+// agent home over virtiofs or NFS may observe a different st_dev than the
+// container.
+func fileIdentity(fi os.FileInfo) (fileID, error) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok || st == nil {
-		return "", fmt.Errorf("file identity: missing unix stat info")
+		return fileID{}, fmt.Errorf("file identity: missing unix stat info")
 	}
-	return fmt.Sprintf("%d:%d", st.Dev, st.Ino), nil
+	return fileID{
+		Dev: uint64(st.Dev),
+		Ino: st.Ino,
+	}, nil
 }

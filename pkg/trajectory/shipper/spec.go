@@ -85,12 +85,14 @@ func HarnessSpecFor(name string) (HarnessSpec, bool) {
 type DiscoveredArtifact struct {
 	NativeRelativePath string
 	AbsPath            string
+	RuleRootAbs        string
+	RelWithinRuleRoot  string
 	Kind               ArtifactKind
 	SessionID          string
 }
 
 // RefusedPath records a path skipped during discovery due to a safety check
-// (such as a symlink escaping the agent home or an invalid relative path).
+// (such as a symlink escaping the rule root or an invalid relative path).
 type RefusedPath struct {
 	NativeRelativePath string
 	Reason             string
@@ -143,9 +145,10 @@ func ValidateNativeRelativePath(rel string, spec HarnessSpec) (ArtifactKind, err
 	return "", fmt.Errorf("native_relative_path %q does not match any allow-listed root for harness %q", rel, spec.Name)
 }
 
-// Discover scans homeDir for artifacts matching spec. Symlinks that escape
-// homeDir or are dangling are refused and recorded in DiscoveryResult.Refused
-// without blocking discovery of valid sibling artifacts.
+// Discover scans homeDir for artifacts matching spec. Symlinks at or below a
+// rule root (including symlinks targeting outside the matched rule root or
+// dangling links) are refused and recorded in DiscoveryResult.Refused without
+// blocking discovery of valid sibling artifacts.
 func Discover(homeDir string, spec HarnessSpec) (*DiscoveryResult, error) {
 	if homeDir == "" {
 		return nil, errors.New("home directory is required")
@@ -164,20 +167,31 @@ func Discover(homeDir string, spec HarnessSpec) (*DiscoveryResult, error) {
 		if rootRel == "" {
 			continue
 		}
-		rootPath := filepath.Join(resolvedHome, filepath.FromSlash(rootRel))
-		if _, err := os.Lstat(rootPath); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
+
+		// Verify no component of the rule root path itself is a symlink
+		// (prevents e.g. .claude/projects -> ~ from escaping the rule root).
+		rootPath, ok, refuseReason, skipErr := verifyRuleRootNoSymlink(resolvedHome, rootRel)
+		if skipErr != nil {
+			if errors.Is(skipErr, os.ErrNotExist) {
 				continue
 			}
 			res.Refused = append(res.Refused, RefusedPath{
 				NativeRelativePath: rootRel,
-				Reason:             fmt.Sprintf("lstat root: %v", err),
+				Reason:             skipErr.Error(),
 			})
 			continue
 		}
+		if !ok {
+			res.Refused = append(res.Refused, RefusedPath{
+				NativeRelativePath: rootRel,
+				Reason:             refuseReason,
+			})
+			continue
+		}
+
 		within, err := pathcanon.Within(resolvedHome, rootPath)
 		if err != nil || !within {
-			reason := "symlink escapes home directory"
+			reason := "rule root escapes home directory"
 			if err != nil {
 				reason = err.Error()
 			}
@@ -187,7 +201,7 @@ func Discover(homeDir string, spec HarnessSpec) (*DiscoveryResult, error) {
 			})
 			continue
 		}
-		resolvedRoot, err := pathcanon.Resolve(rootPath)
+		resolvedRuleRoot, err := pathcanon.Resolve(rootPath)
 		if err != nil {
 			res.Refused = append(res.Refused, RefusedPath{
 				NativeRelativePath: rootRel,
@@ -195,11 +209,11 @@ func Discover(homeDir string, spec HarnessSpec) (*DiscoveryResult, error) {
 			})
 			continue
 		}
-		fi, err := os.Stat(resolvedRoot)
+		fi, err := os.Stat(resolvedRuleRoot)
 		if err != nil || !fi.IsDir() {
 			continue
 		}
-		walkRuleDir(resolvedHome, rootPath, rootRel, spec, rule, visitedDirs, seenRel, res)
+		walkRuleDir(resolvedRuleRoot, rootPath, rootRel, "", spec, rule, visitedDirs, seenRel, res)
 	}
 
 	sort.Slice(res.Artifacts, func(i, j int) bool {
@@ -211,10 +225,31 @@ func Discover(homeDir string, spec HarnessSpec) (*DiscoveryResult, error) {
 	return res, nil
 }
 
+// verifyRuleRootNoSymlink checks each component of rootRel under resolvedHome
+// with os.Lstat, refusing any symlink component.
+func verifyRuleRootNoSymlink(resolvedHome, rootRel string) (fullPath string, ok bool, refuseReason string, statErr error) {
+	cur := resolvedHome
+	for _, comp := range strings.Split(rootRel, "/") {
+		if err := pathcanon.ValidName(comp); err != nil {
+			return "", false, err.Error(), nil
+		}
+		cur = filepath.Join(cur, comp)
+		lfi, err := os.Lstat(cur)
+		if err != nil {
+			return "", false, "", err
+		}
+		if lfi.Mode()&os.ModeSymlink != 0 {
+			return "", false, fmt.Sprintf("rule root component %q is a symlink", comp), nil
+		}
+	}
+	return cur, true, "", nil
+}
+
 func walkRuleDir(
-	resolvedHome string,
+	resolvedRuleRoot string,
 	dirPath string,
 	relPrefix string,
+	relWithinRootPrefix string,
 	spec HarnessSpec,
 	rule ArtifactRule,
 	visitedDirs map[string]struct{},
@@ -226,6 +261,18 @@ func walkRuleDir(
 		res.Refused = append(res.Refused, RefusedPath{
 			NativeRelativePath: relPrefix,
 			Reason:             err.Error(),
+		})
+		return
+	}
+	withinRoot, err := pathcanon.Within(resolvedRuleRoot, resolvedDir)
+	if err != nil || !withinRoot {
+		reason := "directory escapes rule root"
+		if err != nil {
+			reason = err.Error()
+		}
+		res.Refused = append(res.Refused, RefusedPath{
+			NativeRelativePath: relPrefix,
+			Reason:             reason,
 		})
 		return
 	}
@@ -246,41 +293,33 @@ func walkRuleDir(
 	for _, entry := range entries {
 		name := entry.Name()
 		childRel := relPrefix + "/" + name
+		childRelWithinRoot := name
+		if relWithinRootPrefix != "" {
+			childRelWithinRoot = relWithinRootPrefix + "/" + name
+		}
 		childPath := filepath.Join(dirPath, name)
 
-		isSymlink := entry.Type()&os.ModeSymlink != 0
-		if isSymlink {
-			within, err := pathcanon.Within(resolvedHome, childPath)
-			if err != nil || !within {
-				reason := "symlink escapes home directory"
-				if err != nil {
-					reason = err.Error()
-				}
-				res.Refused = append(res.Refused, RefusedPath{
-					NativeRelativePath: childRel,
-					Reason:             reason,
-				})
-				continue
+		if entry.Type()&os.ModeSymlink != 0 {
+			// Refuse symlinks at both directory and leaf levels; report
+			// whether the symlink escapes the rule root or is dangling.
+			within, werr := pathcanon.Within(resolvedRuleRoot, childPath)
+			reason := "symlink refused inside artifact tree"
+			if werr != nil {
+				reason = werr.Error()
+			} else if !within {
+				reason = "symlink escapes rule root"
 			}
-			fi, err := os.Stat(childPath)
-			if err != nil {
-				res.Refused = append(res.Refused, RefusedPath{
-					NativeRelativePath: childRel,
-					Reason:             fmt.Sprintf("stat symlink target: %v", err),
-				})
-				continue
-			}
-			if fi.IsDir() {
-				walkRuleDir(resolvedHome, childPath, childRel, spec, rule, visitedDirs, seenRel, res)
-				continue
-			}
-			if !fi.Mode().IsRegular() {
-				continue
-			}
-		} else if entry.IsDir() {
-			walkRuleDir(resolvedHome, childPath, childRel, spec, rule, visitedDirs, seenRel, res)
+			res.Refused = append(res.Refused, RefusedPath{
+				NativeRelativePath: childRel,
+				Reason:             reason,
+			})
 			continue
-		} else if !entry.Type().IsRegular() {
+		}
+		if entry.IsDir() {
+			walkRuleDir(resolvedRuleRoot, childPath, childRel, childRelWithinRoot, spec, rule, visitedDirs, seenRel, res)
+			continue
+		}
+		if !entry.Type().IsRegular() {
 			continue
 		}
 
@@ -302,6 +341,8 @@ func walkRuleDir(
 		res.Artifacts = append(res.Artifacts, DiscoveredArtifact{
 			NativeRelativePath: childRel,
 			AbsPath:            childPath,
+			RuleRootAbs:        resolvedRuleRoot,
+			RelWithinRuleRoot:  childRelWithinRoot,
 			Kind:               kind,
 			SessionID:          extractSessionID(spec.Name, childRel),
 		})

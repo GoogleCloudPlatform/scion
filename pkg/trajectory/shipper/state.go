@@ -71,8 +71,17 @@ func LockPath(homeDir string) string {
 // ArtifactKey is the logical identity of an artifact generation tracked in state.
 type ArtifactKey struct {
 	NativeRelativePath string
-	FileID             string
+	Inode              uint64
 	Generation         int
+}
+
+// PendingSegment records an in-flight segment persisted before Uploader.Ship so
+// that a lost ACK or crash followed by file growth replays the exact same byte
+// range and raw_sha256 (resolving via idempotent replay rather than 409).
+type PendingSegment struct {
+	ByteEnd        int64  `json:"byte_end"`
+	RawSHA256      string `json:"raw_sha256"`
+	IncompleteTail bool   `json:"incomplete_tail"`
 }
 
 // State is the durable state persisted to <home>/.scion/trajectory-shipper/state.json.
@@ -85,6 +94,7 @@ type State struct {
 	BaselinedAt      *time.Time                `json:"baselined_at,omitempty"`
 	BackfillExisting bool                      `json:"backfill_existing,omitempty"`
 	Truncated        bool                      `json:"truncated,omitempty"`
+	TruncatedRunID   string                    `json:"truncated_run_id,omitempty"`
 	TruncatedReason  string                    `json:"truncated_reason,omitempty"`
 	Artifacts        map[string]*ArtifactState `json:"artifacts"`
 
@@ -95,32 +105,39 @@ type State struct {
 // ArtifactState holds durable per-artifact watermark and guard metadata.
 // Unknown JSON fields are preserved in Extra across load/save cycles.
 type ArtifactState struct {
-	NativeRelativePath   string       `json:"native_relative_path"`
-	ArtifactKind         ArtifactKind `json:"artifact_kind"`
-	FileID               string       `json:"file_id"`
-	Generation           int          `json:"generation"`
-	RawCommittedOffset   int64        `json:"raw_committed_offset"`
-	ParsedOffset         int64        `json:"parsed_offset"`
-	GuardHash            string       `json:"guard_hash,omitempty"`
-	GuardLen             int          `json:"guard_len,omitempty"`
-	Baseline             bool         `json:"baseline"`
-	BaselineOffset       int64        `json:"baseline_offset,omitempty"`
-	OriginHubID          string       `json:"origin_hub_id,omitempty"`
-	ConsecutiveFailures  int          `json:"consecutive_failures"`
-	LastError            string       `json:"last_error,omitempty"`
-	LastGenerationReason string       `json:"last_generation_reason,omitempty"`
-	Truncated            bool         `json:"truncated"`
-	UpdatedAt            *time.Time   `json:"updated_at,omitempty"`
+	NativeRelativePath   string          `json:"native_relative_path"`
+	ArtifactKind         ArtifactKind    `json:"artifact_kind"`
+	Inode                uint64          `json:"inode,omitempty"`
+	Device               uint64          `json:"device,omitempty"`
+	FileID               string          `json:"file_id,omitempty"`
+	Generation           int             `json:"generation"`
+	RawCommittedOffset   int64           `json:"raw_committed_offset"`
+	ParsedOffset         int64           `json:"parsed_offset"`
+	GuardHash            string          `json:"guard_hash,omitempty"`
+	GuardLen             int             `json:"guard_len,omitempty"`
+	Pending              *PendingSegment `json:"pending,omitempty"`
+	Baseline             bool            `json:"baseline"`
+	BaselineOffset       int64           `json:"baseline_offset,omitempty"`
+	NeedsBaseline        bool            `json:"needs_baseline,omitempty"`
+	OriginHubID          string          `json:"origin_hub_id,omitempty"`
+	ConsecutiveFailures  int             `json:"consecutive_failures"`
+	LastError            string          `json:"last_error,omitempty"`
+	LastGenerationReason string          `json:"last_generation_reason,omitempty"`
+	Rejected             bool            `json:"rejected,omitempty"`
+	RejectedReason       string          `json:"rejected_reason,omitempty"`
+	Truncated            bool            `json:"truncated"`
+	TruncatedRunID       string          `json:"truncated_run_id,omitempty"`
+	UpdatedAt            *time.Time      `json:"updated_at,omitempty"`
 
 	// Extra preserves unknown JSON fields for forward compatibility.
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
-// Key returns the logical (native_relative_path, file_id, generation) key for a.
+// Key returns the logical (native_relative_path, inode, generation) key for a.
 func (a *ArtifactState) Key() ArtifactKey {
 	return ArtifactKey{
 		NativeRelativePath: a.NativeRelativePath,
-		FileID:             a.FileID,
+		Inode:              a.Inode,
 		Generation:         a.Generation,
 	}
 }
@@ -135,6 +152,7 @@ var knownStateFields = map[string]struct{}{
 	"baselined_at":      {},
 	"backfill_existing": {},
 	"truncated":         {},
+	"truncated_run_id":  {},
 	"truncated_reason":  {},
 	"artifacts":         {},
 }
@@ -192,19 +210,26 @@ type artifactStateAlias ArtifactState
 var knownArtifactStateFields = map[string]struct{}{
 	"native_relative_path":   {},
 	"artifact_kind":          {},
+	"inode":                  {},
+	"device":                 {},
 	"file_id":                {},
 	"generation":             {},
 	"raw_committed_offset":   {},
 	"parsed_offset":          {},
 	"guard_hash":             {},
 	"guard_len":              {},
+	"pending":                {},
 	"baseline":               {},
 	"baseline_offset":        {},
+	"needs_baseline":         {},
 	"origin_hub_id":          {},
 	"consecutive_failures":   {},
 	"last_error":             {},
 	"last_generation_reason": {},
+	"rejected":               {},
+	"rejected_reason":        {},
 	"truncated":              {},
+	"truncated_run_id":       {},
 	"updated_at":             {},
 }
 
@@ -348,7 +373,34 @@ func ComputeGuardHash(r io.ReaderAt, offset int64) (string, int, error) {
 	if readN != n {
 		return "", 0, io.ErrUnexpectedEOF
 	}
+	return hashGuardWindow(buf), n, nil
+}
+
+// ComputeGuardHashFromBytes computes the 64-bit FNV-1a guard hash at the end of
+// committed using the committed byte slice itself plus any needed trailing
+// bytes from prefix (the bytes immediately preceding committed). This avoids
+// re-reading the committed range from disk after upload.
+func ComputeGuardHashFromBytes(prefix, committed []byte) (string, int) {
+	total := len(prefix) + len(committed)
+	if total == 0 {
+		return "", 0
+	}
+	if len(committed) >= GuardWindowBytes {
+		tail := committed[len(committed)-GuardWindowBytes:]
+		return hashGuardWindow(tail), GuardWindowBytes
+	}
+	needPrefix := GuardWindowBytes - len(committed)
+	if needPrefix > len(prefix) {
+		needPrefix = len(prefix)
+	}
+	window := make([]byte, 0, needPrefix+len(committed))
+	window = append(window, prefix[len(prefix)-needPrefix:]...)
+	window = append(window, committed...)
+	return hashGuardWindow(window), len(window)
+}
+
+func hashGuardWindow(buf []byte) string {
 	h := fnv.New64a()
 	_, _ = h.Write(buf)
-	return fmt.Sprintf("%016x", h.Sum64()), n, nil
+	return fmt.Sprintf("%016x", h.Sum64())
 }
