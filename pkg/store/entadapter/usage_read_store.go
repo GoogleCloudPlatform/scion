@@ -534,6 +534,67 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 			return nil, err
 		}
 	}
+	query, args, ok := buildUsageScopeCoverageSQL(dialectName, filter, dbNow)
+	if !ok {
+		return &store.UsageScopeCoverage{}, nil
+	}
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, args, rows); err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := &store.UsageScopeCoverage{}
+	for rows.Next() {
+		var (
+			isRunning        int
+			hasMeterHealth   int
+			latestFinalState string
+			isReceiptStale   int
+			hasUsageData     int
+			agentCount       int64
+			rawLastReceipt   any
+		)
+		if err := rows.Scan(
+			&isRunning,
+			&hasMeterHealth,
+			&latestFinalState,
+			&isReceiptStale,
+			&hasUsageData,
+			&agentCount,
+			&rawLastReceipt,
+		); err != nil {
+			return nil, mapError(err)
+		}
+		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
+			IsRunning:        isRunning != 0,
+			HasMeterHealth:   hasMeterHealth != 0,
+			LatestFinalState: latestFinalState,
+			IsReceiptStale:   isReceiptStale != 0,
+			HasUsageData:     hasUsageData != 0,
+			AgentCount:       int(agentCount),
+		})
+		if rawLastReceipt != nil {
+			ts, err := parseSQLTimestamp(rawLastReceipt)
+			if err != nil {
+				return nil, fmt.Errorf("parse max_last_receipt_at: %w", err)
+			}
+			if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
+				out.LastReceiptAt = ts
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
+}
+
+// buildUsageScopeCoverageSQL builds the dialect-rebound SQL query and bind
+// arguments for GetUsageScopeCoverage. Returns ok=false when an explicit
+// ProjectID or AgentID filter is not a valid UUID (guaranteed empty result).
+func buildUsageScopeCoverageSQL(dialectName string, filter store.UsageCoverageFilter, dbNow time.Time) (string, []any, bool) {
 	until := filter.Until
 	if until.IsZero() {
 		until = dbNow
@@ -677,7 +738,7 @@ scoped_agents AS (
 	if filter.ProjectID != "" {
 		projUUID, err := uuid.Parse(filter.ProjectID)
 		if err != nil {
-			return &store.UsageScopeCoverage{}, nil
+			return "", nil, false
 		}
 		scopeWhere = append(scopeWhere, "a.project_id = ?")
 		args = append(args, projUUID)
@@ -685,7 +746,7 @@ scoped_agents AS (
 	if filter.AgentID != "" {
 		agentUUID, err := uuid.Parse(filter.AgentID)
 		if err != nil {
-			return &store.UsageScopeCoverage{}, nil
+			return "", nil, false
 		}
 		scopeWhere = append(scopeWhere, "a.id = ?")
 		args = append(args, agentUUID)
@@ -816,56 +877,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		rdFlagCond,
 	)
 
-	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), args, rows); err != nil {
-		return nil, mapError(err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	out := &store.UsageScopeCoverage{}
-	for rows.Next() {
-		var (
-			isRunning        int
-			hasMeterHealth   int
-			latestFinalState string
-			isReceiptStale   int
-			hasUsageData     int
-			agentCount       int64
-			rawLastReceipt   any
-		)
-		if err := rows.Scan(
-			&isRunning,
-			&hasMeterHealth,
-			&latestFinalState,
-			&isReceiptStale,
-			&hasUsageData,
-			&agentCount,
-			&rawLastReceipt,
-		); err != nil {
-			return nil, mapError(err)
-		}
-		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
-			IsRunning:        isRunning != 0,
-			HasMeterHealth:   hasMeterHealth != 0,
-			LatestFinalState: latestFinalState,
-			IsReceiptStale:   isReceiptStale != 0,
-			HasUsageData:     hasUsageData != 0,
-			AgentCount:       int(agentCount),
-		})
-		if rawLastReceipt != nil {
-			ts, err := parseSQLTimestamp(rawLastReceipt)
-			if err != nil {
-				return nil, fmt.Errorf("parse max_last_receipt_at: %w", err)
-			}
-			if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
-				out.LastReceiptAt = ts
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, mapError(err)
-	}
-	return out, nil
+	return usageRebindSQL(dialectName, query), args, true
 }
 
 // CountUsageActiveAgents implements store.UsageLedgerStore.CountUsageActiveAgents.
@@ -1133,11 +1145,8 @@ func dbNowFromDriver(ctx context.Context, drv dialect.Driver, dialectName string
 // into meter_health's unique index (agent_id, run_id, producer_epoch) and
 // run_attribution's PK so CAST(a.id AS TEXT) is on the outer driving side
 // rather than defeating index use on agents.
-func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
-	drv := s.client.Driver()
-	dialectName := drv.Dialect()
-
-	query := `
+func countStaleMetersByProjectSQL(dialectName string) string {
+	return usageRebindSQL(dialectName, `
 WITH running_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id,
@@ -1170,11 +1179,17 @@ FROM (
 	HAVING MAX(mh.last_receipt_at) < ?
 ) AS stale_runs
 GROUP BY project_id
-ORDER BY project_id ASC`
+ORDER BY project_id ASC`)
+}
 
+func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	query := countStaleMetersByProjectSQL(dialectName)
 	cutoff := staleBefore.UTC().Truncate(time.Microsecond)
 	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), []any{cutoff}, rows); err != nil {
+	if err := drv.Query(ctx, query, []any{cutoff}, rows); err != nil {
 		return nil, mapError(err)
 	}
 	defer func() { _ = rows.Close() }()

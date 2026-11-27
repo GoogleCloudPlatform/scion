@@ -685,7 +685,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 				"cap", maxMeterHealthMissingRanges, "max_seq_seen", initMax)
 		}
 		if rejectedCoalesced {
-			slog.Warn("meter_health: rejected_ranges exceeded cap; conservatively coalesced adjacent ranges",
+			slog.Warn("meter_health: rejected_ranges exceeded cap; coalesced adjacent ranges",
 				"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
 				"cap", maxMeterHealthMissingRanges, "max_seq_seen", initMax)
 		}
@@ -749,7 +749,7 @@ func (s *UsageLedgerStore) upsertMeterHealthTx(
 			"cap", maxMeterHealthMissingRanges, "max_seq_seen", nextMax)
 	}
 	if rejectedCoalesced {
-		slog.Warn("meter_health: rejected_ranges exceeded cap; conservatively coalesced adjacent ranges",
+		slog.Warn("meter_health: rejected_ranges exceeded cap; coalesced adjacent ranges",
 			"agent_id", mh.AgentID, "run_id", mh.RunID, "producer_epoch", mh.ProducerEpoch,
 			"cap", maxMeterHealthMissingRanges, "max_seq_seen", nextMax)
 	}

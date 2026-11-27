@@ -1512,55 +1512,18 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 			return plan
 		}
 
-		stalePlan := explainPlan("CountStaleMetersByProject", usageRebindSQL(dialectName, `
-WITH running_agents AS (
-	SELECT CAST(a.id AS TEXT) AS agent_id, a.run_id AS run_id
-	FROM agents a
-	WHERE a.deleted_at IS NULL AND a.phase = 'running' AND a.run_id IS NOT NULL AND a.run_id <> ''
-)
-SELECT project_id, COUNT(*) AS stale_count
-FROM (
-	SELECT ra.project_id, mh.agent_id, mh.run_id
-	FROM running_agents ag
-	INNER JOIN meter_health mh ON mh.agent_id = ag.agent_id AND mh.run_id = ag.run_id
-	INNER JOIN run_attribution ra ON ra.run_id = ag.run_id
-	WHERE mh.final_state = 'open'
-	  AND NOT EXISTS (
-		SELECT 1 FROM meter_health mh2
-		WHERE mh2.agent_id = mh.agent_id AND mh2.run_id = mh.run_id
-		  AND mh2.final_state <> 'open' AND mh2.last_receipt_at >= mh.last_receipt_at
-	  )
-	GROUP BY ra.project_id, mh.agent_id, mh.run_id
-	HAVING MAX(mh.last_receipt_at) < ?
-) AS stale_runs
-GROUP BY project_id ORDER BY project_id ASC`), staleCutoff)
+		stalePlan := explainPlan("CountStaleMetersByProject", countStaleMetersByProjectSQL(dialectName), staleCutoff)
 		assert.NotContains(t, stalePlan, "Seq Scan on agents", "CountStaleMetersByProject must use partial index on agents, not Seq Scan")
 		assert.Contains(t, stalePlan, "agent_running_active", "CountStaleMetersByProject must use agent_running_active partial index")
 
-		sinceWin := now.Add(-24 * time.Hour)
-		sinceDay := utcDayStart(sinceWin)
-		untilDay := utcDayStart(now)
-		covPlan := explainPlan("GetUsageScopeCoverage (global, includes now)", usageRebindSQL(dialectName, `
-WITH candidate_agents AS (
-	SELECT ra.agent_id FROM run_attribution ra WHERE ra.created_at >= ? AND ra.created_at <= ?
-	UNION
-	SELECT rd.agent_id FROM usage_rollups_daily rd WHERE rd.bucket_start >= ? AND rd.bucket_start <= ?
-	UNION
-	SELECT mh.agent_id FROM meter_health mh WHERE mh.last_receipt_at >= ? AND mh.last_receipt_at <= ?
-	UNION
-	SELECT CAST(a.id AS TEXT) AS agent_id FROM agents a WHERE a.deleted_at IS NULL AND a.phase = 'running'
-),
-scoped_agents AS (
-	SELECT CAST(a.id AS TEXT) AS agent_id_text, COALESCE(a.run_id, '') AS run_id, COALESCE(a.phase, '') AS phase
-	FROM candidate_agents ca
-	JOIN agents a ON a.id = CASE
-		WHEN ca.agent_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-		THEN CAST(ca.agent_id AS UUID)
-	END
-	WHERE a.deleted_at IS NULL
-	  AND EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.agent_id = ca.agent_id AND ra.created_at <= ?)
-)
-SELECT COUNT(*) FROM scoped_agents`), sinceWin, now, sinceDay, untilDay, sinceWin, now, now)
+		covQuery, covArgs, ok := buildUsageScopeCoverageSQL(dialectName, store.UsageCoverageFilter{
+			Since:      now.Add(-24 * time.Hour),
+			Until:      now,
+			StaleAfter: 3 * time.Minute,
+			DBNow:      now,
+		}, now)
+		require.True(t, ok)
+		covPlan := explainPlan("GetUsageScopeCoverage (global, includes now)", covQuery, covArgs...)
 		assert.NotContains(t, covPlan, "Seq Scan on agents", "global GetUsageScopeCoverage must not Seq Scan agents")
 		assert.Contains(t, covPlan, "agent_running_active", "global GetUsageScopeCoverage must use agent_running_active")
 	}

@@ -1290,15 +1290,28 @@ func TestUsageIngest_RejectedSeqsVsLostGaps(t *testing.T) {
 	assert.Equal(t, int64(2), mhs[0].RejectedCount)
 	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}, {Start: 6, End: 6}}, mhs[0].RejectedRanges)
 
-	// 5. Verify rejected_ranges cap (maxMeterHealthMissingRanges = 1024).
+	// 5. Verify rejected_ranges cap (maxMeterHealthMissingRanges = 1024) AND
+	//    that rejected_count still increments when a later batch rejects a seq
+	//    falling inside a coalesced gap.
 	manyRejected := make([]int64, maxMeterHealthMissingRanges+50)
 	for i := range manyRejected {
-		manyRejected[i] = int64((i + 1) * 2)
+		manyRejected[i] = int64((i + 1) * 2) // 2, 4, 6, ... (odd seqs are gaps)
 	}
-	_, _, _, rejCount, rejRanges, _, rejCoalesced := advanceIngestSeqState(0, 0, nil, 0, nil, int64(len(manyRejected)*2), nil, manyRejected)
+	contigCap, maxCap, missCap, rejCount, rejRanges, _, rejCoalesced := advanceIngestSeqState(0, 0, nil, 0, nil, int64(len(manyRejected)*2), nil, manyRejected)
 	assert.True(t, rejCoalesced)
 	assert.LessOrEqual(t, len(rejRanges), maxMeterHealthMissingRanges)
 	assert.Equal(t, int64(len(manyRejected)), rejCount)
+	// Find an odd seq that was absorbed into a coalesced range (start < end).
+	var gapSeq int64
+	for _, r := range rejRanges {
+		if r.End > r.Start {
+			gapSeq = r.Start + 1 // odd seq between two even rejected seqs
+			break
+		}
+	}
+	require.NotZero(t, gapSeq, "expected at least one coalesced range spanning a gap")
+	_, _, _, rejCountAfter, _, _, _ := advanceIngestSeqState(contigCap, maxCap, missCap, rejCount, rejRanges, maxCap, nil, []int64{gapSeq})
+	assert.Equal(t, rejCount+1, rejCountAfter, "newly rejected seq inside a coalesced gap must still increment rejected_count")
 }
 
 func TestUsageIngest_MultiRowBatchFallbackAndDuplicates(t *testing.T) {
@@ -1316,23 +1329,28 @@ func TestUsageIngest_MultiRowBatchFallbackAndDuplicates(t *testing.T) {
 	ts := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
 	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
 
-	// Seed 2 existing events so the next batch exercises DB duplicates alongside new rows.
+	// Seed 3 existing events: mr-evt-0 and mr-evt-1 land in the first chunk
+	// (exercising fast-path DB duplicates), while mr-evt-bad-dup sorts adjacent
+	// to mr-evt-bad-fk in the final chunk (exercising the per-row fallback's
+	// dbDuplicates branch).
 	seed1 := makeStoreUsageEvent("hub-mr", "mr-evt-0", runID, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
 	seed2 := makeStoreUsageEvent("hub-mr", "mr-evt-1", runID, projectID, agentID, &userID, 2, ts.Add(time.Second), 10, 5, 0, 0)
+	seedFallbackDup := makeStoreUsageEvent("hub-mr", "mr-evt-bad-dup", runID, projectID, agentID, &userID, 98, ts.Add(98*time.Second), 10, 5, 0, 0)
 	res0, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
 		AgentID: agentID,
-		Events:  []*store.UsageEvent{seed1, seed2},
+		Events:  []*store.UsageEvent{seed1, seed2, seedFallbackDup},
 	})
 	require.NoError(t, err)
-	require.Equal(t, 2, res0.Accepted)
+	require.Equal(t, 3, res0.Accepted)
 
-	// Build a 60-event batch (spans multiple chunks on SQLite) containing:
-	// - 2 DB duplicates (mr-evt-0, mr-evt-1)
+	// Build a 61-event batch (3 chunks on SQLite) containing:
+	// - 2 fast-path DB duplicates (mr-evt-0, mr-evt-1)
+	// - 1 fallback-chunk DB duplicate (mr-evt-bad-dup, sorts in the third SQLite chunk with mr-evt-bad-fk)
 	// - 1 intra-batch duplicate (mr-evt-10 twice)
-	// - 1 bad row (non-existent run_id FK violation) in the second chunk
+	// - 1 bad row (non-existent run_id FK violation) sorting last (third SQLite chunk)
 	// - 56 new valid rows
-	events := make([]*store.UsageEvent, 0, 60)
-	events = append(events, seed1, seed2)
+	events := make([]*store.UsageEvent, 0, 61)
+	events = append(events, seed1, seed2, seedFallbackDup)
 	for i := 2; i < 58; i++ {
 		ev := makeStoreUsageEvent("hub-mr", fmt.Sprintf("mr-evt-%d", i), runID, projectID, agentID, &userID, int64(i+1), ts.Add(time.Duration(i)*time.Second), 10, 5, 0, 0)
 		events = append(events, ev)
@@ -1349,19 +1367,19 @@ func TestUsageIngest_MultiRowBatchFallbackAndDuplicates(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, 56, res.Accepted)
-	assert.Equal(t, 3, res.Duplicates, "2 DB duplicates + 1 intra-batch duplicate")
+	assert.Equal(t, 4, res.Duplicates, "3 DB duplicates (2 fast-path + 1 fallback-chunk) + 1 intra-batch duplicate")
 	require.Len(t, res.Rejected, 1)
 	assert.Equal(t, "mr-evt-bad-fk", res.Rejected[0].EventID)
 	assert.Len(t, res.InsertedEvents, 56)
 
-	// Verify rollups reflect exact 58 total inserted rows (2 seeded + 56 new), never duplicates or rejected row.
+	// Verify rollups reflect exact 59 total inserted rows (3 seeded + 56 new), never duplicates or rejected row.
 	rollup, err := client.UsageRollupDaily.Query().
 		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(agentID)).
 		Only(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, int64(58), rollup.Events)
-	assert.Equal(t, int64(580), rollup.Input)
-	assert.Equal(t, int64(290), rollup.Output)
+	assert.Equal(t, int64(59), rollup.Events)
+	assert.Equal(t, int64(590), rollup.Input)
+	assert.Equal(t, int64(295), rollup.Output)
 }
 
 func TestUsageIngest_AntigravityUnmeasuredCallsReconciliation(t *testing.T) {
@@ -1534,4 +1552,39 @@ func TestUsageIngest_AntigravityUnmeasuredCallsReconciliation(t *testing.T) {
 	calls, unmeasured = getProjectCounter()
 	assert.Equal(t, int64(6), calls)
 	assert.Equal(t, int64(3), unmeasured, "non-hooks event with missing tokens must still count as unmeasured")
+
+	// 6. Independent schema_drift_detected check (D12): producer declares token
+	//    signals AND schema_drift_detected=true. Both the in-request path
+	//    (resolvedMHState) and the persisted path (MeterHealth == nil) must
+	//    count the hooks calls-only event in unmeasured_calls.
+	agDriftTok := uuid.NewString()
+	runDriftTok := "run-agy-drift-tok-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agDriftTok, runDriftTok, &userID)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDriftTok,
+		Events:  []*store.UsageEvent{makeHookCall("agy-drift-tok-req", runDriftTok, agDriftTok, "ep-1", 1)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agDriftTok,
+			RunID:               runDriftTok,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       ts.Add(8 * time.Second),
+			ProducerSeq:         1,
+			ReceivedSeqs:        []int64{1},
+			SupportedSignals:    []string{"calls", "input", "output", "cache_read", "cache_write", "reasoning"},
+			SchemaDriftDetected: true,
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(7), calls)
+	assert.Equal(t, int64(4), unmeasured, "schema_drift_detected=true with token signals (request path) must count as unmeasured")
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDriftTok,
+		Events:  []*store.UsageEvent{makeHookCall("agy-drift-tok-persisted", runDriftTok, agDriftTok, "ep-1", 2)},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(8), calls)
+	assert.Equal(t, int64(5), unmeasured, "schema_drift_detected=true with token signals (persisted meter_health path) must count as unmeasured")
 }
