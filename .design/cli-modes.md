@@ -85,17 +85,19 @@ There is intentionally **no** `--mode` CLI flag. The mode is an environmental pr
 When commands are removed by mode restrictions, they are **fully removed from the command tree** — not merely hidden. This means:
 
 - `scion --help` does not list restricted commands
-- `scion <restricted-command> --help` returns "unknown command"
+- `scion <restricted-command> --help` and `scion help <restricted-command>` report `command "<path>" is not available in agent mode` (ptone/scion#8365, ptone/scion#9449)
 - Shell completions do not suggest restricted commands
 - There is no indication in help text that other modes exist
 
 ### 4.2. No Mode Documentation in CLI
 
-The `--help` output, command descriptions, and error messages make no reference to CLI modes. The mode system is a platform-level concern documented in operator/admin documentation, not in agent-facing text.
+The `--help` output and command descriptions omit restricted commands rather than documenting other modes. Only invoking a restricted command (or requesting help for it) names it as unavailable in agent mode (ptone/scion#8365, ptone/scion#9449).
 
 ### 4.3. Error Messages
 
-When a command is blocked by mode restrictions, the error is a generic "unknown command" — identical to the error for a truly nonexistent command. There is no "this command is restricted in your mode" message that would reveal the mode system's existence.
+> **Update (2026-11-27):** Maintainer decision (`cli-agent-mode-message`) reversed the original stealth-only rule in this section.
+
+When a command is blocked by mode restrictions, the CLI exits non-zero (without printing a usage block) and reports `command "<path>" is not available in agent mode` so callers can distinguish a mode-gated command from a typo or nonexistent command (`unknown command`; ptone/scion#8365 and ptone/scion#9449). Truly unknown commands still report `unknown command`.
 
 ## 5. Implementation Approach
 
@@ -106,7 +108,7 @@ In `cmd/root.go`, during `init()` or early in `PersistentPreRunE`, read `SCION_C
 This approach is preferred over a runtime check because:
 - Removed commands disappear from help, completions, and the command tree entirely
 - No possibility of bypass through direct invocation
-- No leakage of command names in error messages
+- Removed command names and aliases are recorded on their surviving parent so invoking them reports "not available in agent mode" while unknown commands still report "unknown command" (ptone/scion#8365, ptone/scion#9449)
 - Simpler than maintaining per-command annotations
 
 ### 5.2. Allow-List vs Deny-List

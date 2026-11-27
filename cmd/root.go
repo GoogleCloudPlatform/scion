@@ -314,6 +314,12 @@ func Execute() {
 		}
 	}
 
+	if mode == ModeAgent {
+		// Initialize Cobra's default "help" command before applyModeRestrictions
+		// so applyAgentMode can wrap it for removed command topics while keeping
+		// rootCmd non-Runnable.
+		rootCmd.InitDefaultHelpCmd()
+	}
 	applyModeRestrictions(rootCmd, mode)
 	applyPlatformRestrictions(rootCmd, runtime.GOOS)
 	// Shell completion of a command the Windows gate refused: no
@@ -326,11 +332,15 @@ func Execute() {
 	// than init(), where the mode cannot yet be resolved safely.
 	if mode == ModeAgent {
 		rootCmd.Long = ""
+		if err := agentModeGatedInvocationError(rootCmd, cliArgs); err != nil {
+			fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
+			os.Exit(1)
+		}
 	}
 
 	// "<group> <unknown> --help" is an unknown command, not the group's
 	// help (ptone/scion#4579). Checked after the mode restrictions, so a
-	// subcommand the mode removed is unknown too.
+	// subcommand the mode removed reports unavailable in agent mode too.
 	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
 		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
 		os.Exit(1)
@@ -450,6 +460,9 @@ func showUsageForError(cmd *cobra.Command, err error, autoHelp bool) bool {
 	}
 	if isUsageError(err) {
 		return true
+	}
+	if isAgentModeUnavailableError(err) {
+		return false
 	}
 	if isHubFailure(err) {
 		return false

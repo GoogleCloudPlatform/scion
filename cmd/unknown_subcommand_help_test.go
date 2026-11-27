@@ -99,7 +99,11 @@ func TestUnknownSubcommandHelpErrorScope(t *testing.T) {
 	applyModeRestrictions(root, ModeAgent)
 	err := unknownSubcommandHelpError(root, []string{"artifact", "share", "--help"})
 	require.Error(t, err, "share is removed in agent mode")
-	assert.Contains(t, err.Error(), `unknown command "share" for "scion artifact"`)
+	assert.Contains(t, err.Error(), `command "scion artifact share" is not available in agent mode`)
+
+	nosuchErr := unknownSubcommandHelpError(root, []string{"artifact", "nosuch", "--help"})
+	require.Error(t, nosuchErr, "truly unknown subcommand still fails")
+	assert.Contains(t, nosuchErr.Error(), `unknown command "nosuch" for "scion artifact"`)
 
 	// The groups' validator answers pflag.ErrHelp for "help", which is
 	// left alone.
