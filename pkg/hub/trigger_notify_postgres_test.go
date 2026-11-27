@@ -25,7 +25,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -46,8 +45,9 @@ func TestTriggerNotify_TwoServersRace_Postgres(t *testing.T) {
 
 	ctx := context.Background()
 	srvA, _ := testServerWithStore(t, cs)
+	f := setupTriggersTestFixtureOnServer(t, srvA, cs)
+
 	srvB, _ := testServerOnMigratedStore(t, cs)
-	enableTriggersExperimentForTest(t, srvA, true)
 	enableTriggersExperimentForTest(t, srvB, true)
 
 	fixedNow := time.Date(2026, 11, 27, 15, 10, 0, 0, time.UTC)
@@ -58,69 +58,14 @@ func TestTriggerNotify_TwoServersRace_Postgres(t *testing.T) {
 	srvA.SetDispatcher(disp)
 	srvB.SetDispatcher(disp)
 
-	owner := &store.User{
-		ID:          api.NewUUID(),
-		Email:       "notify-pg-owner@example.com",
-		DisplayName: "PG Owner",
-		Role:        store.UserRoleAdmin,
-		Status:      store.UserStatusActive,
-	}
-	require.NoError(t, cs.CreateUser(ctx, owner))
-
-	projID := api.NewUUID()
-	require.NoError(t, cs.CreateProject(ctx, &store.Project{
-		ID:   projID,
-		Name: "p7a-pg-race",
-		Slug: "p7a-pg-race",
-	}))
-	agentID := api.NewUUID()
-	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
-		ID:        agentID,
-		Slug:      "pg-notify-agent",
-		Name:      "pg-notify-agent",
-		ProjectID: projID,
-		Phase:     "running",
-		OwnerID:   owner.ID,
-	}))
-
-	tr := &store.Trigger{
-		ID:         api.NewUUID(),
-		ProjectID:  projID,
-		Name:       "pg-race-trig",
-		SourceKind: store.TriggerSourceKindWebhook,
-		SourceID:   api.NewUUID(),
-		MatchTypes: []string{"webhook.received"},
-		Actions:    []store.TriggerAction{{Type: store.TriggerActionMessage, Payload: `{"agentId":"` + agentID + `","message":"hi"}`}},
-		Notify: &store.TriggerNotifyPolicy{
-			UserNotice: boolPtr(true),
-			AgentID:    agentID,
-			AgentName:  "pg-notify-agent",
-		},
-		Status:    store.TriggerStatusActive,
-		CreatedBy: owner.ID,
-		InitiatorAttribution: store.InitiatorAttribution{
-			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
-			InitiatorPrincipalID:    owner.ID,
-			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
-			AttributionVersion:      1,
-			AuthorizationRevision:   1,
-		},
-		AuthorityCeiling: store.EffectCeiling{
-			Kind:    store.EffectCeilingPrincipal,
-			Version: 1,
-		},
-	}
-	require.NoError(t, cs.CreateTrigger(ctx, tr))
+	tr := p7aProbeTrigger(t, f, f.ownerAuth, "pg-race-trig", &TriggerNotifySpec{
+		UserNotice: boolPtr(true),
+		AgentID:    f.agentA.ID,
+	})
 
 	out := hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "message failed"}
-	fireA := &store.TriggerFire{
-		ID: api.NewUUID(), ProjectID: projID, TriggerID: tr.ID, EventID: api.NewUUID(),
-		ActionType: store.TriggerActionMessage, ActionIndex: 0,
-	}
-	fireB := &store.TriggerFire{
-		ID: api.NewUUID(), ProjectID: projID, TriggerID: tr.ID, EventID: api.NewUUID(),
-		ActionType: store.TriggerActionMessage, ActionIndex: 0,
-	}
+	fireA := p7aFire(f, tr)
+	fireB := p7aFire(f, tr)
 
 	start := make(chan struct{})
 	var wg sync.WaitGroup
@@ -138,7 +83,7 @@ func TestTriggerNotify_TwoServersRace_Postgres(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	notifs, err := cs.GetNotifications(ctx, store.SubscriberTypeUser, owner.ID, false)
+	notifs, err := cs.GetNotifications(ctx, store.SubscriberTypeUser, f.owner.ID, false)
 	require.NoError(t, err)
 	t.Logf("dialect=%s user_notices=%d agent_messages=%d", client.Driver().Dialect(), len(notifs), len(disp.getCalls()))
 	assert.Len(t, notifs, 1, "two racing replicas on Postgres must emit exactly 1 user notice")
