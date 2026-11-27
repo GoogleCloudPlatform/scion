@@ -150,7 +150,7 @@ flight continue to be started or followed. Note that starting an existing
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
     - `--broker <string>`: Preferred runtime broker ID, name, slug, or unique prefix for execution. An ambiguous prefix fails with `runtime_broker_ambiguous` (409) and lists the matching brokers; a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
     - `--agent-log-level <spec>`: Set `SCION_LOG_LEVEL` in the agent's environment, for example `debug` or `info,hubsync=debug` (same syntax as [`SCION_LOG_LEVEL`](/scion/hosted/single-node/observability/#debugging-an-agent)). An invalid value fails before anything starts. Agents never inherit `--debug` or the server's debug setting. The value is saved in the agent's applied config and kept on later restarts (remove it by deleting and re-creating the agent); when `scion resume` reuses an existing agent in place, the flag is not applied and `scion resume` prints a warning.
-    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Default: the template's mode, else the parent agent's mode, else the Hub's default message mode ([`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub), `project` unless the operator sets it). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
+    - `--message-mode <mode>`: Set the agent's initial message mode (`none`, `owner`, `direct`, `tree`, `project`, or `hub`). Default: the template's mode, else the parent agent's mode, else the Hub's default message mode ([`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub), `project` unless the operator sets it). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
     - `--wait-timeout <duration>`: How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
@@ -962,7 +962,8 @@ as stop, start, and restart); an agent can always reincarnate itself.
 `--dry-run` shows the old and new value of each patched setting. For a user, patch flags need
 permission to update the agent (`agent.update`) as well as `agent.lifecycle`, so a user access token
 needs the `agent:update` scope for them; otherwise sign in with `scion hub auth login`. An agent caller, including an agent
-patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
+patching itself, needs the agent lifecycle permission. `--image` and `--harness` also need `agent.attach` on the agent for every caller, checked
+before a dry run is planned, so an agent cannot reincarnate itself with them (an ancestor agent with the full role can). Before a real patched reincarnation the CLI dry-runs
 the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags other than `--harness` combine
 with `--broker`: the move's checks judge the patched configuration, for example the patched service
 account. When a reincarnation that changed the service account fails and the agent returns to its
@@ -1239,8 +1240,12 @@ use `scion harness-config` to inspect them instead.
 would accept but never read, and leaves the file unchanged:
 `hub.token`, `hub.apiKey`, `hub.lastSyncedAt`, `bucket.provider`, `bucket.name`,
 `bucket.prefix`, `hub_connections` and `hub_connections.<name>.<field>` at either layer (Runtime Broker Hub connections live in `~/.scion/hub-credentials/<name>.json`, managed by `scion runtime-broker register`, `join`, and `deregister`), and
-`server.auth.display_name`, `server.auth.email` and `server.auth.username` at the
-project layer (they are read only from the global settings). The error names the key
+at the project layer, any key under a top-level key that is not read from project settings
+(for example `server.*`, `use_host_credentials`, and legacy aliases that resolve under
+`server`, such as `hub.brokerId`, `hub.brokerToken` and `hub.brokerNickname`; see
+[Keys read from project settings](/scion/reference/orchestrator-settings/#keys-read-from-project-settings)).
+A key that `config set` can write to the global settings gets a hint to use `--global`; any
+other key under those top-level keys is refused as an unknown key at both layers. The error names the key
 and does not include the value. After a successful write, the value of a
 credential-like key (for example `hub.brokerToken`) is shown masked. `cli.mode`
 accepts `human` or `agent`. Agent mode removes the `config` commands, so after

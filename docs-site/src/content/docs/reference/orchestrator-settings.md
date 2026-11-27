@@ -13,6 +13,17 @@ Scion loads settings from the following locations, merging them in order (later 
 2.  **Project Settings**: `.scion/settings.yaml` (Project-specific overrides)
 3.  **Environment Variables**: `SCION_*` overrides.
 
+### Keys read from project settings
+
+A project's settings (`.scion/settings.*`, or the project's external settings directory) are read through a deny-by-default allow-list of top-level keys. Only these top-level keys are read from them:
+
+- Project identity and format: `schema_version`, `project_type`, `project_id`, and `hub` (the project's Hub link; `hub.token`, `hub.apiKey` and `hub.lastSyncedAt` are never read from files).
+- Agent defaults: `active_profile`, `default_template`, `default_harness_config`, `default_model`, `default_thinking_level`, `default_max_turns`, `default_max_model_calls`, `default_max_duration` and `default_resources`.
+- Runtimes, profiles and harness configs: `runtimes`, `runtime`, `profiles` and `harness_configs`.
+- Images, telemetry, CLI and workspace: `image_registry`, `image_tag`, `telemetry`, `cli`, `workspace_path`, `shared_dirs` and `local_experiments`.
+
+Every other top-level key in a project's settings is ignored, including `server`, `hub_connections`, `use_host_credentials`, `auto_inject_gcloud_adc`, `managed_agents`, `agent_policy`, `quotas`, `agent_secrets`, `broker_policy`, `project_defaults`, `auto_expose_ports`, the Hub-level defaults (`default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_max_agent_role`, `default_agent_role`) and any key Scion does not recognize. Legacy aliases that resolve under an ignored key, such as `hub.brokerId`, `hub.brokerToken` and `hub.brokerNickname` (now `server.broker.*`), are ignored too. The value from the global settings and the defaults applies instead, and Scion logs one warning, `project settings set keys that are not read from project settings (project settings are moving to the Hub); ignored`, naming the ignored key paths and files (never their values). [`scion config set`](/scion/reference/cli/#scion-config) refuses to write these keys to a project's settings; use `--global` to write a known key to the global settings file.
+
 ## Versioned Format
 
 Settings files use a versioned format identified by the `schema_version` field. The current version is `1`.

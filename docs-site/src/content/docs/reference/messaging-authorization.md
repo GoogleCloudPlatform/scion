@@ -740,13 +740,13 @@ ratified by the project sponsor. Key decisions:
 |----|---------|
 | D1 | `message` is a first-class axis, split from lifecycle/attach |
 | D2 | User-side messaging grant is project-coarse (relay rule) |
-| D3 | Five-tier mode system: none, lineage, branch, project, hub |
-| D4 | Lineage mode: strict user-to-agent only, no agent-to-agent edges |
+| D3 | Six-tier mode system: none, owner, direct, tree, project, hub |
+| D4 | `owner` mode: strict user-to-agent only, no agent-to-agent edges |
 | D5 | Mode is fully orthogonal to agent role |
-| D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce lineage/branch; user-identity-only |
+| D6 | Piercing rules: super-admin pierces all; owner/ancestry pierce owner/direct/tree; user-identity-only |
 | D7 | Mode changes restricted to human users and full-role agents; no UAT scope |
 | D8 | System plane exempt from all mode checks |
-| D9 | Branch mode uses 1-degree parent/child edges; relay closure = branch cell |
+| D9 | `direct` mode uses 1-degree parent/child edges; `tree` mode bonds agents in the same creation tree |
 | D10 | Modes are mutable; mutation is foundational to the design |
 | D11 | Hub mode: project cell + cross-project DMs; recipient may be project or hub mode |
 | D12 | Hub mode grant: agent caller must be full-role and already hub-mode (non-escalation) |
