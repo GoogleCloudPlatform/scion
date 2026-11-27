@@ -40,6 +40,17 @@ func TestListArtifactsDraftsFlagAndOutput(t *testing.T) {
 					ReviewInDraft: true,
 					Access:        "project",
 				},
+				{
+					Artifact: hubclient.Artifact{
+						ID:         "5f1c2d3e-1111-2222-3333-444455557777",
+						Title:      "Reviewed And Drafted",
+						CurrentSeq: 3,
+						UpdatedAt:  time.Date(2026, 11, 26, 12, 5, 0, 0, time.UTC),
+					},
+					ReviewOnLatest: true,
+					ReviewInDraft:  true,
+					Access:         "owned",
+				},
 			},
 		},
 	}
@@ -54,11 +65,18 @@ func TestListArtifactsDraftsFlagAndOutput(t *testing.T) {
 	if svc.lastListOpts == nil || !svc.lastListOpts.Drafts {
 		t.Fatalf("List options = %+v, want Drafts=true", svc.lastListOpts)
 	}
-	if !strings.Contains(out.String(), "project, review in draft") {
-		t.Errorf("table output missing review in draft:\n%s", out.String())
+	gotTable := out.String()
+	if !strings.Contains(gotTable, "STATE") || !strings.Contains(gotTable, "review in draft") {
+		t.Errorf("table output missing STATE column with review in draft:\n%s", gotTable)
+	}
+	if !strings.Contains(gotTable, "review on latest, review in draft") {
+		t.Errorf("table output missing comma-joined review on latest, review in draft:\n%s", gotTable)
+	}
+	if strings.Contains(gotTable, "project, review in draft") {
+		t.Errorf("table output must not suffix ACCESS with review in draft:\n%s", gotTable)
 	}
 
-	// JSON output preserves reviewInDraft.
+	// JSON output preserves reviewInDraft and reviewOnLatest.
 	out.Reset()
 	err = listArtifacts(context.Background(), svc, &out, listArtifactsParams{
 		Options: hubclient.ListArtifactsOptions{Drafts: true},
@@ -73,8 +91,8 @@ func TestListArtifactsDraftsFlagAndOutput(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("decode JSON: %v", err)
 	}
-	if len(decoded.Artifacts) != 1 || !decoded.Artifacts[0].ReviewInDraft {
-		t.Fatalf("decoded JSON artifacts = %+v, want ReviewInDraft=true", decoded.Artifacts)
+	if len(decoded.Artifacts) != 2 || !decoded.Artifacts[0].ReviewInDraft || !decoded.Artifacts[1].ReviewOnLatest || !decoded.Artifacts[1].ReviewInDraft {
+		t.Fatalf("decoded JSON artifacts = %+v, want ReviewInDraft/ReviewOnLatest set", decoded.Artifacts)
 	}
 
 	// Flag is registered on artifactListCmd and command is allowed in both modes.

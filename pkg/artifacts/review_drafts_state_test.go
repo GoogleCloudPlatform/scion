@@ -277,11 +277,11 @@ func TestReviewDraftState_MyDraftAndDraftsInProgress(t *testing.T) {
 		t.Fatalf("drafts gate off draftsInProgress = %+v, want 0", got.ReviewState)
 	}
 
-	// 6. Both gates OFF -> reviewState is nil/omitted.
+	// 6. Both gates OFF -> reviewState still carries ungated reviewOnLatest, while gated fields are omitted.
 	h.setGates(false, false)
 	rec = doDraftReq(svc, owner, http.MethodGet, "/api/v1/artifacts/"+artID, nil)
-	if got := decodeInto[ArtifactResponse](t, rec); got.ReviewState != nil {
-		t.Fatalf("both gates off reviewState = %+v, want nil", got.ReviewState)
+	if got := decodeInto[ArtifactResponse](t, rec); got.ReviewState == nil || got.ReviewState.ReviewOnLatest || got.ReviewState.RequestedOfMe != nil || got.ReviewState.MyDraft != nil || got.ReviewState.DraftsInProgress != 0 {
+		t.Fatalf("both gates off reviewState = %+v, want only reviewOnLatest=false", got.ReviewState)
 	}
 }
 

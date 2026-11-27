@@ -250,7 +250,7 @@
         "kind": "flag_set",
         "exec": "server",
         "enum": [
-          "review",
+          "reviewed",
           "requested",
           "draft",
           "mine",
@@ -284,6 +284,7 @@
         "exec": "server",
         "enum": [
           "shared",
+          "reviewed",
           "requested",
           "draft"
         ],

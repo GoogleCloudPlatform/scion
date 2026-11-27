@@ -482,9 +482,7 @@ export class ScionPageArtifacts extends LitElement {
     void this.load();
   };
 
-  private onFlagChipClick(
-    flag: 'reviewed' | 'requested' | 'draft' | 'mine' | 'shared'
-  ): void {
+  private onFlagChipClick(flag: 'reviewed' | 'requested' | 'draft' | 'mine' | 'shared'): void {
     const exclusive = flag === 'mine' ? ['shared'] : flag === 'shared' ? ['mine'] : [];
     const edit = toggleIsFlagInQueryWithNotice(
       this.filterQueryText,
