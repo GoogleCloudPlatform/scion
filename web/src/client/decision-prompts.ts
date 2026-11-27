@@ -201,10 +201,25 @@ export function applyDecisionHistoryMaps(items: Message[], data: DecisionHistory
 /**
  * Keeps the decision fields of a message already shown when the same message
  * arrives again: the newer decision views per row (out-of-order guard), and
- * the held fields when the incoming copy carries none.
+ * the held fields when the incoming copy carries none (including
+ * decisionResponse / decisionResponseSet on delivery-state updates).
  */
 export function carryDecisionFields(existing: Message | undefined, incoming: Message): void {
-  if (!existing?.decisions) return;
+  if (!existing) return;
+  if (
+    incoming.type === 'decision-response' &&
+    incoming.msg === existing.msg &&
+    !incoming.decisionResponse &&
+    !incoming.decisionResponseSet
+  ) {
+    if (existing.decisionResponse) {
+      incoming.decisionResponse = existing.decisionResponse;
+    }
+    if (existing.decisionResponseSet) {
+      incoming.decisionResponseSet = existing.decisionResponseSet;
+    }
+  }
+  if (!existing.decisions) return;
   if (!incoming.decisions) {
     incoming.decisions = existing.decisions;
     if (incoming.decisionIntro === undefined && existing.decisionIntro !== undefined) {

@@ -1756,3 +1756,89 @@ func TestDecisions_AllowOther_SingleEndToEndValidationAndAskerOnlyDelivery(t *te
 	require.Equal(t, http.StatusBadRequest, mbOver.Code, mbOver.Body.String())
 	assert.Equal(t, ErrCodeValidationError, errorCode(t, mbOver))
 }
+
+// Regression test for ptone/scion#9543: delivery-state SSE re-publishes
+// (delivered, failed, unconfirmed) for decision-response rows must keep
+// decisionResponse / decisionResponseSet attached when web.decisions is on,
+// and omit them when the experiment is off.
+func TestDecisionResponse_DeliveryStateUpdatesCarryDecisionViews(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// 1. Single decision response.
+	_, singleRes := f.topicPrompt(t, oneDecision, false)
+	singleRR := f.answer(t, f.bob, singleRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, singleRR.Code, singleRR.Body.String())
+	var singleAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(singleRR.Body.Bytes(), &singleAns))
+	singleMsg, err := f.store.GetMessage(ctx, singleAns.ResponseMessageID)
+	require.NoError(t, err)
+
+	// 2. Set decision response.
+	setPrompt, setRes := f.topicPrompt(t, `[
+		{"id":"D9543A","question":"Which region?","choices":["us-central1","europe-west4"]},
+		{"id":"D9543B","question":"Auto-rollback?","choices":["yes","no"]}
+	]`, false)
+	setRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+setPrompt.ID+"/answers", map[string]interface{}{
+		"answers": []map[string]string{
+			{"decision_row_id": setRes.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": setRes.Decisions[1].RowID, "choice_id": "2"},
+		},
+	})
+	require.Equal(t, http.StatusOK, setRR.Code, setRR.Body.String())
+	var setAns DecisionSetAnswerResponse
+	require.NoError(t, json.Unmarshal(setRR.Body.Bytes(), &setAns))
+	setMsg, err := f.store.GetMessage(ctx, setAns.ResponseMessageID)
+	require.NoError(t, err)
+
+	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
+	defer unsub()
+
+	// Delivered / failed / unconfirmed on single response all carry decisionResponse.
+	f.srv.notifyStoredMessageSenderDelivered(ctx, singleMsg)
+	f.srv.notifyStoredMessageSenderFailed(ctx, f.agent, singleMsg, "broker unreachable")
+	f.srv.notifyStoredMessageSenderUnconfirmed(ctx, f.agent, singleMsg)
+	// Delivered on set response carries decisionResponseSet.
+	f.srv.notifyStoredMessageSenderDelivered(ctx, setMsg)
+
+	evts := collectEvents(events)
+	require.Len(t, evts, 4)
+
+	var deliveredSingle, failedSingle, unconfirmedSingle, deliveredSet UserMessageEvent
+	require.NoError(t, json.Unmarshal(evts[0].Data, &deliveredSingle))
+	require.NoError(t, json.Unmarshal(evts[1].Data, &failedSingle))
+	require.NoError(t, json.Unmarshal(evts[2].Data, &unconfirmedSingle))
+	require.NoError(t, json.Unmarshal(evts[3].Data, &deliveredSet))
+
+	assert.Equal(t, store.MessageDispatchDelivered, deliveredSingle.DispatchState)
+	require.NotNil(t, deliveredSingle.DecisionResponse)
+	assert.Equal(t, singleRes.Decisions[0].Key, deliveredSingle.DecisionResponse.Key)
+	assert.Nil(t, deliveredSingle.DecisionResponseSet)
+
+	assert.Equal(t, store.MessageDispatchFailed, failedSingle.DispatchState)
+	require.NotNil(t, failedSingle.DecisionResponse)
+	assert.Equal(t, singleRes.Decisions[0].Key, failedSingle.DecisionResponse.Key)
+
+	assert.Equal(t, store.MessageDispatchFailed, unconfirmedSingle.DispatchState)
+	require.NotNil(t, unconfirmedSingle.DecisionResponse)
+	assert.Equal(t, singleRes.Decisions[0].Key, unconfirmedSingle.DecisionResponse.Key)
+
+	assert.Equal(t, store.MessageDispatchDelivered, deliveredSet.DispatchState)
+	assert.Nil(t, deliveredSet.DecisionResponse)
+	require.NotNil(t, deliveredSet.DecisionResponseSet)
+	assert.Len(t, deliveredSet.DecisionResponseSet.Answers, 2)
+
+	// With web.decisions disabled, delivery-state re-publishes omit decision views.
+	setDecisionsExperiment(t, f.srv, false)
+	f.srv.notifyStoredMessageSenderDelivered(ctx, singleMsg)
+	f.srv.notifyStoredMessageSenderDelivered(ctx, setMsg)
+	offEvts := collectEvents(events)
+	require.Len(t, offEvts, 2)
+	var offSingle, offSet UserMessageEvent
+	require.NoError(t, json.Unmarshal(offEvts[0].Data, &offSingle))
+	require.NoError(t, json.Unmarshal(offEvts[1].Data, &offSet))
+	assert.Nil(t, offSingle.DecisionResponse)
+	assert.Nil(t, offSingle.DecisionResponseSet)
+	assert.Nil(t, offSet.DecisionResponse)
+	assert.Nil(t, offSet.DecisionResponseSet)
+}
