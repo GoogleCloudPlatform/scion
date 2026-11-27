@@ -1375,6 +1375,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 			sshSessionEnv(config), os.Getenv)
 	}
 
+	if notice := fetchTrajectoryCaptureNotice(ctx, hubClient, trajectoryNoticeFetchTimeout); notice != "" {
+		childArgs = injectTmuxTrajectoryNotice(childArgs, notice)
+	}
+
 	// since_init_ms (not elapsed_ms, unlike the other sciontool init: lines
 	// above): this is the time since process start, the same quantity as
 	// startup_ms below, not the duration of a single step. Naming it

@@ -329,8 +329,11 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 // underlying database, so cross-domain foreign keys (e.g. group -> project,
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
+	agentStore := NewAgentStore(client)
+	usageLedgerStore := NewUsageLedgerStore(client)
+	usageLedgerStore.trajectoryCapture = agentStore.trajectoryCapture
 	return &CompositeStore{
-		AgentStore:                  NewAgentStore(client),
+		AgentStore:                  agentStore,
 		ProjectStore:                NewProjectStore(client),
 		UserStore:                   NewUserStore(client),
 		SecretStore:                 NewSecretStore(client),
@@ -379,7 +382,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		TriggerStore:                NewTriggerStore(client),
 		MessagePolicyStore:          NewMessagePolicyStore(client),
 		AgentSuspendScreenStore:     NewAgentSuspendScreenStore(client),
-		UsageLedgerStore:            NewUsageLedgerStore(client),
+		UsageLedgerStore:            usageLedgerStore,
 		TrajectorySegmentStore:      NewTrajectorySegmentStore(client),
 		client:                      client,
 	}

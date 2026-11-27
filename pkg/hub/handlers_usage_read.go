@@ -97,6 +97,8 @@ type AgentUsageRunSummary struct {
 	HarnessConfig   string    `json:"harness_config,omitempty"`
 	Template        string    `json:"template,omitempty"`
 	UsageLiveSource string    `json:"usage_live_source,omitempty"`
+	CapturePolicy   string    `json:"capture_policy,omitempty"`
+	NoticeVersion   string    `json:"notice_version,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -557,6 +559,8 @@ func buildAgentUsageResponse(
 			HarnessConfig:   ra.HarnessConfig,
 			Template:        ra.Template,
 			UsageLiveSource: ra.UsageLiveSource,
+			CapturePolicy:   ra.CapturePolicy,
+			NoticeVersion:   ra.NoticeVersion,
 			CreatedAt:       ra.CreatedAt,
 		})
 	}

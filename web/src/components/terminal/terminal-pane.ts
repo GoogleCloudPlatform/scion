@@ -68,7 +68,12 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   isFeatureEnabled,
   TERMINAL_KEY_BAR_FLAG,
+  trajectoryCaptureEnabled,
 } from '../../utils/feature-flags.js';
+import {
+  formatTrajectoryCaptureNotice,
+  isTrajectoryCaptureEffective,
+} from '../../shared/trajectory-capture-notice.js';
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
@@ -1081,6 +1086,27 @@ export class ScionTerminalPane extends LitElement {
       background: var(--scion-badge-danger-bg, #fee2e2);
       color: var(--scion-badge-danger-text, #991b1b);
       font-size: 0.75rem;
+    }
+
+    .trajectory-capture-banner {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 1rem;
+      background: var(--scion-bg-subtle);
+      border-bottom: 1px solid var(--scion-border);
+      color: var(--scion-text-secondary);
+      font-size: 0.75rem;
+    }
+
+    .trajectory-capture-banner sl-icon {
+      flex-shrink: 0;
+      font-size: 0.875rem;
+      color: var(--scion-text-muted);
+    }
+
+    .trajectory-capture-banner.effective sl-icon {
+      color: var(--scion-primary);
     }
 
     /* Inline text-link action inside the themed banner; inherits its colour. */
@@ -3196,6 +3222,30 @@ export class ScionTerminalPane extends LitElement {
     >`;
   }
 
+  private renderTrajectoryCaptureBanner() {
+    if (!trajectoryCaptureEnabled() || !this.agent?.trajectory_capture) {
+      return nothing;
+    }
+    const status = this.agent.trajectory_capture;
+    const notice = formatTrajectoryCaptureNotice(status);
+    if (!notice) {
+      return nothing;
+    }
+    const effective = isTrajectoryCaptureEffective(status.policy);
+    return html`
+      <div
+        class="trajectory-capture-banner ${effective ? 'effective' : ''}"
+        role="status"
+        data-testid="terminal-trajectory-capture-banner"
+        data-policy=${status.policy}
+        data-enforced=${String(!!status.enforced_by_hub)}
+      >
+        <sl-icon name=${effective ? 'eye' : 'eye-slash'}></sl-icon>
+        <span>${notice}</span>
+      </div>
+    `;
+  }
+
   override render() {
     if (this.loading) {
       return html`
@@ -3428,6 +3478,7 @@ export class ScionTerminalPane extends LitElement {
             </div>
           `
         : ''}
+      ${this.renderTrajectoryCaptureBanner()}
       <div
         class="terminal-wrapper"
         @dragenter=${(e: DragEvent) => this._onDragEnter(e)}

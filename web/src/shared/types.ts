@@ -1207,6 +1207,19 @@ export interface Agent {
   pendingConfig?: AgentPendingConfig | null;
   // Optimistic-concurrency version; send it back with a PATCH.
   stateVersion?: number;
+
+  // Effective Track 2 trajectory capture policy for this agent's project.
+  // Present on single-agent GET only when experiment tokenomics.trajectory_capture is on.
+  trajectory_capture?: TrajectoryCapturePolicyStatus;
+}
+
+/** Track 2 trajectory capture policy values (pkg/telemetrycontract). */
+export type TrajectoryCapturePolicy = 'full' | 'metadata_only' | 'off';
+
+/** Effective Track 2 trajectory capture policy status from the Hub. */
+export interface TrajectoryCapturePolicyStatus {
+  policy: TrajectoryCapturePolicy | (string & Record<never, never>);
+  enforced_by_hub: boolean;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */

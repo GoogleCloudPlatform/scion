@@ -80,7 +80,7 @@ func (s *UsageLedgerStore) EnsureRunAttributionForAgent(ctx context.Context, age
 		if err != nil {
 			return mapError(err)
 		}
-		attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, "", hubID, "")
+		attr, err := buildRunAttributionFromAgentRow(ctx, client, row, runID, "", hubID, "", s.trajectoryCapture.load())
 		if err != nil {
 			return err
 		}
