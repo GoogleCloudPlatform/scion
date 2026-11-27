@@ -143,17 +143,18 @@ const (
 
 // StepOutcome records the engine-owned result of evaluating one chain element.
 type StepOutcome struct {
-	Index      int
-	Dialect    string
-	Kind       Kind
-	Class      StepClass
-	Reason     string          // closed token (engine set ∪ dialect TraceReasons)
-	Elapsed    time.Duration   // charged evaluation elapsed (0 for non-leader group members)
-	GroupID    string          // "" when evaluated alone; identical for all members of one group execution
-	Domain     ChainDomainName // "inline" | "io"
-	Provenance map[string]any  // validated typed operational metadata
-	RawTrace   string          // optional legacy Decision.Trace (not serialized by ChainTrace)
-	Err        error           // underlying error for non-pass/fail steps (not serialized by ChainTrace)
+	Index        int
+	Dialect      string
+	Kind         Kind
+	Class        StepClass
+	Reason       string          // closed token (engine set ∪ dialect TraceReasons)
+	Elapsed      time.Duration   // charged evaluation elapsed (0 for non-leader group members)
+	GroupElapsed time.Duration   // group execution elapsed visible to every member of a group execution (0 when evaluated alone)
+	GroupID      string          // "" when evaluated alone; identical for all members of one group execution
+	Domain       ChainDomainName // "inline" | "io"
+	Provenance   map[string]any  // validated typed operational metadata
+	RawTrace     string          // optional legacy Decision.Trace (not serialized by ChainTrace)
+	Err          error           // underlying error for non-pass/fail steps (not serialized by ChainTrace)
 }
 
 // Control is the consumer's routing decision returned by StepPolicy.
@@ -285,13 +286,19 @@ type ChainRun struct {
 	pending        *PendingStep
 	pendingOutcome StepOutcome
 	pendingDetail  any
+	pendingCopier  func(any) any
 
-	judgments map[int]Judgment
+	judgments map[int]storedJudgment
 	steps     []StepOutcome
 	trace     []ChainTraceElement
 	stopped   bool
 	verdict   string
 	deciding  StepOutcome
+}
+
+type storedJudgment struct {
+	judgment Judgment
+	copier   func(any) any
 }
 
 type chainElemSpec struct {
@@ -475,7 +482,7 @@ func (e *Engine) NewChainRun(
 		enricher:  enr,
 		reserved:  reservedSet,
 		state:     chainStateReady,
-		judgments: make(map[int]Judgment),
+		judgments: make(map[int]storedJudgment),
 		steps:     make([]StepOutcome, 0, len(specs)),
 		trace:     make([]ChainTraceElement, 0, len(specs)),
 	}
@@ -522,7 +529,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 			Domain:  domName,
 			Err:     &FailedError{Reason: celengine.ReasonCanceled, Cause: ctxErr},
 		}
-		r.recordStepLocked(out, Control{Stop: true}, nil)
+		r.recordStepLocked(out, Control{Stop: true}, nil, nil)
 		r.state = chainStateDone
 		r.mu.Unlock()
 		cp := cloneStepOutcome(out)
@@ -544,7 +551,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 			Err:     err,
 		}
 		ctrl := r.policy(cloneStepOutcome(out))
-		r.recordStepLocked(out, ctrl, nil)
+		r.recordStepLocked(out, ctrl, nil, nil)
 		r.nextPos++
 		done := ctrl.Stop || r.nextPos >= len(r.elements)
 		if done {
@@ -569,7 +576,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 			Err:     enrichErr,
 		}
 		ctrl := r.policy(cloneStepOutcome(out))
-		r.recordStepLocked(out, ctrl, nil)
+		r.recordStepLocked(out, ctrl, nil, nil)
 		r.nextPos++
 		done := ctrl.Stop || r.nextPos >= len(r.elements)
 		if done {
@@ -613,7 +620,7 @@ func (r *ChainRun) Next() (*StepOutcome, *PendingStep, bool, error) {
 	if out.Class == StepClassBudget || out.Class == StepClassCanceled {
 		ctrl.Stop = true
 	}
-	r.recordStepLocked(out, ctrl, detail)
+	r.recordStepLocked(out, ctrl, detail, caps.CopyDetail)
 	r.nextPos++
 	done := ctrl.Stop || r.nextPos >= len(r.elements)
 	if done {
@@ -670,7 +677,7 @@ func (e *Engine) evaluateInlineElement(
 	out := classifyDecisionToOutcome(spec.elem.Index, spec.dialect, spec.elem.Kind, DomainInline, "", caps, dec, elapsed, evalErr)
 	var detail any
 	if spec.elem.Kind == KindJudgment && out.Class == StepClassPass {
-		detail = deepCopyValue(dec.Detail)
+		detail = copyJudgmentDetail(dec.Detail, caps.CopyDetail)
 	}
 	return out, detail
 }
@@ -872,7 +879,7 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 			Domain:  DomainIO,
 			Err:     admErr,
 		}
-		run.completePending(p, out, nil)
+		run.completePending(p, out, nil, nil)
 		return nil
 	}
 	caps := dial.Declares()
@@ -888,7 +895,7 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 			Domain:  DomainIO,
 			Err:     &FailedError{Reason: celengine.ReasonCanceled, Cause: ctxErr},
 		}
-		run.completePending(p, out, nil)
+		run.completePending(p, out, nil, nil)
 		return nil
 	}
 
@@ -903,7 +910,7 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 			Domain:  DomainIO,
 			Err:     ErrBudgetExhausted,
 		}
-		run.completePending(p, out, nil)
+		run.completePending(p, out, nil, nil)
 		return nil
 	}
 
@@ -915,9 +922,9 @@ func (e *Engine) EvaluatePending(p *PendingStep) error {
 	out := classifyDecisionToOutcome(p.index, p.dialect, p.kind, DomainIO, "", caps, dec, elapsed, evalErr)
 	var detail any
 	if p.kind == KindJudgment && out.Class == StepClassPass {
-		detail = deepCopyValue(dec.Detail)
+		detail = copyJudgmentDetail(dec.Detail, caps.CopyDetail)
 	}
-	run.completePending(p, out, detail)
+	run.completePending(p, out, detail, caps.CopyDetail)
 	return nil
 }
 
@@ -977,7 +984,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 					Reason:  ReasonIncompatibleGroup,
 					Domain:  DomainIO,
 					Err:     err,
-				}, nil)
+				}, nil, nil)
 			}
 			return "", err
 		}
@@ -1049,7 +1056,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 				GroupID: groupID,
 				Domain:  DomainIO,
 				Err:     &FailedError{Reason: celengine.ReasonCanceled, Cause: ctxErr},
-			}, nil)
+			}, nil, nil)
 		}
 		return groupID, nil
 	}
@@ -1074,7 +1081,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 				GroupID: groupID,
 				Domain:  DomainIO,
 				Err:     &FailedError{Reason: celengine.ReasonCanceled, Cause: ctxErr},
-			}, nil)
+			}, nil, nil)
 		}
 		return groupID, nil
 	}
@@ -1091,7 +1098,7 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 				GroupID: groupID,
 				Domain:  DomainIO,
 				Err:     ErrBudgetExhausted,
-			}, nil)
+			}, nil, nil)
 		}
 		return groupID, nil
 	}
@@ -1103,9 +1110,11 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 
 	dec, elapsed, evalErr := e.evaluateCore(evalCtx, leader.compiled, leader.input, leaderIO.Budget)
 	leaderOut := classifyDecisionToOutcome(leader.index, leader.dialect, leader.kind, DomainIO, groupID, caps, dec, elapsed, evalErr)
+	leaderOut.GroupElapsed = elapsed
 
-	// Step 5: Distribute identical outcome to leader (with Elapsed) and every
-	// member (Elapsed: 0), each receiving an independent deep copy of Detail.
+	// Step 5: Distribute identical outcome to leader (with Elapsed and
+	// GroupElapsed) and every member (Elapsed: 0, GroupElapsed: elapsed),
+	// each receiving an independent concrete-type-preserving deep copy of Detail.
 	for i, m := range claimed {
 		out := cloneStepOutcome(leaderOut)
 		out.Index = m.index
@@ -1114,9 +1123,9 @@ func (e *Engine) EvaluateGroup(leader *PendingStep, members []*PendingStep) (str
 		}
 		var detail any
 		if m.kind == KindJudgment && out.Class == StepClassPass {
-			detail = deepCopyValue(dec.Detail)
+			detail = copyJudgmentDetail(dec.Detail, caps.CopyDetail)
 		}
-		m.run.completePending(m, out, detail)
+		m.run.completePending(m, out, detail, caps.CopyDetail)
 	}
 	return groupID, nil
 }
@@ -1140,7 +1149,7 @@ func (e *Engine) failWholeGroupIncompatible(all []*PendingStep, cause error) {
 				Reason:  ReasonIncompatibleGroup,
 				Domain:  DomainIO,
 				Err:     &FailedError{Reason: ReasonIncompatibleGroup, Cause: cause},
-			}, nil)
+			}, nil, nil)
 		}
 	}
 }
@@ -1156,7 +1165,7 @@ func (e *Engine) failClaimedGroup(claimed []*PendingStep, cause error) (string, 
 			Reason:  ReasonIncompatibleGroup,
 			Domain:  DomainIO,
 			Err:     fErr,
-		}, nil)
+		}, nil, nil)
 	}
 	return "", fErr
 }
@@ -1198,15 +1207,17 @@ func (r *ChainRun) Resume() (Control, error) {
 
 	out := r.pendingOutcome
 	detail := r.pendingDetail
+	copier := r.pendingCopier
 	r.pending = nil
 	r.pendingOutcome = StepOutcome{}
 	r.pendingDetail = nil
+	r.pendingCopier = nil
 
 	ctrl := r.policy(cloneStepOutcome(out))
 	if out.Class == StepClassBudget || out.Class == StepClassCanceled || out.Reason == ReasonInvalidCompletion {
 		ctrl.Stop = true
 	}
-	r.recordStepLocked(out, ctrl, detail)
+	r.recordStepLocked(out, ctrl, detail, copier)
 	r.nextPos++
 	if ctrl.Stop || r.nextPos >= len(r.elements) {
 		r.state = chainStateDone
@@ -1221,13 +1232,16 @@ func (r *ChainRun) Resume() (Control, error) {
 func (r *ChainRun) Judgments() JudgmentView {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	jm := make(map[int]Judgment, len(r.judgments))
+	jm := make(map[int]storedJudgment, len(r.judgments))
 	steps := make([]int, 0, len(r.judgments))
-	for s, j := range r.judgments {
-		jm[s] = Judgment{
-			Step:    j.Step,
-			Dialect: j.Dialect,
-			Detail:  deepCopyValue(j.Detail),
+	for s, sj := range r.judgments {
+		jm[s] = storedJudgment{
+			judgment: Judgment{
+				Step:    sj.judgment.Step,
+				Dialect: sj.judgment.Dialect,
+				Detail:  copyJudgmentDetail(sj.judgment.Detail, sj.copier),
+			},
+			copier: sj.copier,
 		}
 		steps = append(steps, s)
 	}
@@ -1316,7 +1330,7 @@ func (p *PendingStep) claimForCompletion() error {
 	return nil
 }
 
-func (r *ChainRun) completePending(p *PendingStep, out StepOutcome, detail any) {
+func (r *ChainRun) completePending(p *PendingStep, out StepOutcome, detail any, copier func(any) any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.pending != p || r.state != chainStatePending {
@@ -1324,6 +1338,7 @@ func (r *ChainRun) completePending(p *PendingStep, out StepOutcome, detail any) 
 	}
 	r.pendingOutcome = out
 	r.pendingDetail = detail
+	r.pendingCopier = copier
 	r.state = chainStatePendingCompleted
 }
 
@@ -1342,17 +1357,20 @@ func (r *ChainRun) failInvalidCompletion(p *PendingStep, err error) {
 		Domain:  DomainIO,
 		Err:     err,
 	}
-	r.recordStepLocked(out, Control{Stop: true}, nil)
+	r.recordStepLocked(out, Control{Stop: true}, nil, nil)
 	r.pending = nil
 	r.state = chainStateDone
 }
 
-func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any) {
+func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any, copier func(any) any) {
 	if out.Kind == KindJudgment && out.Class == StepClassPass {
-		r.judgments[out.Index] = Judgment{
-			Step:    out.Index,
-			Dialect: out.Dialect,
-			Detail:  deepCopyValue(detail),
+		r.judgments[out.Index] = storedJudgment{
+			judgment: Judgment{
+				Step:    out.Index,
+				Dialect: out.Dialect,
+				Detail:  copyJudgmentDetail(detail, copier),
+			},
+			copier: copier,
 		}
 	}
 	r.steps = append(r.steps, cloneStepOutcome(out))
@@ -1378,19 +1396,19 @@ func (r *ChainRun) recordStepLocked(out StepOutcome, ctrl Control, detail any) {
 }
 
 type stepJudgmentView struct {
-	judgments map[int]Judgment
+	judgments map[int]storedJudgment
 	steps     []int
 }
 
 func (v *stepJudgmentView) Get(step int) (Judgment, bool) {
-	j, ok := v.judgments[step]
+	sj, ok := v.judgments[step]
 	if !ok {
 		return Judgment{}, false
 	}
 	return Judgment{
-		Step:    j.Step,
-		Dialect: j.Dialect,
-		Detail:  deepCopyValue(j.Detail),
+		Step:    sj.judgment.Step,
+		Dialect: sj.judgment.Dialect,
+		Detail:  copyJudgmentDetail(sj.judgment.Detail, sj.copier),
 	}, true
 }
 
@@ -1399,20 +1417,37 @@ func (v *stepJudgmentView) Steps() []int {
 }
 
 func (r *ChainRun) buildJudgmentViewLocked(currentStep int) JudgmentView {
-	jm := make(map[int]Judgment)
+	jm := make(map[int]storedJudgment)
 	var steps []int
-	for s, j := range r.judgments {
+	for s, sj := range r.judgments {
 		if s < currentStep {
-			jm[s] = Judgment{
-				Step:    j.Step,
-				Dialect: j.Dialect,
-				Detail:  deepCopyValue(j.Detail),
+			jm[s] = storedJudgment{
+				judgment: Judgment{
+					Step:    sj.judgment.Step,
+					Dialect: sj.judgment.Dialect,
+					Detail:  copyJudgmentDetail(sj.judgment.Detail, sj.copier),
+				},
+				copier: sj.copier,
 			}
 			steps = append(steps, s)
 		}
 	}
 	sort.Ints(steps)
 	return &stepJudgmentView{judgments: jm, steps: steps}
+}
+
+// copyJudgmentDetail returns an independent copy of detail preserving its
+// concrete Go type. Uses the dialect-declared copier when non-nil, and falls
+// back to deepCopyValue (Cloner interface -> typed maps/slices -> reflect deep
+// copy preserving pointer/struct concrete types without aliasing).
+func copyJudgmentDetail(detail any, copier func(any) any) any {
+	if detail == nil {
+		return nil
+	}
+	if copier != nil {
+		return copier(detail)
+	}
+	return deepCopyValue(detail)
 }
 
 func (r *ChainRun) resolveStepInputLocked(stepIndex int) (Input, error) {

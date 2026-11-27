@@ -1241,3 +1241,203 @@ func TestChainTrace_TypedValidationAndTruncation(t *testing.T) {
 		t.Fatalf("expected earliest-first provenance drop, got %s", truncOut)
 	}
 }
+
+type fakeTypedDetail struct {
+	ID    string
+	Flags map[string]bool
+	Tags  []string
+}
+
+type copyDetailDialect struct {
+	*countingFakeIODialect
+	copyFn func(any) any
+}
+
+func (d *copyDetailDialect) Declares() ruleengine.Capabilities {
+	caps := d.countingFakeIODialect.Declares()
+	caps.CopyDetail = d.copyFn
+	return caps
+}
+
+// TestChain_FitCheck_R1_R2_R3_AndCompileBudgetPrecedence covers so-p1-em's
+// checkpoint fit-check additive requests:
+//   - R1: StepOutcome.GroupElapsed exposed to every member while Elapsed stays 0 for non-leaders.
+//   - R2: Capabilities.CopyDetail (and reflection fallback) preserve concrete Go pointer/struct types without aliasing.
+//   - R3: KindJudgment exists and JudgmentView stores ONLY KindJudgment steps whose class is pass.
+//   - CompileBudget condition: non-nil CompileBudget never alters cancel > eval-budget > compile-budget precedence,
+//     and OnCompileMiss receives only the dialect name.
+func TestChain_FitCheck_R1_R2_R3_AndCompileBudgetPrecedence(t *testing.T) {
+	const consumer = "fit_consumer"
+
+	t.Run("R1_GroupElapsed_And_R2_ConcreteTypePreserved", func(t *testing.T) {
+		var customCopierCalls atomic.Int64
+		origDetail := &fakeTypedDetail{
+			ID:    "eval-42",
+			Flags: map[string]bool{"pii": true},
+			Tags:  []string{"a", "b"},
+		}
+
+		for _, withCustomCopier := range []bool{true, false} {
+			mode := "fallback_reflect_copier"
+			if withCustomCopier {
+				mode = "dialect_CopyDetail"
+			}
+			t.Run(mode, func(t *testing.T) {
+				customCopierCalls.Store(0)
+				base := newCountingFakeIODialect("fit_io", time.Second)
+				base.setHandler("J", func(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+					_ = sleepWithCtx(ctx, 15*time.Millisecond)
+					return ruleengine.Decision{Kind: c.Kind(), Detail: origDetail}, nil
+				})
+				var copyFn func(any) any
+				if withCustomCopier {
+					copyFn = func(v any) any {
+						customCopierCalls.Add(1)
+						src := v.(*fakeTypedDetail)
+						cp := &fakeTypedDetail{
+							ID:    src.ID,
+							Flags: make(map[string]bool, len(src.Flags)),
+							Tags:  slices.Clone(src.Tags),
+						}
+						for k, b := range src.Flags {
+							cp.Flags[k] = b
+						}
+						return cp
+					}
+				}
+				dial := &copyDetailDialect{countingFakeIODialect: base, copyFn: copyFn}
+				eng, _ := newChainTestEngine(t, consumer, dial)
+				cJ := mustCompile(t, eng, consumer, "fit_io", "J", ruleengine.KindJudgment)
+
+				tracker := ruleengine.NewBudgetTracker(time.Second)
+				dom := ruleengine.Domain{Ctx: context.Background(), Budget: ruleengine.Budget{Tracker: tracker}}
+				in := ruleengine.Input{AdmittedInputKey: "fit-r1-r2"}
+
+				r1, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+				r2, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{Index: 1, Compiled: cJ, GroupKey: "gk"}}}, in, ruleengine.ChainLimits{}, nil, nil, nil)
+
+				_, p1, _, _ := r1.Next()
+				_, p2, _, _ := r2.Next()
+				if _, err := eng.EvaluateGroup(p1, []*ruleengine.PendingStep{p2}); err != nil {
+					t.Fatalf("EvaluateGroup: %v", err)
+				}
+				_, _ = r1.Resume()
+				_, _ = r2.Resume()
+
+				// R1: Leader has Elapsed == GroupElapsed > 0; non-leader has Elapsed == 0 and GroupElapsed == leader.GroupElapsed.
+				res1, _ := r1.Result()
+				res2, _ := r2.Result()
+				if res1.Steps[0].Elapsed <= 0 || res1.Steps[0].GroupElapsed != res1.Steps[0].Elapsed {
+					t.Fatalf("leader timing = %+v, want Elapsed == GroupElapsed > 0", res1.Steps[0])
+				}
+				if res2.Steps[0].Elapsed != 0 || res2.Steps[0].GroupElapsed != res1.Steps[0].GroupElapsed {
+					t.Fatalf("member timing = %+v, want Elapsed=0 and GroupElapsed=%s", res2.Steps[0], res1.Steps[0].GroupElapsed)
+				}
+				if tracker.Spent() != res1.Steps[0].Elapsed {
+					t.Fatalf("tracker charged %s, want single charge %s", tracker.Spent(), res1.Steps[0].Elapsed)
+				}
+
+				// R2: Concrete pointer type *fakeTypedDetail preserved and no aliasing across runs.
+				j1, ok1 := r1.Judgments().Get(1)
+				j2, ok2 := r2.Judgments().Get(1)
+				if !ok1 || !ok2 {
+					t.Fatalf("missing judgments: ok1=%v ok2=%v", ok1, ok2)
+				}
+				d1, okType1 := j1.Detail.(*fakeTypedDetail)
+				d2, okType2 := j2.Detail.(*fakeTypedDetail)
+				if !okType1 || !okType2 {
+					t.Fatalf("concrete type not preserved: %T / %T", j1.Detail, j2.Detail)
+				}
+				if d1 == origDetail || d2 == origDetail || d1 == d2 {
+					t.Fatalf("pointer aliased across dialect/members")
+				}
+				d1.Flags["pii"] = false
+				d1.Tags[0] = "tampered"
+				if !d2.Flags["pii"] || d2.Tags[0] != "a" {
+					t.Fatalf("member 1 mutation leaked to member 2: %+v", d2)
+				}
+				if withCustomCopier && customCopierCalls.Load() == 0 {
+					t.Fatalf("expected Capabilities.CopyDetail to be invoked")
+				}
+			})
+		}
+	})
+
+	t.Run("R3_JudgmentView_StoresOnlyPassKindJudgment", func(t *testing.T) {
+		ioDial := newCountingFakeIODialect("r3_io", time.Second)
+		ioDial.setHandler("unc", func(_ context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+			return ruleengine.Decision{Kind: ruleengine.KindJudgment, Detail: map[string]any{"should_not_store": true}}, &ruleengine.UncertainError{Reason: "abstain"}
+		})
+		eng, _ := newChainTestEngine(t, consumer, ioDial)
+		cFilter := mustCompile(t, eng, consumer, ruleengine.DialectCEL, "flag == true", ruleengine.KindFilter)
+		cUnc := mustCompile(t, eng, consumer, "r3_io", "unc", ruleengine.KindJudgment)
+
+		dom := ruleengine.Domain{Ctx: context.Background()}
+		run, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{
+			{Index: 1, Compiled: cFilter}, // KindFilter pass (has CEL EvalStats in Detail) -> must NOT be in JudgmentView
+			{Index: 2, Compiled: cUnc},    // KindJudgment uncertain -> must NOT be in JudgmentView
+		}}, ruleengine.Input{Activation: map[string]any{"flag": true}}, ruleengine.ChainLimits{}, nil, nil, nil)
+
+		_, _, _, _ = run.Next()
+		_, p, _, _ := run.Next()
+		_ = eng.EvaluatePending(p)
+		_, _ = run.Resume()
+		if got := run.Judgments().Steps(); len(got) != 0 {
+			t.Fatalf("JudgmentView stored non-pass or non-KindJudgment steps: %v", got)
+		}
+	})
+
+	t.Run("CompileBudget_PreservesCancelPrecedence_And_OnCompileMissDialectOnly", func(t *testing.T) {
+		eng, _ := newChainTestEngine(t, consumer)
+		exhCompile := ruleengine.NewBudgetTracker(time.Millisecond)
+		exhCompile.Exhaust()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		var observedMiss []string
+		dom := ruleengine.Domain{Ctx: ctx}
+		run, err := eng.NewChainRun(ruleengine.ChainDomains{Inline: dom, IO: dom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{
+			Index:   1,
+			Dialect: ruleengine.DialectCEL,
+			Kind:    ruleengine.KindFilter,
+			Source: &ruleengine.ChainElementSource{
+				Expr:          "flag == true",
+				Scope:         celengine.CacheScope{Consumer: consumer, ID: "cb-1", Revision: 1},
+				Kind:          ruleengine.KindFilter,
+				EnvRef:        ruleengine.EnvironmentRef{Consumer: consumer, Name: "chain_test"},
+				CompileBudget: exhCompile,
+				OnCompileMiss: func(d string) { observedMiss = append(observedMiss, d) },
+			},
+		}}}, ruleengine.Input{Activation: map[string]any{"flag": true}}, ruleengine.ChainLimits{}, nil, nil, nil)
+		if err != nil {
+			t.Fatalf("NewChainRun: %v", err)
+		}
+		out, _, done, err := run.Next()
+		if err != nil || !done || out == nil || out.Class != ruleengine.StepClassCanceled {
+			t.Fatalf("canceled ctx with exhausted CompileBudget = (%+v, %v, %v), want canceled (not compile_budget)", out, done, err)
+		}
+
+		// Live ctx with non-exhausted CompileBudget invokes OnCompileMiss with dialect name only.
+		liveDom := ruleengine.Domain{Ctx: context.Background()}
+		run2, _ := eng.NewChainRun(ruleengine.ChainDomains{Inline: liveDom, IO: liveDom}, ruleengine.Chain{Elements: []ruleengine.ChainElement{{
+			Index:   1,
+			Dialect: ruleengine.DialectCEL,
+			Kind:    ruleengine.KindFilter,
+			Source: &ruleengine.ChainElementSource{
+				Expr:          "flag == true && score == 7",
+				Scope:         celengine.CacheScope{Consumer: consumer, ID: "cb-2", Revision: 1},
+				Kind:          ruleengine.KindFilter,
+				EnvRef:        ruleengine.EnvironmentRef{Consumer: consumer, Name: "chain_test"},
+				CompileBudget: ruleengine.NewBudgetTracker(time.Second),
+				OnCompileMiss: func(d string) { observedMiss = append(observedMiss, d) },
+			},
+		}}}, ruleengine.Input{Activation: map[string]any{"flag": true, "score": int64(7)}}, ruleengine.ChainLimits{}, nil, nil, nil)
+		out2, _, _, _ := run2.Next()
+		if out2 == nil || out2.Class != ruleengine.StepClassPass {
+			t.Fatalf("live CompileBudget run = %+v, want pass", out2)
+		}
+		if !slices.Equal(observedMiss, []string{ruleengine.DialectCEL}) {
+			t.Fatalf("OnCompileMiss observed = %v, want [cel]", observedMiss)
+		}
+	})
+}
