@@ -208,7 +208,6 @@ export function buildFixture() {
           'web.agent_edit': true,
           'web.artifact_manage_access': false,
           'web.artifact_review_editor': false,
-          'web.chat_scheduled_send': false,
           'web.decisions': false,
           'web.inbox_dashboard': false,
           'web.sse_hidden_tab_close': false,

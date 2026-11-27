@@ -24,6 +24,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as featureFlags from './feature-flags.js';
+import * as chatScheduled from '../client/chat-scheduled.js';
 import * as chatStars from '../client/chat-stars.js';
 import * as filterQuery from '../shared/filter-query/index.js';
 import {
@@ -246,6 +247,34 @@ describe('feature-flags: gs:// links flag removed', () => {
   // (see the experiment-removal checklist).
   it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
     expect(isFeatureEnabled('web.gcs_links')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Removed scheduled send flag (graduated, ptone/scion#9484)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: scheduled send flag removed', () => {
+  it('does not export CHAT_SCHEDULED_SEND_EXPERIMENT or scheduledSendEnabled from chat-scheduled', () => {
+    // Type-level check: neither symbol is exported from client/chat-scheduled.ts.
+    type HasFlag = 'CHAT_SCHEDULED_SEND_EXPERIMENT' extends keyof typeof chatScheduled
+      ? true
+      : false;
+    type HasHelper = 'scheduledSendEnabled' extends keyof typeof chatScheduled ? true : false;
+    const hasFlag: HasFlag = false;
+    const hasHelper: HasHelper = false;
+    expect(hasFlag).toBe(false);
+    expect(hasHelper).toBe(false);
+    expect(
+      (chatScheduled as Record<string, unknown>).CHAT_SCHEDULED_SEND_EXPERIMENT
+    ).toBeUndefined();
+    expect((chatScheduled as Record<string, unknown>).scheduledSendEnabled).toBeUndefined();
+  });
+
+  // The one allowed reference to the retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
+    expect(isFeatureEnabled('web.chat_scheduled_send')).toBe(false);
   });
 });
 

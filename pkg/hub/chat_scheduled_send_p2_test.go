@@ -99,23 +99,6 @@ func TestScheduledSend_OverdueBeyondCutoff_MissedThenSendNow(t *testing.T) {
 	assert.Equal(t, []string{"sending", "failed", "requeued", "sending", "sent"}, scheduledEventActions(t, collectEvents(events)))
 }
 
-// Held while the experiment is off and turned back on later than the
-// cutoff: missed, not sent.
-func TestScheduledSend_HeldBeyondCutoff_Missed(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	ctx := context.Background()
-	m := f.insertScheduled(t, f.bob, "held", time.Now().Add(-2*time.Hour))
-	setScheduledSendExperiment(t, f.srv, false)
-	assert.Equal(t, 0, f.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
-	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, m.ID).Status)
-	setScheduledSendExperiment(t, f.srv, true)
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
-	row := f.row(t, f.bob, m.ID)
-	assert.Equal(t, ScheduledMessageFailed, row.Status)
-	assert.Equal(t, ScheduledFailureMissed, row.FailureReason)
-	assert.Empty(t, f.topicMessages(t))
-}
-
 func TestScheduledSend_Missed(t *testing.T) {
 	now := time.Now()
 	assert.False(t, scheduledMissed(&ScheduledChatMessage{FireAt: now.Add(-scheduledLateCutoff)}, now))
@@ -320,20 +303,6 @@ func TestScheduledSend_Dismiss(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code, "dismissing again is a no-op")
 	assert.Equal(t, []string{"dismissed"}, scheduledEventActions(t, collectEvents(events)))
 	assert.Empty(t, f.topicMessages(t))
-}
-
-// The new routes are behind the experiment like the others.
-func TestScheduledSend_Phase2RoutesExperimentOff(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	now := time.Now().UTC()
-	m := f.insertScheduled(t, f.bob, "off", now.Add(-2*time.Hour))
-	failRow(t, f.sms, m.ID, ScheduledFailureMissed, now)
-	setScheduledSendExperiment(t, f.srv, false)
-	for _, suffix := range []string{"/send-now", "/dismiss"} {
-		rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.rowPath(m.ID, suffix), nil)
-		assert.Equal(t, http.StatusNotFound, rec.Code, suffix)
-	}
-	assert.Equal(t, ScheduledMessageFailed, f.row(t, f.bob, m.ID).Status)
 }
 
 // ---------------------------------------------------------------------------

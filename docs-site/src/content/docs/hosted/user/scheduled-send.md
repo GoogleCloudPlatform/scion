@@ -5,10 +5,6 @@ description: Write a chat message now and have the Hub send it as you later.
 
 Scheduled send lets you write a message in the web chat and have the Hub send it at a time you choose. When the time comes, the Hub sends it exactly as if you had pressed **Send** then: it comes from you, agents receive it through the usual routing, and it appears in the thread like any other message.
 
-:::caution[Experimental]
-Scheduled send is behind the `web.chat_scheduled_send` [experiment](/scion/reference/experiments/), which is off by default. While it is off, the menu item and the scheduled messages are hidden, the scheduled-message API answers `404`, and pending messages are held: they are neither sent nor failed.
-:::
-
 ## Scheduling a message
 
 1. Type your message in a topic or a direct message (with an agent or another user).
@@ -49,7 +45,7 @@ If a check fails, the message is not sent and its banner turns red with the reas
 | This conversation no longer exists | The topic was deleted. |
 | The recipient no longer exists | The agent of a direct message was deleted. |
 | Your account is not active | Your account was suspended. |
-| It was found more than an hour after its time | The Hub found the message more than 60 minutes after its time, for example after downtime or while the experiment was off. It is not sent that late without asking you. |
+| It was found more than an hour after its time | The Hub found the message more than 60 minutes after its time, for example after downtime. It is not sent that late without asking you. |
 | Delivery was interrupted | The Hub stopped while it was sending the message. It may or may not have reached the thread; check the thread before sending it again. The Hub never sends it again on its own. |
 | The agent couldn't be woken (no permission, or it is on hold) | Wake was requested for a suspended primary agent, but you do not have permission to start it, or the agent (or an ancestor) is on hold. Nothing was posted to the thread. |
 | Waking the agent failed | Wake was requested for a suspended primary agent, and starting it or waiting for readiness failed (for example the Runtime Broker was unavailable, capacity was full, or another start was already in progress). Nothing was posted to the thread. |

@@ -34,7 +34,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/jackc/pgx/v5"
@@ -42,49 +41,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// ---------------------------------------------------------------------------
-// Experiment gate
-// ---------------------------------------------------------------------------
-
-func TestScheduledSend_ExperimentRegistered(t *testing.T) {
-	exp, ok := experiments.Default().Lookup(experiments.ChatScheduledSend)
-	require.True(t, ok)
-	assert.False(t, exp.Default, "default off")
-	assert.True(t, exp.HasLayer(experiments.LayerWeb))
-	assert.True(t, exp.HasLayer(experiments.LayerServer))
-	assert.Equal(t, "ptone/scion#3666", exp.Issue)
-}
-
-func TestScheduledSend_ExperimentOff_EndpointsNotFound(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	setScheduledSendExperiment(t, f.srv, false)
-
-	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, f.scheduledPath(), map[string]interface{}{
-		"content": "hi", "fire_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodGet, f.scheduledPath(), nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-	rec = doRequestAsUser(t, f.srv, f.bob, http.MethodDelete, f.scheduledPath()+"/"+tid("any"), nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-}
-
-func TestScheduledSend_ExperimentOff_PendingHeld(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	ctx := context.Background()
-	fireAt := time.Now().Add(2 * time.Minute)
-	sm := f.schedule(t, f.bob, "held while off", fireAt)
-
-	setScheduledSendExperiment(t, f.srv, false)
-	assert.Equal(t, 0, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Minute)))
-	assert.Equal(t, ScheduledMessagePending, f.row(t, f.bob, sm.ID).Status, "held, not sent and not failed")
-	assert.Empty(t, f.topicMessages(t))
-
-	setScheduledSendExperiment(t, f.srv, true)
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(ctx, fireAt.Add(time.Minute)))
-	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, sm.ID).Status)
-}
 
 // ---------------------------------------------------------------------------
 // Visibility
@@ -1114,38 +1070,6 @@ func TestScheduledSend_SlowSenderDoesNotBlockOthers(t *testing.T) {
 	assert.Equal(t, ScheduledMessageSent, f.row(t, f.bob, bob2.ID).Status)
 }
 
-// experimentTogglingDispatcher turns the experiment off on its first
-// dispatch.
-type experimentTogglingDispatcher struct {
-	brokerMockDispatcher
-	t   *testing.T
-	srv *Server
-	off sync.Once
-}
-
-func (d *experimentTogglingDispatcher) DispatchAgentMessage(ctx context.Context, a *store.Agent, msg string, interrupt bool, sm *messages.StructuredMessage) error {
-	d.off.Do(func() { setScheduledSendExperiment(d.t, d.srv, false) })
-	return d.brokerMockDispatcher.DispatchAgentMessage(ctx, a, msg, interrupt, sm)
-}
-
-// The experiment is checked before each claim: turning it off during a
-// batch holds the rest of the batch.
-func TestScheduledSend_ExperimentTurnedOffMidBatch_RestHeld(t *testing.T) {
-	f := newScheduledSendFixture(t)
-	fireAt := time.Now().Add(2 * time.Minute)
-	first := f.schedule(t, f.bob, "first", fireAt)
-	second := f.schedule(t, f.bob, "second", fireAt)
-	f.srv.SetDispatcher(&experimentTogglingDispatcher{t: t, srv: f.srv})
-
-	assert.Equal(t, 1, f.srv.sweepScheduledMessages(context.Background(), fireAt.Add(time.Second)))
-	sent, held := f.row(t, f.bob, first.ID), f.row(t, f.bob, second.ID)
-	if sent.Status == ScheduledMessagePending {
-		sent, held = held, sent
-	}
-	assert.Equal(t, ScheduledMessageSent, sent.Status)
-	assert.Equal(t, ScheduledMessagePending, held.Status)
-}
-
 // A 404 from sendChatMessage at fire time is a delivery error (the checks
 // just before it proved the conversation exists), unless it is a refusal of
 // the sender's access answered as not found, which is no_access.
@@ -1865,7 +1789,6 @@ func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
 		require.NoError(t, wcs.Init())
 		srv.SetWebChatStore(wcs)
 		srv.SetDispatcher(&brokerMockDispatcher{})
-		setScheduledSendExperiment(t, srv, true)
 		return twoServerReplica{srv: srv, st: st, wcs: wcs, db: db}
 	}
 	f := &twoServerSQLite{a: newReplica(), b: newReplica()}

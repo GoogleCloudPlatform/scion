@@ -54,7 +54,6 @@ func TestScheduledSend_TwoHubReplicasPostgres_OneDelivery(t *testing.T) {
 		srv.SetWebChatStore(wcs)
 		d := &brokerMockDispatcher{}
 		srv.SetDispatcher(d)
-		setScheduledSendExperiment(t, srv, true)
 		return srv, s, wcs, db, d
 	}
 	_ = stdlib.GetDefaultDriver() // registers the "pgx" driver

@@ -72,7 +72,6 @@
         "experiments.web.agent_edit:boolean",
         "experiments.web.artifact_manage_access:boolean",
         "experiments.web.artifact_review_editor:boolean",
-        "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.decisions:boolean",
         "experiments.web.inbox_dashboard:boolean",
         "experiments.web.sse_hidden_tab_close:boolean",

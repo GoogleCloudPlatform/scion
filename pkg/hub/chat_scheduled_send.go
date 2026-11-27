@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -44,9 +43,6 @@ import (
 // schedule time: the sender, the conversation (a topic and its project, or
 // a DM and its peer) and the sender's access are all checked again at fire
 // time.
-//
-// Everything here is gated by the web.chat_scheduled_send experiment: while
-// it is off the routes answer 404 and the sweeper holds pending rows.
 
 const (
 	// scheduledSendTick is how often each replica looks for due messages;
@@ -76,8 +72,8 @@ const (
 )
 
 // scheduledLateCutoff is how late a message may still be sent. A message
-// found due later than this (the hub was down, or the experiment was off)
-// fails as missed instead, and the sender may ask to send it now.
+// found due later than this (for example after hub downtime) fails as missed
+// instead, and the sender may ask to send it now.
 const scheduledLateCutoff = 60 * time.Minute
 
 // scheduledMissed reports whether m is more than scheduledLateCutoff past
@@ -174,40 +170,38 @@ func (s *Server) scheduledMessageStore() ScheduledMessageStore {
 // handleConversationScheduledRoutes serves the scheduled-message routes of
 // a conversation. rest is the path after "scheduled" ("" or "/{id}").
 func (s *Server) handleConversationScheduledRoutes(w http.ResponseWriter, r *http.Request, key, rest string) {
-	s.requireExperiment(experiments.ChatScheduledSend, func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(rest, "/")
-		switch {
-		case rest == "":
-			switch r.Method {
-			case http.MethodGet:
-				s.handleScheduledList(w, r, key)
-			case http.MethodPost:
-				s.handleScheduledCreate(w, r, key)
-			default:
-				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
-			}
-		case id != "" && !strings.Contains(id, "/"):
-			if r.Method != http.MethodDelete {
-				MethodNotAllowed(w, http.MethodDelete)
-				return
-			}
-			s.handleScheduledCancel(w, r, key, id)
-		case strings.HasSuffix(id, "/send-now") && scheduledRowID(id, "/send-now") != "":
-			if r.Method != http.MethodPost {
-				MethodNotAllowed(w, http.MethodPost)
-				return
-			}
-			s.handleScheduledSendNow(w, r, key, scheduledRowID(id, "/send-now"))
-		case strings.HasSuffix(id, "/dismiss") && scheduledRowID(id, "/dismiss") != "":
-			if r.Method != http.MethodPost {
-				MethodNotAllowed(w, http.MethodPost)
-				return
-			}
-			s.handleScheduledDismiss(w, r, key, scheduledRowID(id, "/dismiss"))
+	id := strings.TrimPrefix(rest, "/")
+	switch {
+	case rest == "":
+		switch r.Method {
+		case http.MethodGet:
+			s.handleScheduledList(w, r, key)
+		case http.MethodPost:
+			s.handleScheduledCreate(w, r, key)
 		default:
-			http.NotFound(w, r)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
-	})(w, r)
+	case id != "" && !strings.Contains(id, "/"):
+		if r.Method != http.MethodDelete {
+			MethodNotAllowed(w, http.MethodDelete)
+			return
+		}
+		s.handleScheduledCancel(w, r, key, id)
+	case strings.HasSuffix(id, "/send-now") && scheduledRowID(id, "/send-now") != "":
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleScheduledSendNow(w, r, key, scheduledRowID(id, "/send-now"))
+	case strings.HasSuffix(id, "/dismiss") && scheduledRowID(id, "/dismiss") != "":
+		if r.Method != http.MethodPost {
+			MethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		s.handleScheduledDismiss(w, r, key, scheduledRowID(id, "/dismiss"))
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // scheduledSendCaller returns the caller of a scheduled-message route, or
@@ -901,13 +895,8 @@ func (s *Server) waitScheduledDeliveries() {
 // that sender's due messages one after another, fetching the next one
 // after each delivery; at most scheduledSendWorkers senders are delivered
 // at a time, and a sender that already has a delivery in progress (from
-// an earlier tick) is skipped until it finishes. The experiment is checked
-// before each claim; while it is off nothing is claimed, so pending
-// messages are held, not sent or failed.
+// an earlier tick) is skipped until it finishes.
 func (s *Server) sweepScheduledMessages(ctx context.Context, now time.Time) int {
-	if !s.experimentEnabled(experiments.ChatScheduledSend) {
-		return 0
-	}
 	sms := s.scheduledMessageStore()
 	if sms == nil {
 		return 0
@@ -1004,15 +993,15 @@ func (rt *scheduledSendRuntime) yieldedLast(due []ScheduledChatMessage) []Schedu
 
 // deliverSenderDue delivers one sender's due messages one after another,
 // starting with row, and returns how many it claimed. It stops when the
-// sweeper stops, the experiment is turned off, a claim fails, a row is
-// handed back to pending (it is retried next tick), or the sender has no
-// more due messages; after scheduledSendYieldAfter claims with more due, it
-// yields its slot (see scheduledSendYieldAfter).
+// sweeper stops, a claim fails, a row is handed back to pending (it is
+// retried next tick), or the sender has no more due messages; after
+// scheduledSendYieldAfter claims with more due, it yields its slot (see
+// scheduledSendYieldAfter).
 func (s *Server) deliverSenderDue(ctx context.Context, rt *scheduledSendRuntime, sms ScheduledMessageStore, row *ScheduledChatMessage, now time.Time) int {
 	claimed := 0
 	attempted := make(map[string]bool)
 	for row != nil && !attempted[row.ID] {
-		if ctx.Err() != nil || !s.experimentEnabled(experiments.ChatScheduledSend) {
+		if ctx.Err() != nil {
 			return claimed
 		}
 		attempted[row.ID] = true
