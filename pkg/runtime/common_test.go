@@ -211,6 +211,22 @@ func TestFindContainerAgent_SharedPrefix(t *testing.T) {
 		}
 	})
 
+	t.Run("exact ID beats exact name match", func(t *testing.T) {
+		// Container A's Name equals Container B's full ContainerID and appears
+		// first; querying that ID must select Container B by exact ID.
+		agents := []api.AgentInfo{
+			{ContainerID: "aaaa111122223333", Name: "bbbb444455556666"},
+			{ContainerID: "bbbb444455556666", Name: "other-agent"},
+		}
+		got, err := findContainerAgent(agents, "bbbb444455556666")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got == nil || got.ContainerID != "bbbb444455556666" {
+			t.Errorf("got %+v, want bbbb444455556666", got)
+		}
+	})
+
 	t.Run("exact name beats prefix ID match", func(t *testing.T) {
 		agents := []api.AgentInfo{
 			{ContainerID: "my-long-agent-name-extra", Name: "other"},
