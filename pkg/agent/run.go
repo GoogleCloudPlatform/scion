@@ -806,8 +806,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					}
 					return ""
 				}())
+			convertedTel := config.ConvertV1TelemetryToAPI(settings.Telemetry)
+			if convertedTel != nil {
+				// Retention is Hub-only; never carry it into agent configs.
+				convertedTel.Retention = nil
+			}
 			settingsCfg := &api.ScionConfig{
-				Telemetry: config.ConvertV1TelemetryToAPI(settings.Telemetry),
+				Telemetry: convertedTel,
 			}
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		} else {

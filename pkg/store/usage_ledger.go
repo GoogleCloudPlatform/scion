@@ -101,6 +101,12 @@ const (
 	LegacyUsageRollupHourlyCoverageSection = "internal.usage_rollups_hourly_coverage"
 )
 
+// UsageRetentionStateSection is the internal hub_settings section that
+// persists shared usage-retention sweeper progress (last completed pass,
+// resume index for multi-tick passes) and the monotonic hourly swept-through
+// watermark across replicas and restarts.
+const UsageRetentionStateSection = "system.usage_retention_state"
+
 // Usage rollup granularities and supported groupBy dimensions.
 const (
 	UsageGranularityHour = "hour"
@@ -538,4 +544,79 @@ type UsageLedgerStore interface {
 	// project_id whose latest open meter_health receipt is strictly older than
 	// staleBefore (and not superseded by a newer non-open epoch).
 	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
+
+	UsageRetentionStore
+}
+
+// UsageExportCursor is the analytics export watermark for usage_events (P8).
+// When provided to SweepUsageEventsBatch, only rows at or before this cursor
+// are eligible for retention deletion; rows newer than the cursor are kept
+// until exported.
+type UsageExportCursor struct {
+	ReceivedAt time.Time
+	// EventID is an optional tie-breaker matching the (received_at, event_id)
+	// index. When empty, all rows with received_at <= ReceivedAt are eligible.
+	EventID string
+}
+
+// UsageRetentionState holds durable state for the Hub DB usage-ledger
+// retention sweeper (stored in hub_settings under UsageRetentionStateSection).
+type UsageRetentionState struct {
+	// LastCompletedAt is the UTC timestamp when the last full retention pass
+	// drained every registered target.
+	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
+	// NextTargetIndex is the 0-based target index to resume from on the next
+	// 1-minute tick while InProgress is true.
+	NextTargetIndex int `json:"next_target_index,omitempty"`
+	// InProgress is true when a pass did not finish draining all targets within
+	// a tick budget and should continue on subsequent 1-minute ticks without
+	// waiting sweep_interval.
+	InProgress bool `json:"in_progress,omitempty"`
+	// HourlySweptThrough is the highest UTC hour-aligned cutoff that the
+	// usage_rollups_hourly sweeper has swept through. Monotonic: never moves
+	// backward, preventing silent under-reporting if hourly_rollups_days is
+	// later increased.
+	HourlySweptThrough *time.Time `json:"hourly_swept_through,omitempty"`
+}
+
+// UsageRetentionStore defines bounded-batch retention sweep operations for the
+// Hub DB Track 1 usage tables (Tokenomics design §4.2, D8/D8a). Each method
+// deletes at most batchSize rows in one transaction and returns the deleted
+// row count.
+type UsageRetentionStore interface {
+	// GetUsageRetentionState loads the persisted usage retention sweeper state
+	// and hourly swept-through watermark. Returns a zero-value state (not an
+	// error) when no row exists yet.
+	GetUsageRetentionState(ctx context.Context) (*UsageRetentionState, error)
+
+	// SaveUsageRetentionState persists the usage retention sweeper state and
+	// hourly swept-through watermark in hub_settings.
+	SaveUsageRetentionState(ctx context.Context, state *UsageRetentionState) error
+
+	// SweepUsageEventsBatch deletes up to batchSize usage_events rows with
+	// event_ts < cutoff (and at or before exportCursor when non-nil).
+	SweepUsageEventsBatch(ctx context.Context, cutoff time.Time, exportCursor *UsageExportCursor, batchSize int) (int64, error)
+
+	// SweepUsageRollupsHourlyBatch deletes up to batchSize usage_rollups_hourly
+	// rows with bucket_start < cutoff.
+	SweepUsageRollupsHourlyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageRollupsDailyBatch deletes up to batchSize usage_rollups_daily
+	// rows with bucket_start < cutoff.
+	SweepUsageRollupsDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepUsageScopeCountersDailyBatch deletes up to batchSize
+	// usage_scope_counters_daily rows with day_utc < cutoff.
+	SweepUsageScopeCountersDailyBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepMeterHealthBatch deletes up to batchSize meter_health rows with
+	// updated_at < cutoff that do not belong to the current run of a live
+	// (non-deleted) agent (D8 rule).
+	SweepMeterHealthBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
+
+	// SweepRunAttributionBatch deletes up to batchSize run_attribution rows
+	// with created_at < cutoff, legal_hold = false, not the current run of a
+	// live (non-deleted) agent, and with no remaining usage_events or
+	// meter_health rows referencing the run (D8a rule).
+	SweepRunAttributionBatch(ctx context.Context, cutoff time.Time, batchSize int) (int64, error)
 }

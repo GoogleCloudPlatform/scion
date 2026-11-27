@@ -187,6 +187,7 @@ func (UsageEvent) Indexes() []ent.Index {
 		index.Fields("agent_id", "event_ts"),
 		index.Fields("received_at", "event_id"),
 		index.Fields("run_id"),
+		index.Fields("event_ts"),
 	}
 }
 

@@ -79,6 +79,7 @@ func (MeterHealth) Indexes() []ent.Index {
 			StorageKey("meter_health_agent_run_epoch"),
 		index.Fields("run_id"),
 		index.Fields("final_state", "updated_at"),
+		index.Fields("updated_at"),
 	}
 }
 

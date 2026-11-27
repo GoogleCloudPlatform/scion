@@ -1946,6 +1946,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		errs := opsettings.Validate(secName, doc)
 		if secName == "telemetry" {
 			errs = append(errs, telemetryTLSSaveErrors(doc, tlsTouched, slog.Default())...)
+			errs = append(errs, opsettings.ValidateTelemetryRetention(doc)...)
 		}
 		if len(errs) > 0 {
 			allValidationErrors[secName] = errs

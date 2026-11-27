@@ -194,6 +194,14 @@ var telemetryProbeDocs = map[string]string{
 	"telemetry.filter.sampling":                `{"filter":{"sampling":{"default":0.5}}}`,
 	"telemetry.filter.sampling.default":        `{"filter":{"sampling":{"default":0.5}}}`,
 	"telemetry.filter.sampling.rates":          `{"filter":{"sampling":{"rates":{"agent.tool.call":0.25}}}}`,
+	"telemetry.retention":                      `{"retention":{"usage_events_days":40}}`,
+	"telemetry.retention.usage_events_days":    `{"retention":{"usage_events_days":40}}`,
+	"telemetry.retention.hourly_rollups_days":  `{"retention":{"hourly_rollups_days":7}}`,
+	"telemetry.retention.daily_rollups_days":   `{"retention":{"daily_rollups_days":180}}`,
+	"telemetry.retention.scope_counters_days":  `{"retention":{"scope_counters_days":75}}`,
+	"telemetry.retention.meter_health_days":    `{"retention":{"meter_health_days":15}}`,
+	"telemetry.retention.sweep_interval":       `{"retention":{"sweep_interval":"12h"}}`,
+	"telemetry.retention.batch_size":           `{"retention":{"batch_size":2500}}`,
 	"telemetry.resource":                       `{"resource":{"service.namespace":"probe"}}`,
 }
 

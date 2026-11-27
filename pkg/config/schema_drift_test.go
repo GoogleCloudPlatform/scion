@@ -138,6 +138,8 @@ var agentSchemaDriftAllowList = map[string]string{
 	// Wire-only fields on api.ScionConfig (yaml:"-"); ignored if a template sets them.
 	"go-only: cleared_fields": "wire-only hub-to-broker field (yaml:\"-\"); not valid in template configs",
 	"go-only: changed_fields": "wire-only hub-to-broker field (yaml:\"-\"); not valid in template configs",
+	// Hub-only telemetry retention settings on shared api.TelemetryConfig; valid in settings-v1, not agent-v1.
+	"go-only: telemetry.retention": "Hub-only DB retention config on shared api.TelemetryConfig; not valid in agent configs",
 }
 
 // TestAgentSchema_NoDriftFromGoTypes walks api.ScionConfig alongside

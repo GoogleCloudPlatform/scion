@@ -106,6 +106,18 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 		}
 	}
 
+	if v1.Retention != nil {
+		result.Retention = &api.TelemetryRetentionConfig{
+			UsageEventsDays:   v1.Retention.UsageEventsDays,
+			HourlyRollupsDays: v1.Retention.HourlyRollupsDays,
+			DailyRollupsDays:  v1.Retention.DailyRollupsDays,
+			ScopeCountersDays: v1.Retention.ScopeCountersDays,
+			MeterHealthDays:   v1.Retention.MeterHealthDays,
+			SweepInterval:     v1.Retention.SweepInterval,
+			BatchSize:         v1.Retention.BatchSize,
+		}
+	}
+
 	return result
 }
 
