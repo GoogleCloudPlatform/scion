@@ -49,6 +49,7 @@ const (
 	GenReasonGuardMismatch = "guard_mismatch"
 	GenReasonInodeChanged  = "inode_changed"
 	GenReasonConflict      = "segment_conflict"
+	GenReasonRebaseline    = "rebaseline"
 )
 
 // Sentinel errors returned by shipper filesystem safety checks.
@@ -107,6 +108,7 @@ type State struct {
 	BaselinedAt              *time.Time                `json:"baselined_at,omitempty"`
 	LastRebaselineReason     string                    `json:"last_rebaseline_reason,omitempty"`
 	LastRebaselineAt         *time.Time                `json:"last_rebaseline_at,omitempty"`
+	RefusedPendingRebaseline bool                      `json:"refused_pending_rebaseline,omitempty"`
 	BackfillExisting         bool                      `json:"backfill_existing,omitempty"`
 	DeferredBaselinePrefixes []string                  `json:"deferred_baseline_prefixes,omitempty"`
 	NextStartPath            string                    `json:"next_start_path,omitempty"`
@@ -172,6 +174,7 @@ var knownStateFields = map[string]struct{}{
 	"baselined_at":               {},
 	"last_rebaseline_reason":     {},
 	"last_rebaseline_at":         {},
+	"refused_pending_rebaseline": {},
 	"backfill_existing":          {},
 	"deferred_baseline_prefixes": {},
 	"next_start_path":            {},

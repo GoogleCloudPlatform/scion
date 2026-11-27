@@ -43,14 +43,18 @@ var (
 		return unix.Fchown(fd, uid, gid)
 	}
 
+	mkdiratFD = func(dirfd int, path string, mode uint32) error {
+		return unix.Mkdirat(dirfd, path, mode)
+	}
+
 	renameatFD = func(olddirfd int, oldpath string, newdirfd int, newpath string, _, _ string) error {
 		return unix.Renameat(olddirfd, oldpath, newdirfd, newpath)
 	}
 )
 
-// wrapRootChownErr annotates EPERM/EACCES from root fchown calls with
-// ErrRootSquashChownRefused so root-squashed NFS exports fail with a distinct,
-// actionable error.
+// wrapRootChownErr annotates EPERM/EACCES from root filesystem operations
+// (fchown, mkdirat, openat) with ErrRootSquashChownRefused so root-squashed
+// NFS exports fail with a distinct, actionable error.
 func wrapRootChownErr(label string, err error) error {
 	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
 		return fmt.Errorf("%s: %w: %w", label, ErrRootSquashChownRefused, err)
@@ -118,9 +122,12 @@ func openPinnedStateDir(homeDir string, create bool) (dirFD int, homeUID, homeGI
 func openOrCreateDirNoFollow(parentFD int, name, displayPath string, homeUID, homeGID uint32, create bool) (int, error) {
 	created := false
 	if create {
-		if err := unix.Mkdirat(parentFD, name, 0o700); err == nil {
+		if err := mkdiratFD(parentFD, name, 0o700); err == nil {
 			created = true
 		} else if !errors.Is(err, syscall.EEXIST) {
+			if geteuidFn() == 0 {
+				return -1, wrapRootChownErr("mkdirat "+displayPath, err)
+			}
 			return -1, fmt.Errorf("mkdirat %s: %w", displayPath, err)
 		}
 	}
@@ -132,6 +139,9 @@ func openOrCreateDirNoFollow(parentFD int, name, displayPath string, homeUID, ho
 		}
 		if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENOTDIR) {
 			return -1, fmt.Errorf("refusing state dir ancestor %s: %w", displayPath, privatefs.ErrReparsePoint)
+		}
+		if geteuidFn() == 0 {
+			return -1, wrapRootChownErr("openat "+displayPath, err)
 		}
 		return -1, fmt.Errorf("openat %s: %w", displayPath, err)
 	}

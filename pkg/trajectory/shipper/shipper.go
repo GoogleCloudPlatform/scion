@@ -93,6 +93,16 @@ type Uploader interface {
 	Ship(ctx context.Context, seg Segment) (ShipResult, error)
 }
 
+// Prober is an optional interface implemented by Uploaders that can probe
+// whether the Hub currently accepts capture (for example via segments:prepare
+// without uploading payload bytes). When state.json records
+// RefusedPendingRebaseline=true after a prior 404 or 403 policy refusal,
+// RunRound probes before shipping so bytes written during the refusal or
+// backoff window are rebaselined away instead of shipped retroactively.
+type Prober interface {
+	Probe(ctx context.Context, seg Segment) (ShipResult, error)
+}
+
 // Config configures a Shipper instance.
 type Config struct {
 	// HomeDir is the agent home directory containing native harness artifacts
@@ -253,12 +263,21 @@ type RebaselineResult struct {
 }
 
 // Rebaseline moves every discovered artifact's baseline, raw_committed_offset,
-// and parsed_offset to current EOF under the exclusive state lock, clears any
-// pending segments, and records reason on state.json.
+// and parsed_offset to the byte immediately after the last '\n' at or before
+// EOF under the exclusive state lock, clears any pending segments, and records
+// reason on state.json.
 //
-// Call this when the Hub refuses capture by policy (403 capture_disabled or
-// 403 capture_metadata_only) before backing off, so no backlog accumulates
-// while capture is disabled and ships if capture is later re-enabled.
+// When the current generation already has committed or pending bytes past its
+// baseline start (RawCommittedOffset > BaselineOffset, or Pending != nil) and
+// the new offset differs from RawCommittedOffset, Generation is incremented
+// with LastGenerationReason = GenReasonRebaseline so no generation ever
+// contains a byte hole.
+//
+// Call this when the Hub refuses capture (404 or 403 capture_disabled /
+// capture_metadata_only) before backing off, so no backlog accumulates while
+// capture is disabled. It also persists RefusedPendingRebaseline=true so the
+// first accepted probe after backoff (or across a restart) rebaselines past
+// anything written during the backoff window before shipping new bytes.
 func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -269,6 +288,21 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 	}
 	defer lock.Unlock()
 
+	st, exists, err := LoadState(s.cfg.HomeDir)
+	if err != nil {
+		return nil, err
+	}
+	if !exists || st == nil {
+		st = &State{
+			Version:   StateVersion,
+			Harness:   s.spec.Name,
+			Artifacts: make(map[string]*ArtifactState),
+		}
+	}
+	return s.rebaselineLocked(st, reason, true)
+}
+
+func (s *Shipper) rebaselineLocked(st *State, reason string, markRefusalPending bool) (*RebaselineResult, error) {
 	resolvedHome, err := pathcanon.Resolve(s.cfg.HomeDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory %s: %w", s.cfg.HomeDir, err)
@@ -278,18 +312,7 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 		return nil, err
 	}
 
-	st, exists, err := LoadState(s.cfg.HomeDir)
-	if err != nil {
-		return nil, err
-	}
 	now := s.now().UTC()
-	if !exists || st == nil {
-		st = &State{
-			Version:   StateVersion,
-			Harness:   s.spec.Name,
-			Artifacts: make(map[string]*ArtifactState),
-		}
-	}
 	if st.Version == 0 {
 		st.Version = StateVersion
 	}
@@ -299,10 +322,14 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 	if st.OriginHubID == "" {
 		st.OriginHubID = s.cfg.OriginHubID
 	}
+	if st.Artifacts == nil {
+		st.Artifacts = make(map[string]*ArtifactState)
+	}
 	st.Baselined = true
 	st.BaselinedAt = &now
 	st.LastRebaselineReason = reason
 	st.LastRebaselineAt = &now
+	st.RefusedPendingRebaseline = markRefusalPending
 	st.DeferredBaselinePrefixes = mergeDeferredPrefixes(st.DeferredBaselinePrefixes, disc.Refused)
 
 	discoveredSet := make(map[string]struct{}, len(disc.Artifacts))
@@ -326,7 +353,15 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 			continue
 		}
 
-		offset := fi.Size()
+		// Rebaseline to the byte immediately after the last '\n' at or before
+		// EOF so post-rebaseline segments always begin on a line boundary.
+		offset, nlErr := findLastNewlineOffset(f, fi.Size())
+		if nlErr != nil {
+			_ = f.Close()
+			markRebaselineSkipped(st, art, existing, nlErr, now, &skipped)
+			continue
+		}
+
 		var guardHash string
 		var guardLen int
 		if offset > 0 {
@@ -342,38 +377,42 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 
 		gen := 0
 		originHubID := st.OriginHubID
+		lastGenReason := ""
 		if existing != nil {
 			gen = existing.Generation
+			lastGenReason = existing.LastGenerationReason
 			if existing.OriginHubID != "" {
 				originHubID = existing.OriginHubID
 			}
-			// If the file shrank below the previously committed watermark or
-			// its inode changed, advance generation so future segments cannot
-			// collide with committed segments in the old generation.
-			if existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode)) {
+			hasCommittedOrPending := existing.RawCommittedOffset > existing.BaselineOffset || existing.Pending != nil
+			shrankOrRotated := existing.RawCommittedOffset > 0 && (offset < existing.RawCommittedOffset || (existing.Inode != 0 && fid.Ino != existing.Inode))
+			createsHole := hasCommittedOrPending && offset != existing.RawCommittedOffset
+			if shrankOrRotated || createsHole {
 				gen++
+				lastGenReason = GenReasonRebaseline
 			}
 		}
 
 		st.Artifacts[art.NativeRelativePath] = &ArtifactState{
-			NativeRelativePath: art.NativeRelativePath,
-			ArtifactKind:       art.Kind,
-			Inode:              fid.Ino,
-			Device:             fid.Dev,
-			FileID:             fid.String(),
-			Generation:         gen,
-			RawCommittedOffset: offset,
-			ParsedOffset:       offset,
-			GuardHash:          guardHash,
-			GuardLen:           guardLen,
-			Pending:            nil,
-			Baseline:           true,
-			BaselineOffset:     offset,
-			BaselineGuardHash:  guardHash,
-			BaselineGuardLen:   guardLen,
-			NeedsBaseline:      false,
-			OriginHubID:        originHubID,
-			UpdatedAt:          &now,
+			NativeRelativePath:   art.NativeRelativePath,
+			ArtifactKind:         art.Kind,
+			Inode:                fid.Ino,
+			Device:               fid.Dev,
+			FileID:               fid.String(),
+			Generation:           gen,
+			RawCommittedOffset:   offset,
+			ParsedOffset:         offset,
+			GuardHash:            guardHash,
+			GuardLen:             guardLen,
+			Pending:              nil,
+			Baseline:             true,
+			BaselineOffset:       offset,
+			BaselineGuardHash:    guardHash,
+			BaselineGuardLen:     guardLen,
+			NeedsBaseline:        false,
+			OriginHubID:          originHubID,
+			LastGenerationReason: lastGenReason,
+			UpdatedAt:            &now,
 		}
 		rebased++
 	}
@@ -395,6 +434,34 @@ func (s *Shipper) Rebaseline(ctx context.Context, reason string) (*RebaselineRes
 		RefusedPaths:     disc.Refused,
 		SkippedPaths:     skipped,
 	}, nil
+}
+
+// findLastNewlineOffset scans backwards from fileSize in bounded chunks and
+// returns the byte offset immediately after the last '\n' at or before
+// fileSize, or 0 if no '\n' exists.
+func findLastNewlineOffset(r io.ReaderAt, fileSize int64) (int64, error) {
+	if fileSize <= 0 {
+		return 0, nil
+	}
+	const chunkSize int64 = 64 * 1024
+	buf := make([]byte, min(fileSize, chunkSize))
+	pos := fileSize
+	for pos > 0 {
+		readLen := min(pos, int64(len(buf)))
+		start := pos - readLen
+		n, err := r.ReadAt(buf[:readLen], start)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return 0, err
+		}
+		chunk := buf[:n]
+		for i := len(chunk) - 1; i >= 0; i-- {
+			if chunk[i] == '\n' {
+				return start + int64(i) + 1, nil
+			}
+		}
+		pos = start
+	}
+	return 0, nil
 }
 
 func markRebaselineSkipped(
@@ -1047,6 +1114,46 @@ func (s *Shipper) shipArtifactLocked(
 		if err != nil {
 			res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("build segment: %w", err)
 			return false, nil
+		}
+
+		// If a prior refusal left RefusedPendingRebaseline=true and the
+		// uploader supports probing (segments:prepare without uploading
+		// payload), probe first before persisting pending or shipping so bytes
+		// written during the refusal/backoff window never leave the container.
+		if st.RefusedPendingRebaseline {
+			if prober, ok := s.cfg.Uploader.(Prober); ok {
+				probeRes, probeErr := prober.Probe(ctx, seg)
+				*remainingBudget -= seg.RawSize
+				switch probeRes.Outcome {
+				case OutcomeCaptureUnavailable:
+					res.CaptureUnavailable = true
+					return true, nil
+				case OutcomePolicyRefused:
+					msg := probeRes.Message
+					if msg == "" && probeErr != nil {
+						msg = probeErr.Error()
+					}
+					if msg == "" {
+						msg = "capture_policy_refused"
+					}
+					res.PolicyRefused = true
+					res.PolicyRefusedReason = msg
+					return true, nil
+				case OutcomeCommitted:
+					// Hub accepted prepare: rebaseline past everything written
+					// during the refusal/backoff window and clear the flag.
+					if _, rerr := s.rebaselineLocked(st, "capture_accepted", false); rerr != nil {
+						return true, rerr
+					}
+					return true, nil
+				default:
+					// Transient probe error (5xx / network): keep flag set and retry later.
+					if probeErr != nil {
+						res.ArtifactErrors[art.NativeRelativePath] = probeErr
+					}
+					return true, nil
+				}
+			}
 		}
 
 		// Persist the pending segment record under the lock before calling Ship

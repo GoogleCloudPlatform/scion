@@ -339,6 +339,28 @@ func TestCrossUIDStateSharingRootAndHomeOwner(t *testing.T) {
 			t.Fatalf("expected underlying EPERM to remain wrapped, got %v", err)
 		}
 	})
+
+	t.Run("root-squashed filesystem mkdirat EACCES returns ErrRootSquashChownRefused", func(t *testing.T) {
+		home := t.TempDir()
+		_ = installSimulatedUIDFS(t, home, homeUID, 0)
+		origMkdirat := mkdiratFD
+		t.Cleanup(func() { mkdiratFD = origMkdirat })
+		mkdiratFD = func(_ int, _ string, _ uint32) error {
+			return unix.EACCES
+		}
+
+		sRoot, err := New(Config{HomeDir: home, RunID: "run-1"})
+		if err != nil {
+			t.Fatalf("New root: %v", err)
+		}
+		_, err = sRoot.Baseline(context.Background())
+		if !errors.Is(err, ErrRootSquashChownRefused) {
+			t.Fatalf("expected ErrRootSquashChownRefused on root-squashed mkdirat EACCES, got %v", err)
+		}
+		if !errors.Is(err, unix.EACCES) {
+			t.Fatalf("expected underlying EACCES to remain wrapped, got %v", err)
+		}
+	})
 }
 
 func TestOwnerUIDRuleTable(t *testing.T) {

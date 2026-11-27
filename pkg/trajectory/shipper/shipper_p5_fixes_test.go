@@ -298,3 +298,189 @@ type uploaderFunc func(ctx context.Context, seg Segment) (ShipResult, error)
 func (f uploaderFunc) Ship(ctx context.Context, seg Segment) (ShipResult, error) {
 	return f(ctx, seg)
 }
+
+type probeAndShipUploader struct {
+	probeFn func(ctx context.Context, seg Segment) (ShipResult, error)
+	shipFn  func(ctx context.Context, seg Segment) (ShipResult, error)
+}
+
+func (u *probeAndShipUploader) Probe(ctx context.Context, seg Segment) (ShipResult, error) {
+	return u.probeFn(ctx, seg)
+}
+
+func (u *probeAndShipUploader) Ship(ctx context.Context, seg Segment) (ShipResult, error) {
+	return u.shipFn(ctx, seg)
+}
+
+func TestRebaselineAfterCommitBumpsGenerationAndAlignsToLineBoundary(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-rebaseline-gen.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+
+	initLine := "{\"init\":0}\n"
+	if err := os.WriteFile(artPath, []byte(initLine), 0o644); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+
+	var shipped []Segment
+	up := uploaderFunc(func(_ context.Context, seg Segment) (ShipResult, error) {
+		shipped = append(shipped, seg)
+		return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+	})
+
+	s, err := New(Config{HomeDir: home, RunID: "run-reb-gen", Uploader: up})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Commit [B, X) in generation 0.
+	lineA := "{\"seq\":1}\n"
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append A: %v", err)
+	}
+	_, _ = f.WriteString(lineA)
+	_ = f.Close()
+
+	res1, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res1.SegmentsShipped != 1 {
+		t.Fatalf("RunRound 1: res=%+v err=%v", res1, err)
+	}
+
+	// Append bytes written while capture is off, ending in a partial line.
+	offComplete := "{\"off\":true}\n"
+	offPartial := "{\"partial"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append off: %v", err)
+	}
+	_, _ = f2.WriteString(offComplete + offPartial)
+	_ = f2.Close()
+
+	if _, err := s.Rebaseline(context.Background(), "capture_unavailable"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+
+	st, ok, err := LoadState(home)
+	if err != nil || !ok {
+		t.Fatalf("LoadState: ok=%v err=%v", ok, err)
+	}
+	entry := st.Artifacts[rel]
+	wantRebasedOffset := int64(len(initLine) + len(lineA) + len(offComplete))
+	if entry.Generation != 1 || entry.LastGenerationReason != GenReasonRebaseline {
+		t.Fatalf("expected Generation=1 reason=%q, got gen=%d reason=%q",
+			GenReasonRebaseline, entry.Generation, entry.LastGenerationReason)
+	}
+	if entry.RawCommittedOffset != wantRebasedOffset || entry.BaselineOffset != wantRebasedOffset || entry.ParsedOffset != wantRebasedOffset {
+		t.Fatalf("expected line-aligned offset %d, got raw=%d base=%d parsed=%d",
+			wantRebasedOffset, entry.RawCommittedOffset, entry.BaselineOffset, entry.ParsedOffset)
+	}
+
+	// Finish the partial line and append a new line, then ship.
+	finishAndB := "\":1}\n{\"seq\":2}\n"
+	f3, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append finish+B: %v", err)
+	}
+	_, _ = f3.WriteString(finishAndB)
+	_ = f3.Close()
+
+	res2, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res2.SegmentsShipped != 1 {
+		t.Fatalf("RunRound 2: res=%+v err=%v", res2, err)
+	}
+	if len(shipped) != 2 {
+		t.Fatalf("expected 2 shipped segments, got %d", len(shipped))
+	}
+	if shipped[0].Generation != 0 || shipped[1].Generation != 1 {
+		t.Fatalf("expected gen 0 then gen 1, got %d then %d", shipped[0].Generation, shipped[1].Generation)
+	}
+	if shipped[1].ByteStart != wantRebasedOffset {
+		t.Fatalf("expected gen 1 segment to start at line boundary %d, got %d", wantRebasedOffset, shipped[1].ByteStart)
+	}
+}
+
+func TestRefusedPendingRebaselineProbesAndDropsBackoffBacklog(t *testing.T) {
+	home := t.TempDir()
+	projDir := filepath.Join(home, ".claude", "projects", "-workspace")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	rel := ".claude/projects/-workspace/sess-probe.jsonl"
+	artPath := filepath.Join(home, filepath.FromSlash(rel))
+	if err := os.WriteFile(artPath, []byte("{\"init\":0}\n"), 0o644); err != nil {
+		t.Fatalf("write init: %v", err)
+	}
+
+	probeCalls := 0
+	var shipped []Segment
+	up := &probeAndShipUploader{
+		probeFn: func(_ context.Context, _ Segment) (ShipResult, error) {
+			probeCalls++
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "probe-ok"}, nil
+		},
+		shipFn: func(_ context.Context, seg Segment) (ShipResult, error) {
+			shipped = append(shipped, seg)
+			return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-ok"}, nil
+		},
+	}
+
+	s1, err := New(Config{HomeDir: home, RunID: "run-1", Uploader: up})
+	if err != nil {
+		t.Fatalf("New 1: %v", err)
+	}
+	if _, err := s1.Rebaseline(context.Background(), "capture_disabled"); err != nil {
+		t.Fatalf("Rebaseline: %v", err)
+	}
+
+	// Write bytes during the backoff window while RefusedPendingRebaseline=true.
+	duringBackoff := "{\"during_backoff\":true}\n"
+	f, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append backoff: %v", err)
+	}
+	_, _ = f.WriteString(duringBackoff)
+	_ = f.Close()
+
+	// Fresh Shipper (simulating restart) runs ResumeCatchup: must probe,
+	// rebaseline past duringBackoff without calling Ship, and clear the flag.
+	s2, err := New(Config{HomeDir: home, RunID: "run-2", Uploader: up})
+	if err != nil {
+		t.Fatalf("New 2: %v", err)
+	}
+	res, err := s2.ResumeCatchup(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeCatchup: %v", err)
+	}
+	if probeCalls != 1 || len(shipped) != 0 || res.SegmentsShipped != 0 {
+		t.Fatalf("expected 1 probe and 0 shipped bytes, got probeCalls=%d shipped=%d res=%+v", probeCalls, len(shipped), res)
+	}
+	st, ok, err := LoadState(home)
+	if err != nil || !ok || st.RefusedPendingRebaseline {
+		t.Fatalf("expected RefusedPendingRebaseline=false after accepted probe, got ok=%v flag=%v err=%v", ok, st.RefusedPendingRebaseline, err)
+	}
+
+	// Append post-acceptance bytes: next round must ship ONLY these bytes.
+	afterAccept := "{\"after_accept\":true}\n"
+	f2, err := os.OpenFile(artPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("append afterAccept: %v", err)
+	}
+	_, _ = f2.WriteString(afterAccept)
+	_ = f2.Close()
+
+	res2, err := s2.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil || res2.SegmentsShipped != 1 || len(shipped) != 1 {
+		t.Fatalf("expected 1 post-acceptance segment shipped, got res=%+v shipped=%d err=%v", res2, len(shipped), err)
+	}
+	if shipped[0].RawSize != int64(len(afterAccept)) {
+		t.Fatalf("shipped RawSize=%d, want %d", shipped[0].RawSize, len(afterAccept))
+	}
+}
