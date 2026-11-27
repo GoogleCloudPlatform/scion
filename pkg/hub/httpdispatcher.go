@@ -418,6 +418,31 @@ func (d *HTTPAgentDispatcher) SetTokenGenerator(gen AgentTokenGenerator) {
 	d.tokenGenerator = gen
 }
 
+// recordDroppedScopeWarnings attaches any user-facing dropped-scope warning to
+// ctx and logs demoted dropped scopes (such as project:skill:write,
+// ptone/scion#9452) at Hub debug level.
+func (d *HTTPAgentDispatcher) recordDroppedScopeWarnings(ctx context.Context, agent *store.Agent, grant *AgentTokenGrant) {
+	if w := droppedScopesWarning(agent, grant); w != "" {
+		addDispatchWarnings(ctx, w)
+	}
+	if demoted := debugOnlyDroppedScopesFromGrant(grant); len(demoted) > 0 && d.log != nil {
+		agentID, agentSlug := "", ""
+		if agent != nil {
+			agentID = agent.ID
+			agentSlug = agent.Slug
+		}
+		names := make([]string, len(demoted))
+		for i, s := range demoted {
+			names[i] = string(s)
+		}
+		d.log.DebugContext(ctx, "agent token issued without ceiling-optional scopes",
+			"agent_id", agentID,
+			"agent_slug", agentSlug,
+			"dropped_scopes", names,
+		)
+	}
+}
+
 // agentRoleAndScopes extracts the effective role and config-based additional
 // scopes (e.g. GCP token) from the agent record. Used by all dispatch call
 // sites to keep role/scope computation in a single place.
@@ -1038,7 +1063,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			return nil, fmt.Errorf("%s: %w", callerName, err)
 		}
 		req.tokenGrant = grant
-		addDispatchWarnings(ctx, droppedScopesWarning(agent, grant))
+		d.recordDroppedScopeWarnings(ctx, agent, grant)
 	} else if d.debug {
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
 	}
@@ -4028,7 +4053,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
 		}
 		tokenGrant = grant
-		addDispatchWarnings(ctx, droppedScopesWarning(agent, grant))
+		d.recordDroppedScopeWarnings(ctx, agent, grant)
 	}
 
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker).

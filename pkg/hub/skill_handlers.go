@@ -35,6 +35,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -621,6 +622,34 @@ func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) b
 	return true
 }
 
+// writeSkillMissingScope answers 403 missing_scope when an agent presenting a
+// real token (with a token ID) is denied a write on a skill in its own project
+// because its token lacks project:skill:write (ptone/scion#9452). It never
+// grants access and never fires for global, user, or another project's skills,
+// avoiding any cross-project existence leakage.
+func writeSkillMissingScope(w http.ResponseWriter, identity Identity, scope, scopeID string) bool {
+	if scope != store.SkillScopeProject || scopeID == "" {
+		return false
+	}
+	agent, ok := identity.(*agentIdentityWrapper)
+	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
+		return false
+	}
+	if agent.ProjectID() != scopeID {
+		return false
+	}
+	if agentHasAnyScope(agent, []string{string(ScopeProjectSkillWrite)}) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, apiclient.ErrCodeMissingScope,
+		fmt.Sprintf("the credential does not carry the %s scope needed to publish skills in this project", ScopeProjectSkillWrite),
+		map[string]any{
+			"scope":  string(ScopeProjectSkillWrite),
+			"scopes": []string{string(ScopeProjectSkillWrite)},
+		})
+	return true
+}
+
 // createSkill creates a new skill record.
 func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -691,6 +720,9 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 		decision := s.authzService.CheckAccess(ctx, identity,
 			skillScopeResource(store.SkillScopeProject, req.ScopeID), ActionCreate)
 		if !decision.Allowed {
+			if writeSkillMissingScope(w, identity, store.SkillScopeProject, req.ScopeID) {
+				return
+			}
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
 			return
 		}
@@ -815,6 +847,9 @@ func (s *Server) updateSkill(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(existing), catalogWriteAction(permissions.ResourceSkill, existing.Scope, ActionUpdate))
 	if !decision.Allowed {
+		if writeSkillMissingScope(w, identity, existing.Scope, existing.ScopeID) {
+			return
+		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to update this skill", nil)
 		return
 	}
@@ -1010,6 +1045,9 @@ func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, s
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
+		if writeSkillMissingScope(w, identity, skill.Scope, skill.ScopeID) {
+			return
+		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to deprecate versions of this skill", nil)
 		return
 	}
@@ -1072,6 +1110,9 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
+		if writeSkillMissingScope(w, identity, skill.Scope, skill.ScopeID) {
+			return
+		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to publish versions for this skill", nil)
 		return
 	}
@@ -1408,6 +1449,9 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
+		if writeSkillMissingScope(w, identity, skill.Scope, skill.ScopeID) {
+			return
+		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
 		return
 	}
@@ -1494,6 +1538,9 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
+		if writeSkillMissingScope(w, identity, skill.Scope, skill.ScopeID) {
+			return
+		}
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to finalize versions for this skill", nil)
 		return
 	}

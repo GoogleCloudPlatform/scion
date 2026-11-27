@@ -398,7 +398,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 				ScopeID: projectID,
 			})
 			if err != nil {
-				return fmt.Errorf("failed to create skill: %w", err)
+				return wrapHubError(fmt.Errorf("failed to create skill: %w", err))
 			}
 			skillID = createResp.Skill.ID
 			fmt.Printf("Created skill %q (ID: %s)\n", name, skillID)
@@ -416,12 +416,12 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		Files:   fileReqs,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create version: %w", err)
+		return wrapHubError(fmt.Errorf("failed to create version: %w", err))
 	}
 
 	// Upload files
 	if err := uploadSkillFiles(ctx, skillSvc, skillRoot, files, pubResp.UploadURLs, os.Stdout); err != nil {
-		return err
+		return wrapHubError(err)
 	}
 
 	// Build manifest with the hashes recorded at collection
@@ -436,7 +436,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		Manifest: manifest,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to finalize version: %w", err)
+		return wrapHubError(fmt.Errorf("failed to finalize version: %w", err))
 	}
 
 	if isJSONOutput() {

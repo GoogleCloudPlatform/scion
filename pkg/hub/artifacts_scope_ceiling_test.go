@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -292,12 +294,13 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	require.Contains(t, parentScopes, ScopeAgentCreate)
 	require.NotContains(t, parentScopes, ScopeProjectArtifactRead, "the parent's own token lacks the read scope")
 
-	// Both create responses warn that the ceiling-optional scopes were left
-	// out (ptone/scion#4569).
-	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	// Both create responses warn that the non-demoted ceiling-optional scopes
+	// were left out (ptone/scion#4569); project:skill:write is demoted to Hub
+	// debug logging (ptone/scion#9452).
+	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	childRec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "artifact-child"})
 	child, childEdge := f.createdAgent(t, childRec, "artifact-child")
-	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.read")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.update")
@@ -355,15 +358,17 @@ func TestDroppedScopesWarningText(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(nonArtifact), "artifact", "warning text must be generic across scopes")
 
 	skillOnly := droppedScopesWarning(&store.Agent{Slug: "worker-skill"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite}})
-	assert.Contains(t, skillOnly, "without the project:skill:write scope:")
-	assert.Contains(t, skillOnly, "does not allow it, so operations requiring it will fail with missing_scope")
-	assert.NotContains(t, strings.ToLower(skillOnly), "artifact")
-	assert.Contains(t, skillOnly, "'scion reset-auth worker-skill --reissue-scopes'")
+	assert.Empty(t, skillOnly, "project:skill:write alone is demoted to Hub debug logging (ptone/scion#9452)")
+	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite},
+		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite}}))
 
 	combined := droppedScopesWarning(&store.Agent{Slug: "worker-all"},
 		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
-	assert.Contains(t, combined, "without the project:skill:write and project:artifact:read and project:artifact:write scopes:")
+	assert.Contains(t, combined, "without the project:artifact:read and project:artifact:write scopes:")
+	assert.NotContains(t, combined, string(ScopeProjectSkillWrite))
 	assert.Contains(t, combined, "so operations requiring them will fail with missing_scope")
+	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite},
+		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}}))
 
 	slugged := droppedScopesWarning(&store.Agent{Slug: "worker-3", Name: "Worker 3 (docs site)"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
 	assert.Contains(t, slugged, "'scion reset-auth worker-3 --reissue-scopes'")
@@ -394,7 +399,7 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 	f := newMintFixture(t, "drop-warn")
 	capped := f.agent(t, "drop-warn-capped", AgentRoleBaseline, state.PhaseStopped)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, capped.ID, preArtifactReadCeiling(), provSession)
-	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
 
 	for name, dispatch := range map[string]func(context.Context) error{
 		"create": func(ctx context.Context) error {
@@ -423,6 +428,96 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 		assert.NotContains(t, w, "issued without the", "no warning when the ceiling allows the artifact scopes")
 	}
 	assert.Contains(t, f.tokenClaims(t, f.client.lastResolvedEnv["SCION_AUTH_TOKEN"]).Scopes, ScopeProjectArtifactWrite)
+}
+
+// TestMintDemotesDroppedSkillWriteScopeToDebug verifies ptone/scion#9452:
+//   - When only project:skill:write is dropped by the creator's ceiling, no
+//     user-facing dispatch/HTTP warning is emitted; the omission is logged at
+//     Hub debug level instead, while grant.DroppedScopes and minted scopes are
+//     unchanged.
+//   - When both project:skill:write and another ceiling-optional scope (such as
+//     project:artifact:write) are dropped, the user-facing warning lists only
+//     the other scope, and project:skill:write is logged at Hub debug.
+func TestMintDemotesDroppedSkillWriteScopeToDebug(t *testing.T) {
+	f := newMintFixture(t, "drop-skill-debug")
+
+	// Capture Hub debug logs from the dispatcher.
+	var logBuf bytes.Buffer
+	f.disp.log = slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Ceiling allowing everything in AgentRoleFull EXCEPT skill.create/skill.update.
+	allExceptSkillWrite := agentScopeCoverage(slices.DeleteFunc(
+		slices.Clone(ScopesForRole(AgentRoleFull)),
+		func(s AgentTokenScope) bool { return s == ScopeProjectSkillWrite },
+	))
+	noSkillWriteCeiling := store.EffectCeiling{
+		Kind:          store.EffectCeilingBounded,
+		Version:       permissions.CeilingVersionV1,
+		PermissionIDs: allExceptSkillWrite,
+	}
+
+	skillOnlyAgent := f.agent(t, "drop-skill-only", AgentRoleFull, state.PhaseStopped)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, skillOnlyAgent.ID, noSkillWriteCeiling, provSession)
+
+	// Minting and grant.DroppedScopes are unchanged.
+	grant, err := f.srv.AuthorizeAgentToken(context.Background(), skillOnlyAgent)
+	require.NoError(t, err)
+	assert.NotContains(t, grant.Scopes, ScopeProjectSkillWrite)
+	assert.Contains(t, grant.Scopes, ScopeProjectArtifactWrite)
+	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite}, grant.DroppedScopes)
+
+	for name, dispatch := range map[string]func(context.Context) error{
+		"create": func(ctx context.Context) error {
+			_, err := f.disp.DispatchAgentCreate(ctx, skillOnlyAgent)
+			return err
+		},
+		"start":   func(ctx context.Context) error { return f.disp.DispatchAgentStart(ctx, skillOnlyAgent, "", false) },
+		"restart": func(ctx context.Context) error { return f.disp.DispatchAgentRestart(ctx, skillOnlyAgent) },
+	} {
+		logBuf.Reset()
+		ctx, warns := withDispatchWarnings(context.Background())
+		require.NoError(t, dispatch(ctx), name)
+		for _, w := range warns.Warnings() {
+			assert.NotContains(t, w, "issued without the", "%s: no user-facing warning when only project:skill:write is dropped", name)
+		}
+		assert.Contains(t, logBuf.String(), "agent token issued without ceiling-optional scopes", name)
+		assert.Contains(t, logBuf.String(), string(ScopeProjectSkillWrite), name)
+	}
+
+	// HTTP /start response also carries no user-facing dropped-scope warning.
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+skillOnlyAgent.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, w := range createResponseWarnings(t, rec) {
+		assert.NotContains(t, w, "issued without the")
+	}
+
+	// When both project:skill:write and project:artifact:write are dropped, the
+	// user-facing warning names only project:artifact:write, and
+	// project:skill:write is logged at Hub debug.
+	withoutSkillAndArtifactWrite := agentScopeCoverage(slices.DeleteFunc(
+		slices.Clone(ScopesForRole(AgentRoleFull)),
+		func(s AgentTokenScope) bool {
+			return s == ScopeProjectSkillWrite || s == ScopeProjectArtifactWrite
+		},
+	))
+	bothCeiling := store.EffectCeiling{
+		Kind:          store.EffectCeilingBounded,
+		Version:       permissions.CeilingVersionV1,
+		PermissionIDs: withoutSkillAndArtifactWrite,
+	}
+	bothAgent := f.agent(t, "drop-skill-and-artifact", AgentRoleFull, state.PhaseStopped)
+	f.edge(t, store.DelegationPrincipalUser, f.userID, bothAgent.ID, bothCeiling, provSession)
+
+	logBuf.Reset()
+	ctx, warns := withDispatchWarnings(context.Background())
+	require.NoError(t, f.disp.DispatchAgentStart(ctx, bothAgent, "", false))
+	wantArtifactOnly := droppedScopesWarning(bothAgent, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
+	require.NotEmpty(t, wantArtifactOnly)
+	assert.Contains(t, warns.Warnings(), wantArtifactOnly)
+	for _, w := range warns.Warnings() {
+		assert.NotContains(t, w, string(ScopeProjectSkillWrite))
+	}
+	assert.Contains(t, logBuf.String(), string(ScopeProjectSkillWrite))
 }
 
 // withholdRoleScopesForTest simulates a pre-deploy binary whose ScopesForRole
