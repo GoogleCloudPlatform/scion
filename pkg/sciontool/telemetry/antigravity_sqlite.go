@@ -207,6 +207,7 @@ type AntigravitySQLiteTailer struct {
 	versionFirstFailureAt time.Time
 	agyVersion            string
 	driftEmitted          map[string]bool
+	pendingDriftSentinels map[string]UsageObservation
 	outboxBackoff         time.Duration
 	outboxRetryAfter      time.Time
 
@@ -272,9 +273,10 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 
 	t := &AntigravitySQLiteTailer{
-		cfg:          cfg,
-		wakeCh:       make(chan struct{}, 1),
-		driftEmitted: make(map[string]bool),
+		cfg:                   cfg,
+		wakeCh:                make(chan struct{}, 1),
+		driftEmitted:          make(map[string]bool),
+		pendingDriftSentinels: make(map[string]UsageObservation),
 	}
 	t.loadState()
 	return t
@@ -549,10 +551,20 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 	if !t.driftLatched.Load() && t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
 		return nil
 	}
+	var firstErr error
+	if err := t.flushPendingDriftSentinelsLocked(); err != nil {
+		firstErr = err
+		if isRetryableOutboxError(err) {
+			return firstErr
+		}
+	}
 	entries, err := os.ReadDir(t.cfg.ConversationsDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil
+			return firstErr
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 		return fmt.Errorf("read antigravity conversations dir: %w", err)
 	}
@@ -595,7 +607,6 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		}
 	}
 
-	var firstErr error
 	versionCheckedThisPoll := false
 	var pollAgyVer string
 	var pollVerErr error
@@ -722,8 +733,12 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		// polls never debit tokens after drift is detected.
 		if res.Status != agydecode.StatusVerified {
 			if err := t.handleDriftLocked(res); err != nil {
+				dirty = true
 				if firstErr == nil {
 					firstErr = err
+				}
+				if isRetryableOutboxError(err) {
+					break
 				}
 				continue
 			}
@@ -863,11 +878,7 @@ func (t *AntigravitySQLiteTailer) handleDriftLocked(res *agydecode.Result) error
 	} else {
 		obs.TokenStatus = telemetrycontract.TokenStatusUnverified
 	}
-	if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
-		return err
-	}
-	t.driftEmitted[sentinelKey] = true
-	return nil
+	return t.emitDriftSentinelLocked(sentinelKey, obs)
 }
 
 func (t *AntigravitySQLiteTailer) latchVersionDetectDriftLocked(reason string) error {
@@ -891,11 +902,64 @@ func (t *AntigravitySQLiteTailer) latchVersionDetectDriftLocked(reason string) e
 		Calls:         0,
 		TokenStatus:   telemetrycontract.TokenStatusUnverified,
 	}
-	if _, err := t.cfg.Analytics.RecordUnique(obs); err != nil {
+	return t.emitDriftSentinelLocked(sentinelKey, obs)
+}
+
+func (t *AntigravitySQLiteTailer) emitDriftSentinelLocked(sentinelKey string, obs UsageObservation) error {
+	if t.driftEmitted[sentinelKey] || t.cfg.Analytics == nil {
+		return nil
+	}
+	outcome, err := t.cfg.Analytics.RecordUnique(obs)
+	if err != nil {
+		if isRetryableOutboxError(err) {
+			t.recordOutboxBackoffLocked()
+		}
+		if t.pendingDriftSentinels == nil {
+			t.pendingDriftSentinels = make(map[string]UsageObservation)
+		}
+		t.pendingDriftSentinels[sentinelKey] = obs
 		return err
 	}
+	if outcome == AppendDisabled {
+		return nil
+	}
+	t.resetOutboxBackoffLocked()
+	delete(t.pendingDriftSentinels, sentinelKey)
 	t.driftEmitted[sentinelKey] = true
 	return nil
+}
+
+func (t *AntigravitySQLiteTailer) flushPendingDriftSentinelsLocked() error {
+	if len(t.pendingDriftSentinels) == 0 || t.cfg.Analytics == nil || t.cfg.Analytics.IsDisabled() {
+		return nil
+	}
+	keys := make([]string, 0, len(t.pendingDriftSentinels))
+	for k := range t.pendingDriftSentinels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var firstErr error
+	for _, key := range keys {
+		obs := t.pendingDriftSentinels[key]
+		outcome, err := t.cfg.Analytics.RecordUnique(obs)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			if isRetryableOutboxError(err) {
+				t.recordOutboxBackoffLocked()
+				break
+			}
+			continue
+		}
+		if outcome == AppendDisabled {
+			break
+		}
+		t.resetOutboxBackoffLocked()
+		delete(t.pendingDriftSentinels, key)
+		t.driftEmitted[key] = true
+	}
+	return firstErr
 }
 
 func agyRecordToObservation(rec agydecode.Record, agyVersion string, now time.Time) UsageObservation {

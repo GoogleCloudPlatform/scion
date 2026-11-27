@@ -2977,3 +2977,184 @@ func TestAntigravitySQLiteTailer_OutboxRetryBackoff(t *testing.T) {
 		}
 	})
 }
+
+func TestAntigravitySQLiteTailer_DriftSentinelRetry(t *testing.T) {
+	t.Run("unverified_version_retries_after_outbox_overflow", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-drift-retry-unv.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795742000, testAgyUsage{
+			modelID: 1466, input: 300, output: 60, id11: "drift-retry-unv-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		hubOutbox.maxPending = 128
+
+		now := time.Date(2026, 11, 27, 16, 20, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:             home,
+			DisableWakeSocket:     true,
+			Analytics:             NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			OutboxRetryMinBackoff: 5 * time.Second,
+			DetectVersion:         func(context.Context) (string, error) { return "99.0.0-unverified", nil },
+			Now:                   func() time.Time { return now },
+		})
+
+		// Poll 1: drift latches immediately, but sentinel append overflows.
+		if err := tailer.PollOnce(context.Background()); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("poll 1 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if !tailer.SchemaDriftDetected() {
+			t.Fatal("expected SchemaDriftDetected() == true immediately after drift")
+		}
+		if got := drainOutboxEvents(t, hubOutbox); len(got) != 0 {
+			t.Fatalf("expected 0 events after overflow, got %d", len(got))
+		}
+
+		// Background poll during backoff is suppressed and does not burn another producer_seq.
+		now = now.Add(2 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("suppressed poll err = %v, want nil", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 1 {
+			t.Fatalf("overflow count during backoff = %d, want 1", got)
+		}
+
+		// Free outbox space and advance past backoff -> sentinel is retried and emitted once.
+		hubOutbox.maxPending = analyticsOutboxMaxPending
+		now = now.Add(4 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("poll 2 (retry) err = %v, want nil", err)
+		}
+		// Poll 3: must not emit a duplicate sentinel.
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll 3 err = %v, want nil", err)
+		}
+
+		events := drainOutboxEvents(t, hubOutbox)
+		if len(events) != 1 {
+			t.Fatalf("got %d events, want exactly 1 retried unverified drift sentinel", len(events))
+		}
+		if events[0].TokenStatus != telemetrycontract.TokenStatusUnverified || events[0].Calls != 0 || events[0].Input != nil {
+			t.Fatalf("unexpected drift sentinel event: %+v", events[0])
+		}
+	})
+
+	t.Run("malformed_decode_retries_after_outbox_overflow", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-drift-retry-mal.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, 3)`, []byte{0xff, 0xff, 0xff}); err != nil {
+			t.Fatalf("insert corrupt gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		hubOutbox.maxPending = 128
+
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		})
+
+		if err := tailer.PollOnce(context.Background()); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("poll 1 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if !tailer.SchemaDriftDetected() {
+			t.Fatal("expected SchemaDriftDetected() == true immediately after malformed decode")
+		}
+
+		hubOutbox.maxPending = analyticsOutboxMaxPending
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll 2 (retry) err = %v, want nil", err)
+		}
+		events := drainOutboxEvents(t, hubOutbox)
+		if len(events) != 1 || events[0].TokenStatus != telemetrycontract.TokenStatusMalformed {
+			t.Fatalf("got events %+v, want 1 malformed drift sentinel", events)
+		}
+	})
+
+	t.Run("version_detect_drift_retries_after_outbox_overflow", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-drift-retry-vfail.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795742100, testAgyUsage{
+			modelID: 1466, input: 150, output: 30, id11: "drift-retry-vfail-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		hubOutbox.maxPending = 128
+
+		now := time.Date(2026, 11, 27, 16, 30, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:               home,
+			DisableWakeSocket:       true,
+			Analytics:               NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			MaxVersionFailures:      2,
+			MinVersionFailureWindow: 1 * time.Minute,
+			DetectVersion:           func(context.Context) (string, error) { return "", context.DeadlineExceeded },
+			Now:                     func() time.Time { return now },
+		})
+
+		// Poll 1: failure 1 of 2.
+		if err := tailer.PollOnce(context.Background()); err == nil {
+			t.Fatal("poll 1: expected version detection error")
+		}
+		if tailer.SchemaDriftDetected() {
+			t.Fatal("poll 1: must not latch before failure window")
+		}
+
+		// Poll 2 at t+2m: latches version-detect drift, but sentinel append overflows.
+		now = now.Add(2 * time.Minute)
+		if err := tailer.PollOnce(context.Background()); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("poll 2 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if !tailer.SchemaDriftDetected() {
+			t.Fatal("poll 2: expected SchemaDriftDetected() == true")
+		}
+		if got := drainOutboxEvents(t, hubOutbox); len(got) != 0 {
+			t.Fatalf("expected 0 events after overflow, got %d", len(got))
+		}
+
+		// Poll 3 after freeing space: pending sentinel is retried and emitted once.
+		hubOutbox.maxPending = analyticsOutboxMaxPending
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll 3 err = %v, want nil", err)
+		}
+		if err := tailer.PollOnce(context.Background()); err != nil {
+			t.Fatalf("poll 4 err = %v, want nil", err)
+		}
+		events := drainOutboxEvents(t, hubOutbox)
+		if len(events) != 1 || events[0].TokenStatus != telemetrycontract.TokenStatusUnverified || events[0].Calls != 0 || events[0].Input != nil {
+			t.Fatalf("got events %+v, want 1 unverified version-detect drift sentinel", events)
+		}
+	})
+}
