@@ -296,15 +296,19 @@ func writeMuseVersionCheckMarker(path string, m museVersionCheckMarker) error {
 	ok := false
 	defer func() {
 		if !ok {
-			_ = tmp.Close()
+			if tmp != nil {
+				_ = tmp.Close()
+			}
 			_ = tree.Remove(tmpRel)
 		}
 	}()
 	if _, err := tmp.Write(encoded); err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	closeErr := tmp.Close()
+	tmp = nil
+	if closeErr != nil {
+		return closeErr
 	}
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing %s: %w", path, privatefs.ErrReparsePoint)
@@ -336,7 +340,7 @@ func configureMuseProbeCmd(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = museVersionProbeWaitDelay
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
+		if cmd.Process == nil || cmd.Process.Pid <= 0 {
 			return nil
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -350,7 +354,7 @@ func configureMuseProbeCmd(cmd *exec.Cmd) {
 // exited normally and only WaitDelay expired, stdout already read is preserved.
 func runMuseProbeCmd(cmd *exec.Cmd) ([]byte, error) {
 	out, err := procreap.OutputManaged(cmd)
-	if err != nil && cmd.Process != nil {
+	if err != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {

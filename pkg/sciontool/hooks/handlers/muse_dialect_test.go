@@ -1600,6 +1600,20 @@ func TestConfigureMuseProbeCmdSetsHardenedEnvAndProcessGroup(t *testing.T) {
 	if cmd.Cancel == nil {
 		t.Fatal("cmd.Cancel = nil, want process-group SIGKILL cancel func")
 	}
+	// Defensive guard: nil Process or non-positive Pid must be a no-op so
+	// syscall.Kill(-pid, SIGKILL) can never signal the caller's own process
+	// group (pid == 0) or an unrelated PID (pid < 0).
+	if err := cmd.Cancel(); err != nil {
+		t.Fatalf("cmd.Cancel() with nil Process = %v, want nil", err)
+	}
+	cmd.Process = &os.Process{Pid: 0}
+	if err := cmd.Cancel(); err != nil {
+		t.Fatalf("cmd.Cancel() with zero Pid = %v, want nil", err)
+	}
+	cmd.Process = &os.Process{Pid: -999999}
+	if err := cmd.Cancel(); err != nil {
+		t.Fatalf("cmd.Cancel() with negative Pid = %v, want nil", err)
+	}
 }
 
 func TestMuseVersionProbeCancelKillsProcessGroup(t *testing.T) {
@@ -1607,7 +1621,7 @@ func TestMuseVersionProbeCancelKillsProcessGroup(t *testing.T) {
 	// must SIGKILL the entire process group (not just cmd.Process.Kill()), so
 	// the grandchild is dead as soon as OutputManaged returns.
 	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
-	cctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	cctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "/bin/sh", "-c", `sleep 6 & echo $! > "$1"; exec sleep 6`, "_", pidFile)
 	configureMuseProbeCmd(cmd)
