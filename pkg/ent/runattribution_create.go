@@ -784,6 +784,24 @@ func (u *RunAttributionUpsert) ClearHarnessBuild() *RunAttributionUpsert {
 	return u
 }
 
+// SetUsageLiveSource sets the "usage_live_source" field.
+func (u *RunAttributionUpsert) SetUsageLiveSource(v string) *RunAttributionUpsert {
+	u.Set(runattribution.FieldUsageLiveSource, v)
+	return u
+}
+
+// UpdateUsageLiveSource sets the "usage_live_source" field to the value that was provided on create.
+func (u *RunAttributionUpsert) UpdateUsageLiveSource() *RunAttributionUpsert {
+	u.SetExcluded(runattribution.FieldUsageLiveSource)
+	return u
+}
+
+// ClearUsageLiveSource clears the value of the "usage_live_source" field.
+func (u *RunAttributionUpsert) ClearUsageLiveSource() *RunAttributionUpsert {
+	u.SetNull(runattribution.FieldUsageLiveSource)
+	return u
+}
+
 // SetLegalHold sets the "legal_hold" field.
 func (u *RunAttributionUpsert) SetLegalHold(v bool) *RunAttributionUpsert {
 	u.Set(runattribution.FieldLegalHold, v)
@@ -857,9 +875,6 @@ func (u *RunAttributionUpsertOne) UpdateNewValues() *RunAttributionUpsertOne {
 		}
 		if _, exists := u.create.mutation.MeteringWriterMode(); exists {
 			s.SetIgnore(runattribution.FieldMeteringWriterMode)
-		}
-		if _, exists := u.create.mutation.UsageLiveSource(); exists {
-			s.SetIgnore(runattribution.FieldUsageLiveSource)
 		}
 		if _, exists := u.create.mutation.CapturePolicy(); exists {
 			s.SetIgnore(runattribution.FieldCapturePolicy)
@@ -985,6 +1000,27 @@ func (u *RunAttributionUpsertOne) UpdateHarnessBuild() *RunAttributionUpsertOne 
 func (u *RunAttributionUpsertOne) ClearHarnessBuild() *RunAttributionUpsertOne {
 	return u.Update(func(s *RunAttributionUpsert) {
 		s.ClearHarnessBuild()
+	})
+}
+
+// SetUsageLiveSource sets the "usage_live_source" field.
+func (u *RunAttributionUpsertOne) SetUsageLiveSource(v string) *RunAttributionUpsertOne {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.SetUsageLiveSource(v)
+	})
+}
+
+// UpdateUsageLiveSource sets the "usage_live_source" field to the value that was provided on create.
+func (u *RunAttributionUpsertOne) UpdateUsageLiveSource() *RunAttributionUpsertOne {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.UpdateUsageLiveSource()
+	})
+}
+
+// ClearUsageLiveSource clears the value of the "usage_live_source" field.
+func (u *RunAttributionUpsertOne) ClearUsageLiveSource() *RunAttributionUpsertOne {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.ClearUsageLiveSource()
 	})
 }
 
@@ -1230,9 +1266,6 @@ func (u *RunAttributionUpsertBulk) UpdateNewValues() *RunAttributionUpsertBulk {
 			if _, exists := b.mutation.MeteringWriterMode(); exists {
 				s.SetIgnore(runattribution.FieldMeteringWriterMode)
 			}
-			if _, exists := b.mutation.UsageLiveSource(); exists {
-				s.SetIgnore(runattribution.FieldUsageLiveSource)
-			}
 			if _, exists := b.mutation.CapturePolicy(); exists {
 				s.SetIgnore(runattribution.FieldCapturePolicy)
 			}
@@ -1358,6 +1391,27 @@ func (u *RunAttributionUpsertBulk) UpdateHarnessBuild() *RunAttributionUpsertBul
 func (u *RunAttributionUpsertBulk) ClearHarnessBuild() *RunAttributionUpsertBulk {
 	return u.Update(func(s *RunAttributionUpsert) {
 		s.ClearHarnessBuild()
+	})
+}
+
+// SetUsageLiveSource sets the "usage_live_source" field.
+func (u *RunAttributionUpsertBulk) SetUsageLiveSource(v string) *RunAttributionUpsertBulk {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.SetUsageLiveSource(v)
+	})
+}
+
+// UpdateUsageLiveSource sets the "usage_live_source" field to the value that was provided on create.
+func (u *RunAttributionUpsertBulk) UpdateUsageLiveSource() *RunAttributionUpsertBulk {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.UpdateUsageLiveSource()
+	})
+}
+
+// ClearUsageLiveSource clears the value of the "usage_live_source" field.
+func (u *RunAttributionUpsertBulk) ClearUsageLiveSource() *RunAttributionUpsertBulk {
+	return u.Update(func(s *RunAttributionUpsert) {
+		s.ClearUsageLiveSource()
 	})
 }
 

@@ -88,12 +88,13 @@ type AgentUsageModelBreakdown struct {
 
 // AgentUsageRunSummary is a compact attribution summary for recent runs of an agent.
 type AgentUsageRunSummary struct {
-	RunID         string    `json:"run_id"`
-	Generation    int       `json:"generation"`
-	Harness       string    `json:"harness,omitempty"`
-	HarnessConfig string    `json:"harness_config,omitempty"`
-	Template      string    `json:"template,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	RunID           string    `json:"run_id"`
+	Generation      int       `json:"generation"`
+	Harness         string    `json:"harness,omitempty"`
+	HarnessConfig   string    `json:"harness_config,omitempty"`
+	Template        string    `json:"template,omitempty"`
+	UsageLiveSource string    `json:"usage_live_source,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 // AgentUsageWindow describes the effective day-aligned UTC [since, until]
@@ -532,12 +533,13 @@ func buildAgentUsageResponse(
 			continue
 		}
 		runSummaries = append(runSummaries, AgentUsageRunSummary{
-			RunID:         ra.RunID,
-			Generation:    ra.Generation,
-			Harness:       ra.Harness,
-			HarnessConfig: ra.HarnessConfig,
-			Template:      ra.Template,
-			CreatedAt:     ra.CreatedAt,
+			RunID:           ra.RunID,
+			Generation:      ra.Generation,
+			Harness:         ra.Harness,
+			HarnessConfig:   ra.HarnessConfig,
+			Template:        ra.Template,
+			UsageLiveSource: ra.UsageLiveSource,
+			CreatedAt:       ra.CreatedAt,
 		})
 	}
 

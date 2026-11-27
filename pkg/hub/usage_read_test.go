@@ -685,6 +685,71 @@ func TestAgentUsage_VerticalSliceIngestReplayAndRead(t *testing.T) {
 	assert.Equal(t, "claude", resp.ByModel[0].Harness)
 	require.NotNil(t, resp.ByModel[0].Tokens.SummableTokens)
 	assert.Equal(t, int64(18), *resp.ByModel[0].Tokens.SummableTokens)
+
+	require.Len(t, resp.Runs, 1)
+	assert.Equal(t, "run-gate1-1", resp.Runs[0].RunID)
+	assert.Equal(t, store.UsageSourceNative, resp.Runs[0].UsageLiveSource)
+}
+
+func TestAgentUsageRead_ExposesRunUsageLiveSource(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-read-ls")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	owner := &store.User{ID: uuid.NewString(), Email: "read-ls-owner@example.com", DisplayName: "Owner", Role: "member", Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	proj := &store.Project{ID: tid("read-ls-proj"), Name: "read-ls", Slug: "read-ls"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, owner.ID, proj.ID, "project-owner")
+
+	ag := &store.Agent{
+		ID:        tid("read-ls-agent"),
+		Slug:      "read-ls-agent",
+		Name:      "read-ls-agent",
+		ProjectID: proj.ID,
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	// Run 1: no events ingested yet -> usage_live_source is omitted from JSON.
+	_, err := s.SetAgentRunID(ctx, ag.ID, "run-read-ls-empty", nil)
+	require.NoError(t, err)
+
+	readEmpty := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, readEmpty.Code, readEmpty.Body.String())
+	var rawEmpty map[string]any
+	require.NoError(t, json.Unmarshal(readEmpty.Body.Bytes(), &rawEmpty))
+	rawRuns, ok := rawEmpty["runs"].([]any)
+	require.True(t, ok)
+	require.Len(t, rawRuns, 1)
+	firstRunMap := rawRuns[0].(map[string]any)
+	_, hasLiveSource := firstRunMap["usage_live_source"]
+	assert.False(t, hasLiveSource, "empty usage_live_source should be omitted via omitempty")
+
+	// Ingest a sqlite_native event for run-read-ls-empty -> usage_live_source is returned on read.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	ev := makeWireUsageEvent("hub-read-ls", ag.ID, proj.ID, "run-read-ls-empty", "evt-read-ls-1", 1, now, 12, 8)
+	ev.UsageSource = telemetrycontract.UsageSourceSQLiteNative
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{ev},
+		RunID:         "run-read-ls-empty",
+		ProducerEpoch: "ep-1",
+		ProducerSeq:   1,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	readPopulated := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+ag.ID+"/usage", owner)
+	require.Equal(t, http.StatusOK, readPopulated.Code, readPopulated.Body.String())
+	var resp AgentUsageResponse
+	require.NoError(t, json.Unmarshal(readPopulated.Body.Bytes(), &resp))
+	require.Len(t, resp.Runs, 1)
+	assert.Equal(t, "run-read-ls-empty", resp.Runs[0].RunID)
+	assert.Equal(t, telemetrycontract.UsageSourceSQLiteNative, resp.Runs[0].UsageLiveSource)
 }
 
 func TestAgentUsageRead_ResolveCurrentRunNoCrossRunFallbackAndModelTieBreak(t *testing.T) {

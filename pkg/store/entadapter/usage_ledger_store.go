@@ -21,6 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -533,6 +536,121 @@ func fillRunAttributionLaunchIDTx(ctx context.Context, client *ent.Client, runID
 		SetLaunchID(launchID).
 		Save(ctx)
 	return mapError(err)
+}
+
+// fillRunAttributionUsageLiveSourcesTx stamps run_attribution.usage_live_source
+// fill-once (WHERE usage_live_source = ” OR usage_live_source IS NULL) for each
+// distinct run_id present in newly inserted non-legacy Track 1 usage events,
+// iterating run_ids in canonical sorted order.
+//
+// First-wins semantics: if usage_live_source is already populated with a
+// different value (or if the same batch contains events with conflicting live
+// sources for the same run_id), the first value is preserved and a warning is
+// logged without overwriting.
+func fillRunAttributionUsageLiveSourcesTx(ctx context.Context, client *ent.Client, events []*store.UsageEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	type runLiveSourceCandidates struct {
+		first     string
+		conflicts []string
+	}
+	byRun := make(map[string]*runLiveSourceCandidates)
+	for _, ev := range events {
+		if ev == nil || ev.RunID == "" {
+			continue
+		}
+		src := strings.TrimSpace(ev.UsageSource)
+		if src == "" || src == store.UsageSourceLegacySessionMetrics {
+			continue
+		}
+		cand, ok := byRun[ev.RunID]
+		if !ok {
+			byRun[ev.RunID] = &runLiveSourceCandidates{first: src}
+			continue
+		}
+		if src != cand.first && !slices.Contains(cand.conflicts, src) {
+			cand.conflicts = append(cand.conflicts, src)
+		}
+	}
+	if len(byRun) == 0 {
+		return nil
+	}
+
+	runIDs := make([]string, 0, len(byRun))
+	for runID := range byRun {
+		runIDs = append(runIDs, runID)
+	}
+	sort.Strings(runIDs)
+
+	rows, err := client.RunAttribution.Query().
+		Where(runattribution.IDIn(runIDs...)).
+		Select(runattribution.FieldID, runattribution.FieldUsageLiveSource).
+		All(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	existingByRun := make(map[string]string, len(rows))
+	hasRow := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		existingByRun[row.ID] = row.UsageLiveSource
+		hasRow[row.ID] = true
+	}
+
+	for _, runID := range runIDs {
+		if !hasRow[runID] {
+			continue
+		}
+		cand := byRun[runID]
+		existing := existingByRun[runID]
+
+		if existing == "" {
+			n, err := client.RunAttribution.Update().
+				Where(
+					runattribution.IDEQ(runID),
+					runattribution.Or(
+						runattribution.UsageLiveSourceEQ(""),
+						runattribution.UsageLiveSourceIsNil(),
+					),
+				).
+				SetUsageLiveSource(cand.first).
+				Save(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			if n > 0 {
+				existing = cand.first
+			} else {
+				// Another concurrent transaction won the fill-once race;
+				// re-read the winning value so we can log a warning if our
+				// candidate conflicts with it.
+				row, err := client.RunAttribution.Query().
+					Where(runattribution.IDEQ(runID)).
+					Select(runattribution.FieldUsageLiveSource).
+					Only(ctx)
+				if err != nil {
+					if ent.IsNotFound(err) {
+						continue
+					}
+					return mapError(err)
+				}
+				existing = row.UsageLiveSource
+			}
+		}
+
+		if existing != "" && existing != cand.first {
+			slog.Warn("run_attribution: ignoring conflicting usage_live_source update",
+				"run_id", runID, "existing", existing, "incoming", cand.first)
+		}
+		for _, conflict := range cand.conflicts {
+			if existing != "" && existing != conflict {
+				slog.Warn("run_attribution: ignoring conflicting usage_live_source update",
+					"run_id", runID, "existing", existing, "incoming", conflict)
+			}
+		}
+	}
+	return nil
 }
 
 // runAttributionNotExists filters agents to those whose current run_id does

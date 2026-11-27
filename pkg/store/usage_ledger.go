@@ -624,6 +624,8 @@ type UsageLedgerStore interface {
 	// (ON CONFLICT (hub_id, event_id) DO NOTHING RETURNING), increments
 	// usage_rollups_daily and usage_scope_counters_daily ONLY for newly
 	// inserted rows (in canonical key-sorted order to prevent deadlocks),
+	// fills run_attribution.usage_live_source once for newly inserted
+	// non-legacy Track 1 events (first-wins, logging a warning on conflict),
 	// and updates meter_health (events and/or heartbeats).
 	IngestUsageBatch(ctx context.Context, in *UsageIngestBatchInput) (*UsageIngestBatchResult, error)
 

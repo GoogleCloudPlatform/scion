@@ -17,8 +17,10 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
 	"sync"
@@ -1585,4 +1587,149 @@ func TestUsageIngest_AntigravityUnmeasuredCallsReconciliation(t *testing.T) {
 	calls, unmeasured = getProjectCounter()
 	assert.Equal(t, int64(8), calls)
 	assert.Equal(t, int64(5), unmeasured, "schema_drift_detected=true with token signals (persisted meter_health path) must count as unmeasured")
+}
+
+func TestUsageIngest_FillRunAttributionUsageLiveSource(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "ingest-live-source")
+	userID := createTestUser(t, cs, "live-source-user@example.com")
+	agentID := uuid.NewString()
+	ts := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+
+	// 1. Fill-once works for every live Track 1 usage source.
+	liveSources := []string{
+		store.UsageSourceNative,
+		store.UsageSourceHooks,
+		store.UsageSourceSQLiteNative,
+		store.UsageSourceFileTailer,
+	}
+	for i, src := range liveSources {
+		runID := fmt.Sprintf("run-live-%s-%s", src, uuid.NewString())
+		seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+		// Verify initial state is empty.
+		before, err := cs.GetRunAttribution(ctx, runID)
+		require.NoError(t, err)
+		assert.Empty(t, before.UsageLiveSource)
+
+		ev := makeStoreUsageEvent("hub-test", fmt.Sprintf("evt-live-%d", i), runID, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+		ev.UsageSource = src
+		res, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: agentID,
+			Events:  []*store.UsageEvent{ev},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.Accepted)
+
+		after, err := cs.GetRunAttribution(ctx, runID)
+		require.NoError(t, err)
+		assert.Equal(t, src, after.UsageLiveSource)
+
+		// Idempotent duplicate replay leaves usage_live_source intact.
+		resDup, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+			AgentID: agentID,
+			Events:  []*store.UsageEvent{ev},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, resDup.Accepted)
+		assert.Equal(t, 1, resDup.Duplicates)
+
+		afterDup, err := cs.GetRunAttribution(ctx, runID)
+		require.NoError(t, err)
+		assert.Equal(t, src, afterDup.UsageLiveSource)
+	}
+
+	// 2. Conflicting later Track 1 source preserves the first value and logs a warning.
+	runConflict := "run-conflict-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runConflict, &userID)
+
+	evFirst := makeStoreUsageEvent("hub-test", "evt-conf-1", runConflict, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	evFirst.UsageSource = store.UsageSourceNative
+	_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evFirst},
+	})
+	require.NoError(t, err)
+
+	var logBuf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	evSecond := makeStoreUsageEvent("hub-test", "evt-conf-2", runConflict, projectID, agentID, &userID, 2, ts.Add(time.Second), 20, 10, 0, 0)
+	evSecond.UsageSource = store.UsageSourceHooks
+	resConf, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evSecond},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, resConf.Accepted)
+
+	gotConflict, err := cs.GetRunAttribution(ctx, runConflict)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageSourceNative, gotConflict.UsageLiveSource, "conflicting later event must not overwrite usage_live_source")
+	assert.Contains(t, logBuf.String(), "ignoring conflicting usage_live_source update")
+	assert.Contains(t, logBuf.String(), runConflict)
+
+	// 3. legacy_session_metrics is excluded from stamping usage_live_source,
+	//    and a subsequent live Track 1 event can still fill it once.
+	runLegacy := "run-legacy-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runLegacy, &userID)
+
+	evLegacy := makeStoreUsageEvent("hub-test", "evt-legacy-1", runLegacy, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	evLegacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evLegacy},
+	})
+	require.NoError(t, err)
+
+	afterLegacy, err := cs.GetRunAttribution(ctx, runLegacy)
+	require.NoError(t, err)
+	assert.Empty(t, afterLegacy.UsageLiveSource, "legacy_session_metrics must not stamp usage_live_source")
+
+	evLiveAfterLegacy := makeStoreUsageEvent("hub-test", "evt-legacy-2", runLegacy, projectID, agentID, &userID, 2, ts.Add(time.Second), 10, 5, 0, 0)
+	evLiveAfterLegacy.UsageSource = store.UsageSourceSQLiteNative
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evLiveAfterLegacy},
+	})
+	require.NoError(t, err)
+
+	afterLive, err := cs.GetRunAttribution(ctx, runLegacy)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageSourceSQLiteNative, afterLive.UsageLiveSource)
+
+	// 4. Multi-run batch updates each run_id independently (including SQL NULL usage_live_source).
+	runB := "run-multi-b-" + uuid.NewString()
+	runA := "run-multi-a-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runB, &userID)
+	seedRunForIngestTest(t, cs, projectID, agentID, runA, &userID)
+
+	// Explicitly set runA.usage_live_source to SQL NULL to verify IS NULL is also fillable.
+	require.NoError(t, client.RunAttribution.UpdateOneID(runA).ClearUsageLiveSource().Exec(ctx))
+
+	evMultiB := makeStoreUsageEvent("hub-test", "evt-multi-b", runB, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	evMultiB.UsageSource = store.UsageSourceHooks
+	evMultiA := makeStoreUsageEvent("hub-test", "evt-multi-a", runA, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	evMultiA.UsageSource = store.UsageSourceFileTailer
+
+	resMulti, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{evMultiB, evMultiA},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, resMulti.Accepted)
+
+	gotA, err := cs.GetRunAttribution(ctx, runA)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageSourceFileTailer, gotA.UsageLiveSource)
+
+	gotB, err := cs.GetRunAttribution(ctx, runB)
+	require.NoError(t, err)
+	assert.Equal(t, store.UsageSourceHooks, gotB.UsageLiveSource)
 }

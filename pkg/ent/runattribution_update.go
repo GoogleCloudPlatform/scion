@@ -109,6 +109,26 @@ func (_u *RunAttributionUpdate) ClearHarnessBuild() *RunAttributionUpdate {
 	return _u
 }
 
+// SetUsageLiveSource sets the "usage_live_source" field.
+func (_u *RunAttributionUpdate) SetUsageLiveSource(v string) *RunAttributionUpdate {
+	_u.mutation.SetUsageLiveSource(v)
+	return _u
+}
+
+// SetNillableUsageLiveSource sets the "usage_live_source" field if the given value is not nil.
+func (_u *RunAttributionUpdate) SetNillableUsageLiveSource(v *string) *RunAttributionUpdate {
+	if v != nil {
+		_u.SetUsageLiveSource(*v)
+	}
+	return _u
+}
+
+// ClearUsageLiveSource clears the value of the "usage_live_source" field.
+func (_u *RunAttributionUpdate) ClearUsageLiveSource() *RunAttributionUpdate {
+	_u.mutation.ClearUsageLiveSource()
+	return _u
+}
+
 // SetLegalHold sets the "legal_hold" field.
 func (_u *RunAttributionUpdate) SetLegalHold(v bool) *RunAttributionUpdate {
 	_u.mutation.SetLegalHold(v)
@@ -259,6 +279,9 @@ func (_u *RunAttributionUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if _u.mutation.MeteringWriterModeCleared() {
 		_spec.ClearField(runattribution.FieldMeteringWriterMode, field.TypeString)
+	}
+	if value, ok := _u.mutation.UsageLiveSource(); ok {
+		_spec.SetField(runattribution.FieldUsageLiveSource, field.TypeString, value)
 	}
 	if _u.mutation.UsageLiveSourceCleared() {
 		_spec.ClearField(runattribution.FieldUsageLiveSource, field.TypeString)
@@ -414,6 +437,26 @@ func (_u *RunAttributionUpdateOne) SetNillableHarnessBuild(v *string) *RunAttrib
 // ClearHarnessBuild clears the value of the "harness_build" field.
 func (_u *RunAttributionUpdateOne) ClearHarnessBuild() *RunAttributionUpdateOne {
 	_u.mutation.ClearHarnessBuild()
+	return _u
+}
+
+// SetUsageLiveSource sets the "usage_live_source" field.
+func (_u *RunAttributionUpdateOne) SetUsageLiveSource(v string) *RunAttributionUpdateOne {
+	_u.mutation.SetUsageLiveSource(v)
+	return _u
+}
+
+// SetNillableUsageLiveSource sets the "usage_live_source" field if the given value is not nil.
+func (_u *RunAttributionUpdateOne) SetNillableUsageLiveSource(v *string) *RunAttributionUpdateOne {
+	if v != nil {
+		_u.SetUsageLiveSource(*v)
+	}
+	return _u
+}
+
+// ClearUsageLiveSource clears the value of the "usage_live_source" field.
+func (_u *RunAttributionUpdateOne) ClearUsageLiveSource() *RunAttributionUpdateOne {
+	_u.mutation.ClearUsageLiveSource()
 	return _u
 }
 
@@ -597,6 +640,9 @@ func (_u *RunAttributionUpdateOne) sqlSave(ctx context.Context) (_node *RunAttri
 	}
 	if _u.mutation.MeteringWriterModeCleared() {
 		_spec.ClearField(runattribution.FieldMeteringWriterMode, field.TypeString)
+	}
+	if value, ok := _u.mutation.UsageLiveSource(); ok {
+		_spec.SetField(runattribution.FieldUsageLiveSource, field.TypeString, value)
 	}
 	if _u.mutation.UsageLiveSourceCleared() {
 		_spec.ClearField(runattribution.FieldUsageLiveSource, field.TypeString)
