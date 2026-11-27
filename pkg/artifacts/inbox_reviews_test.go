@@ -23,6 +23,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,12 +34,44 @@ import (
 
 type inboxRecordingHost struct {
 	*fakeHost
-	inboxMu     sync.Mutex
-	hintsActive bool
-	inboxUsers  []string
+	inboxMu      sync.Mutex
+	hintsActive  bool
+	inboxUsers   []string
+	requestsOn   bool
+	draftsOn     bool
+	displayNames map[string]string
 }
 
-var _ InboxNotifier = (*inboxRecordingHost)(nil)
+var (
+	_ InboxNotifier  = (*inboxRecordingHost)(nil)
+	_ FeatureGate    = (*inboxRecordingHost)(nil)
+	_ PrincipalNamer = (*inboxRecordingHost)(nil)
+)
+
+func (h *inboxRecordingHost) FeatureEnabled(_ context.Context, name string) bool {
+	h.inboxMu.Lock()
+	defer h.inboxMu.Unlock()
+	switch name {
+	case FeatureReviewRequests:
+		return h.requestsOn
+	case FeatureReviewDrafts:
+		return h.draftsOn
+	default:
+		return false
+	}
+}
+
+func (h *inboxRecordingHost) PrincipalDisplayNames(_ context.Context, refs []string) map[string]string {
+	h.inboxMu.Lock()
+	defer h.inboxMu.Unlock()
+	out := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		if name, ok := h.displayNames[ref]; ok {
+			out[ref] = name
+		}
+	}
+	return out
+}
 
 func (h *inboxRecordingHost) InboxHintsActive(context.Context) bool {
 	h.inboxMu.Lock()
@@ -83,80 +117,293 @@ func seedReviewArtifact(t *testing.T, st Store, scope, ownerKind, ownerRef, titl
 	return id
 }
 
-func TestReviewOnLatestSummary_BasicOrderingAndCapping(t *testing.T) {
+func TestReviewStateSummary_CountsParityMetadataGatesAndCapping(t *testing.T) {
 	f := newFixture(t, false)
+	recHost := &inboxRecordingHost{
+		fakeHost:   f.host,
+		requestsOn: true,
+		draftsOn:   true,
+		displayNames: map[string]string{
+			PrincipalRef(PrincipalKindUser, outside.ref): "Outside Author",
+			PrincipalRef(PrincipalKindUser, userU.ref):   "Reviewer U",
+		},
+	}
+	f.svc.host = recHost
 	f.host.allow(userU, "project-2", PermissionRead, PermissionCreate)
 
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	idOld := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "old-review", VersionKindReview, base.Add(1*time.Minute), nil)
 	idMid := seedReviewArtifact(t, f.store, "project-2", PrincipalKindUser, userU.ref, "mid-review", VersionKindReview, base.Add(2*time.Minute), nil)
 	idNew := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "new-review", VersionKindReview, base.Add(3*time.Minute), nil)
-	// Non-review owned artifact (excluded).
+	// Non-review owned artifact (excluded from ToAddress).
 	seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "publish-only", VersionKindPublish, base.Add(4*time.Minute), nil)
 	// Expired review owned artifact (excluded).
 	past := base.Add(-time.Minute)
 	seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, userU.ref, "expired-review", VersionKindReview, base.Add(5*time.Minute), &past)
-	// Another user's review artifact in a project userU can read (excluded because OwnedOnly).
+	// Another user's review artifact in a project userU can read (excluded from ToAddress because OwnedOnly).
 	seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, outside.ref, "other-user-review", VersionKindReview, base.Add(6*time.Minute), nil)
+
+	// Open review requests addressed to userU:
+	// req1 in project-1 (readable via project membership) with a long multiline note.
+	req1 := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, outside.ref, "requested-1", VersionKindPublish, base.Add(10*time.Minute), nil)
+	longNote := "Please check\n  section 2 " + strings.Repeat("x", 300)
+	_, _, err := f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+		ArtifactID:    req1,
+		ReviewerKind:  PrincipalKindUser,
+		ReviewerRef:   userU.ref,
+		RequesterKind: PrincipalKindUser,
+		RequesterRef:  outside.ref,
+		Note:          longNote,
+		Access:        ReviewRequestAccessExisting,
+	}, 24*time.Hour, base.Add(11*time.Minute), &Actor{Kind: PrincipalKindUser, Ref: outside.ref, Authority: AuthorityOwner}, nil)
+	if err != nil {
+		t.Fatalf("create request 1: %v", err)
+	}
+	// req2 in project-2 (readable via project-2 membership).
+	req2 := seedReviewArtifact(t, f.store, "project-2", PrincipalKindUser, outside.ref, "requested-2", VersionKindPublish, base.Add(12*time.Minute), nil)
+	_, _, err = f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+		ArtifactID:    req2,
+		ReviewerKind:  PrincipalKindUser,
+		ReviewerRef:   userU.ref,
+		RequesterKind: PrincipalKindUser,
+		RequesterRef:  outside.ref,
+		Note:          "quick check",
+		Access:        ReviewRequestAccessExisting,
+	}, 24*time.Hour, base.Add(13*time.Minute), &Actor{Kind: PrincipalKindUser, Ref: outside.ref, Authority: AuthorityOwner}, nil)
+	if err != nil {
+		t.Fatalf("create request 2: %v", err)
+	}
+	// reqUnreadable in project-3 (userU cannot read project-3) -> must be excluded by canReadWith.
+	reqUnreadable := seedReviewArtifact(t, f.store, "project-3", PrincipalKindUser, outside.ref, "requested-hidden", VersionKindPublish, base.Add(14*time.Minute), nil)
+	_, _, err = f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+		ArtifactID:    reqUnreadable,
+		ReviewerKind:  PrincipalKindUser,
+		ReviewerRef:   userU.ref,
+		RequesterKind: PrincipalKindUser,
+		RequesterRef:  outside.ref,
+		Note:          "secret",
+		Access:        ReviewRequestAccessExisting,
+	}, 24*time.Hour, base.Add(15*time.Minute), &Actor{Kind: PrincipalKindUser, Ref: outside.ref, Authority: AuthorityOwner}, nil)
+	if err != nil {
+		t.Fatalf("create unreadable request: %v", err)
+	}
+
+	// Saved drafts held by userU: one on req1 (readable) and one on reqUnreadable (unreadable).
+	for _, artID := range []string{req1, reqUnreadable} {
+		if _, _, err := f.store.PutReviewDraft(context.Background(), ReviewDraft{
+			ArtifactID:    artID,
+			PrincipalKind: PrincipalKindUser,
+			PrincipalRef:  userU.ref,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "draft body",
+		}, 0, base.Add(16*time.Minute), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("PutReviewDraft(%s): %v", artID, err)
+		}
+	}
 
 	ctx := context.WithValue(context.Background(), principalKey{}, userU)
 
-	// previews=2 returns count=3, capped=false, newest 2 items.
-	count, capped, items, err := f.svc.ReviewOnLatestSummary(ctx, 2)
+	// Full summary with Requests: true, Drafts: true, and Previews: 2.
+	sum, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: true, Drafts: true})
 	if err != nil {
-		t.Fatalf("ReviewOnLatestSummary: %v", err)
+		t.Fatalf("ReviewStateSummary: %v", err)
 	}
-	if count != 3 || capped {
-		t.Fatalf("got count=%d capped=%v, want 3 false", count, capped)
+	if sum.ToAddress.Count != 3 || sum.ToAddress.Capped {
+		t.Fatalf("ToAddress = (%d, capped=%v), want (3, false)", sum.ToAddress.Count, sum.ToAddress.Capped)
 	}
-	if len(items) != 2 || items[0].ID != idNew || items[1].ID != idMid {
-		t.Fatalf("got items %v, want [%s, %s]", items, idNew, idMid)
+	if len(sum.ToAddress.Items) != 2 || sum.ToAddress.Items[0].ID != idNew || sum.ToAddress.Items[1].ID != idMid {
+		t.Fatalf("ToAddress.Items = %v, want [%s, %s]", sum.ToAddress.Items, idNew, idMid)
+	}
+	for _, it := range sum.ToAddress.Items {
+		if it.Request != nil {
+			t.Fatalf("ToAddress item unexpectedly has Request: %+v", it.Request)
+		}
 	}
 
-	// previews=0 returns count=3 and empty items.
-	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 0)
-	if err != nil {
-		t.Fatalf("ReviewOnLatestSummary(0): %v", err)
+	if sum.Requested.Count != 2 || sum.Requested.Capped {
+		t.Fatalf("Requested = (%d, capped=%v), want (2, false)", sum.Requested.Count, sum.Requested.Capped)
 	}
-	if count != 3 || capped || len(items) != 0 {
-		t.Fatalf("got count=%d capped=%v len=%d, want 3 false 0", count, capped, len(items))
+	if len(sum.Requested.Items) != 2 || sum.Requested.Items[0].ID != req2 || sum.Requested.Items[1].ID != req1 {
+		t.Fatalf("Requested.Items = %v, want [%s, %s]", sum.Requested.Items, req2, req1)
+	}
+	if sum.Requested.Items[0].Request == nil || sum.Requested.Items[0].Request.Requester.DisplayName != "Outside Author" || sum.Requested.Items[0].Request.RequestedSeq != 1 || sum.Requested.Items[0].Request.Note != "quick check" {
+		t.Fatalf("Requested.Items[0].Request = %+v", sum.Requested.Items[0].Request)
+	}
+	if sum.Requested.Items[1].Request == nil || strings.Contains(sum.Requested.Items[1].Request.Note, "\n") || len([]rune(sum.Requested.Items[1].Request.Note)) > reviewSummaryNoteMaxRunes {
+		t.Fatalf("Requested.Items[1].Request.Note not cleaned/excerpted: %+v", sum.Requested.Items[1].Request)
 	}
 
-	// Token boundary denial on project-2 excludes idMid.
+	if sum.Drafts == nil || sum.Drafts.Count != 1 || sum.Drafts.Capped || len(sum.Drafts.Items) != 1 || sum.Drafts.Items[0].ID != req1 {
+		t.Fatalf("Drafts = %+v, want count=1 item=[%s]", sum.Drafts, req1)
+	}
+	if sum.Drafts.Items[0].Request != nil {
+		t.Fatalf("Drafts item unexpectedly has Request: %+v", sum.Drafts.Items[0].Request)
+	}
+
+	// Parity with filtered HTTP lists, and handleList never sets ArtifactListItem.Request.
+	listHTTP := func(path string) ArtifactListResponse {
+		t.Helper()
+		rec := f.do(&userU, http.MethodGet, path, nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d %s", path, rec.Code, rec.Body.String())
+		}
+		var resp ArtifactListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	toAddrList := listHTTP("/api/v1/artifacts?mine=1&review_on_latest=1&owner=me")
+	reqList := listHTTP("/api/v1/artifacts?mine=1&requested=1")
+	draftList := listHTTP("/api/v1/artifacts?mine=1&drafts=1")
+	if len(toAddrList.Artifacts) != sum.ToAddress.Count {
+		t.Fatalf("ToAddress parity mismatch: list=%d summary=%d", len(toAddrList.Artifacts), sum.ToAddress.Count)
+	}
+	if len(reqList.Artifacts) != sum.Requested.Count {
+		t.Fatalf("Requested parity mismatch: list=%d summary=%d", len(reqList.Artifacts), sum.Requested.Count)
+	}
+	for _, it := range reqList.Artifacts {
+		if it.Request != nil {
+			t.Fatalf("handleList must never populate ArtifactListItem.Request, got %+v", it.Request)
+		}
+	}
+	if len(draftList.Artifacts) != sum.Drafts.Count {
+		t.Fatalf("Drafts parity mismatch: list=%d summary=%d", len(draftList.Artifacts), sum.Drafts.Count)
+	}
+
+	// Drafts: false omits Drafts (nil); Previews: 0 returns counts with empty Items.
+	sumNoDrafts, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 0, Requests: true, Drafts: false})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(0, true, false): %v", err)
+	}
+	if sumNoDrafts.Drafts != nil {
+		t.Fatalf("expected Drafts=nil when opts.Drafts=false, got %+v", sumNoDrafts.Drafts)
+	}
+	if sumNoDrafts.ToAddress.Count != 3 || len(sumNoDrafts.ToAddress.Items) != 0 {
+		t.Fatalf("ToAddress(previews=0) = %+v", sumNoDrafts.ToAddress)
+	}
+	if sumNoDrafts.Requested.Count != 2 || len(sumNoDrafts.Requested.Items) != 0 {
+		t.Fatalf("Requested(previews=0) = %+v", sumNoDrafts.Requested)
+	}
+
+	// opts.Requests: false -> Requested is empty (0, false, []).
+	sumReqOff, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: false, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(requests=false): %v", err)
+	}
+	if sumReqOff.Requested.Count != 0 || sumReqOff.Requested.Capped || len(sumReqOff.Requested.Items) != 0 {
+		t.Fatalf("Requested with opts.Requests=false = %+v, want empty", sumReqOff.Requested)
+	}
+
+	// opts.Requests: true with FeatureGate OFF -> Requested is still populated
+	// because ReviewStateSummary relies on opts.Requests (single hub gate read).
+	recHost.requestsOn = false
+	sumOptOverridesGate, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(opts.Requests=true, gate=false): %v", err)
+	}
+	if sumOptOverridesGate.Requested.Count != 2 || len(sumOptOverridesGate.Requested.Items) != 2 {
+		t.Fatalf("Requested with opts.Requests=true and FeatureGate=false = %+v, want count=2", sumOptOverridesGate.Requested)
+	}
+	recHost.requestsOn = true
+
+	// Token boundary denial on project-2 excludes idMid and req2.
 	f.host.deny(userU, "project-2", PermissionRead)
-	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 5)
+	sumDenied, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
 	if err != nil {
-		t.Fatalf("ReviewOnLatestSummary(denied): %v", err)
+		t.Fatalf("ReviewStateSummary(denied): %v", err)
 	}
-	if count != 2 || capped {
-		t.Fatalf("got count=%d capped=%v, want 2 false", count, capped)
+	if sumDenied.ToAddress.Count != 2 || sumDenied.ToAddress.Capped {
+		t.Fatalf("ToAddress(denied) = (%d, %v), want (2, false)", sumDenied.ToAddress.Count, sumDenied.ToAddress.Capped)
 	}
-	if len(items) != 2 || items[0].ID != idNew || items[1].ID != idOld {
-		t.Fatalf("got items %v, want [%s, %s]", items, idNew, idOld)
+	if len(sumDenied.ToAddress.Items) != 2 || sumDenied.ToAddress.Items[0].ID != idNew || sumDenied.ToAddress.Items[1].ID != idOld {
+		t.Fatalf("ToAddress(denied).Items = %v, want [%s, %s]", sumDenied.ToAddress.Items, idNew, idOld)
+	}
+	if sumDenied.Requested.Count != 1 || len(sumDenied.Requested.Items) != 1 || sumDenied.Requested.Items[0].ID != req1 {
+		t.Fatalf("Requested(denied) = %+v, want count=1 [%s]", sumDenied.Requested, req1)
 	}
 
-	// Lower maxListScan to 2 to verify capped=true when scan budget runs out.
+	// Lower maxListScan to 2 to verify Capped=true when scan budget runs out.
 	origScan := maxListScan
 	maxListScan = 2
 	t.Cleanup(func() { maxListScan = origScan })
-	count, capped, items, err = f.svc.ReviewOnLatestSummary(ctx, 5)
+	sumCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 5, Requests: true, Drafts: true})
 	if err != nil {
-		t.Fatalf("ReviewOnLatestSummary(capped): %v", err)
+		t.Fatalf("ReviewStateSummary(capped): %v", err)
 	}
-	if !capped {
-		t.Fatalf("expected capped=true when scan budget reached; got count=%d items=%d", count, len(items))
+	if !sumCap.ToAddress.Capped {
+		t.Fatalf("expected ToAddress.Capped=true when scan budget reached; got %+v", sumCap.ToAddress)
 	}
 
 	// Unauthenticated caller returns empty without error.
-	count, capped, items, err = f.svc.ReviewOnLatestSummary(context.Background(), 3)
-	if err != nil || count != 0 || capped || len(items) != 0 {
-		t.Fatalf("unauthenticated: got (%d, %v, %d, %v)", count, capped, len(items), err)
+	sumAnon, err := f.svc.ReviewStateSummary(context.Background(), ReviewSummaryOptions{Previews: 3, Requests: true, Drafts: true})
+	if err != nil || sumAnon.ToAddress.Count != 0 || sumAnon.Requested.Count != 0 || sumAnon.Drafts == nil || sumAnon.Drafts.Count != 0 {
+		t.Fatalf("unauthenticated: got (%+v, %v)", sumAnon, err)
 	}
 
 	// Unconfigured backend returns ErrBackendUnavailable.
 	unconfigured := NewService(f.host)
-	if _, _, _, err := unconfigured.ReviewOnLatestSummary(ctx, 3); err != ErrBackendUnavailable {
+	if _, err := unconfigured.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 3, Requests: true}); err != ErrBackendUnavailable {
 		t.Fatalf("expected ErrBackendUnavailable, got %v", err)
+	}
+}
+
+func TestReviewStateSummary_RequestedAndDraftsCapped(t *testing.T) {
+	f := newFixture(t, false)
+	origScan := maxListScan
+	maxListScan = 2
+	t.Cleanup(func() { maxListScan = origScan })
+
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	var reqIDs []string
+	for i := 0; i < 3; i++ {
+		id := seedReviewArtifact(t, f.store, "project-1", PrincipalKindUser, outside.ref, fmt.Sprintf("req-%d", i), VersionKindPublish, base.Add(time.Duration(i)*time.Minute), nil)
+		if _, _, err := f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+			ArtifactID:    id,
+			ReviewerKind:  PrincipalKindUser,
+			ReviewerRef:   userU.ref,
+			RequesterKind: PrincipalKindUser,
+			RequesterRef:  outside.ref,
+			Access:        ReviewRequestAccessExisting,
+		}, 24*time.Hour, base.Add(time.Duration(i)*time.Minute), &Actor{Kind: PrincipalKindUser, Ref: outside.ref, Authority: AuthorityOwner}, nil); err != nil {
+			t.Fatalf("create request %d: %v", i, err)
+		}
+		reqIDs = append(reqIDs, id)
+	}
+
+	ctx := context.WithValue(context.Background(), principalKey{}, userU)
+
+	// Requested exceeds maxListScan while ToAddress and Drafts have 0 rows.
+	sumReqCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: true, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(requested capped): %v", err)
+	}
+	if sumReqCap.ToAddress.Capped || !sumReqCap.Requested.Capped || sumReqCap.Drafts == nil || sumReqCap.Drafts.Capped {
+		t.Fatalf("got capped=(toAddr:%v req:%v drafts:%v), want (false, true, false)",
+			sumReqCap.ToAddress.Capped, sumReqCap.Requested.Capped, sumReqCap.Drafts != nil && sumReqCap.Drafts.Capped)
+	}
+
+	// Add 3 drafts on the same artifacts, query with Requests: false so only Drafts is capped.
+	for i, id := range reqIDs {
+		if _, _, err := f.store.PutReviewDraft(context.Background(), ReviewDraft{
+			ArtifactID:    id,
+			PrincipalKind: PrincipalKindUser,
+			PrincipalRef:  userU.ref,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "draft",
+		}, 0, base.Add(time.Duration(i)*time.Minute), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("put draft %d: %v", i, err)
+		}
+	}
+	sumDraftCap, err := f.svc.ReviewStateSummary(ctx, ReviewSummaryOptions{Previews: 2, Requests: false, Drafts: true})
+	if err != nil {
+		t.Fatalf("ReviewStateSummary(drafts capped): %v", err)
+	}
+	if sumDraftCap.ToAddress.Capped || sumDraftCap.Requested.Capped || sumDraftCap.Drafts == nil || !sumDraftCap.Drafts.Capped {
+		t.Fatalf("got capped=(toAddr:%v req:%v drafts:%v), want (false, false, true)",
+			sumDraftCap.ToAddress.Capped, sumDraftCap.Requested.Capped, sumDraftCap.Drafts != nil && sumDraftCap.Drafts.Capped)
 	}
 }
 
@@ -389,5 +636,69 @@ func TestInboxNotifier_PublishDeleteAndGrantRevoke(t *testing.T) {
 	}
 	if got := recHost.takeInboxUsers(); len(got) != 0 {
 		t.Fatalf("delete agent artifact should not fire InboxChanged, got %v", got)
+	}
+}
+
+func TestInboxNotifier_SoftDeleteHintsOwnerReviewersAndDraftHolders(t *testing.T) {
+	f := newFixture(t, false)
+	recHost := &inboxRecordingHost{
+		fakeHost:    f.host,
+		hintsActive: true,
+		requestsOn:  true,
+		draftsOn:    true,
+	}
+	f.svc.host = recHost
+
+	drafterOnly := principal{kind: PrincipalKindUser, ref: "user-drafter-only"}
+	both := principal{kind: PrincipalKindUser, ref: "user-both"}
+	f.host.allow(outside, "project-1", PermissionRead)
+	f.host.allow(drafterOnly, "project-1", PermissionRead)
+	f.host.allow(both, "project-1", PermissionRead)
+
+	art := f.publish(userU, "doc.md", []byte("v1\n"), "scope=project-1")
+	now := time.Now().UTC()
+	// Open requests for outside and both.
+	for _, rev := range []principal{outside, both} {
+		if _, _, err := f.store.CreateOrRemindReviewRequest(context.Background(), ReviewRequest{
+			ArtifactID:    art.Artifact.ID,
+			ReviewerKind:  PrincipalKindUser,
+			ReviewerRef:   rev.ref,
+			RequesterKind: PrincipalKindUser,
+			RequesterRef:  userU.ref,
+			Access:        ReviewRequestAccessExisting,
+		}, 24*time.Hour, now, &Actor{Kind: PrincipalKindUser, Ref: userU.ref, Authority: AuthorityOwner}, nil); err != nil {
+			t.Fatalf("create request for %s: %v", rev.ref, err)
+		}
+	}
+	// Saved drafts for drafterOnly, both (overlap with open request), and agentA (non-user, must not be hinted).
+	for _, dp := range []principal{drafterOnly, both, agentA} {
+		if _, _, err := f.store.PutReviewDraft(context.Background(), ReviewDraft{
+			ArtifactID:    art.Artifact.ID,
+			PrincipalKind: dp.kind,
+			PrincipalRef:  dp.ref,
+			BaseSeq:       1,
+			EntryPath:     "doc.md",
+			Body:          "wip",
+		}, 0, now, MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("put draft for %s: %v", dp.ref, err)
+		}
+	}
+
+	delRec := f.do(&userU, http.MethodDelete, "/api/v1/artifacts/"+art.Artifact.ID, nil, nil)
+	if delRec.Code != http.StatusNoContent {
+		t.Fatalf("delete artifact: %d %s", delRec.Code, delRec.Body.String())
+	}
+
+	got := recHost.takeInboxUsers()
+	sort.Strings(got)
+	want := []string{drafterOnly.ref, both.ref, outside.ref, userU.ref}
+	sort.Strings(want)
+	if len(got) != len(want) {
+		t.Fatalf("soft-delete hints = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("soft-delete hints = %v, want %v", got, want)
+		}
 	}
 }

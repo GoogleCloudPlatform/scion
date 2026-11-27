@@ -761,6 +761,11 @@ type Store interface {
 	// (artifactID, reviewerKind, reviewerRef), or ErrNotFound.
 	GetOpenReviewRequest(ctx context.Context, artifactID, reviewerKind, reviewerRef string) (*ReviewRequest, error)
 
+	// GetOpenReviewRequestsFor returns the open review request addressed to
+	// (reviewerKind, reviewerRef) for each artifact ID in artifactIDs, keyed by
+	// artifact ID. At most MaxGrantsForIDs ids may be given.
+	GetOpenReviewRequestsFor(ctx context.Context, artifactIDs []string, reviewerKind, reviewerRef string) (map[string]ReviewRequest, error)
+
 	// GetReviewRequest returns the review request with id requestID on
 	// artifactID, or ErrNotFound.
 	GetReviewRequest(ctx context.Context, artifactID, requestID string) (*ReviewRequest, error)

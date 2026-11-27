@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -469,6 +470,42 @@ func (s *sqlStore) GetOpenReviewRequest(ctx context.Context, artifactID, reviewe
 		return nil, fmt.Errorf("artifacts: get open review request: %w", err)
 	}
 	return &rr, nil
+}
+
+// GetOpenReviewRequestsFor implements Store.
+func (s *sqlStore) GetOpenReviewRequestsFor(ctx context.Context, artifactIDs []string, reviewerKind, reviewerRef string) (map[string]ReviewRequest, error) {
+	out := make(map[string]ReviewRequest)
+	if len(artifactIDs) == 0 || reviewerKind == "" || reviewerRef == "" {
+		return out, nil
+	}
+	if len(artifactIDs) > MaxGrantsForIDs {
+		return nil, fmt.Errorf("artifacts: GetOpenReviewRequestsFor accepts at most %d ids", MaxGrantsForIDs)
+	}
+	placeholders := strings.Repeat("?,", len(artifactIDs))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]any, 0, 3+len(artifactIDs))
+	args = append(args, ReviewRequestStateOpen, reviewerKind, reviewerRef)
+	for _, id := range artifactIDs {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+reviewRequestColumns+`
+		FROM artifact_review_request
+		WHERE state = ? AND reviewer_kind = ? AND reviewer_ref = ? AND artifact_id IN (`+placeholders+`)`), args...)
+	if err != nil {
+		return nil, fmt.Errorf("artifacts: get open review requests for artifacts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		rr, err := scanReviewRequest(rows)
+		if err != nil {
+			return nil, fmt.Errorf("artifacts: scan open review request: %w", err)
+		}
+		out[rr.ArtifactID] = rr
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("artifacts: get open review requests for artifacts: %w", err)
+	}
+	return out, nil
 }
 
 // GetReviewRequest implements Store.

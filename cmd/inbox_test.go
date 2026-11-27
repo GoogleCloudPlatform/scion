@@ -120,6 +120,7 @@ func TestInboxConstantsMatchHub(t *testing.T) {
 	assert.Equal(t, hub.InboxBreakdownProjects, hubclient.InboxBreakdownProjects)
 	assert.Equal(t, hub.InboxBreakdownToAddress, hubclient.InboxBreakdownToAddress)
 	assert.Equal(t, hub.InboxBreakdownRequested, hubclient.InboxBreakdownRequested)
+	assert.Equal(t, hub.InboxBreakdownDrafts, hubclient.InboxBreakdownDrafts)
 	assert.Equal(t, hub.InboxBreakdownUnreadConversations, hubclient.InboxBreakdownUnreadConversations)
 	assert.Equal(t, hub.InboxBreakdownDMs, hubclient.InboxBreakdownDMs)
 	assert.Equal(t, hub.InboxBreakdownMentions, hubclient.InboxBreakdownMentions)

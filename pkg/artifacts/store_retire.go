@@ -228,6 +228,7 @@ type DeleteResult struct {
 	Drafts               int
 	ReviewRequests       int
 	OpenRequestReviewers []string
+	DraftHolders         []string
 }
 
 // insertEvent writes one artifact_event row inside tx.
@@ -337,6 +338,25 @@ func (s *sqlStore) deleteArtifactTx(ctx context.Context, tx *sql.Tx, artifactID 
 	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_session WHERE artifact_id = ?`), artifactID); err != nil {
 		return DeleteResult{}, fmt.Errorf("artifacts: drop review sessions: %w", err)
 	}
+	draftRows, err := tx.QueryContext(ctx, s.rebind(`SELECT DISTINCT principal_ref FROM artifact_review_draft
+		WHERE artifact_id = ? AND principal_kind = ? ORDER BY principal_ref`),
+		artifactID, PrincipalKindUser)
+	if err != nil {
+		return DeleteResult{}, fmt.Errorf("artifacts: list review draft holders: %w", err)
+	}
+	for draftRows.Next() {
+		var uid string
+		if err := draftRows.Scan(&uid); err != nil {
+			_ = draftRows.Close()
+			return DeleteResult{}, fmt.Errorf("artifacts: scan review draft holder: %w", err)
+		}
+		res.DraftHolders = append(res.DraftHolders, uid)
+	}
+	if err := draftRows.Err(); err != nil {
+		_ = draftRows.Close()
+		return DeleteResult{}, fmt.Errorf("artifacts: list review draft holders: %w", err)
+	}
+	_ = draftRows.Close()
 	dr, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_review_draft WHERE artifact_id = ?`), artifactID)
 	if err != nil {
 		return DeleteResult{}, fmt.Errorf("artifacts: drop review drafts: %w", err)
