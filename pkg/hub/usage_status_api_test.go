@@ -55,6 +55,7 @@ func TestUsageReadAPI_UsageYAMLMeasurementStatus_PerAgentAndScoped(t *testing.T)
 		OwnerID: admin.ID,
 	}
 	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, admin.ID, proj.ID, store.ProjectRoleOwner)
 
 	// Seed global HarnessConfigs with usage.yaml capabilities.
 	seedHC := func(slug, scope, scopeID, harness string, cap *api.HarnessUsageCapabilities) {
