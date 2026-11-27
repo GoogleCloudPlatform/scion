@@ -1,6 +1,6 @@
 # Live Track 1 usage metering capability for pi.
 # Hook bridge (scion-bridge.js assistant message_end); compaction and branch-summary
-# calls are not visible to Track 1, and measured zeros are dropped by the hook path.
+# calls are not visible to Track 1.
 schema_version: 1
 usage:
   live:

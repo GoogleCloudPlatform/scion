@@ -67,7 +67,7 @@ func TestMappingDialect_InputTokensInclusive(t *testing.T) {
 		}
 	})
 
-	t.Run("zero input_tokens leaves InputTokensDerived false", func(t *testing.T) {
+	t.Run("explicit zero input_tokens sets InputTokensDerived true and preserves presence", func(t *testing.T) {
 		ev, err := md.Parse(map[string]interface{}{
 			"hook_event_name": "PostLLMCall",
 			"usage": map[string]interface{}{
@@ -79,8 +79,24 @@ func TestMappingDialect_InputTokensInclusive(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse: %v", err)
 		}
-		if ev.Data.InputTokens != 0 || ev.Data.InputTokensDerived {
-			t.Errorf("InputTokens=%d InputTokensDerived=%v, want 0/false", ev.Data.InputTokens, ev.Data.InputTokensDerived)
+		if ev.Data.InputTokens != 0 || !ev.Data.HasInputTokens() || !ev.Data.InputTokensDerived {
+			t.Errorf("InputTokens=%d has=%v InputTokensDerived=%v, want 0/true/true", ev.Data.InputTokens, ev.Data.HasInputTokens(), ev.Data.InputTokensDerived)
+		}
+	})
+
+	t.Run("absent input_tokens leaves InputTokensDerived false", func(t *testing.T) {
+		ev, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "PostLLMCall",
+			"usage": map[string]interface{}{
+				"output_tokens": float64(10),
+				"cached_tokens": float64(0),
+			},
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if ev.Data.InputTokens != 0 || ev.Data.HasInputTokens() || ev.Data.InputTokensDerived {
+			t.Errorf("InputTokens=%d has=%v InputTokensDerived=%v, want 0/false/false", ev.Data.InputTokens, ev.Data.HasInputTokens(), ev.Data.InputTokensDerived)
 		}
 	})
 }

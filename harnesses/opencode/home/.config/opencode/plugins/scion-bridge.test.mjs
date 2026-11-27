@@ -91,23 +91,21 @@ test('run2: token math matches the captured step-finish parts, output includes r
   assert.equal(stepFinishes.length, 3);
 
   // Real captured values (see fixture provenance): step1 has reasoning=5,
-  // which must be summed into output_tokens (design §3.2); steps 2 and 3
-  // have no reasoning and a cache read instead.
+  // which must be summed into output_tokens (design §3.2), and cache.read=0;
+  // steps 2 and 3 have reasoning=0 and a cache read instead; all 3 steps
+  // carry measured cache.write=0 alongside `total`.
   assert.deepEqual(
-    { input_tokens: stepFinishes[0].data.input_tokens, output_tokens: stepFinishes[0].data.output_tokens, reasoning_tokens: stepFinishes[0].data.reasoning_tokens, cached_tokens: stepFinishes[0].data.cached_tokens },
-    { input_tokens: 400, output_tokens: 30, reasoning_tokens: 5, cached_tokens: undefined }
+    { input_tokens: stepFinishes[0].data.input_tokens, output_tokens: stepFinishes[0].data.output_tokens, reasoning_tokens: stepFinishes[0].data.reasoning_tokens, cached_tokens: stepFinishes[0].data.cached_tokens, cache_write_tokens: stepFinishes[0].data.cache_write_tokens },
+    { input_tokens: 400, output_tokens: 30, reasoning_tokens: 5, cached_tokens: 0, cache_write_tokens: 0 }
   );
   assert.deepEqual(
-    { input_tokens: stepFinishes[1].data.input_tokens, output_tokens: stepFinishes[1].data.output_tokens, cached_tokens: stepFinishes[1].data.cached_tokens, reasoning_tokens: stepFinishes[1].data.reasoning_tokens },
-    { input_tokens: 516, output_tokens: 25, cached_tokens: 384, reasoning_tokens: undefined }
+    { input_tokens: stepFinishes[1].data.input_tokens, output_tokens: stepFinishes[1].data.output_tokens, cached_tokens: stepFinishes[1].data.cached_tokens, reasoning_tokens: stepFinishes[1].data.reasoning_tokens, cache_write_tokens: stepFinishes[1].data.cache_write_tokens },
+    { input_tokens: 516, output_tokens: 25, cached_tokens: 384, reasoning_tokens: 0, cache_write_tokens: 0 }
   );
   assert.deepEqual(
-    { input_tokens: stepFinishes[2].data.input_tokens, output_tokens: stepFinishes[2].data.output_tokens, cached_tokens: stepFinishes[2].data.cached_tokens },
-    { input_tokens: 148, output_tokens: 18, cached_tokens: 1152 }
+    { input_tokens: stepFinishes[2].data.input_tokens, output_tokens: stepFinishes[2].data.output_tokens, cached_tokens: stepFinishes[2].data.cached_tokens, reasoning_tokens: stepFinishes[2].data.reasoning_tokens, cache_write_tokens: stepFinishes[2].data.cache_write_tokens },
+    { input_tokens: 148, output_tokens: 18, cached_tokens: 1152, reasoning_tokens: 0, cache_write_tokens: 0 }
   );
-  for (const e of stepFinishes) {
-    assert.equal(e.data.cache_write_tokens, undefined, 'this mock model never reports a cache write, so the field must be omitted, not zero');
-  }
 });
 
 test('run2: streaming deltas and repeated message.updated add nothing', () => {
@@ -398,6 +396,56 @@ test('all-zero tokens with no total still count the call but emit no token field
   });
   assert.equal(emissions.length, 1, 'the call itself is still counted');
   assert.deepEqual(Object.keys(emissions[0].data).sort(), ['model', 'session_id'].sort(), 'no token fields when usage is unknown, only session_id and the joined model');
+});
+
+test('all-zero tokens with total defined emit measured zeros, and absent fields remain omitted', () => {
+  const state = createBridgeState();
+  const messageID = 'msg_synthetic_measured_zero';
+  const sessionID = 'ses_synthetic_measured_zero';
+  route(state, {
+    type: 'message.updated',
+    properties: { info: { id: messageID, role: 'assistant', providerID: 'p', modelID: 'm', time: { created: 1 } } },
+  });
+  const e1 = route(state, {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: 'prt_measured_zero', sessionID, messageID, type: 'step-finish', reason: 'stop',
+        tokens: { total: 0, input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      },
+    },
+  });
+  assert.equal(e1.length, 1);
+  assert.deepEqual(e1[0].data, {
+    session_id: sessionID,
+    model: 'p/m',
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+    reasoning_tokens: 0,
+  });
+
+  // Absent fields (undefined) are not coerced to 0.
+  const e2 = route(state, {
+    type: 'message.part.updated',
+    properties: {
+      part: {
+        id: 'prt_partial_fields', sessionID, messageID, type: 'step-finish', reason: 'stop',
+        tokens: { total: 100, input: 100, output: 0 },
+      },
+    },
+  });
+  assert.equal(e2.length, 1);
+  assert.deepEqual(e2[0].data, {
+    session_id: sessionID,
+    model: 'p/m',
+    input_tokens: 100,
+    output_tokens: 0,
+  });
+  assert.ok(!Object.hasOwn(e2[0].data, 'cached_tokens'));
+  assert.ok(!Object.hasOwn(e2[0].data, 'cache_write_tokens'));
+  assert.ok(!Object.hasOwn(e2[0].data, 'reasoning_tokens'));
 });
 
 test('a synthetic non-zero cache_write step-finish maps through the bridge', () => {

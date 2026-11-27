@@ -80,21 +80,24 @@ func rawScalar(raw map[string]interface{}, key string) string {
 }
 
 // hookUsageObservation is the event form of a hook model-end increment.
-// The dialect layer keeps only token values > 0, so a zero cannot be told
-// from an absent field: only positive categories are written and the
-// status is partial (some tokens) or not_reported (none), never an
-// invented zero. Hook token semantics match the counters: input is
-// reported as-is, and reasoning is already included in output.
+// Token presence from the dialect layer distinguishes measured zeros from
+// absent fields: present categories (including 0) are written as non-nil
+// pointers, absent categories remain nil, and TokenStatus is reported when
+// all five canonical categories are present, partial when 1-4 are present,
+// and not_reported when none are present. Hook token semantics match the
+// counters: input is reported as-is, and reasoning is already included in
+// output.
 func hookUsageObservation(event *hooks.Event, now time.Time) telemetry.UsageObservation {
 	status := telemetrycontract.StatusSuccess
 	if event.Data.Error != "" {
 		status = telemetrycontract.StatusError
 	}
-	positive := func(n int64) *int64 {
-		if n <= 0 {
+	present := func(ok bool, n int64) *int64 {
+		if !ok {
 			return nil
 		}
-		return &n
+		v := n
+		return &v
 	}
 	dialect := event.Dialect
 	if dialect == "" {
@@ -111,16 +114,27 @@ func hookUsageObservation(event *hooks.Event, now time.Time) telemetry.UsageObse
 		SessionID:               event.Data.SessionID,
 		Status:                  status,
 		Calls:                   1,
-		Input:                   positive(event.Data.InputTokens),
-		Output:                  positive(event.Data.OutputTokens),
-		CacheRead:               positive(event.Data.CachedTokens),
-		CacheWrite:              positive(event.Data.CacheWriteTokens),
-		Reasoning:               positive(event.Data.ReasoningTokens),
+		Input:                   present(event.Data.HasInputTokens(), event.Data.InputTokens),
+		Output:                  present(event.Data.HasOutputTokens(), event.Data.OutputTokens),
+		CacheRead:               present(event.Data.HasCachedTokens(), event.Data.CachedTokens),
+		CacheWrite:              present(event.Data.HasCacheWriteTokens(), event.Data.CacheWriteTokens),
+		Reasoning:               present(event.Data.HasReasoningTokens(), event.Data.ReasoningTokens),
 		ReasoningOverlapsOutput: true,
 		InputDerivation:         inputDerivation,
 		TokenStatus:             telemetrycontract.TokenStatusNotReported,
 	}
-	if obs.Input != nil || obs.Output != nil || obs.CacheRead != nil || obs.CacheWrite != nil || obs.Reasoning != nil {
+	presentCount := 0
+	for _, p := range []*int64{obs.Input, obs.Output, obs.CacheRead, obs.CacheWrite, obs.Reasoning} {
+		if p != nil {
+			presentCount++
+		}
+	}
+	switch presentCount {
+	case 0:
+		obs.TokenStatus = telemetrycontract.TokenStatusNotReported
+	case 5:
+		obs.TokenStatus = telemetrycontract.TokenStatusReported
+	default:
 		obs.TokenStatus = telemetrycontract.TokenStatusPartial
 	}
 	obs.Identity, obs.SourceEventID = hookSourceIdentity(event)

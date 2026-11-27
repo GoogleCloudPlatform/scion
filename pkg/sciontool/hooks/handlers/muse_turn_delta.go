@@ -144,27 +144,47 @@ func (h *TelemetryHandler) normalizeMuseTurnUsage(event *hooks.Event) *hooks.Eve
 	}
 
 	var delta museTurnUsageTotals
+	var failedClosed bool
 	switch {
 	case h.MuseTurnUsageStatePath != "":
 		var err error
 		delta, err = applyMuseTurnUsageFile(h.MuseTurnUsageStatePath, key, cur)
 		if err != nil {
 			log.Warn("Muse turn usage delta state file %q failed (%v); dropping tokens for untrackable turn %s", h.MuseTurnUsageStatePath, err, key)
-			delta = museTurnUsageTotals{}
+			failedClosed = true
 		}
 	case h.MuseTurnUsageStateRequired:
 		log.Warn("Muse turn usage state path is unavailable (empty home); dropping tokens for untrackable turn %s", key)
-		delta = museTurnUsageTotals{}
+		failedClosed = true
 	default:
 		delta = h.applyMuseTurnUsageMem(key, cur)
 	}
 
 	copied := *event
+	if failedClosed {
+		copied.Data.ClearTokens()
+		return &copied
+	}
+	// Failed steps in Muse Code repeat the prior step's cumulative usage,
+	// yielding all-zero deltas. Clear token presence so failed calls report
+	// token_status="not_reported" with nil token pointers rather than
+	// fabricating measured zeros.
+	if event.Data.Error != "" && delta == (museTurnUsageTotals{}) {
+		copied.Data.ClearTokens()
+		return &copied
+	}
 	copied.Data.InputTokens = delta.Input
 	copied.Data.OutputTokens = delta.Output
 	copied.Data.CachedTokens = delta.Cached
 	copied.Data.CacheWriteTokens = delta.CacheWrite
 	copied.Data.ReasoningTokens = delta.Reasoning
+	copied.Data.TokenPresence = hooks.TokenPresence{
+		Input:      event.Data.HasInputTokens(),
+		Output:     event.Data.HasOutputTokens(),
+		Cached:     event.Data.HasCachedTokens(),
+		CacheWrite: event.Data.HasCacheWriteTokens(),
+		Reasoning:  event.Data.HasReasoningTokens(),
+	}
 	return &copied
 }
 

@@ -45,12 +45,13 @@ type EventData struct {
 	FilePath   string `json:"file_path,omitempty"`
 
 	// Token usage fields (populated from model-end / session-end events)
-	InputTokens        int64 `json:"input_tokens,omitempty"`
-	OutputTokens       int64 `json:"output_tokens,omitempty"`
-	CachedTokens       int64 `json:"cached_tokens,omitempty"`
-	CacheWriteTokens   int64 `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens    int64 `json:"reasoning_tokens,omitempty"`
-	InputTokensDerived bool  `json:"input_tokens_derived,omitempty"`
+	InputTokens        int64         `json:"input_tokens,omitempty"`
+	OutputTokens       int64         `json:"output_tokens,omitempty"`
+	CachedTokens       int64         `json:"cached_tokens,omitempty"`
+	CacheWriteTokens   int64         `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens    int64         `json:"reasoning_tokens,omitempty"`
+	InputTokensDerived bool          `json:"input_tokens_derived,omitempty"`
+	TokenPresence      TokenPresence `json:"-"`
 
 	// Status fields
 	Success bool   `json:"success,omitempty"`
@@ -78,6 +79,80 @@ type EventData struct {
 
 	// Raw contains the original unparsed data
 	Raw map[string]interface{} `json:"raw,omitempty"`
+}
+
+// TokenPresence records which token usage fields on EventData were explicitly
+// reported by the harness payload (including measured zeros) versus absent.
+type TokenPresence struct {
+	Input      bool
+	Output     bool
+	Cached     bool
+	CacheWrite bool
+	Reasoning  bool
+}
+
+// HasInputTokens reports whether InputTokens was explicitly reported (including
+// a measured 0) or populated with a positive value directly on EventData.
+func (d EventData) HasInputTokens() bool { return d.TokenPresence.Input || d.InputTokens > 0 }
+
+// HasOutputTokens reports whether OutputTokens was explicitly reported
+// (including a measured 0) or populated with a positive value directly on EventData.
+func (d EventData) HasOutputTokens() bool { return d.TokenPresence.Output || d.OutputTokens > 0 }
+
+// HasCachedTokens reports whether CachedTokens was explicitly reported
+// (including a measured 0) or populated with a positive value directly on EventData.
+func (d EventData) HasCachedTokens() bool { return d.TokenPresence.Cached || d.CachedTokens > 0 }
+
+// HasCacheWriteTokens reports whether CacheWriteTokens was explicitly reported
+// (including a measured 0) or populated with a positive value directly on EventData.
+func (d EventData) HasCacheWriteTokens() bool {
+	return d.TokenPresence.CacheWrite || d.CacheWriteTokens > 0
+}
+
+// HasReasoningTokens reports whether ReasoningTokens was explicitly reported
+// (including a measured 0) or populated with a positive value directly on EventData.
+func (d EventData) HasReasoningTokens() bool {
+	return d.TokenPresence.Reasoning || d.ReasoningTokens > 0
+}
+
+// SetInputTokens records a measured input token count and marks it present.
+func (d *EventData) SetInputTokens(v int64) {
+	d.InputTokens = v
+	d.TokenPresence.Input = true
+}
+
+// SetOutputTokens records a measured output token count and marks it present.
+func (d *EventData) SetOutputTokens(v int64) {
+	d.OutputTokens = v
+	d.TokenPresence.Output = true
+}
+
+// SetCachedTokens records a measured cached token count and marks it present.
+func (d *EventData) SetCachedTokens(v int64) {
+	d.CachedTokens = v
+	d.TokenPresence.Cached = true
+}
+
+// SetCacheWriteTokens records a measured cache-write token count and marks it present.
+func (d *EventData) SetCacheWriteTokens(v int64) {
+	d.CacheWriteTokens = v
+	d.TokenPresence.CacheWrite = true
+}
+
+// SetReasoningTokens records a measured reasoning token count and marks it present.
+func (d *EventData) SetReasoningTokens(v int64) {
+	d.ReasoningTokens = v
+	d.TokenPresence.Reasoning = true
+}
+
+// ClearTokens zeroes all token counts and clears their presence flags.
+func (d *EventData) ClearTokens() {
+	d.InputTokens = 0
+	d.OutputTokens = 0
+	d.CachedTokens = 0
+	d.CacheWriteTokens = 0
+	d.ReasoningTokens = 0
+	d.TokenPresence = TokenPresence{}
 }
 
 // NormalizedEventName constants for standard event types.

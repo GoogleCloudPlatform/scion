@@ -56,8 +56,8 @@ function emitHookEvent(eventName, data) {
   }
 }
 
-function numberOrZero(v) {
-  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+function nonNegativeFinite(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.trunc(v) : undefined;
 }
 
 // MAX_CACHE_ENTRIES bounds every per-session/per-message cache below. A
@@ -360,16 +360,7 @@ function routeMessagePartUpdated(state, event) {
   state.seenModelEnds.add(dedupeKey);
   evictOldest(state.seenModelEnds, MAX_CACHE_ENTRIES);
 
-  const tokens = part.tokens || {};
-  const input = numberOrZero(tokens.input);
-  const reasoning = numberOrZero(tokens.reasoning);
-  // Canonical output includes reasoning (design §3.2); OpenCode's own
-  // `output` field is exclusive of it, so the sum happens here, once, and
-  // nowhere else in this file or in dialect.yaml.
-  const output = numberOrZero(tokens.output) + reasoning;
-  const cacheRead = numberOrZero(tokens.cache && tokens.cache.read);
-  const cacheWrite = numberOrZero(tokens.cache && tokens.cache.write);
-
+  const tokens = part.tokens && typeof part.tokens === 'object' ? part.tokens : undefined;
   const data = { session_id: sessionID };
 
   const model = state.modelByMessage.get(messageID);
@@ -380,20 +371,31 @@ function routeMessagePartUpdated(state, event) {
     data.model = `${model.providerID}/${model.modelID}`;
   }
 
-  // design §3.7: all-zero tokens with `total` undefined mean unknown usage —
-  // count the call (the model-end event itself does that), but emit no
-  // token fields at all, rather than a misleading all-zero response. This
-  // falls out of the guards below with no separate check: every field is
-  // included only when it's greater than zero, matching the dialect's own
-  // token-field semantics (dialects/common.go's extractTokens and
-  // dialects/mapping.go's applyFieldPath both treat "present and > 0" as
-  // the only way a value is recorded), so an all-zero step-finish already
-  // produces none of these fields regardless of `total`.
-  if (input > 0) data.input_tokens = input;
-  if (output > 0) data.output_tokens = output;
-  if (cacheRead > 0) data.cached_tokens = cacheRead;
-  if (cacheWrite > 0) data.cache_write_tokens = cacheWrite;
-  if (reasoning > 0) data.reasoning_tokens = reasoning;
+  if (tokens) {
+    const input = nonNegativeFinite(tokens.input);
+    const rawOutput = nonNegativeFinite(tokens.output);
+    const reasoning = nonNegativeFinite(tokens.reasoning);
+    // Canonical output includes reasoning (design §3.2); OpenCode's own
+    // `output` field is exclusive of it, so the sum happens here, once, and
+    // nowhere else in this file or in dialect.yaml.
+    const output = rawOutput !== undefined ? rawOutput + (reasoning ?? 0) : undefined;
+    const cacheRead = nonNegativeFinite(tokens.cache && tokens.cache.read);
+    const cacheWrite = nonNegativeFinite(tokens.cache && tokens.cache.write);
+
+    // design §3.7: all-zero tokens with `total` undefined mean unknown usage —
+    // count the call (the model-end event itself does that), but emit no
+    // token fields at all, rather than a misleading all-zero response.
+    // Otherwise emit every defined non-negative field including measured 0s.
+    const defined = [input, output, cacheRead, cacheWrite, reasoning].filter((v) => v !== undefined);
+    const unknownUsage = tokens.total === undefined && defined.every((v) => v === 0);
+    if (!unknownUsage) {
+      if (input !== undefined) data.input_tokens = input;
+      if (output !== undefined) data.output_tokens = output;
+      if (cacheRead !== undefined) data.cached_tokens = cacheRead;
+      if (cacheWrite !== undefined) data.cache_write_tokens = cacheWrite;
+      if (reasoning !== undefined) data.reasoning_tokens = reasoning;
+    }
+  }
 
   // "message.part.updated.step-finish" is a bridge-internal name, not an
   // OpenCode wire event: message.part.updated covers every part type, and

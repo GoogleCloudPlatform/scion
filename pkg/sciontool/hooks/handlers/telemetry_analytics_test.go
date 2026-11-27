@@ -136,9 +136,10 @@ func TestHookAnalyticsFollowsUsageSourceSelection(t *testing.T) {
 	}
 }
 
-// Hook token values: only positive categories are written (the dialect
-// layer cannot tell 0 from absent); an unvetted dialect has no identity
-// and is explicitly ambiguous; errors are failed calls.
+// Hook token values: directly populated positive categories without
+// TokenPresence are treated as present while omitted zero fields remain
+// unknown (partial); an unvetted dialect has no identity and is explicitly
+// ambiguous; errors are failed calls.
 func TestHookAnalyticsPositiveTokensAndUnvettedIdentity(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
@@ -180,5 +181,91 @@ func TestRawScalar(t *testing.T) {
 		if got := rawScalar(raw, key); got != want {
 			t.Errorf("rawScalar(%q) = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestHookAnalyticsMeasuredZerosAndTokenStatus(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "opencode")
+	analytics, dir := hookAnalytics(t)
+	h := NewTelemetryHandler(nil, nil, nil)
+	h.Analytics = analytics
+
+	// 1. All 5 fields present, with measured zeros for cache_write and reasoning -> reported.
+	fullData := hooks.EventData{Model: "provider/model", SessionID: "s1"}
+	fullData.SetInputTokens(400)
+	fullData.SetOutputTokens(25)
+	fullData.SetCachedTokens(100)
+	fullData.SetCacheWriteTokens(0)
+	fullData.SetReasoningTokens(0)
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelEnd, Dialect: "opencode", Data: fullData}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Subset of fields present (some measured 0, some absent) -> partial.
+	partialData := hooks.EventData{Model: "provider/model", SessionID: "s1"}
+	partialData.SetInputTokens(50)
+	partialData.SetOutputTokens(0)
+	partialData.SetCacheWriteTokens(0)
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelEnd, Dialect: "opencode", Data: partialData}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. No token fields present -> not_reported.
+	if err := h.Handle(&hooks.Event{Name: hooks.EventModelEnd, Dialect: "opencode", Data: hooks.EventData{Model: "provider/model", SessionID: "s1"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify raw JSONL preserves explicit 0s for reported event.
+	rawBytes, err := os.ReadFile(filepath.Join(dir, "staging.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(rawBytes)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("staged lines = %d, want 3", len(lines))
+	}
+	if !strings.Contains(lines[0], `"cache_write":0`) || !strings.Contains(lines[0], `"reasoning":0`) {
+		t.Errorf("full event JSONL must serialize measured 0s, got %s", lines[0])
+	}
+
+	got := hookStagedEvents(t, dir)
+	if len(got) != 3 {
+		t.Fatalf("events = %d, want 3", len(got))
+	}
+
+	full := got[0]
+	if full.TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("full.TokenStatus = %q, want %q", full.TokenStatus, telemetrycontract.TokenStatusReported)
+	}
+	if full.Input == nil || *full.Input != 400 || full.Output == nil || *full.Output != 25 ||
+		full.CacheRead == nil || *full.CacheRead != 100 ||
+		full.CacheWrite == nil || *full.CacheWrite != 0 ||
+		full.Reasoning == nil || *full.Reasoning != 0 {
+		t.Errorf("full tokens = %+v, want 400/25/100/0/0", full)
+	}
+	if full.InputDerivation != telemetrycontract.InputDerivationReported {
+		t.Errorf("full.InputDerivation = %q, want reported", full.InputDerivation)
+	}
+	if full.ReasoningOverlapsOutput == nil || !*full.ReasoningOverlapsOutput {
+		t.Errorf("full.ReasoningOverlapsOutput = %v, want true", full.ReasoningOverlapsOutput)
+	}
+
+	partial := got[1]
+	if partial.TokenStatus != telemetrycontract.TokenStatusPartial {
+		t.Errorf("partial.TokenStatus = %q, want %q", partial.TokenStatus, telemetrycontract.TokenStatusPartial)
+	}
+	if partial.Input == nil || *partial.Input != 50 || partial.Output == nil || *partial.Output != 0 ||
+		partial.CacheWrite == nil || *partial.CacheWrite != 0 ||
+		partial.CacheRead != nil || partial.Reasoning != nil {
+		t.Errorf("partial tokens = %+v, want in=50 out=0 cw=0 cr=nil reas=nil", partial)
+	}
+
+	none := got[2]
+	if none.TokenStatus != telemetrycontract.TokenStatusNotReported {
+		t.Errorf("none.TokenStatus = %q, want %q", none.TokenStatus, telemetrycontract.TokenStatusNotReported)
+	}
+	if none.Input != nil || none.Output != nil || none.CacheRead != nil || none.CacheWrite != nil || none.Reasoning != nil {
+		t.Errorf("none tokens must all be nil, got %+v", none)
 	}
 }
