@@ -215,6 +215,7 @@ func TestConduitHA_C19_FunctionalSmoke(t *testing.T) {
 
 	assert.NoError(t, res.FirstError)
 	assert.Equal(t, int64(0), res.Deliver429s, "must not hit 429 at default MaxConcurrentRPCs")
+	assert.Equal(t, int64(0), res.DeliverNonDelivered, "every delivery response must report outcome=delivered")
 	assert.Equal(t, int64(0), res.DeliverErrors, "all deliveries must succeed without session-window stall")
 	assert.Equal(t, int64(4), res.LargeBodySucceeded, "all 512 KiB deliveries must succeed")
 	assert.Equal(t, int64(0), res.LargeBodyErrors)

@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -266,7 +267,8 @@ func TestConduitHA_2796_C2_AgentPTYCrossNode(t *testing.T) {
 // cap; the in-flight cross-node PTY opened on Hub A keeps working during drain,
 // the agent reconnects on a replacement session that serves new attaches, and
 // at the 30s drain deadline (before the cap) the original PTY closes with 4503
-// relay_restart while the replacement PTY keeps running.
+// relay_restart while the accepted replacement PTY keeps echoing (even as the
+// replacement session itself enters its own drain at t0+60s).
 func TestConduitHA_2796_C4_LifetimeHandoffCrossNode(t *testing.T) {
 	t0 := time.Now().UTC().Truncate(time.Second)
 	relayClk := clock.NewFake(t0)
@@ -312,8 +314,10 @@ func TestConduitHA_2796_C4_LifetimeHandoffCrossNode(t *testing.T) {
 	pty2 := haWaitFakePTY(t, agent.PTYs.Spawned)
 	haPTYEcho(t, c2, "on-replacement")
 
-	// Advance to the 30s drain deadline (still before capAt): old PTY closes
-	// with 4503 relay_restart while the replacement PTY keeps working.
+	// Advance to the 30s drain deadline (t0+60s, still before orig capAt t0+90s):
+	// the old PTY closes with 4503 relay_restart. Note: the replacement session
+	// was admitted at t0+30s so its own 90s-60s GoAway also fires at t0+60s;
+	// its accepted PTY stream (c2) survives drain and keeps echoing.
 	relayClk.Advance(30 * time.Second)
 	ce := haPTYReadClose(t, c1, 10*time.Second)
 	assert.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, ce.Code)
@@ -393,31 +397,87 @@ func TestConduitHA_2796_C10_CapabilityTruthCrossNode(t *testing.T) {
 	assert.Empty(t, ptyAgent.PTYs.Spawned, "agent must not spawn a PTY when broker attach=true")
 }
 
+// haAuthzMetrics records conduitStreamAuthzMetrics events for deterministic
+// trigger/outcome assertions in C16b.
+type haAuthzMetrics struct {
+	mu     sync.Mutex
+	counts map[string]int
+	notify chan struct{}
+}
+
+func newHAAuthzMetrics() *haAuthzMetrics {
+	return &haAuthzMetrics{
+		counts: map[string]int{},
+		notify: make(chan struct{}, 1),
+	}
+}
+
+func (m *haAuthzMetrics) RecordConduitStreamAuthz(trigger, outcome, kind string) {
+	m.mu.Lock()
+	m.counts[trigger+"/"+outcome+"/"+kind]++
+	m.mu.Unlock()
+	select {
+	case m.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (m *haAuthzMetrics) waitCount(t *testing.T, key string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		m.mu.Lock()
+		got := m.counts[key]
+		m.mu.Unlock()
+		if got >= want {
+			return
+		}
+		select {
+		case <-m.notify:
+		case <-deadline:
+			m.mu.Lock()
+			got = m.counts[key]
+			all := fmt.Sprintf("%v", m.counts)
+			m.mu.Unlock()
+			t.Fatalf("authz metric %q = %d, want >= %d within %s (all=%s)", key, got, want, timeout, all)
+		}
+	}
+}
+
 // TestConduitHA_2796_C16b_ActiveAuthzCrossNode validates ptone/scion#2796
 // checkbox "C16b (T2 active authorization)" across two Postgres hub nodes with
-// a short authz_recheck_interval (200ms) and UserStreamAuthzMax (3s):
-//   - Renewal: streams whose permission still holds stay open past their
-//     authorization interval (3s) and keep echoing.
-//   - Fast-path NOTIFY revocation: revoking u1's attach role binding through
-//     Hub B closes u1's cross-node PTY on Hub A with 4401 authz_expired within
-//     1s, while u2's stream stays open.
+// a deterministic fake AuthzClock, short authz_recheck_interval (200ms), and
+// UserStreamAuthzMax (5s):
+//   - Renewal: advancing AuthzClock by UserStreamAuthzMax fires the interval
+//     check and records interval/renewed/pty for both streams while permission
+//     holds; both PTYs keep echoing.
+//   - Fast-path NOTIFY revocation: with AuthzClock frozen (so the periodic
+//     sweep cannot fire), revoking u1's attach role binding through Hub B
+//     closes u1's cross-node PTY on Hub A with 4401 authz_expired and records
+//     notify/closed/pty, while u2's stream stays open.
 //   - Missed-notification sweep: with Hub A's Postgres LISTEN blocked via
-//     BlockLISTEN, revoking u2's attach role binding through Hub B still closes
-//     u2's PTY on Hub A with 4401 authz_expired within 1s, with an explicit
-//     assertion that sweepStart+closeBound < u2Dial+2*authzMax so u2's next
-//     interval renewal deadline cannot satisfy the sweep check.
+//     BlockLISTEN, revoking u2's attach role binding through Hub B and
+//     advancing AuthzClock by one recheckInterval (200ms, far below authzMax)
+//     closes u2's PTY on Hub A with 4401 authz_expired and records
+//     sweep/closed/pty.
 func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	const (
 		recheckInterval = 200 * time.Millisecond
-		authzMax        = 3 * time.Second
-		closeBound      = 1 * time.Second
+		authzMax        = 5 * time.Second
+		closeBound      = 5 * time.Second
 	)
+	authzClk := clock.NewFake(time.Now().UTC().Truncate(time.Second))
 	env := newConduitHAEnvWith(t, conduitHAOptions{
 		AuthzRecheckInterval: recheckInterval,
 		UserStreamAuthzMax:   authzMax,
+		AuthzClock:           authzClk,
 	})
 	haSetBrokerAttach(t, env, false)
 	ctx := context.Background()
+
+	metrics := newHAAuthzMetrics()
+	var metricsIface conduitStreamAuthzMetrics = metrics
+	env.HubA.Server.conduitAuthzMetrics.Store(&metricsIface)
 
 	// Use Hub B's dev admin token for Hub B's role-binding DELETE API, and
 	// create two project members (u1, u2) with a custom agent.attach binding.
@@ -468,46 +528,67 @@ func TestConduitHA_2796_C16b_ActiveAuthzCrossNode(t *testing.T) {
 	pty1 := haWaitFakePTY(t, agent.PTYs.Spawned)
 	haPTYEcho(t, c1, "u1-initial")
 
-	u2Dial := time.Now()
 	c2, _, err := haDialPTY(t, env.HubA, env.Agent.ID, u2Tok, "")
 	require.NoError(t, err)
 	pty2 := haWaitFakePTY(t, agent.PTYs.Spawned)
 	haPTYEcho(t, c2, "u2-initial")
 
-	// 1. Renewal when permission still holds: wait past UserStreamAuthzMax
-	//    (3s) and verify both streams stay open and echo.
-	time.Sleep(authzMax + 250*time.Millisecond)
+	// 1. Renewal when permission still holds: advance AuthzClock by authzMax
+	//    and require interval/renewed/pty to be recorded for both streams
+	//    before checking post-renewal echoes.
+	authzClk.Advance(authzMax)
+	metrics.waitCount(t, conduitAuthzTriggerInterval+"/"+conduitAuthzOutcomeRenewed+"/pty", 2, 10*time.Second)
 	haPTYEcho(t, c1, "u1-renewed")
 	haPTYEcho(t, c2, "u2-renewed")
 
-	// 2. Cross-node revocation via Hub B API -> u1 closes with 4401
-	//    authz_expired within closeBound, while u2 stays open.
+	// 2. Fast-path NOTIFY revocation: first confirm Hub A's Postgres LISTEN
+	//    connection is actively receiving conduitAuthzChangedSubject events
+	//    from Hub B (mirrors conduit_authz_postgres_test.go waitListening so
+	//    the fast-path test never races initial LISTEN setup). With AuthzClock
+	//    frozen (so sweep cannot fire), revoking u1 via Hub B API must close
+	//    u1 with 4401 authz_expired via trigger=notify, while u2 stays open.
+	listenCh, unsubListen := env.HubA.Events.Subscribe(conduitAuthzChangedSubject)
+	probeMarker := conduitAuthzMatch{AgentID: "listen-probe-" + uuid.NewString()}
+	require.NoError(t, pollUntil(10*time.Second, func() error {
+		env.HubB.Events.PublishRaw(conduitAuthzChangedSubject, probeMarker)
+		select {
+		case evt := <-listenCh:
+			if strings.Contains(string(evt.Data), probeMarker.AgentID) {
+				return nil
+			}
+			return errors.New("waiting for matching LISTEN probe")
+		case <-time.After(100 * time.Millisecond):
+			return errors.New("Hub A LISTEN not yet receiving Hub B conduitAuthzChangedSubject")
+		}
+	}))
+	unsubListen()
+
 	revokeStart := time.Now()
 	deleteBindingOnHubB(u1BindID)
 	ce1 := haPTYReadClose(t, c1, closeBound)
 	assert.LessOrEqual(t, time.Since(revokeStart), closeBound)
 	assert.Equal(t, wsprotocol.ClosePTYAuthRequired, ce1.Code)
 	assert.Equal(t, conduitReasonAuthzExpired, ce1.Text)
+	metrics.waitCount(t, conduitAuthzTriggerNotify+"/"+conduitAuthzOutcomeClosed+"/pty", 1, 10*time.Second)
 	haWaitFakePTYClosed(t, pty1)
 
 	haPTYEcho(t, c2, "u2-still-open")
 
-	// 3. Missed notification: block Hub A's Postgres LISTEN, then revoke u2
-	//    through Hub B. The 200ms periodic sweep on Hub A must close u2 with
-	//    4401 authz_expired within closeBound, strictly before u2's next
-	//    interval renewal deadline (u2Dial + 2*authzMax).
+	// 3. Missed notification: block Hub A's Postgres LISTEN, revoke u2 through
+	//    Hub B, and advance AuthzClock by one recheckInterval (200ms, far
+	//    below authzMax=5s). The periodic sweep on Hub A must close u2 with
+	//    4401 authz_expired and record trigger=sweep.
 	unblock := env.BlockLISTEN(t, env.HubA)
 	defer unblock()
 
 	sweepStart := time.Now()
-	require.True(t, sweepStart.Add(closeBound).Before(u2Dial.Add(2*authzMax)),
-		"sweep window (%s) must end strictly before u2's next interval deadline (%s)",
-		sweepStart.Add(closeBound).Sub(u2Dial), 2*authzMax)
 	deleteBindingOnHubB(u2BindID)
+	authzClk.Advance(recheckInterval)
 	ce2 := haPTYReadClose(t, c2, closeBound)
 	assert.LessOrEqual(t, time.Since(sweepStart), closeBound)
 	assert.Equal(t, wsprotocol.ClosePTYAuthRequired, ce2.Code)
 	assert.Equal(t, conduitReasonAuthzExpired, ce2.Text)
+	metrics.waitCount(t, conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/pty", 1, 10*time.Second)
 	haWaitFakePTYClosed(t, pty2)
 }
 
@@ -567,23 +648,32 @@ func TestConduitHA_2796_C5_SlowReaderIsolationCrossNode(t *testing.T) {
 	t.Cleanup(func() { _ = tunnelStream.Close() })
 
 	// Wait until the producer has written at least one stream window (256 KiB)
-	// and then stalls (no further progress over 100ms).
-	require.NoError(t, pollUntil(10*time.Second, func() error {
+	// and then stalls for 5 consecutive 100ms quiet windows (500ms total) so
+	// staged buffer fills under CPU load do not trigger mid-fill.
+	require.NoError(t, pollUntil(15*time.Second, func() error {
 		if bulkWritten.Load() < conduit.DefaultStreamWindow {
 			return fmt.Errorf("bulkWritten=%d < %d", bulkWritten.Load(), conduit.DefaultStreamWindow)
 		}
 		return nil
 	}))
 	var stalledAt int64
-	require.NoError(t, pollUntil(10*time.Second, func() error {
-		before := bulkWritten.Load()
+	const requiredQuietWindows = 5
+	quietCount := 0
+	lastBytes := bulkWritten.Load()
+	require.NoError(t, pollUntil(20*time.Second, func() error {
 		time.Sleep(100 * time.Millisecond)
-		after := bulkWritten.Load()
-		if after != before {
-			return fmt.Errorf("bulk producer still advancing: %d -> %d", before, after)
+		nowBytes := bulkWritten.Load()
+		if nowBytes == lastBytes {
+			quietCount++
+			if quietCount >= requiredQuietWindows {
+				stalledAt = nowBytes
+				return nil
+			}
+			return fmt.Errorf("confirming backpressure stall (%d/%d quiet windows at %d bytes)", quietCount, requiredQuietWindows, nowBytes)
 		}
-		stalledAt = after
-		return nil
+		quietCount = 0
+		lastBytes = nowBytes
+		return fmt.Errorf("bulk producer still advancing: %d", nowBytes)
 	}))
 
 	// While the TCP tunnel reader is completely stalled, an interactive PTY

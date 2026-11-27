@@ -122,6 +122,7 @@ type Result struct {
 	AgentCount              int
 	DeliverAttempts         int64
 	DeliverSucceeded        int64
+	DeliverNonDelivered     int64
 	Deliver429s             int64
 	DeliverErrors           int64
 	LargeBodySucceeded      int64
@@ -246,26 +247,35 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				case <-time.After(15 * time.Millisecond):
 				}
 			}
-			// Wait until the bulk producer is actually backpressured (no
-			// further byte progress over 100ms) so StalledBulkBytesAtStart
-			// captures the steady-state stalled watermark.
+			// Wait until the bulk producer is actually backpressured (5
+			// consecutive 100ms quiet windows = 500ms with zero byte progress)
+			// so staged window fills under CPU load do not trigger mid-fill.
+			stallDeadline := time.Now().Add(20 * time.Second)
+			const requiredQuietWindows = 5
+			quietCount := 0
+			lastBytes := bulkWritten.Load()
 			for {
-				before := bulkWritten.Load()
 				select {
 				case <-ctx.Done():
 					return nil, ctx.Err()
 				case <-time.After(100 * time.Millisecond):
 				}
-				after := bulkWritten.Load()
-				if after == before {
-					stalledAtStart = after
-					break
+				nowBytes := bulkWritten.Load()
+				if nowBytes == lastBytes {
+					quietCount++
+					if quietCount >= requiredQuietWindows {
+						stalledAtStart = nowBytes
+						break
+					}
+				} else {
+					quietCount = 0
+					lastBytes = nowBytes
 				}
-				if time.Now().After(deadline) {
+				if time.Now().After(stallDeadline) {
 					// Record the current count rather than erroring here so
 					// callers asserting StalledBulkBytesAtStart == StalledBulkBytesWritten
 					// can surface the lack of backpressure directly.
-					stalledAtStart = after
+					stalledAtStart = nowBytes
 					break
 				}
 			}
@@ -277,17 +287,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		StalledBulkBytesAtStart: stalledAtStart,
 	}
 	var (
-		mu             sync.Mutex
-		deliverAttempt atomic.Int64
-		deliverOK      atomic.Int64
-		deliver429     atomic.Int64
-		deliverErr     atomic.Int64
-		largeOK        atomic.Int64
-		largeErr       atomic.Int64
-		rotateOK       atomic.Int64
-		rotateErr      atomic.Int64
-		brokerOK       atomic.Int64
-		brokerErr      atomic.Int64
+		mu                  sync.Mutex
+		deliverAttempt      atomic.Int64
+		deliverOK           atomic.Int64
+		deliverNonDelivered atomic.Int64
+		deliver429          atomic.Int64
+		deliverErr          atomic.Int64
+		largeOK             atomic.Int64
+		largeErr            atomic.Int64
+		rotateOK            atomic.Int64
+		rotateErr           atomic.Int64
+		brokerOK            atomic.Int64
+		brokerErr           atomic.Int64
 	)
 	recordErr := func(e error) {
 		if e == nil {
@@ -325,7 +336,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				defer cancel()
 				start := time.Now()
 				deliverAttempt.Add(1)
-				status, _, err := cfg.Deliver(callCtx, agentID, fmt.Sprintf("c19-agent-%d-msg-%d", idx, seq))
+				status, outcome, err := cfg.Deliver(callCtx, agentID, fmt.Sprintf("c19-agent-%d-msg-%d", idx, seq))
 				elapsed := time.Since(start)
 				seq++
 				if status == http.StatusTooManyRequests {
@@ -338,6 +349,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					} else {
 						recordErr(fmt.Errorf("deliver agent %s: status %d", agentID, status))
 					}
+					return
+				}
+				if outcome != "delivered" {
+					deliverNonDelivered.Add(1)
+					recordErr(fmt.Errorf("deliver agent %s: outcome %q, want delivered", agentID, outcome))
 					return
 				}
 				deliverOK.Add(1)
@@ -370,7 +386,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 				start := time.Now()
 				deliverAttempt.Add(1)
-				status, _, err := cfg.Deliver(callCtx, target.AgentID, largePayload)
+				status, outcome, err := cfg.Deliver(callCtx, target.AgentID, largePayload)
 				elapsed := time.Since(start)
 				cancel()
 				if status == http.StatusTooManyRequests {
@@ -384,6 +400,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 					} else {
 						recordErr(fmt.Errorf("large deliver agent %s: status %d", target.AgentID, status))
 					}
+					continue
+				}
+				if outcome != "delivered" {
+					largeErr.Add(1)
+					deliverNonDelivered.Add(1)
+					recordErr(fmt.Errorf("large deliver agent %s: outcome %q, want delivered", target.AgentID, outcome))
 					continue
 				}
 				largeOK.Add(1)
@@ -449,6 +471,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	res.DeliverAttempts = deliverAttempt.Load()
 	res.DeliverSucceeded = deliverOK.Load()
+	res.DeliverNonDelivered = deliverNonDelivered.Load()
 	res.Deliver429s = deliver429.Load()
 	res.DeliverErrors = deliverErr.Load()
 	res.LargeBodySucceeded = largeOK.Load()

@@ -40,6 +40,13 @@ func TestNoProductionBinaryImportsConduittest(t *testing.T) {
 		modulePath + "/cmd/scion",
 		modulePath + "/cmd/sciontool",
 	} {
+		files, err := nonTestGoFiles(root, entry)
+		if err != nil {
+			t.Fatalf("inspecting %s: %v", entry, err)
+		}
+		if len(files) == 0 {
+			t.Fatalf("entry package %s has zero non-test .go files; update the guard if the binary moved", entry)
+		}
 		chain, err := findImport(root, entry, selfPath)
 		if err != nil {
 			t.Fatalf("walking %s: %v", entry, err)
@@ -91,6 +98,16 @@ func TestFindImportDetectsConduittest(t *testing.T) {
 	if chain != nil {
 		t.Fatalf("chain = %v, want none (only _test.go imports conduittest)", chain)
 	}
+
+	// A missing/moved entry package must report zero non-test .go files so
+	// TestNoProductionBinaryImportsConduittest cannot pass vacuously.
+	missingFiles, err := nonTestGoFiles(root, modulePath+"/cmd/doesnotexist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missingFiles) != 0 {
+		t.Fatalf("missing entry returned %v, want empty", missingFiles)
+	}
 }
 
 func moduleRoot(t *testing.T) string {
@@ -139,7 +156,7 @@ func findImport(root, from, target string) ([]string, error) {
 	return nil, nil
 }
 
-func packageImports(root, pkg string) ([]string, error) {
+func nonTestGoFiles(root, pkg string) ([]string, error) {
 	dir := root
 	if pkg != modulePath {
 		dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, modulePath+"/")))
@@ -149,11 +166,22 @@ func packageImports(root, pkg string) ([]string, error) {
 		return nil, err
 	}
 	var out []string
+	for _, n := range names {
+		if !strings.HasSuffix(n, "_test.go") {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+func packageImports(root, pkg string) ([]string, error) {
+	names, err := nonTestGoFiles(root, pkg)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
 	fset := token.NewFileSet()
 	for _, n := range names {
-		if strings.HasSuffix(n, "_test.go") {
-			continue
-		}
 		f, err := parser.ParseFile(fset, n, nil, parser.ImportsOnly)
 		if err != nil {
 			return nil, err
