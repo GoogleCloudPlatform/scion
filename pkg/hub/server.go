@@ -6629,6 +6629,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			!state.Activity(agent.Activity).IsSuspendEligible() ||
 			agent.ActivitySince == nil ||
 			!agent.ActivitySince.Before(cutoff) ||
+			(agent.LastDeliveryAt != nil && !agent.LastDeliveryAt.Before(cutoff)) ||
 			agent.LastSeen.IsZero() ||
 			agent.LastSeen.Before(heartbeatCutoff) {
 			slog.Info("Scheduler: skipping idle auto-suspend; agent no longer eligible in the same run",

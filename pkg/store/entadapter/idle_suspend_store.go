@@ -222,12 +222,14 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 			},
 		}
 	}
-	if row.LastDeliveryAt != nil && !claimTime(*row.LastDeliveryAt).Before(claimTime(*row.ActivitySince)) {
+	if row.LastDeliveryAt != nil && !claimTime(*row.LastDeliveryAt).Before(claimTime(*row.ActivitySince)) &&
+		(cond.IdleSuspendAfter <= 0 || !row.LastDeliveryAt.Before(now.Add(-cond.IdleSuspendAfter))) {
 		return &store.IdleSuspendPreconditionError{
 			Predicate: "delivery_since_activity",
 			Attrs: []any{
 				"last_delivery_at", row.LastDeliveryAt.UTC(),
 				"row_activity_since", row.ActivitySince.UTC(),
+				"idle_suspend_after", cond.IdleSuspendAfter,
 				"store_now", now.UTC(),
 			},
 		}

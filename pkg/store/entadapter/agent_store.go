@@ -3768,6 +3768,10 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtIsNil(),
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
+		agent.Or(
+			agent.LastDeliveryAtIsNil(),
+			agent.LastDeliveryAtLT(cutoff.UTC()),
+		),
 	)
 	if excludeNeverSuspend {
 		q = q.Where(agent.SuspendPolicyNEQ(agent.SuspendPolicyNever))
