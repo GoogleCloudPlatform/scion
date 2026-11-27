@@ -1335,6 +1335,9 @@ func (s *Server) selectMetricsDashboardSource(ledgerEnabled bool, view, groupBy 
 			src.hourlyRetentionDays = func() int {
 				return s.usageRetentionConfig().HourlyRollupsDays
 			}
+			src.newCapabilityLookup = func(ctx context.Context) usageCapabilityLookup {
+				return newUsageCapabilityMemo(ctx, s).resolve
+			}
 			return src
 		}
 		if cm == nil {

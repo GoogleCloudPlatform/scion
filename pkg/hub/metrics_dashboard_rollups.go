@@ -37,6 +37,10 @@ type HubRollupSource struct {
 	// retention horizon (in days; 0 = unlimited). When nil, defaults to
 	// config.DefaultResolvedTelemetryRetention().HourlyRollupsDays.
 	hourlyRetentionDays func() int
+	// newCapabilityLookup optionally constructs a per-request usage.yaml
+	// capability lookup memo (wired from *Server so dashboard and scoped usage
+	// API statuses agree). When nil, capability is treated as unknown.
+	newCapabilityLookup func(ctx context.Context) usageCapabilityLookup
 	// groupLimit optionally overrides dashboardRollupGroupLimit in tests to
 	// exercise truncation and daily degradation deterministically.
 	groupLimit int
@@ -323,18 +327,39 @@ func knownSummableTotal(t *DashboardTokenTotals) int64 {
 	return *t.SummableTokens
 }
 
-func (s *HubRollupSource) queryMeasurement(ctx context.Context, projectID string, w resolvedRollupWindow, totalEvents int64) (*DashboardMeasurement, error) {
+func (s *HubRollupSource) queryMeasurement(
+	ctx context.Context,
+	projectID string,
+	w resolvedRollupWindow,
+	totalEvents int64,
+	hasLegacyRollups bool,
+	hasNonLegacyRollups bool,
+) (*DashboardMeasurement, error) {
 	cov, err := s.store.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
-		ProjectID:  projectID,
-		Since:      w.since,
-		Until:      w.until,
-		StaleAfter: staleHeartbeatMultiplier * defaultHeartbeatInterval,
-		DBNow:      w.dbNow,
+		ProjectID:    projectID,
+		Since:        w.since,
+		Until:        w.until,
+		StaleAfter:   staleHeartbeatMultiplier * defaultHeartbeatInterval,
+		StartupGrace: defaultUsageStartupGrace,
+		DBNow:        w.dbNow,
 	})
 	if err != nil {
 		return nil, err
 	}
-	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, totalEvents, w.dbNow)
+	var resolveCap usageCapabilityLookup
+	if s.newCapabilityLookup != nil {
+		resolveCap = s.newCapabilityLookup(ctx)
+	}
+	windowIncludesNow := usageWindowIncludesNow(w.until, w.dbNow)
+	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(
+		cov,
+		totalEvents,
+		hasLegacyRollups,
+		hasNonLegacyRollups,
+		w.dbNow,
+		windowIncludesNow,
+		resolveCap,
+	)
 	return &DashboardMeasurement{
 		Status:           status,
 		UnmeasuredAgents: unmeasuredAgents,
@@ -403,7 +428,7 @@ func (s *HubRollupSource) QuerySummary(ctx context.Context, periodDays int, opts
 		summary.TotalSessions = sessionsRes.TotalSessions
 	}
 
-	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, rollupRes.Totals.Events)
+	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, rollupRes.Totals.Events, rollupRes.HasLegacyRollups, rollupRes.HasNonLegacyRollups)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
 	} else {
@@ -542,6 +567,7 @@ func (s *HubRollupSource) QuerySessions(ctx context.Context, periodDays int, opt
 	}
 
 	var totalEvents int64
+	var hasLegacyRollups, hasNonLegacyRollups bool
 	if rollupRes, rErr := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
 		Granularity: w.granularity,
 		Since:       w.since,
@@ -551,9 +577,11 @@ func (s *HubRollupSource) QuerySessions(ctx context.Context, periodDays int, opt
 		queryErrors = append(queryErrors, fmt.Sprintf("rollup totals: %v", rErr))
 	} else {
 		totalEvents = rollupRes.Totals.Events
+		hasLegacyRollups = rollupRes.HasLegacyRollups
+		hasNonLegacyRollups = rollupRes.HasNonLegacyRollups
 	}
 
-	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents)
+	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents, hasLegacyRollups, hasNonLegacyRollups)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
 	} else {
@@ -660,8 +688,11 @@ func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, o
 	}
 
 	var totalEvents int64
+	var hasLegacyRollups, hasNonLegacyRollups bool
 	if qs.byModel != nil {
 		totalEvents = qs.byModel.Totals.Events
+		hasLegacyRollups = qs.byModel.HasLegacyRollups
+		hasNonLegacyRollups = qs.byModel.HasNonLegacyRollups
 		view.ByModel = buildCallsSeries(qs.byModel.Groups, w, qs.byModel.Truncated, func(g *store.UsageRollupGroup) string {
 			return g.Model
 		})
@@ -669,19 +700,26 @@ func (s *HubRollupSource) QueryModelCalls(ctx context.Context, periodDays int, o
 	if qs.byHarness != nil {
 		if totalEvents == 0 {
 			totalEvents = qs.byHarness.Totals.Events
+			hasLegacyRollups = qs.byHarness.HasLegacyRollups
+			hasNonLegacyRollups = qs.byHarness.HasNonLegacyRollups
 		}
 		view.ByHarness = buildCallsSeries(qs.byHarness.Groups, w, qs.byHarness.Truncated, func(g *store.UsageRollupGroup) string {
 			return g.Harness
 		})
 	}
 	if qs.byUser != nil {
+		if totalEvents == 0 {
+			totalEvents = qs.byUser.Totals.Events
+			hasLegacyRollups = qs.byUser.HasLegacyRollups
+			hasNonLegacyRollups = qs.byUser.HasNonLegacyRollups
+		}
 		view.ByUser = buildCallsSeries(qs.byUser.Groups, w, qs.byUser.Truncated, func(g *store.UsageRollupGroup) string {
 			return g.BillingUserID
 		})
 	}
 
 	queryErrors := qs.errors
-	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents)
+	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, totalEvents, hasLegacyRollups, hasNonLegacyRollups)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
 	} else {
@@ -842,7 +880,7 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 		Truncated:         rollupRes.Truncated,
 	}
 
-	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, rollupRes.Totals.Events)
+	measurement, err := s.queryMeasurement(ctx, cfg.ProjectID, w, rollupRes.Totals.Events, rollupRes.HasLegacyRollups, rollupRes.HasNonLegacyRollups)
 	if err != nil {
 		view.PartialFailure = true
 		view.PartialErrors = []string{fmt.Sprintf("measurement: %v", err)}
@@ -917,7 +955,7 @@ func (s *HubRollupSource) QueryProjectSummary(ctx context.Context, projectID str
 		summary.SessionsCount24h = sessionsRes.TotalSessions
 	}
 
-	measurement, err := s.queryMeasurement(ctx, projectID, w, rollupRes.Totals.Events)
+	measurement, err := s.queryMeasurement(ctx, projectID, w, rollupRes.Totals.Events, rollupRes.HasLegacyRollups, rollupRes.HasNonLegacyRollups)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("measurement: %v", err))
 	} else {
