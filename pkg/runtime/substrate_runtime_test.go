@@ -3059,6 +3059,46 @@ func TestNewSubstrateRuntime_RejectsPlaintextRouterEndpoint(t *testing.T) {
 	}
 }
 
+func TestNewSubstrateRuntime_RejectsInvalidRouterConnectEndpoint(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+
+	built := 0
+	origBuilder := substrateRuntimeBuilder
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		built++
+		return nil, errors.New("builder must not be called for invalid router_connect_endpoint")
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	for _, bad := range []string{
+		"https://atenet-router.ate-system.svc:8444",
+		"http://atenet-router.ate-system.svc:8444",
+		"atenet-router.ate-system.svc",
+		":8444",
+		"atenet-router.ate-system.svc:0",
+		"atenet-router.ate-system.svc:65536",
+		"atenet-router.ate-system.svc:abc",
+	} {
+		_, err := NewSubstrateRuntime(&config.V1SubstrateConfig{
+			APIEndpoint:           "api.ate-system.svc:443",
+			RouterEndpoint:        "https://atenet-router.ate-system.svc",
+			RouterConnectEndpoint: bad,
+		})
+		if err == nil {
+			t.Fatalf("NewSubstrateRuntime(RouterConnectEndpoint=%q) = nil error, want refusal", bad)
+		}
+		if !errors.Is(err, ErrSubstrateProfileInvalid) {
+			t.Errorf("NewSubstrateRuntime(RouterConnectEndpoint=%q) error = %v, want ErrSubstrateProfileInvalid", bad, err)
+		}
+		if !strings.Contains(err.Error(), "router_connect_endpoint") {
+			t.Errorf("NewSubstrateRuntime(RouterConnectEndpoint=%q) error = %v, want message naming router_connect_endpoint", bad, err)
+		}
+	}
+	if built != 0 {
+		t.Errorf("builder called %d times, want 0", built)
+	}
+}
+
 // TestSubstrateAgentState_SharedAcrossConfigChange confirms control tokens
 // and agent records are shared process-wide, not per SubstrateRuntime
 // instance, because the broker resolves a genuinely new instance whenever

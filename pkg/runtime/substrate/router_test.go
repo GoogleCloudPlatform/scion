@@ -154,7 +154,14 @@ func (f *fakeConnectRouter) handle(c net.Conn) {
 			statusCode = http.StatusOK
 		}
 		resp := fmt.Sprintf("%s %s %s", ir.method, ir.path, ir.body)
-		if _, err := fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s", statusCode, http.StatusText(statusCode), len(resp), resp); err != nil {
+		connHdr := ""
+		if inner.Close {
+			connHdr = "Connection: close\r\n"
+		}
+		if _, err := fmt.Fprintf(c, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n%s\r\n%s", statusCode, http.StatusText(statusCode), len(resp), connHdr, resp); err != nil {
+			return
+		}
+		if inner.Close {
 			return
 		}
 	}
@@ -637,6 +644,258 @@ func TestRouterClient_RejectsPlaintextEndpointWhenTLSEnabled(t *testing.T) {
 	if got := hits.Load(); got != 0 {
 		t.Errorf("plaintext server received %d request(s), want 0 (must fail closed without dialing)", got)
 	}
+}
+
+func TestRouterClient_ControlPortDoesNotFollowRedirectsWhenTLSEnabled(t *testing.T) {
+	fx := newRouterTLSFixture(t)
+
+	var plainHits atomic.Int32
+	plainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		plainHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plainSrv.Close()
+
+	var redirectCode atomic.Int32
+	routerSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		http.Redirect(w, r, plainSrv.URL+"/leaked", int(redirectCode.Load()))
+	}))
+	routerSrv.TLS = fx.serverTLS()
+	routerSrv.StartTLS()
+	defer routerSrv.Close()
+
+	c := NewRouterClientWithOptions(RouterOptions{
+		Endpoint:        routerSrv.URL,
+		ConnectEndpoint: "unused.invalid:8444",
+		TLS:             fx.src,
+	})
+
+	for _, code := range []int{http.StatusTemporaryRedirect, http.StatusFound} {
+		for _, method := range []string{http.MethodPost, http.MethodGet} {
+			name := fmt.Sprintf("%d_%s", code, method)
+			t.Run(name, func(t *testing.T) {
+				redirectCode.Store(int32(code))
+				var body io.Reader
+				if method == http.MethodPost {
+					body = strings.NewReader(`{"secret":"bootstrap-token"}`)
+				}
+				resp, err := c.Do(testCtx(t), "space", "actor-1", ControlServerPort, method, "/scion/v1/bootstrap", body, nil)
+				if err != nil {
+					t.Fatalf("Do(%s) error = %v, want raw %d redirect response", name, err, code)
+				}
+				_ = readBody(t, resp)
+				if resp.StatusCode != code {
+					t.Errorf("Do(%s) status = %d, want %d", name, resp.StatusCode, code)
+				}
+				if loc, want := resp.Header.Get("Location"), plainSrv.URL+"/leaked"; loc != want {
+					t.Errorf("Location = %q, want %q", loc, want)
+				}
+				if got := plainHits.Load(); got != 0 {
+					t.Fatalf("plaintext redirect target received %d hit(s), want 0", got)
+				}
+			})
+		}
+	}
+}
+
+func TestRouterClient_TransportRefusesPlaintextDialWhenTLSEnabled(t *testing.T) {
+	fx := newRouterTLSFixture(t)
+
+	var plainHits atomic.Int32
+	plainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		plainHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer plainSrv.Close()
+
+	c := NewRouterClientWithOptions(RouterOptions{
+		Endpoint:        "https://atenet-router.ate-system.svc",
+		ConnectEndpoint: "unused.invalid:8444",
+		TLS:             fx.src,
+	})
+
+	tr, ok := c.HTTPClient.Transport.(*http.Transport)
+	if !ok || tr.DialContext == nil {
+		t.Fatalf("HTTPClient.Transport = %T (DialContext nil=%v), want *http.Transport with non-nil DialContext", c.HTTPClient.Transport, tr == nil || tr.DialContext == nil)
+	}
+	if conn, err := tr.DialContext(testCtx(t), "tcp", plainSrv.Listener.Addr().String()); err == nil {
+		_ = conn.Close()
+		t.Fatal("transport.DialContext() = nil error, want plaintext dial refusal")
+	} else if !strings.Contains(err.Error(), "plaintext HTTP dial refused when router TLS is enabled") {
+		t.Errorf("transport.DialContext() error = %v, want plaintext dial refusal message", err)
+	}
+
+	req, err := http.NewRequestWithContext(testCtx(t), http.MethodGet, plainSrv.URL+"/probe", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := c.HTTPClient.Do(req); err == nil {
+		_ = readBody(t, resp)
+		t.Fatal("HTTPClient.Do(http://...) = nil error, want plaintext dial refusal")
+	} else if !strings.Contains(err.Error(), "plaintext HTTP dial refused when router TLS is enabled") {
+		t.Errorf("HTTPClient.Do(http://...) error = %v, want plaintext dial refusal message", err)
+	}
+	if got := plainHits.Load(); got != 0 {
+		t.Errorf("plaintext server received %d hit(s), want 0", got)
+	}
+}
+
+func TestRouterClient_TrimsEndpointAndConnectEndpointWhitespace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+	f := newFakeConnectRouter(t, nil)
+
+	c := NewRouterClientWithOptions(RouterOptions{
+		Endpoint:        "  " + srv.URL + "/  ",
+		ConnectEndpoint: "  " + f.addr() + "  ",
+	})
+	if c.Endpoint != srv.URL {
+		t.Errorf("Endpoint = %q, want %q", c.Endpoint, srv.URL)
+	}
+	if c.ConnectEndpoint != f.addr() {
+		t.Errorf("ConnectEndpoint = %q, want %q", c.ConnectEndpoint, f.addr())
+	}
+
+	resp, err := c.Do(testCtx(t), "space", "actor-1", ControlServerPort, http.MethodGet, "/healthz", nil, nil)
+	if err != nil {
+		t.Fatalf("port-80 Do() error = %v", err)
+	}
+	if body := readBody(t, resp); resp.StatusCode != http.StatusOK || body != "ok" {
+		t.Errorf("port-80 Do() = %d %q, want 200 ok", resp.StatusCode, body)
+	}
+
+	resp, err = c.Do(testCtx(t), "space", "actor-1", 8080, http.MethodGet, "/v1/ping", nil, nil)
+	if err != nil {
+		t.Fatalf("port-8080 Do() error = %v", err)
+	}
+	if body := readBody(t, resp); resp.StatusCode != http.StatusOK || body != "GET /v1/ping " {
+		t.Errorf("port-8080 Do() = %d %q, want 200", resp.StatusCode, body)
+	}
+
+	cDefault := NewRouterClientWithOptions(RouterOptions{
+		Endpoint:        "  https://atenet-router.ate-system.svc/  ",
+		ConnectEndpoint: "   ",
+	})
+	wantConnect := "atenet-router.ate-system.svc:" + strconv.Itoa(DefaultRouterConnectPort)
+	if cDefault.ConnectEndpoint != wantConnect {
+		t.Errorf("whitespace-only ConnectEndpoint resolved to %q, want %q", cDefault.ConnectEndpoint, wantConnect)
+	}
+}
+
+func TestRouterClient_ConnectFailedTunnelDoesNotRetainOrphanedPool(t *testing.T) {
+	poolCount := func(c *RouterClient) int {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return len(c.pools)
+	}
+
+	t.Run("404 refusal on unknown actors leaves no pool", func(t *testing.T) {
+		f := newFakeConnectRouter(t, nil)
+		f.setRefuse(http.StatusNotFound, http.StatusNotFound)
+		c := NewRouterClientWithOptions(RouterOptions{Endpoint: "http://unused.invalid", ConnectEndpoint: f.addr()})
+
+		for _, ghost := range []string{"ghost-1", "ghost-2"} {
+			resp, err := c.Do(testCtx(t), "space", ghost, 8080, http.MethodGet, "/", nil, nil)
+			if err != nil {
+				t.Fatalf("Do(%s) error = %v", ghost, err)
+			}
+			_ = readBody(t, resp)
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("Do(%s) status = %d, want 404", ghost, resp.StatusCode)
+			}
+		}
+		if n := poolCount(c); n != 0 {
+			t.Errorf("pools retained after 404 refusals = %d, want 0", n)
+		}
+	})
+
+	t.Run("dial error leaves no pool", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedAddr := ln.Addr().String()
+		_ = ln.Close()
+
+		c := NewRouterClientWithOptions(RouterOptions{Endpoint: "http://unused.invalid", ConnectEndpoint: closedAddr})
+		if resp, err := c.Do(testCtx(t), "space", "actor-1", 8080, http.MethodGet, "/", nil, nil); err == nil {
+			_ = readBody(t, resp)
+			t.Fatal("Do() against closed connect listener succeeded, want dial error")
+		}
+		if n := poolCount(c); n != 0 {
+			t.Errorf("pools retained after dial failure = %d, want 0", n)
+		}
+	})
+
+	t.Run("404 after earlier 200 evicts stale pool", func(t *testing.T) {
+		f := newFakeConnectRouter(t, nil)
+		c := NewRouterClientWithOptions(RouterOptions{Endpoint: "http://unused.invalid", ConnectEndpoint: f.addr()})
+
+		resp, err := c.Do(testCtx(t), "space", "ephemeral", 8080, http.MethodGet, "/ok", nil, nil)
+		if err != nil {
+			t.Fatalf("initial Do() error = %v", err)
+		}
+		_ = readBody(t, resp)
+		if n := poolCount(c); n != 1 {
+			t.Fatalf("pools after 200 = %d, want 1", n)
+		}
+
+		// Close the pooled tunnel via Connection: close, then have the router
+		// answer 404 on the next outer CONNECT for the now-deleted actor.
+		resp2, err := c.Do(testCtx(t), "space", "ephemeral", 8080, http.MethodGet, "/bye", nil, http.Header{"Connection": {"close"}})
+		if err != nil {
+			t.Fatalf("second Do() error = %v", err)
+		}
+		_ = readBody(t, resp2)
+
+		f.setRefuse(http.StatusNotFound)
+		resp3, err := c.Do(testCtx(t), "space", "ephemeral", 8080, http.MethodGet, "/after-delete", nil, nil)
+		if err != nil {
+			t.Fatalf("third Do() error = %v", err)
+		}
+		_ = readBody(t, resp3)
+		if resp3.StatusCode != http.StatusNotFound {
+			t.Fatalf("third Do() status = %d, want 404", resp3.StatusCode)
+		}
+		if n := poolCount(c); n != 0 {
+			t.Errorf("pools after subsequent 404 = %d, want 0", n)
+		}
+	})
+
+	t.Run("concurrent requests share pool safely", func(t *testing.T) {
+		f := newFakeConnectRouter(t, nil)
+		f.setRefuse(http.StatusNotFound) // first dial 404, rest 200
+		c := NewRouterClientWithOptions(RouterOptions{Endpoint: "http://unused.invalid", ConnectEndpoint: f.addr()})
+
+		var wg sync.WaitGroup
+		var okCount atomic.Int32
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resp, err := c.Do(testCtx(t), "space", "shared", 8080, http.MethodGet, "/ping", nil, nil)
+				if err != nil {
+					t.Errorf("concurrent Do() error = %v", err)
+					return
+				}
+				_ = readBody(t, resp)
+				if resp.StatusCode == http.StatusOK {
+					okCount.Add(1)
+				}
+			}()
+		}
+		wg.Wait()
+		if okCount.Load() == 0 {
+			t.Fatal("expected concurrent 200 responses after initial 404")
+		}
+		if n := poolCount(c); n != 1 {
+			t.Errorf("pools after concurrent 200s = %d, want 1", n)
+		}
+	})
 }
 
 func TestRouterClient_ConnectInner503NotRetried(t *testing.T) {

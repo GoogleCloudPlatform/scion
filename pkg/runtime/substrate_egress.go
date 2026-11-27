@@ -347,6 +347,7 @@ func hostFromURLEnv(env map[string]string, keys ...string) string {
 // from a URL string, tolerating bare host[:port] values (no scheme) as well
 // as full URLs.
 func hostFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}

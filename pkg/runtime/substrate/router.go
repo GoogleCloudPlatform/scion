@@ -101,7 +101,7 @@ type RouterClient struct {
 	sleep func(context.Context, time.Duration) error
 
 	mu    sync.Mutex
-	pools map[connectPoolKey]*http.Transport
+	pools map[connectPoolKey]*connectPool
 }
 
 // connectPoolKey identifies one CONNECT tunnel pool.
@@ -109,6 +109,23 @@ type connectPoolKey struct {
 	atespace, actor string
 	port            int
 }
+
+// connectPool tracks active RoundTrip callers and whether a pooled transport
+// has ever established a working tunnel, so failed dials and non-retryable
+// CONNECT refusals (e.g. 404) do not leave orphaned transports in c.pools.
+type connectPool struct {
+	transport *http.Transport
+	inFlight  int
+	everOK    bool
+}
+
+var errPlaintextDialRefused = errors.New("substrate: plaintext HTTP dial refused when router TLS is enabled")
+
+func noRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+var defaultNoRedirectClient = &http.Client{CheckRedirect: noRedirect}
 
 // RouterOptions configures NewRouterClientWithOptions.
 type RouterOptions struct {
@@ -130,15 +147,17 @@ func NewRouterClient(endpoint string) *RouterClient {
 // NewRouterClientWithOptions builds a RouterClient from opts. An empty
 // ConnectEndpoint defaults to Endpoint's host on DefaultRouterConnectPort.
 func NewRouterClientWithOptions(opts RouterOptions) *RouterClient {
+	endpoint := strings.TrimRight(strings.TrimSpace(opts.Endpoint), "/")
+	connectEndpoint := strings.TrimSpace(opts.ConnectEndpoint)
+	if connectEndpoint == "" {
+		connectEndpoint = DefaultConnectEndpoint(endpoint)
+	}
 	c := &RouterClient{
-		Endpoint:        strings.TrimRight(opts.Endpoint, "/"),
-		ConnectEndpoint: opts.ConnectEndpoint,
+		Endpoint:        endpoint,
+		ConnectEndpoint: connectEndpoint,
 		TLS:             opts.TLS,
 		sleep:           sleepContext,
-		pools:           make(map[connectPoolKey]*http.Transport),
-	}
-	if c.ConnectEndpoint == "" {
-		c.ConnectEndpoint = DefaultConnectEndpoint(opts.Endpoint)
+		pools:           make(map[connectPoolKey]*connectPool),
 	}
 	transport := &http.Transport{
 		Proxy:               nil,
@@ -150,8 +169,14 @@ func NewRouterClientWithOptions(opts RouterOptions) *RouterClient {
 		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return dialTLS(ctx, tlsSource, network, addr)
 		}
+		transport.DialContext = func(context.Context, string, string) (net.Conn, error) {
+			return nil, errPlaintextDialRefused
+		}
 	}
-	c.HTTPClient = &http.Client{Transport: transport}
+	c.HTTPClient = &http.Client{
+		Transport:     transport,
+		CheckRedirect: noRedirect,
+	}
 	return c
 }
 
@@ -231,7 +256,10 @@ func (c *RouterClient) doOnce(ctx context.Context, atespace, actor string, port 
 		req.Header.Set(TargetActorHeader, atespace+"/"+actor)
 		client := c.HTTPClient
 		if client == nil {
-			client = http.DefaultClient
+			if c.TLS != nil {
+				return nil, false, errors.New("substrate: RouterClient.HTTPClient must not be nil when router TLS is enabled")
+			}
+			client = defaultNoRedirectClient
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -253,7 +281,9 @@ func (c *RouterClient) doOnce(ctx context.Context, atespace, actor string, port 
 		return nil, false, err
 	}
 	copyHeaders(req.Header, hdr)
-	resp, err := c.connectTransport(atespace, actor, port).RoundTrip(req)
+	poolKey, pool := c.acquireConnectPool(atespace, actor, port)
+	resp, err := pool.transport.RoundTrip(req)
+	c.releaseConnectPool(poolKey, pool, err)
 	if err != nil {
 		var refused *connectRefusedError
 		if errors.As(err, &refused) {
@@ -281,9 +311,9 @@ func (c *RouterClient) doOnce(ctx context.Context, atespace, actor string, port 
 func (c *RouterClient) DropActor(atespace, actor string) {
 	c.mu.Lock()
 	var drop []*http.Transport
-	for k, t := range c.pools {
+	for k, p := range c.pools {
 		if k.atespace == atespace && k.actor == actor {
-			drop = append(drop, t)
+			drop = append(drop, p.transport)
 			delete(c.pools, k)
 		}
 	}
@@ -293,29 +323,69 @@ func (c *RouterClient) DropActor(atespace, actor string) {
 	}
 }
 
-// connectTransport returns the pooled transport tunnelling to
-// atespace/actor:port, creating it on first use.
-func (c *RouterClient) connectTransport(atespace, actor string, port int) *http.Transport {
+// acquireConnectPool returns the pooled transport tunnelling to
+// atespace/actor:port, creating it on first use and incrementing its active
+// RoundTrip count so concurrent failures cannot evict an in-flight pool.
+func (c *RouterClient) acquireConnectPool(atespace, actor string, port int) (connectPoolKey, *connectPool) {
 	key := connectPoolKey{atespace: atespace, actor: actor, port: port}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pools == nil {
-		c.pools = make(map[connectPoolKey]*http.Transport)
+		c.pools = make(map[connectPoolKey]*connectPool)
 	}
-	if t, ok := c.pools[key]; ok {
-		return t
+	if p, ok := c.pools[key]; ok {
+		p.inFlight++
+		return key, p
 	}
-	t := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return c.dialConnect(ctx, atespace, actor, port)
+	p := &connectPool{
+		transport: &http.Transport{
+			Proxy: nil,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return c.dialConnect(ctx, atespace, actor, port)
+			},
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     connectTunnelIdleTimeout,
+			ForceAttemptHTTP2:   false,
 		},
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     connectTunnelIdleTimeout,
-		ForceAttemptHTTP2:   false,
+		inFlight: 1,
 	}
-	c.pools[key] = t
-	return t
+	c.pools[key] = p
+	return key, p
+}
+
+// releaseConnectPool updates pool state after RoundTrip completes, evicting
+// pools that have never succeeded or received a non-retryable CONNECT refusal
+// once no other RoundTrip is in flight on them.
+func (c *RouterClient) releaseConnectPool(key connectPoolKey, p *connectPool, err error) {
+	var nonRetryableRefusal bool
+	if err != nil {
+		var refused *connectRefusedError
+		if errors.As(err, &refused) && refused.code != http.StatusServiceUnavailable {
+			nonRetryableRefusal = true
+		}
+	}
+
+	var closeTransport *http.Transport
+	c.mu.Lock()
+	p.inFlight--
+	if err == nil {
+		p.everOK = true
+	} else if nonRetryableRefusal {
+		p.everOK = false
+	}
+	if p.inFlight == 0 {
+		if c.pools[key] != p {
+			closeTransport = p.transport
+		} else if !p.everOK {
+			delete(c.pools, key)
+			closeTransport = p.transport
+		}
+	}
+	c.mu.Unlock()
+
+	if closeTransport != nil {
+		closeTransport.CloseIdleConnections()
+	}
 }
 
 // connectRefusedError is a non-2xx answer to the outer CONNECT.

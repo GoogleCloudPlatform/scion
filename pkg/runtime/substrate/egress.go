@@ -16,9 +16,11 @@ package substrate
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -110,6 +112,7 @@ var egressAllowSpecialUseTLDs = map[string]string{
 // or "everything" through its EgressPolicy. It checks:
 //
 //   - the removed sandbox_class / sandbox_config_name keys;
+//   - router_endpoint (https:// URL) and router_connect_endpoint (host:port);
 //   - egress_allow (public hosts; see ValidateEgressAllow) and
 //     egress_trust_bundle.
 //
@@ -141,6 +144,11 @@ func Validate(s *config.V1SubstrateConfig) error {
 			return fmt.Errorf("%srouter_endpoint: %w", prefix, err)
 		}
 	}
+	if strings.TrimSpace(s.RouterConnectEndpoint) != "" {
+		if err := ValidateRouterConnectEndpoint(s.RouterConnectEndpoint); err != nil {
+			return fmt.Errorf("%srouter_connect_endpoint: %w", prefix, err)
+		}
+	}
 	if err := ValidateEgressAllow(s.EgressAllow); err != nil {
 		return fmt.Errorf("%segress_allow: %w", prefix, err)
 	}
@@ -159,6 +167,28 @@ func ValidateRouterEndpoint(raw string) error {
 	u, err := url.Parse(trimmed)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" {
 		return fmt.Errorf("%q must use https:// with a host (plaintext http:// is not supported)", raw)
+	}
+	return nil
+}
+
+// ValidateRouterConnectEndpoint requires router_connect_endpoint to be a
+// "host:port" address without a URL scheme, with a non-empty host and a
+// numeric port in 1..65535.
+func ValidateRouterConnectEndpoint(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if strings.Contains(trimmed, "://") {
+		return fmt.Errorf("%q must be host:port without a URL scheme", raw)
+	}
+	host, port, err := net.SplitHostPort(trimmed)
+	if err != nil || host == "" {
+		return fmt.Errorf("%q must be a valid host:port with a non-empty host", raw)
+	}
+	if strings.ContainsAny(host, "/?# \t\r\n") {
+		return fmt.Errorf("%q host %q must not contain a URL path, query, or whitespace", raw, host)
+	}
+	n, perr := strconv.ParseUint(port, 10, 16)
+	if perr != nil || n == 0 {
+		return fmt.Errorf("%q has invalid port %q (must be 1..65535)", raw, port)
 	}
 	return nil
 }

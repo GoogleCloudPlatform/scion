@@ -443,6 +443,29 @@ func TestBuildEgressPolicy_TrustedHubNormalizedAndInvalidPortsRejected(t *testin
 		assertNoPortTies(t, byRule)
 	})
 
+	t.Run("surrounding whitespace trimmed consistently", func(t *testing.T) {
+		endpoint := "  https://HUB.Scion-System.svc.cluster.local.:8443  "
+		hosts, err := substrateEgressHostnames(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, config.V1SubstrateConfig{})
+		if err != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", err)
+		}
+		if !containsHost(hosts, "hub.scion-system.svc.cluster.local") {
+			t.Fatalf("substrateEgressHostnames() = %v, want hub.scion-system.svc.cluster.local", hosts)
+		}
+		req, err := buildEgressPolicy("scion-proj", "agent-a", hosts, endpoint, config.V1SubstrateConfig{})
+		if err != nil {
+			t.Fatalf("buildEgressPolicy() error = %v", err)
+		}
+		byRule := policyHostsByRule(t, req)
+		if !slices.Equal(byRule["tls_passthrough:8443"], []string{"hub.scion-system.svc.cluster.local"}) {
+			t.Fatalf("tls_passthrough:8443 = %v, want [hub.scion-system.svc.cluster.local]", byRule["tls_passthrough:8443"])
+		}
+		if containsHost(byRule["tls_passthrough:443"], "hub.scion-system.svc.cluster.local") {
+			t.Fatalf("tls_passthrough:443 = %v, hub on custom port 8443 should not also be on 443", byRule["tls_passthrough:443"])
+		}
+		assertNoPortTies(t, byRule)
+	})
+
 	for _, endpoint := range []string{
 		"https://hub.example.com:0",
 		"http://hub.example.com:70000",
@@ -632,6 +655,8 @@ func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
 		{"short form with trailing dot", "https://127.1."},
 		{"short form bare no scheme", "127.1:8443"},
 		{"IPv6 with percent-encoded zone", "https://[fe80::1%25eth0]:8443"},
+		{"whitespace-padded IPv4 URL", " https://127.0.0.1:9810 "},
+		{"whitespace-padded bare IPv4", "\t10.0.0.5:8443\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := RunConfig{TrustedHubEndpoint: tc.endpoint}
