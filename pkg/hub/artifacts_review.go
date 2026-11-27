@@ -189,7 +189,7 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 		}
 		wakeCtx, cancelWake := context.WithTimeout(context.WithoutCancel(ctx), chatWakeResumeBudget)
 		defer cancelWake()
-		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, agent)
+		wakeRes, wakeErr := s.wakeAgentForDMAuthorized(wakeCtx, agent, s.explicitWakeAuthorize(wakeCtx, caller))
 		if wakeErr != nil {
 			status := artifacts.ReviewDeliveryWakeFailed
 			if isWakeRefusal(wakeErr) {

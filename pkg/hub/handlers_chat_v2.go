@@ -1638,7 +1638,7 @@ func (s *Server) isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if unreachable, why := isAgentUnreachable(agent); unreachable {
 		return true, why
 	}
-	if agent != nil && agent.IdleSuspendClaimActive {
+	if s.isHubAutoSuspending(agent) {
 		return true, string(state.PhaseSuspended)
 	}
 	return false, ""
@@ -1948,7 +1948,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	wakePrimary := false
 	autoWakePrimary := !primaryReincarnating && primaryAgent.DeletedAt.IsZero() &&
 		s.shouldQueueAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID)
-	if !primaryReincarnating && (state.Phase(primaryAgent.Phase) == state.PhaseSuspended || autoWakePrimary) &&
+	if !primaryReincarnating && (state.Phase(primaryAgent.Phase) == state.PhaseSuspended || s.isHubAutoSuspending(primaryAgent) || autoWakePrimary) &&
 		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake || autoWakePrimary) {
 		switch {
 		case autoWakePrimary:
@@ -2110,7 +2110,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				wakeRes = &WakeResult{Outcome: WakeDeferred}
 			}
 		} else {
-			wakeRes, wakeErr = s.wakeAgentForDM(wakeCtx, primaryAgent)
+			wakeRes, wakeErr = s.wakeAgentForDMAuthorized(wakeCtx, primaryAgent, s.explicitWakeAuthorize(wakeCtx, user))
 		}
 		cancelWake()
 		if wakeErr != nil {
@@ -2373,8 +2373,20 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				primaryInterrupt,
 				msg,
 				withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
-					if !s.shouldQueueAutoWake(target) || s.agentHeldOrUnknown(ctx, target.ID) {
-						return nil, nil, &errAgentIdleSuspending{agent: target, claimActive: target.IdleSuspendClaimActive}
+					if s != nil && s.store != nil && target != nil {
+						if fresh, err := s.store.GetAgent(ctx, target.ID); err == nil && fresh != nil {
+							*target = *fresh
+						}
+					}
+					canAutoWake := s.shouldQueueAutoWake(target) && !s.agentHeldOrUnknown(ctx, target.ID)
+					canExplicitWake := opts.Wake && !s.agentHeldOrUnknown(ctx, target.ID) &&
+						(s.isHubAutoSuspending(target) || state.Phase(store.EffectiveRestingPhase(target)) == state.PhaseSuspended) &&
+						s.agentLifecycleAllowed(ctx, user, target)
+					if !canAutoWake && !canExplicitWake {
+						if s.validateAgentDeliverable(target) == nil {
+							return nil, nil, errNoWakeRecovery
+						}
+						return nil, nil, &errAgentIdleSuspending{agent: target, claimActive: s.isHubAutoSuspending(target)}
 					}
 					if opts.BeforeWake != nil {
 						opts.BeforeWake(len(agents))
@@ -2385,7 +2397,17 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						baseCtx = context.WithoutCancel(ctx)
 					}
 					wakeCtx, cancelWake := context.WithTimeout(baseCtx, chatWakeResumeBudget)
-					dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, target)
+					var dmErr *AgentDMError
+					var awaitErr error
+					if canAutoWake {
+						dmErr, awaitErr = s.wakeOrAwaitStart(wakeCtx, target)
+					} else {
+						var wakeRes *WakeResult
+						wakeRes, dmErr = s.wakeAgentForDMAuthorized(wakeCtx, target, s.explicitWakeAuthorize(wakeCtx, user))
+						if dmErr == nil && wakeRes != nil && wakeRes.Outcome == WakeDeferred {
+							awaitErr = s.awaitStartInProgress(wakeCtx, target)
+						}
+					}
 					cancelWake()
 					if dmErr != nil {
 						return nil, nil, &errAutoWakeRefused{dmErr: dmErr}

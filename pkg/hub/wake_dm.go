@@ -94,12 +94,53 @@ func wakeDeleteWonError(agentID string) *AgentDMError {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
+	return s.wakeAgentForDMAuthorized(ctx, agent, nil)
+}
+
+// explicitWakeAuthorize returns a post-settle authorization callback for
+// wakeAgentForDMAuthorized on explicit --wake paths. After waiting for an
+// in-flight hub auto-suspend to settle and refreshing the target row, it
+// re-checks deletion, holds, and lifecycle permission on the freshly settled
+// row so a sender who could not wake the settled target cannot bypass those
+// checks across the settle window.
+func (s *Server) explicitWakeAuthorize(ctx context.Context, identity Identity) func(*store.Agent) *AgentDMError {
+	return func(settled *store.Agent) *AgentDMError {
+		if settled == nil {
+			return nil
+		}
+		if !settled.DeletedAt.IsZero() {
+			return agentDeletedRefusal(settled.ID).dmError()
+		}
+		if deletionActive(settled) {
+			return deleteInProgressRefusal(settled.ID).dmError()
+		}
+		if dmErr := s.heldTargetRefusal(ctx, settled); dmErr != nil {
+			return dmErr
+		}
+		if denial := s.wakeResumeDenial(ctx, identity, settled); denial != nil {
+			return denial
+		}
+		return nil
+	}
+}
+
+// wakeAgentForDMAuthorized is wakeAgentForDM with an optional post-settle
+// authorize callback invoked on the freshly re-read row whenever
+// waitForHubAutoSuspendToSettle runs. Explicit --wake callers pass
+// s.explicitWakeAuthorize so lifecycle permission, holds, and deletions are
+// enforced after any settle wait.
+func (s *Server) wakeAgentForDMAuthorized(ctx context.Context, agent *store.Agent, authorize func(*store.Agent) *AgentDMError) (*WakeResult, *AgentDMError) {
 	if isShellAgent(agent) {
 		return nil, shellAgentNotMessageableError(agent)
 	}
-	if agent != nil && agent.IdleSuspendClaimActive {
-		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+	if s.isHubAutoSuspending(agent) || (agent != nil && agent.IdleSuspendClaimUntil != nil && !deletionActive(agent) && !reincarnationInFlight(agent)) {
+		if err := s.waitForHubAutoSuspendToSettle(ctx, agent); err != nil {
 			return nil, startInProgressDMError(agent, err)
+		}
+		if authorize != nil {
+			if dmErr := authorize(agent); dmErr != nil {
+				return nil, dmErr
+			}
 		}
 	}
 	// The effective resting phase (ptone/scion#4669): an error row that
@@ -539,7 +580,7 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 // agent automatically without --wake, so the hint omits "--wake".
 func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
 	err := s.validateAgentDeliverable(agent)
-	claimSuspending := agent != nil && agent.IdleSuspendClaimActive
+	claimSuspending := s.isHubAutoSuspending(agent)
 	if err != nil && (state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended || claimSuspending) {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
 	}
@@ -550,8 +591,19 @@ func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
 }
 
 // validateAgentDeliverable checks target deliverability, always honouring an
-// active idle-suspend claim on the target row regardless of current settings.
+// active idle-suspend claim or in-flight hub auto-suspend on this replica
+// regardless of current settings.
 func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	if isShellAgent(agent) {
+		return shellAgentNotMessageableError(agent)
+	}
+	if agent != nil && s != nil && s.autoSuspending.isActive(agent.ID) {
+		return &AgentDMError{
+			Code:       ErrCodeAgentNotRunning,
+			Message:    fmt.Sprintf("agent %q is suspending; use --wake to resume and deliver", agentTargetLabel(agent)),
+			HTTPStatus: http.StatusConflict,
+		}
+	}
 	return validateAgentDeliverable(agent)
 }
 
@@ -643,7 +695,7 @@ func (s *Server) deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
 	}
-	if agent != nil && agent.IdleSuspendClaimActive {
+	if s.isHubAutoSuspending(agent) {
 		return "agent is suspending"
 	}
 	if agent != nil && agent.StartClaimKind == store.StartClaimStop {

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -159,13 +160,29 @@ type idleSuspendGateChecker interface {
 	IdleSuspendGateActive() bool
 }
 
+// autoSuspendChecker is an optional predicate on agentDeliveryMarker reporting
+// whether this hub replica currently has an in-flight auto-suspend (stalled or
+// idle) for agentID. Checked before MarkAgentDelivery so an in-flight stalled
+// auto-suspend is intercepted even when lifecycle.idle_suspend is off.
+type autoSuspendChecker interface {
+	AutoSuspendingReason(agentID string) (state.SuspendReason, bool)
+}
+
 type gatedDeliveryMarker struct {
-	store agentDeliveryMarker
-	gate  func() bool
+	store          agentDeliveryMarker
+	gate           func() bool
+	autoSuspending func(agentID string) (state.SuspendReason, bool)
 }
 
 func (m gatedDeliveryMarker) IdleSuspendGateActive() bool {
 	return m.gate != nil && m.gate()
+}
+
+func (m gatedDeliveryMarker) AutoSuspendingReason(agentID string) (state.SuspendReason, bool) {
+	if m.autoSuspending == nil {
+		return "", false
+	}
+	return m.autoSuspending(agentID)
 }
 
 func (m gatedDeliveryMarker) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
@@ -193,8 +210,9 @@ func (e *errDeliveryMarkFailed) Unwrap() error { return e.err }
 // observes a hub-suspended row, or observes that an agent the caller read as
 // running/starting is no longer in running/starting. No broker dispatch ran.
 type errAgentIdleSuspending struct {
-	agent       *store.Agent
-	claimActive bool
+	agent         *store.Agent
+	claimActive   bool
+	suspendReason state.SuspendReason
 }
 
 func (e *errAgentIdleSuspending) Error() string {
@@ -208,9 +226,9 @@ func (e *errAgentIdleSuspending) Error() string {
 }
 
 // asSuspendedAgent returns a copy of e.agent normalized to phase=suspended
-// (reason=idle) while an idle-suspend claim is still stopping the container,
-// so non-auto-wake callers produce the exact refusal/failure message they emit
-// for a suspended target.
+// while an auto-suspend is still stopping the container, so non-auto-wake
+// callers produce the exact refusal/failure message they emit for a suspended
+// target.
 func (e *errAgentIdleSuspending) asSuspendedAgent() *store.Agent {
 	if e == nil || e.agent == nil {
 		return nil
@@ -218,9 +236,40 @@ func (e *errAgentIdleSuspending) asSuspendedAgent() *store.Agent {
 	cp := *e.agent
 	if e.claimActive {
 		cp.Phase = string(state.PhaseSuspended)
-		cp.SuspendReason = string(state.SuspendReasonIdle)
+		if e.suspendReason != "" {
+			cp.SuspendReason = string(e.suspendReason)
+		} else {
+			cp.SuspendReason = string(state.SuspendReasonIdle)
+		}
 	}
 	return &cp
+}
+
+// errNoWakeRecovery is an internal sentinel returned by a syncAutoWake hook
+// when it re-reads the agent and finds it running and deliverable (no wake
+// recovery applies). dispatchWithBrokerRetry handles it internally — retrying
+// once when invoked from markAgentForDispatch (nothing dispatched yet), or
+// returning the original broker error when invoked after a container-not-running
+// broker error — so this sentinel never surfaces to callers or message rows.
+var errNoWakeRecovery = errors.New("no wake recovery applicable")
+
+// isContainerNotRunningDispatchError reports whether a synchronous broker
+// DispatchAgentMessage error definitively indicates the target container was
+// stopping or not running (so the message was NOT accepted by the broker).
+// Ambiguous errors (timeouts, cancellations, 5xx) return false and are never
+// retried.
+func isContainerNotRunningDispatchError(err error) bool {
+	if err == nil || isPreDispatchDeliveryError(err) {
+		return false
+	}
+	if isBrokerAgentNotFound(err) {
+		return true
+	}
+	// Defensive fallback for runtimes/proxies that surface Docker's raw
+	// daemon text directly; the current runtime broker translates stopped or
+	// missing containers to a 404 agent_not_found (*brokerStatusError) above.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "container") && strings.Contains(msg, "is not running")
 }
 
 // errAutoWakeRefused wraps a synchronous auto-wake refusal or readiness timeout
@@ -269,20 +318,29 @@ func isPreDispatchDeliveryError(err error) bool {
 	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr) || errors.As(err, &notMsgErr)
 }
 
-// markAgentForDispatch runs MarkAgentDelivery under the row lock whenever
+// markAgentForDispatch first checks any in-memory hub auto-suspend tracker on
+// marker (for every dispatch caller, regardless of experiment state) and
+// rejects with *errAgentIdleSuspending when active. Otherwise, whenever
 // lifecycle.idle_suspend is enabled OR the target snapshot already carries an
-// idle-suspend claim, updates *agent with the fresh store snapshot (including
-// store-clock IdleSuspendClaimActive), fails closed on any store error, and
-// rejects dispatch with *errAgentIdleSuspending if an idle-suspend claim is
-// active or a previously running/starting target moved out of running/starting
-// since the caller's read. When the experiment is off and the row carries no
-// claim, it returns nil immediately without touching the store (AC 8).
+// idle-suspend claim, it runs MarkAgentDelivery under the row lock, updates
+// *agent with the fresh store snapshot (including store-clock
+// IdleSuspendClaimActive), fails closed on any store error, and rejects
+// dispatch with *errAgentIdleSuspending if an idle-suspend claim is active or
+// a previously running/starting target moved out of running/starting since the
+// caller's read. When no local auto-suspend is tracked, the experiment is off,
+// and the row carries no claim, it returns nil immediately without touching the
+// store (AC 8).
 func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent *store.Agent) error {
 	if marker == nil {
 		return &errDeliveryMarkFailed{err: errors.New("delivery marker store is nil")}
 	}
 	if agent == nil || agent.ID == "" {
 		return &errDeliveryMarkFailed{err: errors.New("target agent is nil")}
+	}
+	if checker, ok := marker.(autoSuspendChecker); ok {
+		if reason, active := checker.AutoSuspendingReason(agent.ID); active {
+			return &errAgentIdleSuspending{agent: agent, claimActive: true, suspendReason: reason}
+		}
 	}
 	hasRowClaim := agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil
 	if gate, ok := marker.(idleSuspendGateChecker); ok && !gate.IdleSuspendGateActive() && !hasRowClaim {
@@ -419,6 +477,14 @@ func dispatchWithBrokerRetry(
 					defer cancelNew()
 				}
 				if wakeErr != nil {
+					if errors.Is(wakeErr, errNoWakeRecovery) {
+						// The target is running and deliverable again (for example,
+						// an in-flight auto-suspend aborted right after
+						// markAgentForDispatch). Nothing has been dispatched yet,
+						// so retry once instead of surfacing the internal sentinel.
+						backoff = brokerRetryInitialBackoff
+						continue
+					}
 					return wakeErr
 				}
 				if newCtx != nil {
@@ -431,6 +497,28 @@ func dispatchWithBrokerRetry(
 				continue
 			}
 			return err
+		}
+		if isContainerNotRunningDispatchError(err) && cfg.syncAutoWake != nil && !wokeOnce {
+			wokeOnce = true
+			nextLog = nil
+			newCtx, cancelNew, wakeErr := cfg.syncAutoWake(attemptCtx, agent)
+			if cancelNew != nil {
+				defer cancelNew()
+			}
+			if wakeErr != nil {
+				if errors.Is(wakeErr, errNoWakeRecovery) {
+					return err
+				}
+				return wakeErr
+			}
+			if newCtx != nil {
+				attemptCtx = newCtx
+			}
+			if cfg.adjustUrgentAfterWake != nil {
+				urgent = cfg.adjustUrgentAfterWake(agent, urgent)
+			}
+			backoff = brokerRetryInitialBackoff
+			continue
 		}
 		if isPreDispatchDeliveryError(err) {
 			return err

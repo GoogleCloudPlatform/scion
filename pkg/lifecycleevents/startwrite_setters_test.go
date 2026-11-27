@@ -34,7 +34,9 @@ import (
 var pinnedStartWriteSetters = map[string]int{
 	"handlers_agent_lifecycle.go:Server.handleAgentLifecycle": 1, // the start/restart final write
 	"start_claim.go:Server.writeStartedStatus":                1,
-	"wake_dm.go:Server.wakeAgentForDM":                        2, // the starting write (not E: not running) and the running write
+	// wakeAgentForDM delegates to wakeAgentForDMAuthorized (ptone/scion#9421);
+	// same two post-dispatch writes: the starting write (not E: not running) and the running write.
+	"wake_dm.go:Server.wakeAgentForDMAuthorized": 2,
 }
 
 // TestStartWriteSettersArePinned parses pkg/hub (non-test files, no

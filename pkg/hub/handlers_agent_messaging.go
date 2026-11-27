@@ -2757,7 +2757,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
-		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
+		wakeResult, wakeErr := s.wakeAgentForDMAuthorized(ctx, agent, s.explicitWakeAuthorize(ctx, GetIdentityFromContext(ctx)))
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
 			return
@@ -2773,6 +2773,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
 	if !userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
+		if s.isHubAutoSuspending(agent) {
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is suspending. Use --wake to resume and deliver.", agent.Slug), nil)
+			return
+		}
 		rest := store.EffectiveRestingPhase(agent)
 		switch state.Phase(rest) {
 		case state.PhaseRunning:
@@ -3548,7 +3553,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					s.extendWriteDeadlineForDMWake(ctx, w)
 					wctx, wcancel := context.WithTimeout(ctx, scheduledWakeBudget)
 					defer wcancel()
-					if err := s.syncAutoWakeForDM(wctx, target); err != nil {
+					if err := s.syncWakeForDM(wctx, target, req.Wake, GetIdentityFromContext(ctx)); err != nil {
 						return nil, nil, err
 					}
 					newCtx, newCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
