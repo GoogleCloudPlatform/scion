@@ -1240,8 +1240,12 @@ use `scion harness-config` to inspect them instead.
 would accept but never read, and leaves the file unchanged:
 `hub.token`, `hub.apiKey`, `hub.lastSyncedAt`, `bucket.provider`, `bucket.name`,
 `bucket.prefix`, `hub_connections` and `hub_connections.<name>.<field>` at either layer (Runtime Broker Hub connections live in `~/.scion/hub-credentials/<name>.json`, managed by `scion runtime-broker register`, `join`, and `deregister`), and
-`server.auth.display_name`, `server.auth.email` and `server.auth.username` at the
-project layer (they are read only from the global settings). The error names the key
+at the project layer, any key whose top-level key project settings do not read
+(for example `server.*`, `use_host_credentials`, and legacy aliases that resolve under
+`server`, such as `hub.brokerId`, `hub.brokerToken` and `hub.brokerNickname`; see
+[Keys read from project settings](/scion/reference/orchestrator-settings/#keys-read-from-project-settings)).
+A key that `config set` can write to the global settings gets a hint to use `--global`; any
+other key under those top-level keys is refused as an unknown key at both layers. The error names the key
 and does not include the value. After a successful write, the value of a
 credential-like key (for example `hub.brokerToken`) is shown masked. `cli.mode`
 accepts `human` or `agent`. Agent mode removes the `config` commands, so after
