@@ -106,4 +106,33 @@ func TestStart_DurationBackstopGateAndDeadline(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("padded max_duration clamped by P4b ceiling stamps backstop from clamped value", func(t *testing.T) {
+		project, _ := envFixture(t, envSettingsV1)
+		ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+			Experiments:   []string{experiments.AgentPolicyDurationBackstop},
+			LimitCeilings: &api.LimitCeilings{MaxDuration: "30m"},
+		})
+		before := time.Now().UTC()
+		rc, info := startEnvCtxWithInfo(t, ctx, project, func(o *api.StartOptions) {
+			o.InlineConfig = &api.ScionConfig{MaxDuration: " 5m"}
+		})
+		after := time.Now().UTC()
+
+		wantDuration := 30*time.Minute + api.DurationBackstopTotalGrace
+		if info.EffectiveMaxDuration != "30m" {
+			t.Fatalf("EffectiveMaxDuration = %q, want 30m (clamped from padded \" 5m\")", info.EffectiveMaxDuration)
+		}
+		if rc.RunDeadlineDuration != wantDuration {
+			t.Fatalf("RunDeadlineDuration = %v, want %v", rc.RunDeadlineDuration, wantDuration)
+		}
+		minDL := before.Add(wantDuration).Truncate(time.Second)
+		maxDL := after.Add(wantDuration).Add(time.Second)
+		if rc.RunDeadline.Before(minDL) || rc.RunDeadline.After(maxDL) {
+			t.Errorf("RunDeadline = %v, want in [%v, %v]", rc.RunDeadline, minDL, maxDL)
+		}
+		if want := rc.RunDeadline.UTC().Format(time.RFC3339); info.EffectiveRunDeadline != want {
+			t.Errorf("EffectiveRunDeadline = %q, want %q", info.EffectiveRunDeadline, want)
+		}
+	})
 }
