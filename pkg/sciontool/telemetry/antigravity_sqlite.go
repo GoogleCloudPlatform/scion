@@ -844,13 +844,15 @@ func verifyRegularAgyDB(dbPath string) error {
 	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("mode %s is not regular", fi.Mode())
 	}
-	walPath := dbPath + "-wal"
-	if wfi, werr := os.Lstat(walPath); werr == nil {
-		if !wfi.Mode().IsRegular() {
-			return fmt.Errorf("wal mode %s is not regular", wfi.Mode())
+	for _, suffix := range []string{"-wal", "-journal", "-shm"} {
+		compPath := dbPath + suffix
+		if cfi, cerr := os.Lstat(compPath); cerr == nil {
+			if !cfi.Mode().IsRegular() {
+				return fmt.Errorf("%s mode %s is not regular", suffix, cfi.Mode())
+			}
+		} else if !errors.Is(cerr, os.ErrNotExist) {
+			return cerr
 		}
-	} else if !errors.Is(werr, os.ErrNotExist) {
-		return werr
 	}
 	return nil
 }

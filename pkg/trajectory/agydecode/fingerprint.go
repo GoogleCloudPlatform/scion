@@ -38,17 +38,21 @@ func Fingerprint(dbPath string) (FileFingerprint, error) {
 		DBSize:      dbInfo.Size(),
 		DBModTimeNS: dbInfo.ModTime().UnixNano(),
 	}
-	walPath := dbPath + "-wal"
-	walInfo, err := os.Lstat(walPath)
-	if err == nil {
-		if !walInfo.Mode().IsRegular() {
-			return FileFingerprint{}, fmt.Errorf("agy wal %s is not a regular file (mode %s)", walPath, walInfo.Mode())
+	for _, suffix := range []string{"-wal", "-journal", "-shm"} {
+		compPath := dbPath + suffix
+		compInfo, err := os.Lstat(compPath)
+		if err == nil {
+			if !compInfo.Mode().IsRegular() {
+				return FileFingerprint{}, fmt.Errorf("agy companion %s is not a regular file (mode %s)", compPath, compInfo.Mode())
+			}
+			if suffix == "-wal" {
+				fp.WALPresent = true
+				fp.WALSize = compInfo.Size()
+				fp.WALModTimeNS = compInfo.ModTime().UnixNano()
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return FileFingerprint{}, fmt.Errorf("lstat companion %s: %w", compPath, err)
 		}
-		fp.WALPresent = true
-		fp.WALSize = walInfo.Size()
-		fp.WALModTimeNS = walInfo.ModTime().UnixNano()
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return FileFingerprint{}, fmt.Errorf("lstat wal %s: %w", walPath, err)
 	}
 	return fp, nil
 }

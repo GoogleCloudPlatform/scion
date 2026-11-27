@@ -313,3 +313,94 @@ func TestAntigravitySQLiteTailer_Sec_StateParentSymlinkRefused(t *testing.T) {
 		t.Fatalf("expected 0 files written into symlinked .scion target, got %d (%v)", len(entries), entries)
 	}
 }
+
+func TestAntigravitySQLiteTailer_Sec_SkipsFIFOJournalAndSHMWithoutHanging(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	convDir := AgyConversationsDir(home)
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatalf("mkdir convDir: %v", err)
+	}
+
+	// 1. Rollback-mode DB with a FIFO <x>.db-journal companion (no writer).
+	journalDBPath := filepath.Join(convDir, "a-rollback.db")
+	journalDB := createTestAgyDB(t, journalDBPath)
+	if _, err := journalDB.Exec(`PRAGMA journal_mode=DELETE`); err != nil {
+		t.Fatalf("set rollback journal_mode: %v", err)
+	}
+	_ = journalDB.Close()
+	if err := syscall.Mkfifo(journalDBPath+"-journal", 0o600); err != nil {
+		t.Fatalf("mkfifo -journal: %v", err)
+	}
+
+	// 2. DB with a FIFO <y>.db-shm companion (no writer).
+	shmDBPath := filepath.Join(convDir, "b-shm.db")
+	shmDB := createTestAgyDB(t, shmDBPath)
+	_ = shmDB.Close()
+	if err := syscall.Mkfifo(shmDBPath+"-shm", 0o600); err != nil {
+		t.Fatalf("mkfifo -shm: %v", err)
+	}
+
+	// 3. Clean regular DB c-good.db with 1 historical row.
+	goodPath := filepath.Join(convDir, "c-good.db")
+	goodDB := createTestAgyDB(t, goodPath)
+	defer func() { _ = goodDB.Close() }()
+	histRow := encodeTestGenMeta(1466, "gemini-4-neon", 1795700000, testAgyUsage{
+		modelID: 1466, input: 5000, output: 500, id11: "hist-journal-good",
+	})
+	if _, err := goodDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, histRow, len(histRow)); err != nil {
+		t.Fatalf("insert histRow: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+
+	runBounded := func(label string, fn func() error) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- fn() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s failed: %v", label, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s hung on FIFO -journal/-shm companion", label)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runBounded("Start", func() error { return tailer.Start(ctx) })
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stopCancel()
+		_ = tailer.Stop(stopCtx)
+	}()
+
+	runBounded("PollOnce(baseline)", func() error { return tailer.PollOnce(ctx) })
+	if got := drainOutboxEvents(t, outbox); len(got) != 0 {
+		t.Fatalf("after baseline got %d events, want 0", len(got))
+	}
+
+	// Insert a new row into c-good.db and confirm it is still metered cleanly.
+	newGood := encodeTestGenMeta(1466, "gemini-4-neon", 1795721000, testAgyUsage{
+		modelID: 1466, input: 612, output: 84, id11: "good-after-fifo-journal",
+	})
+	if _, err := goodDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, newGood, len(newGood)); err != nil {
+		t.Fatalf("insert newGood: %v", err)
+	}
+	runBounded("PollOnce(new row)", func() error { return tailer.PollOnce(ctx) })
+	events := drainOutboxEvents(t, outbox)
+	if len(events) != 1 || events[0].Input == nil || *events[0].Input != 612 {
+		t.Fatalf("got events %+v, want 1 event from c-good.db with input=612", events)
+	}
+}
