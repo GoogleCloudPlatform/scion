@@ -3995,7 +3995,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.project-deletion"),
 	)
-	srv.deletionService.onProjectDeleted = srv.invalidateTriggerRuleCacheForProject
+	srv.deletionService.onProjectDeleted = func(projectID string) {
+		srv.invalidateTriggerRuleCacheForProject(projectID)
+		srv.refreshDecisionRetentionAfterProjectChange(projectID)
+	}
 
 	// RS4: Initialize user access token service with authorization, audit, and
 	// transactional support via the bounded domain service pattern.

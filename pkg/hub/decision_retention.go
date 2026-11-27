@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -141,6 +142,36 @@ func (s *Server) decisionRetentionConfig() opsettings.DecisionRetentionConfig {
 		return ops.DecisionRetention()
 	}
 	return opsettings.DefaultDecisionRetentionConfig()
+}
+
+// refreshDecisionRetentionAfterProjectChange refreshes and applies operational
+// settings (and notifies peer replicas) after a project delete or create may
+// have pruned a per-project decision_retention override in the store
+// (ptone/scion#9439).
+//
+// Always routes through refreshAndApplyResult so any concurrently changed
+// operational sections or store resets observed by the refresh are applied to
+// the server rather than swallowed. Drops any local-cache gate so a replica
+// whose cache did not yet hold the pruned override still refreshes and notifies
+// peers, and publishes whenever either the local cache previously held the
+// override (even if a concurrent refresh already absorbed the pruned row) or
+// this refresh observed decision_retention change.
+func (s *Server) refreshDecisionRetentionAfterProjectChange(projectID string) {
+	ops := s.GetOperationalSettings()
+	if ops == nil {
+		return
+	}
+	_, hadCachedOverride := ops.DecisionRetention().ProjectOverrides[projectID]
+	ctx, cancel := context.WithTimeout(context.Background(), decisionRetentionFinalWriteTimeout)
+	defer cancel()
+	changed, err := ops.refreshAndApplyResult(ctx, s)
+	if err != nil {
+		slog.Warn("decision retention: refresh settings after project change", "project_id", projectID, "error", err)
+		return
+	}
+	if hadCachedOverride || slices.Contains(changed, opsettings.DecisionRetentionSectionName) {
+		ops.publish(opsettings.DecisionRetentionSectionName, ops.SectionRevision(opsettings.DecisionRetentionSectionName))
+	}
 }
 
 // decisionRetentionConfigForJob returns the resolved decision_retention config

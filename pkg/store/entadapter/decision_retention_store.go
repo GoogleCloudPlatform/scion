@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,11 +29,13 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionretentionrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -828,4 +831,86 @@ func (s *DecisionRetentionStore) PruneDecisionRetentionRuns(ctx context.Context,
 		return 0, fmt.Errorf("decision retention: prune runs: %w", err)
 	}
 	return n, nil
+}
+
+// pruneDecisionRetentionProjectOverrideTx removes projectID from the stored
+// decision_retention hub_settings section's project_overrides map inside the
+// caller's transaction (project delete or project create), so re-creating a
+// project with a deleted project's UUID starts with defaults instead of
+// reviving a stale override (ptone/scion#9439).
+//
+// No-op (no write, no revision bump) when the section does not exist, fails to
+// parse (fail closed — logs a warning and leaves the malformed document
+// untouched), or does not contain projectID. Preserves all resolved settings,
+// other projects' overrides, and keep_forever holds.
+//
+// On Postgres, performs a fast unlocked read first and only acquires FOR UPDATE
+// when projectID is present, avoiding lock contention on the common path where
+// a project has no override.
+func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, isPostgres bool, projectID, updatedBy string) error {
+	if projectID == "" {
+		return nil
+	}
+	if tx == nil {
+		return errors.New("prune decision retention override: requires an ent transaction")
+	}
+	existing, err := tx.HubSetting.Query().
+		Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
+		Only(ctx)
+	if ent.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("prune decision retention override: read section: %w", mapError(err))
+	}
+	cfg, err := opsettings.ParseDecisionRetentionDoc(existing.Value)
+	if err != nil {
+		slog.Warn("decision retention: malformed section left untouched during project override prune",
+			"project_id", projectID, "error", err)
+		return nil
+	}
+	ov, ok := cfg.ProjectOverrides[projectID]
+	if !ok {
+		return nil
+	}
+	if isPostgres {
+		existing, err = tx.HubSetting.Query().
+			Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
+			ForUpdate().
+			Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("prune decision retention override: lock section: %w", mapError(err))
+		}
+		cfg, err = opsettings.ParseDecisionRetentionDoc(existing.Value)
+		if err != nil {
+			slog.Warn("decision retention: malformed section left untouched during project override prune",
+				"project_id", projectID, "error", err)
+			return nil
+		}
+		ov, ok = cfg.ProjectOverrides[projectID]
+		if !ok {
+			return nil
+		}
+	}
+	delete(cfg.ProjectOverrides, projectID)
+	doc, err := json.Marshal(cfg.Settings())
+	if err != nil {
+		return fmt.Errorf("prune decision retention override: marshal settings: %w", err)
+	}
+	if _, err := tx.HubSetting.UpdateOneID(existing.ID).
+		SetValue(doc).
+		SetRevision(existing.Revision + 1).
+		SetUpdatedBy(updatedBy).
+		Save(ctx); err != nil {
+		return fmt.Errorf("prune decision retention override: update section: %w", mapError(err))
+	}
+	if _, err := bumpSettingsRevision(ctx, tx); err != nil {
+		return fmt.Errorf("prune decision retention override: %w", err)
+	}
+	slog.Info("decision retention: pruned project override",
+		"project_id", projectID, "mode", ov.Mode, "reason", updatedBy)
+	return nil
 }

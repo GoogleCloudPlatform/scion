@@ -229,6 +229,9 @@ func (svc *ProjectDeletionService) purgeFixtureProject(ctx context.Context, proj
 	if err != nil {
 		return fixtureProjectOutcome{}, err
 	}
+	if out.Deleted && svc.onProjectDeleted != nil {
+		svc.onProjectDeleted(projectID)
+	}
 	return out, nil
 }
 

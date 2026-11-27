@@ -600,6 +600,125 @@ func TestDecisionRetentionOps_PreviewCrossPageDedup(t *testing.T) {
 	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 2, Answers: 2}, manualRun.Counts[projStraddle])
 }
 
+// TestDecisionRetentionOps_PreviewBoundedDedupAcrossPages verifies L2
+// (ptone/scion#9439): Preview bounds its dedup map to the current created_at
+// timestamp group while still producing identical counts to a manual run across
+// 3+ pages, including:
+//  1. a 2-decision prompt straddling page 1 -> page 2 (positions 50 and 51);
+//  2. two distinct 2-decision prompts sharing the exact same created_at
+//     timestamp straddling page 2 -> page 3 (positions 99..102);
+//  3. MaxDedupEntries staying <= 2 (not growing with the 120+ scanned prompts).
+func TestDecisionRetentionOps_PreviewBoundedDedupAcrossPages(t *testing.T) {
+	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
+	cs := s.(*entadapter.CompositeStore)
+	st := cs.DecisionRetention()
+	srv.SetDecisionRetentionStore(st)
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tBase := now.Add(-60 * 24 * time.Hour)
+
+	projFill := uuid.NewString()
+	projStraddle := uuid.NewString()
+	projSameTS := uuid.NewString()
+	for i, pid := range []string{projFill, projStraddle, projSameTS} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("bdedup-%d", i), Slug: fmt.Sprintf("bdedup-%d", i), Created: now,
+		}))
+	}
+
+	db := cs.DB()
+	setTimes := func(decID string, ts time.Time) {
+		uid := uuid.MustParse(decID)
+		_, err := db.ExecContext(ctx, "UPDATE decisions SET created_at = ?, decided_at = ? WHERE id = ?", ts, ts, uid)
+		require.NoError(t, err)
+		_, err = db.ExecContext(ctx, "UPDATE decision_answers SET created_at = ? WHERE decision_row_id = ?", ts, uid)
+		require.NoError(t, err)
+	}
+	seedMulti := func(pid, prefix string, ts time.Time) {
+		aid := uuid.NewString()
+		res, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: &store.Message{
+				ID: uuid.NewString(), ProjectID: pid, ThreadID: "topic-" + prefix,
+				Sender: "agent:" + prefix, SenderID: aid, Recipient: "user:" + admin.ID, RecipientID: admin.ID,
+			},
+			AskerAgentID:   aid,
+			AskerAgentName: prefix,
+			Decisions: []messages.Decision{
+				{Key: prefix + "1", Question: prefix + " Q1", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+				{Key: prefix + "2", Question: prefix + " Q2", Choices: []messages.Choice{{ID: "1", Label: "Yes"}}},
+			},
+		})
+		require.NoError(t, err)
+		for _, d := range res.Decisions {
+			_, _, err = cs.RecordAnswer(ctx, &store.RecordAnswerInput{
+				DecisionRowID: d.RowID, ChoiceID: "1",
+				AnsweredByUserID: admin.ID, AnsweredByName: "Admin", AnsweredByEmail: "admin@test.com",
+				Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceNative,
+				ResponseMessage: &store.Message{
+					ID: uuid.NewString(), ProjectID: pid, ThreadID: "topic-" + prefix,
+					Sender: "user:" + admin.ID, SenderID: admin.ID, Recipient: "agent:" + prefix, RecipientID: aid,
+				},
+			})
+			require.NoError(t, err)
+			setTimes(d.RowID, ts)
+		}
+	}
+
+	// Rows 1..49: distinct timestamps in projFill.
+	for i := 0; i < 49; i++ {
+		_, decID := seedOldSettledDecision(t, ctx, cs, projFill, uuid.NewString(), admin.ID, fmt.Sprintf("BF1_%02d", i), 60*24*time.Hour)
+		setTimes(decID, tBase.Add(time.Duration(i)*time.Second))
+	}
+	// Rows 50..51: 2-decision prompt straddling page 1 -> page 2.
+	seedMulti(projStraddle, "BS1", tBase.Add(49*time.Second))
+
+	// Rows 52..98 (47 rows): distinct timestamps in projFill.
+	for i := 0; i < 47; i++ {
+		_, decID := seedOldSettledDecision(t, ctx, cs, projFill, uuid.NewString(), admin.ID, fmt.Sprintf("BF2_%02d", i), 60*24*time.Hour)
+		setTimes(decID, tBase.Add(time.Duration(50+i)*time.Second))
+	}
+	// Rows 99..102: two 2-decision prompts sharing the EXACT same created_at
+	// timestamp straddling page 2 -> page 3.
+	tSame := tBase.Add(100 * time.Second)
+	seedMulti(projSameTS, "BT1", tSame)
+	seedMulti(projSameTS, "BT2", tSame)
+
+	// Rows 103..122 (20 rows): distinct timestamps in projFill on page 3.
+	for i := 0; i < 20; i++ {
+		_, decID := seedOldSettledDecision(t, ctx, cs, projFill, uuid.NewString(), admin.ID, fmt.Sprintf("BF3_%02d", i), 60*24*time.Hour)
+		setTimes(decID, tBase.Add(time.Duration(101+i)*time.Second))
+	}
+
+	const totalFill = 49 + 47 + 20
+
+	ops := srv.GetOperationalSettings()
+	_, err := ops.Update(ctx, opsettings.DecisionRetentionSectionName,
+		json.RawMessage(`{"enabled":true,"retention_days":30,"sweep":{"page_size":50,"tick_interval_minutes":1}}`),
+		"test", 0, "managed")
+	require.NoError(t, err)
+
+	p, err := srv.decisionRetentionPolicyAt(ctx, now)
+	require.NoError(t, err)
+	sw := newDecisionRetentionSweeper(st, true)
+	prevRes, err := sw.Preview(ctx, p, now.Add(time.Hour))
+	require.NoError(t, err)
+	assert.True(t, prevRes.ReachedCutoff)
+	assert.GreaterOrEqual(t, prevRes.Pages, 3, "walk must span at least 3 pages")
+	assert.LessOrEqual(t, prevRes.MaxDedupEntries, 2,
+		"bounded dedup map must stay bounded by per-timestamp group size, not total messages (%d)", totalFill+3)
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: totalFill, Answers: totalFill}, prevRes.ByProject[projFill])
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 2, Answers: 2}, prevRes.ByProject[projStraddle])
+	assert.Equal(t, store.DecisionRetentionCounts{Decisions: 4, Answers: 4}, prevRes.ByProject[projSameTS])
+
+	// Confirm Preview output matches a real manual run exactly.
+	var manualLog bytes.Buffer
+	manualRun, _, err := srv.runDecisionRetentionManual(ctx, &manualLog, admin.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DecisionRetentionStatusOK, manualRun.Status)
+	assert.Equal(t, prevRes.ByProject, manualRun.Counts, "bounded-dedup preview counts must equal manual-run counts")
+}
+
 type faultyProjectSummariesStore struct {
 	store.Store
 	fault *storeFaultSwitch

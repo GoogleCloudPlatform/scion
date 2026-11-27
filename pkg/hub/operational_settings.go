@@ -1303,13 +1303,20 @@ func (o *OperationalSettings) runPollBackstop(ctx context.Context, server *Serve
 // ApplySnapshot writes the same values and ApplyMaintenanceFromSnapshot
 // is idempotent by design.
 func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Server) {
+	if _, err := o.refreshAndApplyResult(ctx, server); err != nil {
+		slog.Error("Settings propagation refresh failed", "error", err)
+	}
+}
+
+// refreshAndApplyResult performs a Refresh, applies any changed sections (or a
+// store reset) to server, and returns the list of changed sections.
+func (o *OperationalSettings) refreshAndApplyResult(ctx context.Context, server *Server) ([]string, error) {
 	o.mu.RLock()
 	generation := o.generation
 	o.mu.RUnlock()
 	changed, err := o.Refresh(ctx)
 	if err != nil {
-		slog.Error("Settings propagation refresh failed", "error", err)
-		return
+		return nil, err
 	}
 	o.mu.RLock()
 	reset := o.generation != generation
@@ -1320,6 +1327,7 @@ func (o *OperationalSettings) refreshAndApply(ctx context.Context, server *Serve
 		ApplySnapshot(server, snap)
 		ApplyMaintenanceFromSnapshot(server, snap)
 	}
+	return changed, nil
 }
 
 // loadSectionDocIntoKoanf loads a single section's JSON document into the

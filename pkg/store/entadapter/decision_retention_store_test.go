@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionfacetentry"
@@ -1171,4 +1172,179 @@ func TestDecisionRetentionStore_PerProjectWindowsPreviewAndDifferentialFacets(t 
 	legByProj, err := cs.listProjectDecisionAgentsForProjectsLegacy(ctx, allProjectUUIDs)
 	require.NoError(t, err)
 	assert.Equal(t, legByProj, sumByProj, "ListProjectDecisionAgentsForProjects must equal legacy after mixed-window purge")
+}
+
+// TestDecisionRetentionStore_DeleteProjectPrunesOverride verifies L1
+// (ptone/scion#9439) at the store layer on both SQLite and Postgres:
+//  1. Deleting a project with no override is a no-op (no revision bump).
+//  2. Deleting a project with an override atomically prunes its key from
+//     decision_retention in hub_settings, bumps section and settings revisions,
+//     and leaves other projects' overrides and keep_forever holds untouched.
+//  3. Re-creating a project with the exact same UUID starts clean (sees hub
+//     defaults, not the deleted project's override).
+//  4. Deleting the last override leaves project_overrides empty and valid.
+//  5. A malformed decision_retention document is left untouched (fail closed).
+func TestDecisionRetentionStore_DeleteProjectPrunesOverride(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Now().UTC()
+
+	pKeep := uuid.NewString()
+	pDays := uuid.NewString()
+	pDel := uuid.NewString()
+	pNoOverride := uuid.NewString()
+	for i, pid := range []string{pKeep, pDays, pDel, pNoOverride} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("prune-p-%d", i), Slug: fmt.Sprintf("prune-p-%d", i), Created: now,
+		}))
+	}
+
+	doc := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 60},
+			%q: {"mode": "days", "days": 30}
+		}
+	}`, pKeep, pDays, pDel))
+	saved, err := cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, doc, "admin@test.com", 0, "managed")
+	require.NoError(t, err)
+	revBefore := saved.Revision
+	settingsRevBefore := saved.SettingsRevision
+
+	// 1. Deleting a project without an override must be a no-op.
+	require.NoError(t, cs.DeleteProject(ctx, pNoOverride))
+	row, err := cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, revBefore, row.Revision, "deleting a project without an override must not bump section revision")
+	revRow, err := cs.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, settingsRevBefore, revRow.Revision, "deleting a project without an override must not bump settings revision")
+
+	// 2. Deleting pDel prunes its override and preserves pKeep (keep_forever) and pDays (60d).
+	require.NoError(t, cs.DeleteProject(ctx, pDel))
+	row, err = cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, revBefore+1, row.Revision)
+	assert.Equal(t, "project-delete", row.UpdatedBy)
+	revRow, err = cs.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Greater(t, revRow.Revision, settingsRevBefore, "pruning override must bump operational settings revision")
+
+	cfg, err := opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, 90, cfg.RetentionDays)
+	assert.NotContains(t, cfg.ProjectOverrides, pDel, "deleted project override must be pruned")
+	require.Contains(t, cfg.ProjectOverrides, pKeep)
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, cfg.ProjectOverrides[pKeep].Mode)
+	require.Contains(t, cfg.ProjectOverrides, pDays)
+	require.NotNil(t, cfg.ProjectOverrides[pDays].Days)
+	assert.Equal(t, 60, *cfg.ProjectOverrides[pDays].Days)
+
+	// 3. Re-creating a project with the exact same UUID pDel sees hub default (90d), not 30d.
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: pDel, Name: "prune-p-recreated", Slug: "prune-p-recreated", Created: now,
+	}))
+	row, err = cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	cfg, err = opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+	days, ok := cfg.EffectiveDays(pDel)
+	assert.True(t, ok)
+	assert.Equal(t, 90, days, "re-created same-UUID project must inherit hub default, not deleted project's 30d override")
+	_, held := cfg.EffectiveDays(pKeep)
+	assert.False(t, held, "keep_forever hold on pKeep must remain intact")
+
+	// 4. Deleting remaining overrides leaves project_overrides empty and valid.
+	require.NoError(t, cs.DeleteProject(ctx, pKeep))
+	require.NoError(t, cs.DeleteProject(ctx, pDays))
+	row, err = cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	cfg, err = opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.ProjectOverrides)
+	assert.True(t, cfg.Enabled)
+	assert.Equal(t, 90, cfg.RetentionDays)
+
+	// 5. Malformed stored JSON that still contains the deleted project's key is
+	// left untouched (fail closed, exact bytes preserved) on project delete.
+	pMalformed := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: pMalformed, Name: "prune-p-bad", Slug: "prune-p-bad", Created: now,
+	}))
+	badDoc := json.RawMessage(fmt.Sprintf(`{"project_overrides":{%q:{"mode":"days","days":30}},"retention_days":5}`, pMalformed))
+	badRow, err := cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, badDoc, "test", row.Revision, "managed")
+	require.NoError(t, err)
+	require.NoError(t, cs.DeleteProject(ctx, pMalformed))
+	afterBad, err := cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, badRow.Revision, afterBad.Revision, "malformed decision_retention doc must not be rewritten on project delete")
+	assert.JSONEq(t, string(badDoc), string(afterBad.Value), "malformed decision_retention doc must remain untouched")
+}
+
+// TestDecisionRetentionStore_CreateProjectPrunesPreExistingOverride verifies
+// that an override left behind by a project deleted before delete-time pruning
+// existed is pruned atomically when a new project is created with that UUID
+// (ptone/scion#9439), while attempting to create a duplicate of an existing
+// live project fails with ErrAlreadyExists without touching the live project's
+// override or keep_forever hold.
+func TestDecisionRetentionStore_CreateProjectPrunesPreExistingOverride(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Now().UTC()
+
+	pKeep := uuid.NewString()
+	pLive := uuid.NewString()
+	pLegacy := uuid.NewString() // never exists yet — simulates pre-fix deleted project
+	for i, pid := range []string{pKeep, pLive} {
+		require.NoError(t, cs.CreateProject(ctx, &store.Project{
+			ID: pid, Name: fmt.Sprintf("pre-p-%d", i), Slug: fmt.Sprintf("pre-p-%d", i), Created: now,
+		}))
+	}
+
+	doc := json.RawMessage(fmt.Sprintf(`{
+		"enabled": true,
+		"retention_days": 90,
+		"project_overrides": {
+			%q: {"mode": "keep_forever"},
+			%q: {"mode": "days", "days": 60},
+			%q: {"mode": "days", "days": 30}
+		}
+	}`, pKeep, pLive, pLegacy))
+	saved, err := cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, doc, "admin@test.com", 0, "managed")
+	require.NoError(t, err)
+
+	// 1. Duplicate-UUID create of an existing live project fails without touching its override.
+	dupErr := cs.CreateProject(ctx, &store.Project{
+		ID: pLive, Name: "dup-live", Slug: "dup-live", Created: now,
+	})
+	require.ErrorIs(t, dupErr, store.ErrAlreadyExists)
+	row, err := cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, saved.Revision, row.Revision, "failed duplicate create must not bump revision")
+	cfg, err := opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+	require.Contains(t, cfg.ProjectOverrides, pLive, "live project override must remain intact after failed duplicate create")
+
+	// 2. Creating a project with the leftover UUID prunes ONLY pLegacy's override.
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID: pLegacy, Name: "legacy-recreated", Slug: "legacy-recreated", Created: now,
+	}))
+	row, err = cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, saved.Revision+1, row.Revision)
+	assert.Equal(t, "project-create", row.UpdatedBy)
+	cfg, err = opsettings.ParseDecisionRetentionDoc(row.Value)
+	require.NoError(t, err)
+	assert.NotContains(t, cfg.ProjectOverrides, pLegacy, "leftover pre-fix override must be pruned on create")
+	days, ok := cfg.EffectiveDays(pLegacy)
+	assert.True(t, ok)
+	assert.Equal(t, 90, days, "new project reusing pre-fix UUID must inherit hub default")
+	require.Contains(t, cfg.ProjectOverrides, pKeep)
+	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, cfg.ProjectOverrides[pKeep].Mode)
+	require.Contains(t, cfg.ProjectOverrides, pLive)
+	require.NotNil(t, cfg.ProjectOverrides[pLive].Days)
+	assert.Equal(t, 60, *cfg.ProjectOverrides[pLive].Days)
 }
