@@ -862,3 +862,114 @@ func TestDelegatorMissingWithConcurrentMoveReturns403(t *testing.T) {
 		t.Errorf("expected 0 review requests after 403, got %+v", reqs)
 	}
 }
+
+// TestHumanSameLevelShareTakeoverOfBoundedGrantSurvivesWithdraw verifies
+// security review L1: when an agent requests review (creating a bounded review
+// grant), a human admin then explicitly shares `review` (same level) with the
+// same reviewer, and the agent withdraws the request, the reviewer's grant
+// survives as an ordinary human-owned review grant.
+func TestHumanSameLevelShareTakeoverOfBoundedGrantSurvivesWithdraw(t *testing.T) {
+	svc, _, st, agentArtID, _ := newAgentReviewFixture(t)
+	ctx := context.Background()
+
+	// 1. Agent requests review from Bob -> bounded grant created.
+	rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+		PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent request: %d %s", rec.Code, rec.Body.String())
+	}
+	var createResp CreateReviewRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(createResp.Requests) != 1 || createResp.Requests[0].Access != ReviewRequestAccessBounded || createResp.Requests[0].Request == nil {
+		t.Fatalf("unexpected create response: %+v", createResp.Requests)
+	}
+	reqID := createResp.Requests[0].Request.ID
+
+	// 2. Human admin (Alice) shares `review` (same level) with Bob.
+	put, err := st.PutGrant(ctx, &Grant{
+		ID: "same-level-takeover", ArtifactID: agentArtID, SubjectKind: SubjectPrincipal,
+		SubjectRef: "user:bob", Permission: GrantReview, CreatedByRef: "user:alice", CreatedAt: time.Now().UTC(),
+	}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+	if err != nil || put != GrantPutChanged {
+		t.Fatalf("same-level human PutGrant over bounded = %v, %v; want GrantPutChanged, nil", put, err)
+	}
+
+	// 3. Agent withdraws the review request.
+	wRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests/"+reqID+"/withdraw",
+		PrincipalKindAgent, "agent-1", "proj-1", nil)
+	if wRec.Code != http.StatusOK {
+		t.Fatalf("withdraw: %d %s", wRec.Code, wRec.Body.String())
+	}
+
+	// 4. Bob's grant must survive as an ordinary review grant owned by Alice.
+	gs, err := st.ListGrants(ctx, agentArtID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	var bobGrant *Grant
+	for i := range gs {
+		if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == "user:bob" {
+			bobGrant = &gs[i]
+		}
+	}
+	if bobGrant == nil || bobGrant.Permission != GrantReview || bobGrant.CreatedByRef != "user:alice" {
+		t.Fatalf("bob grant after withdraw = %+v, want ordinary review grant created_by_ref=user:alice", bobGrant)
+	}
+}
+
+// TestWithdrawCleanupOnlyDeletesReviewPermissionBoundedGrant verifies the
+// security review defence-in-depth guard in cleanupWithdrawnRequestGrantTx:
+// withdraw only deletes a bounded grant whose permission is still `review`.
+func TestWithdrawCleanupOnlyDeletesReviewPermissionBoundedGrant(t *testing.T) {
+	svc, _, st, agentArtID, _ := newAgentReviewFixture(t)
+	ctx := context.Background()
+	sqlSt := st.(*sqlStore)
+
+	rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+		PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("agent request: %d %s", rec.Code, rec.Body.String())
+	}
+	var createResp CreateReviewRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &createResp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	reqID := createResp.Requests[0].Request.ID
+	storedReq, err := st.GetReviewRequest(ctx, agentArtID, reqID)
+	if err != nil {
+		t.Fatalf("GetReviewRequest: %v", err)
+	}
+	grantID := storedReq.GrantID
+	if grantID == "" {
+		t.Fatalf("expected non-empty grantID on bounded request")
+	}
+
+	// Synthetically mutate the grant row's permission to `write` while leaving
+	// created_by_ref as BoundedReviewCreator.
+	if _, err := sqlSt.db.ExecContext(ctx, sqlSt.rebind(`UPDATE artifact_grant SET permission = ? WHERE id = ?`), GrantWrite, grantID); err != nil {
+		t.Fatalf("mutate grant permission: %v", err)
+	}
+
+	wRec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests/"+reqID+"/withdraw",
+		PrincipalKindAgent, "agent-1", "proj-1", nil)
+	if wRec.Code != http.StatusOK {
+		t.Fatalf("withdraw: %d %s", wRec.Code, wRec.Body.String())
+	}
+
+	// The non-review grant row must NOT have been deleted by withdraw cleanup.
+	gs, err := st.ListGrants(ctx, agentArtID)
+	if err != nil {
+		t.Fatalf("ListGrants: %v", err)
+	}
+	var found bool
+	for _, g := range gs {
+		if g.ID == grantID && g.Permission == GrantWrite {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected non-review grant %s to survive withdraw cleanup, grants=%+v", grantID, gs)
+	}
+}

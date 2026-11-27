@@ -698,8 +698,8 @@ func (s *sqlStore) cleanupWithdrawnRequestGrantTx(ctx context.Context, tx *sql.T
 	var subjectKind, subjectRef, perm string
 	err := tx.QueryRowContext(ctx, s.rebind(`SELECT subject_kind, subject_ref, permission
 		FROM artifact_grant
-		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ?`),
-		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator).Scan(&subjectKind, &subjectRef, &perm)
+		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ? AND permission = ?`),
+		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator, GrantReview).Scan(&subjectKind, &subjectRef, &perm)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -707,8 +707,8 @@ func (s *sqlStore) cleanupWithdrawnRequestGrantTx(ctx context.Context, tx *sql.T
 		return fmt.Errorf("artifacts: find bounded grant for withdraw: %w", err)
 	}
 	res, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_grant
-		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ?`),
-		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator)
+		WHERE id = ? AND artifact_id = ? AND subject_kind = ? AND created_by_ref = ? AND permission = ?`),
+		existing.GrantID, existing.ArtifactID, SubjectPrincipal, BoundedReviewCreator, GrantReview)
 	if err != nil {
 		return fmt.Errorf("artifacts: delete bounded grant on withdraw: %w", err)
 	}

@@ -225,10 +225,11 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 			newBy = sql.NullString{String: BoundedReviewCreator, Valid: true}
 			newExpires = nil
 		} else {
-			needUpdate = perm != g.Permission || (fromReviewRequest && (wasRoleGated || existingExpired))
+			needUpdate = perm != g.Permission || by.String == BoundedReviewCreator || (fromReviewRequest && (wasRoleGated || existingExpired))
 			if needUpdate {
-				// A level change by a person (or a review-request raise over a
-				// role-gated grant) ends the role-gated form (ptone/scion#7134,
+				// A level change by a person, a same-level human write over a
+				// bounded grant, or a review-request raise over a role-gated
+				// grant ends the role-gated form (ptone/scion#7134,
 				// ptone/scion#5548): its creator becomes that person, so it no
 				// longer depends on a role in the home project.
 				if wasRoleGated {
