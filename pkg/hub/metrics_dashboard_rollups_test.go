@@ -127,52 +127,58 @@ func makeDashUsageEvent(eventID, runID, projectID, agentID string, billingUserID
 
 func TestComputeCacheHitRate(t *testing.T) {
 	// Fully known ratio: 36000 / (12000 + 36000 + 2000) = 0.72, partial=false
-	r, partial := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000), 0, 0, 0)
+	r, partial := computeCacheHitRate(i64ptr(12000), i64ptr(36000), i64ptr(2000), 0, 0, 0, false)
 	require.NotNil(t, r)
 	assert.InDelta(t, 0.72, *r, 1e-9)
 	assert.False(t, partial)
 
 	// Zero cache_read with positive input -> 0.0 (known zero, not nil), partial=false
-	rZero, partialZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0), 0, 0, 0)
+	rZero, partialZero := computeCacheHitRate(i64ptr(1000), i64ptr(0), i64ptr(0), 0, 0, 0, false)
 	require.NotNil(t, rZero)
 	assert.Equal(t, 0.0, *rZero)
 	assert.False(t, partialZero)
 
 	// Zero denominator -> (nil, false) (never divide by zero / NaN)
-	rNil, partialNil := computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0), 0, 0, 0)
+	rNil, partialNil := computeCacheHitRate(i64ptr(0), i64ptr(0), i64ptr(0), 0, 0, 0, false)
 	assert.Nil(t, rNil)
 	assert.False(t, partialNil)
 
 	// Unknown input or cacheRead -> (nil, false)
-	rInNil, pInNil := computeCacheHitRate(nil, i64ptr(100), i64ptr(0), 0, 0, 0)
+	rInNil, pInNil := computeCacheHitRate(nil, i64ptr(100), i64ptr(0), 0, 0, 0, false)
 	assert.Nil(t, rInNil)
 	assert.False(t, pInNil)
-	rCRNil, pCRNil := computeCacheHitRate(i64ptr(100), nil, i64ptr(0), 0, 0, 0)
+	rCRNil, pCRNil := computeCacheHitRate(i64ptr(100), nil, i64ptr(0), 0, 0, 0, false)
 	assert.Nil(t, rCRNil)
 	assert.False(t, pCRNil)
 
 	// Token-bearing unknown cacheRead > 0 (D11b: numerator understated) -> (nil, false)
-	rCRUnk, pCRUnk := computeCacheHitRate(i64ptr(200), i64ptr(0), i64ptr(0), 0, 1, 0)
+	rCRUnk, pCRUnk := computeCacheHitRate(i64ptr(200), i64ptr(0), i64ptr(0), 0, 1, 0, false)
 	assert.Nil(t, rCRUnk)
 	assert.False(t, pCRUnk)
 
 	// Unknown cacheWrite (e.g. legacy rows) -> true upper bound 50/(100+50) with partial=true
-	rCWNil, pCWNil := computeCacheHitRate(i64ptr(100), i64ptr(50), nil, 0, 0, 1)
+	rCWNil, pCWNil := computeCacheHitRate(i64ptr(100), i64ptr(50), nil, 0, 0, 1, false)
 	require.NotNil(t, rCWNil)
 	assert.InDelta(t, 50.0/150.0, *rCWNil, 1e-9)
 	assert.True(t, pCWNil)
 
 	// Mixed known+unknown cacheWrite -> true upper bound 900/(1100+900+0)=0.45 with partial=true
-	rMixed, pMixed := computeCacheHitRate(i64ptr(1100), i64ptr(900), i64ptr(0), 0, 0, 1)
+	rMixed, pMixed := computeCacheHitRate(i64ptr(1100), i64ptr(900), i64ptr(0), 0, 0, 1, false)
 	require.NotNil(t, rMixed)
 	assert.InDelta(t, 0.45, *rMixed, 1e-9)
 	assert.True(t, pMixed)
 
 	// Mixed known+unknown input with known cacheRead -> true upper bound with partial=true
-	rInUnk, pInUnk := computeCacheHitRate(i64ptr(100), i64ptr(100), i64ptr(0), 1, 0, 0)
+	rInUnk, pInUnk := computeCacheHitRate(i64ptr(100), i64ptr(100), i64ptr(0), 1, 0, 0, false)
 	require.NotNil(t, rInUnk)
 	assert.InDelta(t, 0.50, *rInUnk, 1e-9)
 	assert.True(t, pInUnk)
+
+	// Untracked legacy portion present (events > presence_tracked_events) -> partial=true
+	rUntracked, pUntracked := computeCacheHitRate(i64ptr(500), i64ptr(200), i64ptr(100), 0, 0, 0, true)
+	require.NotNil(t, rUntracked)
+	assert.InDelta(t, 200.0/800.0, *rUntracked, 1e-9)
+	assert.True(t, pUntracked)
 }
 
 // TestHubRollupSource_SummaryNullableTokensAndHitRate runs against SQLite by
@@ -1209,4 +1215,147 @@ func TestHubRollupSource_D7bCoverageDayConsistencyDeterministic(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.UsageGranularityDay, after.Granularity, "D7b: discrepancy on first (coverage) UTC day must force daily fallback at any hour")
 	assert.Equal(t, "UTC", after.TimeZone)
+}
+
+// TestHubRollupSource_PrePresenceLegacyMixedHitRate pins the conservative
+// trackedNullLB + hasUntracked D11b formula when pre-P2.1a daily rows
+// (presence_tracked_events == 0, null_token_events > 0) share a daily window
+// with presence-tracked rows:
+//   - Probe A: legacy (events=5, null=5, presence=0) + tracked (2 events, 1 with
+//     cache_read NULL) -> nil hit rate (totals + daily point).
+//   - Probe B: legacy (events=5, null=5, presence=0) + tracked (2 events, 1 with
+//     cache_write NULL) -> partial=true hit rate (totals + daily point).
+//   - Pure legacy with positive sums (events=5, null=0, presence=0) -> partial=true.
+//   - Pure tracked fully known -> partial=false (unchanged).
+func TestHubRollupSource_PrePresenceLegacyMixedHitRate(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	dbNow, err := cs.DBNow(ctx)
+	require.NoError(t, err)
+	todayDay := time.Date(dbNow.UTC().Year(), dbNow.UTC().Month(), dbNow.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	eventTS := todayDay.Add(time.Hour)
+	if eventTS.After(dbNow) {
+		eventTS = dbNow.Add(-time.Minute)
+	}
+
+	u1 := &store.User{ID: uuid.NewString(), Email: "legacy-mix@example.com", DisplayName: "U1", Role: "member", Status: "active"}
+	require.NoError(t, cs.CreateUser(ctx, u1))
+
+	projProbeA := &store.Project{ID: uuid.NewString(), Name: "leg-a", Slug: "leg-a-" + uuid.NewString()[:8]}
+	projProbeB := &store.Project{ID: uuid.NewString(), Name: "leg-b", Slug: "leg-b-" + uuid.NewString()[:8]}
+	projPureLeg := &store.Project{ID: uuid.NewString(), Name: "leg-pure", Slug: "leg-pure-" + uuid.NewString()[:8]}
+	projPureTrk := &store.Project{ID: uuid.NewString(), Name: "trk-pure", Slug: "trk-pure-" + uuid.NewString()[:8]}
+	for _, p := range []*store.Project{projProbeA, projProbeB, projPureLeg, projPureTrk} {
+		require.NoError(t, cs.CreateProject(ctx, p))
+	}
+
+	agA, runA := seedDashboardAgentAndRun(t, cs, projProbeA.ID, u1.ID, "ag-la", "claude", string(state.PhaseRunning), todayDay)
+	agB, runB := seedDashboardAgentAndRun(t, cs, projProbeB.ID, u1.ID, "ag-lb", "claude", string(state.PhaseRunning), todayDay)
+	agTrk, runTrk := seedDashboardAgentAndRun(t, cs, projPureTrk.ID, u1.ID, "ag-lt", "claude", string(state.PhaseRunning), todayDay)
+
+	seedRawPrePresence := func(projectID string, events, nullEvents, in, cr, cw int64) {
+		_, sErr := client.UsageRollupDaily.Create().
+			SetBucketStart(todayDay).
+			SetProjectID(projectID).
+			SetBillingUserID(u1.ID).
+			SetAgentID(uuid.NewString()).
+			SetHarness("antigravity").
+			SetModel("legacy-model").
+			SetUsageSource(store.UsageSourceHooks).
+			SetCalls(events).
+			SetInput(in).
+			SetOutput(0).
+			SetCacheRead(cr).
+			SetCacheWrite(cw).
+			SetEvents(events).
+			SetNullTokenEvents(nullEvents).
+			SetPresenceTrackedEvents(0).
+			SetFirstEventTs(eventTS).
+			SetLastEventTs(eventTS).
+			Save(ctx)
+		require.NoError(t, sErr)
+	}
+
+	// Probe A: pre-presence legacy row (events=5, null=5, presence=0) + tracked (1 known + 1 cache_read NULL)
+	seedRawPrePresence(projProbeA.ID, 5, 5, 0, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agA,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("la-1", runA, projProbeA.ID, agA, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(500), i64ptr(50), i64ptr(400), i64ptr(5)),
+			makeDashUsageEvent("la-2", runA, projProbeA.ID, agA, &u1.ID, "claude", "claude-sonnet-4-6", 2, eventTS.Add(time.Second), 1, i64ptr(500), i64ptr(50), nil, i64ptr(5)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Probe B: pre-presence legacy row (events=5, null=5, presence=0) + tracked (1 known + 1 cache_write NULL)
+	seedRawPrePresence(projProbeB.ID, 5, 5, 0, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agB,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("lb-1", runB, projProbeB.ID, agB, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(500), i64ptr(50), i64ptr(400), i64ptr(5)),
+			makeDashUsageEvent("lb-2", runB, projProbeB.ID, agB, &u1.ID, "claude", "claude-sonnet-4-6", 2, eventTS.Add(time.Second), 1, i64ptr(500), i64ptr(50), i64ptr(400), nil),
+		},
+	})
+	require.NoError(t, err)
+
+	// Pure legacy row with positive sums (events=5, null=0, presence=0)
+	seedRawPrePresence(projPureLeg.ID, 5, 0, 500, 200, 100)
+
+	// Pure tracked fully known
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agTrk,
+		Events: []*store.UsageEvent{
+			makeDashUsageEvent("lt-1", runTrk, projPureTrk.ID, agTrk, &u1.ID, "claude", "claude-sonnet-4-6", 1, eventTS, 1, i64ptr(100), i64ptr(50), i64ptr(900), i64ptr(0)),
+		},
+	})
+	require.NoError(t, err)
+
+	// Remove hourly coverage marker so all queries read daily rollups (where pre-presence rows live).
+	_, err = client.HubSetting.Delete().Where(hubsetting.SectionEQ(store.UsageRollupHourlyCoverageSection)).Exec(ctx)
+	require.NoError(t, err)
+
+	src := NewHubRollupSource(cs)
+
+	// Probe A -> nil hit rate on both summary totals and dailyCacheHitRate point
+	sumA, err := src.QuerySummary(ctx, 7, WithProjectID(projProbeA.ID))
+	require.NoError(t, err)
+	assert.Nil(t, sumA.CacheHitRate, "Probe A: legacy null_token_events must not mask tracked unknown cache_read")
+	assert.False(t, sumA.CacheHitRatePartial)
+	tokA, err := src.QueryTokens(ctx, 7, WithProjectID(projProbeA.ID))
+	require.NoError(t, err)
+	assert.Nil(t, tokA.Totals.CacheHitRate)
+	require.Len(t, tokA.DailyCacheHitRate, 1)
+	assert.Nil(t, tokA.DailyCacheHitRate[0].Value)
+	assert.False(t, tokA.DailyCacheHitRate[0].Partial)
+
+	// Probe B -> non-nil rate flagged partial=true on both summary totals and dailyCacheHitRate point
+	sumB, err := src.QuerySummary(ctx, 7, WithProjectID(projProbeB.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumB.CacheHitRate)
+	assert.InDelta(t, 800.0/1805.0, *sumB.CacheHitRate, 1e-9)
+	assert.True(t, sumB.CacheHitRatePartial, "Probe B: legacy null_token_events must not mask tracked unknown cache_write")
+	tokB, err := src.QueryTokens(ctx, 7, WithProjectID(projProbeB.ID))
+	require.NoError(t, err)
+	require.NotNil(t, tokB.Totals.CacheHitRate)
+	assert.True(t, tokB.Totals.CacheHitRatePartial)
+	require.Len(t, tokB.DailyCacheHitRate, 1)
+	require.NotNil(t, tokB.DailyCacheHitRate[0].Value)
+	assert.True(t, tokB.DailyCacheHitRate[0].Partial)
+
+	// Pure legacy with positive sums -> rate=200/800, partial=true (untracked legacy portion exists)
+	sumLeg, err := src.QuerySummary(ctx, 7, WithProjectID(projPureLeg.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumLeg.CacheHitRate)
+	assert.InDelta(t, 200.0/800.0, *sumLeg.CacheHitRate, 1e-9)
+	assert.True(t, sumLeg.CacheHitRatePartial)
+
+	// Pure tracked fully known -> rate=0.90, partial=false
+	sumTrk, err := src.QuerySummary(ctx, 7, WithProjectID(projPureTrk.ID))
+	require.NoError(t, err)
+	require.NotNil(t, sumTrk.CacheHitRate)
+	assert.InDelta(t, 0.90, *sumTrk.CacheHitRate, 1e-9)
+	assert.False(t, sumTrk.CacheHitRatePartial)
 }

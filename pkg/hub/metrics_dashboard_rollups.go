@@ -171,15 +171,34 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 	}, nil
 }
 
-// tokenBearingHitRateUnknowns computes per-field counts of token-bearing events
-// (excluding token-less / calls-only events counted in NullTokenEvents) whose
-// input, cache_read, or cache_write bucket was NULL (D11b):
+// tokenBearingHitRateUnknowns computes conservative per-field counts of
+// presence-tracked token-bearing events whose input, cache_read, or cache_write
+// bucket was NULL, plus whether any pre-presence (legacy) events exist in the
+// scope (D11b):
 //
-//	unknown(F) = max(0, (presence_tracked_events - null_token_events) - F_known_events)
-func tokenBearingHitRateUnknowns(t store.UsageRollupTotals) (unknownInput, unknownCacheRead, unknownCacheWrite int64) {
-	tokenBearing := t.PresenceTrackedEvents - t.NullTokenEvents
+//	untracked      = max(0, events - presence_tracked_events)
+//	trackedNullLB  = max(0, null_token_events - untracked)
+//	tokenBearing   = max(0, presence_tracked_events - trackedNullLB)
+//	unknown(F)     = max(0, tokenBearing - F_known_events)
+//
+// Subtracting only trackedNullLB prevents pre-P2.1a daily rows (which carry
+// null_token_events > 0 with presence_tracked_events == 0) from masking real
+// unknowns in presence-tracked rows. When untracked > 0, hasUntracked is true
+// so the caller flags any non-nil hit rate as partial.
+func tokenBearingHitRateUnknowns(t store.UsageRollupTotals) (unknownInput, unknownCacheRead, unknownCacheWrite int64, hasUntracked bool) {
+	untracked := t.Events - t.PresenceTrackedEvents
+	if untracked < 0 {
+		untracked = 0
+	}
+	hasUntracked = untracked > 0
+
+	trackedNullLB := t.NullTokenEvents - untracked
+	if trackedNullLB < 0 {
+		trackedNullLB = 0
+	}
+	tokenBearing := t.PresenceTrackedEvents - trackedNullLB
 	if tokenBearing <= 0 {
-		return 0, 0, 0
+		return 0, 0, 0, hasUntracked
 	}
 	if d := tokenBearing - t.InputKnownEvents; d > 0 {
 		unknownInput = d
@@ -190,27 +209,27 @@ func tokenBearingHitRateUnknowns(t store.UsageRollupTotals) (unknownInput, unkno
 	if d := tokenBearing - t.CacheWriteKnownEvents; d > 0 {
 		unknownCacheWrite = d
 	}
-	return unknownInput, unknownCacheRead, unknownCacheWrite
+	return unknownInput, unknownCacheRead, unknownCacheWrite, hasUntracked
 }
 
 // computeCacheHitRate returns cache_read / (input + cache_read + known_cache_write)
-// and whether the rate is partial (a true upper bound because at least one
-// token-bearing event had unknown input or cache_write, including legacy rows
-// where cache_write is NULL).
+// and whether the rate is partial (a true upper bound when only input or
+// cache_write has unknowns, or when pre-presence untracked rows are present).
 //
 // Per D11b:
-//   - Token-less (calls-only) events are excluded via NullTokenEvents and do
-//     not affect the hit rate.
+//   - Token-less (calls-only) events are excluded via trackedNullLB and do not
+//     affect the hit rate.
 //   - If input or cacheRead is nil, or unknownCacheRead > 0 (numerator would
 //     be understated), or the denominator is <= 0, returns (nil, false).
 //   - Otherwise computes from known values and sets partial=true whenever
-//     cacheWrite is nil, unknownInput > 0, or unknownCacheWrite > 0.
-func computeCacheHitRate(input, cacheRead, cacheWrite *int64, unknownInput, unknownCacheRead, unknownCacheWrite int64) (*float64, bool) {
+//     cacheWrite is nil, unknownInput > 0, unknownCacheWrite > 0, or
+//     hasUntracked is true (events > presence_tracked_events).
+func computeCacheHitRate(input, cacheRead, cacheWrite *int64, unknownInput, unknownCacheRead, unknownCacheWrite int64, hasUntracked bool) (*float64, bool) {
 	if input == nil || cacheRead == nil || unknownCacheRead > 0 {
 		return nil, false
 	}
 	var cw float64
-	partial := unknownInput > 0 || unknownCacheWrite > 0
+	partial := hasUntracked || unknownInput > 0 || unknownCacheWrite > 0
 	if cacheWrite != nil {
 		cw = float64(*cacheWrite)
 	} else {
@@ -249,8 +268,8 @@ func dashboardTokenTotalsFromRollup(t store.UsageRollupTotals) *DashboardTokenTo
 	if t.Saturated {
 		resolved.Saturated = true
 	}
-	unkIn, unkCR, unkCW := tokenBearingHitRateUnknowns(t)
-	rate, partial := computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite, unkIn, unkCR, unkCW)
+	unkIn, unkCR, unkCW, hasUntracked := tokenBearingHitRateUnknowns(t)
+	rate, partial := computeCacheHitRate(resolved.Input, resolved.CacheRead, resolved.CacheWrite, unkIn, unkCR, unkCW, hasUntracked)
 	return &DashboardTokenTotals{
 		Input:               resolved.Input,
 		Output:              resolved.Output,
@@ -765,8 +784,8 @@ func (s *HubRollupSource) QueryTokens(ctx context.Context, periodDays int, opts 
 			acc.Input, acc.Output, acc.CacheRead, acc.CacheWrite, acc.CacheWrite1h, acc.Reasoning,
 			presenceFromTotals(*acc),
 		)
-		unkIn, unkCR, unkCW := tokenBearingHitRateUnknowns(*acc)
-		rate, partial := computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite, unkIn, unkCR, unkCW)
+		unkIn, unkCR, unkCW, hasUntracked := tokenBearingHitRateUnknowns(*acc)
+		rate, partial := computeCacheHitRate(tok.Input, tok.CacheRead, tok.CacheWrite, unkIn, unkCR, unkCW, hasUntracked)
 		dailyHitRate = append(dailyHitRate, NullableFloatPoint{
 			Timestamp: dk,
 			Value:     rate,
