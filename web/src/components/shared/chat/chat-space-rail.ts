@@ -1236,7 +1236,7 @@ export class ScionChatSpaceRail extends LitElement {
       justify-content: center;
     }
 
-    @container (max-width: 230px) {
+    @container (max-width: 259px) {
       .rail-toolbar {
         padding: 0.375rem 0.5rem;
         gap: 0.25rem;

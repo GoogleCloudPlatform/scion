@@ -716,7 +716,7 @@ func TestUserMeInboxSummary_ChatStoreCallCount(t *testing.T) {
 //   - starredMessages never changes chat.count or summary.total (even when unread is 0)
 //   - projects is the union of unread threads, unread agent DMs, and authorized starred conversations
 //   - web.chat_starred_messages off omits starredMessages and excludes starred-only projects
-//   - exceeding the starred scan budget sets chat.capped = true
+//   - exceeding the starred scan budget sets breakdown.starredMessagesCapped = 1 while leaving chat.capped and summary.totalCapped false
 //   - project-bounded UAT scopes starredMessages and projects to its boundary project
 func TestUserMeInboxSummary_ChatStarredMessagesProjectsGateAndCap(t *testing.T) {
 	f := newChatFixture(t)
