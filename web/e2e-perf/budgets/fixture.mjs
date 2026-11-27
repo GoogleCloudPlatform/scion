@@ -165,6 +165,10 @@ export function buildFixture() {
         autoExposePortsEnabled: false,
         nativeChatEnabled: true,
         telemetryEnabled: false,
+        uploads: {
+          maxAttachmentSize: 10485760,
+          maxWorkspaceFileSize: 52428800,
+        },
       },
     },
     '/api/v1/experiments': {

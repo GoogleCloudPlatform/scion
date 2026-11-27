@@ -108,15 +108,27 @@ func (s *Server) attachmentWriterKind(ctx context.Context) string {
 }
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file
-// size limit when it is stored as an artifact, MaxAttachmentSize otherwise.
+// size limit when it is stored as an artifact, the configured
+// server.hub.uploads.max_attachment_size (default MaxAttachmentSize)
+// otherwise.
 func (s *Server) attachmentMaxBytes(ctx context.Context, toArtifacts bool) int64 {
 	if !toArtifacts {
-		return MaxAttachmentSize
+		return s.config.Uploads.EffectiveMaxAttachmentSize()
 	}
 	if n := s.artifactLimits(ctx).MaxFileBytes; n > 0 {
 		return n
 	}
 	return artifacts.DefaultMaxFileBytes
+}
+
+// webAttachmentMaxBytes is the per-file limit of a chat attachment a web
+// session uploads, whoever asks: a signed-in user's upload goes to the
+// artifact service while hub.attachment_artifacts is on and the service is
+// ready (attachmentUploadsToArtifacts), so it does not depend on the caller
+// of the public settings, which may be anonymous.
+func (s *Server) webAttachmentMaxBytes(ctx context.Context) int64 {
+	toArtifacts := s.experimentEnabled(experiments.AttachmentArtifacts) && s.attachmentArtifactsReady()
+	return s.attachmentMaxBytes(ctx, toArtifacts)
 }
 
 // bindChatAttachments binds each artifact attachment of refs to the stored

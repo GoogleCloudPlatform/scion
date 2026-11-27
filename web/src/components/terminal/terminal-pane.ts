@@ -54,6 +54,7 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { dragAxis, wheelNotches } from '../../shared/terminal-wheel.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
@@ -2365,19 +2366,11 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private async _handleFileDrop(files: FileList): Promise<void> {
-    // Client-side size validation
-    const MAX_FILE = 50 * 1024 * 1024; // 50MB
-    const MAX_TOTAL = 100 * 1024 * 1024; // 100MB
-    let total = 0;
-    for (const f of files) {
-      if (f.size > MAX_FILE) {
-        this._showUploadError(`File "${f.name}" exceeds 50MB limit`);
-        return;
-      }
-      total += f.size;
-    }
-    if (total > MAX_TOTAL) {
-      this._showUploadError('Total upload exceeds 100MB limit');
+    // Client-side size validation using hub-published limits.
+    const limits = await getUploadLimits();
+    const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
+    if (sizeErr) {
+      this._showUploadError(sizeErr);
       return;
     }
 

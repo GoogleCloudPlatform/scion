@@ -155,6 +155,14 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"system_one":{"max_eval_time":"45s"}`,
 			"server.hub.system_one.max_eval_time",
 			config.HubSystemOneConfig{MaxEvalTime: "45s"}.Validate().Error()},
+		{"uploads max_attachment_size negative",
+			`"uploads":{"max_attachment_size":-1}`,
+			"server.hub.uploads.max_attachment_size",
+			config.HubUploadsConfig{MaxAttachmentSize: -1}.Validate().Error()},
+		{"uploads max_workspace_file_size above maximum",
+			`"uploads":{"max_workspace_file_size":1073741824}`,
+			"server.hub.uploads.max_workspace_file_size",
+			config.HubUploadsConfig{MaxWorkspaceFileSize: 1073741824}.Validate().Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -256,6 +256,7 @@
     "server.hub.system_one.secret_names",
     "server.hub.schedules",
     "server.hub.default_message_mode",
+    "server.hub.uploads",
     "server.hub.init_firewall",
     "server.relay"
   ],

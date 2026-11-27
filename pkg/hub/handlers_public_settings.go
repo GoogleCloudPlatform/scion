@@ -48,6 +48,20 @@ type PublicSettingsResponse struct {
 	// Branding carries Hub-wide UI branding (non-boolean fields only) when
 	// server.hub.branding is customized; omitted when stock defaults apply.
 	Branding *config.PublicBranding `json:"branding,omitempty"`
+	// Uploads are the web upload limits (server.hub.uploads), so the web UI
+	// can check a file before sending it.
+	Uploads PublicUploadLimits `json:"uploads"`
+}
+
+// PublicUploadLimits are the upload limits the web UI reads, in bytes.
+type PublicUploadLimits struct {
+	// MaxAttachmentSize is the per-file limit of a chat attachment
+	// uploaded from the web UI (the artifact service's file limit while
+	// attachments are stored there).
+	MaxAttachmentSize int64 `json:"maxAttachmentSize"`
+	// MaxWorkspaceFileSize is the per-file limit of a project workspace or
+	// shared directory upload.
+	MaxWorkspaceFileSize int64 `json:"maxWorkspaceFileSize"`
 }
 
 // nativeChatEnabled reports whether the built-in chat feature is active.
@@ -88,5 +102,9 @@ func (s *Server) handlePublicSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultModel:              defaults.DefaultModel,
 		AgentSecretsUserScopeOnly: s.agentSecretsUserScopeOnly(),
 		Branding:                  s.ResolvedBranding().Public(),
+		Uploads: PublicUploadLimits{
+			MaxAttachmentSize:    s.webAttachmentMaxBytes(r.Context()),
+			MaxWorkspaceFileSize: s.config.Uploads.EffectiveMaxWorkspaceFileSize(),
+		},
 	})
 }
