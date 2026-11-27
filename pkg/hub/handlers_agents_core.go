@@ -238,24 +238,37 @@ type ListAgentsStats struct {
 }
 
 // maxAgentCreateBodySize bounds POST /api/v1/agents and
-// POST /api/v1/projects/{projectId}/agents request bodies.
-// Create-time secrets allow up to maxCreateAgentSecrets (50) entries of up to
-// maxCreateAgentSecretValueBytes (64 KiB) each (~3.2 MiB raw, ~4.3 MiB when
-// base64-encoded), leaving ~700 KiB for JSON framing, HomeFiles (64 KiB cap),
-// WorkspaceFiles manifests, labels, and ScionConfig.
-const maxAgentCreateBodySize = 5 << 20
+// POST /api/v1/projects/{projectId}/agents request bodies at 16 MiB
+// (16,777,216 bytes).
+//
+// Sizing arithmetic:
+//   - Create-time secrets: up to maxCreateAgentSecrets (50) entries of up to
+//     maxCreateAgentSecretValueBytes (64 KiB) each = 3.125 MiB raw (~4.17 MiB /
+//     4.37 MB base64-encoded, plus JSON framing).
+//   - HomeFiles (64 KiB cap), labels, ScionConfig, and JSON framing: < 128 KiB.
+//   - WorkspaceFiles manifest (non-git workspace bootstrap): each transfer.FileInfo
+//     entry marshals to 120 B + len(path) including the array comma (~170-177 B
+//     for 50-57 byte paths). 16 MiB accommodates ~95k-98k files on its own or
+//     ~70k files alongside worst-case secrets; extreme manifests above 16 MiB
+//     are intentionally rejected with 413 payload_too_large.
+const maxAgentCreateBodySize = 16 << 20
+
+const agentCreateBodyTooLargeMsg = "request body exceeds the 16 MiB maximum size (for example, the workspace file manifest is too large)"
 
 // readBoundedAgentJSON caps r.Body with http.MaxBytesReader and decodes JSON
 // into dst. On failure it writes 413 payload_too_large (for *http.MaxBytesError)
 // or 400 invalid_request and returns false.
 func readBoundedAgentJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, dst interface{}) bool {
+	return readBoundedAgentJSONWithMessage(w, r, maxBytes, "request body exceeds maximum size", dst)
+}
+
+func readBoundedAgentJSONWithMessage(w http.ResponseWriter, r *http.Request, maxBytes int64, tooLargeMsg string, dst interface{}) bool {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	}
 	if err := readJSON(r, dst); err != nil {
 		if isMaxBytesError(err) {
-			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
-				"request body exceeds maximum size", nil)
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", tooLargeMsg, nil)
 			return false
 		}
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -881,7 +894,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req CreateAgentRequest
-	if !readBoundedAgentJSON(w, r, maxAgentCreateBodySize, &req) {
+	if !readBoundedAgentJSONWithMessage(w, r, maxAgentCreateBodySize, agentCreateBodyTooLargeMsg, &req) {
 		return
 	}
 

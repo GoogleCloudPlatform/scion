@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,7 +68,7 @@ func exactSizeJSON(t *testing.T, prefix, suffix string, targetBytes int) []byte 
 	return out
 }
 
-func assertPayloadTooLarge(t *testing.T, rec *httptest.ResponseRecorder) {
+func assertPayloadTooLarge(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
 	var env struct {
@@ -78,6 +79,14 @@ func assertPayloadTooLarge(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), rec.Body.String())
 	assert.Equal(t, "payload_too_large", env.Error.Code)
+	return env.Error.Message
+}
+
+func assertCreatePayloadTooLarge(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	msg := assertPayloadTooLarge(t, rec)
+	assert.Contains(t, msg, "16 MiB", "create 413 message should name the 16 MiB limit")
+	assert.Contains(t, msg, "workspace file manifest", "create 413 message should mention the workspace file manifest")
 }
 
 func assertPassedBodyDecode(t *testing.T, rec *httptest.ResponseRecorder) {
@@ -132,8 +141,61 @@ func setupAgentBodyLimitFixture(t *testing.T) (*Server, store.Store, *store.User
 	return srv, s, owner, outsider, project, provAgent, runningAgent
 }
 
+func buildManifestCreateRequestBytes(t *testing.T, projectID, name string, targetBytes int, wantOver bool) []byte {
+	t.Helper()
+	hash := "sha256:" + strings.Repeat("a", 64)
+	sample := transfer.FileInfo{
+		Path: "node_modules/@scope/pkg-000000/dist/cjs/index.js",
+		Size: 12345,
+		Hash: hash,
+		Mode: "0644",
+	}
+	sampleBytes, err := json.Marshal(sample)
+	require.NoError(t, err)
+	perEntry := len(sampleBytes) + 1 // +1 for JSON array comma
+
+	baseReq := CreateAgentRequest{
+		Name:      name,
+		ProjectID: projectID,
+		Template:  "default",
+	}
+	baseBytes, err := json.Marshal(baseReq)
+	require.NoError(t, err)
+
+	// Overhead for `"workspaceFiles":[]` plus comma.
+	count := (targetBytes - len(baseBytes) - 32) / perEntry
+	if wantOver {
+		count += 5
+	} else {
+		count -= 2
+	}
+	require.Greater(t, count, 0)
+
+	files := make([]transfer.FileInfo, count)
+	for i := range files {
+		files[i] = transfer.FileInfo{
+			Path: fmt.Sprintf("node_modules/@scope/pkg-%06d/dist/cjs/index.js", i),
+			Size: 12345,
+			Hash: hash,
+			Mode: "0644",
+		}
+	}
+	baseReq.WorkspaceFiles = files
+	raw, err := json.Marshal(baseReq)
+	require.NoError(t, err)
+
+	if wantOver {
+		require.Greater(t, len(raw), targetBytes, "expected oversized manifest to exceed targetBytes")
+		require.Less(t, len(raw), targetBytes+4096, "expected oversized manifest to be just over targetBytes")
+	} else {
+		require.LessOrEqual(t, len(raw), targetBytes, "expected under-limit manifest to fit within targetBytes")
+		require.Greater(t, len(raw), targetBytes-4096, "expected under-limit manifest to be just under targetBytes")
+	}
+	return raw
+}
+
 func TestAgentBodyLimits_CreateAgent(t *testing.T) {
-	srv, _, owner, outsider, project, _, _ := setupAgentBodyLimitFixture(t)
+	srv, s, owner, outsider, project, _, _ := setupAgentBodyLimitFixture(t)
 
 	routes := []struct {
 		name              string
@@ -154,6 +216,13 @@ func TestAgentBodyLimits_CreateAgent(t *testing.T) {
 			authzBeforeDecode: true,
 		},
 	}
+
+	// Pin the 16 MiB ceiling behaviorally rather than deriving the test size from
+	// maxAgentCreateBodySize, so lowering the constant (e.g. to 5 MiB) fails the
+	// under-limit manifest test and raising it fails the over-limit test.
+	const pinnedCreateBodyLimit = 16 << 20
+	underManifest := buildManifestCreateRequestBytes(t, project.ID, "manifest-under-limit", pinnedCreateBodyLimit, false)
+	overManifest := buildManifestCreateRequestBytes(t, project.ID, "manifest-over-limit", pinnedCreateBodyLimit, true)
 
 	for _, rt := range routes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -176,16 +245,36 @@ func TestAgentBodyLimits_CreateAgent(t *testing.T) {
 				})
 			}
 
-			t.Run("at-limit 5 MiB body passes decode", func(t *testing.T) {
+			t.Run("at-limit 16 MiB body passes decode", func(t *testing.T) {
 				payload := exactSizeJSON(t, prefix, suffix, maxAgentCreateBodySize)
 				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(payload))
 				assertPassedBodyDecode(t, rec)
 			})
 
-			t.Run("just-above-limit 5 MiB + 1 byte returns 413 payload_too_large", func(t *testing.T) {
+			t.Run("just-above-limit 16 MiB + 1 byte returns actionable 413 payload_too_large", func(t *testing.T) {
 				payload := exactSizeJSON(t, prefix, suffix, maxAgentCreateBodySize+1)
 				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(payload))
-				assertPayloadTooLarge(t, rec)
+				assertCreatePayloadTooLarge(t, rec)
+			})
+
+			t.Run("large workspace manifest just under 16 MiB passes decode", func(t *testing.T) {
+				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(underManifest))
+				assertPassedBodyDecode(t, rec)
+			})
+
+			t.Run("workspace manifest just over 16 MiB returns actionable 413 with no side effects", func(t *testing.T) {
+				ctx := context.Background()
+				before, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+				require.NoError(t, err)
+
+				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(overManifest))
+				assertCreatePayloadTooLarge(t, rec)
+
+				after, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+				require.NoError(t, err)
+				assert.Equal(t, len(before.Items), len(after.Items), "rejected over-limit manifest must not create an agent")
+				_, err = s.GetAgentBySlug(ctx, project.ID, "manifest-over-limit")
+				assert.ErrorIs(t, err, store.ErrNotFound, "rejected over-limit manifest must not persist agent slug")
 			})
 
 			t.Run("largest realistic payload with 50x64KiB base64 secrets passes decode", func(t *testing.T) {
@@ -373,13 +462,15 @@ func TestAgentBodyLimits_AgentMessage(t *testing.T) {
 				assertPayloadTooLarge(t, rec)
 			})
 
-			t.Run("largest realistic 64 KiB message passes decode", func(t *testing.T) {
+			t.Run("largest legal message (MaxMessageLength chars) passes decode", func(t *testing.T) {
 				raw, err := json.Marshal(MessageRequest{
-					Message: strings.Repeat("m", messages.MaxMsgSize),
+					Message: strings.Repeat("<", messages.MaxMessageLength),
 				})
 				require.NoError(t, err)
+				require.LessOrEqual(t, len(raw), maxSettingsBodySize, "worst-case legal message must fit within maxSettingsBodySize")
 				rec := doRawRequestWithUser(t, srv, owner, http.MethodPost, rt.path, bytes.NewReader(raw))
 				assertPassedBodyDecode(t, rec)
+				assert.NotContains(t, rec.Body.String(), "character limit", "legal MaxMessageLength message must not fail length validation")
 			})
 		})
 	}

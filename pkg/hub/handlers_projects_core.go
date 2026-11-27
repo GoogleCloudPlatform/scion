@@ -3383,7 +3383,7 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	var req CreateAgentRequest
-	if !readBoundedAgentJSON(w, r, maxAgentCreateBodySize, &req) {
+	if !readBoundedAgentJSONWithMessage(w, r, maxAgentCreateBodySize, agentCreateBodyTooLargeMsg, &req) {
 		return
 	}
 
