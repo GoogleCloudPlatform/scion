@@ -61,6 +61,14 @@ type HubUsageSinkConfig struct {
 	// SupportedSignals returns the usage signal categories this producer can
 	// report for the current run (e.g. ["calls", "input", "output", ...]).
 	SupportedSignals func() []string
+	// SuppressDirectOTel records the initial suppression directive from the
+	// Hub capability probe (Tokenomics P2.2 D3). Subsequent ingest and
+	// heartbeat responses revalidate this state via OnSuppressChanged.
+	SuppressDirectOTel bool
+	// OnSuppressChanged is invoked on every successful ingest or heartbeat
+	// response with resp.SuppressDirectOTel (an omitted field decodes as false
+	// and un-suppresses direct container export).
+	OnSuppressChanged func(bool)
 }
 
 func (c HubUsageSinkConfig) maxBatchEvents() int {
@@ -231,15 +239,20 @@ func (s *HubUsageSink) SendBatch(ctx context.Context, lines [][]byte) (BatchSend
 
 	ledgerEpoch, ledgerSeq := s.ledgerMeta()
 
-	// Partition into contiguous groups sharing (run_id, producer_epoch) so each
-	// Hub ingest request has a single consistent meter_health (run, epoch) key
-	// and preserves per-event run_id across restarts.
+	// Partition into contiguous groups sharing (run_id, producer_epoch,
+	// direct_otel_suppressed) so each Hub ingest request has a single
+	// consistent meter_health (run, epoch) key and carries the exact
+	// per-event suppression state recorded at outbox write time (R2).
 	start := 0
 	for start < len(events) {
 		groupRunID := events[start].RunID
 		groupEpoch := events[start].ProducerEpoch
+		groupSuppressed := eventDirectOTelSuppressed(&events[start])
 		end := start + 1
-		for end < len(events) && events[end].RunID == groupRunID && events[end].ProducerEpoch == groupEpoch {
+		for end < len(events) &&
+			events[end].RunID == groupRunID &&
+			events[end].ProducerEpoch == groupEpoch &&
+			eventDirectOTelSuppressed(&events[end]) == groupSuppressed {
 			end++
 		}
 		if err := s.sendGroup(ctx, events[start:end], origIndex[start:end], ledgerEpoch, ledgerSeq, &rejected); err != nil {
@@ -282,6 +295,12 @@ func (s *HubUsageSink) sendGroup(
 		seq = ledgerSeq
 	}
 
+	// Derive DirectOTelSuppressed strictly from the per-event stamp recorded at
+	// outbox write time (Tokenomics P2.2 R2). Pre-P2.2 outbox lines omit the
+	// field and decode as false (preventing double counting), while residual
+	// WAL lines from a suppressed prior run keep true across restarts.
+	directSuppressed := eventDirectOTelSuppressed(&events[0])
+
 	req := telemetrycontract.UsageIngestRequest{
 		Events:               events,
 		RunID:                runID,
@@ -289,6 +308,7 @@ func (s *HubUsageSink) sendGroup(
 		ProducerSeq:          seq,
 		LastSourceActivityAt: s.lastActivityRFC3339(),
 		SupportedSignals:     s.supportedSignals(),
+		DirectOTelSuppressed: directSuppressed,
 	}
 
 	// Proactive re-encoded size check (O2): encoding/json HTML-escaping or
@@ -324,6 +344,9 @@ func (s *HubUsageSink) sendGroup(
 	}
 
 	if resp != nil {
+		if s.cfg.OnSuppressChanged != nil {
+			s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+		}
 		for _, rej := range resp.Rejected {
 			if rej.Index >= 0 && rej.Index < len(origIndices) {
 				*rejected = append(*rejected, origIndices[rej.Index])
@@ -357,6 +380,16 @@ func (s *HubUsageSink) SendHeartbeat(ctx context.Context, finalState string) err
 		SupportedSignals:     s.supportedSignals(),
 		FinalState:           finalState,
 	}
-	_, err := s.cfg.Post(ctx, req)
-	return err
+	resp, err := s.cfg.Post(ctx, req)
+	if err != nil {
+		return err
+	}
+	if resp != nil && s.cfg.OnSuppressChanged != nil {
+		s.cfg.OnSuppressChanged(resp.SuppressDirectOTel)
+	}
+	return nil
+}
+
+func eventDirectOTelSuppressed(ev *telemetrycontract.UsageEvent) bool {
+	return ev != nil && ev.DirectOTelSuppressed != nil && *ev.DirectOTelSuppressed
 }

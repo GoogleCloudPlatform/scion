@@ -647,12 +647,51 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		log.Print(obs.Tracing.LogLine())
 
-		// Wire hub OTel metrics export to Cloud Monitoring.
-		if obs.Metrics.Enabled {
-			mp, mpErr := hubmetrics.NewMeterProvider(ctx, obs.Metrics.Project.ID, telemetryID.metricsOptions()...)
+		// Wire hub OTel metrics export to Cloud Monitoring and/or operator OTLP.
+		otlpEndpointConfigured := hubmetrics.HasOTLPEndpointEnv()
+		if otlpEndpointConfigured {
+			obs.OTLPMetrics = &hubexport.OTLPMetricsStatus{
+				Configured: true,
+				Endpoint:   strings.TrimSpace(os.Getenv("SCION_OTEL_ENDPOINT")),
+			}
+		}
+		if obs.Metrics.Enabled || otlpEndpointConfigured {
+			gcpMetricsProjectID := ""
+			if obs.Metrics.Enabled {
+				gcpMetricsProjectID = obs.Metrics.Project.ID
+			}
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, gcpMetricsProjectID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
-				obs.Metrics = obs.Metrics.Failed(mpErr)
-			} else {
+				var partialErr *hubmetrics.PartialError
+				if errors.As(mpErr, &partialErr) && mp != nil {
+					if partialErr.GCPErr != nil && obs.Metrics.Enabled {
+						obs.Metrics = obs.Metrics.Failed(partialErr.GCPErr)
+					}
+					if obs.OTLPMetrics != nil {
+						if partialErr.OTLPErr != nil {
+							obs.OTLPMetrics.Enabled = false
+							obs.OTLPMetrics.Reason = fmt.Sprintf("exporter could not be created: %v", partialErr.OTLPErr)
+						} else {
+							obs.OTLPMetrics.Enabled = true
+							obs.OTLPMetrics.Reason = "SCION_OTEL_ENDPOINT configured"
+						}
+					}
+				} else {
+					if obs.Metrics.Enabled {
+						obs.Metrics = obs.Metrics.Failed(mpErr)
+					}
+					if obs.OTLPMetrics != nil {
+						obs.OTLPMetrics.Enabled = false
+						obs.OTLPMetrics.Reason = fmt.Sprintf("exporter could not be created: %v", mpErr)
+					}
+					log.Printf("WARNING: hub metrics/OTLP configured but no exporter started; Hub usage OTel re-emission and container suppression are inactive")
+					mp = nil
+				}
+			} else if obs.OTLPMetrics != nil {
+				obs.OTLPMetrics.Enabled = true
+				obs.OTLPMetrics.Reason = "SCION_OTEL_ENDPOINT configured"
+			}
+			if mp != nil {
 				exit.addFlush(mp.Shutdown)
 				lifecycleMeterProvider = mp
 
@@ -686,6 +725,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 		log.Print(obs.Metrics.LogLine())
+		if obs.OTLPMetrics != nil {
+			log.Print(obs.OTLPMetrics.LogLine())
+		}
 		hubSrv.SetObservabilityExportStatus(obs)
 		wireLifecycleEventsSink(hubSrv, cfg, devAuthToken != "")
 
@@ -3273,6 +3315,13 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 	}
 	if err := hubSrv.RegisterNeverSuspendMetrics(mp); err != nil {
 		log.Printf("WARNING: hub never-suspend metrics disabled: %v", err)
+	}
+	if err := hubSrv.RegisterUsageOTelMetrics(
+		mp,
+		hub.WithUsageOTelActiveSink(true),
+		hub.WithUsageOTelCardinality(hub.UsageOTelCardinalityFromEnv()),
+	); err != nil {
+		log.Printf("WARNING: hub usage OTel re-emission metrics disabled: %v", err)
 	}
 
 	if drainRec, err := hub.NewOTelConduitIngressDrainMetrics(mp); err != nil {

@@ -745,14 +745,16 @@ type analyticsState struct {
 	// outboxDir, hubOutboxDir and owner locate the outboxes under the AGENT
 	// home and name their owner (Pipeline.SetAnalyticsOutbox); resolver
 	// overrides the hub ID resolver (tests).
-	outboxDir        string
-	hubOutboxDir     string
-	owner            *OutboxOwner
-	resolver         HubIDResolver
-	hubSinkCfg       *HubUsageSinkConfig
-	hubProbe         HubUsageProbeFunc
-	hubProbeInterval time.Duration
-	supportedSignals func() []string
+	outboxDir         string
+	hubOutboxDir      string
+	owner             *OutboxOwner
+	resolver          HubIDResolver
+	hubSinkCfg        *HubUsageSinkConfig
+	hubProbe          HubUsageProbeFunc
+	hubProbeInterval  time.Duration
+	supportedSignals  func() []string
+	onSuppressChanged func(bool)
+	isSuppressed      func() bool
 }
 
 // SetHubUsageSink configures the pipeline's analytics outbox to drain usage
@@ -866,6 +868,12 @@ func (a *analyticsState) probeInterval() time.Duration {
 }
 
 func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
+	onSuppressChanged := a.onSuppressChanged
+	setSuppress := func(v bool) {
+		if onSuppressChanged != nil {
+			onSuppressChanged(v)
+		}
+	}
 	gcpDir, hubDir := a.resolvedDirs()
 	resolver := a.resolver
 	if resolver == nil && a.hubSinkCfg != nil && a.hubSinkCfg.HubID != "" {
@@ -899,13 +907,21 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 			if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 				cfg.SupportedSignals = a.supportedSignals
 			}
+			applySuppress := func(v bool) {
+				hubOutbox.setHubSuppress(v)
+				setSuppress(v)
+			}
+			cfg.OnSuppressChanged = applySuppress
 			sink := NewHubUsageSink(hubOutbox, cfg)
 			a.native = NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceNative)
 			a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+			a.native.setDirectOTelSuppressedFn(a.isSuppressed)
 			hubSend := newCountingBatchSend(sink.SendBatch)
 			a.drainer = newDualAnalyticsDrainerWithSend(gcpOutbox, a.send.Send, hubOutbox, sink, hubSend.SendBatch, resolver)
+			applySuppress(cfg.SuppressDirectOTel)
 			native := a.native
 			a.drainer.onHubRevoked = func() {
+				applySuppress(false)
 				native.clearHubOutbox()
 			}
 		}
@@ -922,13 +938,21 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		if cfg.SupportedSignals == nil && a.supportedSignals != nil {
 			cfg.SupportedSignals = a.supportedSignals
 		}
+		applySuppress := func(v bool) {
+			hubOutbox.setHubSuppress(v)
+			setSuppress(v)
+		}
+		cfg.OnSuppressChanged = applySuppress
 		sink := NewHubUsageSink(hubOutbox, cfg)
 		a.native = NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceNative)
 		a.native.setRunAndActivity(cfg.RunID, sink.NoteActivity)
+		a.native.setDirectOTelSuppressedFn(a.isSuppressed)
 		a.send = newCountingBatchSend(sink.SendBatch)
 		a.drainer = newHubAnalyticsDrainerWithSend(hubOutbox, sink, a.send.SendBatch, resolver)
+		applySuppress(cfg.SuppressDirectOTel)
 		native := a.native
 		a.drainer.onHubRevoked = func() {
+			applySuppress(false)
 			native.detach()
 		}
 	default:
@@ -943,6 +967,7 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 			return
 		}
 		a.native = NewUsageAnalytics(gcpOutbox, telemetrycontract.UsageSourceNative)
+		a.native.setDirectOTelSuppressedFn(a.isSuppressed)
 		a.send = newCountingSend(gcp.SendAnalytics)
 		a.drainer = NewAnalyticsDrainer(gcpOutbox, a.send.Send, resolver)
 		a.drainer.hubOutboxDir = hubDir
@@ -950,12 +975,19 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 		if a.hubProbe != nil {
 			native := a.native
 			a.drainer.onHubRevoked = func() {
+				setSuppress(false)
 				native.clearHubOutbox()
 			}
 			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
+				applySuppress := func(v bool) {
+					hubOutbox.setHubSuppress(v)
+					setSuppress(v)
+				}
+				sink.cfg.OnSuppressChanged = applySuppress
 				if native != nil {
 					native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 				}
+				applySuppress(cfg.SuppressDirectOTel)
 			})
 		}
 	}

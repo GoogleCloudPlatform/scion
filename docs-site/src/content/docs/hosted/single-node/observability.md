@@ -667,6 +667,36 @@ The response returns process uptime and real-time divergence counters, along wit
 - **comparisons**: Arithmetic sum of `matches` + `mismatches` (internally consistent but approximate).
 - **fallbacks**: Number of read-path fallback attempts to old routing configurations during the switch.
 
+## Hub Usage OTel Re-Emission
+
+When the `tokenomics.usage_ledger` experiment is enabled and the Hub has at least one constructed metrics export sink (Cloud Monitoring via Hub credentials and/or an operator-configured OTLP gRPC collector via `SCION_OTEL_ENDPOINT` + `SCION_OTEL_HEADERS`), the Hub re-emits canonical usage counters from newly committed `usage_events` rows:
+
+- `gen_ai.api.calls` (cumulative counter, unit `{call}`, labels: `harness`, `model`, `status`, plus attribution labels)
+- `scion.usage.tokens` (cumulative counter, unit `{token}`, labels: `harness`, `model`, `token_type` ∈ `{input, output, cache_read, cache_write, reasoning}`, plus attribution labels; `cache_write_1h` is excluded and unknown/NULL fields are not emitted)
+- `scion.usage.meter_stale` (observable gauge, unit `{agent}`, label: `project`): count of active running agents whose current run's latest open `meter_health` receipt is older than 3 heartbeat intervals (180s). Every Hub replica computes this gauge from the shared database and reports the same per-project value, so dashboards **must aggregate across `service.instance.id` using `max` (not `sum`)**.
+
+Each Hub replica carries a distinct `service.instance.id` resource attribute so Cloud Monitoring and OTLP collectors never see duplicate writers on the same time series; dashboards sum `gen_ai.api.calls` and `scion.usage.tokens` across `service.instance.id`. Once suppression is active, `gen_ai.api.calls` and `scion.usage.tokens` series originate from the Hub's `service.instance.id` rather than container resource attributes (operators filtering Cloud Monitoring on container resource labels should filter on `scion_project_id` / `scion_agent_id` instead).
+
+When the Hub has an active metrics sink, the capability probe (`GET /api/v1/agents/{id}/usage/capabilities`) and every ingest/heartbeat response (`POST /api/v1/agents/{id}/usage/events`) advertise `suppress_direct_otel: true` so `sciontool` suppresses duplicate direct container export of those two canonical counters while leaving traces, logs, and non-canonical metrics unchanged. If a Hub replica lacks an active sink (or an older Hub omits the field), `suppress_direct_otel` is `false` and `sciontool` resumes direct export on the next batch or 60s heartbeat.
+
+### Operator Notes & Switch-Over Semantics
+
+- **Hub OTLP endpoint scope:** Setting `SCION_OTEL_ENDPOINT` on the Hub exports **all** Hub metric groups (not only usage counters) to that OTLP gRPC collector and enables `suppress_direct_otel: true`. Do not point `SCION_OTEL_ENDPOINT` at a logs-only collector. `SCION_OTEL_PROTOCOL` must be `grpc` (or unset); non-gRPC values are rejected at startup so no broken exporter is constructed and suppression stays off.
+- **Uniform fleet configuration:** In multi-replica deployments, all Hub replicas must be uniformly configured with a working metrics sink. During config skew or a rolling upgrade with pre-P2.2 replicas in the pool, any batch stamped `direct_otel_suppressed=true` that lands on a replica without a sink is persisted to the ledger/rollups but not re-emitted (the response then flips the container back to direct export on the next batch/heartbeat).
+- **Bounded toggle windows:** Each outbox event records whether direct OTel was suppressed at write time (`direct_otel_suppressed`), so residual WAL replays across restarts or mid-run toggles are neither double-counted nor dropped. At an experiment toggle mid-run (late activation via periodic re-probe or `404` revocation), a bounded window of up to one loopback periodic reader interval (~60s) remains where in-flight metric deltas recorded immediately before the toggle may be stripped on late activation or double-counted on revocation.
+
+### Cardinality Control (`SCION_HUB_USAGE_OTEL_CARDINALITY` & `SCION_HUB_OTEL_CARDINALITY_LIMIT`)
+
+Because cumulative OTel counters retain every observed attribute set in memory until the Hub process restarts, the Hub sets a MeterProvider-wide per-instrument OTel SDK cardinality limit via `SCION_HUB_OTEL_CARDINALITY_LIMIT` (default `20000`, minimum `2000`, maximum `250000`). Because `go.opentelemetry.io/otel/sdk/metric` applies `WithCardinalityLimit` to **all** instruments on the Hub `MeterProvider` (not only usage counters), values below the SDK default of `2000` are rejected with a warning and fall back to `20000` so other Hub metrics can never be lowered below the SDK default.
+
+At ~200–400 bytes per active cumulative series, `20000` attribute sets on `gen_ai.api.calls` and `scion.usage.tokens` alone uses ~8–16 MiB per replica (~4,000 `(agent, model)` pairs × 5 `token_type`s per replica lifetime), plus memory for any other Hub instruments that grow past the old 2,000 cap. If any instrument reaches the limit, the OTel SDK folds additional attribute sets into `otel.metric.overflow=true` (dropping `scion_project_id` / `scion_agent_id` on usage counters) and the Hub logs a rate-limited warning.
+
+| Variable | Value | Behavior & Sizing |
+|---|---|---|
+| `SCION_HUB_USAGE_OTEL_CARDINALITY` | `agent` *(default)* | Stamps `scion_project_id`, `scion_agent_id`, `scion_agent_slug`. Preserves parity with per-agent Cloud Monitoring queries and `UniqueAgents`. Each `(agent, model)` creates ~7 cumulative series per replica until restart. Suitable for small-to-medium fleets (up to ~4,000 `(agent, model)` pairs per replica restart under the default 20,000 SDK limit; Cloud Monitoring allows 50k–250k active series per descriptor). |
+| `SCION_HUB_USAGE_OTEL_CARDINALITY` | `project` | **Recommended for large fleets.** Stamps `scion_project_id` only, keeping both SDK memory and Cloud Monitoring descriptor cardinality bounded by `(project, model, token_type)` while per-agent views remain available from Hub DB rollups. |
+| `SCION_HUB_OTEL_CARDINALITY_LIMIT` | `20000` *(default)* | MeterProvider-wide per-instrument OTel SDK cardinality limit applied to **all** Hub metric instruments (`2000`..`250000`; values below `2000` warn and fall back to `20000`). Raise if an `otel.metric.overflow` warning is logged on an `agent`-mode Hub, or switch to `project` mode. |
+
 ## Related Guides
 
 - [Metrics & OpenTelemetry](/scion/hosted/single-node/metrics/) - Detailed telemetry configuration

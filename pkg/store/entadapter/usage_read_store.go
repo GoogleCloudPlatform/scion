@@ -204,6 +204,61 @@ func (s *UsageLedgerStore) DBNow(ctx context.Context) (time.Time, error) {
 	return ts.UTC().Truncate(time.Microsecond), nil
 }
 
+// CountStaleMetersByProject implements store.UsageLedgerStore.CountStaleMetersByProject.
+// Matches the read-time staleness rule in pkg/hub/handlers_usage_read.go: scoped
+// to each live (non-deleted, running) agent's current run_id, a run is stale
+// when its latest meter_health row is still "open" and has last_receipt_at
+// strictly before staleBefore.
+func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	query := `
+SELECT project_id, COUNT(*) AS stale_count
+FROM (
+	SELECT ra.project_id, mh.agent_id, mh.run_id
+	FROM meter_health mh
+	INNER JOIN agents a ON CAST(a.id AS TEXT) = mh.agent_id AND a.run_id = mh.run_id AND a.deleted_at IS NULL AND a.phase = 'running'
+	INNER JOIN run_attribution ra ON ra.run_id = mh.run_id
+	WHERE mh.final_state = 'open'
+	  AND NOT EXISTS (
+		SELECT 1
+		FROM meter_health mh2
+		WHERE mh2.agent_id = mh.agent_id
+		  AND mh2.run_id = mh.run_id
+		  AND mh2.final_state <> 'open'
+		  AND mh2.last_receipt_at >= mh.last_receipt_at
+	  )
+	GROUP BY ra.project_id, mh.agent_id, mh.run_id
+	HAVING MAX(mh.last_receipt_at) < ?
+) AS stale_runs
+GROUP BY project_id
+ORDER BY project_id ASC`
+
+	cutoff := staleBefore.UTC().Truncate(time.Microsecond)
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), []any{cutoff}, rows); err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]int64)
+	for rows.Next() {
+		var projectID string
+		var count int64
+		if err := rows.Scan(&projectID, &count); err != nil {
+			return nil, mapError(err)
+		}
+		if projectID != "" && count > 0 {
+			out[projectID] = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
+}
+
 func entUsageRollupDailyToStore(r *ent.UsageRollupDaily) *store.UsageRollupDaily {
 	return &store.UsageRollupDaily{
 		ID:                 r.ID.String(),

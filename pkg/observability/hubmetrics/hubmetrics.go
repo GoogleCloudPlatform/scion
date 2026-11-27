@@ -84,6 +84,42 @@ type options struct {
 	// exporterOpts are extra Cloud Monitoring exporter options. Tests use
 	// them to point the exporter at an in-process fake API server.
 	exporterOpts []mexporter.Option
+	// otlp configures an optional operator-managed OTLP gRPC metrics sink.
+	// When nil, NewMeterProvider falls back to LoadOTLPConfigFromEnv().
+	otlp *OTLPConfig
+	// cardinalityLimit overrides the MeterProvider-wide OTel SDK cardinality
+	// limit applied to all Hub metric instruments (min 2000, default 20000).
+	cardinalityLimit int
+}
+
+// PartialError is returned alongside a usable *metric.MeterProvider when one
+// configured exporter (for example GCP Cloud Monitoring) failed to construct
+// while another configured exporter (for example OTLP) succeeded. Callers can
+// surface the failed sink's health status while still wiring the working
+// provider.
+type PartialError struct {
+	GCPErr  error
+	OTLPErr error
+}
+
+func (e *PartialError) Error() string {
+	switch {
+	case e.GCPErr != nil && e.OTLPErr != nil:
+		return fmt.Sprintf("partial hub metrics exporter failure: gcp=%v; otlp=%v", e.GCPErr, e.OTLPErr)
+	case e.GCPErr != nil:
+		return fmt.Sprintf("partial hub metrics exporter failure (GCP disabled, OTLP active): %v", e.GCPErr)
+	case e.OTLPErr != nil:
+		return fmt.Sprintf("partial hub metrics exporter failure (OTLP disabled, GCP active): %v", e.OTLPErr)
+	default:
+		return "partial hub metrics exporter failure"
+	}
+}
+
+func (e *PartialError) Unwrap() error {
+	if e.GCPErr != nil {
+		return e.GCPErr
+	}
+	return e.OTLPErr
 }
 
 // WithExportInterval sets the periodic reader interval. Defaults to 60s.
@@ -123,46 +159,112 @@ func withExporterOptions(opts ...mexporter.Option) Option {
 }
 
 // NewMeterProvider creates an OTel SDK MeterProvider that exports to GCP Cloud
-// Monitoring. It uses Application Default Credentials (workload identity on
-// Cloud Run, attached SA on GCE).
+// Monitoring (via Application Default Credentials when gcpProjectID is
+// non-empty) and/or an operator-configured OTLP gRPC sink (when WithOTLPConfig
+// or SCION_OTEL_ENDPOINT is configured).
 //
-// If gcpProjectID is empty, an error is returned — callers should fall back to
-// disabled recorders.
+// Both sinks share the same OTel Resource, including service.instance.id, so
+// multi-replica Hubs never collide on the same time series.
+//
+// If neither gcpProjectID nor an OTLP endpoint is configured (or all
+// configured exporters fail to construct), an error is returned — callers
+// should fall back to disabled recorders.
 func NewMeterProvider(ctx context.Context, gcpProjectID string, opts ...Option) (*metric.MeterProvider, error) {
-	if gcpProjectID == "" {
-		return nil, fmt.Errorf("GCP project ID is required for hub metrics export")
-	}
-
 	o := &options{exportInterval: defaultExportInterval}
 	for _, fn := range opts {
 		fn(o)
 	}
 
-	exporterOpts := append([]mexporter.Option{
-		mexporter.WithProjectID(gcpProjectID),
-		mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
-	}, o.exporterOpts...)
-	baseExporter, err := mexporter.New(exporterOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("creating GCP metric exporter: %w", err)
+	var otlpCfg OTLPConfig
+	var otlpCfgErr error
+	if o.otlp != nil {
+		otlpCfg = *o.otlp
+	} else {
+		otlpCfg, otlpCfgErr = LoadOTLPConfigFromEnv()
 	}
-	exporter := &loggingExporter{delegate: baseExporter}
+
+	if gcpProjectID == "" && !otlpCfg.Enabled() {
+		if otlpCfgErr != nil {
+			return nil, otlpCfgErr
+		}
+		return nil, fmt.Errorf("GCP project ID or OTLP endpoint is required for hub metrics export")
+	}
 
 	res, err := newResource(ctx, o)
 	if err != nil {
 		return nil, err
 	}
 
-	mpOpts := []metric.Option{
-		metric.WithResource(res),
-		metric.WithReader(metric.NewPeriodicReader(exporter,
-			metric.WithInterval(o.exportInterval),
-		)),
+	var readers []metric.Reader
+	var gcpErr, otlpErr error
+	overflow := &usageOverflowTracker{}
+
+	if gcpProjectID != "" {
+		exporterOpts := append([]mexporter.Option{
+			mexporter.WithProjectID(gcpProjectID),
+			mexporter.WithFilteredResourceAttributes(ResourceAttributeLabelFilter),
+		}, o.exporterOpts...)
+		baseExporter, err := mexporter.New(exporterOpts...)
+		if err != nil {
+			gcpErr = fmt.Errorf("creating GCP metric exporter: %w", err)
+			slog.Warn("hub metrics: GCP Cloud Monitoring exporter disabled",
+				"project_id", gcpProjectID,
+				"error", gcpErr,
+			)
+		} else {
+			exporter := &loggingExporter{delegate: baseExporter, overflow: overflow}
+			readers = append(readers, metric.NewPeriodicReader(exporter,
+				metric.WithInterval(o.exportInterval),
+			))
+		}
 	}
 
+	if otlpCfgErr != nil {
+		otlpErr = otlpCfgErr
+		warnOTLPConfig(otlpCfgErr)
+	} else if otlpCfg.Enabled() {
+		otlpExp, err := newOTLPExporter(ctx, otlpCfg)
+		if err != nil {
+			otlpErr = err
+			warnOTLPConfig(err)
+		} else {
+			if le, ok := otlpExp.(*loggingExporter); ok {
+				le.overflow = overflow
+			}
+			readers = append(readers, metric.NewPeriodicReader(otlpExp,
+				metric.WithInterval(o.exportInterval),
+			))
+		}
+	}
+
+	if len(readers) == 0 {
+		if gcpErr != nil {
+			return nil, gcpErr
+		}
+		if otlpErr != nil {
+			return nil, otlpErr
+		}
+		return nil, fmt.Errorf("no hub metrics exporter constructed")
+	}
+
+	cardinalityLimit := o.cardinalityLimit
+	if cardinalityLimit <= 0 {
+		cardinalityLimit = HubOTelCardinalityLimitFromEnv()
+	}
+
+	mpOpts := make([]metric.Option, 0, 1+len(readers)+2)
+	mpOpts = append(mpOpts, metric.WithResource(res))
+	for _, r := range readers {
+		mpOpts = append(mpOpts, metric.WithReader(r))
+	}
+	mpOpts = append(mpOpts, HubCardinalityLimitOptions(cardinalityLimit)...)
 	mpOpts = append(mpOpts, groupDropViews()...)
 
-	return metric.NewMeterProvider(mpOpts...), nil
+	mp := metric.NewMeterProvider(mpOpts...)
+	if gcpErr != nil || otlpErr != nil {
+		return mp, &PartialError{GCPErr: gcpErr, OTLPErr: otlpErr}
+	}
+	return mp, nil
 }
 
 // NewResource builds the OTel resource NewMeterProvider attaches to every
@@ -271,6 +373,7 @@ func InstrumentationScope(name string) instrumentation.Scope {
 // only surface through the global error handler.
 type loggingExporter struct {
 	delegate metric.Exporter
+	overflow *usageOverflowTracker
 }
 
 var _ metric.Exporter = (*loggingExporter)(nil)
@@ -284,6 +387,9 @@ func (e *loggingExporter) Aggregation(k metric.InstrumentKind) metric.Aggregatio
 }
 
 func (e *loggingExporter) Export(ctx context.Context, rm *metricdata.ResourceMetrics) error {
+	if e.overflow != nil {
+		e.overflow.observe(rm)
+	}
 	err := e.delegate.Export(ctx, rm)
 	if err != nil {
 		metricCount := 0

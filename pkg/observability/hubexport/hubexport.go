@@ -267,14 +267,37 @@ func decideFromSetting(d Decision, on bool, project Project) Decision {
 	return d
 }
 
+// OTLPMetricsStatus is the startup state of the operator-configured OTLP gRPC
+// metrics exporter (SCION_OTEL_ENDPOINT), tracked separately from GCP Cloud
+// Monitoring so operators can see whether the sink backing Hub usage
+// re-emission and suppress_direct_otel is active.
+type OTLPMetricsStatus struct {
+	Configured bool   `json:"configured"`
+	Enabled    bool   `json:"enabled"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// LogLine is the startup log line for the OTLP metrics exporter status.
+func (o OTLPMetricsStatus) LogLine() string {
+	if !o.Configured {
+		return "Hub OTLP metrics export: off (not configured)"
+	}
+	if o.Enabled {
+		return fmt.Sprintf("Hub OTLP metrics export: on (endpoint: %s)", o.Endpoint)
+	}
+	return fmt.Sprintf("WARNING: Hub OTLP metrics export: off (%s)", o.Reason)
+}
+
 // Status is the startup state of both exporters and the export project.
 // The hub reports it read-only to admins.
 type Status struct {
 	// Project is the export project resolved at startup, whether or not an
 	// exporter uses it.
-	Project Project  `json:"project"`
-	Metrics Decision `json:"metrics"`
-	Tracing Decision `json:"tracing"`
+	Project     Project            `json:"project"`
+	Metrics     Decision           `json:"metrics"`
+	OTLPMetrics *OTLPMetricsStatus `json:"otlp_metrics,omitempty"`
+	Tracing     Decision           `json:"tracing"`
 }
 
 func copyBool(p *bool) *bool {

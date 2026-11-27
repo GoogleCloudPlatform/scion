@@ -136,6 +136,8 @@ func IsHubOutboxActive(home string) bool {
 	return isHubOutboxActiveDir(HubAnalyticsOutboxDirFor(home))
 }
 
+const hubOutboxSuppressMarker = "suppress.hub"
+
 func isHubOutboxActiveDir(hubDir string) bool {
 	if hubDir == "" {
 		return false
@@ -144,14 +146,42 @@ func isHubOutboxActiveDir(hubDir string) bool {
 	return err == nil
 }
 
-// ClearHubOutboxActive removes the Hub outbox active marker in hubDir if
-// present, without creating hubDir.
+func isHubOutboxSuppressDir(hubDir string) bool {
+	if hubDir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(hubDir, hubOutboxSuppressMarker))
+	return err == nil
+}
+
+// ClearHubOutboxActive removes the Hub outbox active and suppression markers
+// in hubDir if present, without creating hubDir.
 func ClearHubOutboxActive(hubDir string) {
 	if hubDir == "" {
 		return
 	}
+	removed := false
 	if err := os.Remove(filepath.Join(hubDir, hubOutboxActiveMarker)); err == nil {
+		removed = true
+	}
+	if err := os.Remove(filepath.Join(hubDir, hubOutboxSuppressMarker)); err == nil {
+		removed = true
+	}
+	if removed {
 		_ = syncDir(hubDir)
+	}
+}
+
+func (o *AnalyticsOutbox) setHubSuppress(suppress bool) {
+	if o == nil {
+		return
+	}
+	if suppress {
+		_ = o.writeFileAtomic(hubOutboxSuppressMarker, []byte("1\n"))
+		return
+	}
+	if err := os.Remove(filepath.Join(o.dir, hubOutboxSuppressMarker)); err == nil {
+		_ = syncDir(o.dir)
 	}
 }
 

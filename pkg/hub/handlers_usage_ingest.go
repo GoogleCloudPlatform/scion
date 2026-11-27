@@ -70,11 +70,10 @@ func (s *Server) handleAgentUsageCapabilities(w http.ResponseWriter, r *http.Req
 
 	writeJSON(w, http.StatusOK, telemetrycontract.UsageCapabilitiesResponse{
 		UsageIngestEnabled: true,
-		// Keep container-direct OTel export active until Hub OTel re-emission
-		// lands in P2; advertising true before then would cause a P2-aware
-		// sciontool to suppress gen_ai.api.calls / scion.usage.tokens while
-		// this Hub does not yet re-emit them.
-		SuppressDirectOTel:   false,
+		// Advertise suppress_direct_otel=true only when tokenomics.usage_ledger
+		// is enabled (checked above) AND this Hub actually constructed and
+		// started an OTel metrics export sink (Cloud Monitoring or OTLP).
+		SuppressDirectOTel:   s.UsageOTelMetrics().HasConfiguredSink(),
 		MaxBatchEvents:       telemetrycontract.UsageIngestMaxBatchEvents,
 		MaxBatchBytes:        telemetrycontract.UsageIngestMaxBatchBytes,
 		HeartbeatIntervalSec: telemetrycontract.DefaultUsageHeartbeatIntervalSec,
@@ -462,6 +461,15 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
+	// Post-commit Hub OTel re-emission (§4.1 item 2): runs strictly after
+	// IngestUsageBatch commits, only for newly inserted (RETURNING) rows, and
+	// only when the producer confirmed direct canonical-counter suppression
+	// (preventing double counting from older sciontool images or pre-switch
+	// residual batches). Emission never fails or slows the ingest response.
+	if req.DirectOTelSuppressed && len(res.InsertedEvents) > 0 {
+		s.UsageOTelMetrics().RecordCommittedEvents(ctx, res.InsertedEvents, attrCache)
+	}
+
 	if len(res.Rejected) > 0 {
 		for _, r := range res.Rejected {
 			rejected = append(rejected, telemetrycontract.UsageIngestRejection{
@@ -483,6 +491,7 @@ func (s *Server) ingestUsageEvents(w http.ResponseWriter, r *http.Request, agent
 		Enforcement: &telemetrycontract.UsageEnforcement{
 			Action: telemetrycontract.UsageEnforcementActionNone,
 		},
+		SuppressDirectOTel: s.UsageOTelMetrics().HasConfiguredSink(),
 	})
 }
 

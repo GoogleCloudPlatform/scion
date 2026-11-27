@@ -303,11 +303,18 @@ type UsageIngestRowRejection struct {
 }
 
 // UsageIngestBatchResult reports the counts of newly inserted vs duplicate
-// events persisted by IngestUsageBatch, plus any per-row DB rejections.
+// events persisted by IngestUsageBatch, plus any per-row DB rejections and the
+// slice of newly inserted events (from RETURNING) for post-commit consumers
+// such as Hub OTel re-emission.
+//
+// InsertedEvents is guaranteed committed only when the store is not inTx;
+// callers executing inside an outer transaction must defer post-commit effects
+// until that outer transaction commits.
 type UsageIngestBatchResult struct {
-	Accepted   int
-	Duplicates int
-	Rejected   []UsageIngestRowRejection
+	Accepted       int
+	Duplicates     int
+	Rejected       []UsageIngestRowRejection
+	InsertedEvents []*UsageEvent
 }
 
 // UsageTokenPresence reports per-(model, harness, usage_source) non-null event
@@ -398,4 +405,9 @@ type UsageLedgerStore interface {
 	// DBNow returns the current UTC timestamp from the database clock
 	// (Tokenomics design §4.2 item 7).
 	DBNow(ctx context.Context) (time.Time, error)
+
+	// CountStaleMetersByProject returns the number of stale open runs per
+	// project_id whose latest open meter_health receipt is strictly older than
+	// staleBefore (and not superseded by a newer non-open epoch).
+	CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error)
 }

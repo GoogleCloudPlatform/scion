@@ -328,9 +328,10 @@ RETURNING event_id`, jsonbParam, jsonbParam))
 	}
 
 	return &store.UsageIngestBatchResult{
-		Accepted:   len(insertedEvents),
-		Duplicates: intraDuplicates + dbDuplicates,
-		Rejected:   rejectedRows,
+		Accepted:       len(insertedEvents),
+		Duplicates:     intraDuplicates + dbDuplicates,
+		Rejected:       rejectedRows,
+		InsertedEvents: insertedEvents,
 	}, nil
 }
 

@@ -165,7 +165,7 @@ func TestUsageIngest_AuthAndCapabilityProbe(t *testing.T) {
 	var capResp telemetrycontract.UsageCapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &capResp))
 	assert.True(t, capResp.UsageIngestEnabled)
-	assert.False(t, capResp.SuppressDirectOTel, "must stay false until Hub OTel re-emission lands in P2")
+	assert.False(t, capResp.SuppressDirectOTel, "must stay false when no Hub OTel metrics sink is configured")
 	assert.Equal(t, telemetrycontract.UsageIngestMaxBatchEvents, capResp.MaxBatchEvents)
 	assert.Equal(t, telemetrycontract.UsageIngestMaxBatchBytes, capResp.MaxBatchBytes)
 	assert.Equal(t, "hub-cap-test", capResp.HubID)
