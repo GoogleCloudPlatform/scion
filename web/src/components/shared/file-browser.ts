@@ -30,6 +30,12 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { getUploadLimits, validateWorkspaceUploadFiles } from '../../client/upload-limits.js';
+import {
+  UploadCancelledError,
+  UploadHttpError,
+  uploadWorkspaceFiles,
+} from '../../client/chunked-upload.js';
+import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { showConfirm } from './confirm-dialog.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { formatInstant, zoneLabel } from '../../utils/time.js';
@@ -94,7 +100,10 @@ export interface FileBrowserDataSource {
   deleteFile(path: string): Promise<void>;
 
   /** Upload one or more files. */
-  uploadFiles(files: FileList): Promise<void>;
+  uploadFiles(
+    files: FileList,
+    options?: { onProgress?: (sent: number, total: number) => void; signal?: AbortSignal }
+  ): Promise<void>;
 
   /** Get the download URL for a file (opened in a new tab). */
   getDownloadUrl(path: string): string;
@@ -123,11 +132,13 @@ function encodeFilePath(filePath: string): string {
  */
 export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
   private readonly basePath: string;
+  private readonly uploadsPath: string;
   private readonly projectId: string;
 
   constructor(projectId: string) {
     this.projectId = projectId;
     this.basePath = `/api/v1/projects/${projectId}/workspace/files`;
+    this.uploadsPath = `/api/v1/projects/${projectId}/workspace/uploads`;
   }
 
   async listFiles(opts?: { limit?: number }): Promise<FileListResult> {
@@ -160,7 +171,20 @@ export class WorkspaceFileBrowserDataSource implements FileBrowserDataSource {
     }
   }
 
-  async uploadFiles(files: FileList): Promise<void> {
+  async uploadFiles(
+    files: FileList,
+    options?: { onProgress?: (sent: number, total: number) => void; signal?: AbortSignal }
+  ): Promise<void> {
+    if (isFeatureEnabled('hub.large_uploads')) {
+      await uploadWorkspaceFiles(
+        this.basePath,
+        this.uploadsPath,
+        Array.from(files).map((file) => ({ path: file.name, file })),
+        options
+      );
+      return;
+    }
+
     const limits = await getUploadLimits();
     const sizeErr = validateWorkspaceUploadFiles(files, limits.maxWorkspaceFileSize);
     if (sizeErr) {
@@ -557,6 +581,12 @@ function isDotFile(path: string): boolean {
   return path.split('/').some((segment) => segment.startsWith('.'));
 }
 
+/** Matches server-side `.scion-upload-{sid}.partial` staging files (§3.6). */
+function isUploadPartialFile(filePath: string): boolean {
+  const base = filePath.split('/').pop() ?? '';
+  return base.startsWith('.scion-upload-') && base.endsWith('.partial');
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -593,6 +623,8 @@ export class ScionFileBrowser extends LitElement {
   @state() private initialHasMore = false;
   @state() private providerCount = 0;
   @state() private uploadProgress = false;
+  /** Percent of the current upload sent, or null when unknown / legacy single-request upload. */
+  @state() private uploadPercent: number | null = null;
   @state() private sortField: 'name' | 'size' | 'modified' = 'name';
   @state() private sortDir: 'asc' | 'desc' = 'asc';
   @state() private filterText = '';
@@ -607,6 +639,7 @@ export class ScionFileBrowser extends LitElement {
 
   private readonly initialLimit = 500;
   private _searchAbortController: AbortController | null = null;
+  private _uploadAbortController: AbortController | null = null;
   /** The text query most recently committed / in flight for commit deduplication. */
   private _committedBackendQuery = '';
   /** The text query that `backendResults` actually answered (set only on successful response). */
@@ -685,6 +718,12 @@ export class ScionFileBrowser extends LitElement {
       display: flex;
       gap: 0.5rem;
       align-items: center;
+    }
+
+    .upload-status {
+      font-size: 0.75rem;
+      color: var(--scion-text-muted);
+      white-space: nowrap;
     }
 
     .provider-warning {
@@ -882,6 +921,8 @@ export class ScionFileBrowser extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cancelSearch();
+    this._uploadAbortController?.abort();
+    this._uploadAbortController = null;
     // Reset so a future reconnect (e.g. tab hidden/shown while cached) issues
     // exactly one fresh load rather than being treated as already-requested.
     this._requestedSource = null;
@@ -1136,8 +1177,9 @@ export class ScionFileBrowser extends LitElement {
   }
 
   private getBaseFiles(): FileEntry[] {
-    if (this.showDotFiles) return this.files;
-    return this.files.filter((f) => !isDotFile(f.path));
+    const visible = this.files.filter((f) => !isUploadPartialFile(f.path));
+    if (this.showDotFiles) return visible;
+    return visible.filter((f) => !isDotFile(f.path));
   }
 
   private getFilteredAndSortedFiles(): FileEntry[] {
@@ -1169,20 +1211,44 @@ export class ScionFileBrowser extends LitElement {
     if (input) input.click();
   }
 
+  private handleCancelUpload(): void {
+    this._uploadAbortController?.abort();
+  }
+
   private async handleFileUpload(e: Event): Promise<void> {
     const input = e.target as HTMLInputElement;
     const fileList = input.files;
     if (!fileList || fileList.length === 0 || !this.dataSource) return;
 
+    this.error = null;
     this.uploadProgress = true;
+    this.uploadPercent = null;
+    const controller = new AbortController();
+    this._uploadAbortController = controller;
     try {
-      await this.dataSource.uploadFiles(fileList);
+      await this.dataSource.uploadFiles(fileList, {
+        onProgress: (sent, total) => {
+          this.uploadPercent = total > 0 ? Math.min(100, Math.floor((sent / total) * 100)) : 100;
+        },
+        signal: controller.signal,
+      });
       void this.loadFiles();
     } catch (err) {
+      if (err instanceof UploadCancelledError) {
+        return;
+      }
       console.error('Failed to upload files:', err);
-      this.error = err instanceof Error ? err.message : 'Upload failed';
+      if (err instanceof UploadHttpError && err.code === 'experiment_disabled') {
+        this.error = 'Large uploads were disabled.';
+      } else {
+        this.error = err instanceof Error ? err.message : 'Upload failed';
+      }
     } finally {
       this.uploadProgress = false;
+      this.uploadPercent = null;
+      if (this._uploadAbortController === controller) {
+        this._uploadAbortController = null;
+      }
       input.value = '';
     }
   }
@@ -1388,6 +1454,20 @@ export class ScionFileBrowser extends LitElement {
                   <sl-icon slot="prefix" name="upload"></sl-icon>
                   Upload Files
                 </sl-button>
+                ${this.uploadProgress && this.uploadPercent !== null
+                  ? html`
+                      <span class="upload-status" role="status"
+                        >Uploading ${this.uploadPercent}%</span
+                      >
+                      <sl-button
+                        size="small"
+                        variant="default"
+                        @click=${() => this.handleCancelUpload()}
+                      >
+                        Cancel
+                      </sl-button>
+                    `
+                  : nothing}
               `
             : nothing}
         </div>
