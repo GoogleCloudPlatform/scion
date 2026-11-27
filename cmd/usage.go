@@ -456,9 +456,8 @@ func writeAgentUsageTable(out io.Writer, resp *hubclient.AgentUsageResponse) {
 }
 
 func formatUsageWindow(w hubclient.UsageWindow) string {
-	loc := clitime.Zone()
-	sinceStr := w.Since.In(loc).Format("2006-01-02 15:04 MST")
-	untilStr := w.Until.In(loc).Format("2006-01-02 15:04 MST")
+	sinceStr := clitime.Format(w.Since, clitime.Minute)
+	untilStr := clitime.Format(w.Until, clitime.Minute)
 	if w.Granularity != "" {
 		return fmt.Sprintf("%s .. %s (%s)", sinceStr, untilStr, w.Granularity)
 	}
@@ -574,15 +573,15 @@ func formatGroupDimCell(dim string, g hubclient.UsageGroupRow, granularity strin
 		if g.BucketStart == nil {
 			return usageUnknownCell
 		}
-		return g.BucketStart.UTC().Format("2006-01-02")
+		return clitime.Format(*g.BucketStart, clitime.Date)
 	case "hour":
 		if g.BucketStart == nil {
 			return usageUnknownCell
 		}
 		if granularity == "day" {
-			return g.BucketStart.UTC().Format("2006-01-02")
+			return clitime.Format(*g.BucketStart, clitime.Date)
 		}
-		return g.BucketStart.In(clitime.Zone()).Format("2006-01-02 15:04 MST")
+		return clitime.Format(*g.BucketStart, clitime.Minute)
 	case "project":
 		return formatOptionalDim(g.ProjectID)
 	case "user":

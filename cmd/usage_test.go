@@ -602,3 +602,29 @@ func TestUsageCLI_FormatAPIError(t *testing.T) {
 	assert.ErrorIs(t, entityErr, notFound)
 	assert.Contains(t, entityErr.Error(), "tokenomics.usage_ledger")
 }
+
+func TestUsageCLI_TimeZoneFormatting(t *testing.T) {
+	origZone := clitime.Zone()
+	t.Cleanup(func() { clitime.SetZone(origZone) })
+
+	bucket := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+	row := hubclient.UsageGroupRow{BucketStart: &bucket}
+	win := hubclient.UsageWindow{
+		Since:       time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC),
+		Until:       bucket,
+		Granularity: "hour",
+	}
+
+	clitime.SetZone(time.UTC)
+	assert.Equal(t, "2026-11-27 00:00 UTC .. 2026-11-27 23:00 UTC (hour)", formatUsageWindow(win))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("day", row, "day"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("hour", row, "day"))
+	assert.Equal(t, "2026-11-27 23:00 UTC", formatGroupDimCell("hour", row, "hour"))
+
+	jst := time.FixedZone("JST", 9*3600)
+	clitime.SetZone(jst)
+	assert.Equal(t, "2026-11-27 09:00 JST .. 2026-11-28 08:00 JST (hour)", formatUsageWindow(win))
+	assert.Equal(t, "2026-11-28 JST", formatGroupDimCell("day", row, "day"))
+	assert.Equal(t, "2026-11-28 JST", formatGroupDimCell("hour", row, "day"))
+	assert.Equal(t, "2026-11-28 08:00 JST", formatGroupDimCell("hour", row, "hour"))
+}
