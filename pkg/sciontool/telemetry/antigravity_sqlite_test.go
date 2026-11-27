@@ -1702,3 +1702,158 @@ func TestAntigravitySQLiteTailer_Rev4_BadDBDoesNotBlockBaselineForOtherDBs(t *te
 		t.Fatalf("repaired DB new events = %+v, want 1 event with input=222", repairedEvents)
 	}
 }
+
+func TestPipeline_AgySQLiteTailer_SuppressDirectOTel(t *testing.T) {
+	cases := []struct {
+		name     string
+		suppress bool
+	}{
+		{name: "suppression_active", suppress: true},
+		{name: "suppression_inactive", suppress: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(SetTelemetryTestSandboxed())
+			setTestAgyEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_USAGE_SOURCE", "")
+			if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
+				t.Fatalf("unset SCION_USAGE_SOURCE: %v", err)
+			}
+
+			addr, backend := startCaptureOTLPBackend(t)
+
+			var mu sync.Mutex
+			var gotReqs []telemetrycontract.UsageIngestRequest
+			cfg := &Config{
+				Enabled:      true,
+				CloudEnabled: true,
+				Endpoint:     addr,
+				Protocol:     "grpc",
+				Insecure:     true,
+				GRPCPort:     0,
+				HTTPPort:     0,
+			}
+			p := NewWithConfig(cfg)
+			p.SetAnalyticsOutbox(home, 0, 0)
+			p.SetHubUsageSink(HubUsageSinkConfig{
+				Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					mu.Lock()
+					gotReqs = append(gotReqs, req)
+					mu.Unlock()
+					return &telemetrycontract.UsageIngestResponse{
+						Accepted:           len(req.Events),
+						SuppressDirectOTel: tc.suppress,
+					}, nil
+				},
+				RunID:              "run-agy-suppress",
+				HubID:              "hub-test",
+				SuppressDirectOTel: tc.suppress,
+				DrainInterval:      20 * time.Millisecond,
+			})
+
+			ctx := context.Background()
+			if err := p.Start(ctx); err != nil {
+				t.Fatalf("Pipeline.Start: %v", err)
+			}
+
+			if got := p.SuppressDirectOTel(); got != tc.suppress {
+				t.Fatalf("SuppressDirectOTel() = %v, want %v", got, tc.suppress)
+			}
+
+			outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative)
+			if err != nil {
+				t.Fatalf("ActivateUsageSource: %v", err)
+			}
+			if outcome != UsageActivated {
+				t.Fatalf("ActivateUsageSource = %q, want %q", outcome, UsageActivated)
+			}
+			tailer := p.agyTailer.Load()
+			if tailer == nil {
+				t.Fatal("expected active agyTailer")
+			}
+			tailer.mu.Lock()
+			tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+			tailer.mu.Unlock()
+
+			// Insert a conversation DB row after initial baseline and poll.
+			dbPath := filepath.Join(AgyConversationsDir(home), "conv-suppress.db")
+			db := createTestAgyDB(t, dbPath)
+			defer func() { _ = db.Close() }()
+			gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730000, testAgyUsage{
+				modelID: 1466, input: 500, output: 100, id11: "suppress-call-1",
+			})
+			if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+				t.Fatalf("insert gen0: %v", err)
+			}
+			if err := tailer.PollOnce(ctx); err != nil {
+				t.Fatalf("tailer.PollOnce: %v", err)
+			}
+
+			// Feed a canonical counter metrics batch into handleMetrics to verify
+			// direct canonical counter export obeys SuppressDirectOTel.
+			if err := p.handleMetrics(ctx, testMixedMetricsBatch()); err != nil {
+				t.Fatalf("handleMetrics: %v", err)
+			}
+			if err := p.Stop(ctx); err != nil {
+				t.Fatalf("Pipeline.Stop: %v", err)
+			}
+
+			// Verify Hub received the sqlite_native event with matching DirectOTelSuppressed stamp.
+			mu.Lock()
+			reqs := append([]telemetrycontract.UsageIngestRequest(nil), gotReqs...)
+			mu.Unlock()
+			var matchedEv *telemetrycontract.UsageEvent
+			var matchedReq *telemetrycontract.UsageIngestRequest
+			for i := range reqs {
+				for j := range reqs[i].Events {
+					ev := &reqs[i].Events[j]
+					if ev.UsageSource == telemetrycontract.UsageSourceSQLiteNative && ev.Input != nil && *ev.Input == 500 {
+						matchedEv = ev
+						matchedReq = &reqs[i]
+						break
+					}
+				}
+			}
+			if matchedEv == nil || matchedReq == nil {
+				t.Fatalf("expected Hub to receive sqlite_native event (input=500), got reqs=%+v", reqs)
+			}
+			evSuppressed := matchedEv.DirectOTelSuppressed != nil && *matchedEv.DirectOTelSuppressed
+			if evSuppressed != tc.suppress {
+				t.Fatalf("event.DirectOTelSuppressed = %v, want %v", evSuppressed, tc.suppress)
+			}
+			if matchedReq.DirectOTelSuppressed != tc.suppress {
+				t.Fatalf("req.DirectOTelSuppressed = %v, want %v", matchedReq.DirectOTelSuppressed, tc.suppress)
+			}
+
+			// Verify direct OTLP export of canonical counters is suppressed iff tc.suppress is true.
+			backend.mu.Lock()
+			var gotAPICalls, gotUsageTokens bool
+			for _, rm := range backend.metrics {
+				for _, sm := range rm.GetScopeMetrics() {
+					for _, m := range sm.GetMetrics() {
+						switch m.GetName() {
+						case telemetrycontract.MetricAPICalls:
+							gotAPICalls = true
+						case telemetrycontract.MetricUsageTokens:
+							gotUsageTokens = true
+						}
+					}
+				}
+			}
+			backend.mu.Unlock()
+
+			if tc.suppress {
+				if gotAPICalls || gotUsageTokens {
+					t.Fatalf("expected canonical counters suppressed from direct OTLP export, got api_calls=%v usage_tokens=%v", gotAPICalls, gotUsageTokens)
+				}
+			} else {
+				if !gotAPICalls || !gotUsageTokens {
+					t.Fatalf("expected canonical counters exported directly when suppression is off, got api_calls=%v usage_tokens=%v", gotAPICalls, gotUsageTokens)
+				}
+			}
+		})
+	}
+}
