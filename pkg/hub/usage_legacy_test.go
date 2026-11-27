@@ -365,7 +365,8 @@ func TestHandleAgentMetrics_LiveConversionAsyncDoesNotBlockPost(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code)
 
 	// Cancel the HTTP request context immediately after response; conversion
-	// must still succeed once released because it uses context.WithoutCancel.
+	// must still succeed once released because it runs on the server worker
+	// context rather than the HTTP request context.
 	cancelReq()
 
 	var resp map[string]string
@@ -636,16 +637,19 @@ func TestUsageLedger_OffPeriodRunBackfillReadsLegacyClient(t *testing.T) {
 
 	agentToken := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
 
-	// Post an unmarked segment after the run was minted while experiment is OFF.
-	segStart := time.Now().UTC().Add(1 * time.Second).Truncate(time.Second)
-	segEnd := segStart.Add(2 * time.Second)
+	// Post an unmarked segment after the run was minted while experiment is OFF,
+	// and ensure the segment has ended before the OFF -> ON active-run backfill
+	// runs so run_attribution.created_at > segEnd > segStart >= run_id_updated_at.
+	// That guarantees the old created_at boundary would fail this test.
+	segStart := time.Now().UTC().Add(10 * time.Millisecond).Truncate(time.Millisecond)
+	segEnd := segStart.Add(10 * time.Millisecond)
 	body, err := json.Marshal(metricsPayloadRequest{
 		Type:    "agent_metrics",
 		AgentID: ag.ID,
 		Session: metricsSession{
 			ID:        "sess-off-curr-run",
-			StartedAt: segStart.Format(time.RFC3339),
-			EndedAt:   segEnd.Format(time.RFC3339),
+			StartedAt: segStart.Format(time.RFC3339Nano),
+			EndedAt:   segEnd.Format(time.RFC3339Nano),
 			Status:    "completed",
 			Model:     "claude-sonnet-4-6",
 		},
@@ -663,9 +667,21 @@ func TestUsageLedger_OffPeriodRunBackfillReadsLegacyClient(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &postResp))
 	metricsID := postResp["id"]
 
+	// Wait until wall clock is strictly past segEnd so BackfillActiveRunAttributions
+	// stamps run_attribution.created_at after the segment ended.
+	if wait := time.Until(segEnd.Add(15 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+
 	// Toggle experiment ON and reconcile.
 	setUsageLedgerExperimentForTest(t, srv, true)
 	srv.reconcileUsageLedger(ctx)
+
+	runAttr, err := s.GetRunAttribution(ctx, runID)
+	require.NoError(t, err)
+	require.NotNil(t, runAttr)
+	require.True(t, runAttr.CreatedAt.After(segEnd),
+		"precondition: run_attribution.created_at (%v) must be after segEnd (%v)", runAttr.CreatedAt, segEnd)
 
 	require.Eventually(t, func() bool {
 		row, rerr := s.GetAgentSessionMetrics(ctx, metricsID)

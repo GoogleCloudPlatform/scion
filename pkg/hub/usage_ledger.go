@@ -378,8 +378,12 @@ func (s *Server) prepareLegacyCatchupLocked(ctx context.Context, uls usageLedger
 		case !rt.enabled:
 			// Experiment disabled or Hub shutting down.
 		case rt.gen != myGen:
-			// An OFF -> ON transition occurred while unwinding; start a fresh pass.
-			nextRun = s.prepareLegacyCatchupLocked(context.Background(), uls)
+			// An OFF -> ON transition occurred while unwinding; start a fresh
+			// pass only if the new generation's active-run attribution backfill
+			// has already completed (otherwise its completion branch starts it).
+			if rt.backfillSucceeded {
+				nextRun = s.prepareLegacyCatchupLocked(context.Background(), uls)
+			}
 		case err == nil && ctxErr == nil:
 			rt.legacyRetryAttempts = 0
 			if legacyRes.Processed > 0 {
@@ -462,11 +466,14 @@ func (s *Server) enqueueLiveLegacySessionMetrics(metrics *store.AgentSessionMetr
 		preferredRunID: preferredRunID,
 	}
 	// Hold rt.mu across the non-blocking send so stopUsageLedger cannot race
-	// with enqueueing.
+	// with enqueueing. Increment liveInFlight before sending so the worker
+	// cannot finish (e.g. early return when the experiment flips OFF) and call
+	// Done() before Add(1) executes.
+	rt.liveInFlight.Add(1)
 	select {
 	case queue <- job:
-		rt.liveInFlight.Add(1)
 	default:
+		rt.liveInFlight.Done()
 		s.agentMetricsLog.Warn("Live legacy session_metrics conversion queue full; deferring to catch-up",
 			"agent_id", metrics.AgentID, "session_id", metrics.SessionID, "metrics_id", metrics.ID)
 	}
