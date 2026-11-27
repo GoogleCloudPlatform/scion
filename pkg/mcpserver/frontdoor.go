@@ -59,7 +59,7 @@ func requestAuthFromContext(ctx context.Context) (requestAuth, bool) {
 //  3. Origin allowlist (403 on disallowed Origin; absent Origin is allowed)
 //  4. Credential extraction (Authorization: Bearer xor X-Scion-Federation-Token;
 //     401 + WWW-Authenticate for none/both; 401 unsupported_credential for
-//     agent JWT and scion_adt_)
+//     agent JWT, scion_adt_, and scion_dev_)
 //  5. Principal resolution via GET /api/v1/auth/me (cached <= 60s)
 func (s *Server) frontDoor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +151,7 @@ func (s *Server) resolvePrincipal(ctx context.Context, cred Credential) (Princip
 
 // extractAndClassifyCredential reads Authorization: Bearer and
 // X-Scion-Federation-Token, enforces strict XOR, and refuses unsupported
-// credential classes (agent JWT, scion_adt_) without validating them.
+// credential classes (agent JWT, scion_adt_, scion_dev_) without validating them.
 func extractAndClassifyCredential(r *http.Request) (cred Credential, errCode, errMsg string) {
 	var bearer string
 	if authz := strings.TrimSpace(r.Header.Get("Authorization")); authz != "" {
@@ -172,6 +172,9 @@ func extractAndClassifyCredential(r *http.Request) (cred Credential, errCode, er
 	}
 
 	if bearer != "" {
+		if strings.HasPrefix(bearer, apiclient.DevTokenPrefix) {
+			return Credential{}, "unsupported_credential", "dev token credentials are not accepted on the MCP endpoint"
+		}
 		if strings.HasPrefix(bearer, delegatedAgentPrefix) {
 			return Credential{}, "unsupported_credential", "agent delegated credentials are not accepted on the MCP endpoint"
 		}

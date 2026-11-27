@@ -140,17 +140,21 @@ func (b *hubBackend) SendToAgent(ctx context.Context, c Credential, project, age
 		return SendResult{}, err
 	}
 
-	if resp.Cursor == "" {
-		return SendResult{}, errors.New("hub did not return a conversation cursor for the sent message")
-	}
-
-	return SendResult{
+	res := SendResult{
 		MessageID:      resp.MessageID,
 		ConversationID: resp.ConversationID,
 		Status:         resp.Status,
 		Deferred:       resp.Deferred,
 		Cursor:         resp.Cursor,
-	}, nil
+	}
+	if resp.Cursor == "" {
+		// Hub already accepted/delivered the message (2xx), so never return a
+		// tool error here (which would prompt an LLM caller to resend and
+		// duplicate the side effect).
+		res.Warning = "delivered but not recorded in conversation history; replies cannot be read via this conversation; do not resend"
+	}
+
+	return res, nil
 }
 
 // resolveProjectID resolves a project slug to its UUID via the Hub API using

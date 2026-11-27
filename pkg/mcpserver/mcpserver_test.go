@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -53,6 +54,7 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 	var mu sync.Mutex
 	var lastHubHeaders http.Header
 	var lastHubRemoteAddr string
+	var lastMCPClientRemoteAddr string
 
 	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -116,7 +118,13 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ts := httptest.NewServer(srv.Handler())
+	mcpHandler := srv.Handler()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lastMCPClientRemoteAddr = r.RemoteAddr
+		mu.Unlock()
+		mcpHandler.ServeHTTP(w, r)
+	}))
 	defer ts.Close()
 
 	postMCP := func(headers map[string]string, body string) *http.Response {
@@ -168,6 +176,9 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 		{"non-bearer auth", map[string]string{
 			"Authorization": "Basic dXNlcjpwYXNz",
 		}, "unauthorized"},
+		{"dev token", map[string]string{
+			"Authorization": "Bearer " + apiclient.DevTokenPrefix + "secret123",
+		}, "unsupported_credential"},
 		{"delegated agent token", map[string]string{
 			"Authorization": "Bearer scion_adt_secret123",
 		}, "unsupported_credential"},
@@ -242,6 +253,7 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 	mu.Lock()
 	gotHeaders := lastHubHeaders
 	gotRemote := lastHubRemoteAddr
+	wantRemote := lastMCPClientRemoteAddr
 	mu.Unlock()
 
 	if gotHeaders.Get("Cookie") != "" {
@@ -259,8 +271,11 @@ func TestFrontDoor_PoliciesAndHeaderAllowlist(t *testing.T) {
 	if got := gotHeaders.Get("User-Agent"); !strings.HasPrefix(got, "scion-mcp/test-1.0 (") {
 		t.Fatalf("User-Agent = %q, want prefix %q", got, "scion-mcp/test-1.0 (")
 	}
-	if gotRemote == "" {
-		t.Fatal("expected RemoteAddr to be propagated to in-process Hub request")
+	if wantRemote == "" {
+		t.Fatal("expected test server to capture MCP client RemoteAddr")
+	}
+	if gotRemote != wantRemote {
+		t.Fatalf("Hub request RemoteAddr = %q, want MCP client RemoteAddr %q", gotRemote, wantRemote)
 	}
 
 	// 6. Audit log line contains §4.5 fields (without hard-coded principal_kind).
@@ -430,18 +445,16 @@ func (t *staticHeaderTransport) RoundTrip(req *http.Request) (*http.Response, er
 	return t.base.RoundTrip(clone)
 }
 
-func TestSendMessage_MissingCursorReturnsError(t *testing.T) {
+func TestSendMessage_MissingCursorReturnsWarningNotError(t *testing.T) {
 	fakeHub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/api/v1/auth/me":
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": "u1", "email": "u1@example.com"})
 		case strings.HasSuffix(r.URL.Path, "/message"):
-			// Deliberately omit cursor to verify fail-closed behavior.
+			// Simulate Hub 200 delivery when persistence failed (no cursor/conversation_id).
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"message_id":      "msg-1",
-				"conversation_id": "conv-1",
-				"status":          "delivered",
+				"status": "delivered",
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -462,7 +475,7 @@ func TestSendMessage_MissingCursorReturnsError(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	cl := mcp.NewClient(&mcp.Implementation{Name: "cursor-err-test", Version: "0.1"}, nil)
+	cl := mcp.NewClient(&mcp.Implementation{Name: "cursor-warn-test", Version: "0.1"}, nil)
 	hc := &http.Client{
 		Transport: &staticHeaderTransport{
 			base:    &http.Transport{DisableKeepAlives: true},
@@ -490,12 +503,91 @@ func TestSendMessage_MissingCursorReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool protocol error: %v", err)
 	}
-	if !res.IsError {
-		t.Fatalf("expected tool error when hub omits cursor, got success: %+v", res.Content)
+	if res.IsError {
+		t.Fatalf("expected non-error result after Hub 200 delivery, got IsError=true: %+v", res.Content)
 	}
 	gotText := res.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(gotText, "cursor") {
-		t.Fatalf("expected cursor error message, got %q", gotText)
+	var out SendResult
+	if err := json.Unmarshal([]byte(gotText), &out); err != nil {
+		t.Fatalf("unmarshal SendResult (%q): %v", gotText, err)
+	}
+	if out.Status != "delivered" {
+		t.Fatalf("status = %q, want delivered", out.Status)
+	}
+	if out.Cursor != "" {
+		t.Fatalf("cursor = %q, want empty", out.Cursor)
+	}
+	if out.ConversationID != "" {
+		t.Fatalf("conversation_id = %q, want empty", out.ConversationID)
+	}
+	if !strings.Contains(strings.ToLower(out.Warning), "do not resend") {
+		t.Fatalf("expected warning telling caller not to resend, got %q", out.Warning)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestAllowlistTransport_StripsDisallowedHeaders(t *testing.T) {
+	var captured http.Header
+	rt := &AllowlistTransport{
+		Version: "1.2.3",
+		Base: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			captured = req.Header.Clone()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	ctx := withTransportMeta(context.Background(), transportMeta{
+		RemoteAddr: "198.51.100.10:12345",
+		ClientName: "test-mcp-client/1.0\r\nInjected: bad",
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://in-process/api/v1/test", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer scion_pat_abc")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cookie", "session=secret")
+	req.Header.Set("X-Goog-Iap-Jwt-Assertion", "eyJ.iap.sig")
+	req.Header.Set("X-Scion-Agent-Token", "agent-secret")
+	req.Header.Set("X-Scion-Broker-ID", "broker-123")
+	req.Header.Set("X-Custom-Untrusted", "drop-me")
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	wantKeys := map[string]bool{
+		"Authorization":  true,
+		"Content-Type":   true,
+		"Accept":         true,
+		"User-Agent":     true,
+		"X-Scion-Client": true,
+	}
+	for k := range captured {
+		if !wantKeys[k] {
+			t.Errorf("unexpected header forwarded to base RoundTripper: %s=%q", k, captured.Get(k))
+		}
+	}
+	for k := range wantKeys {
+		if captured.Get(k) == "" {
+			t.Errorf("expected allowlisted header %s to be set", k)
+		}
+	}
+	if got := captured.Get("User-Agent"); strings.ContainsAny(got, "\r\n") {
+		t.Errorf("User-Agent must sanitize CR/LF, got %q", got)
+	}
+	if got := captured.Get(HeaderScionClient); got != ClientHeaderValue {
+		t.Errorf("X-Scion-Client = %q, want %q", got, ClientHeaderValue)
 	}
 }
 
@@ -633,6 +725,42 @@ func TestInProcessTransport_StreamingAndCancellation(t *testing.T) {
 			}
 		case <-time.After(2 * time.Second):
 			t.Fatal("handler did not exit after early Body.Close")
+		}
+	})
+
+	t.Run("fallback_remote_addr", func(t *testing.T) {
+		var gotRemote string
+		rt := &InProcessTransport{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotRemote = r.RemoteAddr
+				w.WriteHeader(http.StatusOK)
+			}),
+		}
+
+		// Without transportMeta, fallback must be the non-loopback TEST-NET-1 sentinel.
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://in-process/ping", nil)
+		resp, err := rt.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip (fallback): %v", err)
+		}
+		_ = resp.Body.Close()
+		if gotRemote != inProcessFallbackRemoteAddr {
+			t.Fatalf("fallback RemoteAddr = %q, want %q", gotRemote, inProcessFallbackRemoteAddr)
+		}
+		if host, _, err := net.SplitHostPort(gotRemote); err != nil || net.ParseIP(host).IsLoopback() {
+			t.Fatalf("fallback RemoteAddr %q must be a non-loopback host:port", gotRemote)
+		}
+
+		// With transportMeta, the caller's RemoteAddr is propagated verbatim.
+		ctx := withTransportMeta(context.Background(), transportMeta{RemoteAddr: "203.0.113.5:54321"})
+		req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://in-process/ping", nil)
+		resp2, err := rt.RoundTrip(req2)
+		if err != nil {
+			t.Fatalf("RoundTrip (meta): %v", err)
+		}
+		_ = resp2.Body.Close()
+		if gotRemote != "203.0.113.5:54321" {
+			t.Fatalf("meta RemoteAddr = %q, want %q", gotRemote, "203.0.113.5:54321")
 		}
 	})
 }

@@ -799,12 +799,10 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentPolicyLimitCeilings:        testAdminPolicyDeny,
 	experiments.AgentPolicyTelemetryEnforcement: testAdminPolicyDeny,
 	experiments.AgentPolicyDurationBackstop:     testAdminPolicyDeny,
-	experiments.LargeUploads: testAdminPolicyDeny,
-	// Enabling hub.mcp_server confers no permission: every MCP call is
-	// authorized as the caller through the Hub REST API, and the listener
-	// binds only by operator config (server.mcp.enabled). Allowing test
-	// hub-admin identities to toggle it enables live E2E on a test hub.
-	experiments.MCPServer: testAdminPolicyAllow,
+	experiments.LargeUploads:                    testAdminPolicyDeny,
+	// All experiments are deny for test identities (admin tier design §3.6.1);
+	// a human admin enables hub.mcp_server for live E2E.
+	experiments.MCPServer: testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

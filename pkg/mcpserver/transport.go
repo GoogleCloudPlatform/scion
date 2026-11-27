@@ -44,6 +44,11 @@ func transportMetaFromContext(ctx context.Context) transportMeta {
 	return transportMeta{}
 }
 
+// inProcessFallbackRemoteAddr is a non-loopback TEST-NET-1 (RFC 5737) sentinel
+// used when an in-process request carries no front-door RemoteAddr, ensuring
+// callers that bypass the front door do not inherit loopback trust.
+const inProcessFallbackRemoteAddr = "192.0.2.0:0"
+
 // InProcessTransport is an http.RoundTripper that dispatches requests directly
 // to an in-process http.Handler (such as hubSrv.Handler()) using a streaming
 // io.Pipe-backed ResponseWriter. No network socket or loopback port is used.
@@ -68,7 +73,7 @@ func (t *InProcessTransport) RoundTrip(req *http.Request) (*http.Response, error
 	if meta := transportMetaFromContext(req.Context()); meta.RemoteAddr != "" {
 		serverReq.RemoteAddr = meta.RemoteAddr
 	} else if serverReq.RemoteAddr == "" {
-		serverReq.RemoteAddr = "127.0.0.1:0"
+		serverReq.RemoteAddr = inProcessFallbackRemoteAddr
 	}
 	if serverReq.RequestURI == "" && serverReq.URL != nil {
 		serverReq.RequestURI = serverReq.URL.RequestURI()

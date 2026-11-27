@@ -81,11 +81,12 @@ type Principal struct {
 
 // SendResult is returned by HubBackend.SendToAgent and the send_message tool.
 type SendResult struct {
-	MessageID      string `json:"message_id"`
-	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
 	Status         string `json:"status"`
 	Deferred       string `json:"deferred,omitempty"`
 	Cursor         string `json:"cursor,omitempty"`
+	Warning        string `json:"warning,omitempty"`
 }
 
 // MessageSenderDTO identifies the sender of a message in MCP tool outputs.
