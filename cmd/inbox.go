@@ -447,7 +447,7 @@ func inboxCategoryLabel(key string) string {
 	case hubclient.InboxCategoryPendingSecrets:
 		return "Pending Secrets"
 	case hubclient.InboxCategoryReviews:
-		return "Reviews"
+		return "Artifact Reviews"
 	case hubclient.InboxCategoryChat:
 		return "Chat"
 	default:

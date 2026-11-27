@@ -45,8 +45,11 @@ import {
   type ProfileDecisionVisibility,
 } from '../../client/profile-decisions.js';
 import {
+  ARTIFACTS_REVIEW_DRAFTS_FLAG,
+  ARTIFACTS_REVIEW_REQUESTS_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   decisionsEnabled,
+  isFeatureEnabled,
   isInboxDashboardEnabled,
 } from '../../utils/feature-flags.js';
 import {
@@ -96,8 +99,8 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
   {
     key: 'reviews',
     icon: 'clipboard-check',
-    title: 'Reviews',
-    descriptor: 'Reviews on your artifacts and review requests for you',
+    title: 'Artifact Reviews',
+    descriptor: 'Reviews on your artifacts, review requests for you, and your unfinished drafts',
     defaultHref: '/artifacts?review_on_latest=1&owner=me',
   },
   {
@@ -111,7 +114,7 @@ export const INBOX_CARDS: readonly InboxCardConfig[] = [
 
 /**
  * Web-owned hrefs for non-primary inline prose link keys (design §14.3).
- * Reviews keys stay absent until Phase 4 hydrates those filters (AC-16).
+ * `reviews-to-address` resolves to the hub-owned primary href (`cat.href`).
  */
 export const INBOX_LINK_HREFS: Partial<
   Record<Exclude<InboxLinkKey, 'primary' | 'secrets-requests' | 'secrets-pending'>, string>
@@ -119,6 +122,8 @@ export const INBOX_LINK_HREFS: Partial<
   'chat-unread': '/chat?filter=unread',
   'chat-mentions': '/chat?filter=mentions',
   'chat-starred': '/chat?filter=starred',
+  'reviews-requested': '/artifacts?requested=1',
+  'reviews-drafts': '/artifacts?drafts=1',
 };
 
 function resolveMergedSecretsCategory(
@@ -224,7 +229,7 @@ function resolveInboxLinkHref(
   card: InboxCardConfig,
   categories?: InboxSummaryResponse['categories']
 ): string | undefined {
-  if (link === 'primary') {
+  if (link === 'primary' || link === 'reviews-to-address') {
     return cat.href || card.defaultHref;
   }
   if (link === 'secrets-requests') {
@@ -232,6 +237,12 @@ function resolveInboxLinkHref(
   }
   if (link === 'secrets-pending') {
     return categories?.pending_secrets?.href || '/profile/secrets';
+  }
+  if (link === 'reviews-requested' && !isFeatureEnabled(ARTIFACTS_REVIEW_REQUESTS_FLAG)) {
+    return undefined;
+  }
+  if (link === 'reviews-drafts' && !isFeatureEnabled(ARTIFACTS_REVIEW_DRAFTS_FLAG)) {
+    return undefined;
   }
   return INBOX_LINK_HREFS[link];
 }

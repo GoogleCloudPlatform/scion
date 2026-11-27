@@ -229,41 +229,157 @@
       "category": "reviews",
       "count": 0,
       "capped": false,
+      "breakdown": { "toAddress": 0, "requested": 0, "drafts": 0 },
+      "expected": "Nothing Waiting",
+      "segments": null
+    },
+    {
+      "name": "reviews empty when drafts absent",
+      "category": "reviews",
+      "count": 0,
+      "capped": false,
       "breakdown": { "toAddress": 0, "requested": 0 },
       "expected": "Nothing Waiting",
       "segments": null
     },
     {
-      "name": "reviews singular",
+      "name": "reviews all three clauses",
       "category": "reviews",
-      "count": 1,
+      "count": 3,
       "capped": false,
-      "breakdown": { "toAddress": 1, "requested": 0 },
-      "expected": "1 pending review",
+      "breakdown": { "toAddress": 2, "requested": 1, "drafts": 4 },
+      "expected": "2 reviews to address, 1 review requested, 4 unfinished drafts",
       "segments": [
-        { "text": "1 pending review", "link": "primary" }
+        { "text": "2 reviews to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "1 review requested", "link": "reviews-requested" },
+        { "text": ", " },
+        { "text": "4 unfinished drafts", "link": "reviews-drafts" }
       ]
     },
     {
-      "name": "reviews plural",
+      "name": "reviews singular toAddress and draft with plural requested",
+      "category": "reviews",
+      "count": 3,
+      "capped": false,
+      "breakdown": { "toAddress": 1, "requested": 2, "drafts": 1 },
+      "expected": "1 review to address, 2 reviews requested, 1 unfinished draft",
+      "segments": [
+        { "text": "1 review to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "2 reviews requested", "link": "reviews-requested" },
+        { "text": ", " },
+        { "text": "1 unfinished draft", "link": "reviews-drafts" }
+      ]
+    },
+    {
+      "name": "reviews drops zero requested and drafts",
+      "category": "reviews",
+      "count": 1,
+      "capped": false,
+      "breakdown": { "toAddress": 1, "requested": 0, "drafts": 0 },
+      "expected": "1 review to address",
+      "segments": [
+        { "text": "1 review to address", "link": "reviews-to-address" }
+      ]
+    },
+    {
+      "name": "reviews drops zero toAddress and drafts",
+      "category": "reviews",
+      "count": 3,
+      "capped": false,
+      "breakdown": { "toAddress": 0, "requested": 3, "drafts": 0 },
+      "expected": "3 reviews requested",
+      "segments": [
+        { "text": "3 reviews requested", "link": "reviews-requested" }
+      ]
+    },
+    {
+      "name": "reviews drafts only with zero count",
+      "category": "reviews",
+      "count": 0,
+      "capped": false,
+      "breakdown": { "toAddress": 0, "requested": 0, "drafts": 3 },
+      "expected": "3 unfinished drafts",
+      "segments": [
+        { "text": "3 unfinished drafts", "link": "reviews-drafts" }
+      ]
+    },
+    {
+      "name": "reviews drafts absent when gate off",
       "category": "reviews",
       "count": 5,
       "capped": false,
       "breakdown": { "toAddress": 2, "requested": 3 },
-      "expected": "5 pending reviews",
+      "expected": "2 reviews to address, 3 reviews requested",
       "segments": [
-        { "text": "5 pending reviews", "link": "primary" }
+        { "text": "2 reviews to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "3 reviews requested", "link": "reviews-requested" }
       ]
     },
     {
-      "name": "reviews capped",
+      "name": "reviews drafts capped keeps toAddress and requested exact",
+      "category": "reviews",
+      "count": 2,
+      "capped": false,
+      "breakdown": { "toAddress": 1, "requested": 1, "drafts": 500, "draftsCapped": 1 },
+      "expected": "1 review to address, 1 review requested, 500+ unfinished drafts",
+      "segments": [
+        { "text": "1 review to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "1 review requested", "link": "reviews-requested" },
+        { "text": ", " },
+        { "text": "500+ unfinished drafts", "link": "reviews-drafts" }
+      ]
+    },
+    {
+      "name": "reviews only toAddress capped via per-clause key",
+      "category": "reviews",
+      "count": 502,
+      "capped": true,
+      "breakdown": { "toAddress": 500, "toAddressCapped": 1, "requested": 2, "drafts": 1 },
+      "expected": "500+ reviews to address, 2 reviews requested, 1 unfinished draft",
+      "segments": [
+        { "text": "500+ reviews to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "2 reviews requested", "link": "reviews-requested" },
+        { "text": ", " },
+        { "text": "1 unfinished draft", "link": "reviews-drafts" }
+      ]
+    },
+    {
+      "name": "reviews only requested capped via per-clause key",
+      "category": "reviews",
+      "count": 502,
+      "capped": true,
+      "breakdown": { "toAddress": 2, "requested": 500, "requestedCapped": 1 },
+      "expected": "2 reviews to address, 500+ reviews requested",
+      "segments": [
+        { "text": "2 reviews to address", "link": "reviews-to-address" },
+        { "text": ", " },
+        { "text": "500+ reviews requested", "link": "reviews-requested" }
+      ]
+    },
+    {
+      "name": "reviews capped fallback without per-clause keys",
       "category": "reviews",
       "count": 500,
       "capped": true,
       "breakdown": { "toAddress": 500, "requested": 0 },
-      "expected": "500+ pending reviews",
+      "expected": "500+ reviews to address",
       "segments": [
-        { "text": "500+ pending reviews", "link": "primary" }
+        { "text": "500+ reviews to address", "link": "reviews-to-address" }
+      ]
+    },
+    {
+      "name": "reviews falls back when breakdown omitted",
+      "category": "reviews",
+      "count": 3,
+      "capped": true,
+      "expected": "3+ pending reviews",
+      "segments": [
+        { "text": "3+ pending reviews", "link": "primary" }
       ]
     },
     {

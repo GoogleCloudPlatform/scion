@@ -35,7 +35,12 @@ async function globalSetup(): Promise<void> {
     env: {
       SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
     },
-    experiments: ['web.inbox_dashboard'],
+    experiments: [
+      'web.inbox_dashboard',
+      'hub.artifacts',
+      'hub.artifacts_review_requests',
+      'hub.artifacts_review_drafts',
+    ],
   });
   console.info(`[setup] Inbox real hub ${String(state.hubId)} at ${state.baseURL}`);
 }

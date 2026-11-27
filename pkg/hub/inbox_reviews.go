@@ -232,14 +232,23 @@ func (s *Server) inboxReviewsCategory(ctx context.Context, v inboxViewer, previe
 		InboxBreakdownToAddress: toAddressCount,
 		InboxBreakdownRequested: requestedCount,
 	}
+	if toAddressCapped {
+		breakdown[InboxBreakdownToAddressCapped] = 1
+	}
+	if requestedCapped {
+		breakdown[InboxBreakdownRequestedCapped] = 1
+	}
 	if summary.Drafts != nil {
 		breakdown[InboxBreakdownDrafts] = summary.Drafts.Count
+		if draftsCapped {
+			breakdown[InboxBreakdownDraftsCapped] = 1
+		}
 	}
 
 	return InboxCategory{
 		State:             InboxStateOK,
 		Count:             toAddressCount + requestedCount,
-		Capped:            toAddressCapped || requestedCapped || draftsCapped,
+		Capped:            toAddressCapped || requestedCapped,
 		CountsTowardTotal: true,
 		Href:              inboxReviewsHref,
 		Previews:          items,
