@@ -721,7 +721,13 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestConduitHA_2801_C2_BrokerPathCrossNode \
 	TestConduitHA_2801_C20_AmbiguousAndRetrySemantics \
 	TestConduitHA_2801_BrokerDrainAfterGoAwayCrossNode \
-	TestConduitHA_2801_C17_BrokerIncarnation
+	TestConduitHA_2801_C17_BrokerIncarnation \
+	TestConduitHA_2796_C2_AgentPTYCrossNode \
+	TestConduitHA_2796_C4_LifetimeHandoffCrossNode \
+	TestConduitHA_2796_C10_CapabilityTruthCrossNode \
+	TestConduitHA_2796_C16b_ActiveAuthzCrossNode \
+	TestConduitHA_2796_C5_SlowReaderIsolationCrossNode \
+	TestConduitHA_C19_FunctionalSmoke
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
