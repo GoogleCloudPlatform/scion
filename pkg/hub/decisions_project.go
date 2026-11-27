@@ -110,6 +110,7 @@ type ProjectDecisionPromptView struct {
 	DisabledReason        string                    `json:"disabledReason,omitempty"`
 	WaitingReasons        map[string]string         `json:"waitingReasons,omitempty"`
 	Artifacts             []chatArtifactRef         `json:"artifacts,omitempty"`
+	ArtifactsUnavailable  bool                      `json:"artifactsUnavailable,omitempty"`
 	Decisions             []DecisionView            `json:"decisions"`
 }
 
@@ -1506,7 +1507,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 		}
 	}
 	replacedBy := s.decisionRows(ctx, replacedByIDs)
-	artifactViews, _ := s.messageArtifactViews(ctx, promptMsgIDs)
+	artifactViews, artifactsUnavailable := s.messageArtifactViews(ctx, promptMsgIDs)
 
 	out := make([]ProjectDecisionPromptView, 0, len(page))
 	for _, item := range page {
@@ -1535,6 +1536,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 			DisabledReason:        item.disabledReason,
 			WaitingReasons:        item.waitingReasons,
 			Artifacts:             artifactViews[p.MessageID],
+			ArtifactsUnavailable:  artifactsUnavailable && item.promptAvail,
 			Decisions:             decViews,
 		})
 	}

@@ -1105,6 +1105,7 @@ export function renderPromptCard(
         .waitingReasons=${p.waitingReasons}
         .askerGone=${Boolean(opts.askerGone)}
         .artifactRefs=${p.artifacts ?? []}
+        .artifactsUnavailable=${Boolean(p.artifactsUnavailable)}
         surface="decisions_page"
         @decision-artifact-open=${(e: CustomEvent<DecisionArtifactOpenDetail>): void =>
           opts.onArtifactOpen?.(e)}

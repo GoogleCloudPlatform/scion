@@ -102,6 +102,7 @@ export interface ProjectDecisionPromptView {
   disabledReason?: string;
   waitingReasons?: Record<string, ProjectDecisionWaitingReason>;
   artifacts?: MessageArtifactRef[];
+  artifactsUnavailable?: boolean;
   decisions: DecisionView[];
 }
 

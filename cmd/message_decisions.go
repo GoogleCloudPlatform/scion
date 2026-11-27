@@ -267,7 +267,7 @@ func printSentDecisions(result *hubclient.OutboundMessageResult) {
 		fmt.Println(decisionSendLine(d))
 	}
 	if result.DecisionArtifactNotice != "" {
-		fmt.Printf("Note: %s\n", result.DecisionArtifactNotice)
+		fmt.Fprintf(os.Stderr, "Note: %s\n", result.DecisionArtifactNotice)
 	}
 }
 

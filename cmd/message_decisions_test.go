@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -348,15 +350,24 @@ func TestSendOutboundDecisions_WithArtifacts(t *testing.T) {
 
 	respBody := decisionsSentBody()
 	respBody["artifact_warning"] = "1 artifact reference(s) may not be readable by alice@example.com"
-	respBody["decision_artifact_notice"] = "1 artifact reference(s) from the replaced decision prompt were not included in this --update (scion://artifact/5f1c2d3e-0000-4000-8000-0000000000bb); pass --artifact to re-attach if unintentional"
+	respBody["decision_artifact_notice"] = "1 artifact reference(s) from the replaced decision prompt are not attached to the new prompt (scion://artifact/5f1c2d3e-0000-4000-8000-0000000000bb); pass --artifact to attach them if unintentional"
 	var got map[string]interface{}
 	hubCtx := newDecisionsHub(t, http.StatusOK, respBody, &got)
 
 	body := appendArtifactRefsToBody("Review mockup before deciding", msgArtifactRefs)
 	var sendErr error
+	var stderrBuf bytes.Buffer
+	origStderr := os.Stderr
+	rPipe, wPipe, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stderr = wPipe
 	out := captureStdout(t, func() {
 		sendErr = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", body, false)
 	})
+	_ = wPipe.Close()
+	os.Stderr = origStderr
+	_, _ = io.Copy(&stderrBuf, rPipe)
+	_ = rPipe.Close()
 	require.NoError(t, sendErr)
 
 	assert.Contains(t, got["msg"], "Review mockup before deciding")
@@ -366,7 +377,8 @@ func TestSendOutboundDecisions_WithArtifacts(t *testing.T) {
 	require.True(t, ok, "expected metadata map on outbound request")
 	assert.Contains(t, md["artifacts"], artID)
 	assert.Contains(t, out, "D234 v1 (new)")
-	assert.Contains(t, out, "Note: 1 artifact reference(s) from the replaced decision prompt were not included in this --update")
+	assert.NotContains(t, out, "Note:", "dropped-artifact notice goes to stderr, not stdout")
+	assert.Contains(t, stderrBuf.String(), "Note: 1 artifact reference(s) from the replaced decision prompt are not attached to the new prompt")
 	assert.Len(t, *asked, 1)
 }
 

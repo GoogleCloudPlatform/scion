@@ -299,7 +299,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 	}
 
 	// 6. The message, with the markdown fallback as its text.
-	msgText, introLen := messages.RenderDecisionFallbackWithRefs(in.Intro, keyed, in.AnswerURL, in.ArtifactRefs)
+	msgText, introLen := messages.RenderDecisionFallback(in.Intro, keyed, in.AnswerURL, in.ArtifactRefs...)
 	in.Message.Msg = msgText
 	in.Message.Type = messages.TypeDecisionPrompt
 	if err := c.CreateMessage(ctx, in.Message); err != nil {

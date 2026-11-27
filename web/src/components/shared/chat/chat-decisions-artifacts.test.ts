@@ -23,9 +23,12 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { render } from 'lit';
 import type { MessageArtifactRef } from '../../../client/artifacts.js';
+import type { ProjectDecisionPromptView } from '../../../client/project-decisions.js';
 import type { DecisionView } from '../../../shared/types.js';
 import type { DecisionArtifactOpenDetail } from './chat-decisions.js';
+import { renderPromptCard } from '../decisions-views.js';
 
 vi.mock('../../../utils/markdown.js', () => {
   const render = (markdown: string): string => `<p>${markdown}</p>`;
@@ -50,6 +53,17 @@ const apiFetchMock = vi.fn();
 vi.mock('../../../client/api.js', () => ({
   apiFetch: (path: string, options?: RequestInit) => apiFetchMock(path, options),
   extractApiError: () => Promise.resolve('error'),
+  parseApiError: () => Promise.resolve({ code: 'err', message: 'error' }),
+}));
+
+vi.mock('../../../client/state.js', () => ({
+  stateManager: {
+    getCurrentUserId: vi.fn(() => 'user-1'),
+    setScope: vi.fn(),
+    clearScope: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  },
 }));
 
 await import('./chat-decisions.js');
@@ -233,5 +247,132 @@ describe('decision card artifact references (ptone/scion#9424)', () => {
     expect(msg.shadowRoot?.querySelector('scion-chat-decisions')).toBeNull();
     const chips = msg.shadowRoot?.querySelectorAll('.artifact-chips .artifact-chip') ?? [];
     expect(chips).toHaveLength(1);
+  });
+
+  it('shows unavailable notice when artifactsUnavailable is true and hides it when hub.artifacts is off', async () => {
+    const el = document.createElement('scion-chat-decisions') as ScionChatDecisions;
+    el.messageId = 'msg-1';
+    el.decisions = [sampleDecision('D1', 'Approve?')];
+    el.artifactsUnavailable = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const note = el.shadowRoot?.querySelector('.card-artifacts-unavailable');
+    expect(note).not.toBeNull();
+    expect(note?.textContent?.trim()).toContain('Artifact references could not be loaded');
+
+    window.__SCION_FEATURES__ = { 'web.decisions': true, 'hub.artifacts': false };
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.card-artifacts-unavailable')).toBeNull();
+  });
+
+  it('renderPromptCard passes artifacts and artifactsUnavailable and wires onArtifactOpen', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const opened: DecisionArtifactOpenDetail[] = [];
+
+    const prompt: ProjectDecisionPromptView = {
+      promptMessageId: 'msg-p1',
+      promptAvailable: true,
+      chatKey: 'thread-1',
+      conversationLabel: '#design',
+      conversationAvailable: true,
+      askerAgentId: 'agent-1',
+      askerAgentName: 'designer',
+      createdAt: '2026-11-27T12:00:00Z',
+      answerMode: 'single',
+      waitingOnYou: true,
+      canAnswer: true,
+      artifacts: [readableRef(ART_A, 'Mockup v3', 3, 'designer', 3)],
+      decisions: [sampleDecision('D1', 'Approve mockup?')],
+    };
+
+    render(
+      renderPromptCard(prompt, {
+        currentUserId: 'user-1',
+        onAnswered: () => {},
+        onJump: () => {},
+        onArtifactOpen: (e) => {
+          opened.push(e.detail);
+        },
+      }),
+      host
+    );
+
+    const card = host.querySelector('scion-chat-decisions') as ScionChatDecisions | null;
+    expect(card).not.toBeNull();
+    await card!.updateComplete;
+
+    const chip = card!.shadowRoot?.querySelector<HTMLButtonElement>(
+      '.card-artifacts .artifact-chip'
+    );
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Mockup v3 · v3 · designer');
+    chip!.click();
+    expect(opened).toEqual([{ id: ART_A, seq: 3, title: 'Mockup v3' }]);
+
+    // Also verify artifactsUnavailable flows through renderPromptCard.
+    render(
+      renderPromptCard(
+        { ...prompt, artifacts: [], artifactsUnavailable: true },
+        {
+          currentUserId: 'user-1',
+          onAnswered: () => {},
+          onJump: () => {},
+        }
+      ),
+      host
+    );
+    await card!.updateComplete;
+    expect(card!.shadowRoot?.querySelector('.card-artifacts-unavailable')).not.toBeNull();
+  });
+
+  it('project-decisions and profile-decisions pages open <scion-chat-file-preview> on decision-artifact-open', async () => {
+    await import('../../pages/project-decisions.js');
+    await import('../../pages/profile-decisions.js');
+
+    for (const tag of ['scion-page-project-decisions', 'scion-page-profile-decisions'] as const) {
+      const page = document.createElement(tag) as HTMLElement & {
+        updateComplete: Promise<boolean>;
+        onArtifactOpen: (e: CustomEvent<DecisionArtifactOpenDetail>) => void;
+      };
+      document.body.appendChild(page);
+      await page.updateComplete;
+
+      // Invoke the page's bound handler directly (matching the renderPromptCard callback).
+      (
+        page as unknown as {
+          onArtifactOpen: (e: CustomEvent<DecisionArtifactOpenDetail>) => void;
+        }
+      ).onArtifactOpen(
+        new CustomEvent<DecisionArtifactOpenDetail>('decision-artifact-open', {
+          detail: { id: ART_A, seq: 2, title: 'Mockup v2' },
+        })
+      );
+      await page.updateComplete;
+
+      const preview = page.shadowRoot?.querySelector('scion-chat-file-preview') as
+        | (HTMLElement & { target?: unknown })
+        | null;
+      // Note: preview renders once the page is in its main (non-loading/404) view;
+      // verify previewTarget state was set cleanly on both page components.
+      const internal = page as unknown as { previewTarget: unknown };
+      expect(internal.previewTarget).toEqual({
+        kind: 'artifact',
+        id: ART_A,
+        seq: 2,
+        name: 'Mockup v2',
+      });
+      if (preview) {
+        expect(preview.target).toEqual({
+          kind: 'artifact',
+          id: ART_A,
+          seq: 2,
+          name: 'Mockup v2',
+        });
+      }
+      page.remove();
+    }
   });
 });

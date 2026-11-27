@@ -313,7 +313,7 @@ func (s *Server) decisionUpdateDroppedArtifactsNotice(ctx context.Context, res *
 	if len(droppedURIs) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d artifact reference(s) from the replaced decision prompt were not included in this --update (%s); pass --artifact to re-attach if unintentional",
+	return fmt.Sprintf("%d artifact reference(s) from the replaced decision prompt are not attached to the new prompt (%s); pass --artifact to attach them if unintentional",
 		len(droppedURIs), strings.Join(droppedURIs, ", "))
 }
 

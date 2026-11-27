@@ -178,6 +178,10 @@ export class ScionChatDecisions extends LitElement {
   @property({ attribute: false })
   artifactRefs: MessageArtifactRef[] = [];
 
+  /** True when the hub could not load artifact references for this prompt (ptone/scion#4295). */
+  @property({ type: Boolean })
+  artifactsUnavailable = false;
+
   /** Optional prompt intro text, used to order artifact chips to match mention order. */
   @property()
   intro = '';
@@ -370,6 +374,17 @@ export class ScionChatDecisions extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-style: dashed;
       color: var(--scion-text-muted, #64748b);
+    }
+
+    .card-artifacts-unavailable {
+      align-items: center;
+      font-size: var(--chat-fs-sm, 0.875rem);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    .card-artifacts-unavailable sl-icon {
+      flex: none;
+      color: var(--scion-status-warning, #d97706);
     }
 
     .row + .row {
@@ -2086,8 +2101,16 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private renderArtifacts(): TemplateResult | typeof nothing {
-    if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;
     if (!isFeatureEnabled(ARTIFACTS_FLAG)) return nothing;
+    if (this.artifactsUnavailable) {
+      return html`
+        <div class="card-artifacts card-artifacts-unavailable" role="status">
+          <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+          <span>Artifact references could not be loaded</span>
+        </div>
+      `;
+    }
+    if (!this.artifactRefs || this.artifactRefs.length === 0) return nothing;
     const refs = orderDecisionArtifactRefs(this.artifactRefs, this.intro ?? '');
     return html`
       <div class="card-artifacts" role="group" aria-label="Referenced artifacts">
