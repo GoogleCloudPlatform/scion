@@ -71,6 +71,7 @@ const (
 	TokenStatusReported    = "reported"
 	TokenStatusPartial     = "partial"
 	TokenStatusNotReported = "not_reported"
+	TokenStatusUnverified  = "unverified"
 	TokenStatusMalformed   = "malformed"
 )
 
@@ -234,7 +235,7 @@ func (e *UsageEvent) Validate() error {
 		errs = append(errs, fmt.Errorf("input_derivation %q is not known", e.InputDerivation))
 	}
 	switch e.TokenStatus {
-	case TokenStatusReported, TokenStatusPartial, TokenStatusNotReported, TokenStatusMalformed:
+	case TokenStatusReported, TokenStatusPartial, TokenStatusNotReported, TokenStatusUnverified, TokenStatusMalformed:
 	default:
 		errs = append(errs, fmt.Errorf("token_status %q is not known", e.TokenStatus))
 	}
@@ -243,6 +244,9 @@ func (e *UsageEvent) Validate() error {
 	}
 	if e.TokenStatus == TokenStatusNotReported && e.hasTokens() {
 		errs = append(errs, errors.New("token_status not_reported must not carry token fields"))
+	}
+	if e.TokenStatus == TokenStatusUnverified && e.hasTokens() {
+		errs = append(errs, errors.New("token_status unverified must not carry token fields"))
 	}
 	if e.SourceTime != "" {
 		if _, err := ParseTS(e.SourceTime); err != nil {

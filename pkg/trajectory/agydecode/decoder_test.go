@@ -1272,3 +1272,177 @@ func TestDecodeFile_O2_PersistedLearnedModelsAcrossPolls(t *testing.T) {
 		t.Fatalf("poll 2 got %+v, want model gemini-9-custom resolved from persisted LearnedModels", res2.Records)
 	}
 }
+
+func TestNormalizeVersion_RejectsFourPartVersion(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantNorm string
+		wantVer  bool
+	}{
+		{"1.5.18", "1.5.18", true},
+		{"v1.5.18\n", "1.5.18", true},
+		{"agy 1.5.18", "1.5.18", true},
+		{"agy v1.5.18 (linux)", "1.5.18", true},
+		{"agy 1.5.18.1", "", false},
+		{"1.5.18.1", "", false},
+		{"0.1.5.18", "", false},
+		{"1.5.18-rc.1", "1.5.18-rc.1", false},
+	}
+	for _, tc := range cases {
+		got := NormalizeVersion(tc.raw)
+		if got != tc.wantNorm {
+			t.Errorf("NormalizeVersion(%q) = %q, want %q", tc.raw, got, tc.wantNorm)
+		}
+		if IsVerifiedVersion(tc.raw) != tc.wantVer {
+			t.Errorf("IsVerifiedVersion(%q) = %v, want %v", tc.raw, IsVerifiedVersion(tc.raw), tc.wantVer)
+		}
+	}
+}
+
+func TestDedupeState_CloneIsolatesMutations(t *testing.T) {
+	if (*DedupeState)(nil).Clone() != nil {
+		t.Fatal("nil.Clone() must return nil")
+	}
+	orig := NewDedupeState()
+	in1, out1 := int64(100), int64(25)
+	_, key1, _, _, emit := orig.RecordDelta(TokenUsage{Input: &in1, Output: &out1}, "antigravity:11:call-a")
+	if !emit || key1 == "" {
+		t.Fatal("initial RecordDelta failed")
+	}
+	orig.LearnedModels[1466] = "gemini-4-neon"
+	orig.AmbiguousModels[42] = true
+
+	cloned := orig.Clone()
+	in2, out2 := int64(200), int64(50)
+	_, key2, _, isDelta, emit2 := cloned.RecordDelta(TokenUsage{Input: &in2, Output: &out2}, "antigravity:11:call-a")
+	if !emit2 || !isDelta || key2 == key1 {
+		t.Fatalf("clone delta got emit=%v isDelta=%v key=%q", emit2, isDelta, key2)
+	}
+	cloned.LearnedModels[1466] = "mutated"
+	cloned.AmbiguousModels[99] = true
+
+	// Original must remain unchanged so re-running the same delta against orig
+	// reproduces the exact same EmissionKey (outbox append failure retry).
+	if *orig.Emitted["antigravity:11:call-a"].Input != 100 {
+		t.Fatalf("orig input mutated to %d, want 100", *orig.Emitted["antigravity:11:call-a"].Input)
+	}
+	if orig.LearnedModels[1466] != "gemini-4-neon" {
+		t.Fatalf("orig LearnedModels mutated to %q", orig.LearnedModels[1466])
+	}
+	if orig.AmbiguousModels[99] {
+		t.Fatal("orig AmbiguousModels mutated")
+	}
+	_, retryKey, _, retryDelta, retryEmit := orig.Clone().RecordDelta(TokenUsage{Input: &in2, Output: &out2}, "antigravity:11:call-a")
+	if !retryEmit || !retryDelta || retryKey != key2 {
+		t.Fatalf("retry on unmutated orig got emit=%v delta=%v key=%q, want key=%q", retryEmit, retryDelta, retryKey, key2)
+	}
+}
+
+func TestDedupeState_PruneEvictsOldestRootsAndPreservesModels(t *testing.T) {
+	d := NewDedupeState()
+	d.LearnedModels[1466] = "gemini-4-neon"
+	for i := 0; i < 5; i++ {
+		v := int64(10 + i)
+		id11 := "antigravity:11:call-" + string(rune('a'+i))
+		id7 := "antigravity:7:alias-" + string(rune('a'+i))
+		d.RecordDelta(TokenUsage{Input: &v}, id11, id7)
+	}
+	if d.RootCount() != 5 || d.Size() != 10 {
+		t.Fatalf("before prune: roots=%d size=%d, want 5/10", d.RootCount(), d.Size())
+	}
+
+	evicted := d.Prune(2)
+	if evicted != 3 {
+		t.Fatalf("Prune(2) evicted %d, want 3", evicted)
+	}
+	if d.RootCount() != 2 || d.Size() != 4 {
+		t.Fatalf("after prune: roots=%d size=%d, want 2/4", d.RootCount(), d.Size())
+	}
+	// Oldest 3 (a, b, c) evicted; newest 2 (d, e) kept.
+	if _, ok := d.Contains("antigravity:11:call-a", "antigravity:7:alias-a"); ok {
+		t.Fatal("expected oldest root call-a and its alias to be evicted")
+	}
+	if _, ok := d.Contains("antigravity:7:alias-e"); !ok {
+		t.Fatal("expected newest root call-e and its alias to be retained")
+	}
+	if d.LearnedModels[1466] != "gemini-4-neon" {
+		t.Fatal("Prune must preserve LearnedModels")
+	}
+}
+
+func TestDedupeState_UnionRootsBridgingSumsHighWater(t *testing.T) {
+	d := NewDedupeState()
+	inA, outA := int64(100), int64(20)
+	inB, outB := int64(80), int64(15)
+
+	// Poll 1 sees only field 11 key; poll 2 sees only field 7 key.
+	_, _, _, _, emit1 := d.RecordDelta(TokenUsage{Input: &inA, Output: &outA}, "antigravity:11:x")
+	_, _, _, _, emit2 := d.RecordDelta(TokenUsage{Input: &inB, Output: &outB}, "antigravity:7:z")
+	if !emit1 || !emit2 {
+		t.Fatalf("expected both initial disjoint emissions, got %v/%v", emit1, emit2)
+	}
+
+	// Poll 3 sees a bridging copy carrying both keys with counts <= A+B (180, 35):
+	// unionRoots sums the two persisted high-water marks so no extra delta is emitted.
+	inBridge, outBridge := int64(150), int64(30)
+	_, _, _, _, emit3 := d.RecordDelta(TokenUsage{Input: &inBridge, Output: &outBridge}, "antigravity:11:x", "antigravity:7:z")
+	if emit3 {
+		t.Fatal("expected bridging copy <= A+B to emit no extra delta")
+	}
+	hw := d.Emitted["antigravity:11:x"]
+	if hw.Input == nil || *hw.Input != 180 || hw.Output == nil || *hw.Output != 35 {
+		t.Fatalf("summed high-water = (%v, %v), want (180, 35)", hw.Input, hw.Output)
+	}
+
+	// A later copy exceeding the summed high-water emits only the positive remainder.
+	inHigher, outHigher := int64(200), int64(35)
+	_, _, delta, isDelta, emit4 := d.RecordDelta(TokenUsage{Input: &inHigher, Output: &outHigher}, "antigravity:11:x", "antigravity:7:z")
+	if !emit4 || !isDelta || delta.Input == nil || *delta.Input != 20 || delta.Output != nil {
+		t.Fatalf("post-bridge higher copy got emit=%v isDelta=%v delta=%+v, want input=20/output=nil", emit4, isDelta, delta)
+	}
+}
+
+func TestDecodeFile_TwoDBsKeylessIdentitySharedDedupe(t *testing.T) {
+	dir := t.TempDir()
+	dbAPath := filepath.Join(dir, "session-alpha.db")
+	dbBPath := filepath.Join(dir, "session-beta.db")
+
+	writeKeylessDB := func(path string) {
+		db := createAgySchemaDB(t, path)
+		defer func() { _ = db.Close() }()
+		blob := encodeGenMetadataPB(pbGenMetaSpec{
+			modelID:   1466,
+			modelName: "gemini-4-neon",
+			tsSecs:    1795709000,
+			primary: &pbUsageSpec{
+				modelID:   1466,
+				hasInput:  true,
+				input:     123,
+				hasOutput: true,
+				output:    45,
+				// Deliberately no id11, id12, or id7 -> fallback composite identity.
+			},
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, blob, len(blob)); err != nil {
+			t.Fatalf("insert gen_metadata %s: %v", path, err)
+		}
+	}
+	writeKeylessDB(dbAPath)
+	writeKeylessDB(dbBPath)
+
+	shared := NewDedupeState()
+	resA, err := DecodeFile(context.Background(), dbAPath, Options{AgyVersion: "1.5.18", Dedupe: shared})
+	if err != nil {
+		t.Fatalf("decode A: %v", err)
+	}
+	resB, err := DecodeFile(context.Background(), dbBPath, Options{AgyVersion: "1.5.18", Dedupe: shared})
+	if err != nil {
+		t.Fatalf("decode B: %v", err)
+	}
+	if len(resA.Records) != 1 || len(resB.Records) != 1 {
+		t.Fatalf("got records A=%d B=%d, want 1 and 1 (session-scoped keyless identities must not collide)", len(resA.Records), len(resB.Records))
+	}
+	if resA.Records[0].Identity == resB.Records[0].Identity {
+		t.Fatalf("keyless identities collided across sessions: %q", resA.Records[0].Identity)
+	}
+}

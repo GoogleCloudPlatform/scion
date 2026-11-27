@@ -77,6 +77,9 @@ type Pipeline struct {
 	meter              otelmetric.Meter
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
+	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
+	agyActiveAtStop    atomic.Bool    // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
+	driftLatched       atomic.Bool    // preserved across Pipeline.Stop after agyTailer is swapped nil
 	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health             healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
@@ -245,6 +248,9 @@ const (
 	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
 	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
 	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
+	// UsageActivationAnalyticsDisabled means sqlite_native could not start
+	// because no analytics outbox sink is active.
+	UsageActivationAnalyticsDisabled UsageActivation = "analytics outbox is not enabled"
 )
 
 // ActivateUsageSource enables native usage derivation on an already-running
@@ -272,7 +278,7 @@ const (
 // It returns UsageActivated when a new deriver was stored, and otherwise the
 // reason it was skipped.
 func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
-	if source != UsageSourceNative {
+	if source != UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative {
 		return UsageActivationNotNative, nil
 	}
 	// Known limitation (predates ptone/scion#3391): the supervisor applies
@@ -293,6 +299,21 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 
 	if !p.running {
 		return UsageActivationNotRunning, nil
+	}
+	if source == telemetrycontract.UsageSourceSQLiteNative {
+		if os.Getenv("SCION_HARNESS") != "antigravity" {
+			return UsageActivationNoHarnessRule, nil
+		}
+		if p.agyTailer.Load() != nil {
+			return UsageActivationAlreadyActive, nil
+		}
+		if p.analytics.sqliteNative == nil {
+			return UsageActivationAnalyticsDisabled, nil
+		}
+		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
+			return "", fmt.Errorf("starting antigravity sqlite tailer: %w", err)
+		}
+		return UsageActivated, nil
 	}
 	if current := p.usageDeriver.Load(); current != nil && len(current.rules) > 0 {
 		return UsageActivationAlreadyActive, nil
@@ -318,6 +339,40 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	// in-flight request that loaded the old no-op deriver derives nothing.
 	p.usageDeriver.Store(deriver)
 	return UsageActivated, nil
+}
+
+// startAgySQLiteTailerLocked starts the Antigravity local SQLite usage tailer
+// whenever an analytics sink (Hub usage outbox and/or GCP analytics) is active.
+// Neither nativeMeteringOnly nor cloudInitDegraded blocks it:
+//   - nativeMeteringOnly only suppresses forwarding non-sciontool OTLP signals
+//     to the cloud exporter; the SQLite tailer emits only sciontool's own
+//     agent.usage metering events, which are intended to flow under metering
+//     policy.
+//   - cloudInitDegraded means cloud export failed/was misconfigured at Start
+//     while the Hub usage sink kept the pipeline running; Hub-only metering
+//     (including sqlite_native) intentionally continues operating while
+//     deliveryState remains "degraded".
+func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
+	if p.analytics.sqliteNative == nil {
+		log.Debug("Antigravity SQLite tailer not started: analytics outbox is disabled")
+		return nil
+	}
+	agentHome := p.analytics.agentHome
+	if agentHome == "" {
+		agentHome, _ = os.UserHomeDir()
+	}
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:      agentHome,
+		WakeOwner:      p.analytics.owner,
+		Analytics:      p.analytics.sqliteNative,
+		LoopbackConfig: p.loopbackConfig.Load(),
+		SessionUsage:   p.forwardSessionUsage,
+	})
+	if err := tailer.Start(ctx); err != nil {
+		return err
+	}
+	p.agyTailer.Store(tailer)
+	return nil
 }
 
 // Start starts the telemetry pipeline.
@@ -474,6 +529,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.analytics.supportedSignals = p.supportedUsageSignals
 	p.analytics.onSuppressChanged = p.setSuppressDirectOTel
 	p.analytics.isSuppressed = p.SuppressDirectOTel
+	p.analytics.schemaDrift = p.schemaDriftDetected
 	p.analytics.start(ctx, gcpExporter)
 
 	// Create receiver with span and metric handlers
@@ -524,7 +580,14 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.cloudInitDegraded = cloudInitDegraded
+	p.agyActiveAtStop.Store(false)
+	p.driftLatched.Store(false)
 	p.running = true
+	if os.Getenv("SCION_HARNESS") == "antigravity" && os.Getenv("SCION_USAGE_SOURCE") == telemetrycontract.UsageSourceSQLiteNative {
+		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
+			log.Error("Failed to start antigravity SQLite tailer: %v", err)
+		}
+	}
 	if cloudInitDegraded {
 		p.deliveryState.Store("degraded")
 	} else {
@@ -589,6 +652,21 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 		}
 		cancel()
 		p.captureFinalUsage(deriver)
+	}
+	// Shut the Antigravity SQLite tailer down before intake/receiver close so
+	// its final PollOnce appends any last DB rows to the still-open analytics
+	// outbox AND flushes any buffered scion.usage.tokens increments over
+	// loopback into the still-open receiver before flushMetricsOnStop runs.
+	// Capture active status and drift latch before clearing agyTailer so the
+	// final health event and heartbeat remain accurate.
+	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		p.agyActiveAtStop.Store(true)
+		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
+		if tailer.SchemaDriftDetected() {
+			p.driftLatched.Store(true)
+		}
 	}
 
 	var errs []error

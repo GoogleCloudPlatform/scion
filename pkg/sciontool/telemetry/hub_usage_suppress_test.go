@@ -635,6 +635,7 @@ func TestPipeline_SuppressClearedOnRevocationAndSetOnLateActivation(t *testing.T
 			},
 			time.Millisecond,
 			nil,
+			nil,
 			func(cfg HubUsageSinkConfig, ho *AnalyticsOutbox, sink *HubUsageSink) {
 				applySuppress := func(v bool) {
 					ho.setHubSuppress(v)

@@ -36,17 +36,21 @@ var VerifiedVersions = []string{
 	"1.5.18",
 }
 
-var semverRe = regexp.MustCompile(`\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b`)
+// semverRe matches a canonical 3-part semver (optional leading 'v' and optional
+// prerelease suffix) bounded by start/whitespace/open-paren/slash on the left
+// and end/whitespace/close-paren/comma on the right. Anchoring rejects 4-part
+// versions such as "agy 1.5.18.1" so unpinned builds cannot pass as pinned.
+var semverRe = regexp.MustCompile(`(?:^|[\s(/])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:$|[\s),])`)
 
 // NormalizeVersion extracts a canonical semver string from raw `agy --version`
 // output or a caller-supplied version string (e.g. "v1.5.18\n" -> "1.5.18",
-// "agy 1.5.18" -> "1.5.18"). Returns "" if no version can be parsed.
+// "agy 1.5.18" -> "1.5.18"). Returns "" if no valid 3-part semver can be parsed
+// (for example, "agy 1.5.18.1" returns "" and is treated as unverified).
 func NormalizeVersion(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""
 	}
-	s = strings.TrimPrefix(s, "v")
 	if m := semverRe.FindStringSubmatch(s); len(m) == 2 {
 		return m[1]
 	}

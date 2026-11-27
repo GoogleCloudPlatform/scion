@@ -383,6 +383,7 @@ func minimalEnv(home string, m *containerProvisionManifest) []string {
 		"SCION_AGENT_WORKSPACE=" + m.AgentWorkspace,
 		"SCION_HARNESS_BUNDLE=" + m.HarnessBundleDir,
 		"SCION_HARNESS=" + m.HarnessConfig.Harness,
+		"SCION_USAGE_SOURCES_SUPPORTED=native,hooks,sqlite_native",
 		"PYTHONDONTWRITEBYTECODE=1",
 	}
 	for _, e := range os.Environ() {

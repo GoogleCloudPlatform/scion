@@ -125,6 +125,13 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 		return nativeDisabled(telemetrycontract.UsageDisabledDeriverFailed)
 	case telemetrycontract.UsageSourceHooks:
 		return enabledUsage(telemetrycontract.UsageSourceHooks, harness)
+	case telemetrycontract.UsageSourceSQLiteNative:
+		if nativeActive {
+			return enabledUsage(telemetrycontract.UsageSourceSQLiteNative, harness)
+		}
+		u := disabled(telemetrycontract.UsageDisabledDeriverFailed)
+		u.Source = telemetrycontract.UsageSourceSQLiteNative
+		return u
 	default:
 		return disabled(telemetrycontract.UsageDisabledSourceUnrecognized)
 	}
@@ -142,8 +149,9 @@ var usageCapabilityTable = map[string]struct {
 	"native/gemini-cli": {
 		[]string{"calls", "input", "output", "cache_read", "reasoning"}, telemetrycontract.UsageGranularityRequest,
 	},
-	"native/copilot":    {[]string{"calls", "input", "output", "cache_read", "cache_write"}, telemetrycontract.UsageGranularityInterval},
-	"hooks/antigravity": {[]string{"calls"}, telemetrycontract.UsageGranularityInvocation},
+	"native/copilot":            {[]string{"calls", "input", "output", "cache_read", "cache_write"}, telemetrycontract.UsageGranularityInterval},
+	"hooks/antigravity":         {[]string{"calls"}, telemetrycontract.UsageGranularityInvocation},
+	"sqlite_native/antigravity": {[]string{"calls", "input", "output", "cache_read", "cache_write", "reasoning"}, telemetrycontract.UsageGranularityRequest},
 }
 
 func enabledUsage(source, harness string) usageCollection {
@@ -805,7 +813,11 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	} else if d := p.usageDeriver.Load(); d != nil {
 		usage, nativeActive = d.Diagnostics(), len(d.rules) > 0
 	}
-	in.Usage = deriveUsageCollection(sel, in.Harness, nativeActive, len(rulesForHarness(in.Harness)) > 0)
+	sourceActive := nativeActive
+	if sel.Source == telemetrycontract.UsageSourceSQLiteNative {
+		sourceActive = p.agyTailer.Load() != nil || p.agyActiveAtStop.Load()
+	}
+	in.Usage = deriveUsageCollection(sel, in.Harness, sourceActive, len(rulesForHarness(in.Harness)) > 0)
 	in.SourceOrigin = sel.Origin
 	if !sel.Settled && nativeActive {
 		in.SourceOrigin = telemetrycontract.UsageSourceOriginRuntimeEnv
@@ -1205,9 +1217,14 @@ func (h analyticsHandles) enabled() bool {
 
 // supportedUsageSignals returns the usage signal categories this pipeline's
 // active usage source and harness can report (from usageCapabilityTable).
+// When schema drift has been latched by a live tailer, tokens are no longer
+// reported and the producer degrades to calls_only (["calls"]).
 func (p *Pipeline) supportedUsageSignals() []string {
 	if p == nil {
 		return nil
+	}
+	if p.schemaDriftDetected() {
+		return []string{"calls"}
 	}
 	p.health.mu.Lock()
 	sel := p.health.selection
@@ -1222,4 +1239,19 @@ func (p *Pipeline) supportedUsageSignals() []string {
 		return append([]string(nil), entry.caps...)
 	}
 	return nil
+}
+
+// schemaDriftDetected reports whether any active live tailer (such as the
+// Antigravity SQLite tailer) has latched a schema drift condition.
+func (p *Pipeline) schemaDriftDetected() bool {
+	if p == nil {
+		return false
+	}
+	if p.driftLatched.Load() {
+		return true
+	}
+	if tailer := p.agyTailer.Load(); tailer != nil && tailer.SchemaDriftDetected() {
+		return true
+	}
+	return false
 }

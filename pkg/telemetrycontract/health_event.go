@@ -436,8 +436,8 @@ func (e *HealthEvent) Validate() error {
 	if e.Harness == "" || e.UsageRulesVersion == "" || e.DeliveryState == "" {
 		errs = append(errs, errors.New("harness, usage_rules_version and delivery_state are required"))
 	}
-	if e.UsageSource != "" && e.UsageSource != UsageSourceNative && e.UsageSource != UsageSourceHooks {
-		errs = append(errs, fmt.Errorf("usage_source %q is not native or hooks", e.UsageSource))
+	if e.UsageSource != "" && !ValidUsageSource(e.UsageSource) {
+		errs = append(errs, fmt.Errorf("usage_source %q is not a known usage source", e.UsageSource))
 	}
 	switch e.UsageSourceOrigin {
 	case UsageSourceOriginRuntimeEnv, UsageSourceOriginOverlay, UsageSourceOriginUnset:

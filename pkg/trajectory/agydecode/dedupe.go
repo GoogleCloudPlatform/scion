@@ -27,6 +27,14 @@ import (
 // identity key from a union-find equivalence class over protobuf IDs [11, 12, 7].
 var identityFieldOrder = []int{11, 12, 7}
 
+// DefaultMaxDedupeRoots is the default upper bound on canonical root identities
+// retained by DedupeState.Prune so long-running conversations do not grow the
+// persisted state file without bound. Because incremental SQLite polling reads
+// strictly forward from Cursor (plus at most MaxPendingRowIDs recent NULL gaps),
+// evicting the least-recently-touched roots keeps state compact without
+// re-emitting already-scanned historical rows.
+const DefaultMaxDedupeRoots = 4096
+
 // DedupeState maintains a union-find (disjoint-set) index over protobuf call
 // identity keys ("antigravity:<field>:<id>" for fields [11, 12, 7]) plus any
 // fallback composite identities, along with the per-channel high-water mark
@@ -39,7 +47,23 @@ var identityFieldOrder = []int{11, 12, 7}
 // with smaller or equal counts emits nothing. This keeps incremental Track 1
 // totals equal to single-pass Track 2 totals.
 //
+// Bridging limitation: if two earlier polls emit copies of the same call with
+// completely disjoint identity key sets (for example {antigravity:11:x} in poll 1
+// and {antigravity:7:z} in poll 2) and a later poll sees a bridging copy carrying
+// both keys, unionRoots sums the two already-emitted high-water marks onto the
+// winning root because past emissions cannot be retracted. That guarantees no
+// further extra delta is emitted unless the bridging copy exceeds the sum, at
+// the cost of breaking single-pass max-merge equality for that disjoint-then-bridged
+// input class. In observed agy 1.5.18 shapes fields 7/11/12 appear together.
+//
+// Retention: long-running callers should call Prune (for example with
+// DefaultMaxDedupeRoots) after committing a poll so Parent/Emitted/LastSeen do
+// not grow without bound. LearnedModels and AmbiguousModels are bounded by the
+// small set of distinct numeric model IDs and are never pruned.
+//
 // DedupeState is JSON-serializable so a live tailer can persist it across restarts.
+// Callers that must survive outbox append failures should decode against Clone()
+// and commit the mutated state only after the append succeeds.
 type DedupeState struct {
 	// Parent maps each known identity key to its union-find parent key.
 	// Root keys map to themselves.
@@ -47,6 +71,12 @@ type DedupeState struct {
 	// Emitted maps each canonical root key to the highest per-channel token
 	// counts emitted so far for that equivalence class.
 	Emitted map[string]TokenUsage `json:"emitted,omitempty"`
+	// LastSeen records the monotonic TouchSeq at which each canonical root was
+	// last observed, used by Prune to evict the oldest roots first.
+	LastSeen map[string]int64 `json:"last_seen,omitempty"`
+	// TouchSeq is a monotonic counter incremented whenever an identity is added
+	// or updated, providing deterministic LRU ordering for Prune.
+	TouchSeq int64 `json:"touch_seq,omitempty"`
 	// LearnedModels persists concrete numeric model_id -> model_name mappings
 	// discovered across polls so later steps-only polls resolve the same model
 	// names as a single full pass.
@@ -61,9 +91,44 @@ func NewDedupeState() *DedupeState {
 	return &DedupeState{
 		Parent:          make(map[string]string),
 		Emitted:         make(map[string]TokenUsage),
+		LastSeen:        make(map[string]int64),
 		LearnedModels:   make(map[int64]string),
 		AmbiguousModels: make(map[int64]bool),
 	}
+}
+
+// Clone returns a deep copy of DedupeState (or nil if d is nil). Callers
+// should pass a clone to DecodeFile and swap it in only after downstream
+// outbox appends succeed so a transient append failure never suppresses
+// re-emission on the next poll.
+func (d *DedupeState) Clone() *DedupeState {
+	if d == nil {
+		return nil
+	}
+	out := &DedupeState{
+		Parent:          make(map[string]string, len(d.Parent)),
+		Emitted:         make(map[string]TokenUsage, len(d.Emitted)),
+		LastSeen:        make(map[string]int64, len(d.LastSeen)),
+		TouchSeq:        d.TouchSeq,
+		LearnedModels:   make(map[int64]string, len(d.LearnedModels)),
+		AmbiguousModels: make(map[int64]bool, len(d.AmbiguousModels)),
+	}
+	for k, v := range d.Parent {
+		out.Parent[k] = v
+	}
+	for k, v := range d.Emitted {
+		out.Emitted[k] = cloneTokenUsage(v)
+	}
+	for k, v := range d.LastSeen {
+		out.LastSeen[k] = v
+	}
+	for k, v := range d.LearnedModels {
+		out.LearnedModels[k] = v
+	}
+	for k, v := range d.AmbiguousModels {
+		out.AmbiguousModels[k] = v
+	}
+	return out
 }
 
 func (d *DedupeState) ensureInit() {
@@ -72,6 +137,9 @@ func (d *DedupeState) ensureInit() {
 	}
 	if d.Emitted == nil {
 		d.Emitted = make(map[string]TokenUsage)
+	}
+	if d.LastSeen == nil {
+		d.LastSeen = make(map[string]int64)
 	}
 	if d.LearnedModels == nil {
 		d.LearnedModels = make(map[int64]string)
@@ -157,7 +225,15 @@ func (d *DedupeState) Add(keys ...string) (canonical string, isNew bool) {
 			}
 		}
 	}
+	if root != "" {
+		d.touchRoot(root)
+	}
 	return root, isNew
+}
+
+func (d *DedupeState) touchRoot(root string) {
+	d.TouchSeq++
+	d.LastSeen[root] = d.TouchSeq
 }
 
 // RecordDelta unions keys into DedupeState and compares tokens against the
@@ -216,7 +292,8 @@ func computeEmissionKey(identity string, highWater TokenUsage) string {
 // unionRoots merges two root keys, preferring the higher-priority key
 // (field 11 > field 12 > field 7 > fallback, then lexicographically smaller)
 // so canonical identities are deterministic regardless of insertion order.
-// Any persisted Emitted high-water marks on both roots are combined onto the winner.
+// Any persisted Emitted high-water marks on both roots are summed onto the
+// winner (see the bridging limitation in DedupeState's doc comment).
 func (d *DedupeState) unionRoots(a, b string) string {
 	if a == b {
 		return a
@@ -234,7 +311,72 @@ func (d *DedupeState) unionRoots(a, b string) string {
 		}
 		delete(d.Emitted, loser)
 	}
+	if loserSeq, ok := d.LastSeen[loser]; ok {
+		if loserSeq > d.LastSeen[winner] {
+			d.LastSeen[winner] = loserSeq
+		}
+		delete(d.LastSeen, loser)
+	}
 	return winner
+}
+
+// Prune evicts the least-recently-touched canonical root identities (and all
+// union-find aliases pointing to them) when the number of tracked roots exceeds
+// maxRoots. LearnedModels and AmbiguousModels are tiny and never pruned.
+// Returns the number of evicted roots. If d is nil or maxRoots <= 0, returns 0.
+func (d *DedupeState) Prune(maxRoots int) int {
+	if d == nil || maxRoots <= 0 || len(d.Parent) == 0 {
+		return 0
+	}
+	// Path-compress every key and record its root before mutating d.Parent.
+	rootOf := make(map[string]string, len(d.Parent))
+	rootSet := make(map[string]struct{}, len(d.Emitted))
+	for k := range d.Parent {
+		if root, ok := d.Find(k); ok {
+			rootOf[k] = root
+			rootSet[root] = struct{}{}
+		}
+	}
+	for r := range d.Emitted {
+		rootSet[r] = struct{}{}
+	}
+	if len(rootSet) <= maxRoots {
+		return 0
+	}
+	roots := make([]string, 0, len(rootSet))
+	for r := range rootSet {
+		roots = append(roots, r)
+	}
+	// Sort oldest-first by LastSeen, tie-breaking lexicographically for determinism.
+	sort.Slice(roots, func(i, j int) bool {
+		si, sj := d.LastSeen[roots[i]], d.LastSeen[roots[j]]
+		if si != sj {
+			return si < sj
+		}
+		return roots[i] < roots[j]
+	})
+
+	evictCount := len(roots) - maxRoots
+	evicted := make(map[string]struct{}, evictCount)
+	for _, r := range roots[:evictCount] {
+		evicted[r] = struct{}{}
+		delete(d.Emitted, r)
+		delete(d.LastSeen, r)
+	}
+	for k, root := range rootOf {
+		if _, drop := evicted[root]; drop {
+			delete(d.Parent, k)
+		}
+	}
+	return evictCount
+}
+
+// RootCount returns the number of distinct canonical roots tracked in Emitted.
+func (d *DedupeState) RootCount() int {
+	if d == nil {
+		return 0
+	}
+	return len(d.Emitted)
 }
 
 // Size returns the number of tracked keys in the state.

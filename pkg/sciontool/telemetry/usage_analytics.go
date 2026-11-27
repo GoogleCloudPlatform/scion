@@ -145,6 +145,17 @@ func NewLazyUsageAnalytics(dir string, owner *OutboxOwner, usageSource string) *
 // marked active on disk. When gcpEnabled is false (Hub-only mode), it writes
 // only to the Hub outbox while it is marked active on disk.
 func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxOwner) *UsageAnalytics {
+	return NewLazyHookUsageAnalyticsForSource(agentHome, gcpEnabled, owner, telemetrycontract.UsageSourceHooks)
+}
+
+// NewLazyHookUsageAnalyticsForSource is like NewLazyHookUsageAnalytics but
+// stamps events with the caller-supplied usageSource (for example
+// UsageSourceSQLiteNative when PostInvocation hooks own calls alongside the
+// SQLite token tailer).
+func NewLazyHookUsageAnalyticsForSource(agentHome string, gcpEnabled bool, owner *OutboxOwner, usageSource string) *UsageAnalytics {
+	if usageSource == "" {
+		usageSource = telemetrycontract.UsageSourceHooks
+	}
 	gcpDir := AnalyticsOutboxDirFor(agentHome)
 	hubDir := HubAnalyticsOutboxDirFor(agentHome)
 	if !gcpEnabled {
@@ -154,7 +165,7 @@ func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxO
 			hubDir:      hubDir,
 			hubOwner:    owner,
 			hubOnly:     true,
-			usageSource: telemetrycontract.UsageSourceHooks,
+			usageSource: usageSource,
 			now:         time.Now,
 		}
 	}
@@ -164,7 +175,7 @@ func NewLazyHookUsageAnalytics(agentHome string, gcpEnabled bool, owner *OutboxO
 		failOwner:   owner,
 		hubDir:      hubDir,
 		hubOwner:    owner,
-		usageSource: telemetrycontract.UsageSourceHooks,
+		usageSource: usageSource,
 		now:         time.Now,
 	}
 }
@@ -245,6 +256,27 @@ func AnalyticsEnabledForHooks(cfg *Config) bool {
 // errNoAgentIdentity is returned when SCION_AGENT_ID is unset: the event
 // would have no stable producer namespace, so it is not written.
 var errNoAgentIdentity = errors.New("analytics: SCION_AGENT_ID is unset; usage event not written")
+
+// Retryable refusal errors returned by RecordUnique when an outbox cannot
+// accept an event temporarily (overflow or relocated hold) so replayable
+// producers withhold cursor commits and retry once space or relocation clears.
+// AppendOversize is deliberately NOT mapped here: a single line over the cap
+// can never succeed and is skipped terminally.
+var (
+	ErrAnalyticsOutboxOverflow         = errors.New("analytics outbox: overflow (retryable)")
+	ErrAnalyticsOutboxRelocatedRefused = errors.New("analytics outbox: refused while relocated (retryable)")
+)
+
+func retryableOutcomeError(outcome AppendOutcome) error {
+	switch outcome {
+	case AppendOverflow:
+		return ErrAnalyticsOutboxOverflow
+	case AppendRefusedRelocated:
+		return ErrAnalyticsOutboxRelocatedRefused
+	default:
+		return nil
+	}
+}
 
 func (a *UsageAnalytics) setRunAndActivity(runID string, onRecord func(time.Time)) {
 	if a == nil {
@@ -350,8 +382,34 @@ func (a *UsageAnalytics) resolveHubOutbox() (*AnalyticsOutbox, bool, error) {
 // outbox independently so a Hub outbox overflow or I/O error never affects
 // the primary GCP outbox outcome or counters.
 func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
+	return a.record(obs, false)
+}
+
+// RecordUnique is like Record, except:
+//  1. Appends use AppendUsageUnique so any replay carrying an already-indexed
+//     (namespace, source_kind, source_event_id) is skipped atomically as
+//     AppendCertainDuplicate without minting a second event_id.
+//  2. Policy for dual-sink (GCP + Hub) replayable producers: unlike Record
+//     (used by non-replayable native/hook producers where Hub tee errors are
+//     swallowed so GCP is unaffected), RecordUnique surfaces any active-sink
+//     open or append error via errors.Join(primaryErr, hubErr). Callers then
+//     withhold cursor/dedupe commit and replay on the next poll; whichever
+//     sink already succeeded skips the replay as AppendCertainDuplicate while
+//     the failed sink appends the event once. When both sinks succeed, the
+//     returned outcome is AppendWritten if either sink wrote a new line.
+func (a *UsageAnalytics) RecordUnique(obs UsageObservation) (AppendOutcome, error) {
+	return a.record(obs, true)
+}
+
+func (a *UsageAnalytics) record(obs UsageObservation, uniqueByEventID bool) (AppendOutcome, error) {
 	if a == nil || a.disabled.Load() {
 		return 0, nil
+	}
+	appendFn := func(o *AnalyticsOutbox, ev *telemetrycontract.UsageEvent) (AppendOutcome, error) {
+		if uniqueByEventID {
+			return o.AppendUsageUnique(ev)
+		}
+		return o.AppendUsage(ev)
 	}
 	a.metaMu.RLock()
 	onRecord := a.onRecord
@@ -383,9 +441,13 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 			a.recordOpenFailure()
 			return 0, herr
 		}
-		outcome, err := hubOutbox.AppendUsage(ev)
+		outcome, err := appendFn(hubOutbox, ev)
 		if err != nil {
 			a.invalid.Add(1)
+		} else if uniqueByEventID {
+			if rerr := retryableOutcomeError(outcome); rerr != nil {
+				return outcome, rerr
+			}
 		}
 		return outcome, err
 	}
@@ -401,14 +463,20 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 		a.recordOpenFailure()
 		primaryErr = oerr
 	} else {
-		outcome, primaryErr = a.outbox.AppendUsage(ev)
+		outcome, primaryErr = appendFn(a.outbox, ev)
 		if primaryErr != nil {
 			a.invalid.Add(1)
+		} else if uniqueByEventID {
+			primaryErr = retryableOutcomeError(outcome)
 		}
 	}
 
+	var hubOutcome AppendOutcome
+	var hubErr error
+	hubAppended := false
 	if hubOutbox, active, herr := a.resolveHubOutbox(); active {
 		if herr != nil {
+			hubErr = herr
 			a.metaMu.RLock()
 			hDir, hOwner := a.hubDir, a.hubOwner
 			a.metaMu.RUnlock()
@@ -418,8 +486,22 @@ func (a *UsageAnalytics) Record(obs UsageObservation) (AppendOutcome, error) {
 				}
 			}
 		} else if hubOutbox != nil {
-			_, _ = hubOutbox.AppendUsage(&hubEv)
+			hubAppended = true
+			hubOutcome, hubErr = appendFn(hubOutbox, &hubEv)
+			if hubErr == nil && uniqueByEventID {
+				hubErr = retryableOutcomeError(hubOutcome)
+			}
 		}
+	}
+
+	if uniqueByEventID {
+		if primaryErr != nil || hubErr != nil {
+			return outcome, errors.Join(primaryErr, hubErr)
+		}
+		if hubAppended && outcome != AppendWritten && hubOutcome == AppendWritten {
+			outcome = AppendWritten
+		}
+		return outcome, nil
 	}
 
 	return outcome, primaryErr

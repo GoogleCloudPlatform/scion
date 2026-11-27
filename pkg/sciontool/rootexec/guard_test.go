@@ -36,6 +36,7 @@ var guardedDirs = []string{
 	"pkg/sciontool/metadata",
 	"pkg/sciontool/supervisor",
 	"pkg/sciontool/services",
+	"pkg/sciontool/telemetry",
 }
 
 // execSite identifies one exec.Command/exec.CommandContext call site
