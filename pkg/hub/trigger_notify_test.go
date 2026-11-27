@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -231,7 +232,9 @@ func TestTriggerNotify_EndToEndCooldownUserAndAgentSinks(t *testing.T) {
 	require.Len(t, calls, 1, "expected exactly 1 agent notification message")
 	assert.Equal(t, f.agentA.ID, calls[0].Agent.ID)
 	assert.NotContains(t, calls[0].Message, payloadSentinel, "agent notification message must never contain payload text")
-	env := extractEnvelopeJSONFromDelivery(t, calls[0].Message)
+	require.NotNil(t, calls[0].StructuredMessage)
+	assert.NotContains(t, calls[0].StructuredMessage.DeliveryText, payloadSentinel, "agent delivery envelope must never contain payload text")
+	env := extractEnvelopeJSONFromDelivery(t, calls[0].StructuredMessage.DeliveryText)
 	assert.Equal(t, FireNotifyEventType, env.Event.EventType)
 	assert.Nil(t, env.Event.External, "synthetic trigger.fire_failed event must have no external_payload")
 	assert.Equal(t, trResp.ID, env.Event.Attributes["trigger"])
@@ -494,7 +497,13 @@ func TestTriggerNotify_ExpiredProjectCapAndMultiAction(t *testing.T) {
 	notifsAfterCap, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.owner.ID, false)
 	require.NoError(t, err)
 	assert.Len(t, notifsAfterCap, 2, "project trigger-agent cap skip must route to notify even without skipped opt-in")
-	assert.Contains(t, notifsAfterCap[1].Message, trigger.ErrFireProjectTriggerAgentCap)
+	foundCap := false
+	for _, n := range notifsAfterCap {
+		if strings.Contains(n.Message, trigger.ErrFireProjectTriggerAgentCap) {
+			foundCap = true
+		}
+	}
+	assert.True(t, foundCap, "expected project trigger-agent cap notification")
 
 	curTime = now.Add(4 * time.Hour)
 	f.srv.notifyTriggerFire(ctx, tr, &store.TriggerFire{
@@ -505,5 +514,11 @@ func TestTriggerNotify_ExpiredProjectCapAndMultiAction(t *testing.T) {
 	notifsAfterExpired, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.owner.ID, false)
 	require.NoError(t, err)
 	assert.Len(t, notifsAfterExpired, 3, "expired outcome must route to notify")
-	assert.Contains(t, notifsAfterExpired[2].Message, "expired")
+	foundExpired := false
+	for _, n := range notifsAfterExpired {
+		if strings.Contains(n.Message, "expired") {
+			foundExpired = true
+		}
+	}
+	assert.True(t, foundExpired, "expected expired notification")
 }
