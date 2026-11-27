@@ -588,8 +588,9 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// Catch-up of deferred messages (ptone/scion#4596, D15).
-	s.noteDeferredAttachments(ctx, result.Items)
+	// Populate readable artifact-backed attachments (ptone/scion#9579) and
+	// deferred attachment notices (ptone/scion#4596, D15) in one pass.
+	s.noteMessageAttachments(ctx, result.Items)
 
 	writeJSON(w, http.StatusOK, result)
 }

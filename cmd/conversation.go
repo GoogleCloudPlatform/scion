@@ -475,19 +475,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for i := range items {
-		msg := &items[i]
-		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
-		from := truncateRunes(msg.Sender, 20, true)
-		body := truncateRunes(msg.Msg, 60, true)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
-		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
-		}
-	}
-	if err := tw.Flush(); err != nil {
+	if err := writeConversationMessagesTable(os.Stdout, items, label, false); err != nil {
 		return err
 	}
 	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
@@ -1011,25 +999,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for i := range items {
-		msg := &items[i]
-		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
-		from := truncateRunes(msg.Sender, 20, true)
-		body := truncateRunes(msg.Msg, 60, true)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
-		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
-		}
-		// A deferred message was never dispatched, so its attachments never
-		// reached this agent's home (ptone/scion#4596). The hub lists them
-		// only to a reader.
-		for _, a := range msg.DeferredAttachments {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
-		}
-	}
-	if err := tw.Flush(); err != nil {
+	if err := writeConversationMessagesTable(os.Stdout, items, label, true); err != nil {
 		return err
 	}
 	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
@@ -1044,6 +1014,36 @@ func chronologicalMessages(msgs []store.Message) []store.Message {
 		return a.CreatedAt.Compare(b.CreatedAt)
 	})
 	return sorted
+}
+
+// writeConversationMessagesTable writes conversation messages in table format
+// with TIME, FROM, ATT (attachment count, blank when 0), and MESSAGE columns.
+func writeConversationMessagesTable(w io.Writer, items []store.Message, label func(string) string, showDeferred bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tATT\tMESSAGE")
+	for i := range items {
+		msg := &items[i]
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
+		from := truncateRunes(msg.Sender, 20, true)
+		attCount := ""
+		if len(msg.Attachments) > 0 {
+			attCount = fmt.Sprintf("%d", len(msg.Attachments))
+		}
+		body := truncateRunes(msg.Msg, 60, true)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", timeStr, from, attCount, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t\t%s\n", authorizedBy)
+		}
+		if showDeferred {
+			// A deferred message was never dispatched, so its attachments never
+			// reached this agent's home (ptone/scion#4596). The hub lists them
+			// only to a reader.
+			for _, a := range msg.DeferredAttachments {
+				_, _ = fmt.Fprintf(tw, "\t\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
+			}
+		}
+	}
+	return tw.Flush()
 }
 
 // writeConversationMessagesFull prints full untruncated messages in
@@ -1069,6 +1069,9 @@ func writeConversationMessagesFull(w io.Writer, items []store.Message, label fun
 			}
 		}
 		if _, err := fmt.Fprintln(w, msg.Msg); err != nil {
+			return err
+		}
+		if err := writeMessageAttachmentsText(w, msg.Attachments); err != nil {
 			return err
 		}
 		for _, a := range msg.DeferredAttachments {

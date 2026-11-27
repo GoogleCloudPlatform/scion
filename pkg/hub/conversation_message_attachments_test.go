@@ -368,3 +368,167 @@ func TestConversationMessageAttachment_AgentE2E(t *testing.T) {
 	gotSum := sha256.Sum256(downloaded)
 	assert.Equal(t, att.SHA256, hex.EncodeToString(gotSum[:]))
 }
+
+// TestConversationMessageAttachment_ListMessagesPayload validates Phase 2
+// (ptone/scion#9579, #9607): GET /api/v1/conversations/{id}/messages populates
+// attachments[] and deferredAttachments in one pass, enforces MayReadAttachments,
+// and omits legacy AttachmentStore attachments (D5).
+func TestConversationMessageAttachment_ListMessagesPayload(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+
+	dm := seedDirectConversation(t, f.st, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	t0 := time.Now().UTC().Add(-3 * time.Minute).Truncate(time.Second)
+
+	// 1. Plain message with no attachments.
+	plainMsg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      f.projA.ID,
+		Sender:         "user:alice",
+		SenderID:       f.ua.ID,
+		Recipient:      "agent:aa",
+		RecipientID:    f.aa.ID,
+		Msg:            "plain text",
+		Type:           "instruction",
+		Channel:        "web",
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      t0,
+	}
+	require.NoError(t, f.st.CreateMessage(ctx, plainMsg))
+
+	// 2. Delivered message with an artifact-backed attachment AND a legacy AttachmentStore attachment.
+	deliveredMsg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      f.projA.ID,
+		Sender:         "user:alice",
+		SenderID:       f.ua.ID,
+		Recipient:      "agent:aa",
+		RecipientID:    f.aa.ID,
+		Msg:            "delivered with attachment",
+		Type:           "instruction",
+		Channel:        "web",
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		DispatchState:  store.MessageDispatchDispatched,
+		CreatedAt:      t0.Add(time.Minute),
+	}
+	require.NoError(t, f.st.CreateMessage(ctx, deliveredMsg))
+
+	const deliveredBody = "list delivered payload"
+	delSum := sha256.Sum256([]byte(deliveredBody))
+	wantDeliveredSHA := hex.EncodeToString(delSum[:])
+
+	artAttID := f.uploadAs(t, f.ua, f.projA.ID, "summary.txt", deliveredBody)
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, artAttID, artifacts.PrincipalKindUser, f.ua.ID, deliveredMsg.ID, f.projA.ID))
+
+	// Link a legacy AttachmentStore row to verify D5 omits it on ListMessages too.
+	legacyAtt := AttachmentMeta{
+		ID:         uuid.NewString(),
+		Filename:   "legacy-list.txt",
+		MimeType:   "text/plain",
+		Size:       11,
+		UploadedBy: f.ua.ID,
+		ProjectID:  f.projA.ID,
+		CreatedAt:  time.Now().UTC(),
+	}
+	require.NoError(t, f.srv.webChatStore.CreateAttachment(ctx, legacyAtt))
+	require.NoError(t, f.srv.webChatStore.LinkAttachmentToMessage(ctx, deliveredMsg.ID, legacyAtt.ID))
+
+	// 3. Deferred message with an artifact-backed attachment: must carry BOTH attachments and deferredAttachments.
+	deferredMsg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      f.projA.ID,
+		Sender:         "user:alice",
+		SenderID:       f.ua.ID,
+		Recipient:      "agent:aa",
+		RecipientID:    f.aa.ID,
+		Msg:            "deferred with attachment",
+		Type:           "instruction",
+		Channel:        "web",
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		DispatchState:  store.MessageDispatchDeferred,
+		CreatedAt:      t0.Add(2 * time.Minute),
+	}
+	require.NoError(t, f.st.CreateMessage(ctx, deferredMsg))
+
+	const deferredBody = "deferred list payload"
+	defSum := sha256.Sum256([]byte(deferredBody))
+	wantDeferredSHA := hex.EncodeToString(defSum[:])
+
+	defAttID := f.uploadAs(t, f.ua, f.projA.ID, "My Deferred File.txt", deferredBody)
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, defAttID, artifacts.PrincipalKindUser, f.ua.ID, deferredMsg.ID, f.projA.ID))
+
+	// Read via GET /api/v1/conversations/{id}/messages as agent aa using a real
+	// SCION_AUTH_TOKEN lacking project:artifact:read.
+	agentToken, err := f.srv.GenerateAgentToken(
+		f.aa.ID, f.projA.ID, nil, "",
+		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentNotify},
+	)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+dm.ID+"/messages", nil)
+	req.Header.Set("Authorization", "Bearer "+agentToken)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var listResp struct {
+		Items []store.Message `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+	byID := make(map[string]store.Message, len(listResp.Items))
+	for _, item := range listResp.Items {
+		byID[item.ID] = item
+	}
+	require.Len(t, byID, 3)
+
+	// Plain message has neither field.
+	gotPlain := byID[plainMsg.ID]
+	assert.Empty(t, gotPlain.Attachments)
+	assert.Empty(t, gotPlain.DeferredAttachments)
+
+	// Delivered message has artifact-backed attachment only (legacy omitted) and no deferredAttachments.
+	gotDelivered := byID[deliveredMsg.ID]
+	require.Len(t, gotDelivered.Attachments, 1, "only artifact-backed attachment should be listed (D5)")
+	assert.Equal(t, artAttID, gotDelivered.Attachments[0].ID)
+	assert.Equal(t, "summary.txt", gotDelivered.Attachments[0].Name)
+	assert.Equal(t, int64(len(deliveredBody)), gotDelivered.Attachments[0].Size)
+	assert.Equal(t, "text/plain", gotDelivered.Attachments[0].ContentType)
+	assert.Equal(t, wantDeliveredSHA, gotDelivered.Attachments[0].SHA256)
+	assert.Equal(t, artifacts.FormatAttachmentRef(artAttID), gotDelivered.Attachments[0].Ref)
+	assert.Empty(t, gotDelivered.DeferredAttachments)
+
+	// Deferred message carries BOTH attachments (original name) and deferredAttachments (reduced name).
+	gotDeferred := byID[deferredMsg.ID]
+	require.Len(t, gotDeferred.Attachments, 1)
+	assert.Equal(t, defAttID, gotDeferred.Attachments[0].ID)
+	assert.Equal(t, "My Deferred File.txt", gotDeferred.Attachments[0].Name)
+	assert.Equal(t, int64(len(deferredBody)), gotDeferred.Attachments[0].Size)
+	assert.Equal(t, "text/plain", gotDeferred.Attachments[0].ContentType)
+	assert.Equal(t, wantDeferredSHA, gotDeferred.Attachments[0].SHA256)
+	assert.Equal(t, artifacts.FormatAttachmentRef(defAttID), gotDeferred.Attachments[0].Ref)
+	require.Len(t, gotDeferred.DeferredAttachments, 1)
+	assert.Equal(t, "My_Deferred_File.txt", gotDeferred.DeferredAttachments[0].Name)
+	assert.Equal(t, int64(len(deferredBody)), gotDeferred.DeferredAttachments[0].Size)
+
+	// MayReadAttachments gating: a non-reader (outsider agent in projB) gets
+	// neither Attachments nor DeferredAttachments from noteMessageAttachments.
+	outsider := &store.Agent{
+		ID:        uuid.NewString(),
+		ProjectID: f.projB.ID,
+		Name:      "outsider",
+		Slug:      "outsider",
+		Phase:     "running",
+		OwnerID:   f.ub.ID,
+		CreatedBy: f.ub.ID,
+	}
+	require.NoError(t, f.st.CreateAgent(ctx, outsider))
+	items := []store.Message{*deliveredMsg, *deferredMsg}
+	f.srv.noteMessageAttachments(storedAgentContext(outsider), items)
+	assert.Empty(t, items[0].Attachments, "non-reader must not receive attachments")
+	assert.Empty(t, items[1].Attachments, "non-reader must not receive attachments on deferred message")
+	assert.Empty(t, items[1].DeferredAttachments, "non-reader must not receive deferredAttachments")
+}

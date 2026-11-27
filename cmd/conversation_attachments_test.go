@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -330,4 +332,184 @@ func TestSaveMessageAttachments_404ContinuesRemaining(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dir, "ok.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, presentBody, string(got))
+}
+
+func TestConversationMessagesAndCatchUp_AttachmentsDisplay(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+	origMsgJSON, origMsgFull := convMsgJSON, convMsgFull
+	origCatchUpJSON, origCatchUpFull, origCatchUpSince := convCatchUpJSON, convCatchUpFull, convCatchUpSince
+	defer func() {
+		convMsgJSON, convMsgFull = origMsgJSON, origMsgFull
+		convCatchUpJSON, convCatchUpFull, convCatchUpSince = origCatchUpJSON, origCatchUpFull, origCatchUpSince
+	}()
+
+	const (
+		convID = "77777777-7777-7777-7777-777777777777"
+		att1ID = "11111111-aaaa-1111-1111-111111111111"
+		att2ID = "22222222-bbbb-2222-2222-222222222222"
+		att3ID = "33333333-cccc-3333-3333-333333333333"
+	)
+
+	t1 := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	t2 := t1.Add(time.Minute)
+	t3 := t1.Add(2 * time.Minute)
+
+	msgs := []store.Message{
+		{
+			ID:             "msg-plain",
+			ConversationID: convID,
+			Sender:         "user:alice",
+			Msg:            "no attachments here",
+			CreatedAt:      t1,
+		},
+		{
+			ID:             "msg-two-atts",
+			ConversationID: convID,
+			Sender:         "user:alice",
+			Msg:            "two files attached",
+			CreatedAt:      t2,
+			Attachments: []store.MessageAttachment{
+				{
+					ID:          att1ID,
+					Name:        "notes.txt",
+					Size:        2048,
+					ContentType: "text/plain",
+					SHA256:      strSHA256("notes"),
+					Ref:         artifacts.FormatAttachmentRef(att1ID),
+				},
+				{
+					ID:          att2ID,
+					Name:        "chart.png",
+					Size:        512,
+					ContentType: "image/png",
+					SHA256:      strSHA256("png"),
+					Ref:         artifacts.FormatAttachmentRef(att2ID),
+				},
+			},
+		},
+		{
+			ID:             "msg-deferred",
+			ConversationID: convID,
+			Sender:         "user:bob",
+			Msg:            "sent while away",
+			DispatchState:  store.MessageDispatchDeferred,
+			CreatedAt:      t3,
+			Attachments: []store.MessageAttachment{
+				{
+					ID:          att3ID,
+					Name:        "My Report.pdf",
+					Size:        1024,
+					ContentType: "application/pdf",
+					SHA256:      strSHA256("pdf"),
+					Ref:         artifacts.FormatAttachmentRef(att3ID),
+				},
+			},
+			DeferredAttachments: []store.DeferredAttachment{
+				{Name: "My_Report.pdf", Size: 1024},
+			},
+		},
+	}
+
+	var downloadHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/attachments/") {
+			downloadHits++
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Path == "/api/v1/conversations/"+convID+"/messages" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items":      msgs,
+				"totalCount": len(msgs),
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	isolateHubEnvForTest(t, srv.URL, "proj-9579")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupProjectWithoutHubEnabled(t, tmpHome)
+
+	newCmd := func() *cobra.Command {
+		c := &cobra.Command{}
+		c.SetContext(context.Background())
+		return c
+	}
+
+	ts1 := clitime.Format(t1, clitime.Clock)
+	ts2 := clitime.Format(t2, clitime.Clock)
+	ts3 := clitime.Format(t3, clitime.Clock)
+
+	// 1. messages table mode: ATT column blank for 0, count for >0.
+	convMsgJSON, convMsgFull, outputFormat = false, false, ""
+	msgTableOut := captureStdout(t, func() {
+		require.NoError(t, runConversationMessages(newCmd(), []string{convID}))
+	})
+	assert.Equal(t, renderTabTable(
+		"TIME\tFROM\tATT\tMESSAGE",
+		ts1+"\tuser:alice\t\tno attachments here",
+		ts2+"\tuser:alice\t2\ttwo files attached",
+		ts3+"\tuser:bob\t1\tsent while away",
+	), msgTableOut)
+
+	// 2. catch-up table mode: ATT column + deferred "not delivered" line aligned under MESSAGE.
+	convCatchUpJSON, convCatchUpFull, convCatchUpSince, outputFormat = false, false, "1h", ""
+	catchUpTableOut := captureStdout(t, func() {
+		require.NoError(t, runConversationCatchUp(newCmd(), []string{convID}))
+	})
+	assert.Equal(t, renderTabTable(
+		"TIME\tFROM\tATT\tMESSAGE",
+		ts1+"\tuser:alice\t\tno attachments here",
+		ts2+"\tuser:alice\t2\ttwo files attached",
+		ts3+"\tuser:bob\t1\tsent while away",
+		"\t\t\tAttachment not delivered: My_Report.pdf (1.0 KiB): the message was deferred. Ask the sender to resend it.",
+	), catchUpTableOut)
+
+	// 3. messages --full and catch-up --full: identical per-attachment lines as get-message + deferred notice.
+	convMsgJSON, convMsgFull, outputFormat = false, true, ""
+	msgFullOut := captureStdout(t, func() {
+		require.NoError(t, runConversationMessages(newCmd(), []string{convID}))
+	})
+	convCatchUpJSON, convCatchUpFull, outputFormat = false, true, ""
+	catchUpFullOut := captureStdout(t, func() {
+		require.NoError(t, runConversationCatchUp(newCmd(), []string{convID}))
+	})
+	for name, out := range map[string]string{"messages --full": msgFullOut, "catch-up --full": catchUpFullOut} {
+		assert.Contains(t, out, "Attachment: notes.txt (2.0 KiB, text/plain) scion://attachment/"+att1ID, name)
+		assert.Contains(t, out, "Attachment: chart.png (512 bytes, image/png) scion://attachment/"+att2ID, name)
+		assert.Contains(t, out, "Attachment: My Report.pdf (1.0 KiB, application/pdf) scion://attachment/"+att3ID, name)
+		assert.Contains(t, out, "  Attachment not delivered: My_Report.pdf (1.0 KiB): the message was deferred. Ask the sender to resend it.", name)
+	}
+
+	// 4. messages --json and catch-up --json: attachments[] and deferredAttachments preserved, zero downloads.
+	convMsgJSON, convMsgFull, outputFormat = true, false, ""
+	msgJSONOut := captureStdout(t, func() {
+		require.NoError(t, runConversationMessages(newCmd(), []string{convID}))
+	})
+	convCatchUpJSON, convCatchUpFull, outputFormat = true, false, ""
+	catchUpJSONOut := captureStdout(t, func() {
+		require.NoError(t, runConversationCatchUp(newCmd(), []string{convID}))
+	})
+	for name, raw := range map[string]string{"messages --json": msgJSONOut, "catch-up --json": catchUpJSONOut} {
+		var decoded struct {
+			Items []store.Message `json:"items"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(raw), &decoded), name)
+		require.Len(t, decoded.Items, 3, name)
+		assert.Empty(t, decoded.Items[0].Attachments, name)
+		require.Len(t, decoded.Items[1].Attachments, 2, name)
+		assert.Equal(t, att1ID, decoded.Items[1].Attachments[0].ID, name)
+		assert.Equal(t, artifacts.FormatAttachmentRef(att1ID), decoded.Items[1].Attachments[0].Ref, name)
+		require.Len(t, decoded.Items[2].Attachments, 1, name)
+		assert.Equal(t, att3ID, decoded.Items[2].Attachments[0].ID, name)
+		require.Len(t, decoded.Items[2].DeferredAttachments, 1, name)
+		assert.Equal(t, "My_Report.pdf", decoded.Items[2].DeferredAttachments[0].Name, name)
+	}
+	assert.Zero(t, downloadHits, "--json and text list modes must never download attachment bytes")
 }
