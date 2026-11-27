@@ -1650,7 +1650,7 @@ export class ScionPageProjectSettings extends LitElement {
   }
 
   private hubCeiling(annotationKey: string): number | string | null {
-    const c = this.resolvedSettings[annotationKey]?.ceiling;
+    const c = this.resolvedSettings?.[annotationKey]?.ceiling;
     if (typeof c === 'number' && c > 0) return c;
     if (typeof c === 'string' && c.trim() !== '') return c.trim();
     return null;
@@ -1690,9 +1690,13 @@ export class ScionPageProjectSettings extends LitElement {
         .value=${value && value > 0 ? String(value) : ''}
         ?disabled=${!canEdit || (unlimited && maxCeiling === null)}
         @sl-input=${(e: Event) => {
-          const parsed = parseCountLimitInput((e.target as HTMLInputElement).value);
+          const rawInput = (e.target as HTMLInputElement).value;
+          const parsed = parseCountLimitInput(rawInput);
           const errors = { ...this.countLimitErrors };
-          if (parsed.error) {
+          if (maxCeiling !== null && /^0+$/.test(rawInput.trim())) {
+            errors[annotationKey] =
+              `Unlimited (0) is not allowed while a hub ceiling (${maxCeiling}) is set.`;
+          } else if (parsed.error) {
             // Keep the current value: an invalid entry never clears a stored limit.
             errors[annotationKey] = parsed.error;
           } else if (maxCeiling !== null && parsed.value !== null && parsed.value > maxCeiling) {

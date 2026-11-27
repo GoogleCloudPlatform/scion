@@ -311,5 +311,22 @@ describe('project settings count limits', () => {
     turnsInput.dispatchEvent(new Event('sl-input'));
     await el.updateComplete;
     expect(el.countLimitErrors['scion.io/default-max-turns']).toContain('hub ceiling (50)');
+
+    // Entering 0 (Unlimited) while a ceiling is active is refused client-side
+    // with a ceiling-specific error (not directing the user to a hidden checkbox).
+    turnsInput.value = '0';
+    turnsInput.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.countLimitErrors['scion.io/default-max-turns']).toContain('Unlimited (0)');
+    expect(el.countLimitErrors['scion.io/default-max-turns']).toContain('hub ceiling (50)');
+    expect(el.configDefaultMaxTurns).toBeNull();
+
+    // When no ceiling exists (max_model_calls), Unlimited (0) via checkbox is still allowed.
+    const callsUnlimited = callsField.querySelector('sl-checkbox.unlimited') as HTMLInputElement;
+    callsUnlimited.checked = true;
+    callsUnlimited.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(el.configDefaultMaxModelCalls).toBe(0);
+    expect(el.countLimitErrors['scion.io/default-max-model-calls']).toBeUndefined();
   });
 });

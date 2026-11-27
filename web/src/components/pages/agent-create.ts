@@ -839,8 +839,8 @@ export class ScionPageAgentCreate extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as {
           settings?: Record<string, { ceiling?: number | string | null }>;
-        };
-        const s = data.settings ?? {};
+        } | null;
+        const s = data?.settings ?? {};
         const ceilings: AgentLimitCeilings = {};
         const turns = s['scion.io/default-max-turns']?.ceiling;
         if (typeof turns === 'number' && turns > 0) ceilings.max_turns = turns;
