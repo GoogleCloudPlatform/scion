@@ -603,7 +603,10 @@ func (r *PodmanRuntime) Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	agent := findContainerAgent(agents, id)
+	agent, err := findContainerAgent(agents, id)
+	if err != nil {
+		return err
+	}
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found, it may have exited and been removed", id)
 	}
@@ -686,7 +689,10 @@ func (r *PodmanRuntime) Sync(ctx context.Context, id string, direction SyncDirec
 		return fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	agent := findContainerAgent(agents, id)
+	agent, err := findContainerAgent(agents, id)
+	if err != nil {
+		return err
+	}
 	if agent == nil {
 		return fmt.Errorf("agent '%s' container not found", id)
 	}
@@ -705,7 +711,11 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
 	if !resolvedContainerID(ctx) {
 		if agents, err := r.List(ctx, nil); err == nil {
-			id = resolveContainerID(agents, id)
+			resolved, err := resolveContainerID(agents, id)
+			if err != nil {
+				return "", err
+			}
+			id = resolved
 		}
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
@@ -721,7 +731,11 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 func (r *PodmanRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	if !resolvedContainerID(ctx) {
 		if agents, err := r.List(ctx, nil); err == nil {
-			id = resolveContainerID(agents, id)
+			resolved, err := resolveContainerID(agents, id)
+			if err != nil {
+				return "", err
+			}
+			id = resolved
 		}
 	}
 	args := append([]string{"exec", "-i", "--user", r.ExecUser(), id}, cmd...)

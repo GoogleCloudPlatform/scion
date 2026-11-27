@@ -677,7 +677,11 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 	// project prefix, e.g. "myproject--agent", so the bare slug won't match).
 	if !resolvedContainerID(ctx) {
 		if agents, err := r.List(ctx, nil); err == nil {
-			id = resolveContainerID(agents, id)
+			resolved, err := resolveContainerID(agents, id)
+			if err != nil {
+				return "", err
+			}
+			id = resolved
 		}
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
@@ -693,7 +697,11 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
 	if !resolvedContainerID(ctx) {
 		if agents, err := r.List(ctx, nil); err == nil {
-			id = resolveContainerID(agents, id)
+			resolved, err := resolveContainerID(agents, id)
+			if err != nil {
+				return "", err
+			}
+			id = resolved
 		}
 	}
 	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)

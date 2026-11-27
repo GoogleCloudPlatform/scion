@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -113,5 +114,72 @@ func TestInitReloadSignalName(t *testing.T) {
 	args, err := initReloadKillArgs("c1")
 	if err != nil || strings.Join(args, " ") != "kill --signal SIGUSR2 c1" {
 		t.Fatalf("initReloadKillArgs = %v, %v", args, err)
+	}
+}
+
+func TestSignalInitReload_SharedPrefixRoutingAndAmbiguity(t *testing.T) {
+	const (
+		idLong   = "myproject--agent-10"
+		idShort  = "myproject--agent-1"
+		ambigPfx = "myproject--agent-"
+	)
+	listings := map[string]string{
+		"docker": `{"ID":"` + idLong + `","Names":"` + idLong + `","Status":"Up 1 minute","Image":"img","Labels":"scion.name=agent-10"}` + "\n" +
+			`{"ID":"` + idShort + `","Names":"` + idShort + `","Status":"Up 1 minute","Image":"img","Labels":"scion.name=agent-1"}` + "\n",
+		"podman": `[{"Id":"` + idLong + `","Names":["` + idLong + `"],"Status":"running","Image":"img","Labels":{"scion.name":"agent-10"}},` +
+			`{"Id":"` + idShort + `","Names":["` + idShort + `"],"Status":"running","Image":"img","Labels":{"scion.name":"agent-1"}}]`,
+		"apple": `[{"status":"running","configuration":{"id":"` + idLong + `","labels":{"scion.name":"agent-10"},"image":{"reference":"img"}}},` +
+			`{"status":"running","configuration":{"id":"` + idShort + `","labels":{"scion.name":"agent-1"},"image":{"reference":"img"}}}]`,
+	}
+
+	writeListAndKillCLI := func(t *testing.T, listing string) (bin, argvFile string) {
+		t.Helper()
+		dir := t.TempDir()
+		listFile := filepath.Join(dir, "listing")
+		if err := os.WriteFile(listFile, []byte(listing), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		argvFile = filepath.Join(dir, "argv")
+		bin = filepath.Join(dir, "mock-cli")
+		script := `#!/bin/sh
+case "$1" in
+  ps|list) cat "` + listFile + `"; exit 0 ;;
+  kill) printf '%s\n' "$@" > "` + argvFile + `"; exit 0 ;;
+esac
+exit 1
+`
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return bin, argvFile
+	}
+
+	for name, listing := range listings {
+		t.Run(name+"/exact_shorter_wins", func(t *testing.T) {
+			bin, argvFile := writeListAndKillCLI(t, listing)
+			sig := initSignalerCases(bin)[name]
+			if err := sig.SignalInitReload(context.Background(), idShort); err != nil {
+				t.Fatalf("SignalInitReload: %v", err)
+			}
+			got, err := os.ReadFile(argvFile)
+			if err != nil {
+				t.Fatalf("kill was not invoked: %v", err)
+			}
+			if want := "kill\n--signal\nSIGUSR2\n" + idShort + "\n"; string(got) != want {
+				t.Errorf("argv = %q, want %q", string(got), want)
+			}
+		})
+
+		t.Run(name+"/ambiguous_prefix_refused", func(t *testing.T) {
+			bin, argvFile := writeListAndKillCLI(t, listing)
+			sig := initSignalerCases(bin)[name]
+			err := sig.SignalInitReload(context.Background(), ambigPfx)
+			if !errors.Is(err, ErrAmbiguousContainerID) {
+				t.Fatalf("SignalInitReload error = %v, want ErrAmbiguousContainerID", err)
+			}
+			if _, statErr := os.Stat(argvFile); statErr == nil {
+				t.Errorf("kill must not run on ambiguous prefix")
+			}
+		})
 	}
 }
