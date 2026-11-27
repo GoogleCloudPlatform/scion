@@ -44,6 +44,9 @@ func acquireStateLock(ctx context.Context, homeDir string, timeout time.Duration
 		timeout = DefaultLockTimeout
 	}
 
+	if err := verifyStateDirAncestors(homeDir); err != nil {
+		return nil, err
+	}
 	stateDir := StateDir(homeDir)
 	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {

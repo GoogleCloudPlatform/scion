@@ -30,6 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
+// fileIdentityFn allows internal tests to inject a fileIdentity failure.
+var fileIdentityFn = fileIdentity
+
 // Round trigger reasons passed in RoundOptions.Reason.
 const (
 	ReasonPeriodic      = "periodic"
@@ -351,7 +354,7 @@ func (s *Shipper) baselineArtifact(resolvedHome string, art DiscoveredArtifact, 
 	}
 	defer func() { _ = f.Close() }()
 
-	fid, err := fileIdentity(fi)
+	fid, err := fileIdentityFn(fi)
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +507,7 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 			start = 0
 		}
 		lastIdx := start
+		firstBudgetSkipIdx := -1
 		for i := 0; i < n; i++ {
 			idx := (start + i) % n
 			lastIdx = idx
@@ -515,14 +519,21 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 			if remainingBudget <= 0 {
 				res.BudgetExhausted = true
 				completedFullScan = false
-				s.nextStart.Store(int64(idx))
+				if firstBudgetSkipIdx == -1 {
+					firstBudgetSkipIdx = idx
+				}
 				break
 			}
 
+			budgetBefore := res.BudgetExhausted
+			bytesBefore := res.BytesShipped
 			stopRound, err := s.shipArtifactLocked(ctx, resolvedHome, st, art, effectiveMaxSeg, opts.Final, &remainingBudget, res)
 			if err != nil {
 				s.nextStart.Store(int64((lastIdx + 1) % n))
 				return res, err
+			}
+			if !budgetBefore && res.BudgetExhausted && res.BytesShipped == bytesBefore && firstBudgetSkipIdx == -1 {
+				firstBudgetSkipIdx = idx
 			}
 			if stopRound {
 				completedFullScan = false
@@ -530,15 +541,21 @@ func (s *Shipper) RunRound(ctx context.Context, opts RoundOptions) (*RoundResult
 				break
 			}
 			if remainingBudget <= 0 {
-				s.nextStart.Store(int64((idx + 1) % n))
 				if i+1 < n {
 					res.BudgetExhausted = true
 					completedFullScan = false
+					if firstBudgetSkipIdx == -1 {
+						firstBudgetSkipIdx = (idx + 1) % n
+					}
+				} else if firstBudgetSkipIdx == -1 {
+					firstBudgetSkipIdx = (idx + 1) % n
 				}
 				break
 			}
 		}
-		if remainingBudget > 0 && !res.BudgetExhausted {
+		if firstBudgetSkipIdx >= 0 {
+			s.nextStart.Store(int64(firstBudgetSkipIdx))
+		} else {
 			s.nextStart.Store(int64((lastIdx + 1) % n))
 		}
 	}
@@ -573,6 +590,29 @@ func (s *Shipper) shipArtifactLocked(
 	remainingBudget *int64,
 	res *RoundResult,
 ) (stopRound bool, fatalErr error) {
+	// If this untracked artifact lies under a deferred baseline prefix, record
+	// its lazy-baseline entry BEFORE opening or stat'ing it so an open/fstat/
+	// identity error still preserves NeedsBaseline=true even if the prefix is
+	// pruned at the end of this round.
+	entry, tracked := st.Artifacts[art.NativeRelativePath]
+	if !tracked && matchesDeferredBaselinePrefix(art.NativeRelativePath, st.DeferredBaselinePrefixes) {
+		now := s.now().UTC()
+		entry = &ArtifactState{
+			NativeRelativePath: art.NativeRelativePath,
+			ArtifactKind:       art.Kind,
+			Generation:         0,
+			Baseline:           true,
+			NeedsBaseline:      true,
+			OriginHubID:        st.OriginHubID,
+			UpdatedAt:          &now,
+		}
+		st.Artifacts[art.NativeRelativePath] = entry
+		tracked = true
+		if err := SaveState(s.cfg.HomeDir, st); err != nil {
+			return true, err
+		}
+	}
+
 	f, fi, err := openArtifactNoFollow(resolvedHome, art.NativeRelativePath)
 	if err != nil {
 		res.ArtifactErrors[art.NativeRelativePath] = fmt.Errorf("open artifact: %w", err)
@@ -580,17 +620,15 @@ func (s *Shipper) shipArtifactLocked(
 	}
 	defer func() { _ = f.Close() }()
 
-	fid, err := fileIdentity(fi)
+	fid, err := fileIdentityFn(fi)
 	if err != nil {
 		res.ArtifactErrors[art.NativeRelativePath] = err
 		return false, nil
 	}
 	fileSize := fi.Size()
 
-	entry, tracked := st.Artifacts[art.NativeRelativePath]
 	if !tracked {
 		now := s.now().UTC()
-		deferred := matchesDeferredBaselinePrefix(art.NativeRelativePath, st.DeferredBaselinePrefixes)
 		entry = &ArtifactState{
 			NativeRelativePath: art.NativeRelativePath,
 			ArtifactKind:       art.Kind,
@@ -600,8 +638,7 @@ func (s *Shipper) shipArtifactLocked(
 			Generation:         0,
 			RawCommittedOffset: 0,
 			ParsedOffset:       0,
-			Baseline:           deferred,
-			NeedsBaseline:      deferred,
+			Baseline:           false,
 			OriginHubID:        st.OriginHubID,
 			UpdatedAt:          &now,
 		}

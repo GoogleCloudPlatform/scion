@@ -287,6 +287,9 @@ func (a ArtifactState) MarshalJSON() ([]byte, error) {
 // LoadState reads state.json from homeDir through privatefs. If the state
 // directory or state.json does not exist, it returns (nil, false, nil).
 func LoadState(homeDir string) (*State, bool, error) {
+	if err := verifyStateDirAncestors(homeDir); err != nil {
+		return nil, false, err
+	}
 	stateDir := StateDir(homeDir)
 	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: false})
 	if err != nil {
@@ -328,6 +331,9 @@ func SaveState(homeDir string, st *State) error {
 		st.Artifacts = make(map[string]*ArtifactState)
 	}
 
+	if err := verifyStateDirAncestors(homeDir); err != nil {
+		return err
+	}
 	stateDir := StateDir(homeDir)
 	tree, err := privatefs.OpenTree(stateDir, privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {

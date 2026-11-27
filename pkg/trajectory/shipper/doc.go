@@ -33,12 +33,14 @@
 // with owner-only permissions (0600 on Unix, owner-only DACL on Windows) inside
 // a private directory (0700 on Unix).
 //
-// Anchor symlink note for P6 broker reuse: state.json and state.lock are
-// opened through pkg/util/privatefs.OpenTree, whose Unix anchor follows
-// symlinks at <home>/.scion and <home>/.scion/trajectory-shipper (while
-// enforcing O_NOFOLLOW on leaves). Before P6 broker harvest reuses this state
-// directory against untrusted host-readable agent homes, it must add an
-// openat-based no-follow anchor for the state directory.
+// Anchor symlink note for root callers and P6 broker reuse: before invoking
+// pkg/util/privatefs.OpenTree on <home>/.scion/trajectory-shipper, the library
+// verifies via Lstat that <home>/.scion and <home>/.scion/trajectory-shipper
+// (when present) are real directories (never symlinks) owned by the expected
+// UID, protecting root-privileged callers (such as sciontool) from static
+// symlink redirection. Because privatefs.OpenTree still opens its Unix anchor
+// by path, P6 broker reuse against untrusted host-readable homes should add an
+// openat-based no-follow anchor for full TOCTOU immunity.
 //
 // Each artifact entry is logically keyed by (native_relative_path, inode,
 // generation) and records:
@@ -121,14 +123,14 @@
 //
 // # Safe Artifact Opening and Containment
 //
-// Discovery requires every artifact and any symlink target to remain inside the
-// matched harness rule root (for example .claude/projects/), not merely inside
-// the agent home. Opening opens the trusted resolved home directory once with
-// O_DIRECTORY and walks every component below it (rule-root ancestors,
-// intermediate directories, and leaf) with openat(2) and O_NOFOLLOW
-// (O_DIRECTORY on directories, O_NONBLOCK on the leaf), then verifies the
-// opened descriptor is a regular file via fstat. This prevents TOCTOU symlink
-// swaps at any component between the home directory and the leaf.
+// Discovery refuses every symlink at or below a matched harness rule root
+// (for example .claude/projects/), regardless of its target. Opening opens the
+// trusted resolved home directory once with O_DIRECTORY and walks every
+// component below it (rule-root ancestors, intermediate directories, and leaf)
+// with openat(2) and O_NOFOLLOW (O_DIRECTORY on directories, O_NONBLOCK on the
+// leaf), then verifies the opened descriptor is a regular file via fstat. This
+// prevents TOCTOU symlink swaps at any component between the home directory
+// and the leaf.
 //
 // # Generation Bumps and Pre-Baseline Privacy
 //

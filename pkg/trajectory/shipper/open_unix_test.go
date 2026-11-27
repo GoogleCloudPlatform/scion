@@ -17,6 +17,7 @@
 package shipper
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -144,5 +145,76 @@ func TestOpenArtifactNoFollowRefusesAllAncestorAndLeafSwaps(t *testing.T) {
 				t.Fatalf("expected ErrReparsePoint, got %v", err)
 			}
 		})
+	}
+}
+
+type noopUploader struct {
+	shipped []Segment
+}
+
+func (u *noopUploader) Ship(_ context.Context, seg Segment) (ShipResult, error) {
+	u.shipped = append(u.shipped, seg)
+	return ShipResult{Outcome: OutcomeCommitted, SegmentID: "seg-1"}, nil
+}
+
+func TestDeferredPrefixFileIdentityFailurePreservesLazyBaseline(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+
+	// Symlinked session dir at baseline -> persisted in deferred_baseline_prefixes.
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+	sessDir := filepath.Join(projectsDir, "-w")
+	if err := os.Symlink(outside, sessDir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	up := &noopUploader{}
+	s, err := New(Config{HomeDir: home, RunID: "run-1", Uploader: up})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Replace symlink with real directory containing pre-existing file.
+	if err := os.Remove(sessDir); err != nil {
+		t.Fatalf("remove symlink: %v", err)
+	}
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessDir: %v", err)
+	}
+	oldFile := filepath.Join(sessDir, "old.jsonl")
+	if err := os.WriteFile(oldFile, []byte("{\"PRE_BASELINE_ID\":1}\n"), 0o644); err != nil {
+		t.Fatalf("write old.jsonl: %v", err)
+	}
+
+	// Round 1: inject fileIdentity failure; prefix is pruned, yet lazy-baseline
+	// entry must still be persisted.
+	origFn := fileIdentityFn
+	fileIdentityFn = func(_ os.FileInfo) (fileID, error) {
+		return fileID{}, errors.New("injected fileIdentity failure")
+	}
+	t.Cleanup(func() { fileIdentityFn = origFn })
+
+	r1, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 1: %v", err)
+	}
+	if len(r1.ArtifactErrors) != 1 {
+		t.Fatalf("expected identity error on round 1, got %+v", r1)
+	}
+
+	// Round 2: fileIdentity succeeds -> lazily baselines at EOF without shipping pre-existing bytes.
+	fileIdentityFn = origFn
+	r2, err := s.RunRound(context.Background(), RoundOptions{Reason: ReasonPeriodic})
+	if err != nil {
+		t.Fatalf("RunRound 2: %v", err)
+	}
+	if r2.SegmentsShipped != 0 || len(up.shipped) != 0 {
+		t.Fatalf("pre-baseline bytes must not ship after identity failure recovery: r2=%+v", r2)
 	}
 }

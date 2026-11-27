@@ -832,6 +832,13 @@ func TestConflictCaptureUnavailableCapAndFaultIsolation(t *testing.T) {
 		if got := string(up.reassemble(t, rel, 0)); got != "{\"a\":1}\n{\"b\":2}\n" {
 			t.Fatalf("run-B reassembled=%q, want %q", got, "{\"a\":1}\n{\"b\":2}\n")
 		}
+		stB, _, err := shipper.LoadState(home)
+		if err != nil {
+			t.Fatalf("LoadState run-B: %v", err)
+		}
+		if stB.Truncated || stB.TruncatedRunID != "" {
+			t.Fatalf("expected state.Truncated cleared after run-B, got %+v", stB)
+		}
 	})
 }
 
@@ -2127,5 +2134,77 @@ func TestWithLockedStateUpdatesParsedOffset(t *testing.T) {
 	}
 	if st2.Artifacts[rel].ParsedOffset != 4 {
 		t.Fatalf("ParsedOffset=%d, want 4", st2.Artifacts[rel].ParsedOffset)
+	}
+}
+
+func TestPendingReplayNotStarvedBySiblingBacklog(t *testing.T) {
+	home := t.TempDir()
+	up := newFakeUploader()
+
+	relA := ".claude/projects/-workspace/sess-a.jsonl"
+	relB := ".claude/projects/-workspace/sess-b.jsonl"
+	// Make B's first attempt fail retryably so B holds a 40-byte pending segment.
+	failB := true
+	up.onShip = func(_ context.Context, seg shipper.Segment, _ int) (shipper.ShipResult, error, bool) {
+		if seg.NativeRelativePath == relB && failB {
+			failB = false
+			return shipper.ShipResult{Outcome: shipper.OutcomeRetryable}, errors.New("temp error"), true
+		}
+		return shipper.ShipResult{}, nil, false
+	}
+
+	s, err := shipper.New(shipper.Config{
+		HomeDir:         home,
+		RunID:           "run-1",
+		MaxSegmentBytes: 100,
+		MaxRoundBytes:   100,
+		Uploader:        up,
+		Now:             fixedClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := s.Baseline(context.Background()); err != nil {
+		t.Fatalf("Baseline: %v", err)
+	}
+
+	// Seed B with a 40-byte line and create its pending record in a setup round.
+	lineB := fmt.Sprintf("{\"b\":%q}\n", strings.Repeat("b", 31)) // 40 bytes
+	if len(lineB) != 40 {
+		t.Fatalf("expected 40-byte lineB, got %d", len(lineB))
+	}
+	writeArtifact(t, home, relB, lineB)
+	if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+		t.Fatalf("setup round: %v", err)
+	}
+
+	// Now A appends 70 bytes before each round; with MaxRoundBytes=100, after A
+	// ships 70 bytes only 30 remain (< B's 40-byte pending). B must ship within
+	// 2 rounds rather than starving.
+	lineA := fmt.Sprintf("{\"a\":%q}\n", strings.Repeat("a", 61)) // 70 bytes
+	if len(lineA) != 70 {
+		t.Fatalf("expected 70-byte lineA, got %d", len(lineA))
+	}
+	absA := writeArtifact(t, home, relA, lineA)
+
+	bShipped := false
+	for round := 1; round <= 2; round++ {
+		if round > 1 {
+			appendArtifact(t, absA, lineA)
+		}
+		if _, err := s.RunRound(context.Background(), shipper.RoundOptions{Reason: shipper.ReasonPeriodic}); err != nil {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		st, _, err := shipper.LoadState(home)
+		if err != nil {
+			t.Fatalf("LoadState round %d: %v", round, err)
+		}
+		if st.Artifacts[relB].RawCommittedOffset == int64(len(lineB)) {
+			bShipped = true
+			break
+		}
+	}
+	if !bShipped {
+		t.Fatalf("artifact B's pending replay was starved over 2 rounds")
 	}
 }
