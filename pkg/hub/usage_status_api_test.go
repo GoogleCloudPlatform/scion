@@ -832,7 +832,10 @@ func TestHubRollupSource_MeasurementStatusParityWithScopedAPI(t *testing.T) {
 	assertParity := func(t *testing.T, projectID, wantStatus string, wantUnmeasured, wantStale int) {
 		t.Helper()
 
-		summary, err := src.QuerySummary(ctx, 1, WithProjectID(projectID))
+		// Use periodDays=2 (yesterday 00:00 UTC .. now) so events within the
+		// trailing 24h window remain inside the dashboard window even right
+		// after 00:00 UTC midnight (matching QueryProjectSummary and since=24h).
+		summary, err := src.QuerySummary(ctx, 2, WithProjectID(projectID))
 		require.NoError(t, err)
 		require.NotNil(t, summary.Measurement)
 		assert.Equal(t, wantStatus, summary.Measurement.Status, "QuerySummary status")
@@ -960,7 +963,7 @@ func TestHubRollupSource_MeasurementStatusParityWithScopedAPI(t *testing.T) {
 		src.store = spy
 		t.Cleanup(func() { src.store = origStore })
 
-		_, err = src.QuerySummary(ctx, 1, WithProjectID(proj.ID))
+		_, err = src.QuerySummary(ctx, 2, WithProjectID(proj.ID))
 		require.NoError(t, err)
 		require.True(t, spy.called)
 		assert.Equal(t, defaultUsageStartupGrace, spy.lastFilter.StartupGrace)
@@ -1098,7 +1101,7 @@ func TestHubRollupSource_MeasurementStatusParityWithScopedAPI(t *testing.T) {
 		assertParity(t, proj.ID, MeasurementStatusPartial, 0, 0)
 
 		// O1: QueryModelCalls grouped by user (only qs.byUser populated) also reads partial.
-		callsView, err := src.QueryModelCalls(ctx, 1, WithProjectID(proj.ID), WithGroupBy("user"))
+		callsView, err := src.QueryModelCalls(ctx, 2, WithProjectID(proj.ID), WithGroupBy("user"))
 		require.NoError(t, err)
 		require.NotNil(t, callsView.Measurement)
 		assert.Equal(t, MeasurementStatusPartial, callsView.Measurement.Status)
