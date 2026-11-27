@@ -20,9 +20,9 @@ import {
   computeCacheHitRate,
   formatCacheHitRate,
   formatUsageToken,
-  measurementStatusDisplay,
-  ScionAgentUsagePanel,
-} from './agent-usage-panel.js';
+} from '../../utils/usage-format.js';
+import { measurementStatusDisplay } from './measurement-status-badge.js';
+import { ScionAgentUsagePanel } from './agent-usage-panel.js';
 import './agent-usage-panel.js';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -506,6 +506,57 @@ describe('scion-agent-usage-panel', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(el.shadowRoot!.querySelector('[data-testid="usage-error"]')).toBeNull();
+    expect(
+      el.shadowRoot!.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()
+    ).toBe('15');
+  });
+
+  it('deduplicates concurrent loadIfNeeded calls while a fetch is still in flight', async () => {
+    let resolveFetch!: (res: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const el = document.createElement('scion-agent-usage-panel') as ScionAgentUsagePanel;
+    el.agentId = 'agent-inflight';
+    container.appendChild(el);
+
+    const first = el.loadIfNeeded();
+    // Re-entering the Usage tab while the first request is still pending must not start a second request.
+    const second = el.loadIfNeeded();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      jsonResponse({
+        agent_id: 'agent-inflight',
+        project_id: 'proj-1',
+        window: { since: '2026-10-29T00:00:00Z', until: '2026-11-27T03:00:00Z' },
+        calls: 1,
+        error_calls: 0,
+        events: 1,
+        null_token_events: 0,
+        tokens: {
+          input: 10,
+          output: 5,
+          cache_read: 0,
+          cache_write: 0,
+          cache_write_1h: null,
+          reasoning: null,
+          summable_tokens: 15,
+        },
+        by_model: [],
+        measurement_status: 'measured',
+        as_of: '2026-11-27T03:00:00Z',
+        last_receipt_at: '2026-11-27T02:59:00Z',
+      })
+    );
+    await Promise.all([first, second]);
+    await waitForPanel(el);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(
       el.shadowRoot!.querySelector('[data-testid="usage-summable-total"]')?.textContent?.trim()
     ).toBe('15');

@@ -33,23 +33,12 @@ import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import {
-  computeCacheHitRate,
   formatCacheHitRate,
   formatUsageToken,
   hasPartialTokenBuckets,
   summableUnknownEvents,
 } from '../../utils/usage-format.js';
 import './measurement-status-badge.js';
-import { measurementStatusDisplay } from './measurement-status-badge.js';
-
-export {
-  computeCacheHitRate,
-  formatCacheHitRate,
-  formatUsageToken,
-  hasPartialTokenBuckets,
-  measurementStatusDisplay,
-  summableUnknownEvents,
-};
 
 export type UsageWindowPreset = '7d' | '30d' | '90d';
 

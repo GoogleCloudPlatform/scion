@@ -57,9 +57,10 @@ function makeSessionSummary(): ProjectSessionMetricsSummary {
 function makeProjectUsage(overrides: Partial<ScopedUsageResponse> = {}): ScopedUsageResponse {
   return {
     scope: { kind: 'project', id: 'proj-usage-1' },
+    // Producer-shaped default 30d window: UTC midnight 29 days back through 03:00 UTC today.
     window: {
-      since: '2026-10-28T00:00:00Z',
-      until: '2026-11-27T00:00:00Z',
+      since: '2026-10-29T00:00:00Z',
+      until: '2026-11-27T03:00:00Z',
       granularity: 'day',
     },
     calls: 12,
@@ -324,15 +325,16 @@ describe('project-detail token total fix & measurement badges', () => {
     ).toBe('2 unmeasured · 1 stale');
   });
 
-  it('renders daily-fallback periodLabel and shows sessions as Unavailable on partialFailure', async () => {
+  it('renders daily-fallback periodLabel, shows generic Some data unavailable without leaking raw errors, and logs details', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     metricsSummaryResponse = {
       ...metricsSummaryResponse,
       granularity: 'day',
       periodLabel: 'Since 2026-11-26 (UTC daily)',
       sessionsCount24h: null,
       partialFailure: true,
-      partialErrors: ['sessions store unavailable'],
+      partialErrors: ['sessions: sql driver internal error'],
     };
 
     const el = await mountProjectDetail();
@@ -350,8 +352,11 @@ describe('project-detail token total fix & measurement badges', () => {
     expect(root.querySelector('[data-testid="project-sessions-24h"]')?.textContent?.trim()).toBe(
       'Unavailable'
     );
-    expect(
-      root.querySelector('[data-testid="project-metrics-24h-partial-failure"]')?.textContent
-    ).toContain('sessions store unavailable');
+    const partialEl = root.querySelector('[data-testid="project-metrics-24h-partial-failure"]');
+    expect(partialEl?.textContent?.trim()).toBe('Some data unavailable');
+    expect(partialEl?.textContent).not.toContain('sql driver internal error');
+    expect(warnSpy).toHaveBeenCalledWith('[project-detail] metrics-summary partial failure:', [
+      'sessions: sql driver internal error',
+    ]);
   });
 });

@@ -608,7 +608,7 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     const root = element.shadowRoot!;
     expect(
       root.querySelector('[data-testid="metrics-source-indicator"]')?.textContent?.trim()
-    ).toBe('Hub rollups · Hourly');
+    ).toBe('Hub rollups · Local-day buckets');
     expect(root.querySelector('[data-testid="metrics-summary-tokens"]')?.textContent?.trim()).toBe(
       '54.5K'
     );
@@ -874,8 +874,52 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     expect(inputChart.data.datasets[1].data).toEqual([null, 500]);
   });
 
-  it('renders truncated notices on sessions/model-calls/tokens and shows sessions as Unavailable on partialFailure', async () => {
+  it('shows not-reported text on empty cacheRead chart when totals.cacheRead is null', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: SUMMARY,
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [{ label: 'model-a', points: [{ timestamp: '2026-11-25', value: 1000 }] }],
+        output: [{ label: 'model-a', points: [{ timestamp: '2026-11-25', value: 500 }] }],
+        cacheRead: [],
+        cacheWrite: [],
+        totals: {
+          input: 1000,
+          output: 500,
+          cacheRead: null,
+          cacheWrite: 0,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 1500,
+          cacheHitRate: null,
+        },
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    expect(
+      root.querySelector('[data-testid="metrics-cache-read-empty"]')?.textContent?.trim()
+    ).toBe('Cache read tokens not reported in this period.');
+    expect(
+      root.querySelector('[data-testid="metrics-cache-write-empty"]')?.textContent?.trim()
+    ).toBe('No cache write tokens in this period.');
+  });
+
+  it('renders truncated notices on sessions/model-calls/tokens, shows generic partialFailure copy without leaking raw errors, and logs details to console', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubResponses({
       summary: {
         ...SUMMARY,
@@ -884,7 +928,7 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
         granularity: 'day',
         totalSessions: null,
         partialFailure: true,
-        partialErrors: ['sessions query failed'],
+        partialErrors: ['daily sessions: sql: driver internal error'],
       },
       sessions: {
         periodDays: 7,
@@ -895,7 +939,7 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
         activeAgents: [{ timestamp: '2026-11-25', value: 2 }],
         truncated: true,
         partialFailure: true,
-        partialErrors: ['sessions query failed'],
+        partialErrors: ['daily sessions: sql: driver internal error'],
       },
       'model-calls': {
         ...MODEL_CALLS,
@@ -918,13 +962,17 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     await settle(element);
 
     const root = element.shadowRoot!;
-    // Summary: totalSessions=null renders Unavailable (never 0) + partial-failure alert.
+    // Summary: totalSessions=null renders Unavailable (never 0) + generic partial-failure alert (no raw SQL/driver text).
     expect(
       root.querySelector('[data-testid="metrics-summary-sessions"]')?.textContent?.trim()
     ).toBe('Unavailable');
     const summaryAlert = root.querySelector('[data-testid="metrics-summary-partial-failure"]');
     expect(summaryAlert).not.toBeNull();
-    expect(summaryAlert?.textContent).toContain('sessions query failed');
+    expect(summaryAlert?.textContent).toContain('Some metrics could not be loaded');
+    expect(summaryAlert?.textContent).not.toContain('sql: driver internal error');
+    expect(warnSpy).toHaveBeenCalledWith('[metrics-dashboard] partial failure on view=summary:', [
+      'daily sessions: sql: driver internal error',
+    ]);
 
     // Sessions: partialFailure with empty dailyCounts shows unavailable placeholder + truncated notice.
     element.activeTab = 'sessions';
@@ -932,6 +980,9 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     await settle(element);
     expect(root.querySelector('[data-testid="metrics-sessions-unavailable"]')).not.toBeNull();
     expect(root.querySelector('[data-testid="metrics-sessions-partial-failure"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="metrics-sessions-partial-failure"]')?.textContent
+    ).not.toContain('sql: driver internal error');
     expect(root.querySelector('[data-testid="metrics-sessions-truncated"]')?.textContent).toContain(
       'earliest boundary day was omitted'
     );

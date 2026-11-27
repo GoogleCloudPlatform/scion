@@ -1904,6 +1904,9 @@ export class ScionPageProjectDetail extends LitElement {
         this.metricsSummary = null;
         return;
       }
+      if (data?.partialFailure && data.partialErrors?.length) {
+        console.warn('[project-detail] metrics-summary partial failure:', data.partialErrors);
+      }
       this.metricsSummary = data;
     } catch {
       this.metricsSummary = null;
@@ -3409,9 +3412,7 @@ export class ScionPageProjectDetail extends LitElement {
                       style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-warning-600);"
                       data-testid="project-metrics-24h-partial-failure"
                     >
-                      ${ms.partialErrors?.length
-                        ? `Partial data (${ms.partialErrors.join('; ')})`
-                        : 'Partial data unavailable'}
+                      Some data unavailable
                     </div>`
                   : nothing}
                 <div style="display: flex; align-items: center; margin-left: auto;">

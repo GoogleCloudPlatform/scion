@@ -93,7 +93,7 @@ describe('usage-format helpers', () => {
     expect(formatDashboardSourceLabel(undefined)).toBeNull();
     expect(formatDashboardSourceLabel('cloud_monitoring')).toBe('Cloud Monitoring');
     expect(formatDashboardSourceLabel('hub_rollups', 'hour', 'America/Chicago')).toBe(
-      'Hub rollups · Hourly'
+      'Hub rollups · Local-day buckets'
     );
     expect(formatDashboardSourceLabel('hub_rollups', 'day', 'UTC')).toBe(
       'Hub rollups · Daily (UTC)'
@@ -143,7 +143,20 @@ describe('usage-format helpers', () => {
     ).toBe(false);
   });
 
-  it('formats scoped usage window labels from since/until timestamps', () => {
+  it('formats scoped usage window labels from producer-shaped day-snapped since/until timestamps', () => {
+    // Hub default 30d window: since = UTC midnight 29 days back, until = now (e.g. 03:00 UTC or 23:59 UTC).
+    expect(
+      formatUsageWindowLabel({
+        since: '2026-10-29T00:00:00Z',
+        until: '2026-11-27T03:00:00Z',
+      })
+    ).toBe('Tokens (30d)');
+    expect(
+      formatUsageWindowLabel({
+        since: '2026-10-29T00:00:00Z',
+        until: '2026-11-27T23:59:59Z',
+      })
+    ).toBe('Tokens (30d)');
     expect(
       formatUsageWindowLabel({
         since: '2026-10-28T00:00:00Z',
@@ -152,8 +165,8 @@ describe('usage-format helpers', () => {
     ).toBe('Tokens (30d)');
     expect(
       formatUsageWindowLabel({
-        since: '2026-11-20T00:00:00Z',
-        until: '2026-11-27T00:00:00Z',
+        since: '2026-11-21T00:00:00Z',
+        until: '2026-11-27T03:00:00Z',
       })
     ).toBe('Tokens (7d)');
     expect(formatUsageWindowLabel(null)).toBe('Tokens (window)');

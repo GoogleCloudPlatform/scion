@@ -474,6 +474,14 @@ export class ScionPageMetrics extends LitElement {
       const data: unknown = await response.json();
       if (this.latestRequestByView.get(view) !== seq) return;
 
+      const partialInfo = data as { partialFailure?: boolean; partialErrors?: string[] } | null;
+      if (partialInfo?.partialFailure && partialInfo.partialErrors?.length) {
+        console.warn(
+          `[metrics-dashboard] partial failure on view=${view}:`,
+          partialInfo.partialErrors
+        );
+      }
+
       switch (view) {
         case 'summary':
           this.summary = data as SummaryData;
@@ -920,16 +928,14 @@ export class ScionPageMetrics extends LitElement {
       truncated?: boolean;
       granularity?: string;
       partialFailure?: boolean;
-      partialErrors?: string[];
     },
     tabKey: string
   ) {
     const showTruncated = this.usageLedgerOn && Boolean(view.truncated);
     const showPartialFailure = Boolean(view.partialFailure);
     if (!showTruncated && !showPartialFailure) return nothing;
-    const partialDetail = view.partialErrors?.length
-      ? `Some metrics could not be loaded (${view.partialErrors.join('; ')}). Affected counts are shown as unavailable.`
-      : 'Some metrics could not be loaded. Affected counts are shown as unavailable.';
+    const partialDetail =
+      'Some metrics could not be loaded. Affected counts are shown as unavailable.';
     const truncatedDetail =
       view.granularity === 'day'
         ? 'Series data reached the query limit (daily granularity); the earliest boundary day was omitted from charts while window totals remain exact.'

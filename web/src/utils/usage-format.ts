@@ -200,7 +200,10 @@ export function formatUsageWindowLabel(
   const sinceMs = Date.parse(window.since);
   const untilMs = Date.parse(window.until);
   if (Number.isFinite(sinceMs) && Number.isFinite(untilMs) && untilMs > sinceMs) {
-    const days = Math.max(1, Math.round((untilMs - sinceMs) / 86_400_000));
+    // Hub day-snapped windows start at UTC midnight (N-1) days before until,
+    // so the elapsed duration is (N-1) days + hours since UTC midnight; ceil
+    // maps the whole UTC day span consistently to N days without flipping at noon.
+    const days = Math.max(1, Math.ceil((untilMs - sinceMs) / 86_400_000));
     return `Tokens (${days}d)`;
   }
   return 'Tokens (window)';
@@ -226,7 +229,7 @@ export function formatDashboardSourceLabel(
   if (!granularity) return sourceLabel;
   const granLabel =
     granularity === 'hour'
-      ? 'Hourly'
+      ? 'Local-day buckets'
       : granularity === 'day'
         ? timeZone === 'UTC'
           ? 'Daily (UTC)'
