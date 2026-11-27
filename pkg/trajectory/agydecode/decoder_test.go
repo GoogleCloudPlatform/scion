@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -1736,6 +1737,150 @@ func TestDecodeFile_MaxRowBytes(t *testing.T) {
 		}
 		if !strings.Contains(res.Errors[0].Error, "exceeds limit") {
 			t.Fatalf("error = %q, want substring 'exceeds limit'", res.Errors[0].Error)
+		}
+	})
+}
+
+// TestDecodeFile_MaxRowBytes_OversizeNotMaterialized pins the core memory-bound
+// invariant: oversize blobs must be rejected in SQL before reaching Go memory.
+// Each subtest inserts a 16 MiB ZEROBLOB on one of the five blob-reading query
+// paths (gen_metadata paged/pending, steps paged/pending, trajectory_metadata_blob)
+// and verifies that DecodeFile's cumulative Go heap allocations stay well below
+// the blob size, failing deterministically if the SQL CASE guard is removed.
+func TestDecodeFile_MaxRowBytes_OversizeNotMaterialized(t *testing.T) {
+	const (
+		oversizeBytes = 16 << 20 // 16 MiB ZEROBLOB in SQLite
+		capBytes      = 1024     // 1 KiB cap
+		maxAllocDelta = 8 << 20  // 8 MiB: < half of oversizeBytes, >> normal DecodeFile overhead
+	)
+
+	measureDecode := func(t *testing.T, dbPath string, cur Cursor) (*Result, uint64) {
+		t.Helper()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		res, err := DecodeFile(context.Background(), dbPath, Options{
+			AgyVersion:  "1.5.18",
+			Cursor:      cur,
+			MaxRowBytes: capBytes,
+		})
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("DecodeFile: %v", err)
+		}
+		var delta uint64
+		if after.TotalAlloc > before.TotalAlloc {
+			delta = after.TotalAlloc - before.TotalAlloc
+		}
+		return res, delta
+	}
+
+	t.Run("gen_metadata_paged", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "nomat-gen-paged.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ZEROBLOB(?), ?)`, oversizeBytes, oversizeBytes); err != nil {
+			t.Fatalf("insert oversize gen_metadata: %v", err)
+		}
+
+		res, delta := measureDecode(t, dbPath, Cursor{})
+		if res.Status != StatusMalformed || len(res.Errors) != 1 {
+			t.Fatalf("got status=%q errors=%+v, want malformed with 1 error", res.Status, res.Errors)
+		}
+		if delta >= maxAllocDelta {
+			t.Fatalf("DecodeFile allocated %d bytes (limit %d) for a %d-byte oversize gen_metadata row; blob was materialized into Go memory", delta, maxAllocDelta, oversizeBytes)
+		}
+	})
+
+	t.Run("gen_metadata_pending_by_rowid", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "nomat-gen-pending.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, NULL, 0)`); err != nil {
+			t.Fatalf("insert null gen_metadata: %v", err)
+		}
+		res1, err := DecodeFile(context.Background(), dbPath, Options{AgyVersion: "1.5.18", MaxRowBytes: capBytes})
+		if err != nil {
+			t.Fatalf("poll 1: %v", err)
+		}
+		if len(res1.Cursor.PendingGenMetadataRowIDs) != 1 {
+			t.Fatalf("poll 1 PendingGenMetadataRowIDs = %v, want [0]", res1.Cursor.PendingGenMetadataRowIDs)
+		}
+		if _, err := db.Exec(`UPDATE gen_metadata SET data = ZEROBLOB(?), size = ? WHERE idx = 0`, oversizeBytes, oversizeBytes); err != nil {
+			t.Fatalf("update oversize gen_metadata: %v", err)
+		}
+
+		res2, delta := measureDecode(t, dbPath, res1.Cursor)
+		if res2.Status != StatusMalformed || len(res2.Errors) != 1 {
+			t.Fatalf("got status=%q errors=%+v, want malformed with 1 error", res2.Status, res2.Errors)
+		}
+		if delta >= maxAllocDelta {
+			t.Fatalf("DecodeFile allocated %d bytes (limit %d) for a %d-byte pending oversize gen_metadata row; blob was materialized into Go memory", delta, maxAllocDelta, oversizeBytes)
+		}
+	})
+
+	t.Run("steps_paged", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "nomat-steps-paged.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 15, ZEROBLOB(?))`, oversizeBytes); err != nil {
+			t.Fatalf("insert oversize step: %v", err)
+		}
+
+		res, delta := measureDecode(t, dbPath, Cursor{})
+		if res.Status != StatusMalformed || len(res.Errors) != 1 {
+			t.Fatalf("got status=%q errors=%+v, want malformed with 1 error", res.Status, res.Errors)
+		}
+		if delta >= maxAllocDelta {
+			t.Fatalf("DecodeFile allocated %d bytes (limit %d) for a %d-byte oversize steps row; blob was materialized into Go memory", delta, maxAllocDelta, oversizeBytes)
+		}
+	})
+
+	t.Run("steps_pending_by_rowid", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "nomat-steps-pending.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO steps(idx, step_type, metadata) VALUES (0, 15, NULL)`); err != nil {
+			t.Fatalf("insert null step: %v", err)
+		}
+		res1, err := DecodeFile(context.Background(), dbPath, Options{AgyVersion: "1.5.18", MaxRowBytes: capBytes})
+		if err != nil {
+			t.Fatalf("poll 1: %v", err)
+		}
+		if len(res1.Cursor.PendingStepsRowIDs) != 1 {
+			t.Fatalf("poll 1 PendingStepsRowIDs = %v, want [0]", res1.Cursor.PendingStepsRowIDs)
+		}
+		if _, err := db.Exec(`UPDATE steps SET metadata = ZEROBLOB(?) WHERE idx = 0`, oversizeBytes); err != nil {
+			t.Fatalf("update oversize step: %v", err)
+		}
+
+		res2, delta := measureDecode(t, dbPath, res1.Cursor)
+		if res2.Status != StatusMalformed || len(res2.Errors) != 1 {
+			t.Fatalf("got status=%q errors=%+v, want malformed with 1 error", res2.Status, res2.Errors)
+		}
+		if delta >= maxAllocDelta {
+			t.Fatalf("DecodeFile allocated %d bytes (limit %d) for a %d-byte pending oversize steps row; blob was materialized into Go memory", delta, maxAllocDelta, oversizeBytes)
+		}
+	})
+
+	t.Run("trajectory_metadata_blob", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "nomat-tmb.db")
+		db := createAgySchemaDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		if _, err := db.Exec(`INSERT INTO trajectory_metadata_blob(id, data) VALUES ('main', ZEROBLOB(?))`, oversizeBytes); err != nil {
+			t.Fatalf("insert oversize tmb: %v", err)
+		}
+
+		res, delta := measureDecode(t, dbPath, Cursor{})
+		if res.Status != StatusVerified || len(res.Errors) != 0 || len(res.Warnings) != 1 {
+			t.Fatalf("got status=%q errors=%+v warnings=%+v, want verified/0/1", res.Status, res.Errors, res.Warnings)
+		}
+		if delta >= maxAllocDelta {
+			t.Fatalf("DecodeFile allocated %d bytes (limit %d) for a %d-byte oversize trajectory_metadata_blob row; blob was materialized into Go memory", delta, maxAllocDelta, oversizeBytes)
 		}
 	})
 }
