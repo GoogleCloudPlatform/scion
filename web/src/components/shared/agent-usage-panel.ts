@@ -27,111 +27,31 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type {
-  AgentUsageResponse,
-  AgentUsageTokens,
-  UsageMeasurementStatus,
-} from '../../shared/types.js';
+import type { AgentUsageResponse } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
+import {
+  computeCacheHitRate,
+  formatCacheHitRate,
+  formatUsageToken,
+  hasPartialTokenBuckets,
+  summableUnknownEvents,
+} from '../../utils/usage-format.js';
+import './measurement-status-badge.js';
+import { measurementStatusDisplay } from './measurement-status-badge.js';
+
+export {
+  computeCacheHitRate,
+  formatCacheHitRate,
+  formatUsageToken,
+  hasPartialTokenBuckets,
+  measurementStatusDisplay,
+  summableUnknownEvents,
+};
 
 export type UsageWindowPreset = '7d' | '30d' | '90d';
-
-/**
- * Format a nullable token count. Unknown (null/undefined) always renders as
- * "—", never 0 (§3.1). When unknownEvents > 0, prefixes with "≥ " to indicate
- * a lower bound from partially unknown events.
- */
-export function formatUsageToken(value: number | null | undefined, unknownEvents = 0): string {
-  if (value === null || value === undefined) return '—';
-  const formatted = formatNumber(value);
-  return unknownEvents > 0 ? `≥ ${formatted}` : formatted;
-}
-
-/**
- * Return the maximum unknown-event count affecting summable_tokens
- * (input, output, cache_read, cache_write, or all-null events).
- */
-export function summableUnknownEvents(tokens: AgentUsageTokens, nullTokenEvents = 0): number {
-  const u = tokens.unknown_events;
-  return Math.max(
-    nullTokenEvents,
-    u?.input ?? 0,
-    u?.output ?? 0,
-    u?.cache_read ?? 0,
-    u?.cache_write ?? 0
-  );
-}
-
-/**
- * Return true if any token bucket has mixed known+unknown events.
- */
-export function hasPartialTokenBuckets(tokens: AgentUsageTokens): boolean {
-  const u = tokens.unknown_events;
-  if (!u) return false;
-  return (
-    (u.input ?? 0) > 0 ||
-    (u.output ?? 0) > 0 ||
-    (u.cache_read ?? 0) > 0 ||
-    (u.cache_write ?? 0) > 0 ||
-    (u.cache_write_1h ?? 0) > 0 ||
-    (u.reasoning ?? 0) > 0
-  );
-}
-
-/**
- * Compute cache hit rate: cache_read / (input + cache_read + cache_write).
- * Returns null when any required bucket is unknown (null) or the denominator
- * is 0.
- */
-export function computeCacheHitRate(tokens: AgentUsageTokens): number | null {
-  if (tokens.input === null || tokens.cache_read === null || tokens.cache_write === null) {
-    return null;
-  }
-  const denom = tokens.input + tokens.cache_read + tokens.cache_write;
-  if (denom <= 0) return null;
-  return tokens.cache_read / denom;
-}
-
-/**
- * Format a cache hit rate ratio [0, 1] as a percentage string (e.g. "23.1%"),
- * prefixed with "≈ " when any of input, cache_read, or cache_write has
- * partially unknown events, or "—" when unknown.
- */
-export function formatCacheHitRate(tokens: AgentUsageTokens): string {
-  const rate = computeCacheHitRate(tokens);
-  if (rate === null) return '—';
-  const u = tokens.unknown_events;
-  const approx = (u?.input ?? 0) > 0 || (u?.cache_read ?? 0) > 0 || (u?.cache_write ?? 0) > 0;
-  const pct = `${(rate * 100).toFixed(1)}%`;
-  return approx ? `≈ ${pct}` : pct;
-}
-
-/**
- * Map measurement_status to a Shoelace badge variant and human-readable label.
- */
-export function measurementStatusDisplay(status: UsageMeasurementStatus): {
-  variant: 'success' | 'warning' | 'neutral';
-  label: string;
-} {
-  switch (status) {
-    case 'measured':
-      return { variant: 'success', label: 'Measured' };
-    case 'stale':
-      return { variant: 'warning', label: 'Stale' };
-    case 'partial':
-      return { variant: 'warning', label: 'Partial' };
-    case 'calls_only':
-      return { variant: 'warning', label: 'Calls only' };
-    case 'legacy_client':
-      return { variant: 'neutral', label: 'Legacy client' };
-    case 'unmeasured':
-    default:
-      return { variant: 'neutral', label: 'Unmeasured' };
-  }
-}
 
 @customElement('scion-agent-usage-panel')
 export class ScionAgentUsagePanel extends LitElement {
@@ -153,7 +73,12 @@ export class ScionAgentUsagePanel extends LitElement {
   private usage: AgentUsageResponse | null = null;
 
   private loadGeneration = 0;
+  /** Agent ID that last completed a successful load. */
   private loadedForAgentId = '';
+  /** Agent ID currently being fetched (prevents duplicate concurrent loads). */
+  private loadingForAgentId = '';
+  /** True once the panel has been activated via loadIfNeeded() or loadUsage(). */
+  private hasAttemptedLoad = false;
 
   static override styles = css`
     :host {
@@ -336,53 +261,65 @@ export class ScionAgentUsagePanel extends LitElement {
   `;
 
   override updated(changed: PropertyValues): void {
-    // Only auto-reload on agentId change if the panel has already been shown
-    // and loaded once; initial loading is triggered lazily via loadIfNeeded()
+    // Only auto-reload on agentId change if the panel has already been
+    // activated; initial loading is triggered lazily via loadIfNeeded()
     // when the Usage tab is first selected.
     if (
       changed.has('agentId') &&
       this.agentId &&
-      this.loadedForAgentId !== '' &&
-      this.loadedForAgentId !== this.agentId
+      this.hasAttemptedLoad &&
+      this.loadedForAgentId !== this.agentId &&
+      this.loadingForAgentId !== this.agentId
     ) {
       void this.loadUsage();
     }
   }
 
   /**
-   * Load usage on first tab activation (or when agentId changed since the last
-   * load). Subsequent tab switches reuse the loaded snapshot until Refresh or
-   * a window change is requested.
+   * Load usage on first tab activation (or when agentId changed, or after a
+   * previous load failed). Subsequent tab switches reuse a successfully loaded
+   * snapshot until Refresh or a window change is requested.
    */
   async loadIfNeeded(): Promise<void> {
     if (!this.agentId) return;
     if (this.loadedForAgentId === this.agentId) return;
+    if (this.loading && this.loadingForAgentId === this.agentId) return;
     await this.loadUsage();
   }
 
   async loadUsage(): Promise<void> {
     if (!this.agentId) return;
+    const targetAgentId = this.agentId;
     const gen = ++this.loadGeneration;
-    this.loadedForAgentId = this.agentId;
+    this.hasAttemptedLoad = true;
+    this.loadingForAgentId = targetAgentId;
     this.loading = true;
     this.error = null;
     try {
-      const url = `/api/v1/agents/${encodeURIComponent(this.agentId)}/usage?since=${encodeURIComponent(this.windowPreset)}`;
+      const url = `/api/v1/agents/${encodeURIComponent(targetAgentId)}/usage?since=${encodeURIComponent(this.windowPreset)}`;
       const res = await apiFetch(url);
       if (gen !== this.loadGeneration) return;
       if (!res.ok) {
         this.error = await extractApiError(res, `Failed to load usage (${res.status})`);
         this.usage = null;
+        if (this.loadedForAgentId === targetAgentId) {
+          this.loadedForAgentId = '';
+        }
         return;
       }
       this.usage = (await res.json()) as AgentUsageResponse;
+      this.loadedForAgentId = targetAgentId;
     } catch (err) {
       if (gen !== this.loadGeneration) return;
       this.error = err instanceof Error ? err.message : 'Failed to load usage';
       this.usage = null;
+      if (this.loadedForAgentId === targetAgentId) {
+        this.loadedForAgentId = '';
+      }
     } finally {
       if (gen === this.loadGeneration) {
         this.loading = false;
+        this.loadingForAgentId = '';
       }
     }
   }
@@ -437,7 +374,6 @@ export class ScionAgentUsagePanel extends LitElement {
       `;
     }
 
-    const statusInfo = measurementStatusDisplay(u.measurement_status);
     const t = u.tokens;
     const unk = t.unknown_events;
     const showPartialNotice = u.null_token_events > 0 || hasPartialTokenBuckets(t);
@@ -445,13 +381,11 @@ export class ScionAgentUsagePanel extends LitElement {
     return html`
       <div class="toolbar">
         <div class="toolbar-left">
-          <sl-badge
-            variant=${statusInfo.variant}
+          <scion-measurement-status-badge
+            .status=${u.measurement_status}
             data-testid="usage-measurement-status"
             data-status=${u.measurement_status}
-          >
-            ${statusInfo.label}
-          </sl-badge>
+          ></scion-measurement-status-badge>
           <span class="last-updated" data-testid="usage-last-updated">
             Last updated: ${this.renderLastUpdated(u.last_receipt_at)}
           </span>

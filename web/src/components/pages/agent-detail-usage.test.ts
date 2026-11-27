@@ -138,4 +138,77 @@ describe('agent detail Usage tab experiment gate', () => {
       expect.any(Object)
     );
   });
+
+  it('retries failed lazy usage fetch when leaving and re-entering the Usage tab', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: 'usage backend down' } }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            agent_id: 'agent-usage-1',
+            project_id: 'proj-1',
+            window: { since: '2026-10-26T00:00:00Z', until: '2026-11-25T18:00:00Z' },
+            calls: 1,
+            error_calls: 0,
+            events: 1,
+            null_token_events: 0,
+            tokens: {
+              input: 100,
+              output: 20,
+              cache_read: 80,
+              cache_write: 0,
+              cache_write_1h: null,
+              reasoning: null,
+              summable_tokens: 200,
+            },
+            by_model: [],
+            measurement_status: 'measured',
+            as_of: '2026-11-25T18:00:00Z',
+            last_receipt_at: '2026-11-25T17:59:00Z',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+    const el = await mountWithLoadedAgent();
+    const tabGroup = el.shadowRoot!.querySelector('sl-tab-group');
+    const usagePanel = el.shadowRoot!.querySelector('scion-agent-usage-panel') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+    };
+
+    // First entry into Usage tab fails -> error banner shown.
+    tabGroup?.dispatchEvent(
+      new CustomEvent('sl-tab-show', { detail: { name: 'usage' }, bubbles: true, composed: true })
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await usagePanel.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(usagePanel.shadowRoot!.querySelector('[data-testid="usage-error"]')).not.toBeNull();
+
+    // Switch away to Status tab, then re-enter Usage tab -> retries and recovers.
+    tabGroup?.dispatchEvent(
+      new CustomEvent('sl-tab-show', { detail: { name: 'status' }, bubbles: true, composed: true })
+    );
+    tabGroup?.dispatchEvent(
+      new CustomEvent('sl-tab-show', { detail: { name: 'usage' }, bubbles: true, composed: true })
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await usagePanel.updateComplete;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(usagePanel.shadowRoot!.querySelector('[data-testid="usage-error"]')).toBeNull();
+    expect(
+      usagePanel
+        .shadowRoot!.querySelector('[data-testid="usage-summable-total"]')
+        ?.textContent?.trim()
+    ).toBe('200');
+  });
 });
