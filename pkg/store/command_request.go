@@ -33,6 +33,12 @@ const (
 	CommandRequestStatusExpired   = string(msgaction.ClassExpired)
 )
 
+// Command request withdrawn_by values (design §4.12).
+const (
+	CommandRequestWithdrawnByAgent  = "agent"
+	CommandRequestWithdrawnBySystem = "system"
+)
+
 // Command run lifecycle status constants.
 const (
 	CommandRunStatusQueued      = "queued"
@@ -174,6 +180,77 @@ func (e *CommandRequestKeyPendingError) Error() string {
 		e.Key, e.Version, e.RowID)
 }
 
+// CommandRequestLimitError is returned when an agent already has the maximum
+// number of pending command requests (429 command_request_limit, design §4.5).
+type CommandRequestLimitError struct {
+	AgentID string
+	Limit   int
+	Current int
+}
+
+func (e *CommandRequestLimitError) Error() string {
+	return fmt.Sprintf("agent has %d pending command requests (limit %d); withdraw or wait for existing requests before sending another",
+		e.Current, e.Limit)
+}
+
+// DismissCommandRequestInput is the input to DismissCommandRequest.
+type DismissCommandRequestInput struct {
+	RequestID      string
+	UserID         string
+	UserName       string
+	UserEmail      string
+	Reason         string
+	Surface        string
+	IdempotencyKey string
+	Now            time.Time
+}
+
+// DismissCommandRequestResult is returned by DismissCommandRequest.
+type DismissCommandRequestResult struct {
+	Request          *CommandRequest
+	AlreadyDismissed bool
+	Replayed         bool
+	Conflict         *CommandRequest
+	ConflictCode     string
+}
+
+// WithdrawCommandRequestInput is the input to WithdrawCommandRequest.
+type WithdrawCommandRequestInput struct {
+	AgentID string
+	Key     string
+	Reason  string
+	Now     time.Time
+}
+
+// WithdrawCommandRequestResult is returned by WithdrawCommandRequest.
+type WithdrawCommandRequestResult struct {
+	Request          *CommandRequest
+	AlreadyWithdrawn bool
+	Conflict         *CommandRequest
+	ConflictCode     string
+}
+
+type withdrawnCommandRequestsCollectorKey struct{}
+
+// WithWithdrawnCommandRequestsCollector attaches a slice pointer to ctx so
+// WithdrawAgentCommandRequestsOnDelete records every row it transitions inside
+// a hard-delete or retention-purge transaction. Callers inspect the slice
+// strictly after commit to publish live updates and emit audit events without
+// a pre-transaction listing race.
+func WithWithdrawnCommandRequestsCollector(ctx context.Context, out *[]*CommandRequest) context.Context {
+	return context.WithValue(ctx, withdrawnCommandRequestsCollectorKey{}, out)
+}
+
+// RecordWithdrawnCommandRequests appends rows to any collector attached to ctx.
+func RecordWithdrawnCommandRequests(ctx context.Context, rows []*CommandRequest) {
+	if len(rows) == 0 {
+		return
+	}
+	if out, ok := ctx.Value(withdrawnCommandRequestsCollectorKey{}).(*[]*CommandRequest); ok && out != nil {
+		*out = append(*out, rows...)
+	}
+}
+
 // ApproveCommandRequestInput is the input to ApproveCommandRequest.
 type ApproveCommandRequestInput struct {
 	RequestID      string
@@ -306,6 +383,26 @@ type CommandRequestStore interface {
 	// IdempotencyKey).
 	CreateAndApproveMarkdownCommandRequest(ctx context.Context, in *CreateMarkdownCommandRequestInput) (*ApproveCommandRequestResult, error)
 
+	// DismissCommandRequest atomically transitions a pending, non-expired
+	// command_requests row from pending -> dismissed. Repeating dismiss on an
+	// already-dismissed row returns AlreadyDismissed=true. On a CAS miss against
+	// another non-pending state (e.g. approved, replaced, withdrawn, expired),
+	// it returns Conflict and ConflictCode without mutating rows.
+	DismissCommandRequest(ctx context.Context, in *DismissCommandRequestInput) (*DismissCommandRequestResult, error)
+
+	// WithdrawCommandRequest atomically transitions the calling agent's latest
+	// version of Key from pending -> withdrawn (withdrawn_by="agent"). Repeating
+	// withdraw on an already-withdrawn head returns AlreadyWithdrawn=true. On a
+	// non-pending state (approved, dismissed, expired), it returns Conflict and
+	// ConflictCode without mutating rows.
+	WithdrawCommandRequest(ctx context.Context, in *WithdrawCommandRequestInput) (*WithdrawCommandRequestResult, error)
+
+	// WithdrawAgentCommandRequestsOnDelete transitions all pending
+	// command_requests for agentID to withdrawn (withdrawn_by="system",
+	// withdrawn_reason="agent deleted") inside the caller's hard-delete
+	// transaction. Approved rows and command_runs are left untouched (§4.12).
+	WithdrawAgentCommandRequestsOnDelete(ctx context.Context, agentID string, now time.Time) ([]*CommandRequest, error)
+
 	// ExpireCommandRequests transitions pending rows with expires_at <= now to
 	// expired and returns the transitioned rows.
 	ExpireCommandRequests(ctx context.Context, now time.Time, limit int) ([]*CommandRequest, error)
@@ -316,6 +413,10 @@ type CommandRequestStore interface {
 	// GetCommandRunByRequestID returns the command_runs row for requestID, or
 	// ErrNotFound if the request has no run.
 	GetCommandRunByRequestID(ctx context.Context, requestID string) (*CommandRun, error)
+
+	// GetCommandRunByOutcomeMessageID returns the command_runs row whose
+	// outcome_message_id matches messageID, or ErrNotFound.
+	GetCommandRunByOutcomeMessageID(ctx context.Context, messageID string) (*CommandRun, error)
 
 	// GetCommandRunsByRequestIDs returns existing command_runs keyed by request ID.
 	GetCommandRunsByRequestIDs(ctx context.Context, requestIDs []string) (map[string]*CommandRun, error)
@@ -341,13 +442,15 @@ type CommandRequestStore interface {
 	FinishCommandRun(ctx context.Context, in *FinishCommandRunInput) (bool, error)
 
 	// ClaimCommandRunOutcomeDelivery atomically sets outcome_delivered_at on a
-	// finished run where outcome_delivered_at IS NULL so outbound delivery of
-	// the command-response message is claimed once.
-	ClaimCommandRunOutcomeDelivery(ctx context.Context, runID string, deliveredAt time.Time) (bool, error)
+	// finished run where outcome_delivered_at IS NULL (or where a prior claim
+	// without an outcome_message_id has aged past staleClaimBefore, when
+	// non-zero) so outbound delivery of the command-response message is claimed
+	// at-least-once across crashes.
+	ClaimCommandRunOutcomeDelivery(ctx context.Context, runID string, deliveredAt, staleClaimBefore time.Time) (bool, error)
 
 	// ClearCommandRunOutcomeDelivery clears outcome_delivered_at when the exact
-	// claimed timestamp matches and no outcome_message_id was recorded, allowing
-	// a retry after a transient send failure.
+	// claimed timestamp matches, allowing a retry after a transient send or
+	// dispatch failure while preserving any recorded outcome_message_id.
 	ClearCommandRunOutcomeDelivery(ctx context.Context, runID string, claimedAt time.Time) (bool, error)
 
 	// RecordCommandRunOutcomeMessage records outcome_message_id on a run after
@@ -364,6 +467,12 @@ type CommandRequestStore interface {
 	// nil or <= now-claimTTL. It sets poll_claimed_at = now on the claimed
 	// rows so multiple replicas divide recovery polling cleanly (design §4.12).
 	ClaimCommandRunsForPoll(ctx context.Context, now time.Time, claimTTL time.Duration, limit int, excludeRunIDs []string) ([]*CommandRun, error)
+
+	// ListCommandRunsPendingOutcomeDelivery returns up to limit finished runs
+	// whose finished_at >= finishedSince and either outcome_delivered_at IS NULL
+	// or (when staleClaimBefore is non-zero) outcome_delivered_at <= staleClaimBefore
+	// with outcome_message_id IS NULL, oldest finished_at first (§4.9).
+	ListCommandRunsPendingOutcomeDelivery(ctx context.Context, finishedSince, staleClaimBefore time.Time, limit int) ([]*CommandRun, error)
 
 	// UpdateCommandRunLastPolled updates last_polled_at on an unfinished run.
 	UpdateCommandRunLastPolled(ctx context.Context, runID string, polledAt time.Time) error

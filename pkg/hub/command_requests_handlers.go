@@ -19,12 +19,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
@@ -32,8 +34,9 @@ import (
 )
 
 const (
-	commandRequestsRoutePrefix   = "/api/v1/command-requests/"
-	agentCommandRequestsExactURL = "/api/v1/agent/command-requests"
+	commandRequestsRoutePrefix      = "/api/v1/command-requests/"
+	agentCommandRequestsExactURL    = "/api/v1/agent/command-requests"
+	agentCommandRequestsRoutePrefix = "/api/v1/agent/command-requests/"
 
 	// commandRunWakeBudget is the wake + readiness budget used to set the
 	// initial command_runs.lease_until at approval (§4.7 step 5, §4.8 step 3).
@@ -75,6 +78,7 @@ func (s *Server) enqueueCommandRun(req *store.CommandRequest, run *store.Command
 //	GET  /api/v1/command-requests/{id}
 //	POST /api/v1/command-requests/{id}/approve
 //	GET  /api/v1/command-requests/{id}/output
+//	POST /api/v1/command-requests/{id}/dismiss
 func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.CommandRequests, func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, commandRequestsRoutePrefix)
@@ -120,6 +124,12 @@ func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Reque
 				return
 			}
 			s.handleCommandRequestOutput(w, r, reqID)
+		case "dismiss":
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleCommandRequestDismiss(w, r, reqID)
 		default:
 			NotFound(w, "Command request")
 		}
@@ -127,24 +137,37 @@ func (s *Server) handleCommandRequestRoutes(w http.ResponseWriter, r *http.Reque
 }
 
 // handleAgentCommandRequestRoutes serves the agent self-service command-request
-// endpoint, 404 while hub.command_requests is off:
+// endpoints, 404 while hub.command_requests is off:
 //
-//	GET /api/v1/agent/command-requests
+//	GET  /api/v1/agent/command-requests
+//	POST /api/v1/agent/command-requests/withdraw
 func (s *Server) handleAgentCommandRequestRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.CommandRequests, func(w http.ResponseWriter, r *http.Request) {
 		agentIdent := agentDecisionCaller(w, r)
 		if agentIdent == nil {
 			return
 		}
-		if r.URL.Path != agentCommandRequestsExactURL {
-			NotFound(w, "Command request")
+		path := r.URL.Path
+		if path == agentCommandRequestsExactURL {
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
+			s.handleAgentCommandRequestList(w, r, agentIdent)
 			return
 		}
-		if r.Method != http.MethodGet {
-			MethodNotAllowed(w, http.MethodGet)
-			return
+		if strings.HasPrefix(path, agentCommandRequestsRoutePrefix) {
+			sub := strings.TrimPrefix(path, agentCommandRequestsRoutePrefix)
+			if sub == "withdraw" {
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				s.handleAgentCommandRequestWithdraw(w, r, agentIdent)
+				return
+			}
 		}
-		s.handleAgentCommandRequestList(w, r, agentIdent)
+		NotFound(w, "Command request")
 	})(w, r)
 }
 
@@ -250,6 +273,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 	now := time.Now().UTC()
 	isApprover := user.ID() == row.ApproverUserID
 	canApprove := isApprover && row.Status == store.CommandRequestStatusPending && row.ExpiresAt.After(now)
+	canDismiss := canApprove
 	reason := ""
 	if !isApprover {
 		reason = msgaction.ConflictCmdNotApprover
@@ -322,10 +346,17 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	runView := commandRunView(runRow)
+	// Strip approver-only execution/container details for non-approver readers
+	// (P3-audit I3: other conversation participants see status/exit code only).
+	var reqView messages.CommandRequestView
+	if isApprover {
+		reqView = commandRequestView(row, replacedBy, runRow)
+	} else {
+		reqView = commandRequestSSEView(row, replacedBy, runRow)
+	}
 	writeJSON(w, http.StatusOK, messages.CommandRequestDetailResponse{
-		Request:                commandRequestView(row, replacedBy, runRow),
-		Run:                    runView,
+		Request:                reqView,
+		Run:                    reqView.Run,
 		ExecContainer:          execView,
 		ProjectName:            projectName,
 		ThreadID:               chatKey,
@@ -334,6 +365,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 		ApproverEmail:          approverEmail,
 		PreviousVersionUnknown: prevUnknown,
 		CanApprove:             canApprove,
+		CanDismiss:             canDismiss,
 		OutputAvailable:        outputAvailable,
 		Reason:                 reason,
 	})
@@ -1023,6 +1055,340 @@ func (s *Server) isSingleAddressedHumanForMarkdownExecute(ctx context.Context, u
 	return ok
 }
 
+func (s *Server) handleCommandRequestDismiss(w http.ResponseWriter, r *http.Request, reqID string) {
+	if pendingSecretBrowserRequestRefused(w, r) {
+		return
+	}
+	user := s.messageActionHumanSessionCaller(w, r, msgaction.KindCommandRequest, reqID, "")
+	if user == nil {
+		return
+	}
+	ctx := r.Context()
+
+	var body messages.DismissCommandRequestBody
+	if r.Body != nil && r.ContentLength != 0 {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, msgaction.MaxRequestBodyBytes+1))
+		if err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if int64(len(raw)) > msgaction.MaxRequestBodyBytes {
+			BadRequest(w, fmt.Sprintf("Invalid request body: request body exceeds %d bytes", msgaction.MaxRequestBodyBytes))
+			return
+		}
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			if err := json.Unmarshal(raw, &body); err != nil {
+				BadRequest(w, "Invalid request body: "+err.Error())
+				return
+			}
+		}
+	}
+
+	reason, rerr := msgaction.NormalizeReason(body.Reason)
+	if rerr != nil {
+		ValidationError(w, fmt.Sprintf("reason is at most %d characters", msgaction.MaxReasonRunes), map[string]interface{}{"field": "reason"})
+		return
+	}
+	surface, ok := normalizeCommandRequestSurface(body.Surface)
+	if !ok {
+		ValidationError(w, "unsupported surface", map[string]interface{}{"field": "surface"})
+		return
+	}
+	if len(body.IdempotencyKey) > msgaction.MaxIdempotencyKeyLen {
+		ValidationError(w, "idempotency_key exceeds maximum length", map[string]interface{}{"field": "idempotency_key"})
+		return
+	}
+
+	row, promptMsg, chatKey, err := s.loadCommandRequestWithMessage(ctx, reqID, false)
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidInput) || errors.Is(err, store.ErrNotFound) {
+			NotFound(w, "Command request")
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	emitRefused := func(code string, details map[string]string) {
+		s.emitCommandRequestRefused(ctx, &MessageActionEvent{
+			RowID:     row.ID,
+			MessageID: row.MessageID,
+			ProjectID: row.ProjectID,
+			AgentID:   row.AgentID,
+			AgentName: row.AgentName,
+			Key:       row.Key,
+			Version:   row.Version,
+			ActorKind: MessageActionActorUser,
+			ActorID:   user.ID(),
+			Surface:   surface,
+			Reason:    code,
+			Details:   details,
+		})
+	}
+
+	// Approver-only + recipient check (§4.7).
+	if !s.isCommandRequestRecipient(ctx, user, row, chatKey, promptMsg, true) || user.ID() != row.ApproverUserID {
+		emitRefused(msgaction.ConflictCmdNotApprover, map[string]string{
+			"approver_user_id": row.ApproverUserID,
+			"command_sha256":   row.CommandSHA256,
+		})
+		writeError(w, http.StatusForbidden, msgaction.ConflictCmdNotApprover,
+			"only the named approver may dismiss this command request", nil)
+		return
+	}
+
+	userName := user.DisplayName()
+	if userName == "" {
+		userName = user.Email()
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	res, err := s.store.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+		RequestID:      row.ID,
+		UserID:         user.ID(),
+		UserName:       userName,
+		UserEmail:      user.Email(),
+		Reason:         reason,
+		Surface:        surface,
+		IdempotencyKey: body.IdempotencyKey,
+		Now:            now,
+	})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if res.Conflict != nil {
+		emitRefused(res.ConflictCode, map[string]string{
+			"command_sha256":   row.CommandSHA256,
+			"approver_user_id": user.ID(),
+		})
+		writeError(w, http.StatusConflict, res.ConflictCode,
+			"command request cannot be dismissed: "+res.ConflictCode,
+			map[string]interface{}{
+				"status": res.Conflict.Status,
+			})
+		return
+	}
+	if res.AlreadyDismissed {
+		writeJSON(w, http.StatusOK, messages.DismissCommandRequestResponse{
+			Request:          commandRequestView(res.Request, nil, nil),
+			AlreadyDismissed: true,
+			Replayed:         res.Replayed,
+		})
+		return
+	}
+
+	if chatKey != "" {
+		s.publishActionUpdated(msgaction.KindCommandRequest, res.Request.ProjectID, res.Request.MessageID, chatKey, commandRequestSSEView(res.Request, nil, nil))
+	}
+	s.emitMessageActionEvent(ctx, &MessageActionEvent{
+		Kind:      msgaction.KindCommandRequest,
+		EventType: MessageActionEventDismissed,
+		RowID:     res.Request.ID,
+		MessageID: res.Request.MessageID,
+		ProjectID: res.Request.ProjectID,
+		AgentID:   res.Request.AgentID,
+		AgentName: res.Request.AgentName,
+		Key:       res.Request.Key,
+		Version:   res.Request.Version,
+		ActorKind: MessageActionActorUser,
+		ActorID:   user.ID(),
+		Surface:   surface,
+		Reason:    reason,
+		Details: map[string]string{
+			"command_sha256":   res.Request.CommandSHA256,
+			"approver_user_id": user.ID(),
+		},
+		Timestamp: now,
+	})
+
+	// Notify the asking agent (best-effort; deleting the asker makes it a no-op).
+	s.notifyCommandRequestDismissed(ctx, res.Request, user, userName, reason, chatKey, now)
+
+	writeJSON(w, http.StatusOK, messages.DismissCommandRequestResponse{
+		Request: commandRequestView(res.Request, nil, nil),
+	})
+}
+
+func (s *Server) notifyCommandRequestDismissed(ctx context.Context, req *store.CommandRequest, user UserIdentity, userName, reason, chatKey string, now time.Time) {
+	if req == nil || req.AgentID == "" {
+		return
+	}
+	asker, err := s.store.GetAgent(ctx, req.AgentID)
+	if err != nil || asker == nil || !asker.DeletedAt.IsZero() {
+		return
+	}
+	suffix := ""
+	if reason != "" {
+		suffix = ": " + reason
+	}
+	respText := fmt.Sprintf("Command request `%s` (v%d) dismissed by %s%s.", req.Key, req.Version, userName, suffix)
+	respMsg := &store.Message{
+		ID:             api.NewUUID(),
+		ProjectID:      req.ProjectID,
+		ConversationID: req.ConversationID,
+		ThreadID:       chatKey,
+		Sender:         userSenderAddress(user),
+		SenderID:       user.ID(),
+		Recipient:      "agent:" + asker.Slug,
+		RecipientID:    asker.ID,
+		Msg:            respText,
+		Type:           messages.TypeCommandResponse,
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	if err := s.store.CreateMessage(ctx, respMsg); err != nil {
+		return
+	}
+	sm := &messages.StructuredMessage{
+		Version:        messages.Version,
+		Timestamp:      now.UTC().Format(time.RFC3339),
+		Sender:         respMsg.Sender,
+		SenderID:       respMsg.SenderID,
+		Recipient:      respMsg.Recipient,
+		RecipientID:    respMsg.RecipientID,
+		Msg:            respText,
+		Type:           messages.TypeCommandResponse,
+		ThreadID:       chatKey,
+		ConversationID: req.ConversationID,
+	}
+	_, _ = s.dispatchActionResponse(ctx, actionResponse{
+		Asker:      asker,
+		Message:    respMsg,
+		Text:       respText,
+		Structured: sm,
+		PopulateMeta: func(meta map[string]string) {
+			meta["command_request_id"] = req.ID
+			meta["command_request_key"] = req.Key
+			meta["command_request_version"] = strconv.Itoa(req.Version)
+			meta["command_request_outcome"] = MessageActionEventDismissed
+		},
+		LogPrefix: "command_request",
+		Label:     "command-response",
+	})
+}
+
+func (s *Server) handleAgentCommandRequestWithdraw(w http.ResponseWriter, r *http.Request, agentIdent AgentIdentity) {
+	ctx := r.Context()
+	agentID := agentIdent.ID()
+
+	r.Body = http.MaxBytesReader(w, r.Body, msgaction.MaxRequestBodyBytes)
+	var body messages.WithdrawCommandRequestBody
+	if err := readJSON(r, &body); err != nil {
+		ValidationError(w, "invalid JSON body: "+err.Error(), nil)
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if key == "" {
+		ValidationError(w, "key is required", map[string]interface{}{"field": "key"})
+		return
+	}
+	reason, rerr := msgaction.NormalizeReason(body.Reason)
+	if rerr != nil {
+		ValidationError(w, fmt.Sprintf("reason is at most %d characters", msgaction.MaxReasonRunes), map[string]interface{}{"field": "reason"})
+		return
+	}
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	res, err := s.store.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+		AgentID: agentID,
+		Key:     key,
+		Reason:  reason,
+		Now:     now,
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.emitCommandRequestRefused(ctx, &MessageActionEvent{
+				AgentID:   agentID,
+				Key:       key,
+				ActorKind: MessageActionActorAgent,
+				ActorID:   agentID,
+				Reason:    "not_found",
+			})
+			NotFound(w, "Command request")
+			return
+		}
+		if errors.Is(err, store.ErrInvalidInput) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if res.Conflict != nil {
+		s.emitCommandRequestRefused(ctx, &MessageActionEvent{
+			RowID:     res.Conflict.ID,
+			MessageID: res.Conflict.MessageID,
+			ProjectID: res.Conflict.ProjectID,
+			AgentID:   res.Conflict.AgentID,
+			AgentName: res.Conflict.AgentName,
+			Key:       res.Conflict.Key,
+			Version:   res.Conflict.Version,
+			ActorKind: MessageActionActorAgent,
+			ActorID:   agentID,
+			Reason:    res.ConflictCode,
+			Details: map[string]string{
+				"command_sha256":   res.Conflict.CommandSHA256,
+				"approver_user_id": res.Conflict.ApproverUserID,
+			},
+		})
+		writeError(w, http.StatusConflict, res.ConflictCode,
+			fmt.Sprintf("command request %s v%d cannot be withdrawn: %s", res.Conflict.Key, res.Conflict.Version, res.ConflictCode),
+			map[string]interface{}{
+				"key":     res.Conflict.Key,
+				"version": res.Conflict.Version,
+				"status":  res.Conflict.Status,
+			})
+		return
+	}
+	if res.AlreadyWithdrawn {
+		writeJSON(w, http.StatusOK, messages.WithdrawCommandRequestResponse{
+			Request:          commandRequestAgentView(res.Request, nil, nil),
+			AlreadyWithdrawn: true,
+		})
+		return
+	}
+
+	s.publishCommandRequestUpdated(ctx, res.Request, nil)
+	s.emitMessageActionEvent(ctx, &MessageActionEvent{
+		Kind:      msgaction.KindCommandRequest,
+		EventType: MessageActionEventWithdrawn,
+		RowID:     res.Request.ID,
+		MessageID: res.Request.MessageID,
+		ProjectID: res.Request.ProjectID,
+		AgentID:   res.Request.AgentID,
+		AgentName: res.Request.AgentName,
+		Key:       res.Request.Key,
+		Version:   res.Request.Version,
+		ActorKind: MessageActionActorAgent,
+		ActorID:   agentID,
+		Reason:    reason,
+		Details: map[string]string{
+			"command_sha256":   res.Request.CommandSHA256,
+			"approver_user_id": res.Request.ApproverUserID,
+		},
+		Timestamp: now,
+	})
+
+	writeJSON(w, http.StatusOK, messages.WithdrawCommandRequestResponse{
+		Request: commandRequestAgentView(res.Request, nil, nil),
+	})
+}
+
+func (s *Server) publishCommandRequestUpdated(ctx context.Context, row *store.CommandRequest, run *store.CommandRun) {
+	if row == nil {
+		return
+	}
+	chatKey := row.ChatKey
+	if chatKey == "" && row.MessageID != "" {
+		if prompt, err := s.store.GetMessage(ctx, row.MessageID); err == nil && prompt != nil {
+			chatKey = prompt.ThreadID
+		}
+	}
+	if chatKey == "" {
+		return
+	}
+	s.publishActionUpdated(msgaction.KindCommandRequest, row.ProjectID, row.MessageID, chatKey, commandRequestSSEView(row, nil, run))
+}
+
 func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Request, agentIdent AgentIdentity) {
 	q := r.URL.Query()
 	limit := store.DefaultCommandRequestListLimit
@@ -1051,7 +1417,7 @@ func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Re
 	items := make([]messages.CommandRequestView, len(res.Items))
 	for i, row := range res.Items {
 		run := res.Runs[row.ID]
-		items[i] = commandRequestSSEView(row, nil, run)
+		items[i] = commandRequestAgentView(row, nil, run)
 		if items[i].Run != nil && run != nil && run.ShareOutput {
 			tail, _ := s.loadSharedCommandRunOutputTail(r.Context(), run)
 			items[i].Run.OutputTail = tail
@@ -1063,13 +1429,36 @@ func (s *Server) handleAgentCommandRequestList(w http.ResponseWriter, r *http.Re
 	})
 }
 
-// commandRequestSSEView builds a CommandRequestView with the human's execution
-// container IDs stripped (used for SSE broadcasts and the agent list view).
+// commandRequestAgentView builds a CommandRequestView for the asking agent
+// (agent list and withdraw responses), stripping only the approver's execution
+// container identifiers (execAgentId, execProjectId) while retaining run
+// status, exit code, reason, wake, outputBytes, shareOutput, and timestamps
+// so the agent can catch up if a command-response message is lost (O8).
+func commandRequestAgentView(row *store.CommandRequest, replacedBy *store.CommandRequest, run *store.CommandRun) messages.CommandRequestView {
+	v := commandRequestView(row, replacedBy, run)
+	if v.Run != nil {
+		v.Run.ExecAgentID = ""
+		v.Run.ExecProjectID = ""
+	}
+	return v
+}
+
+// commandRequestSSEView builds a CommandRequestView for non-approver human
+// readers (GET for non-approvers and SSE broadcasts), keeping run status, exit
+// code, and timestamps while stripping approver-only execution/container
+// details (execAgentId, execProjectId, reason, wake, outputBytes, outputStatus,
+// outputTail, shareOutput).
 func commandRequestSSEView(row *store.CommandRequest, replacedBy *store.CommandRequest, run *store.CommandRun) messages.CommandRequestView {
 	v := commandRequestView(row, replacedBy, run)
 	if v.Run != nil {
 		v.Run.ExecAgentID = ""
 		v.Run.ExecProjectID = ""
+		v.Run.Reason = ""
+		v.Run.Wake = ""
+		v.Run.OutputBytes = nil
+		v.Run.OutputStatus = ""
+		v.Run.OutputTail = ""
+		v.Run.ShareOutput = false
 	}
 	return v
 }
@@ -1119,6 +1508,23 @@ func commandRequestView(row *store.CommandRequest, replacedBy *store.CommandRequ
 			ByName:   row.ResolvedByName,
 			ByEmail:  row.ResolvedByEmail,
 			Surface:  row.Surface,
+		}
+	}
+	if row.Status == store.CommandRequestStatusDismissed && row.ResolvedAt != nil {
+		v.Dismissed = &messages.CommandRequestDismissed{
+			At:       *row.ResolvedAt,
+			ByUserID: row.ResolvedByUserID,
+			ByName:   row.ResolvedByName,
+			ByEmail:  row.ResolvedByEmail,
+			Reason:   row.DismissReason,
+			Surface:  row.Surface,
+		}
+	}
+	if row.Status == store.CommandRequestStatusWithdrawn && row.ResolvedAt != nil {
+		v.Withdrawn = &messages.CommandRequestWithdrawn{
+			At:     *row.ResolvedAt,
+			By:     row.WithdrawnBy,
+			Reason: row.WithdrawnReason,
 		}
 	}
 	return v

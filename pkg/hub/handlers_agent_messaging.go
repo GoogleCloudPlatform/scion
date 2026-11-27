@@ -1366,15 +1366,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if commandRequestSend != nil {
-		if outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM ||
-			result.RecipientID == "" || !strings.HasPrefix(result.Recipient, "user:") ||
-			(result.ConvResult != nil && result.ConvResult.Kind != "direct") {
-			ValidationError(w, "command requests are only supported in direct messages to a user",
+		if outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM {
+			ValidationError(w, "command requests can be sent only to a user or a conversation, not to an agent",
 				map[string]interface{}{"field": "recipient"})
 			return
 		}
-		commandRequestSend.approverID = result.RecipientID
-		commandRequestSend.approverHint = strings.TrimPrefix(result.Recipient, "user:")
+		if !s.resolveCommandRequestApprover(ctx, w, commandRequestSend, result) {
+			return
+		}
 	}
 
 	// Attachments stored as artifacts named by id (ptone/scion#4596): the

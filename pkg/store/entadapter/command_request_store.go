@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	stdsql "database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -155,6 +156,39 @@ func (c *CompositeStore) createCommandRequestPromptTx(ctx context.Context, in *s
 			}
 		}
 		return nil, planErr
+	}
+
+	// Enforce per-agent pending cap (10 pending non-expired command requests,
+	// design §4.5). Replacing an existing pending row via --update keeps the
+	// net pending count unchanged and is allowed even at the cap.
+	// On PostgreSQL (READ COMMITTED), take a transaction-scoped per-agent
+	// advisory lock before counting so concurrent sends with distinct keys
+	// cannot phantom-insert past the cap. SQLite serializes writes natively.
+	if plan.ReplacesRowID == "" || !plan.MarkReplaced {
+		if c.isPostgres() {
+			var lockRes stdsql.Result
+			if lErr := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+				[]any{int32(store.LockCommandRequestQuota), store.StableProjectHash(in.AgentID)}, &lockRes); lErr != nil {
+				return nil, fmt.Errorf("lock command request quota: %w", lErr)
+			}
+		}
+		pendingCount, perr := client.CommandRequest.Query().
+			Where(
+				commandrequest.AgentIDEQ(agentID),
+				commandrequest.StatusEQ(commandrequest.StatusPending),
+				commandrequest.ExpiresAtGT(now),
+			).
+			Count(ctx)
+		if perr != nil {
+			return nil, mapError(perr)
+		}
+		if pendingCount >= messages.MaxPendingCommandRequestsPerAgent {
+			return nil, &store.CommandRequestLimitError{
+				AgentID: in.AgentID,
+				Limit:   messages.MaxPendingCommandRequestsPerAgent,
+				Current: pendingCount,
+			}
+		}
 	}
 
 	intro := strings.TrimSpace(in.Intro)
@@ -781,6 +815,304 @@ func isSQLiteUniqueConstraint(err error) bool {
 	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "duplicate key value")
 }
 
+func classifyCommandRequestNonPendingConflict(row *ent.CommandRequest, now time.Time) string {
+	if row.Status == commandrequest.StatusPending && !row.ExpiresAt.After(now) {
+		return msgaction.ConflictExpired
+	}
+	if code := msgaction.ConflictCode(msgaction.CommandRequestKindSpec, string(row.Status)); code != "" {
+		return code
+	}
+	return msgaction.ConflictAlreadyResolved
+}
+
+// DismissCommandRequest implements store.CommandRequestStore.
+func (c *CompositeStore) DismissCommandRequest(ctx context.Context, in *store.DismissCommandRequestInput) (*store.DismissCommandRequestResult, error) {
+	if in == nil || in.RequestID == "" || in.UserID == "" {
+		return nil, fmt.Errorf("%w: requestID and userID are required", store.ErrInvalidInput)
+	}
+	reqUID, err := parseUUID(in.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	now := in.Now.UTC().Truncate(time.Microsecond)
+	if now.IsZero() {
+		now = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	surface := in.Surface
+	if surface == "" {
+		surface = msgaction.CommandRequestSurfaceNative
+	}
+
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.DismissCommandRequestResult, error) {
+		q := tx.client.CommandRequest.Query().
+			Where(commandrequest.IDEQ(reqUID))
+		if tx.isPostgres() {
+			q = q.ForUpdate()
+		}
+		row, err := q.Only(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+
+		// Idempotent repeat on an already-dismissed row (AC-F6).
+		if row.Status == commandrequest.StatusDismissed {
+			replayed := in.IdempotencyKey != "" &&
+				row.IdempotencyKey != nil && *row.IdempotencyKey == in.IdempotencyKey &&
+				row.ResolvedByUserID != nil && *row.ResolvedByUserID == in.UserID
+			return &store.DismissCommandRequestResult{
+				Request:          entCommandRequestToStore(row),
+				AlreadyDismissed: true,
+				Replayed:         replayed,
+			}, nil
+		}
+
+		// CAS pending -> dismissed WHERE id AND status='pending' AND expires_at > now.
+		ok, current, cerr := casActionRows[*ent.CommandRequest](
+			ctx,
+			1,
+			func(ctx context.Context) (int, error) {
+				upd := tx.client.CommandRequest.Update().
+					Where(
+						commandrequest.IDEQ(reqUID),
+						commandrequest.StatusEQ(commandrequest.StatusPending),
+						commandrequest.ExpiresAtGT(now),
+					).
+					SetStatus(commandrequest.StatusDismissed).
+					SetResolvedByUserID(in.UserID).
+					SetResolvedAt(now).
+					SetSurface(commandrequest.Surface(surface))
+				if in.UserName != "" {
+					upd.SetResolvedByName(in.UserName)
+				}
+				if in.UserEmail != "" {
+					upd.SetResolvedByEmail(in.UserEmail)
+				}
+				if in.Reason != "" {
+					upd.SetDismissReason(in.Reason)
+				}
+				if in.IdempotencyKey != "" {
+					upd.SetIdempotencyKey(in.IdempotencyKey)
+				}
+				return upd.Save(ctx)
+			},
+			func(ctx context.Context) ([]*ent.CommandRequest, error) {
+				reloaded, rerr := tx.client.CommandRequest.Get(ctx, reqUID)
+				if rerr != nil {
+					return nil, rerr
+				}
+				return []*ent.CommandRequest{reloaded}, nil
+			},
+		)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if !ok {
+			if len(current) == 0 {
+				return nil, store.ErrNotFound
+			}
+			cur := current[0]
+			if cur.Status == commandrequest.StatusDismissed {
+				return &store.DismissCommandRequestResult{
+					Request:          entCommandRequestToStore(cur),
+					AlreadyDismissed: true,
+				}, nil
+			}
+			return &store.DismissCommandRequestResult{
+				Conflict:     entCommandRequestToStore(cur),
+				ConflictCode: classifyCommandRequestNonPendingConflict(cur, now),
+			}, nil
+		}
+
+		updated, err := tx.client.CommandRequest.Get(ctx, reqUID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &store.DismissCommandRequestResult{
+			Request: entCommandRequestToStore(updated),
+		}, nil
+	})
+}
+
+// WithdrawCommandRequest implements store.CommandRequestStore.
+func (c *CompositeStore) WithdrawCommandRequest(ctx context.Context, in *store.WithdrawCommandRequestInput) (*store.WithdrawCommandRequestResult, error) {
+	if in == nil || in.AgentID == "" || strings.TrimSpace(in.Key) == "" {
+		return nil, fmt.Errorf("%w: agentID and key are required", store.ErrInvalidInput)
+	}
+	agentUID, err := parseUUID(in.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	now := in.Now.UTC().Truncate(time.Microsecond)
+	if now.IsZero() {
+		now = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	norm := messages.CommandRequestKeyNorm(in.Key)
+
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.WithdrawCommandRequestResult, error) {
+		q := tx.client.CommandRequest.Query().
+			Where(
+				commandrequest.AgentIDEQ(agentUID),
+				commandrequest.KeyNormEQ(norm),
+			).
+			Order(ent.Desc(commandrequest.FieldVersion)).
+			Limit(1)
+		if tx.isPostgres() {
+			q = q.ForUpdate()
+		}
+		rows, err := q.All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if len(rows) == 0 {
+			return nil, store.ErrNotFound
+		}
+		head := rows[0]
+
+		// Idempotent repeat on an already-withdrawn head (AC-F6).
+		if head.Status == commandrequest.StatusWithdrawn {
+			return &store.WithdrawCommandRequestResult{
+				Request:          entCommandRequestToStore(head),
+				AlreadyWithdrawn: true,
+			}, nil
+		}
+
+		if head.Status != commandrequest.StatusPending {
+			return &store.WithdrawCommandRequestResult{
+				Conflict:     entCommandRequestToStore(head),
+				ConflictCode: classifyCommandRequestNonPendingConflict(head, now),
+			}, nil
+		}
+		if !head.ExpiresAt.After(now) {
+			exp := entCommandRequestToStore(head)
+			exp.Status = store.CommandRequestStatusExpired
+			return &store.WithdrawCommandRequestResult{
+				Conflict:     exp,
+				ConflictCode: msgaction.ConflictExpired,
+			}, nil
+		}
+
+		ok, current, cerr := casActionRows[*ent.CommandRequest](
+			ctx,
+			1,
+			func(ctx context.Context) (int, error) {
+				upd := tx.client.CommandRequest.Update().
+					Where(
+						commandrequest.IDEQ(head.ID),
+						commandrequest.StatusEQ(commandrequest.StatusPending),
+						commandrequest.ExpiresAtGT(now),
+					).
+					SetStatus(commandrequest.StatusWithdrawn).
+					SetWithdrawnBy(store.CommandRequestWithdrawnByAgent).
+					SetResolvedAt(now)
+				if in.Reason != "" {
+					upd.SetWithdrawnReason(in.Reason)
+				}
+				return upd.Save(ctx)
+			},
+			func(ctx context.Context) ([]*ent.CommandRequest, error) {
+				reloaded, rerr := tx.client.CommandRequest.Get(ctx, head.ID)
+				if rerr != nil {
+					return nil, rerr
+				}
+				return []*ent.CommandRequest{reloaded}, nil
+			},
+		)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if !ok {
+			if len(current) == 0 {
+				return nil, store.ErrNotFound
+			}
+			cur := current[0]
+			if cur.Status == commandrequest.StatusWithdrawn {
+				return &store.WithdrawCommandRequestResult{
+					Request:          entCommandRequestToStore(cur),
+					AlreadyWithdrawn: true,
+				}, nil
+			}
+			return &store.WithdrawCommandRequestResult{
+				Conflict:     entCommandRequestToStore(cur),
+				ConflictCode: classifyCommandRequestNonPendingConflict(cur, now),
+			}, nil
+		}
+
+		updated, err := tx.client.CommandRequest.Get(ctx, head.ID)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		return &store.WithdrawCommandRequestResult{
+			Request: entCommandRequestToStore(updated),
+		}, nil
+	})
+}
+
+// WithdrawAgentCommandRequestsOnDelete implements store.CommandRequestStore.
+// Only pending rows are transitioned to withdrawn (withdrawn_by="system");
+// approved rows and command_runs are left untouched (§4.12).
+func (c *CompositeStore) WithdrawAgentCommandRequestsOnDelete(ctx context.Context, agentID string, now time.Time) ([]*store.CommandRequest, error) {
+	agentUID, err := parseUUID(agentID)
+	if err != nil {
+		return nil, err
+	}
+	now = now.UTC().Truncate(time.Microsecond)
+	if now.IsZero() {
+		now = time.Now().UTC().Truncate(time.Microsecond)
+	}
+	q := c.client.CommandRequest.Query().
+		Where(
+			commandrequest.AgentIDEQ(agentUID),
+			commandrequest.StatusEQ(commandrequest.StatusPending),
+		)
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	ids := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		ids[i] = r.ID
+	}
+	n, err := c.client.CommandRequest.Update().
+		Where(
+			commandrequest.IDIn(ids...),
+			commandrequest.StatusEQ(commandrequest.StatusPending),
+		).
+		SetStatus(commandrequest.StatusWithdrawn).
+		SetWithdrawnReason("agent deleted").
+		SetWithdrawnBy(store.CommandRequestWithdrawnBySystem).
+		SetResolvedAt(now).
+		Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	updated, err := c.client.CommandRequest.Query().
+		Where(
+			commandrequest.IDIn(ids...),
+			commandrequest.StatusEQ(commandrequest.StatusWithdrawn),
+			commandrequest.WithdrawnByEQ(store.CommandRequestWithdrawnBySystem),
+			commandrequest.ResolvedAtEQ(now),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.CommandRequest, len(updated))
+	for i, r := range updated {
+		out[i] = entCommandRequestToStore(r)
+	}
+	store.RecordWithdrawnCommandRequests(ctx, out)
+	return out, nil
+}
+
 // ExpireCommandRequests implements store.CommandRequestStore.
 func (c *CompositeStore) ExpireCommandRequests(ctx context.Context, now time.Time, limit int) ([]*store.CommandRequest, error) {
 	now = now.UTC().Truncate(time.Microsecond)
@@ -863,6 +1195,21 @@ func (c *CompositeStore) GetCommandRunByRequestID(ctx context.Context, requestID
 	}
 	row, err := c.client.CommandRun.Query().
 		Where(commandrun.RequestIDEQ(uid)).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entCommandRunToStore(row), nil
+}
+
+// GetCommandRunByOutcomeMessageID implements store.CommandRequestStore.
+func (c *CompositeStore) GetCommandRunByOutcomeMessageID(ctx context.Context, messageID string) (*store.CommandRun, error) {
+	msgUID, err := parseUUID(messageID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := c.client.CommandRun.Query().
+		Where(commandrun.OutcomeMessageIDEQ(msgUID)).
 		Only(ctx)
 	if err != nil {
 		return nil, mapError(err)
@@ -1061,7 +1408,7 @@ func (c *CompositeStore) FinishCommandRun(ctx context.Context, in *store.FinishC
 }
 
 // ClaimCommandRunOutcomeDelivery implements store.CommandRequestStore.
-func (c *CompositeStore) ClaimCommandRunOutcomeDelivery(ctx context.Context, runID string, deliveredAt time.Time) (bool, error) {
+func (c *CompositeStore) ClaimCommandRunOutcomeDelivery(ctx context.Context, runID string, deliveredAt, staleClaimBefore time.Time) (bool, error) {
 	uid, err := parseUUID(runID)
 	if err != nil {
 		return false, err
@@ -1070,11 +1417,22 @@ func (c *CompositeStore) ClaimCommandRunOutcomeDelivery(ctx context.Context, run
 	if ts.IsZero() {
 		ts = time.Now().UTC().Truncate(time.Microsecond)
 	}
+	claimPred := commandrun.OutcomeDeliveredAtIsNil()
+	if !staleClaimBefore.IsZero() {
+		staleTS := staleClaimBefore.UTC().Truncate(time.Microsecond)
+		claimPred = commandrun.Or(
+			commandrun.OutcomeDeliveredAtIsNil(),
+			commandrun.And(
+				commandrun.OutcomeDeliveredAtLTE(staleTS),
+				commandrun.OutcomeMessageIDIsNil(),
+			),
+		)
+	}
 	n, err := c.client.CommandRun.Update().
 		Where(
 			commandrun.IDEQ(uid),
 			commandrun.FinishedAtNotNil(),
-			commandrun.OutcomeDeliveredAtIsNil(),
+			claimPred,
 		).
 		SetOutcomeDeliveredAt(ts).
 		Save(ctx)
@@ -1095,7 +1453,6 @@ func (c *CompositeStore) ClearCommandRunOutcomeDelivery(ctx context.Context, run
 		Where(
 			commandrun.IDEQ(uid),
 			commandrun.OutcomeDeliveredAtEQ(ts),
-			commandrun.OutcomeMessageIDIsNil(),
 		).
 		ClearOutcomeDeliveredAt().
 		Save(ctx)
@@ -1227,6 +1584,38 @@ func (c *CompositeStore) ClaimCommandRunsForPoll(ctx context.Context, now time.T
 		}
 		return out, nil
 	})
+}
+
+// ListCommandRunsPendingOutcomeDelivery implements store.CommandRequestStore.
+func (c *CompositeStore) ListCommandRunsPendingOutcomeDelivery(ctx context.Context, finishedSince, staleClaimBefore time.Time, limit int) ([]*store.CommandRun, error) {
+	claimPred := commandrun.OutcomeDeliveredAtIsNil()
+	if !staleClaimBefore.IsZero() {
+		staleTS := staleClaimBefore.UTC().Truncate(time.Microsecond)
+		claimPred = commandrun.Or(
+			commandrun.OutcomeDeliveredAtIsNil(),
+			commandrun.And(
+				commandrun.OutcomeDeliveredAtLTE(staleTS),
+				commandrun.OutcomeMessageIDIsNil(),
+			),
+		)
+	}
+	rows, err := c.client.CommandRun.Query().
+		Where(
+			commandrun.FinishedAtNotNil(),
+			commandrun.FinishedAtGTE(finishedSince.UTC().Truncate(time.Microsecond)),
+			claimPred,
+		).
+		Order(commandrun.ByFinishedAt(), commandrun.ByID()).
+		Limit(clampLimit(limit)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.CommandRun, len(rows))
+	for i, r := range rows {
+		out[i] = entCommandRunToStore(r)
+	}
+	return out, nil
 }
 
 // UpdateCommandRunLastPolled implements store.CommandRequestStore.

@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -363,13 +365,13 @@ func TestCommandRequestStore_ApproveCASIdempotencyAndRunLifecycle(t *testing.T) 
 		t.Errorf("outRow = %+v", outRow)
 	}
 
-	// Outcome delivery claim is once-only unless cleared.
+	// Outcome delivery claim is once-only unless cleared or stale (O3).
 	claimAt := now.Add(8 * time.Second)
-	claimed, err := cs.ClaimCommandRunOutcomeDelivery(ctx, runID, claimAt)
+	claimed, err := cs.ClaimCommandRunOutcomeDelivery(ctx, runID, claimAt, time.Time{})
 	if err != nil || !claimed {
 		t.Fatalf("ClaimCommandRunOutcomeDelivery 1 = (%v, %v)", claimed, err)
 	}
-	claimed2, err := cs.ClaimCommandRunOutcomeDelivery(ctx, runID, claimAt.Add(time.Second))
+	claimed2, err := cs.ClaimCommandRunOutcomeDelivery(ctx, runID, claimAt.Add(time.Second), time.Time{})
 	if err != nil || claimed2 {
 		t.Fatalf("ClaimCommandRunOutcomeDelivery 2 = (%v, %v)", claimed2, err)
 	}
@@ -817,5 +819,409 @@ func TestCommandRequestStore_CreateAndApproveMarkdownCommandRequest(t *testing.T
 	}
 	if len(listed.Items) != 1 {
 		t.Fatalf("listed count = %d, want 1", len(listed.Items))
+	}
+}
+
+func TestCommandRequestStore_P5_DismissWithdrawCapDeleteAndOutcomeRetry(t *testing.T) {
+	ctx := context.Background()
+	cs, projID, agentID := newCommandRequestTestStore(t)
+	approverID := uuid.New().String()
+	execAgentID := uuid.New().String()
+	execProjID := uuid.New().String()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Pending cap 10 per agent (AC-F7).
+	var created []*store.CommandRequest
+	for i := 0; i < messages.MaxPendingCommandRequestsPerAgent; i++ {
+		res, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, fmt.Sprintf("cap-%02d", i), "echo ok", false, now.Add(time.Duration(i)*time.Second)))
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		created = append(created, res.Request)
+	}
+
+	// 11th distinct pending key fails with CommandRequestLimitError.
+	_, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, "cap-overflow", "echo no", false, now.Add(20*time.Second)))
+	var limitErr *store.CommandRequestLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("11th pending key err = %v, want CommandRequestLimitError", err)
+	}
+	if limitErr.Limit != messages.MaxPendingCommandRequestsPerAgent || limitErr.Current != messages.MaxPendingCommandRequestsPerAgent {
+		t.Fatalf("limitErr = %+v", limitErr)
+	}
+
+	// --update replacing an existing pending key succeeds even at the cap (net pending unchanged).
+	updRes, err := cs.CreateCommandRequestPrompt(ctx, makeCommandRequestPromptInput(t, projID, agentID, approverID, "cap-00", "echo updated", true, now.Add(21*time.Second)))
+	if err != nil {
+		t.Fatalf("--update at cap failed: %v", err)
+	}
+	if updRes.Request.Version != 2 || updRes.Replaced == nil || updRes.Replaced.Status != store.CommandRequestStatusReplaced {
+		t.Fatalf("updRes = %+v", updRes)
+	}
+
+	// 2. Dismiss pending -> dismissed + idempotent repeat (AC-F6).
+	disRes, err := cs.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+		RequestID:      created[1].ID,
+		UserID:         approverID,
+		UserName:       "Alice",
+		UserEmail:      "alice@example.com",
+		Reason:         "not needed",
+		Surface:        msgaction.CommandRequestSurfaceCLI,
+		IdempotencyKey: "dis-1",
+		Now:            now.Add(22 * time.Second),
+	})
+	if err != nil || disRes.Request == nil || disRes.Request.Status != store.CommandRequestStatusDismissed || disRes.AlreadyDismissed {
+		t.Fatalf("DismissCommandRequest = (%+v, %v)", disRes, err)
+	}
+	if disRes.Request.DismissReason != "not needed" {
+		t.Fatalf("DismissReason = %q, want %q", disRes.Request.DismissReason, "not needed")
+	}
+	disReplay, err := cs.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+		RequestID:      created[1].ID,
+		UserID:         approverID,
+		Surface:        msgaction.CommandRequestSurfaceCLI,
+		IdempotencyKey: "dis-1",
+		Now:            now.Add(23 * time.Second),
+	})
+	if err != nil || !disReplay.AlreadyDismissed || !disReplay.Replayed {
+		t.Fatalf("DismissCommandRequest replay = (%+v, %v)", disReplay, err)
+	}
+	disRepeat, err := cs.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+		RequestID: created[1].ID,
+		UserID:    approverID,
+		Surface:   msgaction.CommandRequestSurfaceCLI,
+		Now:       now.Add(24 * time.Second),
+	})
+	if err != nil || !disRepeat.AlreadyDismissed || disRepeat.Replayed {
+		t.Fatalf("DismissCommandRequest repeat = (%+v, %v)", disRepeat, err)
+	}
+
+	// 3. Withdraw pending -> withdrawn + idempotent repeat (AC-F6).
+	wdRes, err := cs.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+		AgentID: agentID,
+		Key:     "CAP-02",
+		Reason:  "superseded",
+		Now:     now.Add(25 * time.Second),
+	})
+	if err != nil || wdRes.Request == nil || wdRes.Request.Status != store.CommandRequestStatusWithdrawn || wdRes.AlreadyWithdrawn {
+		t.Fatalf("WithdrawCommandRequest = (%+v, %v)", wdRes, err)
+	}
+	if wdRes.Request.WithdrawnBy != store.CommandRequestWithdrawnByAgent || wdRes.Request.WithdrawnReason != "superseded" {
+		t.Fatalf("withdrawn fields = (by=%q reason=%q)", wdRes.Request.WithdrawnBy, wdRes.Request.WithdrawnReason)
+	}
+	wdRepeat, err := cs.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+		AgentID: agentID,
+		Key:     "cap-02",
+		Now:     now.Add(26 * time.Second),
+	})
+	if err != nil || !wdRepeat.AlreadyWithdrawn {
+		t.Fatalf("WithdrawCommandRequest repeat = (%+v, %v)", wdRepeat, err)
+	}
+	wdDis, err := cs.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+		AgentID: agentID,
+		Key:     "cap-01",
+		Now:     now.Add(27 * time.Second),
+	})
+	if err != nil || wdDis.ConflictCode != msgaction.ConflictDismissed {
+		t.Fatalf("Withdraw on dismissed = (%+v, %v)", wdDis, err)
+	}
+
+	// 4. Race tests: approve vs dismiss, and approve vs withdraw (AC-F6).
+	{
+		req := created[3]
+		start := make(chan struct{})
+		var appOut *store.ApproveCommandRequestResult
+		var disOut *store.DismissCommandRequestResult
+		var appErr, disErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			appOut, appErr = cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+				RequestID:     req.ID,
+				CommandSHA256: req.CommandSHA256,
+				UserID:        approverID,
+				Surface:       msgaction.CommandRequestSurfaceCLI,
+				ExecAgentID:   execAgentID,
+				ExecProjectID: execProjID,
+				LeaseUntil:    now.Add(6 * time.Minute),
+				Now:           now.Add(30 * time.Second),
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			disOut, disErr = cs.DismissCommandRequest(ctx, &store.DismissCommandRequestInput{
+				RequestID: req.ID,
+				UserID:    approverID,
+				Surface:   msgaction.CommandRequestSurfaceCLI,
+				Now:       now.Add(30 * time.Second),
+			})
+		}()
+		close(start)
+		wg.Wait()
+		if appErr != nil || disErr != nil {
+			t.Fatalf("race approve/dismiss errors: app=%v dis=%v", appErr, disErr)
+		}
+		appWon := appOut.Run != nil
+		disWon := disOut.Request != nil && disOut.Conflict == nil && !disOut.AlreadyDismissed
+		if appWon == disWon {
+			t.Fatalf("expected exactly one winner in approve vs dismiss race: app=%+v dis=%+v", appOut, disOut)
+		}
+		if appWon && disOut.ConflictCode != msgaction.ConflictAlreadyResolved {
+			t.Fatalf("dismiss lost to approve but conflictCode=%q", disOut.ConflictCode)
+		}
+		if disWon && appOut.ConflictCode != msgaction.ConflictDismissed {
+			t.Fatalf("approve lost to dismiss but conflictCode=%q", appOut.ConflictCode)
+		}
+	}
+
+	{
+		req := created[4]
+		start := make(chan struct{})
+		var appOut *store.ApproveCommandRequestResult
+		var wdOut *store.WithdrawCommandRequestResult
+		var appErr, wdErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			appOut, appErr = cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+				RequestID:     req.ID,
+				CommandSHA256: req.CommandSHA256,
+				UserID:        approverID,
+				Surface:       msgaction.CommandRequestSurfaceCLI,
+				ExecAgentID:   execAgentID,
+				ExecProjectID: execProjID,
+				LeaseUntil:    now.Add(6 * time.Minute),
+				Now:           now.Add(31 * time.Second),
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			wdOut, wdErr = cs.WithdrawCommandRequest(ctx, &store.WithdrawCommandRequestInput{
+				AgentID: agentID,
+				Key:     req.Key,
+				Now:     now.Add(31 * time.Second),
+			})
+		}()
+		close(start)
+		wg.Wait()
+		if appErr != nil || wdErr != nil {
+			t.Fatalf("race approve/withdraw errors: app=%v wd=%v", appErr, wdErr)
+		}
+		appWon := appOut.Run != nil
+		wdWon := wdOut.Request != nil && wdOut.Conflict == nil && !wdOut.AlreadyWithdrawn
+		if appWon == wdWon {
+			t.Fatalf("expected exactly one winner in approve vs withdraw race: app=%+v wd=%+v", appOut, wdOut)
+		}
+		if appWon && wdOut.ConflictCode != msgaction.ConflictAlreadyResolved {
+			t.Fatalf("withdraw lost to approve but conflictCode=%q", wdOut.ConflictCode)
+		}
+		if wdWon && appOut.ConflictCode != msgaction.ConflictWithdrawn {
+			t.Fatalf("approve lost to withdraw but conflictCode=%q", appOut.ConflictCode)
+		}
+	}
+
+	// 5. Approve created[5] for outcome retry & hard-delete untouched checks.
+	app5, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     created[5].ID,
+		CommandSHA256: created[5].CommandSHA256,
+		UserID:        approverID,
+		Surface:       msgaction.CommandRequestSurfaceCLI,
+		ExecAgentID:   execAgentID,
+		ExecProjectID: execProjID,
+		LeaseUntil:    now.Add(6 * time.Minute),
+		Now:           now.Add(32 * time.Second),
+	})
+	if err != nil || app5.Run == nil {
+		t.Fatalf("approve 5 = (%+v, %v)", app5, err)
+	}
+
+	finAt := now.Add(35 * time.Second)
+	wonFin, err := cs.FinishCommandRun(ctx, &store.FinishCommandRunInput{
+		RunID:      app5.Run.ID,
+		Status:     store.CommandRunStatusSucceeded,
+		FinishedAt: finAt,
+	})
+	if err != nil || !wonFin {
+		t.Fatalf("FinishCommandRun 5 = (%v, %v)", wonFin, err)
+	}
+	pendingDeliv, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(-30*time.Minute), finAt.Add(-2*time.Minute), 10)
+	if err != nil || len(pendingDeliv) != 1 || pendingDeliv[0].ID != app5.Run.ID {
+		t.Fatalf("ListCommandRunsPendingOutcomeDelivery = (%+v, %v)", pendingDeliv, err)
+	}
+	oldDeliv, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(time.Second), finAt.Add(-2*time.Minute), 10)
+	if err != nil || len(oldDeliv) != 0 {
+		t.Fatalf("ListCommandRunsPendingOutcomeDelivery (past window) = (%+v, %v)", oldDeliv, err)
+	}
+	claimAt := finAt.Add(time.Second)
+	if ok, cerr := cs.ClaimCommandRunOutcomeDelivery(ctx, app5.Run.ID, claimAt, claimAt.Add(-2*time.Minute)); cerr != nil || !ok {
+		t.Fatalf("ClaimCommandRunOutcomeDelivery = (%v, %v)", ok, cerr)
+	}
+	// Fresh claim without message is not re-listed yet, but once stale (O3) it is re-listed and re-claimable.
+	freshClaimList, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(-30*time.Minute), claimAt.Add(-time.Second), 10)
+	if err != nil || len(freshClaimList) != 0 {
+		t.Fatalf("fresh claim should not be re-listed: (%+v, %v)", freshClaimList, err)
+	}
+	staleClaimList, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(-30*time.Minute), claimAt.Add(time.Second), 10)
+	if err != nil || len(staleClaimList) != 1 || staleClaimList[0].ID != app5.Run.ID {
+		t.Fatalf("stale pre-message claim should be re-listed (O3): (%+v, %v)", staleClaimList, err)
+	}
+	if rerr := cs.RecordCommandRunOutcomeMessage(ctx, app5.Run.ID, uuid.New().String()); rerr != nil {
+		t.Fatalf("RecordCommandRunOutcomeMessage: %v", rerr)
+	}
+	// Once outcome_message_id is recorded, a stale claim timestamp must NOT re-list it (already delivered).
+	deliveredList, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(-30*time.Minute), claimAt.Add(time.Hour), 10)
+	if err != nil || len(deliveredList) != 0 {
+		t.Fatalf("delivered run with message ID must not be re-listed: (%+v, %v)", deliveredList, err)
+	}
+	if ok, cerr := cs.ClearCommandRunOutcomeDelivery(ctx, app5.Run.ID, claimAt); cerr != nil || !ok {
+		t.Fatalf("ClearCommandRunOutcomeDelivery after RecordOutcomeMessage = (%v, %v)", ok, cerr)
+	}
+	pendingDeliv2, err := cs.ListCommandRunsPendingOutcomeDelivery(ctx, finAt.Add(-30*time.Minute), claimAt.Add(-2*time.Minute), 10)
+	if err != nil || len(pendingDeliv2) != 1 || pendingDeliv2[0].ID != app5.Run.ID {
+		t.Fatalf("ListCommandRunsPendingOutcomeDelivery after clear = (%+v, %v)", pendingDeliv2, err)
+	}
+
+	// 6. Asker hard-delete hook: pending -> withdrawn (withdrawn_by=system); approved & runs untouched.
+	var collected []*store.CommandRequest
+	colCtx := store.WithWithdrawnCommandRequestsCollector(ctx, &collected)
+	withdrawnOnDel, err := cs.WithdrawAgentCommandRequestsOnDelete(colCtx, agentID, now.Add(40*time.Second))
+	if err != nil {
+		t.Fatalf("WithdrawAgentCommandRequestsOnDelete: %v", err)
+	}
+	if len(withdrawnOnDel) == 0 || len(collected) != len(withdrawnOnDel) {
+		t.Fatalf("withdrawnOnDel=%d collected=%d", len(withdrawnOnDel), len(collected))
+	}
+	for _, r := range withdrawnOnDel {
+		if r.Status != store.CommandRequestStatusWithdrawn || r.WithdrawnBy != store.CommandRequestWithdrawnBySystem || r.WithdrawnReason != "agent deleted" {
+			t.Fatalf("unexpected withdrawn row: %+v", r)
+		}
+	}
+	gotReq5, err := cs.GetCommandRequest(ctx, created[5].ID)
+	if err != nil || gotReq5.Status != store.CommandRequestStatusApproved {
+		t.Fatalf("approved row 5 mutated on delete: (%+v, %v)", gotReq5, err)
+	}
+	gotRun5, err := cs.GetCommandRun(ctx, app5.Run.ID)
+	if err != nil || gotRun5.Status != store.CommandRunStatusSucceeded {
+		t.Fatalf("run 5 mutated on delete: (%+v, %v)", gotRun5, err)
+	}
+}
+
+func TestCommandRequest_PurgeDeletedAgentsWithdrawsPending(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	projectID := uuid.New().String()
+	if err := cs.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "CmdReq Purge", Slug: "cmdreq-purge",
+		Created: now, Updated: now,
+	}); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	approverID := uuid.New().String()
+
+	purgedAgent := makeAgent(projectID, "purged-asker")
+	if err := cs.CreateAgent(ctx, purgedAgent); err != nil {
+		t.Fatalf("CreateAgent(purged): %v", err)
+	}
+	purgedAgent.DeletedAt = now.Add(-48 * time.Hour)
+	if err := cs.UpdateAgent(ctx, purgedAgent); err != nil {
+		t.Fatalf("UpdateAgent(purged): %v", err)
+	}
+
+	liveAgent := makeAgent(projectID, "live-asker")
+	if err := cs.CreateAgent(ctx, liveAgent); err != nil {
+		t.Fatalf("CreateAgent(live): %v", err)
+	}
+
+	createPrompt := func(agent *store.Agent, key string) *store.CommandRequest {
+		t.Helper()
+		norm, err := messages.NormalizeCommandRequest("command_request", &messages.CommandRequestInput{
+			Key: key, Script: "echo " + key, TimeoutS: 30,
+		})
+		if err != nil {
+			t.Fatalf("NormalizeCommandRequest: %v", err)
+		}
+		res, err := cs.CreateCommandRequestPrompt(ctx, &store.CommandRequestPromptInput{
+			Message: &store.Message{
+				ID:             uuid.New().String(),
+				ProjectID:      projectID,
+				ConversationID: uuid.New().String(),
+				ThreadID:       "dm:user:" + approverID + ":agent:" + agent.ID,
+				Sender:         "agent:" + agent.Slug,
+				SenderID:       agent.ID,
+				Recipient:      "user:approver@example.com",
+				RecipientID:    approverID,
+			},
+			AgentID:    agent.ID,
+			AgentName:  agent.Slug,
+			ApproverID: approverID,
+			Request:    norm,
+			Now:        now,
+			TTL:        msgaction.CommandRequestTTL,
+		})
+		if err != nil {
+			t.Fatalf("CreateCommandRequestPrompt(%s): %v", key, err)
+		}
+		return res.Request
+	}
+
+	pendingPurged := createPrompt(purgedAgent, "purge-pending")
+	approvedPurged := createPrompt(purgedAgent, "purge-approved")
+	pendingLive := createPrompt(liveAgent, "live-pending")
+
+	appRes, err := cs.ApproveCommandRequest(ctx, &store.ApproveCommandRequestInput{
+		RequestID:     approvedPurged.ID,
+		UserID:        approverID,
+		UserName:      "Approver",
+		UserEmail:     "approver@example.com",
+		CommandSHA256: approvedPurged.CommandSHA256,
+		Surface:       msgaction.CommandRequestSurfaceCLI,
+		ExecAgentID:   uuid.New().String(),
+		ExecProjectID: projectID,
+		Now:           now.Add(time.Second),
+		LeaseUntil:    now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("ApproveCommandRequest: %v", err)
+	}
+
+	purged, err := cs.PurgeDeletedAgents(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("PurgeDeletedAgents: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("purged = %d, want 1", purged)
+	}
+
+	// Purged agent's pending request is withdrawn by system.
+	gotPending, err := cs.GetCommandRequest(ctx, pendingPurged.ID)
+	if err != nil {
+		t.Fatalf("GetCommandRequest(pendingPurged): %v", err)
+	}
+	if gotPending.Status != store.CommandRequestStatusWithdrawn || gotPending.WithdrawnBy != store.CommandRequestWithdrawnBySystem || gotPending.WithdrawnReason != "agent deleted" {
+		t.Fatalf("purged pending request = %+v, want withdrawn/system/'agent deleted'", gotPending)
+	}
+
+	// Purged agent's approved request and run remain untouched.
+	gotApproved, err := cs.GetCommandRequest(ctx, approvedPurged.ID)
+	if err != nil || gotApproved.Status != store.CommandRequestStatusApproved {
+		t.Fatalf("purged approved request = (%+v, %v), want approved", gotApproved, err)
+	}
+	gotRun, err := cs.GetCommandRun(ctx, appRes.Run.ID)
+	if err != nil || gotRun.Status != store.CommandRunStatusQueued {
+		t.Fatalf("purged approved run = (%+v, %v), want queued", gotRun, err)
+	}
+
+	// Live agent's pending request remains pending.
+	gotLive, err := cs.GetCommandRequest(ctx, pendingLive.ID)
+	if err != nil || gotLive.Status != store.CommandRequestStatusPending {
+		t.Fatalf("live pending request = (%+v, %v), want pending", gotLive, err)
 	}
 }

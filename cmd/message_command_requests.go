@@ -41,6 +41,7 @@ var (
 	msgCommandWorkdir     string
 	msgCommandTimeout     string
 	msgCommandShareOutput bool
+	msgCommandApprover    string
 	msgCommandReqPayload  json.RawMessage
 )
 
@@ -59,17 +60,17 @@ func resetCommandRequestFlags() {
 	msgCommandWorkdir = ""
 	msgCommandTimeout = ""
 	msgCommandShareOutput = false
+	msgCommandApprover = ""
 	msgCommandReqPayload = nil
 }
 
 // validateCommandRequestFlags checks the command-request flags against each
-// other and the recipient before reading files or sending (§4.5).
-// In P1, command requests are DM-only (user:<email> or @<email>); conversation
-// targets are refused.
+// other and the recipient before reading files or sending (§4.5, D6).
+// Recipients may be a user (DM) or a conversation/thread (requiring --approver).
 func validateCommandRequestFlags(agentTarget, group, convTarget bool) error {
 	if !commandRequestRequested() {
-		if msgCommandInline != "" || msgCommandFile != "" || msgCommandDescription != "" || msgCommandWorkdir != "" || msgCommandTimeout != "" || msgCommandShareOutput {
-			return newUsageError("--command, --command-file, --description, --workdir, --timeout, and --share-output are valid only with --command-request")
+		if msgCommandInline != "" || msgCommandFile != "" || msgCommandDescription != "" || msgCommandWorkdir != "" || msgCommandTimeout != "" || msgCommandShareOutput || msgCommandApprover != "" {
+			return newUsageError("--command, --command-file, --description, --workdir, --timeout, --share-output, and --approver are valid only with --command-request")
 		}
 		return nil
 	}
@@ -88,8 +89,11 @@ func validateCommandRequestFlags(agentTarget, group, convTarget bool) error {
 	if msgCommandFile == "-" && msgBodyFile == "-" {
 		return newUsageError("--command-file - and --body-file - both read stdin; use a file for one of them")
 	}
-	if agentTarget || group || convTarget {
-		return errors.New("command requests can be sent only as a direct message to a user (user:<email> or @<email>), not to an agent, group, or conversation")
+	if agentTarget || group {
+		return errors.New("command requests can be sent only to a user or a conversation, not to an agent or a message group")
+	}
+	if convTarget && strings.TrimSpace(msgCommandApprover) == "" {
+		return newUsageError("command requests sent to a conversation or thread require --approver naming one human participant")
 	}
 	for _, f := range []struct {
 		name string
@@ -149,6 +153,7 @@ func loadCommandRequestPayload() (json.RawMessage, error) {
 		Workdir:              msgCommandWorkdir,
 		TimeoutS:             timeoutS,
 		ShareOutputRequested: msgCommandShareOutput,
+		Approver:             strings.TrimSpace(msgCommandApprover),
 	}
 	if _, err := messages.NormalizeCommandRequest("command_request", input); err != nil {
 		return nil, err
@@ -201,6 +206,10 @@ func formatCommandRequestSendError(recipient string, err error) error {
 		}
 		return errors.New(errMsgCommandRequestsExperimentRequired)
 	case apiErr.StatusCode == http.StatusConflict && apiErr.Code == msgaction.ConflictCmdKeyPending:
+		if msg := strings.TrimSpace(apiErr.Message); msg != "" {
+			return errors.New(safeText(msg))
+		}
+	case apiErr.StatusCode == http.StatusTooManyRequests && apiErr.Code == msgaction.ConflictCmdRequestLimit:
 		if msg := strings.TrimSpace(apiErr.Message); msg != "" {
 			return errors.New(safeText(msg))
 		}

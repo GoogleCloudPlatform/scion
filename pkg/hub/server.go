@@ -8828,8 +8828,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/agent/secret-requests", s.guarded("/api/v1/agent/secret-requests", s.handleAgentSecretRequestRoutes))
 	s.mux.HandleFunc("/api/v1/agent/secret-requests/", s.guarded("/api/v1/agent/secret-requests/", s.handleAgentSecretRequestRoutes))
 
-	// Agent self-service command-request list (agent token auth; 404 when hub.command_requests is off)
+	// Agent self-service command-request list and withdraw (agent token auth; 404 when hub.command_requests is off)
 	s.mux.HandleFunc("/api/v1/agent/command-requests", s.guarded("/api/v1/agent/command-requests", s.handleAgentCommandRequestRoutes))
+	s.mux.HandleFunc("/api/v1/agent/command-requests/", s.guarded("/api/v1/agent/command-requests/", s.handleAgentCommandRequestRoutes))
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))

@@ -225,6 +225,9 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 	if err != nil {
 		return fmt.Errorf("soft delete: deactivate service-account assignments: %w", err)
 	}
+	if _, err := tx.WithdrawAgentCommandRequestsOnDelete(ctx, row.ID, now.UTC()); err != nil {
+		return fmt.Errorf("soft delete: withdraw agent command requests: %w", err)
+	}
 	if err := runAgentTxHooks(ctx, "soft-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.softDelete), tx, &row, actor); err != nil {
 		return err
 	}
@@ -303,6 +306,12 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	// withAgentSecretCleanup (R4).
 	if _, err := tx.WithdrawAgentSecretRequestsOnDelete(ctx, a.ID, time.Now().UTC()); err != nil {
 		return 0, 0, fmt.Errorf("%s: withdraw agent secret requests: %w", label, err)
+	}
+	// Withdraw pending command requests inside the transaction (approved rows
+	// and command_runs are left untouched, design §4.12); live updates and
+	// audit events are published strictly after commit by withAgentSecretCleanup.
+	if _, err := tx.WithdrawAgentCommandRequestsOnDelete(ctx, a.ID, time.Now().UTC()); err != nil {
+		return 0, 0, fmt.Errorf("%s: withdraw agent command requests: %w", label, err)
 	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err

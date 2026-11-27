@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 468
+**Operations:** 469
 
 ## Table of Contents
 
@@ -248,6 +248,7 @@
 - [chat.commandrequest.approve](#chatcommandrequestapprove) — Approve a pending command request matching command_sha256, atomically transitioning pending -> approved and inserting a single queued command_runs row for the approver's execution container. Requires an interactive human session, same-origin CSRF check on cookie sessions, recipient membership, named approver match, and an eligible non-stopped execution container. 404 while hub.command_requests is off
 - [chat.commandrequest.output](#chatcommandrequestoutput) — Read the captured output tail of an approved command run. Requires an interactive human session, caller == run.approver_user_id, and live agent.attach on exec_agent_id (fails closed if deleted). Sets Cache-Control: no-store and bypasses response compression. 404 while hub.command_requests is off
 - [chat.commandrequest.frommessage](#chatcommandrequestfrommessage) — Create and approve a version-1 command request from a verbatim fenced shell block in an agent-authored chat message, inserting both the approved command_requests row (surface=markdown_block) and the single queued command_runs row in one insert-only transaction. Requires an interactive human session, same-origin CSRF check on cookie sessions, single-addressed-human recipient match, message age < 24 h, verbatim-fence and canonical-hash match, and an eligible non-stopped execution container. 404 while hub.command_requests is off
+- [chat.commandrequest.dismiss](#chatcommandrequestdismiss) — Dismiss a pending command request with an optional reason (<=500 runes), atomically transitioning pending -> dismissed, notifying the requesting agent via a command-response message, and emitting a dismissed audit event. Requires an interactive human session, same-origin CSRF check on cookie sessions, recipient membership, and named approver match. 404 while hub.command_requests is off
 - [chat.secretrequest.fulfill](#chatsecretrequestfulfill) — Fulfill all pending keys of a secret-request card, storing each value at agent scope in the secret backend, notifying the requesting agent via a secret-response message, and emitting fulfilled audit events (never values). Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
 - [chat.secretrequest.dismiss](#chatsecretrequestdismiss) — Dismiss all or a subset of pending keys on a secret-request card with an optional reason, notifying the requesting agent via a secret-response message and emitting dismissed audit events. Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
 - [chat.decisionprompt.dismiss](#chatdecisionpromptdismiss) — Dismiss open decisions of a decision prompt without answering, once the version is at least 5 minutes old, with an optional plain-text reason (up to 500 characters) and surface (native, decisions_page or inbox). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key; a UAT also needs inbox:write and the prompt's project inside its boundary), surviving chat retention purge of the prompt message. Agents get 403 users_only, visitors and non-session/non-UAT credentials get 403, and a user a live asking agent takes no messages from gets 403 MESSAGE_DENIED. A missing or unreadable prompt is 404; a too-recent version is 409 too_recent with details.availableAt; an already-settled prompt is 409 dismiss_changed (with details.availableAt when a listed row is too recent). Records one outcome=dismiss ($dismissed) answer row per dismissed decision with a shared batch id and one decision-response message in one transaction, delivers it to a live asking agent, and reports deliveryStatus: delivered, held (for the agent's next session), gone (stored without failure, not sent), unreachable (a suspended or stopped asker: stored failed, not sent), failed, or none when nothing new was dismissed; and publishes decision.updated per row. 404 while web.decisions is off
@@ -9469,6 +9470,54 @@
 ### Tests
 
 - `pkg/hub:TestCommandRequests_FromMessage_EndToEnd`
+
+---
+
+## chat.commandrequest.dismiss
+
+**Domain:** chat
+
+**Description:** Dismiss a pending command request with an optional reason (<=500 runes), atomically transitioning pending -> dismissed, notifying the requesting agent via a command-response message, and emitting a dismissed audit event. Requires an interactive human session, same-origin CSRF check on cookie sessions, recipient membership, and named approver match. 404 while hub.command_requests is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/command-requests/{id}/dismiss` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent
+
+**Effects:** `update-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.commandrequest.dismiss`
+- **Context Fields:** actor_id, row_id, agent_id, key, command_sha256
+- **After Fields:** status
+- **Atomic:** No
+- **Non-Atomic Justification:** Dismiss CAS runs in one transaction; SSE publish, audit event, and best-effort agent notification run post-commit
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotency_key (optional)
+- **Retry:** repeating dismiss on an already-dismissed request is idempotent and returns the dismissed view without re-notifying
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestCommandRequests_DismissAndWithdraw`
 
 ---
 

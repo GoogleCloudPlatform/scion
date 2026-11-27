@@ -402,6 +402,15 @@ const (
 	// (1000) waiting-fire caps. In the per-object range; not taken through
 	// AdvisoryLocker.
 	LockTriggerOfflineQueue AdvisoryLockKey = 0x5C101009
+
+	// LockCommandRequestQuota is the CLASS ID for per-agent pending command-request
+	// cap serialization (ptone/scion#9285, design §4.5): a transaction-scoped
+	// pg_advisory_xact_lock(classid, objid) with objid StableProjectHash(agentID),
+	// taken by CreateCommandRequestPrompt before counting and inserting so
+	// concurrent sends with distinct keys cannot bypass the 10-pending cap on
+	// PostgreSQL under READ COMMITTED. In the per-object range; not taken through
+	// AdvisoryLocker.
+	LockCommandRequestQuota AdvisoryLockKey = 0x5C10100B
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

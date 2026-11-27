@@ -19,6 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -32,6 +33,7 @@ type commandRequestPromptSend struct {
 	request      *messages.CommandRequest
 	update       bool
 	intro        string
+	approverRaw  string
 	approverID   string
 	approverHint string
 	result       *store.CommandRequestPromptResult
@@ -76,12 +78,7 @@ func (s *Server) prepareCommandRequestSend(w http.ResponseWriter, req *OutboundM
 	}
 	recipient := strings.TrimSpace(req.Recipient)
 	if strings.HasPrefix(recipient, "agent:") || isBroadcastRecipient(recipient) {
-		ValidationError(w, "command requests can be sent only as a direct message to a user, not to an agent or a broadcast",
-			map[string]interface{}{"field": "recipient"})
-		return nil, false
-	}
-	if strings.TrimSpace(req.ConversationID) != "" || strings.TrimSpace(req.ConversationRef) != "" || strings.TrimSpace(req.ThreadID) != "" && !strings.HasPrefix(strings.TrimSpace(req.ThreadID), "dm:") {
-		ValidationError(w, "command requests are only supported in direct messages to a user",
+		ValidationError(w, "command requests can be sent only to a user or a conversation, not to an agent or a broadcast",
 			map[string]interface{}{"field": "recipient"})
 		return nil, false
 	}
@@ -101,9 +98,167 @@ func (s *Server) prepareCommandRequestSend(w http.ResponseWriter, req *OutboundM
 		return nil, false
 	}
 	return &commandRequestPromptSend{
-		request: normalized,
-		update:  req.CommandRequestUpdate,
+		request:     normalized,
+		update:      req.CommandRequestUpdate,
+		approverRaw: strings.TrimSpace(req.CommandRequest.Approver),
 	}, true
+}
+
+// isEligibleCommandRequestApprover reports whether u is an active, non-expired,
+// non-federated (non-visitor) human user who can hold an interactive session
+// and approve a command request (design §4.5, §4.7, D6, R2).
+func isEligibleCommandRequestApprover(u *store.User, now time.Time) bool {
+	if u == nil || u.IsFederated() {
+		return false
+	}
+	if u.Status != "" && u.Status != store.UserStatusActive {
+		return false
+	}
+	if u.ExpiresAt != nil && !u.ExpiresAt.After(now) {
+		return false
+	}
+	return true
+}
+
+// resolveCommandRequestApprover resolves and validates the single named human
+// approver for a command request send (design §4.5, D6):
+//   - DM to a user: approver is the DM user (must be an active non-visitor user);
+//     if --approver is supplied it must match that user.
+//   - Conversation / thread: --approver is required and must resolve to an
+//     active, non-visitor human participant of the target conversation.
+//     Email-shaped inputs (containing '@') match email only, never display name (O1).
+func (s *Server) resolveCommandRequestApprover(ctx context.Context, w http.ResponseWriter, cr *commandRequestPromptSend, result *routingResult) bool {
+	isConv := (result.ConvResult != nil && result.ConvResult.Kind != "direct") ||
+		(result.ConversationID != "" && !strings.HasPrefix(result.Recipient, "user:"))
+
+	raw := strings.TrimSpace(cr.approverRaw)
+	if strings.HasPrefix(raw, "agent:") || strings.HasPrefix(raw, "@agent:") {
+		ValidationError(w, "command request approver must be a human user, not an agent",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+
+	now := time.Now().UTC()
+	if !isConv {
+		if result.RecipientID == "" || !strings.HasPrefix(result.Recipient, "user:") {
+			ValidationError(w, "command requests can be sent only to a user or a conversation, not to an agent",
+				map[string]interface{}{"field": "recipient"})
+			return false
+		}
+		dmUser, uerr := s.store.GetUser(ctx, result.RecipientID)
+		if uerr != nil && !errors.Is(uerr, store.ErrNotFound) {
+			writeErrorFromErr(w, uerr, "")
+			return false
+		}
+		if !isEligibleCommandRequestApprover(dmUser, now) {
+			ValidationError(w, "command request approver must be an active non-visitor human user",
+				map[string]interface{}{"field": "command_request.approver"})
+			return false
+		}
+		dmEmail := strings.TrimPrefix(result.Recipient, "user:")
+		if raw != "" {
+			clean := stripApproverPrefix(raw)
+			if !strings.EqualFold(clean, dmEmail) && clean != result.RecipientID {
+				ValidationError(w, "in a direct message, --approver must match the DM recipient",
+					map[string]interface{}{"field": "command_request.approver"})
+				return false
+			}
+		}
+		cr.approverID = result.RecipientID
+		cr.approverHint = dmEmail
+		return true
+	}
+
+	// Group conversation / thread target: --approver is required (D6), and a
+	// caller-supplied dm: thread_id is refused so group requests can never carry
+	// a DM-shaped chat key (R1, design §4.9).
+	if strings.HasPrefix(strings.TrimSpace(result.ThreadID), "dm:") {
+		ValidationError(w, "a dm: thread_id cannot be used with a non-DM conversation",
+			map[string]interface{}{"field": "thread_id"})
+		return false
+	}
+	if raw == "" {
+		ValidationError(w, "command requests sent to a conversation or thread require --approver naming one human participant",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+	convID := result.ConversationID
+	if convID == "" && result.ConvResult != nil {
+		convID = result.ConvResult.ConversationID
+	}
+	if convID == "" {
+		ValidationError(w, "cannot resolve conversation participants for --approver",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+
+	parts, err := s.store.ListParticipants(ctx, convID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return false
+	}
+	clean := stripApproverPrefix(raw)
+	emailShaped := strings.Contains(clean, "@")
+	var matched *store.User
+	ambiguous := false
+	for _, p := range parts {
+		if p.PrincipalKind != "user" {
+			continue
+		}
+		u, uerr := s.store.GetUser(ctx, p.PrincipalID)
+		if uerr != nil || u == nil {
+			continue
+		}
+		// Match email (including federated email for eligibility rejection) or
+		// exact user ID only — never user-controlled display names (O1/L2).
+		var isMatch bool
+		if emailShaped {
+			isMatch = strings.EqualFold(clean, u.Email) || (u.FederatedEmail != nil && strings.EqualFold(clean, *u.FederatedEmail))
+		} else {
+			isMatch = clean == u.ID
+		}
+		if isMatch {
+			if matched != nil && matched.ID != u.ID {
+				ambiguous = true
+				break
+			}
+			matched = u
+		}
+	}
+	if ambiguous {
+		ValidationError(w, "approver matches more than one human participant; specify the approver's email address",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+	if matched == nil {
+		if !emailShaped {
+			ValidationError(w, "approver must identify a human participant by email or user ID; specify the approver's email address",
+				map[string]interface{}{"field": "command_request.approver"})
+			return false
+		}
+		ValidationError(w, "approver must be a human participant of the target conversation",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+	if !isEligibleCommandRequestApprover(matched, now) {
+		ValidationError(w, "command request approver must be an active non-visitor human user",
+			map[string]interface{}{"field": "command_request.approver"})
+		return false
+	}
+	cr.approverID = matched.ID
+	if matched.Email != "" {
+		cr.approverHint = matched.Email
+	} else {
+		cr.approverHint = matched.DisplayName
+	}
+	return true
+}
+
+func stripApproverPrefix(raw string) string {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "user:")
+	s = strings.TrimPrefix(s, "@")
+	return strings.TrimSpace(s)
 }
 
 func writeCommandRequestValidationErrors(w http.ResponseWriter, err error) {
@@ -119,7 +274,22 @@ func writeCommandRequestValidationErrors(w http.ResponseWriter, err error) {
 // Returns false if err is not a command-request refusal.
 func (s *Server) writeCommandRequestStoreError(w http.ResponseWriter, ctx context.Context, agent *store.Agent, err error) bool {
 	var pendingErr *store.CommandRequestKeyPendingError
+	var limitErr *store.CommandRequestLimitError
 	switch {
+	case errors.As(err, &limitErr):
+		s.emitCommandRequestRefused(ctx, &MessageActionEvent{
+			ProjectID: agentProjectID(agent),
+			AgentID:   agentIDOrEmpty(agent),
+			AgentName: agentDisplayName(agent),
+			ActorKind: MessageActionActorAgent,
+			ActorID:   agentIDOrEmpty(agent),
+			Reason:    msgaction.ConflictCmdRequestLimit,
+		})
+		writeError(w, http.StatusTooManyRequests, msgaction.ConflictCmdRequestLimit, limitErr.Error(), map[string]interface{}{
+			"limit":   limitErr.Limit,
+			"current": limitErr.Current,
+		})
+		return true
 	case errors.As(err, &pendingErr):
 		s.emitCommandRequestRefused(ctx, &MessageActionEvent{
 			RowID:     pendingErr.RowID,

@@ -46,6 +46,7 @@ const (
 	ConflictCmdExecStopped      = "exec_container_stopped"
 	ConflictCmdMarkdownBlock    = "markdown_block_not_found"
 	ConflictCmdKeyPending       = "command_request_key_pending"
+	ConflictCmdRequestLimit     = "command_request_limit"
 )
 
 // CommandRequestKindSpec is the KindSpec for human-approved command requests.
@@ -80,6 +81,7 @@ var CommandRequestKindSpec = KindSpec{
 		ConflictCmdExecStopped,
 		ConflictCmdMarkdownBlock,
 		ConflictCmdKeyPending,
+		ConflictCmdRequestLimit,
 	},
 	DetailKeys: []string{
 		"command_sha256",

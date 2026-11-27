@@ -1657,7 +1657,13 @@ func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred
 	if mode == store.DeletionFinalizeHard {
 		return s.withAgentSecretCleanup(ctx, agentID, run)
 	}
-	return run(ctx)
+	var withdrawnCmds []*store.CommandRequest
+	txCtx := store.WithWithdrawnCommandRequestsCollector(ctx, &withdrawnCmds)
+	n, err := run(txCtx)
+	if err == nil && n > 0 && len(withdrawnCmds) > 0 {
+		s.emitPostCommitDeletedAgentCommandRequests(ctx, withdrawnCmds)
+	}
+	return n, err
 }
 
 // --- Request side (design §2.4) ---

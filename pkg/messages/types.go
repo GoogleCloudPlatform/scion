@@ -411,7 +411,9 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 // even if a new call site forgets to strip the key after consuming it,
 // LogAttrs will not emit it.
 var logMetadataSkipKeys = map[string]bool{
-	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+	AttachmentsMetadataKey:      true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+	"command_run_reason":        true, // private to approver and asking agent (design §4.9, §15)
+	"command_run_output_status": true, // private to approver and asking agent (design §4.9, §15)
 }
 
 // LogAttrs returns slog attributes for structured logging of this message.

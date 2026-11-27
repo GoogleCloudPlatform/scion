@@ -44,20 +44,24 @@ type CommandRunLauncher interface {
 // Command-run executor and sweeper bounds. Variables only as test seams: tests
 // that change them must not use t.Parallel and must restore them via t.Cleanup.
 var (
-	commandRunMaxTracked       = 256
-	commandRunPollInitial      = 1 * time.Second
-	commandRunPollMax          = 10 * time.Second
-	commandRunStopGrace        = 2 * time.Second
-	commandRunNotAfter         = agentcontrol.ExecNotAfter
-	commandRunLeaseGrace       = 120 * time.Second
-	commandRunSweepBatch       = 100
-	commandRunSweepMaxPage     = 10
-	commandRunSweepInFlight    = 8
-	commandRunPollClaimTTL     = 10 * time.Second
-	commandRunWakeTimeout      = commandRunWakeBudget
-	commandRunReadyPollInitial = 1 * time.Second
-	commandRunReadyPollMax     = 5 * time.Second
-	commandRunOutputRetention  = 7 * 24 * time.Hour
+	commandRunMaxTracked              = 256
+	commandRunPollInitial             = 1 * time.Second
+	commandRunPollMax                 = 10 * time.Second
+	commandRunStopGrace               = 2 * time.Second
+	commandRunNotAfter                = agentcontrol.ExecNotAfter
+	commandRunLeaseGrace              = 120 * time.Second
+	commandRunSweepBatch              = 100
+	commandRunSweepMaxPage            = 10
+	commandRunSweepInFlight           = 8
+	commandRunPollClaimTTL            = 10 * time.Second
+	commandRunWakeTimeout             = commandRunWakeBudget
+	commandRunReadyPollInitial        = 1 * time.Second
+	commandRunReadyPollMax            = 5 * time.Second
+	commandRunOutputRetention         = 7 * 24 * time.Hour
+	commandRunOutcomeRetryWindow      = 1 * time.Hour
+	commandRunOutcomeClaimLease       = 2 * time.Minute
+	commandRunOutcomeRetryMaxPerSweep = 20
+	commandRunOutcomeRetryBudget      = 20 * time.Second
 )
 
 // Stages of a command run at which commandRunExecHook runs (test seam only).
@@ -963,19 +967,36 @@ func (s *Server) emitCommandRunAudit(ctx context.Context, req *store.CommandRequ
 // deliverCommandRunOutcome sends one command-response message to the asking
 // agent via dispatchActionResponse (design §4.9). Output tail is attached only
 // when run.ShareOutput is true, after best-effort redaction and 4 KiB UTF-8
-// bounding. Deleting the asker makes delivery a no-op (C2).
+// bounding. Deleting the asker makes delivery a no-op (C2). On transient
+// persistence or dispatch failures, outcome_delivered_at is cleared so the
+// sweeper retries for up to 1h.
 func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.CommandRequest, run *store.CommandRun, capturedOutput []byte) {
 	if req.AgentID == "" {
 		return
 	}
-	deliveredAt := time.Now().UTC()
-	claimed, err := s.store.ClaimCommandRunOutcomeDelivery(ctx, run.ID, deliveredAt)
+	deliveredAt := time.Now().UTC().Truncate(time.Microsecond)
+	staleBefore := deliveredAt.Add(-execSeamDuration(&commandRunOutcomeClaimLease))
+	claimed, err := s.store.ClaimCommandRunOutcomeDelivery(ctx, run.ID, deliveredAt, staleBefore)
 	if err != nil || !claimed {
 		return
 	}
 
+	clearClaim := func() {
+		finCtx, cancelFin := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		defer cancelFin()
+		_, _ = s.store.ClearCommandRunOutcomeDelivery(finCtx, run.ID, deliveredAt)
+	}
+
 	asker, err := s.store.GetAgent(ctx, req.AgentID)
-	if err != nil || asker == nil || !asker.DeletedAt.IsZero() {
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.Warn("Command run: transient error loading asker for outcome delivery; will retry",
+				"run_id", run.ID, "agent_id", req.AgentID, "error", err)
+			clearClaim()
+		}
+		return
+	}
+	if asker == nil || !asker.DeletedAt.IsZero() {
 		return
 	}
 
@@ -989,27 +1010,53 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 		}
 	}
 
-	respText := formatCommandRunOutcomeMessage(req, run, outputTail)
-	respMsg := &store.Message{
-		ID:             api.NewUUID(),
-		ProjectID:      req.ProjectID,
-		ConversationID: req.ConversationID,
-		ThreadID:       req.ChatKey,
-		Sender:         "system:hub",
-		SenderID:       "system:hub",
-		Recipient:      "agent:" + asker.Slug,
-		RecipientID:    asker.ID,
-		Msg:            respText,
-		Type:           messages.TypeCommandResponse,
-		DispatchState:  store.MessageDispatchDispatched,
+	isDM := s.isCommandRequestDM(ctx, req)
+	agentText := formatCommandRunOutcomeMessage(req, run, outputTail)
+	storedText := agentText
+	if !isDM {
+		storedText = formatCommandRunGroupOutcomeMessage(req, run)
 	}
-	if err := s.store.CreateMessage(ctx, respMsg); err != nil {
-		slog.Warn("Command run: failed to persist command-response message",
-			"run_id", run.ID, "agent_id", asker.ID, "error", err)
-		_, _ = s.store.ClearCommandRunOutcomeDelivery(ctx, run.ID, deliveredAt)
-		return
+	var respMsg *store.Message
+	if run.OutcomeMessageID != "" {
+		existing, merr := s.store.GetMessage(ctx, run.OutcomeMessageID)
+		if merr != nil && !errors.Is(merr, store.ErrNotFound) {
+			slog.Warn("Command run: transient error loading persisted outcome message; will retry",
+				"run_id", run.ID, "message_id", run.OutcomeMessageID, "error", merr)
+			clearClaim()
+			return
+		}
+		if existing != nil {
+			respMsg = existing
+			if isDM {
+				agentText = existing.Msg
+			}
+		}
 	}
-	_ = s.store.RecordCommandRunOutcomeMessage(ctx, run.ID, respMsg.ID)
+	if respMsg == nil {
+		respMsg = &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      req.ProjectID,
+			ConversationID: req.ConversationID,
+			ThreadID:       req.ChatKey,
+			Sender:         "system:hub",
+			SenderID:       "system:hub",
+			Recipient:      "agent:" + asker.Slug,
+			RecipientID:    asker.ID,
+			Msg:            storedText,
+			Type:           messages.TypeCommandResponse,
+			DispatchState:  store.MessageDispatchDispatched,
+		}
+		if err := s.store.CreateMessage(ctx, respMsg); err != nil {
+			slog.Warn("Command run: failed to persist command-response message; will retry",
+				"run_id", run.ID, "agent_id", asker.ID, "error", err)
+			clearClaim()
+			return
+		}
+		finCtx, cancelFin := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		_ = s.store.RecordCommandRunOutcomeMessage(finCtx, run.ID, respMsg.ID)
+		cancelFin()
+		run.OutcomeMessageID = respMsg.ID
+	}
 
 	sm := &messages.StructuredMessage{
 		Version:        messages.Version,
@@ -1018,41 +1065,27 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 		SenderID:       respMsg.SenderID,
 		Recipient:      respMsg.Recipient,
 		RecipientID:    respMsg.RecipientID,
-		Msg:            respText,
+		Msg:            agentText,
 		Type:           messages.TypeCommandResponse,
 		ThreadID:       req.ChatKey,
 		ConversationID: req.ConversationID,
 	}
-	_, _ = s.dispatchActionResponse(ctx, actionResponse{
+	if _, derr := s.dispatchActionResponse(ctx, actionResponse{
 		Asker:      asker,
 		Message:    respMsg,
-		Text:       respText,
+		Text:       agentText,
 		Structured: sm,
 		PopulateMeta: func(meta map[string]string) {
-			meta["command_request_id"] = req.ID
-			meta["command_request_key"] = req.Key
-			meta["command_request_version"] = strconv.Itoa(req.Version)
-			if req.MessageID != "" {
-				meta["command_request_message_id"] = req.MessageID
-			}
-			meta["command_run_id"] = run.ID
-			meta["command_run_status"] = run.Status
-			if run.ExitCode != nil {
-				meta["command_run_exit_code"] = strconv.Itoa(*run.ExitCode)
-			}
-			if run.DurationMS != nil {
-				meta["command_run_duration_ms"] = strconv.FormatInt(*run.DurationMS, 10)
-			}
-			if run.Reason != "" {
-				meta["command_run_reason"] = run.Reason
-			}
-			if run.OutputStatus != "" {
-				meta["command_run_output_status"] = run.OutputStatus
-			}
+			populateCommandRunMeta(meta, req, run)
 		},
 		LogPrefix: "command_run",
 		Label:     "command-response",
-	})
+	}); derr != nil {
+		slog.Warn("Command run: failed to deliver command-response; clearing claim for sweeper retry",
+			"run_id", run.ID, "agent_id", asker.ID, "error", derr)
+		clearClaim()
+		return
+	}
 
 	if outputTail != "" {
 		s.emitCommandRunAudit(ctx, req, run, msgaction.EventCmdOutputReturned, "", map[string]string{
@@ -1060,6 +1093,125 @@ func (s *Server) deliverCommandRunOutcome(ctx context.Context, req *store.Comman
 			"redaction_count": strconv.Itoa(redactionCount),
 		})
 	}
+}
+
+func populateCommandRunMeta(meta map[string]string, req *store.CommandRequest, run *store.CommandRun) {
+	if meta == nil || req == nil || run == nil {
+		return
+	}
+	meta["command_request_id"] = req.ID
+	meta["command_request_key"] = req.Key
+	meta["command_request_version"] = strconv.Itoa(req.Version)
+	if req.MessageID != "" {
+		meta["command_request_message_id"] = req.MessageID
+	}
+	meta["command_run_id"] = run.ID
+	meta["command_run_status"] = run.Status
+	if run.ExitCode != nil {
+		meta["command_run_exit_code"] = strconv.Itoa(*run.ExitCode)
+	}
+	if run.DurationMS != nil {
+		meta["command_run_duration_ms"] = strconv.FormatInt(*run.DurationMS, 10)
+	}
+	if run.Reason != "" {
+		meta["command_run_reason"] = run.Reason
+	}
+	if run.OutputStatus != "" {
+		meta["command_run_output_status"] = run.OutputStatus
+	}
+}
+
+// enrichHeldCommandResponse reconstructs the asking-agent command-response text
+// (including run reason and, when shared, the redacted output tail) and hub-set
+// command_* metadata when a held TypeCommandResponse row is re-driven from the
+// store (design §4.9, §15, R2). For group conversations the stored row carries
+// only status/exit code so other participants cannot read reason or tail; this
+// helper ensures the asking agent still receives the full outcome on re-drive.
+// Dismissal TypeCommandResponse rows have no command_runs row and are left as-is.
+func (s *Server) enrichHeldCommandResponse(ctx context.Context, row *store.Message, sm *messages.StructuredMessage) error {
+	if s == nil || s.store == nil || row == nil || sm == nil {
+		return nil
+	}
+	run, err := s.store.GetCommandRunByOutcomeMessageID(ctx, row.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return nil
+		}
+		return fmt.Errorf("command run lookup: %w", err)
+	}
+	if run == nil || run.RequestID == "" {
+		return nil
+	}
+	req, err := s.store.GetCommandRequest(ctx, run.RequestID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("command request lookup: %w", err)
+	}
+	if req == nil {
+		return nil
+	}
+	var outputTail string
+	if run.ShareOutput {
+		outputTail, _ = s.loadSharedCommandRunOutputTail(ctx, run)
+	}
+	sm.Msg = formatCommandRunOutcomeMessage(req, run, outputTail)
+	if sm.Metadata == nil {
+		sm.Metadata = make(map[string]string, 9)
+	}
+	populateCommandRunMeta(sm.Metadata, req, run)
+	return nil
+}
+
+// isCommandRequestDM reports whether req was sent in a 1:1 direct message
+// (approver + asking agent only). The conversation record is authoritative:
+// when ConversationID is set, it returns true only if conv.Kind == "direct"
+// and (when ChatKey is set) conv.ExternalRef == ChatKey, failing closed on
+// lookup error or mismatch. The dm: ChatKey prefix is consulted only when
+// ConversationID is empty, and must be a validDMKey naming req.AgentID and
+// req.ApproverUserID (R1, design §4.9, §15).
+func (s *Server) isCommandRequestDM(ctx context.Context, req *store.CommandRequest) bool {
+	if req == nil {
+		return false
+	}
+	if req.ConversationID != "" {
+		if s.store == nil {
+			return false
+		}
+		conv, err := s.store.GetConversation(ctx, req.ConversationID)
+		if err != nil || conv == nil || conv.Kind != "direct" {
+			return false
+		}
+		if req.ChatKey != "" && conv.ExternalRef != req.ChatKey {
+			return false
+		}
+		return true
+	}
+	if req.ChatKey == "" || !validDMKey(req.ChatKey) {
+		return false
+	}
+	parts := strings.Split(req.ChatKey, ":")
+	if len(parts) != 5 {
+		return false
+	}
+	agentMatches := (parts[1] == "agent" && parts[2] == req.AgentID) || (parts[3] == "agent" && parts[4] == req.AgentID)
+	userMatches := (parts[1] == "user" && parts[2] == req.ApproverUserID) || (parts[3] == "user" && parts[4] == req.ApproverUserID)
+	return agentMatches && userMatches
+}
+
+// formatCommandRunGroupOutcomeMessage builds the conversation-stored outcome
+// message for non-DM conversations (group/thread): status and exit code only
+// plus a fixed agent-only pointer, omitting reason, output status, and shared
+// output tail (design §4.9, §15, R2).
+func formatCommandRunGroupOutcomeMessage(req *store.CommandRequest, run *store.CommandRun) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Command request `%s` (v%d) finished with status **%s**", req.Key, req.Version, run.Status)
+	if run.ExitCode != nil {
+		fmt.Fprintf(&b, " (exit code %d)", *run.ExitCode)
+	}
+	b.WriteString(".\nFull outcome: `scion command request list`.")
+	return b.String()
 }
 
 func formatCommandRunOutcomeMessage(req *store.CommandRequest, run *store.CommandRun, outputTail string) string {
@@ -1098,15 +1250,16 @@ func formatCommandRunOutcomeMessage(req *store.CommandRequest, run *store.Comman
 	return b.String()
 }
 
-// commandRunSweepHandler returns the periodic command-run lease-expiry sweeper
-// handler (P1 subset of design §4.12: rows (a) and (b) only).
+// commandRunSweepHandler returns the periodic command-run sweeper handler
+// (design §4.12: request expiry, lease expiry rows (a)/(b), live poll (c), and outcome delivery retry (d)).
 func (s *Server) commandRunSweepHandler() func(ctx context.Context) {
 	return s.sweepCommandRuns
 }
 
 // sweepCommandRuns resolves expired pending command requests (O2, §4.12),
-// expired unfinished command runs (design §4.12 rows (a) and (b)), and live
-// unowned dispatching/running command runs (design §4.12 row (c)):
+// expired unfinished command runs (design §4.12 rows (a) and (b)), live
+// unowned dispatching/running command runs (design §4.12 row (c)), and pending
+// outcome-delivery retries (design §4.9, §4.12 row (d)):
 //   - pending command_requests past expires_at -> expired + audit event;
 //   - (a) queued/waking past lease -> not_started/lease_expired (nothing sent,
 //     guarded by ExpectedStatuses {queued, waking});
@@ -1114,7 +1267,10 @@ func (s *Server) commandRunSweepHandler() func(ctx context.Context) {
 //     unknown/lease_expired if still unresolved;
 //   - (c) live unowned dispatching/running -> claimed via poll_claimed_at
 //     (ClaimCommandRunsForPoll, excluding this replica's owned IDs) and polled
-//     once.
+//     once;
+//   - (d) finished runs within the 1h retry window with outcome_delivered_at
+//     IS NULL (or a stale pre-message claim past commandRunOutcomeClaimLease) ->
+//     retry outcome message delivery, bounded by count and time budget.
 //
 // The sweeper never sends exec-start and never wakes a container.
 func (s *Server) sweepCommandRuns(ctx context.Context) {
@@ -1211,56 +1367,88 @@ func (s *Server) sweepCommandRuns(ctx context.Context) {
 
 	// (c): live unowned dispatching/running runs claimed via poll_claimed_at.
 	inFlight := execSeamInt(&commandRunSweepInFlight)
-	if inFlight <= 0 || budget <= 0 || ctx.Err() != nil {
-		return
-	}
-	sem := make(chan struct{}, inFlight)
-	var wg sync.WaitGroup
-	defer wg.Wait()
-	var claimedThisSweep []string
-	claimTTL := execSeamDuration(&commandRunPollClaimTTL)
-	for polled := 0; polled < budget && ctx.Err() == nil; {
-		reserved := reserveSweepSlots(ctx, sem, min(inFlight, budget-polled))
-		if reserved == 0 {
-			return
-		}
-		owned := s.commandRuns.ownedIDs()
-		exclude := make([]string, 0, len(owned)+len(claimedThisSweep))
-		exclude = append(exclude, owned...)
-		exclude = append(exclude, claimedThisSweep...)
+	if inFlight > 0 && budget > 0 && ctx.Err() == nil {
+		sem := make(chan struct{}, inFlight)
+		var wg sync.WaitGroup
+		var claimedThisSweep []string
+		claimTTL := execSeamDuration(&commandRunPollClaimTTL)
+		for polled := 0; polled < budget && ctx.Err() == nil; {
+			reserved := reserveSweepSlots(ctx, sem, min(inFlight, budget-polled))
+			if reserved == 0 {
+				break
+			}
+			owned := s.commandRuns.ownedIDs()
+			exclude := make([]string, 0, len(owned)+len(claimedThisSweep))
+			exclude = append(exclude, owned...)
+			exclude = append(exclude, claimedThisSweep...)
 
-		claimed, err := s.store.ClaimCommandRunsForPoll(ctx, time.Now().UTC(), claimTTL, reserved, exclude)
-		if err != nil {
-			for i := 0; i < reserved; i++ {
+			claimed, err := s.store.ClaimCommandRunsForPoll(ctx, time.Now().UTC(), claimTTL, reserved, exclude)
+			if err != nil {
+				for i := 0; i < reserved; i++ {
+					<-sem
+				}
+				slog.Warn("Command run sweep: claim live runs failed", "error", err)
+				break
+			}
+			for i := len(claimed); i < reserved; i++ {
 				<-sem
 			}
-			slog.Warn("Command run sweep: claim live runs failed", "error", err)
-			return
-		}
-		for i := len(claimed); i < reserved; i++ {
-			<-sem
-		}
-		if len(claimed) == 0 {
-			return
-		}
-		for _, run := range claimed {
-			claimedThisSweep = append(claimedThisSweep, run.ID)
-			wg.Add(1)
-			go func(r *store.CommandRun) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				var req *store.CommandRequest
-				if r.RequestID != "" {
-					if loaded, lerr := s.store.GetCommandRequest(ctx, r.RequestID); lerr == nil {
-						req = loaded
+			if len(claimed) == 0 {
+				break
+			}
+			for _, run := range claimed {
+				claimedThisSweep = append(claimedThisSweep, run.ID)
+				wg.Add(1)
+				go func(r *store.CommandRun) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					var req *store.CommandRequest
+					if r.RequestID != "" {
+						if loaded, lerr := s.store.GetCommandRequest(ctx, r.RequestID); lerr == nil {
+							req = loaded
+						}
 					}
-				}
-				s.pollCommandRunOnce(ctx, req, r, false)
-			}(run)
+					s.pollCommandRunOnce(ctx, req, r, false)
+				}(run)
+			}
+			polled += len(claimed)
+			if len(claimed) < reserved {
+				break
+			}
 		}
-		polled += len(claimed)
-		if len(claimed) < reserved {
+		wg.Wait()
+	}
+
+	// (d) Retry outcome delivery for finished runs whose outcome_delivered_at is
+	// NULL (or whose pre-message claim aged past commandRunOutcomeClaimLease)
+	// within the 1h retry window, bounded by count and time budget (design §4.9, §4.12, O2/O3).
+	if ctx.Err() != nil {
+		return
+	}
+	nowSweep := time.Now().UTC()
+	since := nowSweep.Add(-execSeamDuration(&commandRunOutcomeRetryWindow))
+	staleBefore := nowSweep.Add(-execSeamDuration(&commandRunOutcomeClaimLease))
+	retryLimit := min(batch, execSeamInt(&commandRunOutcomeRetryMaxPerSweep))
+	if retryLimit <= 0 {
+		retryLimit = 1
+	}
+	retryDeadline := time.Now().Add(execSeamDuration(&commandRunOutcomeRetryBudget))
+	pendingRuns, err := s.store.ListCommandRunsPendingOutcomeDelivery(ctx, since, staleBefore, retryLimit)
+	if err != nil {
+		slog.Warn("Command run sweep: list pending outcome deliveries failed", "error", err)
+		return
+	}
+	for _, run := range pendingRuns {
+		if ctx.Err() != nil || time.Now().After(retryDeadline) {
 			return
 		}
+		if run.RequestID == "" {
+			continue
+		}
+		req, rerr := s.store.GetCommandRequest(ctx, run.RequestID)
+		if rerr != nil || req == nil {
+			continue
+		}
+		s.deliverCommandRunOutcome(ctx, req, run, nil)
 	}
 }

@@ -265,7 +265,9 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 		Type:      TypeCommandResponse,
 		Msg:       "Finished.\n```\n" + outputMarker + "\n```",
 		Metadata: map[string]string{
-			"command_run_status": "succeeded",
+			"command_run_status":        "succeeded",
+			"command_run_reason":        "PRIVATE_REASON_NEVER_IN_LOG",
+			"command_run_output_status": "captured",
 		},
 	}
 	respAttrs := respMsg.LogAttrs()
@@ -283,6 +285,12 @@ func TestStructuredMessage_LogAttrs_OmitsCommandRequestContent(t *testing.T) {
 	}
 	if respKV["meta_command_run_status"] != "succeeded" {
 		t.Errorf("meta_command_run_status = %v, want succeeded", respKV["meta_command_run_status"])
+	}
+	if _, hasReason := respKV["meta_command_run_reason"]; hasReason {
+		t.Errorf("TypeCommandResponse LogAttrs must omit meta_command_run_reason, got %v", respKV["meta_command_run_reason"])
+	}
+	if _, hasOutStatus := respKV["meta_command_run_output_status"]; hasOutStatus {
+		t.Errorf("TypeCommandResponse LogAttrs must omit meta_command_run_output_status, got %v", respKV["meta_command_run_output_status"])
 	}
 }
 
