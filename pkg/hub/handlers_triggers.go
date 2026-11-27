@@ -517,6 +517,17 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 			}
 		}
 
+		// Baseline agent floor (Stage 2 §4.3, ptone/scion#8065):
+		// Agent callers below baseline (e.g. readonly, which lacks ScopeAgentNotify)
+		// are refused on routes that create or widen trigger authority:
+		//   - POST  /triggers              (create, incl. preset apply)
+		//   - PATCH /triggers/{id}         (update)
+		//   - POST  /triggers/{id}/resume  (re-enable)
+		// Reads (GET list/get/history, POST render) and authority-reducing routes
+		// (POST pause, DELETE) stay at project:read.
+		if authoring && !checkAgentNotifyScope(w, r) {
+			return
+		}
 		if authoring && !authorizeDeferredAuthoringCredential(w, r) {
 			return
 		}

@@ -184,6 +184,10 @@ type webhookEndpointAccess struct {
 //     webhook_endpoint.send for hub_token ingress and webhook_endpoint.update
 //     for PATCH/rotate). UATs must carry the matching scope and project/hub boundary.
 //   - Agents: must be in good standing;
+//   - ActionCreate / rotate-secret / non-disable ActionUpdate: additionally
+//     gated on ScopeAgentNotify (baseline floor, Stage 2 §4.3, ptone/scion#8065)
+//     in handleWebhookEndpoints / updateWebhookEndpoint; reads, DELETE, and
+//     disable-only PATCH stay at project:read.
 //   - ActionCreate / project-level gate (ep == nil): admitted for agents in
 //     projectID (they become the endpoint owner).
 //   - ActionSend (hub_token ingress): requires same project
