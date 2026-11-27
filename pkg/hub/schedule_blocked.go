@@ -164,5 +164,5 @@ func (s *Server) notifyFireBlocked(ctx context.Context, req hubfire.FireRequest,
 // user row. It returns "" when there is none. CreatedBy is only used to
 // address the notification, never for authority.
 func (s *Server) scheduleNotificationRecipient(ctx context.Context, createdBy string) string {
-	return s.fireNotificationRecipient(ctx, createdBy)
+	return s.fireNotificationRecipient(ctx, createdBy, "schedule")
 }

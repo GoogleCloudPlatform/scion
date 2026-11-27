@@ -336,7 +336,7 @@ func (s *Server) sendUserFireNotification(
 			principalID = tr.CreatedBy
 		}
 	}
-	recipient := s.fireNotificationRecipient(ctx, principalID)
+	recipient := s.fireNotificationRecipient(ctx, principalID, "trigger")
 	if recipient == "" {
 		slog.WarnContext(ctx, "trigger notify: no owning user to notify; skipping user notice",
 			"trigger_id", defID, "fire_id", req.Authority.FireID, "principal_id", principalID)
@@ -514,15 +514,23 @@ func normalizeNotifyFireStatus(st hubfire.FireStatus, errMsg string) string {
 // the agent's delegating user (its ancestry root, else its owner) when that is
 // a user row. Returns "" when there is none. Used only to address
 // notifications, never for authority (Stage 2 §10).
-func (s *Server) fireNotificationRecipient(ctx context.Context, createdBy string) string {
+func (s *Server) fireNotificationRecipient(ctx context.Context, createdBy, kindLabel string) string {
 	if createdBy == "" || s == nil || s.store == nil {
 		return ""
 	}
 	if _, err := s.store.GetUser(ctx, createdBy); err == nil {
 		return createdBy
 	} else if !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "looking up definition creator as a user failed; skipping notification",
-			"createdBy", createdBy, "error", err)
+		if kindLabel == "schedule" {
+			slog.WarnContext(ctx, "Scheduler: looking up the schedule creator as a user failed; skipping notification",
+				"subsystem", "scheduler", "createdBy", createdBy, "error", err)
+		} else {
+			if kindLabel == "" {
+				kindLabel = "definition"
+			}
+			slog.WarnContext(ctx, "looking up the "+kindLabel+" creator as a user failed; skipping notification",
+				"createdBy", createdBy, "error", err)
+		}
 		return ""
 	}
 	agent, err := s.store.GetAgent(ctx, createdBy)
