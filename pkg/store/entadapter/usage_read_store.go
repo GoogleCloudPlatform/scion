@@ -520,8 +520,10 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 // Executes a single bounded aggregate SQL query over non-deleted agents
 // overlapping [Since, Until] (with at least one run_attribution created at or
 // before Until), returning counts grouped by the derivation's input flags
-// (at most ~12 rows regardless of fleet size) so the Hub derives status
-// through its single deriveMeasurementStatus function in Go.
+// so the Hub derives status through its single deriveMeasurementStatus function
+// in Go. Cardinality is independent of agent count and scales with
+// (distinct harness_config slugs x projects that define a project-scoped row
+// for that slug x status-flag combinations).
 func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter store.UsageCoverageFilter) (*store.UsageScopeCoverage, error) {
 	drv := s.client.Driver()
 	dialectName := drv.Dialect()
@@ -895,9 +897,9 @@ agent_flags AS (
 		am.harness_config AS harness_config,
 		am.harness AS harness,
 		CASE
-			WHEN EXISTS (
+			WHEN am.harness_config <> '' AND EXISTS (
 				SELECT 1 FROM harness_configs hc
-				WHERE hc.scope = 'project' AND hc.scope_id = am.project_id_text AND hc.status = 'active'
+				WHERE hc.slug = am.harness_config AND hc.scope = 'project' AND hc.scope_id = am.project_id_text
 			) THEN am.project_id_text
 			ELSE ''
 		END AS capability_project_id,

@@ -588,7 +588,7 @@ func buildAgentUsageResponse(
 		}
 	}
 
-	windowIncludesNow := !until.Before(dbNow)
+	windowIncludesNow := usageWindowIncludesNow(until, dbNow)
 	status := deriveMeasurementStatus(measurementStatusInput{
 		MeterHealth:        currentRunMeterRows,
 		HasRunUsageEvents:  hasRunData,
@@ -767,15 +767,25 @@ func classifyUsageLiveCapability(u *api.HarnessUsageCapabilities) usageCapabilit
 	return usageCapFull
 }
 
+// usageWindowIncludesNow is the single shared definition (matching
+// GetUsageScopeCoverage in pkg/store/entadapter/usage_read_store.go) of
+// whether a queried [since, until] window includes "now" for running-phase
+// and staleness derivation (D7a).
+func usageWindowIncludesNow(until, dbNow time.Time) bool {
+	staleCutoff := dbNow.UTC().Add(-(staleHeartbeatMultiplier * defaultHeartbeatInterval)).Truncate(time.Microsecond)
+	return !until.UTC().Truncate(time.Microsecond).Before(staleCutoff)
+}
+
 // resolveAgentUsageCapability resolves the current harness-config revision's
-// live usage capability for an agent using at most 3 indexed store lookups:
-//  1. (harnessConfig, project, projectID)
-//  2. (harnessConfig, global, "")
-//  3. (harness, global, "")
+// live usage capability for an agent using the canonical dispatch scope order
+// (s.harnessConfigLookupScopes: global-first on hosted hubs, project-first on
+// workstation hubs) and no status filter (matching dispatch):
+//  1. hcName in s.harnessConfigLookupScopes(agent.ProjectID)
+//  2. fallback: harnessName in global scope (when harnessName != hcName)
 //
 // Note: capability comes from the current harness-config revision rather than
-// a per-run snapshot. Returns nil (unknown capability, preserving P1 behavior)
-// when no matching harness-config with usage.yaml is found.
+// a per-run snapshot. Returns nil (unknown capability) when no matching
+// harness-config with usage.yaml is found.
 func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.Agent, currentRA *store.RunAttribution) *api.HarnessUsageCapabilities {
 	if s == nil || s.store == nil || agent == nil {
 		return nil
@@ -805,13 +815,10 @@ func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.A
 	}
 
 	if hcName != "" {
-		if agent.ProjectID != "" {
-			if cap := tryLookup(hcName, store.HarnessConfigScopeProject, agent.ProjectID); cap != nil {
+		for _, sc := range s.harnessConfigLookupScopes(agent.ProjectID) {
+			if cap := tryLookup(hcName, sc.scope, sc.scopeID); cap != nil {
 				return cap
 			}
-		}
-		if cap := tryLookup(hcName, store.HarnessConfigScopeGlobal, ""); cap != nil {
-			return cap
 		}
 	}
 	if harnessName != "" && harnessName != hcName {

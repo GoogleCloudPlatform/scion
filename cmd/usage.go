@@ -29,7 +29,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -39,58 +38,15 @@ const (
 	usageUnknownCell = "—"
 )
 
-// usageClientTarget resolves the Hub client and optional default project ID for
-// `scion usage`. Overridden in tests.
-//
-// defaultProjectID is non-empty when running inside a resolved project (or
-// inside an agent container with SCION_PROJECT_ID set), and empty when outside
-// a project (so human mode defaults to /api/v1/me/usage).
-var usageClientTarget = func(mode CLIMode) (client hubclient.Client, defaultProjectID string, err error) {
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve project path: %w", err)
-	}
-	settings, err := loadSettingsForTarget(resolvedPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to load settings: %w", err)
-	}
-	if !hubConfigured() {
-		return nil, "", errHubNotConfigured
-	}
-	client, err = getHubClient(settings)
-	if err != nil {
-		return nil, "", err
-	}
+// usageLoadHubClient loads the Hub client and UAT flag using the canonical
+// project-resolution loader. Overridden only in pure unit tests that do not
+// exercise the full filesystem/context/Hub resolver stack.
+var usageLoadHubClient = loadHubClientForProjectResolution
 
-	if mode == ModeAgent {
-		return client, targetProjectIDFromSettings(settings), nil
-	}
-
-	// Explicit --project / --global always selects a project scope.
-	if explicitProjectTarget() {
-		if id := targetProjectIDFromSettings(settings); id != "" {
-			return client, id, nil
-		}
-		return client, projectPath, nil
-	}
-
-	// Inside a local project directory (.scion): default to that project.
-	if !isGlobal {
-		if id := targetProjectIDFromSettings(settings); id != "" {
-			return client, id, nil
-		}
-	}
-
-	// Outside a local project: check if `scion use` selected a current project
-	// on the effective hub; otherwise leave empty to default to /api/v1/me/usage.
-	if ctxCfg, ctxErr := config.LoadCLIContext(); ctxErr == nil && ctxCfg != nil {
-		if hubEntry, ok := ctxCfg.Hubs[ctxCfg.CurrentHub]; ok && hubEntry != nil && hubEntry.CurrentProject != nil && hubEntry.CurrentProject.ID != "" {
-			return client, hubEntry.CurrentProject.ID, nil
-		}
-	}
-
-	return client, "", nil
-}
+// usageResolveProject resolves the active Hub project using the canonical
+// CLI precedence chain (cmd/hub_project_resolver.go). Overridden only in pure
+// unit tests; integration tests drive the real resolveHubProject.
+var usageResolveProject = resolveHubProject
 
 // usageCmd is the top-level `scion usage` command (Tokenomics P2.3, ptone/scion#9239).
 // Allowed in agent mode (agentAllowed in cmd/cli_mode.go; scoped to the calling
@@ -162,7 +118,11 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 		return err
 	}
 
-	explicitProject := explicitProjectTarget()
+	// Only a user-typed --project or --global counts as an explicit project
+	// scope; a `scion use` context-injected project (projectSource ==
+	// targetSourceContext) is a default, not an explicit flag, so --all,
+	// --user, and --agent work cleanly when a context project is set.
+	explicitProject := (projectPath != "" && projectSource != targetSourceContext) || globalMode
 	scopeCount := 0
 	if explicitProject {
 		scopeCount++
@@ -187,11 +147,14 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 	if strings.TrimSpace(f.agent) != "" && len(groupBy) > 0 {
 		return newUsageError("--by is not supported with --agent (agent usage always returns a by_model breakdown)")
 	}
+	if strings.TrimSpace(f.agent) != "" && f.limit > 0 {
+		return newUsageError("--limit is not supported with --agent")
+	}
 	if f.limit < 0 {
 		return newUsageError("--limit must be a positive integer")
 	}
 
-	client, defaultProjectID, err := usageClientTarget(mode)
+	client, uat, err := usageLoadHubClient()
 	if err != nil {
 		return err
 	}
@@ -214,7 +177,10 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 
 	// Single-agent scope.
 	if agentRef := strings.TrimSpace(f.agent); agentRef != "" {
-		agentID := resolveUsageAgentID(ctx, client, defaultProjectID, agentRef)
+		agentID, resolveErr := resolveUsageAgentID(ctx, client, uat, agentRef)
+		if resolveErr != nil {
+			return resolveErr
+		}
 		resp, err := client.Usage().GetAgent(ctx, agentID, opts)
 		if err != nil {
 			return formatUsageAPIError(err)
@@ -238,24 +204,39 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 			summary, err = client.Usage().GetUser(ctx, u, opts)
 		}
 	case explicitProject:
-		projID, resolveErr := resolveUsageProjectRef(ctx, client, defaultProjectID)
+		res, resolveErr := usageResolveProject(ctx, client, uat, true)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		summary, err = client.Usage().GetProject(ctx, projID, opts)
+		if res.UnlinkedDir != "" {
+			return unlinkedScopeProjectError(res.UnlinkedDir)
+		}
+		if res.ID == "" {
+			return errCannotInferProject
+		}
+		summary, err = client.Usage().GetProject(ctx, res.ID, opts)
 	case mode == ModeAgent:
-		if defaultProjectID == "" {
+		res, resolveErr := usageResolveProject(ctx, client, uat, true)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		if res.ID == "" {
 			return fmt.Errorf("cannot determine project ID for agent scope (SCION_PROJECT_ID is not set)")
 		}
-		summary, err = client.Usage().GetProject(ctx, defaultProjectID, opts)
-	case defaultProjectID != "":
-		projID, resolveErr := resolveUsageProjectRef(ctx, client, defaultProjectID)
+		summary, err = client.Usage().GetProject(ctx, res.ID, opts)
+	default:
+		res, resolveErr := usageResolveProject(ctx, client, uat, false)
 		if resolveErr != nil {
 			return resolveErr
 		}
-		summary, err = client.Usage().GetProject(ctx, projID, opts)
-	default:
-		summary, err = client.Usage().GetMe(ctx, opts)
+		if res.ID != "" {
+			summary, err = client.Usage().GetProject(ctx, res.ID, opts)
+		} else {
+			if res.UnlinkedDir != "" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Note: directory project %s is not linked to a hub; showing your user usage (/me) instead.\n", res.UnlinkedDir)
+			}
+			summary, err = client.Usage().GetMe(ctx, opts)
+		}
 	}
 	if err != nil {
 		return formatUsageAPIError(err)
@@ -312,34 +293,25 @@ func normalizeUsageGroupByFlag(raw []string) ([]string, error) {
 	return out, nil
 }
 
-func resolveUsageProjectRef(ctx context.Context, client hubclient.Client, ref string) (string, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", errors.New("cannot determine project ID; pass --project <slug|id>")
-	}
-	if _, err := uuid.Parse(ref); err == nil {
-		return ref, nil
-	}
-	// Resolve slug or name via Hub projects list; if unavailable, pass ref through.
-	if client != nil && client.Projects() != nil {
-		resp, err := client.Projects().List(ctx, &hubclient.ListProjectsOptions{Slug: ref})
-		if err == nil && resp != nil && len(resp.Projects) > 0 {
-			return resp.Projects[0].ID, nil
-		}
-	}
-	return ref, nil
-}
-
-func resolveUsageAgentID(ctx context.Context, client hubclient.Client, projectID, agentRef string) string {
+func resolveUsageAgentID(ctx context.Context, client hubclient.Client, uat bool, agentRef string) (string, error) {
 	if _, err := uuid.Parse(agentRef); err == nil {
-		return agentRef
+		return agentRef, nil
 	}
-	if projectID != "" && client != nil && client.ProjectAgents(projectID) != nil {
-		if id, err := resolveAgentIDForSubscription(ctx, client, projectID, agentRef); err == nil && id != "" {
-			return id
-		}
+	res, err := usageResolveProject(ctx, client, uat, false)
+	if err != nil {
+		return "", err
 	}
-	return agentRef
+	if res.ID == "" {
+		return "", fmt.Errorf("cannot resolve agent %q outside a linked project; pass the agent UUID or run inside its project", agentRef)
+	}
+	if client == nil || client.ProjectAgents(res.ID) == nil {
+		return "", fmt.Errorf("cannot resolve agent %q: project agent client unavailable", agentRef)
+	}
+	id, err := resolveAgentIDForSubscription(ctx, client, res.ID, agentRef)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve agent %q in project %s: %w (pass the agent UUID to query an agent in another project)", agentRef, res.ID, err)
+	}
+	return id, nil
 }
 
 func formatUsageAPIError(err error) error {

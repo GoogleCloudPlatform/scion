@@ -1556,7 +1556,8 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 		return ag
 	}
 
-	// Seed an active project-scoped harness config ONLY on projOverride.
+	// Seed an archived project-scoped harness config for slug "hermes" on projOverride
+	// (no status filter, matching dispatch; only matching slug splits capability_project_id).
 	require.NoError(t, cs.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID:      uuid.NewString(),
 		Name:    "hermes",
@@ -1564,7 +1565,7 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 		Harness: "hermes",
 		Scope:   store.HarnessConfigScopeProject,
 		ScopeID: projOverride,
-		Status:  store.HarnessConfigStatusActive,
+		Status:  store.HarnessConfigStatusArchived,
 	}))
 
 	// 1. Agent on projGlobal: running past 60s grace, no meter_health, no events.

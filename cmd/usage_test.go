@@ -19,6 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -90,27 +94,35 @@ func strPtr(v string) *string { return &v }
 
 func withUsageTestTarget(t *testing.T, svc *stubUsageService, defaultProjectID string) {
 	t.Helper()
-	origTarget := usageClientTarget
+	origLoad := usageLoadHubClient
+	origResolve := usageResolveProject
 	origProject := projectPath
+	origProjectSource := projectSource
 	origGlobal := globalMode
 	origFormat := outputFormat
 	origZone := clitime.Zone()
 
 	t.Cleanup(func() {
-		usageClientTarget = origTarget
+		usageLoadHubClient = origLoad
+		usageResolveProject = origResolve
 		projectPath = origProject
+		projectSource = origProjectSource
 		globalMode = origGlobal
 		outputFormat = origFormat
 		clitime.SetZone(origZone)
 	})
 
 	projectPath = ""
+	projectSource = ""
 	globalMode = false
 	outputFormat = ""
 	clitime.SetZone(time.UTC)
 
-	usageClientTarget = func(mode CLIMode) (hubclient.Client, string, error) {
-		return &stubUsageHubClient{usage: svc}, defaultProjectID, nil
+	usageLoadHubClient = func() (hubclient.Client, bool, error) {
+		return &stubUsageHubClient{usage: svc}, false, nil
+	}
+	usageResolveProject = func(_ context.Context, _ hubclient.Client, _, _ bool) (resolvedHubProject, error) {
+		return resolvedHubProject{ID: defaultProjectID}, nil
 	}
 }
 
@@ -182,7 +194,7 @@ func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
 		assert.Equal(t, 50, svc.lastOpts.Limit)
 	})
 
-	t.Run("--agent routes to GetAgent and rejects --by", func(t *testing.T) {
+	t.Run("--agent routes to GetAgent, rejects --by and --limit, and gives clear error on unresolved slug (O3)", func(t *testing.T) {
 		svc := &stubUsageService{
 			agentResp: &hubclient.AgentUsageResponse{
 				AgentID:           "22222222-2222-2222-2222-222222222222",
@@ -193,12 +205,26 @@ func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
 		}
 		withUsageTestTarget(t, svc, "")
 
-		cmdBad := newUsageCmd()
-		cmdBad.SetOut(&bytes.Buffer{})
-		cmdBad.SetArgs([]string{"--agent", "22222222-2222-2222-2222-222222222222", "--by", "model"})
-		err := cmdBad.Execute()
+		cmdBadBy := newUsageCmd()
+		cmdBadBy.SetOut(&bytes.Buffer{})
+		cmdBadBy.SetArgs([]string{"--agent", "22222222-2222-2222-2222-222222222222", "--by", "model"})
+		err := cmdBadBy.Execute()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--by is not supported with --agent")
+
+		cmdBadLimit := newUsageCmd()
+		cmdBadLimit.SetOut(&bytes.Buffer{})
+		cmdBadLimit.SetArgs([]string{"--agent", "22222222-2222-2222-2222-222222222222", "--limit", "10"})
+		err = cmdBadLimit.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--limit is not supported with --agent")
+
+		cmdBadSlug := newUsageCmd()
+		cmdBadSlug.SetOut(&bytes.Buffer{})
+		cmdBadSlug.SetArgs([]string{"--agent", "my-agent-slug"})
+		err = cmdBadSlug.Execute()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pass the agent UUID")
 
 		cmdOK := newUsageCmd()
 		cmdOK.SetOut(&bytes.Buffer{})
@@ -208,7 +234,7 @@ func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
 		assert.Equal(t, "22222222-2222-2222-2222-222222222222", svc.lastID)
 	})
 
-	t.Run("mutually exclusive scope flags fail", func(t *testing.T) {
+	t.Run("mutually exclusive user-typed scope flags fail, while context-injected project allows --user/--all/--agent", func(t *testing.T) {
 		svc := &stubUsageService{summaryResp: baseSummary}
 		withUsageTestTarget(t, svc, "")
 
@@ -219,13 +245,23 @@ func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at most one of")
 
+		// User-typed --project conflicts with --user.
 		projectPath = "proj-x"
+		projectSource = ""
 		cmd2 := newUsageCmd()
 		cmd2.SetOut(&bytes.Buffer{})
 		cmd2.SetArgs([]string{"--user", "me"})
 		err = cmd2.Execute()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at most one of")
+
+		// Context-injected project (targetSourceContext) must NOT conflict with --user or --all.
+		projectSource = targetSourceContext
+		cmd3 := newUsageCmd()
+		cmd3.SetOut(&bytes.Buffer{})
+		cmd3.SetArgs([]string{"--user", "me"})
+		require.NoError(t, cmd3.Execute())
+		assert.Equal(t, "me", svc.lastMethod)
 	})
 
 	t.Run("--by rejects invalid dimension and day+hour combination", func(t *testing.T) {
@@ -245,6 +281,178 @@ func TestUsageCLI_ScopeDefaultingAndFlags(t *testing.T) {
 		err = cmd2.Execute()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "both day and hour")
+	})
+}
+
+// TestUsageCLI_RealProjectResolver drives the real loadHubClientForProjectResolution
+// and resolveHubProject against an httptest fake Hub for R4 cases (a), (b), and (c).
+func TestUsageCLI_RealProjectResolver(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "human")
+	t.Setenv("SCION_HUB_TOKEN", "test-token")
+
+	const (
+		ctxProjID      = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+		slugProjID     = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+		localUnlinked  = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+		targetAgentUID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	)
+
+	var seenPaths []string
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPaths = append(seenPaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/my-slug":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": slugProjID, "slug": "my-slug", "name": "My Slug",
+			})
+		case "/api/v1/projects":
+			if r.URL.Query().Get("slug") == "my-slug" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"projects": []map[string]any{
+						{"id": slugProjID, "slug": "my-slug", "name": "My Slug"},
+					},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"projects": []any{}})
+		case "/api/v1/agents/" + targetAgentUID + "/usage":
+			_ = json.NewEncoder(w).Encode(hubclient.AgentUsageResponse{
+				AgentID:           targetAgentUID,
+				ProjectID:         ctxProjID,
+				Window:            hubclient.UsageWindow{Since: now, Until: now},
+				MeasurementStatus: "measured",
+			})
+		default:
+			_ = json.NewEncoder(w).Encode(hubclient.UsageSummaryResponse{
+				Scope:             hubclient.UsageScopeRef{Kind: "project", ID: ctxProjID},
+				Window:            hubclient.UsageWindow{Since: now, Until: now, Granularity: "day"},
+				MeasurementStatus: "measured",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	origProject := projectPath
+	origProjectSource := projectSource
+	origGlobal := globalMode
+	origHubEndpoint := hubEndpoint
+	origHubSource := hubSource
+	origFormat := outputFormat
+	origZone := clitime.Zone()
+	origWD, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		projectPath = origProject
+		projectSource = origProjectSource
+		globalMode = origGlobal
+		hubEndpoint = origHubEndpoint
+		hubSource = origHubSource
+		outputFormat = origFormat
+		clitime.SetZone(origZone)
+		_ = os.Chdir(origWD)
+	})
+
+	clitime.SetZone(time.UTC)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	t.Setenv("SCION_HUB_PROFILE", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Setenv("SCION_HUB_PROJECT_ID", "")
+
+	t.Run("(a) with scion use context project, plain usage uses context project while --all/--user/--agent succeed", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		outsideDir := t.TempDir()
+		require.NoError(t, os.Chdir(outsideDir))
+
+		// Simulate resolveInvocationTarget injecting a `scion use` context project.
+		projectPath = ctxProjID
+		projectSource = targetSourceContext
+		globalMode = false
+		hubEndpoint = ""
+		hubSource = ""
+		outputFormat = ""
+
+		// Plain `scion usage` -> context project.
+		seenPaths = nil
+		cmdPlain := newUsageCmd()
+		cmdPlain.SetOut(&bytes.Buffer{})
+		require.NoError(t, cmdPlain.Execute())
+		assert.Equal(t, []string{"/api/v1/projects/" + ctxProjID + "/usage"}, seenPaths)
+
+		// `scion usage --all` -> /api/v1/usage.
+		seenPaths = nil
+		cmdAll := newUsageCmd()
+		cmdAll.SetOut(&bytes.Buffer{})
+		cmdAll.SetArgs([]string{"--all"})
+		require.NoError(t, cmdAll.Execute())
+		assert.Equal(t, []string{"/api/v1/usage"}, seenPaths)
+
+		// `scion usage --user me` -> /api/v1/me/usage.
+		seenPaths = nil
+		cmdUser := newUsageCmd()
+		cmdUser.SetOut(&bytes.Buffer{})
+		cmdUser.SetArgs([]string{"--user", "me"})
+		require.NoError(t, cmdUser.Execute())
+		assert.Equal(t, []string{"/api/v1/me/usage"}, seenPaths)
+
+		// `scion usage --agent <uuid>` -> /api/v1/agents/<uuid>/usage.
+		seenPaths = nil
+		cmdAgent := newUsageCmd()
+		cmdAgent.SetOut(&bytes.Buffer{})
+		cmdAgent.SetArgs([]string{"--agent", targetAgentUID})
+		require.NoError(t, cmdAgent.Execute())
+		assert.Equal(t, []string{"/api/v1/agents/" + targetAgentUID + "/usage"}, seenPaths)
+	})
+
+	t.Run("(b) inside an unlinked local project, never sends local project-id; falls back to /me with stderr note", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		localProjDir := t.TempDir()
+		scionDir := filepath.Join(localProjDir, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte("schema_version: \"1\"\nproject_id: "+localUnlinked+"\n"), 0o600))
+		require.NoError(t, os.Chdir(localProjDir))
+
+		projectPath = ""
+		projectSource = ""
+		globalMode = false
+		hubEndpoint = ""
+		hubSource = ""
+		outputFormat = ""
+
+		seenPaths = nil
+		var outBuf, errBuf bytes.Buffer
+		cmd := newUsageCmd()
+		cmd.SetOut(&outBuf)
+		cmd.SetErr(&errBuf)
+		require.NoError(t, cmd.Execute())
+
+		assert.Equal(t, []string{"/api/v1/me/usage"}, seenPaths)
+		assert.NotContains(t, seenPaths, "/api/v1/projects/"+localUnlinked+"/usage")
+		assert.Contains(t, errBuf.String(), "not linked to a hub")
+	})
+
+	t.Run("(c) --project <slug> from outside any project resolves via the Hub", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		outsideDir := t.TempDir()
+		require.NoError(t, os.Chdir(outsideDir))
+
+		projectPath = "my-slug"
+		projectSource = ""
+		globalMode = false
+		hubEndpoint = ""
+		hubSource = ""
+		outputFormat = ""
+
+		seenPaths = nil
+		cmd := newUsageCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		require.NoError(t, cmd.Execute())
+
+		assert.Contains(t, seenPaths, "/api/v1/projects/"+slugProjID+"/usage")
 	})
 }
 

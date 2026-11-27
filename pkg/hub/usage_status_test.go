@@ -380,16 +380,36 @@ func TestDeriveMeasurementStatus_TruthTable(t *testing.T) {
 
 func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *testing.T) {
 	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
-	resolver := &usageCapabilityResolver{
-		global: map[string]*api.HarnessUsageCapabilities{
-			"claude":      makeUsageCap(api.UsageLiveSourceNative, []string{"input", "output", "cache_read", "cache_write"}, nil, true),
-			"antigravity": makeUsageCap(api.UsageLiveSourceHooks, nil, nil, false),
-			"hermes":      makeUsageCap(api.UsageLiveSourceNone, nil, nil, false),
-			"partial-h":   makeUsageCap(api.UsageLiveSourceHooks, []string{"input", "output"}, nil, false),
-		},
-		project: map[harnessRefKey]*api.HarnessUsageCapabilities{
-			{projectID: "proj-override", ref: "hermes"}: makeUsageCap(api.UsageLiveSourceHooks, []string{"input", "output", "cache_read", "cache_write"}, nil, false),
-		},
+	globalCaps := map[string]*api.HarnessUsageCapabilities{
+		"claude":      makeUsageCap(api.UsageLiveSourceNative, []string{"input", "output", "cache_read", "cache_write"}, nil, true),
+		"antigravity": makeUsageCap(api.UsageLiveSourceHooks, nil, nil, false),
+		"hermes":      makeUsageCap(api.UsageLiveSourceNone, nil, nil, false),
+		"partial-h":   makeUsageCap(api.UsageLiveSourceHooks, []string{"input", "output"}, nil, false),
+	}
+	projectCaps := map[harnessRefKey]*api.HarnessUsageCapabilities{
+		{projectID: "proj-override", ref: "hermes"}: makeUsageCap(api.UsageLiveSourceHooks, []string{"input", "output", "cache_read", "cache_write"}, nil, false),
+	}
+	resolveHosted := func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+		if cap, ok := globalCaps[harnessConfig]; ok {
+			return cap
+		}
+		if projectID != "" {
+			if cap, ok := projectCaps[harnessRefKey{projectID: projectID, ref: harnessConfig}]; ok {
+				return cap
+			}
+		}
+		return globalCaps[harness]
+	}
+	resolveWorkstation := func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+		if projectID != "" {
+			if cap, ok := projectCaps[harnessRefKey{projectID: projectID, ref: harnessConfig}]; ok {
+				return cap
+			}
+		}
+		if cap, ok := globalCaps[harnessConfig]; ok {
+			return cap
+		}
+		return globalCaps[harness]
 	}
 
 	t.Run("stale wins over partial, measured, calls_only, unmeasured", func(t *testing.T) {
@@ -402,38 +422,46 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 				{HarnessConfig: "hermes", IsRunning: true, IsPastGrace: true, AgentCount: 4},                                  // unmeasured (source:none)
 			},
 		}
-		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 10, now, true, resolver)
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 10, now, true, resolveHosted)
 		assert.Equal(t, MeasurementStatusStale, status)
 		assert.Equal(t, 1, stale)
 		assert.Equal(t, 4, unmeasured)
 	})
 
-	t.Run("mixed measured + calls_only reads partial", func(t *testing.T) {
+	t.Run("mixed measured + calls_only with events reads partial", func(t *testing.T) {
 		cov := &store.UsageScopeCoverage{
 			Buckets: []store.UsageCoverageBucket{
 				{HarnessConfig: "claude", HasUsageData: true, AgentCount: 1},
 				{HarnessConfig: "antigravity", HasUsageData: true, AgentCount: 1},
 			},
 		}
-		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 5, now, true, resolver)
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 5, now, true, resolveHosted)
 		assert.Equal(t, MeasurementStatusPartial, status)
 		assert.Equal(t, 0, unmeasured)
 		assert.Equal(t, 0, stale)
 	})
 
-	t.Run("all calls_only reads calls_only", func(t *testing.T) {
+	t.Run("all calls_only with events reads calls_only (R2)", func(t *testing.T) {
 		cov := &store.UsageScopeCoverage{
 			Buckets: []store.UsageCoverageBucket{
 				{HarnessConfig: "antigravity", HasUsageData: true, AgentCount: 2},
 			},
 		}
-		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 0, now, true, resolver)
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 5, now, true, resolveHosted)
 		assert.Equal(t, MeasurementStatusCallsOnly, status)
 		assert.Equal(t, 0, unmeasured)
 		assert.Equal(t, 0, stale)
 	})
 
-	t.Run("project-scoped harness config override takes precedence over global", func(t *testing.T) {
+	t.Run("deleted-agent historical events fallback reads measured when no agent bucket classified", func(t *testing.T) {
+		cov := &store.UsageScopeCoverage{}
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 12, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusMeasured, status)
+		assert.Equal(t, 0, unmeasured)
+		assert.Equal(t, 0, stale)
+	})
+
+	t.Run("workstation lookup uses project-scoped override over global", func(t *testing.T) {
 		cov := &store.UsageScopeCoverage{
 			Buckets: []store.UsageCoverageBucket{
 				{
@@ -446,7 +474,7 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 				},
 			},
 		}
-		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 0, now, true, resolver)
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 0, now, true, resolveWorkstation)
 		assert.Equal(t, MeasurementStatusMeasured, status)
 		assert.Equal(t, 0, unmeasured)
 		assert.Equal(t, 0, stale)
@@ -458,7 +486,7 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 				{HarnessConfig: "claude", IsRunning: true, IsPastGrace: true, AgentCount: 1},
 			},
 		}
-		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 0, now, false, resolver)
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 0, now, false, resolveHosted)
 		assert.Equal(t, MeasurementStatusUnmeasured, status)
 		assert.Equal(t, 1, unmeasured)
 		assert.Equal(t, 0, stale)
