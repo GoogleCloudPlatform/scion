@@ -41,6 +41,7 @@ const (
 
 	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
 	InboxCategoryDecisions      = "decisions"
+	InboxCategoryAgentSecrets   = "agent_secrets"
 	InboxCategoryWaiting        = "waiting"
 	InboxCategoryReviews        = "reviews"
 	InboxCategoryPendingSecrets = "pending_secrets"
@@ -49,6 +50,7 @@ const (
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
 	InboxBreakdownAgents              = "agents"
 	InboxBreakdownProjects            = "projects"
+	InboxBreakdownSecretsProjects     = "secretsProjects"
 	InboxBreakdownToAddress           = "toAddress"
 	InboxBreakdownRequested           = "requested"
 	InboxBreakdownUnreadConversations = "unreadConversations"
@@ -101,6 +103,12 @@ type InboxCategory struct {
 	// category's items expire (pending_secrets, agent_secrets). It lets
 	// previews=0 clients schedule expiry refreshes without fetching previews.
 	NextExpiresAt *time.Time `json:"nextExpiresAt,omitempty"`
+
+	// projectIDSet is an internal, non-serialized set of distinct non-empty
+	// project IDs over the category's counted items, used by buildInboxSummary
+	// to compute cross-category project unions (e.g. secretsProjects) without
+	// extra store queries.
+	projectIDSet map[string]struct{} `json:"-"`
 }
 
 // MarshalJSON preserves a non-nil empty AgentIDs slice as `"agentIds": []`
@@ -359,6 +367,7 @@ func (s *Server) inboxSources() []inboxSourceEntry {
 	}
 	return []inboxSourceEntry{
 		{key: InboxCategoryPendingSecrets, run: s.inboxPendingSecretsCategory},
+		{key: InboxCategoryAgentSecrets, run: s.inboxAgentSecretsCategory},
 		{key: InboxCategoryWaiting, run: s.inboxWaitingCategory},
 		{key: InboxCategoryReviews, run: s.inboxReviewsCategory},
 		{key: InboxCategoryChat, run: s.inboxChatCategory},
@@ -385,7 +394,7 @@ func (s *Server) buildInboxSummary(ctx context.Context, v inboxViewer, previews 
 	ctx, cancel := context.WithTimeout(ctx, s.chatSearchTimeout())
 	defer cancel()
 
-	categories := make(map[string]InboxCategory, 5)
+	categories := make(map[string]InboxCategory, 6)
 	for _, src := range s.inboxSources() {
 		cctx, ccancel := context.WithTimeout(ctx, inboxCategoryTimeout)
 		cat := src.run(cctx, v, previews, chatFilter)
@@ -394,6 +403,27 @@ func (s *Server) buildInboxSummary(ctx context.Context, v inboxViewer, previews 
 			cat.Previews = []any{}
 		}
 		categories[src.key] = cat
+	}
+
+	if asCat, ok := categories[InboxCategoryAgentSecrets]; ok && asCat.State == InboxStateOK {
+		union := make(map[string]struct{}, len(asCat.projectIDSet))
+		for pid := range asCat.projectIDSet {
+			if pid != "" {
+				union[pid] = struct{}{}
+			}
+		}
+		if psCat, ok := categories[InboxCategoryPendingSecrets]; ok && psCat.State == InboxStateOK {
+			for pid := range psCat.projectIDSet {
+				if pid != "" {
+					union[pid] = struct{}{}
+				}
+			}
+		}
+		if asCat.Breakdown == nil {
+			asCat.Breakdown = make(map[string]int, 1)
+		}
+		asCat.Breakdown[InboxBreakdownSecretsProjects] = len(union)
+		categories[InboxCategoryAgentSecrets] = asCat
 	}
 
 	total, totalCapped := sumInboxCounted(categories)
@@ -530,6 +560,7 @@ func (s *Server) inboxPendingSecretsCategory(ctx context.Context, v inboxViewer,
 			InboxBreakdownProjects: len(seenProjects),
 		},
 		NextExpiresAt: nextExpiresAt,
+		projectIDSet:  seenProjects,
 	}
 }
 

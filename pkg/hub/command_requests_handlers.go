@@ -179,7 +179,7 @@ func (s *Server) isCommandRequestRecipient(ctx context.Context, user UserIdentit
 		return false
 	}
 	if chatKey != "" || promptMsg != nil {
-		return s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, answering)
+		return s.isMessageActionRecipient(ctx, user, chatKey, promptMsg, answering)
 	}
 	return user.ID() == row.ApproverUserID
 }

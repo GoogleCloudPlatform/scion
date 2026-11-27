@@ -37,6 +37,7 @@ const (
 
 	// InboxCategory* are the stable keys returned in InboxSummaryResponse.Categories.
 	InboxCategoryDecisions      = "decisions"
+	InboxCategoryAgentSecrets   = "agent_secrets"
 	InboxCategoryWaiting        = "waiting"
 	InboxCategoryReviews        = "reviews"
 	InboxCategoryPendingSecrets = "pending_secrets"
@@ -45,6 +46,7 @@ const (
 	// InboxBreakdown* are the documented stable keys for InboxCategory.Breakdown.
 	InboxBreakdownAgents              = "agents"
 	InboxBreakdownProjects            = "projects"
+	InboxBreakdownSecretsProjects     = "secretsProjects"
 	InboxBreakdownToAddress           = "toAddress"
 	InboxBreakdownRequested           = "requested"
 	InboxBreakdownUnreadConversations = "unreadConversations"

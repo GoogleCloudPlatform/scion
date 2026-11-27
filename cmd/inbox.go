@@ -43,7 +43,7 @@ const (
 // (design §6.3, §9).
 var inboxCategoryOrder = []string{
 	hubclient.InboxCategoryDecisions,
-	"agent_secrets",
+	hubclient.InboxCategoryAgentSecrets,
 	hubclient.InboxCategoryWaiting,
 	hubclient.InboxCategoryPendingSecrets,
 	hubclient.InboxCategoryReviews,
@@ -280,7 +280,7 @@ func inboxCategoryLabel(key string) string {
 	switch key {
 	case hubclient.InboxCategoryDecisions:
 		return "Decisions"
-	case "agent_secrets":
+	case hubclient.InboxCategoryAgentSecrets:
 		return "Agent Secrets"
 	case hubclient.InboxCategoryWaiting:
 		return "Agents Waiting"

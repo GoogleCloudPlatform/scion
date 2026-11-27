@@ -3915,6 +3915,11 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{SecretRequestsColumns[1], SecretRequestsColumns[29]},
 			},
+			{
+				Name:    "secretrequest_project_id_resolved_at",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[1], SecretRequestsColumns[31]},
+			},
 		},
 	}
 	// SkillsColumns holds the columns for the "skills" table.

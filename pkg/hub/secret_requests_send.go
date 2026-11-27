@@ -269,22 +269,14 @@ func (s *Server) publishReplacedSecretRequests(ctx context.Context, res *store.S
 	if res == nil {
 		return
 	}
+	hinted := make(map[string]struct{})
 	for _, cr := range res.Requests {
 		if cr.Replaced == nil || cr.Replaced.ID == "" {
 			continue
 		}
 		old := cr.Replaced
-		chatKey := old.ChatKey
-		if chatKey == "" {
-			if prompt, err := s.store.GetMessage(ctx, old.MessageID); err == nil && prompt != nil {
-				chatKey = prompt.ThreadID
-			}
-		}
-		if chatKey == "" {
-			continue
-		}
-		view := secretRequestView(old, cr.Row)
-		s.publishActionUpdated(msgaction.KindSecretRequest, old.ProjectID, old.MessageID, chatKey, view)
+		chatKey := s.publishSecretRequestRowUpdated(ctx, old, cr.Row)
+		s.publishSecretRequestsDMHintsOnce(ctx, hinted, old.MessageID, chatKey)
 	}
 }
 

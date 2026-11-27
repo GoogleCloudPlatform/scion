@@ -1266,6 +1266,26 @@ var chatOperations = []OperationSpec{
 		Bearer: SessionOnly(ReasonInteractiveState),
 	},
 	{
+		ID:          "chat.usersecretrequests.list",
+		Domain:      "chat",
+		Description: "List open or resolved secret-request cards across the caller's member projects and DMs, with unfiltered open/answerable counts, filtered counts, agent/project facets, sort=recent|project, and cursor pagination. Requires an interactive human session (agents, visitors and UATs get 403); each row requires recipient membership and agent.read on the requesting agent; answerable counts additionally require answering recipient membership and agent.attach. Unsupported methods get 405; 404 while hub.agent_secrets is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/secret-requests", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "project-collection",
+		BasePermission:   "agent.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserMeSecretRequests_AuthorizationAndScope"},
+		},
+		Bearer: SessionOnly(ReasonInteractiveState),
+	},
+	{
 		ID:          "chat.commandrequest.read",
 		Domain:      "chat",
 		Description: "Read a command-request row and its run view (never output), plus the approver's resolved execution container state for the named approver only. Requires an interactive human session and card recipient membership. 404 while hub.command_requests is off",
