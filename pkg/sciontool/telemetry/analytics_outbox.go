@@ -226,6 +226,12 @@ const (
 	// consumed, persisted relocated_refused count). Lines already appended
 	// keep their bytes and still finalize and drain with the pinned hub.
 	AppendRefusedRelocated
+	// AppendDisabled means the analytics producer is nil, detached, or has no
+	// active outbox sink; when err == nil, nothing was written and no
+	// producer_seq was consumed. UsageAnalytics.record also returns
+	// AppendDisabled as the default outcome alongside a non-nil build/open
+	// error (callers check err != nil first).
+	AppendDisabled
 )
 
 // ErrAnalyticsOutboxRelocated is returned by finalize once the outbox has

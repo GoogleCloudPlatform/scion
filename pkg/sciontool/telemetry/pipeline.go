@@ -361,12 +361,16 @@ func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
 	if agentHome == "" {
 		agentHome, _ = os.UserHomeDir()
 	}
+	hasCloudExporter := p.exporter != nil
 	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
 		AgentHome:      agentHome,
 		WakeOwner:      p.analytics.owner,
 		Analytics:      p.analytics.sqliteNative,
 		LoopbackConfig: p.loopbackConfig.Load(),
-		SessionUsage:   p.forwardSessionUsage,
+		OTelExportActive: func() bool {
+			return hasCloudExporter && !p.SuppressDirectOTel()
+		},
+		SessionUsage: p.forwardSessionUsage,
 	})
 	if err := tailer.Start(ctx); err != nil {
 		return err

@@ -2254,3 +2254,451 @@ func TestPipeline_AgySQLiteTailer_SuppressDirectOTel(t *testing.T) {
 		}
 	})
 }
+
+func TestAntigravitySQLiteTailer_RevocationCursorCommit(t *testing.T) {
+	// Pure Hub-only mode (no cloud/OTLP exporter): after a Hub 404 revocation
+	// detaches sqliteNative, PollOnce must NOT advance cursors, mutate Dedupe,
+	// or accumulate session usage; rows remain unconsumed so a later active sink
+	// can still report them.
+	t.Run("hub_only_revocation_withholds_cursor_and_side_effects", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		var revoke atomic.Bool
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: false,
+		})
+		p.SetAnalyticsOutbox(home, -1, -1)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				if revoke.Load() {
+					return nil, ErrUsageIngestRevoked
+				}
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: true}, nil
+			},
+			RunID:              "run-agy-hubonly-rev",
+			HubID:              "hub-rev",
+			SuppressDirectOTel: true,
+			DrainInterval:      time.Hour,
+			HeartbeatInterval:  time.Millisecond,
+		})
+
+		var sessionMu sync.Mutex
+		var sessionTotal SessionUsage
+		p.SetSessionUsageSink(func(u SessionUsage) {
+			sessionMu.Lock()
+			sessionTotal.TokensInput += u.TokensInput
+			sessionTotal.TokensOutput += u.TokensOutput
+			sessionMu.Unlock()
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		defer func() { _ = p.Stop(ctx) }()
+		// Stop the background drainer loop so this test drives RunOnce synchronously.
+		p.analytics.drainer.Stop(ctx)
+
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-hubonly-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 0 before revocation: accepted by Hub outbox and advances cursor.
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730500, testAgyUsage{
+			modelID: 1466, input: 400, output: 80, id11: "hubonly-rev-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 0: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRow0 := tailer.state.Files["conv-hubonly-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterRow0.GenMetadataRowID == nil {
+			t.Fatalf("expected row 0 to advance cursor, got %+v", cursorAfterRow0)
+		}
+
+		// Revoke Hub sink (404) -> detaches sqliteNative in Hub-only mode.
+		revoke.Store(true)
+		time.Sleep(2 * time.Millisecond)
+		p.analytics.drainer.RunOnce(ctx)
+		if !p.analytics.sqliteNative.IsDisabled() {
+			t.Fatal("expected sqliteNative.IsDisabled()=true after pure Hub-only 404 revocation")
+		}
+
+		// Row 1 after revocation: must NOT advance cursor or accumulate session usage.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730505, testAgyUsage{
+			modelID: 1466, input: 250, output: 50, id11: "hubonly-rev-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1 after revocation: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRevoked := tailer.state.Files["conv-hubonly-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterRevoked.GenMetadataRowID == nil || *cursorAfterRevoked.GenMetadataRowID != *cursorAfterRow0.GenMetadataRowID {
+			t.Fatalf("cursor advanced after pure Hub-only revocation: got %d, want %d",
+				*cursorAfterRevoked.GenMetadataRowID, *cursorAfterRow0.GenMetadataRowID)
+		}
+
+		sessionMu.Lock()
+		gotSession := sessionTotal
+		sessionMu.Unlock()
+		if gotSession.TokensInput != 400 || gotSession.TokensOutput != 80 {
+			t.Fatalf("session usage after revocation = %+v, want only row 0 (400/80)", gotSession)
+		}
+
+		// Verify row 1 is still unconsumed: a new tailer pointing at an active
+		// outbox and loading the same persisted state file emits row 1.
+		recoveryOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "recovery-ob"))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox: %v", err)
+		}
+		recoveryTailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         NewUsageAnalytics(recoveryOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		})
+		if err := recoveryTailer.PollOnce(ctx); err != nil {
+			t.Fatalf("recovery PollOnce: %v", err)
+		}
+		evs := stagedEvents(t, recoveryOutbox)
+		if len(evs) != 1 || evs[0].Input == nil || *evs[0].Input != 250 {
+			t.Fatalf("recovery outbox events = %+v, want 1 event for row 1 (input=250)", evs)
+		}
+	})
+
+	// Hub + generic OTLP exporter (Option A): Hub 404 detaches sqliteNative and
+	// unsuppresses direct OTel export; PollOnce must record row 1 to the OTLP
+	// exporter and advance cursors so row 1 is exported once.
+	t.Run("hub_plus_otlp_revocation_records_otel_and_advances_cursor", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		addr, backend := startCaptureOTLPBackend(t)
+		var revoke atomic.Bool
+		p := NewWithConfig(&Config{
+			Enabled:      true,
+			CloudEnabled: true,
+			Endpoint:     addr,
+			Protocol:     "grpc",
+			Insecure:     true,
+		})
+		p.SetAnalyticsOutbox(home, -1, -1)
+		p.SetHubUsageSink(HubUsageSinkConfig{
+			Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+				if revoke.Load() {
+					return nil, ErrUsageIngestRevoked
+				}
+				return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events), SuppressDirectOTel: true}, nil
+			},
+			RunID:              "run-agy-hub-otlp-rev",
+			HubID:              "hub-rev",
+			SuppressDirectOTel: true,
+			DrainInterval:      time.Hour,
+			HeartbeatInterval:  time.Millisecond,
+		})
+
+		ctx := context.Background()
+		if err := p.Start(ctx); err != nil {
+			t.Fatalf("Pipeline.Start: %v", err)
+		}
+		// Stop the background drainer loop so this test drives RunOnce synchronously.
+		p.analytics.drainer.Stop(ctx)
+		if outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative); err != nil || outcome != UsageActivated {
+			t.Fatalf("ActivateUsageSource = (%q, %v), want (%q, nil)", outcome, err, UsageActivated)
+		}
+		tailer := p.agyTailer.Load()
+		tailer.mu.Lock()
+		tailer.cfg.DetectVersion = func(context.Context) (string, error) { return "1.5.18", nil }
+		tailer.mu.Unlock()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-hub-otlp-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 0 while suppressed: OTLP backend gets 0 tokens.
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730600, testAgyUsage{
+			modelID: 1466, input: 400, output: 80, id11: "hub-otlp-rev-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 0: %v", err)
+		}
+		p.flushMetricsOnStop(ctx)
+		if tokensBefore, _ := collectExportedAgyTokens(backend); len(tokensBefore) != 0 {
+			t.Fatalf("before revocation expected 0 direct tokens, got %v", tokensBefore)
+		}
+
+		// Revoke Hub sink (404) -> detaches sqliteNative and unsuppresses direct OTel.
+		revoke.Store(true)
+		time.Sleep(2 * time.Millisecond)
+		p.analytics.drainer.RunOnce(ctx)
+		if p.SuppressDirectOTel() {
+			t.Fatal("expected SuppressDirectOTel=false after Hub 404 revocation")
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRow0 := tailer.state.Files["conv-hub-otlp-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+
+		// Row 1 after revocation: exported via OTLP and cursor advances.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730605, testAgyUsage{
+			modelID: 1466, input: 250, output: 50, id11: "hub-otlp-rev-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRow1 := tailer.state.Files["conv-hub-otlp-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterRow0.GenMetadataRowID == nil || cursorAfterRow1.GenMetadataRowID == nil ||
+			*cursorAfterRow1.GenMetadataRowID <= *cursorAfterRow0.GenMetadataRowID {
+			t.Fatalf("expected cursor to advance in Hub+OTLP mode after revocation: got %v <= %v",
+				cursorAfterRow1.GenMetadataRowID, cursorAfterRow0.GenMetadataRowID)
+		}
+
+		if err := p.Stop(ctx); err != nil {
+			t.Fatalf("Pipeline.Stop: %v", err)
+		}
+
+		tokensAfter, apiCalls := collectExportedAgyTokens(backend)
+		if apiCalls != 0 {
+			t.Fatalf("tailer must not emit gen_ai.api.calls, got %d", apiCalls)
+		}
+		if tokensAfter[telemetrycontract.TokenTypeInput] != 250 || tokensAfter[telemetrycontract.TokenTypeOutput] != 50 {
+			t.Fatalf("after Hub+OTLP revocation expected exact direct OTLP tokens 250/50, got %v", tokensAfter)
+		}
+	})
+
+	// Dual-run (GCP + Hub) revocation clears Hub outbox while GCP outbox remains
+	// active: PollOnce must continue appending to GCP outbox and advancing cursors.
+	t.Run("dual_run_gcp_hub_revocation_continues_advancing", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		gcpOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "gcp-ob"))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox gcp: %v", err)
+		}
+		hubOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "hub-ob"))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox hub: %v", err)
+		}
+		dual := NewDualUsageAnalytics(gcpOutbox, hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         dual,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		})
+
+		ctx := context.Background()
+		if err := tailer.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = tailer.Stop(ctx) }()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-dual-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Simulate dual-run Hub 404 revocation: clears Hub outbox, keeps GCP outbox.
+		dual.clearHubOutbox()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730700, testAgyUsage{
+			modelID: 1466, input: 300, output: 60, id11: "dual-rev-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cur := tailer.state.Files["conv-dual-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cur.GenMetadataRowID == nil {
+			t.Fatalf("expected cursor to advance in dual-run after Hub clear, got %+v", cur)
+		}
+		if gcpEvs := stagedEvents(t, gcpOutbox); len(gcpEvs) != 1 || gcpEvs[0].Input == nil || *gcpEvs[0].Input != 300 {
+			t.Fatalf("gcp outbox events = %+v, want 1 event (input=300)", gcpEvs)
+		}
+		if hubEvs := stagedEvents(t, hubOutbox); len(hubEvs) != 0 {
+			t.Fatalf("hub outbox events = %d, want 0 after clearHubOutbox", len(hubEvs))
+		}
+	})
+
+	// When RecordUnique returns AppendDisabled mid-poll (e.g. inactive Hub-only
+	// producer or concurrent detach) with no active OTel exporter, cursors and
+	// session usage must not be committed.
+	t.Run("mid_poll_append_disabled_withholds_cursor", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+
+		// Inactive hubOnly producer: IsDisabled() is false, but RecordUnique
+		// returns (AppendDisabled, nil) inside the record loop.
+		inactive := NewLazyHookUsageAnalyticsForSource(home, false, nil, telemetrycontract.UsageSourceSQLiteNative)
+		var sessionCalls int
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         inactive,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+			SessionUsage: func(SessionUsage) {
+				sessionCalls++
+			},
+		})
+		ctx := context.Background()
+		if err := tailer.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = tailer.Stop(ctx) }()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-inactive.db"))
+		defer func() { _ = db.Close() }()
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730800, testAgyUsage{
+			modelID: 1466, input: 150, output: 30, id11: "inactive-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce: %v", err)
+		}
+		tailer.mu.Lock()
+		_, hasFile := tailer.state.Files["conv-inactive.db"]
+		tailer.mu.Unlock()
+		if hasFile {
+			t.Fatalf("expected cursor not to be committed when RecordUnique returns AppendDisabled")
+		}
+		if sessionCalls != 0 {
+			t.Fatalf("expected 0 SessionUsage calls on AppendDisabled, got %d", sessionCalls)
+		}
+	})
+
+	// Optional 1: when schema drift is already latched and Hub-only revocation
+	// detaches Analytics, PollOnce must still run the drift-latched BaselineFile
+	// path so rows written during a drifted+revoked run advance the cursor and
+	// are not retroactively billed by a later run, while emitting no events.
+	t.Run("drift_latched_hub_only_revocation_still_rebaselines", func(t *testing.T) {
+		t.Cleanup(SetTelemetryTestSandboxed())
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_USAGE_SOURCE", "")
+		_ = os.Unsetenv("SCION_USAGE_SOURCE")
+
+		hubOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "hub-ob"))
+		if err != nil {
+			t.Fatalf("OpenAnalyticsOutbox: %v", err)
+		}
+		analytics := NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+		var sessionCalls int
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         analytics,
+			// Unverified agy version triggers schema drift on the first decoded row.
+			DetectVersion: func(context.Context) (string, error) { return "99.0.0-unverified", nil },
+			SessionUsage: func(SessionUsage) {
+				sessionCalls++
+			},
+		})
+		ctx := context.Background()
+		if err := tailer.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer func() { _ = tailer.Stop(ctx) }()
+
+		db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-drift-rev.db"))
+		defer func() { _ = db.Close() }()
+
+		// Row 0 latches schema drift (emits 1 drift sentinel event).
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730900, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "drift-rev-0",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 0: %v", err)
+		}
+		if !tailer.SchemaDriftDetected() {
+			t.Fatal("expected schema drift to be latched after unverified version")
+		}
+		tailer.mu.Lock()
+		cursorAfterDrift := tailer.state.Files["conv-drift-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterDrift.GenMetadataRowID == nil {
+			t.Fatalf("expected cursor after drift latch, got %+v", cursorAfterDrift)
+		}
+		eventsBeforeRevoke := len(stagedEvents(t, hubOutbox))
+
+		// Detach Analytics (pure Hub-only 404 revocation; no OTel exporter).
+		analytics.detach()
+
+		// Row 1 written during the drifted+revoked run must advance the cursor
+		// via BaselineFile without emitting any analytics event or session usage.
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795730905, testAgyUsage{
+			modelID: 1466, input: 200, output: 40, id11: "drift-rev-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.PollOnce(ctx); err != nil {
+			t.Fatalf("PollOnce row 1 after drift+revocation: %v", err)
+		}
+
+		tailer.mu.Lock()
+		cursorAfterRow1 := tailer.state.Files["conv-drift-rev.db"].Cursor.Clone()
+		tailer.mu.Unlock()
+		if cursorAfterRow1.GenMetadataRowID == nil || *cursorAfterRow1.GenMetadataRowID <= *cursorAfterDrift.GenMetadataRowID {
+			t.Fatalf("expected drift-latched re-baseline to advance cursor after Hub-only revocation: got %+v, want > %d",
+				cursorAfterRow1, *cursorAfterDrift.GenMetadataRowID)
+		}
+		if got := len(stagedEvents(t, hubOutbox)); got != eventsBeforeRevoke {
+			t.Fatalf("outbox events changed after drift+revocation: got %d, want %d", got, eventsBeforeRevoke)
+		}
+		if sessionCalls != 0 {
+			t.Fatalf("expected 0 SessionUsage calls after drift+revocation, got %d", sessionCalls)
+		}
+	})
+}
