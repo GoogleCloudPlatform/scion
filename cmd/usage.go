@@ -221,7 +221,7 @@ func runUsage(cmd *cobra.Command, f usageFlags) error {
 			return resolveErr
 		}
 		if res.ID == "" {
-			return fmt.Errorf("cannot determine project ID for agent scope (SCION_PROJECT_ID is not set)")
+			return errors.New("cannot determine the agent's project")
 		}
 		summary, err = client.Usage().GetProject(ctx, res.ID, opts)
 	default:
@@ -366,7 +366,7 @@ func writeScopedUsageTable(out io.Writer, resp *hubclient.UsageSummaryResponse) 
 	if len(resp.Groups) > 0 {
 		_, _ = fmt.Fprintln(out)
 		gtw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-		dims := resolveGroupColumns(resp.GroupBy, resp.Groups)
+		dims := resolveGroupColumns(resp.GroupBy, resp.Groups, resp.Window.Granularity)
 		headers := make([]string, 0, len(dims)+8)
 		for _, d := range dims {
 			headers = append(headers, strings.ToUpper(d))
@@ -523,7 +523,7 @@ func formatTokenCells(t hubclient.UsageTokens, hasPartial, hasSaturated *bool) f
 	}
 }
 
-func resolveGroupColumns(groupBy []string, groups []hubclient.UsageGroupRow) []string {
+func resolveGroupColumns(groupBy []string, groups []hubclient.UsageGroupRow, granularity string) []string {
 	if len(groupBy) > 0 {
 		return groupBy
 	}
@@ -534,7 +534,11 @@ func resolveGroupColumns(groupBy []string, groups []hubclient.UsageGroupRow) []s
 	g := groups[0]
 	var dims []string
 	if g.BucketStart != nil {
-		dims = append(dims, "day")
+		if granularity == "hour" {
+			dims = append(dims, "hour")
+		} else {
+			dims = append(dims, "day")
+		}
 	}
 	if g.ProjectID != nil {
 		dims = append(dims, "project")

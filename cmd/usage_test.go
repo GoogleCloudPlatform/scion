@@ -494,6 +494,11 @@ func TestUsageCLI_AgentModeBehavior(t *testing.T) {
 
 	t.Run("usage is in agentAllowed and survives applyAgentMode", func(t *testing.T) {
 		assert.True(t, agentAllowed["usage"], "agentAllowed must include usage (D10)")
+		root, ran := gateTestTree(t)
+		applyAgentMode(root)
+		root.SetArgs([]string{"usage"})
+		require.NoError(t, root.Execute())
+		assert.Equal(t, []string{"usage"}, *ran)
 	})
 }
 

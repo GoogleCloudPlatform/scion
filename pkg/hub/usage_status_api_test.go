@@ -354,3 +354,173 @@ func TestUsageReadAPI_CapabilityScopeOrderHostedVsWorkstationAndArchived(t *test
 	assert.Equal(t, MeasurementStatusCallsOnly, getAgentStatus(agArchived.ID), "per-agent must resolve archived config matching dispatch")
 	assert.Equal(t, MeasurementStatusCallsOnly, getScopedStatus(agArchived.ID), "scoped must resolve archived config matching dispatch")
 }
+
+func TestUsageReadAPI_ShadowedConfigWithoutUsageYAML(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetHubID("hub-usage-shadow")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	ctx := context.Background()
+
+	admin := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "usage-shadow-admin@example.com",
+		DisplayName: "Usage Shadow Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	bindSystemRoleForUsageReadTest(t, s, admin.ID, store.SystemRoleHubAdmin)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Slug:    "usage-shadow-proj",
+		Name:    "Usage Shadow Proj",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	bindProjectRoleForUsageReadTest(t, s, admin.ID, proj.ID, store.ProjectRoleOwner)
+
+	// Hosted case: global "hosted-shadow" has NO usage.yaml (dispatch winner);
+	// project-scoped "hosted-shadow" declares hooks/calls_only.
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hosted-shadow",
+		Slug:    "hosted-shadow",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeGlobal,
+		ScopeID: "",
+		Status:  store.HarnessConfigStatusActive,
+		Config:  &store.HarnessConfigData{Harness: "claude"},
+	}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "hosted-shadow",
+		Slug:    "hosted-shadow",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage:   makeUsageCap(api.UsageLiveSourceHooks, nil, nil, false),
+		},
+	}))
+
+	// Workstation mirror: project "ws-shadow" has NO usage.yaml (dispatch winner);
+	// global "ws-shadow" declares native full (which would turn past-grace no-receipt into stale).
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "ws-shadow",
+		Slug:    "ws-shadow",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeProject,
+		ScopeID: proj.ID,
+		Status:  store.HarnessConfigStatusActive,
+		Config:  &store.HarnessConfigData{Harness: "claude"},
+	}))
+	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+		ID:      uuid.NewString(),
+		Name:    "ws-shadow",
+		Slug:    "ws-shadow",
+		Harness: "claude",
+		Scope:   store.HarnessConfigScopeGlobal,
+		ScopeID: "",
+		Status:  store.HarnessConfigStatusActive,
+		Config: &store.HarnessConfigData{
+			Harness: "claude",
+			Usage:   makeUsageCap(api.UsageLiveSourceNative, []string{"input", "output", "cache_read", "cache_write"}, nil, true),
+		},
+	}))
+
+	dbNow, err := s.DBNow(ctx)
+	require.NoError(t, err)
+
+	// Hosted agent: running with fresh heartbeat-only meter on hosted-shadow.
+	agHosted := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "ag-hosted-shadow",
+		Name:          "ag-hosted-shadow",
+		ProjectID:     proj.ID,
+		OwnerID:       admin.ID,
+		HarnessConfig: "hosted-shadow",
+		Phase:         string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agHosted))
+	_, err = s.SetAgentRunID(ctx, agHosted.ID, "run-hosted-shadow", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-hosted-shadow",
+		Generation:    1,
+		ProjectID:     proj.ID,
+		AgentID:       agHosted.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude",
+		HarnessConfig: "hosted-shadow",
+		CreatedAt:     dbNow.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = s.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agHosted.ID,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agHosted.ID,
+			RunID:         "run-hosted-shadow",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: dbNow.Add(-15 * time.Second),
+			ProducerSeq:   1,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// Workstation agent: running past 60s grace with NO receipt on ws-shadow.
+	agWS := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "ag-ws-shadow",
+		Name:          "ag-ws-shadow",
+		ProjectID:     proj.ID,
+		OwnerID:       admin.ID,
+		HarnessConfig: "ws-shadow",
+		Phase:         string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agWS))
+	_, err = s.SetAgentRunID(ctx, agWS.ID, "run-ws-shadow", nil)
+	require.NoError(t, err)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-ws-shadow",
+		Generation:    1,
+		ProjectID:     proj.ID,
+		AgentID:       agWS.ID,
+		BillingUserID: &admin.ID,
+		Harness:       "claude",
+		HarnessConfig: "ws-shadow",
+		CreatedAt:     dbNow.Add(-5 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	getAgentStatus := func(agentID string) string {
+		t.Helper()
+		rec := doUserUsageReadRequest(t, srv, "/api/v1/agents/"+agentID+"/usage", admin)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp AgentUsageResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.MeasurementStatus
+	}
+	getScopedStatus := func(agentID string) string {
+		t.Helper()
+		rec := doUserUsageReadRequest(t, srv, "/api/v1/projects/"+proj.ID+"/usage?since=24h&agent_id="+agentID, admin)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp UsageSummaryResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.MeasurementStatus
+	}
+
+	// Hosted: global winner has no usage.yaml -> unknown capability -> heartbeat-only reads unmeasured (NOT calls_only).
+	srv.workstation = false
+	assert.Equal(t, MeasurementStatusUnmeasured, getAgentStatus(agHosted.ID), "hosted per-agent must not fall through to shadowed project config")
+	assert.Equal(t, MeasurementStatusUnmeasured, getScopedStatus(agHosted.ID), "hosted scoped must not fall through to shadowed project config")
+
+	// Workstation: project winner has no usage.yaml -> unknown capability -> past-grace no-receipt reads unmeasured (NOT stale).
+	srv.workstation = true
+	assert.Equal(t, MeasurementStatusUnmeasured, getAgentStatus(agWS.ID), "workstation per-agent must not fall through to shadowed global config")
+	assert.Equal(t, MeasurementStatusUnmeasured, getScopedStatus(agWS.ID), "workstation scoped must not fall through to shadowed global config")
+}

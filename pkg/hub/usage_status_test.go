@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -453,7 +455,19 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 		assert.Equal(t, 0, stale)
 	})
 
-	t.Run("deleted-agent historical events fallback reads measured when no agent bucket classified", func(t *testing.T) {
+	t.Run("all unmeasured (source:none) with events reads unmeasured (R2)", func(t *testing.T) {
+		cov := &store.UsageScopeCoverage{
+			Buckets: []store.UsageCoverageBucket{
+				{HarnessConfig: "hermes", HasUsageData: true, AgentCount: 2},
+			},
+		}
+		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 7, now, true, resolveHosted)
+		assert.Equal(t, MeasurementStatusUnmeasured, status)
+		assert.Equal(t, 2, unmeasured)
+		assert.Equal(t, 0, stale)
+	})
+
+	t.Run("deleted-agent historical events fallback reads measured when zero agent buckets exist", func(t *testing.T) {
 		cov := &store.UsageScopeCoverage{}
 		status, unmeasured, stale := deriveScopeCoverageSummary(cov, 12, now, true, resolveHosted)
 		assert.Equal(t, MeasurementStatusMeasured, status)
@@ -491,4 +505,44 @@ func TestDeriveScopeCoverageSummary_AggregatePrecedenceAndMixedCapabilities(t *t
 		assert.Equal(t, 1, unmeasured)
 		assert.Equal(t, 0, stale)
 	})
+}
+
+type usageCapErrorStubStore struct {
+	store.Store
+	globalErr      error
+	projectCfg     *store.HarnessConfig
+	projectQueried bool
+}
+
+func (s *usageCapErrorStubStore) GetHarnessConfigBySlug(_ context.Context, slug, scope, _ string) (*store.HarnessConfig, error) {
+	if scope == store.HarnessConfigScopeGlobal {
+		return nil, s.globalErr
+	}
+	s.projectQueried = true
+	if s.projectCfg != nil && s.projectCfg.Slug == slug {
+		return s.projectCfg, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestUsageCapabilityMemo_HostedGlobalStoreErrorDoesNotConsultProjectScope(t *testing.T) {
+	stub := &usageCapErrorStubStore{
+		globalErr: errors.New("db temporarily unavailable"),
+		projectCfg: &store.HarnessConfig{
+			Slug:    "err-cfg",
+			Harness: "antigravity",
+			Scope:   store.HarnessConfigScopeProject,
+			ScopeID: "proj-1",
+			Config: &store.HarnessConfigData{
+				Harness: "antigravity",
+				Usage:   makeUsageCap(api.UsageLiveSourceHooks, nil, nil, false),
+			},
+		},
+	}
+	srv := &Server{store: stub, workstation: false}
+	memo := newUsageCapabilityMemo(context.Background(), srv)
+
+	got := memo.resolve("proj-1", "err-cfg", "antigravity")
+	assert.Nil(t, got, "hosted global store error must yield unknown capability (nil)")
+	assert.False(t, stub.projectQueried, "hosted hub must never consult project scope after non-NotFound global store error")
 }

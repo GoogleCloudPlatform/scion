@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -189,7 +190,18 @@ func (s *Server) handleAgentUsage(w http.ResponseWriter, r *http.Request, agentI
 		}
 	}
 
-	usageCap := s.resolveAgentUsageCapability(ctx, agent, currentRA)
+	var hcName, harnessName string
+	if currentRA != nil {
+		hcName = strings.TrimSpace(currentRA.HarnessConfig)
+		harnessName = strings.TrimSpace(currentRA.Harness)
+	}
+	if hcName == "" {
+		hcName = strings.TrimSpace(agent.HarnessConfig)
+	}
+	if harnessName == "" && agent.AppliedConfig != nil {
+		harnessName = strings.TrimSpace(agent.AppliedConfig.Harness)
+	}
+	usageCap := newUsageCapabilityMemo(ctx, s).resolve(agent.ProjectID, hcName, harnessName)
 	var runStartedAt time.Time
 	if currentRA != nil {
 		runStartedAt = currentRA.CreatedAt
@@ -776,54 +788,114 @@ func usageWindowIncludesNow(until, dbNow time.Time) bool {
 	return !until.UTC().Truncate(time.Microsecond).Before(staleCutoff)
 }
 
-// resolveAgentUsageCapability resolves the current harness-config revision's
-// live usage capability for an agent using the canonical dispatch scope order
-// (s.harnessConfigLookupScopes: global-first on hosted hubs, project-first on
-// workstation hubs) and no status filter (matching dispatch):
-//  1. hcName in s.harnessConfigLookupScopes(agent.ProjectID)
-//  2. fallback: harnessName in global scope (when harnessName != hcName)
+type usageConfigLookupResult struct {
+	hc  *store.HarnessConfig
+	err error
+}
+
+// usageCapabilityLookup resolves the current harness-config revision's
+// usage.yaml capability for one (projectID, harnessConfig, harness) tuple.
+type usageCapabilityLookup func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities
+
+// usageCapabilityMemo is the single shared harness-config usage capability
+// resolver used by both per-agent reads and scoped aggregate reads.
 //
-// Note: capability comes from the current harness-config revision rather than
-// a per-run snapshot. Returns nil (unknown capability) when no matching
-// harness-config with usage.yaml is found.
-func (s *Server) resolveAgentUsageCapability(ctx context.Context, agent *store.Agent, currentRA *store.RunAttribution) *api.HarnessUsageCapabilities {
-	if s == nil || s.store == nil || agent == nil {
+// Resolution matches dispatch (resolveHarnessConfigBySlug) exactly:
+//   - walks s.harnessConfigLookupScopes(projectID) (global-first on hosted
+//     hubs, project-first on workstation hubs) with no status filter;
+//   - stops at the FIRST config found — if that dispatch-winning config has
+//     no usage.yaml (or an invalid one), capability is unknown (nil) and
+//     never falls through to a shadowed same-slug config in another scope;
+//   - on hosted hubs, a non-NotFound error on global lookup stops immediately
+//     without consulting project scope (returning unknown/nil);
+//   - falls back to global lookup of harness only when NO config was found
+//     for harnessConfig (and no store error occurred).
+//
+// Memoizes per-scope lookups (hits, not-found, and errors) for one request.
+// Note: capability reflects the current harness-config revision, not a
+// per-run snapshot.
+type usageCapabilityMemo struct {
+	ctx     context.Context
+	s       *Server
+	project map[harnessRefKey]usageConfigLookupResult
+	global  map[string]usageConfigLookupResult
+}
+
+func newUsageCapabilityMemo(ctx context.Context, s *Server) *usageCapabilityMemo {
+	return &usageCapabilityMemo{
+		ctx:     ctx,
+		s:       s,
+		project: make(map[harnessRefKey]usageConfigLookupResult),
+		global:  make(map[string]usageConfigLookupResult),
+	}
+}
+
+func (m *usageCapabilityMemo) lookupScope(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	if slug == "" || m == nil || m.s == nil || m.s.store == nil {
+		return nil, store.ErrNotFound
+	}
+	if scope == store.HarnessConfigScopeProject {
+		k := harnessRefKey{projectID: scopeID, ref: slug}
+		if res, ok := m.project[k]; ok {
+			return res.hc, res.err
+		}
+		hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, scope, scopeID)
+		m.project[k] = usageConfigLookupResult{hc: hc, err: err}
+		return hc, err
+	}
+	if res, ok := m.global[slug]; ok {
+		return res.hc, res.err
+	}
+	hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, store.HarnessConfigScopeGlobal, "")
+	m.global[slug] = usageConfigLookupResult{hc: hc, err: err}
+	return hc, err
+}
+
+func (m *usageCapabilityMemo) resolveConfigBySlug(projectID, name string) (*store.HarnessConfig, error) {
+	if name == "" || m == nil || m.s == nil {
+		return nil, nil
+	}
+	var lookupErr error
+	for _, sc := range m.s.harnessConfigLookupScopes(projectID) {
+		hc, err := m.lookupScope(name, sc.scope, sc.scopeID)
+		if err == nil && hc != nil {
+			return hc, nil
+		}
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			if m.s.agentLifecycleLog != nil {
+				m.s.agentLifecycleLog.Warn("failed to get "+sc.scope+" harness config by slug",
+					"slug", name, "scope_id", sc.scopeID, "error", err)
+			}
+			if !m.s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
+				return nil, err
+			}
+			lookupErr = err
+		}
+	}
+	return nil, lookupErr
+}
+
+func (m *usageCapabilityMemo) resolve(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
+	if m == nil || m.s == nil {
 		return nil
 	}
-	var hcName, harnessName string
-	if currentRA != nil {
-		hcName = strings.TrimSpace(currentRA.HarnessConfig)
-		harnessName = strings.TrimSpace(currentRA.Harness)
-	}
-	if hcName == "" {
-		hcName = strings.TrimSpace(agent.HarnessConfig)
-	}
-	if harnessName == "" && agent.AppliedConfig != nil {
-		harnessName = strings.TrimSpace(agent.AppliedConfig.Harness)
-	}
-
-	tryLookup := func(slug, scope, scopeID string) *api.HarnessUsageCapabilities {
-		if slug == "" {
-			return nil
-		}
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
-		if err != nil || hc == nil {
-			return nil
-		}
-		s.populateHarnessConfigCapabilities(ctx, hc)
-		return usageCapabilityFromHarnessConfig(hc)
-	}
-
+	hcName := strings.TrimSpace(harnessConfig)
+	hName := strings.TrimSpace(harness)
 	if hcName != "" {
-		for _, sc := range s.harnessConfigLookupScopes(agent.ProjectID) {
-			if cap := tryLookup(hcName, sc.scope, sc.scopeID); cap != nil {
-				return cap
-			}
+		hc, err := m.resolveConfigBySlug(projectID, hcName)
+		if err != nil {
+			return nil
+		}
+		if hc != nil {
+			m.s.populateHarnessConfigCapabilities(m.ctx, hc)
+			return usageCapabilityFromHarnessConfig(hc)
 		}
 	}
-	if harnessName != "" && harnessName != hcName {
-		if cap := tryLookup(harnessName, store.HarnessConfigScopeGlobal, ""); cap != nil {
-			return cap
+	if hName != "" && hName != hcName {
+		hc, err := m.lookupScope(hName, store.HarnessConfigScopeGlobal, "")
+		if err == nil && hc != nil {
+			m.s.populateHarnessConfigCapabilities(m.ctx, hc)
+			return usageCapabilityFromHarnessConfig(hc)
 		}
 	}
 	return nil

@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -738,93 +737,12 @@ func buildScopedUsageResponse(
 	}
 }
 
-// usageCapabilityLookup resolves the current harness-config revision's
-// usage.yaml capability for one coverage bucket's (projectID, harnessConfig,
-// harness) tuple.
-type usageCapabilityLookup func(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities
-
-// usageCapabilityMemo resolves harness-config usage.yaml capabilities on demand
-// for only the distinct keys returned by GetUsageScopeCoverage, memoized per
-// request (both hits and misses). It uses s.harnessConfigLookupScopes (global-
-// first on hosted hubs, project-first on workstation hubs) and no status filter,
-// matching dispatch and per-agent resolution 1:1.
-//
-// Note: capability reflects the current harness-config revision, not a per-run
-// snapshot.
-type usageCapabilityMemo struct {
-	ctx     context.Context
-	s       *Server
-	project map[harnessRefKey]*api.HarnessUsageCapabilities
-	global  map[string]*api.HarnessUsageCapabilities
-}
-
-func newUsageCapabilityMemo(ctx context.Context, s *Server) *usageCapabilityMemo {
-	return &usageCapabilityMemo{
-		ctx:     ctx,
-		s:       s,
-		project: make(map[harnessRefKey]*api.HarnessUsageCapabilities),
-		global:  make(map[string]*api.HarnessUsageCapabilities),
-	}
-}
-
-func (m *usageCapabilityMemo) lookupScope(slug, scope, scopeID string) *api.HarnessUsageCapabilities {
-	if slug == "" || m == nil || m.s == nil || m.s.store == nil {
-		return nil
-	}
-	if scope == store.HarnessConfigScopeProject {
-		k := harnessRefKey{projectID: scopeID, ref: slug}
-		if cap, ok := m.project[k]; ok {
-			return cap
-		}
-		hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, scope, scopeID)
-		var cap *api.HarnessUsageCapabilities
-		if err == nil && hc != nil {
-			m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-			cap = usageCapabilityFromHarnessConfig(hc)
-		}
-		m.project[k] = cap
-		return cap
-	}
-	if cap, ok := m.global[slug]; ok {
-		return cap
-	}
-	hc, err := m.s.store.GetHarnessConfigBySlug(m.ctx, slug, store.HarnessConfigScopeGlobal, "")
-	var cap *api.HarnessUsageCapabilities
-	if err == nil && hc != nil {
-		m.s.populateHarnessConfigCapabilities(m.ctx, hc)
-		cap = usageCapabilityFromHarnessConfig(hc)
-	}
-	m.global[slug] = cap
-	return cap
-}
-
-func (m *usageCapabilityMemo) resolve(projectID, harnessConfig, harness string) *api.HarnessUsageCapabilities {
-	if m == nil || m.s == nil {
-		return nil
-	}
-	hc := strings.TrimSpace(harnessConfig)
-	h := strings.TrimSpace(harness)
-	if hc != "" {
-		for _, sc := range m.s.harnessConfigLookupScopes(projectID) {
-			if cap := m.lookupScope(hc, sc.scope, sc.scopeID); cap != nil {
-				return cap
-			}
-		}
-	}
-	if h != "" && h != hc {
-		if cap := m.lookupScope(h, store.HarnessConfigScopeGlobal, ""); cap != nil {
-			return cap
-		}
-	}
-	return nil
-}
-
 // deriveScopeCoverageSummary maps each SQL-grouped coverage bucket through the
 // single deriveMeasurementStatus function in Go (O1c) and computes aggregate
 // status using precedence stale > partial > measured > calls_only > unmeasured
 // (with measured + calls_only mixed scopes reading partial), along with
 // unmeasured_agents and stale_agents counts. The totalEvents fallback applies
-// only when no agent bucket was classified (e.g., historical rollups from
+// ONLY when zero agent buckets were classified (e.g., historical rollups from
 // deleted agents no longer in scope).
 func deriveScopeCoverageSummary(
 	cov *store.UsageScopeCoverage,
@@ -894,6 +812,7 @@ func deriveScopeCoverageSummary(
 		}
 	}
 
+	totalClassified := staleAgents + partialAgents + measuredAgents + callsOnlyAgents + unmeasuredAgents
 	switch {
 	case staleAgents > 0:
 		status = MeasurementStatusStale
@@ -903,7 +822,7 @@ func deriveScopeCoverageSummary(
 		status = MeasurementStatusMeasured
 	case callsOnlyAgents > 0:
 		status = MeasurementStatusCallsOnly
-	case totalEvents > 0:
+	case totalClassified == 0 && totalEvents > 0:
 		status = MeasurementStatusMeasured
 	default:
 		status = MeasurementStatusUnmeasured
