@@ -21,6 +21,8 @@ import {
   formatCompactUsageToken,
   formatDashboardSourceLabel,
   formatUsageToken,
+  formatUsageWindowLabel,
+  hasPartialDashboardTotals,
   isMeasurementPartial,
 } from './usage-format.js';
 
@@ -99,5 +101,61 @@ describe('usage-format helpers', () => {
     expect(formatDashboardSourceLabel('hub_rollups', 'day', 'America/Chicago')).toBe(
       'Hub rollups · Daily'
     );
+  });
+
+  it('detects partial dashboard totals when a summable component bucket is null', () => {
+    expect(hasPartialDashboardTotals(null)).toBe(false);
+    expect(
+      hasPartialDashboardTotals({
+        input: 100,
+        output: 50,
+        cacheRead: 200,
+        cacheWrite: 10,
+        cacheWrite1h: null,
+        reasoning: null,
+        summableTokens: 360,
+        cacheHitRate: 200 / 310,
+      })
+    ).toBe(false);
+    expect(
+      hasPartialDashboardTotals({
+        input: 100,
+        output: 50,
+        cacheRead: 200,
+        cacheWrite: null,
+        cacheWrite1h: null,
+        reasoning: null,
+        summableTokens: 350,
+        cacheHitRate: null,
+      })
+    ).toBe(true);
+    expect(
+      hasPartialDashboardTotals({
+        input: null,
+        output: null,
+        cacheRead: null,
+        cacheWrite: null,
+        cacheWrite1h: null,
+        reasoning: null,
+        summableTokens: null,
+        cacheHitRate: null,
+      })
+    ).toBe(false);
+  });
+
+  it('formats scoped usage window labels from since/until timestamps', () => {
+    expect(
+      formatUsageWindowLabel({
+        since: '2026-10-28T00:00:00Z',
+        until: '2026-11-27T00:00:00Z',
+      })
+    ).toBe('Tokens (30d)');
+    expect(
+      formatUsageWindowLabel({
+        since: '2026-11-20T00:00:00Z',
+        until: '2026-11-27T00:00:00Z',
+      })
+    ).toBe('Tokens (7d)');
+    expect(formatUsageWindowLabel(null)).toBe('Tokens (window)');
   });
 });

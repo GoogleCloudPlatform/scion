@@ -28,6 +28,7 @@
 import type {
   AgentUsageTokens,
   DashboardMeasurement,
+  DashboardTokenTotals,
   UsageMeasurementStatus,
 } from '../shared/types.js';
 import { formatNumber } from './format-number.js';
@@ -167,6 +168,42 @@ export function isMeasurementPartial(
     return true;
   }
   return (measurement.unmeasuredAgents ?? 0) > 0 || (measurement.staleAgents ?? 0) > 0;
+}
+
+/**
+ * Return true when a dashboard token totals object has a non-null summable
+ * total while at least one summable component bucket (input, output,
+ * cacheRead, cacheWrite) is unknown (null), making summableTokens a partial
+ * known-components lower bound.
+ */
+export function hasPartialDashboardTotals(
+  totals: DashboardTokenTotals | null | undefined
+): boolean {
+  if (!totals || totals.summableTokens === null) return false;
+  return (
+    totals.input === null ||
+    totals.output === null ||
+    totals.cacheRead === null ||
+    totals.cacheWrite === null
+  );
+}
+
+/**
+ * Format a compact stat label describing the response window of a scoped usage
+ * summary (e.g. "Tokens (30d)"), so a windowed ledger total is never mistaken
+ * for an all-time lifetime sum.
+ */
+export function formatUsageWindowLabel(
+  window: { since: string; until: string } | null | undefined
+): string {
+  if (!window) return 'Tokens (window)';
+  const sinceMs = Date.parse(window.since);
+  const untilMs = Date.parse(window.until);
+  if (Number.isFinite(sinceMs) && Number.isFinite(untilMs) && untilMs > sinceMs) {
+    const days = Math.max(1, Math.round((untilMs - sinceMs) / 86_400_000));
+    return `Tokens (${days}d)`;
+  }
+  return 'Tokens (window)';
 }
 
 /**

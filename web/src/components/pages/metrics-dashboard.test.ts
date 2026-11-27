@@ -790,4 +790,87 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     await settle(element);
     expect(root.querySelector('[data-testid="metrics-source-indicator"]')).toBeNull();
   });
+
+  it('uses null gaps on HubRollupSource bar series, distinguishes unknown empty cache charts, marks partial totals on null buckets, and applies saturation only to Summable Total', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: SUMMARY,
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [
+          {
+            label: 'model-a',
+            points: [
+              { timestamp: '2026-11-24', value: 1000 },
+              { timestamp: '2026-11-25', value: 2000 },
+            ],
+          },
+          {
+            label: 'model-b',
+            points: [{ timestamp: '2026-11-25', value: 500 }],
+          },
+        ],
+        output: [
+          {
+            label: 'model-a',
+            points: [{ timestamp: '2026-11-24', value: 400 }],
+          },
+        ],
+        cacheRead: [],
+        cacheWrite: [],
+        totals: {
+          input: 3500,
+          output: 400,
+          cacheRead: 0,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 3900,
+          cacheHitRate: null,
+          saturated: true,
+        },
+        measurement: {
+          status: 'measured',
+          unmeasuredAgents: 0,
+          staleAgents: 0,
+        },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    // O3 + N2: summableTokens is marked partial (≥) because cacheWrite is null, and saturated (+) applies only to Summable Total.
+    expect(root.querySelector('[data-testid="metrics-tokens-summable"]')?.textContent?.trim()).toBe(
+      '≥ 3.9K+'
+    );
+    expect(
+      root.querySelector('[data-testid="metrics-tokens-input-total"]')?.textContent?.trim()
+    ).toBe('3.5K');
+    expect(
+      root.querySelector('[data-testid="metrics-tokens-cache-write-total"]')?.textContent?.trim()
+    ).toBe('—');
+
+    // O2: measured 0 cacheRead says "No cache read tokens", while null cacheWrite says "not reported".
+    expect(
+      root.querySelector('[data-testid="metrics-cache-read-empty"]')?.textContent?.trim()
+    ).toBe('No cache read tokens in this period.');
+    expect(
+      root.querySelector('[data-testid="metrics-cache-write-empty"]')?.textContent?.trim()
+    ).toBe('Cache write tokens not reported in this period.');
+
+    // O4: multi-series hub_rollups bar chart uses null (not 0) for omitted dates on model-b.
+    const inputChart = chartConfigs[0];
+    expect(inputChart.data.labels).toEqual(['2026-11-24', '2026-11-25']);
+    expect(inputChart.data.datasets[0].data).toEqual([1000, 2000]);
+    expect(inputChart.data.datasets[1].data).toEqual([null, 500]);
+  });
 });

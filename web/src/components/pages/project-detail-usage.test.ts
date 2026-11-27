@@ -198,28 +198,31 @@ describe('project-detail token total fix & measurement badges', () => {
     container.appendChild(el);
     const priv = el as unknown as {
       loading: boolean;
-      project: Project | null;
-      loadMetricsSummary: () => Promise<void>;
-      loadSessionMetricsSummary: () => Promise<void>;
-      loadProjectUsage: () => Promise<void>;
-      usageLedgerEnabled: boolean;
+      applyLoadedProject: (project: Project) => void;
     };
     priv.loading = false;
-    priv.project = makeProject();
-    await priv.loadMetricsSummary();
-    await priv.loadSessionMetricsSummary();
-    if (priv.usageLedgerEnabled) {
-      await priv.loadProjectUsage();
-    }
+    // Exercise the real production gate in applyLoadedProject() (which calls
+    // loadMetricsSummary, loadSessionMetricsSummary, and — only when
+    // tokenomics.usage_ledger is enabled — loadProjectUsage).
+    priv.applyLoadedProject(makeProject());
+    await new Promise((r) => setTimeout(r, 10));
     await el.updateComplete;
     return el;
   }
 
-  it('keeps legacy input+output sum and skips /usage fetch when tokenomics.usage_ledger is off', async () => {
+  it('keeps legacy input+output sum, keeps Total Tokens label, and skips /usage fetch when tokenomics.usage_ledger is off', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
     const el = await mountProjectDetail();
 
+    // Also verify the guard inside loadProjectUsage() directly.
+    await (el as unknown as { loadProjectUsage: () => Promise<void> }).loadProjectUsage();
+
     expect(fetchUrls).not.toContain('/api/v1/projects/proj-usage-1/usage');
+    expect(
+      el
+        .shadowRoot!.querySelector('[data-testid="project-total-tokens-label"]')
+        ?.textContent?.trim()
+    ).toBe('Total Tokens');
     expect(
       el.shadowRoot!.querySelector('[data-testid="project-total-tokens"]')?.textContent?.trim()
     ).toBe('15.0K');
@@ -231,11 +234,17 @@ describe('project-detail token total fix & measurement badges', () => {
     ).toBeNull();
   });
 
-  it('uses canonical summable_tokens and renders measurement badges when tokenomics.usage_ledger is on', async () => {
+  it('uses canonical summable_tokens with window-labelled stat and renders measurement badges when tokenomics.usage_ledger is on', async () => {
     setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
     const el = await mountProjectDetail();
 
     expect(fetchUrls).toContain('/api/v1/projects/proj-usage-1/usage');
+    // Label names the 30-day response window so it is never mistaken for an all-time sum (R1).
+    expect(
+      el
+        .shadowRoot!.querySelector('[data-testid="project-total-tokens-label"]')
+        ?.textContent?.trim()
+    ).toBe('Tokens (30d)');
     // Canonical summable total is 60,000 (10K input + 5K output + 40K cache_read + 5K cache_write), not 15K.
     expect(
       el.shadowRoot!.querySelector('[data-testid="project-total-tokens"]')?.textContent?.trim()

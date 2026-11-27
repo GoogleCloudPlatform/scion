@@ -175,6 +175,8 @@ import type {
 } from '../../shared/types.js';
 import {
   formatCompactUsageToken,
+  formatUsageWindowLabel,
+  hasPartialDashboardTotals,
   isMeasurementPartial,
   summableUnknownEvents,
 } from '../../utils/usage-format.js';
@@ -3358,7 +3360,8 @@ export class ScionPageProjectDetail extends LitElement {
                   >${this.usageLedgerEnabled && this.metricsSummary.tokens
                     ? formatCompactUsageToken(
                         this.metricsSummary.tokens.summableTokens,
-                        isMeasurementPartial(this.metricsSummary.measurement),
+                        isMeasurementPartial(this.metricsSummary.measurement) ||
+                          hasPartialDashboardTotals(this.metricsSummary.tokens),
                         Boolean(this.metricsSummary.tokens.saturated)
                       )
                     : this.formatTokenCount(this.metricsSummary.tokenUsage24h)}</span
@@ -3395,7 +3398,11 @@ export class ScionPageProjectDetail extends LitElement {
                 <span class="stat-value">${this.sessionMetricsSummary.totalSessions}</span>
               </div>
               <div class="stat">
-                <span class="stat-label">Total Tokens</span>
+                <span class="stat-label" data-testid="project-total-tokens-label"
+                  >${this.usageLedgerEnabled && this.projectUsage
+                    ? formatUsageWindowLabel(this.projectUsage.window)
+                    : 'Total Tokens'}</span
+                >
                 <span class="stat-value" data-testid="project-total-tokens"
                   >${this.usageLedgerEnabled && this.projectUsage
                     ? formatCompactUsageToken(
@@ -3404,6 +3411,11 @@ export class ScionPageProjectDetail extends LitElement {
                           this.projectUsage.tokens,
                           this.projectUsage.null_token_events
                         ) > 0 ||
+                          (this.projectUsage.tokens.summable_tokens !== null &&
+                            (this.projectUsage.tokens.input === null ||
+                              this.projectUsage.tokens.output === null ||
+                              this.projectUsage.tokens.cache_read === null ||
+                              this.projectUsage.tokens.cache_write === null)) ||
                           isMeasurementPartial({
                             status: this.projectUsage.measurement_status,
                             unmeasuredAgents: this.projectUsage.unmeasured_agents,

@@ -40,6 +40,7 @@ import {
   formatCacheHitRateValue,
   formatCompactUsageToken,
   formatDashboardSourceLabel,
+  hasPartialDashboardTotals,
   isMeasurementPartial,
 } from '../../utils/usage-format.js';
 
@@ -312,13 +313,6 @@ export class ScionPageMetrics extends LitElement {
 
     .telemetry-hint {
       margin-bottom: 1rem;
-    }
-
-    .header-meta {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      flex-wrap: wrap;
     }
 
     .source-indicator {
@@ -852,19 +846,17 @@ export class ScionPageMetrics extends LitElement {
               >`
             : nothing}
         </div>
-        <div class="header-meta">
-          <div class="period-selector">
-            ${[7, 14, 30].map(
-              (d) => html`
-                <button
-                  class="period-btn ${this.periodDays === d ? 'active' : ''}"
-                  @click=${() => this.handlePeriodChange(d)}
-                >
-                  ${d}d
-                </button>
-              `
-            )}
-          </div>
+        <div class="period-selector">
+          ${[7, 14, 30].map(
+            (d) => html`
+              <button
+                class="period-btn ${this.periodDays === d ? 'active' : ''}"
+                @click=${() => this.handlePeriodChange(d)}
+              >
+                ${d}d
+              </button>
+            `
+          )}
         </div>
       </div>
 
@@ -909,10 +901,16 @@ export class ScionPageMetrics extends LitElement {
     if (!this.summary) return this.renderEmptyState();
 
     const s = this.summary;
-    const partial = this.usageLedgerOn && isMeasurementPartial(s.measurement);
+    const measurementPartial = this.usageLedgerOn && isMeasurementPartial(s.measurement);
+    const summablePartial =
+      measurementPartial || (this.usageLedgerOn && hasPartialDashboardTotals(s.tokens));
     const totalTokensDisplay =
       this.usageLedgerOn && s.tokens
-        ? formatCompactUsageToken(s.tokens.summableTokens, partial, Boolean(s.tokens.saturated))
+        ? formatCompactUsageToken(
+            s.tokens.summableTokens,
+            summablePartial,
+            Boolean(s.tokens.saturated)
+          )
         : this.formatCompactNumber(s.totalTokens);
     const showCacheHitRate =
       this.usageLedgerOn && (s.tokens !== undefined || s.cacheHitRate !== undefined);
@@ -942,7 +940,7 @@ export class ScionPageMetrics extends LitElement {
               <div class="stat-card">
                 <span class="stat-label">Cache Hit Rate</span>
                 <span class="stat-value" data-testid="metrics-summary-cache-hit-rate"
-                  >${formatCacheHitRateValue(hitRateValue, partial)}</span
+                  >${formatCacheHitRateValue(hitRateValue, measurementPartial)}</span
                 >
               </div>
             `
@@ -1010,11 +1008,21 @@ export class ScionPageMetrics extends LitElement {
     if (!this.tokens) return this.renderEmptyState();
     const t = this.tokens;
     const zone = dayBucketZoneLabel(t.timeZone);
-    const partial = this.usageLedgerOn && isMeasurementPartial(t.measurement);
+    const measurementPartial = this.usageLedgerOn && isMeasurementPartial(t.measurement);
+    const summablePartial =
+      measurementPartial || (this.usageLedgerOn && hasPartialDashboardTotals(t.totals));
     const showCacheCharts =
       this.usageLedgerOn &&
       (Boolean(t.cacheRead?.length) || Boolean(t.cacheWrite?.length) || t.source === 'hub_rollups');
     const showHitRateChart = this.usageLedgerOn && Boolean(t.dailyCacheHitRate?.length);
+    const cacheReadEmptyText =
+      t.totals && t.totals.cacheRead === null
+        ? 'Cache read tokens not reported in this period.'
+        : 'No cache read tokens in this period.';
+    const cacheWriteEmptyText =
+      t.totals && t.totals.cacheWrite === null
+        ? 'Cache write tokens not reported in this period.'
+        : 'No cache write tokens in this period.';
 
     return html`
       ${this.renderMeasurementBar(t.measurement, 'metrics-tokens-measurement')}
@@ -1026,7 +1034,7 @@ export class ScionPageMetrics extends LitElement {
                 <span class="stat-value" data-testid="metrics-tokens-summable"
                   >${formatCompactUsageToken(
                     t.totals.summableTokens,
-                    partial,
+                    summablePartial,
                     Boolean(t.totals.saturated)
                   )}</span
                 >
@@ -1034,47 +1042,31 @@ export class ScionPageMetrics extends LitElement {
               <div class="stat-card">
                 <span class="stat-label">Input</span>
                 <span class="stat-value" data-testid="metrics-tokens-input-total"
-                  >${formatCompactUsageToken(
-                    t.totals.input,
-                    partial,
-                    Boolean(t.totals.saturated)
-                  )}</span
+                  >${formatCompactUsageToken(t.totals.input, measurementPartial)}</span
                 >
               </div>
               <div class="stat-card">
                 <span class="stat-label">Output</span>
                 <span class="stat-value" data-testid="metrics-tokens-output-total"
-                  >${formatCompactUsageToken(
-                    t.totals.output,
-                    partial,
-                    Boolean(t.totals.saturated)
-                  )}</span
+                  >${formatCompactUsageToken(t.totals.output, measurementPartial)}</span
                 >
               </div>
               <div class="stat-card">
                 <span class="stat-label">Cache Read</span>
                 <span class="stat-value" data-testid="metrics-tokens-cache-read-total"
-                  >${formatCompactUsageToken(
-                    t.totals.cacheRead,
-                    partial,
-                    Boolean(t.totals.saturated)
-                  )}</span
+                  >${formatCompactUsageToken(t.totals.cacheRead, measurementPartial)}</span
                 >
               </div>
               <div class="stat-card">
                 <span class="stat-label">Cache Write</span>
                 <span class="stat-value" data-testid="metrics-tokens-cache-write-total"
-                  >${formatCompactUsageToken(
-                    t.totals.cacheWrite,
-                    partial,
-                    Boolean(t.totals.saturated)
-                  )}</span
+                  >${formatCompactUsageToken(t.totals.cacheWrite, measurementPartial)}</span
                 >
               </div>
               <div class="stat-card">
                 <span class="stat-label">Cache Hit Rate</span>
                 <span class="stat-value" data-testid="metrics-tokens-cache-hit-rate-total"
-                  >${formatCacheHitRateValue(t.totals.cacheHitRate, partial)}</span
+                  >${formatCacheHitRateValue(t.totals.cacheHitRate, measurementPartial)}</span
                 >
               </div>
             </div>
@@ -1102,7 +1094,9 @@ export class ScionPageMetrics extends LitElement {
                 <div class="chart-container">
                   ${t.cacheRead?.length
                     ? html`<canvas id="chart-tokens-cache-read"></canvas>`
-                    : html`<div class="chart-empty">No cache read tokens in this period.</div>`}
+                    : html`<div class="chart-empty" data-testid="metrics-cache-read-empty">
+                        ${cacheReadEmptyText}
+                      </div>`}
                 </div>
               </div>
               <div class="section">
@@ -1110,7 +1104,9 @@ export class ScionPageMetrics extends LitElement {
                 <div class="chart-container">
                   ${t.cacheWrite?.length
                     ? html`<canvas id="chart-tokens-cache-write"></canvas>`
-                    : html`<div class="chart-empty">No cache write tokens in this period.</div>`}
+                    : html`<div class="chart-empty" data-testid="metrics-cache-write-empty">
+                        ${cacheWriteEmptyText}
+                      </div>`}
                 </div>
               </div>
             </div>
