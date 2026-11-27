@@ -48,7 +48,7 @@ const (
 	projectSettingDefaultModel           = "scion.io/default-model"
 	projectSettingDefaultThinkingLevel   = "scion.io/default-thinking-level"
 	projectSettingTelemetryEnabled       = "scion.io/telemetry-enabled"
-	projectSettingTrajectoryCapture      = "scion.io/trajectory-capture"
+	projectSettingTrajectoryCapture      = telemetrycontract.TrajectoryCaptureProjectAnnotation
 	projectSettingAutoExposePortsEnabled = "scion.io/auto-expose-ports-enabled"
 	projectSettingActiveProfile          = "scion.io/active-profile"
 
