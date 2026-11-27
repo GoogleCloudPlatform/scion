@@ -35,12 +35,28 @@ interface ChartDataset {
   label: string;
   data: (number | null)[];
   spanGaps?: boolean;
+  pointStyle?: string | string[];
+  pointRadius?: number | number[];
+  partialPoints?: boolean[];
 }
 
 interface ChartConfig {
   type: string;
   data: { labels: string[]; datasets: ChartDataset[] };
-  options: { scales: { x: { title: { display: boolean; text: string } } } };
+  options: {
+    scales: { x: { title: { display: boolean; text: string } } };
+    plugins?: {
+      tooltip?: {
+        callbacks?: {
+          label?: (ctx: {
+            dataIndex: number;
+            dataset: { partialPoints?: boolean[] };
+            parsed: { y: number | null };
+          }) => string;
+        };
+      };
+    };
+  };
 }
 
 const chartConfigs: ChartConfig[] = [];
@@ -1001,5 +1017,119 @@ describe('scion-page-metrics — HubRollupSource tokenomics UI & CM fallback', (
     expect(root.querySelector('[data-testid="metrics-tokens-truncated"]')?.textContent).toContain(
       'earliest boundary day was omitted'
     );
+  });
+
+  it('marks cacheHitRatePartial and dailyCacheHitRate partial points as upper bounds (≤ with tooltip), keeps null as —, and handles absent source when experiment is off', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    stubResponses({
+      summary: {
+        periodDays: 7,
+        timeZone: 'America/Chicago',
+        source: 'hub_rollups',
+        granularity: 'hour',
+        totalSessions: 2,
+        totalApiCalls: 6,
+        totalTokens: 50_000,
+        uniqueAgents: 1,
+        tokens: {
+          input: 12_000,
+          output: 2_000,
+          cacheRead: 36_000,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 50_000,
+          cacheHitRate: 0.75,
+          cacheHitRatePartial: true,
+        },
+        cacheHitRate: 0.75,
+        cacheHitRatePartial: true,
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+      tokens: {
+        periodDays: 7,
+        timeZone: 'UTC',
+        source: 'hub_rollups',
+        granularity: 'day',
+        input: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 1000 }] }],
+        output: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 500 }] }],
+        cacheRead: [{ label: 'm1', points: [{ timestamp: '2026-11-25', value: 3000 }] }],
+        cacheWrite: [],
+        totals: {
+          input: 1000,
+          output: 500,
+          cacheRead: 3000,
+          cacheWrite: null,
+          cacheWrite1h: null,
+          reasoning: null,
+          summableTokens: 4500,
+          cacheHitRate: 0.75,
+          cacheHitRatePartial: true,
+        },
+        dailyCacheHitRate: [
+          { timestamp: '2026-11-24', value: null, partial: false },
+          { timestamp: '2026-11-25', value: 0.75, partial: true },
+          { timestamp: '2026-11-26', value: 0.5, partial: false },
+        ],
+        measurement: { status: 'measured', unmeasuredAgents: 0, staleAgents: 0 },
+      },
+    });
+
+    element = document.createElement('scion-page-metrics') as MetricsPage;
+    document.body.appendChild(element);
+    await settle(element);
+
+    const root = element.shadowRoot!;
+    const summaryHitRate = root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]');
+    expect(summaryHitRate?.textContent?.trim()).toBe('≤ 75.0%');
+    expect(summaryHitRate?.getAttribute('title')).toContain('Upper bound');
+
+    element.activeTab = 'tokens';
+    await element.loadView('tokens');
+    await settle(element);
+
+    const tokensHitRate = root.querySelector('[data-testid="metrics-tokens-cache-hit-rate-total"]');
+    expect(tokensHitRate?.textContent?.trim()).toBe('≤ 75.0%');
+    expect(tokensHitRate?.getAttribute('title')).toContain('Upper bound');
+    expect(root.querySelector('[data-testid="metrics-hit-rate-partial-note"]')).not.toBeNull();
+
+    // Hit rate chart marks partial point with triangle and upper-bound tooltip, null stays null.
+    const hitRateChart = chartConfigs[chartConfigs.length - 1];
+    expect(hitRateChart.data.datasets[0].data).toEqual([null, 75, 50]);
+    expect(hitRateChart.data.datasets[0].pointStyle).toEqual(['circle', 'triangle', 'circle']);
+    const tooltipLabel = hitRateChart.options.plugins?.tooltip?.callbacks?.label;
+    expect(tooltipLabel).toBeDefined();
+    expect(
+      tooltipLabel!({
+        dataIndex: 0,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: null },
+      })
+    ).toBe('Cache Hit Rate: —');
+    expect(
+      tooltipLabel!({
+        dataIndex: 1,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: 75 },
+      })
+    ).toContain('≤ 75.0%');
+    expect(
+      tooltipLabel!({
+        dataIndex: 2,
+        dataset: hitRateChart.data.datasets[0],
+        parsed: { y: 50 },
+      })
+    ).toBe('Cache Hit Rate: 50.0%');
+
+    // Experiment OFF with `source` absent on response works cleanly.
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, false);
+    stubResponses({
+      summary: { ...SUMMARY, timeZone: 'UTC' },
+      tokens: { ...TOKENS, timeZone: 'UTC' },
+    });
+    await element.loadView('summary');
+    await settle(element);
+    expect(root.querySelector('[data-testid="metrics-source-indicator"]')).toBeNull();
+    expect(root.querySelector('[data-testid="metrics-summary-cache-hit-rate"]')).toBeNull();
   });
 });

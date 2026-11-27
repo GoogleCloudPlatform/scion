@@ -124,16 +124,26 @@ export function computeCacheHitRate(tokens: {
   return tokens.cache_read / denom;
 }
 
+export const CACHE_HIT_RATE_UPPER_BOUND_TOOLTIP =
+  'Upper bound: some events had unknown input or cache write tokens.';
+
 /**
  * Format a nullable cache hit rate ratio [0, 1] as a percentage string
- * (e.g. "23.1%"), prefixed with "≈ " when partial/approximate, or "—" when
- * unknown. Measured 0 renders as "0.0%".
+ * (e.g. "23.1%"). When upperBound is true (unknown input or cache_write
+ * tokens), prefixes with "≤ "; otherwise when approx is true, prefixes with
+ * "≈ ". Unknown (null/undefined/non-finite) always renders as "—". Measured 0
+ * renders as "0.0%".
  */
-export function formatCacheHitRateValue(rate: number | null | undefined, approx = false): string {
+export function formatCacheHitRateValue(
+  rate: number | null | undefined,
+  approx = false,
+  upperBound = false
+): string {
   if (rate === null || rate === undefined || !Number.isFinite(rate)) {
     return UNKNOWN_VALUE_DISPLAY;
   }
   const pct = `${(rate * 100).toFixed(1)}%`;
+  if (upperBound) return `≤ ${pct}`;
   return approx ? `≈ ${pct}` : pct;
 }
 
@@ -180,6 +190,13 @@ export function hasPartialDashboardTotals(
   totals: DashboardTokenTotals | null | undefined
 ): boolean {
   if (!totals || totals.summableTokens === null) return false;
+  const u = totals.unknownEvents;
+  if (
+    u &&
+    ((u.input ?? 0) > 0 || (u.output ?? 0) > 0 || (u.cacheRead ?? 0) > 0 || (u.cacheWrite ?? 0) > 0)
+  ) {
+    return true;
+  }
   return (
     totals.input === null ||
     totals.output === null ||

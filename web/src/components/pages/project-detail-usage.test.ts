@@ -359,4 +359,26 @@ describe('project-detail token total fix & measurement badges', () => {
       'sessions: sql driver internal error',
     ]);
   });
+
+  it('renders hourly periodLabel ("Last 24h (hourly buckets)") while keeping (24h) stat labels', async () => {
+    setFeatureFlag(TOKENOMICS_USAGE_LEDGER_FLAG, true);
+    metricsSummaryResponse = {
+      ...metricsSummaryResponse,
+      granularity: 'hour',
+      periodLabel: 'Last 24h (hourly buckets)',
+    };
+
+    const el = await mountProjectDetail();
+    const root = el.shadowRoot!;
+
+    expect(
+      root.querySelector('[data-testid="project-metrics-period-label"]')?.textContent?.trim()
+    ).toBe('Last 24h (hourly buckets)');
+    expect(
+      root.querySelector('[data-testid="project-sessions-24h-label"]')?.textContent?.trim()
+    ).toBe('Sessions (24h)');
+    expect(
+      root.querySelector('[data-testid="project-tokens-24h-label"]')?.textContent?.trim()
+    ).toBe('Tokens (24h)');
+  });
 });

@@ -245,6 +245,7 @@ interface ProjectMetricsSummary {
   periodLabel: string;
   tokens?: DashboardTokenTotals;
   cacheHitRate?: number | null;
+  cacheHitRatePartial?: boolean;
   measurement?: DashboardMeasurement;
   partialFailure?: boolean;
   partialErrors?: string[];
@@ -3353,6 +3354,10 @@ export class ScionPageProjectDetail extends LitElement {
             const ms = this.metricsSummary;
             const isDailyFallback =
               this.usageLedgerEnabled &&
+              (ms.granularity === 'day' ||
+                (Boolean(ms.periodLabel) && ms.periodLabel.startsWith('Since ')));
+            const showPeriodLabel =
+              this.usageLedgerEnabled &&
               Boolean(ms.periodLabel) &&
               ms.periodLabel !== 'Last 24 hours';
             const windowSuffix = isDailyFallback ? '' : ' (24h)';
@@ -3399,7 +3404,7 @@ export class ScionPageProjectDetail extends LitElement {
                   <span class="stat-label">Active Agents${windowSuffix}</span>
                   <span class="stat-value">${ms.activeAgents24h}</span>
                 </div>
-                ${isDailyFallback
+                ${showPeriodLabel
                   ? html`<div
                       style="display: flex; align-items: center; font-size: 0.75rem; color: var(--scion-text-muted);"
                       data-testid="project-metrics-period-label"

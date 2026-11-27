@@ -2790,6 +2790,15 @@ export interface ScopedUsageResponse {
  * Nullable canonical Track 1 token totals returned by HubRollupSource on
  * dashboard endpoints (summary, tokens, metrics-summary).
  */
+export interface DashboardTokenUnknownEvents {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  cacheWrite1h?: number;
+  reasoning?: number;
+}
+
 export interface DashboardTokenTotals {
   input: number | null;
   output: number | null;
@@ -2799,6 +2808,8 @@ export interface DashboardTokenTotals {
   reasoning: number | null;
   summableTokens: number | null;
   cacheHitRate: number | null;
+  cacheHitRatePartial?: boolean;
+  unknownEvents?: DashboardTokenUnknownEvents;
   saturated?: boolean;
 }
 
@@ -2820,4 +2831,5 @@ export interface DashboardMeasurement {
 export interface NullableFloatPoint {
   timestamp: string;
   value: number | null;
+  partial?: boolean;
 }

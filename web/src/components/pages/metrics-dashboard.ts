@@ -16,7 +16,7 @@
 
 import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { Chart, registerables } from 'chart.js';
+import { Chart, registerables, type TooltipItem } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { current, projectTrail, type Named } from '../../client/crumbs.js';
@@ -37,6 +37,7 @@ import {
   effectiveTimeZone,
 } from '../../utils/time.js';
 import {
+  CACHE_HIT_RATE_UPPER_BOUND_TOOLTIP,
   formatCacheHitRateValue,
   formatCompactUsageToken,
   formatDashboardSourceLabel,
@@ -71,8 +72,10 @@ interface SummaryData {
   uniqueAgents: number;
   /** Nullable canonical Track 1 token buckets (HubRollupSource). */
   tokens?: DashboardTokenTotals;
-  /** Cache hit rate: cache_read / (input + cache_read + cache_write), or null. */
+  /** Cache hit rate: cache_read / (input + cache_read + known_cache_write), or null. */
   cacheHitRate?: number | null;
+  /** True when cacheHitRate is an upper bound due to unknown input or cache_write tokens. */
+  cacheHitRatePartial?: boolean;
   /** Track 1 measurement coverage status and unmeasured/stale agent counts. */
   measurement?: DashboardMeasurement;
   /** True when one or more backing sub-queries failed. */
@@ -689,6 +692,7 @@ export class ScionPageMetrics extends LitElement {
               const sorted = [...this.tokens.dailyCacheHitRate].sort((a, b) =>
                 a.timestamp.localeCompare(b.timestamp)
               );
+              const partialFlags = sorted.map((p) => Boolean(p.partial));
               this.renderChart(
                 this.tokens.timeZone,
                 'chart-tokens-cache-hit-rate',
@@ -703,6 +707,11 @@ export class ScionPageMetrics extends LitElement {
                     borderColor: CHART_COLORS[6],
                     backgroundColor: CHART_COLORS[6] + '33',
                     spanGaps: false,
+                    pointStyle: partialFlags.map((isPartial) =>
+                      isPartial ? 'triangle' : 'circle'
+                    ),
+                    pointRadius: partialFlags.map((isPartial) => (isPartial ? 6 : 3)),
+                    partialPoints: partialFlags,
                   },
                 ],
                 { yPercent: true }
@@ -729,6 +738,9 @@ export class ScionPageMetrics extends LitElement {
       backgroundColor?: string;
       borderColor?: string;
       spanGaps?: boolean;
+      pointStyle?: string | string[];
+      pointRadius?: number | number[];
+      partialPoints?: boolean[];
     }[],
     opts?: { yPercent?: boolean }
   ): void {
@@ -770,18 +782,35 @@ export class ScionPageMetrics extends LitElement {
         yScale.max = 100;
       }
 
+      const plugins: Record<string, unknown> = {
+        legend: {
+          position: 'bottom',
+          labels: { boxWidth: 12, padding: 16, font: { size: 12 } },
+        },
+      };
+      if (opts?.yPercent) {
+        plugins.tooltip = {
+          callbacks: {
+            label: (ctx: TooltipItem<'line' | 'bar'>): string => {
+              const y = ctx.parsed.y;
+              if (y === null || y === undefined) return 'Cache Hit Rate: —';
+              const ds = ctx.dataset as unknown as { partialPoints?: boolean[] };
+              const isPartial = Boolean(ds.partialPoints?.[ctx.dataIndex]);
+              return isPartial
+                ? `Cache Hit Rate: ≤ ${y.toFixed(1)}% (${CACHE_HIT_RATE_UPPER_BOUND_TOOLTIP})`
+                : `Cache Hit Rate: ${y.toFixed(1)}%`;
+            },
+          },
+        };
+      }
+
       const chart = new Chart(canvas, {
         type,
         data: { labels, datasets },
         options: {
           responsive: true,
           maintainAspectRatio: false,
-          plugins: {
-            legend: {
-              position: 'bottom',
-              labels: { boxWidth: 12, padding: 16, font: { size: 12 } },
-            },
-          },
+          plugins,
           scales: {
             x: {
               grid: { display: false },
@@ -989,6 +1018,10 @@ export class ScionPageMetrics extends LitElement {
     const showCacheHitRate =
       this.usageLedgerOn && (s.tokens !== undefined || s.cacheHitRate !== undefined);
     const hitRateValue = s.cacheHitRate !== undefined ? s.cacheHitRate : s.tokens?.cacheHitRate;
+    const hitRateUpperBound =
+      hitRateValue !== null &&
+      hitRateValue !== undefined &&
+      Boolean(s.cacheHitRatePartial ?? s.tokens?.cacheHitRatePartial);
     const sessionsUnavailable = s.totalSessions === null || s.totalSessions === undefined;
 
     return html`
@@ -1019,8 +1052,15 @@ export class ScionPageMetrics extends LitElement {
           ? html`
               <div class="stat-card">
                 <span class="stat-label">Cache Hit Rate</span>
-                <span class="stat-value" data-testid="metrics-summary-cache-hit-rate"
-                  >${formatCacheHitRateValue(hitRateValue, measurementPartial)}</span
+                <span
+                  class="stat-value"
+                  data-testid="metrics-summary-cache-hit-rate"
+                  title=${hitRateUpperBound ? CACHE_HIT_RATE_UPPER_BOUND_TOOLTIP : nothing}
+                  >${formatCacheHitRateValue(
+                    hitRateValue,
+                    measurementPartial,
+                    hitRateUpperBound
+                  )}</span
                 >
               </div>
             `
@@ -1154,8 +1194,17 @@ export class ScionPageMetrics extends LitElement {
               </div>
               <div class="stat-card">
                 <span class="stat-label">Cache Hit Rate</span>
-                <span class="stat-value" data-testid="metrics-tokens-cache-hit-rate-total"
-                  >${formatCacheHitRateValue(t.totals.cacheHitRate, measurementPartial)}</span
+                <span
+                  class="stat-value"
+                  data-testid="metrics-tokens-cache-hit-rate-total"
+                  title=${t.totals.cacheHitRate !== null && Boolean(t.totals.cacheHitRatePartial)
+                    ? CACHE_HIT_RATE_UPPER_BOUND_TOOLTIP
+                    : nothing}
+                  >${formatCacheHitRateValue(
+                    t.totals.cacheHitRate,
+                    measurementPartial,
+                    Boolean(t.totals.cacheHitRatePartial)
+                  )}</span
                 >
               </div>
             </div>
@@ -1205,6 +1254,12 @@ export class ScionPageMetrics extends LitElement {
         ? html`
             <div class="section" data-testid="metrics-tokens-hit-rate-section">
               <h3 class="chart-section-title">Daily Cache Hit Rate (${zone})</h3>
+              ${t.dailyCacheHitRate?.some((p) => p.partial && p.value !== null)
+                ? html`<p class="partial-hint" data-testid="metrics-hit-rate-partial-note">
+                    Triangle markers indicate upper bounds (≤) where some events had unknown input
+                    or cache write tokens.
+                  </p>`
+                : nothing}
               <div class="chart-container">
                 <canvas id="chart-tokens-cache-hit-rate"></canvas>
               </div>

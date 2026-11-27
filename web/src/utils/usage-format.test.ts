@@ -62,6 +62,9 @@ describe('usage-format helpers', () => {
     expect(formatCacheHitRateValue(0)).toBe('0.0%');
     expect(formatCacheHitRateValue(0.72)).toBe('72.0%');
     expect(formatCacheHitRateValue(0.72, true)).toBe('≈ 72.0%');
+    expect(formatCacheHitRateValue(0.72, false, true)).toBe('≤ 72.0%');
+    expect(formatCacheHitRateValue(0.72, true, true)).toBe('≤ 72.0%');
+    expect(formatCacheHitRateValue(null, false, true)).toBe('—');
   });
 
   it('detects partial measurement coverage from status or agent counts', () => {
