@@ -2389,7 +2389,7 @@ func TestDualAnalyticsDrainer_PeriodicReprobeActivatesHubSink(t *testing.T) {
 			Post:  httptestPostFunc(srv.URL, "agent-1", "tok-1"),
 			RunID: "run-reprobe",
 		}, nil
-	}, 60*time.Second, nil, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
+	}, 60*time.Second, nil, nil, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
 		native.setHubOutbox(hubOutbox, cfg.RunID, sink.NoteActivity)
 	})
 

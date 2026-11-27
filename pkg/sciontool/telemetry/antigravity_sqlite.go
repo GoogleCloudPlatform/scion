@@ -161,8 +161,9 @@ type agySQLitePersistedState struct {
 }
 
 type agySQLiteFileState struct {
-	Fingerprint agydecode.FileFingerprint `json:"fingerprint"`
-	Cursor      agydecode.Cursor          `json:"cursor"`
+	Fingerprint     agydecode.FileFingerprint `json:"fingerprint"`
+	Cursor          agydecode.Cursor          `json:"cursor"`
+	BaselinePending bool                      `json:"baseline_pending,omitempty"`
 }
 
 // AntigravitySQLiteTailer tails ~/.gemini/antigravity-cli/conversations/*.db
@@ -459,6 +460,25 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 			continue
 		}
 		prevFile, hasPrev := t.state.Files[name]
+		if hasPrev && prevFile.BaselinePending {
+			// A DB that failed initial baselining must never be decoded from
+			// rowid 0 (which would charge historical rows). Retry baselining
+			// until it succeeds or disappears.
+			baseFP, baseCursor, baseErr := agydecode.BaselineFile(ctx, dbPath, t.cfg.BusyTimeoutMs)
+			if baseErr != nil {
+				log.Warn("Antigravity SQLite tailer retry baseline error for %s (remains baseline_pending): %v", name, baseErr)
+				if firstErr == nil {
+					firstErr = baseErr
+				}
+				continue
+			}
+			t.state.Files[name] = agySQLiteFileState{
+				Fingerprint: baseFP,
+				Cursor:      baseCursor,
+			}
+			dirty = true
+			continue
+		}
 		if hasPrev && prevFile.Fingerprint.Equal(fp) {
 			continue
 		}
@@ -468,7 +488,7 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 		// while advancing the rowid cursor via BaselineFile so rows written
 		// during a latched run are never retroactively billed to the next run.
 		if t.driftLatched.Load() {
-			baseFP, baseCursor, baseErr := agydecode.BaselineFile(ctx, dbPath, 0)
+			baseFP, baseCursor, baseErr := agydecode.BaselineFile(ctx, dbPath, t.cfg.BusyTimeoutMs)
 			if baseErr != nil {
 				if firstErr == nil {
 					firstErr = baseErr
@@ -554,18 +574,6 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 				}
 				continue
 			}
-			t.state.Files[name] = agySQLiteFileState{
-				Fingerprint: res.Fingerprint,
-				Cursor:      res.Cursor,
-			}
-			dirty = true
-			continue
-		}
-
-		if t.driftLatched.Load() {
-			// Drift was already latched on an earlier poll: suppress all token
-			// debits while advancing the file fingerprint/cursor so we don't
-			// rescan unchanged rows.
 			t.state.Files[name] = agySQLiteFileState{
 				Fingerprint: res.Fingerprint,
 				Cursor:      res.Cursor,
@@ -826,6 +834,9 @@ func (t *AntigravitySQLiteTailer) loadState() {
 	}
 	tree, err := privatefs.OpenTree(filepath.Dir(t.cfg.StatePath), privatefs.TreeOptions{})
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("Antigravity SQLite tailer could not open state dir for %s (will re-baseline): %v", t.cfg.StatePath, err)
+		}
 		return
 	}
 	defer func() { _ = tree.Close() }()
@@ -833,6 +844,9 @@ func (t *AntigravitySQLiteTailer) loadState() {
 	const maxStateFileBytes = 16 << 20
 	data, err := tree.ReadPrivate(filepath.Base(t.cfg.StatePath), maxStateFileBytes)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn("Antigravity SQLite tailer could not read state file %s (will re-baseline): %v", t.cfg.StatePath, err)
+		}
 		return
 	}
 	var loaded agySQLitePersistedState
@@ -895,6 +909,7 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 	if t.state.Dedupe == nil {
 		t.state.Dedupe = agydecode.NewDedupeState()
 	}
+	var firstErr error
 	for _, name := range dbNames {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -902,8 +917,16 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 		dbPath := filepath.Join(t.cfg.ConversationsDir, name)
 		fp, cur, err := agydecode.BaselineFile(ctx, dbPath, t.cfg.BusyTimeoutMs)
 		if err != nil {
-			log.Debug("Antigravity SQLite tailer baseline error for %s: %v", name, err)
-			return err
+			// Record a per-file baseline_pending marker and keep going so one
+			// corrupt or unreadable DB never blocks metering for the others.
+			log.Warn("Antigravity SQLite tailer baseline error for %s (marked baseline_pending): %v", name, err)
+			t.state.Files[name] = agySQLiteFileState{
+				BaselinePending: true,
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		t.state.Files[name] = agySQLiteFileState{
 			Fingerprint: fp,
@@ -911,7 +934,10 @@ func (t *AntigravitySQLiteTailer) baselineFilesLocked(ctx context.Context, dbNam
 		}
 	}
 	t.stateInitialized = true
-	return t.saveStateLocked()
+	if err := t.saveStateLocked(); err != nil {
+		return err
+	}
+	return firstErr
 }
 
 func (t *AntigravitySQLiteTailer) saveStateLocked() error {

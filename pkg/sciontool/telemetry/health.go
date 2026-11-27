@@ -789,7 +789,7 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	}
 	sourceActive := nativeActive
 	if sel.Source == telemetrycontract.UsageSourceSQLiteNative {
-		sourceActive = p.agyTailer.Load() != nil
+		sourceActive = p.agyTailer.Load() != nil || p.agyActiveAtStop.Load()
 	}
 	in.Usage = deriveUsageCollection(sel, in.Harness, sourceActive, len(rulesForHarness(in.Harness)) > 0)
 	in.SourceOrigin = sel.Origin

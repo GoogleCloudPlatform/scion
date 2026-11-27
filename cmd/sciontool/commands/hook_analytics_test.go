@@ -116,3 +116,77 @@ func TestRunHookTelemetry_CreatesMuseTurnUsageStateFile(t *testing.T) {
 		t.Errorf("state file %s = %s, want entry for sess-wire-1:turn-wire-1", statePath, raw)
 	}
 }
+
+func TestHookUsageAnalytics_UsageSourcesTable(t *testing.T) {
+	gcpCfg := &telemetry.Config{Enabled: true, CloudEnabled: true, CloudProvider: "gcp", ProjectID: "p"}
+	hubOnlyCfg := &telemetry.Config{Enabled: true, CloudEnabled: false}
+
+	cases := []struct {
+		name       string
+		source     string
+		hubIngest  string
+		cfg        *telemetry.Config
+		wantNonNil bool
+	}{
+		{name: "hooks_gcp", source: "hooks", cfg: gcpCfg, wantNonNil: true},
+		{name: "sqlite_native_gcp", source: "sqlite_native", cfg: gcpCfg, wantNonNil: true},
+		{name: "sqlite_native_hub_only", source: "sqlite_native", hubIngest: "1", cfg: hubOnlyCfg, wantNonNil: true},
+		{name: "native_rejected", source: "native", cfg: gcpCfg, wantNonNil: false},
+		{name: "empty_rejected", source: "", cfg: gcpCfg, wantNonNil: false},
+		{name: "unknown_rejected", source: "other", cfg: gcpCfg, wantNonNil: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_USAGE_SOURCE", tc.source)
+			t.Setenv(telemetry.EnvUsageHubIngest, tc.hubIngest)
+
+			got := hookUsageAnalytics(tc.cfg)
+			if (got != nil) != tc.wantNonNil {
+				t.Fatalf("hookUsageAnalytics(source=%q) = %v, wantNonNil=%v", tc.source, got, tc.wantNonNil)
+			}
+			// Must remain lazy and never create outbox dirs before an event is recorded.
+			if _, err := os.Stat(telemetry.AnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+				t.Error("hookUsageAnalytics must not create GCP outbox dir eagerly")
+			}
+			if _, err := os.Stat(telemetry.HubAnalyticsOutboxDirFor(home)); !os.IsNotExist(err) {
+				t.Error("hookUsageAnalytics must not create Hub outbox dir eagerly")
+			}
+		})
+	}
+}
+
+func TestMinimalEnv_AdvertisesSQLiteNativeUsageSource(t *testing.T) {
+	home := t.TempDir()
+	m := &containerProvisionManifest{
+		AgentName:        "agent-test",
+		AgentHome:        home,
+		AgentWorkspace:   filepath.Join(home, "workspace"),
+		HarnessBundleDir: filepath.Join(home, "bundle"),
+	}
+	m.HarnessConfig.Harness = "antigravity"
+
+	env := minimalEnv(home, m)
+	var found string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "SCION_USAGE_SOURCES_SUPPORTED=") {
+			found = strings.TrimPrefix(entry, "SCION_USAGE_SOURCES_SUPPORTED=")
+			break
+		}
+	}
+	if found == "" {
+		t.Fatal("minimalEnv did not set SCION_USAGE_SOURCES_SUPPORTED")
+	}
+	hasSQLiteNative := false
+	for _, tok := range strings.Split(found, ",") {
+		if tok == "sqlite_native" {
+			hasSQLiteNative = true
+			break
+		}
+	}
+	if !hasSQLiteNative {
+		t.Fatalf("SCION_USAGE_SOURCES_SUPPORTED = %q, want it to include sqlite_native", found)
+	}
+}

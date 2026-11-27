@@ -1498,3 +1498,207 @@ func TestPipeline_AgyTailerWithCloudInitDegradedAndNativeMeteringOnly(t *testing
 		t.Fatalf("expected Hub to receive sqlite_native usage event (in=777 out=88) under cloudInitDegraded+nativeMeteringOnly, got %+v", gotEvents)
 	}
 }
+
+func TestPipeline_Rev4_FinalHealthReportsSQLiteNativeEnabledAndPreservesDrift(t *testing.T) {
+	cases := []struct {
+		name  string
+		drift bool
+	}{
+		{name: "healthy_stop", drift: false},
+		{name: "drifted_stop", drift: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(SetTelemetryTestSandboxed())
+			setTestAgyEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_USAGE_SOURCE", "")
+			if err := os.Unsetenv("SCION_USAGE_SOURCE"); err != nil {
+				t.Fatalf("unset SCION_USAGE_SOURCE: %v", err)
+			}
+
+			cfg := &Config{
+				Enabled:      true,
+				GRPCPort:     0,
+				HTTPPort:     0,
+				CloudEnabled: false,
+			}
+			p := NewWithConfig(cfg)
+			p.SetAnalyticsOutbox(home, 0, 0)
+			p.SetHubUsageSink(HubUsageSinkConfig{
+				Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+					return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)}, nil
+				},
+				RunID: "run-final-health",
+				HubID: "hub-test",
+			})
+
+			ctx := context.Background()
+			if err := p.Start(ctx); err != nil {
+				t.Fatalf("Pipeline.Start: %v", err)
+			}
+			p.SettleUsageSource(map[string]string{
+				"SCION_USAGE_SOURCE": telemetrycontract.UsageSourceSQLiteNative,
+			}, "")
+			outcome, err := p.ActivateUsageSource(ctx, telemetrycontract.UsageSourceSQLiteNative)
+			if err != nil {
+				t.Fatalf("ActivateUsageSource: %v", err)
+			}
+			if outcome != UsageActivated {
+				t.Fatalf("ActivateUsageSource = %q, want %q", outcome, UsageActivated)
+			}
+			tailer := p.agyTailer.Load()
+			if tailer == nil {
+				t.Fatal("expected active agyTailer")
+			}
+			if tc.drift {
+				tailer.driftLatched.Store(true)
+			}
+
+			// Capture the final telemetry.health event produced during Stop.
+			var mu sync.Mutex
+			var finalEv *telemetrycontract.HealthEvent
+			p.health.mu.Lock()
+			p.health.enabled = true
+			p.health.now = time.Now
+			p.health.runID = "run-final-health"
+			p.health.hubID = func(context.Context) string { return "hub-test" }
+			p.health.send = func(_ context.Context, line []byte) error {
+				var ev telemetrycontract.HealthEvent
+				if err := json.Unmarshal(line, &ev); err != nil {
+					return err
+				}
+				if ev.Trigger == telemetrycontract.HealthTriggerFinal {
+					mu.Lock()
+					evCopy := ev
+					finalEv = &evCopy
+					mu.Unlock()
+				}
+				return nil
+			}
+			p.health.mu.Unlock()
+
+			if err := p.Stop(ctx); err != nil {
+				t.Fatalf("Pipeline.Stop: %v", err)
+			}
+
+			mu.Lock()
+			ev := finalEv
+			mu.Unlock()
+			if ev == nil {
+				t.Fatal("expected final telemetry.health event on Pipeline.Stop")
+			}
+			if ev.UsageCollection != telemetrycontract.UsageCollectionEnabled {
+				t.Fatalf("final health UsageCollection = %q (reason=%q), want %q", ev.UsageCollection, ev.UsageDisabledReason, telemetrycontract.UsageCollectionEnabled)
+			}
+			if ev.UsageSource != telemetrycontract.UsageSourceSQLiteNative {
+				t.Fatalf("final health UsageSource = %q, want %q", ev.UsageSource, telemetrycontract.UsageSourceSQLiteNative)
+			}
+			if ev.UsageDisabledReason != "" {
+				t.Fatalf("final health UsageDisabledReason = %q, want empty", ev.UsageDisabledReason)
+			}
+			if len(ev.UsageCapabilities) == 0 {
+				t.Fatal("final health UsageCapabilities is empty, want sqlite_native capabilities")
+			}
+			if got := p.schemaDriftDetected(); got != tc.drift {
+				t.Fatalf("schemaDriftDetected() after Stop = %v, want %v", got, tc.drift)
+			}
+		})
+	}
+}
+
+func TestAntigravitySQLiteTailer_Rev4_BadDBDoesNotBlockBaselineForOtherDBs(t *testing.T) {
+	setTestAgyEnv(t)
+	home := t.TempDir()
+	convDir := AgyConversationsDir(home)
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatalf("mkdir convDir: %v", err)
+	}
+
+	// Pre-populate one corrupt/unreadable DB and one valid DB with history.
+	badPath := filepath.Join(convDir, "conv-a-bad.db")
+	if err := os.WriteFile(badPath, []byte("not a valid sqlite database"), 0o600); err != nil {
+		t.Fatalf("write bad db: %v", err)
+	}
+	goodPath := filepath.Join(convDir, "conv-b-good.db")
+	goodDB := createTestAgyDB(t, goodPath)
+	defer func() { _ = goodDB.Close() }()
+	histGood := encodeTestGenMeta(1466, "gemini-4-neon", 1795700000, testAgyUsage{
+		modelID: 1466, input: 9000, output: 1000, id11: "hist-good-0",
+	})
+	if _, err := goodDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, histGood, len(histGood)); err != nil {
+		t.Fatalf("insert histGood: %v", err)
+	}
+
+	outbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+	if err != nil {
+		t.Fatalf("open outbox: %v", err)
+	}
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         NewUsageAnalytics(outbox, telemetrycontract.UsageSourceSQLiteNative),
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+
+	// Poll 1: initial baseline returns error for bad DB, marks it baseline_pending,
+	// baselines good DB, initializes state, and emits 0 events.
+	if err := tailer.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected PollOnce to report error for bad DB during baseline")
+	}
+	if got := drainOutboxEvents(t, outbox); len(got) != 0 {
+		t.Fatalf("initial baseline emitted %d events, want 0", len(got))
+	}
+
+	// Insert a new row into the good DB: must emit immediately even while bad DB is still broken.
+	newGood := encodeTestGenMeta(1466, "gemini-4-neon", 1795713000, testAgyUsage{
+		modelID: 1466, input: 444, output: 55, id11: "new-good-1",
+	})
+	if _, err := goodDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, newGood, len(newGood)); err != nil {
+		t.Fatalf("insert newGood: %v", err)
+	}
+	if err := tailer.PollOnce(context.Background()); err == nil {
+		t.Fatal("expected PollOnce to still report error while bad DB remains broken")
+	}
+	events := drainOutboxEvents(t, outbox)
+	if len(events) != 1 || events[0].Input == nil || *events[0].Input != 444 {
+		t.Fatalf("good DB events = %+v, want 1 event with input=444", events)
+	}
+
+	// Replace bad DB with a valid DB containing historical row: retry baseline
+	// must baseline it without emitting the historical row (never decode from rowid 0).
+	if err := os.Remove(badPath); err != nil {
+		t.Fatalf("remove bad db: %v", err)
+	}
+	repairedDB := createTestAgyDB(t, badPath)
+	defer func() { _ = repairedDB.Close() }()
+	histBad := encodeTestGenMeta(1466, "gemini-4-neon", 1795700500, testAgyUsage{
+		modelID: 1466, input: 8000, output: 800, id11: "hist-bad-0",
+	})
+	if _, err := repairedDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, histBad, len(histBad)); err != nil {
+		t.Fatalf("insert histBad: %v", err)
+	}
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce after repairing bad DB: %v", err)
+	}
+	if got := drainOutboxEvents(t, outbox); len(got) != 0 {
+		t.Fatalf("repaired DB retry-baseline emitted %d historical events, want 0", len(got))
+	}
+
+	// Subsequent new row in the repaired DB must now emit normally.
+	newRepaired := encodeTestGenMeta(1466, "gemini-4-neon", 1795713500, testAgyUsage{
+		modelID: 1466, input: 222, output: 33, id11: "new-repaired-1",
+	})
+	if _, err := repairedDB.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, newRepaired, len(newRepaired)); err != nil {
+		t.Fatalf("insert newRepaired: %v", err)
+	}
+	if err := tailer.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce after new row in repaired DB: %v", err)
+	}
+	repairedEvents := drainOutboxEvents(t, outbox)
+	if len(repairedEvents) != 1 || repairedEvents[0].Input == nil || *repairedEvents[0].Input != 222 {
+		t.Fatalf("repaired DB new events = %+v, want 1 event with input=222", repairedEvents)
+	}
+}

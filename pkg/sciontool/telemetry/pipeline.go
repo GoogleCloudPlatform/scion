@@ -78,6 +78,7 @@ type Pipeline struct {
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
 	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
+	agyActiveAtStop    atomic.Bool    // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
 	driftLatched       atomic.Bool    // preserved across Pipeline.Stop after agyTailer is swapped nil
 	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health             healthEmitter  // telemetry.health events (health.go)
@@ -537,6 +538,8 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	}
 
 	p.cloudInitDegraded = cloudInitDegraded
+	p.agyActiveAtStop.Store(false)
+	p.driftLatched.Store(false)
 	p.running = true
 	if os.Getenv("SCION_HARNESS") == "antigravity" && os.Getenv("SCION_USAGE_SOURCE") == telemetrycontract.UsageSourceSQLiteNative {
 		if err := p.startAgySQLiteTailerLocked(ctx); err != nil {
@@ -713,9 +716,11 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	// Final bounded drain of the Antigravity SQLite tailer before stopping the
 	// analytics outbox drainer so any final DB rows flushed as agy exited are
-	// appended and drained to the Hub. Capture the drift latch before clearing
-	// agyTailer so the final heartbeat remains honest.
+	// appended and drained to the Hub. Capture active status and drift latch
+	// before clearing agyTailer so the final health event and heartbeat remain
+	// accurate.
 	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		p.agyActiveAtStop.Store(true)
 		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
 		}

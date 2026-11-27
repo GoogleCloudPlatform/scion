@@ -141,6 +141,7 @@ type AnalyticsDrainer struct {
 	hubOutboxDir     string
 	hubOutboxOwner   *OutboxOwner
 	supportedSignals func() []string
+	schemaDrift      func() bool
 	onHubActivated   func(HubUsageSinkConfig, *AnalyticsOutbox, *HubUsageSink)
 	onHubRevoked     func()
 
@@ -203,7 +204,7 @@ func NewAnalyticsDrainer(outbox *AnalyticsOutbox, send AnalyticsSendFunc, resolv
 // whose initial probe was negative. When probe returns a non-nil config, the
 // drainer opens the sibling Hub outbox, marks it active on disk, and activates
 // dual-run without interrupting GCP delivery.
-func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Duration, supportedSignals func() []string, onActivated func(HubUsageSinkConfig, *AnalyticsOutbox, *HubUsageSink)) {
+func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Duration, supportedSignals func() []string, schemaDrift func() bool, onActivated func(HubUsageSinkConfig, *AnalyticsOutbox, *HubUsageSink)) {
 	if d == nil || probe == nil {
 		return
 	}
@@ -214,6 +215,7 @@ func (d *AnalyticsDrainer) SetHubProbe(probe HubUsageProbeFunc, interval time.Du
 	d.hubProbe = probe
 	d.probeInterval = interval
 	d.supportedSignals = supportedSignals
+	d.schemaDrift = schemaDrift
 	d.onHubActivated = onActivated
 	d.mu.Unlock()
 }
@@ -504,6 +506,7 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			d.lastProbe = d.now()
 		}
 		supSigs := d.supportedSignals
+		driftFn := d.schemaDrift
 		onAct := d.onHubActivated
 		hubDir := d.hubOutboxDir
 		hubOwner := d.hubOutboxOwner
@@ -523,6 +526,9 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 					c := *cfg
 					if c.SupportedSignals == nil && supSigs != nil {
 						c.SupportedSignals = supSigs
+					}
+					if c.SchemaDriftDetected == nil && driftFn != nil {
+						c.SchemaDriftDetected = driftFn
 					}
 					sink := NewHubUsageSink(hubOutbox, c)
 					if sink != nil {
@@ -1004,7 +1010,7 @@ func (a *analyticsState) startDrainer(ctx context.Context, gcp *GCPExporter) {
 				native.clearHubOutbox()
 				sqliteNative.clearHubOutbox()
 			}
-			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
+			a.drainer.SetHubProbe(a.hubProbe, a.probeInterval(), a.supportedSignals, a.schemaDrift, func(cfg HubUsageSinkConfig, hubOutbox *AnalyticsOutbox, sink *HubUsageSink) {
 				applySuppress := func(v bool) {
 					hubOutbox.setHubSuppress(v)
 					setSuppress(v)
