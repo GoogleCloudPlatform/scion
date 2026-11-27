@@ -700,5 +700,14 @@ func (Agent) Indexes() []ent.Index {
 			Annotations(
 				entsql.IndexWhere("harness_config IS NULL AND applied_config IS NOT NULL"),
 			),
+		// Partial index backing CountStaleMetersByProject (scion.usage.meter_stale)
+		// and global GetUsageScopeCoverage's active-running branch. Contains only
+		// live running agents (shrinking as agents stop/delete), remains HOT-safe
+		// on activity/heartbeat updates, and covers (id, run_id) for index-only scans.
+		index.Fields("id", "run_id").
+			StorageKey("agent_running_active").
+			Annotations(
+				entsql.IndexWhere("deleted_at IS NULL AND phase = 'running'"),
+			),
 	}
 }

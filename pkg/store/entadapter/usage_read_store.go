@@ -534,6 +534,67 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 			return nil, err
 		}
 	}
+	query, args, ok := buildUsageScopeCoverageSQL(dialectName, filter, dbNow)
+	if !ok {
+		return &store.UsageScopeCoverage{}, nil
+	}
+
+	rows := &entsql.Rows{}
+	if err := drv.Query(ctx, query, args, rows); err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := &store.UsageScopeCoverage{}
+	for rows.Next() {
+		var (
+			isRunning        int
+			hasMeterHealth   int
+			latestFinalState string
+			isReceiptStale   int
+			hasUsageData     int
+			agentCount       int64
+			rawLastReceipt   any
+		)
+		if err := rows.Scan(
+			&isRunning,
+			&hasMeterHealth,
+			&latestFinalState,
+			&isReceiptStale,
+			&hasUsageData,
+			&agentCount,
+			&rawLastReceipt,
+		); err != nil {
+			return nil, mapError(err)
+		}
+		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
+			IsRunning:        isRunning != 0,
+			HasMeterHealth:   hasMeterHealth != 0,
+			LatestFinalState: latestFinalState,
+			IsReceiptStale:   isReceiptStale != 0,
+			HasUsageData:     hasUsageData != 0,
+			AgentCount:       int(agentCount),
+		})
+		if rawLastReceipt != nil {
+			ts, err := parseSQLTimestamp(rawLastReceipt)
+			if err != nil {
+				return nil, fmt.Errorf("parse max_last_receipt_at: %w", err)
+			}
+			if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
+				out.LastReceiptAt = ts
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
+}
+
+// buildUsageScopeCoverageSQL builds the dialect-rebound SQL query and bind
+// arguments for GetUsageScopeCoverage. Returns ok=false when an explicit
+// ProjectID or AgentID filter is not a valid UUID (guaranteed empty result).
+func buildUsageScopeCoverageSQL(dialectName string, filter store.UsageCoverageFilter, dbNow time.Time) (string, []any, bool) {
 	until := filter.Until
 	if until.IsZero() {
 		until = dbNow
@@ -554,11 +615,19 @@ func (s *UsageLedgerStore) GetUsageScopeCoverage(ctx context.Context, filter sto
 	var args []any
 	scopeWhere = append(scopeWhere, "a.deleted_at IS NULL")
 
-	// When scoped to a billing user, drive scoped_agents from
-	// run_attribution(billing_user_id, created_at) and join agents by PK so
-	// user-scoped coverage avoids scanning the whole agents table.
+	// Choose the driving CTE based on scope filters:
+	//   1. BillingUserID set: drive from run_attribution(billing_user_id, created_at)
+	//      and join agents by PK.
+	//   2. Global (no ProjectID, BillingUserID, or AgentID): drive from the UNION
+	//      of window activity (run_attribution, usage_rollups_daily, meter_health,
+	//      plus running non-deleted agents when windowIncludesNow) using covering
+	//      time indexes and the partial agent_running_active index, then join
+	//      agents by PK — avoiding a full agents scan with correlated probes.
+	//   3. ProjectID or AgentID set: drive from agents using project/PK indexes.
 	var scopedAgentsCTE string
-	if filter.BillingUserID != "" {
+	globalDriven := filter.BillingUserID == "" && filter.ProjectID == "" && filter.AgentID == ""
+	switch {
+	case filter.BillingUserID != "":
 		if dialectName == dialect.Postgres {
 			scopedAgentsCTE = `user_agents AS (
 	SELECT DISTINCT ra.agent_id
@@ -592,7 +661,70 @@ scoped_agents AS (
 )`
 		}
 		args = append(args, filter.BillingUserID, until)
-	} else {
+	case globalDriven:
+		runningBranch := ""
+		if windowIncludesNow {
+			// Use literal 'running' so Postgres matches the partial index
+			// agent_running_active (WHERE deleted_at IS NULL AND phase = 'running')
+			// even under plan_cache_mode = force_generic_plan.
+			runningBranch = `
+	UNION
+	SELECT CAST(a.id AS TEXT) AS agent_id
+	FROM agents a
+	WHERE a.deleted_at IS NULL AND a.phase = 'running'`
+		}
+		if dialectName == dialect.Postgres {
+			scopedAgentsCTE = fmt.Sprintf(`candidate_agents AS (
+	SELECT ra.agent_id
+	FROM run_attribution ra
+	WHERE ra.created_at >= ? AND ra.created_at <= ?
+	UNION
+	SELECT rd.agent_id
+	FROM usage_rollups_daily rd
+	WHERE rd.bucket_start >= ? AND rd.bucket_start <= ?
+	UNION
+	SELECT mh.agent_id
+	FROM meter_health mh
+	WHERE mh.last_receipt_at >= ? AND mh.last_receipt_at <= ?%s
+),
+scoped_agents AS (
+	SELECT
+		CAST(a.id AS TEXT) AS agent_id_text,
+		COALESCE(a.run_id, '') AS run_id,
+		COALESCE(a.phase, '') AS phase
+	FROM candidate_agents ca
+	JOIN agents a ON a.id = CASE
+		WHEN ca.agent_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+		THEN CAST(ca.agent_id AS UUID)
+	END
+	WHERE %%s
+)`, runningBranch)
+		} else {
+			scopedAgentsCTE = fmt.Sprintf(`candidate_agents AS (
+	SELECT ra.agent_id
+	FROM run_attribution ra
+	WHERE ra.created_at >= ? AND ra.created_at <= ?
+	UNION
+	SELECT rd.agent_id
+	FROM usage_rollups_daily rd
+	WHERE rd.bucket_start >= ? AND rd.bucket_start <= ?
+	UNION
+	SELECT mh.agent_id
+	FROM meter_health mh
+	WHERE mh.last_receipt_at >= ? AND mh.last_receipt_at <= ?%s
+),
+scoped_agents AS (
+	SELECT
+		CAST(a.id AS TEXT) AS agent_id_text,
+		COALESCE(a.run_id, '') AS run_id,
+		COALESCE(a.phase, '') AS phase
+	FROM candidate_agents ca
+	JOIN agents a ON a.id = ca.agent_id
+	WHERE %%s
+)`, runningBranch)
+		}
+		args = append(args, since, until, sinceDay, untilDay, since, until)
+	default:
 		scopedAgentsCTE = `scoped_agents AS (
 	SELECT
 		CAST(a.id AS TEXT) AS agent_id_text,
@@ -606,7 +738,7 @@ scoped_agents AS (
 	if filter.ProjectID != "" {
 		projUUID, err := uuid.Parse(filter.ProjectID)
 		if err != nil {
-			return &store.UsageScopeCoverage{}, nil
+			return "", nil, false
 		}
 		scopeWhere = append(scopeWhere, "a.project_id = ?")
 		args = append(args, projUUID)
@@ -614,7 +746,7 @@ scoped_agents AS (
 	if filter.AgentID != "" {
 		agentUUID, err := uuid.Parse(filter.AgentID)
 		if err != nil {
-			return &store.UsageScopeCoverage{}, nil
+			return "", nil, false
 		}
 		scopeWhere = append(scopeWhere, "a.id = ?")
 		args = append(args, agentUUID)
@@ -624,45 +756,52 @@ scoped_agents AS (
 	// (matching billing_user_id when scoped to a user) AND overlap [since, until]
 	// via run creation, receipt timestamp, daily rollup, or (only when the window
 	// includes now, i.e. until >= dbNow - staleAfter) active running phase.
-	if filter.BillingUserID == "" {
-		scopeWhere = append(scopeWhere, "EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.agent_id = CAST(a.id AS TEXT) AND ra.created_at <= ?)")
+	// For globalDriven, candidate_agents is already the exact union of those
+	// overlap sources, so only the run_attribution <= until existence check is needed.
+	if globalDriven {
+		scopeWhere = append(scopeWhere, "EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.agent_id = ca.agent_id AND ra.created_at <= ?)")
 		args = append(args, until)
-	}
-
-	ra2Cond := "ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?"
-	rdwCond := "rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?"
-	var ra2Args []any
-	ra2Args = append(ra2Args, since, until)
-	var rdwArgs []any
-	rdwArgs = append(rdwArgs, sinceDay, untilDay)
-	if filter.BillingUserID != "" {
-		ra2Cond += " AND ra2.billing_user_id = ?"
-		ra2Args = append(ra2Args, filter.BillingUserID)
-		rdwCond += " AND rd_w.billing_user_id = ?"
-		rdwArgs = append(rdwArgs, filter.BillingUserID)
-	}
-
-	if windowIncludesNow {
-		overlapCond := fmt.Sprintf(`(
-			EXISTS (SELECT 1 FROM run_attribution ra2 WHERE %s)
-			OR a.phase = ?
-			OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
-			OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE %s)
-		)`, ra2Cond, rdwCond)
-		scopeWhere = append(scopeWhere, overlapCond)
-		args = append(args, ra2Args...)
-		args = append(args, runningPhase, since, until)
-		args = append(args, rdwArgs...)
 	} else {
-		overlapCond := fmt.Sprintf(`(
-			EXISTS (SELECT 1 FROM run_attribution ra2 WHERE %s)
-			OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
-			OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE %s)
-		)`, ra2Cond, rdwCond)
-		scopeWhere = append(scopeWhere, overlapCond)
-		args = append(args, ra2Args...)
-		args = append(args, since, until)
-		args = append(args, rdwArgs...)
+		if filter.BillingUserID == "" {
+			scopeWhere = append(scopeWhere, "EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.agent_id = CAST(a.id AS TEXT) AND ra.created_at <= ?)")
+			args = append(args, until)
+		}
+
+		ra2Cond := "ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?"
+		rdwCond := "rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?"
+		var ra2Args []any
+		ra2Args = append(ra2Args, since, until)
+		var rdwArgs []any
+		rdwArgs = append(rdwArgs, sinceDay, untilDay)
+		if filter.BillingUserID != "" {
+			ra2Cond += " AND ra2.billing_user_id = ?"
+			ra2Args = append(ra2Args, filter.BillingUserID)
+			rdwCond += " AND rd_w.billing_user_id = ?"
+			rdwArgs = append(rdwArgs, filter.BillingUserID)
+		}
+
+		if windowIncludesNow {
+			overlapCond := fmt.Sprintf(`(
+				EXISTS (SELECT 1 FROM run_attribution ra2 WHERE %s)
+				OR a.phase = ?
+				OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
+				OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE %s)
+			)`, ra2Cond, rdwCond)
+			scopeWhere = append(scopeWhere, overlapCond)
+			args = append(args, ra2Args...)
+			args = append(args, runningPhase, since, until)
+			args = append(args, rdwArgs...)
+		} else {
+			overlapCond := fmt.Sprintf(`(
+				EXISTS (SELECT 1 FROM run_attribution ra2 WHERE %s)
+				OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)
+				OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE %s)
+			)`, ra2Cond, rdwCond)
+			scopeWhere = append(scopeWhere, overlapCond)
+			args = append(args, ra2Args...)
+			args = append(args, since, until)
+			args = append(args, rdwArgs...)
+		}
 	}
 
 	// Parameters for agent_flags projection:
@@ -738,56 +877,7 @@ GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has
 		rdFlagCond,
 	)
 
-	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), args, rows); err != nil {
-		return nil, mapError(err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	out := &store.UsageScopeCoverage{}
-	for rows.Next() {
-		var (
-			isRunning        int
-			hasMeterHealth   int
-			latestFinalState string
-			isReceiptStale   int
-			hasUsageData     int
-			agentCount       int64
-			rawLastReceipt   any
-		)
-		if err := rows.Scan(
-			&isRunning,
-			&hasMeterHealth,
-			&latestFinalState,
-			&isReceiptStale,
-			&hasUsageData,
-			&agentCount,
-			&rawLastReceipt,
-		); err != nil {
-			return nil, mapError(err)
-		}
-		out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
-			IsRunning:        isRunning != 0,
-			HasMeterHealth:   hasMeterHealth != 0,
-			LatestFinalState: latestFinalState,
-			IsReceiptStale:   isReceiptStale != 0,
-			HasUsageData:     hasUsageData != 0,
-			AgentCount:       int(agentCount),
-		})
-		if rawLastReceipt != nil {
-			ts, err := parseSQLTimestamp(rawLastReceipt)
-			if err != nil {
-				return nil, fmt.Errorf("parse max_last_receipt_at: %w", err)
-			}
-			if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
-				out.LastReceiptAt = ts
-			}
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, mapError(err)
-	}
-	return out, nil
+	return usageRebindSQL(dialectName, query), args, true
 }
 
 // CountUsageActiveAgents implements store.UsageLedgerStore.CountUsageActiveAgents.
@@ -1049,17 +1139,33 @@ func dbNowFromDriver(ctx context.Context, drv dialect.Driver, dialectName string
 // to each live (non-deleted, running) agent's current run_id, a run is stale
 // when its latest meter_health row is still "open" and has last_receipt_at
 // strictly before staleBefore.
-func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
-	drv := s.client.Driver()
-	dialectName := drv.Dialect()
-
-	query := `
+//
+// Driven from running non-deleted agents (backed by the partial index
+// agent_running_active on (id, run_id) WHERE deleted_at IS NULL AND phase = 'running')
+// into meter_health's unique index (agent_id, run_id, producer_epoch) and
+// run_attribution's PK so CAST(a.id AS TEXT) is on the outer driving side
+// rather than defeating index use on agents.
+func countStaleMetersByProjectSQL(dialectName string) string {
+	return usageRebindSQL(dialectName, `
+WITH running_agents AS (
+	SELECT
+		CAST(a.id AS TEXT) AS agent_id,
+		a.run_id AS run_id
+	FROM agents a
+	WHERE a.deleted_at IS NULL
+	  AND a.phase = 'running'
+	  AND a.run_id IS NOT NULL
+	  AND a.run_id <> ''
+)
 SELECT project_id, COUNT(*) AS stale_count
 FROM (
 	SELECT ra.project_id, mh.agent_id, mh.run_id
-	FROM meter_health mh
-	INNER JOIN agents a ON CAST(a.id AS TEXT) = mh.agent_id AND a.run_id = mh.run_id AND a.deleted_at IS NULL AND a.phase = 'running'
-	INNER JOIN run_attribution ra ON ra.run_id = mh.run_id
+	FROM running_agents ag
+	INNER JOIN meter_health mh
+		ON mh.agent_id = ag.agent_id
+	   AND mh.run_id = ag.run_id
+	INNER JOIN run_attribution ra
+		ON ra.run_id = ag.run_id
 	WHERE mh.final_state = 'open'
 	  AND NOT EXISTS (
 		SELECT 1
@@ -1073,11 +1179,17 @@ FROM (
 	HAVING MAX(mh.last_receipt_at) < ?
 ) AS stale_runs
 GROUP BY project_id
-ORDER BY project_id ASC`
+ORDER BY project_id ASC`)
+}
 
+func (s *UsageLedgerStore) CountStaleMetersByProject(ctx context.Context, staleBefore time.Time) (map[string]int64, error) {
+	drv := s.client.Driver()
+	dialectName := drv.Dialect()
+
+	query := countStaleMetersByProjectSQL(dialectName)
 	cutoff := staleBefore.UTC().Truncate(time.Microsecond)
 	rows := &entsql.Rows{}
-	if err := drv.Query(ctx, usageRebindSQL(dialectName, query), []any{cutoff}, rows); err != nil {
+	if err := drv.Query(ctx, query, []any{cutoff}, rows); err != nil {
 		return nil, mapError(err)
 	}
 	defer func() { _ = rows.Close() }()

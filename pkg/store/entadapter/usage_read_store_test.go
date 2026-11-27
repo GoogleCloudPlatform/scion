@@ -18,9 +18,15 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -1157,4 +1163,368 @@ func TestCountSessionMetrics_DeduplicatesAcrossSegmentsAndDays(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), resGlobal.TotalSessions)
+}
+
+// TestUsageRead_StaleAndGlobalCoverageEquivalenceAndExplain verifies that the
+// restructured CountStaleMetersByProject and global GetUsageScopeCoverage
+// queries produce identical results to the previous full-scan SQL queries on
+// the same fixture (on both SQLite and Postgres), and verifies Postgres
+// EXPLAIN (ANALYZE, BUFFERS) plans under plan_cache_mode = force_generic_plan.
+func TestUsageRead_StaleAndGlobalCoverageEquivalenceAndExplain(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	staleCutoff := now.Add(-3 * time.Minute)
+	staleReceipt := staleCutoff.Add(-2 * time.Minute)
+	freshReceipt := now.Add(-15 * time.Second)
+	histStart := now.AddDate(0, 0, -10)
+	histEnd := now.AddDate(0, 0, -8)
+
+	projA := createTestProject(t, cs, "equiv-proj-a")
+	projB := createTestProject(t, cs, "equiv-proj-b")
+	userID := createTestUser(t, cs, "equiv-user@example.com")
+
+	createAgentWithRun := func(projID, runID, phase string, deleted bool, raCreatedAt time.Time) string {
+		agID := uuid.NewString()
+		require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+			ID:        agID,
+			Slug:      "ag-" + agID[:8],
+			Name:      "ag-" + agID[:8],
+			ProjectID: projID,
+			Phase:     phase,
+			RunID:     runID,
+		}))
+		upd := client.Agent.UpdateOneID(uuid.MustParse(agID)).SetRunID(runID)
+		if deleted {
+			upd = upd.SetDeletedAt(now.Add(-1 * time.Hour))
+		}
+		require.NoError(t, upd.Exec(ctx))
+		if runID != "" && !raCreatedAt.IsZero() {
+			_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+				RunID:         runID,
+				Generation:    1,
+				HubID:         "hub-equiv",
+				ProjectID:     projID,
+				AgentID:       agID,
+				AgentSlug:     "ag-" + agID[:8],
+				BillingUserID: &userID,
+				Harness:       "claude",
+				CreatedAt:     raCreatedAt,
+			})
+			require.NoError(t, err)
+		}
+		return agID
+	}
+
+	// 1. Running agent with stale open meter_health (projA) -> stale
+	ag1 := createAgentWithRun(projA, "run-eq-1", "running", false, now.Add(-2*time.Hour))
+	_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag1,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       ag1,
+			RunID:         "run-eq-1",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: staleReceipt,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 2. Running agent with fresh open meter_health + event (projA) -> measured
+	ag2 := createAgentWithRun(projA, "run-eq-2", "running", false, now.Add(-1*time.Hour))
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag2,
+		Events:  []*store.UsageEvent{makeStoreUsageEvent("hub-equiv", "eq-ev-2", "run-eq-2", projA, ag2, &userID, 1, freshReceipt, 100, 50, 0, 0)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       ag2,
+			RunID:         "run-eq-2",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: freshReceipt,
+			ProducerSeq:   1,
+			ReceivedSeqs:  []int64{1},
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 3. Running agent with NO meter_health and NO events, created before histStart (tests running branch!)
+	_ = createAgentWithRun(projB, "run-eq-3", "running", false, now.AddDate(0, 0, -20))
+
+	// 4. Stopped agent with historical rollup only (active in [histStart, histEnd])
+	ag4 := createAgentWithRun(projB, "run-eq-4", "stopped", false, histStart.Add(-24*time.Hour))
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag4,
+		Events:  []*store.UsageEvent{makeStoreUsageEvent("hub-equiv", "eq-ev-4", "run-eq-4", projB, ag4, &userID, 1, histStart.Add(6*time.Hour), 200, 100, 0, 0)},
+	})
+	require.NoError(t, err)
+
+	// 5. Stopped agent with historical meter_health receipt only in [histStart, histEnd]
+	ag5 := createAgentWithRun(projB, "run-eq-5", "stopped", false, histStart.Add(-48*time.Hour))
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag5,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       ag5,
+			RunID:         "run-eq-5",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: histStart.Add(12 * time.Hour),
+			FinalState:    store.MeterHealthFinalStateFinal,
+		},
+	})
+	require.NoError(t, err)
+
+	// 6. Soft-deleted agent with stale open meter_health -> excluded from both
+	ag6 := createAgentWithRun(projA, "run-eq-6", "running", true, now.Add(-2*time.Hour))
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: ag6,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       ag6,
+			RunID:         "run-eq-6",
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: staleReceipt,
+			FinalState:    store.MeterHealthFinalStateOpen,
+		},
+	})
+	require.NoError(t, err)
+
+	// 7. Add many historical stopped agents (outside window) so Postgres planner
+	//    has realistic cardinality to choose the partial/covering indexes and PK
+	//    lookups instead of tiny-table sequential scans.
+	oldTS := now.AddDate(0, 0, -60)
+	drv := client.Driver()
+	dialectName := drv.Dialect()
+	if dialectName == dialect.Postgres {
+		var res sql.Result
+		require.NoError(t, drv.Exec(ctx, `
+INSERT INTO agents (
+	id, slug, name, project_id, phase, run_id,
+	created, updated, state_version
+)
+SELECT
+	(md5('bg-agent-' || g::text))::uuid,
+	'bg-slug-' || g::text,
+	'bg-name-' || g::text,
+	$1::uuid,
+	'stopped',
+	'run-bg-' || g::text,
+	$2, $2, 1
+FROM generate_series(1, 3000) AS g`, []any{projA, oldTS}, &res))
+		require.NoError(t, drv.Exec(ctx, `
+INSERT INTO run_attribution (
+	run_id, launch_id, generation, prior_run_id, hub_id,
+	project_id, agent_id, agent_slug, broker_id,
+	harness, harness_config, template,
+	metering_writer_mode, usage_live_source, capture_policy, notice_version,
+	backfill_existing, legal_hold, created_at
+)
+SELECT
+	'run-bg-' || g::text, '', 1, '', 'hub-equiv',
+	$1, (md5('bg-agent-' || g::text))::uuid::text, 'bg-slug-' || g::text, '',
+	'claude', '', '',
+	'', '', '', '',
+	false, false, $2
+FROM generate_series(1, 3000) AS g`, []any{projA, oldTS}, &res))
+		require.NoError(t, drv.Exec(ctx, "ANALYZE agents, meter_health, run_attribution, usage_rollups_daily", []any{}, &res))
+	} else {
+		for i := 0; i < 50; i++ {
+			_ = createAgentWithRun(projA, fmt.Sprintf("run-bg-%d", i), "stopped", false, oldTS)
+		}
+	}
+
+	// --- Equivalence Check 1: CountStaleMetersByProject (old vs new) ---
+	gotStale, err := cs.CountStaleMetersByProject(ctx, staleCutoff)
+	require.NoError(t, err)
+
+	oldStaleQuery := usageRebindSQL(dialectName, `
+SELECT project_id, COUNT(*) AS stale_count
+FROM (
+	SELECT ra.project_id, mh.agent_id, mh.run_id
+	FROM meter_health mh
+	INNER JOIN agents a ON CAST(a.id AS TEXT) = mh.agent_id AND a.run_id = mh.run_id AND a.deleted_at IS NULL AND a.phase = 'running'
+	INNER JOIN run_attribution ra ON ra.run_id = mh.run_id
+	WHERE mh.final_state = 'open'
+	  AND NOT EXISTS (
+		SELECT 1
+		FROM meter_health mh2
+		WHERE mh2.agent_id = mh.agent_id
+		  AND mh2.run_id = mh.run_id
+		  AND mh2.final_state <> 'open'
+		  AND mh2.last_receipt_at >= mh.last_receipt_at
+	  )
+	GROUP BY ra.project_id, mh.agent_id, mh.run_id
+	HAVING MAX(mh.last_receipt_at) < ?
+) AS stale_runs
+GROUP BY project_id
+ORDER BY project_id ASC`)
+	oldStaleRows := &entsql.Rows{}
+	require.NoError(t, drv.Query(ctx, oldStaleQuery, []any{staleCutoff}, oldStaleRows))
+	wantStale := make(map[string]int64)
+	for oldStaleRows.Next() {
+		var pid string
+		var cnt int64
+		require.NoError(t, oldStaleRows.Scan(&pid, &cnt))
+		if pid != "" && cnt > 0 {
+			wantStale[pid] = cnt
+		}
+	}
+	require.NoError(t, oldStaleRows.Err())
+	require.NoError(t, oldStaleRows.Close())
+	assert.Equal(t, wantStale, gotStale, "new CountStaleMetersByProject must match old query identically")
+	assert.Equal(t, map[string]int64{projA: 1}, gotStale)
+
+	// --- Equivalence Check 2: Global GetUsageScopeCoverage (old vs new) ---
+	runOldGlobalCoverage := func(since, until time.Time, staleAfter time.Duration) *store.UsageScopeCoverage {
+		sinceDay := utcDayStart(since)
+		untilDay := utcDayStart(until)
+		sc := now.Add(-staleAfter).Truncate(time.Microsecond)
+		incNow := !until.Before(sc)
+		var qArgs []any
+		qArgs = append(qArgs, until, since, until)
+		overlap := `EXISTS (SELECT 1 FROM run_attribution ra2 WHERE ra2.agent_id = CAST(a.id AS TEXT) AND ra2.created_at >= ? AND ra2.created_at <= ?)`
+		if incNow {
+			overlap += ` OR a.phase = ?`
+			qArgs = append(qArgs, "running")
+		}
+		overlap += ` OR EXISTS (SELECT 1 FROM meter_health mh_w WHERE mh_w.agent_id = CAST(a.id AS TEXT) AND mh_w.last_receipt_at >= ? AND mh_w.last_receipt_at <= ?)`
+		qArgs = append(qArgs, since, until)
+		overlap += ` OR EXISTS (SELECT 1 FROM usage_rollups_daily rd_w WHERE rd_w.agent_id = CAST(a.id AS TEXT) AND rd_w.bucket_start >= ? AND rd_w.bucket_start <= ?)`
+		qArgs = append(qArgs, sinceDay, untilDay)
+		isRunExpr := "0"
+		isStaleExpr := "0"
+		if incNow {
+			isRunExpr = "CASE WHEN am.phase = ? THEN 1 ELSE 0 END"
+			isStaleExpr = "CASE WHEN am.latest_receipt_at IS NOT NULL AND am.latest_receipt_at < ? THEN 1 ELSE 0 END"
+			qArgs = append(qArgs, "running", sc)
+		}
+		qArgs = append(qArgs, sinceDay, untilDay)
+		oldQ := usageRebindSQL(dialectName, fmt.Sprintf(`
+WITH scoped_agents AS (
+	SELECT CAST(a.id AS TEXT) AS agent_id_text, COALESCE(a.run_id, '') AS run_id, COALESCE(a.phase, '') AS phase
+	FROM agents a
+	WHERE a.deleted_at IS NULL
+	  AND EXISTS (SELECT 1 FROM run_attribution ra WHERE ra.agent_id = CAST(a.id AS TEXT) AND ra.created_at <= ?)
+	  AND (%s)
+),
+agent_mh AS (
+	SELECT sa.agent_id_text, sa.run_id, sa.phase, MAX(mh.last_receipt_at) AS latest_receipt_at,
+		COALESCE(MAX(CASE WHEN mh.last_receipt_at = (
+			SELECT MAX(mh2.last_receipt_at) FROM meter_health mh2 WHERE mh2.agent_id = sa.agent_id_text AND mh2.run_id = sa.run_id
+		) THEN mh.final_state ELSE '' END), '') AS latest_final_state
+	FROM scoped_agents sa
+	LEFT JOIN meter_health mh ON mh.agent_id = sa.agent_id_text AND mh.run_id = sa.run_id AND sa.run_id <> ''
+	GROUP BY sa.agent_id_text, sa.run_id, sa.phase
+),
+agent_flags AS (
+	SELECT %s AS is_running,
+		CASE WHEN am.latest_receipt_at IS NOT NULL THEN 1 ELSE 0 END AS has_meter_health,
+		am.latest_final_state AS latest_final_state,
+		%s AS is_receipt_stale,
+		CASE
+			WHEN am.run_id <> '' AND EXISTS (SELECT 1 FROM usage_events ue WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id) THEN 1
+			WHEN EXISTS (SELECT 1 FROM usage_rollups_daily rd WHERE rd.agent_id = am.agent_id_text AND rd.bucket_start >= ? AND rd.bucket_start <= ?) THEN 1
+			ELSE 0
+		END AS has_usage_data,
+		am.latest_receipt_at AS latest_receipt_at
+	FROM agent_mh am
+)
+SELECT is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data,
+	CAST(COUNT(*) AS BIGINT) AS agent_count, MAX(latest_receipt_at) AS max_last_receipt_at
+FROM agent_flags
+GROUP BY is_running, has_meter_health, latest_final_state, is_receipt_stale, has_usage_data`, overlap, isRunExpr, isStaleExpr))
+
+		rows := &entsql.Rows{}
+		require.NoError(t, drv.Query(ctx, oldQ, qArgs, rows))
+		defer func() { _ = rows.Close() }()
+		out := &store.UsageScopeCoverage{}
+		for rows.Next() {
+			var ir, hmh, irs, hud int
+			var lfs string
+			var cnt int64
+			var rawLR any
+			require.NoError(t, rows.Scan(&ir, &hmh, &lfs, &irs, &hud, &cnt, &rawLR))
+			out.Buckets = append(out.Buckets, store.UsageCoverageBucket{
+				IsRunning:        ir != 0,
+				HasMeterHealth:   hmh != 0,
+				LatestFinalState: lfs,
+				IsReceiptStale:   irs != 0,
+				HasUsageData:     hud != 0,
+				AgentCount:       int(cnt),
+			})
+			if rawLR != nil {
+				ts, err := parseSQLTimestamp(rawLR)
+				require.NoError(t, err)
+				if ts != nil && (out.LastReceiptAt == nil || ts.After(*out.LastReceiptAt)) {
+					out.LastReceiptAt = ts
+				}
+			}
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+
+	// (a) Window including now: [now-24h, now]
+	gotNow, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		Since:      now.Add(-24 * time.Hour),
+		Until:      now,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      now,
+	})
+	require.NoError(t, err)
+	wantNow := runOldGlobalCoverage(now.Add(-24*time.Hour), now, 3*time.Minute)
+	assert.ElementsMatch(t, wantNow.Buckets, gotNow.Buckets, "global coverage (includes now) must match old query")
+	assert.Equal(t, wantNow.LastReceiptAt, gotNow.LastReceiptAt)
+
+	// (b) Historical window: [histStart, histEnd]
+	gotHist, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		Since:      histStart,
+		Until:      histEnd,
+		StaleAfter: 3 * time.Minute,
+		DBNow:      now,
+	})
+	require.NoError(t, err)
+	wantHist := runOldGlobalCoverage(histStart, histEnd, 3*time.Minute)
+	assert.ElementsMatch(t, wantHist.Buckets, gotHist.Buckets, "global coverage (historical) must match old query")
+	assert.Equal(t, wantHist.LastReceiptAt, gotHist.LastReceiptAt)
+
+	// --- Postgres EXPLAIN (ANALYZE, BUFFERS) verification under force_generic_plan ---
+	if dialectName == dialect.Postgres {
+		explainPlan := func(label, q string, qArgs ...any) string {
+			tx, err := client.Tx(ctx)
+			require.NoError(t, err)
+			defer func() { _ = tx.Rollback() }()
+			txDrv := tx.Client().Driver()
+			var res sql.Result
+			require.NoError(t, txDrv.Exec(ctx, "SET LOCAL plan_cache_mode = force_generic_plan", []any{}, &res))
+			rows := &entsql.Rows{}
+			require.NoError(t, txDrv.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+q, qArgs, rows))
+			defer func() { _ = rows.Close() }()
+			var lines []string
+			for rows.Next() {
+				var line string
+				require.NoError(t, rows.Scan(&line))
+				lines = append(lines, line)
+			}
+			require.NoError(t, rows.Err())
+			plan := strings.Join(lines, "\n")
+			t.Logf("=== EXPLAIN %s ===\n%s", label, plan)
+			return plan
+		}
+
+		stalePlan := explainPlan("CountStaleMetersByProject", countStaleMetersByProjectSQL(dialectName), staleCutoff)
+		assert.NotContains(t, stalePlan, "Seq Scan on agents", "CountStaleMetersByProject must use partial index on agents, not Seq Scan")
+		assert.Contains(t, stalePlan, "agent_running_active", "CountStaleMetersByProject must use agent_running_active partial index")
+
+		covQuery, covArgs, ok := buildUsageScopeCoverageSQL(dialectName, store.UsageCoverageFilter{
+			Since:      now.Add(-24 * time.Hour),
+			Until:      now,
+			StaleAfter: 3 * time.Minute,
+			DBNow:      now,
+		}, now)
+		require.True(t, ok)
+		covPlan := explainPlan("GetUsageScopeCoverage (global, includes now)", covQuery, covArgs...)
+		assert.NotContains(t, covPlan, "Seq Scan on agents", "global GetUsageScopeCoverage must not Seq Scan agents")
+		assert.Contains(t, covPlan, "agent_running_active", "global GetUsageScopeCoverage must use agent_running_active")
+	}
 }

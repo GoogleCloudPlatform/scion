@@ -82017,6 +82017,10 @@ type MeterHealthMutation struct {
 	addmax_seq_seen         *int64
 	missing_ranges          *[]store.SeqRange
 	appendmissing_ranges    []store.SeqRange
+	rejected_count          *int64
+	addrejected_count       *int64
+	rejected_ranges         *[]store.SeqRange
+	appendrejected_ranges   []store.SeqRange
 	last_source_activity_at *time.Time
 	supported_signals       *[]string
 	appendsupported_signals []string
@@ -82456,6 +82460,127 @@ func (m *MeterHealthMutation) ResetMissingRanges() {
 	delete(m.clearedFields, meterhealth.FieldMissingRanges)
 }
 
+// SetRejectedCount sets the "rejected_count" field.
+func (m *MeterHealthMutation) SetRejectedCount(i int64) {
+	m.rejected_count = &i
+	m.addrejected_count = nil
+}
+
+// RejectedCount returns the value of the "rejected_count" field in the mutation.
+func (m *MeterHealthMutation) RejectedCount() (r int64, exists bool) {
+	v := m.rejected_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRejectedCount returns the old "rejected_count" field's value of the MeterHealth entity.
+// If the MeterHealth object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MeterHealthMutation) OldRejectedCount(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRejectedCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRejectedCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRejectedCount: %w", err)
+	}
+	return oldValue.RejectedCount, nil
+}
+
+// AddRejectedCount adds i to the "rejected_count" field.
+func (m *MeterHealthMutation) AddRejectedCount(i int64) {
+	if m.addrejected_count != nil {
+		*m.addrejected_count += i
+	} else {
+		m.addrejected_count = &i
+	}
+}
+
+// AddedRejectedCount returns the value that was added to the "rejected_count" field in this mutation.
+func (m *MeterHealthMutation) AddedRejectedCount() (r int64, exists bool) {
+	v := m.addrejected_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRejectedCount resets all changes to the "rejected_count" field.
+func (m *MeterHealthMutation) ResetRejectedCount() {
+	m.rejected_count = nil
+	m.addrejected_count = nil
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (m *MeterHealthMutation) SetRejectedRanges(sr []store.SeqRange) {
+	m.rejected_ranges = &sr
+	m.appendrejected_ranges = nil
+}
+
+// RejectedRanges returns the value of the "rejected_ranges" field in the mutation.
+func (m *MeterHealthMutation) RejectedRanges() (r []store.SeqRange, exists bool) {
+	v := m.rejected_ranges
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRejectedRanges returns the old "rejected_ranges" field's value of the MeterHealth entity.
+// If the MeterHealth object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MeterHealthMutation) OldRejectedRanges(ctx context.Context) (v []store.SeqRange, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRejectedRanges is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRejectedRanges requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRejectedRanges: %w", err)
+	}
+	return oldValue.RejectedRanges, nil
+}
+
+// AppendRejectedRanges adds sr to the "rejected_ranges" field.
+func (m *MeterHealthMutation) AppendRejectedRanges(sr []store.SeqRange) {
+	m.appendrejected_ranges = append(m.appendrejected_ranges, sr...)
+}
+
+// AppendedRejectedRanges returns the list of values that were appended to the "rejected_ranges" field in this mutation.
+func (m *MeterHealthMutation) AppendedRejectedRanges() ([]store.SeqRange, bool) {
+	if len(m.appendrejected_ranges) == 0 {
+		return nil, false
+	}
+	return m.appendrejected_ranges, true
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (m *MeterHealthMutation) ClearRejectedRanges() {
+	m.rejected_ranges = nil
+	m.appendrejected_ranges = nil
+	m.clearedFields[meterhealth.FieldRejectedRanges] = struct{}{}
+}
+
+// RejectedRangesCleared returns if the "rejected_ranges" field was cleared in this mutation.
+func (m *MeterHealthMutation) RejectedRangesCleared() bool {
+	_, ok := m.clearedFields[meterhealth.FieldRejectedRanges]
+	return ok
+}
+
+// ResetRejectedRanges resets all changes to the "rejected_ranges" field.
+func (m *MeterHealthMutation) ResetRejectedRanges() {
+	m.rejected_ranges = nil
+	m.appendrejected_ranges = nil
+	delete(m.clearedFields, meterhealth.FieldRejectedRanges)
+}
+
 // SetLastSourceActivityAt sets the "last_source_activity_at" field.
 func (m *MeterHealthMutation) SetLastSourceActivityAt(t time.Time) {
 	m.last_source_activity_at = &t
@@ -82768,7 +82893,7 @@ func (m *MeterHealthMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MeterHealthMutation) Fields() []string {
-	fields := make([]string, 0, 13)
+	fields := make([]string, 0, 15)
 	if m.agent_id != nil {
 		fields = append(fields, meterhealth.FieldAgentID)
 	}
@@ -82789,6 +82914,12 @@ func (m *MeterHealthMutation) Fields() []string {
 	}
 	if m.missing_ranges != nil {
 		fields = append(fields, meterhealth.FieldMissingRanges)
+	}
+	if m.rejected_count != nil {
+		fields = append(fields, meterhealth.FieldRejectedCount)
+	}
+	if m.rejected_ranges != nil {
+		fields = append(fields, meterhealth.FieldRejectedRanges)
 	}
 	if m.last_source_activity_at != nil {
 		fields = append(fields, meterhealth.FieldLastSourceActivityAt)
@@ -82830,6 +82961,10 @@ func (m *MeterHealthMutation) Field(name string) (ent.Value, bool) {
 		return m.MaxSeqSeen()
 	case meterhealth.FieldMissingRanges:
 		return m.MissingRanges()
+	case meterhealth.FieldRejectedCount:
+		return m.RejectedCount()
+	case meterhealth.FieldRejectedRanges:
+		return m.RejectedRanges()
 	case meterhealth.FieldLastSourceActivityAt:
 		return m.LastSourceActivityAt()
 	case meterhealth.FieldSupportedSignals:
@@ -82865,6 +83000,10 @@ func (m *MeterHealthMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldMaxSeqSeen(ctx)
 	case meterhealth.FieldMissingRanges:
 		return m.OldMissingRanges(ctx)
+	case meterhealth.FieldRejectedCount:
+		return m.OldRejectedCount(ctx)
+	case meterhealth.FieldRejectedRanges:
+		return m.OldRejectedRanges(ctx)
 	case meterhealth.FieldLastSourceActivityAt:
 		return m.OldLastSourceActivityAt(ctx)
 	case meterhealth.FieldSupportedSignals:
@@ -82935,6 +83074,20 @@ func (m *MeterHealthMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetMissingRanges(v)
 		return nil
+	case meterhealth.FieldRejectedCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRejectedCount(v)
+		return nil
+	case meterhealth.FieldRejectedRanges:
+		v, ok := value.([]store.SeqRange)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRejectedRanges(v)
+		return nil
 	case meterhealth.FieldLastSourceActivityAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -82991,6 +83144,9 @@ func (m *MeterHealthMutation) AddedFields() []string {
 	if m.addmax_seq_seen != nil {
 		fields = append(fields, meterhealth.FieldMaxSeqSeen)
 	}
+	if m.addrejected_count != nil {
+		fields = append(fields, meterhealth.FieldRejectedCount)
+	}
 	if m.addanomalous_count != nil {
 		fields = append(fields, meterhealth.FieldAnomalousCount)
 	}
@@ -83006,6 +83162,8 @@ func (m *MeterHealthMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedLastContiguousSeq()
 	case meterhealth.FieldMaxSeqSeen:
 		return m.AddedMaxSeqSeen()
+	case meterhealth.FieldRejectedCount:
+		return m.AddedRejectedCount()
 	case meterhealth.FieldAnomalousCount:
 		return m.AddedAnomalousCount()
 	}
@@ -83031,6 +83189,13 @@ func (m *MeterHealthMutation) AddField(name string, value ent.Value) error {
 		}
 		m.AddMaxSeqSeen(v)
 		return nil
+	case meterhealth.FieldRejectedCount:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRejectedCount(v)
+		return nil
 	case meterhealth.FieldAnomalousCount:
 		v, ok := value.(int64)
 		if !ok {
@@ -83048,6 +83213,9 @@ func (m *MeterHealthMutation) ClearedFields() []string {
 	var fields []string
 	if m.FieldCleared(meterhealth.FieldMissingRanges) {
 		fields = append(fields, meterhealth.FieldMissingRanges)
+	}
+	if m.FieldCleared(meterhealth.FieldRejectedRanges) {
+		fields = append(fields, meterhealth.FieldRejectedRanges)
 	}
 	if m.FieldCleared(meterhealth.FieldLastSourceActivityAt) {
 		fields = append(fields, meterhealth.FieldLastSourceActivityAt)
@@ -83071,6 +83239,9 @@ func (m *MeterHealthMutation) ClearField(name string) error {
 	switch name {
 	case meterhealth.FieldMissingRanges:
 		m.ClearMissingRanges()
+		return nil
+	case meterhealth.FieldRejectedRanges:
+		m.ClearRejectedRanges()
 		return nil
 	case meterhealth.FieldLastSourceActivityAt:
 		m.ClearLastSourceActivityAt()
@@ -83106,6 +83277,12 @@ func (m *MeterHealthMutation) ResetField(name string) error {
 		return nil
 	case meterhealth.FieldMissingRanges:
 		m.ResetMissingRanges()
+		return nil
+	case meterhealth.FieldRejectedCount:
+		m.ResetRejectedCount()
+		return nil
+	case meterhealth.FieldRejectedRanges:
+		m.ResetRejectedRanges()
 		return nil
 	case meterhealth.FieldLastSourceActivityAt:
 		m.ResetLastSourceActivityAt()

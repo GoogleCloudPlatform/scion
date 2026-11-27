@@ -104,6 +104,45 @@ func (_u *MeterHealthUpdate) ClearMissingRanges() *MeterHealthUpdate {
 	return _u
 }
 
+// SetRejectedCount sets the "rejected_count" field.
+func (_u *MeterHealthUpdate) SetRejectedCount(v int64) *MeterHealthUpdate {
+	_u.mutation.ResetRejectedCount()
+	_u.mutation.SetRejectedCount(v)
+	return _u
+}
+
+// SetNillableRejectedCount sets the "rejected_count" field if the given value is not nil.
+func (_u *MeterHealthUpdate) SetNillableRejectedCount(v *int64) *MeterHealthUpdate {
+	if v != nil {
+		_u.SetRejectedCount(*v)
+	}
+	return _u
+}
+
+// AddRejectedCount adds value to the "rejected_count" field.
+func (_u *MeterHealthUpdate) AddRejectedCount(v int64) *MeterHealthUpdate {
+	_u.mutation.AddRejectedCount(v)
+	return _u
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (_u *MeterHealthUpdate) SetRejectedRanges(v []store.SeqRange) *MeterHealthUpdate {
+	_u.mutation.SetRejectedRanges(v)
+	return _u
+}
+
+// AppendRejectedRanges appends value to the "rejected_ranges" field.
+func (_u *MeterHealthUpdate) AppendRejectedRanges(v []store.SeqRange) *MeterHealthUpdate {
+	_u.mutation.AppendRejectedRanges(v)
+	return _u
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (_u *MeterHealthUpdate) ClearRejectedRanges() *MeterHealthUpdate {
+	_u.mutation.ClearRejectedRanges()
+	return _u
+}
+
 // SetLastSourceActivityAt sets the "last_source_activity_at" field.
 func (_u *MeterHealthUpdate) SetLastSourceActivityAt(v time.Time) *MeterHealthUpdate {
 	_u.mutation.SetLastSourceActivityAt(v)
@@ -273,6 +312,23 @@ func (_u *MeterHealthUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	if _u.mutation.MissingRangesCleared() {
 		_spec.ClearField(meterhealth.FieldMissingRanges, field.TypeJSON)
 	}
+	if value, ok := _u.mutation.RejectedCount(); ok {
+		_spec.SetField(meterhealth.FieldRejectedCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRejectedCount(); ok {
+		_spec.AddField(meterhealth.FieldRejectedCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.RejectedRanges(); ok {
+		_spec.SetField(meterhealth.FieldRejectedRanges, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRejectedRanges(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, meterhealth.FieldRejectedRanges, value)
+		})
+	}
+	if _u.mutation.RejectedRangesCleared() {
+		_spec.ClearField(meterhealth.FieldRejectedRanges, field.TypeJSON)
+	}
 	if value, ok := _u.mutation.LastSourceActivityAt(); ok {
 		_spec.SetField(meterhealth.FieldLastSourceActivityAt, field.TypeTime, value)
 	}
@@ -396,6 +452,45 @@ func (_u *MeterHealthUpdateOne) AppendMissingRanges(v []store.SeqRange) *MeterHe
 // ClearMissingRanges clears the value of the "missing_ranges" field.
 func (_u *MeterHealthUpdateOne) ClearMissingRanges() *MeterHealthUpdateOne {
 	_u.mutation.ClearMissingRanges()
+	return _u
+}
+
+// SetRejectedCount sets the "rejected_count" field.
+func (_u *MeterHealthUpdateOne) SetRejectedCount(v int64) *MeterHealthUpdateOne {
+	_u.mutation.ResetRejectedCount()
+	_u.mutation.SetRejectedCount(v)
+	return _u
+}
+
+// SetNillableRejectedCount sets the "rejected_count" field if the given value is not nil.
+func (_u *MeterHealthUpdateOne) SetNillableRejectedCount(v *int64) *MeterHealthUpdateOne {
+	if v != nil {
+		_u.SetRejectedCount(*v)
+	}
+	return _u
+}
+
+// AddRejectedCount adds value to the "rejected_count" field.
+func (_u *MeterHealthUpdateOne) AddRejectedCount(v int64) *MeterHealthUpdateOne {
+	_u.mutation.AddRejectedCount(v)
+	return _u
+}
+
+// SetRejectedRanges sets the "rejected_ranges" field.
+func (_u *MeterHealthUpdateOne) SetRejectedRanges(v []store.SeqRange) *MeterHealthUpdateOne {
+	_u.mutation.SetRejectedRanges(v)
+	return _u
+}
+
+// AppendRejectedRanges appends value to the "rejected_ranges" field.
+func (_u *MeterHealthUpdateOne) AppendRejectedRanges(v []store.SeqRange) *MeterHealthUpdateOne {
+	_u.mutation.AppendRejectedRanges(v)
+	return _u
+}
+
+// ClearRejectedRanges clears the value of the "rejected_ranges" field.
+func (_u *MeterHealthUpdateOne) ClearRejectedRanges() *MeterHealthUpdateOne {
+	_u.mutation.ClearRejectedRanges()
 	return _u
 }
 
@@ -597,6 +692,23 @@ func (_u *MeterHealthUpdateOne) sqlSave(ctx context.Context) (_node *MeterHealth
 	}
 	if _u.mutation.MissingRangesCleared() {
 		_spec.ClearField(meterhealth.FieldMissingRanges, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.RejectedCount(); ok {
+		_spec.SetField(meterhealth.FieldRejectedCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedRejectedCount(); ok {
+		_spec.AddField(meterhealth.FieldRejectedCount, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.RejectedRanges(); ok {
+		_spec.SetField(meterhealth.FieldRejectedRanges, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedRejectedRanges(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, meterhealth.FieldRejectedRanges, value)
+		})
+	}
+	if _u.mutation.RejectedRangesCleared() {
+		_spec.ClearField(meterhealth.FieldRejectedRanges, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.LastSourceActivityAt(); ok {
 		_spec.SetField(meterhealth.FieldLastSourceActivityAt, field.TypeTime, value)

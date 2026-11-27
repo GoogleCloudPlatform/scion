@@ -2812,20 +2812,24 @@ func init() {
 	meterhealthDescMaxSeqSeen := meterhealthFields[6].Descriptor()
 	// meterhealth.DefaultMaxSeqSeen holds the default value on creation for the max_seq_seen field.
 	meterhealth.DefaultMaxSeqSeen = meterhealthDescMaxSeqSeen.Default.(int64)
+	// meterhealthDescRejectedCount is the schema descriptor for rejected_count field.
+	meterhealthDescRejectedCount := meterhealthFields[8].Descriptor()
+	// meterhealth.DefaultRejectedCount holds the default value on creation for the rejected_count field.
+	meterhealth.DefaultRejectedCount = meterhealthDescRejectedCount.Default.(int64)
 	// meterhealthDescAnomalousCount is the schema descriptor for anomalous_count field.
-	meterhealthDescAnomalousCount := meterhealthFields[10].Descriptor()
+	meterhealthDescAnomalousCount := meterhealthFields[12].Descriptor()
 	// meterhealth.DefaultAnomalousCount holds the default value on creation for the anomalous_count field.
 	meterhealth.DefaultAnomalousCount = meterhealthDescAnomalousCount.Default.(int64)
 	// meterhealthDescSchemaDriftDetected is the schema descriptor for schema_drift_detected field.
-	meterhealthDescSchemaDriftDetected := meterhealthFields[11].Descriptor()
+	meterhealthDescSchemaDriftDetected := meterhealthFields[13].Descriptor()
 	// meterhealth.DefaultSchemaDriftDetected holds the default value on creation for the schema_drift_detected field.
 	meterhealth.DefaultSchemaDriftDetected = meterhealthDescSchemaDriftDetected.Default.(bool)
 	// meterhealthDescFinalState is the schema descriptor for final_state field.
-	meterhealthDescFinalState := meterhealthFields[12].Descriptor()
+	meterhealthDescFinalState := meterhealthFields[14].Descriptor()
 	// meterhealth.DefaultFinalState holds the default value on creation for the final_state field.
 	meterhealth.DefaultFinalState = meterhealthDescFinalState.Default.(string)
 	// meterhealthDescUpdatedAt is the schema descriptor for updated_at field.
-	meterhealthDescUpdatedAt := meterhealthFields[13].Descriptor()
+	meterhealthDescUpdatedAt := meterhealthFields[15].Descriptor()
 	// meterhealth.DefaultUpdatedAt holds the default value on creation for the updated_at field.
 	meterhealth.DefaultUpdatedAt = meterhealthDescUpdatedAt.Default.(func() time.Time)
 	// meterhealth.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.

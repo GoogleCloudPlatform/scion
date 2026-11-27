@@ -931,9 +931,11 @@ func TestUsageIngest_PerRowDBRejectionDoesNotFailBatch(t *testing.T) {
 	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
 	require.NoError(t, err)
 	require.Len(t, mhs, 1)
-	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].LastContiguousSeq)
 	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
-	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
+	assert.Empty(t, mhs[0].MissingRanges)
+	assert.Equal(t, int64(1), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
 }
 
 func TestIsUsageEventRowDataError(t *testing.T) {
@@ -971,7 +973,7 @@ func TestMeterHealth_MissingRangesBoundedAndLinearUnderAdversarialProducer(t *te
 			seqs[i] = int64((b*perBatch + i + 1) * 2) // 2, 4, 6, ... (all odd seqs unreceived)
 		}
 		var coalesced bool
-		contig, maxSeq, missing, coalesced = advanceIngestSeqState(contig, maxSeq, missing, seqs[len(seqs)-1], seqs)
+		contig, maxSeq, missing, _, _, coalesced, _ = advanceIngestSeqState(contig, maxSeq, missing, 0, nil, seqs[len(seqs)-1], seqs, nil)
 		if coalesced {
 			anyCoalesced = true
 		}
@@ -980,7 +982,7 @@ func TestMeterHealth_MissingRangesBoundedAndLinearUnderAdversarialProducer(t *te
 	}
 	// Large producer_seq jump beyond maxSeq.
 	jumpTarget := maxSeq + 1_000_000
-	contig, maxSeq, missing, _ = advanceIngestSeqState(contig, maxSeq, missing, jumpTarget, nil)
+	contig, maxSeq, missing, _, _, _, _ = advanceIngestSeqState(contig, maxSeq, missing, 0, nil, jumpTarget, nil, nil)
 	elapsed := time.Since(start)
 
 	assert.True(t, anyCoalesced, "adversarial every-other-seq producer must trigger conservative coalescing")
@@ -1081,4 +1083,506 @@ func TestEnsureRunAttributionForAgent_RechecksCurrentRunIDInTx(t *testing.T) {
 	assert.Equal(t, "run-current", existing.RunID)
 	_, err = cs.EnsureRunAttributionForAgent(ctx, ag.ID, "run-never-attributed", "hub-test")
 	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestUsageIngest_500EventBatchTiming(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projectID,
+		Name: "bench-project",
+		Slug: "bench-project-" + projectID[:8],
+	}))
+	userID := uuid.NewString()
+	require.NoError(t, cs.CreateUser(ctx, &store.User{
+		ID:          userID,
+		Email:       "bench-" + userID[:8] + "@example.com",
+		DisplayName: "Bench User",
+		Role:        store.UserRoleMember,
+	}))
+	agentID := uuid.NewString()
+	runID := "run-bench-" + uuid.NewString()
+	_, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		Generation:    1,
+		HubID:         "hub-bench",
+		ProjectID:     projectID,
+		AgentID:       agentID,
+		AgentSlug:     "bench-worker",
+		BrokerID:      "broker-1",
+		BillingUserID: &userID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		Template:      "default",
+		CreatedAt:     time.Now().UTC().Truncate(time.Microsecond),
+	})
+	require.NoError(t, err)
+
+	baseTS := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	const (
+		batchSize  = 500
+		iterations = 5
+	)
+
+	var total time.Duration
+	for iter := 0; iter < iterations; iter++ {
+		events := make([]*store.UsageEvent, batchSize)
+		seqs := make([]int64, batchSize)
+		baseSeq := int64(iter*batchSize + 1)
+		for i := 0; i < batchSize; i++ {
+			seq := baseSeq + int64(i)
+			seqs[i] = seq
+			events[i] = makeStoreUsageEvent(
+				"hub-bench",
+				fmt.Sprintf("bench-evt-%d-%d", iter, i),
+				runID, projectID, agentID, &userID,
+				seq,
+				baseTS.Add(time.Duration(i)*time.Millisecond),
+				100+int64(i), 50, 20, 10,
+			)
+		}
+		in := &store.UsageIngestBatchInput{
+			AgentID: agentID,
+			Events:  events,
+			MeterHealth: &store.UsageMeterHealthUpdate{
+				AgentID:       agentID,
+				RunID:         runID,
+				ProducerEpoch: "ep-bench",
+				LastReceiptAt: baseTS.Add(time.Duration(iter+1) * time.Second),
+				ProducerSeq:   baseSeq + batchSize - 1,
+				ReceivedSeqs:  seqs,
+			},
+		}
+		start := time.Now()
+		res, err := cs.IngestUsageBatch(ctx, in)
+		elapsed := time.Since(start)
+		require.NoError(t, err)
+		require.Equal(t, batchSize, res.Accepted)
+		total += elapsed
+	}
+	t.Logf("500-event batch avg over %d runs (%s): %v", iterations, client.Driver().Dialect(), total/iterations)
+}
+
+func TestUsageIngest_RejectedSeqsVsLostGaps(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "rejected-vs-lost")
+	userID := createTestUser(t, cs, "rejected-vs-lost@example.com")
+	agentID := uuid.NewString()
+	runID := "run-rej-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+	ts := time.Date(2026, 11, 25, 15, 0, 0, 0, time.UTC)
+
+	// 1. Batch with seq 1 (valid), seq 2 (handler-rejected via RejectedSeqs), seq 3 (valid).
+	ev1 := makeStoreUsageEvent("hub-test", "rej-evt-1", runID, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	ev3 := makeStoreUsageEvent("hub-test", "rej-evt-3", runID, projectID, agentID, &userID, 3, ts.Add(2*time.Second), 20, 10, 0, 0)
+	res, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{ev1, ev3},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(3 * time.Second),
+			ProducerSeq:   3,
+			ReceivedSeqs:  []int64{1, 3},
+			RejectedSeqs:  []int64{2},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Accepted)
+
+	mhs, err := cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	require.Len(t, mhs, 1)
+	assert.Equal(t, int64(3), mhs[0].LastContiguousSeq, "rejected seq 2 must not stall last_contiguous_seq")
+	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
+	assert.Empty(t, mhs[0].MissingRanges, "rejected seq 2 must not appear in missing_ranges")
+	assert.Equal(t, int64(1), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
+
+	// 2. Idempotent retry of the exact same batch must not double-count rejected_count.
+	resRetry, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{ev1, ev3},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(4 * time.Second),
+			ProducerSeq:   3,
+			ReceivedSeqs:  []int64{1, 3},
+			RejectedSeqs:  []int64{2},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, resRetry.Accepted)
+	assert.Equal(t, 2, resRetry.Duplicates)
+
+	mhs, err = cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), mhs[0].RejectedCount, "retry must not increment rejected_count")
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
+	assert.Empty(t, mhs[0].MissingRanges)
+
+	// 3. Batch skipping seq 4 (genuinely lost), delivering seq 5 (valid),
+	//    seq 6 (DB-rejected via FK violation on missing run_id), seq 7 (valid).
+	ev5 := makeStoreUsageEvent("hub-test", "rej-evt-5", runID, projectID, agentID, &userID, 5, ts.Add(5*time.Second), 30, 15, 0, 0)
+	ev6Bad := makeStoreUsageEvent("hub-test", "rej-evt-6-bad", "nonexistent-run-fk", projectID, agentID, &userID, 6, ts.Add(6*time.Second), 99, 99, 0, 0)
+	ev7 := makeStoreUsageEvent("hub-test", "rej-evt-7", runID, projectID, agentID, &userID, 7, ts.Add(7*time.Second), 40, 20, 0, 0)
+	// Also test a DB-rejected event matching the same runID (empty event_id or
+	// constraint error) by setting Handler RejectedSeqs for seq 6 alongside FK-rejected row.
+	res3, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{ev5, ev6Bad, ev7},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(8 * time.Second),
+			ProducerSeq:   7,
+			ReceivedSeqs:  []int64{5, 7},
+			RejectedSeqs:  []int64{6},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res3.Accepted)
+	require.Len(t, res3.Rejected, 1)
+	assert.Equal(t, "rej-evt-6-bad", res3.Rejected[0].EventID)
+
+	mhs, err = cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), mhs[0].LastContiguousSeq, "genuine lost gap at seq 4 must still block contiguity")
+	assert.Equal(t, int64(7), mhs[0].MaxSeqSeen)
+	assert.Equal(t, []store.SeqRange{{Start: 4, End: 4}}, mhs[0].MissingRanges, "only genuine lost seq 4 should be in missing_ranges")
+	assert.Equal(t, int64(2), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}, {Start: 6, End: 6}}, mhs[0].RejectedRanges)
+
+	// 4. Late gap-fill for seq 4 closes missing_ranges (shrink-only) and jumps contiguity to 7.
+	ev4 := makeStoreUsageEvent("hub-test", "rej-evt-4", runID, projectID, agentID, &userID, 4, ts.Add(4*time.Second), 15, 5, 0, 0)
+	res4, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{ev4},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agentID,
+			RunID:         runID,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(9 * time.Second),
+			ProducerSeq:   7,
+			ReceivedSeqs:  []int64{4},
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, res4.Accepted)
+
+	mhs, err = cs.GetMeterHealth(ctx, agentID, runID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), mhs[0].LastContiguousSeq)
+	assert.Empty(t, mhs[0].MissingRanges)
+	assert.Equal(t, int64(2), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}, {Start: 6, End: 6}}, mhs[0].RejectedRanges)
+	assert.False(t, mhs[0].RejectedRangesCoalesced(), "uncoalesced rejected_ranges must report exact (not coalesced)")
+
+	// 5. Verify rejected_ranges cap (maxMeterHealthMissingRanges = 1024):
+	//    once coalesced, RejectedRangesCoalesced() is true (rejected_count is
+	//    a lower bound), and replaying the same batch in the coalesced state
+	//    remains strictly idempotent (+0).
+	manyRejected := make([]int64, maxMeterHealthMissingRanges+50)
+	for i := range manyRejected {
+		manyRejected[i] = int64((i + 1) * 2) // 2, 4, 6, ... (odd seqs are gaps)
+	}
+	contigCap, maxCap, missCap, rejCount, rejRanges, _, rejCoalesced := advanceIngestSeqState(0, 0, nil, 0, nil, int64(len(manyRejected)*2), nil, manyRejected)
+	assert.True(t, rejCoalesced)
+	assert.LessOrEqual(t, len(rejRanges), maxMeterHealthMissingRanges)
+	assert.Equal(t, int64(len(manyRejected)), rejCount)
+	mhCoalesced := &store.MeterHealth{RejectedCount: rejCount, RejectedRanges: rejRanges}
+	assert.True(t, mhCoalesced.RejectedRangesCoalesced(), "coalesced rejected_ranges must be detectable via span > rejected_count")
+
+	// Lost-ack replay of the same batch in the coalesced state must add +0.
+	_, _, _, rejCountReplay, rejRangesReplay, _, _ := advanceIngestSeqState(contigCap, maxCap, missCap, rejCount, rejRanges, maxCap, nil, manyRejected)
+	assert.Equal(t, rejCount, rejCountReplay, "replay in coalesced state must be idempotent (+0)")
+	assert.Equal(t, rejRanges, rejRangesReplay)
+}
+
+func TestUsageIngest_MultiRowBatchFallbackAndDuplicates(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "multirow-fallback")
+	userID := createTestUser(t, cs, "multirow-fallback@example.com")
+	agentID := uuid.NewString()
+	runID := "run-mr-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, &userID)
+
+	ts := time.Date(2026, 11, 25, 16, 0, 0, 0, time.UTC)
+	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	// Seed 3 existing events: mr-evt-0 and mr-evt-1 land in the first chunk
+	// (exercising fast-path DB duplicates), while mr-evt-bad-dup sorts adjacent
+	// to mr-evt-bad-fk in the final chunk (exercising the per-row fallback's
+	// dbDuplicates branch).
+	seed1 := makeStoreUsageEvent("hub-mr", "mr-evt-0", runID, projectID, agentID, &userID, 1, ts, 10, 5, 0, 0)
+	seed2 := makeStoreUsageEvent("hub-mr", "mr-evt-1", runID, projectID, agentID, &userID, 2, ts.Add(time.Second), 10, 5, 0, 0)
+	seedFallbackDup := makeStoreUsageEvent("hub-mr", "mr-evt-bad-dup", runID, projectID, agentID, &userID, 98, ts.Add(98*time.Second), 10, 5, 0, 0)
+	res0, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  []*store.UsageEvent{seed1, seed2, seedFallbackDup},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, res0.Accepted)
+
+	// Build a 61-event batch (3 chunks on SQLite) containing:
+	// - 2 fast-path DB duplicates (mr-evt-0, mr-evt-1)
+	// - 1 fallback-chunk DB duplicate (mr-evt-bad-dup, sorts in the third SQLite chunk with mr-evt-bad-fk)
+	// - 1 intra-batch duplicate (mr-evt-10 twice)
+	// - 1 bad row (non-existent run_id FK violation) sorting last (third SQLite chunk)
+	// - 56 new valid rows
+	events := make([]*store.UsageEvent, 0, 61)
+	events = append(events, seed1, seed2, seedFallbackDup)
+	for i := 2; i < 58; i++ {
+		ev := makeStoreUsageEvent("hub-mr", fmt.Sprintf("mr-evt-%d", i), runID, projectID, agentID, &userID, int64(i+1), ts.Add(time.Duration(i)*time.Second), 10, 5, 0, 0)
+		events = append(events, ev)
+		if i == 10 {
+			events = append(events, ev) // intra-batch duplicate
+		}
+	}
+	badEv := makeStoreUsageEvent("hub-mr", "mr-evt-bad-fk", "run-does-not-exist", projectID, agentID, &userID, 99, ts.Add(99*time.Second), 999, 999, 0, 0)
+	events = append(events, badEv)
+
+	res, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agentID,
+		Events:  events,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 56, res.Accepted)
+	assert.Equal(t, 4, res.Duplicates, "3 DB duplicates (2 fast-path + 1 fallback-chunk) + 1 intra-batch duplicate")
+	require.Len(t, res.Rejected, 1)
+	assert.Equal(t, "mr-evt-bad-fk", res.Rejected[0].EventID)
+	assert.Len(t, res.InsertedEvents, 56)
+
+	// Verify rollups reflect exact 59 total inserted rows (3 seeded + 56 new), never duplicates or rejected row.
+	rollup, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.BucketStartEQ(dayUTC), usagerollupdaily.AgentIDEQ(agentID)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(59), rollup.Events)
+	assert.Equal(t, int64(590), rollup.Input)
+	assert.Equal(t, int64(295), rollup.Output)
+}
+
+func TestUsageIngest_AntigravityUnmeasuredCallsReconciliation(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "agy-unmeasured")
+	userID := createTestUser(t, cs, "agy-unmeasured@example.com")
+	ts := time.Date(2026, 11, 25, 17, 0, 0, 0, time.UTC)
+	dayUTC := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+
+	makeHookCall := func(eventID, runID, agentID, epoch string, seq int64) *store.UsageEvent {
+		return &store.UsageEvent{
+			HubID:          "hub-agy",
+			EventID:        eventID,
+			RunID:          runID,
+			ProjectID:      projectID,
+			AgentID:        agentID,
+			BillingUserID:  &userID,
+			Harness:        "antigravity",
+			Model:          "gemini-3.1-pro",
+			ModelSource:    telemetrycontract.ModelSourceEvent,
+			UsageSource:    store.UsageSourceHooks,
+			SourceKind:     "hook.antigravity.model_end",
+			SourceIdentity: telemetrycontract.SourceIdentityComposite,
+			Status:         telemetrycontract.StatusSuccess,
+			Calls:          1,
+			TokenStatus:    telemetrycontract.TokenStatusNotReported,
+			EventTS:        ts.Add(time.Duration(seq) * time.Second),
+			ReceivedAt:     ts.Add(time.Duration(seq) * time.Second),
+			ProducerEpoch:  epoch,
+			ProducerSeq:    seq,
+		}
+	}
+
+	getProjectCounter := func() (calls, unmeasured int64) {
+		row, err := client.UsageScopeCounterDaily.Query().
+			Where(
+				usagescopecounterdaily.ScopeKindEQ(store.UsageScopeKindProject),
+				usagescopecounterdaily.ScopeIDEQ(projectID),
+				usagescopecounterdaily.DayUtcEQ(dayUTC),
+			).
+			Only(ctx)
+		require.NoError(t, err)
+		return row.Calls, row.UnmeasuredCalls
+	}
+
+	// 1. Rebuilt antigravity (signals include tokens, no drift): hook event arrives
+	//    BEFORE any sqlite_native tailer event -> calls=1, unmeasured_calls=0.
+	agRebuilt := uuid.NewString()
+	runRebuilt := "run-agy-rebuilt-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agRebuilt, runRebuilt, &userID)
+	_, err := cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		Events:  []*store.UsageEvent{makeHookCall("agy-rebuilt-1", runRebuilt, agRebuilt, "ep-1", 1)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agRebuilt,
+			RunID:               runRebuilt,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       ts,
+			ProducerSeq:         1,
+			ReceivedSeqs:        []int64{1},
+			SupportedSignals:    []string{"calls", "input", "output", "cache_read", "cache_write", "reasoning"},
+			SchemaDriftDetected: false,
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured := getProjectCounter()
+	assert.Equal(t, int64(1), calls)
+	assert.Equal(t, int64(0), unmeasured, "rebuilt antigravity hook call before tailer event must not count as unmeasured")
+
+	// 2. Harvest batch without SupportedSignals (both empty slice and nil MeterHealth)
+	//    falls back to persisted meter_health -> still unmeasured_calls=0.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		Events:  []*store.UsageEvent{makeHookCall("agy-rebuilt-harvest-1", runRebuilt, agRebuilt, "ep-1", 2)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agRebuilt,
+			RunID:         runRebuilt,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(2 * time.Second),
+			ProducerSeq:   2,
+			ReceivedSeqs:  []int64{2},
+		},
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		Events:  []*store.UsageEvent{makeHookCall("agy-rebuilt-harvest-2", runRebuilt, agRebuilt, "ep-1", 3)},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(3), calls)
+	assert.Equal(t, int64(0), unmeasured, "harvest batches without signals must use persisted meter_health")
+
+	// 3. Mid-run schema drift: drift latches on meter_health; subsequent hook call
+	//    (even if the later request has SchemaDriftDetected=false and omits signals)
+	//    must count in unmeasured_calls.
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agRebuilt,
+			RunID:               runRebuilt,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       ts.Add(4 * time.Second),
+			ProducerSeq:         3,
+			SupportedSignals:    []string{"calls"},
+			SchemaDriftDetected: true,
+		},
+	})
+	require.NoError(t, err)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		Events:  []*store.UsageEvent{makeHookCall("agy-rebuilt-post-drift", runRebuilt, agRebuilt, "ep-1", 4)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:       agRebuilt,
+			RunID:         runRebuilt,
+			ProducerEpoch: "ep-1",
+			LastReceiptAt: ts.Add(5 * time.Second),
+			ProducerSeq:   4,
+			ReceivedSeqs:  []int64{4},
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(4), calls)
+	assert.Equal(t, int64(1), unmeasured, "post-drift hook call must count as unmeasured")
+
+	// 4. Unrebuilt antigravity image (supported_signals=["calls"]): hook calls count as unmeasured.
+	agOld := uuid.NewString()
+	runOld := "run-agy-old-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agOld, runOld, &userID)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agOld,
+		Events:  []*store.UsageEvent{makeHookCall("agy-old-1", runOld, agOld, "ep-1", 1)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:          agOld,
+			RunID:            runOld,
+			ProducerEpoch:    "ep-1",
+			LastReceiptAt:    ts.Add(6 * time.Second),
+			ProducerSeq:      1,
+			ReceivedSeqs:     []int64{1},
+			SupportedSignals: []string{"calls"},
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(5), calls)
+	assert.Equal(t, int64(2), unmeasured, "unrebuilt calls-only antigravity image must count as unmeasured")
+
+	// 5. Non-hooks event with nil tokens on a healthy token-metered run still counts as unmeasured.
+	nativeNoTok := makeHookCall("agy-native-notok", runRebuilt, agRebuilt, "ep-2", 1)
+	nativeNoTok.UsageSource = store.UsageSourceNative
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agRebuilt,
+		Events:  []*store.UsageEvent{nativeNoTok},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:          agRebuilt,
+			RunID:            runRebuilt,
+			ProducerEpoch:    "ep-2",
+			LastReceiptAt:    ts.Add(7 * time.Second),
+			ProducerSeq:      1,
+			ReceivedSeqs:     []int64{1},
+			SupportedSignals: []string{"calls", "input", "output"},
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(6), calls)
+	assert.Equal(t, int64(3), unmeasured, "non-hooks event with missing tokens must still count as unmeasured")
+
+	// 6. Independent schema_drift_detected check (D12): producer declares token
+	//    signals AND schema_drift_detected=true. Both the in-request path
+	//    (resolvedMHState) and the persisted path (MeterHealth == nil) must
+	//    count the hooks calls-only event in unmeasured_calls.
+	agDriftTok := uuid.NewString()
+	runDriftTok := "run-agy-drift-tok-" + uuid.NewString()
+	seedRunForIngestTest(t, cs, projectID, agDriftTok, runDriftTok, &userID)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDriftTok,
+		Events:  []*store.UsageEvent{makeHookCall("agy-drift-tok-req", runDriftTok, agDriftTok, "ep-1", 1)},
+		MeterHealth: &store.UsageMeterHealthUpdate{
+			AgentID:             agDriftTok,
+			RunID:               runDriftTok,
+			ProducerEpoch:       "ep-1",
+			LastReceiptAt:       ts.Add(8 * time.Second),
+			ProducerSeq:         1,
+			ReceivedSeqs:        []int64{1},
+			SupportedSignals:    []string{"calls", "input", "output", "cache_read", "cache_write", "reasoning"},
+			SchemaDriftDetected: true,
+		},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(7), calls)
+	assert.Equal(t, int64(4), unmeasured, "schema_drift_detected=true with token signals (request path) must count as unmeasured")
+
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDriftTok,
+		Events:  []*store.UsageEvent{makeHookCall("agy-drift-tok-persisted", runDriftTok, agDriftTok, "ep-1", 2)},
+	})
+	require.NoError(t, err)
+	calls, unmeasured = getProjectCounter()
+	assert.Equal(t, int64(8), calls)
+	assert.Equal(t, int64(5), unmeasured, "schema_drift_detected=true with token signals (persisted meter_health path) must count as unmeasured")
 }

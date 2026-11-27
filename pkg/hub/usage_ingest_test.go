@@ -529,11 +529,16 @@ func TestUsageIngest_PoisonEventAndDefaultHubID(t *testing.T) {
 	assert.Equal(t, int64(300), rollup.Input)
 	assert.Equal(t, int64(50), rollup.Output)
 
-	// Verify meter_health: seq 2 is missing (rejected), producer's [99,100] ignored.
+	// Verify meter_health: seq 2 was Hub-rejected (not lost), so missing_ranges
+	// is empty, last_contiguous_seq advances to 3, rejected_ranges records [2,2],
+	// rejected_count is 1 (idempotent across the replay above), and producer's
+	// [99,100] missing_ranges is ignored.
 	mhs, err := s.GetMeterHealth(ctx, ag.ID, "run-poison-1")
 	require.NoError(t, err)
 	require.Len(t, mhs, 1)
-	assert.Equal(t, int64(1), mhs[0].LastContiguousSeq)
+	assert.Equal(t, int64(3), mhs[0].LastContiguousSeq)
 	assert.Equal(t, int64(3), mhs[0].MaxSeqSeen)
-	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].MissingRanges)
+	assert.Empty(t, mhs[0].MissingRanges)
+	assert.Equal(t, int64(1), mhs[0].RejectedCount)
+	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
 }
