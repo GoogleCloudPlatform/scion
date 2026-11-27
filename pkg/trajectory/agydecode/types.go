@@ -150,6 +150,10 @@ type DecodeError struct {
 // gaps exist, the most recent (highest) rowids are kept.
 const MaxPendingRowIDs = 256
 
+// DefaultMaxRowBytes is the default per-row SQLite blob size cap (32 MiB)
+// enforced before materializing row payloads into Go memory.
+const DefaultMaxRowBytes = 32 << 20
+
 // Cursor tracks the highest SQLite rowid processed per table plus a bounded
 // set of pending NULL/empty-blob rowids to re-check on subsequent polls.
 // Nil high-water pointers mean "start from the beginning" (important because
@@ -218,6 +222,12 @@ type Options struct {
 	SkipSteps bool
 	// BusyTimeoutMs overrides the SQLite busy_timeout pragma (default 2000ms).
 	BusyTimeoutMs int
+	// MaxRowBytes caps the maximum SQLite blob size (in bytes) materialized per
+	// row across gen_metadata, steps, and trajectory_metadata_blob
+	// (default DefaultMaxRowBytes). Oversize gen_metadata and steps rows are
+	// reported as StatusMalformed (advancing the cursor without entering
+	// pending); oversize trajectory_metadata_blob rows emit a non-fatal warning.
+	MaxRowBytes int
 }
 
 // Result is the structured output of DecodeFile and `sciontool internal decode-agy-db`.

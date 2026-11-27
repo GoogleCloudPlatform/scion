@@ -143,6 +143,10 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	if busyMs <= 0 {
 		busyMs = defaultBusyTimeoutMs
 	}
+	maxRowBytes := int64(opts.MaxRowBytes)
+	if maxRowBytes <= 0 {
+		maxRowBytes = DefaultMaxRowBytes
+	}
 
 	dsn, err := buildReadOnlyDSN(dbPath, busyMs)
 	if err != nil {
@@ -183,9 +187,9 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		var rowErrs []DecodeError
 		genRows, maxRowID, pending, rowErrs, err = readMetadataTable(
 			ctx, tx, SourceGenMetadata,
-			"SELECT rowid, idx, data FROM gen_metadata WHERE rowid = ?",
-			"SELECT rowid, idx, data FROM gen_metadata WHERE rowid > ? ORDER BY rowid LIMIT ?",
-			genMetadataPageRows, opts.Cursor.GenMetadataRowID, opts.Cursor.PendingGenMetadataRowIDs, false,
+			"SELECT rowid, idx, OCTET_LENGTH(data), CASE WHEN OCTET_LENGTH(data) <= ? THEN data ELSE NULL END FROM gen_metadata WHERE rowid = ?",
+			"SELECT rowid, idx, OCTET_LENGTH(data), CASE WHEN OCTET_LENGTH(data) <= ? THEN data ELSE NULL END FROM gen_metadata WHERE rowid > ? ORDER BY rowid LIMIT ?",
+			genMetadataPageRows, maxRowBytes, opts.Cursor.GenMetadataRowID, opts.Cursor.PendingGenMetadataRowIDs, false,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("read gen_metadata %s: %w", dbPath, err)
@@ -200,7 +204,7 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 	var trajTS *time.Time
 	if tables["trajectory_metadata_blob"] {
 		var tsWarnings []string
-		trajTS, tsWarnings, err = readTrajectoryTimestamp(ctx, tx)
+		trajTS, tsWarnings, err = readTrajectoryTimestamp(ctx, tx, maxRowBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read trajectory_metadata_blob %s: %w", dbPath, err)
 		}
@@ -214,9 +218,9 @@ func DecodeFile(ctx context.Context, dbPath string, opts Options) (*Result, erro
 		var rowErrs []DecodeError
 		stepRows, maxRowID, pending, rowErrs, err = readMetadataTable(
 			ctx, tx, SourceSteps,
-			"SELECT rowid, idx, metadata FROM steps WHERE rowid = ?",
-			"SELECT rowid, idx, metadata FROM steps WHERE rowid > ? ORDER BY rowid LIMIT ?",
-			stepsPageRows, opts.Cursor.StepsRowID, opts.Cursor.PendingStepsRowIDs, true,
+			"SELECT rowid, idx, OCTET_LENGTH(metadata), CASE WHEN OCTET_LENGTH(metadata) <= ? THEN metadata ELSE NULL END FROM steps WHERE rowid = ?",
+			"SELECT rowid, idx, OCTET_LENGTH(metadata), CASE WHEN OCTET_LENGTH(metadata) <= ? THEN metadata ELSE NULL END FROM steps WHERE rowid > ? ORDER BY rowid LIMIT ?",
+			stepsPageRows, maxRowBytes, opts.Cursor.StepsRowID, opts.Cursor.PendingStepsRowIDs, true,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("read steps %s: %w", dbPath, err)
@@ -420,6 +424,7 @@ func readMetadataTable(
 	byRowIDQuery string,
 	pageQuery string,
 	pageRows int,
+	maxRowBytes int64,
 	afterRowID *int64,
 	pendingRowIDs []int64,
 	step bool,
@@ -433,7 +438,19 @@ func readMetadataTable(
 		maxRowID = &v
 	}
 
-	processRow := func(rowID int64, idx sql.NullInt64, blob []byte) {
+	processRow := func(rowID int64, idx sql.NullInt64, blobLen sql.NullInt64, blob []byte) {
+		// Reject oversize rows before the NULL/empty-blob pending check because
+		// the SQL CASE expression intentionally returns NULL for oversize blobs
+		// so they are never materialized into Go memory.
+		if blobLen.Valid && blobLen.Int64 > maxRowBytes {
+			decodeErrs = append(decodeErrs, DecodeError{
+				Source: source,
+				RowID:  rowID,
+				Idx:    idx.Int64,
+				Error:  fmt.Sprintf("row blob size %d exceeds limit %d", blobLen.Int64, maxRowBytes),
+			})
+			return
+		}
 		// Track NULL/empty-blob rows in the bounded pending set rather than
 		// freezing maxRowID: permanently-NULL rows (e.g. non-LLM user steps)
 		// must not pin the cursor, while in-place NULL -> populated UPDATEs
@@ -481,19 +498,20 @@ func readMetadataTable(
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		rows, err := q.QueryContext(ctx, byRowIDQuery, pid)
+		rows, err := q.QueryContext(ctx, byRowIDQuery, maxRowBytes, pid)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
 		for rows.Next() {
 			var rowID int64
 			var idx sql.NullInt64
+			var blobLen sql.NullInt64
 			var blob []byte
-			if err := rows.Scan(&rowID, &idx, &blob); err != nil {
+			if err := rows.Scan(&rowID, &idx, &blobLen, &blob); err != nil {
 				_ = rows.Close()
 				return nil, nil, nil, nil, err
 			}
-			processRow(rowID, idx, blob)
+			processRow(rowID, idx, blobLen, blob)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -513,7 +531,7 @@ func readMetadataTable(
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, nil, err
 		}
-		rows, err := q.QueryContext(ctx, pageQuery, scanCursor, pageRows)
+		rows, err := q.QueryContext(ctx, pageQuery, maxRowBytes, scanCursor, pageRows)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -524,15 +542,16 @@ func readMetadataTable(
 			count++
 			var rowID int64
 			var idx sql.NullInt64
+			var blobLen sql.NullInt64
 			var blob []byte
-			if err := rows.Scan(&rowID, &idx, &blob); err != nil {
+			if err := rows.Scan(&rowID, &idx, &blobLen, &blob); err != nil {
 				_ = rows.Close()
 				return nil, nil, nil, nil, err
 			}
 			lastRowID = rowID
 			v := rowID
 			maxRowID = &v
-			processRow(rowID, idx, blob)
+			processRow(rowID, idx, blobLen, blob)
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -569,8 +588,12 @@ func boundPendingRowIDs(ids []int64, limit int) []int64 {
 	return out
 }
 
-func readTrajectoryTimestamp(ctx context.Context, q sqlQuerier) (*time.Time, []string, error) {
-	rows, err := q.QueryContext(ctx, "SELECT data FROM trajectory_metadata_blob")
+func readTrajectoryTimestamp(ctx context.Context, q sqlQuerier, maxRowBytes int64) (*time.Time, []string, error) {
+	rows, err := q.QueryContext(
+		ctx,
+		"SELECT OCTET_LENGTH(data), CASE WHEN OCTET_LENGTH(data) <= ? THEN data ELSE NULL END FROM trajectory_metadata_blob",
+		maxRowBytes,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -578,9 +601,14 @@ func readTrajectoryTimestamp(ctx context.Context, q sqlQuerier) (*time.Time, []s
 	var trajTS *time.Time
 	var warnings []string
 	for rows.Next() {
+		var blobLen sql.NullInt64
 		var blob []byte
-		if err := rows.Scan(&blob); err != nil {
+		if err := rows.Scan(&blobLen, &blob); err != nil {
 			return nil, nil, err
+		}
+		if blobLen.Valid && blobLen.Int64 > maxRowBytes {
+			warnings = append(warnings, fmt.Sprintf("trajectory_metadata_blob: row blob size %d exceeds limit %d", blobLen.Int64, maxRowBytes))
+			continue
 		}
 		if len(blob) == 0 {
 			continue
