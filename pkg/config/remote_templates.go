@@ -496,9 +496,25 @@ func (f *remoteFetcher) fetchInto(ctx context.Context, uri, destPath, token stri
 	return nil
 }
 
+// remoteHTTPStatusError records a non-200 HTTP response from the default
+// client download path without exposing request headers or response bodies.
+type remoteHTTPStatusError struct {
+	what   string
+	status int
+}
+
+func (e *remoteHTTPStatusError) Error() string {
+	if e.what == "archive" {
+		return fmt.Sprintf("failed to download archive: HTTP %d", e.status)
+	}
+	return fmt.Sprintf("%s download failed: HTTP %d", e.what, e.status)
+}
+
 // get downloads rawURL with the download hook, or with http.DefaultClient
 // when there is none. A non-200 answer is an error naming its status only
-// for the default client; the hook reports its own errors.
+// for the default client; the hook reports its own errors. When authorization
+// is non-empty, it is sent only to rawURL's own HTTPS host and never forwarded
+// on redirects to any other host, subdomain, or plain HTTP.
 func (f *remoteFetcher) get(ctx context.Context, rawURL, authorization, what string) (io.ReadCloser, error) {
 	if f.download != nil {
 		body, err := f.download(ctx, rawURL, authorization)
@@ -511,19 +527,36 @@ func (f *remoteFetcher) get(ctx context.Context, rawURL, authorization, what str
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	client := http.DefaultClient
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
+		c := *http.DefaultClient
+		origCheck := c.CheckRedirect
+		initialHost := req.URL.Host
+		c.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+			if origCheck != nil {
+				if err := origCheck(next, via); err != nil {
+					return err
+				}
+			} else if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			// Never forward Authorization to any other host (including
+			// subdomains or codeload.github.com) or over plain HTTP.
+			if !strings.EqualFold(next.URL.Scheme, "https") || !strings.EqualFold(next.URL.Host, initialHost) {
+				next.Header.Del("Authorization")
+			}
+			return nil
+		}
+		client = &c
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download %s: %w", what, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
-		if what == "archive" {
-			return nil, fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("%s download failed: HTTP %d", what, resp.StatusCode)
+		return nil, &remoteHTTPStatusError{what: what, status: resp.StatusCode}
 	}
 	return resp.Body, nil
 }
@@ -761,9 +794,27 @@ func matchBranchFromRefs(afterTree string, refs map[string]bool) (branch, path s
 	return bestMatch, strings.TrimPrefix(rest, "/"), true
 }
 
+// GitHubAPITarballURL returns the GitHub REST API tarball URL for a repository
+// ref (branch, tag, commit SHA, or full ref such as "refs/heads/main"):
+// https://api.github.com/repos/<owner>/<repo>/tarball/<ref>.
+// It is used for credentialed tarball downloads so private repositories can be
+// fetched with an Authorization header sent only to api.github.com.
+func GitHubAPITarballURL(owner, repo, ref string) string {
+	refParts := strings.Split(ref, "/")
+	for i, p := range refParts {
+		refParts[i] = url.PathEscape(p)
+	}
+	return "https://api.github.com/repos/" +
+		url.PathEscape(owner) + "/" +
+		url.PathEscape(repo) + "/tarball/" +
+		strings.Join(refParts, "/")
+}
+
 // fetchGitHubTarball downloads the repo tarball from GitHub and extracts the
 // desired sub-path. This uses plain HTTPS and does not require git or svn.
-// When token is non-empty it is sent as a Bearer authorization header.
+// When token is non-empty it uses the GitHub REST tarball endpoint on
+// api.github.com with a Bearer authorization header (which is not forwarded on
+// redirects to codeload); anonymous fetches use github.com archive URLs.
 func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
 	return (&remoteFetcher{}).fetchGitHubTarball(ctx, parts, destPath, token)
 }
@@ -774,28 +825,37 @@ func (f *remoteFetcher) fetchGitHubTarball(ctx context.Context, parts *GitHubURL
 		branch = "main"
 	}
 
-	authorization := ""
-	if token != "" {
-		authorization = "Bearer " + token
-	}
-	// The ref may be a branch, a tag or a commit SHA; try the archive of
-	// each in turn.
-	archive := fmt.Sprintf("https://github.com/%s/%s/archive/", parts.Owner, parts.Repo)
 	var body io.ReadCloser
 	var err error
-	for _, tarballURL := range []string{
-		archive + "refs/heads/" + branch + ".tar.gz",
-		archive + "refs/tags/" + branch + ".tar.gz",
-		archive + branch + ".tar.gz",
-	} {
-		body, err = f.get(ctx, tarballURL, authorization, "tarball")
-		if err == nil || errors.Is(err, ErrRemoteFetchLimit) || errors.Is(err, ErrRemoteDownloadTimeout) || ctx.Err() != nil {
-			break
+	if token != "" {
+		// Authenticated fetches use the GitHub REST tarball endpoint, which
+		// works for private repositories and resolves branches, tags and
+		// commit SHAs directly. Authorization is sent only to api.github.com
+		// and stripped on redirects.
+		tarballURL := GitHubAPITarballURL(parts.Owner, parts.Repo, branch)
+		body, err = f.get(ctx, tarballURL, "Bearer "+token, "tarball")
+	} else {
+		// Unauthenticated public fetches use github.com archive URLs. The
+		// ref may be a branch, a tag or a commit SHA; try each in turn.
+		archive := fmt.Sprintf("https://github.com/%s/%s/archive/", parts.Owner, parts.Repo)
+		for _, tarballURL := range []string{
+			archive + "refs/heads/" + branch + ".tar.gz",
+			archive + "refs/tags/" + branch + ".tar.gz",
+			archive + branch + ".tar.gz",
+		} {
+			body, err = f.get(ctx, tarballURL, "", "tarball")
+			if err == nil || errors.Is(err, ErrRemoteFetchLimit) || errors.Is(err, ErrRemoteDownloadTimeout) || ctx.Err() != nil {
+				break
+			}
 		}
 	}
 	if err != nil {
 		if errors.Is(err, ErrRemoteFetchLimit) {
 			return gitHubLimitHint(err)
+		}
+		var statusErr *remoteHTTPStatusError
+		if errors.As(err, &statusErr) && (statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden) {
+			return fmt.Errorf("GitHub authentication failed for %s/%s: %w", parts.Owner, parts.Repo, err)
 		}
 		if ctx.Err() == nil && !errors.Is(err, ErrRemoteDownloadTimeout) {
 			err = fmt.Errorf("GitHub branch, tag or commit %q was not found in %s/%s: %w", branch, parts.Owner, parts.Repo, err)

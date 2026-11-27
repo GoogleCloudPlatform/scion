@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -207,7 +208,7 @@ func (g *templateGitHubSource) archiveURL() string {
 // when a credential is sent. It serves the same single-top-directory gzip
 // tarball as archiveURL.
 func (g *templateGitHubSource) apiTarballURL() string {
-	return "https://api.github.com/repos/" + g.Owner + "/" + g.Repo + "/tarball/refs/heads/" + url.PathEscape(g.Branch)
+	return config.GitHubAPITarballURL(g.Owner, g.Repo, "refs/heads/"+g.Branch)
 }
 
 // errTemplateSourceTooLarge reports that a source exceeded an extraction limit.

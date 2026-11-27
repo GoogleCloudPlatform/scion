@@ -104,23 +104,24 @@ func TestRemoteFetchCredential_NonGitHubReadsNothing(t *testing.T) {
 }
 
 // stubGitHubFetch makes a GitHub folder fetch hermetic and records the
-// credential it sends. The tarball request is answered 404, so the fetch
-// falls back to the sparse-checkout seam, which records the credential it was
-// given and writes marker (a file name) with body; ls-remote is stubbed and
-// no real git runs. The returned func reports the tarball request's
-// Authorization header and the sparse-checkout credential.
-func stubGitHubFetch(t *testing.T, marker, body string) func() (tarballAuth, checkoutToken string) {
+// tarball request URL and credential it sends. The tarball request is answered
+// 404, so the fetch falls back to the sparse-checkout seam, which records the
+// credential it was given and writes marker (a file name) with body; ls-remote
+// is stubbed and no real git runs. The returned func reports the tarball
+// request's URL, its Authorization header, and the sparse-checkout credential.
+func stubGitHubFetch(t *testing.T, marker, body string) func() (tarballURL, tarballAuth, checkoutToken string) {
 	t.Helper()
 	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errors.New("ls-remote disabled in test")
 	}))
-	var tarballAuth, checkoutToken string
+	var tarballURL, tarballAuth, checkoutToken string
 	tarballSeen := false
 	oldTransport := http.DefaultClient.Transport
 	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
 	http.DefaultClient.Transport = credTestRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if strings.Contains(r.URL.Path, "/archive/") {
+		if strings.Contains(r.URL.Path, "/archive/") || strings.Contains(r.URL.Path, "/tarball/") {
 			tarballSeen = true
+			tarballURL = r.URL.String()
 			tarballAuth = r.Header.Get("Authorization")
 		}
 		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
@@ -129,16 +130,16 @@ func stubGitHubFetch(t *testing.T, marker, body string) func() (tarballAuth, che
 		checkoutToken = token
 		return os.WriteFile(filepath.Join(destPath, marker), []byte(body), 0o644)
 	}))
-	return func() (string, string) {
+	return func() (string, string, string) {
 		t.Helper()
 		require.True(t, tarballSeen, "the fetch sent no tarball request")
-		return tarballAuth, checkoutToken
+		return tarballURL, tarballAuth, checkoutToken
 	}
 }
 
 // TestResolveInstallSource_SendsGitHubCredential verifies that
 // 'harness-config install' passes the CLI credential to the fetch, both on
-// the tarball request and to the sparse-checkout fallback.
+// the REST tarball request to api.github.com and to the sparse-checkout fallback.
 func TestResolveInstallSource_SendsGitHubCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearGitHubCredentialEnv(t)
@@ -151,7 +152,8 @@ func TestResolveInstallSource_SendsGitHubCredential(t *testing.T) {
 	require.NotNil(t, cleanup)
 	defer cleanup()
 	assert.FileExists(t, filepath.Join(localPath, "config.yaml"))
-	tarballAuth, checkoutToken := sent()
+	tarballURL, tarballAuth, checkoutToken := sent()
+	assert.Equal(t, "https://api.github.com/repos/acme-corp/private.configs/tarball/main", tarballURL)
 	assert.Equal(t, "Bearer fake-owner-cred", tarballAuth)
 	assert.Equal(t, "fake-owner-cred", checkoutToken)
 }
@@ -176,7 +178,8 @@ func TestRunTemplateImport_SendsGitHubCredential(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	assert.Contains(t, stdout, "claude", "dry run should report the fetched template")
-	tarballAuth, checkoutToken := sent()
+	tarballURL, tarballAuth, checkoutToken := sent()
+	assert.Equal(t, "https://api.github.com/repos/acme-corp/private.templates/tarball/main", tarballURL)
 	assert.Equal(t, "Bearer fake-repo-cred", tarballAuth)
 	assert.Equal(t, "fake-repo-cred", checkoutToken)
 }
