@@ -573,13 +573,15 @@ func formatGroupDimCell(dim string, g hubclient.UsageGroupRow, granularity strin
 		if g.BucketStart == nil {
 			return usageUnknownCell
 		}
-		return clitime.Format(*g.BucketStart, clitime.Date)
+		// Daily rollup buckets are UTC calendar days; keep the label pinned to
+		// UTC so non-UTC display zones do not shift buckets to an adjacent day.
+		return g.BucketStart.UTC().Format("2006-01-02 MST")
 	case "hour":
 		if g.BucketStart == nil {
 			return usageUnknownCell
 		}
 		if granularity == "day" {
-			return clitime.Format(*g.BucketStart, clitime.Date)
+			return g.BucketStart.UTC().Format("2006-01-02 MST")
 		}
 		return clitime.Format(*g.BucketStart, clitime.Minute)
 	case "project":

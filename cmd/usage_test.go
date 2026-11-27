@@ -607,24 +607,38 @@ func TestUsageCLI_TimeZoneFormatting(t *testing.T) {
 	origZone := clitime.Zone()
 	t.Cleanup(func() { clitime.SetZone(origZone) })
 
-	bucket := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
-	row := hubclient.UsageGroupRow{BucketStart: &bucket}
+	dayBucket := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+	hourBucket := time.Date(2026, 11, 27, 23, 0, 0, 0, time.UTC)
+	dayRow := hubclient.UsageGroupRow{BucketStart: &dayBucket}
+	hourRow := hubclient.UsageGroupRow{BucketStart: &hourBucket}
 	win := hubclient.UsageWindow{
-		Since:       time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC),
-		Until:       bucket,
+		Since:       dayBucket,
+		Until:       hourBucket,
 		Granularity: "hour",
 	}
 
 	clitime.SetZone(time.UTC)
 	assert.Equal(t, "2026-11-27 00:00 UTC .. 2026-11-27 23:00 UTC (hour)", formatUsageWindow(win))
-	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("day", row, "day"))
-	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("hour", row, "day"))
-	assert.Equal(t, "2026-11-27 23:00 UTC", formatGroupDimCell("hour", row, "hour"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("day", dayRow, "day"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("hour", dayRow, "day"))
+	assert.Equal(t, "2026-11-27 23:00 UTC", formatGroupDimCell("hour", hourRow, "hour"))
 
+	// Western zone (America/New_York, UTC-5 in Nov): UTC-midnight day buckets
+	// must stay on the same UTC calendar day instead of shifting to 2026-11-26.
+	ny, err := time.LoadLocation("America/New_York")
+	require.NoError(t, err)
+	clitime.SetZone(ny)
+	assert.Equal(t, "2026-11-26 19:00 EST .. 2026-11-27 18:00 EST (hour)", formatUsageWindow(win))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("day", dayRow, "day"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("hour", dayRow, "day"))
+	assert.Equal(t, "2026-11-27 18:00 EST", formatGroupDimCell("hour", hourRow, "hour"))
+
+	// Eastern zone (JST, UTC+9): day buckets also remain pinned to UTC while
+	// window bounds and hourly instants convert to the display zone.
 	jst := time.FixedZone("JST", 9*3600)
 	clitime.SetZone(jst)
 	assert.Equal(t, "2026-11-27 09:00 JST .. 2026-11-28 08:00 JST (hour)", formatUsageWindow(win))
-	assert.Equal(t, "2026-11-28 JST", formatGroupDimCell("day", row, "day"))
-	assert.Equal(t, "2026-11-28 JST", formatGroupDimCell("hour", row, "day"))
-	assert.Equal(t, "2026-11-28 08:00 JST", formatGroupDimCell("hour", row, "hour"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("day", dayRow, "day"))
+	assert.Equal(t, "2026-11-27 UTC", formatGroupDimCell("hour", dayRow, "day"))
+	assert.Equal(t, "2026-11-28 08:00 JST", formatGroupDimCell("hour", hourRow, "hour"))
 }
