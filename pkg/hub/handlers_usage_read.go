@@ -920,8 +920,9 @@ type measurementStatusInput struct {
 
 // deriveMeasurementStatus computes the Track 1 measurement_status for an
 // agent's current run (Tokenomics design §3.3, §4.2 item 7, §4.5):
-//   - "legacy_client" when the current run has usage events solely from
-//     legacy_session_metrics (and no Track 1 meter_health);
+//   - "legacy_client" when the current run's usage events come solely from
+//     legacy_session_metrics (even if a meter_health row exists, unless the
+//     open meter is stale — stale still wins, D13a);
 //   - source: none -> "unmeasured" unconditionally;
 //   - running & window includes now: open meter past 3 heartbeats (180s), OR
 //     known live-metered harness with no receipt/events past 60s startup grace
@@ -945,7 +946,24 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		}
 	}
 
-	if in.HasRunUsageEvents && in.HasLegacyUsageOnly && latest == nil {
+	windowIncludesNow := true
+	if in.WindowIncludesNow != nil {
+		windowIncludesNow = *in.WindowIncludesNow
+	}
+	isRunning := windowIncludesNow && (in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning))
+
+	staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
+	isOpenMeterStale := latest != nil &&
+		isRunning &&
+		latest.FinalState == store.MeterHealthFinalStateOpen &&
+		in.DBNow.Sub(latest.LastReceiptAt) > staleAfter
+
+	// D13a: legacy-only runs read legacy_client even when a meter_health row
+	// exists (and regardless of current usage.yaml), unless the meter is stale.
+	if in.HasRunUsageEvents && in.HasLegacyUsageOnly {
+		if isOpenMeterStale {
+			return MeasurementStatusStale
+		}
 		return MeasurementStatusLegacyClient
 	}
 
@@ -954,20 +972,11 @@ func deriveMeasurementStatus(in measurementStatusInput) string {
 		return MeasurementStatusUnmeasured
 	}
 
-	windowIncludesNow := true
-	if in.WindowIncludesNow != nil {
-		windowIncludesNow = *in.WindowIncludesNow
+	if isOpenMeterStale {
+		return MeasurementStatusStale
 	}
-	isRunning := windowIncludesNow && (in.AgentPhase == "" || in.AgentPhase == string(state.PhaseRunning))
-
-	if latest != nil {
-		staleAfter := staleHeartbeatMultiplier * defaultHeartbeatInterval
-		if isRunning &&
-			latest.FinalState == store.MeterHealthFinalStateOpen &&
-			in.DBNow.Sub(latest.LastReceiptAt) > staleAfter {
-			return MeasurementStatusStale
-		}
-	} else if isRunning &&
+	if latest == nil &&
+		isRunning &&
 		capKind != usageCapUnknown &&
 		!in.HasRunUsageEvents &&
 		!in.RunStartedAt.IsZero() &&

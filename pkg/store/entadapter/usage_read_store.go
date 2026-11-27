@@ -309,15 +309,24 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 
 	sumCols := buildRollupSumSelectSQL(dialectName)
 
-	// 1. Overall window totals (exact even when groups are truncated; saturated on int64 overflow).
-	totalsQuery := usageRebindSQL(dialectName, "SELECT "+sumCols+" FROM "+tableName+whereSQL)
+	// 1. Overall window totals (exact even when groups are truncated; saturated on int64 overflow)
+	// plus source-mix flags so zero-bucket aggregate fallbacks never misreport legacy-only
+	// historical rollups as measured.
+	totalsQuery := usageRebindSQL(dialectName,
+		"SELECT COALESCE(MAX(CASE WHEN events > 0 AND usage_source = ? THEN 1 ELSE 0 END), 0), "+
+			"COALESCE(MAX(CASE WHEN events > 0 AND usage_source <> ? THEN 1 ELSE 0 END), 0), "+
+			sumCols+" FROM "+tableName+whereSQL)
+	totalsArgs := make([]any, 0, 2+len(whereArgs))
+	totalsArgs = append(totalsArgs, store.UsageSourceLegacySessionMetrics, store.UsageSourceLegacySessionMetrics)
+	totalsArgs = append(totalsArgs, whereArgs...)
 	totalsRows := &entsql.Rows{}
-	if err := drv.Query(ctx, totalsQuery, whereArgs, totalsRows); err != nil {
+	if err := drv.Query(ctx, totalsQuery, totalsArgs, totalsRows); err != nil {
 		return nil, mapError(err)
 	}
 	var totals store.UsageRollupTotals
+	var hasLegacyRollups, hasNonLegacyRollups int
 	if totalsRows.Next() {
-		if err := scanUsageRollupTotalsRow(dialectName, totalsRows, nil, &totals); err != nil {
+		if err := scanUsageRollupTotalsRow(dialectName, totalsRows, []any{&hasLegacyRollups, &hasNonLegacyRollups}, &totals); err != nil {
 			_ = totalsRows.Close()
 			return nil, mapError(err)
 		}
@@ -329,7 +338,9 @@ func (s *UsageLedgerStore) QueryUsageRollups(ctx context.Context, q store.UsageR
 	_ = totalsRows.Close()
 
 	res := &store.UsageRollupQueryResult{
-		Totals: totals,
+		Totals:              totals,
+		HasLegacyRollups:    hasLegacyRollups != 0,
+		HasNonLegacyRollups: hasNonLegacyRollups != 0,
 	}
 	if len(q.GroupBy) == 0 {
 		return res, nil
@@ -931,17 +942,17 @@ agent_flags AS (
 		END AS has_usage_data,
 		CASE
 			WHEN am.run_id <> '' THEN
-				CASE WHEN EXISTS (
-					SELECT 1 FROM usage_events ue
-					WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id AND ue.usage_source = ?
-				) AND NOT EXISTS (
+				CASE WHEN NOT EXISTS (
 					SELECT 1 FROM usage_events ue
 					WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id AND ue.usage_source <> ?
+				) AND EXISTS (
+					SELECT 1 FROM usage_events ue
+					WHERE ue.agent_id = am.agent_id_text AND ue.run_id = am.run_id AND ue.usage_source = ?
 				) THEN 1 ELSE 0 END
-			WHEN EXISTS (
-				SELECT 1 FROM usage_rollups_daily rd WHERE %s AND rd.events > 0 AND rd.usage_source = ?
-			) AND NOT EXISTS (
+			WHEN NOT EXISTS (
 				SELECT 1 FROM usage_rollups_daily rd WHERE %s AND rd.events > 0 AND rd.usage_source <> ?
+			) AND EXISTS (
+				SELECT 1 FROM usage_rollups_daily rd WHERE %s AND rd.events > 0 AND rd.usage_source = ?
 			) THEN 1
 			ELSE 0
 		END AS has_legacy_only,

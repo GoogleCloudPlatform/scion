@@ -716,7 +716,15 @@ func buildScopedUsageResponse(
 	}
 
 	windowIncludesNow := usageWindowIncludesNow(win.Until, dbNow)
-	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(cov, t.Events, dbNow, windowIncludesNow, resolveCap)
+	status, unmeasuredAgents, staleAgents := deriveScopeCoverageSummary(
+		cov,
+		t.Events,
+		rollupRes.HasLegacyRollups,
+		rollupRes.HasNonLegacyRollups,
+		dbNow,
+		windowIncludesNow,
+		resolveCap,
+	)
 
 	return UsageSummaryResponse{
 		Scope:             scope,
@@ -748,6 +756,8 @@ func buildScopedUsageResponse(
 func deriveScopeCoverageSummary(
 	cov *store.UsageScopeCoverage,
 	totalEvents int64,
+	hasLegacyRollups bool,
+	hasNonLegacyRollups bool,
 	dbNow time.Time,
 	windowIncludesNow bool,
 	resolveCap usageCapabilityLookup,
@@ -834,7 +844,14 @@ func deriveScopeCoverageSummary(
 	case legacyClientAgents > 0:
 		status = MeasurementStatusLegacyClient
 	case totalClassified == 0 && totalEvents > 0:
-		status = MeasurementStatusMeasured
+		switch {
+		case hasLegacyRollups && hasNonLegacyRollups:
+			status = MeasurementStatusPartial
+		case hasLegacyRollups:
+			status = MeasurementStatusLegacyClient
+		default:
+			status = MeasurementStatusMeasured
+		}
 	default:
 		status = MeasurementStatusUnmeasured
 	}

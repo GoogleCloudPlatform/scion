@@ -497,9 +497,11 @@ type UsageRollupQuery struct {
 // UsageRollupQueryResult holds overall totals and optional bounded grouped rows
 // returned by QueryUsageRollups.
 type UsageRollupQueryResult struct {
-	Totals    UsageRollupTotals
-	Groups    []*UsageRollupGroup
-	Truncated bool
+	Totals              UsageRollupTotals
+	Groups              []*UsageRollupGroup
+	Truncated           bool
+	HasLegacyRollups    bool
+	HasNonLegacyRollups bool
 }
 
 // UsageCoverageFilter scopes a single-query aggregate meter-health and

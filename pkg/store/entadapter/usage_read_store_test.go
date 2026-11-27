@@ -1783,4 +1783,148 @@ func TestGetUsageScopeCoverage_CapabilitiesGraceAndDrift(t *testing.T) {
 	require.Len(t, covMixed.Buckets, 1)
 	assert.True(t, covMixed.Buckets[0].HasUsageData)
 	assert.False(t, covMixed.Buckets[0].HasLegacyOnly, "mixed Track 1 + legacy run must set HasLegacyOnly=false")
+
+	// 7. O1: run_id-empty agent uses the usage_rollups_daily arm for HasLegacyOnly.
+	agEmptyRun := seedAgent(projGlobal, "ag-empty-run-legacy", "", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "legacy-agent:" + agEmptyRun.ID,
+		ProjectID:     projGlobal,
+		AgentID:       agEmptyRun.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-15 * time.Minute),
+	})
+	require.NoError(t, err)
+	evEmptyRunLegacy := makeStoreUsageEvent("hub-cov", "ev-empty-run-leg-1", "legacy-agent:"+agEmptyRun.ID, projGlobal, agEmptyRun.ID, &user1, 1, now.Add(-10*time.Minute), 40, 20, 0, 0)
+	evEmptyRunLegacy.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agEmptyRun.ID,
+		Events:  []*store.UsageEvent{evEmptyRunLegacy},
+	})
+	require.NoError(t, err)
+
+	covEmptyRunLegacy, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agEmptyRun.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covEmptyRunLegacy.Buckets, 1)
+	assert.True(t, covEmptyRunLegacy.Buckets[0].HasUsageData)
+	assert.True(t, covEmptyRunLegacy.Buckets[0].HasLegacyOnly, "run_id-empty agent with only legacy rollups must set HasLegacyOnly=true")
+
+	evEmptyRunTrack1 := makeStoreUsageEvent("hub-cov", "ev-empty-run-t1-1", "legacy-agent:"+agEmptyRun.ID, projGlobal, agEmptyRun.ID, &user1, 2, now.Add(-9*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agEmptyRun.ID,
+		Events:  []*store.UsageEvent{evEmptyRunTrack1},
+	})
+	require.NoError(t, err)
+
+	covEmptyRunMixed, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projGlobal,
+		AgentID:      agEmptyRun.ID,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	require.Len(t, covEmptyRunMixed.Buckets, 1)
+	assert.True(t, covEmptyRunMixed.Buckets[0].HasUsageData)
+	assert.False(t, covEmptyRunMixed.Buckets[0].HasLegacyOnly, "run_id-empty agent with non-legacy rollup added must set HasLegacyOnly=false")
+
+	// 8. R1: deleted-agent scope has zero coverage buckets while QueryUsageRollups
+	// exposes HasLegacyRollups / HasNonLegacyRollups accurately across legacy-only,
+	// mixed, and Track-1-only scopes.
+	projDeletedLegacy := createTestProject(t, cs, "cov-deleted-legacy")
+	agDelLeg := seedAgent(projDeletedLegacy, "ag-del-leg", "run-del-leg-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-del-leg-1",
+		ProjectID:     projDeletedLegacy,
+		AgentID:       agDelLeg.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evDelLeg := makeStoreUsageEvent("hub-cov", "ev-del-leg-1", "run-del-leg-1", projDeletedLegacy, agDelLeg.ID, &user1, 1, now.Add(-5*time.Minute), 100, 50, 0, 0)
+	evDelLeg.UsageSource = store.UsageSourceLegacySessionMetrics
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDelLeg.ID,
+		Events:  []*store.UsageEvent{evDelLeg},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cs.DeleteAgent(ctx, agDelLeg.ID))
+
+	covDelLeg, err := cs.GetUsageScopeCoverage(ctx, store.UsageCoverageFilter{
+		ProjectID:    projDeletedLegacy,
+		Since:        now.Add(-24 * time.Hour),
+		Until:        now,
+		StaleAfter:   3 * time.Minute,
+		StartupGrace: 60 * time.Second,
+		DBNow:        now,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, covDelLeg.Buckets, "deleted agent must yield zero coverage buckets")
+
+	rollupDelLeg, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projDeletedLegacy,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), rollupDelLeg.Totals.Events)
+	assert.True(t, rollupDelLeg.HasLegacyRollups)
+	assert.False(t, rollupDelLeg.HasNonLegacyRollups)
+
+	// Adding a Track 1 event in the same deleted-agent project makes it mixed.
+	evDelTrack1 := makeStoreUsageEvent("hub-cov", "ev-del-t1-1", "run-del-leg-1", projDeletedLegacy, agDelLeg.ID, &user1, 2, now.Add(-4*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agDelLeg.ID,
+		Events:  []*store.UsageEvent{evDelTrack1},
+	})
+	require.NoError(t, err)
+	rollupDelMixed, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projDeletedLegacy,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.True(t, rollupDelMixed.HasLegacyRollups)
+	assert.True(t, rollupDelMixed.HasNonLegacyRollups)
+
+	// Track-1-only project sets HasLegacyRollups=false, HasNonLegacyRollups=true.
+	projTrack1Only := createTestProject(t, cs, "cov-track1-only")
+	agT1 := seedAgent(projTrack1Only, "ag-t1-only", "run-t1-only-1", state.PhaseStopped)
+	_, err = cs.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         "run-t1-only-1",
+		ProjectID:     projTrack1Only,
+		AgentID:       agT1.ID,
+		Harness:       "claude",
+		HarnessConfig: "claude",
+		CreatedAt:     now.Add(-10 * time.Minute),
+	})
+	require.NoError(t, err)
+	evT1Only := makeStoreUsageEvent("hub-cov", "ev-t1-only-1", "run-t1-only-1", projTrack1Only, agT1.ID, &user1, 1, now.Add(-5*time.Minute), 10, 5, 0, 0)
+	_, err = cs.IngestUsageBatch(ctx, &store.UsageIngestBatchInput{
+		AgentID: agT1.ID,
+		Events:  []*store.UsageEvent{evT1Only},
+	})
+	require.NoError(t, err)
+	rollupT1Only, err := cs.QueryUsageRollups(ctx, store.UsageRollupQuery{
+		Granularity: store.UsageGranularityDay,
+		ProjectID:   projTrack1Only,
+		Since:       now.Add(-24 * time.Hour),
+		Until:       now,
+	})
+	require.NoError(t, err)
+	assert.False(t, rollupT1Only.HasLegacyRollups)
+	assert.True(t, rollupT1Only.HasNonLegacyRollups)
 }

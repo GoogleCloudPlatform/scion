@@ -542,10 +542,20 @@ func TestDeriveMeasurementStatus_LegacyClient(t *testing.T) {
 		DBNow:              now,
 	}))
 
-	// If Track 1 meter_health exists (even fresh), status is measured, not legacy_client.
-	assert.Equal(t, MeasurementStatusMeasured, deriveMeasurementStatus(measurementStatusInput{
+	// D13a: if a run's usage events are legacy-only, it reads legacy_client even
+	// when a fresh meter_health row exists, unless the open meter is stale.
+	assert.Equal(t, MeasurementStatusLegacyClient, deriveMeasurementStatus(measurementStatusInput{
 		MeterHealth: []*store.MeterHealth{{
 			LastReceiptAt: now.Add(-10 * time.Second),
+			FinalState:    store.MeterHealthFinalStateOpen,
+		}},
+		HasRunUsageEvents:  true,
+		HasLegacyUsageOnly: true,
+		DBNow:              now,
+	}))
+	assert.Equal(t, MeasurementStatusStale, deriveMeasurementStatus(measurementStatusInput{
+		MeterHealth: []*store.MeterHealth{{
+			LastReceiptAt: now.Add(-5 * time.Minute),
 			FinalState:    store.MeterHealthFinalStateOpen,
 		}},
 		HasRunUsageEvents:  true,
