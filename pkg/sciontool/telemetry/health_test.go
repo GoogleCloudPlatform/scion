@@ -297,6 +297,9 @@ func TestDeriveUsageCollection(t *testing.T) {
 		{"runtime native before settle", UsageSourceSelection{}, "codex", true, true, "enabled", "", "calls,input,output,cache_read,cache_write,reasoning", "static_table", "request", false},
 		{"hooks antigravity", UsageSourceSelection{Settled: true, Source: "hooks"}, "antigravity", false, false, "enabled", "", "calls", "static_table", "invocation", false},
 		{"hooks other", UsageSourceSelection{Settled: true, Source: "hooks"}, "opencode", false, false, "enabled", "", "", "unknown", "invocation", true},
+		{"sqlite_native antigravity active", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "antigravity", true, false, "enabled", "", "calls,input,output,cache_read,cache_write,reasoning", "static_table", "request", false},
+		{"sqlite_native non-antigravity harness", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "claude", false, true, "disabled", "no_harness_rule", "", "", "", false},
+		{"sqlite_native antigravity inactive", UsageSourceSelection{Settled: true, Source: "sqlite_native"}, "antigravity", false, false, "disabled", "deriver_failed", "", "", "", false},
 	}
 	for _, c := range cases {
 		got := deriveUsageCollection(c.sel, c.harness, c.active, c.hasRul)
@@ -1849,5 +1852,68 @@ func TestDisabledAnalyticsLossFlagTransition(t *testing.T) {
 	}
 	if earlier.AnalyticsDelivered == nil || *earlier.AnalyticsDelivered == 0 || earlier.PipelineRunID == after.PipelineRunID {
 		t.Fatalf("earlier run's delivered usage must stay its own independent row")
+	}
+}
+
+// When an Antigravity SQLite tailer latches schema drift, telemetry.health
+// degrades usage_capabilities to ["calls"] (matching supportedUsageSignals on
+// heartbeats) both while the tailer is running and in the final snapshot after
+// Stop() clears agyTailer and retains the latched drift flag.
+func TestHealthSnapshotCapabilitiesDegradeOnDrift(t *testing.T) {
+	setAnalyticsEnv(t, "antigravity")
+	setTestVersion(t)
+
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.now = time.Now
+	p.health.runID = "drift-health-run"
+	p.health.analyticsHandles = analyticsHandles{disabledReason: telemetrycontract.AnalyticsDisabledNoGCPExporter}
+	p.health.selection = UsageSourceSelection{
+		Settled: true,
+		Source:  telemetrycontract.UsageSourceSQLiteNative,
+		Origin:  telemetrycontract.UsageSourceOriginOverlay,
+	}
+
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		ConversationsDir: t.TempDir(),
+		StatePath:        filepath.Join(t.TempDir(), "state.json"),
+	})
+	p.agyTailer.Store(tailer)
+
+	snapshotCaps := func(trigger string) []string {
+		t.Helper()
+		in := p.healthSnapshotInputs(trigger)
+		ev, err := buildHealthEvent(in)
+		if err != nil {
+			t.Fatalf("buildHealthEvent: %v", err)
+		}
+		ev.HubID = "hub-1"
+		if _, err := telemetrycontract.Marshal(ev); err != nil {
+			t.Fatalf("telemetrycontract.Marshal: %v", err)
+		}
+		return ev.UsageCapabilities
+	}
+
+	// Before drift: full sqlite_native/antigravity capabilities.
+	before := snapshotCaps(telemetrycontract.HealthTriggerStart)
+	wantFull := "calls,input,output,cache_read,cache_write,reasoning"
+	if got := strings.Join(before, ","); got != wantFull {
+		t.Fatalf("capabilities before drift = %q, want %q", got, wantFull)
+	}
+
+	// While tailer is running with schema drift latched.
+	tailer.driftLatched.Store(true)
+	during := snapshotCaps(telemetrycontract.HealthTriggerPeriodic)
+	if got := strings.Join(during, ","); got != telemetrycontract.UsageCapabilityCalls {
+		t.Fatalf("capabilities during drift = %v, want [%s]", during, telemetrycontract.UsageCapabilityCalls)
+	}
+
+	// Final snapshot after Stop(): tailer is cleared, agyActiveAtStop and
+	// p.driftLatched preserve the state.
+	p.agyTailer.Store(nil)
+	p.agyActiveAtStop.Store(true)
+	p.driftLatched.Store(true)
+	final := snapshotCaps(telemetrycontract.HealthTriggerFinal)
+	if got := strings.Join(final, ","); got != telemetrycontract.UsageCapabilityCalls {
+		t.Fatalf("capabilities on final snapshot after drift = %v, want [%s]", final, telemetrycontract.UsageCapabilityCalls)
 	}
 }

@@ -129,6 +129,15 @@ func deriveUsageCollection(sel UsageSourceSelection, harness string, nativeActiv
 		if nativeActive {
 			return enabledUsage(telemetrycontract.UsageSourceSQLiteNative, harness)
 		}
+		if harness != "antigravity" {
+			u := disabled(telemetrycontract.UsageDisabledNoHarnessRule)
+			u.Source = telemetrycontract.UsageSourceSQLiteNative
+			return u
+		}
+		// Keep the 5-value usage_disabled_reason contract: when sqlite_native
+		// is inactive on antigravity (including when analytics is disabled),
+		// report deriver_failed; analytics_state and analytics_disabled_reason
+		// on the same health event give the exact analytics reason.
 		u := disabled(telemetrycontract.UsageDisabledDeriverFailed)
 		u.Source = telemetrycontract.UsageSourceSQLiteNative
 		return u
@@ -818,6 +827,11 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 		sourceActive = p.agyTailer.Load() != nil || p.agyActiveAtStop.Load()
 	}
 	in.Usage = deriveUsageCollection(sel, in.Harness, sourceActive, len(rulesForHarness(in.Harness)) > 0)
+	if in.Usage.State == telemetrycontract.UsageCollectionEnabled &&
+		in.Usage.Source == telemetrycontract.UsageSourceSQLiteNative &&
+		p.schemaDriftDetected() {
+		in.Usage.Capabilities = []string{telemetrycontract.UsageCapabilityCalls}
+	}
 	in.SourceOrigin = sel.Origin
 	if !sel.Settled && nativeActive {
 		in.SourceOrigin = telemetrycontract.UsageSourceOriginRuntimeEnv

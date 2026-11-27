@@ -6,10 +6,11 @@ package telemetry
 
 // analytics_drainer.go runs in the long-lived sciontool pipeline and moves
 // agent.usage events from the outbox to Cloud Logging (WP2 design section
-// 2): it pins the hub ID from the hub's public /healthz, finalizes staging
-// lines into ready lines, sends them in order with bounded backoff, and
-// expires the occurrence index. It runs only when the GCP exporter is
-// active; otherwise analytics is disabled (AnalyticsDisabledNoGCPExporter).
+// 2) and/or Scion Hub usage ingest: it pins the hub ID from the hub's public
+// /healthz, finalizes staging lines into ready lines, sends them in order with
+// bounded backoff, and expires the occurrence index. It runs when the GCP
+// exporter and/or Hub usage ingest is active; otherwise analytics is disabled
+// (AnalyticsDisabledNoGCPExporter).
 
 import (
 	"context"
@@ -28,9 +29,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 )
 
-// AnalyticsDisabledNoGCPExporter is the analytics_disabled_reason when no
-// GCP exporter is configured (generic OTLP or cloud disabled). Analytics
-// events are then neither written nor sent.
+// AnalyticsDisabledNoGCPExporter is the analytics_disabled_reason when neither
+// a GCP exporter nor Hub usage ingest is active (e.g., generic OTLP or cloud
+// disabled without Hub usage ingest). Analytics events are then neither
+// written nor sent.
 const AnalyticsDisabledNoGCPExporter = "no_gcp_exporter"
 
 const (

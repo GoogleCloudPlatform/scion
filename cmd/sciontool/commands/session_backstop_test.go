@@ -15,6 +15,8 @@
 package commands
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +32,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
+	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // backstopEnv sets up an agent home, a fake Hub and the environment that
@@ -293,6 +298,219 @@ func TestSessionUsageRecorder_NativeUsageReachesSessionReport(t *testing.T) {
 	}
 	if sessionUsageRecorder("") != nil {
 		t.Error("recorder without an agent home should be nil")
+	}
+}
+
+// Under SCION_USAGE_SOURCE=sqlite_native, any harness that emits SessionEnd
+// holds its session-end report while keeping hook-counted APICallCount from
+// model-end hooks (defensive coverage; Antigravity itself has no SessionEnd
+// hook and uses the shutdown flush + backstop path tested below).
+func TestSessionUsageRecorder_SQLiteNativeHoldsReportAndKeepsHookCalls(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+	hookDialect = "gemini"
+	t.Setenv("SCION_USAGE_SOURCE", "sqlite_native")
+	record := sessionUsageRecorder(home)
+
+	runHooks(t,
+		map[string]interface{}{"hook_event_name": "SessionStart", "session_id": "sess-agy-1"},
+		map[string]interface{}{"hook_event_name": "AfterModel", "session_id": "sess-agy-1"},
+		map[string]interface{}{"hook_event_name": "AfterModel", "session_id": "sess-agy-1"},
+	)
+	// Tailer emits tokens with Calls=0.
+	record(telemetry.SessionUsage{TokensInput: 100, TokensOutput: 20, TokensCached: 300, TokensReasoning: 5})
+	runHooks(t, map[string]interface{}{"hook_event_name": "SessionEnd", "session_id": "sess-agy-1"})
+
+	// With sqlite_native, SessionEnd holds the report so debounced/final
+	// SQLite tailer tokens are added first.
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports at session-end, want the report held", n)
+	}
+	// Verify the held summary preserved hook-counted APICallCount from
+	// model-end hooks (i.e. HookUsageFeedsSessionMetrics stayed true).
+	rawState, err := os.ReadFile(handlers.NewFileSessionState(home).Path)
+	if err != nil {
+		t.Fatalf("read held session state: %v", err)
+	}
+	var heldState struct {
+		Pending []struct {
+			Summary telemetry.SessionSummary `json:"summary"`
+		} `json:"pending"`
+	}
+	if err := json.Unmarshal(rawState, &heldState); err != nil {
+		t.Fatalf("unmarshal held session state: %v", err)
+	}
+	if len(heldState.Pending) != 1 || heldState.Pending[0].Summary.APICallCount != 2 {
+		t.Fatalf("held pending = %+v, want 1 summary with APICallCount=2", heldState.Pending)
+	}
+	record(telemetry.SessionUsage{TokensInput: 40, TokensOutput: 10})
+
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports, want 1: %+v", len(reports), reports)
+	}
+	p := reports[0]
+	if p.Session.ID != "sess-agy-1" {
+		t.Errorf("session ID = %q, want sess-agy-1", p.Session.ID)
+	}
+	if p.Tokens.Input != 140 || p.Tokens.Output != 30 || p.Tokens.Cached != 300 || p.Tokens.Reasoning != 5 {
+		t.Errorf("tokens = %+v, want input 140, output 30, cached 300, reasoning 5", p.Tokens)
+	}
+}
+
+// TestAntigravitySQLiteNative_ShutdownFlushReachesBackstopReport exercises the
+// real Antigravity production path: harnesses/antigravity/dialect.yaml maps
+// PreInvocation/PostInvocation/Stop and has no SessionEnd event, so the
+// session stays open until shutdown. Flushing the SQLite tailer before
+// reportOpenSessionAtShutdown delivers final SQLite tokens to the session
+// state before the backstop tombstones and reports it, while preserving
+// hook-counted APICallCount and model name from PostInvocation.
+func TestAntigravitySQLiteNative_ShutdownFlushReachesBackstopReport(t *testing.T) {
+	home, fake, newClient := backstopEnv(t)
+
+	// Install the real Antigravity dialect.yaml into $HOME/.scion/harness/.
+	dialectSrc := filepath.Join("..", "..", "..", "harnesses", "antigravity", "dialect.yaml")
+	dialectBytes, err := os.ReadFile(dialectSrc)
+	if err != nil {
+		t.Fatalf("read %s: %v", dialectSrc, err)
+	}
+	dialectDst := filepath.Join(home, ".scion", "harness", "dialect.yaml")
+	if err := os.MkdirAll(filepath.Dir(dialectDst), 0o700); err != nil {
+		t.Fatalf("mkdir harness dir: %v", err)
+	}
+	if err := os.WriteFile(dialectDst, dialectBytes, 0o600); err != nil {
+		t.Fatalf("write dialect.yaml: %v", err)
+	}
+
+	hookDialect = "antigravity"
+	t.Setenv("SCION_HARNESS", "antigravity")
+	t.Setenv("SCION_USAGE_SOURCE", "sqlite_native")
+	t.Setenv("SCION_PROJECT_ID", "proj-agy-1")
+	t.Setenv(telemetry.EnvUsageHubIngest, "1")
+
+	ctx := context.Background()
+	pipeline := telemetry.NewWithConfig(&telemetry.Config{
+		Enabled:  true,
+		GRPCPort: 0, // ephemeral loopback port
+	})
+	var detectCalls atomic.Int32
+	// Inject a verified agy version directly so the test never depends on a
+	// system-installed agy binary in rootexec's trusted directories (e.g. CI).
+	pipeline.SetAgyVersionDetector(func(context.Context) (string, error) {
+		detectCalls.Add(1)
+		return "1.5.18", nil
+	})
+	pipeline.SetAnalyticsOutbox(home, -1, -1)
+	pipeline.SetHubUsageSink(telemetry.HubUsageSinkConfig{
+		Post: func(context.Context, telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+			return &telemetrycontract.UsageIngestResponse{}, nil
+		},
+		RunID:          "run-agy-1",
+		HubID:          "hub-1",
+		MaxBatchEvents: 100,
+		MaxBatchBytes:  1 << 20,
+		DrainInterval:  time.Hour,
+	})
+	if err := pipeline.Start(ctx); err != nil {
+		t.Fatalf("pipeline.Start: %v", err)
+	}
+	defer func() { _ = pipeline.Stop(ctx) }()
+	wireSessionUsage(pipeline, home)
+
+	// Open the session via real Antigravity hooks (no SessionEnd exists in
+	// harnesses/antigravity/dialect.yaml).
+	runHooks(t,
+		map[string]interface{}{"hook_event_name": "PreInvocation", "conversationId": "sess-agy-shutdown-1", "modelName": "gemini-3.1-pro-low"},
+		map[string]interface{}{"hook_event_name": "PostInvocation", "conversationId": "sess-agy-shutdown-1", "modelName": "gemini-3.1-pro-low"},
+		map[string]interface{}{"hook_event_name": "PostInvocation", "conversationId": "sess-agy-shutdown-1", "modelName": "gemini-3.1-pro-low"},
+		map[string]interface{}{"hook_event_name": "Stop", "conversationId": "sess-agy-shutdown-1", "terminationReason": "NO_TOOL_CALL"},
+	)
+	if n := len(fake.Reports()); n != 0 {
+		t.Fatalf("got %d reports before shutdown, want 0 (Antigravity has no SessionEnd)", n)
+	}
+
+	// Write a final gen_metadata row to Antigravity's SQLite DB right before
+	// shutdown (simulating the last turn flushed as agy exits, before the
+	// periodic 15s poll fires).
+	convDir := telemetry.AgyConversationsDir(home)
+	if err := os.MkdirAll(convDir, 0o700); err != nil {
+		t.Fatalf("mkdir conversations dir: %v", err)
+	}
+	dbPath := filepath.Join(convDir, "sess-agy-shutdown-1.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE gen_metadata (idx INTEGER, data BLOB, size INTEGER); CREATE TABLE steps (idx INTEGER, metadata BLOB);`); err != nil {
+		_ = db.Close()
+		t.Fatalf("create tables: %v", err)
+	}
+	var usage []byte
+	usage = protowire.AppendTag(usage, 1, protowire.VarintType)
+	usage = protowire.AppendVarint(usage, 1466)
+	usage = protowire.AppendTag(usage, 2, protowire.VarintType)
+	usage = protowire.AppendVarint(usage, 120)
+	usage = protowire.AppendTag(usage, 3, protowire.VarintType)
+	usage = protowire.AppendVarint(usage, 35)
+	usage = protowire.AppendTag(usage, 5, protowire.VarintType)
+	usage = protowire.AppendVarint(usage, 200)
+	usage = protowire.AppendTag(usage, 9, protowire.VarintType)
+	usage = protowire.AppendVarint(usage, 7)
+	usage = protowire.AppendTag(usage, 11, protowire.BytesType)
+	usage = protowire.AppendString(usage, "agy-shutdown-row-1")
+	var genMeta []byte
+	genMeta = protowire.AppendTag(genMeta, 3, protowire.VarintType)
+	genMeta = protowire.AppendVarint(genMeta, 1466)
+	genMeta = protowire.AppendTag(genMeta, 4, protowire.BytesType)
+	genMeta = protowire.AppendBytes(genMeta, usage)
+	genMeta = protowire.AppendTag(genMeta, 5, protowire.BytesType)
+	genMeta = protowire.AppendString(genMeta, "gemini-3.1-pro-low")
+	var wrapper []byte
+	wrapper = protowire.AppendTag(wrapper, 1, protowire.BytesType)
+	wrapper = protowire.AppendBytes(wrapper, genMeta)
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, wrapper, len(wrapper)); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert gen_metadata: %v", err)
+	}
+	_ = db.Close()
+
+	// RunInit's shutdown sequence: flush SQLite tailer BEFORE the backstop
+	// finalizes and tombstones the open session.
+	flushSQLiteUsageBeforeBackstop(pipeline)
+	if detectCalls.Load() == 0 {
+		t.Fatal("expected injected agy version detector to be called during flush")
+	}
+
+	// Confirm the state file holds both hook-counted APICallCount=2 and the
+	// flushed SQLite tokens before the backstop sends and removes it.
+	rawState, err := os.ReadFile(handlers.NewFileSessionState(home).Path)
+	if err != nil {
+		t.Fatalf("read session state after flush: %v", err)
+	}
+	var openState struct {
+		Aggregator struct {
+			APICallCount int `json:"api_call_count"`
+		} `json:"aggregator"`
+	}
+	if err := json.Unmarshal(rawState, &openState); err != nil {
+		t.Fatalf("unmarshal session state: %v", err)
+	}
+	if openState.Aggregator.APICallCount != 2 {
+		t.Errorf("open session APICallCount = %d, want 2 (from PostInvocation hooks)", openState.Aggregator.APICallCount)
+	}
+
+	reportOpenSessionAtShutdown(home, exitOutcome{}, newClient)
+
+	reports := fake.Reports()
+	if len(reports) != 1 {
+		t.Fatalf("got %d reports after shutdown backstop, want 1: %+v", len(reports), reports)
+	}
+	p := reports[0]
+	if p.Session.ID != "sess-agy-shutdown-1" || p.Session.TurnCount != 1 {
+		t.Errorf("session = %+v, want ID sess-agy-shutdown-1 and TurnCount 1", p.Session)
+	}
+	if p.Tokens.Input != 120 || p.Tokens.Output != 35 || p.Tokens.Cached != 200 || p.Tokens.Reasoning != 7 {
+		t.Errorf("tokens = %+v, want input 120, output 35, cached 200, reasoning 7", p.Tokens)
 	}
 }
 

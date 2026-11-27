@@ -46,9 +46,25 @@ type SessionUsageSink func(SessionUsage)
 // metrics aggregator. With SCION_USAGE_SOURCE=native the native UsageDeriver
 // owns usage, and the init daemon adds it to the session through its
 // SessionUsageSink, so hook usage is left out and a call is never counted
-// twice. Any other value, including unset, keeps hook usage as the source.
+// twice. With SCION_USAGE_SOURCE=sqlite_native, PostInvocation hooks still own
+// API call counts (while the SQLite tailer adds token counts asynchronously
+// with Calls=0), so hook usage continues feeding session metrics. Any other
+// value, including unset, keeps hook usage as the source.
 func HookUsageFeedsSessionMetrics() bool {
 	return os.Getenv("SCION_USAGE_SOURCE") != UsageSourceNative
+}
+
+// UsageSourceHoldsSessionReport reports whether source holds session-end
+// reports in the session state file so out-of-band usage (native OTLP exports
+// or Antigravity SQLite tailer polls) can be added before reporting.
+func UsageSourceHoldsSessionReport(source string) bool {
+	return source == UsageSourceNative || source == telemetrycontract.UsageSourceSQLiteNative
+}
+
+// HoldsSessionReports reports whether the current process's SCION_USAGE_SOURCE
+// holds session-end reports for asynchronous usage collection.
+func HoldsSessionReports() bool {
+	return UsageSourceHoldsSessionReport(os.Getenv("SCION_USAGE_SOURCE"))
 }
 
 // sessionUsageFromIncrement maps a derived increment onto the aggregator's

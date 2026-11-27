@@ -1920,6 +1920,7 @@ waitLoop:
 	// (2s lock wait plus shutdownSessionReportTimeout) and deliberately
 	// runs ahead of the stopping and final status reports.
 	stopHeldReportSender()
+	runFlushSQLiteUsageBeforeBackstop(telemetryPipeline)
 	runReportOpenSessionAtShutdown(agentHome, outcome, hub.NewClient)
 
 	// Clean up the GitHub token file on exit
@@ -2071,10 +2072,11 @@ func loadHarnessEnvOverlay(ctx context.Context, harnessReq hooks.HarnessManifest
 // starts before the pre-start provisioner runs, so Start cannot see a
 // SCION_USAGE_SOURCE that only the generated env overlay declares. Only the
 // single SCION_USAGE_SOURCE value is passed, never the rest of the overlay,
-// and Pipeline.ActivateUsageSource accepts only "native" and keeps runtime
-// environment precedence. A disabled native telemetry policy never activates
-// native usage. When the overlay selects native usage but it is not
-// activated, the reason is logged so operators can tell why usage is absent.
+// and Pipeline.ActivateUsageSource accepts only "native" and "sqlite_native"
+// while keeping runtime environment precedence. A disabled native telemetry
+// policy never activates "native" usage. When the overlay selects a
+// pipeline-side usage source but it is not activated, the reason is logged so
+// operators can tell why usage is absent.
 func activateOverlayUsageSource(ctx context.Context, pipeline *telemetry.Pipeline, overlay map[string]string, nativeTelemetryPolicy string) {
 	source, ok := overlay["SCION_USAGE_SOURCE"]
 	if !ok || (source != telemetry.UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative) {

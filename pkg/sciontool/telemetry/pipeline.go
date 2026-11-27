@@ -78,10 +78,11 @@ type Pipeline struct {
 	retryConfig        RetryConfig
 	usageDeriver       atomic.Pointer[UsageDeriver]
 	agyTailer          atomic.Pointer[AntigravitySQLiteTailer]
-	agyActiveAtStop    atomic.Bool    // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
-	driftLatched       atomic.Bool    // preserved across Pipeline.Stop after agyTailer is swapped nil
-	analytics          analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
-	health             healthEmitter  // telemetry.health events (health.go)
+	agyDetectVersion   func(context.Context) (string, error) // optional override for tests; nil uses detectAgyVersionManaged
+	agyActiveAtStop    atomic.Bool                           // preserved across Pipeline.Stop so emitFinalHealth still reports sqlite_native enabled
+	driftLatched       atomic.Bool                           // preserved across Pipeline.Stop after agyTailer is swapped nil
+	analytics          analyticsState                        // agent.usage outbox + drainer (analytics_drainer.go)
+	health             healthEmitter                         // telemetry.health events (health.go)
 	sessionUsageSink   atomic.Pointer[SessionUsageSink]
 	// suppressDirectOTel is true when the Hub usage sink is active and the Hub
 	// advertised suppress_direct_otel=true (Tokenomics P2.2 D3). When true,
@@ -227,14 +228,17 @@ func NewWithConfig(config *Config) *Pipeline {
 
 // UsageActivation is the outcome of Pipeline.ActivateUsageSource. Every
 // value other than UsageActivated names the reason activation was skipped,
-// so callers can explain to operators why native usage stayed off.
+// so callers can explain to operators why pipeline-side usage collection
+// stayed off.
 type UsageActivation string
 
 const (
-	// UsageActivated means a native deriver was built and stored.
+	// UsageActivated means a native deriver or SQLite native tailer was built
+	// and started.
 	UsageActivated UsageActivation = "activated"
-	// UsageActivationNotNative means the requested source is not
-	// UsageSourceNative, so there is nothing for the receiver to do.
+	// UsageActivationNotNative means the requested source is neither
+	// UsageSourceNative nor UsageSourceSQLiteNative, so there is nothing for
+	// the pipeline to activate.
 	UsageActivationNotNative UsageActivation = "source is not native"
 	// UsageActivationRuntimeEnvPrecedence means SCION_USAGE_SOURCE is
 	// present in this process's environment (even if empty), and so wins.
@@ -243,40 +247,44 @@ const (
 	// not been started, has been stopped, or has no bound loopback config
 	// (which cannot happen once Start has succeeded).
 	UsageActivationNotRunning UsageActivation = "telemetry pipeline is not running"
-	// UsageActivationAlreadyActive means a deriver with rules is already in
-	// place and is left untouched.
+	// UsageActivationAlreadyActive means a deriver with rules or an active
+	// SQLite native tailer is already in place and is left untouched.
 	UsageActivationAlreadyActive UsageActivation = "native usage derivation is already active"
-	// UsageActivationNoHarnessRule means SCION_HARNESS has no native rule.
+	// UsageActivationNoHarnessRule means SCION_HARNESS has no matching rule
+	// for the requested usage source (no native rule, or non-antigravity for
+	// sqlite_native).
 	UsageActivationNoHarnessRule UsageActivation = "harness has no native usage rule"
 	// UsageActivationAnalyticsDisabled means sqlite_native could not start
 	// because no analytics outbox sink is active.
 	UsageActivationAnalyticsDisabled UsageActivation = "analytics outbox is not enabled"
 )
 
-// ActivateUsageSource enables native usage derivation on an already-running
-// pipeline when the usage source is selected after Start, e.g. by a
-// container-script provisioner's env overlay, which sciontool init loads only
-// after the receiver is up (ptone/scion#3391). Without this, Start's
-// environment-only check sees the source unset and the deriver stays a no-op
-// for the lifetime of the process.
+// ActivateUsageSource enables pipeline-side usage collection (the native OTLP
+// deriver for UsageSourceNative, or the Antigravity SQLite tailer for
+// UsageSourceSQLiteNative) on an already-running pipeline when the usage
+// source is selected after Start, e.g. by a container-script provisioner's env
+// overlay, which sciontool init loads only after the receiver is up
+// (ptone/scion#3391). Without this, Start's environment-only check sees the
+// source unset and pipeline-side usage collection stays off for the lifetime
+// of the process.
 //
 // It is deliberately narrow:
-//   - only UsageSourceNative activates anything; every other value
-//     (including "hooks", which the hook subprocess handles on its own) is
-//     ignored;
+//   - only UsageSourceNative and UsageSourceSQLiteNative activate anything;
+//     every other value (including "hooks", which the hook subprocess handles
+//     on its own) is ignored;
 //   - if SCION_USAGE_SOURCE is present in this process's environment, even
 //     with an empty value, it wins. This matches the additive overlay merge,
 //     which keeps any existing key for the harness child, so Start has
 //     already made the authoritative choice;
-//   - an already-active deriver is left untouched, so usage is never counted
-//     twice;
-//   - SCION_HARNESS gating still applies: a harness with no native rule stays
-//     a no-op;
+//   - an already-active deriver or tailer is left untouched, so usage is never
+//     counted twice;
+//   - SCION_HARNESS gating still applies: a harness with no matching rule (or
+//     a non-antigravity harness for sqlite_native) stays a no-op;
 //   - activation is refused before Start and after Stop (this assumes Stop
 //     completed; sciontool init activates once, before any Stop).
 //
-// It returns UsageActivated when a new deriver was stored, and otherwise the
-// reason it was skipped.
+// It returns UsageActivated when the deriver or tailer was started, and
+// otherwise the reason it was skipped.
 func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (UsageActivation, error) {
 	if source != UsageSourceNative && source != telemetrycontract.UsageSourceSQLiteNative {
 		return UsageActivationNotNative, nil
@@ -341,6 +349,19 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	return UsageActivated, nil
 }
 
+// SetAgyVersionDetector overrides the agy binary version detector used when
+// this pipeline starts its Antigravity SQLite tailer. Intended for tests that
+// run without a system-installed agy binary; nil restores the default managed
+// detector (detectAgyVersionManaged).
+func (p *Pipeline) SetAgyVersionDetector(fn func(context.Context) (string, error)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.agyDetectVersion = fn
+	p.mu.Unlock()
+}
+
 // startAgySQLiteTailerLocked starts the Antigravity local SQLite usage tailer
 // whenever an analytics sink (Hub usage outbox and/or GCP analytics) is active.
 // Neither nativeMeteringOnly nor cloudInitDegraded blocks it:
@@ -367,6 +388,7 @@ func (p *Pipeline) startAgySQLiteTailerLocked(ctx context.Context) error {
 		WakeOwner:      p.analytics.owner,
 		Analytics:      p.analytics.sqliteNative,
 		LoopbackConfig: p.loopbackConfig.Load(),
+		DetectVersion:  p.agyDetectVersion,
 		OTelExportActive: func() bool {
 			return hasCloudExporter && !p.SuppressDirectOTel()
 		},
@@ -623,6 +645,29 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	return nil
 }
 
+// FlushSQLiteUsage runs a bounded synchronous final poll and shutdown of the
+// Antigravity SQLite tailer (if active) ahead of Pipeline.Stop, so any final
+// DB rows flushed as the harness exited reach the SessionUsageSink before the
+// init shutdown backstop reports the open session. Safe to call when p is nil
+// or no SQLite tailer is active; idempotent with Pipeline.Stop (which swaps
+// agyTailer to nil and preserves agyActiveAtStop / driftLatched).
+func (p *Pipeline) FlushSQLiteUsage(ctx context.Context) {
+	if p == nil {
+		return
+	}
+	if tailer := p.agyTailer.Swap(nil); tailer != nil {
+		p.agyActiveAtStop.Store(true)
+		pollCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
+		defer cancel()
+		if err := tailer.Stop(pollCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
+		}
+		if tailer.SchemaDriftDetected() {
+			p.driftLatched.Store(true)
+		}
+	}
+}
+
 // Stop stops the telemetry pipeline.
 func (p *Pipeline) Stop(ctx context.Context) error {
 	if p == nil {
@@ -663,15 +708,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// loopback into the still-open receiver before flushMetricsOnStop runs.
 	// Capture active status and drift latch before clearing agyTailer so the
 	// final health event and heartbeat remain accurate.
-	if tailer := p.agyTailer.Swap(nil); tailer != nil {
-		p.agyActiveAtStop.Store(true)
-		if err := tailer.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Debug("Antigravity SQLite tailer shutdown error: %v", err)
-		}
-		if tailer.SchemaDriftDetected() {
-			p.driftLatched.Store(true)
-		}
-	}
+	p.FlushSQLiteUsage(ctx)
 
 	var errs []error
 	intakeDone := p.closeIntake()

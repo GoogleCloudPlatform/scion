@@ -44,11 +44,13 @@ func unsetUsageSource(t *testing.T) {
 }
 
 // The init daemon runs the held-report check under the same condition the
-// harness's hooks hold reports under: SCION_USAGE_SOURCE=native in the
-// harness's environment, where init's own environment wins over the overlay
-// even when the variable is empty (supervisor.mergeEnvOverlay).
-func TestNativeUsageSourceSelected(t *testing.T) {
+// harness's hooks hold reports under: SCION_USAGE_SOURCE=native or
+// sqlite_native in the harness's environment, where init's own environment
+// wins over the overlay even when the variable is empty
+// (supervisor.mergeEnvOverlay).
+func TestHeldReportUsageSourceSelected(t *testing.T) {
 	native := map[string]string{"SCION_USAGE_SOURCE": "native"}
+	sqliteNative := map[string]string{"SCION_USAGE_SOURCE": "sqlite_native"}
 	hooksOverlay := map[string]string{"SCION_USAGE_SOURCE": "hooks"}
 	for _, tc := range []struct {
 		name    string
@@ -58,11 +60,16 @@ func TestNativeUsageSourceSelected(t *testing.T) {
 	}{
 		{"unset, no overlay", nil, nil, false},
 		{"unset, overlay native", nil, native, true},
+		{"unset, overlay sqlite_native", nil, sqliteNative, true},
 		{"unset, overlay hooks", nil, hooksOverlay, false},
 		{"env native", ptr("native"), nil, true},
+		{"env sqlite_native", ptr("sqlite_native"), nil, true},
 		{"env hooks wins over overlay native", ptr("hooks"), native, false},
+		{"env hooks wins over overlay sqlite_native", ptr("hooks"), sqliteNative, false},
 		{"env empty wins over overlay native", ptr(""), native, false},
+		{"env empty wins over overlay sqlite_native", ptr(""), sqliteNative, false},
 		{"env native wins over overlay hooks", ptr("native"), hooksOverlay, true},
+		{"env sqlite_native wins over overlay hooks", ptr("sqlite_native"), hooksOverlay, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.env == nil {
@@ -70,8 +77,8 @@ func TestNativeUsageSourceSelected(t *testing.T) {
 			} else {
 				t.Setenv("SCION_USAGE_SOURCE", *tc.env)
 			}
-			if got := nativeUsageSourceSelected(tc.overlay); got != tc.want {
-				t.Errorf("nativeUsageSourceSelected = %v, want %v", got, tc.want)
+			if got := heldReportUsageSourceSelected(tc.overlay); got != tc.want {
+				t.Errorf("heldReportUsageSourceSelected = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -200,12 +207,14 @@ func TestStartHeldReportSender_NotStartedWithoutNativeUsageOrHub(t *testing.T) {
 			}
 		})
 	}
-	// An overlay that selects native usage does start it.
-	unsetUsageSource(t)
-	ticker := useFakeTicker(t)
-	startHeldReportSender(home, map[string]string{"SCION_USAGE_SOURCE": "native"}, newClient)()
-	if ticker.created != 1 {
-		t.Errorf("overlay-selected native usage: tickers created %d, want 1", ticker.created)
+	// An overlay that selects native or sqlite_native usage does start it.
+	for _, src := range []string{"native", "sqlite_native"} {
+		unsetUsageSource(t)
+		ticker := useFakeTicker(t)
+		startHeldReportSender(home, map[string]string{"SCION_USAGE_SOURCE": src}, newClient)()
+		if ticker.created != 1 {
+			t.Errorf("overlay-selected %s usage: tickers created %d, want 1", src, ticker.created)
+		}
 	}
 }
 

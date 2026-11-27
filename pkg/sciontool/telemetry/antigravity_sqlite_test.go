@@ -3324,3 +3324,87 @@ func TestAntigravitySQLiteTailer_PartialAppendFailureDisabledAdvanceNoDoubleCoun
 		t.Fatalf("after detached OTel-active commit, sessionTotal = %+v, want input=1111 output=222", sessionTotal)
 	}
 }
+
+// TestPipelineFlushSQLiteUsage_BeforeStopIsIdempotent verifies that
+// Pipeline.FlushSQLiteUsage runs the Antigravity SQLite tailer's final poll
+// and delivers late tokens to SessionUsageSink before Pipeline.Stop, preserves
+// agyActiveAtStop, and is idempotent with a subsequent FlushSQLiteUsage or Stop.
+func TestPipelineFlushSQLiteUsage_BeforeStopIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+
+	// Nil receiver is safe.
+	var nilPipeline *Pipeline
+	nilPipeline.FlushSQLiteUsage(ctx)
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SCION_HARNESS", "antigravity")
+	t.Setenv("SCION_AGENT_ID", "agent-flush-1")
+	t.Setenv("SCION_PROJECT_ID", "proj-flush-1")
+
+	hubOutboxDir := HubAnalyticsOutboxDirFor(home)
+	hubOutbox, err := OpenAnalyticsOutbox(hubOutboxDir)
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox: %v", err)
+	}
+	analytics := NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative)
+
+	p := NewWithConfig(&Config{Enabled: true})
+	var mu sync.Mutex
+	var got []SessionUsage
+	p.SetSessionUsageSink(func(u SessionUsage) {
+		mu.Lock()
+		got = append(got, u)
+		mu.Unlock()
+	})
+
+	tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+		AgentHome:         home,
+		DisableWakeSocket: true,
+		Analytics:         analytics,
+		PollInterval:      time.Hour,
+		SessionUsage:      p.forwardSessionUsage,
+		DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+	})
+	if err := tailer.Start(ctx); err != nil {
+		t.Fatalf("tailer.Start: %v", err)
+	}
+	p.agyTailer.Store(tailer)
+
+	// Write a late gen_metadata row after Start (no periodic poll will fire).
+	db := createTestAgyDB(t, filepath.Join(AgyConversationsDir(home), "conv-flush.db"))
+	defer func() { _ = db.Close() }()
+	gen := encodeTestGenMeta(1466, "gemini-3.1-pro-low", 1795730900, testAgyUsage{
+		modelID: 1466, input: 120, output: 35, cacheRead: 200, reasoning: 7, id11: "flush-row-1",
+	})
+	if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen, len(gen)); err != nil {
+		t.Fatalf("insert gen_metadata: %v", err)
+	}
+
+	// Flush ahead of Stop: must deliver tokens to SessionUsageSink and record
+	// agyActiveAtStop for final health snapshots.
+	p.FlushSQLiteUsage(ctx)
+	if !p.agyActiveAtStop.Load() {
+		t.Fatal("expected agyActiveAtStop == true after FlushSQLiteUsage")
+	}
+
+	mu.Lock()
+	afterFlush := append([]SessionUsage(nil), got...)
+	mu.Unlock()
+	want := SessionUsage{TokensInput: 120, TokensOutput: 35, TokensCached: 200, TokensReasoning: 7}
+	if len(afterFlush) != 1 || afterFlush[0] != want {
+		t.Fatalf("SessionUsage after FlushSQLiteUsage = %+v, want [%+v]", afterFlush, want)
+	}
+
+	// Second FlushSQLiteUsage and Stop are idempotent (no double-count).
+	p.FlushSQLiteUsage(ctx)
+	if err := p.Stop(ctx); err != nil {
+		t.Fatalf("Pipeline.Stop: %v", err)
+	}
+	mu.Lock()
+	afterStop := len(got)
+	mu.Unlock()
+	if afterStop != 1 {
+		t.Fatalf("SessionUsage calls after second flush + Stop = %d, want 1", afterStop)
+	}
+}
