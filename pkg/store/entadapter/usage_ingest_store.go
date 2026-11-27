@@ -498,6 +498,9 @@ func (s *UsageLedgerStore) ingestUsageBatchTx(ctx context.Context, client *ent.C
 		}); err != nil {
 			return nil, false, err
 		}
+		if err := fillRunAttributionUsageLiveSourcesTx(ctx, client, insertedEvents); err != nil {
+			return nil, false, err
+		}
 	}
 
 	// Atomically stamp converted_at on converted/skipped agent_session_metrics

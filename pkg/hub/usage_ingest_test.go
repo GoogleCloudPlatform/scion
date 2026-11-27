@@ -542,3 +542,65 @@ func TestUsageIngest_PoisonEventAndDefaultHubID(t *testing.T) {
 	assert.Equal(t, int64(1), mhs[0].RejectedCount)
 	assert.Equal(t, []store.SeqRange{{Start: 2, End: 2}}, mhs[0].RejectedRanges)
 }
+
+func TestUsageIngest_PopulatesRunAttributionUsageLiveSource(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-live-src")
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	proj := &store.Project{ID: tid("usage-ls-proj"), Name: "usage-ls", Slug: "usage-ls"}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:        tid("usage-ls-agent"),
+		Slug:      "usage-ls-agent",
+		Name:      "usage-ls-agent",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	tok := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	// 1. Ingest populates usage_live_source for native, hooks, and sqlite_native.
+	for i, src := range []string{
+		telemetrycontract.UsageSourceNative,
+		telemetrycontract.UsageSourceHooks,
+		telemetrycontract.UsageSourceSQLiteNative,
+	} {
+		runID := "run-ls-" + src
+		_, err := s.SetAgentRunID(ctx, ag.ID, runID, nil)
+		require.NoError(t, err)
+
+		ev := makeWireUsageEvent("hub-live-src", ag.ID, proj.ID, runID, "evt-ls-"+src, int64(i+1), now, 50, 20)
+		ev.UsageSource = src
+		rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+			Events:        []telemetrycontract.UsageEvent{ev},
+			RunID:         runID,
+			ProducerEpoch: "ep-ls",
+			ProducerSeq:   int64(i + 1),
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		attr, err := s.GetRunAttribution(ctx, runID)
+		require.NoError(t, err)
+		assert.Equal(t, src, attr.UsageLiveSource)
+	}
+
+	// 2. Conflicting second event on the same run preserves the first usage_live_source.
+	conflictEv := makeWireUsageEvent("hub-live-src", ag.ID, proj.ID, "run-ls-native", "evt-ls-conflict", 10, now.Add(time.Second), 10, 5)
+	conflictEv.UsageSource = telemetrycontract.UsageSourceHooks
+	rec := doAgentUsageRequest(t, srv, http.MethodPost, telemetrycontract.UsageIngestAgentPath(ag.ID), tok, telemetrycontract.UsageIngestRequest{
+		Events:        []telemetrycontract.UsageEvent{conflictEv},
+		RunID:         "run-ls-native",
+		ProducerEpoch: "ep-ls",
+		ProducerSeq:   10,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	attr, err := s.GetRunAttribution(ctx, "run-ls-native")
+	require.NoError(t, err)
+	assert.Equal(t, telemetrycontract.UsageSourceNative, attr.UsageLiveSource, "second conflicting event must preserve first usage_live_source")
+}

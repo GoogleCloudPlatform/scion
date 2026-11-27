@@ -114,10 +114,11 @@ func (RunAttribution) Fields() []ent.Field {
 			Optional().
 			Default("").
 			Immutable(),
+		// usage_live_source is filled once from the first accepted non-legacy
+		// Track 1 UsageEvent.UsageSource ingested for this run_id.
 		field.String("usage_live_source").
 			Optional().
-			Default("").
-			Immutable(),
+			Default(""),
 		field.String("capture_policy").
 			Optional().
 			Default("").
