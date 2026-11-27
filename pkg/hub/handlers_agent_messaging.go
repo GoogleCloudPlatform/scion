@@ -1627,9 +1627,11 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// channel spokes. Every store and publish call uses storeCtx, so the
 	// caller decides whether request cancellation can cut it short.
 	var boundAttachments []AttachmentRef
-	// stampWatermarks, set on the broker path for a message the handler
-	// stores itself (decision D2), runs the watermark steps of
-	// deliverToUser before the SSE publish.
+	// stampWatermarks, when armed on the broker stored-first path (decision
+	// D2), delegates watermark stamping to the broker proxy; otherwise
+	// storeOutboundRow stamps watermarks directly via s.webChatStore before
+	// publishing SSE (covering deliveryUserDirect and the !persisting broker
+	// fallback, ptone/scion#9641).
 	var stampWatermarks func(context.Context, *store.Message)
 	storeOutboundRow := func(storeCtx context.Context) error {
 		if decisionSend != nil {
@@ -1666,6 +1668,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
 		if stampWatermarks != nil {
 			stampWatermarks(storeCtx, storeMsg)
+		} else {
+			stampUserMessageWatermarks(storeCtx, wcs, storeMsg, s.messageLog)
 		}
 		publishRefs := append(append([]AttachmentRef(nil), attachmentRefs...), boundAttachments...)
 		var chatOpts []ChatEventOption

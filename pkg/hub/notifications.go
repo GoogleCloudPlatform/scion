@@ -55,6 +55,11 @@ type NotificationDispatcher struct {
 	// dispatcher (ptone/scion#3904).
 	channelRegistryFn func() *ChannelRegistry
 
+	// webChatStoreFn returns the WebChatStore in use (nil fn or nil store =
+	// disabled). Used by createInboxMessage to stamp DM watermarks on the
+	// non-broker / broker-fallback path (ptone/scion#9641).
+	webChatStoreFn func() WebChatStore
+
 	// autoWakeFn, when set, is offered each suspended subscriber whose
 	// notification is parked. It reports whether it queued a background
 	// wake (ptone/scion#7826); the notification stays parked either way
@@ -744,6 +749,13 @@ func (nd *NotificationDispatcher) currentChannelRegistry() *ChannelRegistry {
 	return nd.channelRegistryFn()
 }
 
+func (nd *NotificationDispatcher) currentWebChatStore() WebChatStore {
+	if nd.webChatStoreFn == nil {
+		return nil
+	}
+	return nd.webChatStoreFn()
+}
+
 // persistsViaInbox reports whether the notifier itself must write the inbox
 // row for sub. Without a broker it always does. With a broker, the broker's
 // deliverToUser persists the published message instead — except for a
@@ -913,6 +925,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 		return
 	}
 
+	stampUserMessageWatermarks(ctx, nd.currentWebChatStore(), storeMsg, nd.log)
 	nd.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 	if nd.messageLog != nil {
 		attrs := []any{

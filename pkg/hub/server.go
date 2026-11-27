@@ -5402,6 +5402,13 @@ func (s *Server) SetWebChatStore(wcs WebChatStore) {
 	s.mu.Unlock()
 }
 
+// currentWebChatStore returns the configured WebChatStore under s.mu.
+func (s *Server) currentWebChatStore() WebChatStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.webChatStore
+}
+
 // SetAttachmentStore sets the attachment file store for upload/download (W7).
 func (s *Server) SetAttachmentStore(as AttachmentStore) {
 	s.mu.Lock()
@@ -6026,6 +6033,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistryFn = s.currentChannelRegistry
+	nd.webChatStoreFn = s.currentWebChatStore
 	nd.autoWakeFn = s.autoWakeNotificationSubscriber
 	nd.idleSuspendGateFn = s.idleSuspendDeliveryGateActive
 	nd.autoSuspendThresholdFn = s.autoSuspendThreshold
