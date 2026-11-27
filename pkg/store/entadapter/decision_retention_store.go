@@ -847,9 +847,12 @@ func (s *DecisionRetentionStore) PruneDecisionRetentionRuns(ctx context.Context,
 // On Postgres, performs a fast unlocked read first and only acquires FOR UPDATE
 // when projectID is present, avoiding lock contention on the common path where
 // a project has no override.
-func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, isPostgres bool, projectID string) error {
-	if tx == nil || projectID == "" {
+func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, isPostgres bool, projectID, updatedBy string) error {
+	if projectID == "" {
 		return nil
+	}
+	if tx == nil {
+		return errors.New("prune decision retention override: requires an ent transaction")
 	}
 	existing, err := tx.HubSetting.Query().
 		Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
@@ -866,7 +869,8 @@ func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, is
 			"project_id", projectID, "error", err)
 		return nil
 	}
-	if _, ok := cfg.ProjectOverrides[projectID]; !ok {
+	ov, ok := cfg.ProjectOverrides[projectID]
+	if !ok {
 		return nil
 	}
 	if isPostgres {
@@ -886,7 +890,8 @@ func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, is
 				"project_id", projectID, "error", err)
 			return nil
 		}
-		if _, ok := cfg.ProjectOverrides[projectID]; !ok {
+		ov, ok = cfg.ProjectOverrides[projectID]
+		if !ok {
 			return nil
 		}
 	}
@@ -898,12 +903,14 @@ func pruneDecisionRetentionProjectOverrideTx(ctx context.Context, tx *ent.Tx, is
 	if _, err := tx.HubSetting.UpdateOneID(existing.ID).
 		SetValue(doc).
 		SetRevision(existing.Revision + 1).
-		SetUpdatedBy("project-delete").
+		SetUpdatedBy(updatedBy).
 		Save(ctx); err != nil {
 		return fmt.Errorf("prune decision retention override: update section: %w", mapError(err))
 	}
 	if _, err := bumpSettingsRevision(ctx, tx); err != nil {
 		return fmt.Errorf("prune decision retention override: %w", err)
 	}
+	slog.Info("decision retention: pruned project override",
+		"project_id", projectID, "mode", ov.Mode, "reason", updatedBy)
 	return nil
 }

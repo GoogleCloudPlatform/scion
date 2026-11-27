@@ -331,6 +331,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			SetChoices(d.Choices).
 			SetNillableDefaultChoiceID(nullableString(d.DefaultChoiceID)).
 			SetFacetIndexed(true).
+			// All rows of a prompt must share created_at; decisionRetentionSweeper.Preview's bounded dedup relies on it.
 			SetCreatedAt(now)
 		if d.Other != nil {
 			cr.SetAllowOther(true).

@@ -19,7 +19,6 @@ package entadapter
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -32,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -551,14 +551,15 @@ func TestDecisionRetentionRace_DeterministicPurgeVsRepostVersionLockOrder(t *tes
 	assertFacetSummaryMatchesRecompute(t, ctx, f.cs.client)
 }
 
-// TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut exercises the Postgres
-// FOR UPDATE serialization between CompositeStore.DeleteProject pruning a
-// project's override and a concurrent CAS UpsertHubSetting on
-// decision_retention (ptone/scion#9439). Either the PUT commits first and the
-// delete prunes pDel from the PUT's committed document (preserving the PUT's
-// other edits), or the delete commits first and the stale-revision PUT returns
-// store.ErrRevisionConflict. Neither may lose the PUT's edits or leave pDel
-// behind.
+// TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut deterministically
+// verifies the Postgres FOR UPDATE re-read in
+// pruneDecisionRetentionProjectOverrideTx (ptone/scion#9439): an admin PUT
+// transaction holds FOR UPDATE on the decision_retention row while
+// DeleteProject runs its unlocked pre-check (seeing retention_days=90) and
+// blocks waiting for the row lock. The admin PUT then commits retention_days=120
+// at revision+1. When DeleteProject unblocks, it must re-read the committed
+// row under FOR UPDATE and prune pDel from retention_days=120 (writing
+// revision+2), never clobbering the PUT's edit back to 90.
 func TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut(t *testing.T) {
 	requirePostgres(t)
 	ctx := context.Background()
@@ -584,7 +585,32 @@ func TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut(t *testing.T) {
 	saved, err := f.cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, initialDoc, "admin@test.com", 0, "managed")
 	require.NoError(t, err)
 
-	// Concurrent admin PUT updates retention_days from 90 -> 120 using the pre-delete revision.
+	// Hold FOR UPDATE on the decision_retention row inside a concurrent PUT tx.
+	putTx, err := f.cs.client.Tx(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = putTx.Rollback() })
+	lockedRow, err := putTx.HubSetting.Query().
+		Where(hubsetting.SectionEQ(opsettings.DecisionRetentionSectionName)).
+		ForUpdate().
+		Only(ctx)
+	require.NoError(t, err)
+
+	// Start DeleteProject while putTx holds the section row lock.
+	delDone := make(chan error, 1)
+	go func() {
+		delDone <- f.cs.DeleteProject(ctx, pDel)
+	}()
+
+	// Wait until DeleteProject has completed its unlocked pre-check and is
+	// blocked waiting for putTx's row lock.
+	const blockedFor = 150 * time.Millisecond
+	select {
+	case delErr := <-delDone:
+		t.Fatalf("DeleteProject did not block on decision_retention row lock: %v", delErr)
+	case <-time.After(blockedFor):
+	}
+
+	// Commit the admin PUT (updating retention_days 90 -> 120, keeping pKeep & pDel).
 	putDoc := json.RawMessage(fmt.Sprintf(`{
 		"enabled": true,
 		"retention_days": 120,
@@ -593,42 +619,28 @@ func TestDecisionRetentionRace_DeleteProjectPruneVsAdminPut(t *testing.T) {
 			%q: {"mode": "days", "days": 30}
 		}
 	}`, pKeep, pDel))
+	_, err = putTx.HubSetting.UpdateOneID(lockedRow.ID).
+		SetValue(putDoc).
+		SetRevision(lockedRow.Revision + 1).
+		SetUpdatedBy("admin@test.com").
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = bumpSettingsRevision(ctx, putTx)
+	require.NoError(t, err)
+	require.NoError(t, putTx.Commit())
 
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	var delErr, putErr error
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		delErr = f.cs.DeleteProject(ctx, pDel)
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		_, putErr = f.cs.UpsertHubSetting(ctx, opsettings.DecisionRetentionSectionName, putDoc, "admin@test.com", saved.Revision, "managed")
-	}()
-	close(start)
-	wg.Wait()
+	// DeleteProject must now unblock, re-read the committed doc under FOR UPDATE,
+	// and prune pDel while preserving retention_days=120 and pKeep's hold.
+	require.NoError(t, <-delDone, "DeleteProject must succeed without deadlock")
 
-	require.NoError(t, delErr, "DeleteProject must succeed without deadlock")
 	row, err := f.cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
 	require.NoError(t, err)
 	cfg, err := opsettings.ParseDecisionRetentionDoc(row.Value)
 	require.NoError(t, err)
 
-	assert.NotContains(t, cfg.ProjectOverrides, pDel, "deleted project override must never survive")
+	assert.NotContains(t, cfg.ProjectOverrides, pDel, "deleted project override must be pruned")
 	require.Contains(t, cfg.ProjectOverrides, pKeep, "keep_forever hold must survive")
 	assert.Equal(t, opsettings.DecisionRetentionOverrideModeKeepForever, cfg.ProjectOverrides[pKeep].Mode)
-
-	if putErr == nil {
-		// PUT committed first, then DeleteProject pruned pDel from the PUT's doc.
-		assert.Equal(t, 120, cfg.RetentionDays, "PUT edit must not be lost when PUT wins the race")
-		assert.Equal(t, saved.Revision+2, row.Revision)
-	} else {
-		// DeleteProject committed first, so stale-revision PUT conflicted cleanly.
-		assert.True(t, errors.Is(putErr, store.ErrRevisionConflict), "expected ErrRevisionConflict, got: %v", putErr)
-		assert.Equal(t, 90, cfg.RetentionDays)
-		assert.Equal(t, saved.Revision+1, row.Revision)
-	}
+	assert.Equal(t, 120, cfg.RetentionDays, "concurrent admin PUT edit must not be lost when DeleteProject prunes")
+	assert.Equal(t, saved.Revision+2, row.Revision, "section revision must reflect both PUT and prune")
 }

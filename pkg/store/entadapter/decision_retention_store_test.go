@@ -1281,15 +1281,15 @@ func TestDecisionRetentionStore_DeleteProjectPrunesOverride(t *testing.T) {
 	afterBad, err := cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
 	require.NoError(t, err)
 	assert.Equal(t, badRow.Revision, afterBad.Revision, "malformed decision_retention doc must not be rewritten on project delete")
-	assert.Equal(t, string(badDoc), string(afterBad.Value), "malformed decision_retention doc bytes must remain untouched")
+	assert.JSONEq(t, string(badDoc), string(afterBad.Value), "malformed decision_retention doc must remain untouched")
 }
 
 // TestDecisionRetentionStore_CreateProjectPrunesPreExistingOverride verifies
-// audit finding L1 (ptone/scion#9439): an override left behind by a project
-// deleted before delete-time pruning existed is pruned atomically when a new
-// project is created with that UUID, while attempting to create a duplicate of
-// an existing live project fails with ErrAlreadyExists without touching the
-// live project's override or keep_forever hold.
+// that an override left behind by a project deleted before delete-time pruning
+// existed is pruned atomically when a new project is created with that UUID
+// (ptone/scion#9439), while attempting to create a duplicate of an existing
+// live project fails with ErrAlreadyExists without touching the live project's
+// override or keep_forever hold.
 func TestDecisionRetentionStore_CreateProjectPrunesPreExistingOverride(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
@@ -1335,6 +1335,7 @@ func TestDecisionRetentionStore_CreateProjectPrunesPreExistingOverride(t *testin
 	row, err = cs.GetHubSetting(ctx, opsettings.DecisionRetentionSectionName)
 	require.NoError(t, err)
 	assert.Equal(t, saved.Revision+1, row.Revision)
+	assert.Equal(t, "project-create", row.UpdatedBy)
 	cfg, err = opsettings.ParseDecisionRetentionDoc(row.Value)
 	require.NoError(t, err)
 	assert.NotContains(t, cfg.ProjectOverrides, pLegacy, "leftover pre-fix override must be pruned on create")

@@ -797,7 +797,14 @@ func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Proj
 	}); err != nil {
 		return err
 	}
-	s.refreshDecisionRetentionAfterProjectChange(project.ID)
+	// Only refresh operational settings after create when the local cache held
+	// a leftover override for this UUID, avoiding a full ListHubSettings read
+	// on normal project creates while still clearing cached pre-fix leftovers.
+	if ops := s.GetOperationalSettings(); ops != nil {
+		if _, hasLeftover := ops.DecisionRetention().ProjectOverrides[project.ID]; hasLeftover {
+			s.refreshDecisionRetentionAfterProjectChange(project.ID)
+		}
+	}
 	return nil
 }
 

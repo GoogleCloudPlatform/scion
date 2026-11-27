@@ -414,12 +414,12 @@ func TestAdminDecisionRetention_ProjectDeletePrunesOverrideAndSameUUIDStartsClea
 	assert.ErrorIs(t, err, store.ErrNotFound, "75d decision in 60d-override project must be purged")
 }
 
-// TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride verifies audit
-// finding L1 (ptone/scion#9439) end-to-end: an override left behind by a
-// project deleted before delete-time pruning existed is pruned when a new
-// project is created via POST /api/v1/projects with that client-chosen UUID,
-// refreshing the cache and leaving other projects' overrides and keep_forever
-// holds untouched.
+// TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride verifies
+// end-to-end (ptone/scion#9439) that an override left behind by a project
+// deleted before delete-time pruning existed is pruned when a new project is
+// created via POST /api/v1/projects with that client-chosen UUID, refreshing
+// the cache and leaving other projects' overrides and keep_forever holds
+// untouched.
 func TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride(t *testing.T) {
 	srv, s, admin, _ := decisionRetentionAdminServer(t, true)
 	ctx := context.Background()
@@ -477,7 +477,7 @@ func TestAdminDecisionRetention_CreateProjectPrunesLeftoverOverride(t *testing.T
 }
 
 // TestAdminDecisionRetention_ProjectDeleteRefreshesAndAppliesOtherSectionsAndPublishes
-// verifies rev R1 and audit L2 (ptone/scion#9439):
+// verifies post-delete settings refresh and peer notification (ptone/scion#9439):
 //  1. When another operational section (maintenance) was written in the DB
 //     bypassing ops.Update, deleting a project with an override refreshes AND
 //     applies that other section to the server (never swallowing it into cache).
@@ -558,8 +558,8 @@ func TestAdminDecisionRetention_ProjectDeleteRefreshesAndAppliesOtherSectionsAnd
 	}
 	assert.True(t, foundDR, "decision_retention settings event must be published after override prune")
 
-	// 2. Audit L2: write an override for p2 directly to DB bypassing local cache,
-	// then delete p2. Even without p2 in the local cache, refresh + publish must fire.
+	// 2. Write an override for p2 directly to DB bypassing local cache, then
+	// delete p2. Even without p2 in the local cache, refresh + publish must fire.
 	docWithP2 := json.RawMessage(fmt.Sprintf(`{
 		"enabled": true,
 		"retention_days": 90,
@@ -586,8 +586,8 @@ func TestAdminDecisionRetention_ProjectDeleteRefreshesAndAppliesOtherSectionsAnd
 	}
 	assert.True(t, foundDR, "decision_retention event must be published even when deleting replica's cache lacked the override")
 
-	// 3. Rev R1: when local cache holds an override (p3) and refresh sees no DB
-	// diff (simulating a concurrent refresh that already absorbed the pruned row),
+	// 3. When local cache holds an override (p3) and refresh sees no DB diff
+	// (simulating a concurrent refresh that already absorbed the pruned row),
 	// decision_retention event is still published.
 	require.Contains(t, ops.DecisionRetention().ProjectOverrides, p3)
 	_ = drainEvents()
