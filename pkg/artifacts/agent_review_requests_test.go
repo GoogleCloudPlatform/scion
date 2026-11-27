@@ -29,13 +29,17 @@ import (
 
 type agentReviewRequestTestHost struct {
 	*reviewRequestTestHost
-	delegators   map[string]string
-	delegatorErr error
+	delegators       map[string]string
+	delegatorErr     error
+	onDelegatingUser func()
 }
 
 var _ SponsorRecorder = (*agentReviewRequestTestHost)(nil)
 
 func (h *agentReviewRequestTestHost) DelegatingUser(_ context.Context, agentID string) (string, error) {
+	if h.onDelegatingUser != nil {
+		h.onDelegatingUser()
+	}
 	if h.delegatorErr != nil {
 		return "", h.delegatorErr
 	}
@@ -760,4 +764,101 @@ func TestAgentReviewRequests_BoundedConflictExpiredAndNonOwnerWriteGrant(t *test
 			t.Errorf("expected 0 review request rows, got %+v", reqs)
 		}
 	})
+}
+
+// TestPlainPutGrantLevelChangePreservesExpiryWhileRaiseClearsIt verifies
+// review round 2 finding 3: a plain PutGrant level change (the Share route,
+// fromReviewRequest=false) over an expired grant preserves expires_at, while
+// the review-request raise path (fromReviewRequest=true) clears expires_at.
+func TestPlainPutGrantLevelChangePreservesExpiryWhileRaiseClearsIt(t *testing.T) {
+	svc, h, st, _, userArtID := newAgentReviewFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	past := now.Add(-time.Hour)
+	sqlSt := st.(*sqlStore)
+
+	_, err := sqlSt.db.ExecContext(ctx, sqlSt.rebind(`INSERT INTO artifact_grant
+		(id, artifact_id, subject_kind, subject_ref, permission, expires_at, created_by_ref, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+		"expired-bob-plain", userArtID, SubjectPrincipal, "user:bob", GrantRead, sqlSt.timeArg(past), "user:alice", sqlSt.timeArg(past))
+	if err != nil {
+		t.Fatalf("insert expired grant: %v", err)
+	}
+
+	// Plain PutGrant level change (read -> write) must leave expires_at intact.
+	put, err := st.PutGrant(ctx, &Grant{
+		ID: "ignored-id", ArtifactID: userArtID, SubjectKind: SubjectPrincipal,
+		SubjectRef: "user:bob", Permission: GrantWrite, CreatedByRef: "user:alice", CreatedAt: now,
+	}, MaxGrantsPerArtifact, false, &Actor{Kind: PrincipalKindUser, Ref: "alice", Authority: AuthorityOwner})
+	if err != nil || put != GrantPutChanged {
+		t.Fatalf("plain PutGrant over expired = %v, %v; want GrantPutChanged, nil", put, err)
+	}
+	findBob := func() *Grant {
+		gs, lerr := st.ListGrants(ctx, userArtID)
+		if lerr != nil {
+			t.Fatalf("ListGrants: %v", lerr)
+		}
+		for i := range gs {
+			if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == "user:bob" {
+				return &gs[i]
+			}
+		}
+		return nil
+	}
+	afterPlain := findBob()
+	if afterPlain == nil || afterPlain.Permission != GrantWrite || afterPlain.ExpiresAt == nil || !afterPlain.ExpiresAt.Equal(past) {
+		t.Fatalf("after plain PutGrant: got %+v, want permission=write expires_at=%v", afterPlain, past)
+	}
+
+	// Review-request raise over the still-expired grant must clear expires_at.
+	h.visibleUsers = map[string]bool{"bob": true}
+	rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+userArtID+"/review-requests",
+		PrincipalKindUser, "alice", "", CreateReviewRequestsBody{Reviewers: []string{"user:bob"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("raise over expired grant: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp CreateReviewRequestsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Requests) != 1 || resp.Requests[0].Outcome != ReviewRequestOutcomeCreated || resp.Requests[0].Access != ReviewRequestAccessRaised {
+		t.Fatalf("raise result = %+v, want created(raised)", resp.Requests)
+	}
+	afterRaise := findBob()
+	if afterRaise == nil || afterRaise.Permission != GrantReview || afterRaise.ExpiresAt != nil {
+		t.Fatalf("after raise: got %+v, want permission=review expires_at=nil", afterRaise)
+	}
+}
+
+// TestDelegatorMissingWithConcurrentMoveReturns403 verifies review round 2
+// finding 5: when --delegator resolves to nothing and a concurrent move is
+// detected on the first real reviewer via checkExpect, the route returns 403
+// instead of a per-reviewer reviewer_cannot_review refusal.
+func TestDelegatorMissingWithConcurrentMoveReturns403(t *testing.T) {
+	svc, h, st, agentArtID, _ := newAgentReviewFixture(t)
+	ctx := context.Background()
+	sqlSt := st.(*sqlStore)
+
+	h.delegators["agent-1"] = ""
+	h.onDelegatingUser = func() {
+		// Simulate the artifact moving to proj-2 after readableArtifact passed
+		// the route-level home check and before CreateOrRemindReviewRequest runs.
+		_, _ = sqlSt.db.ExecContext(ctx, sqlSt.rebind(`UPDATE artifact SET scope_ref = ? WHERE id = ?`), "proj-2", agentArtID)
+	}
+
+	rec := doAgentJSON(svc, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests",
+		PrincipalKindAgent, "agent-1", "proj-1", CreateReviewRequestsBody{
+			Delegator: true,
+			Reviewers: []string{"user:bob"},
+		})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("delegator missing + concurrent move = %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	reqs, err := st.ListReviewRequests(ctx, agentArtID, 10)
+	if err != nil {
+		t.Fatalf("ListReviewRequests: %v", err)
+	}
+	if len(reqs) != 0 {
+		t.Errorf("expected 0 review requests after 403, got %+v", reqs)
+	}
 }

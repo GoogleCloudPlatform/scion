@@ -661,10 +661,7 @@ func (s *sqlStore) WithdrawReviewRequest(ctx context.Context, artifactID, reques
 		return ReviewRequest{}, ErrRequestClosed
 	}
 
-	// Phase 4 hook: bounded grants (ReviewRequestAccessBounded) do not exist
-	// until Phase 4; when they do, delete existing.GrantID here if its
-	// created_by_ref is still BoundedReviewCreator. Raised grants are
-	// intentionally left in place (design §4.4).
+	// Clean up a still-role-gated bounded grant; see cleanupWithdrawnRequestGrantTx.
 	if err := s.cleanupWithdrawnRequestGrantTx(ctx, tx, existing, actor, at); err != nil {
 		return ReviewRequest{}, err
 	}

@@ -586,8 +586,9 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			Note:          req.Note,
 			Access:        reqAccess,
 		}, reviewRequestRemindCooldown, now, actor, grantOpt)
+		noTargetProcessed := len(results) == 0 || (delegatorMissing && len(results) == 1)
 		if errors.Is(err, ErrStewardPrecondition) && kind == PrincipalKindAgent {
-			if len(results) == 0 {
+			if noTargetProcessed {
 				writeError(w, http.StatusForbidden, "forbidden", "the artifact's home project or owner changed")
 				return
 			}
@@ -599,7 +600,7 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStewardPrecondition) {
-			if len(results) == 0 {
+			if noTargetProcessed {
 				writeNotFound(w)
 				return
 			}
@@ -619,7 +620,7 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if errors.Is(err, ErrNothingToReview) {
-			if len(results) == 0 {
+			if noTargetProcessed {
 				writeError(w, http.StatusConflict, CodeNothingToReview, "a review request needs an artifact with a published version")
 				return
 			}

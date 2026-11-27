@@ -173,7 +173,8 @@ func droppedCeilingOptionalScopes(candidates, issued []AgentTokenScope) []AgentT
 // requiring one of these scopes receives a 403 missing_scope error with the
 // reissue hint.
 var debugOnlyDroppedScopes = map[AgentTokenScope]bool{
-	ScopeProjectSkillWrite: true,
+	ScopeProjectSkillWrite:            true,
+	ScopeProjectArtifactRequestReview: true,
 }
 
 // debugOnlyDroppedScopesFromGrant returns the dropped scopes on grant that are

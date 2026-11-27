@@ -234,7 +234,7 @@ func (s *sqlStore) putGrantTx(ctx context.Context, tx *sql.Tx, g *Grant, maxGran
 				if wasRoleGated {
 					newBy = sql.NullString{String: PrincipalRef(actor.Kind, actor.Ref), Valid: true}
 				}
-				if existingExpired {
+				if fromReviewRequest && existingExpired {
 					newExpires = nil
 				}
 			}

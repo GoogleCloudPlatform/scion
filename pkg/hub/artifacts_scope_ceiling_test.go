@@ -298,12 +298,12 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	require.NotContains(t, parentScopes, ScopeProjectArtifactRead, "the parent's own token lacks the read scope")
 
 	// Both create responses warn that the non-demoted ceiling-optional scopes
-	// were left out (ptone/scion#4569); project:skill:write is demoted to Hub
-	// debug logging (ptone/scion#9452).
-	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview)
+	// were left out (ptone/scion#4569); project:skill:write and
+	// project:artifact:request_review are demoted to Hub debug logging (ptone/scion#9452).
+	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	childRec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "artifact-child"})
 	child, childEdge := f.createdAgent(t, childRec, "artifact-child")
-	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview)
+	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.read")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.update")
@@ -365,13 +365,19 @@ func TestDroppedScopesWarningText(t *testing.T) {
 	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite},
 		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite}}))
 
+	reqReviewOnly := droppedScopesWarning(&store.Agent{Slug: "worker-reqrev"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRequestReview}})
+	assert.Empty(t, reqReviewOnly, "project:artifact:request_review alone is demoted to Hub debug logging")
+	assert.Equal(t, []AgentTokenScope{ScopeProjectArtifactRequestReview},
+		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRequestReview}}))
+
 	combined := droppedScopesWarning(&store.Agent{Slug: "worker-all"},
-		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRequestReview, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
 	assert.Contains(t, combined, "without the project:artifact:read and project:artifact:write scopes:")
 	assert.NotContains(t, combined, string(ScopeProjectSkillWrite))
+	assert.NotContains(t, combined, string(ScopeProjectArtifactRequestReview))
 	assert.Contains(t, combined, "so operations requiring them will fail with missing_scope")
-	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite},
-		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}}))
+	assert.Equal(t, []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRequestReview},
+		debugOnlyDroppedScopesFromGrant(&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRequestReview, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}}))
 
 	slugged := droppedScopesWarning(&store.Agent{Slug: "worker-3", Name: "Worker 3 (docs site)"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
 	assert.Contains(t, slugged, "'scion reset-auth worker-3 --reissue-scopes'")
@@ -402,7 +408,7 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 	f := newMintFixture(t, "drop-warn")
 	capped := f.agent(t, "drop-warn-capped", AgentRoleBaseline, state.PhaseStopped)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, capped.ID, preArtifactReadCeiling(), provSession)
-	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite, ScopeProjectArtifactRequestReview}})
+	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
 
 	for name, dispatch := range map[string]func(context.Context) error{
 		"create": func(ctx context.Context) error {
