@@ -1986,6 +1986,30 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// uploads.max_pending_bytes_per_user warning (§3.11): warn (do not reject)
+	// when the per-user pending cap is below the largest effective per-file
+	// upload limit across workspace, attachment, and artifact settings.
+	if doc, ok := sectionDocs[opsettings.UploadsSectionName]; ok {
+		if cfg, err := opsettings.ParseUploadsDoc(doc); err == nil {
+			var us opsettings.UploadsSettings
+			_ = json.Unmarshal(doc, &us)
+			limits := s.ResolvedUploads()
+			if us.MaxAttachmentSize != nil {
+				limits.MaxAttachmentSize = *us.MaxAttachmentSize
+			}
+			if us.MaxWorkspaceFileSize != nil {
+				limits.MaxWorkspaceFileSize = *us.MaxWorkspaceFileSize
+			}
+			largest := max(limits.EffectiveMaxWorkspaceFileSize(), limits.EffectiveMaxAttachmentSize())
+			if art := ops.Artifacts(); art.MaxFileBytes > largest {
+				largest = art.MaxFileBytes
+			}
+			if warn := cfg.PendingBytesWarning(largest); warn != "" {
+				saveWarnings = append(saveWarnings, warn)
+			}
+		}
+	}
+
 	// Workstation: validate and prepare the settings.yaml part before any DB
 	// write, so a bad file-routed value or a file that cannot be edited
 	// writes nothing. The settings-file lock is held from here to the
@@ -3769,9 +3793,9 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys
 	"artifacts":         settingsTokenConfiguration, // artifact limits
 
-	"agent_delegation_policy":         settingsTokenRefused,       // which permissions may be delegated to agents
-	"chat_retention":                  settingsTokenRefused,       // written through PUT /api/v1/admin/chat-retention
-	"decision_retention":              settingsTokenRefused,       // written through PUT /api/v1/admin/decision-retention
+	"agent_delegation_policy":         settingsTokenRefused, // which permissions may be delegated to agents
+	"chat_retention":                  settingsTokenRefused, // written through PUT /api/v1/admin/chat-retention
+	"decision_retention":              settingsTokenRefused, // written through PUT /api/v1/admin/decision-retention
 	opsettings.AgentLimitsSectionName: settingsTokenRefused, // hub-operator run-limit ceilings
 }
 
