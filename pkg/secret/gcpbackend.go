@@ -628,9 +628,6 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			if sc.scope == store.ScopeHub && !hubRowDeliverable(&s) {
 				continue
 			}
-			// Non-deliverable, non-internal rows (e.g. on_demand) are never
-			// fetched and shadow lower-precedence candidates matching by name
-			// or effective env target.
 			// Hosted-mode reserved non-hub secrets (name scion-telemetry-gcp-credentials
 			// of any type, or file secrets targeting .scion/telemetry-gcp-credentials.json)
 			// must be dropped BEFORE non-deliverable shadow recording and merging so an
@@ -644,6 +641,9 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				}
 				continue
 			}
+			// Non-deliverable, non-internal rows (e.g. on_demand) are never
+			// fetched and shadow lower-precedence candidates matching by name
+			// or effective env target.
 			if !DeliverableType(s.SecretType) {
 				shadowed.Record(s.Key, scopeRank)
 				continue

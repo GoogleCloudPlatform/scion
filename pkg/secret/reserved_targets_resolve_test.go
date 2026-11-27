@@ -23,22 +23,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *testing.T) {
+func assertDropReservedFileTargetsPreservesHubCredential(t *testing.T, backend SecretBackend, hubID string) {
+	t.Helper()
 	ctx := context.Background()
-	st, err := newTestStore(":memory:")
-	if err != nil {
-		t.Fatalf("newTestStore: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	hubID := tid("hub-1")
 	projID := tid("proj-1")
 	userID := tid("user-1")
 	agentID := tid("agent-1")
-	backend := NewLocalBackend(st, hubID, "test-secret")
 
 	// Hub-scope telemetry credential file.
-	_, _, err = backend.Set(ctx, &SetSecretInput{
+	_, _, err := backend.Set(ctx, &SetSecretInput{
 		Name:       telemetryCredentialFileName,
 		Value:      "hub-sa-json",
 		SecretType: store.SecretTypeFile,
@@ -120,4 +113,29 @@ func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *te
 	if len(skipped) != 4 {
 		t.Fatalf("expected 4 skipped secrets, got %d: %v", len(skipped), skipped)
 	}
+}
+
+func TestLocalBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	hubID := tid("hub-1")
+	backend := NewLocalBackend(st, hubID, "test-secret")
+	assertDropReservedFileTargetsPreservesHubCredential(t, backend, hubID)
+}
+
+func TestGCPBackendResolve_DropReservedFileTargetsPreservesHubCredential(t *testing.T) {
+	st, err := newTestStore(":memory:")
+	if err != nil {
+		t.Fatalf("newTestStore: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	hubID := tid("hub-gcp-1")
+	mock := newMockSMClient()
+	backend := NewGCPBackendWithClient(st, mock, "test-project", hubID)
+	assertDropReservedFileTargetsPreservesHubCredential(t, backend, hubID)
 }

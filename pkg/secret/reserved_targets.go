@@ -48,13 +48,19 @@ func IsReservedEnvTarget(target string) bool {
 // IsReservedTelemetryCredentialFileTarget reports whether target resolves to
 // the well-known telemetry GCP credentials path (.scion/telemetry-gcp-credentials.json)
 // at a path-segment boundary, after slash normalization, path cleaning, and
-// ASCII/Unicode case folding (to cover case-insensitive broker hosts).
+// Unicode simple case folding (strings.EqualFold, covering case-insensitive
+// broker filesystems including U+017F long-s folding).
 func IsReservedTelemetryCredentialFileTarget(target string) bool {
 	if target == "" {
 		return false
 	}
-	cleaned := strings.ToLower(path.Clean(strings.ReplaceAll(target, "\\", "/")))
-	return cleaned == telemetryCredentialFilePath || strings.HasSuffix(cleaned, "/"+telemetryCredentialFilePath)
+	cleaned := path.Clean(strings.ReplaceAll(target, "\\", "/"))
+	dir, file := path.Split(cleaned)
+	if dir == "" {
+		return false
+	}
+	return strings.EqualFold(file, "telemetry-gcp-credentials.json") &&
+		strings.EqualFold(path.Base(path.Clean(dir)), ".scion")
 }
 
 // IsReservedTelemetryCredentialSecretName reports whether name is the

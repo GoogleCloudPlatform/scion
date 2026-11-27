@@ -140,6 +140,14 @@ func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 		Type:   store.SecretTypeFile,
 		Target: "~/.scion/telemetry-gcp-credentials.json",
 		Value:  `{"type":"service_account"}`,
+		Source: store.ScopeHub,
+	}}
+	nonHubCredsSecret := []ResolvedSecret{{
+		Name:   telemetryGCPCredentialsSecretName,
+		Type:   store.SecretTypeFile,
+		Target: "~/.config/other.json",
+		Value:  `{"type":"service_account"}`,
+		Source: store.ScopeProject,
 	}}
 
 	cases := []struct {
@@ -154,6 +162,13 @@ func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 			name:     "warns when GCP cloud on, block mode, no credentials secret",
 			agent:    blockAgent,
 			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: true,
+		},
+		{
+			name:     "warns when only non-hub credentials secret is present",
+			agent:    blockAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			secrets:  nonHubCredsSecret,
 			wantWarn: true,
 		},
 		{
