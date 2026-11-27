@@ -567,6 +567,7 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	_, err = f.store.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, ag.ID, edgeID, store.Deactivation{
 		Cause: store.EdgeDeactivationReincarnateReplaced,
 		At:    &now,
+		OpID:  api.NewUUID(),
 	})
 	require.NoError(t, err)
 	require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
