@@ -38,6 +38,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/githubfetch"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
@@ -162,7 +165,7 @@ func DetectRemoteType(uri string) RemoteTemplateType {
 	}
 
 	// GitHub folder URL
-	if u.Host == "github.com" && !isArchiveURL(uri) {
+	if strings.EqualFold(u.Hostname(), "github.com") && !isArchiveURL(uri) {
 		return RemoteTypeGitHub
 	}
 
@@ -202,28 +205,39 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 type RemoteDownloadFunc func(ctx context.Context, rawURL, authorization string) ([]byte, error)
 
 // FetchOptions configures FetchRemoteTemplateWithOptions. The zero value
-// fetches as FetchRemoteTemplate does without a token: HTTP downloads use
-// http.DefaultClient and nothing is limited.
+// fetches GitHub folders via pkg/githubfetch with NetworkSystem and
+// ImportLocalLimits, and non-GitHub archive URLs via http.DefaultClient.
 type FetchOptions struct {
-	// AuthToken authenticates GitHub folder fetches. "" fetches
-	// unauthenticated.
+	// AuthToken authenticates GitHub folder fetches when GitHubCredential is
+	// zero. "" fetches unauthenticated.
 	AuthToken string
-	// Download, when set, performs every HTTP download (GitHub tarballs and
-	// archive URLs) instead of http.DefaultClient.
+	// GitHubCredential, when non-zero, supplies the full githubfetch.Credential
+	// (token, principal scope, kind, and diagnostic hint) for GitHub folder
+	// fetches.
+	GitHubCredential githubfetch.Credential
+	// GitHubClient, when non-nil, is used for GitHub folder fetches instead of
+	// the default local NetworkSystem client.
+	GitHubClient *githubfetch.Client
+	// GitHubLimits optionally overrides the limits for GitHub folder fetches
+	// (defaults to githubfetch.ImportLocalLimits() when nil).
+	GitHubLimits *githubfetch.Limits
+	// Download, when set, performs non-GitHub HTTP archive downloads instead
+	// of http.DefaultClient.
 	Download RemoteDownloadFunc
 	// MaxBytes, when positive, caps the bytes of file content written while
-	// fetching, including temporary extraction and checkout copies.
+	// fetching non-GitHub sources (archives, rclone).
 	MaxBytes int64
 	// MaxFiles, when positive, caps the files and directories written while
-	// fetching, counted the same way.
+	// fetching non-GitHub sources.
 	MaxFiles int
 	// MaxUnpackedBytes, when positive, caps the decompressed bytes read from
-	// an archive in each pass over it (a gzip bomb stops here even when most
-	// of its entries are skipped).
+	// a non-GitHub archive in each pass over it (a gzip bomb stops here even
+	// when most of its entries are skipped).
 	MaxUnpackedBytes int64
 	// PrivateCacheDir fetches into a new directory of this fetch's own
 	// under the cache, instead of the per-URI directory, so concurrent
-	// fetches of one URI do not share a tree. The caller removes it.
+	// fetches of one URI do not share a tree. GitHub folder fetches always
+	// use a private per-call staging directory. The caller removes it.
 	PrivateCacheDir bool
 }
 
@@ -378,25 +392,10 @@ type RemoteFetchResult struct {
 	Commit string
 }
 
-var gitCommitSHARe = regexp.MustCompile(`^[0-9a-f]{40}$`)
-
-func validateGitCommitSHA(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	if !gitCommitSHARe.MatchString(trimmed) {
-		slog.Debug("ignoring invalid remote template commit", "raw", trimmed)
-		return ""
-	}
-	return trimmed
-}
-
 // FetchRemoteTemplateWithOptions is FetchRemoteTemplate with the download
-// hook, limits and cache directory choice of opts. When a limit is set (or
-// PrivateCacheDir) and the fetch fails, the partially filled cache
-// directory is removed. With a limit set, a GitHub folder whose tarball
-// cannot be downloaded is not retried with a git checkout.
+// hook, GitHub client/limits, and cache directory choice of opts. When a limit
+// is set (or PrivateCacheDir, or any GitHub folder fetch) and the fetch fails,
+// the partially filled cache directory is removed.
 func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchOptions) (string, error) {
 	res, err := FetchRemoteTemplateWithResult(ctx, uri, opts)
 	if err != nil {
@@ -409,7 +408,6 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 // both the local cache directory and the resolved GitHub commit SHA (when
 // fetched from a GitHub folder).
 func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOptions) (*RemoteFetchResult, error) {
-	token := opts.AuthToken
 	budget := newFetchBudget(opts)
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
@@ -420,7 +418,9 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 	cacheKey := generateCacheKey(uri)
 	templateCachePath := filepath.Join(cacheDir, cacheKey)
 
-	if opts.PrivateCacheDir {
+	isGitHub := DetectRemoteType(uri) == RemoteTypeGitHub
+	privateDir := opts.PrivateCacheDir || isGitHub
+	if privateDir {
 		// A directory of this fetch's own, so concurrent fetches of the
 		// same URI cannot remove or mix each other's trees.
 		if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -443,9 +443,15 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 		}
 	}
 
-	f := &remoteFetcher{download: opts.Download, budget: budget}
-	if err := f.fetchInto(ctx, uri, templateCachePath, token); err != nil {
-		if budget != nil || opts.PrivateCacheDir {
+	cred := resolveFetchCredential(opts)
+	f := &remoteFetcher{
+		download: opts.Download,
+		budget:   budget,
+		ghClient: opts.GitHubClient,
+		ghLimits: opts.GitHubLimits,
+	}
+	if err := f.fetchInto(ctx, uri, templateCachePath, cred); err != nil {
+		if budget != nil || privateDir {
 			_ = os.RemoveAll(templateCachePath)
 		}
 		return nil, err
@@ -464,19 +470,70 @@ func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOp
 	}, nil
 }
 
-// remoteFetcher carries the download hook and budget of one fetch. The
-// zero value is the unlimited http.DefaultClient fetch.
+func resolveFetchCredential(opts FetchOptions) githubfetch.Credential {
+	c := opts.GitHubCredential
+	if c.Token != "" || c.Scope != "" || c.Hint != "" || c.Kind != githubfetch.CredAnonymous {
+		return c
+	}
+	if opts.AuthToken != "" {
+		return githubfetch.Credential{
+			Token: opts.AuthToken,
+			Scope: "env:" + githubfetch.TokenFingerprint(opts.AuthToken)[:32],
+			Kind:  githubfetch.CredEnv,
+		}
+	}
+	return githubfetch.Credential{
+		Scope: githubfetch.AnonScope,
+		Kind:  githubfetch.CredAnonymous,
+	}
+}
+
+// EnvGitHubCredential resolves the local CLI/process environment credential
+// for sourceURL in the unified order GH_{OWNER}__{REPO} > GH_{OWNER} >
+// GITHUB_TOKEN, returning a githubfetch.Credential. Non-GitHub sources return
+// an anonymous credential without reading environment variables.
+func EnvGitHubCredential(sourceURL string) githubfetch.Credential {
+	cred, _ := EnvGitHubCredentialWithName(sourceURL)
+	return cred
+}
+
+// EnvGitHubCredentialWithName is EnvGitHubCredential returning the environment
+// variable name that supplied the token (or "" when anonymous), so callers can
+// log the variable name without ever logging its value.
+func EnvGitHubCredentialWithName(sourceURL string) (githubfetch.Credential, string) {
+	owner, repo, ok := GitHubRepoForURL(sourceURL)
+	if !ok {
+		return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}, ""
+	}
+	val, name := ghauth.Lookup(owner, repo, os.Getenv)
+	if val == "" {
+		val, name = os.Getenv(ghauth.DefaultKey), ghauth.DefaultKey
+	}
+	if val == "" {
+		return githubfetch.Credential{Scope: githubfetch.AnonScope, Kind: githubfetch.CredAnonymous}, ""
+	}
+	return githubfetch.Credential{
+		Token: val,
+		Scope: "env:" + githubfetch.TokenFingerprint(val)[:32],
+		Kind:  githubfetch.CredEnv,
+	}, name
+}
+
+// remoteFetcher carries the download hook, GitHub client, and budget of one
+// fetch.
 type remoteFetcher struct {
 	download     RemoteDownloadFunc
 	budget       *fetchBudget
+	ghClient     *githubfetch.Client
+	ghLimits     *githubfetch.Limits
 	sourceCommit string
 }
 
 // fetchInto fetches uri into the existing directory destPath.
-func (f *remoteFetcher) fetchInto(ctx context.Context, uri, destPath, token string) error {
+func (f *remoteFetcher) fetchInto(ctx context.Context, uri, destPath string, cred githubfetch.Credential) error {
 	switch DetectRemoteType(uri) {
 	case RemoteTypeGitHub:
-		if err := f.fetchGitHubFolder(ctx, uri, destPath, token); err != nil {
+		if err := f.fetchGitHubFolder(ctx, uri, destPath, cred); err != nil {
 			return fmt.Errorf("failed to fetch GitHub folder: %w", err)
 		}
 	case RemoteTypeArchive:
@@ -586,123 +643,80 @@ func generateCacheKey(uri string) string {
 	return fmt.Sprintf("%x", hash[:8]) // Use first 8 bytes (16 hex chars)
 }
 
-// fetchGitHubFolder fetches a folder from a GitHub repository.
-// Uses the GitHub tarball API (plain HTTPS, no git binary required),
-// with a fallback to sparse git checkout. When token is non-empty it is
-// used for authentication (e.g. a GitHub App installation token).
-func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token string) error {
-	return (&remoteFetcher{}).fetchGitHubFolder(ctx, uri, destPath, token)
+// defaultGitHubClientForTest, when non-nil, overrides defaultLocalGitHubClient
+// so tests in pkg/config, cmd, and pkg/hub can inject an httptest-backed
+// githubfetch.Client without contacting the network.
+var defaultGitHubClientForTest *githubfetch.Client
+
+// SetGitHubClientForTest replaces the default githubfetch.Client used by
+// FetchRemoteTemplate for GitHub folder fetches when FetchOptions.GitHubClient
+// is nil, and returns a func that restores the previous client.
+//
+// TEST-ONLY: never call this from production code. It mutates package-global
+// state and is not safe for use from parallel tests.
+func SetGitHubClientForTest(c *githubfetch.Client) (restore func()) {
+	prev := defaultGitHubClientForTest
+	defaultGitHubClientForTest = c
+	return func() { defaultGitHubClientForTest = prev }
 }
 
-func (f *remoteFetcher) fetchGitHubFolder(ctx context.Context, uri string, destPath string, token string) error {
-	parsed, err := parseGitHubURL(uri)
+func defaultLocalGitHubClient(lim githubfetch.Limits) *githubfetch.Client {
+	if defaultGitHubClientForTest != nil {
+		return defaultGitHubClientForTest
+	}
+	ep := githubfetch.DefaultEndpoint()
+	reqTimeout := lim.RequestTimeout
+	if reqTimeout <= 0 {
+		reqTimeout = lim.Timeout
+	}
+	doer := githubfetch.NewDoer(ep, remotefetch.NetworkSystem, lim.MaxDownload, reqTimeout, slog.Default())
+	return githubfetch.New(githubfetch.Options{
+		Endpoint:   ep,
+		Doer:       doer,
+		Cooldown:   githubfetch.SharedCooldown(),
+		MaxRetries: 3,
+	})
+}
+
+// fetchGitHubFolder fetches a folder from a GitHub repository via
+// pkg/githubfetch into destPath opened as an *os.Root. No git binary is
+// invoked.
+func (f *remoteFetcher) fetchGitHubFolder(ctx context.Context, uri, destPath string, cred githubfetch.Credential) error {
+	src, err := githubfetch.ParseURL(uri)
 	if err != nil {
 		return err
 	}
-
-	// Resolve branch names that may contain slashes
-	resolveGitHubRef(ctx, parsed, token)
-
-	if _, err := cleanRemoteSubPath(parsed.Path); err != nil {
-		return err
+	lim := githubfetch.ImportLocalLimits()
+	if f.ghLimits != nil {
+		lim = *f.ghLimits
 	}
-
-	// Try GitHub tarball download first (works without git installed)
-	err = f.fetchGitHubTarball(ctx, parsed, destPath, token)
-	if err == nil {
-		return nil
+	client := f.ghClient
+	if client == nil {
+		client = defaultLocalGitHubClient(lim)
 	}
-	if errors.Is(err, errRemoteContentRefused) || errors.Is(err, ErrRemoteFetchLimit) {
-		// The content was fetched but refused, or is over a limit; a sparse
-		// checkout of the same content would be refused too, so keep the
-		// clear error.
-		return err
-	}
-	if f.budget != nil {
-		// A limited fetch has no git fallback: git fetches every blob of
-		// the commit, which the limits cannot bound.
-		return err
-	}
-
-	// Fall back to sparse git checkout
-	commit, err := sparseGitCheckoutWithCommit(ctx, parsed, destPath, token)
+	root, err := os.OpenRoot(destPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open staging directory: %w", err)
 	}
-	f.sourceCommit = commit
+	res, fetchErr := client.FetchFolder(ctx, src, cred, root, lim)
+	closeErr := root.Close()
+	if fetchErr != nil {
+		return fetchErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	f.sourceCommit = res.CommitSHA
 	return nil
 }
 
-// errRemoteContentRefused marks errors where fetched template content (or the
-// requested sub-path) is refused, as opposed to a download or checkout
-// failure. fetchGitHubFolder does not fall back to a sparse checkout for it.
-var errRemoteContentRefused = errors.New("remote template content refused")
-
-// cleanRemoteSubPath returns subPath cleaned ("." for the repository root).
-// It refuses a sub-path that is not local to the repository (absolute, or
-// with ".." leaving it) or that has a .git component.
-func cleanRemoteSubPath(subPath string) (string, error) {
-	sub := filepath.Clean(subPath)
-	if subPath == "" {
-		sub = "."
-	}
-	if !filepath.IsLocal(sub) {
-		return "", fmt.Errorf("path %s is not inside the repository: %w", subPath, errRemoteContentRefused)
-	}
-	for _, part := range strings.Split(sub, string(filepath.Separator)) {
-		if part == ".git" {
-			return "", fmt.Errorf("path %s is inside a .git directory: %w", subPath, errRemoteContentRefused)
-		}
-	}
-	return sub, nil
-}
-
-// GitLsRemoteFunc runs `git ls-remote --heads <repoURL>` and returns its
-// stdout, authenticating with token when it is non-empty. repoURL is the plain
-// repository URL. It is the signature of the ls-remote seam used by
-// resolveGitHubRef.
-type GitLsRemoteFunc func(ctx context.Context, repoURL, token string) ([]byte, error)
-
-// gitLsRemote is the ls-remote runner used by resolveGitHubRef. It is a
-// package-level variable only so tests can replace it (see
-// SetGitLsRemoteForTest); production code never reassigns it.
-var gitLsRemote GitLsRemoteFunc = execGitLsRemote
-
-// gitLsRemoteTimeout bounds a single production `git ls-remote` invocation so
-// a stalled connection to the remote cannot hang a template import forever
-// (ptone/scion#3749). It is a variable only so tests can shorten it.
+// gitLsRemoteTimeout bounds a single production `git ls-remote` invocation for
+// welcome-project pinned ref resolution (execGitLsRemoteRef).
 var gitLsRemoteTimeout = 30 * time.Second
 
-// gitLsRemoteWaitDelay bounds how long execGitLsRemote waits for the git
-// process's output pipes to close after the timeout kills git. Without it, a
-// helper child (e.g. git-remote-https) that inherited the pipes could keep
-// cmd.Output blocked after git itself was killed.
+// gitLsRemoteWaitDelay bounds how long execGitLsRemoteRef waits for the git
+// process's output pipes to close after the timeout kills git.
 var gitLsRemoteWaitDelay = 5 * time.Second
-
-// execGitLsRemote is the production ls-remote runner: it shells out to the
-// git binary as host-side git (util.HostGitArgs, util.HostGitEnv) with the
-// remote authentication layer (util.HostGitRemoteEnv): no host credential, and
-// without a token git runs anonymously. When token is non-empty, git
-// authenticates through the credential helper scoped to repoURL's host only.
-// The invocation is bounded by gitLsRemoteTimeout (a shorter deadline on ctx
-// still wins); if that bound fires, a descriptive timeout error naming
-// owner/repo is returned.
-func execGitLsRemote(ctx context.Context, repoURL, token string) ([]byte, error) {
-	tctx, cancel := context.WithTimeout(ctx, gitLsRemoteTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(tctx, "git", append(util.HostGitArgs(), "ls-remote", "--heads", repoURL)...)
-	cmd.Env = util.HostGitRemoteEnv(util.HostGitEnv(os.Environ()), repoURL, token)
-	cmd.WaitDelay = gitLsRemoteWaitDelay
-	out, err := cmd.Output()
-	if err != nil && ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
-		// Our own bound fired (not the caller's ctx). Name the repository as
-		// owner/repo only, with any URL credentials stripped.
-		return out, fmt.Errorf("git ls-remote for %s timed out after %s: %w",
-			redactedRepoName(repoURL), gitLsRemoteTimeout, context.DeadlineExceeded)
-	}
-	return out, err
-}
 
 // redactedRepoName returns the "owner/repo" portion of a git remote URL with
 // any credentials stripped, for use in logs and error messages.
@@ -714,260 +728,6 @@ func redactedRepoName(repoURL string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(u.Path, "/"), ".git")
 }
 
-// SetGitLsRemoteForTest replaces the git ls-remote runner used when resolving
-// GitHub branch names that contain slashes, and returns a func that restores
-// the previous runner. It exists so tests in other packages (e.g. pkg/hub)
-// can keep remote-import paths hermetic instead of shelling out to a real
-// `git ls-remote` against github.com (ptone/scion#3670).
-//
-// TEST-ONLY: never call this from production code. It mutates package-global
-// state and is not safe for use from parallel tests.
-func SetGitLsRemoteForTest(fn GitLsRemoteFunc) (restore func()) {
-	prev := gitLsRemote
-	gitLsRemote = fn
-	return func() { gitLsRemote = prev }
-}
-
-// resolveGitHubRef uses git ls-remote to disambiguate branch names that may
-// contain slashes. It updates parts.Branch and parts.Path in place.
-// Falls back to the naive parse if git is unavailable or fails (silently),
-// or if ls-remote times out (with one warning log line).
-func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) {
-	afterTree := parts.Branch
-	if parts.Path != "" {
-		afterTree = parts.Branch + "/" + parts.Path
-	}
-
-	if !strings.Contains(afterTree, "/") {
-		return
-	}
-
-	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
-
-	output, err := gitLsRemote(ctx, repoURL, token)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			// Keep the naive parse, but make the stall visible. The error text
-			// names owner/repo only.
-			slog.Warn("git ls-remote timed out; using naive branch/path parse",
-				"repo", parts.Owner+"/"+parts.Repo, "error", err)
-		}
-		return
-	}
-
-	refs := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			continue
-		}
-		fields := strings.SplitN(line, "\t", 2)
-		if len(fields) == 2 {
-			ref := strings.TrimPrefix(fields[1], "refs/heads/")
-			refs[ref] = true
-		}
-	}
-
-	if branch, path, ok := matchBranchFromRefs(afterTree, refs); ok {
-		parts.Branch = branch
-		parts.Path = path
-	}
-}
-
-// matchBranchFromRefs finds the longest branch name from refs that is a prefix
-// of afterTree (the URL path segments after "tree/").
-func matchBranchFromRefs(afterTree string, refs map[string]bool) (branch, path string, found bool) {
-	bestMatch := ""
-	for ref := range refs {
-		if ref == afterTree || strings.HasPrefix(afterTree, ref+"/") {
-			if len(ref) > len(bestMatch) {
-				bestMatch = ref
-			}
-		}
-	}
-
-	if bestMatch == "" {
-		return "", "", false
-	}
-
-	rest := strings.TrimPrefix(afterTree, bestMatch)
-	return bestMatch, strings.TrimPrefix(rest, "/"), true
-}
-
-// GitHubAPITarballURL returns the GitHub REST API tarball URL for a repository
-// ref (branch, tag, commit SHA, or full ref such as "refs/heads/main"):
-// https://api.github.com/repos/<owner>/<repo>/tarball/<ref>.
-// It is used for credentialed tarball downloads so private repositories can be
-// fetched with an Authorization header sent only to api.github.com.
-func GitHubAPITarballURL(owner, repo, ref string) string {
-	refParts := strings.Split(ref, "/")
-	for i, p := range refParts {
-		refParts[i] = url.PathEscape(p)
-	}
-	return "https://api.github.com/repos/" +
-		url.PathEscape(owner) + "/" +
-		url.PathEscape(repo) + "/tarball/" +
-		strings.Join(refParts, "/")
-}
-
-// fetchGitHubTarball downloads the repo tarball from GitHub and extracts the
-// desired sub-path. This uses plain HTTPS and does not require git or svn.
-// When token is non-empty it uses the GitHub REST tarball endpoint on
-// api.github.com with a Bearer authorization header (which is not forwarded on
-// redirects to codeload); anonymous fetches use github.com archive URLs.
-func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
-	return (&remoteFetcher{}).fetchGitHubTarball(ctx, parts, destPath, token)
-}
-
-func (f *remoteFetcher) fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
-	branch := parts.Branch
-	if branch == "" {
-		branch = "main"
-	}
-
-	var body io.ReadCloser
-	var err error
-	if token != "" {
-		// Authenticated fetches use the GitHub REST tarball endpoint, which
-		// works for private repositories and resolves branches, tags and
-		// commit SHAs directly. Authorization is sent only to api.github.com
-		// and stripped on redirects.
-		tarballURL := GitHubAPITarballURL(parts.Owner, parts.Repo, branch)
-		body, err = f.get(ctx, tarballURL, "Bearer "+token, "tarball")
-	} else {
-		// Unauthenticated public fetches use github.com archive URLs. The
-		// ref may be a branch, a tag or a commit SHA; try each in turn.
-		archive := fmt.Sprintf("https://github.com/%s/%s/archive/", parts.Owner, parts.Repo)
-		for _, tarballURL := range []string{
-			archive + "refs/heads/" + branch + ".tar.gz",
-			archive + "refs/tags/" + branch + ".tar.gz",
-			archive + branch + ".tar.gz",
-		} {
-			body, err = f.get(ctx, tarballURL, "", "tarball")
-			if err == nil || errors.Is(err, ErrRemoteFetchLimit) || errors.Is(err, ErrRemoteDownloadTimeout) || ctx.Err() != nil {
-				break
-			}
-		}
-	}
-	if err != nil {
-		if errors.Is(err, ErrRemoteFetchLimit) {
-			return gitHubLimitHint(err)
-		}
-		var statusErr *remoteHTTPStatusError
-		if errors.As(err, &statusErr) && (statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden) {
-			return fmt.Errorf("GitHub authentication failed for %s/%s: %w", parts.Owner, parts.Repo, err)
-		}
-		if ctx.Err() == nil && !errors.Is(err, ErrRemoteDownloadTimeout) {
-			err = fmt.Errorf("GitHub branch, tag or commit %q was not found in %s/%s: %w", branch, parts.Owner, parts.Repo, err)
-		}
-		return err
-	}
-	defer func() { _ = body.Close() }()
-
-	// Save to a temp file
-	tmpFile, err := os.CreateTemp("", "scion-gh-tarball-*.tar.gz")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := io.Copy(tmpFile, body); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("failed to save tarball: %w", err)
-	}
-	_ = tmpFile.Close()
-
-	// If no sub-path, extract directly to destPath
-	subPath := strings.TrimRight(parts.Path, "/")
-	if subPath == "" {
-		return gitHubLimitHint(f.extractTarGz(tmpPath, destPath))
-	}
-
-	// Extract to a temp directory, then copy the desired sub-path
-	tmpExtract, err := os.MkdirTemp("", "scion-gh-extract-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpExtract) }()
-
-	if err := f.extractTarGz(tmpPath, tmpExtract); err != nil {
-		return gitHubLimitHint(err)
-	}
-
-	return gitHubLimitHint(f.copyDirExcludingGit(tmpExtract, subPath, destPath))
-}
-
-// gitHubLimitHint adds to a limit error of a GitHub folder fetch that the
-// whole repository counts toward the limits; other errors are unchanged.
-func gitHubLimitHint(err error) error {
-	if err == nil || !errors.Is(err, ErrRemoteFetchLimit) {
-		return err
-	}
-	return fmt.Errorf("%w; a GitHub folder import downloads and unpacks the whole repository, "+
-		"so import from a smaller repository or ask a Hub administrator to allowlist a source ("+AllowedImportSourcesKey+")", err)
-}
-
-// GitHubURLParts contains parsed parts of a GitHub URL.
-type GitHubURLParts struct {
-	Owner  string
-	Repo   string
-	Branch string
-	Path   string
-}
-
-// parseGitHubURL extracts components from a GitHub folder URL.
-func parseGitHubURL(uri string) (*GitHubURLParts, error) {
-	// Patterns to match:
-	// https://github.com/owner/repo/tree/branch/path/to/folder
-	// https://github.com/owner/repo/tree/branch (repo root at branch)
-	// https://github.com/owner/repo/path/to/folder (defaults to main branch)
-	// https://github.com/owner/repo (repo root, defaults to main branch)
-
-	u, err := url.Parse(uri)
-	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
-	}
-
-	if u.Host != "github.com" {
-		return nil, fmt.Errorf("not a GitHub URL: %s", uri)
-	}
-
-	// Remove leading slash and split path
-	pathParts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-
-	if len(pathParts) < 2 {
-		return nil, fmt.Errorf("invalid GitHub URL format, expected owner/repo: %s", uri)
-	}
-
-	result := &GitHubURLParts{
-		Owner: pathParts[0],
-		Repo:  pathParts[1],
-	}
-
-	// Check for tree/branch/path format
-	if len(pathParts) >= 4 && pathParts[2] == "tree" {
-		result.Branch = pathParts[3]
-		if len(pathParts) > 4 {
-			result.Path = strings.Join(pathParts[4:], "/")
-		}
-	} else if len(pathParts) == 2 {
-		// Just owner/repo, default to main branch
-		result.Branch = "main"
-	} else if len(pathParts) > 2 {
-		// Direct path without /tree/branch/ — default to main branch
-		// e.g., https://github.com/org/repo/some/path/.scion/templates
-		result.Branch = "main"
-		result.Path = strings.Join(pathParts[2:], "/")
-	}
-
-	// Trim trailing slashes from the path to normalise URLs like
-	// .../tree/main/harnesses/ that browsers copy with a trailing slash.
-	result.Path = strings.TrimRight(result.Path, "/")
-
-	return result, nil
-}
-
 // GitHubRepoForURL returns the owner and repository of uri when
 // FetchRemoteTemplate would fetch it as a GitHub folder (the only remote type
 // that sends a credential). ok is false for archive, rclone and other URLs,
@@ -976,311 +736,11 @@ func GitHubRepoForURL(uri string) (owner, repo string, ok bool) {
 	if DetectRemoteType(uri) != RemoteTypeGitHub {
 		return "", "", false
 	}
-	parts, err := parseGitHubURL(uri)
-	if err != nil || parts.Owner == "" || parts.Repo == "" {
+	src, err := githubfetch.ParseURL(uri)
+	if err != nil || src.Owner == "" || src.Repo == "" {
 		return "", "", false
 	}
-	return parts.Owner, parts.Repo, true
-}
-
-// GitSparseCheckoutFunc performs a sparse checkout of parts (a GitHub repo,
-// branch and optional sub-path) into destPath, authenticating with token when
-// it is non-empty. It is the signature of the sparse-checkout seam used by
-// fetchGitHubFolder.
-type GitSparseCheckoutFunc func(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error
-
-// sparseGitCheckout is the sparse-checkout runner used by fetchGitHubFolder
-// when the tarball download fails. It is a package-level variable only so
-// tests can replace it (see SetGitSparseCheckoutForTest); production code
-// never reassigns it.
-var sparseGitCheckout GitSparseCheckoutFunc = execSparseGitCheckout
-
-// sparseGitCheckoutWithCommit is the commit-returning counterpart invoked by
-// fetchGitHubFolder. SetGitSparseCheckoutForTest wraps custom test stubs so
-// production code never relies on reflection to compare function pointers.
-var sparseGitCheckoutWithCommit = execSparseGitCheckoutWithCommit
-
-// SetGitSparseCheckoutForTest replaces the sparse git checkout runner used as
-// the fallback when a GitHub tarball download fails, and returns a func that
-// restores the previous runner. It exists so tests in other packages (e.g.
-// pkg/hub) can keep remote-import paths hermetic instead of shelling out to a
-// real `git fetch` against github.com (ptone/scion#3750).
-//
-// TEST-ONLY: never call this from production code. It mutates package-global
-// state and is not safe for use from parallel tests.
-func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
-	prev := sparseGitCheckout
-	prevWithCommit := sparseGitCheckoutWithCommit
-	sparseGitCheckout = fn
-	if fn == nil {
-		sparseGitCheckoutWithCommit = nil
-	} else {
-		sparseGitCheckoutWithCommit = func(ctx context.Context, parts *GitHubURLParts, destPath, token string) (string, error) {
-			return "", fn(ctx, parts, destPath, token)
-		}
-	}
-	return func() {
-		sparseGitCheckout = prev
-		sparseGitCheckoutWithCommit = prevWithCommit
-	}
-}
-
-// ProductionGitSparseCheckoutForTest returns the production sparse-checkout
-// runner. Test binaries that install a hermetic runner for every test (pkg/hub
-// does, see SetGitSparseCheckoutForTest) use it to run the real checkout and
-// copy code in one test, with a fake git first on PATH so nothing reaches the
-// network.
-//
-// TEST-ONLY: never call this from production code.
-func ProductionGitSparseCheckoutForTest() GitSparseCheckoutFunc {
-	return execSparseGitCheckout
-}
-
-// execSparseGitCheckout is the production sparse-checkout runner: it performs
-// a sparse git checkout to get only the needed folder.
-// Every git command runs with the remote authentication layer
-// (util.HostGitRemoteEnv): no host credential, and without a token git runs
-// anonymously. When token is non-empty, git authenticates through the
-// credential helper scoped to the remote URL's host only.
-func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
-	_, err := execSparseGitCheckoutWithCommit(ctx, parts, destPath, token)
-	return err
-}
-
-func execSparseGitCheckoutWithCommit(ctx context.Context, parts *GitHubURLParts, destPath string, token string) (string, error) {
-	// Create a temporary directory for the git clone
-	tmpDir, err := os.MkdirTemp("", "scion-git-sparse-*")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(tmpDir) }()
-
-	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
-
-	// Host-side git for the template cache: run with the fixed pins (no
-	// repository hooks, fsmonitor, pager; ext transport off) and with the LFS
-	// smudge skipped, so the checkout below never resolves an LFS pointer
-	// through an endpoint named in the template's own tracked .lfsconfig.
-	// The remote layer applies to every command here; it changes nothing for
-	// the local ones (init, remote add, config, checkout). A token is offered
-	// to https://github.com and to no other endpoint.
-	gitEnv := util.HostGitRemoteEnv(
-		append(util.HostGitEnv(os.Environ()), "GIT_LFS_SKIP_SMUDGE=1"), repoURL, token)
-
-	// Initialize git repo with sparse checkout
-	commands := [][]string{
-		{"git", "init"},
-		{"git", "remote", "add", "origin", repoURL},
-		{"git", "config", "core.sparseCheckout", "true"},
-	}
-
-	for _, args := range commands {
-		cmd := exec.CommandContext(ctx, args[0], append(util.HostGitArgs(), args[1:]...)...)
-		cmd.Dir = tmpDir
-		cmd.Env = gitEnv
-		if err := cmd.Run(); err != nil {
-			return "", fmt.Errorf("git command %v failed: %w", args, err)
-		}
-	}
-
-	// Write sparse-checkout config
-	sparseCheckoutPath := filepath.Join(tmpDir, ".git", "info", "sparse-checkout")
-	if err := os.MkdirAll(filepath.Dir(sparseCheckoutPath), 0755); err != nil {
-		return "", err
-	}
-
-	// If there's a path, only check out that path; otherwise, check out everything
-	sparsePattern := "/**"
-	if parts.Path != "" {
-		sparsePattern = parts.Path + "/**"
-	}
-	if err := os.WriteFile(sparseCheckoutPath, []byte(sparsePattern+"\n"), 0644); err != nil {
-		return "", fmt.Errorf("failed to write sparse-checkout config: %w", err)
-	}
-
-	// Fetch and checkout the branch
-	var stderrBuf strings.Builder
-	fetchCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "fetch", "--depth=1", "origin", parts.Branch)...)
-	fetchCmd.Dir = tmpDir
-	fetchCmd.Env = gitEnv
-	fetchCmd.Stderr = &stderrBuf
-	if err := fetchCmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderrBuf.String())
-		if detail != "" {
-			return "", fmt.Errorf("git fetch failed: %s", detail)
-		}
-		return "", fmt.Errorf("git fetch failed: %w", err)
-	}
-
-	stderrBuf.Reset()
-	checkoutCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "checkout", parts.Branch)...)
-	checkoutCmd.Dir = tmpDir
-	checkoutCmd.Env = gitEnv
-	checkoutCmd.Stderr = &stderrBuf
-	if err := checkoutCmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderrBuf.String())
-		if detail != "" {
-			return "", fmt.Errorf("git checkout failed: %s", detail)
-		}
-		return "", fmt.Errorf("git checkout failed: %w", err)
-	}
-
-	// Capture checked-out commit SHA (best-effort; empty if unavailable).
-	var commit string
-	revCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "rev-parse", "HEAD")...)
-	revCmd.Dir = tmpDir
-	revCmd.Env = gitEnv
-	if out, err := revCmd.Output(); err == nil {
-		commit = validateGitCommitSHA(string(out))
-	}
-
-	// Copy the desired folder to the destination, excluding .git. The
-	// checkout may contain symbolic links (git materialises them as links);
-	// copyDirExcludingGit never follows or copies them, so the template holds
-	// regular files and directories only.
-	if err := copyDirExcludingGit(tmpDir, parts.Path, destPath); err != nil {
-		return "", err
-	}
-	return commit, nil
-}
-
-// copyDirExcludingGit copies the directory subPath of baseDir into dst,
-// excluding .git directories. subPath is relative to baseDir ("" or "." for
-// baseDir itself), must stay inside it, and must not name a .git directory
-// (cleanRemoteSubPath).
-//
-// Fetched content is untrusted, so the copy never follows symbolic links:
-//   - the source is read only through an os.Root opened at baseDir, so no
-//     path (including a ".." in subPath) can resolve outside it;
-//   - every component of subPath must be a real directory, not a link;
-//   - symbolic links and other non-regular entries inside the tree are
-//     skipped (logged), never followed or recreated;
-//   - each regular file is opened only after an Lstat confirms it is a
-//     regular file, and the opened file must be the same file (os.SameFile),
-//     which gives O_NOFOLLOW semantics without relying on the open flag.
-//
-// Writes go through an os.Root opened at dst. The result therefore contains
-// regular files and directories only.
-func copyDirExcludingGit(baseDir, subPath, dst string) error {
-	return (&remoteFetcher{}).copyDirExcludingGit(baseDir, subPath, dst)
-}
-
-func (f *remoteFetcher) copyDirExcludingGit(baseDir, subPath, dst string) error {
-	sub, err := cleanRemoteSubPath(subPath)
-	if err != nil {
-		return err
-	}
-
-	srcRoot, err := os.OpenRoot(baseDir)
-	if err != nil {
-		return fmt.Errorf("failed to open source directory: %w", err)
-	}
-	defer func() { _ = srcRoot.Close() }()
-
-	if err := checkRealDirPath(srcRoot, sub, subPath); err != nil {
-		return err
-	}
-
-	dstRoot, err := os.OpenRoot(dst)
-	if err != nil {
-		return fmt.Errorf("failed to open destination directory: %w", err)
-	}
-	defer func() { _ = dstRoot.Close() }()
-
-	walkRoot := filepath.ToSlash(sub)
-	return iofs.WalkDir(srcRoot.FS(), walkRoot, func(p string, d iofs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		srcName := filepath.FromSlash(p)
-		rel, err := filepath.Rel(sub, srcName)
-		if err != nil {
-			return err
-		}
-
-		switch {
-		case d.IsDir():
-			if rel == "." {
-				return nil
-			}
-			if d.Name() == ".git" {
-				return iofs.SkipDir
-			}
-			info, err := d.Info()
-			if err != nil {
-				return err
-			}
-			if err := f.budget.addPath(dst, rel, true); err != nil {
-				return err
-			}
-			return dstRoot.MkdirAll(rel, dirPerm(info.Mode()))
-		case d.Type().IsRegular():
-			if err := f.budget.addPath(dst, rel, false); err != nil {
-				return err
-			}
-			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel, f.budget)
-		default:
-			// Symbolic links, devices, sockets and pipes are never copied.
-			slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(rel), "type", d.Type().String())
-			return nil
-		}
-	})
-}
-
-// checkRealDirPath verifies that every component of sub (a local, cleaned
-// path) inside root is a directory and not a symbolic link. display is the
-// path as the caller named it, used in error messages.
-func checkRealDirPath(root *os.Root, sub, display string) error {
-	if sub == "." {
-		return nil
-	}
-	cur := ""
-	for _, part := range strings.Split(sub, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
-		info, err := root.Lstat(cur)
-		if errors.Is(err, iofs.ErrNotExist) {
-			return fmt.Errorf("path %s not found in repository", display)
-		}
-		if err != nil {
-			return fmt.Errorf("failed to inspect path %s: %w", display, err)
-		}
-		if info.Mode()&iofs.ModeSymlink != 0 {
-			return fmt.Errorf("path %s in repository goes through a symbolic link: %w", display, errRemoteContentRefused)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("path %s in repository is not a directory: %w", display, errRemoteContentRefused)
-		}
-	}
-	return nil
-}
-
-// copyRegularFileNoFollow copies the regular file srcName in srcRoot to
-// dstName in dstRoot. It refuses anything that is not a regular file at the
-// time of the Lstat, and anything that is not that same file once opened.
-func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string, budget *fetchBudget) error {
-	linfo, err := srcRoot.Lstat(srcName)
-	if err != nil {
-		return err
-	}
-	if !linfo.Mode().IsRegular() {
-		slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(dstName), "type", linfo.Mode().Type().String())
-		return nil
-	}
-
-	in, err := srcRoot.Open(srcName)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	oinfo, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	if !oinfo.Mode().IsRegular() || !os.SameFile(linfo, oinfo) {
-		return fmt.Errorf("file %s changed while copying the remote template: %w", filepath.ToSlash(dstName), errRemoteContentRefused)
-	}
-
-	return writeFileInRoot(dstRoot, dstName, budget.content(in), linfo.Mode())
+	return src.Owner, src.Repo, true
 }
 
 // writeFileInRoot creates (or truncates) the regular file name inside root,
@@ -1583,9 +1043,6 @@ func (rf *remoteFetcher) extractTarGz(tarGzPath, destPath string) error {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 		if header.Typeflag == tar.TypeXGlobalHeader {
-			if rf.sourceCommit == "" {
-				rf.sourceCommit = validateGitCommitSHA(header.PAXRecords["comment"])
-			}
 			continue
 		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
@@ -1885,7 +1342,7 @@ func ValidateRemoteURI(uri string) error {
 	switch remoteType {
 	case RemoteTypeGitHub:
 		// Validate GitHub URL format
-		_, err := parseGitHubURL(uri)
+		_, err := githubfetch.ParseURL(uri)
 		return err
 
 	case RemoteTypeArchive:

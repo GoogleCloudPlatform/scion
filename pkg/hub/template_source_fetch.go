@@ -31,10 +31,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// templateSourceHosts is retained for import_source_guard.go until Phase 2
-// migrates general GitHub imports onto pkg/githubfetch.
-var templateSourceHosts = []string{"github.com", "api.github.com", "codeload.github.com"}
-
 // errTemplateSourceTooLarge, cappedReader and extractFileMode are retained for
 // welcome_stage.go until Phase 7 migrates welcome archive extraction.
 var errTemplateSourceTooLarge = errors.New("template source exceeds the size limit")

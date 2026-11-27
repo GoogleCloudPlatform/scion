@@ -62,5 +62,5 @@ func TestImportSource_FileCountLimit(t *testing.T) {
 		"sourceUrl": "https://github.com/acme/repo/tree/main/templates",
 	})
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "exceeds the size or file-count limit")
+	assert.Contains(t, rec.Body.String(), "exceeds the size or file count limit")
 }

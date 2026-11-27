@@ -38,18 +38,6 @@ func clearAmbientGCPProjectEnv() {
 	hubtestutil.ClearAmbientGCPProjectEnv()
 }
 
-type gitLsRemoteStub = hubtestutil.GitLsRemoteStub
-
-type gitSparseCheckoutStub = hubtestutil.GitSparseCheckoutStub
-
-func installHermeticGitLsRemote() (restore func()) {
-	return hubtestutil.InstallHermeticGitLsRemote()
-}
-
-func installHermeticGitSparseCheckout() (restore func()) {
-	return hubtestutil.InstallHermeticGitSparseCheckout()
-}
-
 type leakGuardResult = hubtestutil.LeakGuardResult
 
 var leakGuardSignatures = hubtestutil.LeakGuardSignatures
@@ -105,16 +93,6 @@ func startMemGuard() (stop func()) {
 }
 
 type storeFaultSwitch = hubtestutil.StoreFaultSwitch
-
-func stubGitLsRemote(t *testing.T, output string) *gitLsRemoteStub {
-	t.Helper()
-	return hubtestutil.StubGitLsRemote(t, output)
-}
-
-func stubGitSparseCheckout(t *testing.T, files map[string]string) *gitSparseCheckoutStub {
-	t.Helper()
-	return hubtestutil.StubGitSparseCheckout(t, files)
-}
 
 type syncBuffer = hubtestutil.SyncBuffer
 
