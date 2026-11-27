@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -909,4 +910,48 @@ func TestPatchAgentLabels_PatchAgentPreReadBodyLimit(t *testing.T) {
 		assert.Equal(t, map[string]string{"env": "prod", "team": "core"}, got.Labels)
 		assert.Len(t, f.labelAudits(t, f.agent.ID), 1)
 	})
+
+	t.Run("agent caller pre-read restores r.Body for downstream readers", func(t *testing.T) {
+		payload := []byte(`{"labels":{"env":"hacked"}}`)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, bytes.NewReader(payload))
+		req = req.WithContext(contextWithIdentity(req.Context(), &DelegatedAgentIdentity{agentID: f.agent.ID}))
+		rec := httptest.NewRecorder()
+		f.srv.applyAgentUpdate(rec, req, f.agent)
+
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		restored, err := io.ReadAll(req.Body)
+		require.NoError(t, err)
+		assert.Equal(t, payload, restored, "r.Body must be restored after agent pre-read")
+	})
+}
+
+func TestPatchAgentLabels_MergeBodyLimit(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	oversized := PatchAgentLabelsRequest{
+		Set: map[string]string{
+			"env": "prod",
+			"pad": strings.Repeat("a", maxSettingsBodySize+1024),
+		},
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"by-id route", "/api/v1/agents/" + f.agent.ID + "/labels"},
+		{"project-scoped route", "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug + "/labels"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, tc.path, oversized)
+
+			assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "payload_too_large")
+
+			got, err := f.s.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+			assert.Empty(t, f.labelAudits(t, f.agent.ID))
+		})
+	}
 }

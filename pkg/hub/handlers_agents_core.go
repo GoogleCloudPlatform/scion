@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -5012,6 +5013,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
 		}
+		r.Body = io.NopCloser(bytes.NewReader(preReadBody))
 		bodyPreRead = true
 		if patchBodyHasLabelsField(preReadBody) {
 			writeForbidden(w, errMsgAgentsCannotEditLabels)

@@ -124,8 +124,16 @@ func (s *Server) applyAgentLabelsMerge(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxSettingsBodySize)
+	}
 	var req PatchAgentLabelsRequest
 	if err := readJSON(r, &req); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				"request body exceeds maximum size", nil)
+			return
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
