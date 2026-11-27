@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -89,7 +91,6 @@ type conduitHANode struct {
 	internalSelfProbes atomic.Int64
 
 	stopOnce sync.Once
-	stopped  atomic.Bool
 }
 
 // InternalRPCHops returns the number of internal relay RPC hop requests
@@ -106,7 +107,10 @@ func (n *conduitHANode) InternalStreamHops() int64 {
 	return n.internalStreamHops.Load()
 }
 
-// Relay returns this node's running in-process relay, or nil if stopped.
+// Relay returns this node's in-process relay, or nil before StartConduitRelay
+// has succeeded. Note that shutdownConduitRelay drains the relay without
+// clearing Server.conduit, so Relay still returns the drained relay after
+// StopHub.
 func (n *conduitHANode) Relay() *relay.Relay {
 	if rt := n.Server.conduit.Load(); rt != nil {
 		return rt.relay
@@ -114,7 +118,8 @@ func (n *conduitHANode) Relay() *relay.Relay {
 	return nil
 }
 
-// Router returns this node's conduit router, or nil if stopped.
+// Router returns this node's conduit router, or nil before StartConduitRelay
+// has succeeded. As with Relay, it remains non-nil after StopHub.
 func (n *conduitHANode) Router() *router.Router {
 	return n.Server.conduitRouter()
 }
@@ -124,7 +129,6 @@ func (n *conduitHANode) Router() *router.Router {
 // Postgres event publisher). It is safe to call multiple times.
 func (n *conduitHANode) stop() {
 	n.stopOnce.Do(func() {
-		n.stopped.Store(true)
 		if n.Public != nil {
 			n.Public.Close()
 		}
@@ -150,12 +154,20 @@ func (n *conduitHANode) stop() {
 // one isolated Postgres schema, each with:
 //   - hub.conduit and hub.conduit_deliver enabled via Postgres hub_settings,
 //   - a shared at-rest encryption key (ConduitGrantRingShared() == true),
-//   - an in-process conduit relay started with RequireHA: true and a distinct
-//     instance_id ("hub-a", "hub-b"),
-//   - a loopback internal peer listener authenticated with a shared HMAC key
-//     and instrumented to count cross-node relay hops,
+//   - an in-process conduit relay started via hub-side Server.StartConduitRelay
+//     with RequireHA: true and a distinct instance_id ("hub-a", "hub-b"),
+//   - a loopback internal peer listener authenticated via NewConduitPeerAuth
+//     (HMAC mode derived from the shared signing secret) and instrumented to
+//     count cross-node relay hops,
 //   - a real PostgresEventPublisher with OperationalSettings propagation, and
 //   - a real PostgresCommandBus (LISTEN/NOTIFY on scion_broker_cmd).
+//
+// Scope note: because pkg/hub tests cannot import package cmd, this harness
+// invokes Server.StartConduitRelay directly (exercising the shared at-rest-key
+// check and registry.SelfCheck), not cmd.startConduitRelay. The cmd-layer C8
+// startup checks (Cloud Run service check, checkConduitAdvertiseHost,
+// serveConduitInternalListener, conduitHopTLS, and shutdown-drain registration)
+// are covered by cmd unit tests rather than this harness.
 //
 // Seeded fixtures: Project, Owner, Broker (with HMAC secret persisted in
 // Postgres), and Agent (assigned to Broker, with a launch RunID).
@@ -165,11 +177,13 @@ func (n *conduitHANode) stop() {
 //   - agent.CloseSession() / broker.CloseSession(): abruptly closes the
 //     client's underlying WebSocket TCP connection.
 //   - agent.SilentDrop() / agent.Restore() and broker.SilentDrop() /
-//     broker.Restore(): blackholes reads and writes on the client's WebSocket
-//     TCP connection without sending a close frame.
+//     broker.Restore(): stalls reads and writes on the client's WebSocket TCP
+//     connection without sending a close frame, resuming and delivering pending
+//     frames on Restore (modeling a transient TCP partition).
 //   - StopHub(node): shuts down a hub node cleanly (listeners, relay, buses).
 //   - BlockLISTEN(t, node): terminates the node's Postgres LISTEN backend and
-//     holds reconnect down until the returned unblock function is called.
+//     holds PostgresEventPublisher reconnect down until the returned unblock
+//     function is called.
 type conduitHAEnv struct {
 	DSN          string
 	HubA         *conduitHANode
@@ -180,7 +194,6 @@ type conduitHAEnv struct {
 	BrokerSecret []byte
 	Agent        *store.Agent
 
-	peerSecret   []byte
 	sharedSecret string
 }
 
@@ -201,19 +214,14 @@ func newConduitHAEnvWith(t *testing.T, opts conduitHAOptions) *conduitHAEnv {
 	dsn := enttest.NewSchemaURL(t)
 	ctx := context.Background()
 
-	peerSecret := make([]byte, 32)
-	_, err := rand.Read(peerSecret)
-	require.NoError(t, err)
-
 	sharedSecretRaw := make([]byte, 32)
-	_, err = rand.Read(sharedSecretRaw)
+	_, err := rand.Read(sharedSecretRaw)
 	require.NoError(t, err)
 	sharedSecret := hex.EncodeToString(sharedSecretRaw)
 
 	suffix := uuid.NewString()[:8]
 	env := &conduitHAEnv{
 		DSN:          dsn,
-		peerSecret:   peerSecret,
 		sharedSecret: sharedSecret,
 	}
 
@@ -231,8 +239,8 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	client, err := entc.OpenPostgres(nodeDSN, entc.PoolConfig{MaxOpenConns: 8, MaxIdleConns: 2})
 	require.NoError(t, err)
 
+	// enttest.NewSchemaURL already migrated the isolated schema once.
 	cs := entadapter.NewCompositeStore(client)
-	require.NoError(t, cs.Migrate(ctx))
 
 	cfg := testServerConfig()
 	cfg.HubID = "conduit-ha-hub"
@@ -278,7 +286,8 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	node.Ops = ops
 
 	ownsLocally := func(brokerID string) bool {
-		return srv.controlChannel != nil && srv.controlChannel.IsConnected(brokerID)
+		cc := srv.GetControlChannelManager()
+		return cc != nil && cc.IsConnected(brokerID)
 	}
 	cmdBus, err := NewPostgresCommandBus(ctx, nodeDSN, ownsLocally, srv.ReconcileBroker, slog.Default())
 	require.NoError(t, err)
@@ -301,11 +310,13 @@ func (e *conduitHAEnv) startNode(t *testing.T, ctx context.Context, instanceID, 
 	})
 	node.Internal = httptest.NewServer(internalHandler)
 
-	peerAuth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{
-		Secret: e.peerSecret,
-		SelfID: instanceID,
+	peerAuth, mode, err := NewConduitPeerAuth(ConduitPeerAuthOptions{
+		Mode:         config.ConduitPeerAuthHMAC,
+		SharedSecret: e.sharedSecret,
+		SelfID:       instanceID,
 	})
 	require.NoError(t, err)
+	require.Equal(t, config.ConduitPeerAuthHMAC, mode)
 
 	regStore := entadapter.NewConduitRegistryStore(client)
 	node.RegStore = regStore
@@ -418,6 +429,16 @@ func (e *conduitHAEnv) StopHub(node *conduitHANode) {
 // BlockLISTEN terminates node's Postgres LISTEN backend(s) and holds its
 // PostgresEventPublisher listener reconnect down until the returned unblock
 // function is called.
+//
+// Caveats:
+//   - Because pg_terminate_backend filters by application_name (shared across
+//     node's connections), it also terminates node's PostgresCommandBus LISTEN
+//     backend; that bus reconnects immediately on its own backoff, while only
+//     PostgresEventPublisher is held down via testHookBeforeConnect.
+//   - The query ILIKE 'LISTEN %' filter matches the backend's most recent SQL
+//     statement. If a subscription was just removed with UNLISTEN immediately
+//     before calling BlockLISTEN, the backend may not match and BlockLISTEN
+//     will fail loudly after its timeout rather than silently succeeding.
 func (e *conduitHAEnv) BlockLISTEN(t *testing.T, node *conduitHANode) (unblock func()) {
 	t.Helper()
 	peer := e.HubA
@@ -462,23 +483,29 @@ func (e *conduitHAEnv) BlockLISTEN(t *testing.T, node *conduitHANode) (unblock f
 
 // --- Fault-injectable WebSocket dialer ---
 
-// faultConn wraps a net.Conn so a test can abruptly close it or silently drop
-// all reads and writes (blackhole without sending a TCP FIN/RST or WS close).
+// faultConn wraps a net.Conn so a test can abruptly close it or simulate a
+// transient silent TCP partition: while dropped, both Read and Write block
+// until Restore, Close, or their respective deadlines expire, without sending
+// a TCP FIN/RST or WebSocket close frame. On Restore, pending writes proceed
+// and buffered inbound data is read, preserving TCP byte-stream fidelity.
 type faultConn struct {
 	net.Conn
-	mu           sync.Mutex
-	dropped      bool
-	unblock      chan struct{}
-	closed       chan struct{}
-	closeOnce    sync.Once
-	readDeadline time.Time
+	mu            sync.Mutex
+	dropped       bool
+	unblock       chan struct{}
+	deadlineCh    chan struct{}
+	closed        chan struct{}
+	closeOnce     sync.Once
+	readDeadline  time.Time
+	writeDeadline time.Time
 }
 
 func newFaultConn(c net.Conn) *faultConn {
 	return &faultConn{
-		Conn:    c,
-		unblock: make(chan struct{}),
-		closed:  make(chan struct{}),
+		Conn:       c,
+		unblock:    make(chan struct{}),
+		deadlineCh: make(chan struct{}),
+		closed:     make(chan struct{}),
 	}
 }
 
@@ -495,30 +522,44 @@ func (c *faultConn) setDropped(drop bool) {
 	}
 }
 
-func (c *faultConn) waitIfDropped() error {
+func (c *faultConn) waitIfDropped(isWrite bool) error {
 	for {
 		c.mu.Lock()
 		dropped := c.dropped
 		unblock := c.unblock
+		deadlineCh := c.deadlineCh
 		deadline := c.readDeadline
+		if isWrite {
+			deadline = c.writeDeadline
+		}
 		c.mu.Unlock()
 		if !dropped {
 			return nil
 		}
 		var timer <-chan time.Time
+		var t *time.Timer
 		if !deadline.IsZero() {
 			d := time.Until(deadline)
 			if d <= 0 {
 				return osTimeoutErr{}
 			}
-			t := time.NewTimer(d)
+			t = time.NewTimer(d)
 			timer = t.C
-			defer t.Stop()
 		}
 		select {
 		case <-c.closed:
+			if t != nil {
+				t.Stop()
+			}
 			return net.ErrClosed
 		case <-unblock:
+			if t != nil {
+				t.Stop()
+			}
+		case <-deadlineCh:
+			if t != nil {
+				t.Stop()
+			}
 		case <-timer:
 			return osTimeoutErr{}
 		}
@@ -526,7 +567,7 @@ func (c *faultConn) waitIfDropped() error {
 }
 
 func (c *faultConn) Read(b []byte) (int, error) {
-	if err := c.waitIfDropped(); err != nil {
+	if err := c.waitIfDropped(false); err != nil {
 		return 0, err
 	}
 	n, err := c.Conn.Read(b)
@@ -534,7 +575,7 @@ func (c *faultConn) Read(b []byte) (int, error) {
 	dropped := c.dropped
 	c.mu.Unlock()
 	if dropped {
-		if werr := c.waitIfDropped(); werr != nil {
+		if werr := c.waitIfDropped(false); werr != nil {
 			return 0, werr
 		}
 	}
@@ -542,26 +583,38 @@ func (c *faultConn) Read(b []byte) (int, error) {
 }
 
 func (c *faultConn) Write(b []byte) (int, error) {
-	c.mu.Lock()
-	dropped := c.dropped
-	c.mu.Unlock()
-	if dropped {
-		// Blackhole outbound bytes without failing the write.
-		return len(b), nil
+	if err := c.waitIfDropped(true); err != nil {
+		return 0, err
 	}
 	return c.Conn.Write(b)
+}
+
+func (c *faultConn) notifyDeadlineChange() {
+	close(c.deadlineCh)
+	c.deadlineCh = make(chan struct{})
 }
 
 func (c *faultConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.readDeadline = t
+	c.notifyDeadlineChange()
 	c.mu.Unlock()
 	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *faultConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.writeDeadline = t
+	c.notifyDeadlineChange()
+	c.mu.Unlock()
+	return c.Conn.SetWriteDeadline(t)
 }
 
 func (c *faultConn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	c.readDeadline = t
+	c.writeDeadline = t
+	c.notifyDeadlineChange()
 	c.mu.Unlock()
 	return c.Conn.SetDeadline(t)
 }
@@ -578,7 +631,7 @@ func (osTimeoutErr) Timeout() bool   { return true }
 func (osTimeoutErr) Temporary() bool { return true }
 
 // faultWSDialer tracks the latest dialed faultConn so tests can close or
-// silently drop the active WebSocket transport.
+// silently pause the active WebSocket transport.
 type faultWSDialer struct {
 	mu      sync.Mutex
 	current *faultConn
@@ -670,6 +723,14 @@ func (r *recordingTmuxRunner) Calls() [][]string {
 	return out
 }
 
+// Stdins returns a copy of the stdin payload recorded for each Run call,
+// aligned by index with Calls().
+func (r *recordingTmuxRunner) Stdins() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.stdins...)
+}
+
 func (r *recordingTmuxRunner) Flushes() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -678,7 +739,7 @@ func (r *recordingTmuxRunner) Flushes() int {
 
 // conduitHAAgent is a fake agent wired with the real pkg/sciontool/conduit
 // session client, the real control.Handler (with deliver-message enabled), and
-// a fake tmuxdeliver.Runner recording argv.
+// a fake tmuxdeliver.Runner recording argv and stdin.
 type conduitHAAgent struct {
 	Runner   *recordingTmuxRunner
 	ws       *faultWSDialer
@@ -818,7 +879,8 @@ func (a *conduitHAAgent) Close() { a.stopFn() }
 // CloseSession abruptly closes the agent's current WebSocket TCP connection.
 func (a *conduitHAAgent) CloseSession() { a.ws.CloseCurrent() }
 
-// SilentDrop blackholes reads and writes on the agent's WebSocket TCP conn.
+// SilentDrop stalls reads and writes on the agent's WebSocket TCP conn without
+// sending a close frame. Call Restore to resume and deliver pending frames.
 func (a *conduitHAAgent) SilentDrop() { a.ws.SilentDrop() }
 
 // Restore resumes reads and writes on the agent's WebSocket TCP conn.
@@ -888,7 +950,7 @@ func (e *conduitHAEnv) StartBroker(t *testing.T, node *conduitHANode, rpcHandler
 	}
 	t.Cleanup(fb.stopFn)
 
-	require.NoError(t, conduitHAPollUntil(10*time.Second, func() error {
+	require.NoError(t, pollUntil(10*time.Second, func() error {
 		if d.CommandPathState() != api.BrokerHealthHealthy {
 			return fmt.Errorf("broker conduit command path state = %q, want %q", d.CommandPathState(), api.BrokerHealthHealthy)
 		}
@@ -916,7 +978,8 @@ func (b *conduitHABroker) Close() { b.stopFn() }
 // CloseSession abruptly closes the broker's current WebSocket TCP connection.
 func (b *conduitHABroker) CloseSession() { b.ws.CloseCurrent() }
 
-// SilentDrop blackholes reads and writes on the broker's WebSocket TCP conn.
+// SilentDrop stalls reads and writes on the broker's WebSocket TCP conn without
+// sending a close frame. Call Restore to resume and deliver pending frames.
 func (b *conduitHABroker) SilentDrop() { b.ws.SilentDrop() }
 
 // Restore resumes reads and writes on the broker's WebSocket TCP conn.
@@ -937,19 +1000,7 @@ func conduitHADSNParam(t *testing.T, dsn, key, value string) string {
 	return u.String()
 }
 
-func conduitHAPollUntil(timeout time.Duration, fn func() error) error {
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		if lastErr = fn(); lastErr == nil {
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return fmt.Errorf("timed out after %s: %w", timeout, lastErr)
-}
-
-// --- Phase 1 Vertical Slice Test ---
+// --- Phase 1 Vertical Slice Tests ---
 
 // TestConduitHA_DeliverCrossNode exercises the full cross-node deliver-message
 // path on a 2-node Postgres Conduit HA topology:
@@ -961,7 +1012,8 @@ func conduitHAPollUntil(timeout time.Duration, fn func() error) error {
 //     RemoteSession on Hub B, and relays the control RPC over the loopback
 //     internal peer listener,
 //   - Fake agent (real pkg/sciontool/conduit + real control.Handler + fake
-//     tmuxdeliver.Runner) executes exactly one flush and answers 200 delivered,
+//     tmuxdeliver.Runner) executes exactly one flush with the exact payload and
+//     answers 200 delivered,
 //   - Hub A finishes the message row in Postgres to delivered, and a same-id
 //     replay returns the stored outcome without another relay hop or flush.
 func TestConduitHA_DeliverCrossNode(t *testing.T) {
@@ -976,7 +1028,7 @@ func TestConduitHA_DeliverCrossNode(t *testing.T) {
 	// Confirm the agent's session is visible in Postgres on Hub A and resolves
 	// to a RemoteSession pointing at Hub B.
 	var resolved router.Resolved
-	require.NoError(t, conduitHAPollUntil(5*time.Second, func() error {
+	require.NoError(t, pollUntil(5*time.Second, func() error {
 		var err error
 		resolved, err = env.HubA.Router().Resolve(ctx, router.Request{
 			Op:    router.OpStatefulRPC,
@@ -1018,13 +1070,48 @@ func TestConduitHA_DeliverCrossNode(t *testing.T) {
 	assert.Equal(t, hopsBeforeB+1, env.HubB.InternalRPCHops(), "Hub B internal listener must receive exactly one relayed RPC hop")
 	assert.Equal(t, hopsBeforeA, env.HubA.InternalRPCHops(), "Hub A internal listener must not receive an RPC hop")
 
-	// Assert exactly one agent flush with recorded tmux argv.
+	// Assert exactly one agent flush with recorded tmux argv order and stdin payload.
 	assert.Equal(t, int64(1), agent.RPCCount(), "agent must receive exactly one control RPC")
 	assert.Equal(t, []string{"/v1/control/deliver-message"}, agent.RPCPaths())
 	assert.Equal(t, 1, agent.Runner.Flushes(), "agent fake tmux runner must record exactly one flush")
 	calls := agent.Runner.Calls()
+	stdins := agent.Runner.Stdins()
+	require.Equal(t, len(calls), len(stdins))
 	require.NotEmpty(t, calls)
 	assert.Equal(t, []string{"tmux", "has-session", "-t", tmuxdeliver.Target}, calls[0])
+
+	idxHasSession, idxLoadBuf, idxPasteBuf, idxSendEnter := -1, -1, -1, -1
+	for i, argv := range calls {
+		if len(argv) < 2 || argv[0] != "tmux" {
+			continue
+		}
+		switch argv[1] {
+		case "has-session":
+			if idxHasSession == -1 {
+				idxHasSession = i
+			}
+		case "load-buffer":
+			if idxLoadBuf == -1 {
+				idxLoadBuf = i
+			}
+		case "paste-buffer":
+			if idxPasteBuf == -1 {
+				idxPasteBuf = i
+			}
+		case "send-keys":
+			if idxSendEnter == -1 && slices.Contains(argv, "Enter") {
+				idxSendEnter = i
+			}
+		}
+	}
+	require.NotEqual(t, -1, idxHasSession, "expected tmux has-session call")
+	require.NotEqual(t, -1, idxLoadBuf, "expected tmux load-buffer call")
+	require.NotEqual(t, -1, idxPasteBuf, "expected tmux paste-buffer call")
+	require.NotEqual(t, -1, idxSendEnter, "expected tmux send-keys Enter call")
+	assert.Less(t, idxHasSession, idxLoadBuf, "has-session must precede load-buffer")
+	assert.Less(t, idxLoadBuf, idxPasteBuf, "load-buffer must precede paste-buffer")
+	assert.Less(t, idxPasteBuf, idxSendEnter, "paste-buffer must precede send-keys Enter")
+	assert.Equal(t, "hello cross-node", stdins[idxLoadBuf], "load-buffer stdin must carry the exact delivered text")
 
 	// Assert the message row reached delivered in real Postgres (readable from both hubs).
 	for name, s := range map[string]*entadapter.CompositeStore{"hub-a": env.HubA.Store, "hub-b": env.HubB.Store} {
@@ -1042,4 +1129,156 @@ func TestConduitHA_DeliverCrossNode(t *testing.T) {
 	assert.Equal(t, hopsBeforeB+1, env.HubB.InternalRPCHops(), "replay must not trigger another relay hop")
 	assert.Equal(t, int64(1), agent.RPCCount(), "replay must not call the agent again")
 	assert.Equal(t, 1, agent.Runner.Flushes(), "replay must not flush again")
+}
+
+// TestConduitHA_FaultHooks validates every fault hook exposed by conduitHAEnv
+// so later HA row tests can rely on them:
+//   - agent SilentDrop -> deliver RPC in flight -> Restore within ping timeout:
+//     outbound/inbound frames are stalled rather than dropped, the RPC completes
+//     on the same session, and a follow-up RPC succeeds;
+//   - broker SilentDrop -> Restore keeps the broker session healthy, and broker
+//     CloseSession triggers clean redial;
+//   - relay-side CloseSession and client-side agent.CloseSession trigger agent
+//     re-admission with a fresh session ID;
+//   - BlockLISTEN holds Hub B's Postgres event listener down so a notification
+//     published on Hub A is missed during the gap, and unblocking restores
+//     cross-node delivery;
+//   - StopHub cleanly shuts down Hub B's listeners.
+func TestConduitHA_FaultHooks(t *testing.T) {
+	env := newConduitHAEnv(t)
+	ctx := context.Background()
+
+	broker := env.StartBroker(t, env.HubA, nil)
+	agent := env.StartAgent(t, env.HubB)
+	origSessionID := agent.SessionID()
+
+	// 1. Agent SilentDrop -> in-flight deliver RPC -> Restore within ping timeout.
+	//    Verify frames are paused (not discarded) and the session stays intact.
+	agent.SilentDrop()
+
+	msgID := env.CreateMessage(t, store.MessageDispatchDispatched, "after-partition")
+	text := "after-partition"
+	req := &agentcontrol.DeliverRequest{
+		V:          1,
+		DeliveryID: "ha-fault-drop-" + uuid.NewString(),
+		MessageIDs: []string{msgID},
+		Op:         agentcontrol.OpPaste,
+		Text:       &text,
+		DeadlineMS: 92000,
+		SubmitKeys: []string{"Enter"},
+	}
+	type deliverOut struct {
+		status int
+		resp   agentcontrol.DeliverResponse
+		err    error
+	}
+	done := make(chan deliverOut, 1)
+	go func() {
+		st, resp, err := broker.DeliverMessage(ctx, env.Agent.ID, req)
+		done <- deliverOut{status: st, resp: resp, err: err}
+	}()
+
+	// Hold the partition briefly so the RPC request is stalled on the paused TCP
+	// connection, then heal well within the ping/RPC timeout.
+	select {
+	case out := <-done:
+		t.Fatalf("deliver completed while agent connection was silently dropped: %+v", out)
+	case <-time.After(150 * time.Millisecond):
+	}
+	agent.Restore()
+
+	select {
+	case out := <-done:
+		require.NoError(t, out.err)
+		require.Equal(t, http.StatusOK, out.status)
+		assert.Equal(t, agentcontrol.OutcomeDelivered, out.resp.Outcome)
+	case <-time.After(10 * time.Second):
+		t.Fatal("deliver did not complete after agent.Restore()")
+	}
+	assert.Equal(t, origSessionID, agent.SessionID(), "transient SilentDrop/Restore must preserve the same session")
+
+	// A follow-up RPC on the same session confirms no protocol desync.
+	msgID2 := env.CreateMessage(t, store.MessageDispatchDispatched, "post-restore")
+	text2 := "post-restore"
+	st2, resp2, err := broker.DeliverMessage(ctx, env.Agent.ID, &agentcontrol.DeliverRequest{
+		V:          1,
+		DeliveryID: "ha-fault-post-" + uuid.NewString(),
+		MessageIDs: []string{msgID2},
+		Op:         agentcontrol.OpPaste,
+		Text:       &text2,
+		DeadlineMS: 92000,
+		SubmitKeys: []string{"Enter"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, st2)
+	assert.Equal(t, agentcontrol.OutcomeDelivered, resp2.Outcome)
+	assert.Equal(t, origSessionID, agent.SessionID())
+
+	// 2. Broker SilentDrop -> Restore keeps session healthy; broker.CloseSession redials.
+	broker.SilentDrop()
+	time.Sleep(100 * time.Millisecond)
+	broker.Restore()
+	assert.Equal(t, api.BrokerHealthHealthy, broker.Dialer.CommandPathState())
+
+	broker.CloseSession()
+	require.NoError(t, pollUntil(10*time.Second, func() error {
+		if broker.Dialer.CommandPathState() != api.BrokerHealthHealthy {
+			return fmt.Errorf("broker state = %q, want healthy after redial", broker.Dialer.CommandPathState())
+		}
+		return nil
+	}))
+
+	// 3. Relay-side CloseSession triggers agent re-admission with a new session ID.
+	env.CloseSession(t, env.HubB, origSessionID)
+	w2 := agent.WaitAdmitted(t, 10*time.Second)
+	require.NotEmpty(t, w2.GetSessionId())
+	assert.NotEqual(t, origSessionID, w2.GetSessionId(), "relay CloseSession must produce a new agent session")
+
+	// 4. Client-side agent.CloseSession triggers agent re-admission with a new session ID.
+	agent.CloseSession()
+	w3 := agent.WaitAdmitted(t, 10*time.Second)
+	require.NotEmpty(t, w3.GetSessionId())
+	assert.NotEqual(t, w2.GetSessionId(), w3.GetSessionId(), "client CloseSession must produce a new agent session")
+
+	// 5. BlockLISTEN drops Hub B's Postgres LISTEN and holds reconnect down until unblocked.
+	evCh, unsub := env.HubB.Events.Subscribe("project." + env.Project.ID + ".>")
+	defer unsub()
+	// Wait until Hub B's listener has applied the LISTEN for the project channel.
+	require.NoError(t, pollUntil(5*time.Second, func() error {
+		env.HubA.Events.PublishProjectUpdated(ctx, env.Project)
+		select {
+		case <-evCh:
+			return nil
+		case <-time.After(100 * time.Millisecond):
+			return errors.New("waiting for initial cross-node LISTEN event on Hub B")
+		}
+	}))
+	// Drain any queued events from the warm-up probe.
+	for len(evCh) > 0 {
+		<-evCh
+	}
+
+	unblock := env.BlockLISTEN(t, env.HubB)
+	env.HubA.Events.PublishProjectUpdated(ctx, env.Project)
+	select {
+	case ev := <-evCh:
+		t.Fatalf("unexpected event delivered to Hub B while LISTEN was blocked: %+v", ev)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	unblock()
+	require.NoError(t, pollUntil(5*time.Second, func() error {
+		env.HubA.Events.PublishProjectUpdated(ctx, env.Project)
+		select {
+		case <-evCh:
+			return nil
+		case <-time.After(100 * time.Millisecond):
+			return errors.New("waiting for cross-node LISTEN event on Hub B after unblock")
+		}
+	}))
+
+	// 6. StopHub cleanly shuts down Hub B's public and internal listeners.
+	env.StopHub(env.HubB)
+	_, err = http.Get(env.HubB.Public.URL + "/healthz")
+	assert.Error(t, err, "stopped hub public listener must refuse connections")
 }
