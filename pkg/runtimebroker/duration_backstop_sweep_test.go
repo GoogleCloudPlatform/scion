@@ -348,6 +348,50 @@ func TestServer_ReportDurationBackstopStop_NoHubConnectionDropsCleanly(t *testin
 	})
 }
 
+func TestDurationBackstopSweeper_StopsExpiredSubstrateRun(t *testing.T) {
+	now := time.Date(2026, 11, 26, 18, 0, 0, 0, time.UTC)
+	expired := now.Add(-1 * time.Minute).Format(time.RFC3339)
+
+	subRT := &backstopFakeRuntime{
+		name: "substrate",
+		agents: []api.AgentInfo{
+			{
+				ID:          "agent-sub-1",
+				Name:        "sub-agent",
+				ContainerID: "scion-proj/sub-agent",
+				RunID:       "run-sub-1",
+				Phase:       string(state.PhaseRunning),
+				Labels: map[string]string{
+					"scion.agent":        "true",
+					"scion.name":         "sub-agent",
+					api.LabelRunID:       "run-sub-1",
+					api.LabelRunDeadline: expired,
+				},
+			},
+		},
+	}
+
+	var reported []api.AgentInfo
+	sw := newDurationBackstopSweeper(
+		func() []scionrt.Runtime { return []scionrt.Runtime{subRT} },
+		func(_ context.Context, a api.AgentInfo) { reported = append(reported, a) },
+		slog.Default(),
+	)
+	sw.now = func() time.Time { return now }
+	sw.sweep(context.Background())
+
+	if subRT.lastFilter["scion.agent"] != "true" || len(subRT.lastFilter) != 1 {
+		t.Errorf("substrate List filter = %v, want map[scion.agent:true]", subRT.lastFilter)
+	}
+	stops := subRT.stoppedRefs()
+	if len(stops) != 1 || stops[0].ID != "scion-proj/sub-agent" || stops[0].RunID != "run-sub-1" {
+		t.Fatalf("substrate stops = %+v, want [{ID:scion-proj/sub-agent RunID:run-sub-1}]", stops)
+	}
+	if len(reported) != 1 || reported[0].Name != "sub-agent" || reported[0].RunID != "run-sub-1" {
+		t.Fatalf("reported = %+v, want 1 report for sub-agent/run-sub-1", reported)
+	}
+}
+
 type backstopCaptureHandler struct {
 	mu      sync.Mutex
 	records *[]slog.Record

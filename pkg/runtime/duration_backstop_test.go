@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
+	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/iterator"
 	corev1 "k8s.io/api/core/v1"
@@ -294,6 +295,49 @@ func TestSubstrateRuntime_RunDeadlineLabel(t *testing.T) {
 	if _, ok := gotZero[api.LabelRunDeadline]; ok {
 		t.Errorf("unexpected %s label when RunDeadline is zero", api.LabelRunDeadline)
 	}
+
+	// Verify SubstrateRuntime.List with the sweeper's scion.agent=true filter
+	// surfaces the stamped scion.io/run-deadline label from substrateAgentRecords.
+	rec := &callRecorder{}
+	rt, fc, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	substrateAgentStateMu.Lock()
+	substrateAgentRecords["uid-deadline"] = &substrateAgentRecord{
+		Labels:  got,
+		Project: "proj-sub",
+	}
+	substrateAgentStateMu.Unlock()
+	t.Cleanup(func() {
+		substrateAgentStateMu.Lock()
+		delete(substrateAgentRecords, "uid-deadline")
+		substrateAgentStateMu.Unlock()
+	})
+
+	fc.listActors = func(*ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
+		return &ateapipb.ListActorsResponse{
+			Actors: []*ateapipb.Actor{
+				{
+					Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-proj", Name: "sub-agent", Uid: "uid-deadline"},
+					Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
+				},
+			},
+		}, nil
+	}
+
+	listed, err := rt.List(context.Background(), map[string]string{"scion.agent": "true"})
+	if err != nil {
+		t.Fatalf("SubstrateRuntime.List: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("len(listed) = %d, want 1", len(listed))
+	}
+	if listed[0].Labels["scion.agent"] != "true" {
+		t.Errorf("listed[0].Labels[scion.agent] = %q, want \"true\"", listed[0].Labels["scion.agent"])
+	}
+	if listed[0].Labels[api.LabelRunDeadline] != deadline.Format(time.RFC3339) {
+		t.Errorf("listed[0].Labels[%s] = %q, want %q", api.LabelRunDeadline, listed[0].Labels[api.LabelRunDeadline], deadline.Format(time.RFC3339))
+	}
 }
 
 func TestParseDockerListLabels_DuplicateRunDeadlineFailsClosed(t *testing.T) {
@@ -338,6 +382,23 @@ func TestParseDockerListLabels_DuplicateRunDeadlineFailsClosed(t *testing.T) {
 			got := parseDockerListLabels(tc.raw)
 			if got[api.LabelRunDeadline] != tc.want {
 				t.Errorf("parseDockerListLabels(%q)[%s] = %q, want %q", tc.raw, api.LabelRunDeadline, got[api.LabelRunDeadline], tc.want)
+			}
+		})
+	}
+
+	// Residual R1: a comma-injected duplicate scion.agent=false must not drop
+	// a Scion-managed container from the scion.agent=true sweep in either order.
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{"true then false keeps true", "scion.agent=true,other=x,scion.agent=false"},
+		{"false then true keeps true", "other=x,scion.agent=false,scion.agent=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseDockerListLabels(tc.raw)
+			if got["scion.agent"] != "true" {
+				t.Errorf("parseDockerListLabels(%q)[scion.agent] = %q, want \"true\"", tc.raw, got["scion.agent"])
 			}
 		})
 	}

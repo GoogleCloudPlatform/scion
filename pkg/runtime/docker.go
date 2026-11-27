@@ -568,6 +568,12 @@ func parseDockerListLabels(raw string) map[string]string {
 				continue
 			}
 		}
+		if k == "scion.agent" {
+			if prev, exists := labels[k]; exists && (prev == "true" || v == "true") {
+				labels[k] = "true"
+				continue
+			}
+		}
 		labels[k] = v
 	}
 	return labels
