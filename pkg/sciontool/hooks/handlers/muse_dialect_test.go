@@ -2011,6 +2011,35 @@ func TestMuseTurnUsage_SkipPathLogsOncePerProcess(t *testing.T) {
 	if evOk.Data.InputTokens != 700 || evOk.Data.OutputTokens != 70 {
 		t.Fatalf("post-recovery delta = (%d, %d), want (700, 70)", evOk.Data.InputTokens, evOk.Data.OutputTokens)
 	}
+
+	// Re-acquire lock: warning must be re-armed so a subsequent failure burst
+	// logs exactly one new warning (total 2), still deduped within the burst.
+	held2, err := os.OpenFile(statePath+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(held2.Fd()), unix.LOCK_EX); err != nil {
+		_ = held2.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = unix.Flock(int(held2.Fd()), unix.LOCK_UN)
+		_ = held2.Close()
+	})
+
+	for i := 1; i <= 2; i++ {
+		h := &TelemetryHandler{
+			MuseTurnUsageStatePath: statePath,
+			museVersionProbe:       func(context.Context) string { return "1.4.25" },
+		}
+		ev := h.normalizeMuseTurnUsage(makeMuseModelEndEvent("s1", "t1", int64(1200+i*100), int64(120+i*10)))
+		if ev.Data.HasInputTokens() || ev.Data.HasOutputTokens() || ev.Data.InputTokens != 0 || ev.Data.OutputTokens != 0 {
+			t.Fatalf("post-recovery held-lock call %d did not fail closed: in=%d out=%d", i, ev.Data.InputTokens, ev.Data.OutputTokens)
+		}
+	}
+	if warns := cap.warnings(); len(warns) != 2 {
+		t.Fatalf("warnings after re-arm and second held-lock burst = %d, want 2 (%+v)", len(warns), warns)
+	}
 }
 
 // TestMuseTurnUsage_RetryCapStopsBeforeTimeout verifies that the retry cap
