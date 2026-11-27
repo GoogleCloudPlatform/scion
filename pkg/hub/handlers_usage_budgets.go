@@ -176,7 +176,7 @@ func (s *Server) handleProjectUsageBudgets(w http.ResponseWriter, r *http.Reques
 		},
 	}
 
-	entries, err := s.buildBudgetEntries(ctx, specs, asOf, true)
+	entries, err := s.buildBudgetEntries(ctx, newTokenLimitEvalCache(s.quotaService), specs, asOf, true)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -328,7 +328,8 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 		},
 	}
 
-	entries, err := s.buildBudgetEntries(ctx, userSpecs, asOf, true)
+	evalCache := newTokenLimitEvalCache(s.quotaService)
+	entries, err := s.buildBudgetEntries(ctx, evalCache, userSpecs, asOf, true)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -374,7 +375,7 @@ func (s *Server) serveUserUsageBudgets(w http.ResponseWriter, r *http.Request, c
 		// Only include user_project rows where a finite cap applies OR an active
 		// state row already exists (avoiding 2*N empty unlimited rows across all
 		// projects on a large Hub).
-		upEntries, err := s.buildBudgetEntries(ctx, upSpecs, asOf, false)
+		upEntries, err := s.buildBudgetEntries(ctx, evalCache, upSpecs, asOf, false)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -448,33 +449,27 @@ func (s *Server) listVisibleProjectIDsForCaller(ctx context.Context, caller User
 
 func (s *Server) buildBudgetEntries(
 	ctx context.Context,
+	evalCache *tokenLimitEvalCache,
 	specs []budgetEvalSpec,
 	asOf time.Time,
 	includeUnlimitedWithoutRow bool,
 ) ([]UsageBudgetEntry, error) {
-	defCache := make(map[string]*store.LimitDefinition, 6)
+	if evalCache == nil {
+		evalCache = newTokenLimitEvalCache(s.quotaService)
+	}
 	entries := make([]UsageBudgetEntry, 0, len(specs))
 
 	for _, spec := range specs {
-		def, cached := defCache[spec.limitName]
-		if !cached {
-			var err error
-			def, err = s.store.GetLimitDefinitionByName(ctx, spec.limitName)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					defCache[spec.limitName] = nil
-					continue
-				}
-				return nil, err
-			}
-			defCache[spec.limitName] = def
+		def, err := evalCache.lookupLimitDef(ctx, spec.limitName)
+		if err != nil {
+			return nil, err
 		}
 		if def == nil {
 			continue
 		}
 
-		capVal, action, err := s.quotaService.ResolveEffectiveTokenLimit(
-			ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+		capVal, action, err := evalCache.resolveForDef(
+			ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
 		)
 		if err != nil {
 			return nil, err

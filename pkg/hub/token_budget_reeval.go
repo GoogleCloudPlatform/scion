@@ -241,6 +241,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 		return
 	}
 
+	evalCache := newTokenLimitEvalCache(e.quota)
 	// Targeted single-scope re-evaluation for direct user or project bindings
 	// (including creating a state row when a newly added/lowered cap is already
 	// exceeded by current-window consumption).
@@ -259,7 +260,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -278,7 +279,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -300,7 +301,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 			windowStartUTC: winStart,
 			windowEndUTC:   winEnd,
 		}
-		if err := e.reevaluateSpec(ctx, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
 			e.recordReevalError(spec, err)
 		}
 		return
@@ -308,7 +309,7 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterEntitlementChange(
 
 	// System-wide, project-default-for-user_project, or group bindings:
 	// re-evaluate existing open-window state rows for this limit (bounded).
-	e.reevaluateOpenRowsForLimit(ctx, def, binding.ScopeType, binding.ScopeID, now)
+	e.reevaluateOpenRowsForLimit(ctx, evalCache, def, binding.ScopeType, binding.ScopeID, now)
 }
 
 // ReevaluateAfterLimitDefaultChange re-evaluates existing open-window budget
@@ -319,11 +320,12 @@ func (e *TokenBudgetEvaluator) ReevaluateAfterLimitDefaultChange(ctx context.Con
 	if !e.enabled() || def == nil || def.ResourceType != store.LimitResourceTypeLLMTokens {
 		return
 	}
-	e.reevaluateOpenRowsForLimit(ctx, def, "", "", e.now())
+	e.reevaluateOpenRowsForLimit(ctx, newTokenLimitEvalCache(e.quota), def, "", "", e.now())
 }
 
 func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 	ctx context.Context,
+	evalCache *tokenLimitEvalCache,
 	def *store.LimitDefinition,
 	filterScopeType string,
 	filterScopeID string,
@@ -349,7 +351,7 @@ func (e *TokenBudgetEvaluator) reevaluateOpenRowsForLimit(
 		if !ok {
 			continue
 		}
-		if err := e.reevaluateSpec(ctx, spec, def, now); err != nil {
+		if err := e.reevaluateSpec(ctx, evalCache, spec, def, now); err != nil {
 			e.recordReevalError(spec, err)
 		}
 	}
@@ -373,12 +375,16 @@ func (e *TokenBudgetEvaluator) recordReevalError(spec budgetEvalSpec, err error)
 // thresholds_notified bits for thresholds no longer met.
 func (e *TokenBudgetEvaluator) reevaluateSpec(
 	ctx context.Context,
+	evalCache *tokenLimitEvalCache,
 	spec budgetEvalSpec,
 	def *store.LimitDefinition,
 	now time.Time,
 ) error {
-	capVal, action, err := e.quota.ResolveEffectiveTokenLimit(
-		ctx, def.ID, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
+	if evalCache == nil {
+		evalCache = newTokenLimitEvalCache(e.quota)
+	}
+	capVal, action, err := evalCache.resolveForDef(
+		ctx, def, spec.bindingSubject, spec.bindingScope, spec.bindingScopeID,
 	)
 	if err != nil {
 		return fmt.Errorf("resolve effective token limit %q: %w", spec.limitName, err)
