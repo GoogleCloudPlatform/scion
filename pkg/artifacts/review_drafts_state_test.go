@@ -706,3 +706,147 @@ func TestReviewDraftPerCallerIsolation(t *testing.T) {
 		}
 	}
 }
+
+// TestReviewDraftPrincipalKindIsolation pins the principal_kind predicate at
+// every review-draft SQL site (my_draft select column, drafts=1, -is:draft,
+// is:draft, and GetReviewDraftSummary) when a user and an agent share the same
+// principal_ref string. Each principal has a draft on a different artifact, and
+// neither may see the other's draft on global or project-scoped lists.
+func TestReviewDraftPrincipalKindIsolation(t *testing.T) {
+	f := newFixture(t, false)
+	fh := newFakeHost()
+	h := newDraftStateTestHost(fh)
+	svc := NewService(h)
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-test")
+
+	const (
+		scope     = "proj-1"
+		sharedRef = "shared-principal-ref"
+	)
+	owner := principal{kind: PrincipalKindUser, ref: "u-owner"}
+	user := principal{kind: PrincipalKindUser, ref: sharedRef}
+	agent := principal{kind: PrincipalKindAgent, ref: sharedRef, home: scope}
+
+	fh.allow(owner, scope, PermissionRead, PermissionCreate)
+	fh.allow(user, scope, PermissionRead, PermissionCreate)
+	fh.allow(agent, scope, PermissionRead, PermissionCreate)
+
+	publishAndGrant := func(name string) string {
+		t.Helper()
+		rec := doDraftReq(svc, owner, http.MethodPost, "/api/v1/artifacts?name="+name+"&scope="+scope, []byte("# "+name+"\n"))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("publish %s = %d: %s", name, rec.Code, rec.Body.String())
+		}
+		artID := decodeInto[ArtifactResponse](t, rec).Artifact.ID
+		for _, g := range []struct {
+			who  principal
+			perm string
+		}{
+			{user, GrantReview},
+			{agent, GrantWrite},
+		} {
+			if _, err := f.store.PutGrant(context.Background(), &Grant{
+				ID:          "g-" + artID + "-" + g.who.kind,
+				ArtifactID:  artID,
+				SubjectKind: SubjectPrincipal,
+				SubjectRef:  PrincipalRef(g.who.kind, g.who.ref),
+				Permission:  g.perm,
+			}, 100, true, &Actor{Kind: owner.kind, Ref: owner.ref, Authority: AuthorityOwner}); err != nil {
+				t.Fatalf("PutGrant %s for %s: %v", name, g.who.kind, err)
+			}
+		}
+		return artID
+	}
+
+	artUserDraft := publishAndGrant("user-draft.md")
+	artAgentDraft := publishAndGrant("agent-draft.md")
+	artNeither := publishAndGrant("no-draft.md")
+
+	// Save one draft as the user and one draft as the agent with the same ref.
+	rec := doDraftReq(svc, user, http.MethodPut, draftPath(artUserDraft),
+		[]byte(`{"rev":0,"base":1,"entry":"user-draft.md","body":"user draft","note":""}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT draft as user = %d: %s", rec.Code, rec.Body.String())
+	}
+	rec = doDraftReq(svc, agent, http.MethodPut, draftPath(artAgentDraft),
+		[]byte(`{"rev":0,"base":1,"entry":"agent-draft.md","body":"agent draft","note":""}`))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT draft as agent = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	listFlags := func(who principal, path string) map[string]bool {
+		t.Helper()
+		rec := doDraftReq(svc, who, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s as %s = %d: %s", path, who.kind, rec.Code, rec.Body.String())
+		}
+		resp := decodeInto[ArtifactListResponse](t, rec)
+		out := make(map[string]bool, len(resp.Artifacts))
+		for _, it := range resp.Artifacts {
+			out[it.ID] = it.ReviewInDraft
+		}
+		return out
+	}
+
+	assertFlags := func(who principal, path string, want map[string]bool) {
+		t.Helper()
+		got := listFlags(who, path)
+		if len(got) != len(want) {
+			t.Fatalf("GET %s as %s returned %v, want %v", path, who.kind, got, want)
+		}
+		for id, wantDraft := range want {
+			gotDraft, ok := got[id]
+			if !ok || gotDraft != wantDraft {
+				t.Fatalf("GET %s as %s returned %v, want %v", path, who.kind, got, want)
+			}
+		}
+	}
+
+	cases := []struct {
+		who        principal
+		ownDraft   string
+		otherDraft string
+	}{
+		{who: user, ownDraft: artUserDraft, otherDraft: artAgentDraft},
+		{who: agent, ownDraft: artAgentDraft, otherDraft: artUserDraft},
+	}
+	scopes := []string{"", "&scope=" + scope}
+
+	for _, tc := range cases {
+		for _, scopeParam := range scopes {
+			base := "/api/v1/artifacts?mine=1" + scopeParam
+
+			// Unfiltered list: only the caller's own draft has reviewInDraft=true.
+			assertFlags(tc.who, base, map[string]bool{
+				tc.ownDraft:   true,
+				tc.otherDraft: false,
+				artNeither:    false,
+			})
+
+			// drafts=1 and is:draft return only the caller's own draft.
+			for _, suffix := range []string{"&drafts=1", "&q=is:draft"} {
+				assertFlags(tc.who, base+suffix, map[string]bool{
+					tc.ownDraft: true,
+				})
+			}
+
+			// -is:draft excludes only the caller's own draft and keeps the other
+			// principal's drafted artifact with reviewInDraft=false.
+			assertFlags(tc.who, base+"&q=-is:draft", map[string]bool{
+				tc.otherDraft: false,
+				artNeither:    false,
+			})
+		}
+
+		// Detail endpoint must not leak the other principal's draft either.
+		rec := doDraftReq(svc, tc.who, http.MethodGet, "/api/v1/artifacts/"+tc.otherDraft, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/v1/artifacts/%s as %s = %d: %s", tc.otherDraft, tc.who.kind, rec.Code, rec.Body.String())
+		}
+		detail := decodeInto[ArtifactResponse](t, rec)
+		if detail.ReviewState == nil || detail.ReviewState.MyDraft != nil {
+			t.Fatalf("GET /api/v1/artifacts/%s as %s leaked myDraft: %+v", tc.otherDraft, tc.who.kind, detail.ReviewState)
+		}
+	}
+}
