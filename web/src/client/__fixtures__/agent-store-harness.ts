@@ -194,6 +194,7 @@ export const COMPACT_KEYS = [
   'phase',
   'activity',
   'suspendReason',
+  'suspendPolicy',
   'containerStatus',
   'message',
   'messageMode',

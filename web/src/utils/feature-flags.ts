@@ -559,3 +559,17 @@ export const TELEMETRY_ENFORCEMENT_FLAG = 'agent_policy.telemetry_enforcement';
 export function telemetryEnforcementEnabled(): boolean {
   return isFeatureEnabled(TELEMETRY_ENFORCEMENT_FLAG);
 }
+
+/**
+ * Never-suspend agents (lifecycle.never_suspend, ptone/scion#9178):
+ * gates the Never suspend create checkbox, badge, edit toggle, force-suspend
+ * confirmation dialog, and hub-wide agent list filter/column. Presentation
+ * only: the hub enforces the experiment on create, PATCH, suspend, and
+ * auto-suspend sweeps. Default OFF.
+ */
+export const NEVER_SUSPEND_FLAG = 'lifecycle.never_suspend';
+
+/** Whether Never-suspend UI surfaces are enabled in this session. */
+export function neverSuspendEnabled(): boolean {
+  return isFeatureEnabled(NEVER_SUSPEND_FLAG);
+}

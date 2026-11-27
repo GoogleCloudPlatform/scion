@@ -33,6 +33,7 @@ const TIERS: Record<string, AgentEditTier> = {
   name: 'T0',
   labels: 'T0',
   messageMode: 'T0',
+  suspendPolicy: 'T0',
   'config.task': 'T1',
   'config.model': 'T1',
   'config.thinking_level': 'T1',

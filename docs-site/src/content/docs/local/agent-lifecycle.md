@@ -574,6 +574,91 @@ runtime, so new work no longer wakes it.
 
 For the settings, see [`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 
+## Never-Suspend Agents
+
+Standing leads, listeners, and service agents may need to stay running through
+idle and stalled auto-suspend sweeps and routine bulk suspends. When the
+[`lifecycle.never_suspend`](/scion/reference/experiments/#server-experiments-with-notes)
+experiment is enabled (alpha, off by default; independent of
+`lifecycle.idle_suspend`), you can mark an agent with `suspendPolicy: "never"`.
+
+### What Never-Suspend Does and Does Not Do
+
+| Path | Behavior for a `never`-policy agent |
+| :--- | :--- |
+| **Idle auto-suspend sweep** | Skipped — the agent stays `running`. |
+| **Stalled auto-suspend** | Skipped — the agent is still marked `stalled` and stall notifications still fire, but the Hub does not suspend it. |
+| **Bulk suspend (`scion suspend --all`)** | Skipped and reported as `skipped (never-suspend)` unless `--force` is passed. |
+| **Manual single suspend** | Refused with `409 agent_never_suspend` unless `force: true` (`--force`) is sent by an allowlisted human user or dev principal with `agent.lifecycle`. Applies equally when converting an `idle`- or `stalled`-suspended agent to `user`. |
+| **Membership-loss hold** | **Still applies** — security revocation is never weakened or overridable. |
+| **`stop`, `stop --all`, `delete`, `limits_exceeded` stops, `reincarnate`** | **Unaffected** — `stop` remains the explicit escape hatch. |
+
+A forced suspend is audited (`agent.suspend.forced`), notifies the agent's
+creator when performed by another user, records `suspendReason: "user"` (so it
+does not auto-wake), and keeps `suspendPolicy: "never"` across resume.
+
+Agents whose harness does not support session resume are never auto-suspended
+anyway; setting `suspendPolicy: "never"` on one is allowed and returns an
+advisory warning that the flag has no effect.
+
+Turning `lifecycle.never_suspend` off keeps stored `suspendPolicy` values in the
+database but ignores them (flagged agents behave like `auto`), and refuses
+create or `PATCH` requests that set `suspendPolicy` with `400 experiment_disabled`.
+
+### Setting and Changing the Policy
+
+- **CLI at create or start** (human and agent modes):
+
+  ```bash
+  scion create standing-lead --never-suspend
+  scion start standing-lead --never-suspend "Monitor incoming requests"
+  ```
+
+  `scion list` shows a marker next to the phase for flagged agents, and
+  `scion look <agent>` reports `Suspend policy: never`. Re-running `scion create`
+  or `scion start` on an existing agent with a different `suspendPolicy` returns
+  `409 suspend_policy_create_only`.
+
+- **Manual and bulk suspend override** (human principals with `agent.lifecycle`):
+
+  ```bash
+  scion suspend standing-lead --force
+  scion suspend --all --force
+  ```
+
+- **Changing after creation (API and Web UI):** send `PATCH /api/v1/agents/{id}`
+  with `{"suspendPolicy": "never"}` or `{"suspendPolicy": "auto"}`, or toggle
+  **Never suspend** on the agent's **Edit** page in the Web UI. The field is T0
+  metadata and takes effect immediately in any phase (emitting an
+  `agent.suspend_policy.set` audit record). Setting `suspendPolicy: "never"`
+  after an auto-suspend claim or stop intent was already taken does not cancel
+  that in-flight suspend; the `PATCH` response sets `suspensionInFlight: true`
+  and the Web UI shows a hint explaining that the policy will apply once the
+  agent is running again.
+
+- **Web UI:** while `lifecycle.never_suspend` is enabled, the **Create Agent**
+  form offers a **Never suspend** checkbox, agent lists and detail pages show a
+  **Never suspend** badge, the hub-wide **Agents** page adds a **Policy** filter
+  (`suspendPolicy:never` / `suspendPolicy:auto`) and surfaces non-default
+  lifecycle and messaging settings in the **Traits** column, and clicking
+  **Suspend** on a flagged agent opens a confirmation dialog that sends
+  `force: true`.
+
+### Current Limits (v1)
+
+- **Per-project quota (`max_never_suspend_agents_per_project`):** an optional
+  fairness limit (unlimited by default) that counts flagged non-deleted agents
+  in the project; creating or `PATCH`ing over the cap returns `429`, and
+  restoring a soft-deleted flagged agent over the cap returns `409`.
+- **Agent principals can set the flag only at creation.** Calling
+  `scion create --never-suspend` or `scion start --never-suspend` from an agent
+  works under the existing `agent.create` rules, but `PATCH /api/v1/agents/{id}`
+  from an agent principal returns `403`.
+- **Users from a federated hub cannot use `force`.** Only allowlisted human
+  user and dev principals on the local Hub with `agent.lifecycle` may
+  force-suspend a flagged agent; federated and agent principals receive
+  `403 force_suspend_forbidden`.
+
 ---
 
 ## Troubleshooting & Diagnostics

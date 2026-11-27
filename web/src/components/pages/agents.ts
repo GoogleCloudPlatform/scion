@@ -44,6 +44,14 @@ import {
 
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import { getMessageModeDisplay } from '../../shared/message-mode.js';
+import {
+  isNeverSuspendActive,
+  neverSuspendBadge,
+  neverSuspendBadgeStyles,
+  resolveSuspendAction,
+  showSuspendAction,
+} from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { stateManager } from '../../client/state.js';
@@ -76,7 +84,12 @@ import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
 import { agentBadges } from '../shared/agent-badges.js';
-import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  AGENT_BADGES_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  isFeatureEnabled,
+  neverSuspendEnabled,
+} from '../../utils/feature-flags.js';
 import { replaceSearch } from '../../client/navigation.js';
 import '../shared/filter-box/filter-box.js';
 import type { FilterCommitDetail, FilterInputDetail } from '../shared/filter-box/filter-box.js';
@@ -329,6 +342,7 @@ export class ScionPageAgents extends LitElement {
 
   static override styles = [
     listPageStyles,
+    neverSuspendBadgeStyles,
     css`
       .agent-header {
         display: flex;
@@ -369,9 +383,52 @@ export class ScionPageAgents extends LitElement {
       /* The badges keep their intrinsic size so the name absorbs the
          shrinking rather than squeezing the status indicators. */
       .agent-header > scion-status-badge,
+      .agent-header > .never-suspend-badge,
       .agent-header > scion-message-mode-badge,
       .agent-header > scion-messageability-indicator {
         flex-shrink: 0;
+      }
+
+      .traits-pills {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .trait-msg-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+      }
+
+      .trait-pill {
+        display: inline-flex;
+        align-items: center;
+        align-self: center;
+        gap: 0.25rem;
+        flex-shrink: 0;
+        padding: 0.0625rem 0.4375rem;
+        border-radius: 9999px;
+        font-size: 0.6875rem;
+        font-weight: 500;
+        line-height: 1.25;
+        white-space: nowrap;
+      }
+
+      .trait-pill sl-icon {
+        font-size: 0.72rem;
+        flex-shrink: 0;
+      }
+
+      .trait-pill--messaging {
+        background: var(--scion-badge-warning-bg);
+        color: var(--scion-badge-warning-text);
+      }
+
+      .trait-pill--lifecycle {
+        background: var(--scion-badge-primary-bg);
+        color: var(--scion-badge-primary-text);
       }
 
       .agent-meta {
@@ -630,8 +687,15 @@ export class ScionPageAgents extends LitElement {
     this.windowTick++;
   };
 
+  private readonly boundOnFeatureFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
+    if (typeof window !== 'undefined') {
+      window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
 
     // Read persisted view mode
     const stored = localStorage.getItem('scion-view-agents') as ViewMode | null;
@@ -753,6 +817,9 @@ export class ScionPageAgents extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.removeEventListener('agent-created', this.boundOnAgentCreated);
@@ -1361,6 +1428,13 @@ export class ScionPageAgents extends LitElement {
     action: AgentLifecycleAction,
     event?: MouseEvent
   ): Promise<void> {
+    const shown = this.findShownAgent(agentId);
+    if (action === 'suspend' && shown) {
+      const resolved = await resolveSuspendAction(shown);
+      if (!resolved) return;
+      action = resolved;
+    }
+
     if (action === 'force-resume') {
       if (
         !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
@@ -1383,10 +1457,10 @@ export class ScionPageAgents extends LitElement {
       start: 'starting',
       stop: 'stopping',
       suspend: 'stopping',
+      'force-suspend': 'stopping',
       resume: 'starting',
       'force-resume': 'starting',
     };
-    const shown = this.findShownAgent(agentId);
     if (shown) {
       this.applyOptimisticAgents([{ ...shown, phase: optimisticPhase[action] as Agent['phase'] }]);
     }
@@ -1395,6 +1469,7 @@ export class ScionPageAgents extends LitElement {
       start: `/api/v1/agents/${agentId}/start`,
       stop: `/api/v1/agents/${agentId}/stop`,
       suspend: `/api/v1/agents/${agentId}/suspend`,
+      'force-suspend': `/api/v1/agents/${agentId}/suspend`,
       resume: `/api/v1/agents/${agentId}/start`,
       'force-resume': `/api/v1/agents/${agentId}/start`,
     };
@@ -1623,6 +1698,13 @@ export class ScionPageAgents extends LitElement {
     const onPhaseClick = (phase: AgentPhase | ''): void => {
       this.setChipInQuery('phase', phase);
     };
+    const neverSuspendOn = neverSuspendEnabled();
+    const activePolicy = neverSuspendOn
+      ? getActiveSingleKeyValue(this.filterQueryText, 'suspendPolicy', AGENTS_FILTER_SCHEMA)
+      : '';
+    const onPolicyClick = (policy: '' | 'never' | 'auto'): void => {
+      this.setChipInQuery('suspendPolicy', policy);
+    };
 
     return html`
       <div class="filter-bar">
@@ -1662,6 +1744,33 @@ export class ScionPageAgents extends LitElement {
             Error
           </button>
         </div>
+        ${neverSuspendOn
+          ? html`
+              <span class="label">Policy:</span>
+              <div class="scope-toggle" data-testid="suspend-policy-filter">
+                <button
+                  class=${activePolicy === '' ? 'active' : ''}
+                  @click=${() => onPolicyClick('')}
+                >
+                  All
+                </button>
+                <button
+                  class=${activePolicy === 'never' ? 'active' : ''}
+                  data-testid="filter-suspend-policy-never"
+                  @click=${() => onPolicyClick('never')}
+                >
+                  Never suspend
+                </button>
+                <button
+                  class=${activePolicy === 'auto' ? 'active' : ''}
+                  data-testid="filter-suspend-policy-auto"
+                  @click=${() => onPolicyClick('auto')}
+                >
+                  Auto
+                </button>
+              </div>
+            `
+          : nothing}
         <scion-filter-box
           view="agents"
           .value=${this.filterQueryText}
@@ -2062,9 +2171,11 @@ export class ScionPageAgents extends LitElement {
       ${isAgentRunning(agent)
         ? lifecycleOk
           ? html`
-              ${agent.harnessCapabilities?.resume?.support !== 'no'
+              ${showSuspendAction(agent)
                 ? html`
-                    <sl-tooltip content="Suspend">
+                    <sl-tooltip
+                      content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
+                    >
                       <sl-button
                         class="action-btn-warning"
                         variant="warning"
@@ -2073,7 +2184,7 @@ export class ScionPageAgents extends LitElement {
                         ?loading=${isLoading}
                         ?disabled=${isLoading}
                         @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                        aria-label="Suspend"
+                        aria-label=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
                       >
                         <sl-icon slot="prefix" name="pause-circle"></sl-icon>
                       </sl-button>
@@ -2232,6 +2343,7 @@ export class ScionPageAgents extends LitElement {
             </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
+          ${neverSuspendBadge(agent, { compact: true })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -2272,6 +2384,7 @@ export class ScionPageAgents extends LitElement {
   private renderTable(items: Agent[]): TemplateResult {
     // Read once per list render, not per row (web.agent_badges, ptone/scion#5503).
     const badgesOn = isFeatureEnabled(AGENT_BADGES_FLAG);
+    const neverSuspendOn = neverSuspendEnabled();
     return html`
       <div class="resource-table-container">
         <table>
@@ -2291,7 +2404,7 @@ export class ScionPageAgents extends LitElement {
               >
                 Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
               </th>
-              <th class="hide-mobile">Messaging</th>
+              <th class="hide-mobile" data-testid="traits-col-header">Traits</th>
               <th
                 class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
                 @click=${() => this.toggleSort('updated')}
@@ -2306,7 +2419,7 @@ export class ScionPageAgents extends LitElement {
             ${repeat(
               items,
               (agent) => agent.id,
-              (agent) => this.renderAgentRow(agent, badgesOn)
+              (agent) => this.renderAgentRow(agent, badgesOn, neverSuspendOn)
             )}
           </tbody>
         </table>
@@ -2314,7 +2427,70 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  private renderAgentRow(agent: Agent, badgesOn: boolean) {
+  /**
+   * Traits holds only per-agent settings that change lifecycle or messaging
+   * behaviour (plus the reachability exception).
+   */
+  private renderTraitsCell(agent: Agent, neverSuspendOn: boolean): TemplateResult | typeof nothing {
+    const mode = agent.messageMode;
+    const hasNonDefaultMode = Boolean(mode && mode !== 'project');
+    const hasNeverSuspend = neverSuspendOn && isNeverSuspendActive(agent);
+    const msg = agent._messageability;
+    const hasReachabilityException = Boolean(msg && !(msg.canMessage && msg.canReachViewer));
+
+    if (!hasNonDefaultMode && !hasNeverSuspend && !hasReachabilityException) {
+      return nothing;
+    }
+
+    const modeDisplay = hasNonDefaultMode ? getMessageModeDisplay(mode) : null;
+    const modeTooltip = modeDisplay
+      ? `Messaging: ${modeDisplay.label} — ${modeDisplay.description}`
+      : '';
+    const lifecycleTooltip =
+      'Lifecycle: Never suspend — skipped by automatic idle/stalled and bulk suspends';
+
+    const reachabilityEl = hasReachabilityException
+      ? html`
+          <scion-messageability-indicator
+            .messageability=${msg}
+            agentName=${agent.name}
+            size="small"
+          ></scion-messageability-indicator>
+        `
+      : nothing;
+
+    return html`
+      <span class="traits-pills">
+        ${modeDisplay
+          ? html`<span class="trait-msg-group">
+              <span
+                class="trait-pill trait-pill--messaging"
+                data-testid="trait-message-mode"
+                title=${modeTooltip}
+                aria-label=${modeTooltip}
+              >
+                <sl-icon name="chat-dots" aria-hidden="true"></sl-icon>
+                ${modeDisplay.label}
+              </span>
+              ${reachabilityEl}
+            </span>`
+          : reachabilityEl}
+        ${hasNeverSuspend
+          ? html`<span
+              class="trait-pill trait-pill--lifecycle"
+              data-testid="never-suspend-badge"
+              title=${lifecycleTooltip}
+              aria-label=${lifecycleTooltip}
+            >
+              <sl-icon name="power" aria-hidden="true"></sl-icon>
+              Never suspend
+            </span>`
+          : nothing}
+      </span>
+    `;
+  }
+
+  private renderAgentRow(agent: Agent, badgesOn: boolean, neverSuspendOn: boolean) {
     return html`
       <tr>
         <td>
@@ -2337,19 +2513,8 @@ export class ScionPageAgents extends LitElement {
           ></scion-deletion-badge>
           ${this.renderDeletionBanner(agent, true)}
         </td>
-        <td class="hide-mobile">
-          <scion-message-mode-badge
-            mode=${agent.messageMode || 'project'}
-            size="small"
-          ></scion-message-mode-badge>
-          ${agent._messageability
-            ? html`
-                <scion-messageability-indicator
-                  .messageability=${agent._messageability}
-                  size="small"
-                ></scion-messageability-indicator>
-              `
-            : nothing}
+        <td class="hide-mobile" data-testid="traits-cell">
+          ${this.renderTraitsCell(agent, neverSuspendOn)}
         </td>
         <td class="hide-mobile">
           ${(agent.lastActivityEvent && !agent.lastActivityEvent.startsWith('0001')) ||

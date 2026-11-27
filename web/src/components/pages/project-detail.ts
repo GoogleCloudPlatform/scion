@@ -46,6 +46,13 @@ import {
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
+import {
+  isNeverSuspendActive,
+  neverSuspendBadge,
+  neverSuspendBadgeStyles,
+  resolveSuspendAction,
+  showSuspendAction,
+} from '../../shared/never-suspend.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import type { AdminStatus } from '../../lib/admin-permissions.js';
@@ -752,621 +759,625 @@ export class ScionPageProjectDetail extends LitElement {
   @state()
   private templateError = '';
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    neverSuspendBadgeStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    /* The linked-project marker beside the name. */
-    .linked-badge {
-      color: var(--scion-primary, #3b82f6);
-      font-size: 0.875rem;
-      opacity: 0.7;
-    }
+      /* The linked-project marker beside the name. */
+      .linked-badge {
+        color: var(--scion-primary, #3b82f6);
+        font-size: 0.875rem;
+        opacity: 0.7;
+      }
 
-    .header-path {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-      word-break: break-all;
-    }
+      .header-path {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+        word-break: break-all;
+      }
 
-    .stats-row {
-      display: flex;
-      gap: 2rem;
-      margin-bottom: 2rem;
-      padding: 1.25rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
+      .stats-row {
+        display: flex;
+        gap: 2rem;
+        margin-bottom: 2rem;
+        padding: 1.25rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
 
-    .stat {
-      display: flex;
-      flex-direction: column;
-    }
+      .stat {
+        display: flex;
+        flex-direction: column;
+      }
 
-    .stat-label {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 0.25rem;
-    }
+      .stat-label {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 0.25rem;
+      }
 
-    .stat-value {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-    }
+      .stat-value {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .stat-incomplete {
-      display: block;
-      font-size: 0.75rem;
-      font-weight: 400;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .stat-incomplete {
+        display: block;
+        font-size: 0.75rem;
+        font-weight: 400;
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-    }
+      .section-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
 
-    .section-header h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
+      .section-header h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
 
-    /* Matches the shared .resource-grid in resource-styles.ts. When expanded
+      /* Matches the shared .resource-grid in resource-styles.ts. When expanded
        the section flows at full height; when collapsed (the default) it is
        capped by .agents-collapsed below. */
-    .agent-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap: 1.5rem;
-    }
+      .agent-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+        gap: 1.5rem;
+      }
 
-    /* Collapsed agents section: fixed max-height with a slim, themed
+      /* Collapsed agents section: fixed max-height with a slim, themed
        scrollbar. The expand toggle in the section header removes the cap. */
-    .agent-grid.agents-collapsed,
-    .agent-table-container.agents-collapsed {
-      max-height: 26rem;
-      overflow-y: auto;
-      scrollbar-width: thin;
-      scrollbar-color: var(--scion-border, #cbd5e1) transparent;
-    }
+      .agent-grid.agents-collapsed,
+      .agent-table-container.agents-collapsed {
+        max-height: 26rem;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: var(--scion-border, #cbd5e1) transparent;
+      }
 
-    /* Keep column headers visible while the collapsed table scrolls. With
+      /* Keep column headers visible while the collapsed table scrolls. With
        border-collapse the th border-bottom does not stick, so draw the
        divider with an inset shadow instead. */
-    .agent-table-container.agents-collapsed th {
-      position: sticky;
-      top: 0;
-      z-index: 1;
-      box-shadow: inset 0 -1px 0 var(--scion-border, #e2e8f0);
-    }
+      .agent-table-container.agents-collapsed th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        box-shadow: inset 0 -1px 0 var(--scion-border, #e2e8f0);
+      }
 
-    .agent-grid.agents-collapsed {
-      /* Room so card hover shadows/borders are not clipped by the scroller. */
-      padding: 2px 0.5rem 2px 2px;
-    }
+      .agent-grid.agents-collapsed {
+        /* Room so card hover shadows/borders are not clipped by the scroller. */
+        padding: 2px 0.5rem 2px 2px;
+      }
 
-    .agents-collapsed::-webkit-scrollbar {
-      width: 8px;
-      height: 8px;
-    }
+      .agents-collapsed::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
 
-    .agents-collapsed::-webkit-scrollbar-track {
-      background: transparent;
-    }
+      .agents-collapsed::-webkit-scrollbar-track {
+        background: transparent;
+      }
 
-    .agents-collapsed::-webkit-scrollbar-thumb {
-      background: var(--scion-border, #cbd5e1);
-      border-radius: 9999px;
-    }
+      .agents-collapsed::-webkit-scrollbar-thumb {
+        background: var(--scion-border, #cbd5e1);
+        border-radius: 9999px;
+      }
 
-    .agents-collapsed::-webkit-scrollbar-thumb:hover {
-      background: var(--scion-text-muted, #94a3b8);
-    }
+      .agents-collapsed::-webkit-scrollbar-thumb:hover {
+        background: var(--scion-text-muted, #94a3b8);
+      }
 
-    .agents-expand-toggle {
-      font-size: 1rem;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .agents-expand-toggle {
+        font-size: 1rem;
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .agent-card scion-deletion-banner {
-      margin-top: 0.75rem;
-    }
+      .agent-card scion-deletion-banner {
+        margin-top: 0.75rem;
+      }
 
-    td scion-deletion-banner {
-      margin-top: 0.25rem;
-    }
+      td scion-deletion-banner {
+        margin-top: 0.25rem;
+      }
 
-    .agent-card {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1.5rem;
-      transition: all var(--scion-transition-fast, 150ms ease);
-      text-decoration: none;
-      color: inherit;
-      display: block;
-    }
+      .agent-card {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        padding: 1.5rem;
+        transition: all var(--scion-transition-fast, 150ms ease);
+        text-decoration: none;
+        color: inherit;
+        display: block;
+      }
 
-    .agent-card:hover {
-      border-color: var(--scion-primary, #3b82f6);
-      box-shadow: var(--scion-shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1));
-    }
+      .agent-card:hover {
+        border-color: var(--scion-primary, #3b82f6);
+        box-shadow: var(--scion-shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.1));
+      }
 
-    .agent-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      margin-bottom: 0.75rem;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
+      .agent-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 0.75rem;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
 
-    /* Let the name column shrink so .agent-name can wrap; without this a
+      /* Let the name column shrink so .agent-name can wrap; without this a
        flex item's min-width:auto holds the header open at the full name. */
-    .agent-header > div {
-      /* Full-width basis so the badge always wraps to its own row. A wide
+      .agent-header > div {
+        /* Full-width basis so the badge always wraps to its own row. A wide
          status label like "waiting on parent" would otherwise crush the name
          to a few characters, the same failure the agents grid had — it is the
          badge's width that matters, not how many there are. */
-      flex: 1 1 100%;
-      min-width: 0;
-    }
+        flex: 1 1 100%;
+        min-width: 0;
+      }
 
-    .agent-header > scion-status-badge {
-      flex-shrink: 0;
-    }
+      .agent-header > scion-status-badge,
+      .agent-header > .never-suspend-badge {
+        flex-shrink: 0;
+      }
 
-    .agent-name {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      min-width: 0;
-    }
+      .agent-name {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        min-width: 0;
+      }
 
-    .agent-name sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      flex-shrink: 0;
-    }
+      .agent-name sl-icon {
+        color: var(--scion-primary, #3b82f6);
+        flex-shrink: 0;
+      }
 
-    /* Wrapping has to land on the anchor that holds the text; the flex parent
+      /* Wrapping has to land on the anchor that holds the text; the flex parent
        only bounds it. overflow-wrap:anywhere covers the hard case — a long
        name with no spaces or hyphens, which has nowhere else to break. */
-    .agent-name > a {
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
+      .agent-name > a {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
 
-    .agent-meta {
-      font-size: 0.813rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-    }
+      .agent-meta {
+        font-size: 0.813rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+      }
 
-    .agent-meta sl-icon {
-      font-size: 0.875rem;
-      vertical-align: -0.125em;
-      opacity: 0.7;
-    }
+      .agent-meta sl-icon {
+        font-size: 0.875rem;
+        vertical-align: -0.125em;
+        opacity: 0.7;
+      }
 
-    .broker-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-    }
+      .broker-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        color: var(--scion-text-muted, #64748b);
+        text-decoration: none;
+      }
 
-    .broker-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
+      .broker-link:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
 
-    .agent-task {
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      margin-top: 0.75rem;
-      padding: 0.75rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: var(--scion-radius, 0.5rem);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+      .agent-task {
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        margin-top: 0.75rem;
+        padding: 0.75rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-radius: var(--scion-radius, 0.5rem);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-    .agent-actions {
-      display: flex;
-      gap: 0.5rem;
-      margin-top: 1rem;
-      padding-top: 1rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
+      .agent-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    /* overflow-x: auto keeps the rounded corners clipping the table while
+      /* overflow-x: auto keeps the rounded corners clipping the table while
        allowing horizontal scrolling on smaller screens. The collapsed height
        cap is shared with the grid via .agents-collapsed. */
-    .agent-table-container {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow-x: auto;
-    }
-
-    .agent-table-container table {
-      width: 100%;
-      border-collapse: collapse;
-    }
-
-    .agent-table-container th {
-      text-align: left;
-      padding: 0.75rem 1rem;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .agent-table-container td {
-      padding: 0.75rem 1rem;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      vertical-align: middle;
-    }
-
-    .agent-table-container tr:last-child td {
-      border-bottom: none;
-    }
-
-    .agent-table-container tr:hover td {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .agent-table-container .name-cell {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-weight: 500;
-    }
-
-    .agent-table-container .name-cell sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      flex-shrink: 0;
-    }
-
-    .agent-table-container .name-cell a {
-      color: inherit;
-      text-decoration: none;
-    }
-
-    .agent-table-container .name-cell a:hover {
-      text-decoration: underline;
-    }
-
-    .agent-table-container .status-col {
-      min-width: 11rem;
-    }
-
-    .agent-table-container .task-cell {
-      display: -webkit-box;
-      -webkit-line-clamp: 2;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
-      max-width: 250px;
-      white-space: normal;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.8125rem;
-    }
-
-    .agent-table-container .actions-cell {
-      text-align: right;
-      white-space: nowrap;
-    }
-
-    .table-actions {
-      display: flex;
-      gap: 0.375rem;
-      justify-content: flex-end;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 4rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px dashed var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    .empty-state > sl-icon {
-      font-size: 4rem;
-      color: var(--scion-text-muted, #64748b);
-      opacity: 0.5;
-      margin-bottom: 1rem;
-    }
-
-    .empty-state h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
-
-    .empty-state p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1.5rem 0;
-    }
-
-    .loading-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 4rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .loading-state sl-spinner {
-      font-size: 2rem;
-      margin-bottom: 1rem;
-    }
-
-    .leave-blocked-reason {
-      max-width: 18rem;
-      white-space: normal;
-      font-size: var(--sl-font-size-x-small, 0.75rem);
-      color: var(--sl-color-neutral-600, #4b5563);
-    }
-
-    .error-state {
-      text-align: center;
-      padding: 3rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    .error-state sl-icon {
-      font-size: 3rem;
-      color: var(--sl-color-danger-500, #ef4444);
-      margin-bottom: 1rem;
-    }
-
-    .error-state h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
-
-    .error-state p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-    }
-
-    .error-details {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      padding: 0.75rem 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      color: var(--sl-color-danger-700, #b91c1c);
-      margin-bottom: 1rem;
-    }
-
-    .clone-summary {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 1rem;
-      line-height: 1.5;
-    }
-
-    .clone-summary strong {
-      color: var(--scion-text, #1e293b);
-    }
-
-    .clone-slug-preview {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.5rem;
-    }
-
-    .clone-error {
-      color: var(--sl-color-danger-700, #b91c1c);
-      font-size: 0.875rem;
-      margin-top: 0.75rem;
-    }
-
-    .header-path a {
-      color: inherit;
-      text-decoration: none;
-    }
-
-    .header-path a:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
-    .workspace-section {
-      margin-top: 2rem;
-      margin-bottom: 2rem;
-    }
-
-    .workspace-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 1rem;
-    }
-
-    .workspace-header-left {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .workspace-header h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
-
-    .files-tab-group {
-      margin-bottom: 0;
-    }
-
-    .files-tab-group::part(base) {
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .files-tab-group::part(body) {
-      padding: 0;
-    }
-
-    .editor-back-row {
-      margin-bottom: 0.5rem;
-    }
-
-    .tab-label-truncated {
-      max-width: 10rem;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      display: inline-block;
-      vertical-align: bottom;
-    }
-
-    .pull-commits {
-      margin-top: 0.375rem;
-      max-height: 8rem;
-      overflow-y: auto;
-      font-family: var(--sl-font-mono, monospace);
-      line-height: 1.5;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .pull-commits .commit-hash {
-      color: var(--sl-color-primary-600, #2563eb);
-      margin-right: 0.375rem;
-    }
-
-    .filter-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 1rem;
-      flex-wrap: wrap;
-    }
-
-    .filter-bar .label {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-    }
-
-    .scope-toggle {
-      display: inline-flex;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      overflow: hidden;
-    }
-
-    .scope-toggle button {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      height: 2rem;
-      border: none;
-      background: var(--scion-surface, #ffffff);
-      color: var(--scion-text-muted, #64748b);
-      cursor: pointer;
-      padding: 0 0.625rem;
-      font-size: 0.8125rem;
-      font-family: inherit;
-      transition: all 150ms ease;
-      white-space: nowrap;
-    }
-
-    .scope-toggle button:not(:last-child) {
-      border-right: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .scope-toggle button:hover:not(.active) {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
-
-    .scope-toggle button.active {
-      background: var(--scion-primary, #3b82f6);
-      color: var(--scion-primary-text, #ffffff);
-    }
-
-    th.sortable {
-      cursor: pointer;
-      user-select: none;
-    }
-
-    th.sortable:hover {
-      color: var(--scion-text, #1e293b);
-    }
-
-    .sort-indicator {
-      display: inline-block;
-      margin-left: 0.25rem;
-      font-size: 0.625rem;
-      vertical-align: middle;
-      opacity: 0.4;
-    }
-
-    th.sorted .sort-indicator {
-      opacity: 1;
-    }
-
-    .empty-filter-state {
-      text-align: center;
-      padding: 3rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .agent-window-banner {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.5rem 0;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-    }
-
-    .agent-window-banner sl-tag {
-      cursor: pointer;
-    }
-
-    .decisions-btn sl-badge::part(base) {
-      font-size: 0.65rem;
-      margin-left: 0.35rem;
-    }
-
-    @media (max-width: 768px) {
-      .hide-mobile {
-        display: none;
+      .agent-table-container {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        overflow-x: auto;
       }
-    }
-  `;
+
+      .agent-table-container table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      .agent-table-container th {
+        text-align: left;
+        padding: 0.75rem 1rem;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--scion-text-muted, #64748b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .agent-table-container td {
+        padding: 0.75rem 1rem;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        vertical-align: middle;
+      }
+
+      .agent-table-container tr:last-child td {
+        border-bottom: none;
+      }
+
+      .agent-table-container tr:hover td {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .agent-table-container .name-cell {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 500;
+      }
+
+      .agent-table-container .name-cell sl-icon {
+        color: var(--scion-primary, #3b82f6);
+        flex-shrink: 0;
+      }
+
+      .agent-table-container .name-cell a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .agent-table-container .name-cell a:hover {
+        text-decoration: underline;
+      }
+
+      .agent-table-container .status-col {
+        min-width: 11rem;
+      }
+
+      .agent-table-container .task-cell {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        max-width: 250px;
+        white-space: normal;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.8125rem;
+      }
+
+      .agent-table-container .actions-cell {
+        text-align: right;
+        white-space: nowrap;
+      }
+
+      .table-actions {
+        display: flex;
+        gap: 0.375rem;
+        justify-content: flex-end;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 4rem 2rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px dashed var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
+
+      .empty-state > sl-icon {
+        font-size: 4rem;
+        color: var(--scion-text-muted, #64748b);
+        opacity: 0.5;
+        margin-bottom: 1rem;
+      }
+
+      .empty-state h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
+
+      .empty-state p {
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1.5rem 0;
+      }
+
+      .loading-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 4rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .loading-state sl-spinner {
+        font-size: 2rem;
+        margin-bottom: 1rem;
+      }
+
+      .leave-blocked-reason {
+        max-width: 18rem;
+        white-space: normal;
+        font-size: var(--sl-font-size-x-small, 0.75rem);
+        color: var(--sl-color-neutral-600, #4b5563);
+      }
+
+      .error-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
+
+      .error-state sl-icon {
+        font-size: 3rem;
+        color: var(--sl-color-danger-500, #ef4444);
+        margin-bottom: 1rem;
+      }
+
+      .error-state h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
+
+      .error-state p {
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1rem 0;
+      }
+
+      .error-details {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.875rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        padding: 0.75rem 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        color: var(--sl-color-danger-700, #b91c1c);
+        margin-bottom: 1rem;
+      }
+
+      .clone-summary {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 1rem;
+        line-height: 1.5;
+      }
+
+      .clone-summary strong {
+        color: var(--scion-text, #1e293b);
+      }
+
+      .clone-slug-preview {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.5rem;
+      }
+
+      .clone-error {
+        color: var(--sl-color-danger-700, #b91c1c);
+        font-size: 0.875rem;
+        margin-top: 0.75rem;
+      }
+
+      .header-path a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .header-path a:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
+
+      .workspace-section {
+        margin-top: 2rem;
+        margin-bottom: 2rem;
+      }
+
+      .workspace-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+      }
+
+      .workspace-header-left {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .workspace-header h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
+
+      .files-tab-group {
+        margin-bottom: 0;
+      }
+
+      .files-tab-group::part(base) {
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .files-tab-group::part(body) {
+        padding: 0;
+      }
+
+      .editor-back-row {
+        margin-bottom: 0.5rem;
+      }
+
+      .tab-label-truncated {
+        max-width: 10rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: inline-block;
+        vertical-align: bottom;
+      }
+
+      .pull-commits {
+        margin-top: 0.375rem;
+        max-height: 8rem;
+        overflow-y: auto;
+        font-family: var(--sl-font-mono, monospace);
+        line-height: 1.5;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .pull-commits .commit-hash {
+        color: var(--sl-color-primary-600, #2563eb);
+        margin-right: 0.375rem;
+      }
+
+      .filter-bar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+
+      .filter-bar .label {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+      }
+
+      .scope-toggle {
+        display: inline-flex;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        overflow: hidden;
+      }
+
+      .scope-toggle button {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        height: 2rem;
+        border: none;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text-muted, #64748b);
+        cursor: pointer;
+        padding: 0 0.625rem;
+        font-size: 0.8125rem;
+        font-family: inherit;
+        transition: all 150ms ease;
+        white-space: nowrap;
+      }
+
+      .scope-toggle button:not(:last-child) {
+        border-right: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .scope-toggle button:hover:not(.active) {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+
+      .scope-toggle button.active {
+        background: var(--scion-primary, #3b82f6);
+        color: var(--scion-primary-text, #ffffff);
+      }
+
+      th.sortable {
+        cursor: pointer;
+        user-select: none;
+      }
+
+      th.sortable:hover {
+        color: var(--scion-text, #1e293b);
+      }
+
+      .sort-indicator {
+        display: inline-block;
+        margin-left: 0.25rem;
+        font-size: 0.625rem;
+        vertical-align: middle;
+        opacity: 0.4;
+      }
+
+      th.sorted .sort-indicator {
+        opacity: 1;
+      }
+
+      .empty-filter-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .agent-window-banner {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 0;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+      }
+
+      .agent-window-banner sl-tag {
+        cursor: pointer;
+      }
+
+      .decisions-btn sl-badge::part(base) {
+        font-size: 0.65rem;
+        margin-left: 0.35rem;
+      }
+
+      @media (max-width: 768px) {
+        .hide-mobile {
+          display: none;
+        }
+      }
+    `,
+  ];
 
   @state()
   private adminStatus: AdminStatus | null = null;
@@ -2617,6 +2628,13 @@ export class ScionPageProjectDetail extends LitElement {
     action: AgentLifecycleAction,
     event?: MouseEvent
   ): Promise<void> {
+    const shown = this.findShownAgent(agentId);
+    if (action === 'suspend' && shown) {
+      const resolved = await resolveSuspendAction(shown);
+      if (!resolved) return;
+      action = resolved;
+    }
+
     if (action === 'force-resume') {
       if (
         !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
@@ -2639,10 +2657,10 @@ export class ScionPageProjectDetail extends LitElement {
       start: 'starting',
       stop: 'stopping',
       suspend: 'stopping',
+      'force-suspend': 'stopping',
       resume: 'starting',
       'force-resume': 'starting',
     };
-    const shown = this.findShownAgent(agentId);
     if (shown) {
       this.applyOptimisticAgents([{ ...shown, phase: optimisticPhase[action] as Agent['phase'] }]);
     }
@@ -2651,6 +2669,7 @@ export class ScionPageProjectDetail extends LitElement {
       start: `/api/v1/agents/${agentId}/start`,
       stop: `/api/v1/agents/${agentId}/stop`,
       suspend: `/api/v1/agents/${agentId}/suspend`,
+      'force-suspend': `/api/v1/agents/${agentId}/suspend`,
       resume: `/api/v1/agents/${agentId}/start`,
       'force-resume': `/api/v1/agents/${agentId}/start`,
     };
@@ -4288,6 +4307,7 @@ export class ScionPageProjectDetail extends LitElement {
         </td>
         <td>
           ${agentStatusBadge(agent, { size: 'small' })}
+          ${neverSuspendBadge(agent, { compact: true })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -4331,17 +4351,22 @@ export class ScionPageProjectDetail extends LitElement {
             ${isAgentRunning(agent)
               ? lifecycleOk
                 ? html`
-                    ${agent.harnessCapabilities?.resume?.support !== 'no'
+                    ${showSuspendAction(agent)
                       ? html`
-                          <sl-tooltip content="Suspend">
+                          <sl-tooltip
+                            content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
+                          >
                             <sl-button
                               variant="warning"
                               size="small"
                               outline
+                              data-testid="agent-row-suspend"
                               ?loading=${isLoading}
                               ?disabled=${isLoading}
                               @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                              aria-label="Suspend"
+                              aria-label=${isNeverSuspendActive(agent)
+                                ? 'Force suspend'
+                                : 'Suspend'}
                             >
                               <sl-icon slot="prefix" name="pause-circle"></sl-icon>
                             </sl-button>
@@ -4466,6 +4491,7 @@ export class ScionPageProjectDetail extends LitElement {
             </div>
           </div>
           ${agentStatusBadge(agent, { size: 'small' })}
+          ${neverSuspendBadge(agent, { compact: true })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -4497,17 +4523,20 @@ export class ScionPageProjectDetail extends LitElement {
           ${isAgentRunning(agent)
             ? lifecycleOk
               ? html`
-                  ${agent.harnessCapabilities?.resume?.support !== 'no'
+                  ${showSuspendAction(agent)
                     ? html`
-                        <sl-tooltip content="Suspend">
+                        <sl-tooltip
+                          content=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
+                        >
                           <sl-button
                             variant="warning"
                             size="small"
                             outline
+                            data-testid="agent-card-suspend"
                             ?loading=${isLoading}
                             ?disabled=${isLoading}
                             @click=${() => this.handleAgentAction(agent.id, 'suspend')}
-                            aria-label="Suspend"
+                            aria-label=${isNeverSuspendActive(agent) ? 'Force suspend' : 'Suspend'}
                           >
                             <sl-icon slot="prefix" name="pause-circle"></sl-icon>
                           </sl-button>

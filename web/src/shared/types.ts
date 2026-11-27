@@ -692,15 +692,16 @@ export type AgentLifecycleAction =
   | 'start'
   | 'stop'
   | 'suspend'
+  | 'force-suspend'
   | 'resume'
   | 'delete'
   | 'force-resume';
 
 /**
  * Builds the fetch RequestInit for POSTing an agent lifecycle action.
- * Only `force-resume` needs a JSON body; every other action (including the
- * plain `start` that a suspended/stopped/error agent otherwise uses) posts
- * with no body, matching the Hub's existing `/start` and `/stop` handlers.
+ * `force-resume` and `force-suspend` send a JSON body; every other action
+ * (including the plain `start` and `suspend`) posts with no body, matching
+ * the Hub's existing `/start`, `/stop`, and `/suspend` handlers.
  */
 export function lifecycleActionRequestInit(action: AgentLifecycleAction): RequestInit {
   if (action === 'force-resume') {
@@ -708,6 +709,13 @@ export function lifecycleActionRequestInit(action: AgentLifecycleAction): Reques
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ forceResume: true }),
+    };
+  }
+  if (action === 'force-suspend') {
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force: true }),
     };
   }
   return { method: 'POST' };
@@ -1065,6 +1073,11 @@ export interface AgentAuthority {
 }
 
 /**
+ * Agent automatic suspension policy.
+ */
+export type AgentSuspendPolicy = 'auto' | 'never';
+
+/**
  * Agent information from the Hub API
  */
 export interface Agent {
@@ -1083,6 +1096,11 @@ export interface Agent {
    * recorded). Unknown future values are possible.
    */
   suspendReason?: string;
+  /**
+   * Automatic suspension policy ("auto" or "never"). Absent on older hubs;
+   * treated as "auto" when absent or when lifecycle.never_suspend is off.
+   */
+  suspendPolicy?: AgentSuspendPolicy;
   detail?: AgentDetail;
   taskSummary?: string;
   message?: string;

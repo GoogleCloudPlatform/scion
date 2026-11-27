@@ -62,6 +62,7 @@ import type {
   AgentInlineConfig,
   AgentResourceSpec,
   AgentSecretInput,
+  AgentSuspendPolicy,
   CapabilityField,
   HarnessAdvancedCapabilities,
   MessageMode,
@@ -80,6 +81,7 @@ import {
   AGENT_SECRETS_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   isFeatureEnabled,
+  neverSuspendEnabled,
 } from '../../utils/feature-flags.js';
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 import { isZeroDurationLimit } from '../../shared/duration-limit.js';
@@ -176,6 +178,8 @@ export interface AgentConfigTopLevel {
   gcp_identity?: { metadata_mode: GcpMetadataMode; service_account_id?: string };
   /** Edit mode only: a zone name pins it, "" unpins it. */
   explicitTimezone?: string;
+  /** Edit mode only (when lifecycle.never_suspend is on): "auto" or "never". */
+  suspendPolicy?: AgentSuspendPolicy;
 }
 
 /**
@@ -189,6 +193,7 @@ export interface AgentConfigEditValues {
   explicitTimezone?: string | undefined;
   /** The pin was adopted from a TZ an older hub saved in env. */
   explicitTimezoneLegacy?: boolean | undefined;
+  suspendPolicy?: AgentSuspendPolicy | undefined;
   messageMode?: string | undefined;
   agentRole?: string | undefined;
   /** The agent's live env (AppliedConfig.Env). */
@@ -276,6 +281,7 @@ export type AgentConfigFieldDef = AgentConfigFieldBase &
           | 'gcp-identity'
           | 'name'
           | 'timezone'
+          | 'suspend-policy'
           | 'fixed';
       }
   );
@@ -482,6 +488,15 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Timezone',
     tier: 'T1',
     help: "Pins the container's timezone. Clear unpins it.",
+    editOnly: true,
+  },
+  {
+    key: 'suspendPolicy',
+    control: 'suspend-policy',
+    tab: 'general',
+    label: 'Never suspend',
+    tier: 'T0',
+    help: 'Skips automatic idle/stalled and bulk suspends; manual suspend requires force.',
     editOnly: true,
   },
   // Auth & Security
@@ -863,6 +878,7 @@ export class ScionAgentConfigForm extends LitElement {
       // An agent's branch is shown read-only in edit mode whatever its project.
       if (!edit && f.control === 'branch' && !this.branchAvailable) return false;
       if (f.control === 'gcp-identity' && !this.gcpIdentity) return false;
+      if (f.control === 'suspend-policy' && !neverSuspendEnabled()) return false;
       return true;
     });
   }
@@ -1053,6 +1069,10 @@ export class ScionAgentConfigForm extends LitElement {
           out.explicitTimezone = d.cleared ? '' : d.text.trim();
           break;
         }
+        case 'suspend-policy': {
+          out.suspendPolicy = this.drafts[f.key].text === 'never' ? 'never' : 'auto';
+          break;
+        }
         case 'branch': {
           const v = emitString('text', this.drafts[f.key]);
           if (v) out.branch = v;
@@ -1235,6 +1255,8 @@ export class ScionAgentConfigForm extends LitElement {
           return this.editValues.name ?? '';
         case 'timezone':
           return this.editValues.explicitTimezone ?? '';
+        case 'suspend-policy':
+          return this.editValues.suspendPolicy ?? 'auto';
         case 'top-choice':
           return (
             (f.topKey === 'agentRole' ? this.editValues.agentRole : this.editValues.messageMode) ??
@@ -1611,6 +1633,9 @@ export class ScionAgentConfigForm extends LitElement {
       case 'timezone':
         control = this.renderTimezone(f, off, d, id);
         break;
+      case 'suspend-policy':
+        control = this.renderSuspendPolicy(f, off, d, id);
+        break;
       case 'resources':
         control = this.renderResources(off, st.disposition === 'held');
         break;
@@ -1715,6 +1740,34 @@ export class ScionAgentConfigForm extends LitElement {
         ${this.renderClear(f, off || (!d && !this.storedText(f)), d)}
       </div>
       ${legacy}`;
+  }
+
+  /**
+   * Never suspend toggle: switches between "never" and "auto" (T0 metadata,
+   * immediate in any phase).
+   */
+  private renderSuspendPolicy(
+    f: AgentConfigFieldDef,
+    off: boolean,
+    d: FieldDraft | undefined,
+    id: string
+  ) {
+    const value = d ? d.text : this.storedText(f);
+    const checked = value === 'never';
+    return html`<div class="row">
+      <sl-checkbox
+        id=${id}
+        data-testid="suspend-policy-toggle"
+        ?checked=${checked}
+        ?disabled=${off}
+        @sl-change=${(e: Event) => {
+          const next = (e.target as HTMLInputElement).checked ? 'never' : 'auto';
+          this.editField(f.key, { typed: true, cleared: false, text: next }, f);
+        }}
+      >
+        Prevent automatic idle/stalled and bulk suspension
+      </sl-checkbox>
+    </div>`;
   }
 
   /** A choice that an override setting will replace today is still recorded. */

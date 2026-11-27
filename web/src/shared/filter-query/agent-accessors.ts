@@ -40,6 +40,8 @@ export function agentToFilterRow(agent: Agent, ctx?: AgentFilterContext): Filter
           return agent.phase ? [agent.phase] : [];
         case 'activity':
           return agent.activity ? [agent.activity] : [];
+        case 'suspendpolicy':
+          return [agent.suspendPolicy || 'auto'];
         case 'label': {
           if (!agent.labels) return [];
           const out: string[] = [];

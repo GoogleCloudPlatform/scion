@@ -128,9 +128,14 @@ describe('the two groupings partition the field table', () => {
       it(`${phase}, by ${grouping}: every field is in exactly one section`, async () => {
         const el = await mount(phase, { grouping });
         const rendered = el.fields.map((f) => f.key);
-        // Every field of the table renders in edit mode (the identity picker
-        // is given), so the partition covers the whole table.
-        expect(rendered.sort()).toEqual(mod.AGENT_CONFIG_FIELDS.map((f) => f.key).sort());
+        // Every non-experiment-gated field of the table renders in edit mode
+        // (the identity picker is given), so the partition covers them all.
+        // suspendPolicy is gated on lifecycle.never_suspend (off by default).
+        expect(rendered.sort()).toEqual(
+          mod.AGENT_CONFIG_FIELDS.filter((f) => f.key !== 'suspendPolicy')
+            .map((f) => f.key)
+            .sort()
+        );
 
         const all = Array.from(sectionKeys(el).values()).flat();
         expect(all.sort()).toEqual([...rendered].sort());
@@ -659,6 +664,7 @@ const EDIT_CLEAR_SWEEP: Record<
   'config.telemetry': 'clear-null',
   autoExpose: 'undo',
   explicitTimezone: 'clear-empty',
+  suspendPolicy: 'editor',
   agentRole: 'not-saveable',
   messageMode: 'not-saveable',
   'config.auth_selectedType': 'clear-null',
@@ -705,72 +711,81 @@ describe('edit-mode Clear matches what the hub does with an empty value (field t
 
   for (const [key, kind] of Object.entries(EDIT_CLEAR_SWEEP)) {
     it(`${key}: ${kind}`, async () => {
-      const el = await mountStored();
-      const f = () => field(el, key);
-      const clearBtn = () => f().querySelector('sl-button.clear') as HTMLElement | null;
-      const def = mod.AGENT_CONFIG_FIELDS.find((d) => d.key === key)!;
-      switch (kind) {
-        case 'clear-null':
-        case 'clear-empty': {
-          expect(el.fieldSaveable(def)).toBe(true);
-          expect(clearBtn()).not.toBeNull();
-          expect(clearBtn()!.hasAttribute('disabled')).toBe(false);
-          clearBtn()!.click();
-          await el.updateComplete;
-          if (kind === 'clear-empty') {
-            expect(el.collectTopLevel()).toEqual({ explicitTimezone: '' });
-          } else {
-            const configKey = key.replace(/^config\./, '');
-            expect(el.collectConfigPatch()).toEqual({ [configKey]: null });
+      if (key === 'suspendPolicy') {
+        window.__SCION_FEATURES__ = { 'lifecycle.never_suspend': true };
+      }
+      try {
+        const el = await mountStored();
+        const f = () => field(el, key);
+        const clearBtn = () => f().querySelector('sl-button.clear') as HTMLElement | null;
+        const def = mod.AGENT_CONFIG_FIELDS.find((d) => d.key === key)!;
+        switch (kind) {
+          case 'clear-null':
+          case 'clear-empty': {
+            expect(el.fieldSaveable(def)).toBe(true);
+            expect(clearBtn()).not.toBeNull();
+            expect(clearBtn()!.hasAttribute('disabled')).toBe(false);
+            clearBtn()!.click();
+            await el.updateComplete;
+            if (kind === 'clear-empty') {
+              expect(el.collectTopLevel()).toEqual({ explicitTimezone: '' });
+            } else {
+              const configKey = key.replace(/^config\./, '');
+              expect(el.collectConfigPatch()).toEqual({ [configKey]: null });
+            }
+            break;
           }
-          break;
-        }
-        case 'clear-set': {
-          const box = f().querySelector('sl-checkbox.set') as HTMLInputElement;
-          expect(box.hasAttribute('checked')).toBe(true);
-          box.checked = false;
-          box.dispatchEvent(new Event('sl-change'));
-          await el.updateComplete;
-          expect(el.collectConfigPatch()).toEqual({ thinking_level: null });
-          break;
-        }
-        case 'replace-only': {
-          expect(el.fieldSaveable(def)).toBe(true);
-          expect(clearBtn()).toBeNull();
-          await typeInto(el, key, '');
-          expect(el.touchedKeys).not.toContain(key);
-          expect(el.collectConfigPatch()).toEqual({});
-          expect(el.collectTopLevel()).toEqual({});
-          break;
-        }
-        case 'undo': {
-          expect(clearBtn()).toBeNull();
-          if (key === 'autoExpose') {
-            const sel = f().querySelector('sl-select') as HTMLElement & { value: string };
-            sel.value = 'false';
-            sel.dispatchEvent(new Event('sl-change'));
-          } else {
-            const input = f().querySelector('.sub sl-input') as HTMLInputElement;
-            input.value = '2';
-            input.dispatchEvent(new Event('sl-input'));
+          case 'clear-set': {
+            const box = f().querySelector('sl-checkbox.set') as HTMLInputElement;
+            expect(box.hasAttribute('checked')).toBe(true);
+            box.checked = false;
+            box.dispatchEvent(new Event('sl-change'));
+            await el.updateComplete;
+            expect(el.collectConfigPatch()).toEqual({ thinking_level: null });
+            break;
           }
-          await el.updateComplete;
-          expect(clearBtn()).toBeNull();
-          const undo = f().querySelector('sl-button.undo') as HTMLElement;
-          expect(undo.textContent).toContain('Undo');
-          undo.click();
-          await el.updateComplete;
-          expect(el.touchedKeys).not.toContain(key);
-          break;
+          case 'replace-only': {
+            expect(el.fieldSaveable(def)).toBe(true);
+            expect(clearBtn()).toBeNull();
+            await typeInto(el, key, '');
+            expect(el.touchedKeys).not.toContain(key);
+            expect(el.collectConfigPatch()).toEqual({});
+            expect(el.collectTopLevel()).toEqual({});
+            break;
+          }
+          case 'undo': {
+            expect(clearBtn()).toBeNull();
+            if (key === 'autoExpose') {
+              const sel = f().querySelector('sl-select') as HTMLElement & { value: string };
+              sel.value = 'false';
+              sel.dispatchEvent(new Event('sl-change'));
+            } else {
+              const input = f().querySelector('.sub sl-input') as HTMLInputElement;
+              input.value = '2';
+              input.dispatchEvent(new Event('sl-input'));
+            }
+            await el.updateComplete;
+            expect(clearBtn()).toBeNull();
+            const undo = f().querySelector('sl-button.undo') as HTMLElement;
+            expect(undo.textContent).toContain('Undo');
+            undo.click();
+            await el.updateComplete;
+            expect(el.touchedKeys).not.toContain(key);
+            break;
+          }
+          case 'editor':
+            expect(el.fieldSaveable(def)).toBe(true);
+            expect(clearBtn()).toBeNull();
+            break;
+          case 'not-saveable':
+            expect(el.fieldSaveable(def)).toBe(false);
+            expect(clearBtn() === null || clearBtn()!.hasAttribute('disabled')).toBe(true);
+            break;
         }
-        case 'editor':
-          expect(el.fieldSaveable(def)).toBe(true);
-          expect(clearBtn()).toBeNull();
-          break;
-        case 'not-saveable':
-          expect(el.fieldSaveable(def)).toBe(false);
-          expect(clearBtn() === null || clearBtn()!.hasAttribute('disabled')).toBe(true);
-          break;
+      } finally {
+        if (key === 'suspendPolicy') {
+          delete window.__SCION_FEATURES__;
+        }
       }
     });
   }

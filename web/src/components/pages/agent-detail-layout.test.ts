@@ -21,7 +21,7 @@ import type { Agent, Project } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import { PROVISIONED_ONLY_LABEL } from '../../shared/agent-state-display.js';
 import { crumbTuples, type CrumbTuple } from '../../test-utils/crumbs.js';
-import { styleRules } from './__fixtures__/css-rules.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the header tests do.
@@ -33,10 +33,7 @@ describe('agent detail layout', () => {
 
   beforeAll(async () => {
     await import('./agent-detail.js');
-    const ctor = customElements.get('scion-page-agent-detail') as unknown as {
-      styles: { cssText: string };
-    };
-    rules = styleRules(ctor.styles.cssText);
+    rules = elementStyleRules('scion-page-agent-detail');
   }, 30_000);
 
   it('leaves the header layout to the shared detail header', () => {

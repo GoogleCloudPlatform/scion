@@ -222,9 +222,23 @@ export async function runAgentDelete(opts: AgentDeleteOptions): Promise<AgentDel
 }
 
 /**
+ * Toast text when the hub refuses to suspend a never-suspend agent without
+ * `force: true` (409 `agent_never_suspend`).
+ */
+export const AGENT_NEVER_SUSPEND_MESSAGE =
+  'This agent has Never suspend enabled and cannot be suspended without forcing it. Reload to see the current policy.';
+
+/**
+ * Toast text when the hub refuses a forced suspend because the caller is not
+ * an allowlisted human principal (403 `force_suspend_forbidden`).
+ */
+export const FORCE_SUSPEND_FORBIDDEN_MESSAGE =
+  'Only human users with lifecycle permission may force-suspend a Never suspend agent.';
+
+/**
  * The toast text for a failed lifecycle action (start, resume, restart,
- * ...). A 409 `delete_in_progress` (design §2.1: an unfinished delete
- * blocks start) gets an explanation instead of the hub's generic text.
+ * ...). Known conflict and authorization codes get clear explanations instead
+ * of raw API/CLI phrasing.
  */
 export async function lifecycleActionErrorMessage(
   response: Response,
@@ -233,6 +247,12 @@ export async function lifecycleActionErrorMessage(
   const err = await readError(response, fallback);
   if (response.status === 409 && err.code === 'delete_in_progress') {
     return START_BLOCKED_BY_DELETE_MESSAGE;
+  }
+  if (response.status === 409 && err.code === 'agent_never_suspend') {
+    return AGENT_NEVER_SUSPEND_MESSAGE;
+  }
+  if (response.status === 403 && err.code === 'force_suspend_forbidden') {
+    return FORCE_SUSPEND_FORBIDDEN_MESSAGE;
   }
   return err.message;
 }

@@ -71,6 +71,7 @@ import {
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
+  neverSuspendEnabled,
 } from '../../utils/feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
@@ -111,6 +112,7 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private profile = '';
   @state() private task = '';
   @state() private notify = true;
+  @state() private neverSuspend = false;
 
   // ── Additional Options ──────────────────────────────────────────
   /** The hub's public settings, for the hub-tier placeholders. */
@@ -979,6 +981,7 @@ export class ScionPageAgentCreate extends LitElement {
       if (this.brokerId) body.runtimeBrokerId = this.brokerId;
       if (profile) body.profile = profile;
       if (this.task.trim() && !this.isShellHarness) body.task = this.task.trim();
+      if (neverSuspendEnabled() && this.neverSuspend) body.suspendPolicy = 'never';
 
       // Additional Options: only what the user set. Everything else
       // (including gcp_identity with no explicit pick) is left to the hub's
@@ -1433,6 +1436,29 @@ export class ScionPageAgentCreate extends LitElement {
           <span class="help-badge">?</span>
         </sl-tooltip>
       </div>
+
+      ${neverSuspendEnabled()
+        ? html`
+            <!-- Never Suspend -->
+            <div class="notify-field">
+              <sl-checkbox
+                data-testid="never-suspend-checkbox"
+                ?checked=${this.neverSuspend}
+                @sl-change=${(e: Event) => {
+                  this.neverSuspend = (e.target as HTMLInputElement).checked;
+                }}
+              >
+                Never suspend
+              </sl-checkbox>
+              <sl-tooltip
+                content="Skip automatic idle/stalled and bulk suspends. Manual suspend requires force; stop and membership-loss holds are unaffected."
+                hoist
+              >
+                <span class="help-badge">?</span>
+              </sl-tooltip>
+            </div>
+          `
+        : nothing}
     `;
   }
 }
