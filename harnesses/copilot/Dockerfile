@@ -41,9 +41,10 @@ RUN printf '{\n  "trustedFolders": ["/workspace"]\n}\n' > /home/scion/.copilot/c
 
 # Install the Copilot CLI from npm (@github/copilot), as the claude harness
 # installs Claude Code. npm verifies each tarball against the registry's
-# sha512 integrity, and the package pulls the binary for this platform
-# (@github/copilot-linux-x64 or -linux-arm64; glibc, as scion-base is Debian)
-# as an optional dependency. It uses the npm mirror chosen when core-base was
+# sha512 integrity, and the package pulls the binary for this platform as an
+# optional dependency: npm installs only the one matching the build's CPU and
+# libc (@github/copilot-linux-x64 or -linux-arm64 on scion-base, which is
+# glibc-based Debian trixie). It uses the npm mirror chosen when core-base was
 # built (--build-arg NPM_REGISTRY, exported as NPM_CONFIG_REGISTRY, which takes
 # precedence over a registry= line in .npmrc). A mirror that needs credentials
 # gets them from an .npmrc passed with --secret id=npmrc,src=<path>; the secret
