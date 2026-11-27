@@ -226,6 +226,8 @@ type Tx struct {
 	ThreadGroup *ThreadGroupClient
 	// ThreadGroupMember is the client for interacting with the ThreadGroupMember builders.
 	ThreadGroupMember *ThreadGroupMemberClient
+	// TrajectorySegment is the client for interacting with the TrajectorySegment builders.
+	TrajectorySegment *TrajectorySegmentClient
 	// Trigger is the client for interacting with the Trigger builders.
 	Trigger *TriggerClient
 	// TriggerEvent is the client for interacting with the TriggerEvent builders.
@@ -496,6 +498,7 @@ func (tx *Tx) init() {
 	tx.TestInfraMarker = NewTestInfraMarkerClient(tx.config)
 	tx.ThreadGroup = NewThreadGroupClient(tx.config)
 	tx.ThreadGroupMember = NewThreadGroupMemberClient(tx.config)
+	tx.TrajectorySegment = NewTrajectorySegmentClient(tx.config)
 	tx.Trigger = NewTriggerClient(tx.config)
 	tx.TriggerEvent = NewTriggerEventClient(tx.config)
 	tx.TriggerFire = NewTriggerFireClient(tx.config)

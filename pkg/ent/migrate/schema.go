@@ -4358,6 +4358,56 @@ var (
 			},
 		},
 	}
+	// TrajectorySegmentsColumns holds the columns for the "trajectory_segments" table.
+	TrajectorySegmentsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeString},
+		{Name: "hub_id", Type: field.TypeString},
+		{Name: "origin_hub_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "project_id", Type: field.TypeString},
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "run_id", Type: field.TypeString},
+		{Name: "harness", Type: field.TypeString},
+		{Name: "native_relative_path", Type: field.TypeString},
+		{Name: "artifact_kind", Type: field.TypeString},
+		{Name: "generation", Type: field.TypeInt},
+		{Name: "byte_start", Type: field.TypeInt64},
+		{Name: "byte_end", Type: field.TypeInt64},
+		{Name: "raw_sha256", Type: field.TypeString},
+		{Name: "compressed_size", Type: field.TypeInt64},
+		{Name: "compressed_sha256", Type: field.TypeString},
+		{Name: "incomplete_tail", Type: field.TypeBool, Default: false},
+		{Name: "session_id", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "object_path", Type: field.TypeString},
+		{Name: "manifest_path", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "status", Type: field.TypeString, Default: "pending"},
+		{Name: "normalize_status", Type: field.TypeString, Default: "pending"},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "committed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "prepare_expires_at", Type: field.TypeTime},
+	}
+	// TrajectorySegmentsTable holds the schema information for the "trajectory_segments" table.
+	TrajectorySegmentsTable = &schema.Table{
+		Name:       "trajectory_segments",
+		Columns:    TrajectorySegmentsColumns,
+		PrimaryKey: []*schema.Column{TrajectorySegmentsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "trajectorysegment_agent_id_run_id_harness_native_relative_path_generation_byte_start",
+				Unique:  true,
+				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[5], TrajectorySegmentsColumns[6], TrajectorySegmentsColumns[7], TrajectorySegmentsColumns[9], TrajectorySegmentsColumns[10]},
+			},
+			{
+				Name:    "trajectorysegment_project_id_agent_id_run_id",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectorySegmentsColumns[3], TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[5]},
+			},
+			{
+				Name:    "trajectorysegment_agent_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{TrajectorySegmentsColumns[4], TrajectorySegmentsColumns[21]},
+			},
+		},
+	}
 	// TriggersColumns holds the columns for the "triggers" table.
 	TriggersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -5298,6 +5348,7 @@ var (
 		TestInfraMarkerTable,
 		ThreadGroupsTable,
 		ThreadGroupMembersTable,
+		TrajectorySegmentsTable,
 		TriggersTable,
 		TriggerEventsTable,
 		TriggerFiresTable,
@@ -5599,6 +5650,9 @@ func init() {
 	}
 	ThreadGroupMembersTable.Annotation = &entsql.Annotation{
 		Table: "thread_group_members",
+	}
+	TrajectorySegmentsTable.Annotation = &entsql.Annotation{
+		Table: "trajectory_segments",
 	}
 	TriggersTable.Annotation = &entsql.Annotation{
 		Table: "triggers",

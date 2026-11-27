@@ -119,6 +119,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -302,6 +303,7 @@ func checkColumn(t, c string) error {
 			testinframarker.Table:               testinframarker.ValidColumn,
 			threadgroup.Table:                   threadgroup.ValidColumn,
 			threadgroupmember.Table:             threadgroupmember.ValidColumn,
+			trajectorysegment.Table:             trajectorysegment.ValidColumn,
 			trigger.Table:                       trigger.ValidColumn,
 			triggerevent.Table:                  triggerevent.ValidColumn,
 			triggerfire.Table:                   triggerfire.ValidColumn,

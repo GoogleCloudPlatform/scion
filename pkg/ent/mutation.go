@@ -121,6 +121,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -258,6 +259,7 @@ const (
 	TypeTestInfraMarker               = "TestInfraMarker"
 	TypeThreadGroup                   = "ThreadGroup"
 	TypeThreadGroupMember             = "ThreadGroupMember"
+	TypeTrajectorySegment             = "TrajectorySegment"
 	TypeTrigger                       = "Trigger"
 	TypeTriggerEvent                  = "TriggerEvent"
 	TypeTriggerFire                   = "TriggerFire"
@@ -128681,6 +128683,1740 @@ func (m *ThreadGroupMemberMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ThreadGroupMemberMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ThreadGroupMember edge %s", name)
+}
+
+// TrajectorySegmentMutation represents an operation that mutates the TrajectorySegment nodes in the graph.
+type TrajectorySegmentMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *string
+	hub_id               *string
+	origin_hub_id        *string
+	project_id           *string
+	agent_id             *string
+	run_id               *string
+	harness              *string
+	native_relative_path *string
+	artifact_kind        *string
+	generation           *int
+	addgeneration        *int
+	byte_start           *int64
+	addbyte_start        *int64
+	byte_end             *int64
+	addbyte_end          *int64
+	raw_sha256           *string
+	compressed_size      *int64
+	addcompressed_size   *int64
+	compressed_sha256    *string
+	incomplete_tail      *bool
+	session_id           *string
+	object_path          *string
+	manifest_path        *string
+	status               *string
+	normalize_status     *string
+	created_at           *time.Time
+	committed_at         *time.Time
+	prepare_expires_at   *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*TrajectorySegment, error)
+	predicates           []predicate.TrajectorySegment
+}
+
+var _ ent.Mutation = (*TrajectorySegmentMutation)(nil)
+
+// trajectorysegmentOption allows management of the mutation configuration using functional options.
+type trajectorysegmentOption func(*TrajectorySegmentMutation)
+
+// newTrajectorySegmentMutation creates new mutation for the TrajectorySegment entity.
+func newTrajectorySegmentMutation(c config, op Op, opts ...trajectorysegmentOption) *TrajectorySegmentMutation {
+	m := &TrajectorySegmentMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeTrajectorySegment,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withTrajectorySegmentID sets the ID field of the mutation.
+func withTrajectorySegmentID(id string) trajectorysegmentOption {
+	return func(m *TrajectorySegmentMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *TrajectorySegment
+		)
+		m.oldValue = func(ctx context.Context) (*TrajectorySegment, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().TrajectorySegment.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withTrajectorySegment sets the old TrajectorySegment of the mutation.
+func withTrajectorySegment(node *TrajectorySegment) trajectorysegmentOption {
+	return func(m *TrajectorySegmentMutation) {
+		m.oldValue = func(context.Context) (*TrajectorySegment, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m TrajectorySegmentMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m TrajectorySegmentMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of TrajectorySegment entities.
+func (m *TrajectorySegmentMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *TrajectorySegmentMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *TrajectorySegmentMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().TrajectorySegment.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHubID sets the "hub_id" field.
+func (m *TrajectorySegmentMutation) SetHubID(s string) {
+	m.hub_id = &s
+}
+
+// HubID returns the value of the "hub_id" field in the mutation.
+func (m *TrajectorySegmentMutation) HubID() (r string, exists bool) {
+	v := m.hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHubID returns the old "hub_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHubID: %w", err)
+	}
+	return oldValue.HubID, nil
+}
+
+// ResetHubID resets all changes to the "hub_id" field.
+func (m *TrajectorySegmentMutation) ResetHubID() {
+	m.hub_id = nil
+}
+
+// SetOriginHubID sets the "origin_hub_id" field.
+func (m *TrajectorySegmentMutation) SetOriginHubID(s string) {
+	m.origin_hub_id = &s
+}
+
+// OriginHubID returns the value of the "origin_hub_id" field in the mutation.
+func (m *TrajectorySegmentMutation) OriginHubID() (r string, exists bool) {
+	v := m.origin_hub_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOriginHubID returns the old "origin_hub_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldOriginHubID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOriginHubID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOriginHubID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOriginHubID: %w", err)
+	}
+	return oldValue.OriginHubID, nil
+}
+
+// ClearOriginHubID clears the value of the "origin_hub_id" field.
+func (m *TrajectorySegmentMutation) ClearOriginHubID() {
+	m.origin_hub_id = nil
+	m.clearedFields[trajectorysegment.FieldOriginHubID] = struct{}{}
+}
+
+// OriginHubIDCleared returns if the "origin_hub_id" field was cleared in this mutation.
+func (m *TrajectorySegmentMutation) OriginHubIDCleared() bool {
+	_, ok := m.clearedFields[trajectorysegment.FieldOriginHubID]
+	return ok
+}
+
+// ResetOriginHubID resets all changes to the "origin_hub_id" field.
+func (m *TrajectorySegmentMutation) ResetOriginHubID() {
+	m.origin_hub_id = nil
+	delete(m.clearedFields, trajectorysegment.FieldOriginHubID)
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *TrajectorySegmentMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *TrajectorySegmentMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *TrajectorySegmentMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *TrajectorySegmentMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *TrajectorySegmentMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *TrajectorySegmentMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *TrajectorySegmentMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *TrajectorySegmentMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *TrajectorySegmentMutation) ResetRunID() {
+	m.run_id = nil
+}
+
+// SetHarness sets the "harness" field.
+func (m *TrajectorySegmentMutation) SetHarness(s string) {
+	m.harness = &s
+}
+
+// Harness returns the value of the "harness" field in the mutation.
+func (m *TrajectorySegmentMutation) Harness() (r string, exists bool) {
+	v := m.harness
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHarness returns the old "harness" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldHarness(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHarness is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHarness requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHarness: %w", err)
+	}
+	return oldValue.Harness, nil
+}
+
+// ResetHarness resets all changes to the "harness" field.
+func (m *TrajectorySegmentMutation) ResetHarness() {
+	m.harness = nil
+}
+
+// SetNativeRelativePath sets the "native_relative_path" field.
+func (m *TrajectorySegmentMutation) SetNativeRelativePath(s string) {
+	m.native_relative_path = &s
+}
+
+// NativeRelativePath returns the value of the "native_relative_path" field in the mutation.
+func (m *TrajectorySegmentMutation) NativeRelativePath() (r string, exists bool) {
+	v := m.native_relative_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNativeRelativePath returns the old "native_relative_path" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldNativeRelativePath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNativeRelativePath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNativeRelativePath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNativeRelativePath: %w", err)
+	}
+	return oldValue.NativeRelativePath, nil
+}
+
+// ResetNativeRelativePath resets all changes to the "native_relative_path" field.
+func (m *TrajectorySegmentMutation) ResetNativeRelativePath() {
+	m.native_relative_path = nil
+}
+
+// SetArtifactKind sets the "artifact_kind" field.
+func (m *TrajectorySegmentMutation) SetArtifactKind(s string) {
+	m.artifact_kind = &s
+}
+
+// ArtifactKind returns the value of the "artifact_kind" field in the mutation.
+func (m *TrajectorySegmentMutation) ArtifactKind() (r string, exists bool) {
+	v := m.artifact_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArtifactKind returns the old "artifact_kind" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldArtifactKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArtifactKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArtifactKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArtifactKind: %w", err)
+	}
+	return oldValue.ArtifactKind, nil
+}
+
+// ResetArtifactKind resets all changes to the "artifact_kind" field.
+func (m *TrajectorySegmentMutation) ResetArtifactKind() {
+	m.artifact_kind = nil
+}
+
+// SetGeneration sets the "generation" field.
+func (m *TrajectorySegmentMutation) SetGeneration(i int) {
+	m.generation = &i
+	m.addgeneration = nil
+}
+
+// Generation returns the value of the "generation" field in the mutation.
+func (m *TrajectorySegmentMutation) Generation() (r int, exists bool) {
+	v := m.generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGeneration returns the old "generation" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldGeneration(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGeneration: %w", err)
+	}
+	return oldValue.Generation, nil
+}
+
+// AddGeneration adds i to the "generation" field.
+func (m *TrajectorySegmentMutation) AddGeneration(i int) {
+	if m.addgeneration != nil {
+		*m.addgeneration += i
+	} else {
+		m.addgeneration = &i
+	}
+}
+
+// AddedGeneration returns the value that was added to the "generation" field in this mutation.
+func (m *TrajectorySegmentMutation) AddedGeneration() (r int, exists bool) {
+	v := m.addgeneration
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetGeneration resets all changes to the "generation" field.
+func (m *TrajectorySegmentMutation) ResetGeneration() {
+	m.generation = nil
+	m.addgeneration = nil
+}
+
+// SetByteStart sets the "byte_start" field.
+func (m *TrajectorySegmentMutation) SetByteStart(i int64) {
+	m.byte_start = &i
+	m.addbyte_start = nil
+}
+
+// ByteStart returns the value of the "byte_start" field in the mutation.
+func (m *TrajectorySegmentMutation) ByteStart() (r int64, exists bool) {
+	v := m.byte_start
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldByteStart returns the old "byte_start" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldByteStart(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldByteStart is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldByteStart requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldByteStart: %w", err)
+	}
+	return oldValue.ByteStart, nil
+}
+
+// AddByteStart adds i to the "byte_start" field.
+func (m *TrajectorySegmentMutation) AddByteStart(i int64) {
+	if m.addbyte_start != nil {
+		*m.addbyte_start += i
+	} else {
+		m.addbyte_start = &i
+	}
+}
+
+// AddedByteStart returns the value that was added to the "byte_start" field in this mutation.
+func (m *TrajectorySegmentMutation) AddedByteStart() (r int64, exists bool) {
+	v := m.addbyte_start
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetByteStart resets all changes to the "byte_start" field.
+func (m *TrajectorySegmentMutation) ResetByteStart() {
+	m.byte_start = nil
+	m.addbyte_start = nil
+}
+
+// SetByteEnd sets the "byte_end" field.
+func (m *TrajectorySegmentMutation) SetByteEnd(i int64) {
+	m.byte_end = &i
+	m.addbyte_end = nil
+}
+
+// ByteEnd returns the value of the "byte_end" field in the mutation.
+func (m *TrajectorySegmentMutation) ByteEnd() (r int64, exists bool) {
+	v := m.byte_end
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldByteEnd returns the old "byte_end" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldByteEnd(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldByteEnd is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldByteEnd requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldByteEnd: %w", err)
+	}
+	return oldValue.ByteEnd, nil
+}
+
+// AddByteEnd adds i to the "byte_end" field.
+func (m *TrajectorySegmentMutation) AddByteEnd(i int64) {
+	if m.addbyte_end != nil {
+		*m.addbyte_end += i
+	} else {
+		m.addbyte_end = &i
+	}
+}
+
+// AddedByteEnd returns the value that was added to the "byte_end" field in this mutation.
+func (m *TrajectorySegmentMutation) AddedByteEnd() (r int64, exists bool) {
+	v := m.addbyte_end
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetByteEnd resets all changes to the "byte_end" field.
+func (m *TrajectorySegmentMutation) ResetByteEnd() {
+	m.byte_end = nil
+	m.addbyte_end = nil
+}
+
+// SetRawSha256 sets the "raw_sha256" field.
+func (m *TrajectorySegmentMutation) SetRawSha256(s string) {
+	m.raw_sha256 = &s
+}
+
+// RawSha256 returns the value of the "raw_sha256" field in the mutation.
+func (m *TrajectorySegmentMutation) RawSha256() (r string, exists bool) {
+	v := m.raw_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRawSha256 returns the old "raw_sha256" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldRawSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRawSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRawSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRawSha256: %w", err)
+	}
+	return oldValue.RawSha256, nil
+}
+
+// ResetRawSha256 resets all changes to the "raw_sha256" field.
+func (m *TrajectorySegmentMutation) ResetRawSha256() {
+	m.raw_sha256 = nil
+}
+
+// SetCompressedSize sets the "compressed_size" field.
+func (m *TrajectorySegmentMutation) SetCompressedSize(i int64) {
+	m.compressed_size = &i
+	m.addcompressed_size = nil
+}
+
+// CompressedSize returns the value of the "compressed_size" field in the mutation.
+func (m *TrajectorySegmentMutation) CompressedSize() (r int64, exists bool) {
+	v := m.compressed_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCompressedSize returns the old "compressed_size" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldCompressedSize(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCompressedSize is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCompressedSize requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCompressedSize: %w", err)
+	}
+	return oldValue.CompressedSize, nil
+}
+
+// AddCompressedSize adds i to the "compressed_size" field.
+func (m *TrajectorySegmentMutation) AddCompressedSize(i int64) {
+	if m.addcompressed_size != nil {
+		*m.addcompressed_size += i
+	} else {
+		m.addcompressed_size = &i
+	}
+}
+
+// AddedCompressedSize returns the value that was added to the "compressed_size" field in this mutation.
+func (m *TrajectorySegmentMutation) AddedCompressedSize() (r int64, exists bool) {
+	v := m.addcompressed_size
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCompressedSize resets all changes to the "compressed_size" field.
+func (m *TrajectorySegmentMutation) ResetCompressedSize() {
+	m.compressed_size = nil
+	m.addcompressed_size = nil
+}
+
+// SetCompressedSha256 sets the "compressed_sha256" field.
+func (m *TrajectorySegmentMutation) SetCompressedSha256(s string) {
+	m.compressed_sha256 = &s
+}
+
+// CompressedSha256 returns the value of the "compressed_sha256" field in the mutation.
+func (m *TrajectorySegmentMutation) CompressedSha256() (r string, exists bool) {
+	v := m.compressed_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCompressedSha256 returns the old "compressed_sha256" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldCompressedSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCompressedSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCompressedSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCompressedSha256: %w", err)
+	}
+	return oldValue.CompressedSha256, nil
+}
+
+// ResetCompressedSha256 resets all changes to the "compressed_sha256" field.
+func (m *TrajectorySegmentMutation) ResetCompressedSha256() {
+	m.compressed_sha256 = nil
+}
+
+// SetIncompleteTail sets the "incomplete_tail" field.
+func (m *TrajectorySegmentMutation) SetIncompleteTail(b bool) {
+	m.incomplete_tail = &b
+}
+
+// IncompleteTail returns the value of the "incomplete_tail" field in the mutation.
+func (m *TrajectorySegmentMutation) IncompleteTail() (r bool, exists bool) {
+	v := m.incomplete_tail
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIncompleteTail returns the old "incomplete_tail" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldIncompleteTail(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIncompleteTail is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIncompleteTail requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIncompleteTail: %w", err)
+	}
+	return oldValue.IncompleteTail, nil
+}
+
+// ResetIncompleteTail resets all changes to the "incomplete_tail" field.
+func (m *TrajectorySegmentMutation) ResetIncompleteTail() {
+	m.incomplete_tail = nil
+}
+
+// SetSessionID sets the "session_id" field.
+func (m *TrajectorySegmentMutation) SetSessionID(s string) {
+	m.session_id = &s
+}
+
+// SessionID returns the value of the "session_id" field in the mutation.
+func (m *TrajectorySegmentMutation) SessionID() (r string, exists bool) {
+	v := m.session_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSessionID returns the old "session_id" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldSessionID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSessionID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSessionID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSessionID: %w", err)
+	}
+	return oldValue.SessionID, nil
+}
+
+// ClearSessionID clears the value of the "session_id" field.
+func (m *TrajectorySegmentMutation) ClearSessionID() {
+	m.session_id = nil
+	m.clearedFields[trajectorysegment.FieldSessionID] = struct{}{}
+}
+
+// SessionIDCleared returns if the "session_id" field was cleared in this mutation.
+func (m *TrajectorySegmentMutation) SessionIDCleared() bool {
+	_, ok := m.clearedFields[trajectorysegment.FieldSessionID]
+	return ok
+}
+
+// ResetSessionID resets all changes to the "session_id" field.
+func (m *TrajectorySegmentMutation) ResetSessionID() {
+	m.session_id = nil
+	delete(m.clearedFields, trajectorysegment.FieldSessionID)
+}
+
+// SetObjectPath sets the "object_path" field.
+func (m *TrajectorySegmentMutation) SetObjectPath(s string) {
+	m.object_path = &s
+}
+
+// ObjectPath returns the value of the "object_path" field in the mutation.
+func (m *TrajectorySegmentMutation) ObjectPath() (r string, exists bool) {
+	v := m.object_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObjectPath returns the old "object_path" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldObjectPath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObjectPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObjectPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObjectPath: %w", err)
+	}
+	return oldValue.ObjectPath, nil
+}
+
+// ResetObjectPath resets all changes to the "object_path" field.
+func (m *TrajectorySegmentMutation) ResetObjectPath() {
+	m.object_path = nil
+}
+
+// SetManifestPath sets the "manifest_path" field.
+func (m *TrajectorySegmentMutation) SetManifestPath(s string) {
+	m.manifest_path = &s
+}
+
+// ManifestPath returns the value of the "manifest_path" field in the mutation.
+func (m *TrajectorySegmentMutation) ManifestPath() (r string, exists bool) {
+	v := m.manifest_path
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldManifestPath returns the old "manifest_path" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldManifestPath(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldManifestPath is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldManifestPath requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldManifestPath: %w", err)
+	}
+	return oldValue.ManifestPath, nil
+}
+
+// ClearManifestPath clears the value of the "manifest_path" field.
+func (m *TrajectorySegmentMutation) ClearManifestPath() {
+	m.manifest_path = nil
+	m.clearedFields[trajectorysegment.FieldManifestPath] = struct{}{}
+}
+
+// ManifestPathCleared returns if the "manifest_path" field was cleared in this mutation.
+func (m *TrajectorySegmentMutation) ManifestPathCleared() bool {
+	_, ok := m.clearedFields[trajectorysegment.FieldManifestPath]
+	return ok
+}
+
+// ResetManifestPath resets all changes to the "manifest_path" field.
+func (m *TrajectorySegmentMutation) ResetManifestPath() {
+	m.manifest_path = nil
+	delete(m.clearedFields, trajectorysegment.FieldManifestPath)
+}
+
+// SetStatus sets the "status" field.
+func (m *TrajectorySegmentMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *TrajectorySegmentMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *TrajectorySegmentMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetNormalizeStatus sets the "normalize_status" field.
+func (m *TrajectorySegmentMutation) SetNormalizeStatus(s string) {
+	m.normalize_status = &s
+}
+
+// NormalizeStatus returns the value of the "normalize_status" field in the mutation.
+func (m *TrajectorySegmentMutation) NormalizeStatus() (r string, exists bool) {
+	v := m.normalize_status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNormalizeStatus returns the old "normalize_status" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldNormalizeStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNormalizeStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNormalizeStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNormalizeStatus: %w", err)
+	}
+	return oldValue.NormalizeStatus, nil
+}
+
+// ResetNormalizeStatus resets all changes to the "normalize_status" field.
+func (m *TrajectorySegmentMutation) ResetNormalizeStatus() {
+	m.normalize_status = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *TrajectorySegmentMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *TrajectorySegmentMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *TrajectorySegmentMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetCommittedAt sets the "committed_at" field.
+func (m *TrajectorySegmentMutation) SetCommittedAt(t time.Time) {
+	m.committed_at = &t
+}
+
+// CommittedAt returns the value of the "committed_at" field in the mutation.
+func (m *TrajectorySegmentMutation) CommittedAt() (r time.Time, exists bool) {
+	v := m.committed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommittedAt returns the old "committed_at" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldCommittedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommittedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommittedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommittedAt: %w", err)
+	}
+	return oldValue.CommittedAt, nil
+}
+
+// ClearCommittedAt clears the value of the "committed_at" field.
+func (m *TrajectorySegmentMutation) ClearCommittedAt() {
+	m.committed_at = nil
+	m.clearedFields[trajectorysegment.FieldCommittedAt] = struct{}{}
+}
+
+// CommittedAtCleared returns if the "committed_at" field was cleared in this mutation.
+func (m *TrajectorySegmentMutation) CommittedAtCleared() bool {
+	_, ok := m.clearedFields[trajectorysegment.FieldCommittedAt]
+	return ok
+}
+
+// ResetCommittedAt resets all changes to the "committed_at" field.
+func (m *TrajectorySegmentMutation) ResetCommittedAt() {
+	m.committed_at = nil
+	delete(m.clearedFields, trajectorysegment.FieldCommittedAt)
+}
+
+// SetPrepareExpiresAt sets the "prepare_expires_at" field.
+func (m *TrajectorySegmentMutation) SetPrepareExpiresAt(t time.Time) {
+	m.prepare_expires_at = &t
+}
+
+// PrepareExpiresAt returns the value of the "prepare_expires_at" field in the mutation.
+func (m *TrajectorySegmentMutation) PrepareExpiresAt() (r time.Time, exists bool) {
+	v := m.prepare_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrepareExpiresAt returns the old "prepare_expires_at" field's value of the TrajectorySegment entity.
+// If the TrajectorySegment object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TrajectorySegmentMutation) OldPrepareExpiresAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrepareExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrepareExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrepareExpiresAt: %w", err)
+	}
+	return oldValue.PrepareExpiresAt, nil
+}
+
+// ResetPrepareExpiresAt resets all changes to the "prepare_expires_at" field.
+func (m *TrajectorySegmentMutation) ResetPrepareExpiresAt() {
+	m.prepare_expires_at = nil
+}
+
+// Where appends a list predicates to the TrajectorySegmentMutation builder.
+func (m *TrajectorySegmentMutation) Where(ps ...predicate.TrajectorySegment) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the TrajectorySegmentMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *TrajectorySegmentMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.TrajectorySegment, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *TrajectorySegmentMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *TrajectorySegmentMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (TrajectorySegment).
+func (m *TrajectorySegmentMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *TrajectorySegmentMutation) Fields() []string {
+	fields := make([]string, 0, 23)
+	if m.hub_id != nil {
+		fields = append(fields, trajectorysegment.FieldHubID)
+	}
+	if m.origin_hub_id != nil {
+		fields = append(fields, trajectorysegment.FieldOriginHubID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, trajectorysegment.FieldProjectID)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, trajectorysegment.FieldAgentID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, trajectorysegment.FieldRunID)
+	}
+	if m.harness != nil {
+		fields = append(fields, trajectorysegment.FieldHarness)
+	}
+	if m.native_relative_path != nil {
+		fields = append(fields, trajectorysegment.FieldNativeRelativePath)
+	}
+	if m.artifact_kind != nil {
+		fields = append(fields, trajectorysegment.FieldArtifactKind)
+	}
+	if m.generation != nil {
+		fields = append(fields, trajectorysegment.FieldGeneration)
+	}
+	if m.byte_start != nil {
+		fields = append(fields, trajectorysegment.FieldByteStart)
+	}
+	if m.byte_end != nil {
+		fields = append(fields, trajectorysegment.FieldByteEnd)
+	}
+	if m.raw_sha256 != nil {
+		fields = append(fields, trajectorysegment.FieldRawSha256)
+	}
+	if m.compressed_size != nil {
+		fields = append(fields, trajectorysegment.FieldCompressedSize)
+	}
+	if m.compressed_sha256 != nil {
+		fields = append(fields, trajectorysegment.FieldCompressedSha256)
+	}
+	if m.incomplete_tail != nil {
+		fields = append(fields, trajectorysegment.FieldIncompleteTail)
+	}
+	if m.session_id != nil {
+		fields = append(fields, trajectorysegment.FieldSessionID)
+	}
+	if m.object_path != nil {
+		fields = append(fields, trajectorysegment.FieldObjectPath)
+	}
+	if m.manifest_path != nil {
+		fields = append(fields, trajectorysegment.FieldManifestPath)
+	}
+	if m.status != nil {
+		fields = append(fields, trajectorysegment.FieldStatus)
+	}
+	if m.normalize_status != nil {
+		fields = append(fields, trajectorysegment.FieldNormalizeStatus)
+	}
+	if m.created_at != nil {
+		fields = append(fields, trajectorysegment.FieldCreatedAt)
+	}
+	if m.committed_at != nil {
+		fields = append(fields, trajectorysegment.FieldCommittedAt)
+	}
+	if m.prepare_expires_at != nil {
+		fields = append(fields, trajectorysegment.FieldPrepareExpiresAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *TrajectorySegmentMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case trajectorysegment.FieldHubID:
+		return m.HubID()
+	case trajectorysegment.FieldOriginHubID:
+		return m.OriginHubID()
+	case trajectorysegment.FieldProjectID:
+		return m.ProjectID()
+	case trajectorysegment.FieldAgentID:
+		return m.AgentID()
+	case trajectorysegment.FieldRunID:
+		return m.RunID()
+	case trajectorysegment.FieldHarness:
+		return m.Harness()
+	case trajectorysegment.FieldNativeRelativePath:
+		return m.NativeRelativePath()
+	case trajectorysegment.FieldArtifactKind:
+		return m.ArtifactKind()
+	case trajectorysegment.FieldGeneration:
+		return m.Generation()
+	case trajectorysegment.FieldByteStart:
+		return m.ByteStart()
+	case trajectorysegment.FieldByteEnd:
+		return m.ByteEnd()
+	case trajectorysegment.FieldRawSha256:
+		return m.RawSha256()
+	case trajectorysegment.FieldCompressedSize:
+		return m.CompressedSize()
+	case trajectorysegment.FieldCompressedSha256:
+		return m.CompressedSha256()
+	case trajectorysegment.FieldIncompleteTail:
+		return m.IncompleteTail()
+	case trajectorysegment.FieldSessionID:
+		return m.SessionID()
+	case trajectorysegment.FieldObjectPath:
+		return m.ObjectPath()
+	case trajectorysegment.FieldManifestPath:
+		return m.ManifestPath()
+	case trajectorysegment.FieldStatus:
+		return m.Status()
+	case trajectorysegment.FieldNormalizeStatus:
+		return m.NormalizeStatus()
+	case trajectorysegment.FieldCreatedAt:
+		return m.CreatedAt()
+	case trajectorysegment.FieldCommittedAt:
+		return m.CommittedAt()
+	case trajectorysegment.FieldPrepareExpiresAt:
+		return m.PrepareExpiresAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *TrajectorySegmentMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case trajectorysegment.FieldHubID:
+		return m.OldHubID(ctx)
+	case trajectorysegment.FieldOriginHubID:
+		return m.OldOriginHubID(ctx)
+	case trajectorysegment.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case trajectorysegment.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case trajectorysegment.FieldRunID:
+		return m.OldRunID(ctx)
+	case trajectorysegment.FieldHarness:
+		return m.OldHarness(ctx)
+	case trajectorysegment.FieldNativeRelativePath:
+		return m.OldNativeRelativePath(ctx)
+	case trajectorysegment.FieldArtifactKind:
+		return m.OldArtifactKind(ctx)
+	case trajectorysegment.FieldGeneration:
+		return m.OldGeneration(ctx)
+	case trajectorysegment.FieldByteStart:
+		return m.OldByteStart(ctx)
+	case trajectorysegment.FieldByteEnd:
+		return m.OldByteEnd(ctx)
+	case trajectorysegment.FieldRawSha256:
+		return m.OldRawSha256(ctx)
+	case trajectorysegment.FieldCompressedSize:
+		return m.OldCompressedSize(ctx)
+	case trajectorysegment.FieldCompressedSha256:
+		return m.OldCompressedSha256(ctx)
+	case trajectorysegment.FieldIncompleteTail:
+		return m.OldIncompleteTail(ctx)
+	case trajectorysegment.FieldSessionID:
+		return m.OldSessionID(ctx)
+	case trajectorysegment.FieldObjectPath:
+		return m.OldObjectPath(ctx)
+	case trajectorysegment.FieldManifestPath:
+		return m.OldManifestPath(ctx)
+	case trajectorysegment.FieldStatus:
+		return m.OldStatus(ctx)
+	case trajectorysegment.FieldNormalizeStatus:
+		return m.OldNormalizeStatus(ctx)
+	case trajectorysegment.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case trajectorysegment.FieldCommittedAt:
+		return m.OldCommittedAt(ctx)
+	case trajectorysegment.FieldPrepareExpiresAt:
+		return m.OldPrepareExpiresAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown TrajectorySegment field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectorySegmentMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case trajectorysegment.FieldHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHubID(v)
+		return nil
+	case trajectorysegment.FieldOriginHubID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOriginHubID(v)
+		return nil
+	case trajectorysegment.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case trajectorysegment.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case trajectorysegment.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case trajectorysegment.FieldHarness:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHarness(v)
+		return nil
+	case trajectorysegment.FieldNativeRelativePath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNativeRelativePath(v)
+		return nil
+	case trajectorysegment.FieldArtifactKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArtifactKind(v)
+		return nil
+	case trajectorysegment.FieldGeneration:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGeneration(v)
+		return nil
+	case trajectorysegment.FieldByteStart:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetByteStart(v)
+		return nil
+	case trajectorysegment.FieldByteEnd:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetByteEnd(v)
+		return nil
+	case trajectorysegment.FieldRawSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRawSha256(v)
+		return nil
+	case trajectorysegment.FieldCompressedSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCompressedSize(v)
+		return nil
+	case trajectorysegment.FieldCompressedSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCompressedSha256(v)
+		return nil
+	case trajectorysegment.FieldIncompleteTail:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIncompleteTail(v)
+		return nil
+	case trajectorysegment.FieldSessionID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSessionID(v)
+		return nil
+	case trajectorysegment.FieldObjectPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObjectPath(v)
+		return nil
+	case trajectorysegment.FieldManifestPath:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetManifestPath(v)
+		return nil
+	case trajectorysegment.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case trajectorysegment.FieldNormalizeStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNormalizeStatus(v)
+		return nil
+	case trajectorysegment.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case trajectorysegment.FieldCommittedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommittedAt(v)
+		return nil
+	case trajectorysegment.FieldPrepareExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrepareExpiresAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySegment field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *TrajectorySegmentMutation) AddedFields() []string {
+	var fields []string
+	if m.addgeneration != nil {
+		fields = append(fields, trajectorysegment.FieldGeneration)
+	}
+	if m.addbyte_start != nil {
+		fields = append(fields, trajectorysegment.FieldByteStart)
+	}
+	if m.addbyte_end != nil {
+		fields = append(fields, trajectorysegment.FieldByteEnd)
+	}
+	if m.addcompressed_size != nil {
+		fields = append(fields, trajectorysegment.FieldCompressedSize)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *TrajectorySegmentMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case trajectorysegment.FieldGeneration:
+		return m.AddedGeneration()
+	case trajectorysegment.FieldByteStart:
+		return m.AddedByteStart()
+	case trajectorysegment.FieldByteEnd:
+		return m.AddedByteEnd()
+	case trajectorysegment.FieldCompressedSize:
+		return m.AddedCompressedSize()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *TrajectorySegmentMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case trajectorysegment.FieldGeneration:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGeneration(v)
+		return nil
+	case trajectorysegment.FieldByteStart:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddByteStart(v)
+		return nil
+	case trajectorysegment.FieldByteEnd:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddByteEnd(v)
+		return nil
+	case trajectorysegment.FieldCompressedSize:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCompressedSize(v)
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySegment numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *TrajectorySegmentMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(trajectorysegment.FieldOriginHubID) {
+		fields = append(fields, trajectorysegment.FieldOriginHubID)
+	}
+	if m.FieldCleared(trajectorysegment.FieldSessionID) {
+		fields = append(fields, trajectorysegment.FieldSessionID)
+	}
+	if m.FieldCleared(trajectorysegment.FieldManifestPath) {
+		fields = append(fields, trajectorysegment.FieldManifestPath)
+	}
+	if m.FieldCleared(trajectorysegment.FieldCommittedAt) {
+		fields = append(fields, trajectorysegment.FieldCommittedAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *TrajectorySegmentMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *TrajectorySegmentMutation) ClearField(name string) error {
+	switch name {
+	case trajectorysegment.FieldOriginHubID:
+		m.ClearOriginHubID()
+		return nil
+	case trajectorysegment.FieldSessionID:
+		m.ClearSessionID()
+		return nil
+	case trajectorysegment.FieldManifestPath:
+		m.ClearManifestPath()
+		return nil
+	case trajectorysegment.FieldCommittedAt:
+		m.ClearCommittedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySegment nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *TrajectorySegmentMutation) ResetField(name string) error {
+	switch name {
+	case trajectorysegment.FieldHubID:
+		m.ResetHubID()
+		return nil
+	case trajectorysegment.FieldOriginHubID:
+		m.ResetOriginHubID()
+		return nil
+	case trajectorysegment.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case trajectorysegment.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case trajectorysegment.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case trajectorysegment.FieldHarness:
+		m.ResetHarness()
+		return nil
+	case trajectorysegment.FieldNativeRelativePath:
+		m.ResetNativeRelativePath()
+		return nil
+	case trajectorysegment.FieldArtifactKind:
+		m.ResetArtifactKind()
+		return nil
+	case trajectorysegment.FieldGeneration:
+		m.ResetGeneration()
+		return nil
+	case trajectorysegment.FieldByteStart:
+		m.ResetByteStart()
+		return nil
+	case trajectorysegment.FieldByteEnd:
+		m.ResetByteEnd()
+		return nil
+	case trajectorysegment.FieldRawSha256:
+		m.ResetRawSha256()
+		return nil
+	case trajectorysegment.FieldCompressedSize:
+		m.ResetCompressedSize()
+		return nil
+	case trajectorysegment.FieldCompressedSha256:
+		m.ResetCompressedSha256()
+		return nil
+	case trajectorysegment.FieldIncompleteTail:
+		m.ResetIncompleteTail()
+		return nil
+	case trajectorysegment.FieldSessionID:
+		m.ResetSessionID()
+		return nil
+	case trajectorysegment.FieldObjectPath:
+		m.ResetObjectPath()
+		return nil
+	case trajectorysegment.FieldManifestPath:
+		m.ResetManifestPath()
+		return nil
+	case trajectorysegment.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case trajectorysegment.FieldNormalizeStatus:
+		m.ResetNormalizeStatus()
+		return nil
+	case trajectorysegment.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case trajectorysegment.FieldCommittedAt:
+		m.ResetCommittedAt()
+		return nil
+	case trajectorysegment.FieldPrepareExpiresAt:
+		m.ResetPrepareExpiresAt()
+		return nil
+	}
+	return fmt.Errorf("unknown TrajectorySegment field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *TrajectorySegmentMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *TrajectorySegmentMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *TrajectorySegmentMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *TrajectorySegmentMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *TrajectorySegmentMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *TrajectorySegmentMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *TrajectorySegmentMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown TrajectorySegment unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *TrajectorySegmentMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown TrajectorySegment edge %s", name)
 }
 
 // TriggerMutation represents an operation that mutates the Trigger nodes in the graph.

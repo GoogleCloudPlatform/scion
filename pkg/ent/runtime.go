@@ -113,6 +113,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trajectorysegment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
@@ -4090,6 +4091,100 @@ func init() {
 	threadgroupmemberDescID := threadgroupmemberFields[0].Descriptor()
 	// threadgroupmember.DefaultID holds the default value on creation for the id field.
 	threadgroupmember.DefaultID = threadgroupmemberDescID.Default.(func() uuid.UUID)
+	trajectorysegmentFields := schema.TrajectorySegment{}.Fields()
+	_ = trajectorysegmentFields
+	// trajectorysegmentDescHubID is the schema descriptor for hub_id field.
+	trajectorysegmentDescHubID := trajectorysegmentFields[1].Descriptor()
+	// trajectorysegment.HubIDValidator is a validator for the "hub_id" field. It is called by the builders before save.
+	trajectorysegment.HubIDValidator = trajectorysegmentDescHubID.Validators[0].(func(string) error)
+	// trajectorysegmentDescOriginHubID is the schema descriptor for origin_hub_id field.
+	trajectorysegmentDescOriginHubID := trajectorysegmentFields[2].Descriptor()
+	// trajectorysegment.DefaultOriginHubID holds the default value on creation for the origin_hub_id field.
+	trajectorysegment.DefaultOriginHubID = trajectorysegmentDescOriginHubID.Default.(string)
+	// trajectorysegmentDescProjectID is the schema descriptor for project_id field.
+	trajectorysegmentDescProjectID := trajectorysegmentFields[3].Descriptor()
+	// trajectorysegment.ProjectIDValidator is a validator for the "project_id" field. It is called by the builders before save.
+	trajectorysegment.ProjectIDValidator = trajectorysegmentDescProjectID.Validators[0].(func(string) error)
+	// trajectorysegmentDescAgentID is the schema descriptor for agent_id field.
+	trajectorysegmentDescAgentID := trajectorysegmentFields[4].Descriptor()
+	// trajectorysegment.AgentIDValidator is a validator for the "agent_id" field. It is called by the builders before save.
+	trajectorysegment.AgentIDValidator = trajectorysegmentDescAgentID.Validators[0].(func(string) error)
+	// trajectorysegmentDescRunID is the schema descriptor for run_id field.
+	trajectorysegmentDescRunID := trajectorysegmentFields[5].Descriptor()
+	// trajectorysegment.RunIDValidator is a validator for the "run_id" field. It is called by the builders before save.
+	trajectorysegment.RunIDValidator = trajectorysegmentDescRunID.Validators[0].(func(string) error)
+	// trajectorysegmentDescHarness is the schema descriptor for harness field.
+	trajectorysegmentDescHarness := trajectorysegmentFields[6].Descriptor()
+	// trajectorysegment.HarnessValidator is a validator for the "harness" field. It is called by the builders before save.
+	trajectorysegment.HarnessValidator = trajectorysegmentDescHarness.Validators[0].(func(string) error)
+	// trajectorysegmentDescNativeRelativePath is the schema descriptor for native_relative_path field.
+	trajectorysegmentDescNativeRelativePath := trajectorysegmentFields[7].Descriptor()
+	// trajectorysegment.NativeRelativePathValidator is a validator for the "native_relative_path" field. It is called by the builders before save.
+	trajectorysegment.NativeRelativePathValidator = trajectorysegmentDescNativeRelativePath.Validators[0].(func(string) error)
+	// trajectorysegmentDescArtifactKind is the schema descriptor for artifact_kind field.
+	trajectorysegmentDescArtifactKind := trajectorysegmentFields[8].Descriptor()
+	// trajectorysegment.ArtifactKindValidator is a validator for the "artifact_kind" field. It is called by the builders before save.
+	trajectorysegment.ArtifactKindValidator = trajectorysegmentDescArtifactKind.Validators[0].(func(string) error)
+	// trajectorysegmentDescGeneration is the schema descriptor for generation field.
+	trajectorysegmentDescGeneration := trajectorysegmentFields[9].Descriptor()
+	// trajectorysegment.GenerationValidator is a validator for the "generation" field. It is called by the builders before save.
+	trajectorysegment.GenerationValidator = trajectorysegmentDescGeneration.Validators[0].(func(int) error)
+	// trajectorysegmentDescByteStart is the schema descriptor for byte_start field.
+	trajectorysegmentDescByteStart := trajectorysegmentFields[10].Descriptor()
+	// trajectorysegment.ByteStartValidator is a validator for the "byte_start" field. It is called by the builders before save.
+	trajectorysegment.ByteStartValidator = trajectorysegmentDescByteStart.Validators[0].(func(int64) error)
+	// trajectorysegmentDescByteEnd is the schema descriptor for byte_end field.
+	trajectorysegmentDescByteEnd := trajectorysegmentFields[11].Descriptor()
+	// trajectorysegment.ByteEndValidator is a validator for the "byte_end" field. It is called by the builders before save.
+	trajectorysegment.ByteEndValidator = trajectorysegmentDescByteEnd.Validators[0].(func(int64) error)
+	// trajectorysegmentDescRawSha256 is the schema descriptor for raw_sha256 field.
+	trajectorysegmentDescRawSha256 := trajectorysegmentFields[12].Descriptor()
+	// trajectorysegment.RawSha256Validator is a validator for the "raw_sha256" field. It is called by the builders before save.
+	trajectorysegment.RawSha256Validator = trajectorysegmentDescRawSha256.Validators[0].(func(string) error)
+	// trajectorysegmentDescCompressedSize is the schema descriptor for compressed_size field.
+	trajectorysegmentDescCompressedSize := trajectorysegmentFields[13].Descriptor()
+	// trajectorysegment.CompressedSizeValidator is a validator for the "compressed_size" field. It is called by the builders before save.
+	trajectorysegment.CompressedSizeValidator = trajectorysegmentDescCompressedSize.Validators[0].(func(int64) error)
+	// trajectorysegmentDescCompressedSha256 is the schema descriptor for compressed_sha256 field.
+	trajectorysegmentDescCompressedSha256 := trajectorysegmentFields[14].Descriptor()
+	// trajectorysegment.CompressedSha256Validator is a validator for the "compressed_sha256" field. It is called by the builders before save.
+	trajectorysegment.CompressedSha256Validator = trajectorysegmentDescCompressedSha256.Validators[0].(func(string) error)
+	// trajectorysegmentDescIncompleteTail is the schema descriptor for incomplete_tail field.
+	trajectorysegmentDescIncompleteTail := trajectorysegmentFields[15].Descriptor()
+	// trajectorysegment.DefaultIncompleteTail holds the default value on creation for the incomplete_tail field.
+	trajectorysegment.DefaultIncompleteTail = trajectorysegmentDescIncompleteTail.Default.(bool)
+	// trajectorysegmentDescSessionID is the schema descriptor for session_id field.
+	trajectorysegmentDescSessionID := trajectorysegmentFields[16].Descriptor()
+	// trajectorysegment.DefaultSessionID holds the default value on creation for the session_id field.
+	trajectorysegment.DefaultSessionID = trajectorysegmentDescSessionID.Default.(string)
+	// trajectorysegmentDescObjectPath is the schema descriptor for object_path field.
+	trajectorysegmentDescObjectPath := trajectorysegmentFields[17].Descriptor()
+	// trajectorysegment.ObjectPathValidator is a validator for the "object_path" field. It is called by the builders before save.
+	trajectorysegment.ObjectPathValidator = trajectorysegmentDescObjectPath.Validators[0].(func(string) error)
+	// trajectorysegmentDescManifestPath is the schema descriptor for manifest_path field.
+	trajectorysegmentDescManifestPath := trajectorysegmentFields[18].Descriptor()
+	// trajectorysegment.DefaultManifestPath holds the default value on creation for the manifest_path field.
+	trajectorysegment.DefaultManifestPath = trajectorysegmentDescManifestPath.Default.(string)
+	// trajectorysegmentDescStatus is the schema descriptor for status field.
+	trajectorysegmentDescStatus := trajectorysegmentFields[19].Descriptor()
+	// trajectorysegment.DefaultStatus holds the default value on creation for the status field.
+	trajectorysegment.DefaultStatus = trajectorysegmentDescStatus.Default.(string)
+	// trajectorysegment.StatusValidator is a validator for the "status" field. It is called by the builders before save.
+	trajectorysegment.StatusValidator = trajectorysegmentDescStatus.Validators[0].(func(string) error)
+	// trajectorysegmentDescNormalizeStatus is the schema descriptor for normalize_status field.
+	trajectorysegmentDescNormalizeStatus := trajectorysegmentFields[20].Descriptor()
+	// trajectorysegment.DefaultNormalizeStatus holds the default value on creation for the normalize_status field.
+	trajectorysegment.DefaultNormalizeStatus = trajectorysegmentDescNormalizeStatus.Default.(string)
+	// trajectorysegment.NormalizeStatusValidator is a validator for the "normalize_status" field. It is called by the builders before save.
+	trajectorysegment.NormalizeStatusValidator = trajectorysegmentDescNormalizeStatus.Validators[0].(func(string) error)
+	// trajectorysegmentDescCreatedAt is the schema descriptor for created_at field.
+	trajectorysegmentDescCreatedAt := trajectorysegmentFields[21].Descriptor()
+	// trajectorysegment.DefaultCreatedAt holds the default value on creation for the created_at field.
+	trajectorysegment.DefaultCreatedAt = trajectorysegmentDescCreatedAt.Default.(func() time.Time)
+	// trajectorysegmentDescID is the schema descriptor for id field.
+	trajectorysegmentDescID := trajectorysegmentFields[0].Descriptor()
+	// trajectorysegment.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	trajectorysegment.IDValidator = trajectorysegmentDescID.Validators[0].(func(string) error)
 	triggerMixin := schema.Trigger{}.Mixin()
 	triggerMixinFields1 := triggerMixin[1].Fields()
 	_ = triggerMixinFields1

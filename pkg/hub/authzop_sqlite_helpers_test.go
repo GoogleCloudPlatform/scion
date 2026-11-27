@@ -836,6 +836,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			e.Name == experiments.ArtifactsTransfer || e.Name == experiments.ArtifactsReviewRequests ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
 			e.Name == experiments.Triggers || e.Name == experiments.TokenomicsUsageLedger ||
+			e.Name == experiments.TokenomicsTrajectoryCapture ||
 			e.Name == experiments.AccessConstraints {
 			e.Default = true
 		}
@@ -859,6 +860,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	require.True(t, srv.experimentEnabled(experiments.TokenomicsUsageLedger))
+	require.True(t, srv.experimentEnabled(experiments.TokenomicsTrajectoryCapture))
 	require.True(t, srv.experimentEnabled(experiments.AccessConstraints))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
@@ -1167,13 +1169,16 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
-		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
-		"/api/v1/agents/{id}/refresh-token":                         {"id": f.agent},
-		"/api/v1/agents/{id}/outbound-message":                      {"id": f.agent},
-		"/api/v1/agents/{id}/metrics":                               {"id": f.agent},
-		"/api/v1/agents/{id}/usage/events":                          {"id": f.agent},
-		"/api/v1/agents/{id}/usage/capabilities":                    {"id": f.agent},
-		"/api/v1/projects/{projectId}/agents/{id}/outbound-message": {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/token/refresh":                           {"id": f.agent},
+		"/api/v1/agents/{id}/refresh-token":                           {"id": f.agent},
+		"/api/v1/agents/{id}/outbound-message":                        {"id": f.agent},
+		"/api/v1/agents/{id}/metrics":                                 {"id": f.agent},
+		"/api/v1/agents/{id}/usage/events":                            {"id": f.agent},
+		"/api/v1/agents/{id}/usage/capabilities":                      {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:prepare":             {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments:commit":              {"id": f.agent},
+		"/api/v1/agents/{id}/trajectory/segments/{segmentId}/content": {"id": f.agent, "segmentId": "seg-1"},
+		"/api/v1/projects/{projectId}/agents/{id}/outbound-message":   {"projectId": f.project, "id": f.agent},
 
 		// --- agent lifecycle family ---
 		"/api/v1/agents/{id}/start":                            {"id": f.agentLifecycle},

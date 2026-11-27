@@ -329,6 +329,15 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
+			key:    "POST /api/v1/agents/{id}/trajectory/segments:prepare",
+			method: http.MethodPost,
+			path: func(_ *standingCoverageFixture, a *store.Agent) string {
+				return "/api/v1/agents/" + a.ID + "/trajectory/segments:prepare"
+			},
+			body:    func(*standingCoverageFixture) any { return map[string]any{} },
+			wantDen: assertForbidden,
+		},
+		{
 			key:    "POST /api/v1/agents",
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/agents" },
@@ -999,6 +1008,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				e.Name == experiments.Artifacts ||
 				e.Name == experiments.FederationProjectVisitors ||
 				e.Name == experiments.CommandRequests ||
+				e.Name == experiments.TokenomicsTrajectoryCapture ||
 				e.Name == conduitExperiment {
 				e.Default = true
 			}

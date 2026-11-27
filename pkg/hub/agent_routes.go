@@ -52,6 +52,9 @@ const (
 	AgentRouteUsage              AgentSubRouteID = "agents.usage"
 	AgentRouteUsageEvents        AgentSubRouteID = "agents.usage.events"
 	AgentRouteUsageCapabilities  AgentSubRouteID = "agents.usage.capabilities"
+	AgentRouteTrajectoryPrepare  AgentSubRouteID = "agents.trajectory.segments.prepare"
+	AgentRouteTrajectoryCommit   AgentSubRouteID = "agents.trajectory.segments.commit"
+	AgentRouteTrajectoryContent  AgentSubRouteID = "agents.trajectory.segments.content"
 	AgentRouteActionStatus       AgentSubRouteID = "agents.action.status"
 	AgentRouteActionStart        AgentSubRouteID = "agents.action.start"
 	AgentRouteActionStop         AgentSubRouteID = "agents.action.stop"
@@ -208,6 +211,9 @@ const (
 	opAgentUsageRead         authzop.OperationID = "agent.usage.read"
 	opAgentUsageIngest       authzop.OperationID = "agent.usage.ingest"
 	opAgentUsageCapabilities authzop.OperationID = "agent.usage.capabilities"
+	opAgentTrajectoryPrepare authzop.OperationID = "agent.trajectory.segments.prepare"
+	opAgentTrajectoryCommit  authzop.OperationID = "agent.trajectory.segments.commit"
+	opAgentTrajectoryContent authzop.OperationID = "agent.trajectory.segments.content"
 	opAgentStatusUpdate      authzop.OperationID = "agent.status.update"
 	opAgentLogsRead          authzop.OperationID = "agent.logs.read"
 	opAgentScreenRead        authzop.OperationID = "agent.screen.read"
@@ -275,6 +281,11 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRouteUsage, form: agentFormByID, segs: []string{"usage"}, ops: getOp(opAgentUsageRead)},
 	{id: AgentRouteUsageEvents, form: agentFormByID, segs: []string{"usage", "events"}, ops: postOp(opAgentUsageIngest)},
 	{id: AgentRouteUsageCapabilities, form: agentFormByID, segs: []string{"usage", "capabilities"}, ops: getOp(opAgentUsageCapabilities)},
+	{id: AgentRouteTrajectoryPrepare, form: agentFormByID, segs: []string{"trajectory", "segments:prepare"}, ops: postOp(opAgentTrajectoryPrepare)},
+	{id: AgentRouteTrajectoryCommit, form: agentFormByID, segs: []string{"trajectory", "segments:commit"}, ops: postOp(opAgentTrajectoryCommit)},
+	{id: AgentRouteTrajectoryContent, form: agentFormByID, segs: []string{"trajectory", "segments", agentRouteParam, "content"}, ops: map[string]authzop.OperationID{
+		http.MethodPut: opAgentTrajectoryContent,
+	}, paramNames: []string{"{segmentId}"}},
 	{id: AgentRouteActionStatus, form: agentFormByID, segs: []string{"status"}, ops: postOp(opAgentStatusUpdate)},
 	{id: AgentRouteActionStart, form: agentFormByID, segs: []string{"start"}, ops: postOp(opAgentLifecycleControl)},
 	{id: AgentRouteActionStop, form: agentFormByID, segs: []string{"stop"}, ops: postOp(opAgentLifecycleControl)},

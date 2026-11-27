@@ -912,6 +912,7 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		// Agent item responses.
 		"/api/v1/agents/a1",
 		"/api/v1/agents/a1/",
+		"/api/v1/agents/a1/trajectory/segments:prepare",
 		"/api/v1/projects/p1/agents/a1",
 		"/api/v1/projects/p1/env/KEY",
 		"/api/v1/secrets",
@@ -927,6 +928,8 @@ func TestCompressBypass_ExcludedEndpoints(t *testing.T) {
 		"/api/v1/agents/a1/message-logs",
 		"/api/v1/agents/a1/logs",
 		"/api/v1/agents/a1/usage/events",
+		"/api/v1/agents/a1/trajectory/segments:commit",
+		"/api/v1/agents/a1/trajectory/segments/s1/content",
 		"/api/v1/brokers/b1/agents/a1/usage/events",
 		"/api/v1/projects",
 		"/api/v1/projects/p1",
