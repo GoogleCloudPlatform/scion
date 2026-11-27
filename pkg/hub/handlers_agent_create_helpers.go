@@ -420,7 +420,9 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		agent.AppliedConfig.Branch = defaultBranch
 	}
 
-	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+	if err := s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate); err != nil {
+		return err
+	}
 	if guard := noAuthFallbackGuardFrom(ctx); guard != nil && guard.refused {
 		return errNoAuthFallbackRefused
 	}
@@ -736,7 +738,7 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // GitClone, Workspace, and Branch (kept verbatim across a reincarnation per
 // design §3.3) — those are populated by populateAgentConfig above this call,
 // before AppliedConfig is handed here.
-func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Populate template ID and hash if template was resolved. The agent role
 	// determines hub access scopes; a template sets none (ptone/scion#4224).
 	if resolvedTemplate != nil {
@@ -804,9 +806,17 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		if project != nil {
 			projectID = project.ID
 		}
-		// A lookup error is logged by the resolver; the create goes on as
-		// for a name the hub does not know.
-		hc, _ := s.resolveHarnessConfigBySlug(ctx, projectID, hcName)
+		// A non-active match refuses the create/reincarnate instead of falling
+		// through to broker-local resolution. Any other lookup error is logged
+		// by the resolver and the create goes on as for a name the hub does not
+		// know.
+		hc, err := s.resolveHarnessConfigBySlug(ctx, projectID, hcName)
+		if err != nil {
+			var notActive *harnessConfigNotActiveError
+			if errors.As(err, &notActive) {
+				return err
+			}
+		}
 		if hc != nil {
 			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
@@ -991,6 +1001,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)
+	return nil
 }
 
 // resolveAutoExposeEnv resolves SCION_AUTO_EXPOSE_PORTS into ac.Env by the
@@ -3592,19 +3603,69 @@ func (s *Server) existingAgentGoneAfterLanding(ctx context.Context, w http.Respo
 	return true
 }
 
+// harnessConfigNotActiveError reports that a harness config matched by slug
+// exists in the store, but its status is not active (for example "archived"
+// or "pending"). Returning a typed error rather than treating it as not-found
+// prevents callers from falling through to a lower scope or to broker-local
+// fallback resolution.
+type harnessConfigNotActiveError struct {
+	Name   string
+	Scope  string
+	Status string
+}
+
+func (e *harnessConfigNotActiveError) Error() string {
+	status := e.Status
+	if status == "" {
+		status = "inactive"
+	}
+	return fmt.Sprintf("harness config %q is not active (status: %s)", e.Name, status)
+}
+
+// writeHarnessConfigNotActive writes a 400 validation error for a
+// *harnessConfigNotActiveError in err and reports whether it did.
+func writeHarnessConfigNotActive(w http.ResponseWriter, err error) bool {
+	var notActive *harnessConfigNotActiveError
+	if !errors.As(err, &notActive) {
+		return false
+	}
+	details := map[string]interface{}{
+		"harnessConfig": notActive.Name,
+		"status":        notActive.Status,
+	}
+	if notActive.Scope != "" {
+		details["scope"] = notActive.Scope
+	}
+	ValidationError(w, notActive.Error(), details)
+	return true
+}
+
 // resolveHarnessConfigBySlug looks up the hub harness config named name in
 // the scopes harnessConfigLookupScopes gives: project then global on a
 // workstation hub, global then project on a hosted hub. It returns (nil, nil)
-// when no scope has one. A store failure other than not-found is logged; on
-// a workstation hub the next scope is still tried and the failure returned
-// with a nil config if none matches, while on a hosted hub a failed global
-// lookup is returned at once, so the project scope is never consulted
-// without knowing whether a global config of that slug exists.
+// when no scope has one. If the first matching row in scope order is not
+// active (e.g. archived or pending), it returns (nil, *harnessConfigNotActiveError)
+// immediately without falling through to a lower scope. A store failure other
+// than not-found is logged; on a workstation hub the next scope is still tried
+// and the failure returned with a nil config if none matches, while on a hosted
+// hub a failed global lookup is returned at once, so the project scope is never
+// consulted without knowing whether a global config of that slug exists.
 func (s *Server) resolveHarnessConfigBySlug(ctx context.Context, projectID, name string) (*store.HarnessConfig, error) {
 	if s == nil || s.store == nil {
 		return nil, nil
 	}
-	return s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
+	hc, err := s.resolveHarnessConfigBySlugWith(projectID, name, func(slug, scope, scopeID string) (*store.HarnessConfig, error) {
 		return s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
 	})
+	if err != nil || hc == nil {
+		return nil, err
+	}
+	if hc.Status != store.HarnessConfigStatusActive {
+		return nil, &harnessConfigNotActiveError{
+			Name:   name,
+			Scope:  hc.Scope,
+			Status: hc.Status,
+		}
+	}
+	return hc, nil
 }

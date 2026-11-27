@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -32,31 +33,41 @@ func (s *Server) resolveHarnessTypeFromConfigRef(ctx context.Context, projectID,
 	return s.resolveHarnessTypeFromConfigRefMemo(ctx, projectID, configRef, nil)
 }
 
+// harnessTypeLookup records the outcome of looking up a harness-config slug in
+// one scope. matched is true when a row was found (active or non-active) or a
+// fail-closed hosted global lookup error occurred, stopping the scope walk so
+// a non-active row never falls through to a lower scope. harness is non-empty
+// only for an active matching row.
+type harnessTypeLookup struct {
+	matched bool
+	harness string
+}
+
 // harnessTypeMemo memoizes harness-config lookups for one request. A
 // project-scope result depends on the project and the reference, a
 // global-scope result on the reference alone, so a global harness-config
 // shared by agents in many projects is read once, not once per project.
 type harnessTypeMemo struct {
-	project map[harnessRefKey]string
-	global  map[string]string
+	project map[harnessRefKey]harnessTypeLookup
+	global  map[string]harnessTypeLookup
 }
 
 // harnessRefKey identifies one project-scope harness-config lookup.
 type harnessRefKey struct{ projectID, ref string }
 
 func newHarnessTypeMemo() *harnessTypeMemo {
-	return &harnessTypeMemo{project: map[harnessRefKey]string{}, global: map[string]string{}}
+	return &harnessTypeMemo{project: map[harnessRefKey]harnessTypeLookup{}, global: map[string]harnessTypeLookup{}}
 }
 
 // projectTable and globalTable return the memo's tables, nil for a nil memo.
-func (m *harnessTypeMemo) projectTable() map[harnessRefKey]string {
+func (m *harnessTypeMemo) projectTable() map[harnessRefKey]harnessTypeLookup {
 	if m == nil {
 		return nil
 	}
 	return m.project
 }
 
-func (m *harnessTypeMemo) globalTable() map[string]string {
+func (m *harnessTypeMemo) globalTable() map[string]harnessTypeLookup {
 	if m == nil {
 		return nil
 	}
@@ -65,16 +76,16 @@ func (m *harnessTypeMemo) globalTable() map[string]string {
 
 // memoized returns table[key], calling load and storing its result on a
 // miss. A nil table (no memo) always calls load and stores nothing.
-func memoized[K comparable](table map[K]string, key K, load func() string) string {
+func memoized[K comparable, V any](table map[K]V, key K, load func() V) V {
 	if table == nil {
 		return load()
 	}
-	if h, ok := table[key]; ok {
-		return h
+	if v, ok := table[key]; ok {
+		return v
 	}
-	h := load()
-	table[key] = h
-	return h
+	v := load()
+	table[key] = v
+	return v
 }
 
 // harnessTypeOfConfig returns the harness type a stored harness-config
@@ -92,6 +103,24 @@ func harnessTypeOfConfig(hc *store.HarnessConfig, err error) string {
 	return hc.Harness
 }
 
+// lookupHarnessTypeInScope resolves configRef in a single scope. A non-active
+// row (archived, pending, etc.) stops the scope walk without returning its
+// harness type, matching resolveHarnessConfigBySlug so callers neither accept
+// non-active configs nor fall through to a lower scope.
+func (s *Server) lookupHarnessTypeInScope(ctx context.Context, configRef string, sc harnessConfigScope) harnessTypeLookup {
+	hc, err := s.store.GetHarnessConfigBySlug(ctx, configRef, sc.scope, sc.scopeID)
+	if err == nil && hc != nil {
+		if hc.Status != store.HarnessConfigStatusActive {
+			return harnessTypeLookup{matched: true}
+		}
+		return harnessTypeLookup{matched: true, harness: harnessTypeOfConfig(hc, nil)}
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) && !s.workstation && sc.scope == store.HarnessConfigScopeGlobal {
+		return harnessTypeLookup{matched: true}
+	}
+	return harnessTypeLookup{}
+}
+
 // resolveHarnessTypeFromConfigRefMemo is resolveHarnessTypeFromConfigRef
 // with an optional per-request memo (nil = no memo).
 func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projectID, configRef string, memo *harnessTypeMemo) string {
@@ -105,18 +134,21 @@ func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projec
 
 	// The scopes in dispatch's order (resolveHarnessConfigBySlug).
 	for _, sc := range s.harnessConfigLookupScopes(projectID) {
-		var h string
+		var res harnessTypeLookup
 		if sc.scope == store.HarnessConfigScopeGlobal {
-			h = memoized(memo.globalTable(), configRef, func() string {
-				return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeGlobal, ""))
+			res = memoized(memo.globalTable(), configRef, func() harnessTypeLookup {
+				return s.lookupHarnessTypeInScope(ctx, configRef, sc)
 			})
 		} else {
-			h = memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() string {
-				return harnessTypeOfConfig(s.store.GetHarnessConfigBySlug(ctx, configRef, store.HarnessConfigScopeProject, projectID))
+			res = memoized(memo.projectTable(), harnessRefKey{projectID, configRef}, func() harnessTypeLookup {
+				return s.lookupHarnessTypeInScope(ctx, configRef, sc)
 			})
 		}
-		if h != "" {
-			return h
+		if res.matched {
+			if res.harness != "" {
+				return res.harness
+			}
+			break
 		}
 	}
 

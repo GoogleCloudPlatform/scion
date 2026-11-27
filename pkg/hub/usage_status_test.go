@@ -702,9 +702,9 @@ func TestResolveHarnessConfigBySlug_DispatchAndUsageMemoParity(t *testing.T) {
 		userID    = "user-1"
 		slug      = "shared-cfg"
 	)
-	globalHC := &store.HarnessConfig{ID: "hc-global", Slug: slug, Scope: store.HarnessConfigScopeGlobal}
-	projectHC := &store.HarnessConfig{ID: "hc-project", Slug: slug, Scope: store.HarnessConfigScopeProject, ScopeID: projectID}
-	userHC := &store.HarnessConfig{ID: "hc-user", Slug: slug, Scope: store.HarnessConfigScopeUser, ScopeID: userID}
+	globalHC := &store.HarnessConfig{ID: "hc-global", Slug: slug, Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive}
+	projectHC := &store.HarnessConfig{ID: "hc-project", Slug: slug, Scope: store.HarnessConfigScopeProject, ScopeID: projectID, Status: store.HarnessConfigStatusActive}
+	userHC := &store.HarnessConfig{ID: "hc-user", Slug: slug, Scope: store.HarnessConfigScopeUser, ScopeID: userID, Status: store.HarnessConfigStatusActive}
 
 	errGlobal := errors.New("global store unavailable")
 	errProject := errors.New("project store unavailable")

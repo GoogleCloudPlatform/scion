@@ -275,7 +275,7 @@ func TestResolveDerivedConfig_RecordsTemplateProvenance(t *testing.T) {
 		Name:          "agent-prov-1",
 		AppliedConfig: &store.AgentAppliedConfig{},
 	}
-	srv.resolveDerivedConfig(ctx, agent, nil, tmpl)
+	require.NoError(t, srv.resolveDerivedConfig(ctx, agent, nil, tmpl))
 
 	assert.Equal(t, tmpl.ID, agent.AppliedConfig.TemplateID)
 	assert.Equal(t, tmpl.ContentHash, agent.AppliedConfig.TemplateHash)
