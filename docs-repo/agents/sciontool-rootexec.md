@@ -3,7 +3,7 @@
 When adding or changing process execution (`exec.Command`, `exec.CommandContext`, or package-level aliases of them) under `cmd/sciontool/` or `pkg/sciontool/`, run the rootexec guard tests:
 
 ```bash
-go test -buildvcs=false ./pkg/sciontool/rootexec/...
+go test -buildvcs=false ./pkg/sciontool/rootexec
 ```
 
 This suite runs in under a second inside a container and needs no special build tags. It is included in `make test-fast-ci` and upstream CI, so it is easy to miss when running scoped package tests (for example `go test -buildvcs=false ./pkg/sciontool/<pkg>/...`).
