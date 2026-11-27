@@ -121,6 +121,7 @@ func TestProbeAndConfigureUsageIngest_PositiveWithoutGCPExporter(t *testing.T) {
 	t.Setenv("SCION_AGENT_ID", "agent-1")
 	t.Setenv("SCION_HARNESS", "claude")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
+	t.Setenv(hub.EnvLaunchID, "")
 	t.Setenv(telemetry.EnvUsageHubIngest, "")
 
 	var mu sync.Mutex

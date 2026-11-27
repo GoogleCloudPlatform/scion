@@ -85,6 +85,12 @@ type Pipeline struct {
 	// handleMetrics strips gen_ai.api.calls and scion.usage.tokens before
 	// direct export while leaving traces, logs, non-canonical metrics, and raw
 	// native metrics policy unchanged.
+	// suppressMu serializes suppression flips (flush-then-flip) against
+	// UsageDeriver's in-memory recordAnalytics+record pair so increments
+	// derived under one decision are flushed through handleMetrics before the
+	// flag swaps. handleMetrics and any path reachable from a flushed
+	// canonical-counter batch must NEVER acquire suppressMu.
+	suppressMu         sync.RWMutex
 	suppressDirectOTel atomic.Bool
 	// apiOutcomeObserver receives model API outcomes (api_outcome.go).
 	apiOutcomeObserver atomic.Pointer[APIOutcomeObserver]
@@ -140,14 +146,46 @@ func (p *Pipeline) SuppressDirectOTel() bool {
 	return p.suppressDirectOTel.Load()
 }
 
+func (p *Pipeline) withSuppressReadLock(fn func()) {
+	if p == nil {
+		fn()
+		return
+	}
+	p.suppressMu.RLock()
+	defer p.suppressMu.RUnlock()
+	fn()
+}
+
 func (p *Pipeline) setSuppressDirectOTel(suppress bool) {
 	if p == nil {
 		return
 	}
-	prev := p.suppressDirectOTel.Swap(suppress)
-	if prev != suppress {
-		log.Info("Direct container export of canonical usage counters suppressed=%t", suppress)
+	if p.suppressDirectOTel.Load() == suppress {
+		return
 	}
+	p.suppressMu.Lock()
+	defer p.suppressMu.Unlock()
+	if p.suppressDirectOTel.Load() == suppress {
+		return
+	}
+	// Flush-then-flip: force-flush any pending deltas in the usage deriver
+	// through handleMetrics under the OLD suppression decision before swapping
+	// the flag, so increments derived under one decision are neither stripped
+	// nor exported under the other.
+	//
+	// Deadlock invariant: handleMetrics reads suppressDirectOTel atomically
+	// and never acquires suppressMu; ProcessResourceMetrics skips
+	// usageMetricScope batches so flushed canonical counters cannot re-enter
+	// suppressMu.RLock.
+	if deriver := p.usageDeriver.Load(); deriver != nil {
+		flushCtx, cancel := context.WithTimeout(context.Background(), usageDeriverFlushTimeout)
+		if err := deriver.ForceFlush(flushCtx); err != nil {
+			log.Debug("Usage deriver flush before suppression switch failed: %v", err)
+		}
+		cancel()
+	}
+	p.suppressDirectOTel.Store(suppress)
+	log.Info("Direct container export of canonical usage counters suppressed=%t", suppress)
 }
 
 func (p *Pipeline) now() time.Time {
@@ -269,6 +307,7 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 	deriver.sessionUsage = p.forwardSessionUsage
 	deriver.apiOutcome = p.forwardAPIOutcome
 	deriver.analytics = p.analytics.native
+	deriver.suppressGuard = p.withSuppressReadLock
 	if len(deriver.rules) == 0 {
 		return UsageActivationNoHarnessRule, nil
 	}
@@ -479,6 +518,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		deriver.sessionUsage = p.forwardSessionUsage
 		deriver.apiOutcome = p.forwardAPIOutcome
 		deriver.analytics = p.analytics.native
+		deriver.suppressGuard = p.withSuppressReadLock
 		p.usageDeriver.Store(deriver)
 	}
 

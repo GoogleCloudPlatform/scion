@@ -154,7 +154,7 @@ func (p *Pipeline) logDeliverySnapshotDisk(force, readDisk bool) {
 	if p == nil {
 		return
 	}
-	var analytics string
+	var analytics, hubAnalytics string
 	if readDisk {
 		// Rate-limit check first, so a skipped tick does no ledger read.
 		p.diagnosticMu.Lock()
@@ -163,7 +163,8 @@ func (p *Pipeline) logDeliverySnapshotDisk(force, readDisk bool) {
 		if limited {
 			return
 		}
-		analytics = p.analyticsSnapshotLine(true) // outside diagnosticMu
+		analytics = p.analyticsSnapshotLine(true)       // outside diagnosticMu
+		hubAnalytics = p.hubAnalyticsSnapshotLine(true) // outside diagnosticMu
 	}
 	p.diagnosticMu.Lock()
 	defer p.diagnosticMu.Unlock()
@@ -173,13 +174,14 @@ func (p *Pipeline) logDeliverySnapshotDisk(force, readDisk bool) {
 	p.diagnosticLast = time.Now()
 	if !readDisk {
 		analytics = p.analyticsSnapshotLine(false)
+		hubAnalytics = p.hubAnalyticsSnapshotLine(false)
 	}
 	depth := p.QueueDepth()
 	diagnostics := p.Diagnostics()
-	log.Info("Telemetry delivery snapshot state=%s queue_bytes=%d queue_records=%d queue_entries=%d spans=%+v metrics=%+v logs=%+v usage=%+v analytics=%s metric_reject_reasons=%s",
+	log.Info("Telemetry delivery snapshot state=%s queue_bytes=%d queue_records=%d queue_entries=%d spans=%+v metrics=%+v logs=%+v usage=%+v analytics=%s hub_analytics=%s metric_reject_reasons=%s",
 		p.DeliveryState(), depth.Bytes, depth.Records, depth.Entries,
 		diagnostics["spans"], diagnostics["metrics"], diagnostics["logs"],
-		p.UsageDiagnostics(), analytics, p.metricRejectReasons(metricRejectReasonLimit))
+		p.UsageDiagnostics(), analytics, hubAnalytics, p.metricRejectReasons(metricRejectReasonLimit))
 }
 
 // analyticsSnapshotLine formats the analytics part of the snapshot line:
@@ -210,6 +212,36 @@ func (p *Pipeline) analyticsSnapshotLine(readDisk bool) string {
 	return fmt.Sprintf("%+v disk={Epoch:%s LastSeq:%d PendingBytes:%d RetainedBytes:%d Held:%v OverflowTotal:%d OversizeTotal:%d AppendFailedTotal:%d DeadLettersTotal:%d SyncUncertainTotal:%d CommitDeferredTotal:%d OldestPendingFileAgeMs:%s}",
 		mem, c.ProducerEpoch, c.ProducerSeqLast, c.PendingBytes, c.RetainedBytes, c.Held, c.OverflowTotal, c.OversizeTotal,
 		c.AppendFailedTotal, c.DeadLettersTotal, c.SyncUncertainTotal, c.CommitDeferredTotal, age)
+}
+
+// hubAnalyticsSnapshotLine formats the Hub analytics part of the snapshot
+// line: in-memory state/counters always, and the Hub outbox ledger only when
+// readDisk is true.
+func (p *Pipeline) hubAnalyticsSnapshotLine(readDisk bool) string {
+	h := &p.health
+	h.mu.Lock()
+	handles := h.analyticsHandles
+	h.mu.Unlock()
+	mem, ok := handles.hubMemory()
+	if !ok {
+		return "disabled"
+	}
+	if !readDisk {
+		return fmt.Sprintf("%+v disk=not_read", mem)
+	}
+	ha, ok := handles.hubCounters(time.Now())
+	if !ok || ha == nil {
+		return "disabled"
+	}
+	if ha.StatsFailed {
+		return fmt.Sprintf("%+v disk=unknown(stats_failed)", mem)
+	}
+	age := "none"
+	if ha.OldestPendingFileAgeMs != nil {
+		age = fmt.Sprintf("%d", *ha.OldestPendingFileAgeMs)
+	}
+	return fmt.Sprintf("%+v disk={PendingBytes:%d RetainedBytes:%d Held:%v DeadLettersTotal:%d OverflowTotal:%d AppendFailedTotal:%d OldestPendingFileAgeMs:%s}",
+		mem, *ha.PendingBytes, *ha.RetainedBytes, *ha.Held, *ha.DeadLettersTotal, *ha.OverflowTotal, *ha.AppendFailedTotal, age)
 }
 
 func (p *Pipeline) markDeliveryDegraded() {

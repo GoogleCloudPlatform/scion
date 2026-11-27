@@ -185,6 +185,7 @@ type healthInputs struct {
 	AnalyticsEnabled        bool
 	AnalyticsDisabledReason string
 	Analytics               telemetrycontract.HealthAnalyticsCounters
+	HubAnalytics            *telemetrycontract.HealthHubAnalytics
 
 	Metrics, Logs DeliverySnapshot
 	Queue         QueueDepth
@@ -290,6 +291,10 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		ev.AnalyticsState = telemetrycontract.AnalyticsStateDisabled
 		ev.AnalyticsDisabledReason = in.AnalyticsDisabledReason
 	}
+	if in.HubAnalytics != nil {
+		ha := *in.HubAnalytics
+		ev.HubAnalytics = &ha
+	}
 	ev.LossIndicated = lossIndicated(in)
 	if in.Trigger == telemetrycontract.HealthTriggerFinal {
 		residual := in.FinalResidualRecords
@@ -298,7 +303,11 @@ func buildHealthEvent(in healthInputs) (*telemetrycontract.HealthEvent, error) {
 		// A held outbox (an intent on disk) is not drained even with zero
 		// pending bytes: WP2 writes the intent before the staging line.
 		pending := in.AnalyticsEnabled && (in.Analytics.PendingBytes > 0 || in.Analytics.StatsFailed || in.Analytics.Held)
-		if residual > 0 || in.Queue.Records > 0 || pending {
+		hubPending := in.HubAnalytics != nil && in.HubAnalytics.State != telemetrycontract.HubAnalyticsStateRevoked &&
+			(in.HubAnalytics.StatsFailed ||
+				(in.HubAnalytics.PendingBytes != nil && *in.HubAnalytics.PendingBytes > 0) ||
+				(in.HubAnalytics.Held != nil && *in.HubAnalytics.Held))
+		if residual > 0 || in.Queue.Records > 0 || pending || hubPending {
 			ev.FinalFlushOutcome = telemetrycontract.FinalFlushNotDrained
 		}
 	}
@@ -326,6 +335,18 @@ func lossIndicated(in healthInputs) bool {
 		a.OversizeTotal > 0 || a.Torn > 0 || a.DroppedNoIdentity > 0 || a.Quarantined > 0 || a.DeadLetters > 0 || a.DeadLettersTotal > 0 ||
 		a.CorruptIntents > 0 || a.Invalid > 0) {
 		return true
+	}
+	if ha := in.HubAnalytics; ha != nil {
+		if ha.DeadLetters > 0 {
+			return true
+		}
+		if !ha.StatsFailed {
+			if (ha.DeadLettersTotal != nil && *ha.DeadLettersTotal > 0) ||
+				(ha.OverflowTotal != nil && *ha.OverflowTotal > 0) ||
+				(ha.AppendFailedTotal != nil && *ha.AppendFailedTotal > 0) {
+				return true
+			}
+		}
 	}
 	for _, s := range []DeliverySnapshot{in.Metrics, in.Logs} {
 		if s.Rejected > 0 || s.Dropped > 0 || s.Unconfirmed > 0 {
@@ -441,10 +462,11 @@ type healthEmitter struct {
 // analyticsHandles are the analytics objects the health snapshot reads,
 // captured once at start so later lifecycle changes cannot race them.
 type analyticsHandles struct {
-	native         *UsageAnalytics
-	drainer        *AnalyticsDrainer
-	send           *countingSend
-	disabledReason string
+	native          *UsageAnalytics
+	drainer         *AnalyticsDrainer
+	send            *countingSend
+	disabledReason  string
+	hubOutboxFailed bool
 }
 
 // counters builds the analytics fields from WP2's typed accessors only:
@@ -751,8 +773,12 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 	h := &p.health
 	h.mu.Lock()
 	h.seq++
+	nowFn := h.now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 	in := healthInputs{
-		Now:                  h.now(),
+		Now:                  nowFn(),
 		PipelineRunID:        h.runID,
 		Seq:                  h.seq,
 		Trigger:              trigger,
@@ -799,6 +825,9 @@ func (p *Pipeline) healthSnapshotInputs(trigger string) healthInputs {
 		// A failing producer (outbox unavailable) still counts the usage
 		// events it could not write: that is loss evidence (loss_indicated).
 		in.DisabledProducerInvalid = handles.native.Invalid()
+	}
+	if ha, ok := handles.hubCounters(in.Now); ok {
+		in.HubAnalytics = ha
 	}
 	d := p.Diagnostics()
 	in.Metrics, in.Logs = d["metrics"], d["logs"]
@@ -940,6 +969,114 @@ func (p *Pipeline) AnalyticsDiagnostics() (counters telemetrycontract.HealthAnal
 	return handles.counters(time.Now()), true, ""
 }
 
+// HubAnalyticsDiagnostics returns the Hub usage sink's health, backlog,
+// dead-letter counters, and last successful drain timestamp (including one
+// ledger read on the Hub outbox), or ok=false when the Hub sink is not
+// configured.
+func (p *Pipeline) HubAnalyticsDiagnostics() (telemetrycontract.HealthHubAnalytics, bool) {
+	if p == nil {
+		return telemetrycontract.HealthHubAnalytics{}, false
+	}
+	h := &p.health
+	h.mu.Lock()
+	handles := h.analyticsHandles
+	h.mu.Unlock()
+	ha, ok := handles.hubCounters(time.Now())
+	if !ok || ha == nil {
+		return telemetrycontract.HealthHubAnalytics{}, false
+	}
+	return *ha, true
+}
+
+// hubCounters reads the Hub usage sink's state, in-memory counters, and one
+// locked ledger snapshot. Returns (nil, false) when the Hub sink is not
+// configured.
+func (h analyticsHandles) hubCounters(now time.Time) (*telemetrycontract.HealthHubAnalytics, bool) {
+	state := h.drainer.HubState()
+	if state == "" && !h.hubOutboxFailed {
+		return nil, false
+	}
+	if h.hubOutboxFailed {
+		return &telemetrycontract.HealthHubAnalytics{
+			State:       telemetrycontract.HubAnalyticsStateDegraded,
+			StatsFailed: true,
+		}, true
+	}
+	outbox := h.drainer.HubOutbox()
+	if outbox == nil {
+		return &telemetrycontract.HealthHubAnalytics{
+			State:       state,
+			StatsFailed: true,
+		}, true
+	}
+	s := outbox.MemoryStats()
+	ha := &telemetrycontract.HealthHubAnalytics{
+		State:          state,
+		Delivered:      s.Delivered,
+		SendFailures:   s.SendFailures,
+		DeadLetters:    s.DeadLetters,
+		RetryBackoffMs: h.drainer.HubBackoff().Milliseconds(),
+	}
+	if last := h.drainer.LastHubDrain(); !last.IsZero() {
+		ha.LastDrainAt = telemetrycontract.FormatTS(last)
+	}
+	ledger, err := outbox.LedgerSnapshot()
+	if err != nil {
+		ha.StatsFailed = true
+		return ha, true
+	}
+	pending, retained := ledger.PendingBytes, ledger.RetainedBytes
+	deadTotal, overflowTotal, appendFailedTotal := ledger.DeadLettersTotal, ledger.OverflowTotal, ledger.AppendFailedTotal
+	held := ledger.Held
+	ha.PendingBytes = &pending
+	ha.RetainedBytes = &retained
+	ha.Held = &held
+	ha.DeadLettersTotal = &deadTotal
+	ha.OverflowTotal = &overflowTotal
+	ha.AppendFailedTotal = &appendFailedTotal
+	if ledger.PendingBytes > 0 && !ledger.OldestPending.IsZero() {
+		age := now.Sub(ledger.OldestPending).Milliseconds()
+		if age < 0 {
+			age = 0
+		}
+		ha.OldestPendingFileAgeMs = &age
+	}
+	return ha, true
+}
+
+// hubAnalyticsMemory is the in-memory Hub analytics view (no outbox lock),
+// for inline diagnostic snapshots.
+type hubAnalyticsMemory struct {
+	State          string
+	LastDrainAt    string
+	Delivered      int64
+	SendFailures   int64
+	DeadLetters    int64
+	RetryBackoffMs int64
+}
+
+func (h analyticsHandles) hubMemory() (hubAnalyticsMemory, bool) {
+	state := h.drainer.HubState()
+	if state == "" && !h.hubOutboxFailed {
+		return hubAnalyticsMemory{}, false
+	}
+	if h.hubOutboxFailed {
+		return hubAnalyticsMemory{State: telemetrycontract.HubAnalyticsStateDegraded}, true
+	}
+	m := hubAnalyticsMemory{
+		State:          state,
+		RetryBackoffMs: h.drainer.HubBackoff().Milliseconds(),
+	}
+	if last := h.drainer.LastHubDrain(); !last.IsZero() {
+		m.LastDrainAt = telemetrycontract.FormatTS(last)
+	}
+	if outbox := h.drainer.HubOutbox(); outbox != nil {
+		s := outbox.MemoryStats()
+		m.Delivered, m.SendFailures, m.DeadLetters = s.Delivered, s.SendFailures, s.DeadLetters
+	}
+	return m, true
+}
+
 // analyticsMemory is the in-memory analytics counter set (no disk values),
 // for local diagnostics only. It is a separate type from
 // HealthAnalyticsCounters so that it can never be serialized into a health
@@ -1004,7 +1141,13 @@ func (p *Pipeline) metricRejectReasons(limit int) string {
 
 // handles returns the analytics objects the health snapshot reads.
 func (a *analyticsState) handles() analyticsHandles {
-	return analyticsHandles{native: a.native, drainer: a.drainer, send: a.send, disabledReason: a.disabledReason}
+	return analyticsHandles{
+		native:          a.native,
+		drainer:         a.drainer,
+		send:            a.send,
+		disabledReason:  a.disabledReason,
+		hubOutboxFailed: a.hubOutboxFailed,
+	}
 }
 
 // cachedHubID memoizes the first successful resolution. Each attempt is

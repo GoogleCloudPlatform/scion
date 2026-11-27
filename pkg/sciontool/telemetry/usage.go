@@ -767,6 +767,12 @@ type UsageDeriver struct {
 	// (WP2 design section 2). Set by the Pipeline before the deriver is
 	// published, only when the GCP exporter is active.
 	analytics *UsageAnalytics
+
+	// suppressGuard, if set by the Pipeline, holds the pipeline's suppression
+	// read lock across the in-memory recordAnalytics + record pair so a
+	// concurrent suppression switch flushes pending counter deltas under the
+	// old decision before flipping the flag. Never held across ForceFlush.
+	suppressGuard func(func())
 }
 
 // UsageDiagnostics are fixed-cardinality usage-derivation counters, exposed
@@ -969,7 +975,7 @@ func (d *UsageDeriver) ProcessResourceMetrics(ctx context.Context, resourceMetri
 	matched := make(map[string]bool)
 	recorded := false
 	for _, rm := range resourceMetrics {
-		if rm == nil {
+		if rm == nil || isOnlyUsageDeriverScope(rm) {
 			continue
 		}
 		for _, br := range batchRules {
@@ -1031,8 +1037,10 @@ func (d *UsageDeriver) observeMetricBatch(ctx context.Context, rule metricBatchD
 			d.recordAnalytics(obs)
 			continue
 		}
-		d.recordAnalytics(obs)
-		d.record(ctx, increment)
+		d.withSuppressGuard(func() {
+			d.recordAnalytics(obs)
+			d.record(ctx, increment)
+		})
 		d.derived.Add(1)
 		recorded = true
 	}
@@ -1117,8 +1125,10 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 			return false
 		}
 		// Outbox first, then counters (design section 2).
-		d.recordAnalytics(obs)
-		d.record(ctx, increment)
+		d.withSuppressGuard(func() {
+			d.recordAnalytics(obs)
+			d.record(ctx, increment)
+		})
 		d.derived.Add(1)
 		if d.apiOutcome != nil && increment.Calls != 0 {
 			d.apiOutcome(apiOutcomeFromRecord(record, increment, time.Now()))
@@ -1265,6 +1275,40 @@ func (d *UsageDeriver) HasMetricRule() bool {
 		}
 	}
 	return false
+}
+
+func (d *UsageDeriver) withSuppressGuard(fn func()) {
+	if d != nil && d.suppressGuard != nil {
+		d.suppressGuard(fn)
+		return
+	}
+	fn()
+}
+
+// isOnlyUsageDeriverScope reports whether every ScopeMetrics in rm comes from
+// UsageDeriver's own canonical-counter scope. Skipping these in
+// ProcessResourceMetrics guarantees a flushed canonical-counter batch can never
+// re-enter metric derivation or acquire suppressMu.
+func isOnlyUsageDeriverScope(rm *metricpb.ResourceMetrics) bool {
+	if rm == nil || len(rm.ScopeMetrics) == 0 {
+		return false
+	}
+	for _, sm := range rm.ScopeMetrics {
+		if sm.GetScope().GetName() != usageMetricScope {
+			return false
+		}
+	}
+	return true
+}
+
+// ForceFlush flushes any pending canonical-counter deltas in the deriver's
+// loopback MeterProvider through the receiver's handleMetrics path. Safe on a
+// nil or no-op deriver.
+func (d *UsageDeriver) ForceFlush(ctx context.Context) error {
+	if d == nil || d.providers == nil || d.providers.MeterProvider == nil {
+		return nil
+	}
+	return d.providers.MeterProvider.ForceFlush(ctx)
 }
 
 // Shutdown releases the deriver's loopback providers, if any were created.
