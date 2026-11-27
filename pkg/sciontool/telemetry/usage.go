@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -628,6 +630,43 @@ const (
 	grokBuildAPIErrorEvent   = "grok_code.api_error"
 )
 
+// GrokBuildVerifiedVersions lists the Grok Build (`grok`) CLI versions whose
+// native OTLP log schema and token semantics have been verified against live
+// captures and pinned by testdata/usage/grok-build-*.pb.json fixtures.
+//
+// Keep in sync with harnesses/grok-build/Dockerfile (ARG GROK_VERSION). See
+// docs-site/src/content/docs/contributing/harness-cli-version-bump.md for the
+// bump and re-verification process.
+var GrokBuildVerifiedVersions = []string{
+	"1.0.92",
+}
+
+// grokVersionTokenRe extracts a complete version token (optional leading "v",
+// X.Y.Z, plus any extra numeric segments, prerelease "-...", or build metadata
+// "+...") bounded by whitespace or parentheses/commas. Capturing the full token
+// ensures prereleases ("1.0.92-rc.1"), extra segments ("1.0.92.1"), and build
+// metadata ("1.0.92+build.1") are preserved verbatim and never silently
+// normalized to a verified "1.0.92".
+var grokVersionTokenRe = regexp.MustCompile(`(?:^|[\s(])v?(\d+\.\d+\.\d+(?:\.\d+)*(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)(?:$|[\s),])`)
+
+// matchGrokBuildVerifiedVersion extracts the version token from raw (for
+// example "1.0.92 (b06756fd6256)" -> "1.0.92", "v1.0.92\n" -> "1.0.92",
+// "grok v1.0.93" -> "1.0.93") and reports whether it matches an entry in
+// GrokBuildVerifiedVersions exactly. Prereleases, extra version segments, and
+// build metadata are not stripped and do not match a release entry. Empty or
+// unparseable inputs return ("", false).
+func matchGrokBuildVerifiedVersion(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", false
+	}
+	m := grokVersionTokenRe.FindStringSubmatch(s)
+	if len(m) != 2 {
+		return "", false
+	}
+	return m[1], slices.Contains(GrokBuildVerifiedVersions, m[1])
+}
+
 type grokBuildUsageRule struct{}
 
 func (grokBuildUsageRule) Harness() string { return "grok-build" }
@@ -739,6 +778,7 @@ type UsageDeriver struct {
 
 	derived, duplicate, malformed atomic.Int64
 	malformedWarnOnce             sync.Once
+	unverifiedVersionWarnOnce     sync.Once
 
 	// WP3 population counters (wp3-design.md section 1.1): raw log
 	// records seen and matched by a log rule; metric batches walked, those
@@ -1076,6 +1116,26 @@ func (d *UsageDeriver) observe(ctx context.Context, scopeName string, record *lo
 	return d.observeRecord(ctx, scopeName, nil, record)
 }
 
+// warnIfUnverifiedGrokVersion logs a one-time operator warning when a
+// recognized grok-build OTLP record reports a parseable CLI version outside
+// GrokBuildVerifiedVersions. Empty or unparseable versions are ignored silently
+// so missing metadata never produces false-positive warnings or burns the
+// sync.Once guard.
+func (d *UsageDeriver) warnIfUnverifiedGrokVersion(rawVersion string) {
+	ver, ok := matchGrokBuildVerifiedVersion(rawVersion)
+	if ver == "" || ok {
+		return
+	}
+	d.unverifiedVersionWarnOnce.Do(func() {
+		slog.Warn(
+			"grok-build CLI version differs from verified usage-decoding versions; usage reporting may silently degrade or miscount tokens — see docs-site/src/content/docs/contributing/harness-cli-version-bump.md",
+			"harness", "grok-build",
+			"installed_version", ver,
+			"verified_versions", strings.Join(GrokBuildVerifiedVersions, ","),
+		)
+	})
+}
+
 // observeRecord is observe with the record's resource attributes, which
 // the analytics event reads the harness version from.
 func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, resourceAttrs []*commonpb.KeyValue, record *logspb.LogRecord) bool {
@@ -1092,6 +1152,9 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		d.logRecognized.Add(1)
 		if v := harnessVersionFromAttrs(record.GetAttributes(), resourceAttrs); v != "" {
 			d.lastHarnessVersion.Store(v)
+			if rule.Harness() == "grok-build" {
+				d.warnIfUnverifiedGrokVersion(v)
+			}
 		}
 		if err != nil {
 			d.malformed.Add(1)

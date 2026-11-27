@@ -19,9 +19,11 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1016,5 +1018,166 @@ func TestBaseImagePlaywrightFfmpegContractDetectsViolations(t *testing.T) {
 	}
 	for _, m := range mutations {
 		expectViolation(t, m.name, checkBaseImagePlaywrightFfmpegContract(t, "test/Dockerfile", m.src), m.want)
+	}
+}
+
+// pinnedCLIContract describes the build-arg pinning invariants for a harness
+// Dockerfile whose usage decoder is verified on specific CLI versions.
+type pinnedCLIContract struct {
+	dockerfilePath   string
+	argName          string
+	installerURL     string
+	installerScript  string
+	binaryName       string
+	verifiedVersions []string
+}
+
+// checkPinnedCLIDockerfileContract verifies that a harness Dockerfile:
+//   - declares `ARG <argName>=<version>` with a non-empty, non-"latest" default
+//   - pins a version matching an entry in verifiedVersions exactly
+//   - passes ${<argName>} or $<argName> directly to the installer invocation
+//   - downloads its installer to a file instead of piping curl to bash/sh
+//   - runs `<binaryName> --version` (without `|| true`) to log and verify install
+func checkPinnedCLIDockerfileContract(t *testing.T, spec pinnedCLIContract, content string) []string {
+	t.Helper()
+	stages := parseDockerfileStages(t, content)
+	if len(stages) == 0 {
+		return []string{spec.dockerfilePath + ": no stages found"}
+	}
+
+	var errs []string
+	var argValue string
+	argDeclared := false
+
+	for _, st := range stages {
+		for _, in := range st.instrs {
+			if in.cmd != "ARG" {
+				continue
+			}
+			for _, tok := range strings.Fields(in.args) {
+				k, v, hasEq := strings.Cut(tok, "=")
+				if k != spec.argName {
+					continue
+				}
+				argDeclared = true
+				if hasEq {
+					argValue = strings.Trim(v, `"'`)
+				} else {
+					argValue = ""
+				}
+			}
+		}
+	}
+
+	if !argDeclared {
+		errs = append(errs, fmt.Sprintf("%s must declare ARG %s=<verified-version>", spec.dockerfilePath, spec.argName))
+	} else if argValue == "" || strings.EqualFold(argValue, "latest") {
+		errs = append(errs, fmt.Sprintf("%s must pin ARG %s to a verified version (got %q, must not be empty or latest)", spec.dockerfilePath, spec.argName, argValue))
+	} else if !slices.Contains(spec.verifiedVersions, argValue) {
+		errs = append(errs, fmt.Sprintf("%s pins ARG %s=%s, which is not in verified versions %v", spec.dockerfilePath, spec.argName, argValue, spec.verifiedVersions))
+	}
+
+	var runs []string
+	for _, st := range stages {
+		for _, in := range st.instrs {
+			if in.cmd == "RUN" {
+				runs = append(runs, strings.Join(strings.Fields(in.args), " "))
+			}
+		}
+	}
+	allRuns := strings.Join(runs, "\n")
+
+	argBraced := "${" + spec.argName + "}"
+	argBare := "$" + spec.argName
+	if !strings.Contains(allRuns, argBraced) && !strings.Contains(allRuns, argBare) {
+		errs = append(errs, fmt.Sprintf("%s must reference %s in a RUN instruction", spec.dockerfilePath, argBraced))
+	}
+	if spec.installerURL != "" && !strings.Contains(allRuns, spec.installerURL) {
+		errs = append(errs, fmt.Sprintf("%s must fetch %s", spec.dockerfilePath, spec.installerURL))
+	}
+
+	var hasInstallerArgPass, hasVersionCheck bool
+	wantBin := spec.binaryName + " --version"
+	wantUsrBin := "/usr/local/bin/" + spec.binaryName + " --version"
+	for _, run := range runs {
+		for _, andClause := range strings.Split(run, "&&") {
+			for _, clause := range strings.Split(andClause, ";") {
+				c := strings.TrimSpace(clause)
+				if (strings.Contains(c, "curl ") || (spec.installerURL != "" && strings.Contains(c, spec.installerURL))) && hasShellPipe(c) {
+					errs = append(errs, fmt.Sprintf("%s must download installer to a file rather than piping curl into bash/sh (Docker /bin/sh lacks pipefail)", spec.dockerfilePath))
+				}
+				if spec.installerScript != "" && !hasShellPipe(c) &&
+					(strings.Contains(c, "bash ") || strings.Contains(c, "sh ")) &&
+					strings.Contains(c, spec.installerScript) &&
+					(strings.Contains(c, argBraced) || strings.Contains(c, argBare)) {
+					hasInstallerArgPass = true
+				}
+				if c == wantBin || c == wantUsrBin {
+					hasVersionCheck = true
+				}
+			}
+		}
+	}
+	if spec.installerScript != "" && !hasInstallerArgPass {
+		errs = append(errs, fmt.Sprintf("%s must pass %s directly to the %s installer invocation", spec.dockerfilePath, argBraced, spec.installerScript))
+	}
+	if !hasVersionCheck {
+		errs = append(errs, fmt.Sprintf("%s must run `%s --version` (without `|| true`) to log the installed version and fail on a broken install", spec.dockerfilePath, spec.binaryName))
+	}
+	return errs
+}
+
+// grokBuildCLIContract enforces the pinned CLI policy for harnesses/grok-build/Dockerfile.
+// Antigravity and muse-code intentionally float via their upstream installers
+// (see GoogleCloudPlatform/scion#4820 and TestAntigravityDockerfileUsesInstaller)
+// and rely on runtime version checks as their safety net, so they are
+// deliberately not enrolled in checkPinnedCLIDockerfileContract.
+var grokBuildCLIContract = pinnedCLIContract{
+	dockerfilePath:   "harnesses/grok-build/Dockerfile",
+	argName:          "GROK_VERSION",
+	installerURL:     "https://x.ai/cli/install.sh",
+	installerScript:  "grok-install.sh",
+	binaryName:       "grok",
+	verifiedVersions: telemetry.GrokBuildVerifiedVersions,
+}
+
+func TestGrokBuildDockerfilePinsVerifiedVersion(t *testing.T) {
+	for _, e := range checkPinnedCLIDockerfileContract(t, grokBuildCLIContract, readRepoFile(t, grokBuildCLIContract.dockerfilePath)) {
+		t.Error(e)
+	}
+}
+
+func TestGrokBuildDockerfileContractDetectsViolations(t *testing.T) {
+	good := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n" +
+		"ARG GROK_VERSION=1.0.92\n" +
+		"USER root\n" +
+		"RUN curl -fsSL -o /tmp/grok-install.sh https://x.ai/cli/install.sh \\\n" +
+		"    && if [ -z \"${GROK_VERSION}\" ] || [ \"${GROK_VERSION}\" = \"latest\" ]; then \\\n" +
+		"         bash /tmp/grok-install.sh; \\\n" +
+		"       else \\\n" +
+		"         bash /tmp/grok-install.sh \"${GROK_VERSION}\"; \\\n" +
+		"       fi \\\n" +
+		"    && rm -f /tmp/grok-install.sh \\\n" +
+		"    && /usr/local/bin/grok --version\n"
+
+	if errs := checkPinnedCLIDockerfileContract(t, grokBuildCLIContract, good); len(errs) != 0 {
+		t.Fatalf("valid Dockerfile reported violations: %q", errs)
+	}
+
+	mutations := []struct{ name, src, want string }{
+		{"latest pin", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=latest"), "must not be empty or latest"},
+		{"empty pin", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION="), "must not be empty or latest"},
+		{"unverified version", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=9.9.9"), "is not in verified versions"},
+		{"prerelease pin rejected", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=1.0.92-rc.1"), "is not in verified versions"},
+		{"extra segment pin rejected", mustReplace(t, good, "ARG GROK_VERSION=1.0.92", "ARG GROK_VERSION=1.0.92.1"), "is not in verified versions"},
+		{"missing ARG", mustReplace(t, good, "ARG GROK_VERSION=1.0.92\n", ""), "must declare ARG GROK_VERSION"},
+		{"dropped arg from installer call in if/else", mustReplace(t, good, `bash /tmp/grok-install.sh "${GROK_VERSION}";`, "bash /tmp/grok-install.sh;"), "must pass ${GROK_VERSION} directly to the grok-install.sh installer invocation"},
+		{"unused ARG", "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG GROK_VERSION=1.0.92\nRUN curl -fsSL -o /tmp/grok-install.sh https://x.ai/cli/install.sh && bash /tmp/grok-install.sh && /usr/local/bin/grok --version\n", "must reference ${GROK_VERSION}"},
+		{"curl piped to bash", "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nARG GROK_VERSION=1.0.92\nRUN curl -fsSL https://x.ai/cli/install.sh | bash -s \"${GROK_VERSION}\" && /usr/local/bin/grok --version\n", "rather than piping curl"},
+		{"missing grok --version", mustReplace(t, good, " \\\n    && /usr/local/bin/grok --version\n", "\n"), "must run `grok --version`"},
+		{"grok --version masked with || true", mustReplace(t, good, "/usr/local/bin/grok --version", "/usr/local/bin/grok --version || true"), "must run `grok --version`"},
+	}
+	for _, m := range mutations {
+		expectViolation(t, m.name, checkPinnedCLIDockerfileContract(t, grokBuildCLIContract, m.src), m.want)
 	}
 }
