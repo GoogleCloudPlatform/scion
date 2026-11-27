@@ -366,7 +366,10 @@ func TestMatchAllWithTrace_GoldenByteParity(t *testing.T) {
 			wantTraceJSON:      "",
 		},
 		{
-			name: "canceled_mid_list",
+			// With Step 3's late-success fix (§3.4), a dialect that cancels ctx
+			// during element 1 and returns (true, nil) is discarded as canceled
+			// at element 1 itself rather than slipping through to element 2.
+			name: "canceled_during_element_1",
 			ctx: func() context.Context {
 				c, cancel := context.WithCancel(context.Background())
 				cancelMid = cancel
@@ -376,6 +379,37 @@ func TestMatchAllWithTrace_GoldenByteParity(t *testing.T) {
 				{Dialect: "golden_fake", Expr: "pass_and_cancel"},
 				{Dialect: ruleengine.DialectCEL, Expr: `true`},
 				{Dialect: ruleengine.DialectCEL, Expr: `true`},
+			},
+			wantRes:            triggerrule.MatchResult{Matched: false, Through: 1, Dialect: "golden_fake", Class: triggerrule.MatchClassFailed, Reason: celengine.ReasonCanceled},
+			wantMatchedThrough: "1/3",
+			wantDecidedDialect: "golden_fake",
+			wantErr:            true,
+			wantSkipReason:     "",
+			wantIsSkip:         false,
+			wantTraceJSON:      `{"elements":[{"i":1,"dialect":"golden_fake","class":"failed","reason":"canceled","duration_ms":0}],"unexecuted":[2,3]}`,
+		},
+		{
+			// Context canceled between element 1 (pass) and element 2 (via compile
+			// miss observer on element 2) stops at element 2 as failed/canceled.
+			name: "canceled_mid_list_before_element_2",
+			ctx: func() context.Context {
+				c, cancel := context.WithCancel(context.Background())
+				cancelMid = cancel
+				return c
+			},
+			rules: []triggerrule.Rule{
+				{Dialect: "golden_fake", Expr: "pass_with_prov"},
+				{Dialect: ruleengine.DialectCEL, Expr: `event.payload.env == "cancel_before_el2"`},
+				{Dialect: ruleengine.DialectCEL, Expr: `true`},
+			},
+			opts: func() []triggerrule.EvalOption {
+				return []triggerrule.EvalOption{
+					triggerrule.WithCompileMissObserver(func(dialect string) {
+						if dialect == ruleengine.DialectCEL && cancelMid != nil {
+							cancelMid()
+						}
+					}),
+				}
 			},
 			wantRes:            triggerrule.MatchResult{Matched: false, Through: 2, Dialect: "cel", Class: triggerrule.MatchClassFailed, Reason: celengine.ReasonCanceled},
 			wantMatchedThrough: "2/3",
