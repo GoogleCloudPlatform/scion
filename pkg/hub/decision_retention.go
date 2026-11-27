@@ -143,6 +143,34 @@ func (s *Server) decisionRetentionConfig() opsettings.DecisionRetentionConfig {
 	return opsettings.DefaultDecisionRetentionConfig()
 }
 
+// refreshDecisionRetentionAfterProjectDelete refreshes the cached
+// decision_retention operational settings (and notifies peer replicas) when a
+// deleted project had a per-project retention override pruned in DeleteProject,
+// so an immediate same-UUID project create never sees a stale cached override
+// (ptone/scion#9439).
+func (s *Server) refreshDecisionRetentionAfterProjectDelete(projectID string) {
+	ops := s.GetOperationalSettings()
+	if ops == nil {
+		return
+	}
+	if _, ok := ops.DecisionRetention().ProjectOverrides[projectID]; !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), decisionRetentionFinalWriteTimeout)
+	defer cancel()
+	changed, err := ops.Refresh(ctx)
+	if err != nil {
+		slog.Warn("decision retention: refresh settings after project delete", "project_id", projectID, "error", err)
+		return
+	}
+	for _, sec := range changed {
+		if sec == opsettings.DecisionRetentionSectionName {
+			ops.publish(opsettings.DecisionRetentionSectionName, ops.SectionRevision(opsettings.DecisionRetentionSectionName))
+			break
+		}
+	}
+}
+
 // decisionRetentionConfigForJob returns the resolved decision_retention config
 // with overrides for deleted projects stripped so the job and maintenance ops
 // ignore them (design-8984 §3.1).

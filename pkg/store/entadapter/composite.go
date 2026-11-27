@@ -619,6 +619,11 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
 		return err
 	}
+	// Prune any per-project decision_retention override in the same transaction
+	// so re-creating a project with the same UUID starts clean (ptone/scion#9439).
+	if err := pruneDecisionRetentionProjectOverrideTx(ctx, c.entTx, c.isPostgres(), uid.String()); err != nil {
+		return err
+	}
 	// Secret request rows go with the project (§4.7).
 	if err := deleteProjectSecretRequests(ctx, c.client, uid); err != nil {
 		return err
