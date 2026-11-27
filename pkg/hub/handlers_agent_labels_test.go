@@ -898,17 +898,18 @@ func TestPatchAgentLabels_PatchAgentPreReadBodyLimit(t *testing.T) {
 		assert.Empty(t, f.labelAudits(t, f.agent.ID))
 	})
 
-	t.Run("normal caller oversized PATCH body keeps existing behavior unchanged", func(t *testing.T) {
+	t.Run("normal caller oversized PATCH body is rejected with 413", func(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
 			"labels":      map[string]string{"env": "prod", "team": "core"},
 			"annotations": map[string]string{"pad": strings.Repeat("a", maxSettingsBodySize+1024)},
 		})
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "payload_too_large")
 
 		got, err := f.s.GetAgent(ctx, f.agent.ID)
 		require.NoError(t, err)
-		assert.Equal(t, map[string]string{"env": "prod", "team": "core"}, got.Labels)
-		assert.Len(t, f.labelAudits(t, f.agent.ID), 1)
+		assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+		assert.Empty(t, f.labelAudits(t, f.agent.ID))
 	})
 
 	t.Run("agent caller pre-read restores r.Body for downstream readers", func(t *testing.T) {
@@ -954,4 +955,150 @@ func TestPatchAgentLabels_MergeBodyLimit(t *testing.T) {
 			assert.Empty(t, f.labelAudits(t, f.agent.ID))
 		})
 	}
+}
+
+type countingReadCloser struct {
+	r io.Reader
+	n atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error { return nil }
+
+func TestUpdateAgent_PatchBodyLimit(t *testing.T) {
+	f := setupLabelTestFixture(t)
+	ctx := context.Background()
+
+	userBearer := func(t *testing.T, user *store.User) string {
+		t.Helper()
+		token, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+			user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+		)
+		require.NoError(t, err)
+		return "Bearer " + token
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{"by-id route", "/api/v1/agents/" + f.agent.ID},
+		{"project-scoped route", "/api/v1/projects/" + f.project.ID + "/agents/" + f.agent.Slug},
+	}
+
+	oversizedJSON := []byte(`{"taskSummary":"should-not-apply","annotations":{"pad":"` + strings.Repeat("a", maxSettingsBodySize+1024) + `"}}`)
+
+	t.Run("oversized body from authorized owner gets 413 payload_too_large", func(t *testing.T) {
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPatch, rt.path, bytes.NewReader(oversizedJSON))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", userBearer(t, f.owner))
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+
+				assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "payload_too_large")
+
+				got, err := f.s.GetAgent(ctx, f.agent.ID)
+				require.NoError(t, err)
+				assert.Empty(t, got.TaskSummary)
+				assert.Equal(t, map[string]string{"env": "dev", "team": "core"}, got.Labels)
+				assert.Empty(t, f.labelAudits(t, f.agent.ID))
+			})
+		}
+	})
+
+	t.Run("unauthenticated caller gets 401 with zero bytes consumed", func(t *testing.T) {
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				body := &countingReadCloser{r: bytes.NewReader(oversizedJSON)}
+				req := httptest.NewRequest(http.MethodPatch, rt.path, body)
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+
+				assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+				assert.Zero(t, body.n.Load(), "unauthenticated caller must not trigger any body read")
+			})
+		}
+	})
+
+	t.Run("unauthorized outsider gets 403 with zero bytes consumed", func(t *testing.T) {
+		for _, rt := range routes {
+			t.Run(rt.name, func(t *testing.T) {
+				body := &countingReadCloser{r: bytes.NewReader(oversizedJSON)}
+				req := httptest.NewRequest(http.MethodPatch, rt.path, body)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", userBearer(t, f.outsider))
+				rec := httptest.NewRecorder()
+				f.srv.Handler().ServeHTTP(rec, req)
+
+				assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+				assert.Zero(t, body.n.Load(), "unauthorized caller must not trigger any body read")
+			})
+		}
+	})
+
+	t.Run("body exactly at maxSettingsBodySize succeeds", func(t *testing.T) {
+		prefix := `{"taskSummary":"exact-limit","annotations":{"pad":"`
+		suffix := `"}}`
+		padLen := maxSettingsBodySize - len(prefix) - len(suffix)
+		require.Greater(t, padLen, 0)
+		exactBody := []byte(prefix + strings.Repeat("a", padLen) + suffix)
+		require.Equal(t, maxSettingsBodySize, len(exactBody))
+
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, bytes.NewReader(exactBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", userBearer(t, f.owner))
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "exact-limit", got.TaskSummary)
+		assert.Equal(t, padLen, len(got.Annotations["pad"]))
+	})
+
+	t.Run("chunked oversized body gets 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, io.NopCloser(bytes.NewReader(oversizedJSON)))
+		req.ContentLength = -1
+		req.TransferEncoding = []string{"chunked"}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", userBearer(t, f.owner))
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "payload_too_large")
+	})
+
+	t.Run("lying small Content-Length oversized body gets 413", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+f.agent.ID, io.NopCloser(bytes.NewReader(oversizedJSON)))
+		req.ContentLength = 16
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", userBearer(t, f.owner))
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "payload_too_large")
+	})
+
+	t.Run("normal PATCH body behaves unchanged", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, "/api/v1/agents/"+f.agent.ID, map[string]any{
+			"taskSummary": "normal-update",
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := f.s.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "normal-update", got.TaskSummary)
+	})
 }

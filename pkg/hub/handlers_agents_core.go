@@ -5061,8 +5061,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		body = preReadBody
 	} else if r.Body != nil {
 		var err error
-		body, err = io.ReadAll(r.Body)
+		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxSettingsBodySize))
 		if err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					"request body exceeds maximum size", nil)
+				return
+			}
 			BadRequest(w, "Invalid request body: "+err.Error())
 			return
 		}
