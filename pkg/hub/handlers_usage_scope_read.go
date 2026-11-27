@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -358,41 +359,27 @@ func (s *Server) serveScopedUsage(w http.ResponseWriter, r *http.Request, scope 
 		return
 	}
 
-	// Read-time cross-check before serving hourly granularity: compare full-day
-	// SUM(events) between usage_rollups_hourly and usage_rollups_daily across
-	// EVERY UTC day the window overlaps (including partial edge days and the
-	// coverage-marker day), using the same scope/dimension filters.
-	// On any mismatch (for example, pre-marker events on the coverage day or
-	// old-binary writes during a multi-replica rolling upgrade or rollback),
-	// fall back to daily granularity, or reject an explicit groupBy=hour with 400.
-	if win.Granularity == store.UsageGranularityHour {
-		sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
-		untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
-		consistent, err := s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
-			Since:         sinceDay,
-			Until:         untilDay,
+	win, validationMsg, err := resolveConsistentUsageWindow(
+		ctx,
+		s.store,
+		win,
+		store.UsageRollupQuery{
 			ProjectID:     filterProjectID,
 			BillingUserID: filterUserID,
 			AgentID:       filterAgentID,
 			Harness:       filterHarness,
 			Model:         filterModel,
 			UsageSource:   filterUsageSource,
-		})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if !consistent {
-			if hasHourGroup {
-				ValidationError(w, "groupBy=hour is unavailable for this window: hourly rollups are incomplete compared to daily rollups", nil)
-				return
-			}
-			win = UsageWindow{
-				Since:       sinceDay,
-				Until:       untilDay.Add(24*time.Hour - time.Microsecond),
-				Granularity: store.UsageGranularityDay,
-			}
-		}
+		},
+		hasHourGroup,
+	)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	if validationMsg != "" {
+		ValidationError(w, validationMsg, nil)
+		return
 	}
 
 	rollupRes, err := s.store.QueryUsageRollups(ctx, store.UsageRollupQuery{
@@ -607,6 +594,45 @@ func resolveUsageWindowAndGranularity(
 		Until:       untilDay.Add(24*time.Hour - time.Microsecond),
 		Granularity: store.UsageGranularityDay,
 	}, nil
+}
+
+// resolveConsistentUsageWindow applies the D7b read-time hourly-vs-daily
+// consistency cross-check to an already-resolved UsageWindow. When win is
+// hourly, it compares full-day SUM(events) between usage_rollups_hourly and
+// usage_rollups_daily across EVERY UTC day the window overlaps (including
+// partial edge days and the coverage-marker day) using the same scope/dimension
+// filters. On mismatch, it returns a validation message when requireHourly is
+// true, or falls back to a UTC day-snapped daily UsageWindow otherwise.
+// Shared by scoped /usage handlers and HubRollupSource so all surfaces agree.
+func resolveConsistentUsageWindow(
+	ctx context.Context,
+	st store.UsageLedgerStore,
+	win UsageWindow,
+	filter store.UsageRollupQuery,
+	requireHourly bool,
+) (UsageWindow, string, error) {
+	if win.Granularity != store.UsageGranularityHour {
+		return win, "", nil
+	}
+	sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
+	untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
+	filter.Since = sinceDay
+	filter.Until = untilDay
+	consistent, err := st.CheckUsageHourlyConsistency(ctx, filter)
+	if err != nil {
+		return UsageWindow{}, "", err
+	}
+	if consistent {
+		return win, "", nil
+	}
+	if requireHourly {
+		return UsageWindow{}, "groupBy=hour is unavailable for this window: hourly rollups are incomplete compared to daily rollups", nil
+	}
+	return UsageWindow{
+		Since:       sinceDay,
+		Until:       untilDay.Add(24*time.Hour - time.Microsecond),
+		Granularity: store.UsageGranularityDay,
+	}, "", nil
 }
 
 func buildScopedUsageResponse(

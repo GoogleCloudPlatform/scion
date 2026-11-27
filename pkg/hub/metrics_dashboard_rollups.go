@@ -79,34 +79,12 @@ func dailyFallbackWindow(dbNow time.Time, periodDays int, projectID string) reso
 	}
 }
 
-// checkHourlyConsistency applies P2.1a's CheckUsageHourlyConsistency read-time
-// cross-check over all whole covered UTC days inside win. Returns true when
-// hourly rollups are safe to serve, false when the caller must fall back to
-// daily rollups.
-// NOTE: will be replaced by P2.1a's shared D7b helper upon restack (R2).
-func (s *HubRollupSource) checkHourlyConsistency(ctx context.Context, win UsageWindow, hourlyCoverageStart time.Time, projectID string) (bool, error) {
-	sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
-	untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
-	checkFirstDay := sinceDay
-	if sinceDay.Before(hourlyCoverageStart) {
-		checkFirstDay = sinceDay.AddDate(0, 0, 1)
-	}
-	if checkFirstDay.After(untilDay) {
-		return true, nil
-	}
-	return s.store.CheckUsageHourlyConsistency(ctx, store.UsageRollupQuery{
-		Since:     checkFirstDay,
-		Until:     untilDay,
-		ProjectID: projectID,
-	})
-}
-
 // resolveWindow computes the dashboard window and delegates hourly-vs-daily
-// granularity selection to P2.1a's shared resolveUsageWindowAndGranularity plus
-// CheckUsageHourlyConsistency. When hourly rollups are eligible and consistent,
-// UTC hour buckets are re-bucketed into the viewer's requested timezone; when
-// falling back to daily rollups, the window and reported timeZone are UTC so
-// day keys match the actual bucket boundaries.
+// granularity selection to P2.1a's shared resolveUsageWindowAndGranularity and
+// resolveConsistentUsageWindow (D7b). When hourly rollups are eligible and
+// consistent, UTC hour buckets are re-bucketed into the viewer's requested
+// timezone; when falling back to daily rollups, the window and reported
+// timeZone are UTC so day keys match the actual bucket boundaries.
 func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg *queryConfig) (resolvedRollupWindow, error) {
 	dbNow, err := s.store.DBNow(ctx)
 	if err != nil {
@@ -130,22 +108,21 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 		return resolvedRollupWindow{}, fmt.Errorf("resolve rollup granularity: %w", err)
 	}
 
+	win, _, err = resolveConsistentUsageWindow(ctx, s.store, win, store.UsageRollupQuery{ProjectID: cfg.ProjectID}, false)
+	if err != nil {
+		return resolvedRollupWindow{}, fmt.Errorf("check hourly rollup consistency: %w", err)
+	}
+
 	if win.Granularity == store.UsageGranularityHour {
-		consistent, err := s.checkHourlyConsistency(ctx, win, hourlyCoverageStart, cfg.ProjectID)
-		if err != nil {
-			return resolvedRollupWindow{}, fmt.Errorf("check hourly rollup consistency: %w", err)
-		}
-		if consistent {
-			loc := cfg.location()
-			return resolvedRollupWindow{
-				dbNow:       dbNow,
-				since:       win.Since,
-				until:       win.Until,
-				granularity: store.UsageGranularityHour,
-				reportLoc:   loc,
-				startDayKey: dayKey(reqWindow.start, loc),
-			}, nil
-		}
+		loc := cfg.location()
+		return resolvedRollupWindow{
+			dbNow:       dbNow,
+			since:       win.Since,
+			until:       win.Until,
+			granularity: store.UsageGranularityHour,
+			reportLoc:   loc,
+			startDayKey: dayKey(reqWindow.start, loc),
+		}, nil
 	}
 
 	// Daily fallback: usage_rollups_daily is keyed by UTC calendar day, so
@@ -154,10 +131,10 @@ func (s *HubRollupSource) resolveWindow(ctx context.Context, periodDays int, cfg
 }
 
 // resolve24hWindow resolves the rolling 24-hour window for QueryProjectSummary
-// through P2.1a's shared granularity helper and CheckUsageHourlyConsistency.
-// When falling back to daily rollups, since/until are snapped to full UTC day
-// boundaries so rollups, sessions, active agents, and coverage all evaluate the
-// exact same window.
+// through P2.1a's shared resolveUsageWindowAndGranularity and
+// resolveConsistentUsageWindow (D7b). When falling back to daily rollups,
+// since/until are snapped to full UTC day boundaries so rollups, sessions,
+// active agents, and coverage all evaluate the exact same window.
 func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string) (resolvedRollupWindow, error) {
 	dbNow, err := s.store.DBNow(ctx)
 	if err != nil {
@@ -180,20 +157,9 @@ func (s *HubRollupSource) resolve24hWindow(ctx context.Context, projectID string
 	if err != nil {
 		return resolvedRollupWindow{}, fmt.Errorf("resolve 24h rollup granularity: %w", err)
 	}
-	if win.Granularity == store.UsageGranularityHour {
-		consistent, err := s.checkHourlyConsistency(ctx, win, hourlyCoverageStart, projectID)
-		if err != nil {
-			return resolvedRollupWindow{}, fmt.Errorf("check 24h hourly rollup consistency: %w", err)
-		}
-		if !consistent {
-			sinceDay := time.Date(win.Since.Year(), win.Since.Month(), win.Since.Day(), 0, 0, 0, 0, time.UTC)
-			untilDay := time.Date(win.Until.Year(), win.Until.Month(), win.Until.Day(), 0, 0, 0, 0, time.UTC)
-			win = UsageWindow{
-				Since:       sinceDay,
-				Until:       untilDay.Add(24*time.Hour - time.Microsecond),
-				Granularity: store.UsageGranularityDay,
-			}
-		}
+	win, _, err = resolveConsistentUsageWindow(ctx, s.store, win, store.UsageRollupQuery{ProjectID: projectID}, false)
+	if err != nil {
+		return resolvedRollupWindow{}, fmt.Errorf("check 24h hourly rollup consistency: %w", err)
 	}
 	return resolvedRollupWindow{
 		dbNow:       dbNow,

@@ -413,6 +413,15 @@ func TestHubRollupSource_TimezoneBucketingAndDailyFallback(t *testing.T) {
 	assert.Equal(t, "UTC", callsMismatch.TimeZone, "hourly/daily mismatch must fall back to daily and report timeZone=UTC")
 	assert.Equal(t, store.UsageGranularityDay, callsMismatch.Granularity)
 	require.Len(t, callsMismatch.ByModel, 2, "daily fallback must include the daily-only row")
+
+	// D7b coverage-day edge case (R2): set hourlyCoverageStart to the middle of yesterdayUTC
+	// (the first UTC day overlapped by a 2-day window) so the daily-only discrepancy is on the
+	// coverage day itself -> must STILL fall back to daily and report timeZone="UTC".
+	setHourlyCoverageStartForTest(t, client, yesterdayDay.Add(1*time.Hour))
+	callsCoverageEdge, err := src.QueryModelCalls(ctx, 2, WithProjectID(proj.ID), WithTimeZone(chicago))
+	require.NoError(t, err)
+	assert.Equal(t, "UTC", callsCoverageEdge.TimeZone, "D7b: coverage-day discrepancy must fall back to daily and report timeZone=UTC")
+	assert.Equal(t, store.UsageGranularityDay, callsCoverageEdge.Granularity)
 }
 
 func TestHubRollupSource_GroupedSeriesModelHarnessUser(t *testing.T) {
