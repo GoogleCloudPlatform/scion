@@ -2754,3 +2754,226 @@ func TestAntigravitySQLiteTailer_StopBoundsFinalPollTimeout(t *testing.T) {
 		t.Fatalf("Stop consumed the entire parent shutdown deadline (elapsed=%s, parentCtx.Err=%v)", elapsed, parentCtx.Err())
 	}
 }
+
+func TestAntigravitySQLiteTailer_OutboxRetryBackoff(t *testing.T) {
+	t.Run("loop_suppresses_retries_during_overflow_backoff", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-backoff.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795741000, testAgyUsage{
+			modelID: 1466, input: 300, output: 60, id11: "backoff-call-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		hubOutbox.maxPending = 128
+
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:         home,
+			DisableWakeSocket: true,
+			Analytics:         NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			Debounce:          10 * time.Millisecond,
+			PollInterval:      25 * time.Millisecond,
+			DetectVersion:     func(context.Context) (string, error) { return "1.5.18", nil },
+		})
+		if err := tailer.Start(context.Background()); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
+		// Trigger repeated wakes and let several periodic ticks fire while overflowed.
+		for range 4 {
+			tailer.TriggerWake()
+			time.Sleep(35 * time.Millisecond)
+		}
+
+		overflowsDuringBackoff := hubOutbox.Stats().Overflow
+		if overflowsDuringBackoff != 1 {
+			_ = tailer.Stop(context.Background())
+			t.Fatalf("outbox overflow count during backoff = %d, want 1 (repeated retries burned producer_seq)", overflowsDuringBackoff)
+		}
+
+		// Free space and verify Stop's final poll bypasses backoff and delivers the row.
+		hubOutbox.maxPending = analyticsOutboxMaxPending
+		if err := tailer.Stop(context.Background()); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		events := drainOutboxEvents(t, hubOutbox)
+		if len(events) != 1 {
+			t.Fatalf("got %d events after Stop drain, want 1", len(events))
+		}
+		if events[0].ProducerSeq != 2 {
+			t.Fatalf("ProducerSeq = %d, want 2 (1 refused overflow + 1 delivered event, no seq gap)", events[0].ProducerSeq)
+		}
+	})
+
+	t.Run("exponential_backoff_cap_and_reset_on_success", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-exp-backoff.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795741100, testAgyUsage{
+			modelID: 1466, input: 400, output: 80, id11: "exp-backoff-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		hubOutbox.maxPending = 128
+
+		now := time.Date(2026, 11, 27, 16, 0, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:             home,
+			DisableWakeSocket:     true,
+			Analytics:             NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			OutboxRetryMinBackoff: 5 * time.Second,
+			OutboxRetryMaxBackoff: 15 * time.Second,
+			DetectVersion:         func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:                   func() time.Time { return now },
+		})
+
+		// Attempt 1 at t=0: overflows -> backoff 5s (retryAfter = t+5s).
+		if err := tailer.pollOnce(context.Background(), true); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("attempt 1 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 1 {
+			t.Fatalf("after attempt 1 overflow = %d, want 1", got)
+		}
+
+		// At t+4s: still within 5s backoff -> suppressed (no error, no overflow).
+		now = now.Add(4 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("suppressed poll at t+4s err = %v, want nil", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 1 {
+			t.Fatalf("at t+4s overflow = %d, want 1", got)
+		}
+
+		// At t+5s: retries -> overflows again -> backoff doubles to 10s (retryAfter = t+15s).
+		now = now.Add(1 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("attempt 2 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 2 {
+			t.Fatalf("after attempt 2 overflow = %d, want 2", got)
+		}
+
+		// At t+14s: still within 10s backoff -> suppressed.
+		now = now.Add(9 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("suppressed poll at t+14s err = %v, want nil", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 2 {
+			t.Fatalf("at t+14s overflow = %d, want 2", got)
+		}
+
+		// At t+15s: retries -> overflows again -> backoff capped at 15s (retryAfter = t+30s).
+		now = now.Add(1 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("attempt 3 err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 3 {
+			t.Fatalf("after attempt 3 overflow = %d, want 3", got)
+		}
+		now = now.Add(14 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("suppressed poll at t+29s err = %v, want nil", err)
+		}
+		if got := hubOutbox.Stats().Overflow; got != 3 {
+			t.Fatalf("at t+29s overflow = %d, want 3", got)
+		}
+
+		// Free space and advance to t+30s: succeeds and resets backoff immediately.
+		hubOutbox.maxPending = analyticsOutboxMaxPending
+		now = now.Add(1 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("recovery poll err = %v, want nil", err)
+		}
+		if tailer.outboxBackoff != 0 || !tailer.outboxRetryAfter.IsZero() {
+			t.Fatalf("backoff not reset after success: backoff=%s retryAfter=%v", tailer.outboxBackoff, tailer.outboxRetryAfter)
+		}
+
+		// Next overflow must start fresh at minBackoff (5s), not capped 15s.
+		hubOutbox.maxPending = 128
+		gen1 := encodeTestGenMeta(1466, "gemini-4-neon", 1795741200, testAgyUsage{
+			modelID: 1466, input: 100, output: 20, id11: "exp-backoff-2",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (1, ?, ?)`, gen1, len(gen1)); err != nil {
+			t.Fatalf("insert gen1: %v", err)
+		}
+		if err := tailer.pollOnce(context.Background(), true); !errors.Is(err, ErrAnalyticsOutboxOverflow) {
+			t.Fatalf("post-reset overflow err = %v, want ErrAnalyticsOutboxOverflow", err)
+		}
+		if tailer.outboxBackoff != 5*time.Second {
+			t.Fatalf("post-reset backoff = %s, want 5s", tailer.outboxBackoff)
+		}
+	})
+
+	t.Run("relocated_refused_triggers_backoff", func(t *testing.T) {
+		setTestAgyEnv(t)
+		home := t.TempDir()
+		seedEmptyAgyState(t, home)
+		dbPath := filepath.Join(AgyConversationsDir(home), "conv-reloc.db")
+		db := createTestAgyDB(t, dbPath)
+		defer func() { _ = db.Close() }()
+
+		gen0 := encodeTestGenMeta(1466, "gemini-4-neon", 1795741300, testAgyUsage{
+			modelID: 1466, input: 200, output: 40, id11: "reloc-1",
+		})
+		if _, err := db.Exec(`INSERT INTO gen_metadata(idx, data, size) VALUES (0, ?, ?)`, gen0, len(gen0)); err != nil {
+			t.Fatalf("insert gen0: %v", err)
+		}
+
+		hubOutbox, err := OpenAnalyticsOutbox(HubAnalyticsOutboxDirFor(home))
+		if err != nil {
+			t.Fatalf("open hub outbox: %v", err)
+		}
+		if _, err := hubOutbox.PinHubID("hub-A"); err != nil {
+			t.Fatalf("PinHubID hub-A: %v", err)
+		}
+		if err := hubOutbox.recordRelocation("hub-B"); err != nil {
+			t.Fatalf("recordRelocation hub-B: %v", err)
+		}
+
+		now := time.Date(2026, 11, 27, 16, 10, 0, 0, time.UTC)
+		tailer := NewAntigravitySQLiteTailer(AntigravitySQLiteConfig{
+			AgentHome:             home,
+			DisableWakeSocket:     true,
+			Analytics:             NewUsageAnalytics(hubOutbox, telemetrycontract.UsageSourceSQLiteNative),
+			OutboxRetryMinBackoff: 5 * time.Second,
+			DetectVersion:         func(context.Context) (string, error) { return "1.5.18", nil },
+			Now:                   func() time.Time { return now },
+		})
+
+		if err := tailer.pollOnce(context.Background(), true); !errors.Is(err, ErrAnalyticsOutboxRelocatedRefused) {
+			t.Fatalf("poll 1 err = %v, want ErrAnalyticsOutboxRelocatedRefused", err)
+		}
+		if got := hubOutbox.Stats().RelocatedRefused; got != 1 {
+			t.Fatalf("RelocatedRefused = %d, want 1", got)
+		}
+
+		// Retry within backoff is suppressed and does not consume another producer_seq.
+		now = now.Add(3 * time.Second)
+		if err := tailer.pollOnce(context.Background(), true); err != nil {
+			t.Fatalf("suppressed poll err = %v, want nil", err)
+		}
+		if got := hubOutbox.Stats().RelocatedRefused; got != 1 {
+			t.Fatalf("RelocatedRefused during backoff = %d, want 1", got)
+		}
+	})
+}

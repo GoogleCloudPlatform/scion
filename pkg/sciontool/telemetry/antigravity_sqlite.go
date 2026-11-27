@@ -49,12 +49,14 @@ const (
 	// wake the live tailer in `sciontool init` immediately on PostInvocation.
 	AgySQLiteWakeSocketName = "agy-sqlite-wake.sock"
 
-	defaultAgySQLiteDebounce       = 500 * time.Millisecond
-	defaultAgySQLitePollInterval   = 15 * time.Second
-	agySQLiteStateSchemaVersion    = 1
-	agyVersionDetectTimeout        = 2 * time.Second
-	defaultAgyVersionMaxFailures   = 3
-	defaultAgyVersionFailureWindow = 5 * time.Minute
+	defaultAgySQLiteDebounce        = 500 * time.Millisecond
+	defaultAgySQLitePollInterval    = 15 * time.Second
+	defaultAgyOutboxRetryMinBackoff = 5 * time.Second
+	defaultAgyOutboxRetryMaxBackoff = 5 * time.Minute
+	agySQLiteStateSchemaVersion     = 1
+	agyVersionDetectTimeout         = 2 * time.Second
+	defaultAgyVersionMaxFailures    = 3
+	defaultAgyVersionFailureWindow  = 5 * time.Minute
 )
 
 // AgySQLiteStatePath returns <agentHome>/.scion/agy-sqlite-state.json, or ""
@@ -136,6 +138,13 @@ type AntigravitySQLiteConfig struct {
 	// Stop so a slow or blocked SQLite read cannot consume the caller's entire
 	// shutdown deadline (default usageDeriverFlushTimeout = 5s).
 	ShutdownPollTimeout time.Duration
+	// OutboxRetryMinBackoff is the initial backoff after a retryable outbox
+	// error (overflow or relocated refusal) before background polls retry
+	// (default 5s).
+	OutboxRetryMinBackoff time.Duration
+	// OutboxRetryMaxBackoff caps the exponential outbox retry backoff
+	// (default 5m).
+	OutboxRetryMaxBackoff time.Duration
 	// MaxDedupeRoots caps retained canonical roots in DedupeState via LRU
 	// pruning (default agydecode.DefaultMaxDedupeRoots).
 	MaxDedupeRoots int
@@ -198,6 +207,8 @@ type AntigravitySQLiteTailer struct {
 	versionFirstFailureAt time.Time
 	agyVersion            string
 	driftEmitted          map[string]bool
+	outboxBackoff         time.Duration
+	outboxRetryAfter      time.Time
 
 	driftLatched atomic.Bool
 
@@ -231,6 +242,15 @@ func NewAntigravitySQLiteTailer(cfg AntigravitySQLiteConfig) *AntigravitySQLiteT
 	}
 	if cfg.ShutdownPollTimeout <= 0 {
 		cfg.ShutdownPollTimeout = usageDeriverFlushTimeout
+	}
+	if cfg.OutboxRetryMinBackoff <= 0 {
+		cfg.OutboxRetryMinBackoff = defaultAgyOutboxRetryMinBackoff
+	}
+	if cfg.OutboxRetryMaxBackoff <= 0 {
+		cfg.OutboxRetryMaxBackoff = defaultAgyOutboxRetryMaxBackoff
+	}
+	if cfg.OutboxRetryMaxBackoff < cfg.OutboxRetryMinBackoff {
+		cfg.OutboxRetryMaxBackoff = cfg.OutboxRetryMinBackoff
 	}
 	if cfg.MaxDedupeRoots <= 0 {
 		cfg.MaxDedupeRoots = agydecode.DefaultMaxDedupeRoots
@@ -439,11 +459,11 @@ func (t *AntigravitySQLiteTailer) loop(ctx context.Context) {
 			debounceC = debounceTimer.C
 		case <-debounceC:
 			debounceC = nil
-			if err := t.PollOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := t.pollOnce(ctx, true); err != nil && !errors.Is(err, context.Canceled) {
 				log.Debug("Antigravity SQLite tailer wake poll error: %v", err)
 			}
 		case <-ticker.C:
-			if err := t.PollOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if err := t.pollOnce(ctx, true); err != nil && !errors.Is(err, context.Canceled) {
 				log.Debug("Antigravity SQLite tailer periodic poll error: %v", err)
 			}
 		}
@@ -456,6 +476,10 @@ func (t *AntigravitySQLiteTailer) loop(ctx context.Context) {
 // usage increments to Analytics, and atomically persisting state only after
 // appends succeed.
 func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
+	return t.pollOnce(ctx, false)
+}
+
+func (t *AntigravitySQLiteTailer) pollOnce(ctx context.Context, respectBackoff bool) error {
 	if t == nil {
 		return nil
 	}
@@ -464,7 +488,7 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		var recorded bool
-		err := t.pollOnceLocked(ctx, &recorded)
+		err := t.pollOnceLocked(ctx, &recorded, respectBackoff)
 		if recorded {
 			flushProviders = t.providers
 		}
@@ -480,6 +504,27 @@ func (t *AntigravitySQLiteTailer) PollOnce(ctx context.Context) error {
 	return err
 }
 
+func isRetryableOutboxError(err error) bool {
+	return errors.Is(err, ErrAnalyticsOutboxOverflow) || errors.Is(err, ErrAnalyticsOutboxRelocatedRefused)
+}
+
+func (t *AntigravitySQLiteTailer) recordOutboxBackoffLocked() {
+	if t.outboxBackoff <= 0 {
+		t.outboxBackoff = t.cfg.OutboxRetryMinBackoff
+	} else {
+		t.outboxBackoff *= 2
+		if t.outboxBackoff > t.cfg.OutboxRetryMaxBackoff {
+			t.outboxBackoff = t.cfg.OutboxRetryMaxBackoff
+		}
+	}
+	t.outboxRetryAfter = t.cfg.Now().Add(t.outboxBackoff)
+}
+
+func (t *AntigravitySQLiteTailer) resetOutboxBackoffLocked() {
+	t.outboxBackoff = 0
+	t.outboxRetryAfter = time.Time{}
+}
+
 // canAdvanceWithoutAnalytics reports whether the tailer may record tokens via
 // direct OTel export and advance cursors when Analytics is disabled or
 // detached (for example after a Hub 404 revocation in Hub + generic OTLP mode).
@@ -489,13 +534,16 @@ func (t *AntigravitySQLiteTailer) canAdvanceWithoutAnalytics() bool {
 	return t.tokens != nil && t.cfg.OTelExportActive != nil && t.cfg.OTelExportActive()
 }
 
-func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool) error {
+func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecorded *bool, respectBackoff bool) error {
 
 	// Do not consume rows or advance persisted cursors when no active token
 	// sink (Analytics or direct OTel export) is available (O2). When schema
 	// drift is already latched, still enter the loop so the drift-latched
 	// BaselineFile path advances cursors without emitting events.
 	if t.cfg.Analytics == nil || t.cfg.ConversationsDir == "" {
+		return nil
+	}
+	if respectBackoff && !t.outboxRetryAfter.IsZero() && t.cfg.Now().Before(t.outboxRetryAfter) {
 		return nil
 	}
 	if !t.driftLatched.Load() && t.cfg.Analytics.IsDisabled() && !t.canAdvanceWithoutAnalytics() {
@@ -692,6 +740,7 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		// record appends cleanly.
 		var sessionDelta SessionUsage
 		appendFailed := false
+		retryableOutboxErr := false
 		for _, rec := range res.Records {
 			if rec.Status != agydecode.StatusVerified || rec.Tokens == nil {
 				continue
@@ -703,6 +752,10 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 				if firstErr == nil {
 					firstErr = err
 				}
+				if isRetryableOutboxError(err) {
+					t.recordOutboxBackoffLocked()
+					retryableOutboxErr = true
+				}
 				appendFailed = true
 				break
 			}
@@ -713,10 +766,13 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 			// so rows are not silently dropped.
 			switch outcome {
 			case AppendWritten:
+				t.resetOutboxBackoffLocked()
 				accumulateSessionUsage(&sessionDelta, rec.Tokens)
 				if t.recordOTelTokens(ctx, rec.Model, rec.Tokens) {
 					*otelRecorded = true
 				}
+			case AppendCertainDuplicate:
+				t.resetOutboxBackoffLocked()
 			case AppendDisabled:
 				if !t.canAdvanceWithoutAnalytics() {
 					appendFailed = true
@@ -734,6 +790,9 @@ func (t *AntigravitySQLiteTailer) pollOnceLocked(ctx context.Context, otelRecord
 		if appendFailed {
 			// Do not advance cursor or commit candDedupe; next poll will
 			// re-decode and re-emit with identical EmissionKeys.
+			if retryableOutboxErr {
+				break
+			}
 			continue
 		}
 
