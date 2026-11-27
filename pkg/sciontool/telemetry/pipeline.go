@@ -180,7 +180,8 @@ func (p *Pipeline) setSuppressDirectOTel(suppress bool) {
 	if deriver := p.usageDeriver.Load(); deriver != nil {
 		flushCtx, cancel := context.WithTimeout(context.Background(), usageDeriverFlushTimeout)
 		if err := deriver.ForceFlush(flushCtx); err != nil {
-			log.Debug("Usage deriver flush before suppression switch failed: %v", err)
+			deriver.recordSuppressFlushFailure()
+			log.Warn("Usage deriver flush before suppression switch failed (suppressed=%t): %v", suppress, err)
 		}
 		cancel()
 	}

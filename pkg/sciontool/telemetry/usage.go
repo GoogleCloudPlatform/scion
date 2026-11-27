@@ -33,7 +33,7 @@ import (
 // usageDeriverFlushTimeout bounds how long ProcessResourceLogs waits for the
 // loopback ForceFlush to land in metricStreams. It never blocks the caller
 // indefinitely.
-const usageDeriverFlushTimeout = 5 * time.Second
+var usageDeriverFlushTimeout = 5 * time.Second
 
 // usageDedupeCapacity and usageDedupeTTL bound the dedupe LRU (design §3.3).
 const (
@@ -768,6 +768,10 @@ type UsageDeriver struct {
 	// published, only when the GCP exporter is active.
 	analytics *UsageAnalytics
 
+	// suppressFlushFailed counts ForceFlush failures/timeouts before a
+	// suppression switch (best-effort flip proceeded without confirming flush).
+	suppressFlushFailed atomic.Int64
+
 	// suppressGuard, if set by the Pipeline, holds the pipeline's suppression
 	// read lock across the in-memory recordAnalytics + record pair so a
 	// concurrent suppression switch flushes pending counter deltas under the
@@ -808,6 +812,7 @@ type UsageDiagnostics struct {
 	MetricBatchesMalformed                   int64
 	MetricIncrements                         int64
 	Ignored                                  int64
+	SuppressFlushFailed                      int64
 	// HarnessVersion is the last harness version seen on a recognized
 	// record, "" if none.
 	HarnessVersion string
@@ -1246,6 +1251,7 @@ func (d *UsageDeriver) Diagnostics() UsageDiagnostics {
 		MetricBatchesMalformed: d.metricMalformed.Load(),
 		MetricIncrements:       d.metricIn.Load(),
 		Ignored:                d.ignored.Load(),
+		SuppressFlushFailed:    d.suppressFlushFailed.Load(),
 	}
 	if v, ok := d.lastHarnessVersion.Load().(string); ok {
 		diag.HarnessVersion = v
@@ -1299,6 +1305,15 @@ func isOnlyUsageDeriverScope(rm *metricpb.ResourceMetrics) bool {
 		}
 	}
 	return true
+}
+
+// recordSuppressFlushFailure increments the diagnostic counter when a
+// pre-flip ForceFlush fails or times out.
+func (d *UsageDeriver) recordSuppressFlushFailure() {
+	if d == nil {
+		return
+	}
+	d.suppressFlushFailed.Add(1)
 }
 
 // ForceFlush flushes any pending canonical-counter deltas in the deriver's

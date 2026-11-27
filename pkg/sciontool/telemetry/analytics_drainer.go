@@ -586,7 +586,7 @@ func (d *AnalyticsDrainer) runOnce(ctx context.Context, final bool) int {
 			var hubBudget time.Duration
 			if final {
 				dualRun := d.outbox != nil && d.send != nil
-				hubBudget = hubFinalPhaseBudget(ctx, dualRun, d.now())
+				hubBudget = hubFinalPhaseBudget(ctx, dualRun)
 				if dualRun {
 					hubCtx, hubCancel = context.WithTimeout(ctx, hubBudget)
 				}
@@ -807,10 +807,10 @@ func (d *AnalyticsDrainer) HubState() string {
 // final pass (batch drain + terminal heartbeat). In dual-run mode it takes
 // 70% of the remaining ctx deadline (or 70% of analyticsStopBudget when ctx
 // has no deadline); in Hub-only mode it uses the full remaining budget.
-func hubFinalPhaseBudget(ctx context.Context, dualRun bool, now time.Time) time.Duration {
+func hubFinalPhaseBudget(ctx context.Context, dualRun bool) time.Duration {
 	remaining := analyticsStopBudget
 	if dl, ok := ctx.Deadline(); ok {
-		remaining = dl.Sub(now)
+		remaining = time.Until(dl)
 	}
 	if remaining <= 0 {
 		return 0

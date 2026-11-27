@@ -236,6 +236,80 @@ func TestDualRunShutdown_FastHubUnusedBudgetFlowsToGCP(t *testing.T) {
 	}
 }
 
+// R1: When the Hub hangs on BOTH batch drain AND terminal heartbeat, the 70%
+// dual-run split must cap the Hub final pass so GCP still gets its 30% share
+// and drains before the outer shutdown deadline expires. Removing the 70% cap
+// gives the Hub 100% of ctx and causes gcpDrained == 0.
+func TestDualRunShutdown_HungHubOnBothBatchAndHeartbeatLeavesShareForGCP(t *testing.T) {
+	gcpOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "gcp"))
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(gcp): %v", err)
+	}
+	hubOutbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "hub"))
+	if err != nil {
+		t.Fatalf("OpenAnalyticsOutbox(hub): %v", err)
+	}
+	appendReadyUsageEvents(t, gcpOutbox, "hub-1", 2, "gcp")
+	appendReadyUsageEvents(t, hubOutbox, "hub-1", 2, "hub")
+
+	var hubBatchCanceled atomic.Bool
+	var hubHeartbeatCanceled atomic.Bool
+	var gcpDrained atomic.Int32
+	var firstGCPAt atomic.Int64
+
+	sink := NewHubUsageSink(hubOutbox, HubUsageSinkConfig{
+		Post: func(ctx context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+			// Hang unconditionally on both batch drain and terminal heartbeat.
+			<-ctx.Done()
+			if len(req.Events) > 0 {
+				hubBatchCanceled.Store(true)
+			} else {
+				hubHeartbeatCanceled.Store(true)
+			}
+			return nil, ctx.Err()
+		},
+		RunID:             "run-hard-1",
+		HubID:             "hub-1",
+		DrainInterval:     time.Hour,
+		HeartbeatInterval: time.Hour,
+	})
+
+	gcpSend := func(ctx context.Context, _ []byte) error {
+		firstGCPAt.CompareAndSwap(0, time.Now().UnixNano())
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		gcpDrained.Add(1)
+		return nil
+	}
+
+	d := NewDualAnalyticsDrainer(gcpOutbox, gcpSend, sink, func(context.Context) (string, error) { return "hub-1", nil })
+	stopBudget := 600 * time.Millisecond
+	start := time.Now()
+	stopCtx, cancel := context.WithTimeout(context.Background(), stopBudget)
+	defer cancel()
+	d.Stop(stopCtx)
+
+	if !hubBatchCanceled.Load() {
+		t.Fatal("expected hanging Hub batch drain to be canceled by its sub-budget")
+	}
+	if !hubHeartbeatCanceled.Load() {
+		t.Fatal("expected hanging Hub terminal heartbeat to be canceled by the 70% Hub budget")
+	}
+	if gcpDrained.Load() != 2 {
+		t.Fatalf("gcpDrained = %d, want 2 (70/30 dual-run split must leave 30%% share for GCP even when both Hub batch and heartbeat hang)", gcpDrained.Load())
+	}
+	// Verify Hub handed off to GCP well before the outer stopBudget (70% cap).
+	gcpStartNs := firstGCPAt.Load()
+	if gcpStartNs == 0 {
+		t.Fatal("expected GCP send to be invoked")
+	}
+	hubElapsed := time.Unix(0, gcpStartNs).Sub(start)
+	if hubElapsed >= stopBudget*9/10 {
+		t.Fatalf("Hub consumed %v of %v stopBudget before GCP ran; expected bounded ~70%% share", hubElapsed, stopBudget)
+	}
+}
+
 // --- Item 2: Surface hub_analytics health in snapshot and diagnostics ---
 
 func TestHubAnalyticsHealth_StatesBacklogDeadLettersAndDiagnostics(t *testing.T) {
@@ -835,5 +909,200 @@ func TestHealthEvent_HubAnalyticsJSONRoundTrip(t *testing.T) {
 	}
 	if ha["state"] != "degraded" || ha["stats_failed"] != true {
 		t.Fatalf("unexpected hub_analytics payload: %v", ha)
+	}
+}
+
+// O1: Deterministic test pinning UsageDeriver's withSuppressGuard read lock.
+// Blocks inside recordAnalytics (via UsageAnalytics's onRecord hook), starts
+// setSuppressDirectOTel(true), and asserts the flip cannot complete until the
+// guarded recordAnalytics+record section returns. Removing withSuppressGuard
+// allows setSuppressDirectOTel(true) to finish immediately while recordAnalytics
+// is still blocked, failing the test.
+func TestPipeline_SuppressGuardSerializesRecordAndFlip(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "ag-guard-1")
+	t.Setenv("SCION_PROJECT_ID", "proj-guard-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+
+	addr, backend := startCaptureOTLPBackend(t)
+	p := NewWithConfig(&Config{
+		Enabled:      true,
+		CloudEnabled: true,
+		Endpoint:     addr,
+		Protocol:     "grpc",
+		Insecure:     true,
+		GRPCPort:     0,
+		HTTPPort:     0,
+	})
+	p.SetAnalyticsOutbox(t.TempDir(), -1, -1)
+	p.SetHubUsageSink(HubUsageSinkConfig{
+		Post: func(_ context.Context, req telemetrycontract.UsageIngestRequest) (*telemetrycontract.UsageIngestResponse, error) {
+			return &telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)}, nil
+		},
+		RunID:              "run-guard-1",
+		HubID:              "hub-guard-1",
+		SuppressDirectOTel: false,
+		DrainInterval:      time.Hour,
+		HeartbeatInterval:  time.Hour,
+	})
+
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	p.analytics.drainer.Stop(ctx)
+
+	enteredRecord := make(chan struct{})
+	releaseRecord := make(chan struct{})
+	var enteredOnce sync.Once
+	p.analytics.native.setRunAndActivity("run-guard-1", func(time.Time) {
+		enteredOnce.Do(func() {
+			close(enteredRecord)
+			<-releaseRecord
+		})
+	})
+
+	logDone := make(chan error, 1)
+	go func() {
+		logDone <- p.handleLogs(ctx, []*logspb.ResourceLogs{{
+			ScopeLogs: []*logspb.ScopeLogs{{
+				Scope: &commonpb.InstrumentationScope{Name: claudeUsageScope},
+				LogRecords: []*logspb.LogRecord{{
+					TimeUnixNano: uint64(time.Now().UnixNano()),
+					Attributes: []*commonpb.KeyValue{
+						metricStringLabel("event.name", "api_request"),
+						metricStringLabel("model", "claude-sonnet-4-6"),
+						{Key: "input_tokens", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: 33}}},
+					},
+				}},
+			}},
+		}})
+	}()
+
+	select {
+	case <-enteredRecord:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handleLogs to enter recordAnalytics")
+	}
+
+	flipDone := make(chan struct{})
+	go func() {
+		p.setSuppressDirectOTel(true)
+		close(flipDone)
+	}()
+
+	// While recordAnalytics+record holds suppressMu.RLock(), setSuppressDirectOTel
+	// must wait and cannot complete.
+	select {
+	case <-flipDone:
+		close(releaseRecord)
+		t.Fatal("setSuppressDirectOTel completed while recordAnalytics+record was still in flight; suppressGuard is not serializing them")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseRecord)
+
+	select {
+	case err := <-logDone:
+		if err != nil {
+			t.Fatalf("handleLogs: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleLogs timed out after releasing recordAnalytics")
+	}
+	select {
+	case <-flipDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("setSuppressDirectOTel timed out after releasing recordAnalytics")
+	}
+
+	if !p.SuppressDirectOTel() {
+		t.Fatal("expected SuppressDirectOTel=true after flip completed")
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := p.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// The in-flight increment derived under suppress=false must have been
+	// exported directly (not stripped by the concurrent flip to true).
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	callPts, callSum := sumMetricValues(backend.metrics, telemetrycontract.MetricAPICalls)
+	tokPts, tokSum := sumMetricValues(backend.metrics, telemetrycontract.MetricUsageTokens)
+	if callPts != 1 || callSum != 1 {
+		t.Fatalf("gen_ai.api.calls exported = (%d points, sum %d), want (1, 1)", callPts, callSum)
+	}
+	if tokPts != 1 || tokSum != 33 {
+		t.Fatalf("scion.usage.tokens exported = (%d points, sum %d), want (1, 33)", tokPts, tokSum)
+	}
+}
+
+// O2: When ForceFlush fails or times out before a suppression switch,
+// setSuppressDirectOTel still performs the best-effort flip, logs at Warn, and
+// increments UsageDiagnostics.SuppressFlushFailed.
+func TestPipeline_FlushThenFlip_FailedFlushWarnsAndCountsInUsageDiagnostics(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "ag-flushfail-1")
+	t.Setenv("SCION_PROJECT_ID", "proj-flushfail-1")
+	t.Setenv("SCION_HARNESS", "claude")
+	t.Setenv("SCION_USAGE_SOURCE", "native")
+
+	origTimeout := usageDeriverFlushTimeout
+	usageDeriverFlushTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { usageDeriverFlushTimeout = origTimeout })
+
+	logFile := filepath.Join(t.TempDir(), "agent.log")
+	log.SetLogPath(logFile)
+	t.Cleanup(func() { log.SetLogPath("/tmp/agent.log") })
+
+	p := NewWithConfig(&Config{
+		Enabled:      true,
+		CloudEnabled: false,
+		GRPCPort:     0,
+		HTTPPort:     0,
+	})
+	p.SetAnalyticsOutbox(t.TempDir(), -1, -1)
+	ctx := context.Background()
+	if err := p.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_ = p.Stop(stopCtx)
+	}()
+
+	// Stop the loopback receiver so the deriver's pre-flip ForceFlush fails.
+	if err := p.receiver.Stop(ctx); err != nil {
+		t.Fatalf("receiver.Stop: %v", err)
+	}
+
+	deriver := p.usageDeriver.Load()
+	if deriver == nil {
+		t.Fatal("expected active usage deriver")
+	}
+	deriver.record(ctx, usageIncrement{
+		Model:  "claude-sonnet-4-6",
+		Status: telemetrycontract.StatusSuccess,
+		Calls:  1,
+		Tokens: map[string]int64{telemetrycontract.TokenTypeInput: 10},
+	})
+
+	p.setSuppressDirectOTel(true)
+
+	if !p.SuppressDirectOTel() {
+		t.Fatal("expected best-effort flip to still set SuppressDirectOTel=true when ForceFlush fails")
+	}
+	if got := p.UsageDiagnostics().SuppressFlushFailed; got != 1 {
+		t.Fatalf("UsageDiagnostics().SuppressFlushFailed = %d, want 1", got)
+	}
+	logBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+	if !strings.Contains(string(logBytes), "[WARN] Usage deriver flush before suppression switch failed") {
+		t.Fatalf("expected WARN log for failed pre-flip flush, got:\n%s", string(logBytes))
 	}
 }
