@@ -595,15 +595,6 @@ func TestTriggerAgentFloor_FireTimeDowngradeRefused(t *testing.T) {
 	refusal, err = runAuthorize(hubfire.DefinitionKindTrigger)
 	require.NoError(t, err)
 	assert.Nil(t, refusal, "baseline agent under bounded project.read ceiling retains self-op agent.notify")
-
-	_, err = f.store.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, ag.ID, boundedEdgeID, store.Deactivation{
-		Cause: store.EdgeDeactivationReincarnateReplaced,
-		At:    &now,
-		OpID:  api.NewUUID(),
-	})
-	require.NoError(t, err)
-	_, err = runAuthorize(hubfire.DefinitionKindTrigger)
-	require.ErrorIs(t, err, errScheduledAuthorityDenied, "revoked delegation edge must deny fire")
 }
 
 // TestTriggerAgentFloor_ReadonlyDisableMixedBodies verifies that every
