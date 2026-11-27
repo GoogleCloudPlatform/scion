@@ -53,10 +53,86 @@ func TestExperimentRegistry_ZeroValueServerFallsBackToDefault(t *testing.T) {
 	}
 	// ptone/scion#2217: a zero-value &Server{} (no New()) must resolve every
 	// compiled experiment to its default without panicking.
+	// TestExperimentRegistry_ZeroValueServerFallsBackToDefault
 	for _, exp := range experiments.Default().All() {
 		if got := srv.experimentEnabled(exp.Name); got != exp.Default {
 			t.Errorf("zero-value Server: %s = %v, want its default %v", exp.Name, got, exp.Default)
 		}
+	}
+}
+
+// TestConduitDeploymentDefault_PrecedenceAndAdminResponse verifies that
+// SetConduitDeploymentDefault overrides the compiled default of hub.conduit
+// for both resolution and the admin experiments response, while stored
+// overrides and malformed documents keep precedence, and that the early-resolve
+// guard panics if hub.conduit is resolved before the setter runs.
+func TestConduitDeploymentDefault_PrecedenceAndAdminResponse(t *testing.T) {
+	srv := &Server{}
+	exp, ok := srv.experimentRegistry().Lookup(conduitExperiment)
+	if !ok {
+		t.Fatalf("%q not registered", conduitExperiment)
+	}
+	if !exp.Default {
+		t.Fatalf("compiled default for %q = false, want true", conduitExperiment)
+	}
+
+	// Early-resolve guard panics before SetConduitDeploymentDefault.
+	srv.SetConduitEarlyResolveGuardForTest(true)
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("expected panic when hub.conduit is resolved before SetConduitDeploymentDefault")
+			}
+		}()
+		_ = srv.experimentEnabled(conduitExperiment)
+	}()
+
+	// Before setter (disarmed): compiled default true applies.
+	srv.SetConduitEarlyResolveGuardForTest(false)
+	if !srv.experimentEnabled(conduitExperiment) || !srv.experimentDefault(exp) {
+		t.Fatal("before SetConduitDeploymentDefault, hub.conduit must resolve to compiled default true")
+	}
+
+	// Set deployment default off (hosted HA stage 1).
+	srv.SetConduitEarlyResolveGuardForTest(true)
+	srv.SetConduitDeploymentDefault(false, "hosted_ha_staged")
+	if srv.ConduitDeploymentDefaultReason() != "hosted_ha_staged" {
+		t.Fatalf("reason = %q, want hosted_ha_staged", srv.ConduitDeploymentDefaultReason())
+	}
+	if srv.experimentEnabled(conduitExperiment) {
+		t.Fatal("after SetConduitDeploymentDefault(false), hub.conduit must resolve off")
+	}
+	if srv.experimentDefault(exp) {
+		t.Fatal("experimentDefault must reflect deployment default false")
+	}
+
+	findConduit := func(resp adminExperimentsResponse) adminExperimentEntry {
+		for _, e := range resp.Experiments {
+			if e.Name == conduitExperiment {
+				return e
+			}
+		}
+		t.Fatalf("%q missing from admin experiments response", conduitExperiment)
+		return adminExperimentEntry{}
+	}
+
+	// Admin API response with no override shows default=false, override=nil, enabled=false.
+	entry := findConduit(srv.buildAdminExperimentsResponse(map[string]bool{}, 0, false, false, time.Time{}, ""))
+	if entry.Default || entry.Override != nil || entry.Enabled {
+		t.Fatalf("admin entry (deployment default off, no override) = %+v, want default=false override=nil enabled=false", entry)
+	}
+
+	// Stored override true beats deployment default false.
+	entry = findConduit(srv.buildAdminExperimentsResponse(map[string]bool{conduitExperiment: true}, 1, false, true, testUpdatedAt, "admin@example.com"))
+	if entry.Default || entry.Override == nil || !*entry.Override || !entry.Enabled {
+		t.Fatalf("admin entry (override true) = %+v, want default=false override=true enabled=true", entry)
+	}
+
+	// Malformed document forces hub.conduit off even when deployment default is true.
+	srvOn := &Server{}
+	srvOn.SetConduitDeploymentDefault(true, "")
+	if srvOn.experimentEnabledIn(ExperimentsSnapshot{Malformed: true, Overrides: map[string]bool{}}, conduitExperiment) {
+		t.Fatal("malformed document must force hub.conduit off even with deployment default true")
 	}
 }
 

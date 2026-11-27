@@ -403,6 +403,44 @@ func TestFlatCloudRunTargetExperimentRegistered(t *testing.T) {
 	}
 }
 
+// TestConduitExperimentRegistered pins the hub.conduit entry: a server-only
+// alpha experiment, compiled default on (hosted HA overrides it off at
+// startup via SetConduitDeploymentDefault), with an accurate description of
+// the paths it changes.
+func TestConduitExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup("hub.conduit")
+	if !ok {
+		t.Fatal("hub.conduit is not registered")
+	}
+	if !e.Default {
+		t.Fatal("hub.conduit compiled default must be on")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must remain alpha, got %q", e.Stage)
+	}
+	if len(e.Layers) != 1 || !e.HasLayer(LayerServer) {
+		t.Fatalf("must be a server-only experiment, got %v", e.Layers)
+	}
+	if strings.Contains(e.Description, "No existing connection path changes") {
+		t.Fatalf("description still carries stale text: %q", e.Description)
+	}
+	for _, want := range []string{
+		"port proxy",
+		"PTY",
+		"tunnel",
+		"SSH",
+		"broker dual-dial",
+		"hub.conduit_deliver",
+		"hub.exec_schedules",
+		"hub.command_requests",
+		"hosted HA",
+	} {
+		if !strings.Contains(e.Description, want) {
+			t.Fatalf("description must mention %q: %q", want, e.Description)
+		}
+	}
+}
+
 // TestConduitDeliverExperimentRegistered pins the hub.conduit_deliver entry:
 // a server-only alpha experiment, off by default, that names its dependency
 // on hub.conduit.

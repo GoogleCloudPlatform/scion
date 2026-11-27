@@ -2380,6 +2380,15 @@ type Server struct {
 	// (SetConduitRelayStartFailure): the setting key that caused it, or ""
 	// when the cause was not one setting. nil: no failure recorded.
 	conduitStartFailure atomic.Pointer[string]
+	// conduitDeploymentDefault overrides the compiled default of hub.conduit
+	// for this deployment when non-nil (SetConduitDeploymentDefault). Set
+	// once at startup after newCommandBus and before startConduit; stored
+	// overrides and a malformed experiments document still take precedence.
+	conduitDeploymentDefault atomic.Pointer[conduitDeploymentDefault]
+	// conduitGuardEarlyResolve, when enabled by tests
+	// (SetConduitEarlyResolveGuardForTest), panics if hub.conduit is
+	// resolved before SetConduitDeploymentDefault has run.
+	conduitGuardEarlyResolve atomic.Bool
 	// conduitExternal is the hub's conduit runtime in external relay mode
 	// (conduit_external.go): routing to separate relays, no relay of its
 	// own. At most one of conduit and conduitExternal is set.

@@ -517,6 +517,55 @@ func conduitInternalRelayAPIServed(cfg *config.GlobalConfig, requireHA bool) boo
 // where hub.conduit is off (design §3.9 startup check).
 var errConduitExternalNeedsExperiment = errors.New("server.hub.conduit.relay_mode is external, which requires the hub.conduit experiment; turn it on or remove relay_mode")
 
+// Conduit deployment-default-off reasons logged when hosted HA defaults
+// hub.conduit off at startup (ptone/scion#9491).
+const (
+	conduitDefaultOffNoAtRestKey            = "no_at_rest_key"
+	conduitDefaultOffCloudRunInProcessRelay = "cloudrun_inprocess_relay"
+	conduitDefaultOffAdvertiseHost          = "advertise_host"
+	conduitDefaultOffCommandBus             = "command_bus"
+	conduitDefaultOffHostedHAStaged         = "hosted_ha_staged"
+)
+
+// conduitDefaultOffReason returns the concrete unmet HA prerequisite when
+// hosted HA cannot run Conduit (A-i through A-iv), or
+// conduitDefaultOffHostedHAStaged when all prerequisites hold (stage 1 keeps
+// hosted HA default-off until live gates pass).
+func conduitDefaultOffReason(cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, commandBusStarted bool) string {
+	if !hubSrv.ConduitGrantRingShared() {
+		return conduitDefaultOffNoAtRestKey
+	}
+	if cloudrunenv.IsService() && !cfg.Hub.Conduit.ExternalRelay() {
+		return conduitDefaultOffCloudRunInProcessRelay
+	}
+	if checkConduitAdvertiseHost(cfg.Hub.Conduit.InternalAdvertise, hubEndpoint) != nil {
+		return conduitDefaultOffAdvertiseHost
+	}
+	if strings.EqualFold(cfg.Database.Driver, "postgres") && !commandBusStarted {
+		return conduitDefaultOffCommandBus
+	}
+	return conduitDefaultOffHostedHAStaged
+}
+
+// configureConduitDeploymentDefault sets the per-deployment default for
+// hub.conduit once at startup, after newCommandBus and before startConduit.
+// Outside hosted HA no deployment default is set, so the compiled default
+// (true) applies. In hosted HA (stage 1) the deployment default is false;
+// stored overrides and a malformed experiments document still take
+// precedence. When the deployment default turns hub.conduit off, one WARN
+// is logged naming the reason.
+func configureConduitDeploymentDefault(cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, commandBusStarted bool) {
+	if hubSrv == nil || !hostedHAGuardsRequired(cfg) {
+		return
+	}
+	reason := conduitDefaultOffReason(cfg, hubSrv, hubEndpoint, commandBusStarted)
+	hubSrv.SetConduitDeploymentDefault(false, reason)
+	_, explicit, malformed := hubSrv.ConduitOverrideState()
+	if !explicit && !malformed {
+		slog.Warn("Conduit disabled by hosted HA deployment default", "conduit_default_off_reason", reason)
+	}
+}
+
 // startConduit opens the internal listener (if configured) and starts the
 // hub's conduit relay when hub.conduit is on; once the relay runs, the
 // graceful shutdown q drains it before the server context is cancelled

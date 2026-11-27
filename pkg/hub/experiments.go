@@ -63,11 +63,66 @@ func (s *Server) experimentEnabled(name string) bool {
 	return s.experimentEnabledIn(s.experimentsSnapshot(), name)
 }
 
+// conduitDeploymentDefault holds a startup-computed deployment default for
+// hub.conduit (SetConduitDeploymentDefault).
+type conduitDeploymentDefault struct {
+	on     bool
+	reason string
+}
+
+// SetConduitDeploymentDefault sets the deployment default for hub.conduit
+// (and its diagnostic reason when off). Call once at startup after
+// newCommandBus and before startConduit. Stored overrides and a malformed
+// experiments document still take precedence.
+func (s *Server) SetConduitDeploymentDefault(on bool, reason string) {
+	s.conduitDeploymentDefault.Store(&conduitDeploymentDefault{
+		on:     on,
+		reason: reason,
+	})
+}
+
+// ConduitDeploymentDefaultReason returns the diagnostic reason recorded by
+// SetConduitDeploymentDefault, or "" when no deployment default was set.
+func (s *Server) ConduitDeploymentDefaultReason() string {
+	if def := s.conduitDeploymentDefault.Load(); def != nil {
+		return def.reason
+	}
+	return ""
+}
+
+// SetConduitEarlyResolveGuardForTest arms or disarms a test-only guard that
+// panics if hub.conduit is resolved before SetConduitDeploymentDefault runs.
+func (s *Server) SetConduitEarlyResolveGuardForTest(on bool) {
+	s.conduitGuardEarlyResolve.Store(on)
+}
+
+// ConduitOverrideState reports the stored override state of hub.conduit
+// without resolving its effective value or reading the deployment default:
+//   - val, true, false when a non-malformed experiments document has an
+//     explicit override for hub.conduit;
+//   - false, false, true when the experiments document is malformed;
+//   - false, false, false when no override is stored.
+//
+// Startup code that runs before SetConduitDeploymentDefault (such as
+// newCommandBus) uses this to detect an explicit operator opt-in without
+// resolving hub.conduit early.
+func (s *Server) ConduitOverrideState() (val, explicit, malformed bool) {
+	snap := s.experimentsSnapshot()
+	if snap.Malformed {
+		return false, false, true
+	}
+	v, ok := snap.Overrides[conduitExperiment]
+	return v, ok, false
+}
+
 // experimentEnabledIn is the single resolution function. Callers that report
 // several values (resolvedExperiments, the admin responses in 1a-ii) take one
 // snapshot and resolve every name from it, so a concurrent refresh cannot
 // produce a mixed answer (ptone/scion#2217).
 func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool {
+	if name == conduitExperiment && s.conduitGuardEarlyResolve.Load() && s.conduitDeploymentDefault.Load() == nil {
+		panic("hub.conduit resolved before SetConduitDeploymentDefault")
+	}
 	overrides := snap.Overrides
 	if _, set := overrides[name]; !set {
 		if def, ok := s.deploymentExperimentDefault(name); ok {
@@ -90,7 +145,16 @@ func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool
 // store (ptone/scion#5827): uploads then go to the artifact service and
 // reach each recipient agent through inbox delivery, so a workstation or
 // single-node hub needs no object storage for attachments.
+//
+// hub.conduit uses the startup deployment default recorded via
+// SetConduitDeploymentDefault when set (e.g. off in hosted HA stage 1).
 func (s *Server) deploymentExperimentDefault(name string) (bool, bool) {
+	if name == conduitExperiment {
+		if def := s.conduitDeploymentDefault.Load(); def != nil {
+			return def.on, true
+		}
+		return false, false
+	}
 	if name == experiments.AttachmentArtifacts && (s.objectStorageConfigured() || s.attachmentArtifactsReady()) {
 		return true, true
 	}

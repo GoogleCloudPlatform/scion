@@ -536,7 +536,7 @@ func TestInitOperationalSettings_ExternalRelayBootstrapsConduitExperiment(t *tes
 		return context.Background(), globalDir
 	}
 
-	t.Run("fresh DB with in_process leaves experiments absent and hub.conduit off", func(t *testing.T) {
+	t.Run("fresh DB with in_process leaves experiments absent without seeding", func(t *testing.T) {
 		ctx, globalDir := setupEnv(t)
 		st := newTestStore(t)
 		cfg := &config.GlobalConfig{}
@@ -545,7 +545,9 @@ func TestInitOperationalSettings_ExternalRelayBootstrapsConduitExperiment(t *tes
 		require.NoError(t, err)
 
 		require.NoError(t, initOperationalSettings(ctx, cfg, srv, st, globalDir))
-		assert.False(t, srv.ConduitEnabled(), "in_process mode must not auto-enable hub.conduit")
+		assert.True(t, srv.ConduitEnabled(), "compiled default enables hub.conduit outside hosted HA")
+		_, explicit, _ := srv.ConduitOverrideState()
+		assert.False(t, explicit, "in_process mode must not seed an explicit hub.conduit override")
 		_, err = st.GetHubSetting(ctx, "experiments")
 		assert.ErrorIs(t, err, store.ErrNotFound, "experiments row stays absent in in_process mode")
 	})

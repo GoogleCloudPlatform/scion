@@ -741,6 +741,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		hubSrv.SetCommandBus(cmdBus)
 
+		// Decide the hub.conduit deployment default once, after newCommandBus
+		// and before startConduit (ptone/scion#9491).
+		_, cmdBusNoop := cmdBus.(hub.NoopCommandBus)
+		configureConduitDeploymentDefault(cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), !cmdBusNoop)
+
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
@@ -4327,9 +4332,11 @@ func newEventPublisher(ctx context.Context, cfg *config.GlobalConfig, dbRec dbme
 // a no-op bus (single-process SQLite always owns all brokers locally).
 //
 // If the Postgres bus cannot start, the hub normally falls back to the
-// no-op bus. In hosted HA with hub.conduit on that is a startup error
-// instead (C8): cross-replica conduit routing and dispatch depend on the
-// listener, so a replica without it must not serve.
+// no-op bus. In hosted HA with hub.conduit explicitly overridden on, that is
+// a startup error instead (C8): cross-replica conduit routing and dispatch
+// depend on the listener, so a replica without it must not serve. When
+// hub.conduit is not an explicit override, startup falls back to the no-op
+// bus and configureConduitDeploymentDefault sets the deployment default off.
 func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) (hub.CommandBus, error) {
 	if !strings.EqualFold(cfg.Database.Driver, "postgres") {
 		return hub.NoopCommandBus{}, nil
@@ -4343,7 +4350,8 @@ func newCommandBus(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	}
 	bus, err := startPostgresCommandBus(ctx, cfg.Database.URL, ownsLocally, hubSrv.ReconcileBroker, logging.Subsystem("hub.commandbus"))
 	if err != nil {
-		if hubSrv.ConduitEnabled() && hostedHAGuardsRequired(cfg) {
+		overrideVal, explicit, _ := hubSrv.ConduitOverrideState()
+		if explicit && overrideVal && hostedHAGuardsRequired(cfg) {
 			return nil, fmt.Errorf("postgres command bus startup failed (hosted HA with hub.conduit on): %w", err)
 		}
 		log.Printf("WARNING: failed to start Postgres command bus (%v); falling back to no-op. Cross-replica dispatch signals will not work.", err)
