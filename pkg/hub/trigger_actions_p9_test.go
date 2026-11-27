@@ -1155,3 +1155,106 @@ func TestTriggerActions_RateDecisionExplicitMarker_Review3HubProbes(t *testing.T
 		require.Equal(t, "", reason, "message sibling must be admitted after exec-cap skip")
 	})
 }
+
+// TestTriggerActions_UpdateCorruptStoredActionsRequiresExecAttach verifies L-1:
+// replacing actions on a trigger with corrupt stored actions re-authorizes
+// agent.attach on the legacy ActionPayload exec target as a floor and fails
+// closed with 403 when the editor lacks attach or when no target can be determined.
+type corruptActionsTriggerStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	corruptIDs map[string]bool
+}
+
+func (s *corruptActionsTriggerStore) GetTrigger(ctx context.Context, id string) (*store.Trigger, error) {
+	tr, err := s.Store.GetTrigger(ctx, id)
+	if s.fault.Active() && err == nil && tr != nil && s.corruptIDs[id] {
+		tr.ActionsCorrupt = true
+	}
+	return tr, err
+}
+
+func TestTriggerActions_UpdateCorruptStoredActionsRequiresExecAttach(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	corruptIDs := map[string]bool{}
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *corruptActionsTriggerStore {
+		return &corruptActionsTriggerStore{Store: inner, fault: sw, corruptIDs: corruptIDs}
+	})
+	fault.Arm()
+
+	// Create a member-owned agent on which f.adminAuth (project admin, who may
+	// PATCH triggers) does NOT hold agent.attach.
+	memberAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "p9-l1-member-agent",
+		Name:      "p9-l1-member-agent",
+		ProjectID: f.projectID,
+		Template:  "default",
+		Phase:     "running",
+		OwnerID:   f.member.ID,
+		Created:   time.Now().UTC(),
+		Updated:   time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, memberAgent))
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:          "p9-l1-ep",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	now := time.Now().UTC()
+	replacement := []TriggerActionSpec{
+		{Type: store.TriggerActionMessage, AgentID: f.targetAgent.ID, Message: "replacement"},
+	}
+
+	t.Run("corrupt_with_legacy_exec_target_denies_editor_without_attach", func(t *testing.T) {
+		trID := api.NewUUID()
+		require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+			ID:            trID,
+			ProjectID:     f.projectID,
+			Name:          "p9-l1-corrupt-with-target",
+			SourceKind:    store.TriggerSourceKindWebhook,
+			SourceID:      ep.ID,
+			MatchTypes:    []string{"webhook.received"},
+			ActionType:    store.TriggerActionExec,
+			ActionPayload: `{"agentId":"` + memberAgent.ID + `","command":["echo","secret"]}`,
+			Status:        store.TriggerStatusActive,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}))
+		corruptIDs[trID] = true
+
+		rec := f.doTrigger(t, f.adminAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+			Actions: &replacement,
+		})
+		require.Equal(t, http.StatusForbidden, rec.Code, "editor without attach on legacy exec target must get 403: %s", rec.Body.String())
+	})
+
+	t.Run("corrupt_with_undeterminable_target_fails_closed_403", func(t *testing.T) {
+		trID := api.NewUUID()
+		require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+			ID:            trID,
+			ProjectID:     f.projectID,
+			Name:          "p9-l1-corrupt-no-target",
+			SourceKind:    store.TriggerSourceKindWebhook,
+			SourceID:      ep.ID,
+			MatchTypes:    []string{"webhook.received"},
+			ActionType:    store.TriggerActionExec,
+			ActionPayload: `{"command":["truncated"`,
+			Status:        store.TriggerStatusActive,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}))
+		corruptIDs[trID] = true
+
+		rec := f.doTrigger(t, f.adminAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+			Actions: &replacement,
+		})
+		require.Equal(t, http.StatusForbidden, rec.Code, "corrupt row with undeterminable target must fail closed with 403: %s", rec.Body.String())
+	})
+}

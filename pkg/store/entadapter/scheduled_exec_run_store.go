@@ -571,6 +571,18 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 				}
 			}
 		} else if runRow.FireID != nil {
+			// Lock order (I-1): always lock the triggers row before updating
+			// trigger_fires, matching FlushTriggerEventCounters and
+			// DeleteTriggersByProject to prevent PG 40P01 deadlocks.
+			tf, tfGetErr := c.TriggerFire.Get(ctx, *runRow.FireID)
+			if tfGetErr != nil && !ent.IsNotFound(tfGetErr) {
+				return mapError(tfGetErr)
+			}
+			if tfGetErr == nil {
+				if lErr := c.Trigger.UpdateOneID(tf.TriggerID).SetUpdated(time.Now().UTC()).Exec(ctx); lErr != nil && !ent.IsNotFound(lErr) {
+					return mapError(lErr)
+				}
+			}
 			fireStatus := triggerFireStatusForFinish(fin)
 			fireErr := fin.FireError
 			if fireErr == "" {
@@ -593,7 +605,7 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 			if _, err := upd.Save(ctx); err != nil {
 				return mapError(err)
 			}
-			if tf, getErr := c.TriggerFire.Get(ctx, *runRow.FireID); getErr == nil {
+			if tfGetErr == nil {
 				if err := recordTriggerFireOnClient(ctx, c, tf.TriggerID, finishedUTC, fireStatus, fireErr); err != nil && !errors.Is(err, store.ErrNotFound) {
 					return err
 				}

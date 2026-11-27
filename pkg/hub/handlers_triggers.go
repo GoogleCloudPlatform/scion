@@ -1478,6 +1478,27 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 					}
 				}
 			}
+		} else if updatingActions {
+			// L-1: fail closed when replacing corrupt stored actions. Re-authorize
+			// agent.attach on the legacy ActionPayload exec target as a floor, and
+			// refuse with 403 when no target can be determined.
+			legacyTarget := execPayloadTarget(tr.ActionPayload)
+			if legacyTarget == "" {
+				Forbidden(w)
+				return
+			}
+			prevLive, ok := s.authorizeStoredExecTargetForUpdate(w, r, projectID, legacyTarget)
+			if !ok {
+				return
+			}
+			if !prevLive {
+				for _, ns := range reqActionSpecs {
+					if strings.TrimSpace(ns.Type) == store.TriggerActionExec && len(ns.Command) == 0 {
+						ValidationError(w, "retargeting an exec trigger whose previous target was deleted requires command", nil)
+						return
+					}
+				}
+			}
 		}
 		if updatingActions {
 			newActions, ok := s.authorizeTriggerActionSpecs(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.SubjectMode, reqActionSpecs, ceiling, prov)

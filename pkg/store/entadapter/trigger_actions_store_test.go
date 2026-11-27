@@ -761,3 +761,138 @@ func TestTriggerActionsStore_FlushTriggerEventCounters_ConcurrentOnce(t *testing
 	require.Equal(t, 1, got.FireCount, "one matched event must count once even when two passes flush concurrently")
 	require.Equal(t, 0, got.ErrorCount)
 }
+
+// TestTriggerActionsStore_FlushVsExecFinish_NoDeadlock_DefectRepro verifies I-1
+// on real Postgres: FlushTriggerEventCounters and FinishScheduledExecRun acquire
+// locks in the same order (triggers row, then trigger_fires), preventing a 40P01
+// deadlock when a [message, exec] trigger flushes counters while the detached exec
+// run finishes.
+func TestTriggerActionsStore_FlushVsExecFinish_NoDeadlock_DefectRepro(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	dialect := cs.client.Driver().Dialect()
+	t.Logf("dialect=%s", dialect)
+	if dialect != "postgres" {
+		t.Skip("deadlock reproduction requires concurrent Postgres writers")
+	}
+
+	projID := uuid.NewString()
+	agentID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	tr := &store.Trigger{
+		ID:         uuid.NewString(),
+		ProjectID:  projID,
+		Name:       "p9-i1-no-deadlock",
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   uuid.NewString(),
+		MatchTypes: []string{"webhook.received"},
+		Actions: []store.TriggerAction{
+			{Type: store.TriggerActionMessage, Payload: `{"agentId":"` + agentID + `","message":"m0"}`},
+			{Type: store.TriggerActionExec, Payload: `{"agentId":"` + agentID + `","command":["echo","ok"]}`},
+		},
+		SubjectMode: store.TriggerSubjectModeNew,
+		Status:      store.TriggerStatusActive,
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	evE := uuid.NewString()
+	// Action 0 (message) inserted first so heap/index order visits fMsg before fExec.
+	fMsg := &store.TriggerFire{
+		ID: uuid.NewString(), ProjectID: projID, TriggerID: tr.ID, EventID: evE,
+		Subject: "pr-1", ActionType: store.TriggerActionMessage, ActionIndex: 0,
+		Status: store.TriggerFireStatusFiring, LeaseUntil: now.Add(10 * time.Minute),
+		StartedAt: now, CreatedAt: now,
+	}
+	ok, _, err := cs.ClaimTriggerFire(ctx, fMsg)
+	require.NoError(t, err)
+	require.True(t, ok)
+	_, err = cs.FinishTriggerFire(ctx, fMsg.ID, store.TriggerFireStatusFired, "", "", "", now)
+	require.NoError(t, err)
+
+	// Action 1 (exec) detached: ScheduledExecRun created while status=firing, then fire status=fired.
+	fExec := &store.TriggerFire{
+		ID: uuid.NewString(), ProjectID: projID, TriggerID: tr.ID, EventID: evE,
+		Subject: "pr-1", ActionType: store.TriggerActionExec, ActionIndex: 1,
+		Status: store.TriggerFireStatusFiring, LeaseUntil: now.Add(10 * time.Minute),
+		StartedAt: now, CreatedAt: now.Add(time.Millisecond),
+	}
+	ok, _, err = cs.ClaimTriggerFire(ctx, fExec)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	run := &store.ScheduledExecRun{
+		ProjectID:      projID,
+		FireID:         fExec.ID,
+		OverlapKey:     "trigger:" + tr.ID + ":1",
+		TargetAgentID:  agentID,
+		CommandSHA256:  "deadbeef",
+		Argc:           2,
+		TimeoutSeconds: 60,
+		StartedAt:      now,
+		NotAfter:       now.Add(time.Minute),
+		LeaseUntil:     now.Add(5 * time.Minute),
+		Outcome:        store.ScheduledExecOutcomeStarting,
+	}
+	require.NoError(t, cs.CreateScheduledExecRun(ctx, run))
+	_, err = cs.FinishTriggerFire(ctx, fExec.ID, store.TriggerFireStatusFired, fExec.ID, agentID, "", now)
+	require.NoError(t, err)
+
+	// Holder locks fMsg (action 0) so FlushTriggerEventCounters acquires triggers
+	// first and blocks on fMsg before reaching fExec (action 1). On an inverted
+	// FinishScheduledExecRun, Finish locks fExec first and blocks on triggers;
+	// releasing holder then triggers a deterministic 40P01 deadlock.
+	holder, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	require.NoError(t, holder.TriggerFire.UpdateOneID(uuid.MustParse(fMsg.ID)).SetAttempts(1).Exec(ctx))
+
+	var (
+		wg        sync.WaitGroup
+		flushErr  error
+		finishErr error
+		finishWon bool
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		flushErr = cs.FlushTriggerEventCounters(ctx, tr.ID, evE, now.Add(time.Second), store.TriggerFireStatusFired, "")
+	}()
+	// Wait for Flush to lock the triggers row and block on fMsg.
+	time.Sleep(300 * time.Millisecond)
+
+	go func() {
+		defer wg.Done()
+		finishWon, finishErr = cs.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+			FireID:     fExec.ID,
+			Outcome:    store.ScheduledExecOutcomeOK,
+			FinishedAt: now.Add(2 * time.Second),
+			FireStatus: store.TriggerFireStatusFired,
+		})
+	}()
+	// Wait for Finish to either lock fExec & block on triggers (bug) or block on triggers (fixed).
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, holder.Commit())
+	wg.Wait()
+
+	require.NoError(t, flushErr, "FlushTriggerEventCounters must not deadlock (40P01)")
+	require.NoError(t, finishErr, "FinishScheduledExecRun must not deadlock (40P01)")
+	require.True(t, finishWon, "FinishScheduledExecRun must win the finish transition")
+
+	got, err := cs.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	require.Equal(t, 2, got.FireCount, "flush (1) + async exec finish (1) must both commit cleanly")
+	require.Equal(t, 0, got.ErrorCount)
+}
+
+// TestTriggerActionsStore_MarshalActionsEncodingPinnedForExecPrefilter verifies I-2:
+// marshalTriggerActions emits compact JSON containing `"type":"exec"` so SQL
+// prefilters (ActionsContains(`"type":"exec"`)) cannot silently undercount.
+func TestTriggerActionsStore_MarshalActionsEncodingPinnedForExecPrefilter(t *testing.T) {
+	encoded, err := marshalTriggerActions([]store.TriggerAction{
+		{Type: store.TriggerActionMessage, Payload: `{ "agentId" : "a1", "message" : "hi" }`},
+		{Type: store.TriggerActionExec, Payload: `{ "agentId" : "a2", "command" : ["echo", "ok"] }`},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, encoded, `"type":"exec"`, "marshalTriggerActions must keep compact \"type\":\"exec\" encoding for SQL exec-cap prefilter")
+	assert.Contains(t, encoded, `"type":"message"`)
+}

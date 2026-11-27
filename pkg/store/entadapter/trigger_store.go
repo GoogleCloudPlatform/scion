@@ -1831,10 +1831,9 @@ func (s *TriggerStore) FlushTriggerEventCounters(ctx context.Context, triggerID,
 		return err
 	}
 	return s.withClientTx(ctx, func(c *ent.Client) error {
-		// R4-1: acquire the triggers row lock before reading trigger_fires so
-		// concurrent flushes for the same (trigger_id, event_id) on Postgres
-		// serialize under READ COMMITTED and never double-count fire_count or
-		// error_count.
+		// Lock order (R4-1 / I-1): always lock the triggers row before updating
+		// trigger_fires, matching FinishScheduledExecRun and DeleteTriggersByProject
+		// so concurrent flushes serialize under READ COMMITTED without PG 40P01 deadlocks.
 		if lErr := c.Trigger.UpdateOneID(tid).SetUpdated(time.Now().UTC()).Exec(ctx); lErr != nil {
 			return mapError(lErr)
 		}
@@ -2009,14 +2008,16 @@ func (s *TriggerStore) DeleteTriggersByProject(ctx context.Context, projectID st
 		if _, dErr := client.ScheduledExecRun.Delete().Where(scheduledexecrun.ProjectIDEQ(pid), scheduledexecrun.FireIDNotNil()).Exec(ctx); dErr != nil {
 			return mapError(dErr)
 		}
+		// Lock order (I-1): delete triggers before trigger_fires to match
+		// FlushTriggerEventCounters and FinishScheduledExecRun.
+		n, dErr := client.Trigger.Delete().Where(trigger.ProjectIDEQ(pid)).Exec(ctx)
+		if dErr != nil {
+			return mapError(dErr)
+		}
 		if _, dErr := client.TriggerFire.Delete().Where(triggerfire.ProjectIDEQ(pid)).Exec(ctx); dErr != nil {
 			return mapError(dErr)
 		}
 		if _, dErr := client.TriggerEvent.Delete().Where(triggerevent.ProjectIDEQ(pid)).Exec(ctx); dErr != nil {
-			return mapError(dErr)
-		}
-		n, dErr := client.Trigger.Delete().Where(trigger.ProjectIDEQ(pid)).Exec(ctx)
-		if dErr != nil {
 			return mapError(dErr)
 		}
 		triggersDeleted = n
