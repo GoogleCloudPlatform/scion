@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -754,7 +755,9 @@ func TestMessageLog_BrokerInbound_OneRecord(t *testing.T) {
 			rec := f.sendBrokerInbound(t, msg, "discord", "discord:chan:inbound-rec", "")
 			require.Equal(t, tc.wantCode, rec.Code, "body: %s", rec.Body.String())
 
-			conv, convErr := f.store.GetConversationByExternalRef(context.Background(), "discord", "discord:chan:inbound-rec")
+			wantExtRef, keyErr := messaging.ThreadConversationExternalRef(f.project.ID, "discord:chan:inbound-rec")
+			require.NoError(t, keyErr)
+			conv, convErr := f.store.GetConversationByExternalRef(context.Background(), "discord", wantExtRef)
 			require.NoError(t, convErr)
 			require.NotNil(t, conv)
 			require.NotEmpty(t, conv.ID)

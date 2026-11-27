@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -60,8 +61,10 @@ func newExternalRefFixture(t *testing.T) externalRefFixture {
 	}
 	require.NoError(t, env.store.CreateProject(ctx, other))
 
-	const surface, ref = "slack", "C0EXTREF:1700000000.000100"
+	const surface = "slack"
 	otherProjectID := other.ID
+	ref, err := messaging.ThreadConversationExternalRef(otherProjectID, "C0EXTREF:1700000000.000100")
+	require.NoError(t, err)
 	conv, err := env.store.UpsertConversationByExternalRef(ctx, &store.Conversation{
 		Kind:        "group",
 		Surface:     surface,
@@ -235,7 +238,9 @@ func TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, got.status, got.body)
 			assert.Contains(t, got.body, chatIntegrationsOnly)
 			if tc.ref != "" {
-				_, err := f.st.GetConversationByExternalRef(ctx, tc.surface, tc.ref)
+				wantKey, keyErr := messaging.ThreadConversationExternalRef(f.projA.ID, tc.ref)
+				require.NoError(t, keyErr)
+				_, err := f.st.GetConversationByExternalRef(ctx, tc.surface, wantKey)
 				assert.ErrorIs(t, err, store.ErrNotFound, "no conversation is created")
 			}
 		})
@@ -248,7 +253,9 @@ func TestAgentMessage_ExternalRefFromNonIntegrationCallerRefused(t *testing.T) {
 		}
 		got := postAgentMessageAs(t, f.srv, withBroker, f.aa, externalRefMessage(f.aa, "slack", ref, "C0BROKER"))
 		require.NotContains(t, got.body, chatIntegrationsOnly)
-		conv, err := f.st.GetConversationByExternalRef(ctx, "slack", ref)
+		wantKey, keyErr := messaging.ThreadConversationExternalRef(f.projA.ID, ref)
+		require.NoError(t, keyErr)
+		conv, err := f.st.GetConversationByExternalRef(ctx, "slack", wantKey)
 		require.NoError(t, err, "the chat integration's reference resolves a conversation (answer: %d %s)", got.status, got.body)
 		require.NotNil(t, conv.ProjectID)
 		assert.Equal(t, f.projA.ID, *conv.ProjectID)
@@ -652,8 +659,10 @@ func TestAgentMessage_ChatIntegrationRefOfOtherProjectNotReused(t *testing.T) {
 		return contextWithIdentity(contextWithBrokerIdentity(c, NewBrokerIdentity("test-broker")), alice)
 	}
 
-	const surface, ref = "slack", "C0OTHERPROJ:1.1"
+	const surface = "slack"
 	projB := f.projB.ID
+	ref, err := messaging.ThreadConversationExternalRef(projB, "C0OTHERPROJ:1.1")
+	require.NoError(t, err)
 	owned, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
 		Kind: "group", Surface: surface, ExternalRef: ref, ParentRef: "C0OTHERPROJ",
 		DisplayName: "project B thread", DriftState: "active", ProjectID: &projB,

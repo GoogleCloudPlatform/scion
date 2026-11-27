@@ -375,7 +375,7 @@ func (s *Server) resolveBrokerInboundConversation(
 		return nil, lookupErr
 	}
 	if errors.Is(lookupErr, store.ErrNotFound) || existingNew == nil {
-		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, newKey, legacyChannel, legacyThreadID); err != nil {
+		if legacyConv, err := s.lookupLegacyPhase5Conversation(ctx, log, projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID); err != nil {
 			return nil, err
 		} else if legacyConv != nil {
 			return &messaging.ConversationResult{
@@ -411,14 +411,44 @@ func (s *Server) resolveBrokerInboundConversation(
 		ctx, s.store, log, newKey, "group", &projectID, keyOpts...)
 }
 
+// isContainerScopedLegacyThreadID reports whether legacyThreadID identifies
+// the parent container (channel/chat) rather than a specific thread. Reusing a
+// container-scoped pre-P4 row for a post-upgrade thread or root post would
+// fold distinct threads into one channel-wide conversation (e.g. a Teams root
+// post whose legacy ThreadID is the stripped channel ID, or a Slack/Telegram
+// legacy key equal to the channel/chat ID).
+func isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID string) bool {
+	if legacyThreadID == "" {
+		return false
+	}
+	if parentRef != "" && legacyThreadID == parentRef {
+		return true
+	}
+	if idx := strings.Index(externalRef, ";messageid="); idx > 0 {
+		if legacyThreadID == externalRef[:idx] {
+			return true
+		}
+	}
+	if idx := strings.IndexByte(externalRef, ':'); idx > 0 {
+		if legacyThreadID == externalRef[:idx] {
+			return true
+		}
+	}
+	return false
+}
+
 // lookupLegacyPhase5Conversation performs a strictly read-only lookup for a
 // pre-P4 Phase-5 conversation row matching legacyThreadID. It never creates a
-// row.
+// row and skips container-scoped legacy keys (where legacyThreadID equals
+// parentRef or the container portion of externalRef).
 func (s *Server) lookupLegacyPhase5Conversation(
 	ctx context.Context,
 	log *slog.Logger,
-	projectID, surface, newKey, legacyChannel, legacyThreadID string,
+	projectID, surface, externalRef, parentRef, newKey, legacyChannel, legacyThreadID string,
 ) (*store.Conversation, error) {
+	if isContainerScopedLegacyThreadID(externalRef, parentRef, legacyThreadID) {
+		return nil, nil
+	}
 	type candidate struct {
 		surface string
 		key     string

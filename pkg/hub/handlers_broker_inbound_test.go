@@ -1725,19 +1725,10 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 			msgThreadID:    "1700000000100",
 		},
 		{
-			name:           "teams_pre_p4_stripped_channel_id_reused",
-			surface:        "teams",
-			legacyThreadID: "19:chan-2@thread.tacv2",
-			p4ExternalRef:  "19:chan-2@thread.tacv2;messageid=1700000000200",
-			p4ParentRef:    "19:chan-2@thread.tacv2",
-			msgChannel:     "teams",
-			msgThreadID:    "19:chan-2@thread.tacv2",
-		},
-		{
 			name:           "telegram_pre_p4_forum_topic_reused",
 			surface:        "telegram",
 			legacyThreadID: "42",
-			p4ExternalRef:  "-100123456:42",
+			p4ExternalRef:  "42",
 			p4ParentRef:    "-100123456",
 			msgChannel:     "telegram",
 			msgThreadID:    "42",
@@ -1928,6 +1919,104 @@ func TestHandleBrokerInbound_R2_PreP4LegacyFallback(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, chanConv.ConversationID, convB.ID, "thread B must not merge into pre-upgrade channel row")
 		assert.NotEqual(t, convA.ID, convB.ID, "thread A and thread B must get two distinct conversations")
+	})
+
+	t.Run("teams_post_upgrade_root_and_reply_share_new_key_not_channel_row", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "teams-root-reply")
+		ctx := context.Background()
+
+		// Seed a pre-P4 channel-wide row (stripped channel ID).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "19:chan@thread.tacv2")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("teams"),
+		)
+		require.NoError(t, err)
+
+		// 1. Post-upgrade Teams ROOT post (legacy ThreadID == stripped channel ID == parentRef)
+		// must NOT reuse the pre-P4 channel-wide row; it creates the new-key row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-new",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "19:chan@thread.tacv2",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "post-upgrade root post",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		// 2. Reply in that same thread (ThreadID == root-new) shares the new-key row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "teams",
+			ExternalRef: "19:chan@thread.tacv2;messageid=root-new",
+			ParentRef:   "19:chan@thread.tacv2",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "teams",
+				ThreadID:  "root-new",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "reply to post-upgrade root",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 2)
+		assert.Equal(t, msgs.Items[0].ConversationID, msgs.Items[1].ConversationID,
+			"root post and its reply must share ONE new-key conversation")
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"post-upgrade root post must NOT reuse the pre-P4 channel-wide row")
+	})
+
+	t.Run("slack_container_scoped_channel_row_not_reused_for_new_thread", func(t *testing.T) {
+		srv, s, user, project, agent := setupEnv(t, "slack-chan-no-reuse")
+		ctx := context.Background()
+
+		// Seed a channel-wide Slack row (thread:<p>:C0123ABC).
+		chanKey, err := messaging.ThreadConversationExternalRef(project.ID, "C0123ABC")
+		require.NoError(t, err)
+		chanConv, err := messaging.ResolveOrCreateConversationByKey(
+			ctx, s, slog.Default(), chanKey, "group", &project.ID,
+			messaging.WithSurface("slack"),
+		)
+		require.NoError(t, err)
+
+		// Inbound thread whose legacy ThreadID equals the container channel ID
+		// must NOT reuse the channel-wide row.
+		postInbound(t, srv, inboundMessageRequest{
+			Topic:       "scion.project." + project.ID + ".agent." + agent.Slug + ".messages",
+			Surface:     "slack",
+			ExternalRef: "C0123ABC:1700000000.000777",
+			ParentRef:   "C0123ABC",
+			Message: &messages.StructuredMessage{
+				Version:   messages.Version,
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel:   "slack",
+				ThreadID:  "C0123ABC",
+				Sender:    "user:" + user.Email,
+				Recipient: "agent:" + agent.Slug,
+				Msg:       "new thread in slack channel",
+				Type:      messages.TypeInstruction,
+			},
+		})
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.NotEqual(t, chanConv.ConversationID, msgs.Items[0].ConversationID,
+			"container-scoped Slack channel row must not be reused for a new thread")
 	})
 }
 
