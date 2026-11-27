@@ -95,8 +95,25 @@ func setupTrajectorySegmentFixture(t *testing.T) (*Server, store.Store, *storage
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	_, err = s.EnsureRunAttribution(ctx, &store.RunAttribution{
+		RunID:         runID,
+		HubID:         srv.usageLedgerHubID(),
+		ProjectID:     proj.ID,
+		AgentID:       agent.ID,
+		AgentSlug:     agent.Slug,
+		Harness:       "claude",
+		HarnessConfig: "claude-default",
+		Template:      "developer",
+	})
 	require.NoError(t, err)
+
+	tok, cred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   agent.ID,
+		ProjectID: proj.ID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+	}, runID)
+	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, cred))
 
 	return srv, s, loc, proj, agent, tok
 }
@@ -355,8 +372,13 @@ func TestTrajectorySegments_AuthExperimentPolicyValidationAndCaps(t *testing.T) 
 		CreatedBy: DevUserID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, otherAgent))
-	otherTok, err := srv.agentTokenService.GenerateAgentToken(otherAgent.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+	otherTok, otherCred, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   otherAgent.ID,
+		ProjectID: proj.ID,
+		Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+	}, otherAgent.RunID)
 	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, otherCred))
 
 	raw := []byte("{\"msg\":\"line\"}\n")
 	comp, rawSHA, compSHA := gzipAndHash(t, raw)
