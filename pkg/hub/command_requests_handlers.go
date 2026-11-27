@@ -248,7 +248,7 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 				Reason: "lookup_error",
 			}
 		} else {
-			execView = s.buildExecContainerView(ctx, res)
+			execView = s.buildExecContainerView(ctx, user, res)
 		}
 	}
 
@@ -311,12 +311,13 @@ func (s *Server) handleCommandRequestGet(w http.ResponseWriter, r *http.Request,
 	})
 }
 
-func (s *Server) buildExecContainerView(ctx context.Context, res ExecContainerResolution) *messages.CommandRequestExecContainerView {
+func (s *Server) buildExecContainerView(ctx context.Context, actor UserIdentity, res ExecContainerResolution) *messages.CommandRequestExecContainerView {
 	v := &messages.CommandRequestExecContainerView{
 		State:          string(res.State),
 		HomePersistent: res.HomePersistent,
-		// Wake-on-approve lands in P2; false until then (R2).
-		CanWake: false,
+	}
+	if res.State == ExecContainerStateSuspended && res.Agent != nil && actor != nil && !isManagedAgentRuntime(res.Agent.Runtime) {
+		v.CanWake = s.agentLifecycleAllowed(ctx, actor, res.Agent)
 	}
 	if res.Agent != nil {
 		v.AgentID = res.Agent.ID
@@ -453,6 +454,19 @@ func (s *Server) handleCommandRequestApprove(w http.ResponseWriter, r *http.Requ
 			})
 			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
 				"your execution container is unavailable", nil)
+			return
+		}
+		if execRes.State == ExecContainerStateSuspended && !s.agentLifecycleAllowed(ctx, user, execRes.Agent) {
+			emitRefused(msgaction.ConflictCmdExecUnavailable, map[string]string{
+				"command_sha256":     row.CommandSHA256,
+				"approver_user_id":   user.ID(),
+				"exec_agent_id":      execRes.Agent.ID,
+				"exec_project_id":    execRes.Agent.ProjectID,
+				"not_started_reason": "wake_not_permitted",
+			})
+			writeError(w, http.StatusConflict, msgaction.ConflictCmdExecUnavailable,
+				"your execution container is suspended and you do not have permission to resume it",
+				map[string]interface{}{"detail": "wake_not_permitted"})
 			return
 		}
 	default:

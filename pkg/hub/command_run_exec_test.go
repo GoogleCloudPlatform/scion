@@ -369,30 +369,20 @@ func TestCommandRunExec_OutcomeMapping(t *testing.T) {
 		assert.Equal(t, agentcontrol.ExecOutputLost, fin.OutputStatus)
 	})
 
-	t.Run("stopped_and_suspended_containers_not_started_no_wake_in_p1", func(t *testing.T) {
-		for _, tc := range []struct {
-			phase      state.Phase
-			wantReason string
-		}{
-			{state.PhaseStopped, "container_stopped"},
-			{state.PhaseSuspended, "container_not_running"},
-		} {
-			t.Run(string(tc.phase), func(t *testing.T) {
-				f := newCmdRunExecFixture(t, nil)
-				ctx := context.Background()
-				ag, err := f.store.GetAgent(ctx, f.launched.ID)
-				require.NoError(t, err)
-				ag.Phase = string(tc.phase)
-				require.NoError(t, f.store.UpdateAgent(ctx, ag))
+	t.Run("stopped_container_not_started_d5", func(t *testing.T) {
+		f := newCmdRunExecFixture(t, nil)
+		ctx := context.Background()
+		ag, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		ag.Phase = string(state.PhaseStopped)
+		require.NoError(t, f.store.UpdateAgent(ctx, ag))
 
-				req, run := f.createApprovedRun(t, "phase-"+string(tc.phase), "echo nope", "", 30)
-				f.srv.EnqueueCommandRun(req, run)
-				fin := f.waitRunFinished(t, run.ID)
-				assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
-				assert.Equal(t, tc.wantReason, fin.Reason)
-				assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
-			})
-		}
+		req, run := f.createApprovedRun(t, "phase-stopped", "echo nope", "", 30)
+		f.srv.EnqueueCommandRun(req, run)
+		fin := f.waitRunFinished(t, run.ID)
+		assert.Equal(t, store.CommandRunStatusNotStarted, fin.Status)
+		assert.Equal(t, "container_stopped", fin.Reason)
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
 	})
 
 	t.Run("hub_busy_when_tracker_slots_full", func(t *testing.T) {

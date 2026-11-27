@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -96,6 +97,11 @@ type ExecOptions struct {
 	Workdir string
 	// Now replaces the clock in tests; nil uses time.Now.
 	Now func() time.Time
+	// OnLiveWork, when set, is called once when the exec route is constructed
+	// with its LiveWork query function so sciontool's liveness sampler can
+	// consult active/uncollected exec work without exposing *control.Handler
+	// outside the Conduit RPC session.
+	OnLiveWork func(func() *liveness.LiveWork)
 }
 
 // execBinding is what a run_id is bound to (D9-S2). A start whose run_id
@@ -197,6 +203,9 @@ func newExecRoute(o ExecOptions) *execRoute {
 		e.now = time.Now
 	}
 	e.tombs = newExecTombs(execTombMax, execTombTTL, execTombFloor, execOutputBudget, execOutputTTL)
+	if o.OnLiveWork != nil {
+		o.OnLiveWork(e.LiveWork)
+	}
 	return e
 }
 
@@ -358,11 +367,51 @@ func (e *execRoute) release(run *execRun) {
 func (e *execRoute) finish(run *execRun, final execFinal) {
 	e.mu.Lock()
 	e.release(run)
-	e.tombs.put(e.now(), &execTomb{runID: run.runID, binding: run.binding, final: final})
+	e.tombs.put(e.now(), &execTomb{
+		runID:     run.runID,
+		binding:   run.binding,
+		final:     final,
+		collected: final.outcome == agentcontrol.ExecOutcomeStartFailed,
+	})
 	e.mu.Unlock()
 	if e.finished != nil {
 		e.finished(run.runID)
 	}
+}
+
+// LiveWork reports active or uncollected Conduit exec work for sciontool's
+// liveness sampler (ptone/scion#9282 §4.10). It returns non-nil with
+// Kind=KindExec and SuppressStall=false when either:
+//   - any exec run is currently live, or
+//   - any finished tombstone has uncollected output/status within execOutputTTL.
+//
+// Guards auto-suspend only; stall marking is unaffected (same semantics as
+// KindAttached). Applies to all agents with exec routes.
+func (e *execRoute) LiveWork() *liveness.LiveWork {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n := len(e.live); n > 0 {
+		detail := "1 active exec run"
+		if n > 1 {
+			detail = fmt.Sprintf("%d active exec runs", n)
+		}
+		return &liveness.LiveWork{
+			Kind:          liveness.KindExec,
+			SuppressStall: false,
+			Detail:        detail,
+		}
+	}
+	if e.tombs.hasUncollected(e.now()) {
+		return &liveness.LiveWork{
+			Kind:          liveness.KindExec,
+			SuppressStall: false,
+			Detail:        "uncollected exec output",
+		}
+	}
+	return nil
 }
 
 // prepare builds the run's spec: the environment, the working directory,
@@ -446,7 +495,9 @@ func (e *execRoute) status(ctx context.Context, runID string) execAnswer {
 		return execAnswer{status: http.StatusOK, resp: agentcontrol.ExecResponse{State: agentcontrol.ExecStateRunning}}
 	}
 	if t, ok := e.tombs.get(e.now(), runID); ok {
-		return finishedAnswer(http.StatusOK, t.final, false, true)
+		ans := finishedAnswer(http.StatusOK, t.final, false, true)
+		t.collected = true
+		return ans
 	}
 	return execAnswer{status: http.StatusNotFound, resp: agentcontrol.ExecResponse{State: agentcontrol.ExecStateUnknown}}
 }
@@ -837,11 +888,27 @@ func (r *tailRing) finalizeTail() (string, []byte) {
 	return agentcontrol.ExecOutputCaptured, out
 }
 
+// isShellContainerForExec reports whether this container is a shell execution
+// container for exec-route registration (carry-forward I2). It keys on the
+// broker-written SCION_HARNESS_READY signal (state.ReadySpecIsIdle) whenever
+// present so start-env SCION_HARNESS cannot spoof shell-ness on an LLM agent,
+// falling back to state.IsShellHarnessEnv only when SCION_HARNESS_READY is
+// absent (older brokers).
+func isShellContainerForExec(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	if strings.TrimSpace(getenv(state.HarnessReadyEnv)) != "" {
+		return state.ReadySpecIsIdle(getenv)
+	}
+	return state.IsShellHarnessEnv(getenv)
+}
+
 // ExecEnabled reports whether sciontool should register the exec routes:
 // the platform runs them (Linux) and the agent was launched with either:
 //   - hub.exec_schedules in SCION_HUB_EXPERIMENTS, or
 //   - hub.command_requests in SCION_HUB_EXPERIMENTS AND the container is a
-//     shell execution container (state.IsShellHarnessEnv(getenv)).
+//     shell execution container (isShellContainerForExec(getenv)).
 //
 // LLM agents never gain exec routes from hub.command_requests alone (AC-S2).
 // Turning either experiment on later does not reach a running agent: it
@@ -850,7 +917,7 @@ func ExecEnabled(getenv func(string) string) bool {
 	if !execSupported {
 		return false
 	}
-	isShell := state.IsShellHarnessEnv(getenv)
+	isShell := isShellContainerForExec(getenv)
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {
 		switch strings.TrimSpace(name) {
 		case ExperimentExecSchedules:
@@ -871,6 +938,7 @@ type execTomb struct {
 	binding    execBinding
 	final      execFinal
 	finishedAt time.Time
+	collected  bool          // set on first exec-status returning finished with output
 	outputElem *list.Element // membership in execTombs.outputOrder when len(final.output) > 0
 }
 
@@ -1045,3 +1113,20 @@ func (s *execTombs) put(now time.Time, t *execTomb) {
 }
 
 func (s *execTombs) len() int { return s.order.Len() }
+
+// hasUncollected reports whether any tombstone has not yet been collected by
+// exec-status and is still within its output TTL window (design §4.10).
+func (s *execTombs) hasUncollected(now time.Time) bool {
+	s.purge(now)
+	for el := s.order.Front(); el != nil; el = el.Next() {
+		t := el.Value.(*execTomb)
+		if t.collected {
+			continue
+		}
+		if s.outputTTL > 0 && now.Sub(t.finishedAt) > s.outputTTL {
+			continue
+		}
+		return true
+	}
+	return false
+}
