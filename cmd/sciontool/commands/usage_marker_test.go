@@ -115,7 +115,7 @@ func TestWireSessionMetrics_UsageEventsEnabledMarker(t *testing.T) {
 	}
 }
 
-func TestSendDueHeldReportsWithHome_UsageEventsEnabledMarker(t *testing.T) {
+func TestSendDueHeldReports_UsageEventsEnabledMarker(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		active bool
@@ -138,7 +138,7 @@ func TestSendDueHeldReportsWithHome_UsageEventsEnabledMarker(t *testing.T) {
 				}},
 			}
 			rep := &markerReporter{}
-			sendDueHeldReportsWithHome(context.Background(), st, home, func() metricsReporter { return rep })
+			sendDueHeldReports(context.Background(), st, home, func() metricsReporter { return rep })
 			if len(rep.sent) != 1 {
 				t.Fatalf("sent %d payloads, want 1", len(rep.sent))
 			}

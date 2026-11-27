@@ -198,15 +198,16 @@ func (s *Server) handleAgentMetrics(w http.ResponseWriter, r *http.Request, id s
 	_ = json.NewEncoder(w).Encode(map[string]string{"id": metrics.ID})
 
 	// Legacy converter (D9/D9a, R3): write 201 Created first, then enqueue
-	// asynchronous conversion off the request path using context.WithoutCancel
-	// + bounded timeout so live conversion never slows or fails POST /metrics.
-	// If the queue is full or conversion fails, converted_at stays NULL and
-	// periodic catch-up retries automatically.
+	// asynchronous conversion onto the server's bounded worker queue (derived
+	// from the server's worker context with a bounded timeout, decoupled from
+	// the HTTP request context) so live conversion never slows or fails POST
+	// /metrics. If the queue is full or conversion fails, converted_at stays
+	// NULL and periodic catch-up retries automatically.
 	if !req.UsageEventsEnabled && s.experimentEnabled(experiments.TokenomicsUsageLedger) {
 		preferredRunID := strings.TrimSpace(presentedAgentTokenRunID(ctx))
 		if preferredRunID == "" {
 			preferredRunID = strings.TrimSpace(agent.RunID)
 		}
-		s.enqueueLiveLegacySessionMetrics(ctx, metrics, preferredRunID)
+		s.enqueueLiveLegacySessionMetrics(metrics, preferredRunID)
 	}
 }

@@ -46,7 +46,6 @@ type usageLedgerHookStore interface {
 }
 
 type liveLegacyConvertJob struct {
-	ctx            context.Context
 	hubID          string
 	metrics        *store.AgentSessionMetrics
 	preferredRunID string
@@ -238,9 +237,13 @@ func (s *Server) reconcileUsageLedgerMode(ctx context.Context, async bool) {
 		runBackfill = s.prepareBackfillLocked(ctx, uls)
 	}
 
-	// Launch legacy catch-up in its own goroutine (never blocks startup, R2).
+	// Order legacy catch-up AFTER the active-run attribution backfill completes
+	// (R1c), while still running it asynchronously in its own goroutine so it
+	// never blocks Hub startup (R2). If the active-run backfill is already
+	// complete for this generation, launch legacy catch-up immediately;
+	// otherwise prepareBackfillLocked starts it upon active-run completion.
 	var runLegacy func()
-	if !rt.legacyRunning && (transitionedOn || rt.legacyTimer == nil) {
+	if rt.backfillSucceeded && !rt.legacyRunning && (transitionedOn || rt.legacyTimer == nil) {
 		runLegacy = s.prepareLegacyCatchupLocked(context.Background(), uls)
 	}
 	rt.mu.Unlock()
@@ -283,6 +286,7 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 		cancel()
 
 		var nextRun func()
+		var runLegacy func()
 		rt.mu.Lock()
 		rt.backfillRunning = false
 		if rt.backfillDone == done {
@@ -302,6 +306,11 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 			if inserted > 0 {
 				slog.Info("tokenomics.usage_ledger: backfilled run_attribution rows for active runs", "inserted", inserted)
 			}
+			// Start legacy catch-up asynchronously once active-run attribution
+			// backfill has completed (R1c/R2).
+			if !rt.legacyRunning && rt.legacyTimer == nil {
+				runLegacy = s.prepareLegacyCatchupLocked(context.Background(), uls)
+			}
 		default:
 			delay := rt.nextRetryDelay()
 			rt.retryAttempts++
@@ -320,6 +329,9 @@ func (s *Server) prepareBackfillLocked(ctx context.Context, uls usageLedgerHookS
 		rt.mu.Unlock()
 		close(done)
 
+		if runLegacy != nil {
+			go runLegacy()
+		}
 		if nextRun != nil {
 			go nextRun()
 		}
@@ -416,10 +428,10 @@ func (s *Server) prepareLegacyCatchupLocked(ctx context.Context, uls usageLedger
 
 // enqueueLiveLegacySessionMetrics schedules asynchronous live conversion of an
 // unmarked agent_session_metrics row onto a bounded per-server worker queue
-// using context.WithoutCancel + bounded timeout (R3). Never blocks the caller;
-// if the queue is full or the server is shutting down, the job is dropped and
-// periodic catch-up converts the row via converted_at IS NULL.
-func (s *Server) enqueueLiveLegacySessionMetrics(ctx context.Context, metrics *store.AgentSessionMetrics, preferredRunID string) {
+// running on the server's worker context with a bounded timeout (R3). Never
+// blocks the caller; if the queue is full or the server is shutting down, the
+// job is dropped and periodic catch-up converts the row via converted_at IS NULL.
+func (s *Server) enqueueLiveLegacySessionMetrics(metrics *store.AgentSessionMetrics, preferredRunID string) {
 	if s == nil || s.store == nil || metrics == nil {
 		return
 	}
@@ -445,7 +457,6 @@ func (s *Server) enqueueLiveLegacySessionMetrics(ctx context.Context, metrics *s
 	queue := rt.liveQueue
 	hubID := s.usageLedgerHubID()
 	job := liveLegacyConvertJob{
-		ctx:            context.WithoutCancel(ctx),
 		hubID:          hubID,
 		metrics:        metrics,
 		preferredRunID: preferredRunID,
@@ -484,6 +495,13 @@ func (s *Server) runLiveLegacyConvertWorker(workerCtx context.Context, queue <-c
 }
 
 func (s *Server) processLiveLegacyConvertJob(workerCtx context.Context, job liveLegacyConvertJob) {
+	// Re-check the experiment before running a queued job (O-c): if the
+	// experiment was turned OFF while this job was queued, leave converted_at
+	// NULL so the next OFF->ON catch-up converts it.
+	if !s.experimentEnabled(experiments.TokenomicsUsageLedger) {
+		return
+	}
+
 	rt := &s.usageLedger
 	rt.mu.Lock()
 	timeout := rt.liveTimeout

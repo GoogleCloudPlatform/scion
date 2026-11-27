@@ -226,16 +226,14 @@ func startHeldReportSender(agentHome string, overlay map[string]string, newClien
 		return client
 	}
 	ticks, stopTicks := heldReportTicker()
-	return runHeldReportSenderWithHome(handlers.NewFileSessionState(agentHome), agentHome, newReporter, ticks, stopTicks)
+	return runHeldReportSender(handlers.NewFileSessionState(agentHome), agentHome, newReporter, ticks, stopTicks)
 }
 
-// runHeldReportSender is a test-only convenience wrapper around
-// runHeldReportSenderWithHome with agentHome="".
-func runHeldReportSender(store heldReportStore, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
-	return runHeldReportSenderWithHome(store, "", newReporter, ticks, stopTicks)
-}
-
-func runHeldReportSenderWithHome(store heldReportStore, agentHome string, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
+// runHeldReportSender runs sendDueHeldReports on every tick until the
+// returned func is called. That func stops the ticks, cancels a send in
+// progress, waits for the check in progress to finish, and may be called
+// more than once.
+func runHeldReportSender(store heldReportStore, agentHome string, newReporter func() metricsReporter, ticks <-chan time.Time, stopTicks func()) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
 	go func() {
@@ -245,7 +243,7 @@ func runHeldReportSenderWithHome(store heldReportStore, agentHome string, newRep
 			case <-ctx.Done():
 				return
 			case <-ticks:
-				sendDueHeldReportsWithHome(ctx, store, agentHome, newReporter)
+				sendDueHeldReports(ctx, store, agentHome, newReporter)
 			}
 		}
 	}()
@@ -280,13 +278,7 @@ type metricsReporter interface {
 // already due (RetryReportsNoFollow), so the next check, a hook process or
 // the shutdown backstop sends it again. That includes a send cancelled
 // through parent (the check is being stopped). Failures are logged.
-// sendDueHeldReports is a test-only convenience wrapper around
-// sendDueHeldReportsWithHome with agentHome="".
-func sendDueHeldReports(parent context.Context, store heldReportStore, newReporter func() metricsReporter) {
-	sendDueHeldReportsWithHome(parent, store, "", newReporter)
-}
-
-func sendDueHeldReportsWithHome(parent context.Context, store heldReportStore, agentHome string, newReporter func() metricsReporter) {
+func sendDueHeldReports(parent context.Context, store heldReportStore, agentHome string, newReporter func() metricsReporter) {
 	client := newReporter()
 	if client == nil {
 		log.Debug("Session metrics: Hub client not configured, held report check skipped")

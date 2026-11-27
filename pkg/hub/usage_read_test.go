@@ -792,7 +792,7 @@ func TestAgentUsageRead_SaturatesOnOverflow(t *testing.T) {
 		},
 	}
 
-	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, true)
+	resp := buildAgentUsageResponse(ag, now.Add(-24*time.Hour), now, now, rollups, nil, ag.RunID, nil, store.RunUsageSourceSummary{HasTrack1Events: true})
 	require.NotNil(t, resp.Tokens.Input)
 	assert.Equal(t, int64(math.MaxInt64), *resp.Tokens.Input)
 	require.NotNil(t, resp.Tokens.Output)

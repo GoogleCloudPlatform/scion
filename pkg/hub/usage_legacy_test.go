@@ -599,3 +599,174 @@ func TestUsageLedger_LegacyBackfillRetryAndPeriodicCatchup(t *testing.T) {
 		}
 	}
 }
+
+func TestUsageLedger_OffPeriodRunBackfillReadsLegacyClient(t *testing.T) {
+	// R1 end-to-end Hub test: run minted while experiment is OFF, segment
+	// posted while OFF, then OFF -> ON reconcile: active-run attribution
+	// backfill completes first, legacy catch-up attributes the segment to the
+	// current run via agents.run_id_updated_at, and GET /agents/{id}/usage
+	// reports measurement_status = "legacy_client".
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-legacy-off-run")
+	t.Cleanup(srv.stopUsageLedger)
+
+	proj := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "OffRun Proj",
+		Slug: "offrun-" + uuid.NewString()[:8],
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:            uuid.NewString(),
+		Slug:          "offrun-agent",
+		Name:          "OffRun Agent",
+		ProjectID:     proj.ID,
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"},
+		Phase:         string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+
+	// Experiment is OFF: mint the current run (sets agents.run_id_updated_at).
+	setUsageLedgerExperimentForTest(t, srv, false)
+	srv.reconcileUsageLedger(ctx)
+	runID := "run-off-period-" + uuid.NewString()[:8]
+	_, err := s.SetAgentRunID(ctx, ag.ID, runID, nil)
+	require.NoError(t, err)
+
+	agentToken := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectRead}, nil)
+
+	// Post an unmarked segment after the run was minted while experiment is OFF.
+	segStart := time.Now().UTC().Add(1 * time.Second).Truncate(time.Second)
+	segEnd := segStart.Add(2 * time.Second)
+	body, err := json.Marshal(metricsPayloadRequest{
+		Type:    "agent_metrics",
+		AgentID: ag.ID,
+		Session: metricsSession{
+			ID:        "sess-off-curr-run",
+			StartedAt: segStart.Format(time.RFC3339),
+			EndedAt:   segEnd.Format(time.RFC3339),
+			Status:    "completed",
+			Model:     "claude-sonnet-4-6",
+		},
+		Tokens: metricsTokens{Input: 750, Output: 125},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ag.ID+"/metrics", bytes.NewReader(body))
+	req.Header.Set("X-Scion-Agent-Token", agentToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	var postResp map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &postResp))
+	metricsID := postResp["id"]
+
+	// Toggle experiment ON and reconcile.
+	setUsageLedgerExperimentForTest(t, srv, true)
+	srv.reconcileUsageLedger(ctx)
+
+	require.Eventually(t, func() bool {
+		row, rerr := s.GetAgentSessionMetrics(ctx, metricsID)
+		return rerr == nil && row.ConvertedAt != nil
+	}, 2*time.Second, 20*time.Millisecond, "OFF-period segment should be caught up")
+
+	// GET /api/v1/agents/{id}/usage must report legacy_client (not unmeasured).
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+ag.ID+"/usage", nil)
+	getReq.Header.Set("X-Scion-Agent-Token", agentToken)
+	getRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getRec, getReq)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+
+	var usageResp AgentUsageResponse
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &usageResp))
+	assert.Equal(t, MeasurementStatusLegacyClient, usageResp.MeasurementStatus)
+	require.NotNil(t, usageResp.Tokens.Input)
+	assert.Equal(t, int64(750), *usageResp.Tokens.Input)
+	require.NotNil(t, usageResp.Tokens.Output)
+	assert.Equal(t, int64(125), *usageResp.Tokens.Output)
+}
+
+func TestHandleAgentMetrics_QueuedLiveConversionSkipsWhenExperimentDisabled(t *testing.T) {
+	// O-c: If the experiment is turned OFF while a live conversion job is
+	// queued behind an earlier job, the worker must skip it and leave
+	// converted_at NULL for the next ON catch-up.
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetHubID("hub-legacy-oc")
+	t.Cleanup(srv.stopUsageLedger)
+
+	proj := &store.Project{
+		ID:   uuid.NewString(),
+		Name: "OC Proj",
+		Slug: "oc-proj-" + uuid.NewString()[:8],
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "oc-agent",
+		Name:      "OC Agent",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, ag))
+	agentToken := srv.generateRecordedAgentToken(t, ag.ID, proj.ID, []AgentTokenScope{ScopeAgentStatusUpdate}, nil)
+
+	firstStarted := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	srv.usageLedger.liveConvertFn = func(c context.Context, hubID string, row *store.AgentSessionMetrics, preferredRunID string) (bool, error) {
+		if row.SessionID == "oc-sess-1" {
+			select {
+			case firstStarted <- struct{}{}:
+			default:
+			}
+			<-releaseFirst
+		}
+		return s.ConvertLegacySessionMetricsRow(c, hubID, row, preferredRunID)
+	}
+
+	setUsageLedgerExperimentForTest(t, srv, true)
+
+	post := func(sess string, offset time.Duration) string {
+		now := time.Now().UTC().Add(offset).Truncate(time.Second)
+		body, _ := json.Marshal(metricsPayloadRequest{
+			Type:    "agent_metrics",
+			AgentID: ag.ID,
+			Session: metricsSession{
+				ID:        sess,
+				StartedAt: now.Add(-2 * time.Minute).Format(time.RFC3339),
+				EndedAt:   now.Format(time.RFC3339),
+				Status:    "completed",
+				Model:     "claude-sonnet-4-6",
+			},
+			Tokens: metricsTokens{Input: 100, Output: 20},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ag.ID+"/metrics", bytes.NewReader(body))
+		req.Header.Set("X-Scion-Agent-Token", agentToken)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code)
+		var resp map[string]string
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp["id"]
+	}
+
+	id1 := post("oc-sess-1", -5*time.Minute)
+	<-firstStarted
+	id2 := post("oc-sess-2", 0)
+
+	// Turn experiment OFF before job 2 runs.
+	setUsageLedgerExperimentForTest(t, srv, false)
+	close(releaseFirst)
+	srv.usageLedger.liveInFlight.Wait()
+
+	got1, err := s.GetAgentSessionMetrics(ctx, id1)
+	require.NoError(t, err)
+	assert.NotNil(t, got1.ConvertedAt, "in-flight job 1 completed")
+
+	got2, err := s.GetAgentSessionMetrics(ctx, id2)
+	require.NoError(t, err)
+	assert.Nil(t, got2.ConvertedAt, "queued job 2 must be skipped once experiment is OFF")
+}

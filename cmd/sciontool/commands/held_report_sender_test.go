@@ -274,7 +274,7 @@ func TestSendDueHeldReports(t *testing.T) {
 	b := telemetry.SessionSummary{SessionID: "b"}
 	store := &fakeHeldStore{claim: []telemetry.SessionSummary{a, b}}
 	rep := &fakeReporter{fail: map[string]bool{"a": true}}
-	sendDueHeldReports(context.Background(), store, reporterOf(rep))
+	sendDueHeldReports(context.Background(), store, "", reporterOf(rep))
 	if !reflect.DeepEqual(rep.sent, []string{"a", "b"}) {
 		t.Errorf("sent %q, want a and b once each", rep.sent)
 	}
@@ -287,13 +287,13 @@ func TestSendDueHeldReports(t *testing.T) {
 
 	store = &fakeHeldStore{claim: []telemetry.SessionSummary{a}, claimErr: errors.New("synthetic")}
 	rep = &fakeReporter{}
-	sendDueHeldReports(context.Background(), store, reporterOf(rep))
+	sendDueHeldReports(context.Background(), store, "", reporterOf(rep))
 	if len(rep.sent) != 0 || len(store.completed) != 0 || len(store.retried) != 0 {
 		t.Errorf("after a failed claim: sent %q, completed %+v, retried %+v; want nothing", rep.sent, store.completed, store.retried)
 	}
 
 	store = &fakeHeldStore{claim: []telemetry.SessionSummary{a}}
-	sendDueHeldReports(context.Background(), store, func() metricsReporter { return nil })
+	sendDueHeldReports(context.Background(), store, "", func() metricsReporter { return nil })
 	if store.claims != 0 {
 		t.Errorf("without a Hub client: %d claims, want none", store.claims)
 	}
@@ -319,7 +319,7 @@ func TestRunHeldReportSender_StopWaitsForSendInProgress(t *testing.T) {
 	rep := &blockingReporter{entered: make(chan struct{}), release: make(chan struct{})}
 	ticks := make(chan time.Time)
 	stopCalled := make(chan struct{})
-	stop := runHeldReportSender(store, reporterOf(rep), ticks, func() { close(stopCalled) })
+	stop := runHeldReportSender(store, "", reporterOf(rep), ticks, func() { close(stopCalled) })
 
 	ticks <- time.Now()
 	<-rep.entered
@@ -361,7 +361,7 @@ func TestRunHeldReportSender_StopCancelsSendInProgress(t *testing.T) {
 	store := &fakeHeldStore{claim: []telemetry.SessionSummary{a}}
 	rep := &ctxReporter{entered: make(chan struct{})}
 	ticks := make(chan time.Time)
-	stop := runHeldReportSender(store, reporterOf(rep), ticks, func() {})
+	stop := runHeldReportSender(store, "", reporterOf(rep), ticks, func() {})
 
 	ticks <- time.Now()
 	<-rep.entered

@@ -43,6 +43,14 @@ const (
 	legacySessionMetricsProducerEpoch           = "legacy-session-metrics"
 )
 
+// runAttributionAgentColumnsWithRunIDUpdatedAt extends runAttributionAgentColumns
+// with agents.run_id_updated_at so catch-up attribution can determine when the
+// agent's current run_id was assigned without an extra query.
+var runAttributionAgentColumnsWithRunIDUpdatedAt = append(
+	append([]string(nil), runAttributionAgentColumns...),
+	agent.FieldRunIDUpdatedAt,
+)
+
 // ConvertLegacySessionMetricsRow implements store.UsageLedgerStore.ConvertLegacySessionMetricsRow.
 // Converts a single newly posted agent_session_metrics row into a
 // legacy_session_metrics usage_events row through IngestUsageBatch and stamps
@@ -117,15 +125,13 @@ func (s *UsageLedgerStore) BackfillLegacySessionMetrics(ctx context.Context, hub
 }
 
 // backfillLegacySessionMetricsPaged processes unconverted agent_session_metrics
-// rows (WHERE converted_at IS NULL) in bounded batches with a short inter-batch
-// yield. Each batch acquires a Postgres transaction-scoped advisory lock (and
-// an in-process mutex for SQLite), converts non-overlapping rows through
+// rows (WHERE converted_at IS NULL) in bounded keyset-paginated batches
+// (id > lastID) with a short inter-batch yield. Keyset pagination within a
+// pass guarantees that permanently rejected rows cannot starve later rows (O-a).
+// Each batch acquires a Postgres transaction-scoped advisory lock (and an
+// in-process mutex for SQLite), converts non-overlapping rows through
 // ingestUsageBatchTx with IsBackfill=true, and stamps converted_at on every
 // non-rejected row in the batch inside the same transaction.
-//
-// If a full batch makes zero stamping progress (e.g. every row was rejected at
-// persistence time), the loop breaks and returns an error rather than spinning
-// forever (O1).
 func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 	ctx context.Context,
 	hubID string,
@@ -147,28 +153,36 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 	}
 
 	var total store.LegacySessionMetricsBackfillResult
+	var lastID uuid.UUID
+	hasCursor := false
+	totalRejected := 0
 	batchNum := 0
 
 	for {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		batchRes, fetched, stamped, rejectedCount, err := s.backfillLegacySessionMetricsOneBatch(ctx, hubID, pageSize, mutateBatchInput)
+		batchRes, fetched, nextLastID, rejectedCount, err := s.backfillLegacySessionMetricsOneBatch(
+			ctx, hubID, pageSize, lastID, hasCursor, mutateBatchInput,
+		)
 		if err != nil {
 			return total, err
 		}
 		total.Processed += batchRes.Processed
 		total.Converted += batchRes.Converted
 		total.Skipped += batchRes.Skipped
+		totalRejected += rejectedCount
 		batchNum++
+
+		if fetched > 0 {
+			lastID = nextLastID
+			hasCursor = true
+		}
 
 		if afterBatchHook != nil && fetched > 0 {
 			if err := afterBatchHook(batchNum, total); err != nil {
 				return total, err
 			}
-		}
-		if fetched > 0 && stamped == 0 {
-			return total, fmt.Errorf("legacy session_metrics backfill made no progress: %d rows fetched, %d rejected", fetched, rejectedCount)
 		}
 		if fetched < pageSize {
 			break
@@ -183,6 +197,9 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsPaged(
 			}
 		}
 	}
+	if totalRejected > 0 {
+		return total, fmt.Errorf("legacy session_metrics backfill completed pass with %d rejected row(s)", totalRejected)
+	}
 	return total, nil
 }
 
@@ -190,10 +207,13 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 	ctx context.Context,
 	hubID string,
 	pageSize int,
+	afterID uuid.UUID,
+	hasCursor bool,
 	mutateBatchInput func(in *store.UsageIngestBatchInput),
-) (store.LegacySessionMetricsBackfillResult, int, int, int, error) {
+) (store.LegacySessionMetricsBackfillResult, int, uuid.UUID, int, error) {
 	var batchRes store.LegacySessionMetricsBackfillResult
-	var fetched, stamped, rejectedCount int
+	var fetched, rejectedCount int
+	var lastID uuid.UUID
 
 	run := func(client *ent.Client) error {
 		drv := client.Driver()
@@ -204,11 +224,14 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 			}
 		}
 
-		entities, err := client.AgentSessionMetrics.Query().
+		q := client.AgentSessionMetrics.Query().
 			Where(entasm.ConvertedAtIsNil()).
 			Order(ent.Asc(entasm.FieldID)).
-			Limit(pageSize).
-			All(ctx)
+			Limit(pageSize)
+		if hasCursor {
+			q = q.Where(entasm.IDGT(afterID))
+		}
+		entities, err := q.All(ctx)
 		if err != nil {
 			return mapError(err)
 		}
@@ -216,6 +239,7 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 		if fetched == 0 {
 			return nil
 		}
+		lastID = entities[fetched-1].ID
 
 		receivedAt := time.Now().UTC().Truncate(time.Microsecond)
 		attrCache := make(map[string]*store.RunAttribution, len(entities))
@@ -251,7 +275,7 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 			return err
 		}
 		rejectedCount = len(ingestRes.Rejected)
-		stamped = len(marks) - rejectedCount
+		stamped := len(marks) - rejectedCount
 		if stamped < 0 {
 			stamped = 0
 		}
@@ -263,23 +287,23 @@ func (s *UsageLedgerStore) backfillLegacySessionMetricsOneBatch(
 
 	if s.inTx {
 		if err := run(s.client); err != nil {
-			return batchRes, 0, 0, 0, err
+			return batchRes, 0, uuid.Nil, 0, err
 		}
-		return batchRes, fetched, stamped, rejectedCount, nil
+		return batchRes, fetched, lastID, rejectedCount, nil
 	}
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return batchRes, 0, 0, 0, mapError(err)
+		return batchRes, 0, uuid.Nil, 0, mapError(err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := run(tx.Client()); err != nil {
-		return batchRes, 0, 0, 0, err
+		return batchRes, 0, uuid.Nil, 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		return batchRes, 0, 0, 0, mapError(err)
+		return batchRes, 0, uuid.Nil, 0, mapError(err)
 	}
-	return batchRes, fetched, stamped, rejectedCount, nil
+	return batchRes, fetched, lastID, rejectedCount, nil
 }
 
 // prepareLegacyUsageEventTx checks for Track 1 overlap, resolves or ensures a
@@ -376,13 +400,15 @@ func hasTrack1OverlapTx(ctx context.Context, client *ent.Client, row *store.Agen
 // agents row if agent.RunID == preferredRunID; falls back to synthetic
 // "legacy-agent:<agent_id>" if no run_id exists.
 //
-// Catch-up/backfill path (preferredRunID == ""): when the agent has a live
-// current run whose run_attribution belongs to row.AgentID and
-// row.StartedAt >= run_attribution.created_at, attributes to that real run so
-// rows posted while the experiment was OFF or failed live conversions appear
-// on the current run (O4). Otherwise uses synthetic "legacy-backfill:<agent_id>"
-// built from the agents row as it exists at conversion time (or minimal
-// project_id/agent_id when the agent was hard-deleted).
+// Catch-up/backfill path (preferredRunID == ""): when the agent is live and
+// has a current run_id, uses agents.run_id_updated_at as the run start
+// boundary (falling back to existing run_attribution.created_at only when
+// run_id_updated_at is NULL). If row.StartedAt >= boundary, lazy-ensures the
+// current run's run_attribution (via INSERT ... ON CONFLICT DO NOTHING) and
+// attributes the segment to that real run (R1/O4). Otherwise uses synthetic
+// "legacy-backfill:<agent_id>" built from the agents row as it exists at
+// conversion time (or minimal project_id/agent_id when the agent was
+// hard-deleted).
 func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 	ctx context.Context,
 	client *ent.Client,
@@ -430,44 +456,81 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 				if rerr != nil {
 					return nil, mapError(rerr)
 				}
-				res := entRunAttributionToStore(stored)
-				attrCache[preferredRunID] = res
-				return res, nil
-			}
-			if !ent.IsNotFound(qerr) {
+				if stored.AgentID == row.AgentID {
+					res := entRunAttributionToStore(stored)
+					attrCache[preferredRunID] = res
+					return res, nil
+				}
+			} else if !ent.IsNotFound(qerr) {
 				return nil, mapError(qerr)
 			}
 		}
 	} else if uid, parseErr := uuid.Parse(row.AgentID); parseErr == nil {
-		// Catch-up path (O4): attribute to the agent's real current run when
-		// row.StartedAt >= that run's run_attribution.created_at and the run
-		// belongs to the agent.
+		// Catch-up path (R1): use agents.run_id_updated_at as the current-run
+		// start boundary (falling back to existing run_attribution.created_at
+		// if run_id_updated_at is NULL), and lazy-ensure run_attribution for
+		// the current run so segments posted while the experiment was OFF land
+		// on the current run regardless of backfill ordering.
 		agRow, qerr := client.Agent.Query().
 			Where(
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RunIDNEQ(""),
 			).
-			Select(agent.FieldID, agent.FieldRunID).
+			Select(runAttributionAgentColumnsWithRunIDUpdatedAt...).
 			Only(ctx)
 		if qerr == nil && agRow.RunID != "" {
-			var currentAttr *store.RunAttribution
+			var existingAttr *store.RunAttribution
 			if cached, ok := attrCache[agRow.RunID]; ok {
-				currentAttr = cached
+				existingAttr = cached
 			} else {
 				ra, rerr := client.RunAttribution.Query().
 					Where(runattribution.IDEQ(agRow.RunID)).
 					Only(ctx)
 				if rerr == nil {
-					currentAttr = entRunAttributionToStore(ra)
-					attrCache[agRow.RunID] = currentAttr
+					existingAttr = entRunAttributionToStore(ra)
+					attrCache[agRow.RunID] = existingAttr
 				} else if !ent.IsNotFound(rerr) {
 					return nil, mapError(rerr)
 				}
 			}
-			if currentAttr != nil && currentAttr.AgentID == row.AgentID &&
-				!row.StartedAt.UTC().Truncate(time.Microsecond).Before(currentAttr.CreatedAt.UTC().Truncate(time.Microsecond)) {
-				return currentAttr, nil
+
+			var boundary time.Time
+			hasBoundary := false
+			if agRow.RunIDUpdatedAt != nil && !agRow.RunIDUpdatedAt.IsZero() {
+				boundary = agRow.RunIDUpdatedAt.UTC().Truncate(time.Microsecond)
+				hasBoundary = true
+			} else if existingAttr != nil && existingAttr.AgentID == row.AgentID {
+				boundary = existingAttr.CreatedAt.UTC().Truncate(time.Microsecond)
+				hasBoundary = true
+			}
+
+			rowStart := row.StartedAt.UTC().Truncate(time.Microsecond)
+			if hasBoundary && !rowStart.Before(boundary) {
+				if existingAttr != nil {
+					if existingAttr.AgentID == row.AgentID {
+						return existingAttr, nil
+					}
+				} else {
+					built, berr := buildRunAttributionFromAgentRow(ctx, client, agRow, agRow.RunID, "", hubID, "")
+					if berr != nil {
+						return nil, berr
+					}
+					if _, ierr := insertRunAttributionOnConflictDoNothing(ctx, client, built); ierr != nil {
+						return nil, ierr
+					}
+					stored, rerr := client.RunAttribution.Query().
+						Where(runattribution.IDEQ(agRow.RunID)).
+						Only(ctx)
+					if rerr != nil {
+						return nil, mapError(rerr)
+					}
+					if stored.AgentID == row.AgentID {
+						res := entRunAttributionToStore(stored)
+						attrCache[agRow.RunID] = res
+						return res, nil
+					}
+				}
 			}
 		} else if qerr != nil && !ent.IsNotFound(qerr) {
 			return nil, mapError(qerr)
@@ -541,7 +604,8 @@ func (s *UsageLedgerStore) ensureLegacyRunAttributionTx(
 // Track 1 store.UsageEvent following §3.1 (unknown = NULL, never 0):
 //   - cache_write and cache_write_1h are always nil;
 //   - input, output, cache_read (tokens_cached), reasoning are non-nil only
-//     when > 0 (legacy columns are NOT NULL DEFAULT 0);
+//     when in (0, MaxSafeInteger]; values > MaxSafeInteger become NULL and are
+//     recorded in malformed_fields with token_status = malformed (O-b);
 //   - calls is 0 (usage_events.calls is NOT NULL; agent_session_metrics does
 //     not record api_calls).
 func buildLegacyUsageEvent(
@@ -560,26 +624,28 @@ func buildLegacyUsageEvent(
 		eventTS = receivedAt
 	}
 
-	var input, output, cacheRead, reasoning *int64
-	if row.TokensInput > 0 {
-		v := row.TokensInput
-		input = &v
-	}
-	if row.TokensOutput > 0 {
-		v := row.TokensOutput
-		output = &v
-	}
-	if row.TokensCached > 0 {
-		v := row.TokensCached
-		cacheRead = &v
-	}
-	if row.TokensReasoning > 0 {
-		v := row.TokensReasoning
-		reasoning = &v
+	var malformedFields []string
+	boundToken := func(fieldName string, raw int64) *int64 {
+		if raw <= 0 {
+			return nil
+		}
+		if raw > telemetrycontract.MaxSafeInteger {
+			malformedFields = append(malformedFields, fieldName)
+			return nil
+		}
+		v := raw
+		return &v
 	}
 
+	input := boundToken("input", row.TokensInput)
+	output := boundToken("output", row.TokensOutput)
+	cacheRead := boundToken("cache_read", row.TokensCached)
+	reasoning := boundToken("reasoning", row.TokensReasoning)
+
 	tokenStatus := telemetrycontract.TokenStatusNotReported
-	if input != nil || output != nil || cacheRead != nil || reasoning != nil {
+	if len(malformedFields) > 0 {
+		tokenStatus = telemetrycontract.TokenStatusMalformed
+	} else if input != nil || output != nil || cacheRead != nil || reasoning != nil {
 		// cache_write is never measured by legacy agent_session_metrics.
 		tokenStatus = telemetrycontract.TokenStatusPartial
 	}
@@ -624,33 +690,34 @@ func buildLegacyUsageEvent(
 	}
 
 	return &store.UsageEvent{
-		HubID:          hubID,
-		EventID:        store.LegacySessionMetricsEventID(row.AgentID, row.SessionID, row.StartedAt),
-		RunID:          attr.RunID,
-		ProjectID:      attr.ProjectID,
-		AgentID:        attr.AgentID,
-		BillingUserID:  billingUserID,
-		BrokerID:       attr.BrokerID,
-		Harness:        attr.Harness,
-		Model:          model,
-		ModelSource:    modelSource,
-		UsageSource:    store.UsageSourceLegacySessionMetrics,
-		SourceKind:     legacySessionMetricsSourceKind,
-		SourceIdentity: telemetrycontract.SourceIdentityComposite,
-		SessionIDHash:  sessionIDHash,
-		Status:         status,
-		Calls:          0,
-		Input:          input,
-		Output:         output,
-		CacheRead:      cacheRead,
-		CacheWrite:     nil,
-		CacheWrite1h:   nil,
-		Reasoning:      reasoning,
-		TokenStatus:    tokenStatus,
-		EventTS:        eventTS,
-		ReceivedAt:     receivedAt,
-		ProducerEpoch:  legacySessionMetricsProducerEpoch,
-		ProducerSeq:    0,
-		Anomalous:      anomalous,
+		HubID:           hubID,
+		EventID:         store.LegacySessionMetricsEventID(row.AgentID, row.SessionID, row.StartedAt),
+		RunID:           attr.RunID,
+		ProjectID:       attr.ProjectID,
+		AgentID:         attr.AgentID,
+		BillingUserID:   billingUserID,
+		BrokerID:        attr.BrokerID,
+		Harness:         attr.Harness,
+		Model:           model,
+		ModelSource:     modelSource,
+		UsageSource:     store.UsageSourceLegacySessionMetrics,
+		SourceKind:      legacySessionMetricsSourceKind,
+		SourceIdentity:  telemetrycontract.SourceIdentityComposite,
+		SessionIDHash:   sessionIDHash,
+		Status:          status,
+		Calls:           0,
+		Input:           input,
+		Output:          output,
+		CacheRead:       cacheRead,
+		CacheWrite:      nil,
+		CacheWrite1h:    nil,
+		Reasoning:       reasoning,
+		TokenStatus:     tokenStatus,
+		MalformedFields: malformedFields,
+		EventTS:         eventTS,
+		ReceivedAt:      receivedAt,
+		ProducerEpoch:   legacySessionMetricsProducerEpoch,
+		ProducerSeq:     0,
+		Anomalous:       anomalous,
 	}
 }

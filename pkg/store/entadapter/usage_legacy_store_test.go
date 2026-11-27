@@ -680,11 +680,10 @@ func TestLegacySessionMetrics_Backfill_PartialBatchRejectionNoLivelock(t *testin
 		}
 	}
 
-	// Page size = 2 (full batch with 1 rejected, 1 valid). First batch stamps
-	// goodRow (progress=1), second batch fetches only badRow (progress=0) and
-	// breaks with an error instead of livelocking.
+	// Page size = 2 (full batch with 1 rejected, 1 valid). Keyset pass stamps
+	// goodRow and returns an error noting 1 rejected row without livelocking.
 	res, err := cs.backfillLegacySessionMetricsPaged(ctx, "hub-o1", 2, 0, nil, fault)
-	require.Error(t, err, "expected clean break error when only rejected row remains")
+	require.Error(t, err, "expected error reporting rejected row at end of pass")
 	assert.Equal(t, 1, res.Converted)
 
 	gotGood, err := cs.GetAgentSessionMetrics(ctx, goodRow.ID)
@@ -696,86 +695,279 @@ func TestLegacySessionMetrics_Backfill_PartialBatchRejectionNoLivelock(t *testin
 	assert.Nil(t, gotBad.ConvertedAt, "rejected row must remain unconverted for later retry")
 }
 
-func TestLegacySessionMetrics_Backfill_CurrentRunAttribution(t *testing.T) {
-	// O4: Catch-up attributes to the agent's real current run when
-	// row.StartedAt >= run_attribution.created_at, and uses synthetic
-	// legacy-backfill:<agent_id> for older rows.
+func TestLegacySessionMetrics_Backfill_RejectedPageDoesNotStarveLaterRows(t *testing.T) {
+	// O-a: At least pageSize permanently rejected rows at the front of the ID
+	// order must NOT starve good rows behind them in the same pass.
 	ctx := context.Background()
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
 
-	projectID := createTestProject(t, cs, "legacy-o4")
+	projectID := createTestProject(t, cs, "legacy-oa")
 	agentID := uuid.NewString()
-	currentRunID := "run-o4-curr-" + uuid.NewString()[:8]
+	t0 := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
 
+	badID1 := "00000000-0000-4000-8000-000000000001"
+	badID2 := "00000000-0000-4000-8000-000000000002"
+	goodID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+
+	for i, tc := range []struct {
+		id   string
+		sess string
+	}{
+		{badID1, "oa-bad-1"},
+		{badID2, "oa-bad-2"},
+		{goodID, "oa-good-3"},
+	} {
+		start := t0.Add(time.Duration(i) * time.Hour)
+		end := start.Add(5 * time.Minute)
+		require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+			ID:           tc.id,
+			AgentID:      agentID,
+			ProjectID:    projectID,
+			SessionID:    tc.sess,
+			StartedAt:    start,
+			EndedAt:      &end,
+			Status:       "completed",
+			Model:        "claude-sonnet-4-6",
+			TokensInput:  100,
+			TokensOutput: 20,
+		}))
+	}
+
+	badEv1 := store.LegacySessionMetricsEventID(agentID, "oa-bad-1", t0)
+	badEv2 := store.LegacySessionMetricsEventID(agentID, "oa-bad-2", t0.Add(time.Hour))
+	fault := func(in *store.UsageIngestBatchInput) {
+		for _, ev := range in.Events {
+			if ev.EventID == badEv1 || ev.EventID == badEv2 {
+				ev.RunID = "nonexistent-fk-run-id"
+			}
+		}
+	}
+
+	// pageSize = 2: batch 1 contains ONLY the 2 rejected rows; batch 2 must
+	// still advance via keyset (id > lastID) and convert goodID.
+	res, err := cs.backfillLegacySessionMetricsPaged(ctx, "hub-oa", 2, 0, nil, fault)
+	require.Error(t, err, "pass with rejected rows reports rejection count")
+	assert.Equal(t, 1, res.Converted, "good row behind full rejected page must be converted")
+
+	gotGood, err := cs.GetAgentSessionMetrics(ctx, goodID)
+	require.NoError(t, err)
+	assert.NotNil(t, gotGood.ConvertedAt, "good row must be stamped converted_at")
+
+	for _, badID := range []string{badID1, badID2} {
+		gotBad, err := cs.GetAgentSessionMetrics(ctx, badID)
+		require.NoError(t, err)
+		assert.Nil(t, gotBad.ConvertedAt, "rejected row %s must remain unconverted", badID)
+	}
+}
+
+func TestLegacySessionMetrics_ConvertRow_MaxSafeIntegerBound(t *testing.T) {
+	// O-b: Legacy token values above MaxSafeInteger become NULL and are
+	// recorded in malformed_fields with token_status = malformed, preventing
+	// int64 rollup saturation.
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "legacy-ob")
+	agentID := uuid.NewString()
+	runID := "run-ob-" + uuid.NewString()[:8]
+	seedRunForIngestTest(t, cs, projectID, agentID, runID, nil)
+
+	t0 := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+	end0 := t0.Add(5 * time.Minute)
+	row := &store.AgentSessionMetrics{
+		ID:              uuid.NewString(),
+		AgentID:         agentID,
+		ProjectID:       projectID,
+		SessionID:       "ob-huge",
+		StartedAt:       t0,
+		EndedAt:         &end0,
+		Status:          "completed",
+		Model:           "claude-sonnet-4-6",
+		TokensInput:     int64(1) << 62, // > MaxSafeInteger (2^53 - 1)
+		TokensOutput:    50,
+		TokensCached:    int64(1) << 60, // > MaxSafeInteger
+		TokensReasoning: 10,
+	}
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, row))
+
+	converted, err := cs.ConvertLegacySessionMetricsRow(ctx, "hub-ob", row, runID)
+	require.NoError(t, err)
+	require.True(t, converted)
+
+	ev, err := client.UsageEvent.Query().
+		Where(usageevent.EventIDEQ(store.LegacySessionMetricsEventID(agentID, "ob-huge", t0))).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, ev.Input, "input > MaxSafeInteger must become NULL")
+	assert.Nil(t, ev.CacheRead, "cache_read > MaxSafeInteger must become NULL")
+	require.NotNil(t, ev.Output)
+	assert.Equal(t, int64(50), *ev.Output)
+	require.NotNil(t, ev.Reasoning)
+	assert.Equal(t, int64(10), *ev.Reasoning)
+	assert.Equal(t, telemetrycontract.TokenStatusMalformed, ev.TokenStatus)
+	assert.Equal(t, []string{"input", "cache_read"}, ev.MalformedFields)
+
+	day := utcDayStart(t0)
+	dr, err := client.UsageRollupDaily.Query().
+		Where(usagerollupdaily.AgentIDEQ(agentID), usagerollupdaily.BucketStartEQ(day)).
+		Only(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), dr.Input)
+	assert.Equal(t, int64(0), dr.InputKnownEvents)
+	assert.Equal(t, int64(50), dr.Output)
+	assert.Equal(t, int64(1), dr.OutputKnownEvents)
+}
+
+func TestLegacySessionMetrics_Backfill_CurrentRunAttribution(t *testing.T) {
+	// R1 (changed approach): Catch-up uses agents.run_id_updated_at as the
+	// boundary for attributing to the agent's real current run and lazy-ensures
+	// run_attribution for that run. Covers:
+	//   1. Run minted with attribution hook OFF, segment posted after run start,
+	//      active-run backfill runs later (created_at > segment.StartedAt), then
+	//      legacy catch-up -> segment lands on current run.
+	//   2. Same scenario with legacy catch-up running BEFORE active-run backfill
+	//      (lazy-ensure path) -> segment lands on current run.
+	//   3. Segment starting BEFORE run_id_updated_at -> synthetic run.
+	//   4. Agent with run_id_updated_at == NULL (no attribution) -> synthetic run.
+	//   5. Soft-deleted agent -> synthetic run.
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	t.Cleanup(func() { _ = cs.Close() })
+
+	projectID := createTestProject(t, cs, "legacy-r1-attr")
+
+	// --- Case 1: Active-run backfill runs AFTER segment posted while OFF ---
+	agent1 := uuid.NewString()
+	run1 := "run-r1-off-" + uuid.NewString()[:8]
 	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
-		ID:            agentID,
-		Slug:          "o4-agent",
-		Name:          "O4 Agent",
+		ID:            agent1,
+		Slug:          "r1-agent-1",
+		Name:          "R1 Agent 1",
 		ProjectID:     projectID,
 		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"},
 		Phase:         "running",
 	}))
-	_, err := cs.SetAgentRunID(ctx, agentID, currentRunID, nil)
+	// Attribution hook is OFF (SetRunAttributionConfig is nil).
+	_, err := cs.SetAgentRunID(ctx, agent1, run1, nil)
 	require.NoError(t, err)
+	run1AssignedAt := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	require.NoError(t, client.Agent.UpdateOneID(uuid.MustParse(agent1)).
+		SetRunIDUpdatedAt(run1AssignedAt).Exec(ctx))
 
-	runCreated := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
-	created, err := cs.EnsureRunAttribution(ctx, &store.RunAttribution{
-		RunID:      currentRunID,
-		Generation: 1,
-		HubID:      "hub-o4",
-		ProjectID:  projectID,
-		AgentID:    agentID,
-		Harness:    "claude",
-		CreatedAt:  runCreated,
-	})
-	require.NoError(t, err)
-	require.True(t, created)
-
-	oldStart := runCreated.Add(-2 * time.Hour)
-	oldEnd := oldStart.Add(5 * time.Minute)
-	currStart := runCreated.Add(10 * time.Minute)
-	currEnd := currStart.Add(5 * time.Minute)
+	preStart1 := run1AssignedAt.Add(-30 * time.Minute)
+	preEnd1 := preStart1.Add(5 * time.Minute)
+	offStart1 := run1AssignedAt.Add(10 * time.Minute)
+	offEnd1 := offStart1.Add(5 * time.Minute)
 
 	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
-		ID:           uuid.NewString(),
-		AgentID:      agentID,
-		ProjectID:    projectID,
-		SessionID:    "o4-old",
-		StartedAt:    oldStart,
-		EndedAt:      &oldEnd,
-		Status:       "completed",
-		Model:        "claude-sonnet-4-6",
-		TokensInput:  100,
-		TokensOutput: 20,
+		ID: uuid.NewString(), AgentID: agent1, ProjectID: projectID,
+		SessionID: "r1-pre-1", StartedAt: preStart1, EndedAt: &preEnd1,
+		Status: "completed", Model: "claude-sonnet-4-6", TokensInput: 50, TokensOutput: 10,
 	}))
 	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
-		ID:           uuid.NewString(),
-		AgentID:      agentID,
-		ProjectID:    projectID,
-		SessionID:    "o4-curr",
-		StartedAt:    currStart,
-		EndedAt:      &currEnd,
-		Status:       "completed",
-		Model:        "claude-sonnet-4-6",
-		TokensInput:  250,
-		TokensOutput: 50,
+		ID: uuid.NewString(), AgentID: agent1, ProjectID: projectID,
+		SessionID: "r1-off-1", StartedAt: offStart1, EndedAt: &offEnd1,
+		Status: "completed", Model: "claude-sonnet-4-6", TokensInput: 250, TokensOutput: 50,
 	}))
 
-	res, err := cs.BackfillLegacySessionMetrics(ctx, "hub-o4")
+	// Active-run backfill runs NOW (created_at = time.Now(), well after offStart1).
+	nAttr, err := cs.BackfillActiveRunAttributions(ctx, "hub-r1")
 	require.NoError(t, err)
-	assert.Equal(t, 2, res.Converted)
+	require.Equal(t, 1, nAttr)
 
-	oldEv, err := client.UsageEvent.Query().
-		Where(usageevent.EventIDEQ(store.LegacySessionMetricsEventID(agentID, "o4-old", oldStart))).
-		Only(ctx)
+	// --- Case 2: Legacy catch-up runs BEFORE active-run backfill (lazy-ensure) ---
+	agent2 := uuid.NewString()
+	run2 := "run-r1-lazy-" + uuid.NewString()[:8]
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:            agent2,
+		Slug:          "r1-agent-2",
+		Name:          "R1 Agent 2",
+		ProjectID:     projectID,
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "claude", HarnessConfig: "claude"},
+		Phase:         "running",
+	}))
+	_, err = cs.SetAgentRunID(ctx, agent2, run2, nil)
 	require.NoError(t, err)
-	assert.Equal(t, "legacy-backfill:"+agentID, oldEv.RunID, "pre-run row must use synthetic backfill run_id")
+	run2AssignedAt := time.Date(2026, 11, 20, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, client.Agent.UpdateOneID(uuid.MustParse(agent2)).
+		SetRunIDUpdatedAt(run2AssignedAt).Exec(ctx))
 
-	currEv, err := client.UsageEvent.Query().
-		Where(usageevent.EventIDEQ(store.LegacySessionMetricsEventID(agentID, "o4-curr", currStart))).
-		Only(ctx)
+	offStart2 := run2AssignedAt.Add(5 * time.Minute)
+	offEnd2 := offStart2.Add(5 * time.Minute)
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		ID: uuid.NewString(), AgentID: agent2, ProjectID: projectID,
+		SessionID: "r1-off-2", StartedAt: offStart2, EndedAt: &offEnd2,
+		Status: "completed", Model: "claude-sonnet-4-6", TokensInput: 300, TokensOutput: 60,
+	}))
+
+	// --- Case 3: Agent with run_id_updated_at == NULL and no run_attribution ---
+	agentNoTS := uuid.NewString()
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentNoTS,
+		Slug:      "r1-agent-nots",
+		Name:      "R1 Agent NoTS",
+		ProjectID: projectID,
+		Phase:     "running",
+	}))
+	require.NoError(t, client.Agent.UpdateOneID(uuid.MustParse(agentNoTS)).
+		SetRunID("run-no-ts").ClearRunIDUpdatedAt().Exec(ctx))
+	noTSStart := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	noTSEnd := noTSStart.Add(5 * time.Minute)
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		ID: uuid.NewString(), AgentID: agentNoTS, ProjectID: projectID,
+		SessionID: "r1-nots", StartedAt: noTSStart, EndedAt: &noTSEnd,
+		Status: "completed", Model: "claude-sonnet-4-6", TokensInput: 80, TokensOutput: 20,
+	}))
+
+	// --- Case 4: Soft-deleted agent ---
+	agentDel := uuid.NewString()
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        agentDel,
+		Slug:      "r1-agent-del",
+		Name:      "R1 Agent Del",
+		ProjectID: projectID,
+		Phase:     "stopped",
+	}))
+	_, err = cs.SetAgentRunID(ctx, agentDel, "run-del", nil)
 	require.NoError(t, err)
-	assert.Equal(t, currentRunID, currEv.RunID, "row started at/after current run must attribute to current run_id")
+	delAssignedAt := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	require.NoError(t, client.Agent.UpdateOneID(uuid.MustParse(agentDel)).
+		SetRunIDUpdatedAt(delAssignedAt).SetDeletedAt(time.Now().UTC()).Exec(ctx))
+	delStart := delAssignedAt.Add(5 * time.Minute)
+	delEnd := delStart.Add(5 * time.Minute)
+	require.NoError(t, cs.CreateAgentSessionMetrics(ctx, &store.AgentSessionMetrics{
+		ID: uuid.NewString(), AgentID: agentDel, ProjectID: projectID,
+		SessionID: "r1-del", StartedAt: delStart, EndedAt: &delEnd,
+		Status: "completed", Model: "claude-sonnet-4-6", TokensInput: 90, TokensOutput: 15,
+	}))
+
+	// Run legacy catch-up for all 5 rows.
+	res, err := cs.BackfillLegacySessionMetrics(ctx, "hub-r1")
+	require.NoError(t, err)
+	assert.Equal(t, 5, res.Converted)
+
+	assertEvRun := func(aid, sess string, start time.Time, wantRun, msg string) {
+		t.Helper()
+		ev, err := client.UsageEvent.Query().
+			Where(usageevent.EventIDEQ(store.LegacySessionMetricsEventID(aid, sess, start))).
+			Only(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, wantRun, ev.RunID, msg)
+	}
+
+	assertEvRun(agent1, "r1-pre-1", preStart1, "legacy-backfill:"+agent1, "segment before run_id_updated_at must use synthetic run")
+	assertEvRun(agent1, "r1-off-1", offStart1, run1, "OFF-period segment after run_id_updated_at must land on current run")
+	assertEvRun(agent2, "r1-off-2", offStart2, run2, "lazy-ensured current run must receive OFF-period segment even before active-run backfill")
+	assertEvRun(agentNoTS, "r1-nots", noTSStart, "legacy-backfill:"+agentNoTS, "agent with NULL run_id_updated_at and no attribution must use synthetic run")
+	assertEvRun(agentDel, "r1-del", delStart, "legacy-backfill:"+agentDel, "soft-deleted agent must use synthetic run")
+
+	// Verify agent2's run_attribution was lazy-ensured.
+	ra2, err := cs.GetRunAttribution(ctx, run2)
+	require.NoError(t, err)
+	assert.Equal(t, agent2, ra2.AgentID)
 }
