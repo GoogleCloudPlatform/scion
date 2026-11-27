@@ -84,6 +84,7 @@ var migrations = []migration{
 	{name: migrationReviewLadder, apply: applyReviewLadder},
 	{name: migrationReviewDrafts, sqlite: sqliteReviewDrafts, postgres: postgresReviewDrafts},
 	{name: migrationReviewRequests, sqlite: sqliteReviewRequests, postgres: postgresReviewRequests},
+	{name: migrationSourceAttachmentIndex, sqlite: sqliteSourceAttachmentIndex, postgres: postgresSourceAttachmentIndex},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (

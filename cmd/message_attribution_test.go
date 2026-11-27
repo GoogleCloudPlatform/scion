@@ -241,14 +241,14 @@ func TestConversationMessages_DelegatedShowsAuthorizedBy(t *testing.T) {
 	})
 	ts := clitime.Format(attributionCreatedAt, clitime.Clock)
 	assert.Equal(t, renderTabTable(
-		"TIME\tFROM\tMESSAGE",
-		ts+"\tuser:carol\tplease review",
-		ts+"\tagent:builder\tbuild is green",
-		"\t\tauthorized by Alice Example via delegation grant-1",
-		ts+"\tagent:builder\tbuild is green",
-		"\t\tauthorized by Alice Example via delegation grant-2",
-		ts+"\tagent:builder\tbuild is green",
-		"\t\tauthorized by u-gone via delegation grant-3",
+		"TIME\tFROM\tATT\tMESSAGE",
+		ts+"\tuser:carol\t\tplease review",
+		ts+"\tagent:builder\t\tbuild is green",
+		"\t\t\tauthorized by Alice Example via delegation grant-1",
+		ts+"\tagent:builder\t\tbuild is green",
+		"\t\t\tauthorized by Alice Example via delegation grant-2",
+		ts+"\tagent:builder\t\tbuild is green",
+		"\t\t\tauthorized by u-gone via delegation grant-3",
 	), out)
 	assert.Equal(t, []string{"/api/v1/users/u-alice", "/api/v1/users/u-gone"}, h.userLookups(),
 		"one lookup per issuer")
@@ -262,7 +262,7 @@ func TestConversationMessages_OrdinaryRendersUnchanged(t *testing.T) {
 		require.NoError(t, runConversationMessages(newAttributionCmd(), []string{"conv:" + attributionConvID}))
 	})
 	ts := clitime.Format(attributionCreatedAt, clitime.Clock)
-	assert.Equal(t, renderTabTable("TIME\tFROM\tMESSAGE", ts+"\tuser:carol\tplease review"), out)
+	assert.Equal(t, renderTabTable("TIME\tFROM\tATT\tMESSAGE", ts+"\tuser:carol\t\tplease review"), out)
 	assert.Empty(t, h.userLookups(), "a listing with no delegated message looks up no user")
 }
 
@@ -304,10 +304,10 @@ func TestConversationCatchUp_DelegatedShowsAuthorizedBy(t *testing.T) {
 	})
 	ts := clitime.Format(attributionCreatedAt, clitime.Clock)
 	assert.Equal(t, renderTabTable(
-		"TIME\tFROM\tMESSAGE",
-		ts+"\tuser:carol\tplease review",
-		ts+"\tagent:builder\tbuild is green",
-		"\t\tauthorized by Alice Example via delegation grant-1",
+		"TIME\tFROM\tATT\tMESSAGE",
+		ts+"\tuser:carol\t\tplease review",
+		ts+"\tagent:builder\t\tbuild is green",
+		"\t\t\tauthorized by Alice Example via delegation grant-1",
 	), out)
 }
 

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -397,9 +398,10 @@ func dmPeerOf(externalRef, callerKind, callerID string) *conversationPeer {
 // handleConversationRoutes handles requests under /api/v1/conversations/.
 // Routes:
 //   - GET /api/v1/conversations/{id}                       — Get a single conversation
-//   - GET /api/v1/conversations/{id}/messages              — List messages in a conversation
-//   - GET /api/v1/conversations/{id}/messages/{messageID}  — Get a single message
-//   - PUT /api/v1/conversations/{id}/default-agent          — Set the default agent
+//   - GET /api/v1/conversations/{id}/messages                                    — List messages in a conversation
+//   - GET /api/v1/conversations/{id}/messages/{messageID}                        — Get a single message
+//   - GET /api/v1/conversations/{id}/messages/{messageID}/attachments/{attID}    — Download a message attachment
+//   - PUT /api/v1/conversations/{id}/default-agent                               — Set the default agent
 func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request) {
 	id, action := extractAction(r, "/api/v1/conversations")
 
@@ -413,12 +415,20 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if messageID, ok := strings.CutPrefix(action, "messages/"); ok {
-		if messageID == "" || strings.Contains(messageID, "/") {
+	if rest, ok := strings.CutPrefix(action, "messages/"); ok {
+		if messageID, sub, hasSub := strings.Cut(rest, "/"); hasSub {
+			if attID, ok := strings.CutPrefix(sub, "attachments/"); ok && messageID != "" && attID != "" && !strings.Contains(attID, "/") {
+				s.handleDownloadConversationMessageAttachment(w, r, id, messageID, attID)
+				return
+			}
 			NotFound(w, "Message")
 			return
 		}
-		s.handleGetConversationMessage(w, r, id, messageID)
+		if rest == "" {
+			NotFound(w, "Message")
+			return
+		}
+		s.handleGetConversationMessage(w, r, id, rest)
 		return
 	}
 
@@ -578,28 +588,28 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// Catch-up of deferred messages (ptone/scion#4596, D15).
-	s.noteDeferredAttachments(ctx, result.Items)
+	// Populate readable artifact-backed attachments (ptone/scion#9579) and
+	// deferred attachment notices (ptone/scion#4596, D15) in one pass.
+	s.noteMessageAttachments(ctx, result.Items)
 
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleGetConversationMessage handles GET /api/v1/conversations/{id}/messages/{messageID}.
-func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Request, conversationID, messageID string) {
-	if r.Method != http.MethodGet {
-		MethodNotAllowed(w, http.MethodGet)
-		return
-	}
-
+// authorizeConversationMessageRead authorizes a caller to read messageID in
+// conversationID, enforcing DM canonical key or group project membership,
+// scoped-UAT token boundaries, message ownership (msg.ConversationID ==
+// conversationID), and the cross-project DM read gate. On failure it writes
+// the HTTP error response and returns ok=false.
+func (s *Server) authorizeConversationMessageRead(w http.ResponseWriter, r *http.Request, conversationID, messageID string) (*store.Conversation, *store.Message, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Forbidden(w)
-		return
+		return nil, nil, false
 	}
 	cls, token, ok := requireInboxCredential(w, r)
 	if !ok {
-		return
+		return nil, nil, false
 	}
 
 	// Authorization: for direct conversations, use canonical DM key (kind+ID).
@@ -608,31 +618,31 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 	conv, err := s.store.GetConversation(ctx, conversationID)
 	if err != nil {
 		writeErrorFromErr(w, err, "Conversation")
-		return
+		return nil, nil, false
 	}
 
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			Forbidden(w)
-			return
+			return nil, nil, false
 		}
 	} else {
 		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
-			return
+			return nil, nil, false
 		}
 	}
 	if cls == inboxCredentialToken && !s.authorizeTokenConversationRead(w, r, token, conv) {
-		return
+		return nil, nil, false
 	}
 
 	msg, err := s.store.GetMessage(ctx, messageID)
 	if err != nil {
 		writeErrorFromErr(w, err, "Message")
-		return
+		return nil, nil, false
 	}
 	if msg.ConversationID != conversationID {
 		NotFound(w, "Message")
-		return
+		return nil, nil, false
 	}
 
 	// Hub-off guard: deny agent callers from reading cross-project DMs when
@@ -642,15 +652,61 @@ func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Req
 	// deleted, instead of depending only on a live agent lookup that 500s.
 	if conv.Kind == "direct" {
 		if !s.enforceCrossProjectReadGate(w, r, conv, msg) {
-			return
+			return nil, nil, false
 		}
 	}
 
+	return conv, msg, true
+}
+
+// handleGetConversationMessage handles GET /api/v1/conversations/{id}/messages/{messageID}.
+func (s *Server) handleGetConversationMessage(w http.ResponseWriter, r *http.Request, conversationID, messageID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	conv, msg, ok := s.authorizeConversationMessageRead(w, r, conversationID, messageID)
+	if !ok {
+		return
+	}
+
+	ctx := r.Context()
 	if GetAgentIdentityFromContext(ctx) != nil {
 		scopeProvenanceToDMParties(conv, msg)
 	}
 
+	items := []store.Message{*msg}
+	s.noteMessageAttachments(ctx, items)
+	*msg = items[0]
+
 	writeJSON(w, http.StatusOK, msg)
+}
+
+// handleDownloadConversationMessageAttachment handles
+// GET /api/v1/conversations/{id}/messages/{messageID}/attachments/{attachmentID}.
+// Serves artifact-backed attachments only (D5); every post-authorization
+// refusal or missing attachment returns an identical 404 Attachment response.
+func (s *Server) handleDownloadConversationMessageAttachment(w http.ResponseWriter, r *http.Request, conversationID, messageID, attachmentID string) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	_, msg, ok := s.authorizeConversationMessageRead(w, r, conversationID, messageID)
+	if !ok {
+		return
+	}
+
+	if !s.attachmentArtifactsReady() {
+		NotFound(w, "Attachment")
+		return
+	}
+
+	r = r.WithContext(withStandingMemo(r.Context()))
+	if s.attachmentService().ServeMessageAttachment(w, r, attachmentID, msg.ID) != artifacts.ServeWritten {
+		NotFound(w, "Attachment")
+	}
 }
 
 // scopeProvenanceToDMParties limits the SenderProjectID/RecipientProjectID

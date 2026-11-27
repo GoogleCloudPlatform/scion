@@ -51,9 +51,13 @@ var (
 
 	convCreateJSON bool
 
-	convGetJSON        bool
-	convGetMessageJSON bool
-	convGetMessageBody bool
+	convGetJSON                    bool
+	convGetMessageJSON             bool
+	convGetMessageBody             bool
+	convGetMessageSaveAttachments  string
+	convGetMessageAttachments      []string
+	convGetMessageForce            bool
+	convGetMessageIncludePublished bool
 
 	convParticipantsJSON bool
 
@@ -313,6 +317,10 @@ func init() {
 	conversationGetCmd.Flags().BoolVar(&convGetJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageJSON, "json", false, "Output in JSON format")
 	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageBody, "body", false, "Print only the message body to stdout (no added bytes)")
+	conversationGetMessageCmd.Flags().StringVar(&convGetMessageSaveAttachments, "save-attachments", "", "Save message attachments into this directory")
+	conversationGetMessageCmd.Flags().StringArrayVar(&convGetMessageAttachments, "attachment", nil, "Save only the named attachment (exact ID or name; repeatable)")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageForce, "force", false, "Overwrite existing files when saving attachments")
+	conversationGetMessageCmd.Flags().BoolVar(&convGetMessageIncludePublished, "include-published", false, "Download attachments even when already published as an artifact")
 
 	// Participants flags
 	conversationParticipantsCmd.Flags().BoolVar(&convParticipantsJSON, "json", false, "Output in JSON format")
@@ -469,19 +477,7 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for i := range items {
-		msg := &items[i]
-		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
-		from := truncateRunes(msg.Sender, 20, true)
-		body := truncateRunes(msg.Msg, 60, true)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
-		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
-		}
-	}
-	if err := tw.Flush(); err != nil {
+	if err := writeConversationMessagesTable(os.Stdout, items, label, false); err != nil {
 		return err
 	}
 	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
@@ -697,6 +693,19 @@ func writeMessageBody(w io.Writer, msg *store.Message) error {
 }
 
 func runConversationGetMessage(cmd *cobra.Command, args []string) error {
+	if convGetMessageBody && convGetMessageSaveAttachments != "" {
+		return errors.New("--body cannot be combined with --save-attachments")
+	}
+	if len(convGetMessageAttachments) > 0 && convGetMessageSaveAttachments == "" {
+		return errors.New("--attachment requires --save-attachments")
+	}
+	if convGetMessageForce && convGetMessageSaveAttachments == "" {
+		return errors.New("--force requires --save-attachments")
+	}
+	if convGetMessageIncludePublished && convGetMessageSaveAttachments == "" {
+		return errors.New("--include-published requires --save-attachments")
+	}
+
 	if convGetMessageJSON {
 		outputFormat = "json"
 	}
@@ -706,7 +715,11 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	timeout := 30 * time.Second
+	if convGetMessageSaveAttachments != "" {
+		timeout = 5 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(cmdContext(cmd), timeout)
 	defer cancel()
 
 	conversationID, err := resolveConversationRef(ctx, client, args[0])
@@ -720,13 +733,45 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	}
 
 	if convGetMessageBody {
-		return writeMessageBody(os.Stdout, msg)
+		return writeMessageBody(cmd.OutOrStdout(), msg)
+	}
+
+	var saveAnnotations []messageAttachmentJSON
+	var saveErr error
+	if convGetMessageSaveAttachments != "" {
+		saveAnnotations, saveErr = saveMessageAttachments(
+			ctx,
+			client.Conversations(),
+			cmd.ErrOrStderr(),
+			conversationID,
+			msg,
+			convGetMessageSaveAttachments,
+			convGetMessageAttachments,
+			convGetMessageForce,
+			convGetMessageIncludePublished,
+		)
 	}
 
 	if isJSONOutput() {
+		if convGetMessageSaveAttachments != "" && saveAnnotations != nil {
+			if jerr := outputMessageWithSaveJSON(cmd.OutOrStdout(), msg, saveAnnotations); jerr != nil {
+				return jerr
+			}
+			return saveErr
+		}
+		if saveErr != nil {
+			return saveErr
+		}
 		return outputJSON(msg)
 	}
 
+	if err := writeGetMessageText(ctx, client, cmd.OutOrStdout(), msg); err != nil {
+		return err
+	}
+	return saveErr
+}
+
+func writeGetMessageText(ctx context.Context, client hubclient.Client, out io.Writer, msg *store.Message) error {
 	senderProjectID := ""
 	if msg.SenderProjectID != nil {
 		senderProjectID = *msg.SenderProjectID
@@ -744,7 +789,7 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 		dispatchFailureReason = *msg.DispatchFailureReason
 	}
 
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "ID\t%s\n", msg.ID)
 	_, _ = fmt.Fprintf(tw, "CONVERSATION ID\t%s\n", msg.ConversationID)
 	_, _ = fmt.Fprintf(tw, "PROJECT ID\t%s\n", msg.ProjectID)
@@ -774,7 +819,10 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "DISPATCH STATE\t%s\n", msg.DispatchState)
 	_, _ = fmt.Fprintf(tw, "DISPATCHED AT\t%s\n", dispatchedAt)
 	_, _ = fmt.Fprintf(tw, "DISPATCH FAILURE REASON\t%s\n", dispatchFailureReason)
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeMessageAttachmentsText(out, msg.Attachments)
 }
 
 func runConversationSetDefault(cmd *cobra.Command, args []string) error {
@@ -957,25 +1005,7 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
 		return nil
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for i := range items {
-		msg := &items[i]
-		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
-		from := truncateRunes(msg.Sender, 20, true)
-		body := truncateRunes(msg.Msg, 60, true)
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
-		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
-		}
-		// A deferred message was never dispatched, so its attachments never
-		// reached this agent's home (ptone/scion#4596). The hub lists them
-		// only to a reader.
-		for _, a := range msg.DeferredAttachments {
-			_, _ = fmt.Fprintf(tw, "\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
-		}
-	}
-	if err := tw.Flush(); err != nil {
+	if err := writeConversationMessagesTable(os.Stdout, items, label, true); err != nil {
 		return err
 	}
 	printListTruncationNotice(os.Stderr, len(pageRes.Items), pageRes.TotalCount, pageRes.Truncated, "messages", "limit", "all")
@@ -990,6 +1020,36 @@ func chronologicalMessages(msgs []store.Message) []store.Message {
 		return a.CreatedAt.Compare(b.CreatedAt)
 	})
 	return sorted
+}
+
+// writeConversationMessagesTable writes conversation messages in table format
+// with TIME, FROM, ATT (attachment count, blank when 0), and MESSAGE columns.
+func writeConversationMessagesTable(w io.Writer, items []store.Message, label func(string) string, showDeferred bool) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tATT\tMESSAGE")
+	for i := range items {
+		msg := &items[i]
+		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
+		from := truncateRunes(msg.Sender, 20, true)
+		attCount := ""
+		if len(msg.Attachments) > 0 {
+			attCount = fmt.Sprintf("%d", len(msg.Attachments))
+		}
+		body := truncateRunes(msg.Msg, 60, true)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", timeStr, from, attCount, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t\t%s\n", authorizedBy)
+		}
+		if showDeferred {
+			// A deferred message was never dispatched, so its attachments never
+			// reached this agent's home (ptone/scion#4596). The hub lists them
+			// only to a reader.
+			for _, a := range msg.DeferredAttachments {
+				_, _ = fmt.Fprintf(tw, "\t\t\t%s\n", messaging.AttachmentNotDeliveredLine(a.Name, a.Size, "the message was deferred"))
+			}
+		}
+	}
+	return tw.Flush()
 }
 
 // writeConversationMessagesFull prints full untruncated messages in
@@ -1015,6 +1075,9 @@ func writeConversationMessagesFull(w io.Writer, items []store.Message, label fun
 			}
 		}
 		if _, err := fmt.Fprintln(w, msg.Msg); err != nil {
+			return err
+		}
+		if err := writeMessageAttachmentsText(w, msg.Attachments); err != nil {
 			return err
 		}
 		for _, a := range msg.DeferredAttachments {

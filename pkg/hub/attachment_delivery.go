@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -539,6 +540,65 @@ func dispatchAttachmentsFromContext(ctx context.Context) []messages.WireAttachme
 	}
 	wire, _ := ctx.Value(dispatchAttachmentsKey{}).([]messages.WireAttachment)
 	return wire
+}
+
+// noteMessageAttachments populates Attachments (and DeferredAttachments for
+// deferred messages) on each message of items when the caller of ctx reads
+// them under the shared read decision (ptone/scion#9579). Only artifact-backed
+// attachments are listed (D5). A non-reader gets neither field.
+func (s *Server) noteMessageAttachments(ctx context.Context, items []store.Message) {
+	if len(items) == 0 || !s.attachmentArtifactsReady() {
+		return
+	}
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	svc := s.attachmentService()
+	found, err := svc.MessageAttachments(ctx, ids)
+	if err != nil {
+		s.messageLog.Error("Failed to list message attachments", "error", err)
+		return
+	}
+	ctx = withStandingMemo(ctx)
+	var attIDs []string
+	for i := range items {
+		if ctx.Err() != nil {
+			break
+		}
+		list := found[items[i].ID]
+		if len(list) == 0 || !svc.MayReadAttachments(ctx, items[i].ID, list[0].MessageProjectID) {
+			continue
+		}
+		deferred := items[i].DispatchState == store.MessageDispatchDeferred
+		for _, a := range list {
+			items[i].Attachments = append(items[i].Attachments, store.MessageAttachment{
+				ID:          a.ID,
+				Name:        a.Name,
+				Size:        a.Size,
+				ContentType: a.MediaType,
+				SHA256:      a.SHA256,
+				Ref:         artifacts.FormatAttachmentRef(a.ID),
+			})
+			attIDs = append(attIDs, a.ID)
+			if deferred {
+				items[i].DeferredAttachments = append(items[i].DeferredAttachments,
+					store.DeferredAttachment{Name: reduceAttachmentName(a.Name), Size: a.Size})
+			}
+		}
+	}
+	if len(attIDs) > 0 && s.experimentEnabled(experiments.Artifacts) {
+		published := svc.PublishedFromAttachments(ctx, attIDs)
+		if len(published) > 0 {
+			for i := range items {
+				for j := range items[i].Attachments {
+					if refs := published[items[i].Attachments[j].ID]; len(refs) > 0 {
+						items[i].Attachments[j].PublishedAs = refs
+					}
+				}
+			}
+		}
+	}
 }
 
 // noteDeferredAttachments lists, on each deferred message of items, its

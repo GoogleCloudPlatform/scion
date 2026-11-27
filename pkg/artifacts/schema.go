@@ -460,3 +460,18 @@ const migrationSponsorBackfill = "0012_sponsor_backfill"
 // DDL; see applyReviewLadder. It follows 0013, the review sessions step
 // of ptone/scion#6849.
 const migrationReviewLadder = "0014_review_ladder"
+
+// migrationSourceAttachmentIndex indexes artifact_version.source_attachment_id
+// for reverse lookups from message attachments to published artifacts
+// (ptone/scion#4599, ptone/scion#9579). Purely additive: no DowngradeFloor bump.
+const migrationSourceAttachmentIndex = "0017_source_attachment_index"
+
+const sqliteSourceAttachmentIndex = `
+CREATE INDEX IF NOT EXISTS idx_artifact_version_source_attachment
+    ON artifact_version (source_attachment_id) WHERE source_attachment_id IS NOT NULL;
+`
+
+const postgresSourceAttachmentIndex = `
+CREATE INDEX IF NOT EXISTS idx_artifact_version_source_attachment
+    ON artifact_version (source_attachment_id) WHERE source_attachment_id IS NOT NULL;
+`

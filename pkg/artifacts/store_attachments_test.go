@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -727,6 +728,166 @@ func TestRecordDeliveryRedemption_Concurrent(t *testing.T) {
 		}
 		if firsts != 1 {
 			t.Fatalf("first uses = %d, want exactly 1", firsts)
+		}
+	})
+}
+
+// TestMigration0017_SourceAttachmentIndex: a database at 0016 migrates to
+// 0017_source_attachment_index, creates idx_artifact_version_source_attachment,
+// records the ledger row once, and a second Init is a no-op.
+func TestMigration0017_SourceAttachmentIndex(t *testing.T) {
+	if i := migrationIndex(migrationSourceAttachmentIndex); i < 1 || migrations[i-1].name != migrationReviewRequests {
+		t.Fatalf("migration %q is not right after %q", migrationSourceAttachmentIndex, migrationReviewRequests)
+	}
+	if got := migrationSourceAttachmentIndex; got != "0017_source_attachment_index" {
+		t.Fatalf("migrationSourceAttachmentIndex = %q", got)
+	}
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver).(*sqlStore)
+			migrateTo(t, db, st, migrationSourceAttachmentIndex)
+			ctx := context.Background()
+			if err := st.Init(ctx); err != nil {
+				t.Fatalf("Init over 0016: %v", err)
+			}
+			var idxCount int
+			if st.dialect == dialectPostgres {
+				if err := db.QueryRow(`SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'idx_artifact_version_source_attachment'`).Scan(&idxCount); err != nil {
+					t.Fatalf("check pg_indexes: %v", err)
+				}
+			} else {
+				if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_artifact_version_source_attachment'`).Scan(&idxCount); err != nil {
+					t.Fatalf("check sqlite_master: %v", err)
+				}
+			}
+			if idxCount != 1 {
+				t.Fatalf("idx_artifact_version_source_attachment count = %d, want 1", idxCount)
+			}
+			count := func() int {
+				var n int
+				if err := db.QueryRow(st.rebind("SELECT COUNT(*) FROM artifact_migrations WHERE name = ?"), migrationSourceAttachmentIndex).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			if n := count(); n != 1 {
+				t.Errorf("ledger rows for 0017 = %d, want 1", n)
+			}
+			if err := st.Init(ctx); err != nil {
+				t.Errorf("Init again: %v", err)
+			}
+			if n := count(); n != 1 {
+				t.Errorf("ledger rows for 0017 after a second Init = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestStoreListArtifactsBySourceAttachments verifies reverse lookup across
+// both SQLite and Postgres: distinct live artifacts ordered by created_at DESC,
+// deleted artifacts excluded, multiple versions referencing the same attachment
+// deduplicated, and batch lookup across multiple attachment IDs.
+func TestStoreListArtifactsBySourceAttachments(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		att1 := uuid.NewString()
+		att2 := uuid.NewString()
+		attUnused := uuid.NewString()
+		t0 := time.Now().UTC().Truncate(time.Microsecond)
+
+		seedPublishedFrom := func(srcAttID string, createdAt time.Time, title string) *Artifact {
+			t.Helper()
+			artID := uuid.NewString()
+			verID := uuid.NewString()
+			a := &Artifact{
+				ID:         artID,
+				ScopeKind:  ScopeKindProject,
+				ScopeRef:   "proj-1",
+				OwnerKind:  PrincipalKindUser,
+				OwnerRef:   "user-1",
+				Title:      title,
+				CurrentSeq: 1,
+				CreatedAt:  createdAt,
+				UpdatedAt:  createdAt,
+			}
+			v := &Version{
+				ID:                 verID,
+				ArtifactID:         artID,
+				Seq:                1,
+				Kind:               VersionKindPublish,
+				EntryPath:          "file.txt",
+				TotalBytes:         4,
+				FileCount:          1,
+				CreatedByKind:      PrincipalKindUser,
+				CreatedByRef:       "user-1",
+				CreatedAt:          createdAt,
+				State:              VersionStateReady,
+				SourceAttachmentID: srcAttID,
+			}
+			files := []File{{VersionID: verID, Path: "file.txt", Size: 4, SHA256: strings.Repeat("a", 64), MediaType: "text/plain"}}
+			if err := st.CreatePublished(ctx, a, v, files, nil); err != nil {
+				t.Fatalf("CreatePublished %s: %v", title, err)
+			}
+			return a
+		}
+
+		// Empty input returns empty map without error.
+		empty, err := st.ListArtifactsBySourceAttachments(ctx, nil)
+		if err != nil || len(empty) != 0 {
+			t.Fatalf("empty input = %+v, %v; want empty map", empty, err)
+		}
+
+		older := seedPublishedFrom(att1, t0.Add(-2*time.Minute), "older")
+		newer := seedPublishedFrom(att1, t0.Add(-1*time.Minute), "newer")
+		deleted := seedPublishedFrom(att1, t0, "deleted")
+		otherAtt := seedPublishedFrom(att2, t0.Add(-30*time.Second), "other")
+
+		// Append a second version of `older` referencing the same att1: `older`
+		// must still appear only once (distinct).
+		v2ID := uuid.NewString()
+		v2 := &Version{
+			ID:                 v2ID,
+			ArtifactID:         older.ID,
+			Seq:                2,
+			Kind:               VersionKindPublish,
+			EntryPath:          "file.txt",
+			TotalBytes:         4,
+			FileCount:          1,
+			CreatedByKind:      PrincipalKindUser,
+			CreatedByRef:       "user-1",
+			CreatedAt:          t0.Add(time.Minute),
+			State:              VersionStateReady,
+			SourceAttachmentID: att1,
+		}
+		if _, err := st.AppendPublishedVersion(ctx, v2, []File{{VersionID: v2ID, Path: "file.txt", Size: 4, SHA256: strings.Repeat("b", 64), MediaType: "text/plain"}}); err != nil {
+			t.Fatalf("AppendPublishedVersion: %v", err)
+		}
+
+		// Soft-delete `deleted`: must not appear in results.
+		actor := Actor{Kind: PrincipalKindUser, Ref: "user-1", Authority: AuthorityOwner}
+		if _, err := st.DeleteArtifact(ctx, deleted.ID, DeleteOptions{Actor: &actor}); err != nil {
+			t.Fatalf("DeleteArtifact: %v", err)
+		}
+
+		// Batch query with duplicate att1 and unused attUnused.
+		got, err := st.ListArtifactsBySourceAttachments(ctx, []string{att1, att1, att2, attUnused, ""})
+		if err != nil {
+			t.Fatalf("ListArtifactsBySourceAttachments: %v", err)
+		}
+		if _, hasUnused := got[attUnused]; hasUnused {
+			t.Errorf("unused attachment should be absent from result map")
+		}
+		got1 := got[att1]
+		if len(got1) != 2 {
+			t.Fatalf("att1 artifacts = %d, want 2 (newer, older)", len(got1))
+		}
+		if got1[0].ID != newer.ID || got1[1].ID != older.ID {
+			t.Errorf("att1 order = [%s, %s], want [%s, %s] (created_at DESC)", got1[0].ID, got1[1].ID, newer.ID, older.ID)
+		}
+		got2 := got[att2]
+		if len(got2) != 1 || got2[0].ID != otherAtt.ID {
+			t.Errorf("att2 artifacts = %+v, want [%s]", got2, otherAtt.ID)
 		}
 	})
 }

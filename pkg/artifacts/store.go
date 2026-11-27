@@ -706,6 +706,12 @@ type Store interface {
 	// creation. Messages without attachments are absent from the map.
 	ListMessageAttachments(ctx context.Context, messageIDs []string) (map[string][]AttachmentRow, error)
 
+	// ListArtifactsBySourceAttachments returns the distinct live
+	// (deleted_at IS NULL) non-attachment artifacts whose versions record a
+	// source_attachment_id in attIDs, keyed by source_attachment_id and
+	// ordered by artifact.created_at DESC (with artifact.id DESC as tie-breaker).
+	ListArtifactsBySourceAttachments(ctx context.Context, attIDs []string) (map[string][]*Artifact, error)
+
 	// RetireScope soft-deletes, through DeleteArtifact, every live artifact
 	// in the scope (kind, ref), up to limit, recording actor, and returns
 	// how many it deleted.

@@ -3936,6 +3936,10 @@ type Message struct {
 	// artifacts here, to a reader only, so catch-up can say they were not
 	// delivered (ptone/scion#4596).
 	DeferredAttachments []DeferredAttachment `json:"deferredAttachments,omitempty"`
+
+	// Attachments lists the attachments of the message the caller may read,
+	// filled on conversation read routes only. Never persisted (ptone/scion#9579).
+	Attachments []MessageAttachment `json:"attachments,omitempty"`
 }
 
 // DeferredAttachment names one attachment of a deferred message: its
@@ -3943,6 +3947,18 @@ type Message struct {
 type DeferredAttachment struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+}
+
+// MessageAttachment describes one artifact-backed attachment of a message
+// returned on conversation read routes (ptone/scion#9579).
+type MessageAttachment struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Size        int64    `json:"size"`
+	ContentType string   `json:"contentType"`
+	SHA256      string   `json:"sha256"`
+	Ref         string   `json:"ref"`
+	PublishedAs []string `json:"publishedAs,omitempty"`
 }
 
 // MessageFilter defines query parameters for listing messages.
