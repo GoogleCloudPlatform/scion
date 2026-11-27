@@ -391,9 +391,10 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 // that adds a role scope from breaking delegation for pre-deploy agent JWTs,
 // frozen bounded agent chains, or existing UAT selector sets (ptone/scion#8324).
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
-	ScopeProjectArtifactRead:  true,
-	ScopeProjectArtifactWrite: true,
-	ScopeProjectSkillWrite:    true,
+	ScopeProjectArtifactRead:          true,
+	ScopeProjectArtifactWrite:         true,
+	ScopeProjectArtifactRequestReview: true,
+	ScopeProjectSkillWrite:            true,
 }
 
 // roleFitsCeiling reports whether every scope of role, other than the

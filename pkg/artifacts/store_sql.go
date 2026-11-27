@@ -1228,16 +1228,21 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any, error) {
 }
 
 // readGrantFilter returns the SQL condition, on the grant table aliased
-// alias, that a grant carries a permission in grantsForRead, and its
+// alias, that a grant carries a permission in grantsForRead and is not
+// role-gated (SponsorReviewCreator or BoundedReviewCreator), and its
 // arguments. Both list pushdowns (the grant arms of the candidate query and
 // the "shared with the project" subquery) use it, so the read set the list
-// pushes down to SQL is always the one canReadWith matches in Go.
+// pushes down to SQL is always the one canReadWith matches in Go, and
+// role-gated grants never surface a row on their own (design §4.3).
 func readGrantFilter(alias string) (string, []any) {
-	args := make([]any, len(grantsForRead))
-	for i, p := range grantsForRead {
-		args[i] = p
+	args := make([]any, 0, len(grantsForRead)+2)
+	for _, p := range grantsForRead {
+		args = append(args, p)
 	}
-	return alias + ".permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(args)), ", ") + ")", args
+	args = append(args, SponsorReviewCreator, BoundedReviewCreator)
+	cond := "(" + alias + ".permission IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(grantsForRead)), ", ") + ")" +
+		" AND (" + alias + ".created_by_ref IS NULL OR " + alias + ".created_by_ref NOT IN (?, ?)))"
+	return cond, args
 }
 
 // candidateColumns is the column list every arm of the candidate query

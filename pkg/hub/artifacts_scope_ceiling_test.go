@@ -164,18 +164,20 @@ func checkCeilingOptionalRoleScopesReviewed(optional, reviewed map[AgentTokenSco
 // (ptone/scion#8324).
 func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
 	reviewed := map[AgentTokenScope]bool{
-		ScopeProjectArtifactRead:  true,
-		ScopeProjectArtifactWrite: true,
-		ScopeProjectSkillWrite:    true,
+		ScopeProjectArtifactRead:          true,
+		ScopeProjectArtifactWrite:         true,
+		ScopeProjectArtifactRequestReview: true,
+		ScopeProjectSkillWrite:            true,
 	}
 	require.NoError(t, checkCeilingOptionalRoleScopesReviewed(ceilingOptionalRoleScopes, reviewed, ScopesForRole))
 
 	t.Run("unreviewed addition prompts review checklist", func(t *testing.T) {
 		candidate := map[AgentTokenScope]bool{
-			ScopeProjectArtifactRead:  true,
-			ScopeProjectArtifactWrite: true,
-			ScopeProjectSkillWrite:    true,
-			ScopeProjectTemplateWrite: true,
+			ScopeProjectArtifactRead:          true,
+			ScopeProjectArtifactWrite:         true,
+			ScopeProjectArtifactRequestReview: true,
+			ScopeProjectSkillWrite:            true,
+			ScopeProjectTemplateWrite:         true,
 		}
 		err := checkCeilingOptionalRoleScopesReviewed(candidate, reviewed, ScopesForRole)
 		require.Error(t, err)
@@ -185,9 +187,10 @@ func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
 
 	t.Run("false entry rejected", func(t *testing.T) {
 		bad := map[AgentTokenScope]bool{
-			ScopeProjectArtifactRead:  true,
-			ScopeProjectArtifactWrite: false,
-			ScopeProjectSkillWrite:    true,
+			ScopeProjectArtifactRead:          true,
+			ScopeProjectArtifactWrite:         false,
+			ScopeProjectArtifactRequestReview: true,
+			ScopeProjectSkillWrite:            true,
 		}
 		err := checkCeilingOptionalRoleScopesReviewed(bad, reviewed, ScopesForRole)
 		require.Error(t, err)
@@ -654,4 +657,39 @@ func TestAdditiveCeilingOptionalRoleScope_NoDelegation403OrWidening(t *testing.T
 	l1GrantAfter, err := f.srv.AuthorizeAgentToken(ctx, l1After)
 	require.NoError(t, err)
 	assert.Contains(t, l1GrantAfter.Scopes, addedScope)
+}
+
+// TestLegacyChainAndPreRequestReviewCeilingOptionalScope verifies design §4.8
+// and §10 Q2: project:artifact:request_review is optional under ceilings. A
+// legacy unrecorded delegation chain or a pre-Phase-4 bounded ceiling lacking
+// artifact.request_review still fits baseline/full without a ceiling violation;
+// the scope is treated as absent (dropped at mint and denied at use).
+func TestLegacyChainAndPreRequestReviewCeilingOptionalScope(t *testing.T) {
+	// 1. Legacy unrecorded delegation chain (EffectCeilingUnrecorded).
+	legacy := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}
+	assert.True(t, roleFitsCeiling(legacy, AgentRoleBaseline), "legacy unrecorded chain must still fit baseline")
+	assert.True(t, roleFitsCeiling(legacy, AgentRoleFull), "legacy unrecorded chain must still fit full")
+	assert.False(t, ceilingAllowsScope(legacy, ScopeProjectArtifactRequestReview), "legacy chain must not be issued project:artifact:request_review")
+	assert.False(t, EffectCeilingAllows(legacy, "artifact.request_review", false), "legacy chain must be denied artifact.request_review at use")
+	legacyIssued := filterScopes(ScopesForRole(AgentRoleBaseline), legacy, ScopeCeilings{})
+	assert.NotContains(t, legacyIssued, ScopeProjectArtifactRequestReview)
+	assert.Contains(t, legacyIssued, ScopeProjectRead)
+
+	// 2. Bounded ceiling that predates artifact.request_review (carries
+	//    artifact.read + artifact.create, lacks artifact.request_review).
+	preReqReview := boundedCeiling(
+		"harness_config.list", "harness_config.read", "project.read",
+		"skill.list", "skill.read", "template.list", "template.read",
+		"agent.create", "artifact.read", "artifact.create",
+	)
+	assert.True(t, roleFitsCeiling(preReqReview, AgentRoleBaseline), "pre-request_review ceiling must still fit baseline")
+	role, cause, ok := childRoleWithinCeiling(preReqReview, AgentRoleBaseline, true)
+	require.True(t, ok, "explicit baseline must not fail ceiling check: %q", cause)
+	assert.Equal(t, AgentRoleBaseline, role)
+
+	issued := filterScopes(ScopesForRole(AgentRoleBaseline), preReqReview, ScopeCeilings{})
+	assert.Contains(t, issued, ScopeProjectArtifactRead)
+	assert.Contains(t, issued, ScopeProjectArtifactWrite)
+	assert.NotContains(t, issued, ScopeProjectArtifactRequestReview, "mint filter must drop optional scope absent from ceiling")
+	assert.False(t, EffectCeilingAllows(preReqReview, "artifact.request_review", false))
 }

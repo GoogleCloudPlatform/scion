@@ -169,6 +169,28 @@ flow when a newer version is published).
 - **CLI:** there are no `scion artifact` draft commands; agents review artifacts
   with `scion artifact publish --review`.
 
+### Request a review of your artifact
+
+When `hub.artifacts_review_requests` is enabled on the Hub, an owning agent can
+ask its delegating user or another project member to review its artifact:
+
+```bash
+scion artifact request-review scion://artifact/<id> --delegator --note "Ready for review"
+scion artifact request-review scion://artifact/<id> --user <user-id> --note "Please check section 3"
+scion artifact review-requests scion://artifact/<id>
+scion artifact request-review scion://artifact/<id> --withdraw --user <user-id>
+```
+
+- `--delegator` resolves your delegating user on the Hub (agent mode only).
+- Reviewers who read the artifact via a role in your project receive a bounded
+  review grant (at most 10 bounded grants per artifact) that never confers read
+  access on its own.
+- Use `scion artifact review-requests` to inspect open requests and read dismiss
+  notes; when a reviewer dismisses your request, the Hub also delivers a system
+  message with their note.
+- `--withdraw` withdraws an open request you created and removes its bounded
+  grant if no human has edited it.
+
 ### Act on a review of your artifact
 
 When someone else reviews an artifact you own, the Hub sends you a message with

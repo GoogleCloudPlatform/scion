@@ -205,6 +205,24 @@ func principalCanReview(ctx context.Context, subject RecipientSubject, a *Artifa
 	return access != accessNone, nil
 }
 
+// principalReadsHomeByRole reports whether a resolved named principal reads
+// artifact a through a role in a's home project (design §4.3 step 5c,
+// ptone/scion#5548). It evaluates Permits and Authorize for PermissionRead on
+// a.ScopeRef via recipientHost, never consulting artifact grants. A nil
+// subject answers (false, nil); any lookup error is returned so callers fail
+// closed.
+func principalReadsHomeByRole(ctx context.Context, subject RecipientSubject, a *Artifact) (bool, error) {
+	if subject == nil || a == nil || a.ScopeKind != ScopeKindProject || a.ScopeRef == "" {
+		return false, nil
+	}
+	rh := &recipientHost{subject: subject}
+	ok := rh.Authorize(ctx, a.ScopeRef, PermissionRead)
+	if rh.err != nil {
+		return false, rh.err
+	}
+	return ok, nil
+}
+
 // recipientHost is the Host canReadWith sees for a recipient check: its
 // caller is the named principal, Permits is the subject's Permits, and
 // Authorize is Permits then the subject's Authorize, as the hub's Authorize

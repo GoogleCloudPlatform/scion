@@ -193,10 +193,10 @@ func TestAgentModeArtifactVerbs(t *testing.T) {
 	root.AddCommand(cloneCommandShape(real))
 	applyModeRestrictions(root, resolveMode())
 	names := collectCommandNames(root)
-	// list, view, comments and review-requests are agent-allowed read-only
+	// list, view, comments, request-review and review-requests are agent-allowed
 	// verbs (ptone/scion#4572, ptone/scion#4579, ptone/scion#7115,
-	// ptone/scion#9307); share, grants and delete are not.
-	assert.Equal(t, []string{"artifact", "artifact.comments", "artifact.get", "artifact.list", "artifact.publish", "artifact.review-requests", "artifact.versions", "artifact.view"}, names)
+	// ptone/scion#9307, ptone/scion#5548); share, grants and delete are not.
+	assert.Equal(t, []string{"artifact", "artifact.comments", "artifact.get", "artifact.list", "artifact.publish", "artifact.request-review", "artifact.review-requests", "artifact.versions", "artifact.view"}, names)
 	assert.False(t, strings.Contains(strings.Join(names, ","), "share"))
 	assert.False(t, strings.Contains(strings.Join(names, ","), "grants"))
 }

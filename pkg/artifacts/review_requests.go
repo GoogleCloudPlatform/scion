@@ -43,8 +43,20 @@ const (
 	maxReviewRequestBodyBytes = 16 << 10
 	maxClosedReviewRequests   = 50
 
+	// MaxBoundedGrantsPerArtifact caps the number of bounded review grants
+	// (CreatedByRef == BoundedReviewCreator) on one artifact (design §4.3,
+	// ptone/scion#5548).
+	MaxBoundedGrantsPerArtifact = 10
+
 	reviewRequestRemindCooldown = 24 * time.Hour
 )
+
+// BoundedReviewCreator is the CreatedByRef of a bounded review grant written
+// by an agent review request (design §4.3, ptone/scion#5548). Like
+// SponsorReviewCreator, a grant carrying this marker counts only while its
+// subject holds a role that reads in the artifact's home project, so it never
+// confers read on its own.
+const BoundedReviewCreator = ActorKindSystem + ":review_request"
 
 // Error and per-reviewer refusal codes for review requests (design §4.3, §4.4).
 const (
@@ -66,17 +78,22 @@ const (
 	reviewerClassUnavailable reviewerClass = iota
 	reviewerClassCanReview
 	reviewerClassNeedsRaise
+	reviewerClassNeedsBounded
+	reviewerClassCannotReview
 )
 
-// classifyReviewer runs steps 3 (ResolveRecipient), 4 (MayNotifyReviewer), and
-// 5a (principalCanReview) for one candidate user reviewer and returns only a
+// classifyReviewer runs steps 3 (ResolveRecipient), 4 (MayNotifyReviewer for
+// user requesters), 5a (principalCanReview), and 5c (principalReadsHomeByRole
+// for agent requesters) for one candidate user reviewer and returns only a
 // classification. The resolved RecipientSubject never leaves this function and
-// is used only for a nil check and principalCanReview.
+// is used only for a nil check, principalCanReview, and
+// principalReadsHomeByRole.
 func classifyReviewer(
 	ctx context.Context,
 	auth RecipientAuthority,
 	notifier ReviewRequestNotifier,
 	a *Artifact,
+	requesterKind string,
 	reviewerUserID string,
 	now time.Time,
 	loadGrants func() ([]Grant, error),
@@ -88,12 +105,14 @@ func classifyReviewer(
 	if subject == nil {
 		return reviewerClassUnavailable, nil
 	}
-	visible, err := notifier.MayNotifyReviewer(ctx, reviewerUserID)
-	if err != nil {
-		return reviewerClassUnavailable, err
-	}
-	if !visible {
-		return reviewerClassUnavailable, nil
+	if requesterKind == PrincipalKindUser {
+		visible, err := notifier.MayNotifyReviewer(ctx, reviewerUserID)
+		if err != nil {
+			return reviewerClassUnavailable, err
+		}
+		if !visible {
+			return reviewerClassUnavailable, nil
+		}
 	}
 	canReview, err := principalCanReview(ctx, subject, a, PrincipalKindUser, reviewerUserID, now, loadGrants)
 	if err != nil {
@@ -102,12 +121,23 @@ func classifyReviewer(
 	if canReview {
 		return reviewerClassCanReview, nil
 	}
+	if requesterKind == PrincipalKindAgent {
+		readsHome, err := principalReadsHomeByRole(ctx, subject, a)
+		if err != nil {
+			return reviewerClassUnavailable, err
+		}
+		if readsHome {
+			return reviewerClassNeedsBounded, nil
+		}
+		return reviewerClassCannotReview, nil
+	}
 	return reviewerClassNeedsRaise, nil
 }
 
 // CreateReviewRequestsBody is the JSON body of POST /api/v1/artifacts/{id}/review-requests.
 type CreateReviewRequestsBody struct {
 	Reviewers []string `json:"reviewers"`
+	Delegator bool     `json:"delegator,omitempty"`
 	Note      string   `json:"note,omitempty"`
 }
 
@@ -230,13 +260,17 @@ func (s *Service) populateReviewState(ctx context.Context, b backend, a *Artifac
 // User requesters must hold an interactive session and publish access; when
 // they may also administer the artifact, reviewers who cannot yet review are
 // raised to a principal review grant in the same transaction (access=raised).
+// Agent requesters must own the artifact in their own home project and hold
+// artifact.request_review; reviewers who read the artifact via a home-project
+// role receive a role-gated bounded review grant in the same transaction
+// (access=bounded, at most MaxBoundedGrantsPerArtifact per artifact).
 func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 	if !s.featureEnabled(ctx, FeatureReviewRequests) {
 		writeNotFound(w)
 		return
 	}
-	kind, ref, _, ok := s.host.Principal(ctx)
+	kind, ref, homeScope, ok := s.host.Principal(ctx)
 	if !ok {
 		writeNotFound(w)
 		return
@@ -245,9 +279,19 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	if kind != PrincipalKindUser {
-		writeError(w, http.StatusForbidden, CodeAgentCannotRequestRev, "only users can request reviews")
+	if kind != PrincipalKindUser && kind != PrincipalKindAgent {
+		writeError(w, http.StatusForbidden, "forbidden", "your principal cannot request reviews")
 		return
+	}
+	if kind == PrincipalKindAgent {
+		if a.OwnerKind != PrincipalKindAgent || a.OwnerRef != ref {
+			writeError(w, http.StatusForbidden, "forbidden", "agents can only request reviews on artifacts they own")
+			return
+		}
+		if homeScope == "" || a.ScopeKind != ScopeKindProject || a.ScopeRef != homeScope {
+			writeError(w, http.StatusForbidden, "forbidden", "agents cannot request reviews on artifacts outside their home project")
+			return
+		}
 	}
 	access, err := s.canWriteErr(ctx, b, a)
 	if err != nil {
@@ -281,13 +325,18 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "reviewer visibility check is unavailable")
 		return
 	}
-	// Route-level refusal for non-interactive credentials before charging the
-	// limiter or entering the per-reviewer loop.
-	if !notifier.IsInteractiveSession(ctx) {
+	// Route-level refusal for non-interactive user credentials before charging
+	// the limiter or entering the per-reviewer loop. Agent requesters use the
+	// owning-agent + home-role bounded path instead (design §4.3 step 5c).
+	if kind == PrincipalKindUser && !notifier.IsInteractiveSession(ctx) {
 		writeError(w, http.StatusForbidden, CodeInteractiveSessionRequired, "requesting reviews requires an interactive user session")
 		return
 	}
-	if !s.chargePrincipal(w, LimitReviewRequest, kind, ref) {
+	limitFamily := LimitReviewRequest
+	if kind == PrincipalKindAgent {
+		limitFamily = LimitReviewRequestAgent
+	}
+	if !s.chargePrincipal(w, limitFamily, kind, ref) {
 		return
 	}
 
@@ -307,7 +356,11 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "bad_request", `the body must be a JSON object such as {"reviewers": ["user:<id>"], "note": "..."}`)
 		return
 	}
-	if len(req.Reviewers) == 0 || len(req.Reviewers) > maxReviewRequestReviewers {
+	if req.Delegator && kind != PrincipalKindAgent {
+		writeError(w, http.StatusBadRequest, "bad_request", "delegator can only be used by an agent")
+		return
+	}
+	if (!req.Delegator && len(req.Reviewers) == 0) || len(req.Reviewers) > maxReviewRequestReviewers {
 		writeError(w, http.StatusBadRequest, "bad_request", "reviewers must contain between 1 and 10 user principals")
 		return
 	}
@@ -321,8 +374,32 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		principal string
 		userID    string
 	}
-	seen := make(map[string]bool, len(req.Reviewers))
-	targets := make([]reviewerTarget, 0, len(req.Reviewers))
+	seen := make(map[string]bool, len(req.Reviewers)+1)
+	targets := make([]reviewerTarget, 0, len(req.Reviewers)+1)
+	var delegatorMissing bool
+	if req.Delegator {
+		rec, ok := s.host.(SponsorRecorder)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "delegating user resolution is unavailable")
+			return
+		}
+		delegatorID, derr := rec.DelegatingUser(ctx, ref)
+		if derr != nil {
+			slog.ErrorContext(ctx, "artifacts: delegating user resolution failed", "error", derr)
+			writeError(w, http.StatusServiceUnavailable, "unavailable", "could not resolve delegating user")
+			return
+		}
+		if delegatorID == "" {
+			delegatorMissing = true
+		} else {
+			if u, err := uuid.Parse(delegatorID); err == nil {
+				delegatorID = u.String()
+			}
+			norm := PrincipalRef(PrincipalKindUser, delegatorID)
+			seen[norm] = true
+			targets = append(targets, reviewerTarget{principal: norm, userID: delegatorID})
+		}
+	}
 	for _, raw := range req.Reviewers {
 		rk, rid, ok := strings.Cut(strings.TrimSpace(raw), ":")
 		if !ok || rk != PrincipalKindUser || !validSubjectID(rid) {
@@ -338,6 +415,10 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 		}
 		seen[norm] = true
 		targets = append(targets, reviewerTarget{principal: norm, userID: rid})
+	}
+	if len(targets) > maxReviewRequestReviewers {
+		writeError(w, http.StatusBadRequest, "bad_request", "reviewers must contain between 1 and 10 user principals")
+		return
 	}
 
 	if a.CurrentSeq == 0 {
@@ -374,6 +455,9 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 
 	now := s.now()
 	actor := &Actor{Kind: kind, Ref: ref, Authority: AuthorityPublisher}
+	if kind == PrincipalKindAgent {
+		actor.Expect = Expect{ScopeRef: a.ScopeRef, OwnerKind: a.OwnerKind, OwnerRef: a.OwnerRef}
+	}
 	nameRefs := make([]string, 0, len(targets)+1)
 	nameRefs = append(nameRefs, PrincipalRef(kind, ref))
 	for _, t := range targets {
@@ -381,9 +465,16 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 	}
 	names := s.principalDisplayNames(ctx, nameRefs)
 
-	results := make([]ReviewRequestResult, 0, len(targets))
+	results := make([]ReviewRequestResult, 0, len(targets)+1)
+	if delegatorMissing {
+		results = append(results, ReviewRequestResult{
+			Reviewer: "delegator",
+			Outcome:  ReviewRequestOutcomeRefused,
+			Code:     CodeReviewerUnavailable,
+		})
+	}
 	for _, t := range targets {
-		if t.userID == ref {
+		if kind == PrincipalKindUser && t.userID == ref {
 			results = append(results, ReviewRequestResult{
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
@@ -392,8 +483,8 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		// Steps 3, 4, and 5a via classifyReviewer (non-access-granting).
-		class, err := classifyReviewer(ctx, auth, notifier, a, t.userID, now, loadGrants)
+		// Steps 3, 4, 5a, and 5c via classifyReviewer (non-access-granting).
+		class, err := classifyReviewer(ctx, auth, notifier, a, kind, t.userID, now, loadGrants)
 		if err != nil {
 			slog.ErrorContext(ctx, "artifacts: classify reviewer failed", "error", err)
 			results = append(results, ReviewRequestResult{
@@ -411,10 +502,19 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			})
 			continue
 		}
+		if class == reviewerClassCannotReview {
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeReviewerCannotReview,
+			})
+			continue
+		}
 
 		reqAccess := ReviewRequestAccessExisting
 		var grantOpt *ReviewRequestGrantOption
-		if class == reviewerClassNeedsRaise {
+		switch class {
+		case reviewerClassNeedsRaise:
 			// Step 5b: user requester who may administer raises the reviewer's
 			// principal grant to review in the same transaction.
 			admAuth, aerr := checkAdmin()
@@ -449,6 +549,33 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 				MaxGrants: MaxGrantsPerArtifact,
 				Actor:     s.callerActor(ctx, a, admAuth),
 			}
+		case reviewerClassNeedsBounded:
+			// Step 5c: owning agent writes a role-gated bounded review grant
+			// in the same transaction.
+			if kind != PrincipalKindAgent || a.OwnerKind != PrincipalKindAgent || a.OwnerRef != ref || a.ScopeRef != homeScope {
+				results = append(results, ReviewRequestResult{
+					Reviewer: t.principal,
+					Outcome:  ReviewRequestOutcomeRefused,
+					Code:     CodeReviewerCannotReview,
+				})
+				continue
+			}
+			reqAccess = ReviewRequestAccessBounded
+			grantOpt = &ReviewRequestGrantOption{
+				Grant: &Grant{
+					ID:           uuid.NewString(),
+					ArtifactID:   a.ID,
+					SubjectKind:  SubjectPrincipal,
+					SubjectRef:   t.principal,
+					Permission:   GrantReview,
+					CreatedByRef: BoundedReviewCreator,
+					CreatedAt:    now,
+				},
+				MaxGrants:        MaxGrantsPerArtifact,
+				Bounded:          true,
+				MaxBoundedGrants: MaxBoundedGrantsPerArtifact,
+				Actor:            actor,
+			}
 		}
 
 		row, outcome, err := b.store.CreateOrRemindReviewRequest(ctx, ReviewRequest{
@@ -460,6 +587,18 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 			Note:          req.Note,
 			Access:        reqAccess,
 		}, reviewRequestRemindCooldown, now, actor, grantOpt)
+		if errors.Is(err, ErrStewardPrecondition) && kind == PrincipalKindAgent {
+			if len(results) == 0 {
+				writeError(w, http.StatusForbidden, "forbidden", "the artifact's home project or owner changed")
+				return
+			}
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeReviewerCannotReview,
+			})
+			continue
+		}
 		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStewardPrecondition) {
 			if len(results) == 0 {
 				writeNotFound(w)
@@ -469,6 +608,14 @@ func (s *Service) handleCreateReviewRequests(w http.ResponseWriter, r *http.Requ
 				Reviewer: t.principal,
 				Outcome:  ReviewRequestOutcomeRefused,
 				Code:     CodeUnavailable,
+			})
+			continue
+		}
+		if errors.Is(err, ErrBoundedGrantConflict) {
+			results = append(results, ReviewRequestResult{
+				Reviewer: t.principal,
+				Outcome:  ReviewRequestOutcomeRefused,
+				Code:     CodeReviewerCannotReview,
 			})
 			continue
 		}

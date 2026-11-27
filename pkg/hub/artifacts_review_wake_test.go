@@ -803,3 +803,59 @@ func TestArtifactReviewWake_DeferredWakeGoroutineRecoversPanic(t *testing.T) {
 	}
 	f.srv.autoWakeWork.wg.Wait()
 }
+
+// TestArtifactReviewRequestDismissWake_SystemVsUserSuspended verifies design §4.7
+// [D: dismiss-agent-delivery] and acceptance §13 item 8:
+//   - a system-suspended agent owner/requester is auto-woken and receives the
+//     dismiss system message;
+//   - a user-suspended agent owner/requester is never woken.
+func TestArtifactReviewRequestDismissWake_SystemVsUserSuspended(t *testing.T) {
+	t.Run("system-suspended auto-wakes and delivers dismiss notice", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonIdle)
+		f.readyOnStart(t)
+
+		host := newArtifactHost(f.srv)
+		err := host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Wake Test Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Will review tomorrow",
+		})
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			return len(f.disp.getStartCalls()) == 1 && len(f.disp.getMessageCalls()) == 1
+		}, 5*time.Second, 20*time.Millisecond, "system-suspended agent should auto-wake and receive dismiss notice")
+		assert.Contains(t, f.disp.getMessageCalls()[0].Message, `dismissed your review request on "Wake Test Doc"`)
+		assert.Contains(t, f.disp.getMessageCalls()[0].Message, "Will review tomorrow")
+	})
+
+	t.Run("user-suspended never wakes", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		f.readyOnStart(t)
+
+		host := newArtifactHost(f.srv)
+		err := host.NotifyRequestDismissed(context.Background(), artifacts.ReviewRequestDismissNotice{
+			ArtifactID:    f.artifactID,
+			ArtifactTitle: "Wake Test Doc",
+			HomeScope:     f.project.ID,
+			ReviewerKind:  artifacts.PrincipalKindUser,
+			ReviewerRef:   f.reviewUser.ID,
+			RequesterKind: artifacts.PrincipalKindAgent,
+			RequesterRef:  f.owner.ID,
+			OwnerKind:     artifacts.PrincipalKindAgent,
+			OwnerRef:      f.owner.ID,
+			ResponseNote:  "Do not wake",
+		})
+		require.Error(t, err, "user-suspended agent cannot be woken or delivered to")
+		assert.Empty(t, f.disp.getStartCalls(), "user-suspended agent must never be woken")
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}

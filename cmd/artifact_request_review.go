@@ -29,10 +29,11 @@ import (
 )
 
 var (
-	artifactRequestReviewUsers    []string
-	artifactRequestReviewNote     string
-	artifactRequestReviewWithdraw bool
-	artifactRequestReviewJSON     bool
+	artifactRequestReviewUsers     []string
+	artifactRequestReviewDelegator bool
+	artifactRequestReviewNote      string
+	artifactRequestReviewWithdraw  bool
+	artifactRequestReviewJSON      bool
 )
 
 var artifactRequestReviewCmd = &cobra.Command{
@@ -44,6 +45,9 @@ request with --withdraw (requires the hub.artifacts_review_requests experiment).
 Each --user flag accepts a user ID, user:<id>, or email address. Repeat
 --user to request reviews from up to 10 users at once.
 
+In agent mode, --delegator requests a review from the agent's delegating user
+without needing to pass their user ID.
+
 Note: --withdraw resolves the request ID through the artifact's review-requests
 list view, so a requester who has lost publish access cannot withdraw a request
 from the CLI.
@@ -52,9 +56,13 @@ Examples:
   scion artifact request-review scion://artifact/5f1c2d3e-... --user alice@example.com
   scion artifact request-review scion://artifact/5f1c2d3e-... --user <user-id> --note "Please check section 3"
   scion artifact request-review scion://artifact/5f1c2d3e-... --user alice@example.com --user bob@example.com --json
+  scion artifact request-review scion://artifact/5f1c2d3e-... --delegator --note "Ready for review"
   scion artifact request-review scion://artifact/5f1c2d3e-... --withdraw --user alice@example.com`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if artifactRequestReviewDelegator && resolveMode() != ModeAgent {
+			return errors.New("--delegator can only be used in agent mode")
+		}
 		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
@@ -62,16 +70,18 @@ Examples:
 		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
 		defer cancel()
 		return requestArtifactReview(ctx, client.Artifacts(), client.Users(), cmd.OutOrStdout(), args[0], requestReviewOptions{
-			Users:    artifactRequestReviewUsers,
-			Note:     artifactRequestReviewNote,
-			Withdraw: artifactRequestReviewWithdraw,
-			JSON:     artifactRequestReviewJSON || isJSONOutput(),
+			Users:     artifactRequestReviewUsers,
+			Delegator: artifactRequestReviewDelegator,
+			Note:      artifactRequestReviewNote,
+			Withdraw:  artifactRequestReviewWithdraw,
+			JSON:      artifactRequestReviewJSON || isJSONOutput(),
 		})
 	},
 }
 
 func init() {
 	artifactRequestReviewCmd.Flags().StringArrayVar(&artifactRequestReviewUsers, "user", nil, "User ID, user:<id>, or email to request a review from (repeatable)")
+	artifactRequestReviewCmd.Flags().BoolVar(&artifactRequestReviewDelegator, "delegator", false, "Request a review from the agent's delegating user (agent mode only)")
 	artifactRequestReviewCmd.Flags().StringVar(&artifactRequestReviewNote, "note", "", "Optional message for the reviewer (at most 1000 characters)")
 	artifactRequestReviewCmd.Flags().BoolVar(&artifactRequestReviewWithdraw, "withdraw", false, "Withdraw the open review request for each --user")
 	artifactRequestReviewCmd.Flags().BoolVar(&artifactRequestReviewJSON, "json", false, "Print the raw JSON response")
@@ -79,10 +89,11 @@ func init() {
 }
 
 type requestReviewOptions struct {
-	Users    []string
-	Note     string
-	Withdraw bool
-	JSON     bool
+	Users     []string
+	Delegator bool
+	Note      string
+	Withdraw  bool
+	JSON      bool
 }
 
 func resolveReviewerPrincipal(ctx context.Context, users hubclient.UserService, raw string) (string, error) {
@@ -142,8 +153,16 @@ func requestArtifactReview(ctx context.Context, svc hubclient.ArtifactService, u
 	if err != nil {
 		return err
 	}
-	if len(opts.Users) == 0 {
-		return errors.New("at least one --user is required")
+	if opts.Withdraw {
+		if opts.Delegator {
+			return errors.New("--delegator cannot be used with --withdraw; pass --user <id>")
+		}
+		if opts.Note != "" {
+			return errors.New("--note cannot be used with --withdraw")
+		}
+	}
+	if len(opts.Users) == 0 && !opts.Delegator {
+		return errors.New("at least one --user (or --delegator in agent mode) is required")
 	}
 	reviewers := make([]string, 0, len(opts.Users))
 	for _, u := range opts.Users {
@@ -154,13 +173,11 @@ func requestArtifactReview(ctx context.Context, svc hubclient.ArtifactService, u
 		reviewers = append(reviewers, principal)
 	}
 	if opts.Withdraw {
-		if opts.Note != "" {
-			return errors.New("--note cannot be used with --withdraw")
-		}
 		return withdrawArtifactReviewRequests(ctx, svc, out, id, reviewers, opts.JSON)
 	}
 	resp, err := svc.RequestReview(ctx, id, &hubclient.ArtifactReviewRequestsInput{
 		Reviewers: reviewers,
+		Delegator: opts.Delegator,
 		Note:      opts.Note,
 	})
 	if err != nil {

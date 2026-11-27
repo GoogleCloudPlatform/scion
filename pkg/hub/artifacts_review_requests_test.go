@@ -382,15 +382,78 @@ func TestArtifactsReviewRequestsOnRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, grantNotifyRec.Code, grantNotifyRec.Body.String())
 	assert.Contains(t, grantNotifyRec.Body.String(), artifacts.CodeUseReviewRequests)
 
-	// 5. Agent requester refused with 403.
+	// 5. Agent requester matrix:
+	//    - non-owning agent on Alice's artifact -> 403;
+	//    - owning agent on its own artifact:
+	//      - reviewer lacking home role (Dave in p2) -> reviewer_cannot_review;
+	//      - reviewer holding home role (Bob in p1) -> bounded, notification labelled "agent rr-agent";
+	//      - dismiss delivers SystemCategoryArtifactReview message to the running agent.
+	createTestUserWithProjectRole(t, s, tid("rr-dave"), "dave-rr@test.com", p2.ID, store.ProjectRoleMember)
+	dave, err := s.GetUser(ctx, tid("rr-dave"))
+	require.NoError(t, err)
+
 	agentBody, _ := json.Marshal(artifacts.CreateReviewRequestsBody{Reviewers: []string{"user:" + bob.ID}})
 	agentReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+artID+"/review-requests", bytes.NewReader(agentBody))
 	agentReq.Header.Set("Authorization", "Bearer "+agentTok)
 	agentRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(agentRec, agentReq)
-	assert.Equal(t, http.StatusForbidden, agentRec.Code)
+	assert.Equal(t, http.StatusForbidden, agentRec.Code, "non-owning agent must receive 403")
 
-	// 5. FeatureEnabled fails closed.
+	// Publish an artifact owned by rr-agent in p1.
+	agentPubReq := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts?name=agent.md&title=Agent+Report&scope="+p1.ID, bytes.NewReader([]byte("# Report\n")))
+	agentPubReq.Header.Set("Authorization", "Bearer "+agentTok)
+	agentPubRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(agentPubRec, agentPubReq)
+	require.Equal(t, http.StatusCreated, agentPubRec.Code, agentPubRec.Body.String())
+	var agentPubResp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(agentPubRec.Body.Bytes(), &agentPubResp))
+	agentArtID := agentPubResp.Artifact.ID
+
+	agentReqBody, _ := json.Marshal(artifacts.CreateReviewRequestsBody{
+		Reviewers: []string{"user:" + dave.ID, "user:" + bob.ID},
+		Note:      "Please check section 4",
+	})
+	agentReq = httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-requests", bytes.NewReader(agentReqBody))
+	agentReq.Header.Set("Authorization", "Bearer "+agentTok)
+	agentRec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(agentRec, agentReq)
+	require.Equal(t, http.StatusOK, agentRec.Code, agentRec.Body.String())
+	var agentCreateResp artifacts.CreateReviewRequestsResponse
+	require.NoError(t, json.Unmarshal(agentRec.Body.Bytes(), &agentCreateResp))
+	require.Len(t, agentCreateResp.Requests, 2)
+	assert.Equal(t, artifacts.ReviewRequestOutcomeRefused, agentCreateResp.Requests[0].Outcome)
+	assert.Equal(t, artifacts.CodeReviewerCannotReview, agentCreateResp.Requests[0].Code)
+	assert.Equal(t, artifacts.ReviewRequestOutcomeCreated, agentCreateResp.Requests[1].Outcome)
+	assert.Equal(t, artifacts.ReviewRequestAccessBounded, agentCreateResp.Requests[1].Access)
+	assert.True(t, agentCreateResp.Requests[1].Notified)
+
+	// Bob received ARTIFACT_REVIEW_REQUESTED labelled "agent rr-agent".
+	bobNotifsAfterAgent, err := s.GetNotifications(ctx, store.SubscriberTypeUser, bob.ID, false)
+	require.NoError(t, err)
+	var agentNoticeFound bool
+	for _, n := range bobNotifsAfterAgent {
+		if n.ResourceID == agentArtID && n.Status == store.NotificationStatusArtifactReviewRequested {
+			assert.Contains(t, n.Message, `agent rr-agent asked you to review "Agent Report" (v1)`)
+			assert.Equal(t, "Please check section 4", n.Excerpt)
+			agentNoticeFound = true
+		}
+	}
+	assert.True(t, agentNoticeFound, "expected Bob to receive review request notice from agent rr-agent")
+
+	// Bob dismisses -> running agent receives a SystemCategoryArtifactReview system message.
+	disp := newWakeRecordingDispatcher()
+	srv.SetDispatcher(disp)
+	dismissAgentRec := doAsUser(bob, http.MethodPost, "/api/v1/artifacts/"+agentArtID+"/review-request/dismiss",
+		artifacts.DismissReviewRequestBody{Note: "Needs benchmark numbers"})
+	require.Equal(t, http.StatusOK, dismissAgentRec.Code, dismissAgentRec.Body.String())
+	var dismissAgentResp artifacts.DismissReviewRequestResponse
+	require.NoError(t, json.Unmarshal(dismissAgentRec.Body.Bytes(), &dismissAgentResp))
+	assert.True(t, dismissAgentResp.AuthorNotified)
+	require.Len(t, disp.getMessageCalls(), 1)
+	assert.Contains(t, disp.getMessageCalls()[0].Message, `dismissed your review request on "Agent Report"`)
+	assert.Contains(t, disp.getMessageCalls()[0].Message, "Needs benchmark numbers")
+
+	// 6. FeatureEnabled fails closed.
 	h := newArtifactHost(srv)
 	assert.Equal(t, experiments.ArtifactsReviewRequests, artifacts.FeatureReviewRequests)
 	assert.True(t, h.FeatureEnabled(ctx, artifacts.FeatureReviewRequests))

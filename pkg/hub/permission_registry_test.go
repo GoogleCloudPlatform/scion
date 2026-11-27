@@ -657,6 +657,11 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// project. Deliberately excludes artifact.delete and artifact.manage,
 		// and the Reserved artifact.update (ptone/scion#3652).
 		ScopeProjectArtifactWrite: {"artifact.create"},
+		// Requesting reviews on artifacts owned by the agent in its own
+		// project (ptone/scion#5548). Ceiling-optional in baseline and full so
+		// legacy chains and UAT ceilings without artifact.request_review keep
+		// fitting without widening authority.
+		ScopeProjectArtifactRequestReview: {"artifact.request_review"},
 		// Reading artifacts has its own ceiling-optional scope rather than
 		// riding on project:read, so ceilings frozen before artifacts existed
 		// keep admitting project:read (see ceilingOptionalRoleScopes).

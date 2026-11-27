@@ -43,8 +43,12 @@ const (
 	// 30 transfers per hour per user, 300 per hour globally per hub instance.
 	LimitTransfer LimitFamily = "transfer"
 	// LimitReviewRequest covers POST /api/v1/artifacts/{id}/review-requests
-	// (ptone/scion#9296): 30/h per user, 600/h global.
+	// for user requesters (ptone/scion#9296): 30/h per user, 600/h global.
 	LimitReviewRequest LimitFamily = "review_request"
+	// LimitReviewRequestAgent covers POST /api/v1/artifacts/{id}/review-requests
+	// for agent requesters (ptone/scion#5548, design §4.7): 10/h per agent,
+	// 600/h global.
+	LimitReviewRequestAgent LimitFamily = "review_request_agent"
 	// LimitReviewRequestDismiss covers POST /api/v1/artifacts/{id}/review-request/dismiss
 	// (ptone/scion#9296): 30/h per user, 600/h global.
 	LimitReviewRequestDismiss LimitFamily = "review_request_dismiss"
@@ -75,6 +79,7 @@ var principalFamilyLimits = map[LimitFamily]familyLimit{
 	LimitDraftWrite:           {perPeriod: 12, burst: 12, globalPerPeriod: 1200, period: time.Minute},
 	LimitTransfer:             {perPeriod: 30, burst: 30, globalPerPeriod: 300, period: time.Hour},
 	LimitReviewRequest:        {perPeriod: 30, burst: 30, globalPerPeriod: 600, period: time.Hour},
+	LimitReviewRequestAgent:   {perPeriod: 10, burst: 10, globalPerPeriod: 600, period: time.Hour},
 	LimitReviewRequestDismiss: {perPeriod: 30, burst: 30, globalPerPeriod: 600, period: time.Hour},
 }
 

@@ -182,8 +182,8 @@ func TestListArtifactsRequestedFlag(t *testing.T) {
 }
 
 func TestArtifactReviewRequestModeAndWindowsGates(t *testing.T) {
-	if agentAllowed["artifact.request-review"] {
-		t.Error("artifact.request-review must NOT be in agentAllowed in Phase 2a")
+	if !agentAllowed["artifact.request-review"] {
+		t.Error("artifact.request-review must be in agentAllowed in Phase 4")
 	}
 	if agentAllowed["artifact.dismiss-review"] {
 		t.Error("artifact.dismiss-review must NOT be in agentAllowed")
@@ -199,6 +199,50 @@ func TestArtifactReviewRequestModeAndWindowsGates(t *testing.T) {
 	}
 	if !windowsAllowed["artifact.review-requests"] {
 		t.Error("artifact.review-requests must be in windowsAllowed")
+	}
+}
+
+func TestRequestArtifactReviewDelegatorCLI(t *testing.T) {
+	const artID = "5f1c2d3e-1111-2222-3333-444455556666"
+	svc := &stubReviewRequestArtifactService{
+		reqResp: &hubclient.ArtifactReviewRequestsResponse{
+			Requests: []hubclient.ArtifactReviewRequestResult{
+				{Reviewer: "user:u-sponsor", Outcome: artifacts.ReviewRequestOutcomeCreated, Access: artifacts.ReviewRequestAccessBounded, Notified: true},
+			},
+		},
+	}
+	var out bytes.Buffer
+	err := requestArtifactReview(context.Background(), svc, nil, &out, "scion://artifact/"+artID, requestReviewOptions{
+		Delegator: true,
+		Note:      "Ready for review",
+	})
+	if err != nil {
+		t.Fatalf("requestArtifactReview --delegator: %v", err)
+	}
+	if !svc.lastReq.Delegator || len(svc.lastReq.Reviewers) != 0 || svc.lastReq.Note != "Ready for review" {
+		t.Errorf("unexpected request input: %+v", svc.lastReq)
+	}
+	if !strings.Contains(out.String(), "user:u-sponsor: requested") {
+		t.Errorf("unexpected output: %q", out.String())
+	}
+
+	// --delegator with --withdraw is rejected.
+	err = requestArtifactReview(context.Background(), svc, nil, &out, "scion://artifact/"+artID, requestReviewOptions{
+		Delegator: true,
+		Withdraw:  true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--delegator cannot be used with --withdraw") {
+		t.Errorf("expected --delegator + --withdraw error, got %v", err)
+	}
+
+	// --delegator in non-agent mode is rejected by RunE.
+	t.Setenv("SCION_CLI_MODE", "human")
+	prevDelegator := artifactRequestReviewDelegator
+	artifactRequestReviewDelegator = true
+	t.Cleanup(func() { artifactRequestReviewDelegator = prevDelegator })
+	err = artifactRequestReviewCmd.RunE(artifactRequestReviewCmd, []string{"scion://artifact/" + artID})
+	if err == nil || !strings.Contains(err.Error(), "agent mode") {
+		t.Errorf("expected non-agent mode error for --delegator, got %v", err)
 	}
 }
 

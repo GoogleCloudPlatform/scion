@@ -182,14 +182,14 @@ var agentAllowed = map[string]bool{
 	"artifact.list":                 true,
 	"artifact.view":                 true,
 	"artifact.comments":             true,
+	"artifact.request-review":       true,
 	"artifact.review-requests":      true,
 	// artifact share, artifact grants, artifact transfer and artifact delete
 	// are human-only and deliberately absent (ptone/scion#4529, ptone/scion#4579,
 	// ptone/scion#9337): agents may not share, transfer or delete artifacts, or
 	// manage their grants.
-	// artifact request-review and artifact dismiss-review are also human-only
-	// in Phase 1 (ptone/scion#9306): agents are never requested reviewers, and
-	// agent requesters arrive in Phase 4.
+	// artifact dismiss-review is human-only: agents are never requested reviewers
+	// (ptone/scion#9296).
 	// Target-hub profiles and test identities (ptone/scion#4240).
 	// These run in agent mode only against a target-hub profile whose
 	// endpoint is not the agent's own hub; the run-time refusal is in

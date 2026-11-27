@@ -196,13 +196,26 @@ var (
 	grantsForAdmin  = []string{GrantAdmin}
 )
 
+// isRoleGatedCreator reports whether createdByRef marks a role-gated review
+// grant (sponsor automatic review grant or agent review-request bounded grant).
+// Such a grant counts only while its subject holds a role that reads in the
+// artifact's home project, so it never confers read on its own.
+func isRoleGatedCreator(createdByRef string) bool {
+	return createdByRef == SponsorReviewCreator || createdByRef == BoundedReviewCreator
+}
+
+// isRoleGated reports whether g is a role-gated principal grant.
+func isRoleGated(g Grant) bool {
+	return isRoleGatedCreator(g.CreatedByRef)
+}
+
 // grantAllows reports whether one of grants, unexpired at now and carrying
 // one of perms, gives the caller (kind, ref) access to a: a principal grant
 // naming the caller, or a scope grant for a scope in which the host
 // authorizes the caller for scopePerm. With excludeHome, a scope grant for
 // a's home scope does not count (the caller's checks already asked the
-// host about the home scope). Share links never count. A principal grant
-// in its automatic form (CreatedByRef SponsorReviewCreator) counts only
+// host about the home scope). Share links never count. A role-gated
+// principal grant (SponsorReviewCreator or BoundedReviewCreator) counts only
 // while the host authorizes the caller to read in a's home scope. It is
 // the one place grants are matched, for reading, writing and administering
 // alike.
@@ -220,12 +233,12 @@ func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, no
 			if g.SubjectRef != PrincipalRef(kind, ref) {
 				continue
 			}
-			// An automatic review grant in its automatic form counts only
-			// while its subject holds a role that reads in the home
-			// project (ptone/scion#7134). Authorize is decided from roles,
-			// never from the artifact's grants, so the grant cannot
-			// justify itself; a failed lookup answers false.
-			if g.CreatedByRef == SponsorReviewCreator && !host.Authorize(ctx, a.ScopeRef, PermissionRead) {
+			// A role-gated review grant (sponsor automatic or agent bounded)
+			// counts only while its subject holds a role that reads in the
+			// home project (ptone/scion#7134, ptone/scion#5548). Authorize is
+			// decided from roles, never from the artifact's grants, so the
+			// grant cannot justify itself; a failed lookup answers false.
+			if isRoleGated(g) && !host.Authorize(ctx, a.ScopeRef, PermissionRead) {
 				continue
 			}
 			return true

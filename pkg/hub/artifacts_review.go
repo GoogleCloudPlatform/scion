@@ -345,3 +345,122 @@ func artifactReviewNoticeText(n artifacts.ReviewNotice) string {
 		artifacts.FormatRef(n.ArtifactID, 0))
 	return b.String()
 }
+
+// deliverReviewRequestDismissToAgent sends a SystemCategoryArtifactReview
+// system message to an agent owner or requester when a reviewer dismisses a
+// review request (design §4.7 [D: dismiss-agent-delivery], ptone/scion#5548).
+// Wake and hold behavior match review notices:
+//   - held agents receive no notice (heldNoticeWithheld, ptone/scion#7145);
+//   - system-suspended agents auto-wake via the shared auto-wake queue;
+//   - user-suspended agents are never woken;
+//   - running agents receive the notice via dispatchWithBrokerRetry.
+func (s *Server) deliverReviewRequestDismissToAgent(ctx context.Context, n artifacts.ReviewRequestDismissNotice, agentID string, isRequester bool) (delivered bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("artifacts: review request dismiss notice panicked",
+				"artifact_id", n.ArtifactID, "agent_id", agentID, "panic", fmt.Sprint(r))
+			delivered = false
+		}
+	}()
+	if s.store == nil || agentID == "" {
+		return false
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || agent == nil || !agent.DeletedAt.IsZero() || reincarnationInFlight(agent) {
+		return false
+	}
+	if heldNoticeWithheld(ctx, s.store, s.recordLog(), agent, heldNoticeArtifactReview) {
+		return false
+	}
+	text := s.artifactReviewDismissNoticeText(ctx, n, isRequester)
+	// System-suspended: auto-wake in the background and deliver once woken.
+	if s.canAutoWakeActionAsker(ctx, agent) {
+		return s.queueAutoWake(agent, s.artifactReviewDismissAutoWakeItem(n.ArtifactID, agentID, text))
+	}
+	// User-suspended: never wake.
+	if state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended {
+		return false
+	}
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), artifactReviewNoticeTimeout)
+	defer cancel()
+	if err := s.dispatchReviewRequestDismissNotice(dctx, agent, text); err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			target := idleErr.agent
+			if target == nil {
+				target = agent
+			}
+			if s.canAutoWakeActionAsker(ctx, target) && s.queueAutoWake(target, s.artifactReviewDismissAutoWakeItem(n.ArtifactID, target.ID, text)) {
+				return true
+			}
+		}
+		slog.WarnContext(ctx, "artifacts: review request dismiss notice not delivered",
+			"artifact_id", n.ArtifactID, "agent_id", agentID, "error", err)
+		return false
+	}
+	return true
+}
+
+func (s *Server) artifactReviewDismissAutoWakeItem(artifactID, agentID, text string) autoWakeItem {
+	return autoWakeItem{
+		deliver: func(ctx context.Context, woken *store.Agent) {
+			dctx, cancel := context.WithTimeout(ctx, chatWakeDeliveryBudget)
+			defer cancel()
+			if err := s.dispatchReviewRequestDismissNotice(dctx, woken, text); err != nil {
+				slog.WarnContext(dctx, "artifacts: failed to deliver review request dismiss notice after auto-wake",
+					"artifact_id", artifactID, "agent_id", woken.ID, "error", err)
+			}
+		},
+		fail: func(ctx context.Context, dmErr *AgentDMError) {
+			slog.WarnContext(ctx, "artifacts: auto-wake failed for review request dismiss notice",
+				"artifact_id", artifactID, "agent_id", agentID, "code", dmErr.Code, "error", dmErr.Message)
+		},
+	}
+}
+
+func (s *Server) dispatchReviewRequestDismissNotice(ctx context.Context, agent *store.Agent, text string) error {
+	if agent == nil || !agent.DeletedAt.IsZero() || reincarnationInFlight(agent) {
+		return fmt.Errorf("agent unavailable")
+	}
+	if heldNoticeWithheld(ctx, s.store, s.recordLog(), agent, heldNoticeArtifactReview) {
+		return nil
+	}
+	dispatcher := s.GetDispatcher()
+	if dispatcher == nil {
+		return fmt.Errorf("no dispatcher available")
+	}
+	msg := messages.NewSystemMessage("system", "agent:"+agent.Slug, text, messages.SystemCategoryArtifactReview)
+	msg.RecipientID = agent.ID
+	var ts time.Time
+	if t, err := time.Parse(time.RFC3339, msg.Timestamp); err == nil {
+		ts = t
+	}
+	msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{Msg: msg, CreatedAt: ts})
+	return dispatchWithBrokerRetry(ctx, s.deliveryMarker(), s.recordLog(), dispatcher, agent, text, false, msg)
+}
+
+func (s *Server) artifactReviewDismissNoticeText(ctx context.Context, n artifacts.ReviewRequestDismissNotice, isRequester bool) string {
+	title := cleanNotificationText(n.ArtifactTitle, reviewRequestTitleMaxRunes)
+	if title == "" {
+		title = "untitled"
+	}
+	reviewer := "A reviewer"
+	if n.ReviewerKind == artifacts.PrincipalKindUser && n.ReviewerRef != "" && s.store != nil {
+		if u, err := s.store.GetUser(ctx, n.ReviewerRef); err == nil && u != nil {
+			if dn := cleanNotificationText(u.DisplayName, 80); dn != "" && !strings.Contains(dn, "@") {
+				reviewer = dn
+			}
+		}
+	}
+	var b strings.Builder
+	if isRequester {
+		fmt.Fprintf(&b, "%s dismissed your review request on %q (%s).", reviewer, title, artifacts.FormatRef(n.ArtifactID, 0))
+	} else {
+		fmt.Fprintf(&b, "%s dismissed a review request on %q (%s).", reviewer, title, artifacts.FormatRef(n.ArtifactID, 0))
+	}
+	if note := cleanNotificationText(n.ResponseNote, reviewExcerptMaxRunes); note != "" {
+		fmt.Fprintf(&b, "\nNote: %s", note)
+	}
+	fmt.Fprintf(&b, "\nReview requests: scion artifact review-requests %s", artifacts.FormatRef(n.ArtifactID, 0))
+	return b.String()
+}

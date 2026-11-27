@@ -61,4 +61,10 @@ package version
 //     re-tighten those unique indexes on AutoMigrate (failing once multi-action
 //     rows exist) and cannot read triggers stored in triggers.actions with empty
 //     legacy action_type.
+//   - Agent review requests write bounded principal review grants marked with
+//     created_by_ref = "system:review_request" (BoundedReviewCreator,
+//     ptone/scion#5548, ptone/scion#9296 Phase 4); older binaries do not
+//     recognize that marker in isRoleGated / readGrantFilter / ResolveLink and
+//     would treat bounded review grants as ordinary review grants that confer
+//     read access without a home-project role.
 const DowngradeFloor = "nightly-20261128"
