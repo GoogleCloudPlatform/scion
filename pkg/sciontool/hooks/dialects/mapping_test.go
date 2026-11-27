@@ -901,3 +901,131 @@ func TestMappingDialect_Parse_SuccessField(t *testing.T) {
 		assert.True(t, event.Data.Success)
 	})
 }
+
+func TestMappingDialect_MeasuredZeroTokensAndPresence(t *testing.T) {
+	t.Run("top-level measured zeros set presence while absent/null/invalid do not", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:        "test",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"ModelEnd": {Event: hooks.EventModelEnd},
+			},
+		})
+		ev, err := md.Parse(map[string]interface{}{
+			"hook_event_name":    "ModelEnd",
+			"input_tokens":       float64(100),
+			"output_tokens":      float64(0),
+			"cached_tokens":      nil,
+			"cache_write_tokens": float64(-5),
+			"reasoning_tokens":   "not-a-number",
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(100), ev.Data.InputTokens)
+		assert.True(t, ev.Data.HasInputTokens())
+		assert.Equal(t, int64(0), ev.Data.OutputTokens)
+		assert.True(t, ev.Data.HasOutputTokens())
+		assert.False(t, ev.Data.HasCachedTokens())
+		assert.False(t, ev.Data.HasCacheWriteTokens())
+		assert.False(t, ev.Data.HasReasoningTokens())
+	})
+
+	t.Run("measured zero prevents alias and nested usage fallbacks from overwriting", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:        "test",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"ModelEnd": {Event: hooks.EventModelEnd},
+			},
+		})
+		ev, err := md.Parse(map[string]interface{}{
+			"hook_event_name":   "ModelEnd",
+			"input_tokens":      float64(0),
+			"prompt_tokens":     float64(999),
+			"cached_tokens":     float64(0),
+			"cache_read_tokens": float64(888),
+			"usage": map[string]interface{}{
+				"input_tokens":  float64(777),
+				"output_tokens": float64(666),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), ev.Data.InputTokens)
+		assert.True(t, ev.Data.HasInputTokens())
+		assert.Equal(t, int64(0), ev.Data.CachedTokens)
+		assert.True(t, ev.Data.HasCachedTokens())
+		// Top-level input_tokens was present, so nested usage fallback does not run.
+		assert.False(t, ev.Data.HasOutputTokens())
+	})
+
+	t.Run("nested usage preserves all five measured zeros", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:        "test",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"ModelEnd": {Event: hooks.EventModelEnd},
+			},
+		})
+		ev, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "ModelEnd",
+			"usage": map[string]interface{}{
+				"input_tokens":       float64(0),
+				"output_tokens":      float64(0),
+				"cached_tokens":      float64(0),
+				"cache_write_tokens": float64(0),
+				"reasoning_tokens":   float64(0),
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, ev.Data.HasInputTokens())
+		assert.True(t, ev.Data.HasOutputTokens())
+		assert.True(t, ev.Data.HasCachedTokens())
+		assert.True(t, ev.Data.HasCacheWriteTokens())
+		assert.True(t, ev.Data.HasReasoningTokens())
+		assert.Equal(t, int64(0), ev.Data.InputTokens)
+		assert.Equal(t, int64(0), ev.Data.OutputTokens)
+		assert.Equal(t, int64(0), ev.Data.CachedTokens)
+		assert.Equal(t, int64(0), ev.Data.CacheWriteTokens)
+		assert.Equal(t, int64(0), ev.Data.ReasoningTokens)
+	})
+
+	t.Run("fields dotted paths preserve measured zero and are not overwritten by extractTokens", func(t *testing.T) {
+		md := NewMappingDialect(MappingDialectSpec{
+			Dialect:        "test",
+			EventNameField: "hook_event_name",
+			Mappings: map[string]MappingEntrySpec{
+				"ModelEnd": {
+					Event: hooks.EventModelEnd,
+					Fields: map[string]string{
+						"input_tokens":       ".metrics.in",
+						"output_tokens":      ".metrics.out",
+						"cached_tokens":      ".metrics.cr",
+						"cache_write_tokens": ".metrics.cw",
+						"reasoning_tokens":   ".metrics.reas",
+					},
+				},
+			},
+		})
+		ev, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "ModelEnd",
+			"input_tokens":    float64(999),
+			"metrics": map[string]interface{}{
+				"in":   float64(0),
+				"out":  float64(12),
+				"cr":   float64(0),
+				"cw":   float64(0),
+				"reas": float64(0),
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), ev.Data.InputTokens)
+		assert.True(t, ev.Data.HasInputTokens())
+		assert.Equal(t, int64(12), ev.Data.OutputTokens)
+		assert.True(t, ev.Data.HasOutputTokens())
+		assert.Equal(t, int64(0), ev.Data.CachedTokens)
+		assert.True(t, ev.Data.HasCachedTokens())
+		assert.Equal(t, int64(0), ev.Data.CacheWriteTokens)
+		assert.True(t, ev.Data.HasCacheWriteTokens())
+		assert.Equal(t, int64(0), ev.Data.ReasoningTokens)
+		assert.True(t, ev.Data.HasReasoningTokens())
+	})
+}

@@ -175,12 +175,12 @@ func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error
 
 	// Run common token and file path extraction (shared with all dialects).
 	extractTokens(data, &event.Data)
-	if entry != nil && entry.InputTokensInclusive && event.Data.InputTokens > 0 {
+	if entry != nil && entry.InputTokensInclusive && event.Data.HasInputTokens() {
 		uncached := event.Data.InputTokens - event.Data.CachedTokens - event.Data.CacheWriteTokens
 		if uncached < 0 {
 			uncached = 0
 		}
-		event.Data.InputTokens = uncached
+		event.Data.SetInputTokens(uncached)
 		event.Data.InputTokensDerived = true
 	}
 	extractFilePath(data, &event.Data)
@@ -257,24 +257,24 @@ func applyFieldPath(data map[string]interface{}, field, path string, ed *hooks.E
 			ed.FilePath = v
 		}
 	case "input_tokens":
-		if v := resolveFieldPathInt64(data, path); v > 0 {
-			ed.InputTokens = v
+		if v, ok := resolveFieldPathInt64(data, path); ok {
+			ed.SetInputTokens(v)
 		}
 	case "output_tokens":
-		if v := resolveFieldPathInt64(data, path); v > 0 {
-			ed.OutputTokens = v
+		if v, ok := resolveFieldPathInt64(data, path); ok {
+			ed.SetOutputTokens(v)
 		}
 	case "cached_tokens":
-		if v := resolveFieldPathInt64(data, path); v > 0 {
-			ed.CachedTokens = v
+		if v, ok := resolveFieldPathInt64(data, path); ok {
+			ed.SetCachedTokens(v)
 		}
 	case "cache_write_tokens":
-		if v := resolveFieldPathInt64(data, path); v > 0 {
-			ed.CacheWriteTokens = v
+		if v, ok := resolveFieldPathInt64(data, path); ok {
+			ed.SetCacheWriteTokens(v)
 		}
 	case "reasoning_tokens":
-		if v := resolveFieldPathInt64(data, path); v > 0 {
-			ed.ReasoningTokens = v
+		if v, ok := resolveFieldPathInt64(data, path); ok {
+			ed.SetReasoningTokens(v)
 		}
 	case "success":
 		if val, found := resolveFieldPathBool(data, path); found {
@@ -335,22 +335,15 @@ func resolveFieldPathBool(data map[string]interface{}, path string) (bool, bool)
 	return false, false
 }
 
-// resolveFieldPathInt64 walks a dotted path and returns an int64 value.
-// JSON numbers arrive as float64, so both float64 and integer types are handled.
-func resolveFieldPathInt64(data map[string]interface{}, path string) int64 {
+// resolveFieldPathInt64 walks a dotted path and returns a non-negative int64
+// value. JSON numbers arrive as float64, so both float64 and integer types are
+// handled. Missing, non-numeric, non-finite, or negative values return (0, false).
+func resolveFieldPathInt64(data map[string]interface{}, path string) (int64, bool) {
 	val := walkPath(data, path)
 	if val == nil {
-		return 0
+		return 0, false
 	}
-	switch v := val.(type) {
-	case float64:
-		return int64(v)
-	case int64:
-		return v
-	case int:
-		return int64(v)
-	}
-	return 0
+	return toNonNegInt64(val)
 }
 
 // walkPath navigates nested maps following a dotted path like ".toolCall.name".

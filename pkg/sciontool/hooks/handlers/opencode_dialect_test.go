@@ -585,3 +585,47 @@ func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
 		}
 	}
 }
+
+func TestOpencodeDialect_MeasuredZerosAndAnalytics(t *testing.T) {
+	scrubTelemetryEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "opencode")
+
+	md := loadOpencodeDialect(t)
+	analytics, outboxDir := hookAnalytics(t)
+	h := NewTelemetryHandler(nil, nil, nil)
+	h.Analytics = analytics
+
+	// Step-finish payload shaped like scion-bridge.js output with measured zeros.
+	payload := map[string]interface{}{
+		"hook_event_name":    "message.part.updated.step-finish",
+		"session_id":         "ses_zero_analytics",
+		"model":              "mockprov/mock-model",
+		"input_tokens":       float64(400),
+		"output_tokens":      float64(30),
+		"cached_tokens":      float64(0),
+		"cache_write_tokens": float64(0),
+		"reasoning_tokens":   float64(5),
+	}
+	ev, err := md.Parse(payload)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := h.Handle(ev); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	staged := hookStagedEvents(t, outboxDir)
+	if len(staged) != 1 {
+		t.Fatalf("staged events = %d, want 1", len(staged))
+	}
+	got := staged[0]
+	if got.TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("TokenStatus = %q, want reported", got.TokenStatus)
+	}
+	if got.Input == nil || *got.Input != 400 || got.Output == nil || *got.Output != 30 ||
+		got.CacheRead == nil || *got.CacheRead != 0 || got.CacheWrite == nil || *got.CacheWrite != 0 ||
+		got.Reasoning == nil || *got.Reasoning != 5 {
+		t.Errorf("staged tokens = %+v, want 400/30/0/0/5", got)
+	}
+}

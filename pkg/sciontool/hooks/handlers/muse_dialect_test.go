@@ -138,11 +138,11 @@ func TestMuseCodeHookTokensReachUsageMetric(t *testing.T) {
 	if ev.Output == nil || *ev.Output != 300 || ev.CacheRead == nil || *ev.CacheRead != 250 || ev.Reasoning == nil || *ev.Reasoning != 80 {
 		t.Errorf("staged tokens = %+v", ev)
 	}
-	if ev.CacheWrite != nil {
-		t.Errorf("staged CacheWrite = %v, want nil (measured 0 dropped by hook path)", *ev.CacheWrite)
+	if ev.CacheWrite == nil || *ev.CacheWrite != 0 {
+		t.Errorf("staged CacheWrite = %v, want 0 (measured zero preserved)", ev.CacheWrite)
 	}
-	if ev.TokenStatus != telemetrycontract.TokenStatusPartial {
-		t.Errorf("TokenStatus = %q, want partial", ev.TokenStatus)
+	if ev.TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("TokenStatus = %q, want reported", ev.TokenStatus)
 	}
 	if ev.SourceIdentity != telemetrycontract.SourceIdentityComposite || ev.IdentityAmbiguous || ev.SourceEventID == "" {
 		t.Errorf("identity = %q ambiguous=%v id=%q", ev.SourceIdentity, ev.IdentityAmbiguous, ev.SourceEventID)
@@ -229,10 +229,15 @@ func TestMuseDialect_CumulativeTurnDeltaAndFailedStep(t *testing.T) {
 		t.Fatalf("staged events = %d, want 5", len(staged))
 	}
 
-	// Step 1 of turn 2 must carry only the delta (600/150/600/30), not cumulative (1200/270/800/70).
+	// Step 1 of turn 2 must carry only the delta (600/150/600/0/30), not cumulative (1200/270/800/0/70).
 	step1 := staged[1]
-	if step1.Input == nil || *step1.Input != 600 || step1.Output == nil || *step1.Output != 150 || step1.CacheRead == nil || *step1.CacheRead != 600 || step1.Reasoning == nil || *step1.Reasoning != 30 {
-		t.Errorf("turn 2 step 1 staged = %+v, want delta 600/150/600/30", step1)
+	if step1.Input == nil || *step1.Input != 600 || step1.Output == nil || *step1.Output != 150 ||
+		step1.CacheRead == nil || *step1.CacheRead != 600 || step1.CacheWrite == nil || *step1.CacheWrite != 0 ||
+		step1.Reasoning == nil || *step1.Reasoning != 30 {
+		t.Errorf("turn 2 step 1 staged = %+v, want delta 600/150/600/0/30", step1)
+	}
+	if step1.TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("turn 2 step 1 TokenStatus = %q, want reported", step1.TokenStatus)
 	}
 	if step1.SourceEventID == staged[0].SourceEventID {
 		t.Errorf("turn 2 step 0 and step 1 shared SourceEventID %q", step1.SourceEventID)
@@ -248,6 +253,15 @@ func TestMuseDialect_CumulativeTurnDeltaAndFailedStep(t *testing.T) {
 	}
 	if failedStep.SourceIdentity != telemetrycontract.SourceIdentityComposite || failedStep.SourceEventID == "" || failedStep.SourceEventID == staged[2].SourceEventID {
 		t.Errorf("failed step identity=%q id=%q (step0 id=%q)", failedStep.SourceIdentity, failedStep.SourceEventID, staged[2].SourceEventID)
+	}
+
+	// Record 5 (subagent turn 4, step 0) has measured zeros for cache_write and reasoning -> reported.
+	subagentStep := staged[4]
+	if subagentStep.TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("subagent step TokenStatus = %q, want reported", subagentStep.TokenStatus)
+	}
+	if subagentStep.CacheWrite == nil || *subagentStep.CacheWrite != 0 || subagentStep.Reasoning == nil || *subagentStep.Reasoning != 0 {
+		t.Errorf("subagent step measured zeros = cw:%v reas:%v, want 0/0", subagentStep.CacheWrite, subagentStep.Reasoning)
 	}
 }
 

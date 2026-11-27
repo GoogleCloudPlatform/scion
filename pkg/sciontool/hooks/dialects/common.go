@@ -4,7 +4,11 @@ Copyright 2025 The Scion Authors.
 
 package dialects
 
-import "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+import (
+	"math"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
+)
 
 // getString safely extracts a string value from a map.
 func getString(data map[string]interface{}, key string) string {
@@ -22,96 +26,59 @@ func getString(data map[string]interface{}, key string) string {
 // cache_read_tokens, cache_read_input_tokens, cache_write_tokens,
 // cache_creation_input_tokens, reasoning_tokens, thinking_tokens,
 // prompt_tokens, completion_tokens.
+// Measured zeros (>= 0) are preserved and marked present in TokenPresence;
+// fields already populated (e.g. via mapping entry `fields:`) are not overwritten.
 func extractTokens(data map[string]interface{}, ed *hooks.EventData) {
-	// Try top-level fields first
-	if v := getInt64(data, "input_tokens"); v > 0 {
-		ed.InputTokens = v
-	}
-	if v := getInt64(data, "output_tokens"); v > 0 {
-		ed.OutputTokens = v
-	}
-	if v := getInt64(data, "cached_tokens"); v > 0 {
-		ed.CachedTokens = v
-	}
-	// Claude uses cache_read_input_tokens; Muse Code also emits cache_read_tokens
-	if ed.CachedTokens == 0 {
-		if v := getInt64(data, "cache_read_tokens"); v > 0 {
-			ed.CachedTokens = v
-		} else if v := getInt64(data, "cache_read_input_tokens"); v > 0 {
-			ed.CachedTokens = v
-		}
-	}
-	if ed.CacheWriteTokens == 0 {
-		if v := getInt64(data, "cache_write_tokens"); v > 0 {
-			ed.CacheWriteTokens = v
-		} else if v := getInt64(data, "cache_creation_input_tokens"); v > 0 {
-			ed.CacheWriteTokens = v
-		}
-	}
-	if ed.ReasoningTokens == 0 {
-		if v := getInt64(data, "reasoning_tokens"); v > 0 {
-			ed.ReasoningTokens = v
-		} else if v := getInt64(data, "thinking_tokens"); v > 0 {
-			ed.ReasoningTokens = v
-		}
-	}
-	// OpenAI-style names
-	if ed.InputTokens == 0 {
-		if v := getInt64(data, "prompt_tokens"); v > 0 {
-			ed.InputTokens = v
-		}
-	}
-	if ed.OutputTokens == 0 {
-		if v := getInt64(data, "completion_tokens"); v > 0 {
-			ed.OutputTokens = v
-		}
-	}
+	extractTokensFromMap(data, ed)
 
-	// Fall back to nested "usage" object
-	if ed.InputTokens == 0 && ed.OutputTokens == 0 {
+	// Fall back to nested "usage" object when neither input nor output was
+	// reported at the top level.
+	if !ed.HasInputTokens() && !ed.HasOutputTokens() {
 		if usageRaw, ok := data["usage"]; ok {
 			if usage, ok := usageRaw.(map[string]interface{}); ok {
-				if v := getInt64(usage, "input_tokens"); v > 0 {
-					ed.InputTokens = v
-				}
-				if v := getInt64(usage, "output_tokens"); v > 0 {
-					ed.OutputTokens = v
-				}
-				if v := getInt64(usage, "cached_tokens"); v > 0 {
-					ed.CachedTokens = v
-				}
-				if ed.CachedTokens == 0 {
-					if v := getInt64(usage, "cache_read_tokens"); v > 0 {
-						ed.CachedTokens = v
-					} else if v := getInt64(usage, "cache_read_input_tokens"); v > 0 {
-						ed.CachedTokens = v
-					}
-				}
-				if ed.CacheWriteTokens == 0 {
-					if v := getInt64(usage, "cache_write_tokens"); v > 0 {
-						ed.CacheWriteTokens = v
-					} else if v := getInt64(usage, "cache_creation_input_tokens"); v > 0 {
-						ed.CacheWriteTokens = v
-					}
-				}
-				if ed.ReasoningTokens == 0 {
-					if v := getInt64(usage, "reasoning_tokens"); v > 0 {
-						ed.ReasoningTokens = v
-					} else if v := getInt64(usage, "thinking_tokens"); v > 0 {
-						ed.ReasoningTokens = v
-					}
-				}
-				if ed.InputTokens == 0 {
-					if v := getInt64(usage, "prompt_tokens"); v > 0 {
-						ed.InputTokens = v
-					}
-				}
-				if ed.OutputTokens == 0 {
-					if v := getInt64(usage, "completion_tokens"); v > 0 {
-						ed.OutputTokens = v
-					}
-				}
+				extractTokensFromMap(usage, ed)
 			}
+		}
+	}
+}
+
+func extractTokensFromMap(data map[string]interface{}, ed *hooks.EventData) {
+	if !ed.HasInputTokens() {
+		if v, ok := getInt64(data, "input_tokens"); ok {
+			ed.SetInputTokens(v)
+		} else if v, ok := getInt64(data, "prompt_tokens"); ok {
+			ed.SetInputTokens(v)
+		}
+	}
+	if !ed.HasOutputTokens() {
+		if v, ok := getInt64(data, "output_tokens"); ok {
+			ed.SetOutputTokens(v)
+		} else if v, ok := getInt64(data, "completion_tokens"); ok {
+			ed.SetOutputTokens(v)
+		}
+	}
+	if !ed.HasCachedTokens() {
+		// Claude uses cache_read_input_tokens; Muse Code also emits cache_read_tokens.
+		if v, ok := getInt64(data, "cached_tokens"); ok {
+			ed.SetCachedTokens(v)
+		} else if v, ok := getInt64(data, "cache_read_tokens"); ok {
+			ed.SetCachedTokens(v)
+		} else if v, ok := getInt64(data, "cache_read_input_tokens"); ok {
+			ed.SetCachedTokens(v)
+		}
+	}
+	if !ed.HasCacheWriteTokens() {
+		if v, ok := getInt64(data, "cache_write_tokens"); ok {
+			ed.SetCacheWriteTokens(v)
+		} else if v, ok := getInt64(data, "cache_creation_input_tokens"); ok {
+			ed.SetCacheWriteTokens(v)
+		}
+	}
+	if !ed.HasReasoningTokens() {
+		if v, ok := getInt64(data, "reasoning_tokens"); ok {
+			ed.SetReasoningTokens(v)
+		} else if v, ok := getInt64(data, "thinking_tokens"); ok {
+			ed.SetReasoningTokens(v)
 		}
 	}
 }
@@ -150,18 +117,34 @@ func extractFilePath(data map[string]interface{}, ed *hooks.EventData) {
 	}
 }
 
-// getInt64 safely extracts an int64 value from a map.
-// JSON numbers arrive as float64, so both float64 and direct integer types are handled.
-func getInt64(data map[string]interface{}, key string) int64 {
-	if val, ok := data[key]; ok {
-		switch v := val.(type) {
-		case float64:
-			return int64(v)
-		case int64:
-			return v
-		case int:
-			return int64(v)
-		}
+// getInt64 safely extracts a non-negative int64 value from a map.
+// JSON numbers arrive as float64, so both float64 and direct integer types are
+// handled. Missing, non-numeric, non-finite, or negative values return (0, false).
+func getInt64(data map[string]interface{}, key string) (int64, bool) {
+	val, ok := data[key]
+	if !ok || val == nil {
+		return 0, false
 	}
-	return 0
+	return toNonNegInt64(val)
+}
+
+func toNonNegInt64(val interface{}) (int64, bool) {
+	switch v := val.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0, false
+		}
+		return int64(v), true
+	case int64:
+		if v < 0 {
+			return 0, false
+		}
+		return v, true
+	case int:
+		if v < 0 {
+			return 0, false
+		}
+		return int64(v), true
+	}
+	return 0, false
 }

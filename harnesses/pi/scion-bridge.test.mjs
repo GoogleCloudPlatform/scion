@@ -306,7 +306,7 @@ test('message_end emits canonical token fields, responseModel over model, and re
   });
 });
 
-test('message_end omits unknown, missing, zero, or non-finite token fields (never fabricates 0)', () => {
+test('message_end preserves measured zeros and omits unknown, missing, negative, or non-finite token fields', () => {
   const { calls, h } = harness();
   h.message_end({
     type: 'message_end',
@@ -329,14 +329,25 @@ test('message_end omits unknown, missing, zero, or non-finite token fields (neve
       timestamp: 1795719212600,
     },
   });
-  assert.equal(calls.length, 2);
+  h.message_end({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-5',
+      usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: -1 },
+      stopReason: 'stop',
+      timestamp: 1795719212700,
+    },
+  });
+  assert.equal(calls.length, 3);
   assert.deepEqual(calls[0].stdin, {
     hook_event_name: 'message_end',
     timestamp: 1795719212500,
     model: 'anthropic/claude-sonnet-4-5',
     input_tokens: 100,
+    output_tokens: 0,
   });
-  assert.ok(!Object.hasOwn(calls[0].stdin, 'output_tokens'));
   assert.ok(!Object.hasOwn(calls[0].stdin, 'cached_tokens'));
   assert.ok(!Object.hasOwn(calls[0].stdin, 'cache_write_tokens'));
   assert.ok(!Object.hasOwn(calls[0].stdin, 'reasoning_tokens'));
@@ -346,6 +357,17 @@ test('message_end omits unknown, missing, zero, or non-finite token fields (neve
     timestamp: 1795719212600,
     model: 'anthropic/claude-sonnet-4-5',
   });
+  // Measured cache zeros are preserved; negative values are omitted.
+  assert.deepEqual(calls[2].stdin, {
+    hook_event_name: 'message_end',
+    timestamp: 1795719212700,
+    model: 'anthropic/claude-sonnet-4-5',
+    input_tokens: 100,
+    output_tokens: 20,
+    cached_tokens: 0,
+    cache_write_tokens: 0,
+  });
+  assert.ok(!Object.hasOwn(calls[2].stdin, 'reasoning_tokens'));
 });
 
 test('message_end ignores non-assistant messages and non-terminal stopReasons', () => {

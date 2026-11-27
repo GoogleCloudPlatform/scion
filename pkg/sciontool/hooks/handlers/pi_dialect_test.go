@@ -291,7 +291,7 @@ func TestPiDialect_ModelEndCanonicalUsageAndAnalytics(t *testing.T) {
 	if okEv.SourceKind != "hook.pi.model_end" || okEv.UsageSource != "hooks" || okEv.Harness != "pi" {
 		t.Errorf("ok event source/harness = %q %q %q", okEv.SourceKind, okEv.UsageSource, okEv.Harness)
 	}
-	if okEv.Calls != 1 || okEv.Status != telemetrycontract.StatusSuccess || okEv.Model != "mockprov/mock-model-2026" || okEv.ModelSource != "event" {
+	if okEv.Calls != 1 || okEv.Status != telemetrycontract.StatusSuccess || okEv.TokenStatus != telemetrycontract.TokenStatusReported || okEv.Model != "mockprov/mock-model-2026" || okEv.ModelSource != "event" {
 		t.Errorf("ok event = %+v", okEv)
 	}
 	if okEv.Input == nil || *okEv.Input != 380 || okEv.Output == nil || *okEv.Output != 40 ||
@@ -382,5 +382,75 @@ func TestPiDialect_MessageEndMappingOmitsExtractTokensFields(t *testing.T) {
 		if _, present := entry.Fields[forbidden]; present {
 			t.Errorf("message_end mapping.fields contains %q; extractTokens reads this top-level key directly", forbidden)
 		}
+	}
+}
+
+func TestPiDialect_MeasuredZerosReported(t *testing.T) {
+	scrubTelemetryEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "pi")
+
+	md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, "pi"))
+	if err != nil {
+		t.Fatalf("LoadMappingDialect: %v", err)
+	}
+	analytics, outboxDir := hookAnalytics(t)
+	h := NewTelemetryHandler(nil, nil, nil)
+	h.Analytics = analytics
+
+	// All 5 fields present with measured zeros -> reported.
+	ev1, err := md.Parse(map[string]interface{}{
+		"hook_event_name":    "message_end",
+		"response_id":        "resp-zero-1",
+		"timestamp":          float64(1795719214000),
+		"model":              "mockprov/mock-model",
+		"input_tokens":       float64(200),
+		"output_tokens":      float64(20),
+		"cached_tokens":      float64(0),
+		"cache_write_tokens": float64(0),
+		"reasoning_tokens":   float64(0),
+	})
+	if err != nil {
+		t.Fatalf("Parse ev1: %v", err)
+	}
+	if err := h.Handle(ev1); err != nil {
+		t.Fatalf("Handle ev1: %v", err)
+	}
+
+	// Only 4 of 5 fields present (reasoning omitted) -> partial.
+	ev2, err := md.Parse(map[string]interface{}{
+		"hook_event_name":    "message_end",
+		"response_id":        "resp-zero-2",
+		"timestamp":          float64(1795719215000),
+		"model":              "mockprov/mock-model",
+		"input_tokens":       float64(200),
+		"output_tokens":      float64(20),
+		"cached_tokens":      float64(0),
+		"cache_write_tokens": float64(0),
+	})
+	if err != nil {
+		t.Fatalf("Parse ev2: %v", err)
+	}
+	if err := h.Handle(ev2); err != nil {
+		t.Fatalf("Handle ev2: %v", err)
+	}
+
+	staged := hookStagedEvents(t, outboxDir)
+	if len(staged) != 2 {
+		t.Fatalf("staged events = %d, want 2", len(staged))
+	}
+	if staged[0].TokenStatus != telemetrycontract.TokenStatusReported {
+		t.Errorf("staged[0].TokenStatus = %q, want reported", staged[0].TokenStatus)
+	}
+	if staged[0].CacheRead == nil || *staged[0].CacheRead != 0 ||
+		staged[0].CacheWrite == nil || *staged[0].CacheWrite != 0 ||
+		staged[0].Reasoning == nil || *staged[0].Reasoning != 0 {
+		t.Errorf("staged[0] measured zeros = %+v", staged[0])
+	}
+	if staged[1].TokenStatus != telemetrycontract.TokenStatusPartial {
+		t.Errorf("staged[1].TokenStatus = %q, want partial", staged[1].TokenStatus)
+	}
+	if staged[1].CacheRead == nil || *staged[1].CacheRead != 0 || staged[1].CacheWrite == nil || *staged[1].CacheWrite != 0 || staged[1].Reasoning != nil {
+		t.Errorf("staged[1] tokens = %+v, want cr=0 cw=0 reas=nil", staged[1])
 	}
 }

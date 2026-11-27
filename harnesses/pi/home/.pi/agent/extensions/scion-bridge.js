@@ -118,8 +118,8 @@ function boundedToolInput(args) {
   }
 }
 
-function positiveFinite(v) {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.trunc(v) : undefined;
+function nonNegativeFinite(v) {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.trunc(v) : undefined;
 }
 
 // createHandlers returns the pi event handlers. `run(argv, stdin)` is
@@ -227,20 +227,26 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
 
       // pi-ai 1.3.0 Usage already matches Scion's canonical contract:
       // `input` is exclusive of cacheRead/cacheWrite, and `output` already
-      // includes `reasoning`. Omit unknown/missing/zero fields rather than
-      // fabricating 0.
+      // includes `reasoning`. Preserve measured 0s, omit absent/non-finite
+      // fields, and omit EMPTY_USAGE (all-zero usage on error/aborted calls)
+      // so failed calls report not_reported rather than fabricated zeros.
       const usage = msg.usage && typeof msg.usage === 'object' ? msg.usage : undefined;
       if (usage) {
-        const input = positiveFinite(usage.input);
-        const output = positiveFinite(usage.output);
-        const cacheRead = positiveFinite(usage.cacheRead);
-        const cacheWrite = positiveFinite(usage.cacheWrite);
-        const reasoning = positiveFinite(usage.reasoning);
-        if (input !== undefined) data.input_tokens = input;
-        if (output !== undefined) data.output_tokens = output;
-        if (cacheRead !== undefined) data.cached_tokens = cacheRead;
-        if (cacheWrite !== undefined) data.cache_write_tokens = cacheWrite;
-        if (reasoning !== undefined) data.reasoning_tokens = reasoning;
+        const input = nonNegativeFinite(usage.input);
+        const output = nonNegativeFinite(usage.output);
+        const cacheRead = nonNegativeFinite(usage.cacheRead);
+        const cacheWrite = nonNegativeFinite(usage.cacheWrite);
+        const reasoning = nonNegativeFinite(usage.reasoning);
+        const isErrorOrAborted = msg.stopReason === 'error' || msg.stopReason === 'aborted';
+        const defined = [input, output, cacheRead, cacheWrite, reasoning].filter((v) => v !== undefined);
+        const isEmptyErrorUsage = isErrorOrAborted && defined.every((v) => v === 0);
+        if (!isEmptyErrorUsage) {
+          if (input !== undefined) data.input_tokens = input;
+          if (output !== undefined) data.output_tokens = output;
+          if (cacheRead !== undefined) data.cached_tokens = cacheRead;
+          if (cacheWrite !== undefined) data.cache_write_tokens = cacheWrite;
+          if (reasoning !== undefined) data.reasoning_tokens = reasoning;
+        }
       }
 
       if (msg.stopReason === 'error') {
