@@ -84,6 +84,8 @@ func (Trigger) Fields() []ent.Field {
 			Default(0),
 		field.Int("max_concurrent_dispatches").
 			Default(0),
+		field.Text("notify").
+			Optional(),
 		field.String("status").
 			Default("active"),
 		field.String("status_reason").

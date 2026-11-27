@@ -65,6 +65,9 @@ var (
 	triggerCoalesceWindow    string
 	triggerMaxFiresPerMinute int
 	triggerMaxConcurrent     int
+	triggerNotifyUser        bool
+	triggerNotifyAgent       string
+	triggerNotifyOn          []string
 
 	triggerListSource  string
 	triggerListWebhook string
@@ -497,6 +500,35 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 	}
 }
 
+func parseTriggerNotifyOutcomes(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		for _, part := range strings.Split(item, ",") {
+			v := strings.TrimSpace(part)
+			if v == "" {
+				continue
+			}
+			switch v {
+			case "failed", "refused", "expired", "skipped":
+				if !seen[v] {
+					seen[v] = true
+					out = append(out, v)
+				}
+			default:
+				return nil, newUsageError("invalid --notify-on value %q (supported: failed, refused, expired, skipped)", triggerTerminalText(v, false))
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, newUsageError("--notify-on must contain at least one outcome (failed, refused, expired, skipped)")
+	}
+	return out, nil
+}
+
 func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 	req, _, err := buildCreateTriggerRequestWithFlags(false, false, false, false)
 	return req, err
@@ -507,6 +539,10 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 }
 
 func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
+	return buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, false)
+}
+
+func buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
 	name := strings.TrimSpace(triggerName)
 	if name == "" {
 		return nil, nil, newUsageError("--name is required")
@@ -718,6 +754,29 @@ func buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentEx
 	req.MaxFiresPerMinute = triggerMaxFiresPerMinute
 	req.MaxConcurrentDispatches = triggerMaxConcurrent
 
+	notifyAgentRef := strings.TrimSpace(triggerNotifyAgent)
+	if notifyUserExplicit || notifyAgentRef != "" || len(triggerNotifyOn) > 0 {
+		outcomes, nErr := parseTriggerNotifyOutcomes(triggerNotifyOn)
+		if nErr != nil {
+			return nil, nil, nErr
+		}
+		ns := &hubclient.TriggerNotifySpec{
+			OnOutcomes: outcomes,
+		}
+		if notifyUserExplicit {
+			v := triggerNotifyUser
+			ns.UserNotice = &v
+		}
+		if notifyAgentRef != "" {
+			if uuid.Validate(notifyAgentRef) == nil {
+				ns.AgentID = notifyAgentRef
+			} else {
+				ns.AgentName = notifyAgentRef
+			}
+		}
+		req.Notify = ns
+	}
+
 	return req, derivedUntrusted, nil
 }
 
@@ -727,7 +786,8 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	actionExplicit := cmd != nil && cmd.Flags().Changed("action")
 	commentExplicit := cmd != nil && cmd.Flags().Changed("comment")
 	ackCommentExplicit := cmd != nil && cmd.Flags().Changed("ack-comment")
-	req, derivedUntrusted, err := buildCreateTriggerRequestWithFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit)
+	notifyUserExplicit := cmd != nil && cmd.Flags().Changed("notify-user")
+	req, derivedUntrusted, err := buildCreateTriggerRequestWithAllFlags(allowExplicit, actionExplicit, commentExplicit, ackCommentExplicit, notifyUserExplicit)
 	if err != nil {
 		return err
 	}
@@ -1221,6 +1281,9 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerCoalesceWindow, "coalesce", "", "Coalescing window duration (0s disables, max 10m, e.g. 30s)")
 	triggerCreateCmd.Flags().IntVar(&triggerMaxFiresPerMinute, "max-per-minute", 0, "Maximum fires per minute for this trigger (0 = unlimited; max 600)")
 	triggerCreateCmd.Flags().IntVar(&triggerMaxConcurrent, "max-concurrent", 0, "Maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
+	triggerCreateCmd.Flags().BoolVar(&triggerNotifyUser, "notify-user", true, "Notify the trigger creator on failure (use --notify-user=false to disable)")
+	triggerCreateCmd.Flags().StringVar(&triggerNotifyAgent, "notify-agent", "", "Agent ID or name to message on trigger failure")
+	triggerCreateCmd.Flags().StringSliceVar(&triggerNotifyOn, "notify-on", nil, "Comma-separated outcomes to notify on (failed,refused,expired[,skipped])")
 
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (webhook or github)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")

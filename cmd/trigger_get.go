@@ -247,6 +247,9 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 			printTriggerActionDetail(act, "      ")
 		}
 	}
+	if tr.Notify != nil {
+		fmt.Printf("  Notify:      %s\n", formatTriggerNotifySummary(tr.Notify))
+	}
 	fmt.Printf("  Fires:       %d (errors: %d)\n", tr.FireCount, tr.ErrorCount)
 	if tr.LastFireAt != nil {
 		lastFire := clitime.Ago(*tr.LastFireAt)
@@ -258,4 +261,35 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	if tr.LastFireError != "" {
 		fmt.Printf("  Last Error:  %s\n", triggerTerminalText(tr.LastFireError, false))
 	}
+}
+
+func formatTriggerNotifySummary(n *hubclient.TriggerNotifySpec) string {
+	if n == nil {
+		return ""
+	}
+	var parts []string
+	userNotice := true
+	if n.UserNotice != nil {
+		userNotice = *n.UserNotice
+	}
+	if userNotice {
+		parts = append(parts, "user=on")
+	} else {
+		parts = append(parts, "user=off")
+	}
+	agentLabel := n.AgentName
+	if agentLabel == "" {
+		agentLabel = n.AgentID
+	}
+	if agentLabel != "" {
+		parts = append(parts, "agent="+triggerTerminalText(agentLabel, false))
+	}
+	if len(n.OnOutcomes) > 0 {
+		safe := make([]string, len(n.OnOutcomes))
+		for i, o := range n.OnOutcomes {
+			safe[i] = triggerTerminalText(o, false)
+		}
+		parts = append(parts, "on="+strings.Join(safe, ","))
+	}
+	return strings.Join(parts, " ")
 }

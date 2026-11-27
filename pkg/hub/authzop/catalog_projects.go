@@ -1443,6 +1443,7 @@ var projectOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerRetryDrainer:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerNotify:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:exec"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:github.comment"},

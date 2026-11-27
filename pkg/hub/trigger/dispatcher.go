@@ -275,6 +275,13 @@ type PreFireRefuser interface {
 	PreFireRefusal(ctx context.Context, tr *store.Trigger, actionType string, ev *hubfire.FireEvent) (reason, auditReason string, refused bool)
 }
 
+// FireOutcomeNotifier is an optional interface Core implementations may satisfy
+// to send failure notifications (Stage 2 §10) after a terminal trigger_fires
+// row has been persisted, always outside any database transaction.
+type FireOutcomeNotifier interface {
+	NotifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, outcome hubfire.FireOutcome)
+}
+
 type triggerActionKey struct {
 	triggerID   string
 	actionIndex int
@@ -1261,6 +1268,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 						})
 						cancelWrite()
 					}
+					d.notifyFireOutcome(ctx, tr, &fire, store.TriggerFireStatusSkipped, ErrFireSubjectBusy)
 					continue
 				}
 			}
@@ -1492,6 +1500,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 						DecidedDialect: fire.DecidedDialect,
 					})
 				}
+				d.notifyFireOutcome(writeCtx, tr, &fire, statusStr, out.Error)
 			}
 			cancelWrite()
 		}
@@ -1876,8 +1885,23 @@ func (d *Dispatcher) recordActionDirectFire(
 				Reason:         auditReason,
 			})
 		}
+		d.notifyFireOutcome(ctx, tr, &fire, status, errMsg)
 	}
 	return claimed, nil
+}
+
+func (d *Dispatcher) notifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, status, errMsg string) {
+	if d == nil || d.core == nil || fire == nil {
+		return
+	}
+	notifier, ok := d.core.(FireOutcomeNotifier)
+	if !ok {
+		return
+	}
+	notifier.NotifyFireOutcome(ctx, tr, fire, hubfire.FireOutcome{
+		Status: hubfire.FireStatus(status),
+		Error:  errMsg,
+	})
 }
 
 func normalizeFireStatus(st hubfire.FireStatus, errMsg string) string {

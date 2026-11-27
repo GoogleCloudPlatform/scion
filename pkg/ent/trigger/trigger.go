@@ -82,6 +82,8 @@ const (
 	FieldMaxFiresPerMinute = "max_fires_per_minute"
 	// FieldMaxConcurrentDispatches holds the string denoting the max_concurrent_dispatches field in the database.
 	FieldMaxConcurrentDispatches = "max_concurrent_dispatches"
+	// FieldNotify holds the string denoting the notify field in the database.
+	FieldNotify = "notify"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldStatusReason holds the string denoting the status_reason field in the database.
@@ -143,6 +145,7 @@ var Columns = []string{
 	FieldCoalesceWindowSeconds,
 	FieldMaxFiresPerMinute,
 	FieldMaxConcurrentDispatches,
+	FieldNotify,
 	FieldStatus,
 	FieldStatusReason,
 	FieldLastFireAt,
@@ -398,6 +401,11 @@ func ByMaxFiresPerMinute(opts ...sql.OrderTermOption) OrderOption {
 // ByMaxConcurrentDispatches orders the results by the max_concurrent_dispatches field.
 func ByMaxConcurrentDispatches(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMaxConcurrentDispatches, opts...).ToFunc()
+}
+
+// ByNotify orders the results by the notify field.
+func ByNotify(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotify, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

@@ -130627,6 +130627,7 @@ type TriggerMutation struct {
 	addmax_fires_per_minute               *int
 	max_concurrent_dispatches             *int
 	addmax_concurrent_dispatches          *int
+	notify                                *string
 	status                                *string
 	status_reason                         *string
 	last_fire_at                          *time.Time
@@ -132264,6 +132265,55 @@ func (m *TriggerMutation) ResetMaxConcurrentDispatches() {
 	m.addmax_concurrent_dispatches = nil
 }
 
+// SetNotify sets the "notify" field.
+func (m *TriggerMutation) SetNotify(s string) {
+	m.notify = &s
+}
+
+// Notify returns the value of the "notify" field in the mutation.
+func (m *TriggerMutation) Notify() (r string, exists bool) {
+	v := m.notify
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotify returns the old "notify" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldNotify(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotify is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotify requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotify: %w", err)
+	}
+	return oldValue.Notify, nil
+}
+
+// ClearNotify clears the value of the "notify" field.
+func (m *TriggerMutation) ClearNotify() {
+	m.notify = nil
+	m.clearedFields[trigger.FieldNotify] = struct{}{}
+}
+
+// NotifyCleared returns if the "notify" field was cleared in this mutation.
+func (m *TriggerMutation) NotifyCleared() bool {
+	_, ok := m.clearedFields[trigger.FieldNotify]
+	return ok
+}
+
+// ResetNotify resets all changes to the "notify" field.
+func (m *TriggerMutation) ResetNotify() {
+	m.notify = nil
+	delete(m.clearedFields, trigger.FieldNotify)
+}
+
 // SetStatus sets the "status" field.
 func (m *TriggerMutation) SetStatus(s string) {
 	m.status = &s
@@ -132763,7 +132813,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 44)
+	fields := make([]string, 0, 45)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -132865,6 +132915,9 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.max_concurrent_dispatches != nil {
 		fields = append(fields, trigger.FieldMaxConcurrentDispatches)
+	}
+	if m.notify != nil {
+		fields = append(fields, trigger.FieldNotify)
 	}
 	if m.status != nil {
 		fields = append(fields, trigger.FieldStatus)
@@ -132972,6 +133025,8 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.MaxFiresPerMinute()
 	case trigger.FieldMaxConcurrentDispatches:
 		return m.MaxConcurrentDispatches()
+	case trigger.FieldNotify:
+		return m.Notify()
 	case trigger.FieldStatus:
 		return m.Status()
 	case trigger.FieldStatusReason:
@@ -133069,6 +133124,8 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldMaxFiresPerMinute(ctx)
 	case trigger.FieldMaxConcurrentDispatches:
 		return m.OldMaxConcurrentDispatches(ctx)
+	case trigger.FieldNotify:
+		return m.OldNotify(ctx)
 	case trigger.FieldStatus:
 		return m.OldStatus(ctx)
 	case trigger.FieldStatusReason:
@@ -133336,6 +133393,13 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetMaxConcurrentDispatches(v)
 		return nil
+	case trigger.FieldNotify:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotify(v)
+		return nil
 	case trigger.FieldStatus:
 		v, ok := value.(string)
 		if !ok {
@@ -133574,6 +133638,9 @@ func (m *TriggerMutation) ClearedFields() []string {
 	if m.FieldCleared(trigger.FieldMatchForm) {
 		fields = append(fields, trigger.FieldMatchForm)
 	}
+	if m.FieldCleared(trigger.FieldNotify) {
+		fields = append(fields, trigger.FieldNotify)
+	}
 	if m.FieldCleared(trigger.FieldStatusReason) {
 		fields = append(fields, trigger.FieldStatusReason)
 	}
@@ -133641,6 +133708,9 @@ func (m *TriggerMutation) ClearField(name string) error {
 		return nil
 	case trigger.FieldMatchForm:
 		m.ClearMatchForm()
+		return nil
+	case trigger.FieldNotify:
+		m.ClearNotify()
 		return nil
 	case trigger.FieldStatusReason:
 		m.ClearStatusReason()
@@ -133766,6 +133836,9 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldMaxConcurrentDispatches:
 		m.ResetMaxConcurrentDispatches()
+		return nil
+	case trigger.FieldNotify:
+		m.ResetNotify()
 		return nil
 	case trigger.FieldStatus:
 		m.ResetStatus()

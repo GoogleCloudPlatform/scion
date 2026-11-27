@@ -380,6 +380,23 @@ type TriggerSubjectPatchSpec struct {
 	CoalesceWindow *string `json:"coalesce_window,omitempty"`
 }
 
+// TriggerNotifySpec configures failure notifications on a trigger definition
+// (Stage 2 §10).
+type TriggerNotifySpec struct {
+	OnOutcomes []string `json:"onOutcomes,omitempty"`
+	UserNotice *bool    `json:"userNotice,omitempty"`
+	AgentID    string   `json:"agentId,omitempty"`
+	AgentName  string   `json:"agentName,omitempty"`
+}
+
+// TriggerNotifyPatchSpec holds partial updates to a trigger's notify block.
+type TriggerNotifyPatchSpec struct {
+	OnOutcomes *[]string `json:"onOutcomes,omitempty"`
+	UserNotice *bool     `json:"userNotice,omitempty"`
+	AgentID    *string   `json:"agentId,omitempty"`
+	AgentName  *string   `json:"agentName,omitempty"`
+}
+
 // Trigger represents a trigger definition returned by the Hub API.
 type Trigger struct {
 	ID                      string              `json:"id"`
@@ -394,6 +411,7 @@ type Trigger struct {
 	Subject                 TriggerSubjectSpec  `json:"subject"`
 	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
 	Status                  string              `json:"status"`
 	StatusReason            string              `json:"statusReason,omitempty"`
 	AuthorizationRevision   int                 `json:"authorizationRevision"`
@@ -418,6 +436,7 @@ type CreateTriggerRequest struct {
 	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifySpec  `json:"notify,omitempty"`
 }
 
 // UpdateTriggerRequest is the client-side request for updating a trigger.
@@ -431,6 +450,7 @@ type UpdateTriggerRequest struct {
 	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
 	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
 	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
+	Notify                  *TriggerNotifyPatchSpec  `json:"notify,omitempty"`
 	ExpectedRevision        *int                     `json:"expectedRevision,omitempty"`
 	IfMatch                 string                   `json:"-"`
 }

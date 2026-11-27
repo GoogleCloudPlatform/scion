@@ -54,7 +54,9 @@ type triggerRuntime struct {
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	started              bool
-	projectCapNotify     map[string]time.Time // per-trigger 1h cooldown for project live-agent cap notification (§7.4)
+	projectCapNotify     map[string]time.Time                // per-trigger 1h cooldown for project live-agent cap warning log (§7.4)
+	fireNotifyCooldown   map[fireNotifyCooldownKey]time.Time // per-(definition, sink) cooldown for notify-on-failure (§10)
+	notifyNow            func() time.Time                    // optional clock override for notify-on-failure tests
 }
 
 // SetTriggerTemplateRefusalAuditSink overrides the audit sink used for
@@ -131,7 +133,15 @@ var (
 	_ trigger.ReuseMessageRenderer = serverTriggerCore{}
 	_ trigger.PreFireRefuser       = serverTriggerCore{}
 	_ trigger.RetryTargetChecker   = serverTriggerCore{}
+	_ trigger.FireOutcomeNotifier  = serverTriggerCore{}
 )
+
+func (c serverTriggerCore) NotifyFireOutcome(ctx context.Context, tr *store.Trigger, fire *store.TriggerFire, outcome hubfire.FireOutcome) {
+	if c.srv == nil {
+		return
+	}
+	c.srv.notifyTriggerFire(ctx, tr, fire, outcome)
+}
 
 func (c serverTriggerCore) PreFireRefusal(ctx context.Context, tr *store.Trigger, actionType string, ev *hubfire.FireEvent) (string, string, bool) {
 	if c.srv == nil || tr == nil || ev == nil {
@@ -431,7 +441,8 @@ func (s *Server) notifyTriggerProjectCapReached(ctx context.Context, req hubfire
 	rt.projectCapNotify[triggerID] = now
 	rt.mu.Unlock()
 
-	// P7 hook point: invoke notifyFireOutcome(ctx, req, FireOutcome{Status: skipped, Error: "project trigger-agent cap"}, ...) here.
+	// Hub user/agent failure notification (§10) is dispatched outside any WithTx
+	// by serverTriggerCore.NotifyFireOutcome once the skipped fire row commits.
 	slog.WarnContext(ctx, "trigger dispatch skipped: project live trigger-agent cap reached",
 		"project_id", req.ProjectID,
 		"trigger_id", triggerID,

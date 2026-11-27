@@ -213,8 +213,10 @@ func (a *messageAction) Authorize(
 	// gate, so a refused or migrating fire resumes nothing. A target the hub
 	// suspended (ptone/scion#7826) wakes without the payload's wake flag and
 	// without the wake permission: the send authorization above suffices.
-	autoWake := s.autoWakeModeOf(agent) != autoWakeNone
-	wake := payload.Wake || autoWake
+	// When req.NoWake is set (e.g. failure notifications, Stage 2 §10), all
+	// wake paths are suppressed.
+	autoWake := !req.NoWake && s.autoWakeModeOf(agent) != autoWakeNone
+	wake := !req.NoWake && (payload.Wake || autoWake)
 	if wake && !autoWake {
 		if wakeErr := s.authorizeScheduledWake(ctx, auth, identity, agent); wakeErr != nil {
 			slog.Warn("Scheduler: scheduled message wake refused at fire time",

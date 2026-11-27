@@ -4278,23 +4278,23 @@ func init() {
 	// trigger.DefaultMaxConcurrentDispatches holds the default value on creation for the max_concurrent_dispatches field.
 	trigger.DefaultMaxConcurrentDispatches = triggerDescMaxConcurrentDispatches.Default.(int)
 	// triggerDescStatus is the schema descriptor for status field.
-	triggerDescStatus := triggerFields[20].Descriptor()
+	triggerDescStatus := triggerFields[21].Descriptor()
 	// trigger.DefaultStatus holds the default value on creation for the status field.
 	trigger.DefaultStatus = triggerDescStatus.Default.(string)
 	// triggerDescFireCount is the schema descriptor for fire_count field.
-	triggerDescFireCount := triggerFields[25].Descriptor()
+	triggerDescFireCount := triggerFields[26].Descriptor()
 	// trigger.DefaultFireCount holds the default value on creation for the fire_count field.
 	trigger.DefaultFireCount = triggerDescFireCount.Default.(int)
 	// triggerDescErrorCount is the schema descriptor for error_count field.
-	triggerDescErrorCount := triggerFields[26].Descriptor()
+	triggerDescErrorCount := triggerFields[27].Descriptor()
 	// trigger.DefaultErrorCount holds the default value on creation for the error_count field.
 	trigger.DefaultErrorCount = triggerDescErrorCount.Default.(int)
 	// triggerDescCreated is the schema descriptor for created field.
-	triggerDescCreated := triggerFields[28].Descriptor()
+	triggerDescCreated := triggerFields[29].Descriptor()
 	// trigger.DefaultCreated holds the default value on creation for the created field.
 	trigger.DefaultCreated = triggerDescCreated.Default.(func() time.Time)
 	// triggerDescUpdated is the schema descriptor for updated field.
-	triggerDescUpdated := triggerFields[29].Descriptor()
+	triggerDescUpdated := triggerFields[30].Descriptor()
 	// trigger.DefaultUpdated holds the default value on creation for the updated field.
 	trigger.DefaultUpdated = triggerDescUpdated.Default.(func() time.Time)
 	// trigger.UpdateDefaultUpdated holds the default value on update for the updated field.

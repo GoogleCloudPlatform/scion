@@ -1136,6 +1136,32 @@ func unmarshalTriggerActions(raw string) ([]store.TriggerAction, bool) {
 	return out, false
 }
 
+func marshalTriggerNotify(p *store.TriggerNotifyPolicy) (string, error) {
+	if p == nil || p.IsEmpty() {
+		return "", nil
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal notify: %v", store.ErrInvalidInput, err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalTriggerNotify(raw string) *store.TriggerNotifyPolicy {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "{}" {
+		return nil
+	}
+	var p store.TriggerNotifyPolicy
+	if err := json.Unmarshal([]byte(trimmed), &p); err != nil {
+		return nil
+	}
+	if p.IsEmpty() {
+		return nil
+	}
+	return &p
+}
+
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 	matchRules, matchRulesCorrupt := unmarshalMatchRules(e.MatchRules)
 	actions, actionsCorrupt := unmarshalTriggerActions(e.Actions)
@@ -1162,6 +1188,7 @@ func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 		CoalesceWindowSeconds:   e.CoalesceWindowSeconds,
 		MaxFiresPerMinute:       e.MaxFiresPerMinute,
 		MaxConcurrentDispatches: e.MaxConcurrentDispatches,
+		Notify:                  unmarshalTriggerNotify(e.Notify),
 		Status:                  e.Status,
 		StatusReason:            e.StatusReason,
 		LastFireAt:              e.LastFireAt,
@@ -1365,6 +1392,10 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 	if err != nil {
 		return err
 	}
+	notifyJSON, err := marshalTriggerNotify(tr.Notify)
+	if err != nil {
+		return err
+	}
 	if err := validateEdgeCeiling(tr.AuthorityCeiling); err != nil {
 		return err
 	}
@@ -1431,6 +1462,9 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 	}
 	if tr.MatchForm != "" {
 		create.SetMatchForm(tr.MatchForm)
+	}
+	if notifyJSON != "" {
+		create.SetNotify(notifyJSON)
 	}
 	if tr.StatusReason != "" {
 		create.SetStatusReason(tr.StatusReason)
@@ -1714,6 +1748,17 @@ func (s *TriggerStore) UpdateTrigger(
 	if fields.MaxConcurrentDispatches {
 		update = update.SetMaxConcurrentDispatches(tr.MaxConcurrentDispatches)
 	}
+	if fields.Notify {
+		notifyJSON, mErr := marshalTriggerNotify(tr.Notify)
+		if mErr != nil {
+			return mErr
+		}
+		if notifyJSON != "" {
+			update = update.SetNotify(notifyJSON)
+		} else {
+			update = update.ClearNotify()
+		}
+	}
 	if fields.Status {
 		update = update.SetStatus(tr.Status)
 		if tr.StatusReason != "" {
@@ -1756,6 +1801,9 @@ func (s *TriggerStore) UpdateTrigger(
 	}
 	if fields.Actions {
 		tr.Actions, tr.ActionsCorrupt = unmarshalTriggerActions(updated.Actions)
+	}
+	if fields.Notify {
+		tr.Notify = unmarshalTriggerNotify(updated.Notify)
 	}
 	return nil
 }
@@ -1841,6 +1889,7 @@ func (s *TriggerStore) FlushTriggerEventCounters(ctx context.Context, triggerID,
 			Where(
 				triggerfire.TriggerIDEQ(tid),
 				triggerfire.EventIDEQ(eid),
+				triggerfire.ActionTypeNEQ(store.TriggerActionNotify),
 			).
 			Order(ent.Asc(triggerfire.FieldActionIndex)).
 			All(ctx)
@@ -3719,6 +3768,7 @@ func (s *TriggerStore) CountRecentTriggerFires(ctx context.Context, triggerID st
 			triggerfire.TriggerIDEQ(tid),
 			triggerfire.CreatedGT(since.UTC()),
 			triggerfire.StatusNEQ(store.TriggerFireStatusSkipped),
+			triggerfire.ActionTypeNEQ(store.TriggerActionNotify),
 		)
 	if excludeFireID != "" {
 		exID, parseErr := parseUUID(excludeFireID)

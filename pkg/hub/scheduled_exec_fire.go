@@ -285,6 +285,9 @@ func (s *Server) finishScheduledExecRunWithOutputStatus(ctx context.Context, run
 	s.auditScheduledExec(ctx, a)
 	slog.Info("Scheduler: exec run finished", "runID", run.RunID(), "agent_id", run.TargetAgentID,
 		"outcome", outcome, "event_status", eventStatus, "capture_mode", run.CaptureMode, "output_status", fin.OutputStatus)
+	if run.IsTriggerOwned() && fin.FireID != "" && fin.FireStatus != "" && fin.FireStatus != store.TriggerFireStatusFired {
+		s.notifyTriggerFireOutcomeByID(ctx, fin.FireID, fin.FireStatus, fin.FireError)
+	}
 	return true, nil
 }
 

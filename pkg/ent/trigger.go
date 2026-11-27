@@ -86,6 +86,8 @@ type Trigger struct {
 	MaxFiresPerMinute int `json:"max_fires_per_minute,omitempty"`
 	// MaxConcurrentDispatches holds the value of the "max_concurrent_dispatches" field.
 	MaxConcurrentDispatches int `json:"max_concurrent_dispatches,omitempty"`
+	// Notify holds the value of the "notify" field.
+	Notify string `json:"notify,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// StatusReason holds the value of the "status_reason" field.
@@ -118,7 +120,7 @@ func (*Trigger) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case trigger.FieldAttributionVersion, trigger.FieldAuthorizationRevision, trigger.FieldAuthorityCeilingVersion, trigger.FieldCoalesceWindowSeconds, trigger.FieldMaxFiresPerMinute, trigger.FieldMaxConcurrentDispatches, trigger.FieldFireCount, trigger.FieldErrorCount:
 			values[i] = new(sql.NullInt64)
-		case trigger.FieldInitiatorPrincipalKind, trigger.FieldInitiatorPrincipalID, trigger.FieldInitiatorCredentialKind, trigger.FieldInitiatorCredentialID, trigger.FieldInitiatorCredentialSnapshot, trigger.FieldAuthorityCeilingKind, trigger.FieldAuthorityCeilingPermissionIds, trigger.FieldAuthorityCeilingBoundaryKind, trigger.FieldAuthorityCeilingBoundaryProjectID, trigger.FieldName, trigger.FieldDescription, trigger.FieldSourceKind, trigger.FieldSourceID, trigger.FieldMatchTypes, trigger.FieldMatchDialect, trigger.FieldMatchRule, trigger.FieldMatchRules, trigger.FieldMatchForm, trigger.FieldActionType, trigger.FieldActionPayload, trigger.FieldActions, trigger.FieldSubjectDialect, trigger.FieldSubjectRule, trigger.FieldSubjectMode, trigger.FieldStatus, trigger.FieldStatusReason, trigger.FieldLastFireStatus, trigger.FieldLastFireError, trigger.FieldCreatedBy:
+		case trigger.FieldInitiatorPrincipalKind, trigger.FieldInitiatorPrincipalID, trigger.FieldInitiatorCredentialKind, trigger.FieldInitiatorCredentialID, trigger.FieldInitiatorCredentialSnapshot, trigger.FieldAuthorityCeilingKind, trigger.FieldAuthorityCeilingPermissionIds, trigger.FieldAuthorityCeilingBoundaryKind, trigger.FieldAuthorityCeilingBoundaryProjectID, trigger.FieldName, trigger.FieldDescription, trigger.FieldSourceKind, trigger.FieldSourceID, trigger.FieldMatchTypes, trigger.FieldMatchDialect, trigger.FieldMatchRule, trigger.FieldMatchRules, trigger.FieldMatchForm, trigger.FieldActionType, trigger.FieldActionPayload, trigger.FieldActions, trigger.FieldSubjectDialect, trigger.FieldSubjectRule, trigger.FieldSubjectMode, trigger.FieldNotify, trigger.FieldStatus, trigger.FieldStatusReason, trigger.FieldLastFireStatus, trigger.FieldLastFireError, trigger.FieldCreatedBy:
 			values[i] = new(sql.NullString)
 		case trigger.FieldAuthorityCeilingSourceExpiresAt, trigger.FieldLastFireAt, trigger.FieldCreated, trigger.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -360,6 +362,12 @@ func (_m *Trigger) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.MaxConcurrentDispatches = int(value.Int64)
 			}
+		case trigger.FieldNotify:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field notify", values[i])
+			} else if value.Valid {
+				_m.Notify = value.String
+			}
 		case trigger.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
@@ -580,6 +588,9 @@ func (_m *Trigger) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("max_concurrent_dispatches=")
 	builder.WriteString(fmt.Sprintf("%v", _m.MaxConcurrentDispatches))
+	builder.WriteString(", ")
+	builder.WriteString("notify=")
+	builder.WriteString(_m.Notify)
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

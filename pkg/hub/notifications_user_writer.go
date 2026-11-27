@@ -45,6 +45,7 @@ var userNoticeKinds = map[string]string{
 	store.NotificationKindArtifactGrant:         store.NotificationResourceArtifact,
 	store.NotificationKindArtifactReviewRequest: store.NotificationResourceArtifact,
 	store.NotificationKindDecisionsWaiting:      store.NotificationResourceDecisions,
+	store.NotificationKindTriggerFireFailed:     store.NotificationResourceTrigger,
 }
 
 // userNotice is a hub-authored notification to one user. Kind, ResourceType
