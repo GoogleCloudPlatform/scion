@@ -17,9 +17,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   buildAgentDMKey,
+  conversationChatPath,
   dmPeerFromKey,
   isChatConversationPath,
   messageFilterFromSearch,
+  parseThreadConversationExternalRef,
   searchWithMessageFilter,
 } from './chat-routes.js';
 
@@ -93,5 +95,78 @@ describe('center message filter', () => {
     expect(searchWithMessageFilter('?messages=starred', '')).toBe('');
     expect(searchWithMessageFilter('?a=1&messages=starred', '')).toBe('?a=1');
     expect(searchWithMessageFilter('?a=1', 'starred')).toBe('?a=1&messages=starred');
+  });
+});
+
+describe('parseThreadConversationExternalRef', () => {
+  it('extracts projectId and topicId from thread:<projectId>:<topicId>', () => {
+    expect(parseThreadConversationExternalRef('thread:proj-1:topic-42')).toEqual({
+      projectId: 'proj-1',
+      topicId: 'topic-42',
+    });
+  });
+
+  it('rejects non-thread refs, empty parts, and dm-prefixed topic IDs', () => {
+    for (const ref of [
+      undefined,
+      '',
+      'dm:agent:a1:user:u1',
+      'thread:',
+      'thread:proj-1',
+      'thread::topic-1',
+      'thread:proj-1:',
+      'thread:proj-1:dm:agent:a1:user:u1',
+    ]) {
+      expect(parseThreadConversationExternalRef(ref), String(ref)).toBeNull();
+    }
+  });
+});
+
+describe('conversationChatPath', () => {
+  it('builds a DM route for native direct conversations', () => {
+    expect(
+      conversationChatPath({
+        kind: 'direct',
+        surface: 'native',
+        externalRef: 'dm:agent:a-1:user:u-1',
+      })
+    ).toBe('/chat/dm/dm%3Aagent%3Aa-1%3Auser%3Au-1');
+  });
+
+  it('builds a space thread route for native group conversations with thread externalRef', () => {
+    expect(
+      conversationChatPath({
+        kind: 'group',
+        surface: 'native',
+        projectId: 'proj-1',
+        externalRef: 'thread:proj-1:topic-99',
+      })
+    ).toBe('/chat/space/proj-1/thread/topic-99');
+  });
+
+  it('returns null for external-surface or unlinked group conversations', () => {
+    expect(
+      conversationChatPath({
+        kind: 'group',
+        surface: 'discord',
+        projectId: 'proj-1',
+        externalRef: 'thread:proj-1:topic-99',
+      })
+    ).toBeNull();
+    expect(
+      conversationChatPath({
+        kind: 'group',
+        surface: 'native',
+        projectId: 'proj-1',
+        externalRef: '',
+      })
+    ).toBeNull();
+    expect(
+      conversationChatPath({
+        kind: 'direct',
+        surface: 'native',
+        externalRef: 'not-a-dm-key',
+      })
+    ).toBeNull();
   });
 });

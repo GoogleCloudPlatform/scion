@@ -104,6 +104,62 @@ export function chatConversationPath(target: ChatConversationTarget): string | n
   return `/chat/space/${encodeURIComponent(projectId)}/thread/${encodeURIComponent(key)}`;
 }
 
+/** Parsed components of a native group conversation's `thread:<projectId>:<topicId>` ref. */
+export interface ParsedThreadExternalRef {
+  projectId: string;
+  topicId: string;
+}
+
+/**
+ * Parses a native thread conversation `externalRef` (`thread:<projectId>:<topicId>`),
+ * mirroring `ParseThreadConversationExternalRef` in `pkg/messaging/derive_key.go`.
+ * Returns null for non-thread refs, missing parts, or a `dm:`-prefixed topic ID.
+ */
+export function parseThreadConversationExternalRef(ref?: string): ParsedThreadExternalRef | null {
+  if (!ref || !ref.startsWith('thread:')) return null;
+  const rest = ref.slice('thread:'.length);
+  const sep = rest.indexOf(':');
+  if (sep <= 0) return null;
+  const projectId = rest.slice(0, sep);
+  const topicId = rest.slice(sep + 1);
+  if (!projectId || !topicId || topicId.startsWith('dm:')) return null;
+  return { projectId, topicId };
+}
+
+/** Minimal conversation shape needed to build a `/chat/...` link. */
+export interface ConversationRouteInput {
+  kind: string;
+  surface?: string;
+  externalRef?: string;
+  projectId?: string;
+}
+
+/**
+ * Builds the `/chat/...` deep link for a conversation returned by
+ * `GET /api/v1/conversations`, or null when the conversation has no native
+ * chat route (for example, external-surface or unlinked group conversations).
+ */
+export function conversationChatPath(conv: ConversationRouteInput): string | null {
+  if (!conv || conv.surface !== 'native') return null;
+
+  if (conv.kind === 'direct') {
+    const key = conv.externalRef?.trim();
+    if (!key || !key.startsWith('dm:')) return null;
+    return chatConversationPath({ conversationKey: key });
+  }
+
+  if (conv.kind === 'group') {
+    const parsed = parseThreadConversationExternalRef(conv.externalRef);
+    if (!parsed) return null;
+    return chatConversationPath({
+      conversationKey: parsed.topicId,
+      projectId: parsed.projectId,
+    });
+  }
+
+  return null;
+}
+
 /**
  * The center message filter of a conversation route: `starred` shows only
  * the signed-in user's starred messages (`?messages=starred`), '' the whole

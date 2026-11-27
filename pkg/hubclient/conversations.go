@@ -86,7 +86,10 @@ type ListConversationsOptions struct {
 	// the list. Use this instead of ProjectID to add "all my project's
 	// groups" without losing DMs or other projects' conversations.
 	IncludeProjectGroups string
-	Limit                int
+	// AgentID narrows the list to conversations that both the caller and
+	// this agent actively participate in.
+	AgentID string
+	Limit   int
 }
 
 // ConversationMessagesOptions configures message listing within a conversation.
@@ -205,6 +208,9 @@ func (s *conversationService) List(ctx context.Context, opts *ListConversationsO
 		}
 		if opts.IncludeProjectGroups != "" {
 			query.Set("include_project_groups", opts.IncludeProjectGroups)
+		}
+		if opts.AgentID != "" {
+			query.Set("agent_id", opts.AgentID)
 		}
 		if opts.Limit > 0 {
 			query.Set("limit", strconv.Itoa(opts.Limit))

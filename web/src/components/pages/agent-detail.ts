@@ -61,6 +61,27 @@ interface AgentNotificationsResponse {
   userNotifications: Notification[];
   agentNotifications: Notification[];
 }
+
+export interface AgentConversationSummary {
+  id: string;
+  projectId?: string;
+  kind: string;
+  surface: string;
+  externalRef?: string;
+  displayName?: string;
+  threadName?: string;
+  dmPeer?: {
+    kind: string;
+    id: string;
+    name?: string;
+  };
+  lastActivityAt: string;
+  createdAt?: string;
+}
+
+interface AgentConversationsResponse {
+  conversations?: AgentConversationSummary[];
+}
 import {
   agentStatusBadge,
   stateLabel,
@@ -104,8 +125,7 @@ import type { ScionAgentSchedulesTab } from '../shared/agent-schedules-tab.js';
 import '../shared/agent-usage-panel.js';
 import type { ScionAgentUsagePanel } from '../shared/agent-usage-panel.js';
 import '../shared/agent-suspend-screen.js';
-import '../shared/chat/chat-thread.js';
-import type { ScionChatThread } from '../shared/chat/chat-thread.js';
+import { conversationChatPath } from '../../client/chat-routes.js';
 import {
   AGENT_SECRETS_FLAG,
   execContainersEnabled,
@@ -312,9 +332,26 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private reincarnateError: string | null = null;
 
-  /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
+  /** Whether the Conversations|Log toggle is in "conversations" mode (vs "log" mode). */
   @state()
   private chatViewActive = true;
+
+  /** Shared conversations between the viewing user and this agent. */
+  @state()
+  private sharedConversations: AgentConversationSummary[] = [];
+
+  @state()
+  private sharedConversationsLoading = false;
+
+  @state()
+  private sharedConversationsLoaded = false;
+
+  @state()
+  private sharedConversationsError: string | null = null;
+
+  private sharedConversationsReqSeq = 0;
+
+  private activeTab = 'status';
 
   /** Current user ID for constructing the DM conversation key. */
   @state()
@@ -538,15 +575,119 @@ export class ScionPageAgentDetail extends LitElement {
       padding-top: 1.5rem;
     }
 
-    /* The chat thread's message list is its own scroller, so the thread needs
-     * a bounded height, as it has on the chat page. Unbounded, it grows to
-     * fit every message: the composer ends up below the fold and the wheel
-     * over the messages does nothing, because the list's
-     * overscroll-behavior: contain keeps it from reaching the page. 24rem is
-     * the page above the thread plus the tab panel's and the shell's bottom
-     * padding. */
-    .messages-chat-thread {
-      height: calc(var(--scion-app-height, 100dvh) - 24rem);
+    /* ---- Messages tab: shared conversations list ---- */
+    .messages-view-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    .messages-view-toggle::part(form-control-label) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .shared-conversations-card {
+      background: var(--scion-surface);
+      border: 1px solid var(--scion-border);
+      border-radius: var(--scion-radius-lg);
+      overflow: hidden;
+    }
+    .shared-conversations-list {
+      display: flex;
+      flex-direction: column;
+    }
+    .shared-conversation-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.875rem 1rem;
+      border-bottom: 1px solid var(--scion-border);
+      color: var(--scion-text);
+      text-decoration: none;
+      transition: background-color 0.15s ease;
+    }
+    .shared-conversation-row:last-child {
+      border-bottom: none;
+    }
+    .shared-conversation-row--link:hover,
+    .shared-conversation-row--link:focus-visible {
+      background: var(--scion-bg-subtle);
+      outline: none;
+    }
+    .shared-conversation-row--link:focus-visible {
+      box-shadow: inset 0 0 0 2px var(--scion-primary);
+    }
+    .shared-conversation-icon {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: var(--scion-radius);
+      background: var(--scion-bg-subtle);
+      color: var(--scion-text-secondary);
+    }
+    .shared-conversation-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+    .shared-conversation-title-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      min-width: 0;
+    }
+    .shared-conversation-name {
+      font-weight: 500;
+      color: var(--scion-text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .shared-conversation-meta {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--scion-text-muted);
+      font-size: 0.8125rem;
+    }
+    .shared-conversation-chevron {
+      color: var(--scion-text-muted);
+      font-size: 0.875rem;
+    }
+    .shared-conversations-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 2rem 1.5rem;
+      text-align: center;
+      color: var(--scion-text-muted);
+    }
+    .shared-conversations-state-title {
+      font-size: 0.9375rem;
+      font-weight: 500;
+      color: var(--scion-text);
+    }
+    .shared-conversations-state-desc {
+      font-size: 0.875rem;
+      color: var(--scion-text-muted);
+      margin: 0;
     }
 
     /* ---- Cards ---- */
@@ -1190,6 +1331,11 @@ export class ScionPageAgentDetail extends LitElement {
   private async loadData(): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.sharedConversations = [];
+    this.sharedConversationsLoaded = false;
+    this.sharedConversationsError = null;
+    this.sharedConversationsLoading = false;
+    this.sharedConversationsReqSeq++;
     // Opened before the agent request, so a live change that lands while
     // any request below is in flight is re-applied over the agent response
     // when it is seeded.
@@ -1326,6 +1472,15 @@ export class ScionPageAgentDetail extends LitElement {
 
       // Load metrics summary (non-blocking).
       void this.loadMetricsSummary();
+
+      if (
+        this.activeTab === 'messages' &&
+        !this.isShellAgent(this.agent) &&
+        this.nativeChatEnabled &&
+        this.chatViewActive
+      ) {
+        void this.loadSharedConversations();
+      }
 
       this.seedAgent(this.agent, agentId, epoch, epochGeneration);
       setAgentPageCurrentAgent({
@@ -1589,7 +1744,36 @@ export class ScionPageAgentDetail extends LitElement {
     this.agent = seeded.agents[0] ?? agent;
   }
 
+  private async loadSharedConversations(): Promise<void> {
+    if (!this.agentId) return;
+    const reqSeq = ++this.sharedConversationsReqSeq;
+    const agentId = this.agentId;
+    this.sharedConversationsLoading = true;
+    this.sharedConversationsError = null;
+
+    try {
+      const res = await apiFetch(`/api/v1/conversations?agent_id=${encodeURIComponent(agentId)}`);
+      if (reqSeq !== this.sharedConversationsReqSeq || agentId !== this.agentId) return;
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}: ${res.statusText}`));
+      }
+      const data = (await res.json()) as AgentConversationsResponse;
+      if (reqSeq !== this.sharedConversationsReqSeq || agentId !== this.agentId) return;
+      this.sharedConversations = data.conversations ?? [];
+      this.sharedConversationsLoaded = true;
+    } catch (err) {
+      if (reqSeq !== this.sharedConversationsReqSeq || agentId !== this.agentId) return;
+      this.sharedConversationsError =
+        err instanceof Error ? err.message : 'Failed to load conversations';
+    } finally {
+      if (reqSeq === this.sharedConversationsReqSeq) {
+        this.sharedConversationsLoading = false;
+      }
+    }
+  }
+
   private handleTabShow(e: CustomEvent<{ name: string }>): void {
+    this.activeTab = e.detail.name;
     if (e.detail.name === 'logs') {
       const viewer = this.shadowRoot?.querySelector(
         'scion-agent-log-viewer'
@@ -1598,10 +1782,7 @@ export class ScionPageAgentDetail extends LitElement {
     }
     if (e.detail.name === 'messages') {
       if (this.nativeChatEnabled && this.chatViewActive) {
-        const chatThread = this.shadowRoot?.querySelector(
-          'scion-chat-thread'
-        ) as ScionChatThread | null;
-        chatThread?.loadHistory();
+        void this.loadSharedConversations();
       } else {
         const viewer = this.shadowRoot?.querySelector(
           'scion-agent-message-viewer'
@@ -1623,16 +1804,11 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private handleMessageViewToggle(mode: 'chat' | 'log'): void {
-    this.chatViewActive = mode === 'chat';
+  private handleMessageViewToggle(mode: 'conversations' | 'log'): void {
+    this.chatViewActive = mode === 'conversations';
     // Trigger load for the newly active view
     if (this.chatViewActive) {
-      void this.updateComplete.then(() => {
-        const chatThread = this.shadowRoot?.querySelector(
-          'scion-chat-thread'
-        ) as ScionChatThread | null;
-        chatThread?.loadHistory();
-      });
+      void this.loadSharedConversations();
     } else {
       void this.updateComplete.then(() => {
         const viewer = this.shadowRoot?.querySelector(
@@ -1916,7 +2092,7 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   // ---------------------------------------------------------------------------
-  // Messages Panel (Chat | Log toggle)
+  // Messages Panel (Conversations | Log toggle)
   // ---------------------------------------------------------------------------
 
   /** Render messaging authorization banners (denial warning / sealed notice). */
@@ -1970,21 +2146,23 @@ export class ScionPageAgentDetail extends LitElement {
       `;
     }
 
-    // Feature flag ON: show Chat|Log toggle, default to Chat
+    // Feature flag ON: show Conversations|Log toggle, default to Conversations
     return html`
       ${this.renderMessagingBanners()}
-      <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
+      <div class="messages-view-bar">
         <sl-radio-group
-          value=${this.chatViewActive ? 'chat' : 'log'}
+          class="messages-view-toggle"
+          label="Messages view"
+          value=${this.chatViewActive ? 'conversations' : 'log'}
           size="small"
           @sl-change=${(e: Event) => {
-            const value = (e.target as HTMLInputElement).value as 'chat' | 'log';
+            const value = (e.target as HTMLInputElement).value as 'conversations' | 'log';
             this.handleMessageViewToggle(value);
           }}
         >
-          <sl-radio-button value="chat">
+          <sl-radio-button value="conversations">
             <sl-icon slot="prefix" name="chat-dots" style="font-size: 0.875rem"></sl-icon>
-            Chat
+            Conversations
           </sl-radio-button>
           <sl-radio-button value="log">
             <sl-icon slot="prefix" name="list-ul" style="font-size: 0.875rem"></sl-icon>
@@ -1992,21 +2170,13 @@ export class ScionPageAgentDetail extends LitElement {
           </sl-radio-button>
         </sl-radio-group>
       </div>
-      <scion-chat-thread
-        class="messages-chat-thread"
-        agentId=${this.agentId}
-        agentName=${agent.name || ''}
-        .conversationKey=${this.currentUserId
-          ? `dm:agent:${this.agentId}:user:${this.currentUserId}`
-          : ''}
-        .projectId=${agent.projectId || ''}
-        .currentUserId=${this.currentUserId}
-        ?isDM=${true}
-        ?canSend=${canMessageAgent(agent._capabilities) &&
-        agent._messageability?.canMessage !== false}
-        ?showVisibilityToggle=${true}
+      <div
+        class="shared-conversations-container"
+        data-testid="shared-conversations-panel"
         style="display: ${this.chatViewActive ? '' : 'none'}"
-      ></scion-chat-thread>
+      >
+        ${this.renderSharedConversations(agent)}
+      </div>
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
@@ -2016,6 +2186,126 @@ export class ScionPageAgentDetail extends LitElement {
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
       ></scion-agent-message-viewer>
+    `;
+  }
+
+  private sharedConversationLabel(conv: AgentConversationSummary, agent: Agent): string {
+    if (conv.displayName) return conv.displayName;
+    if (conv.threadName) return conv.threadName;
+    if (conv.kind === 'direct') {
+      return conv.dmPeer?.name || agent.name || 'Direct message';
+    }
+    return 'Untitled conversation';
+  }
+
+  private renderSharedConversations(agent: Agent): TemplateResult {
+    if (this.sharedConversationsLoading && !this.sharedConversationsLoaded) {
+      return html`
+        <div class="shared-conversations-card">
+          <div class="shared-conversations-state" data-testid="shared-conversations-loading">
+            <sl-spinner></sl-spinner>
+            <span>Loading conversations...</span>
+          </div>
+        </div>
+      `;
+    }
+
+    if (this.sharedConversationsError) {
+      return html`
+        <div class="shared-conversations-card">
+          <div class="shared-conversations-state" data-testid="shared-conversations-error">
+            <sl-icon name="exclamation-triangle" style="font-size: 1.5rem;"></sl-icon>
+            <div class="shared-conversations-state-title">Failed to load conversations</div>
+            <p class="shared-conversations-state-desc">${this.sharedConversationsError}</p>
+            <sl-button
+              variant="default"
+              size="small"
+              data-testid="shared-conversations-retry"
+              @click=${() => void this.loadSharedConversations()}
+            >
+              <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+              Retry
+            </sl-button>
+          </div>
+        </div>
+      `;
+    }
+
+    if (this.sharedConversations.length === 0) {
+      return html`
+        <div class="shared-conversations-card">
+          <div class="shared-conversations-state" data-testid="shared-conversations-empty">
+            <sl-icon name="chat-dots" style="font-size: 1.5rem;"></sl-icon>
+            <div class="shared-conversations-state-title">No shared conversations</div>
+            <p class="shared-conversations-state-desc">
+              Conversations you share with ${agent.name || 'this agent'} will appear here.
+            </p>
+          </div>
+        </div>
+      `;
+    }
+
+    return html`
+      <div class="shared-conversations-card">
+        <div class="shared-conversations-list" data-testid="shared-conversations-list">
+          ${this.sharedConversations.map((conv) => {
+            const label = this.sharedConversationLabel(conv, agent);
+            const isDirect = conv.kind === 'direct';
+            const kindLabel = isDirect ? 'Direct' : conv.kind === 'group' ? 'Group' : conv.kind;
+            const kindIcon = isDirect ? 'chat-dots' : 'people';
+            const href = conversationChatPath(conv);
+            const lastActivity = this.formatRelativeTime(conv.lastActivityAt);
+            const fullDate = this.formatDate(conv.lastActivityAt);
+
+            const content = html`
+              <span class="shared-conversation-icon" aria-hidden="true">
+                <sl-icon name=${kindIcon}></sl-icon>
+              </span>
+              <span class="shared-conversation-main">
+                <span class="shared-conversation-title-row">
+                  <span class="shared-conversation-name">${label}</span>
+                  <sl-badge variant=${isDirect ? 'primary' : 'neutral'}>${kindLabel}</sl-badge>
+                  ${conv.surface && conv.surface !== 'native'
+                    ? html`<sl-badge variant="neutral">${conv.surface}</sl-badge>`
+                    : nothing}
+                </span>
+              </span>
+              <span class="shared-conversation-meta" title=${fullDate}>
+                <span>${lastActivity}</span>
+                ${href
+                  ? html`<sl-icon
+                      class="shared-conversation-chevron"
+                      name="chevron-right"
+                    ></sl-icon>`
+                  : nothing}
+              </span>
+            `;
+
+            if (href) {
+              return html`
+                <a
+                  class="shared-conversation-row shared-conversation-row--link"
+                  data-testid="shared-conversation-row"
+                  data-conversation-id=${conv.id}
+                  href=${href}
+                >
+                  ${content}
+                </a>
+              `;
+            }
+
+            return html`
+              <div
+                class="shared-conversation-row shared-conversation-row--unlinked"
+                data-testid="shared-conversation-row"
+                data-conversation-id=${conv.id}
+              >
+                ${content}
+              </div>
+            `;
+          })}
+        </div>
+      </div>
     `;
   }
 

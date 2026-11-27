@@ -96,12 +96,8 @@ describe('agent detail layout', () => {
     }
   });
 
-  it('bounds the Messages tab chat thread so its message list scrolls', () => {
-    // Unbounded, the thread grows to fit every message, so its list never
-    // scrolls and the composer sits below the fold.
-    expect(rules.get('.messages-chat-thread') ?? '').toMatch(
-      /(^|;)\s*height:\s*calc\(var\(--scion-app-height, 100dvh\) - 24rem\)/
-    );
+  it('renders the Messages tab shared conversations panel with Conversations|Log toggle', () => {
+    expect(rules.get('.shared-conversations-list') ?? '').toMatch(/display:\s*flex/);
     const el = document.createElement('scion-page-agent-detail');
     Object.assign(el, { agentId: 'a-1', agent: makeAgent({}) });
     Object.defineProperty(el, 'nativeChatEnabled', { get: () => true });
@@ -110,9 +106,13 @@ describe('agent detail layout', () => {
       (el as unknown as { renderMessagesPanel: () => TemplateResult }).renderMessagesPanel(),
       host
     );
-    const thread = host.querySelector('scion-chat-thread');
-    expect(thread).not.toBeNull();
-    expect(thread!.classList.contains('messages-chat-thread')).toBe(true);
+    expect(host.querySelector('scion-chat-thread')).toBeNull();
+    const toggle = host.querySelector('sl-radio-group.messages-view-toggle');
+    expect(toggle).not.toBeNull();
+    expect(toggle!.getAttribute('value')).toBe('conversations');
+    const panel = host.querySelector('[data-testid="shared-conversations-panel"]');
+    expect(panel).not.toBeNull();
+    expect(host.querySelector('scion-agent-message-viewer')).not.toBeNull();
   });
 
   /** Render one of the page's template methods for `agent`. */
