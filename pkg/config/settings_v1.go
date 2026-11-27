@@ -1633,6 +1633,7 @@ type V1ServerConfig struct {
 	Env      string               `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Hub      *V1ServerHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
 	Relay    *V1ServerRelayConfig `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
+	MCP      *V1ServerMCPConfig   `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Broker   *V1BrokerConfig      `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
 	Database *V1DatabaseConfig    `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
 	Auth     *V1AuthConfig        `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
@@ -2306,6 +2307,20 @@ type V1ServerRelayConfig struct {
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
 	// Singleton asserts a non-HA singleton relay (required on Cloud Run).
 	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
+}
+
+// V1ServerMCPConfig holds the MCP server listener settings in settings.yaml
+// format (server.mcp; ptone/scion#8137).
+type V1ServerMCPConfig struct {
+	Enabled                bool     `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	Host                   string   `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	Port                   int      `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Path                   string   `json:"path,omitempty" yaml:"path,omitempty" koanf:"path"`
+	PublicURL              string   `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	HubEndpoint            string   `json:"hub_endpoint,omitempty" yaml:"hub_endpoint,omitempty" koanf:"hub_endpoint"`
+	AllowedOrigins         []string `json:"allowed_origins,omitempty" yaml:"allowed_origins,omitempty" koanf:"allowed_origins"`
+	MaxStreamsPerPrincipal int      `json:"max_streams_per_principal,omitempty" yaml:"max_streams_per_principal,omitempty" koanf:"max_streams_per_principal"`
+	StreamWait             string   `json:"stream_wait,omitempty" yaml:"stream_wait,omitempty" koanf:"stream_wait"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -5074,6 +5089,36 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
+	if m := v1.MCP; m != nil {
+		gc.MCP.Enabled = m.Enabled
+		if m.Host != "" {
+			gc.MCP.Host = m.Host
+		}
+		if m.Port != 0 {
+			gc.MCP.Port = m.Port
+		}
+		if m.Path != "" {
+			gc.MCP.Path = m.Path
+		}
+		if m.PublicURL != "" {
+			gc.MCP.PublicURL = m.PublicURL
+		}
+		if m.HubEndpoint != "" {
+			gc.MCP.HubEndpoint = m.HubEndpoint
+		}
+		if len(m.AllowedOrigins) > 0 {
+			gc.MCP.AllowedOrigins = append([]string(nil), m.AllowedOrigins...)
+		}
+		if m.MaxStreamsPerPrincipal > 0 {
+			gc.MCP.MaxStreamsPerPrincipal = m.MaxStreamsPerPrincipal
+		}
+		if m.StreamWait != "" {
+			if d, err := time.ParseDuration(m.StreamWait); err == nil {
+				gc.MCP.StreamWait = d
+			}
+		}
+	}
+
 	// Broker config
 	if v1.Broker != nil {
 		gc.RuntimeBroker.Enabled = v1.Broker.Enabled
@@ -5647,6 +5692,22 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	v1.Hub = v1Hub
 	if r := gc.Relay; !r.IsZero() {
 		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
+	}
+	if m := gc.MCP; !m.IsZero() {
+		v1MCP := &V1ServerMCPConfig{
+			Enabled:                m.Enabled,
+			Host:                   m.Host,
+			Port:                   m.Port,
+			Path:                   m.Path,
+			PublicURL:              m.PublicURL,
+			HubEndpoint:            m.HubEndpoint,
+			AllowedOrigins:         append([]string(nil), m.AllowedOrigins...),
+			MaxStreamsPerPrincipal: m.MaxStreamsPerPrincipal,
+		}
+		if m.StreamWait > 0 {
+			v1MCP.StreamWait = m.StreamWait.String()
+		}
+		v1.MCP = v1MCP
 	}
 
 	// Broker config

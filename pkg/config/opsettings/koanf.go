@@ -138,6 +138,8 @@ var layer0Prefixes = []string{
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",
+	// MCP server listener settings (server.mcp) — read at startup.
+	"server.mcp",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

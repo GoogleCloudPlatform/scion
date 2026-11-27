@@ -744,10 +744,27 @@ const TokenomicsTrajectoryCapture = "tokenomics.trajectory_capture"
 // off.
 const AccessConstraints = "hub.access_constraints"
 
+// MCPServer gates serving the MCP endpoint (messaging tools and MCP Events
+// push) on the listener configured by server.mcp (ptone/scion#8137). While
+// off, /mcp answers 404 and visitors are not admitted to conversation
+// messages and watch. The listener binds only when server.mcp.enabled is set.
+const MCPServer = "hub.mcp_server"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        MCPServer,
+		Title:       "MCP server",
+		Description: "Serves the MCP endpoint (messaging tools and MCP Events push) on the listener configured by `server.mcp`. While off, `/mcp` answers 404 and visitors are not admitted to conversation messages and watch. The listener binds only when `server.mcp.enabled` is set.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8137",
+		Owner:       "mcp-server",
+		ReviewBy:    "2027-01-08",
+	},
 	{
 		Name:        NeverSuspend,
 		Title:       "Never-suspend agents",

@@ -83,6 +83,7 @@
         },
         "hub": { "$ref": "#/$defs/serverHub" },
         "relay": { "$ref": "#/$defs/serverRelay" },
+        "mcp": { "$ref": "#/$defs/serverMCP" },
         "broker": { "$ref": "#/$defs/serverBroker" },
         "database": { "$ref": "#/$defs/serverDatabase" },
         "auth": { "$ref": "#/$defs/serverAuth" },
@@ -1433,6 +1434,73 @@
           "type": "boolean",
           "description": "Asserts a non-HA singleton relay: required on Cloud Run (K_SERVICE set), with max_instances=1, min_instances=1 and cpu_idle=false; allowed elsewhere, where it labels the relay non-HA. Read at startup.",
           "x-env-var": "SCION_SERVER_RELAY_SINGLETON",
+          "x-since": "1"
+        }
+      }
+    },
+    "serverMCP": {
+      "type": "object",
+      "description": "MCP server listener settings (ptone/scion#8137). Read at startup.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the MCP server listener (equivalent to --enable-mcp).",
+          "x-env-var": "SCION_SERVER_MCP_ENABLED",
+          "x-since": "1"
+        },
+        "host": {
+          "type": "string",
+          "description": "Listen address for the MCP server listener (defaults to server.hub.host).",
+          "x-env-var": "SCION_SERVER_MCP_HOST",
+          "x-since": "1"
+        },
+        "port": {
+          "type": "integer",
+          "default": 9820,
+          "description": "Listen port for the MCP server listener.",
+          "x-env-var": "SCION_SERVER_MCP_PORT",
+          "x-since": "1"
+        },
+        "path": {
+          "type": "string",
+          "default": "/mcp",
+          "description": "HTTP path for the MCP streamable HTTP endpoint.",
+          "x-env-var": "SCION_SERVER_MCP_PATH",
+          "x-since": "1"
+        },
+        "public_url": {
+          "type": "string",
+          "description": "Public URL of the MCP server (used in logs; RFC 9728 resource ID in Increment 2).",
+          "x-env-var": "SCION_SERVER_MCP_PUBLICURL",
+          "x-since": "1"
+        },
+        "hub_endpoint": {
+          "type": "string",
+          "description": "Hub API base URL when running MCP in standalone mode without the hub in-process.",
+          "x-env-var": "SCION_SERVER_MCP_HUBENDPOINT",
+          "x-since": "1"
+        },
+        "allowed_origins": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Browser Origin values accepted on MCP requests (requests without an Origin header are allowed).",
+          "x-env-var": "SCION_SERVER_MCP_ALLOWEDORIGINS",
+          "x-since": "1"
+        },
+        "max_streams_per_principal": {
+          "type": "integer",
+          "default": 8,
+          "description": "Maximum concurrent events/stream and wait_for_messages requests per principal per replica.",
+          "x-env-var": "SCION_SERVER_MCP_MAXSTREAMSPERPRINCIPAL",
+          "x-since": "1"
+        },
+        "stream_wait": {
+          "type": "string",
+          "default": "30s",
+          "description": "Hub long-poll wait duration per events/stream iteration (heartbeat cadence).",
+          "x-env-var": "SCION_SERVER_MCP_STREAMWAIT",
           "x-since": "1"
         }
       }
