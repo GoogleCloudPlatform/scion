@@ -150,9 +150,86 @@ function editableFocused(doc: Document): boolean {
  */
 export const SETTLE_RECHECK_MS = 400;
 
+/**
+ * Minimum visual-viewport height, in CSS px, that counts as plausible for a
+ * live keyboard-open frame. Even a small phone in landscape with an on-screen
+ * keyboard leaves ~150-190px; anything below this (such as 0px or a bogus
+ * status-bar-sized reading reported by iOS standalone web clips) is treated
+ * as implausible so `--scion-app-height` is never collapsed to blank the UI.
+ */
+export const MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX = 120;
+
+/** Media query matching home-screen / installed standalone web apps. */
+export const STANDALONE_DISPLAY_QUERY = '(display-mode: standalone)';
+
+/** localStorage key that opts into the viewport diagnostic overlay. */
+export const VIEWPORT_DEBUG_STORAGE_KEY = 'scion:viewport-debug';
+
+/** Query parameter (`?viewportDebug=1`) that opts into the diagnostic overlay. */
+export const VIEWPORT_DEBUG_QUERY_PARAM = 'viewportDebug';
+
 const APP_HEIGHT_PROPERTY = '--scion-app-height';
 const KEYBOARD_OPEN_PROPERTY = '--scion-kb-open';
 type FrameSize = 'short' | 'tight';
+
+export interface ViewportDiagnosticSnapshot {
+  event: string;
+  count: number;
+  vvHeight: number;
+  vvWidth: number;
+  vvScale: number;
+  vvOffsetTop: number;
+  innerHeight: number;
+  innerWidth: number;
+  clientHeight: number;
+  standalone: boolean;
+  editableFocused: boolean;
+  inlineAppHeight: string;
+  computedAppHeight: string;
+  keyboardDataset: string;
+  guard: string;
+  chatRect: { top: number; height: number; width: number } | null;
+}
+
+type WindowWithViewportDiag = Window & {
+  __scionViewportDiag?: () => ViewportDiagnosticSnapshot;
+};
+
+/** Whether a viewport height reading is finite and large enough to be real. */
+export function isPlausibleViewportHeight(height: number): boolean {
+  return Number.isFinite(height) && height >= MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX;
+}
+
+/** Whether the page is running as an installed / home-screen standalone app. */
+function isStandaloneMode(win: Window): boolean {
+  if (win.matchMedia?.(STANDALONE_DISPLAY_QUERY)?.matches === true) return true;
+  const nav = win.navigator as (Navigator & { standalone?: boolean }) | undefined;
+  return nav?.standalone === true;
+}
+
+/**
+ * Whether the opt-in viewport diagnostic is enabled via `?viewportDebug=1`
+ * or `localStorage['scion:viewport-debug'] = '1'`. Inactive by default.
+ */
+export function isViewportDebugEnabled(win: Window = window): boolean {
+  try {
+    const search = win.location?.search;
+    if (search) {
+      const param = new URLSearchParams(search).get(VIEWPORT_DEBUG_QUERY_PARAM);
+      if (param === '1' || param === 'true') return true;
+      if (param === '0' || param === 'false') return false;
+    }
+  } catch {
+    // Ignore malformed location in mocked windows.
+  }
+  try {
+    const stored = win.localStorage?.getItem(VIEWPORT_DEBUG_STORAGE_KEY);
+    if (stored === '1' || stored === 'true') return true;
+  } catch {
+    // Ignore storage access errors (private browsing / sandboxed frames).
+  }
+  return false;
+}
 
 /**
  * Install the visual-viewport listeners. Call once, at startup. Returns a
@@ -164,6 +241,43 @@ export function installViewportFrame(win: Window = window): () => void {
   if (!vv) return () => {};
   const doc = win.document;
   const root = doc.documentElement;
+  const debugEnabled = isViewportDebugEnabled(win);
+  let debugOverlay: HTMLDivElement | null = null;
+  let debugCount = 0;
+  let lastSnapshot: ViewportDiagnosticSnapshot | null = null;
+  let pendingEvent = 'init';
+
+  if (debugEnabled) {
+    debugOverlay = doc.createElement('div');
+    debugOverlay.id = 'scion-viewport-debug';
+    debugOverlay.setAttribute('aria-hidden', 'true');
+    debugOverlay.style.cssText =
+      'position:fixed;left:0;right:0;bottom:env(safe-area-inset-bottom,0px);' +
+      'z-index:2147483647;pointer-events:none;' +
+      'background:var(--scion-surface);color:var(--scion-text);' +
+      'border-top:1px solid var(--scion-border);' +
+      'font:11px/1.3 monospace;padding:4px 6px;white-space:pre-wrap;opacity:0.92';
+    (doc.body ?? root).append(debugOverlay);
+    (win as WindowWithViewportDiag).__scionViewportDiag = () =>
+      lastSnapshot ?? {
+        event: pendingEvent,
+        count: debugCount,
+        vvHeight: vv.height,
+        vvWidth: vv.width,
+        vvScale: vv.scale,
+        vvOffsetTop: vv.offsetTop,
+        innerHeight: win.innerHeight,
+        innerWidth: win.innerWidth,
+        clientHeight: root.clientHeight,
+        standalone: isStandaloneMode(win),
+        editableFocused: editableFocused(doc),
+        inlineAppHeight: root.style.getPropertyValue(APP_HEIGHT_PROPERTY),
+        computedAppHeight: '',
+        keyboardDataset: root.dataset['keyboard'] ?? '',
+        guard: 'pending',
+        chatRect: null,
+      };
+  }
 
   // The height currently written to the inline custom property, or null when
   // nothing is written. Writes happen only on a change, so a resize storm
@@ -185,7 +299,7 @@ export function installViewportFrame(win: Window = window): () => void {
     if (settleTimer !== null) win.clearTimeout(settleTimer);
     settleTimer = win.setTimeout(() => {
       settleTimer = null;
-      schedule();
+      schedule('settle');
     }, SETTLE_RECHECK_MS);
   };
 
@@ -221,23 +335,92 @@ export function installViewportFrame(win: Window = window): () => void {
     return true;
   };
 
-  const sync = (): void => {
-    const atZoom1 = Math.abs(vv.scale - 1) < ZOOM_1_TOLERANCE;
-    const keyboardInset = win.innerHeight - vv.height;
-    const keyboardOpen = atZoom1 && keyboardInset > KEYBOARD_MIN_INSET_PX;
+  const updateDiagnostic = (
+    eventName: string,
+    standalone: boolean,
+    focused: boolean,
+    guard: string
+  ): void => {
+    if (!debugEnabled || !debugOverlay) return;
+    debugCount++;
+    const inlineAppHeight = root.style.getPropertyValue(APP_HEIGHT_PROPERTY).trim();
+    const computedAppHeight =
+      win.getComputedStyle?.(root)?.getPropertyValue(APP_HEIGHT_PROPERTY)?.trim() ?? '';
+    const chatEl = doc.querySelector('scion-page-chat') ?? doc.querySelector('scion-chat-shell');
+    const rect = chatEl?.getBoundingClientRect();
+    const chatRect = rect
+      ? {
+          top: Math.round(rect.top),
+          height: Math.round(rect.height),
+          width: Math.round(rect.width),
+        }
+      : null;
+    lastSnapshot = {
+      event: eventName,
+      count: debugCount,
+      vvHeight: vv.height,
+      vvWidth: vv.width,
+      vvScale: vv.scale,
+      vvOffsetTop: vv.offsetTop,
+      innerHeight: win.innerHeight,
+      innerWidth: win.innerWidth,
+      clientHeight: root.clientHeight,
+      standalone,
+      editableFocused: focused,
+      inlineAppHeight,
+      computedAppHeight,
+      keyboardDataset: root.dataset['keyboard'] ?? '',
+      guard,
+      chatRect,
+    };
+    const chatText = chatRect ? `${chatRect.width}x${chatRect.height}@${chatRect.top}` : 'none';
+    debugOverlay.textContent =
+      `[vp#${debugCount} ${eventName}] vv:${vv.height}x${vv.width} s:${vv.scale} ` +
+      `in:${win.innerHeight} ch:${root.clientHeight} sa:${standalone ? 1 : 0} ` +
+      `ed:${focused ? 1 : 0} g:${guard}\n` +
+      `--app-h: inline="${inlineAppHeight || 'unset'}" comp="${computedAppHeight || 'unset'}" ` +
+      `kb:${root.dataset['keyboard'] ?? '-'} chat:${chatText}`;
+  };
+
+  const sync = (eventName: string): void => {
+    const vvScale = vv.scale;
+    const vvHeight = vv.height;
+    const innerHeight = win.innerHeight;
+    const atZoom1 = Number.isFinite(vvScale) && Math.abs(vvScale - 1) < ZOOM_1_TOLERANCE;
+    const vvHeightPlausible = isPlausibleViewportHeight(vvHeight);
+    const innerHeightPlausible = isPlausibleViewportHeight(innerHeight);
+    const standalone = isStandaloneMode(win);
+    const focused = editableFocused(doc);
+
+    // Guard against implausible visualViewport.height values (<= 0, NaN,
+    // Infinity, or tiny values below MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX) and
+    // against iOS standalone web clips reporting a shrunken visualViewport
+    // when no text field is focused. In both cases, do not shrink
+    // `--scion-app-height`; clear it so CSS `100dvh` applies.
+    const keyboardInset = vvHeightPlausible && innerHeightPlausible ? innerHeight - vvHeight : 0;
+    const standaloneAllowsKeyboard = !standalone || focused;
+    const keyboardOpen =
+      atZoom1 &&
+      vvHeightPlausible &&
+      innerHeightPlausible &&
+      standaloneAllowsKeyboard &&
+      keyboardInset > KEYBOARD_MIN_INSET_PX;
     // A bar shorter than a keyboard: leave Safari's reveal pan alone.
     const shortOccluder =
-      keyboardInset >= OCCLUDER_MIN_INSET_PX && keyboardInset <= KEYBOARD_MIN_INSET_PX;
+      vvHeightPlausible &&
+      innerHeightPlausible &&
+      keyboardInset >= OCCLUDER_MIN_INSET_PX &&
+      keyboardInset <= KEYBOARD_MIN_INSET_PX;
 
     let changed = false;
     if (keyboardOpen) {
-      const height = `${vv.height}px`;
+      const height = `${vvHeight}px`;
       if (height !== appliedHeight) {
         root.style.setProperty(APP_HEIGHT_PROPERTY, height);
         root.style.setProperty(KEYBOARD_OPEN_PROPERTY, '1');
         root.dataset['keyboard'] = 'open';
         applyFrameSize(
-          vv.height < TIGHT_FRAME_MAX_PX ? 'tight' : vv.height < SHORT_FRAME_MAX_PX ? 'short' : null
+          vvHeight < TIGHT_FRAME_MAX_PX ? 'tight' : vvHeight < SHORT_FRAME_MAX_PX ? 'short' : null
         );
         appliedHeight = height;
         changed = true;
@@ -254,15 +437,18 @@ export function installViewportFrame(win: Window = window): () => void {
     // Keyed on the whole-pixel width, so a fractional width (a high-DPI
     // screen, or a zoom) neither misses its orientation's baseline nor adds
     // an entry per sub-pixel step.
-    const width = Math.round(win.innerWidth);
-    const tallest = Math.max(tallestAtWidth.get(width) ?? 0, win.innerHeight);
-    tallestAtWidth.set(width, tallest);
-    const layoutKeyboard =
-      !keyboardOpen &&
-      atZoom1 &&
-      touchPrimary?.matches === true &&
-      tallest - win.innerHeight > KEYBOARD_MIN_INSET_PX &&
-      editableFocused(doc);
+    let layoutKeyboard = false;
+    if (innerHeightPlausible) {
+      const width = Math.round(win.innerWidth);
+      const tallest = Math.max(tallestAtWidth.get(width) ?? 0, innerHeight);
+      tallestAtWidth.set(width, tallest);
+      layoutKeyboard =
+        !keyboardOpen &&
+        atZoom1 &&
+        touchPrimary?.matches === true &&
+        tallest - innerHeight > KEYBOARD_MIN_INSET_PX &&
+        focused;
+    }
     if (setLayoutKeyboard(layoutKeyboard)) changed = true;
     // A change can be followed by another the browser does not announce (a
     // late accessory bar), so look once more after it settles.
@@ -276,34 +462,56 @@ export function installViewportFrame(win: Window = window): () => void {
     ) {
       win.scrollTo(0, 0);
     }
+
+    if (debugEnabled) {
+      const guard = !atZoom1
+        ? 'zoomed'
+        : !vvHeightPlausible
+          ? 'implausible-vv'
+          : !innerHeightPlausible
+            ? 'implausible-inner'
+            : !standaloneAllowsKeyboard && keyboardInset > KEYBOARD_MIN_INSET_PX
+              ? 'standalone-unfocused'
+              : keyboardOpen
+                ? 'keyboard-open'
+                : 'normal';
+      updateDiagnostic(eventName, standalone, focused, guard);
+    }
   };
 
   // One sync per animation frame, however many events arrive.
   let frame: number | null = null;
-  function schedule(): void {
+  function schedule(eventName = 'event'): void {
+    pendingEvent = eventName;
     if (frame !== null) return;
     frame = win.requestAnimationFrame(() => {
       frame = null;
-      sync();
+      sync(pendingEvent);
     });
   }
+
+  const onVvResize = (): void => schedule('vv:resize');
+  const onVvScroll = (): void => schedule('vv:scroll');
+  const onWinScroll = (): void => schedule('win:scroll');
+  const onWinResize = (): void => schedule('win:resize');
+  const onDocEvent = (e: Event): void => schedule(`doc:${e.type}`);
 
   // focusin, focusout and input are composed, so they reach the document
   // from fields inside shadow roots.
   const docEvents = ['focusin', 'focusout', 'input'] as const;
-  vv.addEventListener('resize', schedule);
-  vv.addEventListener('scroll', schedule);
-  win.addEventListener('scroll', schedule, { passive: true });
-  win.addEventListener('resize', schedule);
-  for (const type of docEvents) doc.addEventListener(type, schedule, { capture: true });
-  schedule();
+  vv.addEventListener('resize', onVvResize);
+  vv.addEventListener('scroll', onVvScroll);
+  win.addEventListener('scroll', onWinScroll, { passive: true });
+  win.addEventListener('resize', onWinResize);
+  for (const type of docEvents) doc.addEventListener(type, onDocEvent, { capture: true });
+  schedule('init');
 
   return () => {
-    vv.removeEventListener('resize', schedule);
-    vv.removeEventListener('scroll', schedule);
-    win.removeEventListener('scroll', schedule);
-    win.removeEventListener('resize', schedule);
-    for (const type of docEvents) doc.removeEventListener(type, schedule, { capture: true });
+    vv.removeEventListener('resize', onVvResize);
+    vv.removeEventListener('scroll', onVvScroll);
+    win.removeEventListener('scroll', onWinScroll);
+    win.removeEventListener('resize', onWinResize);
+    for (const type of docEvents) doc.removeEventListener(type, onDocEvent, { capture: true });
     if (frame !== null) {
       win.cancelAnimationFrame(frame);
       frame = null;
@@ -314,5 +522,12 @@ export function installViewportFrame(win: Window = window): () => void {
     }
     clearKeyboardState();
     setLayoutKeyboard(false);
+    if (debugOverlay) {
+      debugOverlay.remove();
+      debugOverlay = null;
+    }
+    if (debugEnabled) {
+      delete (win as WindowWithViewportDiag).__scionViewportDiag;
+    }
   };
 }

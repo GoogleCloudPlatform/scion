@@ -24,16 +24,23 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { APP_FRAME_CLASS } from '../components/shared/app-frame.js';
 import {
   installViewportFrame,
+  isPlausibleViewportHeight,
+  isViewportDebugEnabled,
   KEYBOARD_MIN_INSET_PX,
+  MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX,
   SETTLE_RECHECK_MS,
   SHORT_FRAME_MAX_PX,
+  STANDALONE_DISPLAY_QUERY,
   TIGHT_FRAME_MAX_PX,
+  VIEWPORT_DEBUG_STORAGE_KEY,
+  type ViewportDiagnosticSnapshot,
 } from './viewport.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
 interface FakeVisualViewport extends EventTarget {
   scale: number;
   height: number;
+  width?: number;
   offsetTop: number;
 }
 
@@ -42,6 +49,11 @@ interface FakeWindow extends EventTarget {
   innerHeight: number;
   innerWidth?: number;
   matchMedia?: (query: string) => { matches: boolean };
+  navigator?: { standalone?: boolean };
+  location?: { search: string };
+  localStorage?: Pick<Storage, 'getItem'>;
+  getComputedStyle?: (el: Element) => { getPropertyValue: (prop: string) => string };
+  __scionViewportDiag?: () => ViewportDiagnosticSnapshot;
   scrollY: number;
   document: Document;
   scrollTo: ReturnType<typeof vi.fn>;
@@ -774,5 +786,192 @@ describe('installViewportFrame: throttling and teardown', () => {
     expect(addListener).not.toHaveBeenCalled();
     expect(frames.size).toBe(0);
     expect(() => off()).not.toThrow();
+  });
+});
+
+describe('installViewportFrame: implausible viewport heights and standalone mode', () => {
+  it('validates viewport height plausibility', () => {
+    expect(isPlausibleViewportHeight(0)).toBe(false);
+    expect(isPlausibleViewportHeight(-50)).toBe(false);
+    expect(isPlausibleViewportHeight(Number.NaN)).toBe(false);
+    expect(isPlausibleViewportHeight(Number.POSITIVE_INFINITY)).toBe(false);
+    expect(isPlausibleViewportHeight(Number.NEGATIVE_INFINITY)).toBe(false);
+    expect(isPlausibleViewportHeight(MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX - 1)).toBe(false);
+    expect(isPlausibleViewportHeight(MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX)).toBe(true);
+    expect(isPlausibleViewportHeight(480)).toBe(true);
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -20],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['implausibly small', MIN_PLAUSIBLE_VIEWPORT_HEIGHT_PX - 1],
+  ])('ignores %s visualViewport.height and leaves --scion-app-height unset', (_label, height) => {
+    vv.height = height;
+    install();
+
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().style.getPropertyValue('--scion-kb-open')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('clears a previously applied --scion-app-height if visualViewport.height becomes implausible', () => {
+    install();
+    emit(vv, 'resize', { height: 480 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('480px');
+
+    emit(vv, 'resize', { height: 0 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().style.getPropertyValue('--scion-kb-open')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('ignores implausible window.innerHeight values', () => {
+    win.innerHeight = 0;
+    vv.height = 480;
+    install();
+
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('in standalone mode without a focused input, ignores a shrunken visualViewport.height', () => {
+    win.matchMedia = (query: string) => ({
+      matches: query === STANDALONE_DISPLAY_QUERY,
+    });
+    vv.height = 480;
+    install();
+
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+
+    // Pinch-zoom and return to scale 1: still does not collapse the app height.
+    emit(vv, 'resize', { scale: 1.5, height: 480 });
+    emit(vv, 'resize', { scale: 1, height: 480 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('in navigator.standalone mode without a focused input, ignores a shrunken visualViewport.height', () => {
+    win.navigator = { standalone: true };
+    vv.height = 480;
+    install();
+
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('in standalone mode with a focused editable field, preserves legitimate keyboard resizing', () => {
+    win.matchMedia = (query: string) => ({
+      matches: query === STANDALONE_DISPLAY_QUERY,
+    });
+    const field = document.createElement('textarea');
+    document.body.append(field);
+    field.focus();
+
+    install();
+    emit(vv, 'resize', { height: 480 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('480px');
+    expect(root().style.getPropertyValue('--scion-kb-open')).toBe('1');
+    expect(root().dataset['keyboard']).toBe('open');
+
+    // Blurring the field clears the keyboard height even if vv.height lags.
+    field.blur();
+    flushFrames();
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+
+  it('in standalone mode with a focused editable field, still guards against 0px visualViewport.height', () => {
+    win.matchMedia = (query: string) => ({
+      matches: query === STANDALONE_DISPLAY_QUERY,
+    });
+    const field = document.createElement('textarea');
+    document.body.append(field);
+    field.focus();
+
+    install();
+    emit(vv, 'resize', { height: 0 });
+    expect(root().style.getPropertyValue('--scion-app-height')).toBe('');
+    expect(root().dataset['keyboard']).toBeUndefined();
+  });
+});
+
+describe('installViewportFrame: opt-in viewport diagnostic', () => {
+  it('is inactive by default: no overlay element and no global helper', () => {
+    install();
+
+    expect(isViewportDebugEnabled(win as unknown as Window)).toBe(false);
+    expect(document.getElementById('scion-viewport-debug')).toBeNull();
+    expect(win.__scionViewportDiag).toBeUndefined();
+  });
+
+  it('activates via ?viewportDebug=1, reports measurements and updates on resize/zoom, and cleans up on dispose', () => {
+    win.location = { search: '?viewportDebug=1' };
+    win.matchMedia = (query: string) => ({
+      matches: query === STANDALONE_DISPLAY_QUERY,
+    });
+    win.getComputedStyle = () => ({
+      getPropertyValue: (prop: string) => (prop === '--scion-app-height' ? '100dvh' : ''),
+    });
+    vv.width = 390;
+    vv.height = 0;
+
+    const chatEl = document.createElement('scion-page-chat');
+    chatEl.getBoundingClientRect = () =>
+      ({
+        top: 56,
+        height: 756,
+        width: 390,
+        bottom: 812,
+        left: 0,
+        right: 390,
+        x: 0,
+        y: 56,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    document.body.append(chatEl);
+
+    install();
+
+    const overlay = document.getElementById('scion-viewport-debug');
+    expect(overlay).not.toBeNull();
+    expect(overlay?.style.pointerEvents).toBe('none');
+    expect(win.__scionViewportDiag).toBeTypeOf('function');
+
+    const initial = win.__scionViewportDiag!();
+    expect(initial.event).toBe('init');
+    expect(initial.vvHeight).toBe(0);
+    expect(initial.vvScale).toBe(1);
+    expect(initial.innerHeight).toBe(LAYOUT_HEIGHT);
+    expect(initial.standalone).toBe(true);
+    expect(initial.inlineAppHeight).toBe('');
+    expect(initial.computedAppHeight).toBe('100dvh');
+    expect(initial.guard).toBe('implausible-vv');
+    expect(initial.chatRect).toEqual({ top: 56, height: 756, width: 390 });
+    expect(overlay?.textContent).toContain('g:implausible-vv');
+
+    emit(vv, 'resize', { scale: 1.5, height: 500 });
+    const zoomed = win.__scionViewportDiag!();
+    expect(zoomed.event).toBe('vv:resize');
+    expect(zoomed.vvScale).toBe(1.5);
+    expect(zoomed.guard).toBe('zoomed');
+    expect(zoomed.count).toBeGreaterThan(initial.count);
+
+    dispose!();
+    dispose = null;
+    expect(document.getElementById('scion-viewport-debug')).toBeNull();
+    expect(win.__scionViewportDiag).toBeUndefined();
+  });
+
+  it('activates via localStorage flag and can be disabled by ?viewportDebug=0', () => {
+    win.localStorage = {
+      getItem: (key: string) => (key === VIEWPORT_DEBUG_STORAGE_KEY ? '1' : null),
+    };
+    expect(isViewportDebugEnabled(win as unknown as Window)).toBe(true);
+
+    win.location = { search: '?viewportDebug=0' };
+    expect(isViewportDebugEnabled(win as unknown as Window)).toBe(false);
   });
 });
