@@ -75,6 +75,50 @@ func sendClaudeUsageLogGRPC(t *testing.T, grpcPort int, model string, input, out
 	}
 }
 
+// newIdempotentHubUsageServer starts a fake Hub usage ingest server that
+// deduplicates events by EventID, matching the real Hub's idempotent ingest
+// contract for at-least-once outbox delivery. Without EventID deduplication,
+// Pipeline.Stop canceling an in-flight background drain pass after the server
+// recorded the batch causes Stop's final drain to replay the same EventID
+// (SendRetries: 1), which would otherwise double-count the single logical event.
+func newIdempotentHubUsageServer(t *testing.T) (*httptest.Server, func() []telemetrycontract.UsageEvent) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := make(map[string]struct{})
+	var events []telemetrycontract.UsageEvent
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req telemetrycontract.UsageIngestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		for _, ev := range req.Events {
+			if ev.EventID != "" {
+				if _, dup := seen[ev.EventID]; dup {
+					continue
+				}
+				seen[ev.EventID] = struct{}{}
+			}
+			events = append(events, ev)
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
+	}))
+	t.Cleanup(srv.Close)
+
+	snapshot := func() []telemetrycontract.UsageEvent {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]telemetrycontract.UsageEvent, len(events))
+		copy(out, events)
+		return out
+	}
+	return srv, snapshot
+}
+
 // TestPipeline_HubUsageSinkStartsWhenExplicitCloudMissingDestination verifies
 // that when Hub usage metering is active and cloud export was explicitly enabled
 // without a destination, the pipeline still starts the Hub usage sink, outbox,
@@ -86,21 +130,7 @@ func TestPipeline_HubUsageSinkStartsWhenExplicitCloudMissingDestination(t *testi
 	t.Setenv("SCION_HARNESS", "claude")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
-	var mu sync.Mutex
-	var gotEvents []telemetrycontract.UsageEvent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req telemetrycontract.UsageIngestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		gotEvents = append(gotEvents, req.Events...)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
-	}))
-	defer srv.Close()
+	srv, getEvents := newIdempotentHubUsageServer(t)
 
 	p := New()
 	if p == nil {
@@ -112,7 +142,7 @@ func TestPipeline_HubUsageSinkStartsWhenExplicitCloudMissingDestination(t *testi
 		Post:          httptestPostFunc(srv.URL, "agent-degraded-1", "tok-1"),
 		RunID:         "run-degraded-1",
 		HubID:         "hub-1",
-		DrainInterval: 50 * time.Millisecond,
+		DrainInterval: time.Hour,
 	})
 
 	ctx := context.Background()
@@ -146,8 +176,7 @@ func TestPipeline_HubUsageSinkStartsWhenExplicitCloudMissingDestination(t *testi
 		t.Errorf("DeliveryState() after Stop = %q, want %q", got, "degraded")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	gotEvents := getEvents()
 	if len(gotEvents) != 1 {
 		t.Fatalf("received %d usage events at Hub, want 1", len(gotEvents))
 	}
@@ -169,21 +198,7 @@ func TestPipeline_HubUsageSinkStartsWhenCloudExporterFails(t *testing.T) {
 	t.Setenv("SCION_HARNESS", "claude")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
-	var mu sync.Mutex
-	var gotEvents []telemetrycontract.UsageEvent
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req telemetrycontract.UsageIngestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		gotEvents = append(gotEvents, req.Events...)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
-	}))
-	defer srv.Close()
+	srv, getEvents := newIdempotentHubUsageServer(t)
 
 	p := New()
 	if p == nil {
@@ -198,7 +213,7 @@ func TestPipeline_HubUsageSinkStartsWhenCloudExporterFails(t *testing.T) {
 		Post:          httptestPostFunc(srv.URL, "agent-degraded-2", "tok-1"),
 		RunID:         "run-degraded-2",
 		HubID:         "hub-1",
-		DrainInterval: 50 * time.Millisecond,
+		DrainInterval: time.Hour,
 	})
 
 	ctx := context.Background()
@@ -223,8 +238,7 @@ func TestPipeline_HubUsageSinkStartsWhenCloudExporterFails(t *testing.T) {
 		t.Fatalf("Stop() = %v", err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	gotEvents := getEvents()
 	if len(gotEvents) != 1 {
 		t.Fatalf("received %d usage events at Hub, want 1", len(gotEvents))
 	}
@@ -338,21 +352,7 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 	t.Setenv("SCION_HARNESS", "claude")
 	t.Setenv("SCION_USAGE_SOURCE", "native")
 
-	var mu sync.Mutex
-	var gotHubEvents []telemetrycontract.UsageEvent
-	hubSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req telemetrycontract.UsageIngestRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		mu.Lock()
-		gotHubEvents = append(gotHubEvents, req.Events...)
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(telemetrycontract.UsageIngestResponse{Accepted: len(req.Events)})
-	}))
-	defer hubSrv.Close()
+	hubSrv, getHubEvents := newIdempotentHubUsageServer(t)
 
 	cfg := &Config{
 		Enabled:      true,
@@ -369,7 +369,7 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 		Post:          httptestPostFunc(hubSrv.URL, "agent-metering-r1", "tok-1"),
 		RunID:         "run-metering-r1",
 		HubID:         "hub-1",
-		DrainInterval: 50 * time.Millisecond,
+		DrainInterval: time.Hour,
 	})
 	p.SetNativeMeteringOnly(true)
 
@@ -513,16 +513,11 @@ func TestPipeline_MeteringOnlySuppressesNativeCloudExport(t *testing.T) {
 	}
 
 	// Hub usage sink MUST have received the derived Claude usage event.
-	mu.Lock()
-	hubCount := len(gotHubEvents)
-	var firstEv telemetrycontract.UsageEvent
-	if hubCount > 0 {
-		firstEv = gotHubEvents[0]
+	gotHubEvents := getHubEvents()
+	if len(gotHubEvents) != 1 {
+		t.Fatalf("Hub received %d usage events, want 1", len(gotHubEvents))
 	}
-	mu.Unlock()
-	if hubCount != 1 {
-		t.Fatalf("Hub received %d usage events, want 1", hubCount)
-	}
+	firstEv := gotHubEvents[0]
 	if firstEv.Input == nil || *firstEv.Input != 210 || firstEv.Output == nil || *firstEv.Output != 45 {
 		t.Errorf("unexpected Hub token counts: input=%v output=%v", firstEv.Input, firstEv.Output)
 	}
